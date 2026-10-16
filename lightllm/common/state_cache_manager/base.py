@@ -1,5 +1,6 @@
-import collections
+import numpy as np
 from abc import ABC, abstractmethod
+from contextlib import nullcontext
 from typing import List, Optional
 
 from lightllm.utils.log_utils import init_logger
@@ -13,26 +14,101 @@ class StateCacheManager(ABC):
 
     尾部 keep_num 个槽位保留给 CPU cache 碎页传输，不参与普通分配。
     本类不管理 GPU 运行态，也不判断页面边界、前缀匹配或淘汰策略。
+
+    本地和共享池使用同一 FIFO 环形队列和引用计数布局。假设普通容量为 3：
+    metadata = [
+        3,          # 当前空闲数
+        0,          # 队头位置
+        0, 1, 2,    # 空闲编号表
+        0, 0, 0,    # 槽位 0、1、2 的引用计数
+    ]
     """
 
-    def __init__(self, size: int, keep_num: int = 0):
+    @classmethod
+    def create_dp_shared(cls, name: str, size: int, keep_num: int = 0, **kwargs):
+        """Group node-local DP owners by TP shard before exposing their shared pool."""
+        import torch.distributed as dist
+        from lightllm.utils.envs_utils import get_env_start_args
+        from lightllm.utils.dist_utils import (
+            create_new_group_for_current_node,
+            get_dp_rank_in_node,
+            get_current_rank_in_dp,
+        )
+
+        args = get_env_start_args()
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        if dp_size_in_node == 1:
+            return cls(size=size, keep_num=keep_num, **kwargs)
+
+        dp_rank = get_dp_rank_in_node()
+        group = create_new_group_for_current_node("gloo")
+        pool_args = dict(
+            size=size * dp_size_in_node,
+            keep_num=keep_num * dp_size_in_node,
+            shm_name=f"{name}_tp_{get_current_rank_in_dp()}",
+            **kwargs,
+        )
+        if dp_rank == 0:
+            pool = cls(**pool_args, shm_create=True)
+        dist.barrier(group=group)
+        if dp_rank != 0:
+            pool = cls(**pool_args, shm_create=False)
+        # AtomicShmLock initializes its shared word on attach; all owners attach before use.
+        dist.barrier(group=group)
+        return pool
+
+    def __init__(self, size: int, keep_num: int = 0, shm_name: Optional[str] = None, shm_create: bool = False):
         self.size = size
         self.keep_num = keep_num
         assert 0 <= keep_num <= size, f"invalid keep_num {keep_num} for size {size}"
-        self.free_list = collections.deque(range(size - keep_num))
+        capacity = size - keep_num
+        assert capacity > 0
+        self.metadata_shm = None
+        if shm_name is None:
+            self.metadata = np.empty((2 + 2 * capacity,), dtype=np.int64)
+            self.lock = nullcontext()
+        else:
+            from lightllm.utils.shm_utils import create_or_link_shm
+            from lightllm.server.core.objs.atomic_lock import AtomicShmLock
+
+            self.metadata_shm = create_or_link_shm(
+                shm_name + "_metadata", (2 + 2 * capacity) * 8, force_mode="create" if shm_create else "link"
+            )
+            self.metadata = np.ndarray((2 + 2 * capacity,), dtype=np.int64, buffer=self.metadata_shm.buf)
+            self.lock = AtomicShmLock(shm_name + "_lock")
+        self.free_ids = self.metadata[2 : 2 + capacity]
+        self.refs = self.metadata[2 + capacity :]
+        if shm_name is None or shm_create:
+            self.metadata[0] = capacity
+            self.metadata[1] = 0
+            self.free_ids[:] = np.arange(capacity)
+            self.refs.fill(0)
 
     @abstractmethod
     def get_state_cache(self, buffer_idx: int):
         """返回指定槽位的状态视图；可以是单个 Tensor 或多个 Tensor。"""
 
     def alloc_one_state_cache(self) -> Optional[int]:
-        return None if not self.free_list else self.free_list.popleft()
+        indexes = self.alloc_state_cache(1)
+        return None if indexes is None else indexes[0]
 
     def alloc_state_cache(self, need_size: int) -> Optional[List[int]]:
-        if need_size > len(self.free_list):
-            logger.error(f"warn no enough cache need_size {need_size} free_size {len(self.free_list)}")
-            return None
-        return [self.free_list.popleft() for _ in range(need_size)]
+        if need_size == 0:
+            return []
+        with self.lock:
+            free_num = int(self.metadata[0])
+            if need_size > free_num:
+                logger.error(f"warn no enough cache need_size {need_size} free_size {free_num}")
+                return None
+            capacity = self.size - self.keep_num
+            head = int(self.metadata[1])
+            first_size = min(need_size, capacity - head)
+            indexes = self.free_ids[head : head + first_size].tolist()
+            indexes.extend(self.free_ids[: need_size - first_size].tolist())
+            self.metadata[0] = free_num - need_size
+            self.metadata[1] = (head + need_size) % capacity
+            self.refs[indexes] = 1
+            return indexes
 
     def free_state_cache(self, free_indexes: List[int]):
         alloc_upper_bound = self.size - self.keep_num
@@ -40,18 +116,26 @@ class StateCacheManager(ABC):
             assert 0 <= idx < alloc_upper_bound, (
                 f"free index {idx} out of alloc range [0, {alloc_upper_bound}), " f"reserved tail num {self.keep_num}"
             )
-        self.free_list.extend(free_indexes)
-        assert (
-            len(self.free_list) <= alloc_upper_bound
-        ), f"free cache num {len(self.free_list)} should not be larger than alloc size {alloc_upper_bound}"
+        with self.lock:
+            for idx in free_indexes:
+                assert self.refs[idx] > 0, f"checkpoint {idx} has no owner"
+                self.refs[idx] -= 1
+                if self.refs[idx] == 0:
+                    free_num = int(self.metadata[0])
+                    tail = (int(self.metadata[1]) + free_num) % alloc_upper_bound
+                    self.free_ids[tail] = idx
+                    self.metadata[0] = free_num + 1
 
     def get_free_cache_num(self):
-        return len(self.free_list)
+        with self.lock:
+            return int(self.metadata[0])
+
+    def retain_state_cache(self, indexes: List[int]):
+        """Adopt checkpoints while their source radix path is still pinned."""
+        with self.lock:
+            for idx in indexes:
+                self.refs[idx] += 1
 
     def get_used_cache_num(self):
         # Preserve the existing accounting: reserved slots count as used.
-        return self.size - len(self.free_list)
-
-    def clear_to_init_state(self):
-        """重置空闲槽位；子类同时清零自身的 checkpoint buffer。"""
-        self.free_list = collections.deque(range(self.size - self.keep_num))
+        return self.size - self.get_free_cache_num()
