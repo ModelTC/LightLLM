@@ -26,14 +26,11 @@ class Qwen3_5DSparkModel(Qwen3DSparkModel):
         self.mask_token_id = self.config["mask_token_id"]
 
     def _init_mem_manager(self):
-        target_mem_manager = self.main_model.mem_manager
-        draft_kv_shape = (self.config["num_key_value_heads"], self.config["head_dim"])
-        target_kv_shape = (
-            target_mem_manager.linear_config.full_att_all_num_kv_heads,
-            target_mem_manager.head_dim,
+        layer_start = self.main_model.mem_manager.linear_config.get_main_model_full_att_layer_num()
+        layer_start += sum(len(model.layers_infer) for model in self.mtp_previous_draft_models)
+        self.mem_manager = self.main_model.mem_manager.get_kv_layout_view(
+            self.config["num_key_value_heads"],
+            self.config["head_dim"],
+            layer_start=layer_start,
+            layer_num=self.config["n_layer"],
         )
-        assert draft_kv_shape == target_kv_shape, (
-            "Qwen3.5 parallel block drafter requires matching draft and target KV shapes, "
-            f"got draft={draft_kv_shape}, target={target_kv_shape}."
-        )
-        super()._init_mem_manager()
