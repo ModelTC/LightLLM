@@ -20,6 +20,25 @@ KV 存储和请求表，但资源的申请、缓存和释放以完整物理页�
 真实推理索引由模型执行层从请求表选取。
 `ReqManager` 只保留请求 ID、请求表及其原有生命周期职责，不提供 page allocator 接口。
 
+`ReqManager.req_to_token_indexs_cpu` 是与 GPU 请求表同形状、同 dtype 的 CPU 镜像。
+调度分配、前缀匹配和 diverse 共享直接拷贝到镜像；缓存插入、释放和 PD 元数据直接读取镜像。
+缓存持有的索引必须复制，避免请求槽位复用后改变缓存内容。
+每个 `InferReq` 用 `move_to_gpu_index_len` 记录已经提交到推理流的 GPU 索引长度。
+`_get_classed_reqs` 返回前通过 backend 的 `_copy_req_token_indexes_to_gpu` 统一收集
+prefill/decode 请求的
+`[move_to_gpu_index_len, hold_kv_len)` 区间，通过一次原生 `cudaMemcpyBatchAsync` 提交，
+成功后将长度更新到 `hold_kv_len`。原生批量拷贝使用 `cudaMemcpySrcAccessOrderStream` 源访问属性，
+源数据读取遵循当前非默认推理流的顺序。调用方必须保持对应的 pinned CPU 源区间有效且内容不变，
+直到传输完成；API 返回时源数据读取可能仍未完成，修改、释放或复用源区间前须确认传输已完成。
+后续计算依靠同流顺序读取 GPU 表；`move_to_gpu_index_len` 表示异步拷贝已排队，不表示设备已经完成拷贝。
+暂停/释放时重置长度，前缀重映射时回退长度以重新上传。
+DP 在发布请求 KV 信息前，让专用传输流等待 overlap 流已有的索引更新，
+再将各 TP rank 的待上传索引拷贝到 GPU 表；
+当前流等待传输流，再由同步 NCCL barrier 保证上传完成。其他 DP rank 在 barrier 后
+通过 GPU 请求表读取分配元数据，不跨进程共享 CPU 镜像。
+请求筛选、地址计算、批量上传及长度更新均在这个 backend 函数内完成；`ReqManager` 只持有映射表。
+独立 benchmark 和模型初始化检查共用 `cuda_memcpy_batch_async` 底层调用。
+
 ## 生命周期
 
 - Prefill：请求通过调度后，按目标 KV 长度将容量向上对齐，新页一次申请并完整写入请求表。模型执行时再选择

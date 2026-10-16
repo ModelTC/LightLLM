@@ -13,6 +13,7 @@ from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.cuda_wrapper import cuda_memcpy_pinned_h2d_batch_async
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.common.req_manager import HybridAttentionReqManager
@@ -551,9 +552,9 @@ class ModeBackend:
                                 req_to_next_token_ids = (
                                     self.model.req_manager.req_sampling_params_manager.req_to_next_token_ids
                                 )
-                                # to do 这个地方是否需要加流同步
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                torch.cuda.current_stream().synchronize()
+                                # handle 只更新 CPU 状态；推理入口通过 overlap_stream.wait_stream(current_stream)
+                                # 保证读取首 token 前写入已完成，无需在此阻塞 CPU。修改写入或推理流时须保留此依赖。
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
@@ -644,7 +645,6 @@ class ModeBackend:
         self,
         req_obj: InferReq,
         alloc_token_num: int,
-        no_blcoking_copy: bool = False,
     ) -> Optional[torch.Tensor]:
         if alloc_token_num == 0:
             return None
@@ -656,12 +656,31 @@ class ModeBackend:
         old_hold_kv_len = req_obj.hold_kv_len
         new_hold_kv_len = old_hold_kv_len + alloc_token_num
         mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
-        # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
-        g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
-            mem_indexes, non_blocking=no_blcoking_copy
+        g_infer_context.req_manager.req_to_token_indexs_cpu[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
+            mem_indexes
         )
         req_obj.hold_kv_len = new_hold_kv_len
         return mem_indexes
+
+    def _copy_req_token_indexes_to_gpu(self, run_reqs: List[InferReq]):
+        """Collect pending index tails, upload them in one batch, then advance request lengths."""
+        req_manager = g_infer_context.req_manager
+        cpu_table, gpu_table = req_manager.req_to_token_indexs_cpu, req_manager.req_to_token_indexs
+        pending_copies = []
+        src_tensors, dst_tensors = [], []
+        for req in run_reqs:
+            start, end = req.move_to_gpu_index_len, req.hold_kv_len
+            assert 0 <= start <= end <= cpu_table.shape[1]
+            if start < end:
+                src_tensors.append(cpu_table[req.req_idx, start:end])
+                dst_tensors.append(gpu_table[req.req_idx, start:end])
+                pending_copies.append((req, end))
+        if not pending_copies:
+            return
+
+        cuda_memcpy_pinned_h2d_batch_async(dst_tensors, src_tensors)
+        for req, end in pending_copies:
+            req.move_to_gpu_index_len = end
 
     def _get_classed_reqs(
         self,
@@ -687,6 +706,8 @@ class ModeBackend:
         3. finished_reqs 需要释放的请求, 包含正常结束和aborted退出的请求。
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
+
+        返回前将两组请求尚未上传的 token 索引提交到推理流，并更新 move_to_gpu_index_len。
         """
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
@@ -757,7 +778,7 @@ class ModeBackend:
                 if alloc_token_num > 0 and self.args.page_size < 8:
                     alloc_token_num += 8 // self.args.page_size * self.args.page_size
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num)
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
                 else:
@@ -794,7 +815,7 @@ class ModeBackend:
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num, no_blcoking_copy=True)
+                    self._alloc_req_kv_mem(req_obj, alloc_token_num)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
@@ -846,6 +867,10 @@ class ModeBackend:
                     prefill_reqs.append(decode_req)
                 decode_reqs = []
 
+        if prefill_reqs or decode_reqs:
+            # 使用已有推理流提交映射表更新，与前后推理操作保持顺序。
+            with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+                self._copy_req_token_indexes_to_gpu(prefill_reqs + decode_reqs)
         return prefill_reqs, decode_reqs
 
     # 一些可以复用的通用功能函数

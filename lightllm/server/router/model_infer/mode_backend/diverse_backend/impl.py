@@ -89,6 +89,7 @@ class DiversehBackend(ChunkedPrefillBackend):
 
         # 第二阶段
         event_pack.notify_post_handle_and_wait_pre_post_handle()
+        # TODO: 分析 prefill 元数据事件同步的必要性，以及对 CPU/GPU overlap 的影响。
         model_output.prefill_mem_indexes_ready_event.synchronize()
         update_packs = self._diverse_pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
         # 第三阶段
@@ -172,18 +173,19 @@ class DiversehBackend(ChunkedPrefillBackend):
                 pack = InferReqUpdatePack(req_obj=req_obj, output_len=pre_master_req_pack.output_len)
                 update_func_objs.append(pack)
 
+        # TODO: 分析 master/slave 状态更新后同步当前流的必要性，以及对 overlap 并行的影响。
         torch.cuda.current_stream().synchronize()
         return update_func_objs
 
     def _master_req_to_radix_cache(self, master_req: InferReq):
         key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
         key = torch.tensor(key, dtype=torch.int64, device="cpu")
-        value = self.model.req_manager.req_to_token_indexs[master_req.req_idx][: master_req.cur_kv_len].detach().cpu()
+        value = self.model.req_manager.req_to_token_indexs_cpu[master_req.req_idx][: master_req.cur_kv_len].clone()
         prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len
         assert old_prefix_len <= master_req.cur_kv_len
         self.model.mem_manager.free(
-            self.model.req_manager.req_to_token_indexs[master_req.req_idx][old_prefix_len:prefix_len]
+            self.model.req_manager.req_to_token_indexs_cpu[master_req.req_idx][old_prefix_len:prefix_len]
         )
 
         # 将原有共享节点替换为新共享节点，新共享节点对应的长度为当前的cur_kv_len
@@ -196,7 +198,8 @@ class DiversehBackend(ChunkedPrefillBackend):
 
         share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
         assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
-        self.model.req_manager.req_to_token_indexs[master_req.req_idx][0 : master_req.cur_kv_len] = value
+        self.model.req_manager.req_to_token_indexs_cpu[master_req.req_idx, : master_req.cur_kv_len].copy_(value)
+        master_req.move_to_gpu_index_len = 0
         return
 
     def _copy_master_req_to_slave_req(self, slave_req: InferReq):
@@ -208,9 +211,11 @@ class DiversehBackend(ChunkedPrefillBackend):
 
         kv_len = master_req.cur_kv_len
 
-        self.model.req_manager.req_to_token_indexs[slave_req.req_idx][
-            0:kv_len
-        ] = self.model.req_manager.req_to_token_indexs[master_req.req_idx][0:kv_len]
+        self.model.req_manager.req_to_token_indexs_cpu[slave_req.req_idx, :kv_len].copy_(
+            self.model.req_manager.req_to_token_indexs_cpu[master_req.req_idx, :kv_len]
+        )
+        slave_req.move_to_gpu_index_len = 0
+        # TODO: 确认 CPU 镜像复制后是否需要同步当前流，以及对 diverse 并行流程的影响。
         # torch.cuda.current_stream().synchronize()
         slave_req.shared_kv_node = master_req.shared_kv_node
         slave_req.cur_kv_len = kv_len

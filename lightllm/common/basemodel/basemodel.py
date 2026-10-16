@@ -6,7 +6,6 @@ import copy
 import math
 import json
 import torch
-import torch.nn.functional as F
 import triton
 from typing import final, List
 from tqdm import tqdm
@@ -26,6 +25,8 @@ from lightllm.common.basemodel.cuda_graph import CudaGraph
 from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
+from lightllm.common.basemodel.triton_kernel.pad_decode_inputs import pad_decode_inputs
+from lightllm.common.basemodel.triton_kernel.pad_prefill_inputs import pad_prefill_inputs
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
@@ -410,27 +411,24 @@ class TpPartBaseModel:
         new_model_input.batch_size = new_batch_size
         new_model_input.total_token_num += padded_batch_size * 2
         new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
-        new_model_input.b_req_idx = F.pad(
-            new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
-        )
-        new_model_input.b_mtp_index = F.pad(
-            new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
-        )
-        new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
-        if new_model_input.b_position_delta is not None:
-            new_model_input.b_position_delta = F.pad(
-                new_model_input.b_position_delta, (0, padded_batch_size), mode="constant", value=0
-            )
-        new_model_input.multimodal_params = new_model_input.multimodal_params + [
-            {"images": [], "audios": []} for _ in range(padded_batch_size)
-        ]
-
-        new_model_input.b_shared_seq_len = F.pad(
-            new_model_input.b_shared_seq_len, (0, padded_batch_size), mode="constant", value=0
-        )
-        new_model_input.b_shared_radix_node_id = F.pad(
-            new_model_input.b_shared_radix_node_id, (0, padded_batch_size), mode="constant", value=-1
+        (
+            new_model_input.input_ids,
+            new_model_input.b_req_idx,
+            new_model_input.b_mtp_index,
+            new_model_input.b_seq_len,
+            new_model_input.b_position_delta,
+            new_model_input.b_shared_seq_len,
+            new_model_input.b_shared_radix_node_id,
+        ) = pad_decode_inputs(
+            input_ids=model_input.input_ids,
+            b_req_idx=model_input.b_req_idx,
+            b_mtp_index=model_input.b_mtp_index,
+            b_seq_len=model_input.b_seq_len,
+            b_position_delta=model_input.b_position_delta,
+            b_shared_seq_len=model_input.b_shared_seq_len,
+            b_shared_radix_node_id=model_input.b_shared_radix_node_id,
+            new_batch_size=new_batch_size,
+            hold_request_id=self.req_manager.HOLD_REQUEST_ID,
         )
 
         # 特殊模型，特殊模式的特殊变量的特殊 padding
@@ -439,6 +437,10 @@ class TpPartBaseModel:
                 input=new_model_input.mtp_draft_input_hiddens,
                 new_batch_size=new_batch_size,
             )
+
+        new_model_input.multimodal_params = new_model_input.multimodal_params + [
+            {"images": [], "audios": []} for _ in range(padded_batch_size)
+        ]
 
         new_model_input.check_input()
         return new_model_input
@@ -458,14 +460,23 @@ class TpPartBaseModel:
         new_model_input.max_q_seq_len = max(padded_token_num, model_input.max_q_seq_len)
         new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
         new_model_input.max_cache_len = max(0, model_input.max_cache_len)
-        new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_token_num), mode="constant", value=1)
-        new_model_input.b_req_idx = F.pad(
-            new_model_input.b_req_idx, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
+        (
+            new_model_input.input_ids,
+            new_model_input.b_req_idx,
+            new_model_input.b_mtp_index,
+            new_model_input.b_seq_len,
+            new_model_input.b_ready_cache_len,
+            new_model_input.b_is_decode_req,
+        ) = pad_prefill_inputs(
+            input_ids=model_input.input_ids,
+            b_req_idx=model_input.b_req_idx,
+            b_mtp_index=model_input.b_mtp_index,
+            b_seq_len=model_input.b_seq_len,
+            b_ready_cache_len=model_input.b_ready_cache_len,
+            b_is_decode_req=model_input.b_is_decode_req,
+            new_handle_token_num=new_handle_token_num,
+            hold_request_id=self.req_manager.HOLD_REQUEST_ID,
         )
-        new_model_input.b_mtp_index = F.pad(new_model_input.b_mtp_index, (0, 1), mode="constant", value=0)
-        new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
-        new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
-        new_model_input.b_is_decode_req = F.pad(new_model_input.b_is_decode_req, (0, 1), mode="constant", value=False)
         b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
         new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
@@ -987,8 +998,10 @@ class TpPartBaseModel:
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
             page_size = self.mem_manager.page_size
             alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-            mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
-            self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
+            mem_indexes = self.mem_manager.alloc(alloc_token_num)
+            req_idx = int(b_req_idx[0])
+            self.req_manager.req_to_token_indexs_cpu[req_idx, : len(mem_indexes)].copy_(mem_indexes)
+            self.req_manager.req_to_token_indexs.copy_(self.req_manager.req_to_token_indexs_cpu, non_blocking=True)
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1068,8 +1081,10 @@ class TpPartBaseModel:
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
                 page_size = self.mem_manager.page_size
                 alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-                mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
-                self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
+                mem_indexes = self.mem_manager.alloc(alloc_token_num)
+                req_idx = int(b_req_idx[0])
+                self.req_manager.req_to_token_indexs_cpu[req_idx, : len(mem_indexes)].copy_(mem_indexes)
+                self.req_manager.req_to_token_indexs.copy_(self.req_manager.req_to_token_indexs_cpu, non_blocking=True)
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")

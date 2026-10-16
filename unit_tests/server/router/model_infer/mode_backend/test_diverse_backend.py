@@ -36,8 +36,8 @@ def test_diverse_copy_skips_slaves_waiting_for_overlap_cleanup():
 
 
 def test_copy_master_kv_updates_slave_hold_kv_len():
-    req_to_token_indexs = torch.full((2, 8), -1, dtype=torch.int32)
-    req_to_token_indexs[0, :4] = torch.tensor([10, 11, 12, 13], dtype=torch.int32)
+    req_to_token_indexs_cpu = torch.full((2, 8), -1, dtype=torch.int32)
+    req_to_token_indexs_cpu[0, :4] = torch.tensor([10, 11, 12, 13], dtype=torch.int32)
     old_shared_node = object()
     new_shared_node = object()
     master_req = SimpleNamespace(
@@ -50,6 +50,7 @@ def test_copy_master_kv_updates_slave_hold_kv_len():
         req_idx=1,
         cur_kv_len=2,
         hold_kv_len=2,
+        move_to_gpu_index_len=2,
         cur_output_len=0,
         shared_kv_node=old_shared_node,
         related_master_req=master_req,
@@ -58,17 +59,20 @@ def test_copy_master_kv_updates_slave_hold_kv_len():
     )
     backend = DiversehBackend.__new__(DiversehBackend)
     backend.model = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs=req_to_token_indexs),
+        req_manager=SimpleNamespace(
+            req_to_token_indexs_cpu=req_to_token_indexs_cpu,
+        ),
     )
     backend.radix_cache = _FakeRadixCache()
     backend.is_master_in_dp = False
 
     backend._copy_master_req_to_slave_req(slave_req)
 
-    assert req_to_token_indexs[1, :4].tolist() == [10, 11, 12, 13]
+    assert req_to_token_indexs_cpu[1, :4].tolist() == [10, 11, 12, 13]
     assert slave_req.shared_kv_node is new_shared_node
     assert slave_req.cur_kv_len == 4
     assert slave_req.hold_kv_len == 4
+    assert slave_req.move_to_gpu_index_len == 0
     assert InferReq._kv_cache_alloc_need(slave_req, target_kv_len=5) == 1
     assert backend.radix_cache.dec_nodes == [old_shared_node]
     assert backend.radix_cache.add_nodes == [new_shared_node]

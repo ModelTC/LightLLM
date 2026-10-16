@@ -23,6 +23,7 @@ class DPKVSharedMoudle:
 
         self.backend: DPChunkedPrefillBackend = backend
         self.max_req_num = max_req_num
+        self.copy_stream = torch.cuda.Stream()
 
         # 0 代表 kv_len, 1 代表 radix_cache_len
         self.shared_req_infos = ShmArray(
@@ -38,6 +39,15 @@ class DPKVSharedMoudle:
         """
         填充请求的 kv 信息到共享内存中
         """
+        # 所有 TP rank 先发布 CPU 索引，确保其他 DP rank 读取 GPU 表时数据已经就绪。
+        current_stream = torch.cuda.current_stream()
+        # 常规索引上传使用 overlap stream，本次上传需排在此前的索引更新之后。
+        self.copy_stream.wait_stream(g_infer_context.get_overlap_stream())
+        with torch.cuda.stream(self.copy_stream):
+            self.backend._copy_req_token_indexes_to_gpu(reqs)
+        current_stream.wait_stream(self.copy_stream)
+        # 同步 NCCL barrier 会等待当前流完成，保证其他 rank 读取到已上传的索引。
+        # TODO: 分析传输流依赖及 NCCL barrier 等待对 DP shared 并行效率的影响。
         dist.barrier(group=self.backend.node_nccl_group)
         if self.backend.is_master_in_dp:
             self.shared_req_infos.arr[0 : len(reqs), self.dp_rank_in_node, self._KV_LEN_INDEX] = [

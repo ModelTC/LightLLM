@@ -122,12 +122,9 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
 
         pd_decode_node_info = req_obj.sampling_param.pd_decode_node
         if page_kind == "kv":
-            mem_indexes = (
-                self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
-                .detach()
-                .cpu()
-                .tolist()
-            )
+            mem_indexes = self.model.req_manager.req_to_token_indexs_cpu[
+                req_obj.req_idx, kv_start_index:kv_end_index
+            ].tolist()
             req_idx = None
         elif page_kind == "att_state":
             mem_indexes = []

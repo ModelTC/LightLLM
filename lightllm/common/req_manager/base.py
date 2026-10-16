@@ -1,3 +1,4 @@
+from collections import deque
 from typing import List
 
 import torch
@@ -10,39 +11,27 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger("lightllm.common.req_manager")
 
 
-class _ReqNode:
-    def __init__(self, index):
-        self.index = index
-        self.next: "_ReqNode" = None
-
-
 class _ReqLinkedList:
     def __init__(self, max_request_num):
-        self.nodes = [_ReqNode(i) for i in range(max_request_num)]
+        self._free_indexes = deque(range(max_request_num))
         self.marks = [0 for _ in range(max_request_num)]
-        self.root_node = _ReqNode(-1)
-        for i in range(0, max_request_num - 1):
-            self.nodes[i].next = self.nodes[i + 1]
-        self.root_node.next = self.nodes[0]
         self.can_alloc_size = max_request_num
         return
 
     def alloc(self):
-        if self.root_node.next is None:
+        if not self._free_indexes:
             logger.warning("alloc req index fail")
             return None
-        get_node = self.root_node.next
-        self.root_node.next = self.root_node.next.next
-        assert self.marks[get_node.index] == 0
-        self.marks[get_node.index] = 1
+        index = self._free_indexes.popleft()
+        assert self.marks[index] == 0
+        self.marks[index] = 1
         self.can_alloc_size -= 1
-        return get_node.index
+        return index
 
     def free(self, index):
         assert self.marks[index] == 1
-        node = self.nodes[index]
-        node.next = self.root_node.next
-        self.root_node.next = node
+        # 保持原有头插行为，优先复用最近释放的请求索引。
+        self._free_indexes.appendleft(index)
         self.marks[index] = 0
         self.can_alloc_size += 1
         return
@@ -65,6 +54,10 @@ class ReqManager:
         self.req_to_token_indexs = torch.zeros(
             (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
         )
+        # Allocation and cache metadata use this CPU mirror; inference reads the GPU table.
+        self.req_to_token_indexs_cpu = torch.zeros(
+            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cpu", pin_memory=True
+        )
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
@@ -86,13 +79,14 @@ class ReqManager:
         # HOLD_REQUEST_ID 对应的请求行供 DP padding、overlap microbatch 等占位请求使用。将该行
         # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
         # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
-        hold_row = self.req_to_token_indexs[self.HOLD_REQUEST_ID]
+        hold_row = self.req_to_token_indexs_cpu[self.HOLD_REQUEST_ID]
         hold_page = torch.tensor(
             self.mem_manager.HOLD_TOKEN_MEMINDEXES,
             dtype=hold_row.dtype,
             device=hold_row.device,
         )
         hold_row.view(-1, self.mem_manager.page_size).copy_(hold_page)
+        self.req_to_token_indexs[self.HOLD_REQUEST_ID].copy_(hold_row)
         return
 
     def alloc(self):

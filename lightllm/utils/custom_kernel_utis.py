@@ -21,6 +21,7 @@ def custom_cat(tensors):
     for t, size in zip(tensors, sizes):
         out_tensor[start_loc : (start_loc + size)].copy_(t, non_blocking=True)
         start_loc += size
+    # TODO: 分析 D2H 完成等待的阻塞开销，以及是否能缩小当前流的同步范围。
     torch.cuda.current_stream().synchronize()
 
     return out_tensor

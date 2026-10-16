@@ -570,6 +570,8 @@ class StaticBenchmarkExecutor:
 
         mem_manager = self.model.req_manager.mem_manager
         page_size = mem_manager.page_size
+        cpu_table = self.model.req_manager.req_to_token_indexs_cpu
+        gpu_table = self.model.req_manager.req_to_token_indexs
         for req_id, target_len in max_target_len_by_req.items():
             new_hold_kv_len = align_up(target_len, page_size)
             old_hold_kv_len = self._hold_kv_len_by_req.get(req_id, 0)
@@ -578,7 +580,9 @@ class StaticBenchmarkExecutor:
 
             alloc_token_num = new_hold_kv_len - old_hold_kv_len
             mem_indexes = mem_manager.alloc(alloc_token_num)
-            self.model.req_manager.req_to_token_indexs[req_id, old_hold_kv_len:new_hold_kv_len].copy_(mem_indexes)
+            cpu_indexes = cpu_table[req_id, old_hold_kv_len:new_hold_kv_len]
+            cpu_indexes.copy_(mem_indexes)
+            gpu_table[req_id, old_hold_kv_len:new_hold_kv_len].copy_(cpu_indexes, non_blocking=True)
             self._hold_kv_len_by_req[req_id] = new_hold_kv_len
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:

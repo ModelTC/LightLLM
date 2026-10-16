@@ -104,16 +104,13 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 old_prefix_len = 0 if req_obj.shared_kv_node is None else req_obj.shared_kv_node.node_prefix_total_len
                 error_mem_len = req_obj.hold_kv_len - old_prefix_len
                 if error_mem_len > 0:
-                    mem_indexes = (
-                        self.model.req_manager.req_to_token_indexs[
-                            req_obj.req_idx, old_prefix_len : req_obj.hold_kv_len
-                        ]
-                        .detach()
-                        .cpu()
-                    )
+                    mem_indexes = self.model.req_manager.req_to_token_indexs_cpu[
+                        req_obj.req_idx, old_prefix_len : req_obj.hold_kv_len
+                    ].clone()
                     self.model.mem_manager.free(mem_indexes)
                     req_obj.cur_kv_len = old_prefix_len
                     req_obj.hold_kv_len = old_prefix_len
+                    req_obj.move_to_gpu_index_len = min(req_obj.move_to_gpu_index_len, old_prefix_len)
                     if self.is_master_in_dp:
                         req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
 

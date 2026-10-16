@@ -255,6 +255,8 @@ def test_case10():
     )
     assert tree_node is not None
     assert size == 3
+    tree.dec_node_ref_counter(tree_node)
+    tree.mem_manager = SimpleNamespace(allocator=SimpleNamespace(can_use_mem_size=95), free=lambda indexes: None)
     tree.flush_cache()
     tree_node, size, values = tree.match_prefix(
         torch.tensor([1, 2, 3], dtype=torch.int64, device="cpu"), update_refs=True

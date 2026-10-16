@@ -42,7 +42,7 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     released_refs = []
     context = InferenceContext()
     context.is_hybrid_att_model = False
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
+    context.req_manager = SimpleNamespace(req_to_token_indexs_cpu=torch.tensor([[10, 11, 12, 13, 14, 15, 16]]))
     context.radix_cache = SimpleNamespace(dec_node_ref_counter=released_refs.append)
     shared_node = SimpleNamespace(node_prefix_total_len=2)
     req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
@@ -136,7 +136,7 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     freed_big_pages = []
     context = InferenceContext()
     context.is_hybrid_att_model = True
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
+    context.req_manager = SimpleNamespace(req_to_token_indexs_cpu=torch.tensor([[10, 11, 12]]))
     context.radix_cache = SimpleNamespace(
         small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
         big_page_buffers=SimpleNamespace(free_state_cache=freed_big_pages.extend),
@@ -162,6 +162,7 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
 
 def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     table = torch.full((1, 136), -1, dtype=torch.int32)
+    gpu_table = torch.full_like(table, -2)
     table[0, :4] = torch.arange(4, dtype=torch.int32)
     next_index = 4
     alloc_sizes = []
@@ -181,15 +182,17 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         req.hold_kv_len = new_hold_kv_len
         return mem_indexes
 
-    operator = SimpleNamespace(
-        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist())
-    )
+    def load(mem_indexes, **kwargs):
+        assert mem_indexes.data_ptr() == gpu_table[0, :132].data_ptr()
+        loaded_indexes.extend(mem_indexes.tolist())
+
+    operator = SimpleNamespace(load_cpu_cache_to_gpu=load)
     backend = SimpleNamespace(
         is_master_in_dp=False,
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(req_to_token_indexs_cpu=table, req_to_token_indexs=gpu_table),
         ),
         _alloc_req_kv_mem=alloc_req_kv_mem,
     )
@@ -200,7 +203,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     module.need_sync_compute_stream = lambda: False
     module.cpu_cache_client = SimpleNamespace()
     context = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs=table, mem_manager=SimpleNamespace(alloc=alloc)),
+        req_manager=SimpleNamespace(req_to_token_indexs_cpu=table, mem_manager=SimpleNamespace(alloc=alloc)),
         get_can_alloc_token_num=lambda: 200,
     )
     req = SimpleNamespace(
@@ -217,12 +220,26 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     )
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
-    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+    uploaded_indexes = []
+
+    def upload(tensor, **kwargs):
+        uploaded_indexes.append(tensor)
+        return tensor
+
+    def unexpected_copy(*args, **kwargs):
+        pytest.fail("CPU mirror upload must not re-pin indexes or concatenate GPU tensors")
+
+    monkeypatch.setattr(torch.Tensor, "cuda", upload)
+    monkeypatch.setattr(torch.Tensor, "pin_memory", unexpected_copy)
+    monkeypatch.setattr(torch, "cat", unexpected_copy)
 
     module.load_cpu_cache_to_reqs([req])
 
+    assert len(uploaded_indexes) == 1  # 仅页面编号使用 .cuda()；索引上传到已有 GPU 表。
     assert alloc_sizes == [128]
     assert req.cur_kv_len == 132
     assert req.hold_kv_len == 132
     assert loaded_indexes == list(range(132))
     assert table[0, :132].tolist() == list(range(132))
+    assert gpu_table[0, :132].tolist() == list(range(132))
+    assert gpu_table[0, 132:].eq(-2).all()

@@ -12,6 +12,8 @@ for path in (REPO_ROOT, STATIC_BENCHMARK_DIR):
     if str(path) not in sys.path:
         sys.path.append(str(path))
 
+import static_benchmark
+
 from static_benchmark import (
     BenchmarkCase,
     StaticBenchmarkExecutor,
@@ -34,10 +36,11 @@ class FakeMemManager:
         return indexes
 
 
-def make_executor(page_size: int = 4):
+def make_executor(monkeypatch, page_size: int = 4):
     mem_manager = FakeMemManager(page_size=page_size)
     req_manager = SimpleNamespace(
         mem_manager=mem_manager,
+        req_to_token_indexs_cpu=torch.full((4, 32), -1, dtype=torch.int32),
         req_to_token_indexs=torch.full((4, 32), -1, dtype=torch.int32),
     )
     model = SimpleNamespace(mem_manager=mem_manager, req_manager=req_manager)
@@ -52,8 +55,8 @@ def assert_complete_physical_pages(indexes: torch.Tensor, page_size: int):
         assert torch.all(page // page_size == page[0] // page_size)
 
 
-def test_prefill_allocates_and_reuses_complete_pages_per_request():
-    executor, mem_manager, req_manager = make_executor(page_size=4)
+def test_prefill_allocates_and_reuses_complete_pages_per_request(monkeypatch):
+    executor, mem_manager, req_manager = make_executor(monkeypatch, page_size=4)
     req_idx = torch.tensor([0, 1], dtype=torch.int32)
 
     model_input = executor._make_prefill_input(
@@ -63,10 +66,11 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
     )
 
     assert mem_manager.alloc_sizes == [4, 4]
+    assert torch.equal(req_manager.req_to_token_indexs, req_manager.req_to_token_indexs_cpu)
     assert model_input.b_is_decode_req.tolist() == [False, False]
     assert executor._hold_kv_len_by_req == {0: 4, 1: 4}
-    assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :4], page_size=4)
-    assert_complete_physical_pages(req_manager.req_to_token_indexs[1, :4], page_size=4)
+    assert_complete_physical_pages(req_manager.req_to_token_indexs_cpu[0, :4], page_size=4)
+    assert_complete_physical_pages(req_manager.req_to_token_indexs_cpu[1, :4], page_size=4)
 
     # 两个请求都还在已有页内继续 decode，不应产生新的分配。
     executor._make_decode_input(
@@ -90,12 +94,12 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
     )
     assert mem_manager.alloc_sizes == [4, 4, 4, 4]
     assert executor._hold_kv_len_by_req == {0: 8, 1: 8}
-    assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :8], page_size=4)
-    assert_complete_physical_pages(req_manager.req_to_token_indexs[1, :8], page_size=4)
+    assert_complete_physical_pages(req_manager.req_to_token_indexs_cpu[0, :8], page_size=4)
+    assert_complete_physical_pages(req_manager.req_to_token_indexs_cpu[1, :8], page_size=4)
 
 
-def test_mtp_expanded_rows_allocate_once_per_request():
-    executor, mem_manager, req_manager = make_executor(page_size=4)
+def test_mtp_expanded_rows_allocate_once_per_request(monkeypatch):
+    executor, mem_manager, req_manager = make_executor(monkeypatch, page_size=4)
     executor.args.mtp_mode = "eagle_with_att"
     executor.args.mtp_step = 3
 
@@ -112,8 +116,8 @@ def test_mtp_expanded_rows_allocate_once_per_request():
     assert model_input.batch_size == 4
     assert mem_manager.alloc_sizes == [8, 8]
     assert executor._hold_kv_len_by_req == {0: 8, 1: 8}
-    assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :8], page_size=4)
-    assert_complete_physical_pages(req_manager.req_to_token_indexs[1, :8], page_size=4)
+    assert_complete_physical_pages(req_manager.req_to_token_indexs_cpu[0, :8], page_size=4)
+    assert_complete_physical_pages(req_manager.req_to_token_indexs_cpu[1, :8], page_size=4)
 
 
 def test_profile_capacity_uses_page_aligned_per_request_cost():
