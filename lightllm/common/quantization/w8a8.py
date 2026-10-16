@@ -53,7 +53,12 @@ class BaseQuantizationMethod(QuantizationMethod):
         return "w8a8-base"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         raise NotImplementedError("Not implemented")
 
@@ -103,10 +108,15 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         return "w8a8-vllm"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).cuda(device_id)
         weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
@@ -166,10 +176,15 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
         return "fp8w8a8-vllm"
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
         weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
@@ -285,9 +300,14 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         return qweight, weight_scale, x_q, x_scale, m, n
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
-        if num_experts != 1:
+        if num_experts is not None:
             raise NotImplementedError("FP8 per-tensor quantization currently supports dense weights only")
         if isinstance(out_dims, int):
             out_dims = [out_dims]
@@ -454,10 +474,15 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         return qinput_tensor, qweight, input_scale, weight_scale, out
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
         weight_scale = torch.empty(
             expert_prefix + (out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32

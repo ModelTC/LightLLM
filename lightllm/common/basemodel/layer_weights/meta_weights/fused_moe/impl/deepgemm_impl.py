@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, Tuple, Any
+from typing import Callable, Optional, Tuple, Any
 from .base_impl import FuseMoeBaseImpl
 from ..expert_parallel_state import ExpertParallelState
 from lightllm.distributed import dist_group_manager
@@ -29,7 +29,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         self.expert_parallel_state = expert_parallel_state
         self.eplb = expert_parallel_state.eplb
         self.ep_balance_counters = None
-        self._primary_weight_pack_cache = {}
 
     def __call__(
         self,
@@ -53,6 +52,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        dist_group=None,
     ) -> torch.Tensor:
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         topk_weights, topk_ids, origin_topk_ids = self._select_eplb_experts(
@@ -83,8 +83,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            dist_group=dist_group,
         )
-
 
     def _select_eplb_experts(
         self,
@@ -101,15 +101,19 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         shared_expert_gate: Optional[torch.Tensor] = None,
         is_prefill: Optional[bool] = None,
         preserve_logical_ids: bool = False,
+        poll_migration: bool = True,
     ):
-        """选择 expert；EPLB prefill 统一由融合路径返回 physical ID。"""
+        """EPLB routes both phases through the published physical layout."""
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
         eplb = self.eplb
-        eplb_active = eplb is not None
-        if is_prefill is True and eplb_active:
-            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
+        if eplb is not None:
+            if is_prefill is True and poll_migration and eplb.migration_poll is not None:
+                eplb.migration_poll()
+            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import (
+                get_group_score_used_topk_num,
+                triton_grouped_topk_eplb,
+            )
 
-            group_score_topk_num = 2 if topk_group == 4 and num_expert_group == 8 and top_k == 8 else 1
             topk_weights, topk_ids, logical_topk_ids = triton_grouped_topk_eplb(
                 hidden_states=input_tensor,
                 gating_output=router_logits,
@@ -122,12 +126,16 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
                 logical_to_physical_map=eplb.logical_to_physical_map,
                 logical_replica_count=eplb.logical_replica_count,
                 expert_counter=eplb.route_counter,
-                sample_index=eplb.next_sample_index(),
-                record_load=eplb.recording,
+                sample_index=eplb.next_sample_index() if is_prefill is True else 0,
+                record_load=is_prefill is True and eplb.recording,
                 use_grouped_topk=use_grouped_topk,
-                return_logical_ids=preserve_logical_ids,
-                group_score_used_topk_num=group_score_topk_num,
+                return_logical_ids=preserve_logical_ids or per_expert_scale is not None,
+                group_score_used_topk_num=get_group_score_used_topk_num(topk_group, num_expert_group, top_k),
+                replica_rotation_rank=eplb.replica_rotation_rank,
+                use_replicas=is_prefill is True,
             )
+            if per_expert_scale is not None:
+                topk_weights = topk_weights * per_expert_scale[logical_topk_ids.to(torch.long)].to(topk_weights.dtype)
             origin_topk_ids = logical_topk_ids if logical_topk_ids is not None else topk_ids
         else:
             from lightllm.common.basemodel.triton_kernel.fused_moe.topk_select import select_experts
@@ -149,7 +157,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         if self.routed_scaling_factor != 1.0:
             topk_weights.mul_(self.routed_scaling_factor)
         return topk_weights, topk_ids, origin_topk_ids
-
 
     def _select_experts(
         self,
@@ -190,10 +197,15 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_ids: torch.Tensor,
         is_prefill: bool,
         shared_expert_gate: Optional[torch.Tensor] = None,
+        poll_migration: bool = True,
     ):
         """在逻辑路由采集之后，生成 DeepEP 实际使用的专家 ID。"""
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         assert shared_expert_gate is None, "fused shared expert as MoE is not supported by DeepGEMM fused MoE"
+        if self.eplb is not None:
+            from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import map_eplb_topk
+
+            topk_ids = map_eplb_topk(topk_ids, self.eplb, is_prefill=is_prefill, poll_migration=poll_migration)
         return topk_weights, topk_ids
 
     # ==================== Prefill / Decode 公共接口 ====================
@@ -210,22 +222,16 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        dist_group=None,
         shared_expert_func=None,
     ):
-        if is_prefill is False:
-            w13 = self._primary_weight_pack(w13)
-            w2 = self._primary_weight_pack(w2)
-            num_experts = self.n_routed_experts
-        else:
-            num_experts = self.expert_parallel_state.num_total_physical_experts
-
         output = fused_experts(
             hidden_states=input_tensor,
             w13=w13,
             w2=w2,
             topk_weights=topk_weights,
             topk_idx=topk_ids.to(torch.long),
-            num_experts=num_experts,
+            num_experts=self.expert_parallel_state.num_total_physical_experts,
             quant_method=self.quant_method,
             is_prefill=is_prefill,
             previous_event=None,  # for overlap
@@ -235,7 +241,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             ep_balance_counters=self.ep_balance_counters,
             shared_expert_func=shared_expert_func,
         )
-        return output
+        return self.expert_parallel_state.sync_output(output, is_prefill, dist_group)
 
     def select_experts_and_quant_input(
         self,
@@ -249,6 +255,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_group: int,
         n_group: int,
         scoring_func: str,
+        poll_migration: bool = True,
     ):
         topk_weights, topk_idx, _ = self._select_eplb_experts(
             input_tensor=hidden_states,
@@ -261,37 +268,10 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             num_expert_group=n_group,
             scoring_func=scoring_func,
             is_prefill=True,
+            poll_migration=poll_migration,
         )
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
-
-    def _primary_weight_pack(self, weight_pack: WeightPack) -> WeightPack:
-        """返回所有 decode 路径使用的缓存本地主副本视图。"""
-        if self.eplb is None:
-            return weight_pack
-        cache = getattr(self, "_primary_weight_pack_cache", None)
-        if cache is None:
-            cache = self._primary_weight_pack_cache = {}
-        cache_key = id(weight_pack)
-        primary = cache.get(cache_key)
-        if primary is None:
-            num_primary_experts_per_rank = self.expert_parallel_state.num_primary_experts_per_rank
-            primary = WeightPack(
-                weight=weight_pack.weight[:num_primary_experts_per_rank],
-                weight_scale=(
-                    weight_pack.weight_scale[:num_primary_experts_per_rank]
-                    if weight_pack.weight_scale is not None
-                    else None
-                ),
-                weight_zero_point=(
-                    getattr(weight_pack, "weight_zero_point", None)[:num_primary_experts_per_rank]
-                    if getattr(weight_pack, "weight_zero_point", None) is not None
-                    else None
-                ),
-            )
-            cache[cache_key] = primary
-        return primary
-
 
     def quantize_dispatch_input(self, hidden_states: torch.Tensor, w13: WeightPack):
         return quantize_fused_experts_input(hidden_states, w13, self.quant_method)
@@ -323,7 +303,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             scoring_func=scoring_func,
             is_prefill=False,
         )
-        return self.decode_dispatch_with_topk(
+        return self._decode_dispatch_with_execution_topk(
             hidden_states=hidden_states,
             w13=w13,
             topk_idx=topk_idx,
@@ -331,6 +311,16 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         )
 
     def decode_dispatch_with_topk(
+        self,
+        hidden_states: torch.Tensor,
+        w13: WeightPack,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=False)
+        return self._decode_dispatch_with_execution_topk(hidden_states, w13, topk_idx, topk_weights)
+
+    def _decode_dispatch_with_execution_topk(
         self,
         hidden_states: torch.Tensor,
         w13: WeightPack,
@@ -556,6 +546,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         gemm_out_b: torch.Tensor,
         handle: Any,
         overlap_event: Optional[Any] = None,
+        dist_group=None,
     ):
         combined_x, combined_topk_weights, event = dist_group_manager.ep_buffer.combine(
             gemm_out_b,
@@ -570,6 +561,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
 
         def hook():
             event.current_stream_wait()
+            self.expert_parallel_state.sync_output(combined_x, True, dist_group)
 
         return combined_x, hook
 

@@ -72,6 +72,7 @@ class FuseMoeBaseImpl(ABC):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        dist_group=None,
     ) -> torch.Tensor:
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         topk_weights, topk_ids = self._select_experts(
@@ -105,6 +106,7 @@ class FuseMoeBaseImpl(ABC):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            dist_group=dist_group,
         )
 
     @abstractmethod
@@ -172,6 +174,7 @@ class FuseMoeBaseImpl(ABC):
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
         shared_expert_func=None,
+        dist_group=None,
     ) -> torch.Tensor:
         """根据准备完成的路由结果执行融合 MoE 计算。
 
