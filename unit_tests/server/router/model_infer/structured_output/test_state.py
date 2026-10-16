@@ -173,7 +173,7 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
         requests_mapping={},
         output_constraint_state_factory=compiler.output_constraint_state_factory if constraints_enabled else None,
     )
-    context.backend = SimpleNamespace(dp_rank_in_node=current_dp_rank)
+    context.backend = SimpleNamespace(dp_rank_in_node=current_dp_rank, processed_prefill_tokens=0)
     context.infer_req_ids = []
     context.vocab_size = compiler.vocab_size
     monkeypatch.setattr(infer_batch, "g_infer_context", context)
