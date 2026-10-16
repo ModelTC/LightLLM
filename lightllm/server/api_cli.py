@@ -809,13 +809,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--enable_prefill_eplb",
         action="store_true",
-        help="""Enable online expert load balancing with complete physical layouts; requires --run_mode prefill.""",
+        help="""Balance experts from prefill samples. PD decode automatically disables EPLB.
+        Single-node normal mode shares the published layout between prefill and decode;
+        decode does not sample loads, plan, or commit migrations.""",
     )
     parser.add_argument(
         "--eplb_num_redundant_experts_per_rank",
         type=int,
         default=2,
-        help="""Number of redundant physical experts per EP rank for each MoE layer used by prefill EPLB.
+        help="""Number of redundant physical experts per EP rank for each MoE layer used by EPLB.
+            Shared by both phases in normal mode; ignored on PD decode nodes.
             The value must be nonnegative; zero enables rearrangement without extra replicas.""",
     )
     parser.add_argument(

@@ -64,6 +64,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
             all_config = json.load(json_file)
 
             self.config = all_config["text_config"]
+            self.config["is_mtp_draft_model"] = self.is_mtp_draft_model
             self.vision_config = all_config.get("vision_config", None)
 
             if self.vision_config is None:

@@ -37,6 +37,7 @@ class FuseMoeMarlin(FuseMoeTriton):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        dist_group=None,
     ):
         if alpha is not None or limit is not None:
             raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")

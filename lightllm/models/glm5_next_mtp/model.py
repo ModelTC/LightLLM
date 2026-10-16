@@ -25,6 +25,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
     def _init_config(self):
         # Reuse the validated target configuration without changing its mHC layout.
         self.config = deepcopy(self.main_model.config)
+        self.config["is_mtp_draft_model"] = self.is_mtp_draft_model
         assert self.config.get("num_nextn_predict_layers") == 1, "GLM NextN requires one native MTP block"
         self.config["mhc"] = False
 

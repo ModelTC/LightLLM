@@ -209,7 +209,7 @@ def test_cpu_counter_accumulates_multiple_prefill_dispatches():
     assert (counters.route_load, counters.compute_load) == (7, 384)
 
 
-def test_monitor_reuses_manager_precreated_dedicated_gloo_group(monkeypatch):
+def test_monitor_creates_dedicated_gloo_group_before_starting_thread(monkeypatch):
     sentinel_group = object()
     impl = SimpleNamespace(ep_balance_counters=None)
     weight = SimpleNamespace(
@@ -227,12 +227,19 @@ def test_monitor_reuses_manager_precreated_dedicated_gloo_group(monkeypatch):
     metric_ports = []
     monkeypatch.setattr(monitor_module, "get_shm_port_args", lambda: SimpleNamespace(metric_port=4321))
     monkeypatch.setattr(monitor_module, "MetricClient", lambda port: metric_ports.append(port) or object())
-    monkeypatch.setattr(monitor_module, "dist_group_manager", SimpleNamespace(ep_balance_monitor_group=sentinel_group))
-    monkeypatch.setattr(monitor_module.dist, "new_group", lambda *args, **kwargs: pytest.fail("unexpected new_group"))
+    events = []
+
+    def create_group(*, ranks, backend):
+        assert ranks == [0, 1]
+        assert backend == "gloo"
+        events.append("group")
+        return sentinel_group
+
+    monkeypatch.setattr(monitor_module.dist, "new_group", create_group)
     monkeypatch.setattr(
         monitor_module.threading,
         "Thread",
-        lambda *args, **kwargs: SimpleNamespace(start=lambda: None),
+        lambda *args, **kwargs: SimpleNamespace(start=lambda: events.append("thread")),
     )
 
     monitor = monitor_module.EPBalanceMonitor(model)
@@ -240,6 +247,20 @@ def test_monitor_reuses_manager_precreated_dedicated_gloo_group(monkeypatch):
     assert monitor.gloo_group is sentinel_group
     assert impl.ep_balance_counters is monitor.counters[0]
     assert metric_ports == [4321]
+    assert events == ["group", "thread"]
+
+
+def test_monitor_without_experts_does_not_allocate_resources(monkeypatch):
+    monkeypatch.setattr(monitor_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(monitor_module, "get_global_world_size", lambda: 2)
+    monkeypatch.setattr(monitor_module, "find_ep_moe_weights", lambda _: [])
+    monkeypatch.setattr(monitor_module.dist, "new_group", lambda **kwargs: pytest.fail("unexpected group"))
+    monkeypatch.setattr(monitor_module, "MetricClient", lambda port: pytest.fail("unexpected metric client"))
+    monkeypatch.setattr(monitor_module.threading, "Thread", lambda **kwargs: pytest.fail("unexpected thread"))
+
+    monitor = monitor_module.EPBalanceMonitor(SimpleNamespace())
+
+    assert not monitor.enabled
 
 
 def test_nonzero_rank_monitor_does_not_create_metric_client(monkeypatch):
@@ -257,8 +278,7 @@ def test_nonzero_rank_monitor_does_not_create_metric_client(monkeypatch):
     monkeypatch.setattr(monitor_module, "find_ep_moe_weights", lambda _: [weight])
     monkeypatch.setattr(monitor_module, "get_global_rank", lambda: 1)
     monkeypatch.setattr(monitor_module, "get_global_world_size", lambda: 2)
-    monkeypatch.setattr(monitor_module, "dist_group_manager", SimpleNamespace(ep_balance_monitor_group=sentinel_group))
-    monkeypatch.setattr(monitor_module.dist, "new_group", lambda *args, **kwargs: pytest.fail("unexpected new_group"))
+    monkeypatch.setattr(monitor_module.dist, "new_group", lambda **kwargs: sentinel_group)
     monkeypatch.setattr(monitor_module, "get_shm_port_args", lambda: pytest.fail("unexpected port lookup"))
     monkeypatch.setattr(
         monitor_module,
@@ -278,8 +298,7 @@ def test_nonzero_rank_monitor_does_not_create_metric_client(monkeypatch):
 
 
 @pytest.mark.parametrize("disable_monitor", [False, True])
-def test_group_manager_creates_monitor_gloo_group_only_when_enabled(monkeypatch, disable_monitor):
-    monitor_group = object()
+def test_common_group_creation_does_not_allocate_monitor_resources(monkeypatch, disable_monitor):
     custom_groups = []
 
     class FakeCustomProcessGroup:
@@ -309,19 +328,14 @@ def test_group_manager_creates_monitor_gloo_group_only_when_enabled(monkeypatch,
     monkeypatch.setattr(
         communication_op_module.dist,
         "new_group",
-        lambda *args, **kwargs: calls.append((args, kwargs)) or monitor_group,
+        lambda *args, **kwargs: calls.append((args, kwargs)),
     )
 
     manager = communication_op_module.DistributeGroupManager()
     manager.create_groups(group_size=2)
 
     assert len(manager.groups) == 2
-    if disable_monitor:
-        assert calls == []
-        assert manager.ep_balance_monitor_group is None
-    else:
-        assert calls == [((), {"ranks": [0, 1], "backend": "gloo"})]
-        assert manager.ep_balance_monitor_group is monitor_group
+    assert calls == []
 
 
 def test_monitor_registers_prefill_ep_gauges_with_model_label():
