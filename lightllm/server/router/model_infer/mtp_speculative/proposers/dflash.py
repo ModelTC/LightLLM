@@ -39,6 +39,9 @@ class DFlashProposer(BaseSpecProposer):
         # DFlash prefill 直接复用 target prompt 的 token 布局，并注入 target
         # hidden 初始化唯一 draft model 的 KV。使用浅副本避免在 target 输入上
         # 保留 draft 专用状态。
+        if getattr(self.backend.draft_models[0], "uses_windowed_draft_kv", False):
+            self.backend.draft_models[0].commit_window_kv(target_model_input, target_hidden)
+            return
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
         self.backend.draft_models[0].forward(draft_input)
@@ -78,12 +81,16 @@ class DFlashProposer(BaseSpecProposer):
 
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
 
-        # target verify 的行布局和 mem_indexes 对应本轮所有被验证 token。
-        # 附加 target hidden 后执行一次 draft forward，将这些行提交到 DFlash
-        # KV cache；浅副本保证 target_model_input 本身保持不变。
-        verify_draft_input = copy.copy(target_model_input)
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
-        draft_model.forward(verify_draft_input)
+        # full 模式通过 draft forward 写入 verify 行对应的 KV；windowed 模式
+        # 只将接受的 target hidden 投影并写入独立窗口，不保留被拒绝的行。
+        if getattr(draft_model, "uses_windowed_draft_kv", False):
+            draft_model.commit_window_kv(
+                target_model_input, target_model_output.mtp_collector.spec_hidden, b_req_mtp_start_loc, accept_len
+            )
+        else:
+            verify_draft_input = copy.copy(target_model_input)
+            verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+            draft_model.forward(verify_draft_input)
 
         # 每个请求始终展开完整 block，未被本轮 proposal 返回的 block 尾部仍会
         # 参与 parallel forward；KV 位置由请求页表和序列位置确定。

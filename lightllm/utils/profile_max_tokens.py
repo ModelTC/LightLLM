@@ -74,6 +74,14 @@ def profile_mtp_weight_memory(model):
     weight_memory_before = torch.cuda.memory_allocated()
     yield
     target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
+    if model.args.mtp_windowed:
+        from lightllm.common.state_cache_manager.windowed_mtp import load_window_state_config
+
+        config = load_window_state_config(model.args)
+        draft_cache_bytes = (model.max_req_num + 1) * config.get_state_bytes(model.data_type.itemsize)
+        total_gpu_bytes = torch.cuda.get_device_properties(get_current_device_id()).total_memory
+        # Include the window reservation in the existing per-rank budget reduction.
+        model.mem_fraction -= draft_cache_bytes / total_gpu_bytes
     model.mem_fraction = get_mtp_adjusted_mem_fraction(
         mem_fraction=model.mem_fraction,
         target_weight_bytes=target_weight_bytes,

@@ -11,6 +11,7 @@ from .operator import (
     FP8StaticPerTensorQuantMemOperator,
     LinearAttMemOperator,
 )
+from .windowed_mtp import WindowKVPageHelper
 from typing import Tuple, Any, List
 
 logger = init_logger(__name__)
@@ -38,11 +39,8 @@ class Qwen3NextMemManager(MemoryManager):
         layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         return super().get_att_input_params(layer_index)
 
-    def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        super()._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        # TODO 初始化线性 att 对应的部分 buffer.
+    def _init_state_cache_buffers(self):
         self._init_linear_att_buffers()
-        return
 
     def _init_linear_att_buffers(self):
         big_page_token_num = (
@@ -55,19 +53,11 @@ class Qwen3NextMemManager(MemoryManager):
             size=triton.cdiv(self.size, big_page_token_num) + 2,
             linear_config=self.linear_config,
             keep_num=2,
+            window_config=self.window_state_config,
         )
 
         self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
         self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
-        return
-
-    def _free_buffers(self):
-        super()._free_buffers()
-        self._free_linear_att_buffers()
-        return
-
-    def _free_linear_att_buffers(self):
-        self.big_page_buffers = None
         return
 
     def write_to_shm(self, req_manager):
@@ -85,11 +75,11 @@ class Qwen3NextMemManager(MemoryManager):
         finally:
             self.big_page_buffers = big_page_buffers
 
-    def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
+    def _assert_att_state_page_size(self):
         self.att_state_page_helper = self._create_att_state_page_helper()
         self.att_state_page_helper.assert_page_size()
-        return kv_move_buffer
+        if self.windowed_draft_kv is not None:
+            WindowKVPageHelper(self, offset=self.att_state_page_helper.state_nbytes).assert_page_size()
 
     def _create_att_state_page_helper(self):
         return Qwen3NextLinearAttPageHelper(self)
@@ -119,6 +109,10 @@ class Qwen3NextMemManager(MemoryManager):
         helper = self.att_state_page_helper
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.write_req_to_page(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
+        if self.windowed_draft_kv is not None:
+            WindowKVPageHelper(self, offset=helper.state_nbytes).copy_req_page(
+                page_index, req_idx, dp_mems, mode="write"
+            )
         return
 
     def read_page_kv_move_buffer_to_mem(
@@ -146,6 +140,10 @@ class Qwen3NextMemManager(MemoryManager):
         helper = self.att_state_page_helper
         dp_mems = helper.get_dp_mems(mem_managers, dp_index, dp_world_size)
         helper.read_page_to_req(page_index=page_index, req_idx=req_idx, dp_mems=dp_mems)
+        if self.windowed_draft_kv is not None:
+            WindowKVPageHelper(self, offset=helper.state_nbytes).copy_req_page(
+                page_index, req_idx, dp_mems, mode="read"
+            )
         return
 
 
