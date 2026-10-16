@@ -278,6 +278,14 @@ def get_input_min_max_pixels(input_image_num: int) -> tuple[int, int]:
     return min_pixels, max_pixels
 
 
+def get_chat_template_kwargs() -> dict[str, Any]:
+    return X2VConfig.get_value("chat_template_kwargs", {})
+
+
+def get_enable_t2i_auto_fix() -> bool:
+    return X2VConfig.get_value("enable_t2i_auto_fix", False)
+
+
 def setup_devices(args: StartArgs):
     devices = os.environ.get("CUDA_VISIBLE_DEVICES", "").strip()
     logger.info(f"current devices: {devices} {torch.cuda.device_count()}")

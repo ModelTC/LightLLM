@@ -1,6 +1,6 @@
 import os
 import json
-from typing import Union
+from typing import Union, Any
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.api_models import ImageGenerationRequest, ImageEditRequest
@@ -104,7 +104,7 @@ async def build_prompt(request, tools) -> str:
     return input_str
 
 
-async def build_prompt_from_image_request(request: Union[ImageGenerationRequest, ImageEditRequest]) -> str:
+async def build_prompt_from_image_request(request: Union[ImageGenerationRequest, ImageEditRequest], **chat_template_kwargs: dict[str, Any]) -> str:
     try:
         images = request.images if isinstance(request, ImageEditRequest) else []
         if images:
@@ -118,6 +118,7 @@ async def build_prompt_from_image_request(request: Union[ImageGenerationRequest,
             # "'list object' has no attribute 'startswith'".
             user_content = request.prompt
         kwargs = {"conversation": [{"role": "user", "content": user_content}]}
+        kwargs.update(**chat_template_kwargs)
         # logger.info(f"kwargs: {kwargs}")
 
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True)
