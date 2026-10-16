@@ -12,6 +12,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.visualserver.objs import VIT_Obj
 from ..pd_io_struct import PD_Master_Obj
 from .nccl_tcp_store import start_tcp_store_server
+from .cache_metadata import router as cache_metadata_router, relays as cache_metadata_relays
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
 from lightllm.utils.process_check import start_parent_check_thread
 
@@ -21,6 +22,8 @@ app = FastAPI()
 
 registered_pd_master_objs: Dict[str, PD_Master_Obj] = {}
 registered_visual_server_objs: Dict[str, VIT_Obj] = {}
+app.include_router(cache_metadata_router)
+app.state.registered_pd_master_objs = registered_pd_master_objs
 registered_pd_master_obj_lock = Lock()
 registered_visual_server_obj_lock = Lock()
 
@@ -73,6 +76,8 @@ async def websocket_endpoint(websocket: WebSocket):
         with registered_pd_master_obj_lock:
             if registered_pd_master_objs.get(registered_pd_master_obj.node_id) is registered_pd_master_obj:
                 registered_pd_master_objs.pop(registered_pd_master_obj.node_id, None)
+                for relay in cache_metadata_relays.values():
+                    relay.forget_master(registered_pd_master_obj.node_id)
     return
 
 

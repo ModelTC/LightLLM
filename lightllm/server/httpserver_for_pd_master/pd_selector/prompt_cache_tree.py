@@ -21,6 +21,7 @@ class PromptCacheMatchResult:
     input_char_count: int
     # 命中节点最近一次由 prompt 插入更新的单调时钟时间戳；未命中时为 None。
     last_insert_time: Optional[float]
+    prefill_node_epoch: Optional[int] = None
 
 
 @dataclass(slots=True)
@@ -32,6 +33,7 @@ class _PromptCacheNode:
     edge_char: Optional[str] = None
     last_prefill_node: Optional[str] = None
     last_insert_time: Optional[float] = None
+    prefill_node_epoch: Optional[int] = None
     last_time_mark: int = 0
 
 
@@ -89,14 +91,34 @@ class PromptCacheTree:
         Raises:
             ValueError: prefill_node 为 None 时抛出。
         """
+        self.insert_key(self._to_key(text), prefill_node, time.monotonic())
+
+    def clear(self) -> None:
+        """Discard historical hints when the relay can no longer replay a gap."""
+        with self._lock:
+            self.root = _PromptCacheNode()
+            self._node_count = 0
+            self._leaf_lru.clear()
+
+    def insert_key(
+        self, key: str, prefill_node: str, last_insert_time: Optional[float], prefill_node_epoch: Optional[int] = None
+    ) -> None:
+        """Insert an already sampled key, preserving the original observation age."""
         if prefill_node is None:
             raise ValueError("prefill_node must not be None")
-        key = self._to_key(text)
         with self._lock:
-            self._insert_at(self.root, key, 0, prefill_node)
+            self._insert_at(self.root, key, 0, prefill_node, last_insert_time, prefill_node_epoch)
             self._evict_if_needed()
 
-    def _insert_at(self, node: _PromptCacheNode, key: str, depth: int, prefill_node: str) -> None:
+    def _insert_at(
+        self,
+        node: _PromptCacheNode,
+        key: str,
+        depth: int,
+        prefill_node: str,
+        last_insert_time: Optional[float],
+        prefill_node_epoch: Optional[int],
+    ) -> None:
         path = []
         try:
             while True:
@@ -110,7 +132,6 @@ class PromptCacheTree:
                     child = _PromptCacheNode(
                         parent=node,
                         edge_char=ch,
-                        last_insert_time=time.monotonic(),
                     )
                     child.last_time_mark = self._gen_time_mark()
                     node.children[ch] = child
@@ -122,7 +143,8 @@ class PromptCacheTree:
             for path_node in reversed(path):
                 if path_node is not self.root:
                     path_node.last_prefill_node = prefill_node
-                    path_node.last_insert_time = time.monotonic()
+                    path_node.last_insert_time = last_insert_time
+                    path_node.prefill_node_epoch = prefill_node_epoch
                 if path_node.last_time_mark in self._leaf_lru:
                     self._leaf_lru.pop(path_node.last_time_mark, None)
                 path_node.last_time_mark = self._gen_time_mark()
@@ -172,6 +194,7 @@ class PromptCacheTree:
                 matched_char_count=matched_char_count,
                 input_char_count=len(text),
                 last_insert_time=node.last_insert_time if node is not self.root else None,
+                prefill_node_epoch=node.prefill_node_epoch if node is not self.root else None,
             )
 
     def _match_at(self, node: _PromptCacheNode, key: str, depth: int) -> Tuple[_PromptCacheNode, int]:

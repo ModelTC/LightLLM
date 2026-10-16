@@ -199,6 +199,24 @@ PD disaggregation Mode Parameters
 
     Port number in configuration server mode
 
+    PD masters using ``cache_aware`` share successful-Prefill placement hints and pending-load snapshots over
+    a separate WebSocket, without Redis. Masters must use identical ``model_dir``, ``model_name`` and prefix
+    sampling rules. Selection queries a local prefix tree without waiting for the configuration server.
+    KV data stays on P; placement hints do not guarantee current KV residency.
+
+    Each model namespace retains up to 16 MiB of in-memory hint history. Reconnects replay missing events;
+    an unrecoverable gap or server restart clears the local hint tree and rebuilds from retained history,
+    allowing older hints to be lost. Hint queues are bounded and may drop hints during congestion or outages.
+    Absolute pending-load snapshots are published every 250 ms. Selection adds local current counters to
+    remote snapshots; missing, older-than-3-second or mismatched-P-incarnation snapshots mean unknown load,
+    falling back to worker-reported token utilization. Snapshots are not capacity reservations and cannot
+    prevent simultaneous assignments to the same P. With one P and ``--disable_pd_cache_high_priority``,
+    hint synchronization and index maintenance are skipped.
+
+    Hint freshness and load snapshots require synchronized host wall clocks. Replay preserves the original
+    observation age, and P restarts invalidate old placement hints. Keep the configuration server in one
+    process and upgrade it before the PD masters. Deployments without it retain the local selection policy.
+
 Model Configuration Parameters
 ------------------------------
 

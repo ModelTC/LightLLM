@@ -42,6 +42,9 @@ class PDSelector:
         """记录成功进入推理的 prompt；非 cache-aware 策略无需处理。"""
         return
 
+    async def run_metadata_sync(self) -> None:
+        return
+
 
 class RandomSelector(PDSelector):
     """随机选择器"""
@@ -97,12 +100,28 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
 
         super().__init__(pd_manager)
         self.policy = CacheAwarePolicy(CacheAwareConfig())
+        self.shared_cache = None
+        if pd_manager is not None and pd_manager.args.config_server_host and pd_manager.args.config_server_port:
+            from .shared_cache import SharedCacheState
+
+            self.shared_cache = SharedCacheState(self, pd_manager.args)
 
     def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
-        p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
+        if self.shared_cache is None:
+            p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
+        elif not self.shared_cache.enabled():
+            # With one P and freshness priority disabled, historical placement cannot affect routing.
+            return self.prefill_nodes[0], self._importance_sampling(self.decode_nodes), PDSelectionExtraInfo()
+        else:
+            loads = self.shared_cache.cluster_loads(self.prefill_nodes)
+            p_node = (
+                self._importance_sampling(self.prefill_nodes)
+                if loads is None
+                else self.policy.select_worker(self.prefill_nodes, prompt, loads)
+            )
         d_node = self._importance_sampling(self.decode_nodes)
         # 选点完成后再查询一次前缀树；只有 cache 实际属于最终选中的 P 节点
         # 时才返回命中率，避免负载均衡改派节点后误判为高命中。
@@ -120,4 +139,12 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         self.policy.record_prompt_cache_hit_rate(cache_hit_rate)
 
     def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj) -> None:
-        self.policy.insert_prompt_cache(prompt, p_node)
+        if self.shared_cache is None:
+            self.policy.insert_prompt_cache(prompt, p_node)
+        else:
+            # Apply our own hints through the same ordered stream as every other master.
+            self.shared_cache.publish_hint(prompt, p_node)
+
+    async def run_metadata_sync(self) -> None:
+        if self.shared_cache is not None:
+            await self.shared_cache.run()

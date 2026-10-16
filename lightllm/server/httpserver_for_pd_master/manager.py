@@ -871,6 +871,7 @@ class HttpServerManagerForPDMaster:
             from lightllm.server.httpserver_for_pd_master.register_loop import register_loop
 
             asyncio.create_task(register_loop(self))
+            asyncio.create_task(self.pd_manager.selector.run_metadata_sync())
 
         while True:
             await self.infos_queues.wait_to_ready()
