@@ -351,7 +351,8 @@ PD 分离模式参数
 .. option:: --prefill_queue_strategy
 
     推理后端在资源分配前使用的 prefill 排序策略，默认值为 ``auto``（按运行模式自动选择）。
-    策略会先识别 decode 请求，将其稳定地放在队列最左侧且不参与后续排序；
+    策略先将等待暂停、已暂停、已结束、已中止或已标记清理的请求按原始相对顺序放到队尾，再识别其余
+    decode 请求，将其稳定地放在队列最左侧且不参与后续排序；
     ``infer_high_priority`` 和所选策略只作用于右侧的 prefill 请求。
 
     prefill 请求带有内部字段 ``infer_high_priority``。该字段默认为 ``0``，不接受外部请求设置；
@@ -364,7 +365,7 @@ PD 分离模式参数
     * ``default``：按 ``infer_high_priority`` 从小到大稳定排序，相同值内保持 FCFS 顺序。
     * ``promote_shortest``：负优先级 prefill 请求按到达顺序排在前面；在非负优先级的
       普通请求中选择剩余 prefill token 最少的一个，将其移动到普通请求队头，其余普通
-      请求保持相对顺序。已完成 prompt 计算的请求按零计算。该模式主要适合 PD 分离的
+      请求保持相对顺序。尚未结束但已完成 prompt 计算的请求按零计算。该模式主要适合 PD 分离的
       Prefill 节点，用于改善部分短请求的 TTFT 和首字体验。
     * ``hrrn``：负优先级 prefill 请求仍排在最前面；普通请求按基于 token aging 的最高
       响应比优先（Highest Response Ratio Next）策略排序。等待量从请求首次参与 HRRN 排序时开始累计。

@@ -28,6 +28,8 @@ LightLLM 支持在推理进程中选择 prefill 请求的排队策略。该功�
 ```text
 ready_reqs
     │
+    ├─ 将等待暂停、已暂停、已结束、已中止或已标记清理的请求稳定地放到队尾
+    │
     ├─ 按本轮运行条件识别 decode 和 prefill 请求
     │
     ├─ decode 请求稳定放到最左侧，不参与 prefill 策略排序
@@ -40,8 +42,13 @@ ready_reqs
 最终队列始终具有以下结构：
 
 ```text
-[decode 请求，保持原始相对顺序] + [经过策略排序的 prefill 请求]
+[有效 decode 请求，保持原始相对顺序] + [经过策略排序的 prefill 请求] + [本轮不参与推理的请求，保持原始相对顺序]
 ```
+
+本轮不参与推理的请求指 `filter_mark`、`wait_pause`、`paused`、`infer_aborted` 或 `finish_status.is_finished()` 为真的请求。
+它们不参与 decode/prefill 分类和策略排序，也不初始化 HRRN 的 aging 元数据；仍保留在结果中，由后端按原有流程执行暂停、恢复或清理。
+暂停请求之间保留原始相对顺序，恢复后从下一轮开始参与排序。已经初始化的 HRRN 等待起点和服务成本在暂停及恢复期间保持不变。
+prompt 已计算完成不等于请求已经结束：尚未结束的请求仍按实际阶段参与排序，剩余 prefill token 数最小为零。
 
 排序发生在资源检查之前，因此队列靠前的请求会更早尝试获得本轮计算 token 和 KV cache。该机制只改变尚未执行请求的检查顺序，不会抢占正在 GPU 上运行的请求。
 
@@ -241,7 +248,7 @@ lightllm/server/router/model_infer/mode_backend/prefill_queue_strategy
 4. 同步更新 CLI 和 `StartArgs` 的可选值。
 5. 补充策略顺序、稳定性、空队列、单请求、decode 前置和输入列表不变等测试。
 
-基类已经负责识别并前置 decode 请求。子类只能重排传入的 prefill 请求，并应遵守以下约束：
+基类已经负责将本轮不参与推理的请求后置，并识别和前置有效 decode 请求。子类只能重排传入的 prefill 请求，并应遵守以下约束：
 
 - 不丢弃或复制请求。
 - 不修改请求状态。

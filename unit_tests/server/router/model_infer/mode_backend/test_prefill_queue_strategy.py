@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 
 from lightllm.server.api_cli import make_argument_parser
+from lightllm.server.core.objs import FinishStatus
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend.prefill_queue_strategy import (
@@ -19,10 +20,20 @@ def req(
     priority=0,
     router_priority=False,
     total_len=None,
+    finish_status=FinishStatus.NO_FINISH,
+    infer_aborted=False,
+    filter_mark=False,
+    wait_pause=False,
+    paused=False,
 ):
     request = InferReq.__new__(InferReq)
     request.req_id = group_id
     request.cur_kv_len = kv_len
+    request.finish_status = FinishStatus(finish_status)
+    request.infer_aborted = infer_aborted
+    request.filter_mark = filter_mark
+    request.wait_pause = wait_pause
+    request.paused = paused
     request.shm_req = SimpleNamespace(
         input_len=input_len,
         group_req_id=group_id,
@@ -81,6 +92,155 @@ def test_inference_priority_is_independent_from_router_priority():
 def test_promote_shortest_clamps_remaining_tokens_and_preserves_ties():
     requests = [req(9, 5, 6), req(8, 5, 10), req(7, 5, 5), req(6, 10, 8), req(1, 2)]
     assert strategy("promote_shortest").reorder(requests) == requests
+
+
+def test_promote_shortest_ignores_finished_request_when_selecting_shortest():
+    finished = req(1, 5, kv_len=5, finish_status=FinishStatus.FINISHED_LENGTH)
+    long_request = req(2, 20)
+    short_request = req(3, 2)
+
+    assert strategy("promote_shortest").reorder([finished, long_request, short_request], no_decode=True) == [
+        short_request,
+        long_request,
+        finished,
+    ]
+
+
+def test_promote_shortest_preserves_arrival_order_for_equal_positive_remaining_tokens():
+    long_request = req(1, 20)
+    first_short = req(3, 10, kv_len=8)
+    second_short = req(2, 2)
+
+    assert strategy("promote_shortest").reorder([long_request, first_short, second_short]) == [
+        first_short,
+        long_request,
+        second_short,
+    ]
+
+
+@pytest.mark.parametrize("name", PREFILL_QUEUE_STRATEGIES)
+@pytest.mark.parametrize("mode", [{}, {"no_decode": True}, {"strict_prefill": True}])
+def test_finished_aborted_and_cleanup_requests_stay_last(name, mode):
+    finished_normal = req(9, 5, kv_len=5, finish_status=FinishStatus.FINISHED_LENGTH)
+    finished_high = req(8, 2, priority=-10, finish_status=FinishStatus.FINISHED_STOP)
+    finished_decode = req(7, 5, kv_len=4, finish_status=FinishStatus.FINISHED_ERROR)
+    aborted = req(6, 2, priority=-10, infer_aborted=True)
+    cleanup = req(5, 5, kv_len=4, filter_mark=True)
+    long_request = req(1, 20)
+    short_request = req(2, 2)
+    high_priority = req(3, 100, priority=-1)
+    decode = req(4, 5, kv_len=4)
+    active = [long_request, short_request, high_priority, decode]
+    finished = [finished_normal, finished_high, finished_decode, aborted, cleanup]
+    requests = [
+        finished_normal,
+        long_request,
+        finished_high,
+        short_request,
+        finished_decode,
+        high_priority,
+        aborted,
+        decode,
+        cleanup,
+    ]
+    original = list(requests)
+    policy = strategy(name)
+
+    expected_active = policy.reorder(active, **mode)
+    result = policy.reorder(requests, **mode)
+
+    assert result == expected_active + finished
+    assert all(a is b for a, b in zip(requests, original))
+    assert sorted(map(id, result)) == sorted(map(id, original))
+    for request in finished:
+        assert not hasattr(request, "arrival_processed_prefill_tokens")
+        assert not hasattr(request, "uncached_prefill_tokens")
+
+
+@pytest.mark.parametrize("name", PREFILL_QUEUE_STRATEGIES)
+def test_all_finished_requests_preserve_arrival_order(name):
+    requests = [
+        req(6, 2, finish_status=FinishStatus.FINISHED_ABORTED),
+        req(5, 5, kv_len=5, finish_status=FinishStatus.FINISHED_LENGTH),
+        req(4, 10, priority=-10, finish_status=FinishStatus.FINISHED_STOP),
+        req(3, 5, kv_len=4, infer_aborted=True),
+        req(2, 2, filter_mark=True),
+        req(1, 5, kv_len=4, finish_status=FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+    ]
+
+    assert strategy(name).reorder(requests) == requests
+
+
+@pytest.mark.parametrize("pause_state", ["wait_pause", "paused"])
+def test_promote_shortest_ignores_paused_request_when_selecting_shortest(pause_state):
+    suspended = req(1, 2, **{pause_state: True})
+    long_request = req(2, 20)
+    short_request = req(3, 5)
+
+    assert strategy("promote_shortest").reorder([suspended, long_request, short_request]) == [
+        short_request,
+        long_request,
+        suspended,
+    ]
+    assert getattr(suspended, pause_state) is True
+
+
+@pytest.mark.parametrize("name", PREFILL_QUEUE_STRATEGIES)
+@pytest.mark.parametrize("mode", [{}, {"no_decode": True}, {"strict_prefill": True}])
+def test_paused_requests_keep_arrival_order_at_tail(name, mode):
+    paused_high = req(5, 2, priority=-10, paused=True)
+    waiting = req(6, 5, kv_len=4, wait_pause=True)
+    paused_normal = req(4, 2, paused=True)
+    finished = req(7, 5, finish_status=FinishStatus.FINISHED_STOP)
+    active = [req(1, 20), req(2, 5), req(3, 100, priority=-1)]
+    requests = [paused_high, active[0], waiting, active[1], finished, paused_normal, active[2]]
+    original = list(requests)
+    policy = strategy(name)
+
+    assert policy.reorder(requests, **mode) == policy.reorder(active, **mode) + [
+        paused_high,
+        waiting,
+        finished,
+        paused_normal,
+    ]
+    assert all(a is b for a, b in zip(requests, original))
+
+
+@pytest.mark.parametrize("pause_state", ["wait_pause", "paused"])
+def test_hrrn_initializes_paused_request_only_after_recovery(pause_state):
+    suspended = req(1, 100, **{pause_state: True})
+    active = req(2, 20)
+    policy = strategy("hrrn", processed_prefill_tokens=1000)
+
+    assert policy.reorder([suspended, active]) == [active, suspended]
+    assert not hasattr(suspended, "arrival_processed_prefill_tokens")
+    assert not hasattr(suspended, "uncached_prefill_tokens")
+
+    setattr(suspended, pause_state, False)
+    suspended.cur_kv_len = 90
+    policy.backend.processed_prefill_tokens = 2000
+    assert policy.reorder([suspended, active]) == [active, suspended]
+    assert suspended.arrival_processed_prefill_tokens == 2000
+    assert suspended.uncached_prefill_tokens == 10
+
+
+def test_hrrn_preserves_existing_aging_snapshot_across_pause_and_recovery():
+    request = req(1, 100)
+    policy = strategy("hrrn", processed_prefill_tokens=1000)
+    policy.reorder([request])
+
+    request.paused = True
+    request.cur_kv_len = 0
+    policy.backend.processed_prefill_tokens = 2000
+    assert policy.reorder([request]) == [request]
+    assert request.paused is True
+
+    request.paused = False
+    request.cur_kv_len = 90
+    policy.backend.processed_prefill_tokens = 3000
+    assert policy.reorder([request]) == [request]
+    assert request.arrival_processed_prefill_tokens == 1000
+    assert request.uncached_prefill_tokens == 100
 
 
 def test_promote_shortest_keeps_high_priority_requests_first():

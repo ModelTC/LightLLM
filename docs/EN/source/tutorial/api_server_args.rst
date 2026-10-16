@@ -366,7 +366,8 @@ Scheduling Parameters
 .. option:: --prefill_queue_strategy
 
     Prefill ordering policy in the inference backend before resource allocation. Defaults
-    to ``auto`` (automatic selection by run mode). The policy first identifies decode requests,
+    to ``auto`` (automatic selection by run mode). The policy first moves pause-pending, paused, finished, aborted,
+    or cleanup-marked requests to the end in arrival order. It then identifies active decode requests,
     keeps them at the left in arrival order, and excludes them from subsequent sorting. ``infer_high_priority`` and
     the selected policy apply only to the prefill requests on the right.
 
@@ -384,7 +385,7 @@ Scheduling Parameters
     * ``promote_shortest``: keep negative-priority prefill requests first in arrival order.
       Among non-negative-priority normal requests, move only the request with the fewest
       remaining prefill tokens to the front of the normal queue. Preserve the relative order
-      of all other normal requests. Fully processed prompts count as zero. This mode is mainly
+      of all other normal requests. Fully processed prompts of unfinished requests count as zero. This mode is mainly
       intended for Prefill nodes in PD-disaggregated deployments to improve TTFT for some short
       requests.
     * ``hrrn``: keep negative-priority prefill requests first, then order normal requests with
