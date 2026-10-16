@@ -29,8 +29,27 @@ RED = dict(
 def dead(pid):
     try:
         return open(f"/proc/{pid}/stat").read().split()[2] == "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
         return True
+
+
+def test_worker_preserves_noncontiguous_exact_hash_samples():
+    from unit_tests.common.fused_moe.test_eplb_runtime_hash import _samples
+
+    rng = torch.Generator().manual_seed(17)
+    samples = [[torch.rand((96, 8), generator=rng).argsort(-1)[:, :2] for _ in range(4)]]
+    logical, hist = _samples(samples, 8, 4, 4)
+    packed = torch.cat((logical[..., None], hist), -1)
+    current = torch.tensor([[[0, 1, 6, 7], [0, 2, 3, 4], [0, 3, 4, 5], [1, 2, 5, 6]]])
+    settings = dict(node_world_size=4, expert_alignment=128, stickiness=0.1, replica_hash_load=packed[..., 1:])
+    expected = plan_eplb_candidate(packed[..., 0], current, **settings)
+    worker = EPLBPlannerWorker(timeout_s=30)
+    try:
+        actual, timing = worker.plan(packed[..., 0], current, **settings)
+        assert torch.equal(actual, expected)
+        assert not worker.info["cuda_initialized"]
+    finally:
+        worker.close()
 
 
 def test_worker_persistent_full_redundant_and_cpu():
@@ -45,6 +64,29 @@ def test_worker_persistent_full_redundant_and_cpu():
     finally:
         worker.close()
     assert dead(pid)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-initialized serving parent")
+def test_worker_exec_does_not_reimport_cuda_initialized_main(tmp_path):
+    script = tmp_path / "serving_main.py"
+    script.write_text(
+        """import torch
+torch.cuda.init()
+from lightllm.common.eplb_planner_worker import EPLBPlannerWorker
+if __name__ == "__main__":
+    assert torch.cuda.is_initialized()
+    worker = EPLBPlannerWorker(timeout_s=30)
+    try:
+        assert not worker.info["cuda_initialized"]
+        load = torch.ones((1, 1, 1, 8), dtype=torch.int64)
+        current = torch.arange(8).view(1, 8, 1)
+        result, _ = worker.plan(load, current, node_world_size=8, expert_alignment=128, stickiness=0.1)
+        assert torch.equal(result, current)
+    finally:
+        worker.close()
+"""
+    )
+    subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=45, check=True)
 
 
 def test_worker_rejects_concurrent_and_timeout_cleans_child():

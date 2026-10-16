@@ -10,10 +10,14 @@ from lightllm.server.router.model_infer.mode_backend import ep_runtime, eplb_man
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
 from lightllm.server.router.model_infer.mode_backend.dp_backend.impl import DPChunkedPrefillBackend
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventManager
+from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils import device_utils
 
 
 @pytest.fixture
 def runtime(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    monkeypatch.setattr(device_utils, "is_sm100_gpu", lambda: False)
     events = []
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     output = object()
@@ -22,9 +26,22 @@ def runtime(monkeypatch):
     model._microbatch_overlap_prefill_cuda = lambda *inputs: events.append("overlap") or output
     model.microbatch_overlap_decode = lambda *inputs: output
     monitor = SimpleNamespace(enabled=True, record_prefill_round=lambda: events.append("record"))
-    manager = SimpleNamespace(step=lambda: events.append("step"), poll=lambda: events.append("poll"))
+    manager = SimpleNamespace(
+        before_prefill=lambda: events.append("prepare"),
+        step=lambda: events.append("step"),
+        poll=lambda: events.append("poll"),
+        _eplb_states=[SimpleNamespace(migration_poll=None)],
+        poll_migration_at_layer_boundary=lambda: events.append("layer_poll"),
+    )
     backend = SimpleNamespace(
-        args=SimpleNamespace(enable_prefill_eplb=True, disable_ep_balance_monitor=False),
+        args=StartArgs(
+            enable_prefill_eplb=True,
+            enable_ep_moe=True,
+            run_mode="prefill",
+            disable_ep_balance_monitor=False,
+            enable_prefill_microbatch_overlap=False,
+            enable_tpsp_mix_mode=False,
+        ),
         model=model,
         overlap_event_manager=OverlapEventManager(),
     )
@@ -39,9 +56,11 @@ def runtime(monkeypatch):
 
 @pytest.mark.parametrize("eplb,monitor_enabled", [(False, False), (False, True), (True, False), (True, True)])
 @pytest.mark.parametrize("batch_size", [0, 3])
-def test_completed_rounds_and_decode_preserve_behavior(runtime, eplb, monitor_enabled, batch_size):
+@pytest.mark.parametrize("run_mode", ["prefill", "normal"])
+def test_completed_rounds_and_decode_preserve_behavior(runtime, eplb, monitor_enabled, batch_size, run_mode):
     backend, events, output, monitor, _ = runtime
     backend.args.enable_prefill_eplb = eplb
+    backend.args.run_mode = run_mode
     backend.args.disable_ep_balance_monitor = not monitor_enabled
     model = backend.model
     original_methods = vars(model).copy()
@@ -53,19 +72,20 @@ def test_completed_rounds_and_decode_preserve_behavior(runtime, eplb, monitor_en
     model_input = SimpleNamespace(is_prefill=True, batch_size=batch_size, to_cuda=lambda: None)
     expected = (["record"] if monitor_enabled else []) + (["step"] if eplb else [])
     assert model.forward(model_input) is output
-    assert events == ["prefill", *expected]
+    preparation = (["poll"] if run_mode == "normal" else []) + ["prepare"] if eplb else []
+    assert events == [*preparation, "prefill", *expected]
     events.clear()
     # Empty DP ranks and both empty microbatches still participate in the
     # globally scheduled round. Count one full round, not one per microbatch.
     assert model._microbatch_overlap_prefill_cuda(model_input, model_input) is output
-    assert events == ["overlap", *expected]
+    assert events == [*preparation, "overlap", *expected]
     events.clear()
     model_input.is_prefill = False
     assert model.forward(model_input) is output
     assert events == ["decode"]
     assert model._decode is original_methods["_decode"]
     assert model.microbatch_overlap_decode is original_methods["microbatch_overlap_decode"]
-    if not eplb:
+    if not eplb or run_mode == "normal":
         assert vars(backend.overlap_event_manager) == original_event_methods
     if not eplb and not monitor_enabled:
         assert vars(model) == original_methods
@@ -87,6 +107,47 @@ def test_disabled_monitor_and_draft_methods_are_untouched(runtime):
     assert draft._prefill.__func__ is TpPartBaseModel._prefill
 
 
+def test_normal_decode_and_idle_never_poll_or_wait_for_eplb(runtime):
+    backend, events, output, _, manager = runtime
+    backend.args.run_mode = "normal"
+
+    def forbidden():
+        pytest.fail("decode/idle must not poll, commit, or wait for EPLB")
+
+    manager.poll = forbidden
+    manager.before_prefill = forbidden
+    manager.step = forbidden
+    manager.poll_migration_at_layer_boundary = forbidden
+    ep_runtime.install_ep_runtime(backend)
+    events.clear()
+    event_pack = backend.overlap_event_manager.get_overlap_event_pack()
+    event_pack._close_overlap()
+    event_pack.wait_to_forward()
+    assert not events
+    assert backend.model.forward(SimpleNamespace(is_prefill=False, to_cuda=lambda: None)) is output
+    assert events == ["decode"]
+
+
+def test_pd_decode_never_installs_eplb_even_when_requested(runtime, monkeypatch):
+    backend, events, output, _, _ = runtime
+    backend.args.run_mode = "decode"
+    backend.args.disable_ep_balance_monitor = True
+
+    def forbidden(*args):
+        pytest.fail("PD decode must not construct or synchronize EPLB")
+
+    monkeypatch.setattr(eplb_manager, "EPLBManager", forbidden)
+    monkeypatch.setattr(ep_runtime.dist, "barrier", forbidden)
+    original_methods = vars(backend.model).copy()
+    original_event_methods = vars(backend.overlap_event_manager).copy()
+    ep_runtime.install_ep_runtime(backend)
+    assert vars(backend.model) == original_methods
+    assert vars(backend.overlap_event_manager) == original_event_methods
+    assert not events
+    assert backend.model.forward(SimpleNamespace(is_prefill=False, to_cuda=lambda: None)) is output
+    assert events == ["decode"]
+
+
 @pytest.mark.parametrize("method", ["_prefill", "_microbatch_overlap_prefill_cuda"])
 def test_failed_prefill_is_not_published(runtime, method):
     backend, events, _, _, _ = runtime
@@ -99,7 +160,7 @@ def test_failed_prefill_is_not_published(runtime, method):
     events.clear()
     with pytest.raises(ValueError, match="forward failed"):
         getattr(backend.model, method)(object())
-    assert not events
+    assert events == ["prepare"]
 
 
 def test_poll_waits_for_execution_ownership_and_propagates_failures(runtime):
@@ -150,20 +211,23 @@ def test_poll_binding_does_not_retain_completed_event_packs(runtime):
 
 
 @pytest.mark.parametrize("backend_class", [ChunkedPrefillBackend, DPChunkedPrefillBackend])
-def test_real_infer_loops_poll_before_requests_even_when_idle(runtime, monkeypatch, backend_class):
+@pytest.mark.parametrize("run_mode", ["prefill", "normal"])
+def test_real_infer_loops_poll_only_at_role_specific_boundaries(runtime, monkeypatch, backend_class, run_mode):
     template, events, _, _, _ = runtime
     backend = backend_class.__new__(backend_class)
     vars(backend).update(vars(template))
+    backend.args.run_mode = run_mode
     backend.support_overlap = False
     backend.classed_req_no_decode = False
     backend.classed_req_strict_prefill = False
+    backend.processed_prefill_tokens = 0
     backend.logger = SimpleNamespace(exception=lambda message: None)
     actions = iter(("prefill", "decode", "pass"))
     backend.control_state_machine = SimpleNamespace(
         try_recover_paused_reqs=lambda: False,
         select_run_way=lambda **kwargs: _run_way(next(actions)),
     )
-    backend._get_classed_reqs = lambda **kwargs: ([], [])
+    backend._get_classed_reqs = lambda **kwargs: ([], [], 0)
     get_event_pack = backend.overlap_event_manager.get_overlap_event_pack
 
     def get_ready_event_pack():
@@ -209,10 +273,28 @@ def test_real_infer_loops_poll_before_requests_even_when_idle(runtime, monkeypat
     with pytest.raises(StopLoop):
         backend.infer_loop()
     gathered = ["gather"] if backend_class is DPChunkedPrefillBackend else []
+    if run_mode == "normal":
+        assert events == [
+            "requests",
+            *gathered,
+            "poll",
+            "prepare",
+            "prefill",
+            "record",
+            "step",
+            "requests",
+            *gathered,
+            "decode",
+            "requests",
+            *gathered,
+            "requests",
+        ]
+        return
     assert events == [
         "poll",
         "requests",
         *gathered,
+        "prepare",
         "prefill",
         "record",
         "step",
@@ -232,3 +314,18 @@ def _run_way(action):
     return SimpleNamespace(
         is_prefill=lambda: action == "prefill", is_decode=lambda: action == "decode", is_pass=lambda: action == "pass"
     )
+
+
+@pytest.mark.parametrize(
+    "microbatch,tpsp,installed", [(False, False, True), (True, False, False), (False, True, False)]
+)
+def test_layer_migration_hooks_only_use_ordered_prefill_paths(runtime, microbatch, tpsp, installed):
+    backend, events, _, _, manager = runtime
+    backend.args.enable_prefill_microbatch_overlap = microbatch
+    backend.args.enable_tpsp_mix_mode = tpsp
+    ep_runtime.install_ep_runtime(backend)
+    hook = manager._eplb_states[0].migration_poll
+    assert (hook is not None) == installed
+    if installed:
+        hook()
+        assert events[-1] == "layer_poll"

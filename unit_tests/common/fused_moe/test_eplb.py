@@ -9,6 +9,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.cuda_wrapper import CudaBatchMemcpy, find_loaded_library
+
 
 def _replica_index_reference(token, expert, counts):
     value = token ^ (((expert.to(torch.int64) + 1) * 0x9E3779B9) & 0xFFFFFFFF)
@@ -52,17 +54,13 @@ from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.base_im
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import (
     fused_moe_weight as fused_weight_module,
 )
-from lightllm.utils import envs_utils, dist_utils
+from lightllm.utils import device_utils, envs_utils, dist_utils
 from lightllm.common.eplb_utils import extract_eplb_expert_tensors
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.expert_parallel_state import (
-    disable_eplb_model_init,
-    is_eplb_model_init_disabled,
-)
+from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_topk
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import eplb_planner as eplb_planner_module
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import eplb_placement as placement_module
 from lightllm.server.router.model_infer.mode_backend.eplb_transfer import (
     TransferStep,
-    _CudaBatchMemcpy,
     _commit_staging_rows,
     align_target_placement,
     build_transfer_plan,
@@ -193,14 +191,17 @@ def test_base_call_template_forwards_selection_and_capture_callback(alpha, limit
             alpha=None,
             limit=None,
             clamp_up_add_one=True,
+            dist_group=None,
         ):
             seen["fused"] = {
                 "topk_ids": topk_ids,
                 "activation": (alpha, limit, clamp_up_add_one),
+                "dist_group": dist_group,
             }
             return "output"
 
     seen, captured = {}, []
+    dist_group = object()
     impl = Impl(4, 0, 1.0, SimpleNamespace())
     result = impl(
         "input",
@@ -218,12 +219,14 @@ def test_base_call_template_forwards_selection_and_capture_callback(alpha, limit
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        dist_group=dist_group,
     )
     assert result == "output"
     assert captured == ["logical_ids"]
     assert seen["select"]["preserve_logical_ids"]
     assert seen["fused"]["topk_ids"] == "physical_ids"
     assert seen["fused"]["activation"] == (alpha, limit, clamp_up_add_one)
+    assert seen["fused"]["dist_group"] is dist_group
 
 
 def test_parallel_state_derives_expert_layout():
@@ -740,6 +743,8 @@ def test_plan_and_broadcast_publishes_canonical_placement(monkeypatch):
     manager.num_logical_experts = 8
     manager.num_redundant_experts_per_rank = 2
     manager.current_placement = torch.tensor([[[4, 5], [6, 7], [0, 1], [2, 3]]])
+    manager._initial_plan_complete = False
+    manager._evaluation_snapshot = {"placement": manager.current_placement}
     manager.placement_stickiness = 0.1
     manager.rebalance_gain_threshold = 0.05
     manager.evaluation_group = object()
@@ -771,6 +776,8 @@ def test_plan_and_broadcast_propagates_rank_zero_error_after_existing_broadcast(
     manager.num_logical_experts = 8
     manager.num_redundant_experts_per_rank = 2
     manager.current_placement = torch.tensor([[[4, 5], [6, 7], [0, 1], [2, 3]]])
+    manager._initial_plan_complete = False
+    manager._evaluation_snapshot = {"placement": manager.current_placement}
     manager.placement_stickiness = 0.1
     manager.rebalance_gain_threshold = 0.05
     manager.evaluation_group = object()
@@ -791,134 +798,6 @@ def test_plan_and_broadcast_propagates_rank_zero_error_after_existing_broadcast(
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert str(exc_info.value.__cause__) == "planner boom"
     assert broadcasted == [{"kind": "error", "message": "RuntimeError: planner boom"}]
-
-
-def test_steady_state_sparse_sampling_records_steps_sixteen_to_nineteen_and_evaluates_step_twenty(
-    monkeypatch,
-):
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    counter = torch.tensor([[10, 20, 30, 40], [0, 0, 0, 0]], dtype=torch.int64)
-    manager.weights = [
-        type(
-            "Weight",
-            (),
-            {
-                "expert_parallel_state": _test_parallel_state(
-                    eplb=True,
-                    route_counter=counter,
-                    recording=False,
-                    recorded_sample_count=1,
-                    num_logical_experts=4,
-                    world_size=1,
-                ),
-            },
-        )()
-    ]
-    manager.in_flight = False
-    manager.prefill_steps = 15
-    manager.step_interval = 20
-    manager.sampling_interval = manager.step_interval
-    manager.evaluation_group = object()
-    manager.num_logical_experts = 4
-    manager.global_rank = 1
-    manager.evaluation_in_flight = False
-    manager._steady_collection_end_step = None
-    manager._continuous_collection_start_step = None
-    manager._continuous_collection_end_step = None
-
-    recordings, resets, started = [], [], []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: started.append(True))
-    monkeypatch.setattr(
-        manager_module.torch.cuda,
-        "synchronize",
-        lambda: pytest.fail("step must not synchronize CUDA"),
-    )
-
-    manager.step()
-    assert manager.prefill_steps == 16
-    assert recordings == [True]
-    assert resets == [True]
-    assert manager._steady_collection_end_step is not None
-    assert manager._steady_collection_end_step == 20
-
-    for _ in range(3):
-        manager.step()
-    assert manager.prefill_steps == 19
-    assert recordings == [True]
-    assert started == []
-
-    manager.step()
-    assert manager.prefill_steps == 20
-    assert manager._steady_collection_end_step is None
-    assert started == [True]
-
-
-def test_steady_sampling_window_clamps_to_short_interval_without_moving_boundary(monkeypatch):
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = False
-    manager.evaluation_in_flight = False
-    manager.prefill_steps = 0
-    manager.step_interval = 20
-    manager.sampling_interval = 3
-    manager._steady_collection_end_step = None
-    manager._continuous_collection_start_step = None
-    manager._continuous_collection_end_step = None
-    recordings, resets, started = [], [], []
-    manager._set_recording = lambda enabled: recordings.append((manager.prefill_steps, enabled))
-    manager._reset_recorded_samples = lambda: resets.append(manager.prefill_steps)
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: started.append(manager.prefill_steps))
-
-    manager._prepare_next_sampling_window()
-    assert resets == [0]
-    assert recordings == [(0, True)]
-    assert manager._steady_collection_end_step == 3
-    assert manager._steady_collection_end_step is not None
-
-    manager.step()
-    manager.step()
-    assert started == []
-    manager.step()
-    assert started == [3]
-
-
-def test_eplb_step_does_not_start_a_second_evaluation_while_one_is_pending(monkeypatch):
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    counter = torch.tensor([[10, 20, 30, 40], [0, 0, 0, 0]], dtype=torch.int64)
-    manager.weights = [
-        type(
-            "Weight",
-            (),
-            {
-                "expert_parallel_state": _test_parallel_state(
-                    eplb=True,
-                    route_counter=counter,
-                    recording=False,
-                    recorded_sample_count=1,
-                    num_logical_experts=4,
-                    world_size=1,
-                ),
-            },
-        )()
-    ]
-    manager.in_flight = False
-    manager.prefill_steps = 1
-    manager.step_interval = 2
-    manager.sampling_interval = manager.step_interval
-    manager.evaluation_group = object()
-    manager.num_logical_experts = 4
-    manager.global_rank = 1
-    manager.evaluation_in_flight = True
-
-    started = []
-    monkeypatch.setattr(manager, "_poll_evaluation", lambda: True)
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: started.append(True))
-
-    manager.step()
-
-    assert manager.prefill_steps == 1
-    assert started == []
 
 
 def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_window(
@@ -943,6 +822,8 @@ def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_
     manager.global_rank = 0
     manager.step_interval = 20
     manager.sampling_interval = 20
+    manager.min_rebalance_interval = 0
+    manager._last_evaluation_step = 0
     manager.weights = []
     manager._eplb_states = []
     recordings, logs = [], []
@@ -950,62 +831,13 @@ def test_evaluation_no_improvement_logs_model_fields_without_reopening_interval_
     monkeypatch.setattr(manager_module.logger, "info", lambda *args: logs.append(args))
 
     assert not manager._poll_evaluation()
-    assert recordings == [False]
+    assert recordings == [True]
     assert "model_imbalance_ratio" in logs[0][0]
     assert "candidate_rebalance_gain" in logs[0][0]
     assert "candidate_changed_layer_count" in logs[0][0]
     assert "actual_changed_layer_count" in logs[0][0]
     assert "next_sampling_interval" in logs[0][0]
-    assert manager.sampling_interval == 80
-
-
-def test_interval_one_rearms_after_evaluation_but_never_evaluates_empty_counter(
-    monkeypatch,
-):
-    class DoneThread:
-        def join(self):
-            pass
-
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = False
-    manager.prefill_steps = 1
-    manager.step_interval = 1
-    manager.sampling_interval = 1
-    manager._steady_collection_end_step = None
-    manager.evaluation_in_flight = True
-    manager._evaluation_lock = threading.Lock()
-    manager._evaluation_error = None
-    manager._evaluation_thread = DoneThread()
-    manager._evaluation_result = {
-        "kind": "no_improvement",
-        "model_imbalance_ratio": 1.2,
-        "candidate_model_imbalance_ratio": 1.1,
-        "candidate_rebalance_gain": 0.01,
-        "candidate_changed_layer_count": 2,
-    }
-    manager.global_rank = 1
-    manager.weights = []
-    manager._eplb_states = []
-    recordings, starts = [], []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._start_evaluation = lambda: starts.append(True)
-    manager._evaluation_ready_on_all_ranks = lambda: True
-
-    manager.poll()
-
-    # The no-improvement backoff changes interval 1 to 4.  The clamped
-    # steady window arms immediately but still waits for boundary step 5.
-    assert recordings == [True]
-    assert manager._steady_collection_end_step is not None
-    assert manager._steady_collection_end_step == 5
-    assert starts == []
-    assert manager.prefill_steps == 1
-
-    for _ in range(3):
-        manager.step()
-    assert starts == []
-    manager.step()
-    assert starts == [True]
+    assert manager.sampling_interval == 20
 
 
 def test_evaluation_worker_error_is_raised_by_main_thread():
@@ -1056,6 +888,9 @@ def test_evaluation_state_is_cleared_before_second_round(monkeypatch):
         "candidate_changed_layer_count": 1,
     }
     manager.global_rank = 1
+    manager.min_rebalance_interval = 0
+    manager._last_evaluation_step = 0
+    manager._freeze_evaluation_samples = lambda: None
     manager.prefill_steps = 0
     manager.step_interval = 1
     manager.sampling_interval = 1
@@ -1076,89 +911,6 @@ def test_evaluation_state_is_cleared_before_second_round(monkeypatch):
     assert manager._poll_evaluation()  # New worker has not produced a result.
 
 
-def test_manager_collects_recent_ring_samples_in_chronological_order(monkeypatch):
-    counters = [
-        torch.tensor([[10, 11], [20, 21], [30, 31]], dtype=torch.int64),
-        torch.tensor([[40, 41], [50, 51], [60, 61]], dtype=torch.int64),
-    ]
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.weights = [
-        type(
-            "Weight",
-            (),
-            {
-                "expert_parallel_state": _test_parallel_state(
-                    eplb=True,
-                    route_counter=counter,
-                    recording=False,
-                    recorded_sample_count=5,
-                    num_logical_experts=2,
-                    world_size=1,
-                ),
-            },
-        )()
-        for counter in counters
-    ]
-    manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
-    manager.evaluation_group = object()
-    metadata_sizes = []
-
-    def all_reduce(metadata, **_kwargs):
-        metadata_sizes.append(metadata.numel())
-
-    monkeypatch.setattr(manager_module.dist, "all_reduce", all_reduce)
-
-    samples = manager._collect_local_samples()
-
-    assert metadata_sizes == [4]
-    assert torch.equal(
-        samples,
-        torch.tensor(
-            [
-                [[30, 31], [60, 61]],
-                [[10, 11], [40, 41]],
-                [[20, 21], [50, 51]],
-            ],
-            dtype=torch.int64,
-        ),
-    )
-
-
-def test_manager_collects_only_two_recent_sparse_samples(monkeypatch):
-    counters = [
-        torch.tensor([[10, 11], [20, 21], [30, 31], [40, 41]], dtype=torch.int64),
-        torch.tensor([[50, 51], [60, 61], [70, 71], [80, 81]], dtype=torch.int64),
-    ]
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.weights = [
-        type(
-            "Weight",
-            (),
-            {
-                "expert_parallel_state": _test_parallel_state(
-                    eplb=True,
-                    route_counter=counter,
-                    recording=False,
-                    recorded_sample_count=2,
-                    num_logical_experts=2,
-                    world_size=1,
-                ),
-            },
-        )()
-        for counter in counters
-    ]
-    manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
-    manager.evaluation_group = object()
-    monkeypatch.setattr(manager_module.dist, "all_reduce", lambda tensor, **kwargs: None)
-
-    samples = manager._collect_local_samples()
-
-    assert torch.equal(
-        samples,
-        torch.tensor([[[10, 11], [50, 51]], [[20, 21], [60, 61]]], dtype=torch.int64),
-    )
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize(
     "step_interval,steady_steps,capacity", [(1, 4, 8), (2, 4, 8), (3, 4, 8), (1, 1, 2), (20, 64, 40)]
@@ -1166,16 +918,18 @@ def test_manager_collects_only_two_recent_sparse_samples(monkeypatch):
 def test_eplb_counter_preserves_each_dispatch_in_maximum_window(monkeypatch, step_interval, steady_steps, capacity):
     from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import triton_grouped_topk_eplb
 
-    args = type(
-        "Args",
-        (),
-        {"enable_prefill_eplb": True, "eplb_num_redundant_experts_per_rank": 2, "run_mode": "prefill"},
-    )()
+    args = StartArgs(
+        enable_ep_moe=True,
+        enable_prefill_eplb=True,
+        eplb_num_redundant_experts_per_rank=2,
+        run_mode="prefill",
+    )
     weight = object.__new__(fused_weight_module.FusedMoeWeight)
     weight.n_routed_experts = 4
     weight.global_world_size = 2
     weight.global_rank_ = 0
     weight.enable_ep_moe = True
+    weight.tp_rank_, weight.tp_world_size_ = 0, 1
     monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: args)
     monkeypatch.setattr(envs_utils, "get_prefill_eplb_step_interval", lambda: step_interval)
     monkeypatch.setattr(envs_utils, "get_prefill_eplb_steady_sample_steps", lambda: steady_steps)
@@ -1189,19 +943,26 @@ def test_eplb_counter_preserves_each_dispatch_in_maximum_window(monkeypatch, ste
 
     monkeypatch.setattr(fused_weight_module.torch, "zeros", cpu_zeros)
 
-    weight._init_expert_parallel_state()
+    weight._init_expert_parallel_state({})
 
     state = weight.expert_parallel_state.eplb
-    assert state.route_counter.shape == (capacity, 4)
+    assert state.route_counter.shape == (capacity, 4, 4)
     state.route_counter = state.route_counter.to("cuda")
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager._eplb_states = [state]
     manager.step_interval, manager.steady_sample_steps = step_interval, steady_steps
     manager.sampling_interval = 16 * step_interval
     steps = max(step_interval, manager._steady_sample_window_steps())
-    manager._start_steady_sampling_window(steps)
+    manager._use_full_window = False
+    manager.current_placement = state.physical_to_logical.unsqueeze(0)
+    manager.prefill_steps = 0
+    manager._sample_step_counts = deque([0], maxlen=max(step_interval, 4) + 1)
+    manager.in_flight = True
+    state.recording = True
     expected = []
     for dispatch in range(2 * steps):
+        if dispatch % 2 == 0:
+            manager.before_prefill()
         # Move the hotspot between rank-local expert pairs across dispatches.
         expert = 2 * (dispatch % 2)
         scores = torch.full((256, 4), -10.0, device="cuda")
@@ -1224,8 +985,14 @@ def test_eplb_counter_preserves_each_dispatch_in_maximum_window(monkeypatch, ste
             use_grouped_topk=False,
         )
         expected.append([128, 128, 0, 0] if expert == 0 else [0, 0, 128, 128])
-    samples = manager._recent_ring_samples(state.route_counter, state.recorded_sample_count).cpu()
-    assert torch.equal(samples, torch.tensor(expected, dtype=torch.int64))
+        if dispatch % 2 == 1:
+            manager.step()
+    manager._freeze_evaluation_samples()
+    samples = manager._evaluation_snapshot["samples"][:, 0].cpu()
+    assert torch.equal(samples[..., 0], torch.tensor(expected, dtype=torch.int64))
+    for copies in (1, 2):
+        start = 1 + copies * (copies - 1) // 2
+        assert torch.equal(samples[..., start : start + copies].sum(-1), samples[..., 0])
 
 
 def test_steady_sampling_resets_fixed_ring_without_retained_history():
@@ -1251,20 +1018,35 @@ def test_steady_sampling_resets_fixed_ring_without_retained_history():
     assert not hasattr(manager, "_sample_history")
 
 
-def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
+@pytest.mark.parametrize(
+    "enabled,run_mode,nnodes", [(False, "prefill", 1), (False, "normal", 1), (True, "decode", 1), (True, "decode", 2)]
+)
+@pytest.mark.parametrize("draft", [False, True])
+def test_inactive_eplb_creates_logical_layout_without_runtime_state(monkeypatch, enabled, run_mode, nnodes, draft):
     args = type(
         "Args",
         (),
-        {"enable_prefill_eplb": False, "eplb_num_redundant_experts_per_rank": 2},
+        {
+            "enable_prefill_eplb": enabled,
+            "eplb_num_redundant_experts_per_rank": 2,
+            "run_mode": run_mode,
+            "nnodes": nnodes,
+        },
     )()
     weight = object.__new__(fused_weight_module.FusedMoeWeight)
     weight.n_routed_experts = 4
     weight.global_world_size = 2
     weight.global_rank_ = 0
     weight.enable_ep_moe = True
+    weight.tp_rank_, weight.tp_world_size_ = 0, 1
     monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(
+        placement_module,
+        "build_initial_redundant_expert_ids",
+        lambda *args: pytest.fail("inactive EPLB must not initialize physical replicas"),
+    )
 
-    weight._init_expert_parallel_state()
+    weight._init_expert_parallel_state({"is_mtp_draft_model": draft})
 
     assert weight.expert_parallel_state is not None
     assert weight.expert_parallel_state.eplb is None
@@ -1274,44 +1056,50 @@ def test_ep_without_eplb_creates_layout_without_eplb_runtime_state(monkeypatch):
     assert not hasattr(weight, "routed_expert_counter_tensor")
 
 
-def test_disable_eplb_model_init_skips_eplb_state(monkeypatch):
-    args = type(
-        "Args",
-        (),
-        {"enable_prefill_eplb": True, "eplb_num_redundant_experts_per_rank": 2, "run_mode": "prefill"},
-    )()
+@pytest.mark.parametrize("run_mode", ["prefill", "normal"])
+@pytest.mark.parametrize("transport_experts", [4, 8])
+def test_draft_keeps_static_unrecorded_layout_in_shared_expert_space(monkeypatch, run_mode, transport_experts):
+    # This checks initialization contracts; actual CUDA storage is covered by
+    # the checkpoint-loading and graph routing tests.
+    monkeypatch.setattr(device_utils, "is_sm100_gpu", lambda: False)
+    real_zeros = torch.zeros
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor, *args, **kwargs: tensor)
+    monkeypatch.setattr(torch, "zeros", lambda *args, **kwargs: real_zeros(*args, **{**kwargs, "device": "cpu"}))
+    args = StartArgs(
+        enable_ep_moe=True,
+        enable_prefill_eplb=True,
+        eplb_num_redundant_experts_per_rank=2,
+        run_mode=run_mode,
+    )
     weight = object.__new__(fused_weight_module.FusedMoeWeight)
     weight.n_routed_experts = 4
     weight.global_world_size = 2
     weight.global_rank_ = 0
     weight.enable_ep_moe = True
+    weight.tp_rank_, weight.tp_world_size_ = 0, 1
     monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(
-        placement_module,
-        "build_initial_redundant_expert_ids",
-        lambda *args, **kwargs: pytest.fail("disabled scope must not initialize EPLB"),
-    )
+    monkeypatch.setattr(dist_utils, "get_node_world_size", lambda: 2)
+    monkeypatch.setattr(deepgemm_module.dist_group_manager, "ll_num_experts", transport_experts, raising=False)
+    if transport_experts != 8:
+        monkeypatch.setattr(
+            placement_module,
+            "build_initial_redundant_expert_ids",
+            lambda *args: pytest.fail("reject incompatible transport before creating draft weights"),
+        )
+        with pytest.raises(ValueError, match="same DeepEP expert space"):
+            weight._init_expert_parallel_state({"is_mtp_draft_model": True})
+        return
 
-    with disable_eplb_model_init():
-        weight._init_expert_parallel_state()
+    weight._init_expert_parallel_state({"is_mtp_draft_model": True})
 
-    assert weight.expert_parallel_state.eplb is None
-    assert weight.expert_parallel_state.num_total_physical_experts == weight.n_routed_experts
+    state = weight.expert_parallel_state.eplb
+    assert weight.expert_parallel_state.num_total_physical_experts == 8
+    assert not state.recording
+    assert state.next_sample_index() == state.recorded_sample_count == 0
+    assert state.route_counter.shape[0] == 2
+    assert state.migration_poll is None
+    assert state.placement_generation == 0
     assert not hasattr(weight, "_initial_redundant_expert_ids")
-
-
-def test_disable_eplb_model_init_scope_restores_after_exception():
-    assert not is_eplb_model_init_disabled()
-    with disable_eplb_model_init():
-        assert is_eplb_model_init_disabled()
-        with disable_eplb_model_init():
-            assert is_eplb_model_init_disabled()
-        assert is_eplb_model_init_disabled()
-
-    with pytest.raises(RuntimeError):
-        with disable_eplb_model_init():
-            raise RuntimeError
-    assert not is_eplb_model_init_disabled()
 
 
 def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
@@ -1343,7 +1131,7 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     manager._evaluation_lock = threading.Lock()
     manager._evaluation_result = None
     manager._evaluation_error = None
-    manager._continuous_collection_end_step = None
+    manager._evaluation_snapshot = {"steps": 4}
     local = torch.full((1, 1, 4), 100, dtype=torch.int64)
     manager._collect_local_samples = lambda: local
     seen = {}
@@ -1377,7 +1165,8 @@ def test_manager_evaluation_collective_preserves_source_node_axis(monkeypatch):
     assert manager._evaluation_result["sample_window_steps"] == 4
 
 
-def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_call(monkeypatch):
+@pytest.mark.parametrize("phase", [0, 1])
+def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_call(monkeypatch, phase):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.weights = [
         type(
@@ -1395,6 +1184,8 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
         for _ in range(3)
     ]
     manager._eplb_states = [weight.expert_parallel_state.eplb for weight in manager.weights]
+    for state in manager._eplb_states:
+        state.replica_rotation_rank = phase
     manager.global_rank = 1
     manager.world_size = 4
     manager.node_world_size = 2
@@ -1402,12 +1193,17 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     manager.sampling_interval = 20
     manager.num_logical_experts = 4
     manager.num_redundant_experts_per_rank = 1
-    manager.current_placement = build_initial_redundant_expert_ids(4, 4, 1).unsqueeze(0).expand(3, -1, -1).clone()
+    manager.current_placement = (
+        expand_redundant_placement(build_initial_redundant_expert_ids(4, 4, 1), 4)
+        .unsqueeze(0)
+        .expand(3, -1, -1)
+        .clone()
+    )
     manager.evaluation_group = object()
     manager._evaluation_lock = threading.Lock()
     manager._evaluation_result = None
     manager._evaluation_error = None
-    manager._continuous_collection_end_step = None
+    manager._evaluation_snapshot = {"steps": 4}
     prepare_calls = []
     prepared_batches = object()
 
@@ -1419,9 +1215,9 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     manager._collect_local_samples = lambda: torch.full((1, 3, 4), 100, dtype=torch.int64)
     planned_placement = torch.tensor(
         [
-            [[3], [0], [1], [2]],
-            [[2], [3], [0], [1]],
-            [[1], [2], [3], [0]],
+            [[3, 0], [0, 1], [1, 2], [2, 3]],
+            [[2, 3], [3, 0], [0, 1], [1, 2]],
+            [[1, 2], [2, 3], [3, 0], [0, 1]],
         ],
         dtype=torch.int64,
     )
@@ -1448,7 +1244,7 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
     manager._evaluate_after_event(type("Event", (), {"synchronize": lambda self: None})())
 
     assert manager._evaluation_error is None
-    assert calls == [torch.Size([2, 4, 1])]
+    assert calls == [torch.Size([2, 4, 2])]
     metadata = manager._evaluation_result["metadata"]
     assert metadata[1] is None
     assert [layer_index for layer_index, _plan in manager._evaluation_result["layer_plans"]] == [0, 2]
@@ -1461,6 +1257,7 @@ def test_manager_planned_evaluation_builds_improved_metadata_in_one_multilayer_c
             4,
             source_rank=manager.global_rank,
             node_world_size=manager.node_world_size,
+            replica_rotation_rank=phase,
         )
         assert torch.equal(item[0], expected[0])
         assert torch.equal(item[1], expected[1])
@@ -1494,7 +1291,7 @@ def test_manager_preparation_error_is_saved_as_evaluation_error(monkeypatch):
     manager._evaluation_lock = threading.Lock()
     manager._evaluation_result = None
     manager._evaluation_error = None
-    manager._continuous_collection_end_step = None
+    manager._evaluation_snapshot = {"steps": 4}
     manager._collect_local_samples = lambda: torch.ones((1, 1, 2), dtype=torch.int64)
     manager._plan_and_broadcast = lambda _global_load: {
         "kind": "planned",
@@ -1517,7 +1314,7 @@ def test_manager_preparation_error_is_saved_as_evaluation_error(monkeypatch):
     assert str(manager._evaluation_error) == "prepare failed"
 
 
-def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeypatch):
+def test_decode_dispatch_uses_published_physical_ids_and_expert_count(monkeypatch):
     class Buffer:
         def low_latency_dispatch(self, **kwargs):
             calls.append(kwargs)
@@ -1529,7 +1326,7 @@ def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeyp
     _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
     impl._select_experts = lambda **_kwargs: (
         torch.ones((1, 2)),
-        torch.tensor([[0, 127]], dtype=torch.int32),
+        torch.tensor([[0, 143]], dtype=torch.int32),
         torch.tensor([[0, 127]], dtype=torch.int32),
     )
     calls = []
@@ -1552,18 +1349,33 @@ def test_decode_dispatch_keeps_logical_ids_and_uses_logical_expert_count(monkeyp
         "softmax",
     )
 
-    assert result[2].tolist() == [[0, 127]]
-    assert calls[0]["num_experts"] == 128
+    assert result[2].tolist() == [[0, 143]]
+    assert calls[0]["num_experts"] == 144
 
 
-def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
-    from lightllm.common.basemodel.triton_kernel.fused_moe import topk_select
-
+def test_decode_select_maps_experts_without_sampling_or_polling(monkeypatch):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
     impl.routed_scaling_factor = 1.0
     _set_expert_parallel_state(impl, _test_parallel_state(eplb=True))
-    topk_ids = torch.tensor([[3, 127]], dtype=torch.int32)
-    monkeypatch.setattr(topk_select, "select_experts", lambda **_kwargs: (torch.ones((1, 2)), topk_ids))
+    logical_ids = torch.tensor([[3, 127]], dtype=torch.int64)
+    physical_ids = torch.tensor([[13, 143]], dtype=torch.int64)
+    counter = impl.eplb.route_counter.clone()
+    impl.eplb.recording = True
+
+    def forbidden():
+        pytest.fail("decode must not sample or poll EPLB")
+
+    impl.eplb.next_sample_index = forbidden
+    impl.eplb.migration_poll = forbidden
+
+    def select(**kwargs):
+        assert kwargs["record_load"] is False
+        assert kwargs["use_replicas"] is False
+        assert kwargs["sample_index"] == 0
+        assert kwargs["logical_to_physical_map"] is impl.eplb.logical_to_physical_map
+        return torch.ones((1, 2)), physical_ids, logical_ids
+
+    monkeypatch.setattr(grouped_topk, "triton_grouped_topk_eplb", select)
     _, selected, origin = impl._select_experts(
         torch.empty((1, 4)),
         torch.empty((1, 128)),
@@ -1577,7 +1389,10 @@ def test_decode_select_does_not_clone_or_map_eplb_topk_ids(monkeypatch):
         is_prefill=False,
     )
 
-    assert selected.data_ptr() == origin.data_ptr()
+    assert selected is physical_ids
+    assert origin is logical_ids
+    assert torch.equal(impl.eplb.route_counter, counter)
+    assert impl.eplb.recorded_sample_count == 0
 
 
 def test_eplb_prefill_uses_single_fused_path_for_global_topk(monkeypatch):
@@ -1765,7 +1580,7 @@ def test_prefill_eplb_returns_requested_logical_ids(monkeypatch):
     assert logical_ids.tolist() == [[3, 4]]
 
 
-def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(
+def test_decode_masked_group_gemm_uses_all_published_physical_rows(
     monkeypatch,
 ):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
@@ -1787,11 +1602,11 @@ def test_decode_masked_group_gemm_uses_primary_rows_only_when_eplb_is_enabled(
     )()
 
     assert impl.masked_group_gemm((torch.empty((1, 4)),), pack(), pack(), torch.empty(8), torch.float16, 1) == "out"
-    assert captured["w13"].shape[0] == captured["w2"].shape[0] == 8
-    assert captured["w13_scale"].shape[0] == captured["w2_scale"].shape[0] == 8
+    assert captured["w13"].shape[0] == captured["w2"].shape[0] == 10
+    assert captured["w13_scale"].shape[0] == captured["w2_scale"].shape[0] == 10
 
 
-def test_decode_fused_experts_uses_cached_primary_weight_packs_and_logical_experts(
+def test_decode_fused_experts_uses_original_weight_packs_and_physical_experts(
     monkeypatch,
 ):
     impl = object.__new__(deepgemm_module.FuseMoeDeepGEMM)
@@ -1833,8 +1648,8 @@ def test_decode_fused_experts_uses_cached_primary_weight_packs_and_logical_exper
             == "out"
         )
 
-    assert [call["num_experts"] for call in captured] == [128, 128]
-    assert all(call["w13"].weight.shape[0] == call["w2"].weight.shape[0] == 8 for call in captured)
+    assert [call["num_experts"] for call in captured] == [160, 160]
+    assert all(call["w13"].weight.shape[0] == call["w2"].weight.shape[0] == 10 for call in captured)
     assert captured[0]["w13"] is captured[1]["w13"]
     assert captured[0]["w2"] is captured[1]["w2"]
 
@@ -2211,6 +2026,56 @@ def test_transfer_ring_reuses_a_buffer_only_after_commit_and_consumption(monkeyp
     ]
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
+def test_complete_layer_commit_queues_weights_and_mapping_without_waiting_on_host(monkeypatch):
+    live = torch.ones((2, 8), device="cuda")
+    staging = torch.full_like(live, 2)
+    mapping = torch.ones(1, device="cuda")
+    old_read = torch.empty_like(live)
+    new_read = torch.empty_like(live)
+    stream = torch.cuda.Stream()
+    current = torch.cuda.current_stream()
+    original_overlap = g_infer_context.overlap_stream
+    consumed = torch.cuda.Event()
+    transfer = object.__new__(transfer_module.NixlEPLBTransfer)
+    transfer.live, transfer.staging = [[("weight", live)]], [[("weight", staging)]]
+    transfer._prepared_layer = SimpleNamespace(layer_index=0, parts=(None,), changed_dst_slots=(0,))
+    transfer._pending, transfer._pending_lock = deque([(0, 0)]), threading.Lock()
+    transfer._release = [threading.Event()]
+    transfer._consumed_events, transfer._consumed_recorded = [consumed], [False]
+    transfer._error = None
+    manager = object.__new__(manager_module.EPLBManager)
+    manager.transfer, manager.in_flight_layers = transfer, [0]
+    manager.control_group = object()
+    manager._control_ready_count = torch.empty(1, dtype=torch.int32)
+    manager._commit_layer_metadata = lambda _layer: mapping.fill_(2)
+    transfer.transfer_group = object()
+
+    def reduce_ready(tensor, **kwargs):
+        if kwargs["group"] is manager.control_group:
+            tensor.fill_(1)
+
+    monkeypatch.setattr(manager_module.dist, "all_reduce", reduce_ready)
+    try:
+        g_infer_context.overlap_stream = stream
+        with torch.cuda.stream(stream):
+            stream.wait_stream(current)
+            torch.cuda._sleep(100_000_000)
+            old_read.copy_(live)
+        manager._poll_in_flight(finish_generation=False)
+        assert transfer._consumed_recorded == [True]
+        assert not consumed.query(), "commit waited for the preceding GPU work on the host"
+        with torch.cuda.stream(stream):
+            stream.wait_stream(current)
+            new_read.copy_(live * mapping)
+        stream.synchronize()
+        torch.testing.assert_close(old_read, torch.ones_like(live))
+        torch.testing.assert_close(new_read[0], torch.full_like(new_read[0], 4))
+        torch.testing.assert_close(new_read[1], torch.full_like(new_read[1], 2))
+    finally:
+        g_infer_context.overlap_stream = original_overlap
+
+
 def test_transfer_finalizes_after_join_and_propagates_finalization_failure(monkeypatch):
     def make_transfer(finalize):
         transfer = object.__new__(transfer_module.NixlEPLBTransfer)
@@ -2257,8 +2122,7 @@ def test_manager_rearms_after_rebalance_for_interval_one():
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
     manager.step_interval = 1
     manager.sampling_interval = 1
-    manager._steady_collection_end_step = None
-    manager._continuous_collection_start_step = 0
+    manager._last_evaluation_step = 1
     manager.weights = []
     manager._eplb_states = []
     manager.target_placement = torch.zeros(1)
@@ -2268,275 +2132,7 @@ def test_manager_rearms_after_rebalance_for_interval_one():
     manager._finish_rebalance()
     assert manager.in_flight is False
     assert recording_calls == [True]
-    assert manager._steady_collection_end_step is None
-    assert manager._continuous_collection_start_step is None
-
-
-def test_manager_sparse_insufficient_schedules_bounded_fresh_window(monkeypatch):
-    class DoneThread:
-        def join(self):
-            pass
-
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.evaluation_in_flight = True
-    manager._evaluation_lock = threading.Lock()
-    manager._evaluation_error = None
-    manager._evaluation_thread = DoneThread()
-    manager._evaluation_result = {
-        "kind": "insufficient",
-        "minimum_layer_samples": 1,
-        "minimum": 2,
-    }
-    manager.global_rank = 0
-    manager.step_interval = 20
-    manager.sampling_interval = 20
-    manager.prefill_steps = 37
-    manager.weights = []
-    manager._eplb_states = []
-    manager._continuous_collection_start_step = None
-    manager._continuous_collection_end_step = None
-    recordings, resets, logs = [], [], []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
-    monkeypatch.setattr(manager_module.logger, "info", lambda *args: logs.append(args))
-
-    assert not manager._poll_evaluation()
-    assert not hasattr(manager, "_retained_local_samples")
-    assert manager._continuous_collection_start_step == 40
-    assert manager._continuous_collection_end_step == 60
-    assert recordings == [False]
-    assert resets == [True]
-    assert manager.sampling_interval == 20
-    assert "insufficient samples" in logs[0][0]
-    assert "scheduled_fresh_window" in logs[0][0]
-
-    manager.in_flight = False
-    manager.evaluation_in_flight = False
-    starts = []
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(manager.prefill_steps))
-    manager.step()
-    manager.step()
-    assert manager.prefill_steps == 39
-    assert starts == []
-    manager.step()
-    assert manager.prefill_steps == 40
-    assert starts == []
-    for _ in range(19):
-        manager.step()
-    assert manager.prefill_steps == 59
-    assert starts == []
-    manager.step()
-    assert starts == [60]
-
-
-def test_manager_full_window_insufficient_clears_and_backs_off():
-    class DoneThread:
-        def join(self):
-            pass
-
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.evaluation_in_flight = True
-    manager._evaluation_lock = threading.Lock()
-    manager._evaluation_error = None
-    manager._evaluation_thread = DoneThread()
-    manager._evaluation_result = {
-        "kind": "insufficient",
-        "minimum_layer_samples": 1,
-        "minimum": 2,
-    }
-    manager.global_rank = 1
-    manager.step_interval = 20
-    manager.sampling_interval = 20
-    manager.prefill_steps = 60
-    manager.weights = []
-    manager._eplb_states = []
-    manager._continuous_collection_start_step = 40
-    manager._continuous_collection_end_step = 60
-    recordings, resets = [], []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
-
-    assert not manager._poll_evaluation()
-    assert not hasattr(manager, "_retained_local_samples")
-    assert manager._continuous_collection_start_step is None
-    assert manager._continuous_collection_end_step is None
-    assert manager.sampling_interval == 80
-    assert recordings == [False]
-    assert resets == [True]
-
-
-def test_begin_continuous_collection_uses_full_window_at_fixed_boundary(monkeypatch):
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = False
-    manager.evaluation_in_flight = False
-    manager.prefill_steps = 36
-    manager.step_interval = 20
-    manager.sampling_interval = 20
-    manager._steady_collection_end_step = 40
-    recordings, resets, starts = [], [], []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(True))
-
-    # The window is never truncated to the next boundary: it waits until 40,
-    # records a full 20 fresh steps, then evaluates at the boundary at 60.
-    manager._begin_continuous_collection()
-    assert manager._continuous_collection_start_step == 40
-    assert manager._continuous_collection_end_step == 60
-    assert recordings == [False]
-    assert resets == [True]
-    assert manager._steady_collection_end_step is None
-
-    for _ in range(4):
-        manager.step()
-    assert manager.prefill_steps == 40
-    assert recordings == [False, True]
-    assert starts == []
-    for _ in range(19):
-        manager.step()
-    assert starts == []
-    manager.step()  # 60: the full window ends and triggers the evaluation.
-    assert starts == [True]
-
-
-def test_begin_continuous_collection_preserves_full_window_at_sparse_boundary():
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.prefill_steps = 80
-    manager.step_interval = 20
-    manager.sampling_interval = 80
-    manager._steady_collection_end_step = None
-    recordings = []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: None
-
-    manager._begin_continuous_collection()
-    assert manager._continuous_collection_start_step == 140
-    assert manager._continuous_collection_end_step == 160
-    assert recordings == [False]
-
-
-def test_first_no_improvement_switches_to_sparse_sampling_window(monkeypatch):
-    class DoneThread:
-        def join(self):
-            pass
-
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.evaluation_in_flight = True
-    manager._evaluation_lock = threading.Lock()
-    manager._evaluation_error = None
-    manager._evaluation_thread = DoneThread()
-    manager._evaluation_result = {
-        "kind": "no_improvement",
-        "model_imbalance_ratio": 1.2,
-        "candidate_model_imbalance_ratio": 1.1,
-        "candidate_rebalance_gain": 0.01,
-        "candidate_changed_layer_count": 2,
-    }
-    manager.global_rank = 1
-    manager.step_interval = 20
-    manager.sampling_interval = 20
-    manager._continuous_collection_start_step = 0
-    manager.weights = []
-    manager._eplb_states = []
-    recordings = []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-
-    assert not manager._poll_evaluation()
-    assert manager._continuous_collection_start_step is None
-    assert recordings == [False]
-    assert manager.sampling_interval == 80
-
-
-def test_continuous_collection_evaluates_only_after_one_full_base_window(monkeypatch):
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = False
-    manager._continuous_collection_start_step = 0
-    manager._continuous_collection_end_step = 20
-    manager.prefill_steps = 0
-    manager.step_interval = 20
-    manager.sampling_interval = 320
-    manager._steady_collection_end_step = None
-    manager.evaluation_in_flight = False
-    started = []
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: started.append(True))
-
-    for _ in range(19):
-        manager.step()
-    assert manager.prefill_steps == 19
-    assert started == []
-
-    manager.step()
-    assert manager.prefill_steps == 20
-    assert started == [True]
-
-
-def test_no_improvement_exponentially_backs_off_sampling_interval_at_cap():
-    class DoneThread:
-        def join(self):
-            pass
-
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager._evaluation_lock = threading.Lock()
-    manager._set_recording = lambda _enabled: None
-    manager.global_rank = 1
-    manager.step_interval = 20
-    manager.sampling_interval = 20
-    manager.weights = []
-    manager._eplb_states = []
-
-    for expected_interval in (80, 320, 320):
-        manager.evaluation_in_flight = True
-        manager._evaluation_error = None
-        manager._evaluation_thread = DoneThread()
-        manager._evaluation_result = {
-            "kind": "no_improvement",
-            "model_imbalance_ratio": 1.2,
-            "candidate_model_imbalance_ratio": 1.1,
-            "candidate_rebalance_gain": 0.01,
-            "candidate_changed_layer_count": 2,
-        }
-        assert not manager._poll_evaluation()
-        assert manager.sampling_interval == expected_interval
-
-
-def test_sparse_backoff_arms_and_evaluates_only_at_new_interval_boundary(monkeypatch):
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = False
-    manager.prefill_steps = 18
-    manager.step_interval = 20
-    manager.sampling_interval = 80
-    manager._steady_collection_end_step = None
-    manager._continuous_collection_start_step = None
-    manager._continuous_collection_end_step = None
-    manager.evaluation_in_flight = False
-    recordings, resets, starts = [], [], []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._reset_recorded_samples = lambda: resets.append(True)
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(True))
-
-    manager.step()
-    manager.step()
-    assert manager.prefill_steps == 20
-    assert recordings == []
-    assert starts == []
-
-    for _ in range(55):
-        manager.step()
-    assert manager.prefill_steps == 75
-    assert recordings == []
-    assert starts == []
-
-    manager.step()
-    assert manager.prefill_steps == 76
-    assert recordings == [True]
-    assert resets == [True]
-    assert manager._steady_collection_end_step is not None
-
-    for _ in range(4):
-        manager.step()
-    assert manager.prefill_steps == 80
-    assert starts == [True]
-    assert manager._steady_collection_end_step is None
+    assert manager._next_evaluation_step == 2
 
 
 def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
@@ -2547,7 +2143,6 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
     manager.node_world_size = 1
     manager.step_interval = 20
     manager.sampling_interval = 320
-    manager._continuous_collection_start_step = 0
     manager.global_rank = 1
     manager.transfer = type(
         "Transfer",
@@ -2575,7 +2170,8 @@ def test_planned_rebalance_resets_sampling_interval_to_base(monkeypatch):
 
     assert manager.sampling_interval == 20
     assert manager.in_flight
-    assert manager._continuous_collection_start_step is None
+    assert manager._initial_plan_complete
+    assert not manager._use_full_window
     assert len(manager.transfer.started[0]) == 1
     assert manager.transfer.started[1] is prepared_batches
 
@@ -2588,42 +2184,6 @@ def test_transfer_start_rejects_prepared_layers_with_wrong_count():
 
     with pytest.raises(ValueError, match="prepared layer count"):
         transfer.start([(0, []), (1, []), (2, [])], prepared_layers=[object()])
-
-
-def test_first_rebalance_completion_switches_to_four_step_sparse_window(monkeypatch):
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.step_interval = 20
-    manager.sampling_interval = manager.step_interval
-    manager._steady_collection_end_step = None
-    manager.weights = []
-    manager._eplb_states = []
-    manager.target_placement = torch.zeros(1)
-    manager.in_flight_started_at = 0
-    manager.global_rank = 1
-    recordings, starts = [], []
-    manager._set_recording = lambda enabled: recordings.append(enabled)
-    manager._finish_rebalance()
-    assert recordings == [False]
-
-    manager.in_flight = False
-    manager.prefill_steps = 38
-    manager.evaluation_in_flight = False
-    monkeypatch.setattr(manager, "_start_evaluation", lambda: starts.append(True))
-    manager.prefill_steps = 35
-    manager.step()
-    assert recordings == [False, True]
-    for _ in range(4):
-        manager.step()
-    assert starts == [True]
-
-
-def test_manager_inflight_step_does_not_poll():
-    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.in_flight = True
-    calls = []
-    manager._poll_in_flight = lambda: calls.append("poll")
-    manager.step()
-    assert calls == []
 
 
 def test_manager_poll_advances_inflight_before_evaluation():
@@ -2667,12 +2227,12 @@ def test_nixl_prepare_part_compiles_hot_path_without_tensor_views(monkeypatch):
             self.prepared = []
             self.enqueued = []
 
-        def prepare(self, descriptors):
+        def prepare_memcpy_batch(self, descriptors):
             descriptor = tuple(descriptors)
             self.prepared.append(descriptor)
             return descriptor
 
-        def enqueue(self, descriptor, stream):
+        def cudaMemcpyBatchAsync(self, descriptor, stream):
             self.enqueued.append((descriptor, stream))
 
     stream = SimpleNamespace(cuda_stream=123, synchronize=lambda: None)
@@ -2723,7 +2283,7 @@ def test_nixl_prepare_part_compiles_hot_path_without_tensor_views(monkeypatch):
     assert prepared.remote_entries == {3: [(0, [remote_inbound], staging)]}
 
 
-def test_nixl_prepare_transfer_builds_both_parts_before_transfer():
+def test_nixl_prepare_transfer_builds_complete_layers_before_transfer():
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
     transfer.staging_depth, transfer.staging = 1, ["staging"]
     seen = []
@@ -2735,12 +2295,12 @@ def test_nixl_prepare_transfer_builds_both_parts_before_transfer():
     transfer.global_rank = 0
     transfer._prepare_part = prepare_part
     prepared = transfer.prepare_transfer([(3, []), (4, []), (5, [])])
-    assert seen == [(3, 0), (3, 1), (4, 0), (4, 1), (5, 0), (5, 1)]
+    assert seen == [(3, 0), (4, 0), (5, 0)]
     assert [layer.layer_index for layer in prepared] == [3, 4, 5]
     assert [layer.parts for layer in prepared] == [
-        ("prepared-3-0", "prepared-3-1"),
-        ("prepared-4-0", "prepared-4-1"),
-        ("prepared-5-0", "prepared-5-1"),
+        ("prepared-3-0",),
+        ("prepared-4-0",),
+        ("prepared-5-0",),
     ]
 
 
@@ -2768,9 +2328,9 @@ def test_cuda_batch_memcpy_cuda13_abi_and_descriptor_layout():
     import ctypes
 
     library = Library()
-    batch_memcpy = _CudaBatchMemcpy(library)
-    prepared = batch_memcpy.prepare(((101, 201, 64), (102, 202, 128)))
-    batch_memcpy.enqueue(prepared, 777)
+    batch_memcpy = CudaBatchMemcpy(library)
+    prepared = batch_memcpy.prepare_memcpy_batch(((101, 201, 64), (102, 202, 128)))
+    batch_memcpy.cudaMemcpyBatchAsync(prepared, 777)
 
     assert len(library.cudaMemcpyBatchAsync.argtypes) == 8
     assert library.calls[0][3] == 2
@@ -2809,7 +2369,7 @@ def test_cuda_batch_memcpy_rejects_unsupported_runtime_and_invalid_descriptors()
     import ctypes
 
     with pytest.raises(RuntimeError, match="13.0"):
-        _CudaBatchMemcpy(OldRuntimeLibrary())
+        CudaBatchMemcpy(OldRuntimeLibrary())
 
     class FutureRuntimeLibrary:
         def __init__(self):
@@ -2822,7 +2382,7 @@ def test_cuda_batch_memcpy_rejects_unsupported_runtime_and_invalid_descriptors()
             self.cudaGetErrorString = Function(lambda _result: b"fake cuda error")
 
     with pytest.raises(RuntimeError, match="13.x"):
-        _CudaBatchMemcpy(FutureRuntimeLibrary())
+        CudaBatchMemcpy(FutureRuntimeLibrary())
 
     class MissingBatchSymbolLibrary:
         def __init__(self):
@@ -2834,11 +2394,11 @@ def test_cuda_batch_memcpy_rejects_unsupported_runtime_and_invalid_descriptors()
             self.cudaGetErrorString = Function(lambda _result: b"fake cuda error")
 
     with pytest.raises(RuntimeError, match="cudaMemcpyBatchAsync"):
-        _CudaBatchMemcpy(MissingBatchSymbolLibrary())
+        CudaBatchMemcpy(MissingBatchSymbolLibrary())
     with pytest.raises(ValueError, match="at least one"):
-        _CudaBatchMemcpy.prepare(())
+        CudaBatchMemcpy.prepare_memcpy_batch(())
     with pytest.raises(ValueError, match="positive"):
-        _CudaBatchMemcpy.prepare(((1, 2, 0),))
+        CudaBatchMemcpy.prepare_memcpy_batch(((1, 2, 0),))
 
 
 def test_nixl_transfer_fails_fast_without_cuda13_batch_memcpy(monkeypatch):
@@ -2851,7 +2411,7 @@ def test_nixl_transfer_fails_fast_without_cuda13_batch_memcpy(monkeypatch):
         transfer_module.NixlEPLBTransfer, "_init_staging", lambda self, *_args: setattr(self, "device", "mock")
     )
     monkeypatch.setattr(transfer_module.torch.cuda, "Stream", lambda device: ("stream", device))
-    monkeypatch.setattr(transfer_module, "_CudaBatchMemcpy", unavailable)
+    monkeypatch.setattr(transfer_module, "CudaBatchMemcpy", unavailable)
     weight = SimpleNamespace(expert_parallel_state=_test_parallel_state(eplb=True))
     with pytest.raises(RuntimeError, match="missing cudaMemcpyBatchAsync") as exc_info:
         transfer_module.NixlEPLBTransfer([weight], object(), 0, 1)
@@ -2881,7 +2441,7 @@ def test_cuda_batch_memcpy_finds_first_loaded_cuda13_runtime(monkeypatch, maps, 
         return io.StringIO(maps)
 
     monkeypatch.setattr(builtins, "open", open_maps)
-    assert _CudaBatchMemcpy._find_loaded_cudart() == expected
+    assert find_loaded_library("libcudart", major_version=13) == expected
 
 
 @pytest.mark.parametrize(("layers", "expected_depth"), [(1, 1), (8, 1), (9, 1), (43, 1)])
@@ -2891,7 +2451,7 @@ def test_nixl_transfer_bounds_staging_depth(monkeypatch, layers, expected_depth)
 
     monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_staging", base_init)
     monkeypatch.setattr(transfer_module.torch.cuda, "Stream", lambda device: ("stream", device))
-    monkeypatch.setattr(transfer_module, "_CudaBatchMemcpy", lambda: object())
+    monkeypatch.setattr(transfer_module, "CudaBatchMemcpy", lambda: object())
     monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_ipc_metadata", lambda self: None)
     monkeypatch.setattr(transfer_module.NixlEPLBTransfer, "_init_push_layouts", lambda self: None)
 
@@ -2969,19 +2529,17 @@ def test_nixl_remote_read_cache_reuses_exact_batch_key_and_releases_on_shutdown(
     transfer._get_remote_read(1, changed_entries, 0)
     assert agent.made == 2
 
-    # Cache identity must include the part and both exact address ranges.
-    transfer._get_remote_read(1, first_entries, 1)
-    assert agent.made == 3
+    # Cache identity must include both exact address ranges.
     transfer._remote_layouts[1][0][0] = ("weight", 1008, 0, 8)
     transfer._get_remote_read(1, first_entries, 0)
-    assert agent.made == 4
+    assert agent.made == 3
     staging[0][1].pointer += 16
     transfer._get_remote_read(1, first_entries, 0)
-    assert agent.made == 5
+    assert agent.made == 4
 
     transfer.shutdown()
-    assert agent.released_xfers == 5
-    assert agent.released_dlists == 10
+    assert agent.released_xfers == 4
+    assert agent.released_dlists == 8
     assert agent.removed_agents == ["remote-1"]
 
 
@@ -3069,7 +2627,7 @@ def test_nixl_remote_read_cache_is_bounded_to_the_current_transfer_generation(
     transfer._copy_part = copy_part
     monkeypatch.setattr(transfer_module.torch.cuda, "set_device", lambda _device: None)
 
-    prepared_batches = [transfer._PreparedLayer(0, (), (None, None))]
+    prepared_batches = [transfer._PreparedLayer(0, (), (None,))]
     transfer.start([(0, [])], prepared_batches)
     transfer.finish()
     assert agent.made == 1
@@ -3173,7 +2731,9 @@ def test_nixl_copy_part_source_pushes_local_rows_and_keeps_remote_ucx_reads(
     stream = Stream()
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
     transfer._push_stream = stream
-    transfer._batch_memcpy = SimpleNamespace(enqueue=lambda descriptor, stream: enqueued.append((descriptor, stream)))
+    transfer._batch_memcpy = SimpleNamespace(
+        cudaMemcpyBatchAsync=lambda descriptor, stream: enqueued.append((descriptor, stream))
+    )
     remote_reads, waited_xfers, enqueued = [], [], []
     transfer._get_remote_read = lambda src_rank, entries, part_index=None: remote_reads.append((src_rank, entries)) or (
         None,
@@ -3206,7 +2766,9 @@ def test_nixl_copy_part_self_only_rank_pushes_and_synchronizes(monkeypatch):
     transfer = object.__new__(transfer_module.NixlEPLBTransfer)
     transfer._push_stream = Stream()
     enqueued = []
-    transfer._batch_memcpy = SimpleNamespace(enqueue=lambda descriptor, stream: enqueued.append((descriptor, stream)))
+    transfer._batch_memcpy = SimpleNamespace(
+        cudaMemcpyBatchAsync=lambda descriptor, stream: enqueued.append((descriptor, stream))
+    )
     transfer._wait_xfers = lambda _xfers: None
     monkeypatch.setattr(transfer_module.torch.cuda, "stream", lambda _stream: pytest.fail("must not switch streams"))
 
@@ -3232,6 +2794,9 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
             ),
         },
     )()
+    state = weight.expert_parallel_state.eplb
+    state.route_counter.fill_(9)
+    state.recorded_sample_count = 37
     transfer = object()
     groups = [object(), object(), object()]
     new_group_calls = []
@@ -3268,11 +2833,89 @@ def test_manager_constructs_nixl_transfer(monkeypatch):
     assert transfer_calls == [([weight], groups[2], 0, 2)]
     assert manager.rebalance_gain_threshold == 0.07
     assert "rebalance_gain_threshold=0.0700" in logs[0]
-    assert manager._continuous_collection_start_step is None
-    assert manager._continuous_collection_end_step == manager.step_interval
+    assert manager._next_evaluation_step == manager.step_interval
+    assert tuple(manager._sample_step_counts) == (0,)
     assert weight.expert_parallel_state.eplb.recording
+    assert state.recorded_sample_count == 0
+    assert torch.count_nonzero(state.route_counter) == 0
     assert manager._eplb_states[0] is weight.expert_parallel_state.eplb
     assert not hasattr(weight.expert_parallel_state.eplb, "record_load")
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for physical decode routing")
+@pytest.mark.parametrize("tokens", [1, 4, 16])
+@pytest.mark.parametrize("capture", [False, True])
+def test_decode_reads_republished_layout_without_writing_counters(tokens, capture):
+    torch.manual_seed(57)
+    experts, topk = 8, 2
+    logits = torch.randn((tokens, experts), device="cuda")
+    hidden = torch.empty((tokens, 1), device="cuda")
+    placement = expand_redundant_placement(build_initial_redundant_expert_ids(experts, 2, 1), experts)
+    mapping, replicas = build_logical_to_physical_map(placement, experts)
+    mapping, replicas = mapping.cuda(), replicas.cuda()
+    counter = torch.full((2, experts, 4), 17, dtype=torch.int64, device="cuda")
+    draft_mapping, draft_replicas, draft_counter = mapping.clone(), replicas.clone(), counter.clone()
+
+    def run(route_map=mapping, counts=replicas, load_counter=counter):
+        return grouped_topk.triton_grouped_topk_eplb(
+            hidden,
+            logits,
+            None,
+            topk,
+            True,
+            1,
+            1,
+            "sigmoid",
+            route_map,
+            counts,
+            load_counter,
+            sample_index=0,
+            record_load=False,
+            use_grouped_topk=True,
+            use_replicas=False,
+        )
+
+    run()
+    run(draft_mapping, draft_replicas, draft_counter)
+    if capture:
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            weights, physical_ids, _ = run()
+        draft_graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(draft_graph):
+            draft_weights, draft_ids, _ = run(draft_mapping, draft_replicas, draft_counter)
+    for layout in (placement, placement.roll(1, dims=0), placement.roll(2, dims=1)):
+        next_mapping, next_replicas = build_logical_to_physical_map(layout, experts)
+        mapping.copy_(next_mapping)
+        replicas.copy_(next_replicas)
+        if capture:
+            graph.replay()
+        else:
+            weights, physical_ids, _ = run()
+        logical_ids = layout.flatten().cuda()[physical_ids]
+        reference_scores, reference_ids = torch.sigmoid(logits).topk(topk, dim=-1)
+        reference_weights = reference_scores / reference_scores.sum(dim=-1, keepdim=True)
+        torch.testing.assert_close(physical_ids, next_mapping[:, 0].cuda().long()[reference_ids])
+        torch.testing.assert_close(logical_ids, reference_ids)
+        torch.testing.assert_close(weights, reference_weights)
+        # An expert-specific output catches stale layouts even if all IDs stay in bounds.
+        actual = (weights * (logical_ids + 1).square()).sum(dim=-1)
+        expected = (reference_weights * (reference_ids + 1).square()).sum(dim=-1)
+        torch.testing.assert_close(actual, expected)
+        if capture:
+            draft_graph.replay()
+        else:
+            draft_weights, draft_ids, _ = run(draft_mapping, draft_replicas, draft_counter)
+        draft_logical_ids = placement.flatten().cuda()[draft_ids]
+        torch.testing.assert_close(draft_logical_ids, reference_ids)
+        torch.testing.assert_close(draft_weights, reference_weights)
+        if capture:
+            graph.replay()
+        else:
+            weights, physical_ids, _ = run()
+        torch.testing.assert_close(layout.flatten().cuda()[physical_ids], reference_ids)
+        assert torch.all(counter == 17)
+        assert torch.all(draft_counter == 17)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
@@ -3356,6 +2999,75 @@ def test_grouped_topk_eplb_matches_topk_mapping_and_counting(record_load, tokens
     assert torch.equal(fused_ids, expected_ids)
     assert fused_logical_ids is None
     assert torch.equal(fused_counter, expected_counter)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
+@pytest.mark.parametrize("experts,groups,group_topk", [(288, 1, 1), (256, 8, 4), (160, 8, 3)])
+@pytest.mark.parametrize("tokens", [1, 32])
+@pytest.mark.parametrize("strided", [False, True])
+@pytest.mark.parametrize("scores", ["equal", "quantized", "saturated"])
+def test_grouped_topk_eplb_matches_logical_selection_at_ties(experts, groups, group_topk, tokens, scores, strided):
+    from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_topk import (
+        get_group_score_used_topk_num,
+        triton_grouped_topk,
+        triton_grouped_topk_eplb,
+    )
+
+    generator = torch.Generator(device="cuda").manual_seed(20261022)
+    logits = torch.randn((tokens, experts), device="cuda", generator=generator).round()
+    bias = (torch.arange(experts, device="cuda") % 11 / 64).to(torch.bfloat16)
+    if scores == "equal":
+        logits.zero_()
+        bias.zero_()
+    elif scores == "quantized":
+        # Exactly representable sigmoid scores isolate tie policy from libm rounding.
+        logits = (logits > 0).float() * 32
+    elif scores == "saturated":
+        logits.add_(32)
+    if strided:
+        logits = torch.stack((logits, torch.empty_like(logits)), dim=-1)[..., 0]
+    common = dict(
+        hidden_states=torch.empty((tokens, 1), device="cuda", dtype=torch.bfloat16),
+        gating_output=logits,
+        correction_bias=bias,
+        topk=8,
+        renormalize=True,
+        num_expert_group=groups,
+        topk_group=group_topk,
+        scoring_func="sigmoid",
+        group_score_used_topk_num=get_group_score_used_topk_num(group_topk, groups, 8),
+    )
+    expected_weights, expected_ids = triton_grouped_topk(**common)
+    # Both paths must match the routing formula, including deterministic ties.
+    reference_scores = logits.sigmoid()
+    choice_scores = reference_scores + bias
+    group_values = (
+        choice_scores.reshape(tokens, groups, -1).topk(common["group_score_used_topk_num"], dim=-1).values.sum(-1)
+    )
+    threshold = group_values.topk(group_topk, dim=-1).values[:, -1:]
+    allowed = (group_values >= threshold).repeat_interleave(experts // groups, dim=-1)
+    reference_ids = choice_scores.masked_fill(~allowed, -float("inf")).argsort(descending=True, stable=True)[:, :8]
+    torch.testing.assert_close(expected_ids, reference_ids, rtol=0, atol=0)
+    reference_weights = reference_scores.gather(1, reference_ids)
+    reference_weights /= reference_weights.sum(-1, keepdim=True)
+    torch.testing.assert_close(expected_weights, reference_weights, rtol=1e-6, atol=1e-7)
+    mapping = torch.arange(experts - 1, -1, -1, dtype=torch.int32, device="cuda")[:, None]
+    counter = torch.zeros((1, experts), dtype=torch.int64, device="cuda")
+    weights, physical_ids, logical_ids = triton_grouped_topk_eplb(
+        **common,
+        logical_to_physical_map=mapping,
+        logical_replica_count=torch.ones(experts, dtype=torch.int32, device="cuda"),
+        expert_counter=counter,
+        sample_index=0,
+        record_load=True,
+        use_grouped_topk=True,
+        return_logical_ids=True,
+    )
+    assert torch.equal(logical_ids, expected_ids)
+    assert torch.equal(physical_ids, mapping[expected_ids, 0].long())
+    torch.testing.assert_close(weights, expected_weights, rtol=1e-6, atol=1e-7)
+    expected_counts = torch.bincount(expected_ids.flatten(), minlength=experts)
+    assert torch.equal(counter[0], expected_counts)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for the Triton EPLB kernel")
@@ -3453,18 +3165,125 @@ def test_triton_grouped_topk_eplb_empty_tokens_skips_kernel():
     assert torch.equal(counter, torch.zeros_like(counter))
 
 
-def test_eplb_configured_window_equal_interval_arms_immediately():
+def test_last_layer_commit_finishes_at_outer_boundary_and_preserves_samples(monkeypatch):
     manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
-    manager.step_interval = 20
-    manager.sampling_interval = 20
-    manager.steady_sample_steps = 20
-    manager._continuous_collection_start_step = None
-    manager._continuous_collection_end_step = None
-    manager._steady_collection_end_step = None
-    manager.prefill_steps = 0
-    calls = []
-    manager._reset_recorded_samples = lambda: calls.append("reset")
-    manager._set_recording = lambda value: calls.append(value)
-    manager._prepare_next_sampling_window()
-    assert manager._steady_collection_end_step == 20
-    assert calls == ["reset", True]
+    state = SimpleNamespace(recording=True, recorded_sample_count=7)
+    operations = []
+
+    class Transfer:
+        pending = [(0, 0)]
+
+        def pending_layers(self):
+            return self.pending[:]
+
+        def commit(self, layer, buffer, post_copy):
+            assert self.pending.pop(0) == (layer, buffer)
+            post_copy()
+
+        def finish(self):
+            operations.append("finish")
+
+    manager.transfer = Transfer()
+    manager.in_flight = True
+    manager.in_flight_layers = [0]
+    manager.control_group = object()
+    manager._control_ready_count = torch.empty(1, dtype=torch.int32)
+    manager._inflight_timing = dict(
+        control_poll_calls=0, control_cpu_ms=0.0, commit_calls=0, commit_cpu_ms=0.0, commit_max_ms=0.0
+    )
+    manager._commit_layer_metadata = lambda layer: operations.append(("metadata", layer))
+
+    manager._eplb_states = [state]
+    manager.target_placement = torch.zeros(1)
+    manager.target_metadata = None
+    manager.global_rank = 1
+    manager.sampling_interval = 4
+    manager._last_evaluation_step = 4
+    monkeypatch.setattr(manager_module.dist, "all_reduce", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        manager_module.torch.cuda, "current_stream", lambda: SimpleNamespace(wait_stream=lambda s: None)
+    )
+    monkeypatch.setattr(g_infer_context, "get_overlap_stream", lambda: object())
+    manager.poll_migration_at_layer_boundary()
+    assert operations == [("metadata", 0)]
+    assert manager.in_flight and manager.in_flight_layers == []
+    assert state.recording and state.recorded_sample_count == 7
+    manager.poll_migration_at_layer_boundary()
+    assert operations == [("metadata", 0)]
+    manager.poll()
+    assert operations == [("metadata", 0), "finish"]
+    assert not manager.in_flight and state.recording and state.recorded_sample_count == 7
+    assert manager._next_evaluation_step == 8
+
+
+def test_layer_hook_does_not_start_an_evaluation():
+    manager = manager_module.EPLBManager.__new__(manager_module.EPLBManager)
+    manager.in_flight = False
+    manager.evaluation_in_flight = True
+    manager.poll_migration_at_layer_boundary()
+
+
+def test_migration_metadata_is_committed_before_selecting_experts(monkeypatch):
+    events = []
+    state = EPLBState(
+        num_redundant_experts_per_rank=1,
+        logical_to_physical_map=torch.zeros((4, 2), dtype=torch.int32),
+        logical_replica_count=torch.ones(4, dtype=torch.int32),
+        route_counter=torch.zeros((4, 4), dtype=torch.int64),
+        recording=True,
+    )
+    state.migration_poll = lambda: events.append(("migration", state.recorded_sample_count))
+    impl = deepgemm_module.FuseMoeDeepGEMM.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    impl.eplb, impl.routed_scaling_factor = state, 1.0
+
+    def topk(**kwargs):
+        events.append(("topk", kwargs["sample_index"]))
+        return torch.ones((2, 2)), torch.zeros((2, 2), dtype=torch.int64), None
+
+    monkeypatch.setattr(grouped_topk, "triton_grouped_topk_eplb", topk)
+    impl._select_experts(
+        input_tensor=torch.zeros((2, 4)),
+        router_logits=torch.zeros((2, 4)),
+        correction_bias=None,
+        top_k=2,
+        renormalize=True,
+        use_grouped_topk=True,
+        topk_group=1,
+        num_expert_group=1,
+        scoring_func="sigmoid",
+        is_prefill=True,
+    )
+    assert events == [("migration", 0), ("topk", 0)]
+    assert state.recorded_sample_count == 1
+
+
+def test_eplb_expert_scaling_uses_logical_ids_instead_of_physical_rows(monkeypatch):
+    state = EPLBState(
+        num_redundant_experts_per_rank=1,
+        logical_to_physical_map=torch.zeros((4, 2), dtype=torch.int32),
+        logical_replica_count=torch.ones(4, dtype=torch.int32),
+        route_counter=torch.zeros((4, 4), dtype=torch.int64),
+    )
+    impl = deepgemm_module.FuseMoeDeepGEMM.__new__(deepgemm_module.FuseMoeDeepGEMM)
+    impl.eplb, impl.routed_scaling_factor = state, 2.5
+
+    def topk(**kwargs):
+        assert kwargs["return_logical_ids"]
+        return torch.ones((1, 2)), torch.tensor([[7, 8]]), torch.tensor([[1, 3]])
+
+    monkeypatch.setattr(grouped_topk, "triton_grouped_topk_eplb", topk)
+    weights, physical, logical = impl._select_experts(
+        input_tensor=torch.zeros((1, 4)),
+        router_logits=torch.zeros((1, 4)),
+        correction_bias=None,
+        top_k=2,
+        renormalize=True,
+        use_grouped_topk=True,
+        topk_group=1,
+        num_expert_group=1,
+        scoring_func="sigmoid",
+        is_prefill=True,
+        per_expert_scale=torch.tensor([10.0, 20.0, 30.0, 40.0]),
+    )
+    assert weights.tolist() == [[50.0, 100.0]]
+    assert physical.tolist() == [[7, 8]] and logical.tolist() == [[1, 3]]

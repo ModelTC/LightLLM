@@ -42,6 +42,7 @@ class FuseMoeBaseImpl(ABC):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        dist_group=None,
     ) -> torch.Tensor:
         topk_weights, topk_ids, origin_topk_ids = self._select_experts(
             input_tensor=input_tensor,
@@ -71,6 +72,7 @@ class FuseMoeBaseImpl(ABC):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            dist_group=dist_group,
         )
 
     @abstractmethod
@@ -105,5 +107,6 @@ class FuseMoeBaseImpl(ABC):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        dist_group=None,
     ) -> torch.Tensor:
         pass

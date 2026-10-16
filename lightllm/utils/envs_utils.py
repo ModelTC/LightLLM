@@ -109,7 +109,7 @@ def get_lightllm_websocket_max_message_size():
 
 @lru_cache(maxsize=None)
 def get_eplb_planner_process() -> bool:
-    raw = os.getenv("LIGHTLLM_EPLB_PLANNER_PROCESS", "0")
+    raw = os.getenv("LIGHTLLM_EPLB_PLANNER_PROCESS", "1")
     if raw not in ("0", "1"):
         raise ValueError("LIGHTLLM_EPLB_PLANNER_PROCESS must be 0 or 1")
     return raw == "1"
@@ -166,6 +166,7 @@ def get_eplb_placement_stickiness() -> float:
     return value
 
 
+@lru_cache(maxsize=None)
 def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 

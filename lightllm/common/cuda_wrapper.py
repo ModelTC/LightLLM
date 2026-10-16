@@ -22,8 +22,9 @@ convenient for use when we just need to call a few functions.
 """
 
 import ctypes
+import re
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
 import torch  # noqa
@@ -44,6 +45,31 @@ class cudaIpcMemHandle_t(ctypes.Structure):
     _fields_ = [("internal", ctypes.c_byte * 128)]
 
 
+class cudaMemLocation(ctypes.Structure):
+    _fields_ = [("type", ctypes.c_int), ("id", ctypes.c_int)]
+
+
+class cudaMemcpyAttributes(ctypes.Structure):
+    _fields_ = [
+        ("srcAccessOrder", ctypes.c_int),
+        ("srcLocHint", cudaMemLocation),
+        ("dstLocHint", cudaMemLocation),
+        ("flags", ctypes.c_uint),
+    ]
+
+
+@dataclass
+class PreparedMemcpyBatch:
+    """Host-side arrays retained for one cudaMemcpyBatchAsync submission."""
+
+    dsts: object
+    srcs: object
+    sizes: object
+    attrs: cudaMemcpyAttributes
+    attrs_idxs: object
+    count: int
+
+
 @dataclass
 class Function:
     name: str
@@ -51,29 +77,32 @@ class Function:
     argtypes: List[Any]
 
 
-def find_loaded_library(lib_name) -> Optional[str]:
+def find_loaded_library(lib_name: str, *, major_version: Optional[int] = None) -> Optional[str]:
     """
-    According to according to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
+    According to https://man7.org/linux/man-pages/man5/proc_pid_maps.5.html,
     the file `/proc/self/maps` contains the memory maps of the process, which includes the
-    shared libraries loaded by the process. We can use this file to find the path of the
-    a loaded library.
+    shared libraries loaded by the process. Return the first matching library path,
+    optionally filtering by the shared library's major version.
     """  # noqa
-    found = False
-    with open("/proc/self/maps") as f:
-        for line in f:
-            if lib_name in line:
-                found = True
-                break
-    if not found:
-        # the library is not loaded in the current process
-        return None
-    # if lib_name is libcudart, we need to match a line with:
-    # address /path/to/libcudart-hash.so.11.0
-    start = line.index("/")
-    path = line[start:].strip()
-    filename = path.split("/")[-1]
-    assert filename.rpartition(".so")[0].startswith(lib_name), f"Unexpected filename: {filename} for library {lib_name}"
-    return path
+    try:
+        with open("/proc/self/maps") as maps:
+            for line in maps:
+                if lib_name not in line:
+                    continue
+                path_start = line.find("/")
+                if path_start < 0:
+                    continue
+                # Also accept hashed filenames such as libcudart-hash.so.13.0.
+                path = line[path_start:].strip().removesuffix(" (deleted)")
+                filename = path.rsplit("/", 1)[-1]
+                if not filename.rpartition(".so")[0].startswith(lib_name):
+                    continue
+                if major_version is not None and not re.search(rf"\.so\.{major_version}(?:\D|$)", filename):
+                    continue
+                return path
+    except OSError:
+        pass
+    return None
 
 
 class CudaRTLibrary:
@@ -174,3 +203,91 @@ class CudaRTLibrary:
             self.funcs["cudaIpcOpenMemHandle"](ctypes.byref(devPtr), handle, cudaIpcMemLazyEnablePeerAccess)
         )
         return devPtr
+
+
+class CudaBatchMemcpy:
+    """CUDA 13.x ``cudaMemcpyBatchAsync`` binding for batched memory copies."""
+
+    _SRC_ACCESS_ORDER_STREAM = 1
+    _PREFER_OVERLAP_WITH_COMPUTE = 1
+    _CUDA_13_0 = 13000
+    _CUDA_14_0 = 14000
+
+    def __init__(self, library=None):
+        if library is None:
+            path = find_loaded_library("libcudart", major_version=13)
+            if path is None:
+                raise RuntimeError(
+                    "CUDA batch copies require CUDA Runtime 13.x cudaMemcpyBatchAsync; " "libcudart.so.13 is not loaded"
+                )
+            try:
+                library = ctypes.CDLL(path)
+            except OSError as exc:
+                raise RuntimeError(f"cannot load libcudart: {exc}") from exc
+
+        try:
+            runtime_get_version = library.cudaRuntimeGetVersion
+            self._batch_async = library.cudaMemcpyBatchAsync
+            self._get_error_string = library.cudaGetErrorString
+        except AttributeError as exc:
+            raise RuntimeError("cudaMemcpyBatchAsync is unavailable") from exc
+
+        runtime_get_version.restype = ctypes.c_int
+        runtime_get_version.argtypes = [ctypes.POINTER(ctypes.c_int)]
+        self._get_error_string.restype = ctypes.c_char_p
+        self._get_error_string.argtypes = [ctypes.c_int]
+        runtime_version = ctypes.c_int()
+        result = runtime_get_version(ctypes.byref(runtime_version))
+        if result != 0:
+            raise RuntimeError(f"cudaRuntimeGetVersion failed with CUDA error {result}")
+        if not self._CUDA_13_0 <= runtime_version.value < self._CUDA_14_0:
+            raise RuntimeError(
+                f"cudaMemcpyBatchAsync requires CUDA Runtime 13.x (13.0 ABI), found {runtime_version.value}"
+            )
+
+        pointer_array = ctypes.POINTER(ctypes.c_void_p)
+        self._batch_async.restype = ctypes.c_int
+        self._batch_async.argtypes = [
+            pointer_array,
+            pointer_array,
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_size_t,
+            ctypes.POINTER(cudaMemcpyAttributes),
+            ctypes.POINTER(ctypes.c_size_t),
+            ctypes.c_size_t,
+            ctypes.c_void_p,
+        ]
+
+    @staticmethod
+    def prepare_memcpy_batch(copies: Iterable[Tuple[int, int, int]]) -> PreparedMemcpyBatch:
+        copies = tuple(copies)
+        if not copies:
+            raise ValueError("cudaMemcpyBatchAsync requires at least one copy")
+        for src, dst, size in copies:
+            if not src or not dst or size <= 0:
+                raise ValueError("cudaMemcpyBatchAsync requires non-null pointers and positive sizes")
+        count = len(copies)
+        dsts = (ctypes.c_void_p * count)(*(dst for _, dst, _ in copies))
+        srcs = (ctypes.c_void_p * count)(*(src for src, _, _ in copies))
+        sizes = (ctypes.c_size_t * count)(*(size for _, _, size in copies))
+        attrs = cudaMemcpyAttributes()
+        attrs.srcAccessOrder = CudaBatchMemcpy._SRC_ACCESS_ORDER_STREAM
+        attrs.flags = CudaBatchMemcpy._PREFER_OVERLAP_WITH_COMPUTE
+        attrs_idxs = (ctypes.c_size_t * 1)(0)
+        return PreparedMemcpyBatch(dsts, srcs, sizes, attrs, attrs_idxs, count)
+
+    def cudaMemcpyBatchAsync(self, prepared: PreparedMemcpyBatch, stream: int) -> None:
+        result = self._batch_async(
+            prepared.dsts,
+            prepared.srcs,
+            prepared.sizes,
+            prepared.count,
+            ctypes.byref(prepared.attrs),
+            prepared.attrs_idxs,
+            1,
+            ctypes.c_void_p(stream),
+        )
+        if result != 0:
+            message = self._get_error_string(result)
+            error = message.decode("utf-8") if message else f"CUDA error {result}"
+            raise RuntimeError(f"cudaMemcpyBatchAsync failed: {error}")

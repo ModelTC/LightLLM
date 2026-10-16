@@ -35,10 +35,15 @@ class NoQuantization(QuantizationMethod):
         return torch.addmm(bias, input_tensor, weight, out=out)
 
     def _create_weight(
-        self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: Union[int, List[int]],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: Optional[int] = None,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype).cuda(device_id)
         mm_param = WeightPack(weight=weight, weight_scale=None, weight_zero_point=None)
         # weight layout is (out_dim, in_dim), so the split dimension is -2.
