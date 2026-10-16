@@ -102,8 +102,9 @@ class StartArgs:
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
+    # "none" is resolved in api_start: hrrn for Prefill nodes, default otherwise.
     prefill_queue_strategy: str = field(
-        default="default", metadata={"choices": ["default", "promote_shortest", "hrrn"]}
+        default="none", metadata={"choices": ["none", "default", "promote_shortest", "hrrn"]}
     )
     diverse_mode: bool = field(default=False)
     target_vocab_topk_sampling: Optional[int] = field(

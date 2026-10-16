@@ -63,6 +63,11 @@ def _launch_subprocesses(args: StartArgs):
     if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
+    # 自动选择 prefill 排队策略；显式指定策略时保留用户配置。
+    if args.prefill_queue_strategy == "none":
+        args.prefill_queue_strategy = "hrrn" if args.run_mode == "prefill" else "default"
+        logger.info(f"run_mode={args.run_mode}, auto set prefill_queue_strategy to {args.prefill_queue_strategy}")
+
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
         if has_vision_module(args.model_dir):

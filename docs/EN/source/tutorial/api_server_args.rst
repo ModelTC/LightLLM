@@ -366,14 +366,19 @@ Scheduling Parameters
 .. option:: --prefill_queue_strategy
 
     Prefill ordering policy in the inference backend before resource allocation. Defaults
-    to ``default``. The policy first identifies decode requests, keeps them at the left in
-    arrival order, and excludes them from subsequent sorting. ``infer_high_priority`` and
+    to ``none`` (automatic selection by run mode). The policy first identifies decode requests,
+    keeps them at the left in arrival order, and excludes them from subsequent sorting. ``infer_high_priority`` and
     the selected policy apply only to the prefill requests on the right.
 
     Prefill requests carry an internal ``infer_high_priority`` field. It defaults to ``0``,
     cannot be set by external requests, and is assigned a negative value to continuation
     segments through internal PD-disaggregation communication.
 
+    * ``none``: select the policy automatically in ``api_start.py`` based on ``--run_mode``:
+      use ``default`` for standalone normal mode (``normal``) and Decode nodes (``decode``),
+      and ``hrrn`` for Prefill nodes (``prefill``). Omitting this option is equivalent to
+      setting ``none``; it does not disable ordering. Explicitly selecting one of the policies
+      below overrides automatic selection.
     * ``default``: stably sort by ``infer_high_priority`` from smallest to largest and preserve
       FCFS order within the same value.
     * ``promote_shortest``: keep negative-priority prefill requests first in arrival order.
