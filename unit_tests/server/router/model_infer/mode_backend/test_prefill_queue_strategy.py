@@ -19,12 +19,10 @@ def req(
     priority=0,
     router_priority=False,
     total_len=None,
-    arrival_processed_prefill_tokens=0,
 ):
     request = InferReq.__new__(InferReq)
     request.req_id = group_id
     request.cur_kv_len = kv_len
-    request.arrival_processed_prefill_tokens = arrival_processed_prefill_tokens
     request.shm_req = SimpleNamespace(
         input_len=input_len,
         group_req_id=group_id,
@@ -121,8 +119,11 @@ def test_promote_shortest_moves_only_one_normal_request_and_preserves_other_orde
 
 def test_hrrn_prioritizes_short_work_for_equally_aged_requests():
     requests = [req(1, 100), req(2, 10), req(3, 2)]
+    policy = strategy("hrrn")
+    policy.reorder(requests)
+    policy.backend.processed_prefill_tokens = 1000
 
-    assert strategy("hrrn", processed_prefill_tokens=1000).reorder(requests) == [
+    assert policy.reorder(requests) == [
         requests[2],
         requests[1],
         requests[0],
@@ -130,27 +131,46 @@ def test_hrrn_prioritizes_short_work_for_equally_aged_requests():
 
 
 def test_hrrn_aging_allows_long_request_to_overtake_new_short_request():
-    long_old = req(1, 100, arrival_processed_prefill_tokens=0)
-    short_new = req(2, 2, arrival_processed_prefill_tokens=100_000)
+    long_old = req(1, 100)
+    short_new = req(2, 2)
+    policy = strategy("hrrn")
+    policy.reorder([long_old])
+    policy.backend.processed_prefill_tokens = 100_000
 
-    assert strategy("hrrn", processed_prefill_tokens=100_000).reorder([short_new, long_old]) == [
+    assert policy.reorder([short_new, long_old]) == [
         long_old,
         short_new,
     ]
+
+
+def test_hrrn_aging_starts_at_first_sort_and_survives_later_sorts():
+    long_request = req(1, 100)
+    short_request = req(2, 2)
+    requests = [short_request, long_request]
+    policy = strategy("hrrn", processed_prefill_tokens=1000)
+
+    # 首轮两个请求的等待量均为零，使用请求 ID 打破平局。
+    assert policy.reorder(requests) == [long_request, short_request]
+    policy.backend.processed_prefill_tokens = 2000
+    # 后续排序保留首次快照，等龄请求中短请求的响应比更高。
+    assert policy.reorder(requests) == [short_request, long_request]
 
 
 def test_hrrn_binds_uncached_tokens_once_and_uses_request_id_tiebreaker():
     less_cached = req(2, 100, kv_len=0)
     equally_cached_later_id = req(3, 100, kv_len=90)
     more_cached = req(1, 100, kv_len=90)
-    policy = strategy("hrrn", processed_prefill_tokens=1000)
+    policy = strategy("hrrn")
 
     requests = [less_cached, equally_cached_later_id, more_cached]
+    policy.reorder(requests)
+    policy.backend.processed_prefill_tokens = 1000
     assert policy.reorder(requests) == [more_cached, equally_cached_later_id, less_cached]
     assert [request.uncached_prefill_tokens for request in requests] == [100, 10, 10]
 
     less_cached.cur_kv_len = 95
     more_cached.cur_kv_len = 0
+    policy.backend.processed_prefill_tokens = 2000
     assert policy.reorder(requests) == [more_cached, equally_cached_later_id, less_cached]
 
 

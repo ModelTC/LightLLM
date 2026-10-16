@@ -58,6 +58,9 @@ class HRRNPrefillStrategy(PrefillQueueStrategy):
         processed_prefill_tokens = self.backend.processed_prefill_tokens
 
         def hrrn_key(req: "InferReq"):
+            # 首次参与 HRRN 普通请求排序时记录 aging 起点，后续轮次保留该快照。
+            if not hasattr(req, "arrival_processed_prefill_tokens"):
+                req.arrival_processed_prefill_tokens = processed_prefill_tokens
             # 请求第一次进入 HRRN 排序时才绑定服务成本，使此前完成的 Cache 初始化
             # 能反映在分母中；后续 chunked prefill 不再改变该请求的服务成本。
             if not hasattr(req, "uncached_prefill_tokens"):

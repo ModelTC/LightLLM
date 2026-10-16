@@ -367,7 +367,8 @@ PD 分离模式参数
       请求保持相对顺序。已完成 prompt 计算的请求按零计算。该模式主要适合 PD 分离的
       Prefill 节点，用于改善部分短请求的 TTFT 和首字体验。
     * ``hrrn``：负优先级 prefill 请求仍排在最前面；普通请求按基于 token aging 的最高
-      响应比优先（Highest Response Ratio Next）策略排序。响应比使用请求等待期间已处理的
+      响应比优先（Highest Response Ratio Next）策略排序。等待量从请求首次参与 HRRN 排序时开始累计。
+      响应比使用请求等待期间已处理的
       prefill token 数与该请求首次参与 HRRN 排序时未缓存的 prefill token 数计算，既倾向于较短请求，也会随等待量
       增加逐步提升长请求优先级，避免纯最短任务优先造成饥饿。该模式适合 PD 分离的 Prefill
       节点中请求长度差异较大的流量。该策略参考了

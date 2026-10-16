@@ -130,7 +130,7 @@ uncached_prefill_tokens = max(1, input_len - cur_kv_len_at_first_hrrn_sort)
 ```
 
 - `processed_prefill_tokens` 是当前推理后端累计提交给 prefill forward 执行的 token 数。
-- 请求进入推理等待队列时，会将当前计数保存为 `arrival_processed_prefill_tokens`。
+- 普通请求第一次参与 HRRN 排序时，策略将当前计数保存为 `arrival_processed_prefill_tokens`，后续轮次保持不变。等待量从这次排序开始累计，不包含此前未参与 HRRN 排队的阶段。
 - 请求第一次参与 HRRN 排序时，策略通过动态属性保存 `uncached_prefill_tokens`。因此此前完成的 Prefix/CPU Cache 初始化会反映在服务成本中；属性绑定后保持不变，后续 chunked prefill 不会持续缩小分母。
 - 分数越高越先调度；服务成本最小按一个 token 计算，避免零分母分支。
 - 分数相同时使用请求 ID 作为确定性的次级排序键，确保各 TP rank 得到相同顺序。
@@ -165,7 +165,7 @@ decode-a, decode-b, pd-high, normal-a, normal-b, normal-short
 decode-a, decode-b, pd-high, normal-short, normal-a, normal-b
 ```
 
-假设三个普通请求进入队列时保存的计数相同，且之后已经处理了一批 prefill token，`hrrn` 的结果为：
+假设三个普通请求首次参与 HRRN 排序时保存的计数相同，且之后已经处理了一批 prefill token，`hrrn` 的结果为：
 
 ```text
 decode-a, decode-b, pd-high, normal-short, normal-b, normal-a

@@ -388,7 +388,8 @@ Scheduling Parameters
       intended for Prefill nodes in PD-disaggregated deployments to improve TTFT for some short
       requests.
     * ``hrrn``: keep negative-priority prefill requests first, then order normal requests with
-      token-based Highest Response Ratio Next. The response ratio uses the number of prefill
+      token-based Highest Response Ratio Next. Aging starts when a normal request first participates in HRRN ordering.
+      The response ratio uses the number of prefill
       tokens processed while a request has waited and the uncached prefill tokens captured when it first
       participates in HRRN ordering.
       It favors short requests while gradually aging long-waiting requests to prevent starvation.
