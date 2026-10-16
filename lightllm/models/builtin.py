@@ -1,5 +1,7 @@
 """Built-in model registrations; keep implementation imports out of this file."""
 
+from lightllm.common.mtp_config import FinalHiddenPolicy
+
 from .registry import ModelRegistry, is_reward_model, llm_model_type_is
 from .draft_registry import DraftModelRegistry
 
@@ -151,42 +153,92 @@ DraftModelRegistry.register(
     "deepseek_v3",
     ("vanilla_with_att", "eagle_with_att"),
     "lightllm.models.deepseek_mtp.model:Deepseek3MTPModel",
+    main_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
+    draft_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
 )
 DraftModelRegistry.register(
     "glm4_moe_lite",
     ("vanilla_with_att", "eagle_with_att"),
     "lightllm.models.glm4_moe_lite_mtp.model:Glm4MoeLiteMTPModel",
+    main_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
+    draft_final_hidden_policy=FinalHiddenPolicy.PRE_NORM,
 )
 DraftModelRegistry.register(
     ("glm5_next", "glm5_next_text"),
     ("vanilla_with_att", "eagle_with_att"),
     "lightllm.models.glm5_next_mtp.model:Glm5NextMTPModel",
+    main_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
+    draft_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
 )
 DraftModelRegistry.register(
-    "mistral", ("vanilla_no_att", "eagle_no_att"), "lightllm.models.mistral_mtp.model:MistralMTPModel"
+    "mistral",
+    ("vanilla_no_att", "eagle_no_att"),
+    "lightllm.models.mistral_mtp.model:MistralMTPModel",
+    main_final_hidden_policy=FinalHiddenPolicy.PRE_NORM,
+    draft_final_hidden_policy=FinalHiddenPolicy.PRE_NORM,
 )
 DraftModelRegistry.register(
-    ("qwen3_5", "qwen3_5_text"), "dflash", "lightllm.models.qwen3_5_dflash.model:Qwen3_5DFlashModel"
+    ("qwen3_5", "qwen3_5_text"),
+    "dflash",
+    "lightllm.models.qwen3_5_dflash.model:Qwen3_5DFlashModel",
+    main_final_hidden_policy=FinalHiddenPolicy.NONE,
+    draft_final_hidden_policy=FinalHiddenPolicy.NONE,
 )
 DraftModelRegistry.register(
-    ("qwen3_5", "qwen3_5_text"), "dspark", "lightllm.models.qwen3_5_dspark.model:Qwen3_5DSparkModel"
+    ("qwen3_5", "qwen3_5_text"),
+    "dspark",
+    "lightllm.models.qwen3_5_dspark.model:Qwen3_5DSparkModel",
+    main_final_hidden_policy=FinalHiddenPolicy.NONE,
+    draft_final_hidden_policy=FinalHiddenPolicy.NONE,
 )
 DraftModelRegistry.register(
     ("qwen3_5_moe", "qwen3_5_moe_text"),
     ("vanilla_with_att", "eagle_with_att"),
     "lightllm.models.qwen3_5_moe_mtp.model:Qwen3_5MoeMTPModel",
+    main_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
+    draft_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
 )
 DraftModelRegistry.register(
     ("qwen3_5", "qwen3_5_text"),
     ("vanilla_with_att", "eagle_with_att"),
     "lightllm.models.qwen3_5_mtp.model:Qwen3_5MTPModel",
+    main_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
+    draft_final_hidden_policy=FinalHiddenPolicy.POST_NORM,
 )
-DraftModelRegistry.register("qwen3", "dflash", "lightllm.models.qwen3_dflash.model:Qwen3DFlashModel")
-DraftModelRegistry.register("qwen3", "dflash2", "lightllm.models.qwen3_dflash2.model:Qwen3DFlash2Model")
-DraftModelRegistry.register("qwen3", "dspark", "lightllm.models.qwen3_dspark.model:Qwen3DSparkModel")
-DraftModelRegistry.register("qwen3", "eagle3", "lightllm.models.qwen3_eagle.model:Qwen3EagleModel")
 DraftModelRegistry.register(
-    "qwen3_moe", ("vanilla_no_att", "eagle_no_att"), "lightllm.models.qwen3_moe_mtp.model:Qwen3MOEMTPModel"
+    "qwen3",
+    "dflash2",
+    "lightllm.models.qwen3_dflash2.model:Qwen3DFlash2Model",
+    main_final_hidden_policy=FinalHiddenPolicy.NONE,
+    draft_final_hidden_policy=FinalHiddenPolicy.NONE,
+)
+DraftModelRegistry.register(
+    "qwen3",
+    "dflash",
+    "lightllm.models.qwen3_dflash.model:Qwen3DFlashModel",
+    main_final_hidden_policy=FinalHiddenPolicy.NONE,
+    draft_final_hidden_policy=FinalHiddenPolicy.NONE,
+)
+DraftModelRegistry.register(
+    "qwen3",
+    "dspark",
+    "lightllm.models.qwen3_dspark.model:Qwen3DSparkModel",
+    main_final_hidden_policy=FinalHiddenPolicy.NONE,
+    draft_final_hidden_policy=FinalHiddenPolicy.NONE,
+)
+DraftModelRegistry.register(
+    "qwen3",
+    "eagle3",
+    "lightllm.models.qwen3_eagle.model:Qwen3EagleModel",
+    main_final_hidden_policy=FinalHiddenPolicy.NONE,
+    draft_final_hidden_policy=FinalHiddenPolicy.PRE_NORM,
+)
+DraftModelRegistry.register(
+    "qwen3_moe",
+    ("vanilla_no_att", "eagle_no_att"),
+    "lightllm.models.qwen3_moe_mtp.model:Qwen3MOEMTPModel",
+    main_final_hidden_policy=FinalHiddenPolicy.PRE_NORM,
+    draft_final_hidden_policy=FinalHiddenPolicy.PRE_NORM,
 )
 
 
@@ -196,4 +248,9 @@ MODEL_CLASS_PATHS = {
     for configs in ModelRegistry._registry.values()
     for config in configs
 }
-MODEL_CLASS_PATHS.update({path.rsplit(":", 1)[1]: path for path in DraftModelRegistry._registry.values()})
+MODEL_CLASS_PATHS.update(
+    {
+        config.draft_model_class.rsplit(":", 1)[1]: config.draft_model_class
+        for config in DraftModelRegistry._registry.values()
+    }
+)

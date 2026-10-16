@@ -9,7 +9,6 @@ from lightllm.common.basemodel.basemodel import load_hf_weights
 
 
 class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
-
     # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
     is_mtp_draft_model = True
 

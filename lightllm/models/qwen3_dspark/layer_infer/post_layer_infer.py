@@ -184,7 +184,8 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
             # Graph unpadding still uses the leading logits dimension when token ids are returned directly.
             return PostLayerOutput(logits=local_logits.new_empty((token_num, 1)))
 
-        post_output = self._draft_lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
+        normed_input = self._norm(last_input, infer_state, layer_weight)
+        post_output = self._draft_lm_head_and_gather(normed_input, token_num, layer_weight, infer_state)
         confidence_logits = self.predict_confidence_logits(
             block_hidden,
             anchor_token_ids=anchor_token_ids,

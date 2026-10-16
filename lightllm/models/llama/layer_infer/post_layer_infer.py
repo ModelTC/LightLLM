@@ -1,5 +1,6 @@
 import os
 import torch
+from lightllm.common.mtp_config import FinalHiddenPolicy
 from lightllm.common.basemodel.batch_objs import PostLayerOutput
 import torch.functional as F
 import torch.distributed as dist
@@ -56,10 +57,33 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
 
         assert False, "Error State"
 
+    def _prepare_output_hidden(
+        self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
+    ):
+        hidden_policy = infer_state.final_hidden_policy
+        norm_all_tokens = hidden_policy is FinalHiddenPolicy.POST_NORM or (
+            infer_state.is_prefill and infer_state.return_all_prompt_logics
+        )
+
+        if norm_all_tokens:
+            normed = self._norm(input_embdings, infer_state, layer_weight)
+            last_input, token_num = self._slice_get_last_input(normed, infer_state)
+        else:
+            last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
+            last_input = self._norm(last_input, infer_state, layer_weight)
+
+        final_hidden = None
+        if hidden_policy is FinalHiddenPolicy.PRE_NORM:
+            final_hidden = input_embdings
+        elif hidden_policy is FinalHiddenPolicy.POST_NORM:
+            final_hidden = normed
+
+        return last_input, token_num, final_hidden
+
     def _token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ) -> PostLayerOutput:
-        last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
+        last_input, token_num, final_hidden = self._prepare_output_hidden(input_embdings, infer_state, layer_weight)
         input_embdings = None
 
         # 正常采样使用的 logits，始终只对应每个请求最后一个位置。
@@ -67,8 +91,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
             post_output = self._draft_lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
         else:
             post_output = self._target_lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
-        # 在 return_all_prompt_logics 模式下，prompt_logics 保存的是完整 prefill
-        # 的 hidden state，需要在 norm/lm_head 之前取出来，避免被 input_embdings 置空。
+        # 在 return_all_prompt_logics 模式下，prompt_logics 保存的是已归一化的完整 prefill hidden。
         prompt_logics_hiddens = infer_state.prompt_logics
         infer_state.prompt_logics = None
         # 在 return_all_prompt_logics 模式下，额外计算整个 prefill 阶段所有位置的 logits，
@@ -79,6 +102,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
                 prompt_logics_hiddens, prompt_token_num, layer_weight, infer_state
             ).logits
 
+        post_output.final_hidden = final_hidden
         return post_output
 
     def _project_local_logits(
@@ -88,9 +112,8 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         layer_weight: LlamaPreAndPostLayerWeight,
         infer_state: LlamaInferStateInfo,
     ) -> torch.Tensor:
-        normed = self._norm(hidden, infer_state, layer_weight)
-        normed = normed.permute(1, 0).view(-1, token_num)
-        local_logits = layer_weight.lm_head_weight_(input=normed, alloc_func=self.alloc_tensor)
+        hidden = hidden.permute(1, 0).view(-1, token_num)
+        local_logits = layer_weight.lm_head_weight_(input=hidden, alloc_func=self.alloc_tensor)
         return local_logits
 
     def _lm_head_and_gather(
@@ -100,7 +123,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         layer_weight: LlamaPreAndPostLayerWeight,
         infer_state: LlamaInferStateInfo,
     ) -> PostLayerOutput:
-        """执行原始 lm-head，并收集完整词表 logits。"""
+        """将已归一化的 hidden 投影并收集完整词表 logits。"""
 
         local_logits = self._project_local_logits(hidden, token_num, layer_weight, infer_state)
 
@@ -131,7 +154,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         top_k: int,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """使用 PyTorch 在各 TP 词表分片上选取并合并全局 top-k。"""
+        """将已归一化的 hidden 投影并合并各 TP 词表分片的 top-k。"""
 
         local_logits = self._project_local_logits(hidden, token_num, layer_weight, infer_state)
         vocab_size = layer_weight.lm_head_weight_.vocab_size
@@ -240,7 +263,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ) -> PostLayerOutput:
-
         return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
@@ -251,7 +273,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: BaseLayerWeight,
     ) -> tuple[PostLayerOutput, PostLayerOutput]:
-
         output = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
 
         output1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)

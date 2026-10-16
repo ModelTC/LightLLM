@@ -33,7 +33,6 @@ class Glm5NextMTPModel(TpPartBaseModel):
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, self.config, self.quant_cfg)
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
-        self.pre_post_weight.main_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
         self.trans_layers_weight = [
             self.transformer_weight_class(self.config["num_hidden_layers"], self.data_type, self.config, self.quant_cfg)
         ]
