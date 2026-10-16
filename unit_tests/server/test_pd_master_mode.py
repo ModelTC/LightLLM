@@ -46,6 +46,35 @@ def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
     assert args.reasoning_parser == "qwen3"
 
 
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v3", "deepseek_v31", "deepseek_v32"])
+@pytest.mark.parametrize(
+    ("template_kwargs", "effort", "expected_v4", "expected_v3"),
+    [
+        (None, None, True, False),
+        ({"thinking": False}, None, False, False),
+        ({"thinking": True}, None, True, True),
+        (None, "none", False, False),
+        (None, "high", True, False),
+        ({"thinking": False}, "high", False, False),
+    ],
+)
+def test_deepseek_auto_parser_preserves_default_and_explicit_thinking(
+    tmp_path, monkeypatch, model_type, template_kwargs, effort, expected_v4, expected_v3
+):
+    from lightllm.server import api_openai, build_prompt
+    from lightllm.utils.config_utils import auto_set_response_parsers
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}), encoding="utf-8")
+    args = StartArgs(model_dir=str(tmp_path))
+    auto_set_response_parsers(args)
+    is_v4 = model_type == "deepseek_v4"
+    assert args.reasoning_parser == ("deepseek-v4" if is_v4 else "deepseek-v3")
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
+    request = SimpleNamespace(chat_template_kwargs=template_kwargs, reasoning_effort=effort)
+    assert api_openai._is_force_thinking_mode(request) is (expected_v4 if is_v4 else expected_v3)
+
+
 def test_auto_set_response_parsers_preserves_explicit_values(tmp_path):
     from lightllm.utils.config_utils import auto_set_response_parsers
 
