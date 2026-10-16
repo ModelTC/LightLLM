@@ -2,7 +2,6 @@ import os
 
 import torch
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
@@ -83,7 +82,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     def _init_mem_manager(self):
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
         state_mtp_step = 0 if self.args.run_mode == "prefill" else self.args.mtp_step
-        swa_page_num = self.req_manager.get_swa_pool_page_num(self.args, self.batch_max_tokens, state_mtp_step)
+        swa_page_num = self.req_manager.get_swa_pool_page_num(self.args, self.batch_max_tokens)
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
@@ -156,33 +155,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         else:
             streams = hidden.view(-1, self.config["hc_mult"], self.config["hidden_size"])
         return streams.mean(dim=1)
-
-    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
-        if model_input.batch_size == 0 or (model_input.is_prefill and self.is_mtp_draft_model):
-            return
-        # Runtime inputs retain CPU mirrors. Synthetic warmup inputs are created on GPU.
-        req_ids = model_input.b_req_idx_cpu
-        seq_lens = model_input.b_seq_len_cpu
-        if req_ids is None:
-            req_ids = model_input.b_req_idx.cpu()
-            seq_lens = model_input.b_seq_len.cpu()
-        if req_ids.numel() == 0:
-            return
-        if model_input.is_prefill:
-            ready_lens = model_input.b_ready_cache_len_cpu
-            if ready_lens is None:
-                ready_lens = model_input.b_ready_cache_len.cpu()
-            self.req_manager.prepare_prefill(req_ids, ready_lens, seq_lens)
-        else:
-            mtp_indices = model_input.b_mtp_index_cpu
-            if mtp_indices is None:
-                mtp_indices = model_input.b_mtp_index.cpu()
-            self.req_manager.prepare_decode(req_ids, seq_lens, mtp_indices)
-
-    def _select_mem_indexes(self, model_input: ModelInput):
-        mem_indexes = super()._select_mem_indexes(model_input)
-        self._prepare_dsv4_slots(model_input)
-        return mem_indexes
 
     def _init_to_get_rotary(self):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the

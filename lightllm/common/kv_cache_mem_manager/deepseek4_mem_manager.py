@@ -72,9 +72,8 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     与兄弟 manager 一致的 token-slot 设计；req 索引的表都在 DeepseekV4ReqManager。
 
-    - ``swa_pool``: packed latent for all layers. The request manager owns its
-      physical pages and request-private page table. Prefill retains the entire
-      current chunk, without a fixed-size ring that could overwrite unread KV.
+    - ``swa_pool``: packed latent for all layers. The request manager owns a
+      fixed page ring and borrows extra pages to keep the whole prefill chunk live.
     - ``c4_pool``/``c128_pool``: 压缩 latent，按 qwen3next 的层号压实手法只为压缩层建层；
       c4 另带 packed indexer-K 池。每个 256-token block 对应三个 packed 历史页；
       压缩槽位直接由组末 full slot 除以压缩率得到，随 full 页分配和释放。
@@ -364,38 +363,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         # Pinned CPU checkpoints are process-local; IPC readers need only GPU storage.
         state["big_page_buffers"] = None
         return state
-
-    def alloc_dspark_swa_block(self, token_num: int, block_size: int):
-        """Assign one temporary SWA scratch page to each DSpark proposal block.
-
-        Proposal KV is consumed within the draft forward, then its scratch
-        pages are released. Request token pages stay reserved. Keeping the whole
-        block in a private page avoids the host-side sequence-length decision
-        required by the position-aligned target cache.  Attention still uses
-        the absolute positions stored in the request table; physical SWA slots
-        only identify the packed KV rows.
-        """
-        block_size = int(block_size)
-        assert block_size > 0
-        assert block_size <= DSV4_SWA_PAGE_SIZE
-        assert token_num % block_size == 0
-
-        req_num = token_num // block_size
-        if req_num == 0:
-            return (
-                torch.empty((0,), dtype=torch.int32, device="cpu"),
-                torch.empty((0,), dtype=torch.int32, device=self.swa_pool.buffer.device),
-            )
-
-        device = self.swa_pool.buffer.device
-        pages_cpu = self.swa_page_allocator.alloc(req_num)
-        pages = pages_cpu.to(device, non_blocking=True)
-        # The proposal block addresses its own page directly, outside the request page table.
-        return pages_cpu, pages
-
-    def free_dspark_swa_block(self, pages_cpu: torch.Tensor) -> None:
-        """Release only proposal scratch; token pages remain owned by the request."""
-        self.swa_page_allocator.free(pages_cpu)
 
     def free_all(self):
         super().free_all()

@@ -9,7 +9,6 @@ def _build_dspark_swa_index_kernel(
     pos_ptr,
     req_to_swa_pages,
     req_to_swa_stride0,
-    scratch_pages_ptr,
     swa_index_ptr,
     swa_index_stride0,
     swa_length_ptr,
@@ -40,27 +39,25 @@ def _build_dspark_swa_index_kernel(
     source_position = tl.where(is_history, history_position, block_position)
     source_position = tl.where(is_hold | ~(is_history | is_block), 0, source_position)
 
-    history_page = tl.load(
+    valid = is_history | is_block
+    source_page = tl.load(
         req_to_swa_pages + req_idx * req_to_swa_stride0 + source_position // PAGE_SIZE,
-        mask=in_width & is_history & ~is_hold,
+        mask=in_width & valid & ~is_hold,
         other=0,
     )
-    history_swa_slot = history_page * PAGE_SIZE + source_position % PAGE_SIZE
-    scratch_page = tl.load(
-        scratch_pages_ptr + token_idx // BLOCK_SIZE,
-        mask=~is_hold,
-        other=0,
-    ).to(tl.int64)
-    block_swa_slot = scratch_page * PAGE_SIZE + column - history_len
-    swa_slot = tl.where(is_history, history_swa_slot, block_swa_slot)
-    valid = is_history | is_block
+    swa_slot = source_page * PAGE_SIZE + source_position % PAGE_SIZE
     output = tl.where(valid, swa_slot, -1)
     output = tl.where(is_hold, HOLD_SWA_SLOT, output).to(tl.int32)
     tl.store(swa_index_ptr + token_idx * swa_index_stride0 + column, output, mask=in_width)
 
     length = tl.where(is_hold, 1, history_len + BLOCK_SIZE).to(tl.int32)
     tl.store(swa_length_ptr + token_idx, length)
-    write_slot = scratch_page * PAGE_SIZE + block_offset
+    write_page = tl.load(
+        req_to_swa_pages + req_idx * req_to_swa_stride0 + position // PAGE_SIZE,
+        mask=~is_hold,
+        other=0,
+    )
+    write_slot = write_page * PAGE_SIZE + position % PAGE_SIZE
     write_slot = tl.where(is_hold, HOLD_SWA_SLOT, write_slot).to(tl.int32)
     tl.store(swa_write_slot_ptr + token_idx, write_slot)
 
@@ -69,7 +66,6 @@ def build_dspark_swa_index(
     req_idx: torch.Tensor,
     positions: torch.Tensor,
     req_to_swa_pages: torch.Tensor,
-    scratch_pages: torch.Tensor,
     swa_index: torch.Tensor,
     swa_length: torch.Tensor,
     swa_write_slots: torch.Tensor,
@@ -84,7 +80,6 @@ def build_dspark_swa_index(
     token_num = positions.shape[0]
     width = swa_index.shape[1]
     assert token_num % block_size == 0
-    assert scratch_pages is not None and scratch_pages.is_cuda
     assert window > 0 and width >= window + block_size
     if token_num == 0:
         return swa_index, swa_length
@@ -94,7 +89,6 @@ def build_dspark_swa_index(
         positions,
         req_to_swa_pages,
         req_to_swa_pages.stride(0),
-        scratch_pages,
         swa_index,
         swa_index.stride(0),
         swa_length,

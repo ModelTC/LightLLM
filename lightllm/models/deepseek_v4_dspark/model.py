@@ -3,7 +3,6 @@ import os
 from typing import List
 
 import torch
-import torch.nn.functional as F
 from safetensors import safe_open
 from tqdm import tqdm
 
@@ -131,24 +130,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         new_batch_size = max(new_batch_size, self.block_size)
         new_batch_size = ((new_batch_size + self.block_size - 1) // self.block_size) * self.block_size
 
-        padded_input = super()._create_padded_decode_model_input(model_input, new_batch_size)
-        scratch_pages = model_input.mtp_draft_swa_pages
-        if padded_input is model_input or scratch_pages is None:
-            return padded_input
-
-        assert new_batch_size % self.block_size == 0
-        page_num = model_input.batch_size // self.block_size
-        padded_page_num = new_batch_size // self.block_size
-        assert scratch_pages.shape == (page_num,)
-        # HOLD rows ignore the page value. Pad only the CUDA Graph input; the CPU
-        # owner list must continue to contain exactly the pages that were allocated.
-        padded_input.mtp_draft_swa_pages = F.pad(
-            scratch_pages,
-            (0, padded_page_num - page_num),
-            mode="constant",
-            value=0,
-        )
-        return padded_input
+        return super()._create_padded_decode_model_input(model_input, new_batch_size)
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
@@ -180,22 +162,6 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             layer.sin_compress_table = self._sin_cached_compress
         self.layers_infer[0].context_wkv_weight = self.context_wkv_weight
 
-    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
-        # Target-hidden commits use target SWA; proposal blocks own separate scratch pages.
-        return
-
-    @torch.no_grad()
-    def forward(self, model_input: ModelInput):
-        if model_input.is_prefill or model_input.mtp_draft_input_hiddens is not None:
-            return super().forward(model_input)
-        pages_cpu, pages = self.mem_manager.alloc_dspark_swa_block(model_input.batch_size, self.block_size)
-        model_input.mtp_draft_swa_pages_cpu = pages_cpu
-        model_input.mtp_draft_swa_pages = pages
-        try:
-            return super().forward(model_input)
-        finally:
-            self.mem_manager.free_dspark_swa_block(pages_cpu)
-
     def _decode(self, model_input: ModelInput) -> ModelOutput:
         if model_input.mtp_draft_input_hiddens is None:
             return super()._decode(model_input)
@@ -213,10 +179,6 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         assert token_num % self.block_size == 0
         return {
             "mtp_draft_input_hiddens": None,
-            # CUDA Graph capture must take the same direct scratch-slot branch
-            # as runtime. HOLD rows never dereference the page value, but the
-            # tensor gives the captured graph stable storage for replay copies.
-            "mtp_draft_swa_pages": torch.zeros(token_num // self.block_size, dtype=torch.int32, device="cuda"),
         }
 
     def _autotune_warmup(self):

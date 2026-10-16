@@ -383,7 +383,6 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
-        infer_state.mtp_draft_swa_pages = model_input.mtp_draft_swa_pages
 
         if infer_state.is_prefill:
             infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
@@ -990,14 +989,14 @@ class TpPartBaseModel:
         try:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
-            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cpu")
             page_size = self.mem_manager.page_size
             alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
             mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
             self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-            b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
-            b_seq_len[:] = self.batch_max_tokens
-            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_seq_len = torch.full((1,), self.batch_max_tokens, dtype=torch.int32, device="cpu")
+            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cpu")
+            self.req_manager.prepare_prefill(b_req_idx, b_ready_cache_len, b_seq_len)
             b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
             total_token_num = self.batch_max_tokens
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1075,14 +1074,14 @@ class TpPartBaseModel:
                 dummy_input_ids = torch.randint(
                     0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
                 )
-                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cpu")
                 page_size = self.mem_manager.page_size
                 alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
                 mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
                 self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-                b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
-                b_seq_len[:] = input_len
-                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_seq_len = torch.full((1,), input_len, dtype=torch.int32, device="cpu")
+                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cpu")
+                self.req_manager.prepare_prefill(b_req_idx, b_ready_cache_len, b_seq_len)
                 b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
                 total_token_num = input_len
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")

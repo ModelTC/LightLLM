@@ -132,6 +132,8 @@ def test_radix_match_retries_when_page_alignment_lands_in_earlier_image(monkeypa
 
     req_manager = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
     req_manager.req_to_token_indexs = torch.empty((1, 1025), dtype=torch.int64)
+    req_manager._swa_pages = [list(range(5))]
+    req_manager.swa_pages_per_req = 5
     req_manager.restore_small_page_state = lambda **kwargs: None
     req_manager.mem_manager = SimpleNamespace(swa_page_allocator=SimpleNamespace(can_use_mem_size=2))
     monkeypatch.setattr(g_infer_context, "req_manager", req_manager)
@@ -216,7 +218,8 @@ def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
 
     req_manager = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
     req_manager.sliding_window = 128
-    req_manager._swa_pages = [{}]
+    req_manager._swa_pages = [[]]
+    req_manager.swa_pages_per_req = 5
 
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(disable_chunked_prefill=False, chunked_prefill_size=128)
@@ -226,7 +229,7 @@ def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
     req.image_block_spans = [(500, 884)]
     req.req_idx = 0
 
-    assert req_manager.get_request_resource_need(req, "recover") == 8
+    assert req_manager.get_request_resource_need(req, "recover") == 7
 
 
 @pytest.mark.parametrize(

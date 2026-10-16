@@ -106,7 +106,7 @@ def test_dp_overlap_req_start_rows_rejects_nonempty_cpu_input():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 @pytest.mark.parametrize("draft_step", [1, 3])
 @pytest.mark.parametrize("empty_batches", [(False, False), (True, False), (False, True), (True, True)])
-def test_dsv4_overlap_eagle_uses_one_cpu_accept_buffer(draft_step, empty_batches):
+def test_dsv4_overlap_eagle_selects_gpu_tails_without_waiting_for_cpu(draft_step, empty_batches):
     layouts = ([0, 1, 0, 1, 2], [0, 1])
     accept_lengths = ([2, 1], [1])
     model_inputs, accepts, expected_tails = [], [], []
@@ -125,9 +125,6 @@ def test_dsv4_overlap_eagle_uses_one_cpu_accept_buffer(draft_step, empty_batches
     def forward(input0, input1):
         outputs = []
         for model_input in (input0, input1):
-            assert torch.equal(model_input.b_req_idx_cpu, model_input.b_req_idx.cpu())
-            assert torch.equal(model_input.b_mtp_index_cpu, model_input.b_mtp_index.cpu())
-            assert torch.equal(model_input.b_seq_len_cpu, model_input.b_seq_len.cpu())
             outputs.append(
                 ModelOutput(
                     logits=model_input.b_seq_len.float().unsqueeze(1),
@@ -178,9 +175,7 @@ def test_dsv4_overlap_eagle_uses_one_cpu_accept_buffer(draft_step, empty_batches
     expected = torch.cat(expected_tails)[:, None] + torch.arange(draft_step)[None, :]
     torch.testing.assert_close(proposal.token_ids.cpu(), expected)
     assert len(calls) == draft_step
-    assert len(waits) == int(combined_cpu.numel() > 0 and draft_step > 1)
-    for model_input in model_inputs:
-        torch.testing.assert_close(model_input.b_seq_len.cpu(), model_input.b_seq_len_cpu)
+    assert waits == []
 
 
 def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):

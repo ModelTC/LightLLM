@@ -11,14 +11,15 @@ from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import (
     DSV4_CACHE_BLOCK_SIZE,
 )
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4StateCacheManager
+from lightllm.utils.envs_utils import get_env_start_args
 
 
 class DeepseekV4ReqManager(HybridAttentionReqManager):
-    """Own request-private SWA pages and restore aligned continuation checkpoints.
+    """Own a page ring per request and temporary pages for long prefill chunks.
 
-    The page table covers the whole sequence, so a prefill chunk can keep all of
-    its new KV until attention completes. Only pages preceding the next chunk's
-    retained window are recycled. Speculative retries reuse their held pages.
+    Decode and speculative retries address the ring by absolute token position.
+    Prefill keeps every live page until draft KV and checkpoints have been saved,
+    then exchanges its tail pages into the ring without moving packed KV/state.
     """
 
     def __init__(
@@ -30,13 +31,21 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
     ):
         super().__init__(max_request_num, max_sequence_length, None)
         self.sliding_window = sliding_window
+        args = get_env_start_args()
+        mtp_step = 0 if args.run_mode == "prefill" else args.mtp_step
+        # Keep the existing checkpoint tail, plus the furthest verify + draft
+        # write before acceptance is known. One more page covers an unaligned tail.
+        retain = sliding_window + DSV4_CACHE_BLOCK_SIZE
+        self.swa_pages_per_req = math.ceil((retain + 2 * mtp_step) / DSV4_SWA_PAGE_SIZE) + 1
         self.req_to_swa_pages = torch.full(
             (max_request_num + 1, self.req_to_token_indexs.shape[1] // DSV4_SWA_PAGE_SIZE),
             -1,
             dtype=torch.int32,
             device="cuda",
         )
-        self._swa_pages = [{} for _ in range(max_request_num)]
+        self._swa_pages = [[] for _ in range(max_request_num)]
+        self._swa_prefill_pages = [{} for _ in range(max_request_num)]
+        self._swa_prefill_end = [0] * max_request_num
         if mem_manager is not None:
             self.bind_mem_manager(mem_manager)
 
@@ -46,32 +55,36 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         # IPC pack/unpack workers need the GPU table, without the CPU owner lists.
         mem_manager.req_to_swa_pages = self.req_to_swa_pages
 
-    def _swa_page_changes(self, req_idx, start, end):
+    def alloc(self):
+        req_idx = super().alloc()
+        if req_idx is not None:
+            self._alloc_swa_ring(req_idx)
+        return req_idx
+
+    def _update_swa_page_table(self, req_idx):
         pages = self._swa_pages[req_idx]
-        first_retained = max(0, start - self.sliding_window - DSV4_CACHE_BLOCK_SIZE + 1) // DSV4_SWA_PAGE_SIZE
-        missing = [
-            p
-            for p in range(start // DSV4_SWA_PAGE_SIZE, (end + DSV4_SWA_PAGE_SIZE - 1) // DSV4_SWA_PAGE_SIZE)
-            if p not in pages
-        ]
-        evicted = [p for p in pages if p < first_retained]
-        return missing, evicted
+        page_num = self.req_to_swa_pages.shape[1]
+        mapping = torch.tensor(
+            (pages * math.ceil(page_num / len(pages)))[:page_num], dtype=torch.int32, device="cpu", pin_memory=True
+        )
+        self.req_to_swa_pages[req_idx].copy_(mapping, non_blocking=True)
+
+    def _alloc_swa_ring(self, req_idx):
+        if not self._swa_pages[req_idx]:
+            self._swa_pages[req_idx] = self.mem_manager.swa_page_allocator.alloc(self.swa_pages_per_req).tolist()
+            self._update_swa_page_table(req_idx)
 
     def get_swa_page_need(self, req_idx, start, end):
         if end <= start:
             return 0
-        missing, evicted = self._swa_page_changes(req_idx, start, end)
-        return max(0, len(missing) - len(evicted))
+        first = max(0, start - self.sliding_window - DSV4_CACHE_BLOCK_SIZE + 1) // DSV4_SWA_PAGE_SIZE
+        page_num = math.ceil(end / DSV4_SWA_PAGE_SIZE) - first
+        ring_need = 0 if self._swa_pages[req_idx] else self.swa_pages_per_req
+        return ring_need + max(0, page_num - self.swa_pages_per_req)
 
-    def get_swa_pool_page_num(self, args, batch_max_tokens, mtp_step):
+    def get_swa_pool_page_num(self, args, batch_max_tokens):
         """Capacity for retained windows, verification rows and the active prefill chunk."""
-        retain = self.sliding_window + DSV4_CACHE_BLOCK_SIZE
-        decode_width = max(mtp_step + 1, 2 * mtp_step)
-        # A window can straddle one extra physical page.
-        per_req_pages = math.ceil((retain + decode_width - 1) / DSV4_SWA_PAGE_SIZE) + 1
-        page_num = self.max_request_num * per_req_pages
-        if args.run_mode != "prefill" and args.mtp_mode == "dspark":
-            page_num += self.max_request_num  # Separate DSpark proposal scratch.
+        page_num = self.max_request_num * self.swa_pages_per_req
         if args.run_mode != "decode":
             page_num += math.ceil(batch_max_tokens / DSV4_SWA_PAGE_SIZE)
         return page_num
@@ -83,30 +96,27 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         """SWA page demand using the same logical ranges as prepare_swa."""
         if stage == "restore":
             if target_kv_len is None:
-                # Prefix matching restores a complete continuation checkpoint.
-                return DSV4_CACHE_BLOCK_SIZE // DSV4_SWA_PAGE_SIZE
+                return 0 if self._swa_pages[req.req_idx] else self.swa_pages_per_req
             return self.get_swa_page_need(req.req_idx, target_kv_len - DSV4_CACHE_BLOCK_SIZE, target_kv_len)
         if stage == "decode":
-            seq_len = req.get_cur_total_len()
-            if seq_len <= 0:
-                return 0
-            width = req.mtp_step + 1 if req.args.mtp_mode == "dspark" else max(req.mtp_step + 1, req.mtp_step * 2)
-            return self.get_swa_page_need(req.req_idx, seq_len - 1, seq_len - 1 + width) + int(
-                req.args.mtp_mode == "dspark"
-            )
+            return 0
         if stage not in ("prefill", "recover"):
             raise ValueError(f"Unknown DeepSeek-V4 resource stage: {stage}")
         end = req.get_chuncked_input_token_len() if is_chunked_prefill else req.get_cur_total_len()
         need = self.get_swa_page_need(req.req_idx, req.cur_kv_len, end)
-        if stage == "prefill" or need == 0 or req.args.disable_chunked_prefill:
+        if stage == "prefill" or req.args.disable_chunked_prefill:
             return need
         # Recovery reserves the peak across future chunks, including atomic image blocks.
         chunk_tokens = max(
             req.args.chunked_prefill_size,
             max((end - start for start, end in req.image_block_spans), default=0),
         )
-        peak_tokens = min(end, chunk_tokens + self.sliding_window + 2 * DSV4_CACHE_BLOCK_SIZE)
-        return math.ceil(peak_tokens / DSV4_SWA_PAGE_SIZE)
+        peak_pages = min(
+            math.ceil(end / DSV4_SWA_PAGE_SIZE),
+            math.ceil((chunk_tokens + self.sliding_window + DSV4_CACHE_BLOCK_SIZE - 1) / DSV4_SWA_PAGE_SIZE) + 1,
+        )
+        ring_need = 0 if self._swa_pages[req.req_idx] else self.swa_pages_per_req
+        return ring_need + max(0, peak_pages - self.swa_pages_per_req)
 
     def get_loadable_cpu_cache_end(
         self,
@@ -153,15 +163,32 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
     def prepare_swa(self, req_idx, start, end):
         if req_idx == self.HOLD_REQUEST_ID:
             return
-        pages = self._swa_pages[req_idx]
-        missing, evicted = self._swa_page_changes(req_idx, start, end)
-        if evicted:
-            self.mem_manager.swa_page_allocator.free([pages.pop(p) for p in evicted])
-            self.req_to_swa_pages[req_idx, evicted] = -1
-        if missing:
-            allocated = self.mem_manager.swa_page_allocator.alloc(len(missing))
-            pages.update(zip(missing, allocated.tolist()))
-            self.req_to_swa_pages[req_idx, missing] = allocated.to(device="cuda", non_blocking=True)
+        self.finish_prefill([req_idx])
+        self._alloc_swa_ring(req_idx)
+        first = max(0, start - self.sliding_window - DSV4_CACHE_BLOCK_SIZE + 1) // DSV4_SWA_PAGE_SIZE
+        end_page = math.ceil(end / DSV4_SWA_PAGE_SIZE)
+        extra_start = first + self.swa_pages_per_req
+        if end_page > extra_start:
+            allocated = self.mem_manager.swa_page_allocator.alloc(end_page - extra_start)
+            self._swa_prefill_pages[req_idx] = dict(zip(range(extra_start, end_page), allocated.tolist()))
+            self._swa_prefill_end[req_idx] = end_page
+            self.req_to_swa_pages[req_idx, extra_start:end_page].copy_(allocated, non_blocking=True)
+
+    def finish_prefill(self, req_indexes):
+        """Run after draft KV and checkpoint reads, on their CUDA stream."""
+        for req_idx in req_indexes:
+            borrowed = self._swa_prefill_pages[req_idx]
+            if not borrowed:
+                continue
+            pages = self._swa_pages[req_idx]
+            end = self._swa_prefill_end[req_idx]
+            for logical_page in range(max(0, end - len(pages)), end):
+                if logical_page in borrowed:
+                    ring_idx = logical_page % len(pages)
+                    pages[ring_idx], borrowed[logical_page] = borrowed[logical_page], pages[ring_idx]
+            self._update_swa_page_table(req_idx)
+            self.mem_manager.swa_page_allocator.free(list(borrowed.values()))
+            borrowed.clear()
 
     def get_prompt_cache_page_size(self):
         # Continuation needs one packed history block, independent of allocation/hash page sizes.
@@ -173,16 +200,12 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
             + positions % DSV4_SWA_PAGE_SIZE
         )
 
-    def prepare_prefill(self, b_req_idx_cpu, b_ready_cache_len_cpu, b_seq_len_cpu):
-        for req_idx, start, end in zip(b_req_idx_cpu.tolist(), b_ready_cache_len_cpu.tolist(), b_seq_len_cpu.tolist()):
-            self.prepare_swa(req_idx, start, end)
-
-    def prepare_decode(self, b_req_idx_cpu, b_seq_len_cpu, b_mtp_index_cpu):
-        # Verification rows are request-major and include consecutive MTP positions.
-        width = int(b_mtp_index_cpu.max().item()) + 1
-        reqs, seqs = b_req_idx_cpu.tolist(), b_seq_len_cpu.tolist()
-        for i in range(0, len(reqs), width):
-            self.prepare_swa(reqs[i], seqs[i] - 1, seqs[i + width - 1])
+    def prepare_prefill(self, b_req_idx_cpu, b_ready_cache_len_cpu, b_seq_len_cpu, *, stream=None):
+        with torch.cuda.stream(stream):
+            for req_idx, start, end in zip(
+                b_req_idx_cpu.tolist(), b_ready_cache_len_cpu.tolist(), b_seq_len_cpu.tolist()
+            ):
+                self.prepare_swa(req_idx, start, end)
 
     def prepare_pd_decode_cache(self, req_list, seq_list):
         for req_idx, end in zip(req_list, seq_list):
@@ -196,7 +219,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         return self.small_page_buffers
 
     def init_hybrid_attention_state(self, req):
-        self.clear_runtime_state(req.req_idx)
+        self._alloc_swa_ring(req.req_idx)
 
     def save_state(self, req_idx, buffer_idx, state_cache_manager, checkpoint_len):
         manager = self.mem_manager
@@ -266,9 +289,11 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
 
     def clear_runtime_state(self, req_idx):
         pages = self._swa_pages[req_idx]
-        if pages:
-            self.mem_manager.swa_page_allocator.free(list(pages.values()))
+        borrowed = self._swa_prefill_pages[req_idx]
+        if pages or borrowed:
+            self.mem_manager.swa_page_allocator.free(pages + list(borrowed.values()))
             pages.clear()
+            borrowed.clear()
             self.req_to_swa_pages[req_idx].fill_(-1)
 
     def free(self, free_req_indexes, free_token_index):

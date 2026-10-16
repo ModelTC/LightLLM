@@ -68,8 +68,10 @@ PD 传输页 `--pd_kv_page_size` 和 CPU cache 页也必须是分配页大小的
 - packed 格式保持独立：SWA 每页 128 槽，C4 每页 64 槽，C128 每页 2 槽。
   这些物理块大小来自算子布局，与分配页大小独立。历史复制遍历分配页内的所有 packed block；
   HOLD 请求也预留整个分配页对应的压缩容量。
-- SWA 页和 compressor 运行态归请求所有，保留完整 prefill chunk 所需的数据。
-  两个请求命中同一前缀时，共享压缩历史，分别恢复自己的 SWA 和 compressor 状态。
+- SWA 使用请求持有的循环页组，容量由滑窗、checkpoint 保留范围和最大 MTP 前探位置推导。
+  Decode 和 MTP 按绝对位置寻址，无须逐步分配或回收 SWA 页。
+  长 prefill chunk 借用额外页，完成 draft KV 填充和 checkpoint 读取后，将尾部物理页换入请求页组，
+  归还过期页，不搬移 KV。两个请求命中同一前缀时，共享压缩历史，分别恢复自己的 SWA 和 compressor 状态。
 - 大小页 CPU checkpoint 只保存末尾 256 token 的 SWA、C4 和 indexer continuation，
   不重复保存压缩历史。256 边界已闭合 C128 分组，下一组覆盖状态后再读取。
 - PD 支持任意传输终点，额外保存未闭合分组以及最后可缓存边界的 continuation。

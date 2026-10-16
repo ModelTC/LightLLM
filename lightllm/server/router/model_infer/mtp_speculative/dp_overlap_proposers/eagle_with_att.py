@@ -175,12 +175,6 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
                 schedule_scores=schedule_scores,
             )
 
-        if self.backend.is_deepseek_v4 and req_num > 0:
-            # Both microbatches share one accept-length D2H and its verify event.
-            accept_len_cpu.wait()
-            for model_input, batch_accept_len in zip(model_inputs, accept_len_cpu.tensor.split(req_num_by_batch)):
-                model_input.select_mtp_cpu_mirrors(batch_accept_len)
-
         for batch_index, model_input in enumerate(model_inputs):
             model_input.is_prefill = False
             model_input.batch_size = req_num_by_batch[batch_index]
@@ -213,8 +207,6 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
                 draft_token_ids_by_batch[batch_index] = draft_token_ids
                 draft_hiddens_by_batch[batch_index] = draft_output.mtp_collector.spec_hidden
                 draft_seq_lens_by_batch[batch_index].add_(1)
-                if self.backend.is_deepseek_v4 and req_num > 0:
-                    model_inputs[batch_index].advance_cpu_seq_len()
 
                 batch_req_num = req_num_by_batch[batch_index]
                 proposal_row_start = proposal_row_offsets[batch_index]

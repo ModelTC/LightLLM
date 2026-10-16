@@ -15,10 +15,9 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
 
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
-        if self.is_prefill or self.mtp_draft_swa_pages is None:
-            # Target-hidden commit passes use target-owned mappings. Proposal
-            # blocks, including CUDA Graph HOLD capture, always carry scratch
-            # pages and replace these base indices below.
+        if self.is_prefill or self.mtp_draft_input_hiddens is not None:
+            # Context commits use causal target positions. Proposals attend to
+            # history plus the complete block in the ring's future slots.
             return
 
         (self.dsv4_swa_indices, self.dsv4_swa_lengths, self.dsv4_swa_write_slots,) = model.dsv4_workspace.dspark_swa(
@@ -29,7 +28,6 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
             req_idx=self.dsv4_sparse_req_idx,
             positions=self.position_ids,
             req_to_swa_pages=self.req_manager.req_to_swa_pages,
-            scratch_pages=self.mtp_draft_swa_pages,
             swa_index=self.dsv4_swa_indices,
             swa_length=self.dsv4_swa_lengths,
             swa_write_slots=self.dsv4_swa_write_slots,

@@ -99,10 +99,6 @@ def test_dsv4_eagle_reuses_async_accept_lengths_and_preserves_target_mirrors(dra
     calls = []
 
     def forward(model_input):
-        if calls and not empty:
-            assert torch.equal(model_input.b_req_idx_cpu, model_input.b_req_idx.cpu())
-            assert torch.equal(model_input.b_mtp_index_cpu, model_input.b_mtp_index.cpu())
-            assert torch.equal(model_input.b_seq_len_cpu, model_input.b_seq_len.cpu())
         calls.append(model_input.b_seq_len.clone())
         return ModelOutput(
             logits=model_input.b_seq_len.float().unsqueeze(1),
@@ -135,10 +131,7 @@ def test_dsv4_eagle_reuses_async_accept_lengths_and_preserves_target_mirrors(dra
     )
     torch.testing.assert_close(proposal.token_ids, expected)
     assert len(calls) == draft_step
-    assert len(waits) == int(not empty and draft_step > 1)
-    assert target_input.b_req_idx_cpu is req_idx
-    assert target_input.b_mtp_index_cpu is mtp_index
-    assert target_input.b_seq_len_cpu is seq_len
+    assert waits == []
     torch.testing.assert_close(target_input.b_seq_len.cpu(), seq_len)
     ready_event.synchronize()
 

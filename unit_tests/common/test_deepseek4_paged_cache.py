@@ -14,6 +14,8 @@ from lightllm.utils.envs_utils import get_env_start_args
 def cache(monkeypatch, tmp_path, request):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the packed cache kernels")
+    param = getattr(request, "param", 256)
+    page_size, mtp_step = param if isinstance(param, tuple) else (param, 3)
     (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 100}))
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", "test_dsv4_paged_cache")
@@ -21,8 +23,9 @@ def cache(monkeypatch, tmp_path, request):
         "LIGHTLLM_START_ARGS",
         json.dumps(
             {
-                "page_size": getattr(request, "param", 256),
-                "linear_att_hash_page_size": getattr(request, "param", 256),
+                "page_size": page_size,
+                "run_mode": "normal",
+                "linear_att_hash_page_size": page_size,
                 "linear_att_page_block_num": 8,
                 "chunked_prefill_size": 2048,
                 "max_req_total_len": 4096,
@@ -30,14 +33,13 @@ def cache(monkeypatch, tmp_path, request):
                 "model_dir": str(tmp_path),
                 "penalty_counter_mode": "cpu_counter",
                 "output_constraint_mode": "none",
-                "mtp_step": 3,
+                "mtp_step": mtp_step,
                 "mtp_dynamic_verify": False,
                 "enable_ep_moe": False,
             }
         ),
     )
     get_env_start_args.cache_clear()
-    page_size = getattr(request, "param", 256)
     manager = DeepseekV4MemoryManager(
         8192,
         torch.bfloat16,
@@ -46,7 +48,7 @@ def cache(monkeypatch, tmp_path, request):
         3,
         compress_rates=[4, 128, 0],
         max_request_num=2,
-        mtp_step=3,
+        mtp_step=mtp_step,
         swa_page_num=64,
         cpu_cache_token_page_size=(2048 + page_size - 1) // page_size * page_size,
     )
@@ -145,9 +147,9 @@ def test_speculative_retry_reuses_swa_without_freeing_token_pages(cache):
 
     requests.prepare_prefill(cpu([req_idx]), cpu([0]), cpu([254]))
     for sequences in ([255, 256, 257, 258], [255, 256, 257, 258], [256, 257, 258, 259]):
-        requests.prepare_decode(cpu([req_idx] * 4), cpu(sequences), cpu([0, 1, 2, 3]))
-        assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages - 3
-        assert len(requests._swa_pages[req_idx]) == 3
+        swa_slots = requests.get_swa_slots(req_idx, torch.tensor(sequences, device="cuda") - 1)
+        assert swa_slots.unique().numel() == len(sequences)
+        assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages - requests.swa_pages_per_req
         assert manager.allocator.can_use_mem_size == manager.size - 512
     requests.free([req_idx], slots)
     assert manager.allocator.can_use_mem_size == manager.size
@@ -156,7 +158,7 @@ def test_speculative_retry_reuses_swa_without_freeing_token_pages(cache):
 
 
 @pytest.mark.parametrize("model_kind", ["target", "mtp", "dspark"])
-def test_model_selects_held_slots_and_prepares_only_owned_swa(cache, model_kind):
+def test_model_selects_held_slots_without_allocating_swa(cache, model_kind):
     from lightllm.common.basemodel.batch_objs import ModelInput
     from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
     from lightllm.models.deepseek_v4_mtp.model import DeepseekV4MTPModel
@@ -186,17 +188,29 @@ def test_model_selects_held_slots_and_prepares_only_owned_swa(cache, model_kind)
     model_input.to_cuda()
     for _ in range(2):
         torch.testing.assert_close(model._select_mem_indexes(model_input), slots[256:257])
-        assert len(requests._swa_pages[req_idx]) == (2 if model_kind == "dspark" else 3)
+        assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages - requests.swa_pages_per_req
         assert manager.allocator.can_use_mem_size == manager.size - 512
     requests.free([req_idx], slots)
 
 
+@pytest.mark.parametrize("cache", [(256, 0), (256, 5)], indirect=True)
 def test_prefill_chunk_keeps_all_new_swa_rows(cache):
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, 2048)
     requests.prepare_prefill(torch.tensor([req_idx]), torch.tensor([0]), torch.tensor([2048]))
-    assert requests.get_swa_slots(req_idx, torch.arange(2048, device="cuda")).ge(0).all()
-    assert len(requests._swa_pages[req_idx]) == 16
+    positions = torch.arange(2048, device="cuda")
+    swa_slots = requests.get_swa_slots(req_idx, positions)
+    assert swa_slots.unique().numel() == 2048
+    packed = torch.randint(0, 256, (2048, manager.swa_pool.bytes_per_token), dtype=torch.uint8, device="cuda")
+    _write_packed_rows(manager.swa_pool, 0, swa_slots, packed)
+    # Checkpoints can still read any boundary of the complete chunk here.
+    torch.testing.assert_close(_read_packed_rows(manager.swa_pool, 0, swa_slots), packed)
+    requests.finish_prefill([req_idx])
+    tail = positions[-(requests.sliding_window + 256) :]
+    torch.testing.assert_close(
+        _read_packed_rows(manager.swa_pool, 0, requests.get_swa_slots(req_idx, tail)), packed[tail]
+    )
+    assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages - requests.swa_pages_per_req
     requests.free([req_idx], slots)
     assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
 
@@ -208,6 +222,7 @@ def test_request_budget_matches_private_page_allocation(cache, stage, mode):
     manager, requests = cache
     req_idx = requests.alloc()
     requests.prepare_swa(req_idx, 0, 768)
+    requests.finish_prefill([req_idx])
     start = 768 if stage == "prefill" else 1023
     end = 1153 if stage == "prefill" else 1024
     req = SimpleNamespace(
@@ -227,11 +242,11 @@ def test_request_budget_matches_private_page_allocation(cache, stage, mode):
         requests.prepare_prefill(torch.tensor([req_idx]), torch.tensor([start]), torch.tensor([end]))
     else:
         width = req.mtp_step + 1 if mode == "dspark" else max(req.mtp_step + 1, 2 * req.mtp_step)
-        requests.prepare_decode(torch.full((width,), req_idx), torch.arange(end, end + width), torch.arange(width))
-    scratch = manager.alloc_dspark_swa_block(req.mtp_step + 1, req.mtp_step + 1) if mode == "dspark" else None
+        assert (
+            requests.get_swa_slots(req_idx, torch.arange(end - 1, end - 1 + width, device="cuda")).unique().numel()
+            == width
+        )
     assert budget.available <= manager.swa_page_allocator.can_use_mem_size
-    if scratch is not None:
-        manager.free_dspark_swa_block(scratch[0])
     requests.free_req(req_idx)
     assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
 
@@ -239,8 +254,9 @@ def test_request_budget_matches_private_page_allocation(cache, stage, mode):
 @pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
 def test_history_copy_preserves_packed_data_and_scale_regions(cache):
     manager, requests = cache
-    _, src = _reserve(manager, requests, 2 * manager.page_size)
-    _, dst = _reserve(manager, requests, 2 * manager.page_size)
+    source, src = _reserve(manager, requests, 2 * manager.page_size)
+    destination, dst = _reserve(manager, requests, 2 * manager.page_size)
+    swa_mapping = requests.req_to_swa_pages.clone()
     src = src.view(2, manager.page_size).flip(0).reshape(-1)
     for pool in (manager.c4_pool, manager.c4_indexer_pool, manager.c128_pool):
         pool.buffer.random_(0, 256)
@@ -249,11 +265,12 @@ def test_history_copy_preserves_packed_data_and_scale_regions(cache):
         torch.testing.assert_close(
             pool.buffer[:, src[::256].long() // 256], pool.buffer[:, dst[::256].long() // 256], rtol=0, atol=0
         )
-    assert requests.req_to_swa_pages[: requests.HOLD_REQUEST_ID].eq(-1).all()
+    torch.testing.assert_close(requests.req_to_swa_pages, swa_mapping)
+    requests.free([source, destination], torch.cat([src, dst]))
 
 
 @pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
-def test_hold_page_and_dspark_scratch_have_separate_capacity(cache):
+def test_hold_page_is_separate_from_request_rings(cache):
     manager, requests = cache
     hold = requests.req_to_token_indexs[requests.HOLD_REQUEST_ID]
     torch.testing.assert_close(
@@ -264,11 +281,12 @@ def test_hold_page_and_dspark_scratch_have_separate_capacity(cache):
     assert (hold // 4).lt(manager.c4_pool.num_pages * 64).all()
     assert (hold // 128).lt(manager.c128_pool.num_pages * 2).all()
     free_tokens = manager.allocator.can_use_mem_size
-    for _ in range(3):
-        pages_cpu, pages = manager.alloc_dspark_swa_block(16, 8)
-        assert pages.numel() == 2
-        assert manager.allocator.can_use_mem_size == free_tokens
-        manager.free_dspark_swa_block(pages_cpu)
+    reqs = [requests.alloc(), requests.alloc()]
+    assert set(requests._swa_pages[reqs[0]]).isdisjoint(requests._swa_pages[reqs[1]])
+    assert requests.req_to_swa_pages[reqs].lt(manager.swa_num_pages).all()
+    assert manager.allocator.can_use_mem_size == free_tokens
+    for req in reqs:
+        requests.free_req(req)
     assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
 
 
@@ -473,7 +491,7 @@ def test_shared_history_restores_private_continuation(cache, length):
         rows = tail // 128 * manager.c4_state_ring + tail % manager.c4_state_ring
         torch.testing.assert_close(manager.c4_state_buffer[:, rows], expected_c4)
         torch.testing.assert_close(manager.c4_indexer_state_buffer[:, rows], expected_indexer)
-    assert set(requests._swa_pages[reqs[0]].values()).isdisjoint(requests._swa_pages[reqs[1]].values())
+    assert set(requests._swa_pages[reqs[0]]).isdisjoint(requests._swa_pages[reqs[1]])
     # Advancing one fork releases only its own window; the shared token page survives.
     requests.prepare_swa(reqs[0], length + 512, length + 768)
     pages = requests.req_to_swa_pages[reqs[1], length // 128 - 2 : length // 128].long()
@@ -580,15 +598,17 @@ def test_dp_transfer_uses_request_page_tables(cache):
 
 
 @pytest.mark.parametrize("ratio,layer", [(4, 0), (128, 1)])
-def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, layer):
+@pytest.mark.parametrize("length", [512, 2048])
+@pytest.mark.parametrize("cache", [(256, 0), (256, 1), (256, 5)], indirect=True)
+def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, layer, length):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
 
     manager, requests = cache
-    source, src = _reserve(manager, requests, 512)
-    destination, dst = _reserve(manager, requests, 512)
-    requests.prepare_swa(source, 0, 512)
-    scores = torch.randn((512, 512 * (4 if ratio == 4 else 2)), dtype=torch.float32, device="cuda")
-    cos = torch.ones((512, 32), dtype=torch.float32, device="cuda")
+    source, src = _reserve(manager, requests, length)
+    destination, dst = _reserve(manager, requests, length)
+    requests.prepare_swa(source, 0, length)
+    scores = torch.randn((length, 512 * (4 if ratio == 4 else 2)), dtype=torch.float32, device="cuda")
+    cos = torch.ones((length, 32), dtype=torch.float32, device="cuda")
     sin = torch.zeros_like(cos)
     weight = torch.ones(512, dtype=torch.float32, device="cuda")
 
@@ -624,20 +644,24 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
             sin_table=sin,
         )
 
-    compress(source, src, 0, 512)
+    compress(source, src, 0, length)
     states = requests.create_small_page_cache_manager(1)
     index = states.alloc_one_state_cache()
     requests.save_state(source, index, states, checkpoint_len=256)
     requests.restore_state(SimpleNamespace(req_idx=destination), states, index, checkpoint_len=256)
-    requests.prepare_swa(destination, 256, 512)
-    compress(destination, dst, 256, 508)
+    verify_width = manager.c4_state_ring - 8 + 1
+    for start in range(256, length - verify_width, 256):
+        end = min(start + 256, length - verify_width)
+        requests.prepare_swa(destination, start, end)
+        compress(destination, dst, start, end)
+        requests.finish_prefill([destination])
     # Rejected speculative rows are written again in the same held token page.
-    compress(destination, dst, 508, 512, decode=True)
-    compress(destination, dst, 508, 512, decode=True)
+    compress(destination, dst, length - verify_width, length, decode=True)
+    compress(destination, dst, length - verify_width, length, decode=True)
     pool = manager.c4_pool if ratio == 4 else manager.c128_pool
     torch.testing.assert_close(
-        _read_packed_rows(pool, 0, src[256 + ratio - 1 : 512 : ratio].long() // ratio),
-        _read_packed_rows(pool, 0, dst[256 + ratio - 1 : 512 : ratio].long() // ratio),
+        _read_packed_rows(pool, 0, src[256 + ratio - 1 : length : ratio].long() // ratio),
+        _read_packed_rows(pool, 0, dst[256 + ratio - 1 : length : ratio].long() // ratio),
         rtol=0,
         atol=0,
     )
@@ -679,6 +703,139 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
     assert write_slots[0].item() == expected[0].item()
     assert write_slots[1].item() == manager.swa_size + 1
     requests.free([source, destination], torch.cat([src, dst]))
+
+
+@pytest.mark.parametrize(
+    "dspark,cache",
+    [(False, (256, 0)), (False, (256, 1)), (False, (256, 5)), (True, (256, 1)), (True, (256, 5))],
+    indirect=["cache"],
+)
+def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, dspark):
+    from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
+    from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import build_swa_index
+    from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_index import build_dspark_swa_index
+
+    torch.manual_seed(1593)
+    manager, requests = cache
+    source, src = _reserve(manager, requests, 4096)
+    destination, dst = _reserve(manager, requests, 4096)
+    requests.prepare_swa(source, 0, 4096)  # Reference keeps every logical position in a distinct slot.
+    requests.prepare_swa(destination, 0, 512)
+    values = torch.randn((4096, 512), dtype=torch.bfloat16, device="cuda") * 0.1
+    packed = torch.zeros((4096, 584), dtype=torch.uint8, device="cuda")
+    packed[:, :448] = values[:, :448].to(torch.float8_e4m3fn).view(torch.uint8)
+    packed[:, 448:576] = values[:, 448:].contiguous().view(torch.uint8)
+    packed[:, 576:583] = 127
+    positions = torch.arange(4096, device="cuda")
+    _write_packed_rows(manager.swa_pool, 2, requests.get_swa_slots(source, positions), packed)
+    _write_packed_rows(manager.swa_pool, 2, requests.get_swa_slots(destination, positions[:512]), packed[:512])
+    requests.finish_prefill([destination])
+
+    mtp_step = manager.c4_state_ring - 8
+    token_num = mtp_step if dspark else mtp_step + 1
+    width = 256 if dspark else 128
+    req_idx = torch.full((token_num,), destination, dtype=torch.int32, device="cuda")
+    query_positions = torch.arange(512, 512 + token_num, dtype=torch.int32, device="cuda")
+    indices = torch.empty((token_num, width), dtype=torch.int32, device="cuda")
+    lengths = torch.empty(token_num, dtype=torch.int32, device="cuda")
+    write_slots = torch.empty_like(lengths)
+
+    def build():
+        if dspark:
+            build_dspark_swa_index(
+                req_idx,
+                query_positions,
+                requests.req_to_swa_pages,
+                indices,
+                lengths,
+                write_slots,
+                window=128,
+                block_size=token_num,
+                page_size=128,
+                hold_req_id=requests.HOLD_REQUEST_ID,
+                hold_swa_slot=manager.swa_size,
+            )
+        else:
+            build_swa_index(req_idx, query_positions, requests.req_to_swa_pages, indices, lengths, write_slots)
+
+    backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(
+        type("Model", (), {"config": {"num_attention_heads": 64, "compress_ratios": [0]}, "tp_world_size_": 1})()
+    )
+    state_info = SimpleNamespace(mem_manager=manager)
+    state = backend.create_att_decode_state(state_info)
+    state.init_state()
+    params = dict(
+        layer_index=2,
+        compress_ratio=0,
+        head_dim_v=512,
+        softmax_scale=512 ** -0.5,
+        swa_indices=indices.unsqueeze(1),
+        swa_lengths=lengths,
+        attn_sink=torch.zeros(64, device="cuda"),
+    )
+    control = attention.AttControl(nsa_decode=True, nsa_decode_dict=params)
+    q = torch.randn((token_num, 64, 512), dtype=torch.bfloat16, device="cuda") * 0.1
+    pool = manager.swa_pool.get_layer_buffer(2)
+
+    def forward():
+        build()
+        return state.decode_att(q, pool, None, att_control=control)
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        forward()
+    torch.cuda.current_stream().wait_stream(stream)
+    state.reset_sched_meta_for_capture()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        actual = forward()
+
+    reference_state = backend.create_att_decode_state(state_info)
+    reference_state.init_state()
+    free_pages = manager.swa_page_allocator.can_use_mem_size
+    committed_end = 512
+    # Both sides of page boundaries, repeated retries, and several complete ring wraps.
+    for start in (512, 513, 638, 639, 640, 640, 641, 767, 768, 1023, 1279, 1280, 1919, 1920, 2047):
+        # Advance intervening committed KV in small steps. A large parallel
+        # prefill would instead borrow pages before writing the whole chunk.
+        for gap_start in range(committed_end, start, 128):
+            gap = positions[gap_start : min(start, gap_start + 128)]
+            _write_packed_rows(manager.swa_pool, 2, requests.get_swa_slots(source, gap), packed[gap])
+            _write_packed_rows(manager.swa_pool, 2, requests.get_swa_slots(destination, gap), packed[gap])
+        query_positions.copy_(torch.arange(start, start + token_num, dtype=torch.int32))
+        current = packed[start : start + token_num].clone()
+        current[:, :448] = (
+            (values[start : start + token_num, :448] * (1 + start % 7)).to(torch.float8_e4m3fn).view(torch.uint8)
+        )
+        logical_positions = query_positions.long()
+        _write_packed_rows(manager.swa_pool, 2, requests.get_swa_slots(source, logical_positions), current)
+        _write_packed_rows(manager.swa_pool, 2, requests.get_swa_slots(destination, logical_positions), current)
+        history = torch.arange(max(0, start - 128), start, device="cuda")
+        graph.replay()
+        if dspark:
+            visible = torch.cat((history.flip(0), logical_positions))
+            reference_indices = requests.get_swa_slots(source, visible).expand(token_num, -1).contiguous()
+            reference_lengths = torch.full_like(lengths, visible.numel())
+        else:
+            visible = logical_positions[:, None] - torch.arange(128, device="cuda")
+            reference_indices = requests.get_swa_slots(source, visible)
+            reference_lengths = torch.full_like(lengths, 128)
+        reference_indices = torch.nn.functional.pad(
+            reference_indices, (0, width - reference_indices.shape[1]), value=-1
+        )
+        reference_indices = reference_indices.to(torch.int32)
+        reference_params = dict(params, swa_indices=reference_indices.unsqueeze(1), swa_lengths=reference_lengths)
+        expected = reference_state.decode_att(
+            q, pool, None, att_control=attention.AttControl(nsa_decode=True, nsa_decode_dict=reference_params)
+        )
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0, msg=f"SWA mismatch at position {start}")
+        torch.testing.assert_close(write_slots, requests.get_swa_slots(destination, logical_positions).to(torch.int32))
+        assert manager.swa_page_allocator.can_use_mem_size == free_pages
+        # Accept one position; speculative future rows stay dirty until the next write.
+        committed_end = start + 1
+    requests.free([source, destination], torch.cat([src, dst]))
+    assert manager.swa_page_allocator.can_use_mem_size == manager.swa_num_pages
 
 
 @pytest.mark.parametrize(
@@ -773,9 +930,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
                 _read_packed_rows(pool, 0, held[ratio - 1 : hit_len : ratio].long() // ratio),
                 _read_packed_rows(pool, 0, restored[ratio - 1 : hit_len : ratio].long() // ratio),
             )
-    assert set(requests._swa_pages[forks[0].req_idx].values()).isdisjoint(
-        requests._swa_pages[forks[1].req_idx].values()
-    )
+    assert set(requests._swa_pages[forks[0].req_idx]).isdisjoint(requests._swa_pages[forks[1].req_idx])
     # Pause can publish a reusable prefix; abort with GPU placement disabled only dereferences it.
     forks[1].cache_tiers.clear()
     for fork in forks:

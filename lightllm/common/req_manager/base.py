@@ -99,6 +99,14 @@ class ReqManager:
         """Additional runtime capacity for prefill, decode, recovery or cache restore."""
         return 0
 
+    def prepare_prefill(self, b_req_idx_cpu, b_ready_cache_len_cpu, b_seq_len_cpu, *, stream=None):
+        """Prepare request-private resources before the batch is transferred to GPU."""
+        return
+
+    def finish_prefill(self, req_indexes: List[int]):
+        """Release temporary resources after draft KV and checkpoint reads on the same stream."""
+        return
+
     def init_hold_request_indexs(self):
         assert (
             self.req_list.is_all_free()

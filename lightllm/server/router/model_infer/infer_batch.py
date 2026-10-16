@@ -477,6 +477,7 @@ class InferenceContext:
                             state_cache_manager=self.radix_cache.small_page_buffers,
                             checkpoint_len=req.hybrid_cache_len,
                         )
+        self.req_manager.finish_prefill([req.req_idx for req in reqs])
         return
 
 
