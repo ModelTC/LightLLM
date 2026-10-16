@@ -330,6 +330,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
     parser.add_argument(
+        "--pd_detail_log",
+        action="store_true",
+        help=(
+            "enable verbose per-block PD KV transfer debug logs. "
+            "Request-level debug logs and warning/error logs do not require this flag."
+        ),
+    )
+    parser.add_argument(
         "--disable_shm_warning",
         action="store_true",
         default=False,

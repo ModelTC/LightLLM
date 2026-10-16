@@ -95,6 +95,7 @@ class StartArgs:
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
     detail_log: bool = field(default=False)
+    pd_detail_log: bool = field(default=False)
     router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)

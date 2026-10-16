@@ -356,7 +356,7 @@ class HttpServerManagerForPDMaster:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
+                logger.debug(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
                 # high_priority_request 只影响 HTTP 资源申请和 Router 等待队列：首段仅在
                 # 输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍有效时提升；
@@ -587,7 +587,7 @@ class HttpServerManagerForPDMaster:
         req_status.raise_if_error()
 
         prompt_ids = prefill_prompt_ids_event.prompt_ids
-        logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
+        logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(

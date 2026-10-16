@@ -260,7 +260,7 @@ async def _pd_process_generate(
             metadata["node_mode"] = manager.args.run_mode
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
-        logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
+        logger.debug(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
     except ServerBusyError as e:
         group_request_id = sampling_params.group_request_id
         logger.warning(f"pd node rejected request {group_request_id}: {e.message}")

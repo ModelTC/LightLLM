@@ -173,7 +173,7 @@ class CacheAwarePolicy:
         result = self.prompt_cache_tree.prefix_match(request_text)
         match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
 
-        logger.info(
+        logger.debug(
             f"CacheAwarePolicy: matched_char_count={result.matched_char_count}, "
             f"input_char_count={result.input_char_count}, match_rate={match_rate:.4f}, "
             f"cache_threshold={self.config.cache_threshold:.4f}, "
@@ -199,7 +199,7 @@ class CacheAwarePolicy:
             idle_workers,
             key=lambda worker: (worker.dispatched_prompt_chars, worker.client_ip_port),
         )
-        logger.info(
+        logger.debug(
             f"CacheAwarePolicy: select idle worker, idle_worker_num={len(idle_workers)}, "
             f"cache_worker={cache_worker.client_ip_port if cache_worker else None}, "
             f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
@@ -227,7 +227,7 @@ class CacheAwarePolicy:
         else:
             selected_worker = cache_worker
 
-        logger.info(
+        logger.debug(
             f"CacheAwarePolicy: cache_worker={cache_worker.client_ip_port if cache_worker else None}, "
             f"cache_worker_load={cache_worker.dispatched_prompt_chars if cache_worker else None}, "
             f"cache_projected_load={cache_projected_load}, "
