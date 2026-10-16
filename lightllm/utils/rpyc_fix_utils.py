@@ -33,7 +33,7 @@ def _fix_connect(
         old_s_buf = s.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
         old_r_buf = s.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
 
-        logger.info(f"change socket buffer from {old_s_buf} {old_r_buf} change to {_BUFF_SIZE}")
+        logger.debug(f"change socket buffer from {old_s_buf} {old_r_buf} change to {_BUFF_SIZE}")
 
         # set buffer
         s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _BUFF_SIZE)
@@ -82,7 +82,7 @@ def fix_unix_connect(cls, path, timeout=3):
         old_s_buf = s.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
         old_r_buf = s.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
 
-        logger.info(f"change socket buffer from {old_s_buf} {old_r_buf} change to {_BUFF_SIZE}")
+        logger.debug(f"change socket buffer from {old_s_buf} {old_r_buf} change to {_BUFF_SIZE}")
 
         # set buffer
         s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _BUFF_SIZE)
@@ -104,13 +104,13 @@ def fix_accept(self):
         try:
             sock, addrinfo = self.listener.accept()
             if sock.family != socket.AF_UNIX:
-                logger.info("set nodelay mode")
+                logger.debug("set nodelay mode")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
             old_s_buf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
             old_r_buf = sock.getsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF)
 
-            logger.info(f"change socket buffer from {old_s_buf} {old_r_buf} change to {_BUFF_SIZE}")
+            logger.debug(f"change socket buffer from {old_s_buf} {old_r_buf} change to {_BUFF_SIZE}")
 
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, _BUFF_SIZE)
             sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, _BUFF_SIZE)
