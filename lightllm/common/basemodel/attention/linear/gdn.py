@@ -35,7 +35,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
         pass
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
-
         self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
@@ -107,7 +106,6 @@ class LinearAttBackend(BaseAttBackend, ABC):
 
 @dataclasses.dataclass
 class LinearAttPrefillAttState(BasePrefillAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -172,6 +170,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
             has_initial_state=infer_state.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation=backend.activation,
+            max_seqlen=infer_state.max_q_seq_len,
         )
         mixed_qkv = out_tensor.transpose(0, 1)
 
@@ -199,7 +198,6 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class LinearAttDecodeAttState(BaseDecodeAttState):
-
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
