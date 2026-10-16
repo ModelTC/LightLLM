@@ -7,7 +7,7 @@ if TYPE_CHECKING:
     from ..base_backend import ModeBackend
 
 
-# 在这里注册新的 PrefillQueueStrategy 子类，即可通过启动参数选择。
+# 注册新的策略时，同步更新 CLI 和 StartArgs 的可选值。
 PREFILL_QUEUE_STRATEGIES = {
     "default": FCFSStrategy,
     "promote_shortest": PromoteShortestPrefillStrategy,

@@ -206,13 +206,14 @@ def test_cli_strategy_selection(name):
 
 def test_cli_default_and_invalid_strategy():
     parser = make_argument_parser()
-    assert parser.parse_args([]).prefill_queue_strategy == "none"
-    assert parser.parse_args(["--prefill_queue_strategy", "none"]).prefill_queue_strategy == "none"
+    assert parser.parse_args([]).prefill_queue_strategy == "auto"
+    assert parser.parse_args(["--prefill_queue_strategy", "auto"]).prefill_queue_strategy == "auto"
     assert set(PREFILL_QUEUE_STRATEGIES) == {"default", "promote_shortest", "hrrn"}
-    with pytest.raises(SystemExit):
-        parser.parse_args(["--prefill_queue_strategy", "unknown"])
-    with pytest.raises(ValueError, match="Unknown prefill queue strategy"):
-        strategy("unknown")
+    for name in ("unknown", "none"):
+        with pytest.raises(SystemExit):
+            parser.parse_args(["--prefill_queue_strategy", name])
+        with pytest.raises(ValueError, match="Unknown prefill queue strategy"):
+            strategy(name)
 
 
 def test_strategy_base_is_abstract():

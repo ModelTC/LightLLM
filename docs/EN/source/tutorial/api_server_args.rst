@@ -366,7 +366,7 @@ Scheduling Parameters
 .. option:: --prefill_queue_strategy
 
     Prefill ordering policy in the inference backend before resource allocation. Defaults
-    to ``none`` (automatic selection by run mode). The policy first identifies decode requests,
+    to ``auto`` (automatic selection by run mode). The policy first identifies decode requests,
     keeps them at the left in arrival order, and excludes them from subsequent sorting. ``infer_high_priority`` and
     the selected policy apply only to the prefill requests on the right.
 
@@ -374,10 +374,10 @@ Scheduling Parameters
     cannot be set by external requests, and is assigned a negative value to continuation
     segments through internal PD-disaggregation communication.
 
-    * ``none``: select the policy automatically in ``api_start.py`` based on ``--run_mode``:
+    * ``auto``: select the policy automatically based on ``--run_mode``:
       use ``default`` for standalone normal mode (``normal``) and Decode nodes (``decode``),
       and ``hrrn`` for Prefill nodes (``prefill``). Omitting this option is equivalent to
-      setting ``none``; it does not disable ordering. Explicitly selecting one of the policies
+      setting ``auto``. Explicitly selecting one of the policies
       below overrides automatic selection.
     * ``default``: stably sort by ``infer_high_priority`` from smallest to largest and preserve
       FCFS order within the same value.
@@ -404,7 +404,7 @@ Scheduling Parameters
     To extend, subclass ``PrefillQueueStrategy`` in
     ``lightllm/server/router/model_infer/mode_backend/prefill_queue_strategy``, implement
     ``reorder_prefill``, and
-    add the class to ``PREFILL_QUEUE_STRATEGIES`` to expose its name through the CLI.
+    add the class to ``PREFILL_QUEUE_STRATEGIES``. Update the CLI and ``StartArgs`` choices to expose its name.
     Implementations must preserve the request set, request state, and input list, and
     produce deterministic ordering across TP ranks. Each strategy receives the current
     ``ModeBackend`` instance and can read scheduling state through ``self.backend``.

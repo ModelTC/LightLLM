@@ -350,16 +350,16 @@ PD 分离模式参数
 
 .. option:: --prefill_queue_strategy
 
-    推理后端在资源分配前使用的 prefill 排序策略，默认值为 ``none``（按运行模式自动选择）。
+    推理后端在资源分配前使用的 prefill 排序策略，默认值为 ``auto``（按运行模式自动选择）。
     策略会先识别 decode 请求，将其稳定地放在队列最左侧且不参与后续排序；
     ``infer_high_priority`` 和所选策略只作用于右侧的 prefill 请求。
 
     prefill 请求带有内部字段 ``infer_high_priority``。该字段默认为 ``0``，不接受外部请求设置；
     PD 分离模式会为续跑分段设置负值，使其在推理进程中优先于普通请求。
 
-    * ``none``：在 ``api_start.py`` 中根据 ``--run_mode`` 自动选择：单机普通模式
+    * ``auto``：根据 ``--run_mode`` 自动选择：单机普通模式
       （``normal``）和 Decode 节点（``decode``）使用 ``default``，Prefill 节点
-      （``prefill``）使用 ``hrrn``。省略本参数与显式设置 ``none`` 相同；``none`` 不表示关闭排序。
+      （``prefill``）使用 ``hrrn``。省略本参数与显式设置 ``auto`` 相同。
       显式指定下列策略时，不会被自动选择覆盖。
     * ``default``：按 ``infer_high_priority`` 从小到大稳定排序，相同值内保持 FCFS 顺序。
     * ``promote_shortest``：负优先级 prefill 请求按到达顺序排在前面；在非负优先级的
@@ -379,7 +379,8 @@ PD 分离模式参数
 
     扩展策略时，在 ``lightllm/server/router/model_infer/mode_backend/prefill_queue_strategy`` 中继承
     ``PrefillQueueStrategy`` 并实现 ``reorder_prefill``，然后加入 ``PREFILL_QUEUE_STRATEGIES``
-    映射即可通过启动参数选择。实现必须保持请求集合、请求状态和输入列表不变，
+    映射，并同步更新 CLI 和 ``StartArgs`` 的可选值，
+    即可通过启动参数选择。实现必须保持请求集合、请求状态和输入列表不变，
     并保证各 TP rank 的排序结果一致。策略构造函数会接收当前 ``ModeBackend`` 实例，
     可通过 ``self.backend`` 读取调度所需的全局状态。
 

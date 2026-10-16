@@ -5,19 +5,19 @@ LightLLM 支持在推理进程中选择 prefill 请求的排队策略。该功�
 启动参数为：
 
 ```bash
---prefill_queue_strategy none
+--prefill_queue_strategy auto
 ```
 
-默认值为 `none`，省略该参数时也会按运行模式自动选择。当前支持四个配置值：
+默认值为 `auto`，省略该参数时也会按运行模式自动选择。当前支持四个配置值：
 
 | 策略 | 行为 |
 | --- | --- |
-| `none` | 自动选择：单机普通模式和 D 节点使用 `default`，P 节点使用 `hrrn`。 |
+| `auto` | 自动选择：单机普通模式和 D 节点使用 `default`，P 节点使用 `hrrn`。 |
 | `default` | 负优先级 prefill 请求在前；相同优先级内保持 FCFS 顺序。 |
 | `promote_shortest` | 负优先级请求按到达顺序排在前面，只把一个最短的普通 prefill 请求提升到普通请求队头。 |
 | `hrrn` | 负优先级请求保持在前，普通请求按基于 token aging 的最高响应比排序。 |
 
-`none` 表示自动选择，不表示关闭排序。`api_start.py` 会在启动推理子进程前，根据 `--run_mode` 将其解析为具体策略：`normal` 和 `decode` 对应 `default`，`prefill` 对应 `hrrn`。显式指定 `default`、`promote_shortest` 或 `hrrn` 时，保留所选策略，不受运行模式影响。
+`auto` 表示按运行模式自动选择策略：`normal` 和 `decode` 对应 `default`，`prefill` 对应 `hrrn`。`api_start.py` 会在启动推理子进程前将其解析为具体策略。显式指定 `default`、`promote_shortest` 或 `hrrn` 时，保留所选策略，不受运行模式影响。
 
 ## 调度阶段
 
@@ -185,7 +185,7 @@ decode-a, decode-b, pd-high, normal-short, normal-b, normal-a
 ```bash
 python -m lightllm.server.api_server \
   --model_dir /path/to/model \
-  --prefill_queue_strategy none
+  --prefill_queue_strategy auto
 ```
 
 显式使用 FCFS 策略（包括在 P 节点覆盖自动选择的 HRRN）：
