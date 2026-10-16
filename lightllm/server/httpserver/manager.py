@@ -886,7 +886,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_verify_steps, 1)
                         mtp_avg_accepted_tokens_per_step = mtp_accepted_token_num / max(mtp_total_verify_steps, 1)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.info(
+                        logger.debug(
                             f"X-Request-Id:{x_request_id} "
                             f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
                             f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
