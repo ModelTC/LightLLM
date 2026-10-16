@@ -24,8 +24,8 @@ def test_hybrid_capacity_uses_local_dp_count(monkeypatch, global_capacity, dp, n
     assert ShmReqManager.get_max_req_num(None) == global_capacity
 
 
-@pytest.mark.parametrize("mode", ["full_attention", "diverse", "cache_fetch"])
-def test_modes_requiring_existing_capacity_keep_global_default(monkeypatch, mode):
+@pytest.mark.parametrize("mode,expected", [("full_attention", 4), ("diverse", 32), ("cache_fetch", 32)])
+def test_capacity_depends_on_mode(monkeypatch, mode, expected):
     monkeypatch.setattr("lightllm.utils.config_utils.is_hybrid_att_model", lambda _: mode != "full_attention")
     args = StartArgs(
         running_max_req_size=32,
@@ -33,7 +33,7 @@ def test_modes_requiring_existing_capacity_keep_global_default(monkeypatch, mode
         diverse_mode=mode == "diverse",
         enable_dp_prompt_cache_fetch=mode == "cache_fetch",
     )
-    assert get_running_max_req_size_per_dp(args) == 32
+    assert get_running_max_req_size_per_dp(args) == expected
 
 
 @pytest.mark.parametrize("capacity", [0, -1])
