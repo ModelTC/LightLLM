@@ -61,7 +61,7 @@ def destindex_copy_indexer_k_dsv4(
     positions: [T] int — logical token positions; only c4 group-end rows are written.
     C4 slots are group-end full-token slots divided by four.
     indexer_k_cache: [num_pages, bytes_per_page] uint8 — one layer's slab from the c4 indexer
-        PackedPagePool (128B fp8 data region + 4B fp32 scale tail per token).
+        Packed pages (128B fp8 data region + 4B fp32 scale tail per token).
 
     """
     seq_len = mem_index.shape[0]

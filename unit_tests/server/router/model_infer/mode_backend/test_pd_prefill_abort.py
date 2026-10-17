@@ -101,7 +101,6 @@ def test_decode_infer_sends_abort_at_most_six_times(monkeypatch):
 
     backend = PDDecodeNode.__new__(PDDecodeNode)
     backend.is_master_in_dp = True
-    backend.is_deepseek_v4 = False
     backend.info_queue = queue.Queue()
 
     for _ in range(8):

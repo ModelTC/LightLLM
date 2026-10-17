@@ -6,6 +6,7 @@ from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
     get_row_slice_mixin,
     get_col_slice_mixin,
+    SliceMixinTpl,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import select_fuse_moe_impl
 from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback

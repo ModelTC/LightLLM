@@ -1,5 +1,4 @@
 import ctypes
-from enum import Enum, auto
 from lightllm.utils.envs_utils import get_env_start_args, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
@@ -9,12 +8,6 @@ from lightllm.server.core.objs import AtomicShmLock
 from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
 
 logger = init_logger(__name__)
-
-
-class CpuPageAllocState(Enum):
-    NEW_STORE_OWNER = auto()
-    LOADING_EXISTING = auto()
-    READY_EXISTING = auto()
 
 
 class CpuKvCacheClient(object):
@@ -33,7 +26,13 @@ class CpuKvCacheClient(object):
         if not only_create_meta_data:
             tensor_spec = CpuCacheTensorSpec(
                 shm_key=self.args.cpu_kv_cache_shm_id,
-                shape=self.kv_cache_tensor_meta.get_tensor_shape(),
+                shape=(
+                    self.kv_cache_tensor_meta.page_num,
+                    self.kv_cache_tensor_meta.layer_num,
+                    self.kv_cache_tensor_meta.token_page_size,
+                    self.kv_cache_tensor_meta.num_heads,
+                    self.kv_cache_tensor_meta.get_merged_head_dim(),
+                ),
                 dtype=self.kv_cache_tensor_meta.data_type,
                 size_bytes=self.kv_cache_tensor_meta.calcu_size(),
             )
@@ -69,7 +68,7 @@ class CpuKvCacheClient(object):
 
     def allocate_one_page(
         self, page_items: List[_LinkedListItem], hash_key: int, disk_offload_enable: bool
-    ) -> Tuple[Optional[int], Optional[CpuPageAllocState]]:
+    ) -> Tuple[Optional[int], bool]:
         page_index = self.page_hash_dict.get(hash_key)
         if page_index is not None:
             page_item: _CpuPageStatus = page_items[page_index]
@@ -77,39 +76,39 @@ class CpuKvCacheClient(object):
             if page_item.ref_count == 1:
                 page_item.del_self_from_list()
             if page_item.is_data_ready():
-                return page_index, CpuPageAllocState.READY_EXISTING
+                return page_index, True
             else:
-                return page_index, CpuPageAllocState.LOADING_EXISTING
+                return page_index, False
         else:
             page_index = self.get_one_empty_page(hash_key=hash_key, disk_offload_enable=disk_offload_enable)
             if page_index is not None:
-                return page_index, CpuPageAllocState.NEW_STORE_OWNER
+                return page_index, False
             else:
-                return None, None
+                return None, False
 
-    def allocate_pages(
-        self, hash_keys: List[int], disk_offload_enable: bool
-    ) -> Tuple[List[int], List[Optional[CpuPageAllocState]]]:
-        """Allocate pages and return the allocation state of each page."""
+    def allocate_pages(self, hash_keys: List[int], disk_offload_enable: bool) -> Tuple[List[int], List[bool]]:
+        """
+        allocate_pages will add _CpuPageStaus ref_count
+        """
         page_list = []
-        state_list = []
+        ready_list = []
         page_items = self.page_items.linked_items
         for hash_key in hash_keys:
-            page_index, state = self.allocate_one_page(
+            page_index, ready = self.allocate_one_page(
                 page_items=page_items, hash_key=hash_key, disk_offload_enable=disk_offload_enable
             )
             if page_index is not None:
                 page_list.append(page_index)
-                state_list.append(state)
+                ready_list.append(ready)
             else:
                 page_list.append(-1)
-                state_list.append(None)
+                ready_list.append(False)
                 break
 
         left_num = len(hash_keys) - len(page_list)
         page_list.extend([-1 for _ in range(left_num)])
-        state_list.extend([None for _ in range(left_num)])
-        return page_list, state_list
+        ready_list.extend([False for _ in range(left_num)])
+        return page_list, ready_list
 
     def update_pages_status_to_ready(
         self,

@@ -82,10 +82,7 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
 
     general, general_cache = make_kernel(AutotuneKernelType.GENERAL)
     attention, attention_cache = make_kernel(AutotuneKernelType.DECODE_ATTENTION)
-    states = [
-        SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64), decode_att_state=None, decode_att_state1=None)
-        for _ in range(2 if overlap else 1)
-    ]
+    states = [SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64)) for _ in range(2 if overlap else 1)]
     outputs = [object() for _ in states]
     forward_calls = []
 

@@ -1,3 +1,4 @@
+import threading
 import torch.distributed as dist
 import torch
 import dataclasses
@@ -6,10 +7,12 @@ from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
-from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient, CpuPageAllocState
+from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
+from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
 
@@ -17,22 +20,16 @@ logger = init_logger(__name__)
 
 
 class MultiLevelKvCacheModule(object):
-    retain_load_page_refs = False
-
     def __init__(self, backend):
         self.args = get_env_start_args()
         assert self.args.cpu_cache_token_page_size % self.args.page_size == 0
         from .base_backend import ModeBackend
 
         self.backend: ModeBackend = backend
-        self.init_sync_group = create_new_group_for_current_dp("nccl")
-        dist.barrier(group=self.init_sync_group)
-        self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
-        self._init_offload_state()
-
-    def _init_offload_state(self):
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
+        self.init_sync_group = create_new_group_for_current_dp("nccl")
+        dist.barrier(group=self.init_sync_group)
         self.offload_sync_group = create_new_group_for_current_dp("nccl")
         dist.barrier(group=self.offload_sync_group)
         self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
@@ -41,6 +38,7 @@ class MultiLevelKvCacheModule(object):
         self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
+        self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -63,41 +61,28 @@ class MultiLevelKvCacheModule(object):
         return False
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
-        cache_reqs = []
-        pages_to_release = []
-        is_master_in_dp = self.backend.is_master_in_dp
-        for req in reqs:
-            # KV 命中会跳过计算，无法返回对应的 prompt logprobs。
-            # match 侧通常已跳过；这里仍需释放之前匹配的页面引用。
-            skip_cpu_cache = req.sampling_param.shm_param.prompt_logprobs >= 0
-            if skip_cpu_cache:
-                if is_master_in_dp:
-                    req.shm_req.cpu_prompt_cache_len = 0
-                    req.shm_req.disk_prompt_cache_len = 0
-            else:
-                cache_reqs.append(req)
-            # 使用 page lease 的实现会持有引用，等待异步 load/store 完成。
-            if is_master_in_dp and (skip_cpu_cache or not self.retain_load_page_refs):
-                pages_to_release.extend(req.shm_req.cpu_cache_match_page_indexes.get_all())
-
-        self._load_cpu_cache_to_reqs(cache_reqs)
-
-        if is_master_in_dp and pages_to_release:
-            self.cpu_cache_client.lock.acquire_sleep1ms()
-            try:
-                self.cpu_cache_client.deref_pages(pages_to_release)
-            finally:
-                self.cpu_cache_client.lock.release()
-        return
-
-    def _load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
+        all_page_list = []
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
+            # 需要返回 prompt logprobs 的请求不应加载 cpu cache：
+            # 命中后会复用缓存 kv、跳过推理，拿不到对应 logprobs。
+            # match 侧通常已跳过；这里仍要 deref 已 match 的 page，避免引用泄漏。
+            if req.sampling_param.shm_param.prompt_logprobs >= 0:
+                if is_master_in_dp:
+                    req.shm_req.cpu_prompt_cache_len = 0
+                    req.shm_req.disk_prompt_cache_len = 0
+                all_page_list.extend(page_list)
+                continue
+
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
             page_len_start_list = [0] + page_len_list
             assert len(page_list) <= len(page_len_list)
+            # Bidirectional image blocks must be resumed at a complete boundary.
+            for image_start, image_end in reversed(getattr(req, "image_block_spans", ())):
+                while page_list and image_start < page_len_list[len(page_list) - 1] < image_end:
+                    page_list = page_list[:-1]
 
             if page_list:
                 match_tokens = page_len_list[len(page_list) - 1]
@@ -106,6 +91,9 @@ class MultiLevelKvCacheModule(object):
 
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
             if is_master_in_dp:
+                req.shm_req.disk_prompt_cache_len = min(
+                    req.shm_req.disk_prompt_cache_len, max(0, match_tokens - req.cur_kv_len)
+                )
                 req.shm_req.cpu_prompt_cache_len = max(
                     0, match_tokens - req.cur_kv_len - req.shm_req.disk_prompt_cache_len
                 )
@@ -168,7 +156,14 @@ class MultiLevelKvCacheModule(object):
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
 
+            all_page_list.extend(req.shm_req.cpu_cache_match_page_indexes.get_all())
+
         dist.barrier(group=self.init_sync_group)
+
+        if self.backend.is_master_in_dp:
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            self.cpu_cache_client.deref_pages(page_list=all_page_list)
+            self.cpu_cache_client.lock.release()
         return
 
     def offload_finished_reqs_to_cpu_cache(self, finished_reqs: List[InferReq]) -> List[InferReq]:
@@ -239,6 +234,7 @@ class MultiLevelKvCacheModule(object):
             assert len(token_hash_list) == len(page_len_list)
 
             if self.backend.is_master_in_dp:
+
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 
@@ -254,11 +250,10 @@ class MultiLevelKvCacheModule(object):
 
                 try:
                     self.cpu_cache_client.lock.acquire_sleep1ms()
-                    page_list, alloc_states = self.cpu_cache_client.allocate_pages(
+                    page_list, ready_list = self.cpu_cache_client.allocate_pages(
                         token_hash_list[:move_block_size],
                         disk_offload_enable=disk_offload_enable,
                     )
-                    ready_list = [state is CpuPageAllocState.READY_EXISTING for state in alloc_states]
                 finally:
                     self.cpu_cache_client.lock.release()
 
@@ -338,13 +333,7 @@ class MultiLevelKvCacheModule(object):
                     return move_block_size - 1
         return move_block_size
 
-    def store_completed_prefill_pages(self, reqs: List[InferReq], producer_stream: torch.cuda.Stream) -> None:
-        """Models with incremental checkpoints override this prefill lifecycle hook."""
-        return
-
     def update_cpu_cache_task_states(self):
-        if not g_infer_context.infer_req_ids:
-            return
         if self.backend.is_master_in_dp:
             trans_ok_tasks = []
             while len(self.cpu_cache_handle_queue) != 0:

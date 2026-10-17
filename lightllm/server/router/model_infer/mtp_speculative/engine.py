@@ -107,7 +107,6 @@ class SpecEngine:
         b_req_mtp_start_loc: torch.Tensor,  # [req_num]
         draft_step: int,
         accept_len: Optional[torch.Tensor] = None,  # [req_num]
-        accept_len_cpu: Optional[AsyncPinnedCpuTensor] = None,  # [req_num]
     ) -> SpecProposal:
         return self.proposer.propose_next(
             target_model_input=target_model_input,
@@ -116,7 +115,6 @@ class SpecEngine:
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             draft_step=draft_step,
             accept_len=accept_len,
-            accept_len_cpu=accept_len_cpu,
         )
 
     # Planner runtime statistics.

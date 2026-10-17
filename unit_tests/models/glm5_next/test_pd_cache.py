@@ -1,4 +1,5 @@
 import dataclasses
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -113,37 +114,28 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
             ]
         )
 
-    moved_bytes = source[0].write_mem_to_page_kv_move_buffer(
-        src_indexes, 0, 0, source, prefill_tp, start_kv_index=0, request_kv_len=length
-    )
-    assert moved_bytes == source[0].kv_move_buffer[0].nbytes
-    # Model a byte-preserving transport between separate P/D page buffers.
-    dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
-    dest[0].read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp, start_kv_index=0, request_kv_len=length)
-    moved_bytes = source[0].write_mem_to_page_kv_move_buffer(
-        [],
-        0,
-        0,
-        source,
-        prefill_tp,
-        start_kv_index=0,
-        request_kv_len=length,
-        page_kind="att_state",
+    from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import create_cache_page_io
+
+    source_io = create_cache_page_io(source, 0, prefill_tp)
+    dest_io = create_cache_page_io(dest, 0, decode_tp)
+    task = SimpleNamespace(
+        mem_indexes=src_indexes,
+        src_page_index=0,
+        dst_page_index=0,
+        prefill_dp_index=0,
+        decode_dp_index=0,
+        page_kind="kv",
         req_idx=src_req,
     )
-    assert moved_bytes == source[0].kv_move_buffer[0].nbytes
+    assert source_io.pack(task) == source[0].kv_move_buffer[0].nbytes
     dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
-    dest[0].read_page_kv_move_buffer_to_mem(
-        [],
-        0,
-        0,
-        dest,
-        decode_tp,
-        start_kv_index=0,
-        request_kv_len=length,
-        page_kind="att_state",
-        req_idx=dst_req,
-    )
+    task.mem_indexes, task.req_idx = dst_indexes, dst_req
+    dest_io.unpack(task)
+    task.mem_indexes, task.req_idx, task.page_kind = [], src_req, "att_state"
+    assert source_io.pack(task) == source[0].kv_move_buffer[0].nbytes
+    dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
+    task.req_idx = dst_req
+    dest_io.unpack(task)
     torch.cuda.synchronize()
 
     for rank, mem in enumerate(dest):

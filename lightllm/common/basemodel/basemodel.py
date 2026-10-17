@@ -285,7 +285,7 @@ class TpPartBaseModel:
         cuda_graph_grow_step_size = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         self.graph = (
             None
-            if self.args.run_mode == "prefill" or self.disable_cudagraph
+            if self.disable_cudagraph
             else CudaGraph(
                 batch_step_size_before_split=cuda_graph_grow_step_size,
                 split_batch_size=self.args.graph_split_batch_size * decode_tokens_per_request,
@@ -305,7 +305,7 @@ class TpPartBaseModel:
     def _init_prefill_cuda_graph(self):
         self.prefill_graph = (
             None
-            if self.args.run_mode == "decode" or not get_env_start_args().enable_prefill_cudagraph
+            if not get_env_start_args().enable_prefill_cudagraph
             else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
         )
         if self.prefill_graph is not None:
@@ -632,7 +632,6 @@ class TpPartBaseModel:
     def _context_forward(self, infer_state: InferStateInfo):
 
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
-        infer_state.mtp_draft_input_hiddens = None
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
             infer_state.prepare_prefill_dp_balance()
@@ -701,8 +700,6 @@ class TpPartBaseModel:
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
-        if not infer_state.is_cuda_graph:
-            infer_state.mtp_draft_input_hiddens = None
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
         for i in range(self.layers_num):
@@ -975,8 +972,6 @@ class TpPartBaseModel:
     @final
     @torch.no_grad()
     def _check_max_len_infer(self):
-        if self.args.run_mode == "decode":
-            return
         disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
         if disable_check_max_len_infer:
             logger.info("disable_check_max_len_infer is true")
@@ -989,14 +984,14 @@ class TpPartBaseModel:
         try:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
-            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cpu")
+            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
             page_size = self.mem_manager.page_size
             alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
             mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
             self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-            b_seq_len = torch.full((1,), self.batch_max_tokens, dtype=torch.int32, device="cpu")
-            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cpu")
-            self.req_manager.prepare_prefill(b_req_idx, b_ready_cache_len, b_seq_len)
+            b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+            b_seq_len[:] = self.batch_max_tokens
+            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
             b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
             total_token_num = self.batch_max_tokens
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1052,16 +1047,12 @@ class TpPartBaseModel:
         Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
         torch.distributed.barrier()
 
-        warmup_max_tokens = self.batch_max_tokens
-        if self.args.run_mode == "decode":
-            decode_rows = self.max_req_num * self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
-            warmup_max_tokens = min(warmup_max_tokens, decode_rows)
         warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
 
-        if warmup_max_tokens not in warmup_lengths:
-            warmup_lengths.append(warmup_max_tokens)
+        if self.batch_max_tokens not in warmup_lengths:
+            warmup_lengths.append(self.batch_max_tokens)
 
-        warmup_lengths = [e for e in warmup_lengths if e <= warmup_max_tokens]
+        warmup_lengths = [e for e in warmup_lengths if e <= self.batch_max_tokens]
 
         warmup_lengths.sort(reverse=True)
 
@@ -1074,14 +1065,14 @@ class TpPartBaseModel:
                 dummy_input_ids = torch.randint(
                     0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
                 )
-                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cpu")
+                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
                 page_size = self.mem_manager.page_size
                 alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
                 mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
                 self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-                b_seq_len = torch.full((1,), input_len, dtype=torch.int32, device="cpu")
-                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cpu")
-                self.req_manager.prepare_prefill(b_req_idx, b_ready_cache_len, b_seq_len)
+                b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+                b_seq_len[:] = input_len
+                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
                 b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
                 total_token_num = input_len
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")

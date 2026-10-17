@@ -77,15 +77,40 @@ def test_model_kv_defaults_preserve_hash_pages_kv_selection_and_explicit_pd_tuni
     assert args.linear_att_hash_page_size == 512
     assert args.llm_kv_type == "None"
     assert (args.pd_kv_page_num, args.pd_kv_page_size) == (8, 2048)
-    assert args.cache_placement_strategy == (
-        "legacy" if enable_cpu_cache and model_type == "deepseek_v4" else "adaptive"
-    )
+    assert args.cache_placement_strategy == "adaptive"
 
 
 def test_disabled_cpu_cache_keeps_page_size_unset(startup_args):
     with pytest.raises(RuntimeError, match="startup validation complete"):
         _launch_subprocesses(startup_args)
     assert startup_args.cpu_cache_token_page_size is None
+
+
+def test_other_memory_manager_selection_does_not_import_v4_inference(monkeypatch):
+    from types import SimpleNamespace
+    import lightllm.models as models
+    from lightllm.common.kv_cache_mem_manager import MemoryManager
+    from lightllm.common.kv_cache_mem_manager import mem_utils
+
+    original_getattr = models.__getattr__
+
+    def get_class(name):
+        assert name != "DeepseekV4TpPartModel", "other models must not import V4 inference dependencies"
+        return original_getattr(name)
+
+    monkeypatch.setattr(models, "__getattr__", get_class)
+    for name in ("Deepseek2TpPartModel", "Deepseek3_2TpPartModel"):
+        monkeypatch.setitem(models.__dict__, name, type(name, (), {}))
+    monkeypatch.setattr(mem_utils, "get_model_type", lambda path: "llama")
+    monkeypatch.setattr(mem_utils, "get_llm_model_class", lambda: type("Llama", (), {}))
+    monkeypatch.setattr(
+        mem_utils, "get_env_start_args", lambda: SimpleNamespace(model_dir="unused", llm_kv_type="None")
+    )
+    mem_utils.select_mem_manager_class.cache_clear()
+    try:
+        assert mem_utils.select_mem_manager_class() is MemoryManager
+    finally:
+        mem_utils.select_mem_manager_class.cache_clear()
 
 
 def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_type(startup_args, monkeypatch, tmp_path):
@@ -126,8 +151,8 @@ def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_typ
     try:
         assert select_mem_manager_class() is DeepseekV4MemoryManager
         meta = calcu_cpu_cache_meta()
-        assert meta.token_page_size == 2048
-        assert meta.page_shape == (meta.head_dim,)
+        assert meta.token_page_size == meta.layer_num == meta.num_heads == 1
+        assert args.cpu_cache_token_page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         assert meta.calcu_one_page_size() == meta.head_dim
         assert get_env_start_args().llm_kv_type == "None"
     finally:
@@ -167,12 +192,8 @@ def test_dsv4_page_and_checkpoint_configuration(startup_args, monkeypatch, page_
     args.linear_att_page_block_num = 8
     args.enable_cpu_cache = True
     args.cpu_cache_token_page_size = cpu_page_size
-    if cpu_page_size is not None and cpu_page_size != hash_page_size * 8:
-        with pytest.raises(ValueError, match="CPU cache pages must match"):
-            _launch_subprocesses(args)
-    else:
-        with pytest.raises(RuntimeError, match="DSV4 page-size validation passed"):
-            _launch_subprocesses(args)
+    with pytest.raises(RuntimeError, match="DSV4 page-size validation passed"):
+        _launch_subprocesses(args)
 
 
 @pytest.mark.parametrize(

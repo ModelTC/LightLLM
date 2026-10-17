@@ -49,8 +49,7 @@ def build_c4_indexer_page_table(
         c4_slot(entry p*64 + o) == page_table[p] * 64 + o
     which the current token-slot allocator guarantees.
     """
-    pool = mem_manager.c4_indexer_pool
-    page_size = pool.page_size
+    page_size = 64
     assert c4_cap % page_size == 0
     batch = b_req_idx.shape[0]
     page_cap = c4_cap // page_size

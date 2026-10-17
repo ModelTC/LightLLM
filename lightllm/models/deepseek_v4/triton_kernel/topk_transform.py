@@ -98,8 +98,7 @@ def topk_transform_512(scores, seq_lens, page_tables, out_page_indices, page_siz
     Dense rows use a Triton page transform. Tiny short-row batches fuse
     pairwise rank selection and page mapping; larger short batches use
     FlashInfer. For long rows vLLM selects each valid prefix and Triton
-    translates its int32 output in place. FlashInfer is also the fallback on
-    older vLLM versions. Output ordering is unspecified and padding is -1.
+    translates its int32 output in place. Output ordering is unspecified and padding is -1.
     """
     if scores.shape[0] == 0:
         return
@@ -137,7 +136,7 @@ def topk_transform_512(scores, seq_lens, page_tables, out_page_indices, page_siz
             num_stages=1,
             **pdl_kwargs(scores.device),
         )
-    elif scores.shape[1] > 2048 and vllm_ops is not None and hasattr(vllm_ops, "top_k_per_row_decode"):
+    elif scores.shape[1] > 2048:
         vllm_ops.top_k_per_row_decode(
             scores,
             1,

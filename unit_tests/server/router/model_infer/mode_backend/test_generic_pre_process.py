@@ -15,10 +15,8 @@ def _patch_empty_input_context(monkeypatch):
             HOLD_REQUEST_ID=-1,
             mem_manager=mem_manager,
             req_to_token_indexs=torch.zeros((16, 32), dtype=torch.int32),
-            prepare_prefill=lambda *args, **kwargs: None,
         ),
         radix_cache=None,
-        get_overlap_stream=lambda: None,
     )
     monkeypatch.setattr(generic_pre_process, "g_infer_context", infer_context)
     return infer_context

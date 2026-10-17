@@ -126,16 +126,12 @@ def test_radix_match_retries_when_page_alignment_lands_in_earlier_image(monkeypa
 
     radix_cache = FakeRadixCache()
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
-    monkeypatch.setattr(g_infer_context, "is_deepseek_v4", True)
     monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
     from lightllm.common.req_manager import DeepseekV4ReqManager
 
     req_manager = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
     req_manager.req_to_token_indexs = torch.empty((1, 1025), dtype=torch.int64)
-    req_manager._swa_pages = [list(range(5))]
-    req_manager.swa_pages_per_req = 5
     req_manager.restore_small_page_state = lambda **kwargs: None
-    req_manager.mem_manager = SimpleNamespace(swa_page_allocator=SimpleNamespace(can_use_mem_size=2))
     monkeypatch.setattr(g_infer_context, "req_manager", req_manager)
 
     req = InferReq.__new__(InferReq)
@@ -211,142 +207,6 @@ def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch):
     assert req.hybrid_cache_len == 256
 
 
-def test_recover_swa_budget_includes_atomic_image_block(monkeypatch):
-    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
-
-    from lightllm.common.req_manager import DeepseekV4ReqManager
-
-    req_manager = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
-    req_manager.sliding_window = 128
-    req_manager._swa_pages = [[]]
-    req_manager.swa_pages_per_req = 5
-
-    req = InferReq.__new__(InferReq)
-    req.args = SimpleNamespace(disable_chunked_prefill=False, chunked_prefill_size=128)
-    req.cur_kv_len = 0
-    req.cur_output_len = 0
-    req.shm_req = SimpleNamespace(input_len=2000)
-    req.image_block_spans = [(500, 884)]
-    req.req_idx = 0
-
-    assert req_manager.get_request_resource_need(req, "recover") == 7
-
-
-@pytest.mark.parametrize(
-    ("loaded_start", "load_end", "spans", "expected"),
-    [
-        (0, 4096, [], 4096),
-        (0, 2048, [(2048, 2500)], 2048),
-        (0, 4096, [(3500, 4096)], 4096),
-        (0, 4096, [(3500, 4500)], 2048),
-        (0, 4096, [(1000, 2500), (3500, 4500)], 0),
-        (2304, 4096, [(3000, 4500)], 0),
-    ],
-)
-def test_cpu_cache_load_end_never_splits_an_image(loaded_start, load_end, spans, expected):
-    from lightllm.models.deepseek_v4.cpu_cache import DeepseekV4MultiLevelKvCacheModule
-
-    req = SimpleNamespace(image_block_spans=spans)
-
-    assert DeepseekV4MultiLevelKvCacheModule._get_image_safe_load_end(req, loaded_start, load_end, 2048) == expected
-
-
-def test_cpu_cache_rechecks_image_boundary_after_capacity_changes(monkeypatch):
-    from lightllm.models.deepseek_v4 import cpu_cache as cache_module
-
-    capacity_results = iter([6144, 4096])
-    capacity_calls = []
-    prepare_calls = []
-    loaded_pages = []
-    finish_calls = []
-
-    def get_loadable_cpu_cache_end(*args):
-        capacity_calls.append(args)
-        return next(capacity_results)
-
-    def prepare_cpu_cache_load(*, token_num, loaded_end, resume_swa_slots, mem_indexes):
-        prepare_calls.append((token_num, loaded_end))
-        return SimpleNamespace(mem_indexes=mem_indexes)
-
-    def load_cpu_cache_pages(*, page_indexes, **kwargs):
-        loaded_pages.append(page_indexes.tolist())
-
-    req_to_token_indexs = torch.full((1, 6144), -1, dtype=torch.int32)
-    req_manager = SimpleNamespace(
-        req_to_token_indexs=req_to_token_indexs,
-        prepare_swa=lambda req_idx, start, end: finish_calls.append((req_idx, start, end)),
-        get_swa_slots=lambda req_idx, positions: positions,
-        get_loadable_cpu_cache_end=get_loadable_cpu_cache_end,
-    )
-    mem_manager = SimpleNamespace(
-        cpu_cache_layout=SimpleNamespace(token_page_size=2048),
-        n_c4=False,
-        n_c128=False,
-        allocator=SimpleNamespace(can_use_mem_size=8192),
-        swa_page_allocator=SimpleNamespace(can_use_mem_size=2),
-        prepare_cpu_cache_load=prepare_cpu_cache_load,
-        alloc=lambda token_num: torch.arange(token_num, dtype=torch.int32),
-    )
-    from lightllm.common.kv_cache_mem_manager.operator.deepseek import DeepseekV4MemOperator
-    from lightllm.common.req_manager import DeepseekV4ReqManager
-
-    req_manager.mem_manager = mem_manager
-    req_manager.prepare_cpu_cache_load = lambda *args: DeepseekV4ReqManager.prepare_cpu_cache_load(req_manager, *args)
-
-    mem_manager.operator = DeepseekV4MemOperator(mem_manager)
-    mem_manager.operator.load_cpu_cache_pages = load_cpu_cache_pages
-    module = object.__new__(cache_module.DeepseekV4MultiLevelKvCacheModule)
-    module.backend = SimpleNamespace(
-        is_master_in_dp=True,
-        radix_cache=None,
-        model=SimpleNamespace(mem_manager=mem_manager, req_manager=req_manager),
-    )
-    module.cpu_cache_client = object()
-    module.init_sync_group = None
-    module._dsv4_store_sessions = {}
-
-    req = SimpleNamespace(
-        req_id=7,
-        req_idx=0,
-        cur_kv_len=0,
-        image_block_spans=[(3500, 4500)],
-        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
-        shm_req=SimpleNamespace(
-            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: [10, 11, 12]),
-            token_hash_page_len_list=SimpleNamespace(get_all=lambda: [2048, 4096, 6144]),
-            disk_prompt_cache_len=2048,
-            cpu_prompt_cache_len=0,
-            shm_cur_kv_len=0,
-        ),
-    )
-
-    real_tensor = torch.tensor
-    monkeypatch.setattr(
-        cache_module.torch,
-        "tensor",
-        lambda data, **kwargs: real_tensor(data, **{key: value for key, value in kwargs.items() if key != "device"}),
-    )
-    monkeypatch.setattr(cache_module.torch.cuda, "Event", lambda: SimpleNamespace(record=lambda: None))
-    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
-    monkeypatch.setattr(cache_module.dist, "barrier", lambda group: None)
-    monkeypatch.setattr(cache_module.g_infer_context, "is_deepseek_v4", True)
-    monkeypatch.setattr(cache_module.g_infer_context, "req_manager", req_manager)
-    monkeypatch.setattr(cache_module.g_infer_context, "radix_cache", None)
-    monkeypatch.setattr(cache_module.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
-
-    module.load_cpu_cache_to_reqs([req])
-
-    assert len(capacity_calls) == 2
-    assert prepare_calls == [(2048, 2048)]
-    assert loaded_pages == [[10]]
-    assert finish_calls == [(0, 1792, 2048)]
-    assert req.cur_kv_len == 2048
-    assert req.shm_req.shm_cur_kv_len == 2048
-    assert req.shm_req.cpu_prompt_cache_len == 2048
-    assert req.shm_req.disk_prompt_cache_len == 0
-    assert module._dsv4_store_sessions[7].leased_pages == [10, 11, 12]
-
-
 def test_vision_model_allows_cpu_cache():
     from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 
@@ -387,6 +247,8 @@ def test_router_uses_bias_vl_only_for_image_tokens(is_hash):
     vision_bias = torch.zeros(256, dtype=torch.float32, device="cuda")
     vision_bias[200:206] = torch.tensor([60.0, 55.0, 50.0, 45.0, 40.0, 35.0], device="cuda")
     layer_weight = SimpleNamespace(
+        n_routed_experts=256,
+        gate_weight_=SimpleNamespace(mm=lambda x, out: out.copy_(x)),
         gate_tid2eid_=SimpleNamespace(weight=hash_table),
         gate_bias_=SimpleNamespace(weight=text_bias),
         gate_bias_vl_=SimpleNamespace(weight=vision_bias),
@@ -435,7 +297,12 @@ def test_swa_index_adds_bidirectional_image_visibility():
 
     positions = torch.tensor([5, 8, 10], dtype=torch.int32, device="cuda")
     req_idx = torch.zeros(3, dtype=torch.int32, device="cuda")
-    req_to_swa_pages = torch.tensor([[1]], dtype=torch.int32, device="cuda")
+    requests = SimpleNamespace(
+        prefill_pages=torch.tensor([[0, 1, 1]], dtype=torch.int32, device="cuda"),
+        swa_pages_per_req=1,
+        HOLD_REQUEST_ID=1,
+        swa_buffer=torch.empty((1, 3, 74880), dtype=torch.uint8, device="cuda"),
+    )
     write_slots = torch.empty_like(positions)
     output = torch.empty((3, 8), dtype=torch.int32, device="cuda")
     lengths = torch.empty(3, dtype=torch.int32, device="cuda")
@@ -445,13 +312,14 @@ def test_swa_index_adds_bidirectional_image_visibility():
     build_swa_index(
         req_idx,
         positions,
-        req_to_swa_pages,
+        requests,
         output,
         lengths,
         write_slots,
         window=4,
         image_left=image_left,
         image_right=image_right,
+        is_prefill=True,
     )
 
     assert output.cpu().tolist() == [
@@ -460,3 +328,67 @@ def test_swa_index_adds_bidirectional_image_visibility():
         [134, 135, 136, 137, 138, -1, -1, -1],
     ]
     assert lengths.cpu().tolist() == [4, 6, 5]
+
+
+@pytest.mark.parametrize(
+    "loaded_start,load_end,spans,expected",
+    [
+        (0, 4096, [], 4096),
+        (0, 2048, [(2048, 2500)], 2048),
+        (0, 4096, [(3500, 4096)], 4096),
+        (0, 4096, [(3500, 4500)], 2048),
+        (0, 4096, [(1000, 2500), (3500, 4500)], 0),
+        (2304, 4096, [(3000, 4500)], 2304),
+    ],
+)
+def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, load_end, spans, expected):
+    from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
+
+    ends = list(range(2048, load_end + 1, 2048))
+    page_ids = list(range(10, 10 + len(ends)))
+    released, loaded = [], []
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=loaded_start,
+        hold_kv_len=loaded_start,
+        image_block_spans=spans,
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+        shm_req=SimpleNamespace(
+            input_len=8192,
+            disk_prompt_cache_len=0,
+            cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda: page_ids),
+            token_hash_page_len_list=SimpleNamespace(get_all=lambda: ends),
+        ),
+    )
+    table = torch.arange(8192, dtype=torch.int32).view(1, -1)
+
+    def allocate(req, count):
+        req.hold_kv_len += count
+        return torch.arange(req.cur_kv_len, req.cur_kv_len + count, dtype=torch.int32)
+
+    module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
+    module.args = SimpleNamespace(page_size=256)
+    module.backend = SimpleNamespace(
+        is_master_in_dp=True,
+        _alloc_req_kv_mem=allocate,
+        model=SimpleNamespace(
+            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            mem_manager=SimpleNamespace(
+                operator=SimpleNamespace(load_cpu_cache_to_gpu=lambda **kwargs: loaded.append(req.cur_kv_len))
+            ),
+        ),
+    )
+    module.cpu_cache_client = SimpleNamespace(
+        lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
+        deref_pages=lambda page_list: released.extend(page_list),
+    )
+    module.init_sync_group = None
+    module.need_sync_compute_stream = lambda: False
+    monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
+    monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))
+    module.load_cpu_cache_to_reqs([req])
+    assert req.cur_kv_len == req.hold_kv_len == expected
+    assert loaded == ([expected] if expected > loaded_start else [])
+    assert released == page_ids

@@ -4,6 +4,7 @@ import torch
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
+from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4PreAndPostLayerWeight,
 )
@@ -21,9 +22,10 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
 )
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
 from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DSV4_NSA_BACKENDS
+from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
+from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
-from lightllm.models.deepseek_v4.layer_infer.hyper_connection import hc_post
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
@@ -37,6 +39,26 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
+
+
+class DeepseekV4LayerHiddenCollector(LayerHiddenCollector):
+    """Materialize deferred mHC streams before collecting draft-model features."""
+
+    def _load_layer_ids(self):
+        layer_ids = self.model.config.get("dspark_target_layer_ids")
+        if layer_ids is None:
+            return super()._load_layer_ids()
+        layer_ids = frozenset(map(int, layer_ids))
+        assert layer_ids and all(0 <= layer < self.layer_num for layer in layer_ids)
+        return layer_ids
+
+    def add(self, layer_index: int, hidden):
+        if layer_index not in self.layer_ids:
+            return
+        hc_mult = self.model.config["hc_mult"]
+        if isinstance(hidden, tuple):
+            hidden = hc_post(*hidden, streams=hc_mult)
+        super().add(layer_index=layer_index, hidden=hc_contract(hidden, hc_mult))
 
 
 class DeepseekV4TpPartModel(LlamaTpPartModel):
@@ -72,32 +94,36 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
+        layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
+        cache_config = DeepseekV4CacheConfig(
+            get_deepseek_v4_compress_rates(self.config, layer_num),
+            self.args.cpu_cache_token_page_size or 2048,
+            self.config["head_dim"],
+            self.config["index_head_dim"],
+            sliding_window=self.config["sliding_window"],
+        )
         self.req_manager = DeepseekV4ReqManager(
             self.max_req_num,
             create_max_seq_len,
-            sliding_window=self.config["sliding_window"],
+            None,
+            cache_config,
+            max_forward_tokens=max(self.batch_max_tokens, self.max_req_num) + 2 * self.tp_world_size_,
+            mtp_step=0 if self.args.run_mode == "prefill" else self.args.mtp_step,
+            prefill_regions=0
+            if self.args.run_mode == "decode"
+            else 1 + int(self.args.enable_prefill_microbatch_overlap),
         )
-        return
 
     def _init_mem_manager(self):
-        layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
-        state_mtp_step = 0 if self.args.run_mode == "prefill" else self.args.mtp_step
-        swa_page_num = self.req_manager.get_swa_pool_page_num(self.args, self.batch_max_tokens)
+        cache_config = self.req_manager.cache_config
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=1,
-            head_dim=self.config["head_dim"],
-            layer_num=layer_num,
-            compress_rates=get_deepseek_v4_compress_rates(self.config, layer_num),
-            indexer_head_dim=self.config["index_head_dim"],
-            max_request_num=self.max_req_num,
-            mtp_step=state_mtp_step,
-            swa_page_num=swa_page_num,
-            cpu_cache_token_page_size=(
-                2048 if self.args.cpu_cache_token_page_size is None else self.args.cpu_cache_token_page_size
-            ),
+            head_dim=cache_config.head_dim,
+            layer_num=cache_config.layer_num,
             mem_fraction=self.mem_fraction,
+            cache_config=cache_config,
         )
         self.req_manager.bind_mem_manager(self.mem_manager)
         return
@@ -112,19 +138,16 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
         self.decode_att_backend = get_nsa_decode_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
 
-        real_q_head_num = self.prefill_att_backend.real_q_head_num
+        tp_q_head_num = self.prefill_att_backend.tp_q_head_num
         padded_q_head_num = self.prefill_att_backend.padded_q_head_num
         self.dsv4_workspace.init_flashmla_prefill_q(
-            real_q_head_num=real_q_head_num,
+            tp_q_head_num=tp_q_head_num,
             padded_q_head_num=padded_q_head_num,
             head_dim=self.config["head_dim"],
             dtype=self.data_type,
         )
-        for layer_infer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
+        for layer_infer in self.layers_infer:
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
-            # Prepare both backends before graph capture without changing model weights.
-            self.prefill_att_backend.prepare_attn_sink(layer_weight.attn_sink_.weight)
-            self.decode_att_backend.prepare_attn_sink(layer_weight.attn_sink_.weight)
         return
 
     def _init_custom(self):
@@ -143,18 +166,38 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             n_routed_experts=self.config["n_routed_experts"],
             hidden_size=self.config["hidden_size"],
             expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
-            num_experts_per_tok=self.config.get("num_experts_per_tok", 1),
-            moe_intermediate_size=self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+            num_experts_per_tok=self.config["num_experts_per_tok"],
+            moe_intermediate_size=self.config["moe_intermediate_size"],
         )
         return
 
-    def prepare_mtp_layer_hidden(self, layer_index: int, hidden):
-        """Materialize the official per-layer DSpark feature from the deferred mHC state."""
-        if isinstance(hidden, tuple):
-            streams = hc_post(*hidden)
+    def _init_hidden_collector(self):
+        if not self.is_mtp_draft_model and self.mtp_manager.args.mtp_mode == "dspark":
+            self.hidden_collector_prototype = DeepseekV4LayerHiddenCollector(self)
         else:
-            streams = hidden.view(-1, self.config["hc_mult"], self.config["hidden_size"])
-        return streams.mean(dim=1)
+            super()._init_hidden_collector()
+            if isinstance(self.hidden_collector_prototype, LayerHiddenCollector):
+                self.hidden_collector_prototype = DeepseekV4LayerHiddenCollector(self)
+
+    def _init_cudagraph(self):
+        if self.args.run_mode == "prefill":
+            self.graph = None
+        else:
+            super()._init_cudagraph()
+
+    def _init_prefill_cuda_graph(self):
+        if self.args.run_mode == "decode":
+            self.prefill_graph = None
+        else:
+            super()._init_prefill_cuda_graph()
+
+    def _autotune_warmup(self):
+        if self.args.run_mode != "decode":
+            super()._autotune_warmup()
+
+    def _check_max_len_infer(self):
+        if self.args.run_mode != "decode":
+            super()._check_max_len_infer()
 
     def _init_to_get_rotary(self):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the
@@ -210,8 +253,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             layer.cos_compress_table = self._cos_cached_compress
             layer.sin_compress_table = self._sin_cached_compress
             # the indexer-Q fused kernel (compress rope) needs the complex compress freqs table.
-            if getattr(layer, "index_infer", None) is not None:
-                layer.index_infer.freqs_cis = self._freqs_cis_compress
+            layer.index_infer.freqs_cis = self._freqs_cis_compress
         return
 
 

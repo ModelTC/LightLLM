@@ -165,6 +165,10 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     def _decode(self, model_input: ModelInput) -> ModelOutput:
         if model_input.mtp_draft_input_hiddens is None:
             return super()._decode(model_input)
+        # KV-only commits have no collectives. Empty DP ranks only participate
+        # in the subsequent full draft proposal, through the ordinary padding.
+        if model_input.batch_size == 0:
+            return ModelOutput(logits=model_input.mtp_draft_input_hiddens.new_empty((0, 1)))
 
         assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size
         infer_state = self._create_inferstate(model_input)

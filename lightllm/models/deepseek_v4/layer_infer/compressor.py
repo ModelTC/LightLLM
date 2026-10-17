@@ -2,18 +2,16 @@ import torch
 import triton
 
 from lightllm.common.basemodel import BaseLayerInfer
-from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DSV4_SWA_PAGE_SIZE
 from ..infer_struct import DeepseekV4InferStateInfo
 from ..layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from ..triton_kernel.compressor import apply_ape, _fused_compress_norm_rope_insert_kernel, _save_partial_states_kernel
 
 
 class CompressorInfer(BaseLayerInfer):
-    """Window-softmax compressor. is_in_indexer=False compresses the c4/c128 latent KV into the
-    paged fp8 slab (attention extra_k); is_in_indexer=True reuses the SAME machinery (mirroring
-    sglang's Compressor(is_in_indexer=...)) with the indexer weights/dims/state pool to produce the
-    per-c4-entry Lightning-Indexer keys, emitted as dense bf16 (OUTPUT_BF16) then fp8-packed into
-    c4_indexer_pool by the caller. Indexer mode is c4-only."""
+    """Compress latent KV into packed history, or emit BF16 C4 indexer keys.
+
+    Both paths share the compression kernel and keep unfinished groups in request state.
+    """
 
     def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int, is_in_indexer: bool = False):
         super().__init__()
@@ -41,22 +39,20 @@ class CompressorInfer(BaseLayerInfer):
         if self.compress_ratio == 0:
             return None
         if self.is_in_indexer:
-            kv_score = layer_weight.idx_cmp_wkv_gate_.mm(
-                x,
-                out=kv_score_out,
-                use_custom_tensor_mananger=use_custom_tensor_manager,
-                out_dtype=torch.float32,
-            )
+            projection = layer_weight.idx_cmp_wkv_gate_
             norm_weight = layer_weight.idx_cmp_norm_.weight
             ape = layer_weight.idx_cmp_ape_.weight
             head_dim = self.index_head_dim
         else:
-            kv_score = layer_weight.compressor_wkv_gate_.mm(
-                x, use_custom_tensor_mananger=use_custom_tensor_manager, out_dtype=torch.float32
-            )
+            projection = layer_weight.compressor_wkv_gate_
             norm_weight = layer_weight.compressor_norm_.weight
             ape = layer_weight.compressor_ape_.weight
             head_dim = self.head_dim
+        if kv_score_out is None:
+            shape = (x.shape[0], head_dim * (4 if self.compress_ratio == 4 else 2))
+            allocate = self.alloc_tensor if use_custom_tensor_manager else torch.empty
+            kv_score_out = allocate(shape, dtype=torch.float32, device=x.device)
+        kv_score = projection.mm(x, out=kv_score_out, use_custom_tensor_mananger=use_custom_tensor_manager)
         apply_ape(
             kv_score=kv_score,
             position_ids=infer_state.position_ids,
@@ -101,6 +97,7 @@ def fused_compress(
     out_buffer: torch.Tensor = None,
 ):
     mem_manager = infer_state.mem_manager
+    requests = infer_state.req_manager
     out_slots = torch.where(
         (infer_state.position_ids + 1) % compress_ratio == 0,
         infer_state.mem_index.reshape(-1) // compress_ratio,
@@ -109,24 +106,24 @@ def fused_compress(
     if is_in_indexer:
         assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
 
-        state_buffer = mem_manager.get_c4_indexer_state_buffer(layer_idx)
-        state_ring = mem_manager.c4_state_ring
+        state_buffer = requests.c4_indexer_state_buffer[requests.cache_config.layer_to_c4_idx[layer_idx]]
+        state_ring = requests.c4_state_ring
         if out_buffer is None:
             out_buffer = torch.empty(
-                (infer_state.mem_index.numel(), mem_manager.indexer_head_dim),
+                (infer_state.mem_index.numel(), requests.cache_config.indexer_head_dim),
                 dtype=torch.bfloat16,
                 device=infer_state.mem_index.device,
             )
         out_page_size = 1
     else:
         if compress_ratio == 4:
-            state_buffer = mem_manager.get_c4_state_buffer(layer_idx)
-            state_ring = mem_manager.c4_state_ring
-            out_page_size = mem_manager.c4_pool.page_size
+            state_buffer = requests.c4_state_buffer[requests.cache_config.layer_to_c4_idx[layer_idx]]
+            state_ring = requests.c4_state_ring
+            out_page_size = 64
         elif compress_ratio == 128:
-            state_buffer = mem_manager.get_c128_state_buffer(layer_idx)
-            state_ring = mem_manager.c128_state_ring
-            out_page_size = mem_manager.c128_pool.page_size
+            state_buffer = requests.c128_state_buffer[requests.cache_config.layer_to_c128_idx[layer_idx]]
+            state_ring = requests.c128_state_ring
+            out_page_size = 2
         out_buffer = mem_manager.get_compressed_kv_buffer(layer_idx)
 
     if kv_score.shape[0] == 0:
@@ -142,7 +139,6 @@ def fused_compress(
         infer_state.b_ready_cache_len if infer_state.b_ready_cache_len is not None else infer_state.b_seq_len
     )
     q_start_loc = infer_state.b_q_start_loc if infer_state.b_q_start_loc is not None else infer_state.b_seq_len
-    req_to_swa_pages = infer_state.req_manager.req_to_swa_pages
 
     _fused_compress_norm_rope_insert_kernel[(kv_score.shape[0],)](
         kv_score,
@@ -156,8 +152,8 @@ def fused_compress(
         infer_state.b_seq_len,
         ready_cache_len,
         q_start_loc,
-        req_to_swa_pages,
-        req_to_swa_pages.stride(0),
+        infer_state.dsv4_swa_write_slots,
+        infer_state.dsv4_swa_runtime_write_slots,
         out_slots,
         norm_weight,
         eps,
@@ -175,8 +171,8 @@ def fused_compress(
         WINDOW_SIZE=compress_ratio * (2 if is_c4 else 1),
         IS_C4=is_c4,
         IS_PREFILL=infer_state.is_prefill,
-        SWA_PAGE_SIZE=DSV4_SWA_PAGE_SIZE,
         STATE_RING=state_ring,
+        CHECKPOINT_BASE=requests.c4_checkpoint_base,
         ROPE_HEAD_DIM=qk_rope_head_dim,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
         AMAX_MIN=1e-4,
@@ -198,14 +194,10 @@ def fused_compress(
         token_to_batch_idx,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
-        infer_state.dsv4_swa_write_slots,
         state_buffer,
         STATE_WIDTH=state_width,
         STATE_LAST_DIM=state_last_dim,
-        COMPRESS_RATIO=compress_ratio,
-        IS_C4=is_c4,
         IS_PREFILL=infer_state.is_prefill,
-        SWA_PAGE_SIZE=DSV4_SWA_PAGE_SIZE,
         STATE_RING=state_ring,
         BLOCK=block_state,
         num_warps=4,

@@ -3,7 +3,7 @@ import os
 
 import torch
 
-from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DSV4_CACHE_BLOCK_SIZE
+from lightllm.common.state_cache_manager.deepseek4 import DSV4_CACHE_BLOCK_SIZE
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -135,21 +135,19 @@ class DeepseekV4Workspace:
         self.c4_prefill_aux = None
 
     def init_c4_prefill_aux(self, model):
-        if self.c4_prefill_aux is None:
-            self.c4_prefill_aux = DeepseekV4C4PrefillWorkspace(
-                token_capacity=self.token_capacity,
-                max_seq_length=model.max_seq_length,
-                max_request_num=model.max_req_num,
-                index_n_heads=model.config["index_n_heads"],
-                index_head_dim=model.config["index_head_dim"],
-            )
+        self.c4_prefill_aux = DeepseekV4C4PrefillWorkspace(
+            token_capacity=self.token_capacity,
+            max_seq_length=model.max_seq_length,
+            max_request_num=model.max_req_num,
+            index_n_heads=model.config["index_n_heads"],
+            index_head_dim=model.config["index_head_dim"],
+        )
 
-    def init_flashmla_prefill_q(self, real_q_head_num: int, padded_q_head_num: int, head_dim: int, dtype: torch.dtype):
-        if self.flashmla_prefill_q is None:
-            self.flashmla_prefill_q = torch.empty(
-                (self.token_capacity, padded_q_head_num, head_dim), dtype=dtype, device="cuda"
-            )
-            self.flashmla_prefill_q[:, real_q_head_num:, :].zero_()
+    def init_flashmla_prefill_q(self, tp_q_head_num: int, padded_q_head_num: int, head_dim: int, dtype: torch.dtype):
+        self.flashmla_prefill_q = torch.empty(
+            (self.token_capacity, padded_q_head_num, head_dim), dtype=dtype, device="cuda"
+        )
+        self.flashmla_prefill_q[:, tp_q_head_num:, :].zero_()
 
     @staticmethod
     def needs_c4_prefill_aux(model) -> bool:

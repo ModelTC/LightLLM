@@ -1,4 +1,5 @@
 import time
+from typing_extensions import deprecated
 import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator

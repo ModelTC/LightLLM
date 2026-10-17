@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Type
 import partial_json_parser
 from partial_json_parser.core.exceptions import MalformedJSON
 from partial_json_parser.core.options import Allow
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from .api_models import Tool
 
@@ -789,6 +789,7 @@ class KimiK2Detector(BaseFormatDetector):
                     parsed_args_diff = argument_diff.split("<|tool_call_end|>", 1)[0]
 
                     if parsed_args_diff:
+
                         calls.append(
                             ToolCallItem(
                                 tool_index=self.current_tool_id,

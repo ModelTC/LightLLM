@@ -150,7 +150,6 @@ class DPOverlapSpecEngine:
         target_next_token_ids1: torch.Tensor,  # [verify_batch_size1]
         accept_len1: torch.Tensor,  # [real_req_num1]
         draft_step: int,
-        accept_len_cpu: Optional[AsyncPinnedCpuTensor] = None,  # [real_req_num0 + real_req_num1]
     ) -> SpecProposal:
         assert target_next_token_ids0.shape == (target_model_input0.batch_size,)
         assert target_next_token_ids1.shape == (target_model_input1.batch_size,)
@@ -167,7 +166,6 @@ class DPOverlapSpecEngine:
             target_next_token_ids1=target_next_token_ids1,
             accept_len1=accept_len1,
             draft_step=draft_step,
-            accept_len_cpu=accept_len_cpu,
         )
 
     def update_planner_statics(

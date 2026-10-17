@@ -4,7 +4,7 @@ import deep_gemm
 from lightllm.common.basemodel import BaseLayerInfer
 from ..infer_struct import C4IndexerMetadata, DeepseekV4InferStateInfo
 from ..triton_kernel.topk_transform import topk_transform_512
-from ..workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES
+from ..workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES, compressed_kv_capacity
 from .compressor import CompressorInfer
 
 
@@ -25,6 +25,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.index_n_heads = network_config["index_n_heads"]
         self.tp_world_size_ = tp_world_size
+        self.freqs_cis = None
         self.indexer_score_scale = self.index_head_dim ** -0.5
         self.indexer_weight_scale = self.indexer_score_scale * self.index_n_heads ** -0.5
         # c4 layers own a second compressor (is_in_indexer) that writes the Lightning-Indexer key
@@ -168,7 +169,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         workspace = infer_state.dsv4_workspace
         index_topk = self.index_topk
         max_entries = max(1, int(infer_state.max_kv_seq_len) // 4)
-        c4_cap = ((max_entries + 63) // 64) * 64
+        c4_cap = compressed_kv_capacity(infer_state.max_kv_seq_len, 4)
 
         if max_entries <= index_topk:
             from ..triton_kernel.build_compress_index_dsv4 import build_compress_index
@@ -192,7 +193,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         if infer_state.c4_indexer_metadata is not None:
             return infer_state.c4_indexer_metadata
         mem_manager = infer_state.mem_manager
-        page_size = mem_manager.c4_indexer_pool.page_size
+        page_size = 64
         positions = infer_state.position_ids
         from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
 
@@ -276,12 +277,10 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
     def _score_c4_indices(self, infer_state, idx_q_fp8, weights, c4_cap, paged_meta: C4IndexerMetadata):
         mem_manager = infer_state.mem_manager
         workspace = infer_state.dsv4_workspace
-        page_size = mem_manager.c4_indexer_pool.page_size
+        page_size = 64
         index_topk = self.index_topk
-        indexer_k_cache = mem_manager.c4_indexer_pool.get_layer_buffer(
-            mem_manager.layer_to_c4_idx[self.layer_idx_]
-        ).view(
-            mem_manager.c4_indexer_pool.num_pages,
+        indexer_k_cache = mem_manager.get_indexer_k_buffer(self.layer_idx_).view(
+            mem_manager.c4_indexer_k_buffer.shape[1],
             page_size,
             1,
             self.index_head_dim + 4,
@@ -331,7 +330,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         top_slots,
         page_size,
     ):
-        args = (
+        logits = deep_gemm.fp8_paged_mqa_logits(
             idx_q_fp8.unsqueeze(1),
             indexer_k_cache,
             weights,
@@ -341,7 +340,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             c4_cap,
             False,
         )
-        logits = deep_gemm.fp8_paged_mqa_logits(*args)
         topk_transform_512(
             logits,
             valid_len,

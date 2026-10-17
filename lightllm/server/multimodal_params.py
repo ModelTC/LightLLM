@@ -4,7 +4,7 @@ import os
 import librosa
 import base64
 import numpy as np
-from typing import List, Tuple
+from typing import List, Tuple, Optional
 from io import BytesIO
 from concurrent.futures import ThreadPoolExecutor
 from PIL import Image, ImageFile

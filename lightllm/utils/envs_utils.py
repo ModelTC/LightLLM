@@ -26,7 +26,14 @@ def get_unique_server_name():
     return service_uni_name
 
 
+def set_cuda_arch(args):
+    if not torch.cuda.is_available():
+        return
+    return
+
+
 def set_env_start_args(args):
+    set_cuda_arch(args)
     if not isinstance(args, dict):
         args = vars(args)
     os.environ["LIGHTLLM_START_ARGS"] = json.dumps(args)
@@ -241,11 +248,6 @@ def get_cache_placement_gpu_capacity_ratio() -> float:
     ratio = float(os.getenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", 0.8))
     assert 0 < ratio <= 1
     return ratio
-
-
-@lru_cache(maxsize=None)
-def get_dsv4_cpu_cache_max_pages_per_task() -> int:
-    return int(os.getenv("LIGHTLLM_DSV4_CPU_CACHE_MAX_PAGES_PER_TASK", 4))
 
 
 @lru_cache(maxsize=None)

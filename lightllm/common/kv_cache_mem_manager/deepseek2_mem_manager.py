@@ -1,6 +1,8 @@
 import torch
+import os
+import torch.distributed as dist
 from .mem_manager import MemoryManager
-from typing import List, Any
+from typing import List, Union, Any
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
 from .operator import Deepseek2MemOperator
@@ -10,6 +12,7 @@ logger = init_logger(__name__)
 
 
 class Deepseek2MemoryManager(MemoryManager):
+
     operator_class = Deepseek2MemOperator
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
@@ -38,8 +41,6 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
-        start_kv_index: int,
-        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
@@ -55,7 +56,7 @@ class Deepseek2MemoryManager(MemoryManager):
             kv_buffer=dp_mems[0].kv_buffer,
             mode="write",
         )
-        return cur_page.numel() * cur_page.element_size()
+        return
 
     def read_page_kv_move_buffer_to_mem(
         self,
@@ -64,8 +65,6 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
-        start_kv_index: int,
-        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):

@@ -1,4 +1,4 @@
-from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import (
+from lightllm.common.state_cache_manager.deepseek4 import (
     DSV4_SWA_PAGE_SIZE,
 )
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
@@ -27,7 +27,7 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
         build_dspark_swa_index(
             req_idx=self.dsv4_sparse_req_idx,
             positions=self.position_ids,
-            req_to_swa_pages=self.req_manager.req_to_swa_pages,
+            req_manager=self.req_manager,
             swa_index=self.dsv4_swa_indices,
             swa_length=self.dsv4_swa_lengths,
             swa_write_slots=self.dsv4_swa_write_slots,
@@ -35,5 +35,5 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
             block_size=model.block_size,
             page_size=DSV4_SWA_PAGE_SIZE,
             hold_req_id=self.req_manager.HOLD_REQUEST_ID,
-            hold_swa_slot=self.mem_manager.swa_pool.HOLD_TOKEN_MEMINDEX,
+            hold_swa_slot=self.req_manager.HOLD_SWA_SLOT,
         )

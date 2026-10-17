@@ -65,12 +65,6 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     b_q_seq_len = torch.tensor(b_q_seq_len, dtype=torch.int32, device="cpu")
     b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
 
-    # Resource preparation and the later model/checkpoint readers share one stream.
-    if run_reqs:
-        g_infer_context.req_manager.prepare_prefill(
-            b_req_idx, b_ready_cache_len, b_seq_len, stream=g_infer_context.get_overlap_stream()
-        )
-
     model_input = ModelInput(
         batch_size=b_seq_len.shape[0],
         total_token_num=total_token_num,

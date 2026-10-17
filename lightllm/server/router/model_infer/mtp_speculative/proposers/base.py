@@ -10,7 +10,6 @@ from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-    from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor
 
 
 @dataclass
@@ -70,15 +69,12 @@ class BaseSpecProposer(ABC):
         b_req_mtp_start_loc: torch.Tensor,  # [req_num]
         draft_step: int,
         accept_len: Optional[torch.Tensor] = None,  # [req_num]
-        accept_len_cpu: Optional[AsyncPinnedCpuTensor] = None,
     ) -> SpecProposal:
         """Generate candidate tokens after one target decode forward.
 
         `target_model_input` contains the target verify rows, possibly compacted
         by dynamic scheduling. `b_req_mtp_start_loc` identifies each logical
         request's first row.
-
-        `accept_len_cpu` carries the asynchronous host copy for CPU-owned draft state.
 
         The returned proposal contains one dense row per logical request and
         only the `draft_step` candidate tokens produced by the draft model.

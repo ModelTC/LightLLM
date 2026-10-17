@@ -66,15 +66,12 @@ def _launch_subprocesses(args: StartArgs):
 
     model_type = get_model_type(args.model_dir)
     if model_type == "deepseek_v4":
-        from lightllm.common.kv_cache_mem_manager.deepseek4_cache_layout import DSV4_CACHE_BLOCK_SIZE
+        from lightllm.common.state_cache_manager.deepseek4 import DSV4_CACHE_BLOCK_SIZE
 
         if args.page_size == 1:
             args.page_size = DSV4_CACHE_BLOCK_SIZE
         if args.page_size <= 0 or args.page_size % DSV4_CACHE_BLOCK_SIZE:
             raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_CACHE_BLOCK_SIZE}")
-        if args.enable_cpu_cache and args.cache_placement_strategy == "adaptive":
-            logger.warning("DeepSeek-V4 incremental CPU cache uses legacy placement")
-            args.cache_placement_strategy = "legacy"
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
@@ -313,20 +310,21 @@ def _launch_subprocesses(args: StartArgs):
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache:
-        if model_type == "deepseek_v4":
+    if args.enable_cpu_cache and is_hybrid_model:
+        if model_type == "deepseek_v4" and args.run_mode != "decode":
             big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
-            if big_page_tokens <= args.max_req_total_len:
-                if args.cpu_cache_token_page_size is None:
-                    args.cpu_cache_token_page_size = big_page_tokens
-                if args.cpu_cache_token_page_size != big_page_tokens:
-                    raise ValueError("DeepSeek-V4 CPU cache pages must match the hybrid big-page checkpoint interval")
-            elif args.cpu_cache_token_page_size is None:
-                args.cpu_cache_token_page_size = (2048 + args.page_size - 1) // args.page_size * args.page_size
-        elif is_hybrid_att_model(args.model_dir):
-            args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-            logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
-        elif args.cpu_cache_token_page_size is None:
+            if big_page_tokens > args.max_req_total_len:
+                # CPU pages need the same boundary snapshots as GPU prefix caching.
+                page_tokens = (
+                    args.cpu_cache_token_page_size
+                    or math.ceil(2048 / args.linear_att_hash_page_size) * args.linear_att_hash_page_size
+                )
+                assert page_tokens % args.linear_att_hash_page_size == 0
+                args.linear_att_page_block_num = page_tokens // args.linear_att_hash_page_size
+        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    if args.enable_cpu_cache:
+        if args.cpu_cache_token_page_size is None:
             args.cpu_cache_token_page_size = 256
         assert (
             args.cpu_cache_token_page_size % args.page_size == 0

@@ -1,8 +1,7 @@
 import torch
 
 from lightllm.common.basemodel.batch_objs import PostLayerOutput
-
-from lightllm.models.deepseek_v4.layer_infer.hyper_connection import hc_head, hc_post
+from lightllm.common.basemodel.triton_kernel.mhc import hc_head, hc_post
 from lightllm.models.deepseek_v4_dspark.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4DSparkPreAndPostLayerWeight,
 )
@@ -40,19 +39,21 @@ class DeepseekV4DSparkPostLayerInfer(Qwen3DSparkPostLayerInfer):
         if infer_state.is_prefill:
             return PostLayerOutput(logits=input_embdings.new_empty((0,)))
 
+        cfg = layer_weight.network_config_
         if isinstance(input_embdings, tuple):
-            streams = hc_post(*input_embdings)
-            input_embdings = streams.reshape(streams.shape[0], -1)
+            input_embdings = hc_post(*input_embdings, streams=cfg["hc_mult"])
+        out = self.alloc_tensor(
+            (input_embdings.shape[0], cfg["hidden_size"]), dtype=input_embdings.dtype, device=input_embdings.device
+        )
         collapsed = hc_head(
-            input_embdings,
-            layer_weight.hc_head_fn_.weight,
-            layer_weight.hc_head_scale_.weight,
-            layer_weight.hc_head_base_.weight,
-            layer_weight.network_config_["hc_mult"],
-            layer_weight.network_config_["hidden_size"],
-            layer_weight.network_config_["rms_norm_eps"],
-            layer_weight.network_config_.get("hc_eps", 1e-6),
-            self.alloc_tensor,
+            x=input_embdings,
+            fn=layer_weight.hc_head_fn_.weight,
+            scale=layer_weight.hc_head_scale_.weight,
+            base=layer_weight.hc_head_base_.weight,
+            streams=cfg["hc_mult"],
+            rms_eps=cfg["rms_norm_eps"],
+            hc_eps=cfg.get("hc_eps", 1e-6),
+            out=out,
         )
 
         last_input, token_num = self._slice_get_last_input(collapsed, infer_state)

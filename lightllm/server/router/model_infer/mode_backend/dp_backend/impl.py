@@ -15,7 +15,7 @@ from lightllm.server.router.model_infer.mode_backend.pre import (
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.server.router.model_infer.mtp_speculative.engine import SpecEngine
 from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_engine import DPOverlapSpecEngine
 from lightllm.server.router.model_infer.mtp_speculative import utils as mtp_utils
@@ -508,7 +508,6 @@ class DPChunkedPrefillBackend(ModeBackend):
         event_pack.notify_post_handle_and_wait_pre_post_handle()
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-            mtp_accept_len_cpu = None
             if req_num > 0:
                 next_token_ids, next_token_logprobs = sample(
                     model_output.logits,
@@ -566,9 +565,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
-                accept_len_cpu=(
-                    AsyncPinnedCpuTensor(tensor=mtp_accept_len_cpu, ready_event=verify_event) if req_num > 0 else None
-                ),
             )
             if req_num > 0:
                 mtp_utils.scatter_mtp_next_tokens(
@@ -842,9 +838,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 target_model_output1=model_output1,
                 target_next_token_ids1=target_next_token_ids1,
                 accept_len1=mtp_accept_len1,
-                accept_len_cpu=(
-                    AsyncPinnedCpuTensor(tensor=mtp_accept_len_cpu, ready_event=verify_event) if req_num > 0 else None
-                ),
                 draft_step=spec_plan.draft_step,
             )
             if req_num > 0:

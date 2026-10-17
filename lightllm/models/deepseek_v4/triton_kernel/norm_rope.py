@@ -65,6 +65,7 @@ def _k_norm_rope_cache_kernel(
     freqs_cis,
     positions,
     out_loc,
+    out_loc2,
     kvcache_fp8,
     kvcache_bf16,
     kvcache,
@@ -72,6 +73,7 @@ def _k_norm_rope_cache_kernel(
     EPS: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
     PAGE_BYTES: tl.constexpr,
+    WRITE_TAIL: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -90,25 +92,34 @@ def _k_norm_rope_cache_kernel(
     exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).to(tl.uint32)
     inv_scale = ((254 - exponent) << 23).to(tl.float32, bitcast=True)
     quantized = tl.clamp(grouped * inv_scale[:, None], -448, 448)
-    slot = tl.load(out_loc + row).to(tl.int64)
-    page = slot // PAGE_SIZE
-    offset = slot % PAGE_SIZE
-    value_base = page * PAGE_BYTES + offset * 576
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
-    tl.store(kvcache_fp8 + value_base + groups[:, None] * 64 + cols[None, :], quantized, mask=groups[:, None] < 7)
-    tl.store(kvcache + page * PAGE_BYTES + PAGE_SIZE * 576 + offset * 8 + groups, exponent, mask=groups < 7)
     real, imag = tl.split(tl.reshape(x, (8, 32, 2)))
     pair = tl.arange(0, 32)
     pos = tl.load(positions + row)
     cos = tl.load(freqs_cis + pos * 64 + pair * 2)
     sin = tl.load(freqs_cis + pos * 64 + pair * 2 + 1)
-    rope_base = (value_base + 448) // 2
     rope = tl.reshape(
         tl.join(real * cos[None, :] - imag * sin[None, :], real * sin[None, :] + imag * cos[None, :]), (8, 64)
     )
-    rope_ptr = tl.broadcast_to(kvcache_bf16 + rope_base + cols[None, :], (8, 64))
-    tl.store(rope_ptr, rope, mask=groups[:, None] == 7)
+    for destination in tl.static_range(2 if WRITE_TAIL else 1):
+        slot = tl.load(out_loc + row) if destination == 0 else tl.load(out_loc2 + row)
+        slot = slot.to(tl.int64)
+        valid_slot = True if destination == 0 else slot >= 0
+        page, offset = slot // PAGE_SIZE, slot % PAGE_SIZE
+        value_base = page * PAGE_BYTES + offset * 576
+        tl.store(
+            kvcache_fp8 + value_base + groups[:, None] * 64 + cols[None, :],
+            quantized,
+            mask=(groups[:, None] < 7) & valid_slot,
+        )
+        tl.store(
+            kvcache + page * PAGE_BYTES + PAGE_SIZE * 576 + offset * 8 + groups,
+            exponent,
+            mask=(groups < 7) & valid_slot,
+        )
+        rope_ptr = tl.broadcast_to(kvcache_bf16 + (value_base + 448) // 2 + cols[None, :], (8, 64))
+        tl.store(rope_ptr, rope, mask=(groups[:, None] == 7) & valid_slot)
 
 
 @triton.jit
@@ -179,7 +190,7 @@ def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, positions):
 
 
 @torch.no_grad()
-def fused_k_norm_rope_flashmla(kv, kv_weight, eps, freqs_cis, positions, out_loc, kvcache, page_size):
+def fused_k_norm_rope_flashmla(kv, kv_weight, eps, freqs_cis, positions, out_loc, kvcache, page_size, out_loc2=None):
     """Normalize BF16 KV [T, 512] and write at int32 out_loc [T] in packed pages.
 
     Each uint8 page stores 576 data bytes per slot followed by 8 scale bytes per
@@ -193,6 +204,7 @@ def fused_k_norm_rope_flashmla(kv, kv_weight, eps, freqs_cis, positions, out_loc
             torch.view_as_real(freqs_cis).flatten(-2),
             positions,
             out_loc,
+            out_loc2,
             flat.view(torch.float8_e4m3fn),
             flat.view(torch.bfloat16),
             flat,
@@ -200,6 +212,7 @@ def fused_k_norm_rope_flashmla(kv, kv_weight, eps, freqs_cis, positions, out_loc
             EPS=float(eps),
             PAGE_SIZE=page_size,
             PAGE_BYTES=kvcache.shape[-1],
+            WRITE_TAIL=out_loc2 is not None,
             num_warps=1 if kv.shape[0] >= 512 else 8,
             num_stages=1,
             **pdl_kwargs(kv.device),

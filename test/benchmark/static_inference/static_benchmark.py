@@ -194,7 +194,6 @@ class StaticBenchmarkExecutor:
             output = None
             for model_input in inputs:
                 output = self._forward_prefill_input(model_input, allow_overlap=True)
-                self.model.req_manager.finish_prefill(req_idx.tolist())
             torch.cuda.synchronize()
             elapsed += time.perf_counter() - start
             self._touch_output(output)
@@ -280,7 +279,6 @@ class StaticBenchmarkExecutor:
             if mtp_enabled:
                 # Main and draft KV must advance together for every chunk.
                 next_ids = self._fill_mtp_prefill_kv(case, model_input, output, next_ids)
-            self.model.req_manager.finish_prefill(req_idx.tolist())
         assert output is not None
         assert next_ids is not None
 
@@ -584,9 +582,6 @@ class StaticBenchmarkExecutor:
             self._hold_kv_len_by_req[req_id] = new_hold_kv_len
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:
-        self.model.req_manager.prepare_prefill(
-            model_input.b_req_idx, model_input.b_ready_cache_len, model_input.b_seq_len
-        )
         if allow_overlap and self.args.enable_prefill_microbatch_overlap and model_input.batch_size > 1:
             model_input0, model_input1 = self._split_prefill_input(model_input)
             model_output0, model_output1 = self.model.microbatch_overlap_prefill(model_input0, model_input1)
@@ -734,8 +729,8 @@ class StaticBenchmarkExecutor:
         return torch.tensor(req_indexes, dtype=torch.int32, device="cpu")
 
     def _reset_model_cache(self):
-        self.model.req_manager.free_all()
         self.model.mem_manager.free_all()
+        self.model.req_manager.free_all()
         self._hold_kv_len_by_req.clear()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()

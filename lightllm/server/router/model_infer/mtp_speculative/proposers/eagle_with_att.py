@@ -7,7 +7,7 @@ from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_m
 from lightllm.common.basemodel.triton_kernel.select_mtp_rows import select_accepted_tail_rows
 from lightllm.server.router.model_infer.mtp_speculative.proposers.base import BaseSpecProposer
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
-from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
 class EagleWithAttProposer(BaseSpecProposer):
@@ -43,7 +43,6 @@ class EagleWithAttProposer(BaseSpecProposer):
         b_req_mtp_start_loc: torch.Tensor,
         draft_step: int,
         accept_len: torch.Tensor | None = None,
-        accept_len_cpu: AsyncPinnedCpuTensor | None = None,
     ) -> EagleSpecProposal:
         """提交验证结果对应的 draft KV，并递归生成下一轮 EAGLE proposal。
 

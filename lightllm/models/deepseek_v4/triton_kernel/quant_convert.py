@@ -15,7 +15,9 @@ def prepare_fp8_weights(weights: dict, matrix_weights, data_type: torch.dtype) -
     for matrix_weight in matrix_weights:
         weight_names = matrix_weight.weight_names
         # BMM weights have no quantization scale names and always load dense values.
-        scale_names = getattr(matrix_weight, "weight_scale_names", [None] * len(weight_names))
+        scale_names = (
+            [None] * len(weight_names) if matrix_weight.quant_method is None else matrix_weight.weight_scale_names
+        )
         for weight_name, scale_name in zip(weight_names, scale_names):
             checkpoint_scale_name = weight_name.removesuffix(".weight") + ".scale"
             if checkpoint_scale_name not in weights:

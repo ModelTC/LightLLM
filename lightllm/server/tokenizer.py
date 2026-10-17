@@ -57,20 +57,17 @@ def get_tokenizer(
     if model_type == "deepseek_v32":
         # Register the custom config before AutoTokenizer tries to resolve it.
         from ..models import deepseek3_2  # noqa: F401
+    if model_type == "deepseek_v4":
+        from ..models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
+
+        if tokenizer_mode == "slow":
+            raise ValueError("DeepSeek-V4 requires a fast tokenizer loaded from tokenizer.json")
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
+        logger.info("Using DeepSeek-V4 tokenizer mode with Python-based chat template encoding.")
+        return DeepSeekV4Tokenizer(tokenizer, tokenizer_name, model_cfg)
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
-    except ValueError as e:
-        if (
-            model_type != "deepseek_v4"
-            or tokenizer_mode == "slow"
-            or "Tokenizer class TokenizersBackend does not exist" not in str(e)
-        ):
-            raise
-        logger.warning(
-            "Transformers does not provide DeepSeek-V4 TokenizersBackend; loading tokenizer.json as a fast tokenizer"
-        )
-        tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
     except TypeError as e:
         # The LLaMA tokenizer causes a protobuf error in some environments, using slow mode.
         # you can try pip install protobuf==3.20.0 to try repair
@@ -94,11 +91,6 @@ def get_tokenizer(
         )
         logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
         return DeepSeekV32Tokenizer(hf_tokenizer)
-    if model_type == "deepseek_v4":
-        from ..models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
-
-        logger.info("Using DeepSeek-V4 tokenizer mode with Python-based chat template encoding.")
-        return DeepSeekV4Tokenizer(tokenizer, tokenizer_name, model_cfg)
 
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.tarsier2.model import Tarsier2Tokenizer

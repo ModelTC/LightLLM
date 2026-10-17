@@ -21,12 +21,10 @@ class C4IndexerMetadata:
 
 
 class DeepseekV4InferStateInfo(InferStateInfo):
+    """Per-forward RoPE views, SWA slots and sparse attention metadata."""
+
     req_manager: DeepseekV4ReqManager
     mem_manager: DeepseekV4MemoryManager
-
-    """Per-token interleaved-rope cos/sin for the two rope variants (sliding / compressed), following
-    the gemma4 two-variant convention (_cos_cached_* -> position_cos_*). The full rope tables are
-    model constants and live on the model / layer infers, not here."""
 
     def __init__(self):
         super().__init__()
@@ -39,6 +37,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_sparse_req_idx = None
         self.dsv4_swa_indices = None
         self.dsv4_swa_lengths = None
+        self.dsv4_swa_write_slots = None
+        self.dsv4_swa_runtime_write_slots = None
         self.dsv4_image_left = None
         self.dsv4_image_right = None
         self.dsv4_c128_indices = None
@@ -46,6 +46,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_workspace = None
         # token -> batch-position map for the compressor; built per prefill forward in init_some_extra_state.
         self._dsv4_token_to_batch_idx = None
+        self._dsv4_prefill_pad_q_len = 0
         # The first C4 layer builds metadata and later layers reuse it within this forward.
         # During CUDA Graph capture its tensor producers become graph nodes. Replay updates
         # those captured buffers from staged inputs; copy_for_cuda_graph skips this container.
@@ -63,6 +64,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
     def init_some_extra_state(self, model):
         self.c4_indexer_metadata = None  # Rebuild for each eager forward or graph capture.
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
+        self.req_manager.init_forward_state(self)
         pos = self.position_ids
         self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
         self.position_sin_sliding = torch.index_select(model._sin_cached_sliding, 0, pos)
@@ -71,7 +73,9 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # Per-token request id (decode: one token per req; prefill: ragged -> repeat by q-len).
         # Layer-independent; the swa kernel + build_metadata's c4/c128 readers all reuse it.
         if self.is_prefill:
-            self.dsv4_sparse_req_idx = torch.repeat_interleave(self.b_req_idx, self.b_q_seq_len)
+            self.dsv4_sparse_req_idx = torch.repeat_interleave(
+                self.b_req_idx, self.b_q_seq_len, output_size=pos.numel()
+            )
             self._dsv4_token_to_batch_idx = torch.repeat_interleave(
                 torch.arange(self.b_req_idx.shape[0], dtype=torch.int32, device=self.b_req_idx.device),
                 self.b_q_seq_len,
@@ -111,16 +115,21 @@ class DeepseekV4InferStateInfo(InferStateInfo):
                     image_right=self.dsv4_image_right,
                 )
         self.dsv4_swa_write_slots = torch.empty_like(pos, dtype=torch.int32)
+        self.dsv4_swa_runtime_write_slots = torch.empty_like(pos, dtype=torch.int32) if self.is_prefill else None
         self.dsv4_swa_indices, self.dsv4_swa_lengths = build_swa_index(
             req_idx=self.dsv4_sparse_req_idx,
             positions=self.position_ids,
-            req_to_swa_pages=self.req_manager.req_to_swa_pages,
+            req_manager=self.req_manager,
             swa_index=self.dsv4_swa_indices,
             swa_length=self.dsv4_swa_lengths,
             swa_write_slots=self.dsv4_swa_write_slots,
             window=workspace.sliding_window,
             image_left=self.dsv4_image_left,
             image_right=self.dsv4_image_right,
+            is_prefill=self.is_prefill,
+            runtime_write_slots=self.dsv4_swa_runtime_write_slots,
+            token_to_batch=self._dsv4_token_to_batch_idx,
+            seq_lens=self.b_seq_len,
         )
         from lightllm.models.deepseek_v4.triton_kernel.build_compress_index_dsv4 import build_compress_index
 

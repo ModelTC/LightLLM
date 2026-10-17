@@ -166,10 +166,7 @@ def assert_topk(scores, lengths, pages, out, raw, page_size):
 
 @pytest.mark.parametrize("width", [128, 512, 640, 8192, 262144])
 @pytest.mark.parametrize("page_size", [1, 64, 128])
-@pytest.mark.parametrize("native", [False, True])
-def test_topk_valid_prefix_raw_indices_and_padding(width, page_size, native, monkeypatch):
-    if not native:
-        monkeypatch.setattr(topk_transform, "vllm_ops", None)
+def test_topk_valid_prefix_raw_indices_and_padding(width, page_size):
     torch.manual_seed(31)
     scores = torch.randn(8, width + 128, device="cuda")[:, :width]
     lengths = torch.tensor(
@@ -213,11 +210,8 @@ def test_short_topk_rank_selection_and_optional_raw(width, rows, distribution, p
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
-@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("rows,width", [(8, 8192), (1, 1024), (2, 2048), (4, 1024)])
-def test_topk_cuda_graph_replay_changing_lengths(native, rows, width, monkeypatch):
-    if not native:
-        monkeypatch.setattr(topk_transform, "vllm_ops", None)
+def test_topk_cuda_graph_replay_changing_lengths(rows, width):
     scores = torch.randn(rows, width, device="cuda")
     lengths = torch.zeros(rows, device="cuda", dtype=torch.int32)
     pages = torch.randint(0, 4096, (rows, width // 64), device="cuda", dtype=torch.int32)

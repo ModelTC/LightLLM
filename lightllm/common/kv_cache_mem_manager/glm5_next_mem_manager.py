@@ -53,28 +53,11 @@ class Glm5NextMemManager(Qwen3NextMemManager):
         return (page_num, page_size, self.layer_num, self.head_num, self.head_dim)
 
     def write_mem_to_page_kv_move_buffer(
-        self,
-        mem_indexes,
-        page_index,
-        dp_index,
-        mem_managers,
-        dp_world_size,
-        start_kv_index,
-        request_kv_len,
-        page_kind="kv",
-        req_idx=None,
+        self, mem_indexes, page_index, dp_index, mem_managers, dp_world_size, page_kind="kv", req_idx=None
     ):
         if page_kind != "kv":
             return super().write_mem_to_page_kv_move_buffer(
-                mem_indexes=mem_indexes,
-                page_index=page_index,
-                dp_index=dp_index,
-                mem_managers=mem_managers,
-                dp_world_size=dp_world_size,
-                start_kv_index=start_kv_index,
-                request_kv_len=request_kv_len,
-                page_kind=page_kind,
-                req_idx=req_idx,
+                mem_indexes, page_index, dp_index, mem_managers, dp_world_size, page_kind, req_idx
             )
         pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
         pin_indexes.numpy()[:] = mem_indexes
@@ -84,32 +67,13 @@ class Glm5NextMemManager(Qwen3NextMemManager):
             kv_buffer=mem_managers[dp_index * dp_world_size].kv_buffer,
             mode="write",
         )
-        page = self.kv_move_buffer[page_index]
-        return page.numel() * page.element_size()
 
     def read_page_kv_move_buffer_to_mem(
-        self,
-        mem_indexes,
-        page_index,
-        dp_index,
-        mem_managers,
-        dp_world_size,
-        start_kv_index,
-        request_kv_len,
-        page_kind="kv",
-        req_idx=None,
+        self, mem_indexes, page_index, dp_index, mem_managers, dp_world_size, page_kind="kv", req_idx=None
     ):
         if page_kind != "kv":
             return super().read_page_kv_move_buffer_to_mem(
-                mem_indexes=mem_indexes,
-                page_index=page_index,
-                dp_index=dp_index,
-                mem_managers=mem_managers,
-                dp_world_size=dp_world_size,
-                start_kv_index=start_kv_index,
-                request_kv_len=request_kv_len,
-                page_kind=page_kind,
-                req_idx=req_idx,
+                mem_indexes, page_index, dp_index, mem_managers, dp_world_size, page_kind, req_idx
             )
         pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
         pin_indexes.numpy()[:] = mem_indexes

@@ -1,5 +1,6 @@
 import torch
 import triton
+from typing import List
 from typing import TYPE_CHECKING
 from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args

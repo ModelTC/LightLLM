@@ -8,7 +8,14 @@ import torch
 import torch.nn.functional as F
 import triton
 
-from lightllm.common.basemodel.triton_kernel.mhc import hc_head, hc_post, hc_post_pre_norm, hc_pre_norm
+from lightllm.common.basemodel.triton_kernel.mhc import (
+    hc_contract,
+    hc_expand,
+    hc_head,
+    hc_post,
+    hc_post_pre_norm,
+    hc_pre_norm,
+)
 from lightllm.common.basemodel.triton_kernel.mhc import pre_norm
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 
@@ -86,6 +93,13 @@ def test_mhc_matches_reference(tokens, disable_deepgemm, monkeypatch):
     )
 
 
+def test_empty_stream_expansion_and_contraction():
+    embeddings = torch.empty(0, 4096, device="cuda", dtype=torch.bfloat16)
+    expanded = hc_expand(embeddings, 4)
+    assert expanded.shape == (0, 16384)
+    torch.testing.assert_close(hc_contract(expanded, 4), embeddings)
+
+
 @pytest.mark.parametrize("missing", ["module", "kernel"])
 def test_mhc_reports_missing_deepgemm(monkeypatch, missing):
     monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", False)
@@ -147,40 +161,29 @@ def test_hc_head_learned_gates_and_preallocated_output(tokens, hidden, zeros):
 
 
 @pytest.mark.parametrize("tokens", [1, 16, 17, 129])
-def test_deepseek_v4_deferred_state_and_cuda_graph_replay(tokens):
-    from lightllm.models.deepseek_v4.layer_infer import hyper_connection as hc
-
+def test_shared_mhc_cuda_graph_replay(tokens):
     streams, hidden = 4, 4096
-    residual = torch.randn(tokens, streams, hidden, device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn(tokens, streams * hidden, device="cuda", dtype=torch.bfloat16)
     fn = torch.randn(24, streams * hidden, device="cuda") * 0.005
     scale = torch.randn(3, device="cuda")
     base = torch.randn(24, device="cuda")
     norm = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
     layer_output = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
     head_fn, head_scale, head_base = fn[:streams].contiguous(), scale[:1].contiguous(), base[:streams].contiguous()
-    allocated = []
-
-    def allocate(shape, **kwargs):
-        output = torch.empty(shape, **kwargs)
-        allocated.append(output)
-        return output
+    output = torch.empty(tokens, hidden, device="cuda", dtype=torch.bfloat16)
 
     def run():
-        x, original, post, mix = hc.hc_pre(residual, fn, scale, base, 1e-6, 1e-6, 20, norm, 1e-5)
-        assert original is residual
-        assert x.shape == (tokens, hidden) and post.shape == (tokens, streams, 1)
-        x, updated, post, mix = hc.hc_fused_post_pre(
-            layer_output, original, post, mix, fn, scale, base, 1e-6, 1e-6, 20, norm, 1e-5
+        x, mix, post = hc_pre_norm(residual, fn, scale, base, norm, streams, 1e-6, 1e-5, 1e-6, 20)
+        assert x.shape == (tokens, hidden) and post.shape == (tokens, streams)
+        x, updated, mix, post = hc_post_pre_norm(
+            layer_output, residual, mix, post, fn, scale, base, norm, streams, 1e-6, 1e-5, 1e-6, 20
         )
-        final = hc.hc_post(x, updated, post, mix)
-        output = hc.hc_head(final.flatten(1), head_fn, head_scale, head_base, streams, hidden, 1e-6, 1e-6, allocate)
-        assert output is allocated[-1]
-        return output
+        final = hc_post(x, updated, mix, post, streams)
+        return hc_head(final, head_fn, head_scale, head_base, streams, 1e-6, 1e-6, out=output)
 
     def reference():
-        flat = residual.flatten(1)
-        _, mix, post = _hc_pre_reference(flat, fn, scale, base, streams, 1e-6, 1e-6, 20)
-        updated = _hc_post_reference(layer_output, flat, mix, post, streams)
+        _, mix, post = _hc_pre_reference(residual, fn, scale, base, streams, 1e-6, 1e-6, 20)
+        updated = _hc_post_reference(layer_output, residual, mix, post, streams)
         x, mix, post = _hc_pre_reference(updated, fn, scale, base, streams, 1e-6, 1e-6, 20)
         x = rmsnorm_forward(x, norm, 1e-5)
         final = _hc_post_reference(x, updated, mix, post, streams)

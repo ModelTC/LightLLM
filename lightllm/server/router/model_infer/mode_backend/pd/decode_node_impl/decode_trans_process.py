@@ -19,6 +19,7 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
+from ..cache_page_io import create_cache_page_io
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
@@ -131,6 +132,7 @@ class _DecodeTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
+        self.page_io = create_cache_page_io(mem_managers, device_id, self.dp_world_size)
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -166,20 +168,9 @@ class _DecodeTransModule:
         return
 
     def _warmup(self):
-        cur_mem = self.mem_managers[self.device_id]
-        with torch.cuda.stream(stream=self.copy_cuda_stream):
-            cur_mem.kv_move_buffer[0].zero_()
-            for dp_index in range(self.args.dp // self.args.nnodes):
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    mem_indexes=[cur_mem.HOLD_TOKEN_MEMINDEXES[0]],
-                    page_index=0,
-                    dp_index=dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
-                    start_kv_index=0,
-                    request_kv_len=1,
-                    req_idx=cur_mem.req_to_token_indexs.shape[0] - 1,
-                )
+        with torch.cuda.stream(self.copy_cuda_stream):
+            self.mem_managers[self.device_id].kv_move_buffer[0].zero_()
+            self.page_io.warmup(write=False)
             torch.cuda.current_stream().synchronize()
         return
 
@@ -393,18 +384,7 @@ class _DecodeTransModule:
             copy_end_event = torch.cuda.Event(enable_timing=True)
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 copy_start_event.record(self.copy_cuda_stream)
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    trans_task.mem_indexes,
-                    page_index=trans_task.dst_page_index,
-                    dp_index=trans_task.decode_dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
-                    start_kv_index=trans_task.start_kv_index,
-                    request_kv_len=trans_task.request_kv_len,
-                    page_kind=trans_task.page_kind,
-                    req_idx=trans_task.req_idx,
-                )
+                self.page_io.unpack(trans_task)
                 copy_end_event.record(self.copy_cuda_stream)
             self.success_queue.put((copy_end_event, copy_start_event, trans_task))
 

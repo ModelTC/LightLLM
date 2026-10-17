@@ -39,7 +39,6 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     next_index = [4]
     tasks = []
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
-    backend.is_deepseek_v4 = False
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
     backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
     backend.is_master_in_dp = False
@@ -86,7 +85,6 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
 
 def test_pd_decode_rejects_unaligned_transfer_page_size():
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
-    backend.is_deepseek_v4 = False
     backend.args = SimpleNamespace(pd_kv_page_size=3, page_size=4)
     req = SimpleNamespace(cur_kv_len=4, shm_req=SimpleNamespace(input_len=10))
 
@@ -119,7 +117,7 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     )
     source_table = torch.arange(32, dtype=torch.int32).reshape(2, 16)
     backend = SimpleNamespace(
-        is_deepseek_v4=False,
+        is_hybrid_att_model=False,
         model=SimpleNamespace(mem_manager=SimpleNamespace()),
         dp_world_size=1,
         rank_in_dp=0,
@@ -131,12 +129,8 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     module.backend = backend
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [10, 0]]], dtype=np.int64))
-    from lightllm.common.req_manager.base import ReqManager
-
-    req_manager = ReqManager.__new__(ReqManager)
-    req_manager.req_to_token_indexs = table
     context = SimpleNamespace(
-        req_manager=req_manager,
+        req_manager=SimpleNamespace(req_to_token_indexs=table),
         get_can_alloc_token_num=lambda: 100,
     )
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)

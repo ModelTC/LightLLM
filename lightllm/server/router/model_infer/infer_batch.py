@@ -1,20 +1,23 @@
 import enum
 import torch
 import torch.distributed as dist
+import numpy as np
 import collections
 import pickle
 
 from sortedcontainers import SortedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Dict, Tuple, Optional, Callable, Any, Union
-from lightllm.common.req_manager import DeepseekV4ReqManager, ReqManager, HybridAttentionReqManager
-from lightllm.server.core.objs import Req, FinishStatus, ShmReqManager
+from lightllm.common.req_manager import ReqManager, HybridAttentionReqManager
+from lightllm.utils.infer_utils import mark_start, mark_end
+from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedRadixCache,
     HybridAttPagedTreeNode,
 )
 from lightllm.utils.log_utils import init_logger
+from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
@@ -46,7 +49,6 @@ class InferenceContext:
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_hybrid_att_model: bool = False  # 使用大小页 checkpoint 的混合 attention 模型。
-    is_deepseek_v4: bool = False
 
     def register(
         self,
@@ -71,7 +73,6 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_hybrid_att_model = isinstance(self.req_manager, HybridAttentionReqManager)
-        self.is_deepseek_v4 = isinstance(self.req_manager, DeepseekV4ReqManager)
         self.output_constraint_state_factory = self._init_output_constraint_state_factory()
 
         return
@@ -159,8 +160,6 @@ class InferenceContext:
             else:
                 self._hybrid_att_free_req(free_token_index=free_token_index, req=req)
                 assert len(req.hybrid_len_to_big_page_id) == 0
-        if self.is_deepseek_v4:
-            self.req_manager.clear_runtime_state(req.req_idx)
         req.cur_kv_len = 0
         req.hold_kv_len = 0
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -371,6 +370,7 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
+
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -393,16 +393,12 @@ class InferenceContext:
         if paused_reqs:
             # pause_reqs 可能刚刚释放了 KV，因此恢复前重新读取实时可用容量。
             can_alloc_token_num = self.get_can_alloc_token_num()
-            resource_budget = self.req_manager.get_request_resource_budget()
 
             for req in paused_reqs:
                 # 暂停恢复保持原有的保守语义：只有当前完整序列所需的 KV 页面都有足够空间时才恢复，
                 # 才允许执行 radix cache 匹配，避免在容量不足时提前改变引用或重建 hybrid cache 状态。
                 alloc_token_num = req._kv_cache_alloc_need(req.get_cur_total_len())
                 if alloc_token_num > can_alloc_token_num:
-                    break
-
-                if not resource_budget.reserve(self.req_manager.get_request_resource_need(req, "recover")):
                     break
 
                 if g_infer_context.is_hybrid_att_model:
@@ -457,10 +453,6 @@ class InferenceContext:
                 checkpoint_lens=checkpoint_lens,
             )
 
-        assert (
-            self.is_deepseek_v4 or not self.args.disable_chunked_prefill
-        ), "chunked prefill must be enabled for linear attention models"
-
         # Request-state snapshot at the final small-page boundary.
         for req in reqs:
             # 判断本次prefill 完以后 kv 的长度是否到达 hybrid checkpoint 的存储边界。
@@ -477,7 +469,6 @@ class InferenceContext:
                             state_cache_manager=self.radix_cache.small_page_buffers,
                             checkpoint_len=req.hybrid_cache_len,
                         )
-        self.req_manager.finish_prefill([req.req_idx for req in reqs])
         return
 
 
@@ -690,11 +681,6 @@ class InferReq:
             g_infer_context.is_hybrid_att_model is True
         ), "current _hybrid_match_radix_cache only supports hybrid attention models, to do..."
         enable_prompt_cache = (not self.sampling_param.disable_prompt_cache) and g_infer_context.radix_cache is not None
-        if enable_prompt_cache:
-            req_manager = g_infer_context.req_manager
-            enable_prompt_cache = req_manager.get_request_resource_budget().reserve(
-                req_manager.get_request_resource_need(self, "restore")
-            )
         block_hashs = self.shm_req.hybrid_token_hash_list.get_all()
         hash_page_size = self.args.linear_att_hash_page_size
         match_tokens = min(len(block_hashs) * hash_page_size, self.get_cur_total_len() - 1)
@@ -776,8 +762,7 @@ class InferReq:
 
                             # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
-                                value_tensor[cur_big_page_tokens:shared_kv_len],
-                                tail_mems,
+                                value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
                             )
                             # 尾部 KV 换到新 mem 后，同步拷贝已捕获的 top-k prompt logprobs。
                             self.prompt_selected_logprobs.copy_capture_slots_if_needed(
@@ -894,7 +879,7 @@ class InferReq:
 
     def get_chuncked_input_token_len_for_hybrid_att(self):
         end = self._get_chunked_input_end()
-        if g_infer_context.is_deepseek_v4 and self.args.disable_chunked_prefill:
+        if self.args.disable_chunked_prefill:
             return end
         if g_infer_context.radix_cache is None:
             return end

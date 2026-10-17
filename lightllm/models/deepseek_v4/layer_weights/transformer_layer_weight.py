@@ -83,8 +83,12 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         )
         self.q_norm_ = RMSNormWeight(dim=self.q_lora_rank, weight_name=f"{p}.q_norm.weight", data_type=self.data_type_)
         self.kv_norm_ = RMSNormWeight(dim=self.head_dim, weight_name=f"{p}.kv_norm.weight", data_type=self.data_type_)
+        # Sparse FlashMLA requires sink weights for every head in its 64-head tiles.
         self.attn_sink_ = TpAttSinkWeight(
-            all_q_head_num=self.n_heads, weight_name=f"{p}.attn_sink", data_type=torch.float32
+            all_q_head_num=self.n_heads,
+            weight_name=f"{p}.attn_sink",
+            data_type=torch.float32,
+            head_padding_multiple=64,
         )
         # grouped low-rank output projection (wo_a per-group [in, o_lora], wo_b row-parallel
         # [groups*o_lora -> hidden]).
@@ -241,7 +245,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             tp_rank=shared_tp_rank,
             tp_world_size=shared_tp_world_size,
         )
-        self.experts_ = FusedMoeWeight(
+        self.experts = FusedMoeWeight(
             gate_proj_name="w1",
             down_proj_name="w2",
             up_proj_name="w3",
@@ -297,7 +301,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         prepare_fp8_weights(weights, matrix_weights, self.data_type_)
 
         # MXFP4 loads expert .scale unchanged; FP8 expert kernels expect their own suffix.
-        expert_scale_suffix = self.experts_.quant_method.weight_scale_suffix
+        expert_scale_suffix = self.experts.quant_method.weight_scale_suffix
         if expert_scale_suffix is not None and expert_scale_suffix != "scale":
             expert_prefix = f"{self.prefix}.ffn.experts."
             for scale_name in tuple(weights):

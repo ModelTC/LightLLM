@@ -11,7 +11,7 @@ from lightllm.server.router.model_infer.mtp_speculative.dp_overlap_proposers.uti
     get_dp_overlap_req_start_rows,
 )
 from lightllm.server.router.model_infer.mtp_speculative.proposers.proposal_type import EagleSpecProposal
-from lightllm.server.router.model_infer.pin_mem_manager import AsyncPinnedCpuTensor, g_pin_mem_manager
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
 class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
@@ -61,7 +61,6 @@ class DpOverlapEagleWithAttProposer(BaseDpOverlapProposer):
         target_next_token_ids1: torch.Tensor,
         accept_len1: torch.Tensor,
         draft_step: int,
-        accept_len_cpu: AsyncPinnedCpuTensor | None = None,
     ) -> EagleSpecProposal:
         """提交两个 target verify microbatch 的 draft KV，并生成下一轮 proposal。"""
 

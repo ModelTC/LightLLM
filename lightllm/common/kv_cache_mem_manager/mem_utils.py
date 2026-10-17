@@ -9,6 +9,7 @@ from . import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.config_utils import get_model_type
 from lightllm.utils.llm_utils import get_llm_model_class
 from functools import lru_cache
 
@@ -19,17 +20,14 @@ logger = init_logger(__name__)
 def select_mem_manager_class():
     # case 1
     # 先判断是否是 deepseek 系列的模型
-    model_class = get_llm_model_class()
-
-    from lightllm.models import DeepseekV4TpPartModel
-
-    if issubclass(model_class, DeepseekV4TpPartModel):
+    if get_model_type(get_env_start_args().model_dir) == "deepseek_v4":
         from . import DeepseekV4MemoryManager
 
         mem_class = DeepseekV4MemoryManager
         logger.info(f"Model kv cache using default, mem_manager class: {mem_class}")
         return mem_class
 
+    model_class = get_llm_model_class()
     from lightllm.models import Deepseek3_2TpPartModel
 
     if issubclass(model_class, Deepseek3_2TpPartModel):

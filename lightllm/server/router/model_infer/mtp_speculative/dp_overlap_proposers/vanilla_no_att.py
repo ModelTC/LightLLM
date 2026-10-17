@@ -40,7 +40,6 @@ class DpOverlapVanillaNoAttProposer(BaseDpOverlapProposer):
         target_next_token_ids1: torch.Tensor,
         accept_len1: torch.Tensor,
         draft_step: int,
-        accept_len_cpu=None,  # Optional asynchronous CPU acceptance lengths.
     ) -> VanillaSpecProposal:
         accept_len_by_batch = (accept_len0, accept_len1)
         req_num_by_batch = (accept_len0.shape[0], accept_len1.shape[0])

@@ -65,17 +65,33 @@ PD 传输页 `--pd_kv_page_size` 和 CPU cache 页也必须是分配页大小的
 
 - 分配页按 256-token packed block 持有压缩历史。闭合分组的 C4/C128 槽分别由组末 full slot 除以 4/128 得到；
   不再维护独立压缩槽映射或 allocator。预留容量不改变 attention 的逻辑可见长度。
+  C4 latent、indexer K 和 C128 latent 是同一个 history buffer 的视图，跨 DP 只导出一个历史基址。
 - packed 格式保持独立：SWA 每页 128 槽，C4 每页 64 槽，C128 每页 2 槽。
   这些物理块大小来自算子布局，与分配页大小独立。历史复制遍历分配页内的所有 packed block；
   HOLD 请求也预留整个分配页对应的压缩容量。
-- SWA 使用请求持有的循环页组，容量由滑窗、checkpoint 保留范围和最大 MTP 前探位置推导。
-  Decode 和 MTP 按绝对位置寻址，无须逐步分配或回收 SWA 页。
-  长 prefill chunk 借用额外页，完成 draft KV 填充和 checkpoint 读取后，将尾部物理页换入请求页组，
-  归还过期页，不搬移 KV。两个请求命中同一前缀时，共享压缩历史，分别恢复自己的 SWA 和 compressor 状态。
-- 大小页 CPU checkpoint 只保存末尾 256 token 的 SWA、C4 和 indexer continuation，
-  不重复保存压缩历史。256 边界已闭合 C128 分组，下一组覆盖状态后再读取。
-- PD 支持任意传输终点，额外保存未闭合分组以及最后可缓存边界的 continuation。
+- SWA 与 linear state 一样属于请求运行态，长期缓存通过现有大小页 CPU checkpoint 保存和恢复。
+  每个请求预留固定窗口，使用请求号和绝对位置直接计算环形槽位，不维护独立 SWA 页表或 allocator。
+  窗口包含滑窗、最近 checkpoint 的保留范围和 MTP 前探余量。
+- Prefill 的长 chunk 为每个请求使用连续的「旧窗口前缀 + 本次 chunk KV」。工作区容量按单次 forward 的 token
+  上限加窗口大小乘以请求数预留，并计入 128-token 页对齐；两个 overlap microbatch 使用不同区域。
+  短 chunk 的完整读取区间能放入固定窗口时直接写窗口；其余情况使用工作区。
+  预留量中的请求数同时受 token 预算限制，不按全部并发槽位重复预留长 chunk 工作区。
+  为供 forward 后的中间 checkpoint 读取，各层保留各自的工作区。KV 写入时同时保存必要的运行窗口尾部，
+  无需通用 prepare/finish 生命周期接口、借页回收或延迟收尾。
+- MemoryManager 只分配压缩历史和 CPU 大页 checkpoint。C4、indexer 和 C128 的容量均为同一个
+  `mem_manager.size`，使用相同的 allocator 和 token 索引，buffer 仅以不同的 packed 宽度解释。
+  全局层号通过简单映射定位对应历史和压缩器状态。
+- C4、C4 indexer 和 C128 的压缩运行态由 ReqManager 按请求保存短环。
+  C4 在 256-token 边界记录四行 continuation，供中间 checkpoint 读取；C128 分组在该边界已经闭合。
+  两个请求命中同一前缀时共享压缩历史，分别恢复自己的窗口和运行态。
+- CPU cache 完全沿用通用分配、异步卸载、加载和磁盘缓存流程。模型 operator 复制原始 packed history
+  和已有 CPU checkpoint，无专用 cache module、session、lease 或增量 staging。
+  启用 CPU cache 时，CPU 页与大页 checkpoint 使用相同边界；未配置大页时自动建立对应边界。
+- 大小页 CPU checkpoint 只保存必要的 SWA 窗口、C4 和 indexer continuation，
+  不重复保存压缩历史。跨 DP 复用通过相同的 checkpoint 恢复接口。
+- PD 复用现有 `kv` / `att_state` 任务：前者传输压缩历史，后者传输窗口和未闭合压缩组，支持任意传输终点。
+  P/D 可以使用不同的 MTP 环大小，传输时按绝对位置恢复运行态；推理 backend 无模型专用 checkpoint 回调。
   PD continuation 布局有变化，P/D 节点需要使用相同代码版本。
 
-验证覆盖分页边界、packed history 复制、大小页命中和分叉、推测拒绝后重试、CUDA Graph 索引、
-CPU/PD pack-unpack、跨进程 NCCL checkpoint 传输及资源回收。完整模型精度和性能仍需另行实测。
+验证覆盖分页边界、长 prefill 的窗口前缀和中间 checkpoint、大小页命中和分叉、推测拒绝后重试、
+CUDA Graph 索引、通用 CPU cache 异步卸载与恢复、PD 传输及跨进程 CUDA IPC/Gloo checkpoint 恢复。

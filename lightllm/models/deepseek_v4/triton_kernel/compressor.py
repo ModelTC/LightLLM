@@ -41,14 +41,10 @@ def _save_partial_states_kernel(
     token_to_batch_idx,
     b_req_idx,
     b_seq_len,
-    swa_write_slots,
     state_buffer,
     STATE_WIDTH: tl.constexpr,
     STATE_LAST_DIM: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    IS_C4: tl.constexpr,
     IS_PREFILL: tl.constexpr,
-    SWA_PAGE_SIZE: tl.constexpr,
     STATE_RING: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -57,22 +53,10 @@ def _save_partial_states_kernel(
     position = tl.load(positions + token_idx)
     seq_len = tl.load(b_seq_len + batch_idx)
 
-    if IS_C4:
-        same_page_next = (position % SWA_PAGE_SIZE) + STATE_RING < SWA_PAGE_SIZE
-        if same_page_next and position + STATE_RING < seq_len:
-            return
-    else:
-        if position + COMPRESS_RATIO < seq_len:
-            return
-
-    if IS_C4:
-        swa_slot = tl.load(swa_write_slots + token_idx).to(tl.int64)
-        if swa_slot < 0:
-            return
-        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
-    else:
-        req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
-        state_row = req_idx * STATE_RING + position % STATE_RING
+    if position + STATE_RING < seq_len:
+        return
+    req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
+    state_row = req_idx * STATE_RING + position % STATE_RING
 
     offs = tl.arange(0, BLOCK)
     mask = offs < STATE_WIDTH
@@ -82,6 +66,65 @@ def _save_partial_states_kernel(
     tl.store(state_base + offs, kv, mask=mask)
     tl.store(state_base + STATE_WIDTH + offs, score, mask=mask)
     return
+
+
+@triton.jit
+def _save_c4_checkpoint(
+    kv_score,
+    kv_score_stride0,
+    kv_score_stride1,
+    state_buffer,
+    swa_write_slots,
+    runtime_write_slots,
+    token_idx,
+    req_idx,
+    position,
+    ready_len,
+    q_start,
+    HEAD_DIM: tl.constexpr,
+    STATE_LAST_DIM: tl.constexpr,
+    STATE_RING: tl.constexpr,
+    CHECKPOINT_BASE: tl.constexpr,
+    IS_PREFILL: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    # Capture the original tail before _save_partial_states replaces the request
+    # ring. This also preserves checkpoints in the middle of a long prefill.
+    if (position + 1) % 256 == 0:
+        rows = tl.arange(0, 4)
+        positions = position - 3 + rows
+        current = positions >= ready_len
+        raw_rows = q_start + positions - ready_len
+        old_rows = req_idx * STATE_RING + positions % STATE_RING
+        page = tl.load(swa_write_slots + token_idx).to(tl.int64) // 128
+        target_rows = CHECKPOINT_BASE + page * 4 + rows
+        if IS_PREFILL:
+            runtime_slot = tl.load(runtime_write_slots + token_idx).to(tl.int64)
+            runtime_rows = CHECKPOINT_BASE + runtime_slot // 128 * 4 + rows
+        cols = tl.arange(0, BLOCK)
+        for part in tl.static_range(4):
+            offsets = part * HEAD_DIM + cols
+            valid = cols < HEAD_DIM
+            raw = tl.load(
+                kv_score + raw_rows[:, None] * kv_score_stride0 + offsets[None, :] * kv_score_stride1,
+                mask=current[:, None] & valid[None, :],
+                other=0.0,
+            )
+            old = tl.load(
+                state_buffer + old_rows[:, None] * STATE_LAST_DIM + offsets[None, :],
+                mask=(~current[:, None]) & valid[None, :],
+                other=0.0,
+            )
+            values = tl.where(current[:, None], raw, old)
+            tl.store(
+                state_buffer + target_rows[:, None] * STATE_LAST_DIM + offsets[None, :], values, mask=valid[None, :]
+            )
+            if IS_PREFILL:
+                tl.store(
+                    state_buffer + runtime_rows[:, None] * STATE_LAST_DIM + offsets[None, :],
+                    values,
+                    mask=valid[None, :] & (runtime_slot >= 0),
+                )
 
 
 @triton.jit
@@ -97,8 +140,8 @@ def _fused_compress_norm_rope_insert_kernel(
     b_seq_len,
     b_ready_cache_len,
     b_q_start_loc,
-    req_to_swa_pages,
-    req_to_swa_stride0,
+    swa_write_slots,
+    runtime_write_slots,
     out_slots,
     norm_weight,
     rms_eps,
@@ -116,8 +159,8 @@ def _fused_compress_norm_rope_insert_kernel(
     WINDOW_SIZE: tl.constexpr,
     IS_C4: tl.constexpr,
     IS_PREFILL: tl.constexpr,
-    SWA_PAGE_SIZE: tl.constexpr,
     STATE_RING: tl.constexpr,
+    CHECKPOINT_BASE: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     FP8_MAX: tl.constexpr,
     AMAX_MIN: tl.constexpr,
@@ -164,19 +207,11 @@ def _fused_compress_norm_rope_insert_kernel(
     valid_pos = valid_pos & (~use_current)
     cache_pos = valid_pos
 
+    state_row = req_idx * STATE_RING + gather_pos % STATE_RING
+    state_valid = cache_pos
     if IS_C4:
-        swa_page = tl.load(
-            req_to_swa_pages + req_idx * req_to_swa_stride0 + gather_pos // SWA_PAGE_SIZE,
-            mask=cache_pos,
-            other=-1,
-        ).to(tl.int64)
-        swa_slot = swa_page * SWA_PAGE_SIZE + gather_pos % SWA_PAGE_SIZE
-        state_row = (swa_slot // SWA_PAGE_SIZE) * STATE_RING + (swa_slot % STATE_RING)
-        state_valid = cache_pos & (swa_slot >= 0)
         head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
     else:
-        state_row = req_idx * STATE_RING + gather_pos % STATE_RING
-        state_valid = cache_pos
         head_offset = token_offsets * 0
 
     offs = tl.arange(0, BLOCK)
@@ -237,6 +272,27 @@ def _fused_compress_norm_rope_insert_kernel(
     new_even = even * cos_v - odd * sin_v
     new_odd = odd * cos_v + even * sin_v
     rotated = tl.interleave(new_even, new_odd)
+
+    if IS_C4:
+        _save_c4_checkpoint(
+            kv_score,
+            kv_score_stride0,
+            kv_score_stride1,
+            state_buffer,
+            swa_write_slots,
+            runtime_write_slots,
+            token_idx,
+            req_idx,
+            position,
+            ready_len,
+            q_start,
+            HEAD_DIM,
+            STATE_LAST_DIM,
+            STATE_RING,
+            CHECKPOINT_BASE,
+            IS_PREFILL,
+            BLOCK,
+        )
 
     if IS_IN_INDEXER:
         # indexer-K path: emit the post-rope full HEAD_DIM vector as dense bf16 (token-indexed),

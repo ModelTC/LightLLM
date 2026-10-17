@@ -1,3 +1,4 @@
+from lightllm.common.basemodel.triton_kernel.mhc import hc_expand
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from ..infer_struct import DeepseekV4InferStateInfo
@@ -17,10 +18,11 @@ class DeepseekV4PreLayerInfer(LlamaMultimodalPreLayerInfer):
             input_embdings = super().context_forward(input_ids, infer_state, layer_weight)
         else:
             input_embdings = LlamaPreLayerInfer.context_forward(self, input_ids, infer_state, layer_weight)
-        t, hidden = input_embdings.shape
-        return input_embdings.unsqueeze(1).expand(t, self.hc_mult, hidden).reshape(t, self.hc_mult * hidden)
+        infer_state.mtp_draft_input_hiddens = None
+        return hc_expand(input_embdings, self.hc_mult)
 
     def token_forward(self, input_ids, infer_state: DeepseekV4InferStateInfo, layer_weight):
         input_embdings = super().token_forward(input_ids, infer_state, layer_weight)
-        t, hidden = input_embdings.shape
-        return input_embdings.unsqueeze(1).expand(t, self.hc_mult, hidden).reshape(t, self.hc_mult * hidden)
+        if not infer_state.is_cuda_graph:
+            infer_state.mtp_draft_input_hiddens = None
+        return hc_expand(input_embdings, self.hc_mult)
