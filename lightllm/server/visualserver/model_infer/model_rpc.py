@@ -141,11 +141,7 @@ class VisualModelRpcServer(rpyc.Service):
 
             self._init_taskes()
         except Exception as e:
-            print("#" * 16)
-            print("load model error:", str(e), e, type(e))
-            import traceback
-
-            traceback.print_exc()
+            logger.exception("Model loading failed")
             raise e
 
         set_random_seed(2147483647)
@@ -195,7 +191,7 @@ class VisualModelRpcServer(rpyc.Service):
     def _log_latency(self, image: ImageItem, stage: str):
         latency = time.time() - image.start_time
         if latency > 0.02:
-            logger.info(f"{stage} latency {latency:.4f} seconds for image with md5 {image.md5}")
+            logger.debug(f"{stage} latency {latency:.4f} seconds for image with md5 {image.md5}")
         image.start_time = time.time()
 
     def _init_taskes(self):

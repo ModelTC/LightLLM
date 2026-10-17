@@ -6,7 +6,7 @@ import torch
 import torch.distributed as dist
 from torch.distributed import ProcessGroup
 
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, summarize_exception
 
 logger = init_logger(__name__)
 
@@ -104,7 +104,12 @@ class FlashInferAllReduce:
                 comm_backend=TorchDistBackend(group=self.group),
             )
         except Exception as e:
-            logger.warning("FlashInferAllReduce workspace init failed: %s. Disabling.", e)
+            if self.rank == 0:
+                logger.warning(
+                    "event=allreduce.unavailable backend=flashinfer reason=%r action=disable_backend",
+                    summarize_exception(e),
+                )
+            logger.debug("FlashInfer workspace initialization diagnostics", exc_info=True)
             self.disabled = True
             self._workspace = None
             return False

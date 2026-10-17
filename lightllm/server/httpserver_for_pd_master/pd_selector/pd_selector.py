@@ -5,7 +5,7 @@ from typing import Union, List, Tuple, Dict, Optional
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 
 
 logger = init_logger(__name__)
@@ -108,10 +108,12 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         # 时才返回命中率，避免负载均衡改派节点后误判为高命中。
         selection_extra_info = self.policy.get_estimated_cache_info(p_node, prompt)
 
-        logger.debug(
-            f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "
-            f"d_node={d_node.client_ip_port}, "
-            f"cache_last_insert_time={selection_extra_info.cache_last_insert_time}"
+        log_debug_event(
+            logger,
+            "pd.pair_selected",
+            prefill=p_node.client_ip_port,
+            decode=d_node.client_ip_port,
+            cache_last_insert_time=selection_extra_info.cache_last_insert_time,
         )
 
         return p_node, d_node, selection_extra_info

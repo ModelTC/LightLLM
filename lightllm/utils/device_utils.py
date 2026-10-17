@@ -101,7 +101,7 @@ def is_nvidia():
         and getattr(torch.version, "hip", None) is None
         and not is_musa()
     )
-    logger.info(f"device is_nvidia : {ans}")
+    logger.debug(f"device is_nvidia : {ans}")
     return ans
 
 
@@ -297,12 +297,12 @@ def triton_support_tensor_descriptor() -> bool:
 
         _ = TensorDescriptor
 
-        logger.info("triton support tensor_descriptor")
+        logger.debug("triton support tensor_descriptor")
         return True
     except Exception:
         pass
 
-    logger.info("triton not support tensor_descriptor")
+    logger.debug("triton not support tensor_descriptor")
     return False
 
 

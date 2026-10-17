@@ -431,3 +431,40 @@ def test_pd_stream_validation_returns_bad_request(monkeypatch):
     response = TestClient(app).get("/")
     assert response.status_code == 400
     assert "invalid image tag num" in response.text
+
+
+def test_pd_request_context_isolated_and_reset_on_failure():
+    from lightllm.utils.log_utils import get_http_request_id
+
+    async def run():
+        class ContextManager:
+            args = SimpleNamespace(run_mode="prefill")
+
+            async def generate(self, **kwargs):
+                assert get_http_request_id() in ("client-a", "client-b")
+                expected = get_http_request_id()
+                await asyncio.sleep(0)
+                assert get_http_request_id() == expected
+                if expected == "client-b":
+                    raise RuntimeError("test failure")
+                yield 123, "token", {}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        async def generate(client_id):
+            params = SamplingParams()
+            params.group_request_id = 123
+            await _pd_process_generate(
+                ContextManager(),
+                "prompt",
+                params,
+                None,
+                AsyncMock(),
+                AsyncMock(),
+                asyncio.Event(),
+                http_request_id=client_id,
+            )
+            assert get_http_request_id() == "-"
+
+        await asyncio.gather(generate("client-a"), generate("client-b"))
+        assert get_http_request_id() == "-"
+
+    asyncio.run(run())

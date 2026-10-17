@@ -425,3 +425,21 @@ def test_default_api_and_nested_phase_restore_after_exception():
     assert not Autotuner.is_autotune_warmup()
     assert not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
     assert not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
+
+
+def test_missing_configs_warn_once_and_keep_per_kernel_debug_details(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+
+    logger = Mock()
+    monkeypatch.setattr(autotuner_module, "logger", logger)
+    monkeypatch.setattr(Autotuner, "_defaults_warning_emitted", False)
+    monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG)
+    first, _, _, _ = make_kernel(tmp_path, monkeypatch, "missing_first")
+    second, _, _, _ = make_kernel(tmp_path, monkeypatch, "missing_second")
+    first(8)
+    first(16)
+    second(8)
+    logger.warning.assert_called_once()
+    assert "event=kernel.defaults_used" in logger.warning.call_args.args[0]
+    assert logger.debug.call_count == 2
+    assert {call.args[1] for call in logger.debug.call_args_list} == {"missing_first", "missing_second"}

@@ -4,6 +4,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 import multiprocessing as mp
 import psutil
 from lightllm.utils.log_utils import init_logger
@@ -14,10 +15,90 @@ from lightllm.utils.service_shm_cleanup import start_launcher_shm_cleanup_proces
 logger = init_logger(__name__)
 
 
+class ServiceReadiness:
+    """Log transitions only; steady probes never produce log traffic."""
+
+    def __init__(self, flag, args, address, started):
+        self.flag, self.args, self.address, self.started = flag, args, address, started
+        self.ready = False
+        self.ever_ready = False
+        self.waiting_logged = False
+
+    def observe(self, status):
+        if status == 200:
+            if not self.ready:
+                event = "service.recovered" if self.ever_ready else "service.ready"
+                elapsed = round(time.monotonic() - self.started, 2)
+                duration_key = "uptime_s" if self.ever_ready else "startup_s"
+                fields = {
+                    "event": event,
+                    "run_mode": self.args.run_mode,
+                    "model": self.args.model_name,
+                    "address": self.address,
+                    duration_key: elapsed,
+                }
+                logger.info(
+                    "event=%s role=%s model=%s address=%s %s=%.2f",
+                    event,
+                    self.args.run_mode,
+                    self.args.model_name,
+                    self.address,
+                    duration_key,
+                    elapsed,
+                    extra=fields,
+                )
+                self.flag.set_value(1)
+                self.ready = self.ever_ready = True
+        else:
+            if self.ready:
+                self.flag.set_value(0)
+                self.ready = False
+                logger.warning(
+                    "event=service.unavailable reason=readiness_probe_failed status=%s",
+                    status,
+                    extra={"event": "service.unavailable", "reason": "readiness_probe_failed", "http_status": status},
+                )
+            elif status == 503 and not self.waiting_logged and not self.ever_ready:
+                logger.info(
+                    "event=service.waiting reason=pd_nodes_not_ready",
+                    extra={"event": "service.waiting", "reason": "pd_nodes_not_ready"},
+                )
+                self.waiting_logged = True
+
+
 class SubmoduleManager:
     def __init__(self):
         self.processes = []
         self.process_names = {}
+        self.readiness_stop = threading.Event()
+
+    def start_readiness_monitor(self, http_server_process, args):
+        """Announce readiness after the bound HTTP endpoint and PD topology agree."""
+        import requests
+        from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+        from lightllm.utils.shm_port_args import get_shm_port_args
+
+        ready_flag = SharedInt("service_ready")
+        ready_flag.set_value(0)
+        host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(args.host, args.host)
+        host = f"[{host}]" if ":" in host else host
+        address = f"http://{host}:{get_shm_port_args().port}"
+        started = float(os.getenv("LIGHTLLM_SERVICE_START_TIME", str(time.monotonic())))
+        self.readiness_stop.clear()
+
+        def monitor():
+            state = ServiceReadiness(ready_flag, args, address, started)
+            with requests.Session() as session:
+                session.trust_env = False
+                while not self.readiness_stop.is_set() and http_server_process.poll() is None:
+                    try:
+                        response = session.get(address + "/readiness", timeout=1)
+                        state.observe(response.status_code)
+                    except requests.RequestException:
+                        state.observe(None)
+                    self.readiness_stop.wait(0.5)
+
+        threading.Thread(target=monitor, name="service-readiness", daemon=True).start()
 
     def start_submodule_processes(self, start_funcs=[], start_args=[]):
         assert len(start_funcs) == len(start_args)
@@ -49,7 +130,7 @@ class SubmoduleManager:
                     proc.kill()
                 sys.exit(1)
             else:
-                logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
+                logger.debug("Worker initialized: component=%s", start_funcs[index].__name__)
 
         assert all([proc.is_alive() for proc in processes])
         return managed_processes
@@ -80,6 +161,7 @@ class SubmoduleManager:
     def terminate_all_processes(self):
         from lightllm.utils.envs_utils import get_env_start_args
 
+        self.readiness_stop.set()
         for proc in self.processes:
             if proc.is_running():
                 kill_recursive(proc)
@@ -98,7 +180,7 @@ class SubmoduleManager:
 
             stop_mps()
         if not alive_pids:
-            logger.info("All processes terminated gracefully.")
+            logger.info("event=service.stopped cleanup=complete")
 
     def setup_exit_controller(self):
         """启动 launcher 的独立资源清理进程。
@@ -120,13 +202,13 @@ class SubmoduleManager:
         """在子进程启动完成后安装退出信号处理函数，覆盖启动阶段的处理函数。"""
 
         def signal_handler(sig, _frame):
+            self.readiness_stop.set()
             if sig == signal.SIGINT:
                 logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
                 if http_server_process is not None:
                     kill_recursive(http_server_process)
 
                 self.terminate_all_processes()
-                logger.info("All processes have been forcefully terminated.")
                 sys.exit(0)
 
             if sig == signal.SIGTERM:
@@ -144,16 +226,15 @@ class SubmoduleManager:
                     kill_recursive(http_server_process)
 
             self.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully.")
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGHUP, signal_handler)
 
-        logger.info(f"start process pid {os.getpid()}")
+        logger.debug("Launcher pid=%s", os.getpid())
         if http_server_process is not None:
-            logger.info(f"http server pid {http_server_process.pid}")
+            logger.debug("HTTP server pid=%s", http_server_process.pid)
 
     def supervise_processes(self, http_server_process=None):
         """Watch the HTTP server, when present, and all registered submodules.
@@ -196,6 +277,7 @@ class SubmoduleManager:
 
     def _cleanup_after_process_failure(self, http_server_process):
         """Best-effort cleanup before the launcher exits with a failure."""
+        self.readiness_stop.set()
         if http_server_process is not None and http_server_process.poll() is None:
             try:
                 kill_recursive(http_server_process)
@@ -231,7 +313,7 @@ def start_submodule_processes(start_funcs=[], start_args=[]):
                 proc.kill()
             sys.exit(1)
         else:
-            logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
+            logger.debug("Worker initialized: component=%s", start_funcs[index].__name__)
 
     assert all([proc.is_alive() for proc in processes])
     return
@@ -242,16 +324,16 @@ def kill_recursive(proc):
         parent = psutil.Process(proc.pid)
         children = parent.children(recursive=True)
     except psutil.NoSuchProcess:
-        logger.warning(f"Process {proc.pid} does not exist.")
+        logger.debug(f"Process {proc.pid} does not exist.")
         return
 
     for process in [*reversed(children), parent]:
         try:
-            logger.info(f"Killing process {process.pid}")
+            logger.debug(f"Killing process {process.pid}")
             process.kill()
         except psutil.NoSuchProcess:
             # A concurrent exit must not skip the remaining children or parent.
-            logger.warning(f"Process {process.pid} does not exist.")
+            logger.debug(f"Process {process.pid} does not exist.")
 
 
 process_manager = SubmoduleManager()

@@ -8,6 +8,7 @@ import numpy as np
 
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.httpserver_for_pd_master import manager as pd_master_module
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 
@@ -23,6 +24,7 @@ def _make_manager(monkeypatch):
     mgr.req_id_to_out_inf = {}
     mgr.args = SimpleNamespace(
         disable_pd_master_decode_capacity_limit=True,
+        mtp_step=0,
         reasoning_parser=None,
         enable_rl=False,
         enable_return_routed_experts=False,
@@ -333,7 +335,6 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
 def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
-
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(
@@ -587,7 +588,7 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 @pytest.mark.parametrize(
     "exit_mode, token_count", [("finish", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)]
 )
-def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, token_count):
+def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_count):
     import math
     import time
     from unittest.mock import MagicMock
@@ -599,7 +600,8 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
     params = SamplingParams()
     params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4, group_request_id=80)
     request = SimpleNamespace(headers={"X-Request-Id": "summary-test"}, is_disconnected=lambda: asyncio.sleep(0, False))
-    caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
+    summary = MagicMock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
 
     async def raw_stream(*_args):
         if exit_mode == "empty":
@@ -628,11 +630,14 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
             assert len([result async for result in generator]) == token_count
 
     asyncio.run(run())
-    summaries = [record.getMessage() for record in caplog.records if "out_token_counter:" in record.getMessage()]
+    summaries = summary.call_args_list
     if token_count:
         assert len(summaries) == 1
-        assert "X-Request-Id:summary-test" in summaries[0]
-        assert f"out_token_counter:{token_count}" in summaries[0]
+        assert summaries[0].kwargs["x_request_id"] == "summary-test"
+        assert summaries[0].kwargs["output_tokens"] == token_count
+        assert summaries[0].kwargs["status"] == (
+            "error" if exit_mode == "error" else "abort" if exit_mode == "close" else "completed"
+        )
         manager.first_time_costs.add.assert_called_once()
         manager.per_token_costs.add.assert_called_once()
         assert math.isfinite(manager.per_token_costs.add.call_args.args[0])
@@ -649,7 +654,7 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
 
 
 @pytest.mark.parametrize("late_status", [FinishStatus.NO_FINISH, FinishStatus.FINISHED_PD_DECODE_CAPACITY])
-def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_status):
+def test_pd_stopped_choice_records_segment_summary(monkeypatch, late_status):
     import time
     from unittest.mock import AsyncMock, MagicMock
 
@@ -661,7 +666,8 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
     params = SamplingParams()
     params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
     request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
-    caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
+    summary = MagicMock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
 
     async def raw_stream(_p_node, _d_node, _prompt, sampling_params, *_args):
         metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
@@ -680,9 +686,12 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
             await generator.__anext__()
         assert not manager.active_req_ids
         manager.abort.assert_awaited_once()
-        summaries = [record.getMessage() for record in caplog.records if "out_token_counter:" in record.getMessage()]
+        summaries = summary.call_args_list
         assert len(summaries) == 1
-        assert "lightllm_req_id:1" in summaries[0]
+        assert summaries[0].args[0] == 1
+        assert summaries[0].kwargs["status"] == (
+            "continued" if late_status == FinishStatus.FINISHED_PD_DECODE_CAPACITY else "abort"
+        )
         manager.metric_client.histogram_observe.assert_any_call("lightllm_request_generated_tokens", 2)
 
     asyncio.run(run())

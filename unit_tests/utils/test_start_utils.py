@@ -293,3 +293,30 @@ def test_supervisor_supports_submodule_only_processes(monkeypatch):
 
     assert kill_calls == []
     assert terminate_calls == [True]
+
+
+def test_readiness_waits_for_bound_endpoint_and_pd_topology(monkeypatch):
+    from unittest.mock import Mock
+
+    logger = Mock()
+    monkeypatch.setattr(start_utils, "logger", logger)
+    monkeypatch.setattr(start_utils.time, "monotonic", lambda: 25)
+    flag = Mock()
+    args = SimpleNamespace(run_mode="pd_master", model_name="test-model")
+    state = start_utils.ServiceReadiness(flag, args, "http://127.0.0.1:8000", 10)
+    state.observe(None)
+    state.observe(503)
+    state.observe(503)
+    assert logger.info.call_count == 1
+    flag.set_value.assert_not_called()
+    state.observe(200)
+    state.observe(200)
+    assert logger.info.call_count == 2
+    flag.set_value.assert_called_once_with(1)
+    assert logger.info.call_args.kwargs["extra"]["event"] == "service.ready"
+    state.observe(None)
+    state.observe(None)
+    logger.warning.assert_called_once()
+    assert flag.set_value.call_args.args == (0,)
+    state.observe(200)
+    assert logger.info.call_args.kwargs["extra"]["event"] == "service.recovered"

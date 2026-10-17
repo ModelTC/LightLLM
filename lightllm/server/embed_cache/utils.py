@@ -1,3 +1,7 @@
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
+
 from lightllm.utils.shm_utils import ServiceSharedMemory, get_service_shm_name
 
 
@@ -9,7 +13,7 @@ def create_shm(name, data):
         mem_view = shared_memory.buf
         mem_view[:data_size] = data
     except FileExistsError:
-        print("Warning create shm {} failed because of FileExistsError!".format(name))
+        logger.warning("Shared memory already exists: name=%s", name)
 
 
 def read_shm(name):

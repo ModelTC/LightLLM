@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+from unittest.mock import Mock
 from types import ModuleType, SimpleNamespace
 
 import pytest
@@ -35,7 +36,7 @@ def test_recognizes_neo_interface_without_replacing_regular_fa3(monkeypatch):
 
 
 @pytest.mark.parametrize("interface_kind", ["missing", "regular", "legacy_tag"])
-def test_unavailable_neo_interface_provides_source_install_instructions(monkeypatch, interface_kind):
+def test_unavailable_neo_import_is_silent_and_explicit_use_explains_installation(monkeypatch, interface_kind):
     def regular_attention(q):
         return q
 
@@ -43,12 +44,17 @@ def test_unavailable_neo_interface_provides_source_install_instructions(monkeypa
         return q
 
     attention_func = {"missing": None, "regular": regular_attention, "legacy_tag": legacy_attention}[interface_kind]
-    with pytest.warns(UserWarning, match="Neo FA3 is unavailable") as warnings:
-        module = _load_neo(monkeypatch, attention_func)
+    logger = Mock()
+    monkeypatch.setattr("lightllm.utils.log_utils.init_logger", lambda name: logger)
+    module = _load_neo(monkeypatch, attention_func)
 
     assert not module.HAS_FLASH_ATTN_INTERFACE
     assert module.flash_attn_with_kvcache_neo is None
-    message = str(warnings[0].message)
+    assert not logger.mock_calls
+    with pytest.raises(ImportError) as error:
+        module.require_neo_fa3()
+    message = str(error.value)
+    assert "image_token_end support" in message
     assert "https://github.com/WANDY666/flash-attention.git" in message
     assert "cd flash-attention/hopper" in message
     assert "FLASH_ATTENTION_FORCE_BUILD=TRUE" in message
@@ -117,3 +123,43 @@ def test_prefill_missing_extension_reports_install_instructions(monkeypatch):
     state = neo.NeoFa3PrefillAttState()
     with pytest.raises(ImportError, match="WANDY666/flash-attention"):
         state.prefill_att(None, None, None)
+
+
+@pytest.mark.parametrize("selection", ["triton", "auto", "fa3"])
+def test_neo_selection_only_explains_missing_extension_when_requested(monkeypatch, selection):
+    from lightllm.common.basemodel.attention import create_utils
+
+    monkeypatch.setattr(neo, "HAS_FLASH_ATTN_INTERFACE", False)
+    monkeypatch.setattr(create_utils, "HAS_FLASH_ATTN_INTERFACE", False)
+    monkeypatch.setattr(
+        create_utils,
+        "get_env_start_args",
+        lambda: SimpleNamespace(
+            llm_kv_type="None",
+            llm_prefill_att_backend=[selection],
+        ),
+    )
+    monkeypatch.setattr(
+        create_utils,
+        "neo_data_type_to_backend",
+        {
+            "None": {"triton": create_utils.NeoTritonAttBackend},
+        },
+    )
+    automatic = Mock(return_value=create_utils.NeoTritonAttBackend)
+    logger = Mock()
+    monkeypatch.setattr(create_utils, "_auto_select_backend", automatic)
+    monkeypatch.setattr(create_utils, "logger", logger)
+    if selection == "fa3":
+        with pytest.raises(ImportError, match="WANDY666/flash-attention"):
+            create_utils.get_neo_prefill_att_backend_class()
+        assert not logger.mock_calls
+    else:
+        assert create_utils.get_neo_prefill_att_backend_class() is create_utils.NeoTritonAttBackend
+        if selection == "auto":
+            automatic.assert_called_once()
+            assert logger.info.call_count + logger.debug.call_count == 1
+            assert "backend.fallback" in (logger.info.call_args or logger.debug.call_args).args[0]
+        else:
+            assert not logger.mock_calls
+            automatic.assert_not_called()

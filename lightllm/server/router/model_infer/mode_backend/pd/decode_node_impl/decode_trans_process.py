@@ -1,4 +1,5 @@
 import torch
+import logging
 import time
 import inspect
 import threading
@@ -7,7 +8,7 @@ import torch.multiprocessing as mp
 import queue
 import pickle
 from typing import List, Dict, Union, Optional
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, set_log_context, DebugStatsLogger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import (
     PDChunckedTransTask,
@@ -36,7 +37,7 @@ def start_decode_trans_process(
     proc = mp.Process(target=_init_env, args=(args, device_id, task_in_queue, task_out_queue, up_status_in_queue))
     proc.start()
     assert proc.is_alive()
-    logger.info(f"prefill trans kv process for device: {device_id} started!")
+    logger.info("Decode KV transfer worker started: device=%s", device_id)
     return proc
 
 
@@ -80,6 +81,7 @@ def _init_env(
     try:
         torch.cuda.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
+        set_log_context(component="kv_transfer", device_id=device_id)
 
         task_out_queue.put("proc_start")
 
@@ -104,9 +106,8 @@ def _init_env(
         while True:
             time.sleep(100)
 
-    except Exception as e:
-        logger.exception(str(e))
-        logger.error(f"Fatal error happened in kv trans process: {e}")
+    except Exception:
+        logger.exception("KV transfer worker initialization failed")
         pass
 
 
@@ -249,8 +250,7 @@ class _DecodeTransModule:
             try:
                 notifies_dict = self.transporter.get_new_notifs()
             except BaseException as e:
-                logger.error(f"get new notifies failed: {str(e)}")
-                logger.exception(str(e))
+                logger.exception(f"get new notifies failed: {str(e)}")
                 notifies_dict = {}
 
             if notifies_dict:
@@ -295,8 +295,6 @@ class _DecodeTransModule:
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
                                 self.request_page_task_queue.put(local_trans_task)
-                                if self.args.pd_detail_log:
-                                    logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # This does not necessarily mean the WRITE protocol state is corrupted.
                                 # A common benign case is: decode has already received an abort for this
@@ -323,8 +321,6 @@ class _DecodeTransModule:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
-                                if self.args.pd_detail_log:
-                                    logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -372,8 +368,7 @@ class _DecodeTransModule:
             except BaseException as e:
                 with self.waiting_dict_lock:
                     self.waiting_dict.pop(key, None)
-                logger.error(f"send write ready task to prefill node failed: {trans_task.to_str()}")
-                logger.exception(str(e))
+                logger.exception(f"send write ready task to prefill node failed: {trans_task.to_str()}")
                 self.transporter.remove_remote_agent(peer_name=trans_task.prefill_agent_name)
                 trans_task.error_info = f"send write ready task to prefill node failed: {str(e)}"
                 self.failed_queue.put(trans_task)
@@ -406,15 +401,19 @@ class _DecodeTransModule:
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
+        debug_stats = DebugStatsLogger(logger, "kv.transfer.decode")
         while True:
-            copy_end_event, copy_start_event, trans_task = self.success_queue.get()
+            try:
+                item = self.success_queue.get(timeout=debug_stats.interval)
+            except queue.Empty:
+                debug_stats.flush()
+                continue
+            copy_end_event, copy_start_event, trans_task = item
             trans_task: PDChunckedTransTask = trans_task
             copy_end_event: Optional[torch.cuda.Event] = copy_end_event
             copy_start_event: Optional[torch.cuda.Event] = copy_start_event
-            read_page_gpu_time_ms = -1.0
             if copy_end_event is not None:
                 copy_end_event.synchronize()
-                read_page_gpu_time_ms = copy_start_event.elapsed_time(copy_end_event)
 
             if trans_task.dst_page_index is not None:
                 self.page_index_queue.put(trans_task.dst_page_index)
@@ -425,14 +424,19 @@ class _DecodeTransModule:
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
 
-            if self.args.pd_detail_log:
-                if trans_task.start_trans_time is not None:
-                    logger.debug(
-                        f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
-                        f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
-                    )
-                else:
-                    logger.debug(f"trans task ret success:{ret}")
+            if logger.isEnabledFor(logging.DEBUG):
+                debug_stats.add(
+                    request_id=trans_task.request_id,
+                    pages=1,
+                    kv_tokens_total=trans_task.transfer_kv_num(),
+                    state_pages=int(trans_task.page_kind != "kv"),
+                    read_page_gpu_ms_total=(
+                        copy_start_event.elapsed_time(copy_end_event) if copy_end_event is not None else 0
+                    ),
+                    bytes_total=self.transporter.kv_move_buffer[0].numel()
+                    * self.transporter.kv_move_buffer.element_size(),
+                    task_duration_ms_total=round((time.time() - trans_task.create_time) * 1000, 3),
+                )
 
     @log_exception
     def fail_loop(self):
@@ -449,7 +453,7 @@ class _DecodeTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.warning(f"trans task ret fail:{ret}")
+            logger.error(f"KV transfer failed: {ret}")
 
             if trans_task.error_info is not None:
                 # 提前终结所有有问题的属于同一个请求的任务。

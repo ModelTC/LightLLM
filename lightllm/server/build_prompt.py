@@ -55,16 +55,16 @@ def tokenizer_supports_force_thinking() -> bool:
 
     try:
         ans = "thinking" in tokenizer.chat_template or "enable_thinking" in tokenizer.chat_template
-        logger.debug(f"chat_template: {tokenizer.chat_template}")
-        logger.info(f"tokenizer_supports_force_thinking : {ans}")
+        logger.debug("chat_template chars=%s", len(tokenizer.chat_template))
+        logger.debug(f"tokenizer_supports_force_thinking : {ans}")
         return ans
     except:
         pass
 
     try:
         ans = "thinking" in tokenizer.tokenizer.chat_template or "enable_thinking" in tokenizer.tokenizer.chat_template
-        logger.debug(f"tokenizer.tokenizer.chat_template: {tokenizer.tokenizer.chat_template}")
-        logger.info(f"tokenizer_supports_force_thinking : {ans}")
+        logger.debug("chat_template chars=%s", len(tokenizer.tokenizer.chat_template))
+        logger.debug(f"tokenizer_supports_force_thinking : {ans}")
         return ans
     except:
         pass

@@ -16,7 +16,7 @@ from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from lightllm.server.pd_io_struct import ObjType
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 
 logger = init_logger(__name__)
 
@@ -32,7 +32,8 @@ async def register_and_keep_alive(websocket: WebSocket):
     client_ip, client_port = websocket.client
     logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
     regist_json = json.loads(await websocket.receive_text())
-    logger.info(f"received regist_json {regist_json}")
+    peer = f"{regist_json.get('mode')}@{regist_json.get('client_ip_port')}"
+    logger.debug("PD registration received: peer=%s", peer)
     await g_objs.httpserver_manager.register_pd(regist_json, websocket)
 
     try:
@@ -45,18 +46,17 @@ async def register_and_keep_alive(websocket: WebSocket):
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
     except asyncio.TimeoutError:
-        logger.warning(f"client {regist_json} heartbeat timed out after {heartbeat_timeout_seconds} seconds")
+        logger.warning(f"client {peer} heartbeat timed out after {heartbeat_timeout_seconds} seconds")
         try:
             await websocket.close(code=1011, reason="PD heartbeat timed out")
         except BaseException:
-            logger.debug(f"failed to close timed-out client {regist_json}", exc_info=True)
+            logger.debug(f"failed to close timed-out client {peer}", exc_info=True)
     except WebSocketDisconnect as e:
-        logger.info(f"client {regist_json} disconnected: {str(e)}")
+        logger.info(f"client {peer} disconnected: {str(e)}")
     except BaseException as e:
-        logger.error(f"client {regist_json} has error {str(e)}")
-        logger.exception(str(e))
+        logger.exception(f"client {peer} has error {str(e)}")
     finally:
-        logger.error(f"client {regist_json} removed")
+        logger.info(f"client {peer} removed")
         await g_objs.httpserver_manager.remove_pd(regist_json)
     return
 
@@ -72,9 +72,10 @@ async def kv_move_status(websocket: WebSocket):
         while True:
             data = await websocket.receive_bytes()
             upkv_status = pickle.loads(data)
-            logger.debug(f"received upkv_status {upkv_status} from {(client_ip, client_port)}")
+            log_debug_event(logger, "pd.kv_ready", request_id=upkv_status.group_request_id, peer=client_ip)
             await g_objs.httpserver_manager.update_req_status(upkv_status)
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
-        logger.error(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")
-        logger.exception(str(e))
+    except WebSocketDisconnect:
+        logger.info("KV status connection closed: peer=%s:%s", client_ip, client_port)
+    except Exception as e:
+        logger.exception(f"kv_move_status client {(client_ip, client_port)} has error {str(e)}")
     return

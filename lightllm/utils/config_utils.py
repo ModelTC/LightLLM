@@ -166,16 +166,16 @@ def auto_set_fused_shared_experts(args) -> None:
     """
 
     if args.enable_fused_shared_experts:
-        logger.info("skip auto setting fused shared experts: already enabled")
+        logger.debug("skip auto setting fused shared experts: already enabled")
         return
 
     if args.enable_ep_moe:
-        logger.info("do not enable fused shared experts: EP MoE uses a separate implementation")
+        logger.debug("do not enable fused shared experts: EP MoE uses a separate implementation")
         return
 
     model_dir = args.model_dir
     if not model_dir:
-        logger.info("do not enable fused shared experts: model_dir is empty")
+        logger.debug("do not enable fused shared experts: model_dir is empty")
         return
 
     model_type = get_model_type(model_dir)
@@ -190,11 +190,11 @@ def auto_set_fused_shared_experts(args) -> None:
         "qwen3_5_moe_text",
     }
     if model_type not in supported_model_types:
-        logger.info(f"do not enable fused shared experts: unsupported model_type={model_type}")
+        logger.debug(f"do not enable fused shared experts: unsupported model_type={model_type}")
         return
 
     args.enable_fused_shared_experts = True
-    logger.info(f"auto enable fused shared experts for model_type={model_type}")
+    logger.debug(f"auto enable fused shared experts for model_type={model_type}")
 
 
 def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
@@ -443,7 +443,7 @@ def has_vision_module(model_path: str) -> bool:
         else:
             raise Exception("unknown vision model type")
     except:
-        logger.info(f"model path: {model_path} does not has vision module")
+        logger.debug(f"model path: {model_path} does not has vision module")
         return False
 
 
@@ -466,7 +466,7 @@ def has_audio_module(model_path: str) -> bool:
         else:
             raise Exception("unknown audio model type")
     except:
-        logger.info(f"model path: {model_path} does not has audio module")
+        logger.debug(f"model path: {model_path} does not has audio module")
         return False
 
 
@@ -482,7 +482,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
         else:
             return False
     except:
-        logger.info(f"model path: {model_path} does not has linear hybrid attention")
+        logger.debug(f"model path: {model_path} does not has linear hybrid attention")
         return False
 
 
@@ -587,12 +587,12 @@ def auto_set_response_parsers(args) -> None:
     if args.tool_call_parser is None:
         args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
         if args.tool_call_parser:
-            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+            logger.debug(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
 
     if args.reasoning_parser is None:
         args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
         if args.reasoning_parser:
-            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+            logger.debug(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
 
 
 @lru_cache(maxsize=None)

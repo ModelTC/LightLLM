@@ -1,6 +1,5 @@
 import dataclasses
 import inspect
-import warnings
 
 import torch
 
@@ -19,6 +18,8 @@ _NEO_FA3_INSTALL_HINT = (
 )
 
 
+_NEO_FA3_IMPORT_ERROR = None
+
 try:
     from flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_neo
 
@@ -29,13 +30,20 @@ try:
 
     HAS_FLASH_ATTN_INTERFACE = True
 except ImportError as exc:
-    warnings.warn(
-        f"Neo FA3 is unavailable: {exc}. "
-        "Automatic Neo prefill selection will fall back to Triton. "
-        "To select Triton explicitly, use --llm_prefill_att_backend triton.\n" + _NEO_FA3_INSTALL_HINT
-    )
+    # Optional backend discovery must stay silent in every importing worker.
+    _NEO_FA3_IMPORT_ERROR = str(exc)
     flash_attn_with_kvcache_neo = None
     HAS_FLASH_ATTN_INTERFACE = False
+
+
+def require_neo_fa3():
+    """Explain installation only when the unavailable backend is actually requested."""
+    if not HAS_FLASH_ATTN_INTERFACE:
+        reason = _NEO_FA3_IMPORT_ERROR or "extension unavailable"
+        raise ImportError(
+            f"Neo prefill requires FA3 with image_token_end support: {reason}.\n"
+            "Use --llm_prefill_att_backend triton to select Triton instead.\n" + _NEO_FA3_INSTALL_HINT
+        )
 
 
 class NeoFa3AttBackend(Fa3AttBackend):
@@ -55,8 +63,7 @@ class NeoFa3PrefillAttState(Fa3PrefillAttState):
     ) -> torch.Tensor:
         # neo_chat*: image-token bidirectional attention requires flash_attn_interface
         # (sgl_kernel's flash_attn_with_kvcache does not support image_token_end).
-        if not HAS_FLASH_ATTN_INTERFACE:
-            raise ImportError("Neo prefill requires FA3 with image_token_end support.\n" + _NEO_FA3_INSTALL_HINT)
+        require_neo_fa3()
         if self.infer_state.b_image_token_end is None:
             raise ValueError("Neo prefill requires b_image_token_end to describe image attention spans")
         o = flash_attn_with_kvcache_neo(

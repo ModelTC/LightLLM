@@ -239,7 +239,7 @@ class ShmPortArgs:
                 port = self._alloc_free_port(reserved)
                 ports[name] = port
                 self._save(ports)
-                logger.info(f"ShmPortArgs alloc {name}={port}")
+                logger.debug(f"ShmPortArgs alloc {name}={port}")
                 return port
 
             allocated: List[int] = []
@@ -249,7 +249,7 @@ class ShmPortArgs:
                 allocated.append(port)
             ports[name] = allocated
             self._save(ports)
-            logger.info(f"ShmPortArgs alloc {name}={allocated}")
+            logger.debug(f"ShmPortArgs alloc {name}={allocated}")
             return allocated
 
     @staticmethod

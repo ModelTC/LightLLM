@@ -15,7 +15,13 @@ from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import (
+    init_logger,
+    set_http_request_id,
+    reset_http_request_id,
+    log_debug_event,
+    log_repeated_exception,
+)
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
@@ -48,11 +54,15 @@ async def pd_handle_loop(manager: HttpServerManager, dp_index: Optional[int] = N
         manager.host_ip = manager.args.host
 
     id_to_handle_task: Dict[int, asyncio.Task] = {}
+    previous_master_ids = None
 
     while True:
         try:
             id_to_pd_master_obj = await _get_pd_master_objs(manager.args)
-            logger.info(f"get pd_master_objs {id_to_pd_master_obj}")
+            master_ids = tuple(sorted(id_to_pd_master_obj)) if id_to_pd_master_obj is not None else None
+            if master_ids != previous_master_ids:
+                log_debug_event(logger, "pd.masters_changed", master_ids=master_ids)
+                previous_master_ids = master_ids
 
             if id_to_pd_master_obj is not None:
                 for node_id, pd_master_obj in list(id_to_handle_task.items()):
@@ -95,7 +105,6 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。
                 ping_interval=None,
             ) as websocket:
-
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -112,7 +121,13 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 }
 
                 await websocket.send(json.dumps(regist_json))
-                logger.info(f"Sent registration JSON: {regist_json}")
+                logger.info(
+                    "event=pd.registration_sent role=%s endpoint=%s dp_index=%s",
+                    regist_json["mode"],
+                    regist_json["client_ip_port"],
+                    dp_index,
+                    extra={"event": "pd.registration_sent"},
+                )
 
                 # 转发任务
                 forwarding_tokens_task = asyncio.create_task(
@@ -127,6 +142,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                     obj = pickle.loads(recv_bytes)
                     if obj[0] == ObjType.REQ:
                         prompt, sampling_params, multimodal_params = obj[1]
+                        log_metadata = obj[2] if len(obj) > 2 else {}
                         if dp_index is not None:
                             if sampling_params.suggested_dp_index != -1:
                                 logger.warning(
@@ -148,6 +164,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 forwarding_queue=forwarding_queue,
                                 pd_upload_websocket=websocket,
                                 pd_event=pd_event,
+                                http_request_id=log_metadata.get("http_request_id"),
                             )
                         )
                         generation_tasks[group_req_id] = generation_task
@@ -189,9 +206,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
             logger.warning(f"pd_handle_task {pd_master_obj} cancelled")
             return
 
-        except Exception as e:
-            logger.error("connetion to pd_master has error")
-            logger.exception(str(e))
+        except Exception:
+            log_repeated_exception(logger, "pd.connection_failed", master=pd_master_obj.host_ip_port)
         finally:
             child_tasks = [task for task in (forwarding_tokens_task, heartbeat_task) if task is not None]
             child_tasks.extend(generation_tasks.values())
@@ -247,7 +263,9 @@ async def _pd_process_generate(
     forwarding_queue: AsyncQueue,
     pd_upload_websocket: ClientConnection,
     pd_event: asyncio.Event,
+    http_request_id: Optional[str] = None,
 ):
+    context_token = set_http_request_id(http_request_id or "-")
     try:
         async for sub_req_id, request_output, metadata, finish_status in manager.generate(
             prompt=prompt,
@@ -282,6 +300,8 @@ async def _pd_process_generate(
             )
         except Exception:
             logger.exception(f"report pd node generate error failed, group_request_id: {group_request_id}")
+    finally:
+        reset_http_request_id(context_token)
 
 
 # 转发token的task
@@ -305,7 +325,6 @@ async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
 
 # 获取节点负载信息
 def _get_load_info(dp_index: Optional[int] = None) -> dict:
-
     from lightllm.server.api_http import g_objs
 
     assert g_objs.shared_token_load is not None, "shared_token_load is not initialized"

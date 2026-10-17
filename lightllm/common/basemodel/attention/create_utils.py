@@ -1,7 +1,7 @@
 """Attention backend selection utilities."""
 
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_info_on_leader
 from lightllm.utils.backend_validator import validate
 from typing import Dict
 from .base_att import BaseAttBackend
@@ -13,7 +13,7 @@ from .triton.neo import NeoTritonAttBackend
 from .fa3.fp import Fa3AttBackend
 from .fa3.fp8 import Fp8Fa3AttBackend
 from .fa3.mla import MlaFa3AttBackend
-from .fa3.neo import NeoFa3AttBackend, HAS_FLASH_ATTN_INTERFACE
+from .fa3.neo import NeoFa3AttBackend, HAS_FLASH_ATTN_INTERFACE, require_neo_fa3
 from .flashinfer.fp8 import Fp8FlashInferAttBackend
 from .flashinfer.fp import FlashInferAttBackend
 from .flashinfer.mla import MlaFlashInferAttBackend
@@ -183,6 +183,12 @@ def get_neo_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "tr
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
+        if backend_str == "fa3":
+            require_neo_fa3()
         return neo_data_type_to_backend[llm_dtype][backend_str]
     else:
+        if not HAS_FLASH_ATTN_INTERFACE and "fa3" in priority_list:
+            log_info_on_leader(
+                logger, "event=backend.fallback family=neo requested=auto skipped=fa3 reason=extension_unavailable"
+            )
         return _auto_select_backend(llm_dtype, kv_type_to_backend=neo_data_type_to_backend, priority_list=priority_list)

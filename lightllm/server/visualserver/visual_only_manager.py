@@ -74,7 +74,6 @@ class VisualOnlyManager(rpyc.Service):
             try:
                 uri = f"ws://{args.config_server_host}:{ports.config_server_port}/visual_register"
                 async with websockets.connect(uri, max_queue=(2048 * 1024, 2048 * 1023)) as websocket:
-
                     sock = websocket.transport.get_extra_info("socket")
                     sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -87,19 +86,16 @@ class VisualOnlyManager(rpyc.Service):
                         await websocket.send("heartbeat")
                         await asyncio.sleep(40)
 
-            except Exception as e:
-                logger.error("connetion to config_server has error")
-                logger.exception(str(e))
+            except Exception:
+                logger.exception("connetion to config_server has error")
                 await asyncio.sleep(10)
                 logger.info("reconnection to config_server")
 
     async def wait_to_model_ready(self):
-
         self.model_rpcs: List[List[VisualModelRpcClient]] = [[] for _ in range(self.vit_dp)]
         self.vit_attn_backend = init_vit_att_backend(index=0)
         for dp_rank_id in range(self.vit_dp):
             for tp_rank_id in range(self.vit_tp):
-
                 rpc_model = await start_model_process()
                 self.model_rpcs[dp_rank_id].append(rpc_model)
 

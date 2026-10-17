@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Dict
 from torch import Tensor
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDAgentMetadata
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 
 
 logger = init_logger(__name__)
@@ -17,14 +17,15 @@ try:
     from nixl._api import nixlBind
     from nixl._api import nixl_agent_config
 
-    logger.info("Nixl is available")
+    logger.debug("NIXL is available")
 except ImportError:
-    logger.warning("nixl is not installed, which is required for pd disagreggation!!!")
     NixlWrapper = None
 
 
 class NixlKVTransporter:
     def __init__(self, node_id: int, tp_idx: int, kv_move_buffer: Tensor):
+        if NixlWrapper is None:
+            raise ImportError("pd_trans_mode=nixl requires NIXL; install NIXL or select pd_trans_mode=nccl")
         self.node_id = node_id
         self.tp_idx = tp_idx
         self.capture_telemetry = os.getenv("LIGHTLLM_NIXL_CAPTURE_TELEMETRY", "0").lower() in (
@@ -97,8 +98,13 @@ class NixlKVTransporter:
             )
             remote_agent.page_xfer_handles = kv_page_xfer_handles
 
-            logger.info(
-                f"Added remote agent {peer_name} with mem desc {page_mem_desc} cost time: {time.time() - start_time} s"
+            logger.info("KV peer connected: peer=%s duration_s=%.3f", peer_name, time.time() - start_time)
+            log_debug_event(
+                logger,
+                "kv.peer.descriptor",
+                peer=peer_name,
+                descriptor_type=type(page_mem_desc).__name__,
+                pages=remote_agent.num_pages,
             )
 
             self.remote_agents[remote_agent.agent_name] = remote_agent
@@ -115,13 +121,12 @@ class NixlKVTransporter:
                     if remote_agent.page_xfer_handles is not None:
                         self.nixl_agent.release_dlist_handle(remote_agent.page_xfer_handles)
                     logger.info(f"Removed remote agent {peer_name}, cost time: {time.monotonic() - start_time:.6f} s")
-                except BaseException as e:
-                    logger.error(
+                except BaseException:
+                    logger.exception(
                         f"remove remote agent {peer_name} failed, cost time: {time.monotonic() - start_time:.6f} s"
                     )
-                    logger.exception(str(e))
             else:
-                logger.warning(f"try to remove remote agent, but peer name {peer_name} agent did not exist")
+                logger.debug("KV peer already removed: peer=%s", peer_name)
 
     def send_write_done_task_to_decode_node(self, trans_task: PDChunckedTransTask):
         decode_agent_name = trans_task.decode_agent_name
@@ -213,9 +218,8 @@ class NixlKVTransporter:
                 remote_agent_name=prefill_agent_name,
                 notif_msg=pickle.dumps(new_trans_task),
             )
-        except BaseException as e:
-            logger.error(f"send error info to prefill node failed: {trans_task.to_str()}")
-            logger.exception(str(e))
+        except BaseException:
+            logger.exception(f"send error info to prefill node failed: {trans_task.to_str()}")
             self.remove_remote_agent(peer_name=prefill_agent_name)
         return
 
@@ -239,9 +243,8 @@ class NixlKVTransporter:
                 remote_agent_name=decode_agent_name,
                 notif_msg=pickle.dumps(new_trans_task),
             )
-        except BaseException as e:
-            logger.error(f"send error info to decode node failed: {trans_task.to_str()}")
-            logger.exception(str(e))
+        except BaseException:
+            logger.exception(f"send error info to decode node failed: {trans_task.to_str()}")
             self.remove_remote_agent(peer_name=decode_agent_name)
         return
 

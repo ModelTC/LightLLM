@@ -1,4 +1,5 @@
 import torch
+import logging
 import time
 import inspect
 import threading
@@ -7,7 +8,7 @@ import torch.multiprocessing as mp
 import queue
 import pickle
 from typing import List, Dict, Optional, Union
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, set_log_context, DebugStatsLogger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
@@ -56,6 +57,7 @@ def _init_env(
     try:
         torch.cuda.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
+        set_log_context(component="kv_transfer", device_id=device_id)
         task_out_queue.put("proc_start")
 
         # 从共享内存读取所有rank的mem_manager
@@ -78,9 +80,8 @@ def _init_env(
         while True:
             time.sleep(100)
 
-    except Exception as e:
-        logger.exception(str(e))
-        logger.error(f"Fatal error happened in kv trans process: {e}")
+    except Exception:
+        logger.exception("KV transfer worker initialization failed")
         pass
 
 
@@ -230,13 +231,10 @@ class _PrefillTransModule:
                 with self.waiting_dict_lock:
                     self.waiting_dict[key] = trans_task
                 self.transporter.send_write_request_task_to_decode_node(trans_task)
-                if self.args.pd_detail_log:
-                    logger.debug(f"send WRITE request to decode: {key}")
             except BaseException as e:
                 with self.waiting_dict_lock:
                     self.waiting_dict.pop(key, None)
-                logger.error(f"send WRITE request to decode failed: {trans_task.to_str()}")
-                logger.exception(str(e))
+                logger.exception(f"send WRITE request to decode failed: {trans_task.to_str()}")
                 trans_task.error_info = f"send WRITE request to decode failed: {str(e)}"
                 self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
                 self.failed_queue.put(trans_task)
@@ -249,8 +247,7 @@ class _PrefillTransModule:
             try:
                 notifies_dict = self.transporter.get_new_notifs()
             except BaseException as e:
-                logger.error(f"get new notifies failed: {str(e)}")
-                logger.exception(str(e))
+                logger.exception(f"get new notifies failed: {str(e)}")
                 notifies_dict = {}
 
             if notifies_dict:
@@ -276,12 +273,6 @@ class _PrefillTransModule:
                             if trans_task is not None:
                                 trans_task.dst_page_index = notify_obj.dst_page_index
                                 self.write_peer_kv_queue.put(trans_task)
-                                if self.args.pd_detail_log:
-                                    logger.debug(
-                                        f"recv WRITE ready from decode request_id={trans_task.request_id} "
-                                        f"kv=[{trans_task.start_kv_index},{trans_task.end_kv_index}) "
-                                        f"srcpage={trans_task.src_page_index} dstpage={trans_task.dst_page_index}"
-                                    )
                             else:
                                 logger.warning(
                                     f"can not find pending WRITE request for ready notify: {notify_obj.to_str()}"
@@ -325,12 +316,9 @@ class _PrefillTransModule:
                 trans_task.start_trans_time = time.time()
                 with self.waiting_dict_lock:
                     self.waiting_dict[trans_task.get_key()] = trans_task
-                if self.args.pd_detail_log:
-                    logger.debug(f"start WRITE to decode node: {trans_task.to_str()}")
                 continue
             except BaseException as e:
-                logger.error(f"write_blocks_paged failed: {trans_task.to_str()}")
-                logger.exception(str(e))
+                logger.exception(f"write_blocks_paged failed: {trans_task.to_str()}")
                 self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
                 trans_task.error_info = f"write_blocks_paged failed: {str(e)}"
                 self.failed_queue.put(trans_task)
@@ -372,23 +360,16 @@ class _PrefillTransModule:
                     completed_task = self.waiting_dict.pop(trans_task.get_key(), None)
                     if completed_task is None:
                         continue
-                    if self.transporter.capture_telemetry:
+                    if self.transporter.capture_telemetry and logger.isEnabledFor(logging.DEBUG):
                         try:
                             telem = self.transporter.nixl_agent.get_xfer_telemetry(completed_task.xfer_handle)
-                            total_us = telem.xferDuration
-                            post_us = telem.postDuration
-                            backend_us = telem.xferDuration - telem.postDuration
-                            nixl_backend = self.transporter.nixl_agent.query_xfer_backend(completed_task.xfer_handle)
-                            if self.args.pd_detail_log:
-                                logger.debug(
-                                    f"write trans task request_id={completed_task.request_id} "
-                                    f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
-                                    f"src_page={completed_task.src_page_index} "
-                                    f"dst_page={completed_task.dst_page_index} "
-                                    f"xfer time: {total_us:.3f} us, "
-                                    f"post time: {post_us:.3f} us, backend time: {backend_us:.3f} us, "
-                                    f"nixl_backend: {nixl_backend}, total_bytes: {telem.totalBytes}"
-                                )
+                            if not hasattr(self, "_debug_telemetry"):
+                                self._debug_telemetry = DebugStatsLogger(logger, "kv.transfer.telemetry")
+                            self._debug_telemetry.add(
+                                bytes_total=telem.totalBytes,
+                                transfer_us_total=telem.xferDuration,
+                                post_us_total=telem.postDuration,
+                            )
                         except BaseException:
                             logger.exception(f"get transfer telemetry failed: {completed_task.to_str()}")
 
@@ -400,13 +381,6 @@ class _PrefillTransModule:
                         self.failed_queue.put(completed_task)
                         continue
 
-                    if self.args.pd_detail_log:
-                        logger.debug(
-                            f"send WRITE done nixl notify "
-                            f"request_id={completed_task.request_id} "
-                            f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
-                            f"src_page={completed_task.src_page_index} dst_page={completed_task.dst_page_index}"
-                        )
                     self.success_queue.put(completed_task)
                 elif ret == "ERR":
                     failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
@@ -422,8 +396,16 @@ class _PrefillTransModule:
     @log_exception
     def success_loop(self):
         torch.cuda.set_device(self.device_id)
+        debug_stats = DebugStatsLogger(logger, "kv.transfer.prefill")
         while True:
-            trans_task: PDChunckedTransTask = self.success_queue.get()
+            try:
+                item = self.success_queue.get(timeout=debug_stats.interval)
+            except queue.Empty:
+                debug_stats.flush()
+                if hasattr(self, "_debug_telemetry"):
+                    self._debug_telemetry.flush()
+                continue
+            trans_task: PDChunckedTransTask = item
             # 写回后，回收页面
             if trans_task.src_page_index is not None:
                 self.page_index_queue.put(trans_task.src_page_index)
@@ -435,11 +417,16 @@ class _PrefillTransModule:
             ret.first_gen_token_logprob = None
             self.task_out_queue.put(ret)
 
-            if self.args.pd_detail_log:
-                if trans_task.start_trans_time is not None:
-                    logger.debug(f"trans task ret success:{ret} cost time: {trans_task.transfer_time()}s")
-                else:
-                    logger.debug(f"trans task ret success:{ret}")
+            if logger.isEnabledFor(logging.DEBUG):
+                debug_stats.add(
+                    request_id=trans_task.request_id,
+                    pages=1,
+                    kv_tokens_total=trans_task.transfer_kv_num(),
+                    state_pages=int(trans_task.page_kind != "kv"),
+                    bytes_total=self.transporter.kv_move_buffer[0].numel()
+                    * self.transporter.kv_move_buffer.element_size(),
+                    task_duration_ms_total=round((time.time() - trans_task.create_time) * 1000, 3),
+                )
 
     @log_exception
     def fail_loop(self):
@@ -455,7 +442,7 @@ class _PrefillTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.warning(f"trans task ret fail:{ret}")
+            logger.error(f"KV transfer failed: {ret}")
 
             if trans_task.error_info is not None:
                 self._abort(request_id=trans_task.request_id, error_info=trans_task.error_info)
