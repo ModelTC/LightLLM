@@ -12,20 +12,20 @@ def _add_ape_to_kv_score_kernel(
     ape,
     ape_stride0,
     positions,
-    STATE_WIDTH: tl.constexpr,
+    CANDIDATE_DIM: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     offs = tl.arange(0, BLOCK)
-    mask = offs < STATE_WIDTH
+    mask = offs < CANDIDATE_DIM
 
     position = tl.load(positions + token_idx)
     ape_row = position % COMPRESS_RATIO
-    score = tl.load(kv_score + token_idx * kv_score_stride0 + (STATE_WIDTH + offs) * kv_score_stride1, mask=mask)
+    score = tl.load(kv_score + token_idx * kv_score_stride0 + (CANDIDATE_DIM + offs) * kv_score_stride1, mask=mask)
     ape_value = tl.load(ape + ape_row * ape_stride0 + offs, mask=mask)
     tl.store(
-        kv_score + token_idx * kv_score_stride0 + (STATE_WIDTH + offs) * kv_score_stride1,
+        kv_score + token_idx * kv_score_stride0 + (CANDIDATE_DIM + offs) * kv_score_stride1,
         score + ape_value,
         mask=mask,
     )
@@ -42,10 +42,10 @@ def _save_partial_states_kernel(
     b_req_idx,
     b_seq_len,
     state_buffer,
-    STATE_WIDTH: tl.constexpr,
-    STATE_LAST_DIM: tl.constexpr,
+    CANDIDATE_DIM: tl.constexpr,
+    STATE_DIM: tl.constexpr,
     IS_PREFILL: tl.constexpr,
-    STATE_RING: tl.constexpr,
+    STATE_TOKENS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -53,18 +53,18 @@ def _save_partial_states_kernel(
     position = tl.load(positions + token_idx)
     seq_len = tl.load(b_seq_len + batch_idx)
 
-    if position + STATE_RING < seq_len:
+    if position + STATE_TOKENS < seq_len:
         return
     req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
-    state_row = req_idx * STATE_RING + position % STATE_RING
+    state_slot = req_idx * STATE_TOKENS + position % STATE_TOKENS
 
     offs = tl.arange(0, BLOCK)
-    mask = offs < STATE_WIDTH
+    mask = offs < CANDIDATE_DIM
     kv = tl.load(kv_score + token_idx * kv_score_stride0 + offs * kv_score_stride1, mask=mask)
-    score = tl.load(kv_score + token_idx * kv_score_stride0 + (STATE_WIDTH + offs) * kv_score_stride1, mask=mask)
-    state_base = state_buffer + state_row * STATE_LAST_DIM
+    score = tl.load(kv_score + token_idx * kv_score_stride0 + (CANDIDATE_DIM + offs) * kv_score_stride1, mask=mask)
+    state_base = state_buffer + state_slot * STATE_DIM
     tl.store(state_base + offs, kv, mask=mask)
-    tl.store(state_base + STATE_WIDTH + offs, score, mask=mask)
+    tl.store(state_base + CANDIDATE_DIM + offs, score, mask=mask)
     return
 
 
@@ -74,57 +74,48 @@ def _save_c4_checkpoint(
     kv_score_stride0,
     kv_score_stride1,
     state_buffer,
-    swa_write_slots,
-    runtime_write_slots,
+    checkpoint_buffer,
+    checkpoint_offsets,
     token_idx,
     req_idx,
     position,
     ready_len,
     q_start,
     HEAD_DIM: tl.constexpr,
-    STATE_LAST_DIM: tl.constexpr,
-    STATE_RING: tl.constexpr,
-    CHECKPOINT_BASE: tl.constexpr,
-    IS_PREFILL: tl.constexpr,
+    STATE_DIM: tl.constexpr,
+    STATE_TOKENS: tl.constexpr,
+    COMPRESS_RATIO: tl.constexpr,
+    CHECKPOINT_TOKENS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    # Capture the original tail before _save_partial_states replaces the request
-    # ring. This also preserves checkpoints in the middle of a long prefill.
-    if (position + 1) % 256 == 0:
-        rows = tl.arange(0, 4)
-        positions = position - 3 + rows
-        current = positions >= ready_len
-        raw_rows = q_start + positions - ready_len
-        old_rows = req_idx * STATE_RING + positions % STATE_RING
-        page = tl.load(swa_write_slots + token_idx).to(tl.int64) // 128
-        target_rows = CHECKPOINT_BASE + page * 4 + rows
-        if IS_PREFILL:
-            runtime_slot = tl.load(runtime_write_slots + token_idx).to(tl.int64)
-            runtime_rows = CHECKPOINT_BASE + runtime_slot // 128 * 4 + rows
-        cols = tl.arange(0, BLOCK)
+    # Capture each prefill boundary before replacing the previous request tail.
+    if (position + 1) % CHECKPOINT_TOKENS == 0:
+        token_offsets = tl.arange(0, COMPRESS_RATIO)
+        positions = position - COMPRESS_RATIO + 1 + token_offsets
+        from_chunk = positions >= ready_len
+        chunk_tokens = q_start + positions - ready_len
+        state_slots = req_idx * STATE_TOKENS + positions % STATE_TOKENS
+        checkpoint = tl.load(checkpoint_offsets + req_idx) + (position + 1) // CHECKPOINT_TOKENS
+        checkpoint_slots = checkpoint * COMPRESS_RATIO + token_offsets
+        features = tl.arange(0, BLOCK)
         for part in tl.static_range(4):
-            offsets = part * HEAD_DIM + cols
-            valid = cols < HEAD_DIM
-            raw = tl.load(
-                kv_score + raw_rows[:, None] * kv_score_stride0 + offsets[None, :] * kv_score_stride1,
-                mask=current[:, None] & valid[None, :],
+            offsets = part * HEAD_DIM + features
+            valid = features < HEAD_DIM
+            current = tl.load(
+                kv_score + chunk_tokens[:, None] * kv_score_stride0 + offsets[None, :] * kv_score_stride1,
+                mask=from_chunk[:, None] & valid[None, :],
                 other=0.0,
             )
-            old = tl.load(
-                state_buffer + old_rows[:, None] * STATE_LAST_DIM + offsets[None, :],
-                mask=(~current[:, None]) & valid[None, :],
+            previous = tl.load(
+                state_buffer + state_slots[:, None] * STATE_DIM + offsets[None, :],
+                mask=(~from_chunk[:, None]) & valid[None, :],
                 other=0.0,
             )
-            values = tl.where(current[:, None], raw, old)
             tl.store(
-                state_buffer + target_rows[:, None] * STATE_LAST_DIM + offsets[None, :], values, mask=valid[None, :]
+                checkpoint_buffer + checkpoint_slots[:, None] * STATE_DIM + offsets[None, :],
+                tl.where(from_chunk[:, None], current, previous),
+                mask=valid[None, :],
             )
-            if IS_PREFILL:
-                tl.store(
-                    state_buffer + runtime_rows[:, None] * STATE_LAST_DIM + offsets[None, :],
-                    values,
-                    mask=valid[None, :] & (runtime_slot >= 0),
-                )
 
 
 @triton.jit
@@ -140,8 +131,8 @@ def _fused_compress_norm_rope_insert_kernel(
     b_seq_len,
     b_ready_cache_len,
     b_q_start_loc,
-    swa_write_slots,
-    runtime_write_slots,
+    checkpoint_buffer,
+    checkpoint_offsets,
     out_slots,
     norm_weight,
     rms_eps,
@@ -153,14 +144,15 @@ def _fused_compress_norm_rope_insert_kernel(
     sin_stride1,
     out_buffer,
     HEAD_DIM: tl.constexpr,
-    STATE_WIDTH: tl.constexpr,
-    STATE_LAST_DIM: tl.constexpr,
+    CANDIDATE_DIM: tl.constexpr,
+    STATE_DIM: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     WINDOW_SIZE: tl.constexpr,
     IS_C4: tl.constexpr,
     IS_PREFILL: tl.constexpr,
-    STATE_RING: tl.constexpr,
-    CHECKPOINT_BASE: tl.constexpr,
+    STATE_TOKENS: tl.constexpr,
+    CHECKPOINT_TOKENS: tl.constexpr,
+    HOLD_REQ: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     FP8_MAX: tl.constexpr,
     AMAX_MIN: tl.constexpr,
@@ -207,7 +199,7 @@ def _fused_compress_norm_rope_insert_kernel(
     valid_pos = valid_pos & (~use_current)
     cache_pos = valid_pos
 
-    state_row = req_idx * STATE_RING + gather_pos % STATE_RING
+    state_slot = req_idx * STATE_TOKENS + gather_pos % STATE_TOKENS
     state_valid = cache_pos
     if IS_C4:
         head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
@@ -228,19 +220,19 @@ def _fused_compress_norm_rope_insert_kernel(
         other=0.0,
     )
     cur_score = tl.load(
-        cur_ptrs + STATE_WIDTH * kv_score_stride1,
+        cur_ptrs + CANDIDATE_DIM * kv_score_stride1,
         mask=current_mask,
         other=float("-inf"),
     )
 
-    state_ptrs = state_buffer + state_row[:, None] * STATE_LAST_DIM + head_offset[:, None] + offs[None, :]
+    state_ptrs = state_buffer + state_slot[:, None] * STATE_DIM + head_offset[:, None] + offs[None, :]
     state_kv = tl.load(
         state_ptrs,
         mask=state_mask,
         other=0.0,
     )
     state_score = tl.load(
-        state_ptrs + STATE_WIDTH,
+        state_ptrs + CANDIDATE_DIM,
         mask=state_mask,
         other=float("-inf"),
     )
@@ -273,24 +265,24 @@ def _fused_compress_norm_rope_insert_kernel(
     new_odd = odd * cos_v + even * sin_v
     rotated = tl.interleave(new_even, new_odd)
 
-    if IS_C4:
+    if IS_C4 and IS_PREFILL and req_idx != HOLD_REQ:
         _save_c4_checkpoint(
             kv_score,
             kv_score_stride0,
             kv_score_stride1,
             state_buffer,
-            swa_write_slots,
-            runtime_write_slots,
+            checkpoint_buffer,
+            checkpoint_offsets,
             token_idx,
             req_idx,
             position,
             ready_len,
             q_start,
             HEAD_DIM,
-            STATE_LAST_DIM,
-            STATE_RING,
-            CHECKPOINT_BASE,
-            IS_PREFILL,
+            STATE_DIM,
+            STATE_TOKENS,
+            COMPRESS_RATIO,
+            CHECKPOINT_TOKENS,
             BLOCK,
         )
 
@@ -338,7 +330,7 @@ def apply_ape(
     ape: torch.Tensor,
     compress_ratio: int,
 ):
-    state_width = kv_score.shape[-1] // 2
+    candidate_dim = kv_score.shape[-1] // 2
     _add_ape_to_kv_score_kernel[(kv_score.shape[0],)](
         kv_score,
         kv_score.stride(0),
@@ -346,9 +338,9 @@ def apply_ape(
         ape,
         ape.stride(0),
         position_ids,
-        STATE_WIDTH=state_width,
+        CANDIDATE_DIM=candidate_dim,
         COMPRESS_RATIO=compress_ratio,
-        BLOCK=triton.next_power_of_2(state_width),
+        BLOCK=triton.next_power_of_2(candidate_dim),
         num_warps=4,
     )
     return

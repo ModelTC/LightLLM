@@ -3,30 +3,28 @@
 import triton
 import triton.language as tl
 
-from lightllm.common.state_cache_manager.deepseek4 import (
-    DSV4_CACHE_BLOCK_SIZE,
-    DSV4_C4_PAGE_BYTES,
-    DSV4_C4_INDEXER_PAGE_BYTES,
-    DSV4_C128_PAGE_BYTES,
-)
 
-
-def view_compressed_kv(buffer, ratio):
-    if buffer is None:
-        return None
-    pages = buffer.view(-1, DSV4_CACHE_BLOCK_SIZE * buffer.shape[-1])
-    width = DSV4_C4_PAGE_BYTES if ratio == 4 else DSV4_C128_PAGE_BYTES
-    return pages[:, :width]
+def view_swa_kv(buffer, config):
+    return buffer.view(-1, config.packed_kv_bytes(config.swa_token_alignment))
 
 
 def get_compressed_kv_buffer(manager, layer):
-    return view_compressed_kv(manager.get_att_input_params(layer), manager.cache_config.compress_rates[layer])
+    buffer = manager.get_att_input_params(layer)
+    if buffer is None:
+        return None
+    config = manager.cache_config
+    ratio = config.compress_rates[layer]
+    storage = buffer.view(-1, config.history_token_alignment * buffer.shape[-1])
+    return storage[:, : config.packed_kv_bytes(config.history_token_alignment // ratio)]
 
 
 def get_indexer_k_buffer(manager, layer):
+    config = manager.cache_config
     buffer = manager.get_att_input_params(layer)
-    pages = buffer.view(-1, DSV4_CACHE_BLOCK_SIZE * buffer.shape[-1])
-    return pages[:, DSV4_C4_PAGE_BYTES : DSV4_C4_PAGE_BYTES + DSV4_C4_INDEXER_PAGE_BYTES]
+    storage = buffer.view(-1, config.history_token_alignment * buffer.shape[-1])
+    entries = config.history_token_alignment // config.short_compress_ratio
+    begin = config.packed_kv_bytes(entries)
+    return storage[:, begin : begin + entries * config.indexer_bytes]
 
 
 @triton.jit
@@ -48,25 +46,25 @@ def _copy_tokens(
     BLOCK_WIDTH: tl.constexpr,
 ):
     storage = storage.to(tl.pointer_type(tl.uint8))
-    rows = tl.program_id(0) * 32 + tl.arange(0, 32)
-    slot = tl.load(indexes + rows, rows < TOKEN_NUM, -1).to(tl.int64)
+    tokens = tl.program_id(0) * 32 + tl.arange(0, 32)
+    slot = tl.load(indexes + tokens, tokens < TOKEN_NUM, -1).to(tl.int64)
     if ROUND_TAIL:
-        # Packed page tails include scales for earlier rows. PD also carries
+        # Packed page tails include scales for earlier tokens. PD also carries
         # the unused token slots of its final allocated compression block.
         last = tl.load(indexes + TOKEN_NUM - 1).to(tl.int64)
-        slot = tl.where(rows < TOKEN_NUM, slot, last + rows - TOKEN_NUM + 1)
-    page = rows // PAGE_TOKENS
-    valid = (rows < COPY_NUM) & (slot >= 0)
+        slot = tl.where(tokens < TOKEN_NUM, slot, last + tokens - TOKEN_NUM + 1)
+    page = tokens // PAGE_TOKENS
+    valid = (tokens < COPY_NUM) & (slot >= 0)
     if HAS_READIES:
-        valid &= tl.load(readies + page, rows < COPY_NUM, 1) == 0
-    cpu_page = tl.load(page_ids + page, rows < COPY_NUM, 0).to(tl.int64)
+        valid &= tl.load(readies + page, tokens < COPY_NUM, 1) == 0
+    cpu_page = tl.load(page_ids + page, tokens < COPY_NUM, 0).to(tl.int64)
     columns = tl.arange(0, BLOCK_WIDTH)
     gpu = storage + slot[:, None] * WIDTH + columns[None, :]
     cpu = (
         pages
         + cpu_page[:, None] * PAGE_STRIDE
         + layer_offset
-        + (rows % PAGE_TOKENS)[:, None] * WIDTH
+        + (tokens % PAGE_TOKENS)[:, None] * WIDTH
         + columns[None, :]
     )
     mask = valid[:, None] & (columns[None, :] < WIDTH)
@@ -83,7 +81,10 @@ def copy_history_pages(
         return
     page_tokens = manager.cache_config.cpu_cache_token_page_size if page_tokens is None else page_tokens
     copy_num = (
-        triton.cdiv(indexes.numel(), DSV4_CACHE_BLOCK_SIZE) * DSV4_CACHE_BLOCK_SIZE if round_tail else indexes.numel()
+        triton.cdiv(indexes.numel(), manager.cache_config.history_token_alignment)
+        * manager.cache_config.history_token_alignment
+        if round_tail
+        else indexes.numel()
     )
     offset = 0
     for buffer in manager.kv_buffer:

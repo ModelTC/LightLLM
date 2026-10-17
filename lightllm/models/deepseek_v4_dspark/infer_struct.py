@@ -1,6 +1,3 @@
-from lightllm.common.state_cache_manager.deepseek4 import (
-    DSV4_SWA_PAGE_SIZE,
-)
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_index import (
     build_dspark_swa_index,
@@ -33,7 +30,6 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
             swa_write_slots=self.dsv4_swa_write_slots,
             window=model.config["sliding_window"],
             block_size=model.block_size,
-            page_size=DSV4_SWA_PAGE_SIZE,
             hold_req_id=self.req_manager.HOLD_REQUEST_ID,
             hold_swa_slot=self.req_manager.HOLD_SWA_SLOT,
         )

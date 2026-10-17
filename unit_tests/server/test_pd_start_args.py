@@ -127,6 +127,8 @@ def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_typ
                 "num_hidden_layers": 2,
                 "head_dim": 512,
                 "index_head_dim": 128,
+                "qk_rope_head_dim": 64,
+                "sliding_window": 128,
                 "compress_ratios": [4, 128],
             }
         )

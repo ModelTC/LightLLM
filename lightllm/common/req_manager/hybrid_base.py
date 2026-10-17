@@ -1,5 +1,5 @@
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, List, Optional
+from typing import TYPE_CHECKING, List
 
 import torch
 
@@ -39,16 +39,16 @@ class HybridAttentionReqManager(ReqManager, ABC):
     def init_hybrid_attention_state(self, req: "InferReq"):
         """无前缀缓存命中时，初始化已分配请求槽位的 GPU 运行态。"""
 
-    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq", checkpoint_len: Optional[int] = None):
+    def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
         """将指定大页槽位的 CPU checkpoint 恢复到请求 GPU 运行态。"""
-        self.restore_state(req, self.big_page_buffers, big_page_buffer_idx, checkpoint_len)
+        self.restore_state(req, self.big_page_buffers, big_page_buffer_idx)
 
-    def restore_small_page_state(self, req: "InferReq", checkpoint_len: Optional[int] = None):
+    def restore_small_page_state(self, req: "InferReq"):
         """将 req.shared_kv_node 对应的小页 checkpoint 恢复到请求 GPU 运行态。"""
-        self.restore_state(req, self.small_page_buffers, req.shared_kv_node.small_page_buffer_idx, checkpoint_len)
+        self.restore_state(req, self.small_page_buffers, req.shared_kv_node.small_page_buffer_idx)
 
     @abstractmethod
-    def restore_state(self, req: "InferReq", state_cache_manager, buffer_idx: int, checkpoint_len: int):
+    def restore_state(self, req: "InferReq", state_cache_manager, buffer_idx: int):
         """CPU checkpoint → 请求 GPU 运行态；大小页共用，不负责前缀匹配或 full KV 索引恢复。"""
 
     def save_big_page_states(

@@ -66,12 +66,12 @@ def _launch_subprocesses(args: StartArgs):
 
     model_type = get_model_type(args.model_dir)
     if model_type == "deepseek_v4":
-        from lightllm.common.state_cache_manager.deepseek4 import DSV4_CACHE_BLOCK_SIZE
+        from lightllm.common.state_cache_manager.deepseek4 import DSV4_HISTORY_TOKEN_ALIGNMENT
 
         if args.page_size == 1:
-            args.page_size = DSV4_CACHE_BLOCK_SIZE
-        if args.page_size <= 0 or args.page_size % DSV4_CACHE_BLOCK_SIZE:
-            raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_CACHE_BLOCK_SIZE}")
+            args.page_size = DSV4_HISTORY_TOKEN_ALIGNMENT
+        if args.page_size <= 0 or args.page_size % DSV4_HISTORY_TOKEN_ALIGNMENT:
+            raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_HISTORY_TOKEN_ALIGNMENT}")
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:

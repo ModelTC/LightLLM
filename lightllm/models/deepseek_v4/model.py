@@ -110,6 +110,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             self.config["head_dim"],
             self.config["index_head_dim"],
             sliding_window=self.config["sliding_window"],
+            rope_head_dim=self.config["qk_rope_head_dim"],
         )
         self.req_manager = DeepseekV4ReqManager(
             self.max_req_num,

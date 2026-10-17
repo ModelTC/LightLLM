@@ -723,7 +723,7 @@ class InferReq:
                     assert self.tail_small_page_buffer_id is None
                     # 恢复 hybrid checkpoint
                     g_infer_context.req_manager.restore_big_page_state(
-                        big_page_buffer_idx=share_node.big_page_buffer_idx, req=self, checkpoint_len=ready_cache_len
+                        big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
                     )
                 else:
                     # 小页匹配
@@ -739,7 +739,6 @@ class InferReq:
                         # 恢复 hybrid checkpoint
                         g_infer_context.req_manager.restore_small_page_state(
                             req=self,
-                            checkpoint_len=ready_cache_len,
                         )
                     else:
                         # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
@@ -770,10 +769,10 @@ class InferReq:
                                 destination_indexes=tail_mems,
                             )
 
+                            self.cur_kv_len = int(shared_kv_len)  # Restore state at the matched token position.
                             self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
                             g_infer_context.req_manager.restore_small_page_state(
                                 req=self,
-                                checkpoint_len=shared_kv_len,
                             )
                             self.shared_kv_node = None
 
@@ -798,9 +797,7 @@ class InferReq:
                                 assert self.tail_small_page_buffer_id is None
                                 # 恢复 hybrid checkpoint
                                 g_infer_context.req_manager.restore_big_page_state(
-                                    big_page_buffer_idx=share_node.big_page_buffer_idx,
-                                    req=self,
-                                    checkpoint_len=ready_cache_len,
+                                    big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
                                 )
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len

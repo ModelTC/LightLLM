@@ -67,7 +67,7 @@ def destindex_copy_indexer_k_dsv4(
     seq_len = mem_index.shape[0]
     if seq_len == 0:
         return
-    head_dim = 128
+    head_dim = indexer_k.shape[-1]
 
     indexer_k = indexer_k.reshape(-1, head_dim)
     bytes_per_page = indexer_k_cache.stride(0)

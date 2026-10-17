@@ -141,7 +141,8 @@ class DPKVSharedMoudle:
                 dist.barrier(group=self.backend.node_nccl_group)
 
         for trans_task in trans_tasks:
-            trans_task.req.cur_kv_len += len(trans_task.mem_indexes)
+            if not self.backend.is_hybrid_att_model:
+                trans_task.req.cur_kv_len += len(trans_task.mem_indexes)
             assert trans_task.req.cur_kv_len <= trans_task.req.hold_kv_len
             if self.backend.is_master_in_dp:
                 trans_task.req.shm_req.shm_cur_kv_len = trans_task.req.cur_kv_len
@@ -224,7 +225,8 @@ def transfer_hybrid_checkpoints(backend, trans_tasks):
                     req.hybrid_len_to_big_page_id[length] = index
                 for tensor in snapshot:
                     dist.recv(tensor, src=peer, group=group)
-                requests.restore_state(req, checkpoint, 0, checkpoint_len=end)
+                req.cur_kv_len = end
+                requests.restore_state(req, checkpoint, 0)
                 if end == req.hybrid_cache_len and end % big_tokens:
                     backend.radix_cache.free_one_small_page_buffer()
                     small = backend.small_page_buffers

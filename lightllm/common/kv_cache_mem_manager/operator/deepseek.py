@@ -185,4 +185,4 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
                     requests.small_page_buffers.buffer[tail].copy_(pages[page_ids[-1], checkpoint_offset:])
         # The common loader keeps these CPU pages referenced until its stream sync.
         checkpoint = manager.big_page_buffers.view(pages[page_ids[-1], checkpoint_offset:])
-        requests.restore_state_from_tensors(req, checkpoint, req.cur_kv_len)
+        requests.restore_state_from_tensors(req, checkpoint)

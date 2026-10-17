@@ -3,12 +3,13 @@ import os
 
 import torch
 
-from lightllm.common.state_cache_manager.deepseek4 import DSV4_CACHE_BLOCK_SIZE
+from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 from lightllm.utils.envs_utils import get_env_start_args
 
 
 C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
 C4_LOGITS_ALIGNMENT = 256
+SPARSE_INDEX_ALIGNMENT = 128
 
 
 def compressed_kv_capacity(max_kv_seq_len: int, compress_ratio: int) -> int:
@@ -26,12 +27,16 @@ class DeepseekV4C4PrefillWorkspace:
         max_request_num: int,
         index_n_heads: int,
         index_head_dim: int,
+        cache_config: DeepseekV4CacheConfig,
     ):
         self.token_capacity = int(token_capacity)
         self.max_request_num = int(max_request_num)
         self.index_n_heads = int(index_n_heads)
         self.index_head_dim = int(index_head_dim)
-        self.max_page_cap = compressed_kv_capacity(max_seq_length, 4) // (DSV4_CACHE_BLOCK_SIZE // 4)
+        ratio = cache_config.short_compress_ratio
+        self.max_page_cap = compressed_kv_capacity(max_seq_length, ratio) // (
+            cache_config.history_token_alignment // ratio
+        )
 
         max_indexer_k_phase = self.token_capacity * self.index_head_dim * (4 * 4 + 2 + 2)
         max_indexer_q_phase = self.token_capacity * self.index_n_heads * (self.index_head_dim * 2 + 2)
@@ -114,9 +119,12 @@ class DeepseekV4Workspace:
             # FlashMLA sparse decode requires the physical top-k width to be block aligned.
             # 128 covers both supported padded Q-head configurations; swa_lengths keeps
             # the actual number of visible history + draft-block entries.
-            self.swa_capacity = max(self.swa_capacity, ((dspark_width + 127) // 128) * 128)
+            self.swa_capacity = max(
+                self.swa_capacity,
+                ((dspark_width + SPARSE_INDEX_ALIGNMENT - 1) // SPARSE_INDEX_ALIGNMENT) * SPARSE_INDEX_ALIGNMENT,
+            )
         self.index_topk = int(model.config["index_topk"])
-        self.c128_cap = compressed_kv_capacity(model.max_seq_length, 128)
+        self.c128_cap = compressed_kv_capacity(model.max_seq_length, DeepseekV4CacheConfig.long_compress_ratio)
         overlap = args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap
         self.microbatch_count = 1 + int(overlap)
 
@@ -141,6 +149,7 @@ class DeepseekV4Workspace:
             max_request_num=model.max_req_num,
             index_n_heads=model.config["index_n_heads"],
             index_head_dim=model.config["index_head_dim"],
+            cache_config=model.req_manager.cache_config,
         )
 
     def init_flashmla_prefill_q(self, tp_q_head_num: int, padded_q_head_num: int, head_dim: int, dtype: torch.dtype):

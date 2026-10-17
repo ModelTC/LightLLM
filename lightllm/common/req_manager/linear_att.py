@@ -121,13 +121,7 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             verify_width=verify_width,
         )
 
-    def restore_state(
-        self,
-        req: "InferReq",
-        state_cache_manager: LinearAttCacheManager,
-        buffer_idx: int,
-        checkpoint_len: Optional[int] = None,
-    ):
+    def restore_state(self, req: "InferReq", state_cache_manager: LinearAttCacheManager, buffer_idx: int):
         conv_state, ssm_state = state_cache_manager.get_state_cache(buffer_idx=buffer_idx)
         conv_dest = req.req_idx
         ssm_dest = req.req_idx * (self.mtp_step + 1)

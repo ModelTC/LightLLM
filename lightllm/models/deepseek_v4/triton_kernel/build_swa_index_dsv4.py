@@ -2,7 +2,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .swa_cache import swa_page
+from .swa_cache import swa_token_index
 
 
 @triton.jit
@@ -57,7 +57,8 @@ def build_image_visibility(
 def _build_swa_index_kernel(
     req_idx_ptr,
     pos_ptr,
-    prefill_pages,
+    prefill_ranges,
+    workspace_offsets,
     image_left_ptr,
     image_right_ptr,
     swa_index_ptr,
@@ -73,9 +74,9 @@ def _build_swa_index_kernel(
     WIDTH: tl.constexpr,
     HAS_IMAGE: tl.constexpr,
     BLOCK_W: tl.constexpr,
-    RING_PAGES: tl.constexpr,
+    CAPACITY: tl.constexpr,
     HOLD_REQ: tl.constexpr,
-    HOLD_PAGE: tl.constexpr,
+    HOLD_SLOT: tl.constexpr,
     PREFILL: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
@@ -97,21 +98,26 @@ def _build_swa_index_kernel(
         valid = tl.where(is_image, w < image_length, valid)
         length = tl.where(is_image, image_length, length)
     safe_offset = tl.where(valid, offset, 0)
-    page = swa_page(req, safe_offset // PAGE_SIZE, prefill_pages, RING_PAGES, HOLD_REQ, HOLD_PAGE, PREFILL)
-    swa_slot = page * PAGE_SIZE + safe_offset % PAGE_SIZE
+    swa_slot = swa_token_index(
+        req, safe_offset, prefill_ranges, workspace_offsets, CAPACITY, WINDOW, PAGE_SIZE, HOLD_REQ, HOLD_SLOT, PREFILL
+    )
     out = tl.where(valid, swa_slot, -1).to(tl.int32)
     tl.store(swa_index_ptr + token_idx * swa_index_stride0 + w, out, mask=w_mask)
 
     tl.store(swa_length_ptr + token_idx, length.to(tl.int32))
-    write_page = swa_page(req, pos // PAGE_SIZE, prefill_pages, RING_PAGES, HOLD_REQ, HOLD_PAGE, PREFILL)
-    tl.store(swa_write_slots + token_idx, write_page * PAGE_SIZE + pos % PAGE_SIZE)
+    write_slot = swa_token_index(
+        req, pos, prefill_ranges, workspace_offsets, CAPACITY, WINDOW, PAGE_SIZE, HOLD_REQ, HOLD_SLOT, PREFILL
+    )
+    tl.store(swa_write_slots + token_idx, write_slot)
     if WRITE_RUNTIME:
         batch = tl.load(token_to_batch + token_idx)
         end = tl.load(seq_lens + batch)
-        workspace = tl.load(prefill_pages + req * 3 + 1) > 0
-        keep = workspace & (pos >= end - RING_PAGES * PAGE_SIZE)
-        page = swa_page(req, pos // PAGE_SIZE, prefill_pages, RING_PAGES, HOLD_REQ, HOLD_PAGE, False)
-        tl.store(runtime_write_slots + token_idx, tl.where(keep, page * PAGE_SIZE + pos % PAGE_SIZE, -1))
+        workspace = tl.load(workspace_offsets + req) >= 0
+        keep = workspace & (pos >= end - CAPACITY)
+        runtime_slot = swa_token_index(
+            req, pos, prefill_ranges, workspace_offsets, CAPACITY, WINDOW, PAGE_SIZE, HOLD_REQ, HOLD_SLOT, False
+        )
+        tl.store(runtime_write_slots + token_idx, tl.where(keep, runtime_slot, -1))
 
 
 def build_swa_index(
@@ -142,7 +148,8 @@ def build_swa_index(
     _build_swa_index_kernel[(T,)](
         req_idx,
         positions,
-        req_manager.prefill_pages,
+        req_manager.prefill_token_ranges,
+        req_manager.prefill_workspace_offsets,
         image_left_arg,
         image_right_arg,
         swa_index,
@@ -153,14 +160,14 @@ def build_swa_index(
         token_to_batch,
         seq_lens,
         WRITE_RUNTIME=runtime_write_slots is not None,
-        PAGE_SIZE=128,
+        PAGE_SIZE=req_manager.cache_config.swa_token_alignment,
         WINDOW=window,
         WIDTH=width,
         HAS_IMAGE=image_left is not None,
         BLOCK_W=triton.next_power_of_2(width),
-        RING_PAGES=req_manager.swa_pages_per_req,
+        CAPACITY=req_manager.swa_capacity_tokens,
         HOLD_REQ=req_manager.HOLD_REQUEST_ID,
-        HOLD_PAGE=req_manager.swa_buffer.shape[1] - 1,
+        HOLD_SLOT=req_manager.HOLD_SWA_SLOT,
         PREFILL=is_prefill,
         num_warps=4,
     )

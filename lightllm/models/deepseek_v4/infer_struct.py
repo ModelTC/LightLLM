@@ -133,13 +133,14 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         )
         from lightllm.models.deepseek_v4.triton_kernel.build_compress_index_dsv4 import build_compress_index
 
-        cap = compressed_kv_capacity(self._dsv4_index_max_kv_seq_len(model), 128)
+        long_ratio = self.req_manager.cache_config.long_compress_ratio
+        cap = compressed_kv_capacity(self._dsv4_index_max_kv_seq_len(model), long_ratio)
         self.dsv4_c128_indices, self.dsv4_c128_lengths = workspace.c128(self.microbatch_index, pos.numel(), cap)
         build_compress_index(
             self.dsv4_sparse_req_idx,
             self.position_ids,
             self.req_manager.req_to_token_indexs,
-            128,
+            long_ratio,
             self.dsv4_c128_indices,
             self.dsv4_c128_lengths,
         )

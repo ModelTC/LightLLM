@@ -4,13 +4,6 @@ from typing import TYPE_CHECKING, Optional, Tuple
 import torch
 import flash_mla as flashmla
 
-from lightllm.common.state_cache_manager.deepseek4 import (
-    DSV4_CACHE_BLOCK_SIZE,
-    DSV4_MLA_DATA_BYTES_PER_TOKEN,
-    DSV4_MLA_SCALE_BYTES,
-    DSV4_SWA_PAGE_SIZE,
-)
-
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
 if TYPE_CHECKING:
@@ -21,6 +14,7 @@ if TYPE_CHECKING:
 class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     def __init__(self, model):
         super().__init__(model=model)
+        self.cache_config = model.req_manager.cache_config
         self.tp_q_head_num = model.config["num_attention_heads"] // model.tp_world_size_
         # Sparse FlashMLA uses 64-head tiles; TP can leave fewer local Q heads.
         self.padded_q_head_num = ((self.tp_q_head_num + 63) // 64) * 64
@@ -36,17 +30,20 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     ) -> torch.Tensor:
         """Attend to SWA plus optional compressed KV and return all padded Q heads."""
         swa_packed, compressed_packed = packed_kv
-        bytes_per_token = DSV4_MLA_DATA_BYTES_PER_TOKEN + DSV4_MLA_SCALE_BYTES
+        config = self.cache_config
+        bytes_per_token = config.kv_bytes
         # Expose FlashMLA's [page, token, KV head, byte] axes while retaining padded page strides.
         compressed_cache = None
         if compressed_packed is not None:
-            page_size = DSV4_CACHE_BLOCK_SIZE // nsa_dict["compress_ratio"]
+            page_size = config.history_token_alignment // nsa_dict["compress_ratio"]
             bytes_per_page = page_size * bytes_per_token
             compressed_cache = compressed_packed[:, :bytes_per_page].view(
                 compressed_packed.shape[0], page_size, 1, bytes_per_token
             )
-        swa_bytes_per_page = DSV4_SWA_PAGE_SIZE * bytes_per_token
-        swa_cache = swa_packed[:, :swa_bytes_per_page].view(swa_packed.shape[0], DSV4_SWA_PAGE_SIZE, 1, bytes_per_token)
+        swa_bytes_per_page = config.swa_token_alignment * bytes_per_token
+        swa_cache = swa_packed[:, :swa_bytes_per_page].view(
+            swa_packed.shape[0], config.swa_token_alignment, 1, bytes_per_token
+        )
 
         padded_out, _ = flashmla.flash_mla_with_kvcache(
             q=q.unsqueeze(1),

@@ -3,7 +3,7 @@ import deep_gemm
 
 from lightllm.common.basemodel import BaseLayerInfer
 from ..infer_struct import C4IndexerMetadata, DeepseekV4InferStateInfo
-from ..triton_kernel.topk_transform import topk_transform_512
+from ..triton_kernel.topk_transform import topk_transform
 from ..workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES, compressed_kv_capacity
 from .compressor import CompressorInfer
 
@@ -79,7 +79,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             infer_state.mem_index.reshape(-1),
             infer_state.position_ids,
             get_indexer_k_buffer(infer_state.mem_manager, self.layer_idx_),
-            64,
+            infer_state.req_manager.cache_config.history_token_alignment // self.compress_ratio,
         )
 
     def build_metadata(
@@ -198,7 +198,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         if infer_state.c4_indexer_metadata is not None:
             return infer_state.c4_indexer_metadata
         mem_manager = infer_state.mem_manager
-        page_size = 64
+        page_size = mem_manager.cache_config.history_token_alignment // self.compress_ratio
         positions = infer_state.position_ids
         from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
 
@@ -282,7 +282,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
     def _score_c4_indices(self, infer_state, idx_q_fp8, weights, c4_cap, paged_meta: C4IndexerMetadata):
         mem_manager = infer_state.mem_manager
         workspace = infer_state.dsv4_workspace
-        page_size = 64
+        page_size = mem_manager.cache_config.history_token_alignment // self.compress_ratio
         index_topk = self.index_topk
         from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
 
@@ -348,7 +348,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             c4_cap,
             False,
         )
-        topk_transform_512(
+        topk_transform(
             logits,
             valid_len,
             row_page_table,

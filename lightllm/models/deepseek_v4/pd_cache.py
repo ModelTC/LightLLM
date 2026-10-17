@@ -3,20 +3,20 @@
 import math
 
 import torch
-import triton
 
-from lightllm.common.state_cache_manager.deepseek4 import DSV4_SWA_PAGE_BYTES
 from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import KVCachePageIO
 from .triton_kernel.cache_io import copy_history_pages
+from .triton_kernel.swa_cache import gather_swa_tokens, scatter_swa_tokens
 
 
 def _state_shapes(config):
-    # C4 retains the preceding group plus at most three new rows; C128 retains a partial group.
+    short, long = config.short_compress_ratio, config.long_compress_ratio
+    # The short compressor overlaps its preceding group; the long one does not.
     return (
-        ((config.layer_num, triton.cdiv(config.sliding_window, 128) + 1, DSV4_SWA_PAGE_BYTES), torch.uint8),
-        ((config.n_c4, 7, 4 * config.head_dim), torch.float32),
-        ((config.n_c4, 7, 4 * config.indexer_head_dim), torch.float32),
-        ((config.n_c128, 127, 2 * config.head_dim), torch.float32),
+        ((config.layer_num, config.sliding_window, config.kv_bytes), torch.uint8),
+        ((config.n_c4, 2 * short - 1, 4 * config.head_dim), torch.float32),
+        ((config.n_c4, 2 * short - 1, 4 * config.indexer_head_dim), torch.float32),
+        ((config.n_c128, long - 1, 2 * config.head_dim), torch.float32),
     )
 
 
@@ -27,34 +27,34 @@ def get_pd_page_nbytes(config, page_size):
 
 
 def _copy_request_state(manager, page, req_idx, seq_len, *, write):
-    """Canonical window / live compressor tails; P and D may use different ring sizes."""
+    """Transfer chronological tokens; runtime ring capacities may differ on P and D."""
+    config = manager.cache_config
     device = manager.swa_buffer.device
+    short, long = config.short_compress_ratio, config.long_compress_ratio
     positions = (
-        torch.arange(
-            max(0, seq_len - manager.cache_config.sliding_window) // 128, triton.cdiv(seq_len, 128), device=device
-        ),
-        torch.arange(max(0, seq_len - 4 - seq_len % 4), seq_len, device=device),
-        torch.arange(max(0, seq_len - 4 - seq_len % 4), seq_len, device=device),
-        torch.arange(seq_len - seq_len % 128, seq_len, device=device),
+        torch.arange(seq_len - config.sliding_window, seq_len, device=device),
+        torch.arange(max(0, seq_len - short - seq_len % short), seq_len, device=device),
+        torch.arange(max(0, seq_len - short - seq_len % short), seq_len, device=device),
+        torch.arange(seq_len - seq_len % long, seq_len, device=device),
     )
-    buffers = (manager.swa_buffer, manager.c4_state_buffer, manager.c4_indexer_state_buffer, manager.c128_state_buffer)
-    rings = (manager.swa_pages_per_req, manager.c4_state_ring, manager.c4_state_ring, manager.c128_state_ring)
+    buffers = (None, manager.req_to_c4_state, manager.req_to_c4_indexer_state, manager.req_to_c128_state)
     data, offset = page.reshape(-1), 0
-    for buffer, pos, ring, (shape, dtype) in zip(buffers, positions, rings, _state_shapes(manager.cache_config)):
+    for component, (buffer, pos, (shape, dtype)) in enumerate(zip(buffers, positions, _state_shapes(config))):
         nbytes = math.prod(shape) * dtype.itemsize
         view = data[offset : offset + nbytes].view(dtype).view(shape)
         offset += nbytes
-        if buffer is None or not pos.numel():
-            continue
-        indexes = req_idx * ring + pos % ring
-        if buffer is manager.swa_buffer and req_idx == manager.req_to_token_indexs.shape[0] - 1:
-            indexes.fill_(buffer.shape[1] - 1)
-        if write:
-            view[:, : pos.numel()].copy_(buffer.index_select(1, indexes), non_blocking=True)
-        else:
-            buffer.index_copy_(1, indexes, view[:, : pos.numel()].to(device, non_blocking=True))
+        if component == 0:
+            if write:
+                view.copy_(gather_swa_tokens(manager, req_idx, pos, prefill=False), non_blocking=True)
+            else:
+                scatter_swa_tokens(manager, req_idx, pos, view.to(device, non_blocking=True))
+        elif buffer is not None and pos.numel():
+            slots = pos % buffer.shape[2]
+            if write:
+                view[:, : pos.numel()].copy_(buffer[:, req_idx].index_select(1, slots), non_blocking=True)
+            else:
+                buffer[:, req_idx].index_copy_(1, slots, view[:, : pos.numel()].to(device, non_blocking=True))
     if not write and device != page.device:
-        # The transport's completion event is recorded on page.device.
         torch.cuda.current_stream(device).synchronize()
     return offset
 

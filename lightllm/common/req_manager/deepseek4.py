@@ -2,19 +2,14 @@ import torch
 import triton
 
 from .hybrid_base import HybridAttentionReqManager
-from lightllm.common.state_cache_manager.deepseek4 import (
-    DSV4_CACHE_BLOCK_SIZE,
-    DSV4_SWA_PAGE_SIZE,
-    DSV4_SWA_PAGE_BYTES,
-)
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4StateCacheManager
 
 
 class DeepseekV4ReqManager(HybridAttentionReqManager):
-    """Finite request state, plus a bounded KV workspace for each prefill forward.
+    """Request-owned window and compressor tails, independent of history capacity.
 
-    The fixed SWA rings and the forward workspace share one allocation so FlashMLA
-    can address both using ordinary packed-page indices. No SWA allocator is needed.
+    All capacities and addresses use token slots. Packed attention views and
+    prefill workspace addressing are private to the model's cache operators.
     """
 
     def __init__(
@@ -31,47 +26,71 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         self.cache_config = cache_config
         self.sliding_window = cache_config.sliding_window
-        self.swa_pages_per_req = triton.cdiv(self.sliding_window + DSV4_CACHE_BLOCK_SIZE + 2 * mtp_step, 128) + 1
-        self.swa_runtime_pages = max_request_num * self.swa_pages_per_req
-        # Only overflowing chunks need a workspace. The token budget bounds their count.
-        min_overflow = max(1, (self.swa_pages_per_req - 1) * 128 - self.sliding_window)
-        overflow_reqs = min(max_request_num, max_forward_tokens // min_overflow)
-        self.swa_scratch_pages = (
-            (triton.cdiv(max_forward_tokens + overflow_reqs * self.sliding_window, 128) + 2 * (overflow_reqs + 1))
-            if overflow_reqs
+        alignment = cache_config.swa_token_alignment
+        self.swa_capacity_tokens = triton.cdiv(self.sliding_window + 2 * mtp_step, alignment) * alignment
+        self.swa_runtime_tokens = (max_request_num + 1) * self.swa_capacity_tokens
+        # Each request contributes its previous window and packing padding at both ends.
+        self.prefill_capacity_tokens = (
+            triton.cdiv(max_forward_tokens + max_request_num * (self.sliding_window + 2 * alignment), alignment)
+            * alignment
+            if prefill_regions
             else 0
         )
-        pages = self.swa_runtime_pages + prefill_regions * self.swa_scratch_pages + 1
+        total_tokens = self.swa_runtime_tokens + prefill_regions * self.prefill_capacity_tokens
         self.swa_buffer = torch.zeros(
-            (cache_config.layer_num, pages, DSV4_SWA_PAGE_BYTES), dtype=torch.uint8, device="cuda"
+            (cache_config.layer_num, total_tokens, cache_config.swa_storage_width), dtype=torch.uint8, device="cuda"
         )
-        self.HOLD_SWA_SLOT = (pages - 1) * DSV4_SWA_PAGE_SIZE
-        # For the current forward only: first logical page, exclusive end, workspace base.
-        self.prefill_pages = torch.zeros((max_request_num + 1, 3), dtype=torch.int32, device="cuda")
-        self.c4_state_ring = 8 + mtp_step
-        self.c128_state_ring = triton.cdiv(128 + mtp_step, 4) * 4
-        self.c4_checkpoint_base = (max_request_num + 1) * self.c4_state_ring
-        self.c4_state_buffer = self.c4_indexer_state_buffer = self.c128_state_buffer = None
+        self.req_to_swa_state = self.swa_buffer[:, : self.swa_runtime_tokens].view(
+            cache_config.layer_num, max_request_num + 1, self.swa_capacity_tokens, cache_config.swa_storage_width
+        )
+        self.HOLD_SWA_SLOT = self.HOLD_REQUEST_ID * self.swa_capacity_tokens
+        # Absolute [ready, end) token positions and forward-local storage offsets.
+        self.prefill_token_ranges = torch.zeros((max_request_num + 1, 2), dtype=torch.int32, device="cuda")
+        self.prefill_workspace_offsets = torch.full((max_request_num + 1,), -1, dtype=torch.int32, device="cuda")
+        self.prefill_checkpoint_offsets = torch.zeros((max_request_num + 1,), dtype=torch.int32, device="cuda")
+        short_ratio, long_ratio = cache_config.short_compress_ratio, cache_config.long_compress_ratio
+        self.c4_state_tokens = 2 * short_ratio + mtp_step
+        self.c128_state_tokens = long_ratio + mtp_step
+        self.req_to_c4_state = self.req_to_c4_indexer_state = self.req_to_c128_state = None
         if cache_config.n_c4:
-            rows = self.c4_checkpoint_base + pages * 4 + 1
-            self.c4_state_buffer = self._state_buffer(cache_config.n_c4, rows, 4 * cache_config.head_dim)
-            self.c4_indexer_state_buffer = self._state_buffer(
-                cache_config.n_c4, rows, 4 * cache_config.indexer_head_dim
+            self.req_to_c4_state = self._state_buffer(
+                cache_config.n_c4, self.c4_state_tokens, 4 * cache_config.head_dim
+            )
+            self.req_to_c4_indexer_state = self._state_buffer(
+                cache_config.n_c4, self.c4_state_tokens, 4 * cache_config.indexer_head_dim
             )
         if cache_config.n_c128:
-            self.c128_state_buffer = self._state_buffer(
-                cache_config.n_c128, (max_request_num + 1) * self.c128_state_ring + 1, 2 * cache_config.head_dim
+            self.req_to_c128_state = self._state_buffer(
+                cache_config.n_c128, self.c128_state_tokens, 2 * cache_config.head_dim
+            )
+        # Intermediate prefill snapshots have their own storage, indexed by
+        # checkpoint boundary, never by SWA physical location.
+        self.prefill_checkpoint_capacity = max_forward_tokens // cache_config.history_token_alignment + max_request_num
+        checkpoint_slots = prefill_regions * self.prefill_checkpoint_capacity
+        self.prefill_c4_checkpoints = self.prefill_indexer_checkpoints = None
+        if cache_config.n_c4 and checkpoint_slots:
+            self.prefill_c4_checkpoints = torch.empty(
+                (cache_config.n_c4, checkpoint_slots, short_ratio, 4 * cache_config.head_dim),
+                dtype=torch.float32,
+                device="cuda",
+            )
+            self.prefill_indexer_checkpoints = torch.empty(
+                (cache_config.n_c4, checkpoint_slots, short_ratio, 4 * cache_config.indexer_head_dim),
+                dtype=torch.float32,
+                device="cuda",
             )
 
-    @staticmethod
-    def _state_buffer(layers, rows, width):
-        buffer = torch.zeros((layers, rows, width), dtype=torch.float32, device="cuda")
-        buffer[:, -1, width // 2 :].fill_(float("-inf"))
+    def _state_buffer(self, layer_count, token_capacity, state_dim):
+        buffer = torch.zeros(
+            (layer_count, self.max_request_num + 1, token_capacity, state_dim), dtype=torch.float32, device="cuda"
+        )
+        buffer[:, self.HOLD_REQUEST_ID, :, state_dim // 2 :].fill_(float("-inf"))
         return buffer
 
     def clear_runtime_state(self, req_idx):
-        # Positions determine validity; request reuse does not require clearing KV.
-        self.prefill_pages[req_idx].zero_()
+        # Absolute positions determine validity; stale KV never needs clearing.
+        self.prefill_token_ranges[req_idx].zero_()
+        self.prefill_workspace_offsets[req_idx] = -1
 
     def init_hybrid_attention_state(self, req):
         self.clear_runtime_state(req.req_idx)
@@ -80,37 +99,35 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         if state.is_draft_model:
             return
         if state.microbatch_index == 0:
-            self.prefill_pages.zero_()
-        if not state.is_prefill:
-            return
-        from lightllm.models.deepseek_v4.triton_kernel.swa_cache import prepare_prefill_workspace
+            self.prefill_token_ranges.zero_()
+            self.prefill_workspace_offsets.fill_(-1)
+        if state.is_prefill:
+            from lightllm.models.deepseek_v4.triton_kernel.swa_cache import prepare_prefill_workspace
 
-        prepare_prefill_workspace(
-            self, state.b_req_idx, state.b_ready_cache_len, state.b_seq_len, state.microbatch_index
-        )
-
-    def get_swa_pages(self, req_idx, logical_pages, *, prefill=True):
-        ring = self.swa_pages_per_req
-        physical = req_idx * ring + logical_pages % ring
-        if prefill:
-            first, end, start = self.prefill_pages[req_idx].unbind(-1)
-            physical = torch.where(
-                (logical_pages >= first) & (logical_pages < end), start + logical_pages - first, physical
+            prepare_prefill_workspace(
+                self, state.b_req_idx, state.b_ready_cache_len, state.b_seq_len, state.microbatch_index
             )
-        return torch.where(
-            torch.as_tensor(req_idx, device=logical_pages.device) == self.HOLD_REQUEST_ID,
-            self.swa_buffer.shape[1] - 1,
-            physical,
-        )
 
-    def get_swa_slots(self, req_idx, positions, *, prefill=True):
-        return self.get_swa_pages(req_idx, positions // 128, prefill=prefill) * 128 + positions % 128
+    def get_swa_token_indices(self, req_idx, positions, *, prefill=True):
+        from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices
+
+        return get_swa_token_indices(self, req_idx, positions, prefill=prefill)
 
     def pack_mla_kv_to_cache_fused_norm_rope(
-        self, layer_index, swa_slots, kv, kv_weight, eps, freqs_cis, positions, runtime_slots=None
+        self,
+        layer_index,
+        swa_slots,
+        kv,
+        kv_weight,
+        eps,
+        freqs_cis,
+        positions,
+        runtime_slots=None,
     ):
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_k_norm_rope_flashmla
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import view_swa_kv
 
+        swa = view_swa_kv(self.swa_buffer[layer_index], self.cache_config)
         fused_k_norm_rope_flashmla(
             kv=kv,
             kv_weight=kv_weight,
@@ -119,53 +136,62 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
             positions=positions,
             out_loc=swa_slots,
             out_loc2=runtime_slots,
-            kvcache=self.swa_buffer[layer_index],
-            page_size=128,
+            kvcache=swa,
+            page_size=self.cache_config.swa_token_alignment,
         )
 
     def get_att_input_params(self, layer_index):
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer, view_swa_kv
 
-        history = get_compressed_kv_buffer(self.mem_manager, layer_index)
-        return self.swa_buffer[layer_index], history
+        return view_swa_kv(self.swa_buffer[layer_index], self.cache_config), get_compressed_kv_buffer(
+            self.mem_manager, layer_index
+        )
 
     def get_prompt_cache_page_size(self):
-        return DSV4_CACHE_BLOCK_SIZE
+        return self.cache_config.history_token_alignment
 
     def create_small_page_cache_manager(self, size):
         self.small_page_buffers = DeepseekV4StateCacheManager(size, self.cache_config)
         return self.small_page_buffers
 
     def save_state(self, req_idx, buffer_idx, state_cache_manager, checkpoint_len):
-        end = checkpoint_len // 128
+        from lightllm.models.deepseek_v4.triton_kernel.swa_cache import gather_swa_tokens
+
+        config = self.cache_config
         swa, c4, indexer = state_cache_manager.get_state_cache(buffer_idx)
-        pages = self.get_swa_pages(req_idx, torch.arange(end - swa.shape[1], end, device="cuda")).long()
-        swa.copy_(self.swa_buffer.index_select(1, pages), non_blocking=True)
-        if self.cache_config.n_c4:
-            rows = self.c4_checkpoint_base + pages[-1] * 4 + torch.arange(4, device="cuda")
-            c4.copy_(self.c4_state_buffer.index_select(1, rows), non_blocking=True)
-            indexer.copy_(self.c4_indexer_state_buffer.index_select(1, rows), non_blocking=True)
+        positions = torch.arange(checkpoint_len - config.sliding_window, checkpoint_len, device="cuda")
+        swa.copy_(gather_swa_tokens(self, req_idx, positions), non_blocking=True)
+        if not config.n_c4:
+            return
+        positions = torch.arange(checkpoint_len - config.short_compress_ratio, checkpoint_len, device="cuda")
+        state_slots = positions % self.c4_state_tokens
+        ready, end = self.prefill_token_ranges[req_idx].unbind()
+        from_prefill = (checkpoint_len > ready) & (checkpoint_len <= end)
+        checkpoint_slot = self.prefill_checkpoint_offsets[req_idx] + checkpoint_len // config.history_token_alignment
+        for target, runtime, captured in (
+            (c4, self.req_to_c4_state, self.prefill_c4_checkpoints),
+            (indexer, self.req_to_c4_indexer_state, self.prefill_indexer_checkpoints),
+        ):
+            values = runtime[:, req_idx].index_select(1, state_slots)
+            if captured is not None:
+                saved = captured[:, checkpoint_slot.clamp(0, captured.shape[1] - 1)]
+                values = torch.where(from_prefill, saved, values)
+            target.copy_(values, non_blocking=True)
 
-    def restore_state(self, req, state_cache_manager, buffer_idx, checkpoint_len):
-        self.restore_state_from_tensors(req, state_cache_manager.get_state_cache(buffer_idx), checkpoint_len)
+    def restore_state(self, req, state_cache_manager, buffer_idx):
+        self.restore_state_from_tensors(req, state_cache_manager.get_state_cache(buffer_idx))
 
-    def restore_state_from_tensors(self, req, checkpoint, checkpoint_len):
+    def restore_state_from_tensors(self, req, checkpoint):
+        from lightllm.models.deepseek_v4.triton_kernel.swa_cache import scatter_swa_tokens
+
         self.clear_runtime_state(req.req_idx)
-        end = checkpoint_len // 128
+        config = self.cache_config
         swa, c4, indexer = checkpoint
-        pages = self.get_swa_pages(
-            req.req_idx, torch.arange(end - swa.shape[1], end, device="cuda"), prefill=False
-        ).long()
-        self.swa_buffer.index_copy_(1, pages, swa.cuda(non_blocking=True))
-        if self.cache_config.n_c4:
-            c4_gpu, indexer_gpu = c4.cuda(non_blocking=True), indexer.cuda(non_blocking=True)
-            rows = self.c4_checkpoint_base + pages[-1] * 4 + torch.arange(4, device="cuda")
-            self.c4_state_buffer.index_copy_(1, rows, c4_gpu)
-            self.c4_indexer_state_buffer.index_copy_(1, rows, indexer_gpu)
-            rows = (
-                req.req_idx * self.c4_state_ring
-                + torch.arange(checkpoint_len - 4, checkpoint_len, device="cuda") % self.c4_state_ring
-            )
-            self.c4_state_buffer.index_copy_(1, rows, c4_gpu)
-            self.c4_indexer_state_buffer.index_copy_(1, rows, indexer_gpu)
+        positions = torch.arange(req.cur_kv_len - config.sliding_window, req.cur_kv_len, device="cuda")
+        scatter_swa_tokens(self, req.req_idx, positions, swa.cuda(non_blocking=True))
+        if config.n_c4:
+            positions = torch.arange(req.cur_kv_len - config.short_compress_ratio, req.cur_kv_len, device="cuda")
+            slots = positions % self.c4_state_tokens
+            self.req_to_c4_state[:, req.req_idx].index_copy_(1, slots, c4.cuda(non_blocking=True))
+            self.req_to_c4_indexer_state[:, req.req_idx].index_copy_(1, slots, indexer.cuda(non_blocking=True))
         # Aligned checkpoints close C128 groups; the next group overwrites its tail.

@@ -299,8 +299,11 @@ def test_swa_index_adds_bidirectional_image_visibility():
     positions = torch.tensor([5, 8, 10], dtype=torch.int32, device="cuda")
     req_idx = torch.zeros(3, dtype=torch.int32, device="cuda")
     requests = SimpleNamespace(
-        prefill_pages=torch.tensor([[0, 1, 1]], dtype=torch.int32, device="cuda"),
-        swa_pages_per_req=1,
+        prefill_token_ranges=torch.tensor([[0, 128]], dtype=torch.int32, device="cuda"),
+        prefill_workspace_offsets=torch.tensor([128], dtype=torch.int32, device="cuda"),
+        cache_config=SimpleNamespace(swa_token_alignment=128),
+        swa_capacity_tokens=128,
+        HOLD_SWA_SLOT=256,
         HOLD_REQUEST_ID=1,
         swa_buffer=torch.empty((1, 3, 74880), dtype=torch.uint8, device="cuda"),
     )

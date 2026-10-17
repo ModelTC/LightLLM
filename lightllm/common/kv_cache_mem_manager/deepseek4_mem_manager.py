@@ -92,12 +92,12 @@ class DeepseekV4MemoryManager(MemoryManager):
         # Transport receives GPU views, just as Qwen's mem manager exports linear state.
         for name in (
             "swa_buffer",
-            "c4_state_buffer",
-            "c4_indexer_state_buffer",
-            "c128_state_buffer",
-            "c4_state_ring",
-            "c128_state_ring",
-            "swa_pages_per_req",
+            "swa_capacity_tokens",
+            "HOLD_SWA_SLOT",
+            "HOLD_REQUEST_ID",
+            "req_to_c4_state",
+            "req_to_c4_indexer_state",
+            "req_to_c128_state",
         ):
             setattr(self, name, getattr(req_manager, name))
         return super().write_to_shm(req_manager)

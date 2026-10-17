@@ -11,12 +11,11 @@ def _build_dspark_swa_index_kernel(
     swa_index_stride0,
     swa_length_ptr,
     swa_write_slot_ptr,
-    RING_PAGES: tl.constexpr,
+    CAPACITY: tl.constexpr,
     HOLD_REQ_ID: tl.constexpr,
     HOLD_SWA_SLOT: tl.constexpr,
     WINDOW: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    PAGE_SIZE: tl.constexpr,
     WIDTH: tl.constexpr,
     BLOCK_W: tl.constexpr,
 ):
@@ -39,16 +38,14 @@ def _build_dspark_swa_index_kernel(
     source_position = tl.where(is_hold | ~(is_history | is_block), 0, source_position)
 
     valid = is_history | is_block
-    source_page = req_idx * RING_PAGES + source_position // PAGE_SIZE % RING_PAGES
-    swa_slot = source_page * PAGE_SIZE + source_position % PAGE_SIZE
+    swa_slot = req_idx * CAPACITY + source_position % CAPACITY
     output = tl.where(valid, swa_slot, -1)
     output = tl.where(is_hold, HOLD_SWA_SLOT, output).to(tl.int32)
     tl.store(swa_index_ptr + token_idx * swa_index_stride0 + column, output, mask=in_width)
 
     length = tl.where(is_hold, 1, history_len + BLOCK_SIZE).to(tl.int32)
     tl.store(swa_length_ptr + token_idx, length)
-    write_page = req_idx * RING_PAGES + position // PAGE_SIZE % RING_PAGES
-    write_slot = write_page * PAGE_SIZE + position % PAGE_SIZE
+    write_slot = req_idx * CAPACITY + position % CAPACITY
     write_slot = tl.where(is_hold, HOLD_SWA_SLOT, write_slot).to(tl.int32)
     tl.store(swa_write_slot_ptr + token_idx, write_slot)
 
@@ -62,7 +59,6 @@ def build_dspark_swa_index(
     swa_write_slots: torch.Tensor,
     window: int,
     block_size: int,
-    page_size: int,
     hold_req_id: int,
     hold_swa_slot: int,
 ):
@@ -82,12 +78,11 @@ def build_dspark_swa_index(
         swa_index.stride(0),
         swa_length,
         swa_write_slots,
-        RING_PAGES=req_manager.swa_pages_per_req,
+        CAPACITY=req_manager.swa_capacity_tokens,
         HOLD_REQ_ID=hold_req_id,
         HOLD_SWA_SLOT=hold_swa_slot,
         WINDOW=window,
         BLOCK_SIZE=block_size,
-        PAGE_SIZE=page_size,
         WIDTH=width,
         BLOCK_W=triton.next_power_of_2(width),
         num_warps=4,
