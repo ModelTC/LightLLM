@@ -70,15 +70,13 @@ def destindex_copy_indexer_k_dsv4(
     head_dim = 128
 
     indexer_k = indexer_k.reshape(-1, head_dim)
-    bytes_per_page = indexer_k_cache.shape[-1]
-
-    flat = indexer_k_cache.view(-1)
+    bytes_per_page = indexer_k_cache.stride(0)
     _fwd_kernel_destindex_copy_indexer_k_dsv4[(seq_len,)](
         indexer_k,
         mem_index,
         positions,
-        flat.view(torch.float8_e4m3fn),
-        flat.view(torch.float32),
+        indexer_k_cache.view(torch.float8_e4m3fn),
+        indexer_k_cache.view(torch.float32),
         indexer_k.stride(0),
         indexer_k.stride(1),
         FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,

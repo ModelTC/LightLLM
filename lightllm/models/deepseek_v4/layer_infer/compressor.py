@@ -124,7 +124,9 @@ def fused_compress(
             state_buffer = requests.c128_state_buffer[requests.cache_config.layer_to_c128_idx[layer_idx]]
             state_ring = requests.c128_state_ring
             out_page_size = 2
-        out_buffer = mem_manager.get_compressed_kv_buffer(layer_idx)
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer
+
+        out_buffer = get_compressed_kv_buffer(mem_manager, layer_idx)
 
     if kv_score.shape[0] == 0:
         return out_buffer
@@ -180,7 +182,7 @@ def fused_compress(
         QUANT_BLOCK=64,
         SCALE_BYTES=(head_dim - qk_rope_head_dim) // 64 + 1,
         PAGE_SIZE=out_page_size,
-        BYTES_PER_PAGE=out_buffer.shape[-1],
+        BYTES_PER_PAGE=out_buffer.stride(0),
         BLOCK=block_head,
         IS_IN_INDEXER=is_in_indexer,
         num_warps=4,

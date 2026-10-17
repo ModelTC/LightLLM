@@ -43,10 +43,11 @@ class DeepseekV4CacheConfig:
         self.layer_to_c4_idx = {layer: slot for slot, layer in enumerate(c4_layers)}
         self.layer_to_c128_idx = {layer: slot for slot, layer in enumerate(c128_layers)}
         self.n_c4, self.n_c128 = len(self.layer_to_c4_idx), len(self.layer_to_c128_idx)
-
-    @property
-    def history_block_nbytes(self):
-        return self.n_c4 * (DSV4_C4_PAGE_BYTES + DSV4_C4_INDEXER_PAGE_BYTES) + self.n_c128 * DSV4_C128_PAGE_BYTES
+        history_layers = [layer for layer, rate in enumerate(self.compress_rates) if rate]
+        self.layer_to_history_idx = {layer: slot for slot, layer in enumerate(history_layers)}
+        # Nine-byte token rows keep a 256-token FlashMLA view aligned to 576 bytes.
+        # A C4 layer's row budget includes its indexer K; C128 needs only MLA KV.
+        self.history_widths = tuple(180 if self.compress_rates[layer] == 4 else 9 for layer in history_layers)
 
     @property
     def swa_checkpoint_pages(self):
@@ -61,7 +62,7 @@ class DeepseekV4CacheConfig:
         )
 
     def get_cpu_cache_full_att_bytes(self):
-        return self.cpu_cache_token_page_size // DSV4_CACHE_BLOCK_SIZE * self.history_block_nbytes
+        return self.cpu_cache_token_page_size * sum(self.history_widths)
 
     def get_cpu_cache_big_page_bytes(self):
         # MLA KV and compressor state are replicated across TP ranks.

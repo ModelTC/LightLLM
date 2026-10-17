@@ -7,6 +7,30 @@ from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 
 
+@pytest.mark.parametrize(
+    "balance,ep,tpsp,tp,redundancy,error",
+    [
+        (True, False, False, 2, 0, "enable_dp_prefill_balance"),
+        (False, True, True, 2, 0, "FFN and mHC token layouts"),
+        (False, True, False, 2, 2, "redundant experts"),
+        (False, True, True, 1, 0, None),
+        (False, True, False, 2, 0, None),
+        (False, False, True, 2, 0, None),
+    ],
+)
+def test_unsupported_parallel_layouts_fail_before_inference(monkeypatch, balance, ep, tpsp, tp, redundancy, error):
+    monkeypatch.setattr("lightllm.models.deepseek_v4.model.get_redundancy_expert_num", lambda: redundancy)
+    model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
+    model.load_way, model.tp_world_size_ = "HF", tp
+    model.config = {"num_attention_heads": 64, "o_groups": 8, "index_n_heads": 64}
+    model.args = SimpleNamespace(enable_dp_prefill_balance=balance, enable_ep_moe=ep, enable_tpsp_mix_mode=tpsp)
+    if error:
+        with pytest.raises(ValueError, match=error):
+            model._verify_params()
+    else:
+        model._verify_params()
+
+
 def test_memory_check_rejects_sequence_larger_than_full_token_pool():
     model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
     model.mem_manager = SimpleNamespace(size=60416)

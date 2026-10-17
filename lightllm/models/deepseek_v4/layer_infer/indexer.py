@@ -69,12 +69,17 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         if use_custom_tensor_manager:
             hadamard_out = self.alloc_tensor(scratch.shape, scratch.dtype, device=scratch.device)
         scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5, out=hadamard_out)
-        mem_manager = infer_state.mem_manager
-        mem_manager.pack_indexer_k_to_cache(
-            self.layer_idx_,
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
+        from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k_dsv4 import (
+            destindex_copy_indexer_k_dsv4,
+        )
+
+        destindex_copy_indexer_k_dsv4(
+            scratch,
             infer_state.mem_index.reshape(-1),
             infer_state.position_ids,
-            scratch,
+            get_indexer_k_buffer(infer_state.mem_manager, self.layer_idx_),
+            64,
         )
 
     def build_metadata(
@@ -279,8 +284,11 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         workspace = infer_state.dsv4_workspace
         page_size = 64
         index_topk = self.index_topk
-        indexer_k_cache = mem_manager.get_indexer_k_buffer(self.layer_idx_).view(
-            mem_manager.c4_indexer_k_buffer.shape[1],
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
+
+        packed = get_indexer_k_buffer(mem_manager, self.layer_idx_)
+        indexer_k_cache = packed.view(
+            packed.shape[0],
             page_size,
             1,
             self.index_head_dim + 4,

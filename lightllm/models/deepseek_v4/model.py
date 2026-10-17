@@ -30,7 +30,7 @@ from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
 )
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args, get_redundancy_expert_num
 from lightllm.utils.config_utils import (
     get_deepseek_v4_compress_rates,
     normalize_deepseek_v4_config,
@@ -85,6 +85,15 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         assert self.config["o_groups"] % self.tp_world_size_ == 0
         assert self.config["index_n_heads"] % self.tp_world_size_ == 0
+        if self.args.enable_dp_prefill_balance:
+            raise ValueError(
+                "DeepSeek-V4 does not support --enable_dp_prefill_balance: KV slots remain in request order"
+            )
+        if self.args.enable_ep_moe:
+            if self.args.enable_tpsp_mix_mode and self.tp_world_size_ > 1:
+                raise ValueError("DeepSeek-V4 EP with TP-SP is not supported: FFN and mHC token layouts differ")
+            if get_redundancy_expert_num():
+                raise ValueError("DeepSeek-V4 preselected MoE routing does not yet support redundant experts")
         return
 
     def _init_req_manager(self):

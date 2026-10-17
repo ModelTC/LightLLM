@@ -6,10 +6,6 @@ import triton
 from .mem_manager import MemoryManager
 from .operator import DeepseekV4MemOperator
 from lightllm.common.state_cache_manager.deepseek4 import (
-    DSV4_CACHE_BLOCK_SIZE,
-    DSV4_C4_PAGE_BYTES,
-    DSV4_C4_INDEXER_PAGE_BYTES,
-    DSV4_C128_PAGE_BYTES,
     DeepseekV4CacheConfig,
     DeepseekV4StateCacheManager,
 )
@@ -17,10 +13,11 @@ from lightllm.utils.envs_utils import get_env_start_args
 
 
 class DeepseekV4MemoryManager(MemoryManager):
-    """One ordinary allocator and capacity for all compressed history buffers.
+    """One token-slot capacity, with one byte buffer per history layer.
 
     SWA and compressor working state belong to ReqManager, like linear state.
-    The C4, indexer and C128 tensors only differ in their packed byte widths.
+    Layer widths include packed KV, indexer K where present, and alignment.
+    Model operators expose the physical views needed by their kernels.
     """
 
     operator_class = DeepseekV4MemOperator
@@ -38,11 +35,18 @@ class DeepseekV4MemoryManager(MemoryManager):
     ):
         assert head_num == 1 and cache_config.layer_num == layer_num and cache_config.head_dim == head_dim
         self.cache_config = cache_config
-        self.n_c4, self.n_c128 = self.cache_config.n_c4, self.cache_config.n_c128
-        super().__init__(size, dtype, head_num, head_dim, layer_num, always_copy, mem_fraction)
+        super().__init__(
+            size,
+            torch.uint8,
+            head_num,
+            max(cache_config.history_widths, default=0),
+            len(cache_config.history_widths),
+            always_copy,
+            mem_fraction,
+        )
 
     def get_cell_size(self):
-        return self.cache_config.history_block_nbytes / DSV4_CACHE_BLOCK_SIZE
+        return sum(self.cache_config.history_widths)
 
     def profile_size(self, mem_fraction):
         automatic = self.size is None
@@ -53,60 +57,31 @@ class DeepseekV4MemoryManager(MemoryManager):
                 raise RuntimeError("Insufficient memory for compressed KV history and its HOLD page")
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
-        blocks = (size + self.page_size) // DSV4_CACHE_BLOCK_SIZE
-        shapes = (
-            (self.n_c4, blocks, DSV4_C4_PAGE_BYTES),
-            (self.n_c4, blocks, DSV4_C4_INDEXER_PAGE_BYTES),
-            (self.n_c128, blocks, DSV4_C128_PAGE_BYTES),
-        )
-        section_bytes = tuple(math.prod(shape) for shape in shapes)
-        self.history_buffer = torch.zeros(sum(section_bytes), dtype=torch.uint8, device="cuda")
-        self.history_offsets = (0, section_bytes[0], section_bytes[0] + section_bytes[1])
-        self.kv_buffer = tuple(
-            buffer.view(shape) for buffer, shape in zip(self.history_buffer.split(section_bytes), shapes)
-        )
-        self.c4_kv_buffer, self.c4_indexer_k_buffer, self.c128_kv_buffer = self.kv_buffer
-        self.HOLD_TOKEN_MEMINDEX = size
+        self.kv_buffer = [
+            torch.zeros((size + self.page_size, head_num, width), dtype=dtype, device="cuda")
+            for width in self.cache_config.history_widths
+        ]
         args = get_env_start_args()
         big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
         self.big_page_buffers = DeepseekV4StateCacheManager(triton.cdiv(size, big_page_tokens), self.cache_config)
 
     def _free_buffers(self):
-        self.history_buffer = self.kv_buffer = self.big_page_buffers = None
-        self.c4_kv_buffer = self.c4_indexer_k_buffer = self.c128_kv_buffer = None
+        self.kv_buffer = self.big_page_buffers = None
 
     def free_all(self):
         super().free_all()
         self.big_page_buffers.clear_to_init_state()
 
-    def get_compressed_kv_buffer(self, layer_index):
-        rate = self.cache_config.compress_rates[layer_index]
-        if rate == 4:
-            return self.c4_kv_buffer[self.cache_config.layer_to_c4_idx[layer_index]]
-        if rate == 128:
-            return self.c128_kv_buffer[self.cache_config.layer_to_c128_idx[layer_index]]
-        return None
-
     def get_att_input_params(self, layer_index):
-        kv = self.get_compressed_kv_buffer(layer_index)
-        return kv, kv
+        index = self.cache_config.layer_to_history_idx.get(layer_index)
+        return self.kv_buffer[index] if index is not None else None
 
-    def get_indexer_k_buffer(self, layer_index):
-        return self.c4_indexer_k_buffer[self.cache_config.layer_to_c4_idx[layer_index]]
+    def get_index_kv_buffer(self, index):
+        return {f"layer_{layer}": buffer[index].unsqueeze(0) for layer, buffer in enumerate(self.kv_buffer)}
 
-    def pack_indexer_k_to_cache(self, layer_index, mem_index, positions, indexer_k):
-        from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k_dsv4 import (
-            destindex_copy_indexer_k_dsv4,
-        )
-
-        if indexer_k.numel():
-            destindex_copy_indexer_k_dsv4(
-                indexer_k.reshape(-1, self.cache_config.indexer_head_dim),
-                mem_index.reshape(-1),
-                positions.reshape(-1),
-                self.get_indexer_k_buffer(layer_index),
-                DSV4_CACHE_BLOCK_SIZE // 4,
-            )
+    def load_index_kv_buffer(self, index, load_tensor_dict):
+        for layer, buffer in enumerate(self.kv_buffer):
+            buffer[index] = load_tensor_dict[f"layer_{layer}"][0].to(buffer.device)
 
     def __getstate__(self):
         state = self.__dict__.copy()

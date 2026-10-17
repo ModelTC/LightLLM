@@ -3,7 +3,6 @@ from typing import TYPE_CHECKING, List
 import torch
 from .normal import NormalMemOperator
 from .base import BaseMemManagerOperator
-from lightllm.common.state_cache_manager.deepseek4 import DSV4_CACHE_BLOCK_SIZE
 from lightllm.utils.log_utils import init_logger
 
 if TYPE_CHECKING:
@@ -92,42 +91,38 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
     ):
         """The standard DP copy interface; request checkpoints use the hybrid path."""
         from lightllm.utils.device_utils import kv_trans_use_p2p
-        from lightllm.models.deepseek_v4.triton_kernel.dp_cache_io import copy_dsv4_dp_history
+        from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
 
-        if not hasattr(self, "dp_history_ptrs"):
+        if not hasattr(self, "mem_ptrs_tensor"):
             if not kv_trans_use_p2p():
                 raise RuntimeError("DeepSeek-V4 DP prompt-cache fetch requires P2P KV transfer")
-            for source in mem_managers:
-                assert source.history_buffer.shape == self.mem_manager.history_buffer.shape
-                assert source.history_offsets == self.mem_manager.history_offsets
-            self.dp_history_ptrs = torch.tensor(
-                [source.history_buffer.data_ptr() for source in mem_managers], dtype=torch.uint64, device="cuda"
+            self.mem_ptrs_tensor = torch.tensor(
+                [
+                    [source.kv_buffer[layer].data_ptr() for source in mem_managers]
+                    for layer in range(self.mem_manager.layer_num)
+                ],
+                dtype=torch.uint64,
+                device="cpu",
+                pin_memory=True,
             )
         assert move_token_indexes.numel() == mem_indexes.numel() == token_dp_indexes.numel()
-        assert mem_indexes.numel() % DSV4_CACHE_BLOCK_SIZE == 0
-        copy_dsv4_dp_history(
-            self.dp_history_ptrs,
-            self.mem_manager,
-            move_token_indexes,
-            token_dp_indexes,
-            mem_indexes,
-            len(mem_managers) // dp_size_in_node,
-            rank_in_dp,
-        )
+        for layer, buffer in enumerate(self.mem_manager.kv_buffer):
+            kv_trans_for_dp(
+                input_mems=self.mem_ptrs_tensor[layer].cuda(non_blocking=True),
+                input_idx=move_token_indexes,
+                input_dp_idx=token_dp_indexes,
+                output=buffer.unsqueeze(0),
+                output_idx=mem_indexes,
+                dp_size_in_node=dp_size_in_node,
+                rank_in_dp=rank_in_dp,
+            )
 
     def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
-        """Copy packed history pages; continuation is restored by the request manager."""
-        manager = self.mem_manager
-        # Each allocation page contains one or more independently packed history blocks.
-        src_pages = (src_mem_index[::DSV4_CACHE_BLOCK_SIZE] // DSV4_CACHE_BLOCK_SIZE).to(
-            device="cuda", dtype=torch.int64
-        )
-        dst_pages = (dst_mem_index[::DSV4_CACHE_BLOCK_SIZE] // DSV4_CACHE_BLOCK_SIZE).to(
-            device="cuda", dtype=torch.int64
-        )
-        for buffer in manager.kv_buffer:
-            if buffer.numel():
-                buffer.index_copy_(1, dst_pages, buffer.index_select(1, src_pages))
+        """Copy exactly the requested token slots; request state has a separate owner."""
+        src = src_mem_index.to(device="cuda", dtype=torch.int64, non_blocking=True)
+        dst = dst_mem_index.to(device="cuda", dtype=torch.int64, non_blocking=True)
+        for buffer in self.mem_manager.kv_buffer:
+            buffer.index_copy_(0, dst, buffer.index_select(0, src))
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         raise NotImplementedError("DeepSeek-V4 writes packed KV using request-owned SWA slots")
@@ -135,7 +130,7 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
     def offload_gpu_kv_to_cpu_cache(self, mem_indexes, page_indexes, page_readies, cpu_cache_client, req):
         from lightllm.utils.dist_utils import get_current_rank_in_dp
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
-        from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import copy_history_pages, copy_checkpoints_to_pages
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages, copy_checkpoints_to_pages
 
         # All ranks retain their checkpoints until the common completion event.
         torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
@@ -163,7 +158,7 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
 
     def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req):
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
-        from lightllm.models.deepseek_v4.triton_kernel.cpu_cache_io import copy_history_pages
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages
 
         manager = self.mem_manager
         requests = g_infer_context.req_manager

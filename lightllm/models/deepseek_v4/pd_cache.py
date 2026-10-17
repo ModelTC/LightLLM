@@ -7,7 +7,7 @@ import triton
 
 from lightllm.common.state_cache_manager.deepseek4 import DSV4_SWA_PAGE_BYTES
 from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import KVCachePageIO
-from .triton_kernel.cpu_cache_io import copy_history_pages
+from .triton_kernel.cache_io import copy_history_pages
 
 
 def _state_shapes(config):
@@ -21,7 +21,7 @@ def _state_shapes(config):
 
 
 def get_pd_page_nbytes(config, page_size):
-    history = page_size // 256 * config.history_block_nbytes
+    history = page_size * sum(config.history_widths)
     state = sum(math.prod(shape) * dtype.itemsize for shape, dtype in _state_shapes(config))
     return max(history, state)
 
@@ -79,8 +79,9 @@ class DeepseekV4CachePageIO(KVCachePageIO):
             page.view(1, -1),
             to_pages=True,
             page_tokens=self.mem.pd_kv_page_size,
+            round_tail=True,
         )
-        return self.mem.pd_kv_page_size // 256 * source.cache_config.history_block_nbytes
+        return self.mem.pd_kv_page_size * sum(source.cache_config.history_widths)
 
     def unpack(self, task):
         page = self.mem.kv_move_buffer[task.dst_page_index]
@@ -98,4 +99,5 @@ class DeepseekV4CachePageIO(KVCachePageIO):
                     page.view(1, -1),
                     to_pages=False,
                     page_tokens=self.mem.pd_kv_page_size,
+                    round_tail=True,
                 )

@@ -124,7 +124,9 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         )
 
     def get_att_input_params(self, layer_index):
-        history, _ = self.mem_manager.get_att_input_params(layer_index)
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer
+
+        history = get_compressed_kv_buffer(self.mem_manager, layer_index)
         return self.swa_buffer[layer_index], history
 
     def get_prompt_cache_page_size(self):

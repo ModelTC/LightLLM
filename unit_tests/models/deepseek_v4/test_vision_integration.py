@@ -209,6 +209,7 @@ def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch):
 
 def test_vision_model_allows_cpu_cache():
     from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+    from lightllm.server.core.objs import StartArgs
 
     model = SimpleNamespace(
         load_way="HF",
@@ -219,7 +220,7 @@ def test_vision_model_allows_cpu_cache():
             "index_n_heads": 8,
             "vision_n_layers": 1,
         },
-        args=SimpleNamespace(enable_cpu_cache=True),
+        args=StartArgs(enable_cpu_cache=True),
     )
 
     DeepseekV4TpPartModel._verify_params(model)
