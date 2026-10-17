@@ -16,15 +16,18 @@ def _fwd_kernel_destindex_copy_kv_flashmla_fp8(
     mem_index = tl.load(MemIndex + token).to(tl.int64)
     packed_row = PackedKV + mem_index * packed_stride_s
 
-    # The V4 BF16 tail stores actual NoPE values, without an extra RoPE region.
-    for group in range(7):
-        offsets = group * 64 + tl.arange(0, 64)
-        values = tl.load(KV + token * kv_stride_s + offsets * kv_stride_d).to(tl.float32)
-        absmax = tl.max(tl.abs(values), 0)
-        scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(absmax / 448.0, 1e-4))))
-        quantized = tl.clamp(values / scale, -448.0, 448.0).to(tl.float8e4nv)
-        tl.store(packed_row + offsets, quantized.to(tl.uint8, bitcast=True))
-        tl.store(packed_row + 576 + group, (scale.to(tl.uint32, bitcast=True) >> 23).to(tl.uint8))
+    # Eight rows share one CTA; seven quantized groups are processed in parallel.
+    groups = tl.arange(0, 8)
+    offsets = groups[:, None] * 64 + tl.arange(0, 64)[None, :]
+    group_mask = groups < 7
+    values = tl.load(KV + token * kv_stride_s + offsets * kv_stride_d, mask=group_mask[:, None], other=0.0).to(
+        tl.float32
+    )
+    absmax = tl.max(tl.abs(values), axis=1)
+    scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(absmax / 448.0, 1e-4))))
+    quantized = tl.clamp(values / scale[:, None], -448.0, 448.0).to(tl.float8e4nv)
+    tl.store(packed_row + offsets, quantized.to(tl.uint8, bitcast=True), mask=group_mask[:, None])
+    tl.store(packed_row + 576 + groups, (scale.to(tl.uint32, bitcast=True) >> 23).to(tl.uint8), mask=group_mask)
 
     tail_offsets = tl.arange(0, 64)
     tail_values = tl.load(KV + token * kv_stride_s + (448 + tail_offsets) * kv_stride_d)
