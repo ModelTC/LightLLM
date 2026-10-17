@@ -1,7 +1,9 @@
+import os
+import time
 import torch
 from .api_cli import add_cli_args
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.log_utils import init_logger, set_log_node_role
+from lightllm.utils.log_utils import init_logger, configure_logging_from_args
 
 logger = init_logger(__name__)
 

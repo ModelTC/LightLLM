@@ -47,16 +47,15 @@ async def register_and_keep_alive(websocket: WebSocket):
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 
     except asyncio.TimeoutError:
-        logger.warning(f"client {regist_json} heartbeat timed out after {heartbeat_timeout_seconds} seconds")
+        logger.warning(f"client {peer} heartbeat timed out after {heartbeat_timeout_seconds} seconds")
         try:
             await websocket.close(code=1011, reason="PD heartbeat timed out")
         except BaseException:
-            logger.debug(f"failed to close timed-out client {regist_json}", exc_info=True)
+            logger.debug(f"failed to close timed-out client {peer}", exc_info=True)
     except WebSocketDisconnect as e:
-        logger.info(f"client {regist_json} disconnected: {str(e)}")
+        logger.info(f"client {peer} disconnected: {str(e)}")
     except BaseException as e:
-        logger.error(f"client {regist_json} has error {str(e)}")
-        logger.exception(str(e))
+        logger.exception(f"client {peer} has error {str(e)}")
     finally:
         logger.error(f"client {regist_json} removed")
         await g_objs.httpserver_manager.remove_pd(pd_client=pd_client, websocket=websocket)

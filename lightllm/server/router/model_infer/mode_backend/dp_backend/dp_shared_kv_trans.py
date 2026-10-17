@@ -20,6 +20,7 @@ class DPKVSharedMoudle:
         from .impl import DPChunkedPrefillBackend
 
         self.backend: DPChunkedPrefillBackend = backend
+        self._debug_transfers = DebugStatsLogger(backend.logger, "kv.shared_transfer")
         self.max_req_num = max_req_num
 
         self.big_page_tokens = (

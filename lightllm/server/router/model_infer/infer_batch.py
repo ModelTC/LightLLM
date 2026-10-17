@@ -364,7 +364,7 @@ class InferenceContext:
                 req.paused = True
                 if is_master_in_dp:
                     req.shm_req.is_paused = True
-                    logger.debug(f"infer paused req id {req.req_id}")
+                    log_debug_event(logger, "request.paused", request_id=req.req_id, leader_only=True)
 
             if free_token_index:
                 self.att_state_manager.full_att_allocator.free(torch.cat(free_token_index))
@@ -391,7 +391,7 @@ class InferenceContext:
                 req.paused = False
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
-                    logger.debug(f"infer recover paused req id {req.req_id}")
+                    log_debug_event(logger, "request.resumed", request_id=req.req_id, leader_only=True)
                 can_alloc_token_num -= alloc_token_num
         return
 
@@ -1004,9 +1004,10 @@ class InferReqUpdatePack:
     类绑定相关处理参数，实现解耦和延迟处理。
     """
 
-    def __init__(self, req_obj: InferReq, output_len: int):
+    def __init__(self, req_obj: InferReq, output_len: int, prefill_tokens: int = 0):
         self.req_obj = req_obj
         self.output_len = output_len
+        self.prefill_tokens = prefill_tokens
 
     def handle(
         self,

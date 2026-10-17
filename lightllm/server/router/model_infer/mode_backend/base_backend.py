@@ -7,7 +7,8 @@ from typing import List, Tuple, Callable, Optional
 from transformers.configuration_utils import PretrainedConfig
 from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event, DebugStatsLogger
+from lightllm.server.router.engine_stats import EngineCounters
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
 from lightllm.server.router.model_infer.req_token_index import ReqTokenIndex
@@ -114,6 +115,9 @@ class ModeBackend:
 
         init_distributed_env(kvargs)
         self.init_rank_infos()
+        self.engine_counters = (
+            EngineCounters(self.dp_size_in_node, self.dp_rank_in_node) if self.is_master_in_dp else None
+        )
         group_size = (
             2 if (self.args.enable_decode_microbatch_overlap or self.args.enable_prefill_microbatch_overlap) else 1
         )
@@ -674,9 +678,10 @@ class ModeBackend:
         ):
             start = time.time()
             self.radix_cache.merge_unreferenced_nodes()
-            self.logger.info(
-                f"radix tree merge_unreferenced_nodes cost time {time.time() - start} s in rank {self.global_rank}"
-            )
+            if self.rank_in_dp == 0 and self.logger.isEnabledFor(logging.DEBUG):
+                if not hasattr(self, "_debug_compactions"):
+                    self._debug_compactions = DebugStatsLogger(self.logger, "cache.compactions")
+                self._debug_compactions.add(duration_ms_total=round((time.time() - start) * 1000, 3))
         return
 
     @staticmethod
@@ -906,6 +911,9 @@ class ModeBackend:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
             else:
                 new_kv_len = req_obj.get_cur_total_len()
+            prefill_tokens = max(
+                0, min(new_kv_len, req_obj.shm_req.input_len) - min(req_obj.cur_kv_len, req_obj.shm_req.input_len)
+            )
             req_obj.cur_kv_len = new_kv_len
             if is_master_in_dp:
                 req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
@@ -913,13 +921,13 @@ class ModeBackend:
             # 对于没有到达需要输出 token 阶段的请求，直接略过, 说明还
             # 处于chuncked prefill kv 填充的阶段。
             if req_obj.cur_kv_len < req_obj.get_cur_total_len():
-                pack = InferReqUpdatePack(req_obj=req_obj, output_len=0)
+                pack = InferReqUpdatePack(req_obj=req_obj, output_len=0, prefill_tokens=prefill_tokens)
                 update_func_objs.append(pack)
                 continue
 
             # 将生成的下一个token的信息写入到管理对象中。
             req_obj.cur_output_len += 1
-            pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len)
+            pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len, prefill_tokens=prefill_tokens)
             update_func_objs.append(pack)
         return update_func_objs
 
@@ -966,7 +974,12 @@ class ModeBackend:
                 pd_prefill_chunked_handle_func=pd_prefill_chunked_handle_func,
                 output_top_logprobs=output_top_logprobs,
             )
+            if counters is not None:
+                prefill_tokens += pack.prefill_tokens
+                output_tokens += max(0, req_obj.shm_req.shm_cur_output_len - old_output)
 
+        if counters is not None:
+            counters.add(prefill_tokens, output_tokens)
         g_infer_context.req_manager.req_sampling_params_manager.update_reqs_token_counter(
             req_objs=run_reqs, next_token_ids=next_token_ids
         )
@@ -1080,6 +1093,9 @@ class ModeBackend:
         self.dp_world_size = get_dp_world_size()
         self.global_rank = get_global_rank()
         self.global_world_size = get_global_world_size()
+        from lightllm.utils.log_utils import set_log_context
+
+        set_log_context(tp_rank=self.rank_in_dp, dp_rank=self.global_dp_rank, global_rank=self.global_rank)
         self.dp_size = get_dp_size()
 
         if self.nnodes > 1 and self.dp_size == 1:

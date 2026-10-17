@@ -1,7 +1,7 @@
 """Attention backend selection utilities."""
 
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_info_on_leader
 from lightllm.utils.backend_validator import validate
 from .base_att import BaseAttBackend
 from .import_utils import load_backend_class

@@ -6,7 +6,7 @@ import setproctitle
 import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Optional, Tuple, Union, Callable
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, set_log_context
 from lightllm.server.pd_io_struct import PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.graceful_utils import graceful_registry
@@ -88,11 +88,6 @@ class DecodeKVMoveManager(BaseKVMoveManager):
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task_group)
-                # A task group covers the whole request, so this log does not require pd_detail_log.
-                if isinstance(task_group, PDChunckedTransTaskGroup) and logger.isEnabledFor(logging.DEBUG):
-                    logger.debug(
-                        f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}"
-                    )
 
             except BaseException as e:
                 logger.exception(str(e))

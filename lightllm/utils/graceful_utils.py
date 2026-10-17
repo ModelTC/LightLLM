@@ -5,6 +5,9 @@ logger = init_logger(__name__)
 
 
 def graceful_registry(sub_module_name):
+    from lightllm.utils.log_utils import set_log_context
+
+    set_log_context(component=sub_module_name)
     import signal
 
     # 子进程在受到 SIGTERM的时候，不能自己就提前退出。

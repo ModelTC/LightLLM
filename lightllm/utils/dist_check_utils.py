@@ -9,7 +9,7 @@ import socket
 import threading
 from typing import TYPE_CHECKING, Callable
 
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, summarize_exception
 
 if TYPE_CHECKING:
     from lightllm.server.core.objs.start_args_type import StartArgs
@@ -143,9 +143,12 @@ def _check_ok_two_gpu_all_reduce(worker_entry: Callable[[int, int], None], init_
         torch_mp.spawn(worker_entry, args=(init_tcp_port,), nprocs=2, join=True)
         return True
     except Exception as error:
-        error_str = str(error)
-        error_str = error_str[-66:].replace("\n", "")
-        logger.warning("2-GPU all-reduce capability check failed for %s: %s", worker_entry.__name__, error_str)
+        logger.warning(
+            "event=allreduce.probe_failed probe=%s reason=%r action=disable_backend",
+            worker_entry.__name__,
+            summarize_exception(error),
+        )
+        logger.debug("All-reduce capability probe diagnostics", exc_info=True)
         return False
 
 

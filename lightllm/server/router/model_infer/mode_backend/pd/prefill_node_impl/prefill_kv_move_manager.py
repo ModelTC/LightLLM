@@ -5,7 +5,7 @@ import setproctitle
 import torch.multiprocessing as mp
 import time
 from typing import List, Dict, Union, Callable
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, set_log_context
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
@@ -83,11 +83,5 @@ class PrefillKVMoveManager(BaseKVMoveManager):
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task)
-                if (
-                    isinstance(task, PDChunckedTransTask)
-                    and self.args.pd_detail_log
-                    and logger.isEnabledFor(logging.DEBUG)
-                ):
-                    logger.debug(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
             except BaseException as e:
                 logger.exception(str(e))

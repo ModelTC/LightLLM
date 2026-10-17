@@ -12,7 +12,7 @@ from pathlib import Path
 from tqdm import tqdm
 from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, progress_enabled
 from typing import Callable, List, Optional
 from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
@@ -115,6 +115,7 @@ def autotune(
 
 
 class Autotuner:
+    _defaults_warning_emitted = False
     _autotune_warmup_kernel_type: Optional[AutotuneKernelType] = None
 
     @staticmethod
@@ -164,7 +165,6 @@ class Autotuner:
         benchmark_repeats: int = 3,
         benchmark_retries: int = 3,
     ):
-
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
@@ -298,7 +298,7 @@ class Autotuner:
 
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
         if os.path.exists(cache_file):
-            logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
+            logger.debug(f"Loading cached configs for {self.kernel_name} - {static_key}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
         else:
@@ -400,6 +400,7 @@ class Autotuner:
             desc=f"Autotuning {self.kernel_name} for {run_key}",
             position=rank_id,
             dynamic_ncols=True,
+            disable=not progress_enabled(),
         )
         enum_configs = enumerate(bar)
         for i, config in enum_configs:
@@ -455,7 +456,7 @@ class Autotuner:
                             option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS,
                         )
                     )
-                logger.info(f"Saved configs for {self.kernel_name} - {_static_key}")
+                logger.debug(f"Saved configs for {self.kernel_name} - {_static_key}")
 
         logger.info(f"rank {rank_id} tuning {self.kernel_name} _static_key {static_key} finished")
 

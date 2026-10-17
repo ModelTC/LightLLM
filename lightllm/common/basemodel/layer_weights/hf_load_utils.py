@@ -1,6 +1,10 @@
 import torch
 import os
 import gc
+import time
+from lightllm.utils.log_utils import init_logger, log_info_on_leader, progress_enabled
+
+logger = init_logger(__name__)
 from safetensors import safe_open
 from tqdm import tqdm
 import lightllm.utils.petrel_helper as utils
@@ -61,12 +65,28 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
         weight_dir=weight_dir,
     )  # noqa
     worker = int(os.environ.get("LOADWORKER", 1))
+    started = time.monotonic()
+    log_info_on_leader(
+        logger,
+        "event=model.weights_loading shards=%s workers=%s",
+        len(candidate_files),
+        worker,
+        extra={"event": "model.weights_loading"},
+    )
     with Pool(worker) as p:
         iterator = p.imap_unordered(partial_func, candidate_files, chunksize=1)
         desc_str = f"pid {os.getpid()} Loading model weights with {worker} workers"
-        iterator = tqdm(iterator, total=len(candidate_files), desc=desc_str)
+        iterator = tqdm(iterator, total=len(candidate_files), desc=desc_str, disable=not progress_enabled())
 
         for _ in iterator:
             pass
 
+    duration_s = round(time.monotonic() - started, 3)
+    log_info_on_leader(
+        logger,
+        "event=model.weights_loaded shards=%s duration_s=%.3f",
+        len(candidate_files),
+        duration_s,
+        extra={"event": "model.weights_loaded", "duration_s": duration_s},
+    )
     return

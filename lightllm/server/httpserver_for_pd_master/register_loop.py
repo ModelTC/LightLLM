@@ -22,7 +22,6 @@ async def register_loop(manager: HttpServerManagerForPDMaster):
 
     ports = get_shm_port_args()
     while True:
-
         try:
             uri = f"ws://{manager.args.config_server_host}:{ports.config_server_port}/pd_master_register"
             async with websockets.connect(
@@ -46,8 +45,7 @@ async def register_loop(manager: HttpServerManagerForPDMaster):
                     await websocket.send("heartbeat")
                     await asyncio.sleep(60)
 
-        except Exception as e:
-            logger.error("connetion to config_server has error")
-            logger.exception(str(e))
+        except Exception:
+            logger.exception("connetion to config_server has error")
             await asyncio.sleep(10)
             logger.info("reconnection to config_server")
