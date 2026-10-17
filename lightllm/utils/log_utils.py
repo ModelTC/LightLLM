@@ -301,7 +301,7 @@ def should_log_request(request_id):
     if _request_sample_rate == 1:
         return True
     digest = hashlib.blake2b(str(request_id).encode(), digest_size=8).digest()
-    return int.from_bytes(digest, "big") / 2**64 < _request_sample_rate
+    return int.from_bytes(digest, "big") / 2 ** 64 < _request_sample_rate
 
 
 def http_access_enabled():
