@@ -265,14 +265,18 @@ class Req(ctypes.Structure):
     def _fill_input_token_hash(self):
         self.token_hash_list = TokenHashList()
         self.token_hash_list.clear()
-        hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().cpu_cache_token_page_size)
+        hash_values = compute_token_list_hash(
+            self.get_prompt_ids_numpy(), get_env_start_args().cpu_cache_token_page_size
+        )
         self.token_hash_list.fill(hash_values)
         return
 
     def _fill_hybrid_token_hash(self):
         self.hybrid_token_hash_list = TokenHashList()
         self.hybrid_token_hash_list.clear()
-        hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().linear_att_hash_page_size)
+        hash_values = compute_token_list_hash(
+            self.get_prompt_ids_numpy(), get_env_start_args().linear_att_hash_page_size
+        )
         self.hybrid_token_hash_list.fill(hash_values)
         return
 

@@ -24,7 +24,7 @@ LightLLM supports three FP8 KV quantization modes:
 
 - ``fp8kv_sph``: FP8 Static Per-Head quantization, independent scale per head, uses ``fa3`` backend
 - ``fp8kv_spt``: FP8 Static Per-Tensor quantization, one scalar for K and one scalar for V, uses ``flashinfer`` backend
-- ``fp8kv_dsa``: dynamic per-token, per-128-element quantization for DeepSeek-V3.2 and GLM-5.3 Flash sparse MLA, without calibration
+- ``fp8kv_dsa``: dynamic per-token/group quantization for DeepSeek-V3.2 and GLM-5.3 Flash sparse MLA, with model-specific group sizes and no calibration
 
 Calibration files are mode-dependent:
 
@@ -53,12 +53,14 @@ of 1168 bytes (38.4% less).
 KDA convolution/SSM state and the indexer's raw request tails retain their
 original computation dtypes, so this is not a 38.4% reduction in total model memory.
 
-Prefill uses newly computed BF16 KV directly and dequantizes cached prefixes in chunks.
-All requests use the same chunked path, with a BF16 gather buffer capped at 64 MiB
+Prefill uses newly computed BF16 KV directly. The general path dequantizes cached
+prefixes in chunks, with a BF16 gather buffer capped at 2 GiB (2097152 tokens)
 per rank; shorter inputs allocate only their actual length. Each chunk uses FA3's
 ``only_qv`` sparse attention and results are merged online in FP32. The gather
-buffer does not grow with historical context length. Indices and attention
-workspaces still require additional memory.
+buffer grows with the batch's total KV length until it reaches the cap. Indices
+and attention workspaces still require additional memory.
+For supported layouts with 8 local attention heads, 1–8 query tokens and at least
+65536 total KV tokens in the batch, direct packed attention avoids the BF16 gather buffer.
 The same layout is used by native MTP draft layers, CPU prefix caching and P/D
 transfer. P and D must both use ``--llm_kv_type fp8kv_dsa``. For the supplied
 ``test/start_scripts/glm53/glm53_pd_1p1d.sh`` launcher, set
