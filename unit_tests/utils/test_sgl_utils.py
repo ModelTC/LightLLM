@@ -107,7 +107,7 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
     state = fa3_module.Fa3DecodeAttState(
         backend=SimpleNamespace(
             model=model,
-            page_size=page_size,
+            infer_page_size=page_size,
             uses_causal_attention=lambda: True,
             uses_dynamic_spec_verify_layout=lambda: False,
             get_page_table_view=lambda att_batch_size, max_kv_len, microbatch_index: torch.zeros(
