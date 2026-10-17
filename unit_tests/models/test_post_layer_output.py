@@ -60,7 +60,7 @@ def test_output_head_returns_candidates_without_mutating_state(monkeypatch, draf
     args = SimpleNamespace(target_vocab_topk_sampling=None, draft_vocab_topk_sampling=None)
     setattr(args, "draft_vocab_topk_sampling" if draft else "target_vocab_topk_sampling", 16 if enabled else None)
     monkeypatch.setattr(llama_post, "get_env_start_args", lambda: args)
-    state = SimpleNamespace(is_draft_model=draft, dist_group=None)
+    state = SimpleNamespace(is_draft_model=draft, dist_group=None, b_logits_rows=None)
     weight = SimpleNamespace(lm_head_weight_=Weight())
     method = head._draft_lm_head_and_gather if draft else head._target_lm_head_and_gather
     output = method(torch.ones(3, 2), 3, weight, state)
@@ -290,7 +290,9 @@ def test_model_output_and_unpadding_preserve_candidate_mapping() -> None:
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     logits = torch.randn(3, 2)
     ids = torch.tensor([[10, 20], [30, 40], [50, 60]])
-    state = SimpleNamespace(hidden_collector=NoopHiddenCollector(), prompt_logics=None)
+    state = SimpleNamespace(
+        hidden_collector=NoopHiddenCollector(), prompt_logics=None, recurrent_state_context=None, logits_row_stride=1
+    )
     output = model._create_model_output(PostLayerOutput(logits, ids), state)
     unpadded = model._create_unpad_decode_model_output(output, 2)
     torch.testing.assert_close(unpadded.logits, logits[:2])

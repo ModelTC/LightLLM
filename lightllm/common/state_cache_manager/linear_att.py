@@ -36,6 +36,8 @@ class LinearAttCacheConfig:
     full_attention_interval: int
     all_layer_num: int  # 包括 linear att 和 full att 的层加起来的层数
     draft_full_att_kv_layer_num: int = 0
+    # Static KDA recurrence parameter; unused by GDN.
+    gate_lower_bound: float = -5.0
 
     def get_conv_dim(self):
         # 第一项对应q的参数，第二项对应k的参数，第三项对应v的参数
@@ -68,6 +70,14 @@ class LinearAttCacheConfig:
             f"slot={kv_layer_index}, slots={self.get_full_att_kv_layer_num_with_draft_model()}"
         )
         return kv_layer_index
+
+    def get_linear_layer_index(self, layer_index: int) -> int:
+        """Map a target linear-attention layer to its packed recurrent-state row."""
+        assert 0 <= layer_index < self.all_layer_num, f"invalid transformer layer index {layer_index}"
+        assert (layer_index + 1) % self.full_attention_interval != 0, f"layer {layer_index} uses full attention"
+        linear_index = layer_index - layer_index // self.full_attention_interval
+        assert linear_index < self.linear_layer_num, f"layer {layer_index} maps outside the recurrent-state pool"
+        return linear_index
 
     def get_conv_state_shape(self):
         # Base committed sliding-window state, without speculative MTP tail.

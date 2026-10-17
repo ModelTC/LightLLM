@@ -1,10 +1,13 @@
 import copy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+
+if TYPE_CHECKING:
+    from lightllm.common.recurrent_state_types import RecurrentStateContext
 
 
 @dataclass
@@ -52,8 +55,13 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    # Optional accepted-tail rows for the first EAGLE draft projection.
+    b_logits_rows: Optional[torch.Tensor] = None
+
     def to_cuda(self):
         self.check_input()
+        if self.b_logits_rows is not None:
+            self.b_logits_rows = self.b_logits_rows.cuda(non_blocking=True)
 
         # Prefill 和 decode 都必须提供的公共张量。
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
@@ -201,6 +209,11 @@ class ModelOutput:
     # 仅在 draft 模型直接返回紧凑候选词表时提供。
     # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
     logits_token_ids: Optional[torch.Tensor] = None
+
+    # Opaque commit context for this forward/graph; preserved when unpadding.
+    recurrent_state_context: Optional["RecurrentStateContext"] = None
+    # Number of physical decode rows represented by each selected logits row.
+    logits_row_stride: int = 1
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:

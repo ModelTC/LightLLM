@@ -28,7 +28,6 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-
     operator_class = NormalMemOperator
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
@@ -178,9 +177,6 @@ class MemoryManager:
         pin_mem_indexes.numpy()[:] = mem_indexes
         mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
-        )
         for tp_index in range(dp_world_size):
             page_io(
                 mem_indexes=mem_indexes_gpu,

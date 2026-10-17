@@ -525,6 +525,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=model_input.b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=model_input.b_mtp_index,
+                    recurrent_state_batches=((req_num, model_output.recurrent_state_context),),
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
@@ -799,6 +800,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=b_mtp_index,
+                    recurrent_state_batches=(
+                        (real_request_num0, model_output0.recurrent_state_context),
+                        (real_request_num1, model_output1.recurrent_state_context),
+                    ),
                 )
                 mtp_accept_len0 = mtp_accept_len[:real_request_num0]
                 mtp_accept_len1 = mtp_accept_len[real_request_num0:]

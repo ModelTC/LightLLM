@@ -248,6 +248,8 @@ class StartArgs:
     weight_version: str = "default"
 
     # hybrid attention model (Qwen3Next)
+    ssm_state_mode: str = "native"
+    ssm_replay_config: dict = field(default_factory=dict)
     linear_att_hash_page_size: int = field(default=512)
     linear_att_page_block_num: int = field(default=10000000)
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)

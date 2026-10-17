@@ -4,7 +4,7 @@ import collections
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
-from typing import Tuple, Any, Optional, List
+from typing import TYPE_CHECKING, Tuple, Any, Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
@@ -12,6 +12,9 @@ from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
+
+if TYPE_CHECKING:
+    from lightllm.common.recurrent_state_types import RecurrentStateContext
 
 
 class InferStateInfo:
@@ -64,6 +67,9 @@ class InferStateInfo:
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
         # 在一些细节场景下需要有该信息区分一些资源的申请和管理。
         self.microbatch_index: int = 0
+        self.recurrent_state_context: Optional["RecurrentStateContext"] = None
+        self.b_logits_rows: Optional[torch.Tensor] = None
+        self.logits_row_stride: int = 1
 
         # 当前 forward 独占的 hidden state 收集器。普通推理使用短生命周期实例；
         # Prefill CUDA Graph 使用随 graph infer state 长期保存的实例。

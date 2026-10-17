@@ -98,20 +98,19 @@ def test_topk_without_vllm(indexer, monkeypatch):
 
 
 @pytest.mark.parametrize("mtp_size", [1, 3, 6])
-@pytest.mark.parametrize("max_pools", [1024, 262144])
-def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, mtp_size, max_pools):
+@pytest.mark.parametrize("requests,max_pools", [(5, 640), (5, 1024), (5, 262144), (64, 640)])
+def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, mtp_size, requests, max_pools):
     pytest.importorskip("deep_gemm")
-    _require_vllm_topk()
     torch.manual_seed(27)
-    rows = 5 * mtp_size
+    rows = requests * mtp_size
     storage = torch.empty(1024, 1, 584, device="cuda", dtype=torch.bfloat16)
     packed = storage.view(torch.uint8)[:, :, -132:]
     packed[:, 0, :128] = torch.randn(1024, 128, device="cuda").to(torch.float8_e4m3fn).view(torch.uint8)
     scales = torch.pow(2.0, torch.randint(-3, 2, (1024,), device="cuda").float())
     packed[:, 0, 128:] = scales.view(torch.uint8).view(-1, 4)
-    table = torch.full((5, max_pools * 4), -1, device="cuda", dtype=torch.int32)
-    table[:, 3::4] = torch.randint(0, 1024, (5, max_pools), device="cuda", dtype=torch.int32)
-    req_idx = torch.tensor([1, 3, 0, 2, 4], device="cuda", dtype=torch.int32).repeat_interleave(mtp_size)
+    table = torch.full((requests, max_pools * 4), -1, device="cuda", dtype=torch.int32)
+    table[:, 3::4] = torch.randint(0, 1024, (requests, max_pools), device="cuda", dtype=torch.int32)
+    req_idx = torch.arange(requests, device="cuda", dtype=torch.int32).roll(2).repeat_interleave(mtp_size)
     lengths = torch.zeros(rows, device="cuda", dtype=torch.int32)
     q = torch.randn(rows, 32, 128, device="cuda").to(torch.float8_e4m3fn)
     weights = torch.randn(rows, 32, device="cuda") * 0.05
@@ -142,8 +141,10 @@ def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, 
     with torch.cuda.graph(graph):
         actual = run()
     graph_logits = logits_outputs.pop()
+    graph.replay()
+    assert (actual == -1).all()
     for bases in ([0, 2047, 2051, max_pools * 4 - mtp_size + 1, 0], [7, 65, 511, 2053, 0]):
-        seqs = torch.tensor(bases, device="cuda", dtype=torch.int32)[:, None]
+        seqs = torch.tensor(bases, device="cuda", dtype=torch.int32).repeat((requests + 4) // 5)[:requests, None]
         seqs = seqs + torch.arange(mtp_size, device="cuda", dtype=torch.int32)[None, :]
         seqs[-1].zero_()
         lengths.copy_(seqs.flatten())

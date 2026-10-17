@@ -922,6 +922,17 @@ class ModeBackend:
         return [g_infer_context.requests_mapping[req_id] for req_id in req_ids]
 
     def _gen_argmax_token_ids(self, model_output: ModelOutput):
+        if (
+            model_output.logits_token_ids is None
+            and model_output.logits.is_cuda
+            and model_output.logits.dtype == torch.float32
+            and model_output.logits.shape[0] > 0
+            and model_output.logits.stride(1) == 1
+            and model_output.logits.shape[1] >= 4096
+        ):
+            from lightllm.common.basemodel.triton_kernel.post_process.argmax import argmax
+
+            return argmax(model_output.logits)
         token_indices = torch.argmax(model_output.logits, dim=-1)
         if model_output.logits_token_ids is not None:
             # 候选排列保证分数相同时优先选择最小的全局 token ID。

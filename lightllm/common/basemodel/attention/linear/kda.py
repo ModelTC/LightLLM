@@ -8,6 +8,7 @@ import dataclasses
 from typing import TYPE_CHECKING
 
 import torch
+from lightllm.common.recurrent_state_types import RecurrentStateContext
 
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
@@ -63,7 +64,8 @@ class KDAPrefillAttState(BasePrefillAttState):
 
     def init_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (self.backend.mtp_step + 1)
+        manager = self.infer_state.req_manager
+        self.b_ssm_buffer_idx = manager.recurrent_state.prepare_prefill(self.infer_state.b_req_idx)
 
     def prefill_att(
         self,
@@ -137,6 +139,9 @@ class KDADecodeAttState(BaseDecodeAttState):
             self._init_dynamic_mtp_decode_state(mtp_step + 1)
         else:
             self._init_fixed_mtp_decode_state(mtp_step)
+        self.infer_state.req_manager.recurrent_state.prepare_decode(
+            self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len, single_token=mtp_step == 0
+        )
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
@@ -150,7 +155,7 @@ class KDADecodeAttState(BaseDecodeAttState):
         ) = build_dynamic_mtp_linear_att_state_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
+            req_to_mtp_state_index=self.infer_state.req_manager.recurrent_state.accepted_index,
             hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
         self._init_mtp_ssm_buffer_idx(mtp_size)
@@ -172,10 +177,15 @@ class KDADecodeAttState(BaseDecodeAttState):
             device=self.infer_state.b_req_idx.device,
         )
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
+        self.b_num_accepted_tokens = (
+            self.infer_state.req_manager.recurrent_state.accepted_index[self.b_conv_buffer_idx] + 1
+        )
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
+        if self.infer_state.req_manager.recurrent_state.update_backend is not None:
+            self.b_ssm_buffer_idx = self.b_conv_buffer_idx
+            return
         att_batch_size = self.b_conv_buffer_idx.shape[0]
         # Each request owns mtp_size consecutive recurrent-state slots.
         b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
@@ -221,6 +231,29 @@ class KDADecodeAttState(BaseDecodeAttState):
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(*shape, backend.tp_hidden_size)
         raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
+        updater = self.infer_state.req_manager.recurrent_state.update_backend
+        if updater is not None:
+            layer = self.infer_state.req_manager.linear_config.get_linear_layer_index(layer_num)
+            args = (
+                q,
+                k,
+                v,
+                raw_gate.view(-1, backend.tp_hidden_size),
+                raw_beta.view(-1, backend.tp_num_heads),
+                layer_weight.linear_A_log.weight,
+                layer_weight.linear_dt_bias.weight,
+            )
+            if layer == 0:
+                self.infer_state.recurrent_state_context = RecurrentStateContext.from_run_config(
+                    updater.get_run_config(*args, self.b1_mtp_cu_q_seq_len)
+                )
+            return updater.forward(
+                layer,
+                *args,
+                self.b_conv_buffer_idx,
+                self.b1_mtp_cu_q_seq_len,
+                run_config=self.infer_state.recurrent_state_context.config,
+            )
         output, _ = fused_recurrent_kda(
             q=q,
             k=k,

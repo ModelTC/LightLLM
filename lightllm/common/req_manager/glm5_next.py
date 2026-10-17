@@ -7,6 +7,8 @@ from .linear_att import ReqManagerForMamba
 class Glm5NextReqManager(ReqManagerForMamba):
     """KDA runtime state and the NSA indexer's incomplete four-token pool."""
 
+    kda = True
+
     def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config):
         # Both checkpoint sizes are multiples of this hash page. A restored
         # prefix therefore has no incomplete K-pool to serialize or replay.

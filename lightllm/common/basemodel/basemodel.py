@@ -276,6 +276,21 @@ class TpPartBaseModel:
             alignment = math.lcm(alignment, self.tp_world_size_)
         return triton.cdiv(batch_size, alignment) * alignment
 
+    def use_replayssm_draft_tail(self):
+        """Project only accepted-tail rows in the first draft pass."""
+        return (
+            self.is_mtp_draft_model
+            and self.args.ssm_state_mode == "replay"
+            and self.args.ssm_replay_config.get("compute_mode", "inline") == "parallel"
+            and self.args.mtp_mode == "eagle_with_att"
+            and self.args.mtp_step > 0
+            and not self.args.mtp_dynamic_verify
+            and not self.args.enable_decode_microbatch_overlap
+            and not self.args.enable_tpsp_mix_mode
+            and self.tp_world_size_ == 1
+            and self.config.get("model_type") in ("qwen3_5", "qwen3_5_text")
+        )
+
     def _init_cudagraph(self):
         # When graph covers the configured request length, it must also cover MTP's internal token margin.
         if self.args.mtp_mode is not None and self.graph_max_len_in_batch >= self.args.max_req_total_len:
@@ -296,7 +311,21 @@ class TpPartBaseModel:
                 capture_infer_cost=self.args.mtp_dynamic_verify,
             )
         )
+        self.draft_tail_graph = None
         if self.graph is not None:
+            if self.use_replayssm_draft_tail():
+                width = self.args.mtp_step + 1
+                self.draft_tail_graph = CudaGraph(
+                    batch_step_size_before_split=width,
+                    split_batch_size=self.args.graph_split_batch_size * width,
+                    batch_step_size_after_split=self.args.graph_grow_step_size * width,
+                    max_batch_size=self.graph_max_batch_size * width,
+                    max_len_in_batch=self.graph_max_len_in_batch,
+                    tp_world_size=self.tp_world_size_,
+                )
+                # Draft passes execute sequentially, so both layouts can share the pool.
+                self.draft_tail_graph.mempool = self.graph.mempool
+                self.draft_tail_graph.warmup(self, logits_row_stride=width)
             if get_env_start_args().enable_decode_microbatch_overlap:
                 self.graph.warmup_overlap(self)
             else:
@@ -354,6 +383,16 @@ class TpPartBaseModel:
         infer_state.is_draft_model = self.is_mtp_draft_model
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
+        if model_input.b_logits_rows is not None:
+            assert self.use_replayssm_draft_tail() and not model_input.is_prefill
+            width = self.args.mtp_step + 1
+            assert model_input.batch_size % width == 0
+            count = model_input.batch_size // width
+            rows = model_input.b_logits_rows
+            assert rows.ndim == 1 and rows.numel() <= count
+            rows = F.pad(rows, (0, count - rows.numel()))
+            infer_state.b_logits_rows = rows
+            infer_state.logits_row_stride = width
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len
         infer_state.max_kv_seq_len = model_input.max_kv_seq_len
@@ -491,17 +530,22 @@ class TpPartBaseModel:
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=post_output.logits_token_ids,
+            recurrent_state_context=infer_state.recurrent_state_context,
+            logits_row_stride=infer_state.logits_row_stride,
         )
         return output
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
-        padded_batch_size = model_output.logits.shape[0]
+        stride = model_output.logits_row_stride
+        padded_batch_size = model_output.logits.shape[0] * stride
+        assert origin_batch_size % stride == 0
+        logits_size = origin_batch_size // stride
         if padded_batch_size == origin_batch_size:
             return model_output
         new_model_output = copy.copy(model_output)
-        new_model_output.logits = new_model_output.logits[0:origin_batch_size]
+        new_model_output.logits = new_model_output.logits[0:logits_size]
         if new_model_output.logits_token_ids is not None:
-            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
+            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:logits_size]
         new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
             padded_batch_size=padded_batch_size,
             origin_batch_size=origin_batch_size,
@@ -595,20 +639,24 @@ class TpPartBaseModel:
                 )
 
         origin_batch_size = model_input.batch_size
+        graph = self.draft_tail_graph if model_input.b_logits_rows is not None else self.graph
         # 空 DP rank 也需要完整的 dummy verify group；TP/SP 切分不能破坏 MTP 分组。
         infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size))
+        if model_input.b_logits_rows is not None:
+            width = self.args.mtp_step + 1
+            infer_batch_size = triton.cdiv(infer_batch_size, width) * width
 
         # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
         # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
         infer_max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        use_cuda_graph = self.graph is not None and self.graph.can_run(
+        use_cuda_graph = graph is not None and graph.can_run(
             batch_size=infer_batch_size,
             max_len_in_batch=infer_max_kv_seq_len,
         )
         need_capture = False
         if use_cuda_graph:
-            infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
-            need_capture = self.graph.need_capture(infer_batch_size)
+            infer_batch_size = graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
+            need_capture = graph.need_capture(infer_batch_size)
 
         model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
         infer_state = self._create_inferstate(model_input)
@@ -620,9 +668,9 @@ class TpPartBaseModel:
 
         if use_cuda_graph:
             if need_capture:
-                model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
+                model_output: ModelOutput = graph.capture_decode(self._token_forward, infer_state)
             else:
-                model_output: ModelOutput = self.graph.replay(infer_state)
+                model_output: ModelOutput = graph.replay(infer_state)
         else:
             model_output = self._token_forward(infer_state)
 
@@ -630,7 +678,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"

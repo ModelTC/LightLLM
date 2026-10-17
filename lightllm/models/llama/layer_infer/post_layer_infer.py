@@ -102,6 +102,17 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     ) -> PostLayerOutput:
         """执行原始 lm-head，并收集完整词表 logits。"""
 
+        if self.tp_world_size_ == 1 and hidden.is_cuda and hidden.dtype == torch.bfloat16:
+            # Produce token-major logits directly so the FP32 conversion reads
+            # contiguous rows instead of transposing the full vocabulary matrix.
+            normed = self._norm(hidden, infer_state, layer_weight)
+            vocab_size = layer_weight.lm_head_weight_.vocab_size
+            local_logits = self.alloc_tensor((token_num, vocab_size), dtype=hidden.dtype)
+            torch.mm(normed, layer_weight.lm_head_weight_.weight.t(), out=local_logits)
+            logits = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
+            logits.copy_(local_logits)
+            return PostLayerOutput(logits=logits)
+
         local_logits = self._project_local_logits(hidden, token_num, layer_weight, infer_state)
 
         vocab_size = layer_weight.lm_head_weight_.vocab_size
@@ -230,6 +241,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     ) -> PostLayerOutput:
         """按 draft 配置返回候选 logits，未开启时回退到完整词表。"""
 
+        if infer_state.b_logits_rows is not None:
+            hidden = hidden.index_select(0, infer_state.b_logits_rows)
+            token_num = hidden.shape[0]
         top_k = get_env_start_args().draft_vocab_topk_sampling
         if top_k is None:
             return self._lm_head_and_gather(hidden, token_num, layer_weight, infer_state)
@@ -240,7 +254,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ) -> PostLayerOutput:
-
         return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
@@ -251,7 +264,6 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: BaseLayerWeight,
     ) -> tuple[PostLayerOutput, PostLayerOutput]:
-
         output = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
 
         output1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)

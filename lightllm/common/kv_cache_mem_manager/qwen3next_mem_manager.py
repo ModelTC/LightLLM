@@ -71,8 +71,9 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def write_to_shm(self, req_manager):
-        self.req_to_conv_state = req_manager.req_to_conv_state
-        self.req_to_ssm_state = req_manager.req_to_ssm_state
+        # RecurrentState contains only IPC-safe state/operator configuration;
+        # worker execution resources must remain outside this shared object.
+        self.recurrent_state = req_manager.recurrent_state
         # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
         # CPU tensor 的 storage 原地迁到共享内存，使本进程大页 state cache 原本
         # pinned(cudaHostAlloc) 的内存退化为普通 shm mmap，之后 Triton kernel 携带该指针
@@ -173,8 +174,6 @@ class Qwen3NextLinearAttPageHelper:
     def __init__(self, mem_manager: "Qwen3NextMemManager"):
         self.mem_manager = mem_manager
         self.linear_config = mem_manager.linear_config
-        self.req_to_conv_state = mem_manager.req_to_conv_state
-        self.req_to_ssm_state = mem_manager.req_to_ssm_state
         self.global_linear_k_heads = self.linear_config.global_linear_k_heads
         self.global_linear_v_heads = self.linear_config.global_linear_v_heads
 
@@ -196,9 +195,9 @@ class Qwen3NextLinearAttPageHelper:
         )
 
         self.conv_nbytes = (
-            self.conv_shape[0] * self.conv_shape[1] * self.conv_shape[2] * self.req_to_conv_state.buffer.element_size()
+            self.conv_shape[0] * self.conv_shape[1] * self.conv_shape[2] * self.linear_config.conv_state_dtype.itemsize
         )
-        ssm_alignment = self.req_to_ssm_state.buffer.element_size()
+        ssm_alignment = self.linear_config.ssm_state_dtype.itemsize
         # 做一下字节对齐，防止切出来的不对齐，导致一些操作的性能下降。
         self.ssm_offset = ((self.conv_nbytes + ssm_alignment - 1) // ssm_alignment) * ssm_alignment
         self.ssm_nbytes = (
@@ -206,7 +205,7 @@ class Qwen3NextLinearAttPageHelper:
             * self.ssm_shape[1]
             * self.ssm_shape[2]
             * self.ssm_shape[3]
-            * self.req_to_ssm_state.buffer.element_size()
+            * self.linear_config.ssm_state_dtype.itemsize
         )
         self.state_nbytes = self.ssm_offset + self.ssm_nbytes
 
@@ -222,7 +221,7 @@ class Qwen3NextLinearAttPageHelper:
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         assert len(dp_mems) == dp_world_size
         for mem in dp_mems:
-            assert hasattr(mem, "req_to_conv_state") and hasattr(mem, "req_to_ssm_state")
+            assert hasattr(mem, "recurrent_state")
             assert mem.linear_config.linear_layer_num == self.linear_config.linear_layer_num
             assert mem.linear_config.conv_kernel_size == self.linear_config.conv_kernel_size
             assert mem.linear_config.head_linear_k_dim == self.linear_config.head_linear_k_dim
@@ -233,10 +232,10 @@ class Qwen3NextLinearAttPageHelper:
 
     def view_page_to_linear_att_state(self, page_index: int):
         page_bytes = self.mem_manager.kv_move_buffer[page_index].view(torch.uint8).reshape(-1)
-        conv_page = page_bytes[0 : self.conv_nbytes].view(self.req_to_conv_state.buffer.dtype).view(self.conv_shape)
+        conv_page = page_bytes[0 : self.conv_nbytes].view(self.linear_config.conv_state_dtype).view(self.conv_shape)
         ssm_page = (
             page_bytes[self.ssm_offset : self.ssm_offset + self.ssm_nbytes]
-            .view(self.req_to_ssm_state.buffer.dtype)
+            .view(self.linear_config.ssm_state_dtype)
             .view(self.ssm_shape)
         )
         return conv_page, ssm_page
@@ -263,11 +262,6 @@ class Qwen3NextLinearAttPageHelper:
             self._read_one_rank(mem, tp_index, req_idx, conv_page, ssm_page)
         return
 
-    def _get_req_state_indexes(self, req_idx: int):
-        mtp_size = get_env_start_args().mtp_step + 1
-        # Conv is one widened slot per request; SSM keeps the historical S+1 block layout.
-        return req_idx, req_idx * mtp_size
-
     def _write_one_rank(
         self,
         mem: "Qwen3NextMemManager",
@@ -276,9 +270,7 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
-        conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
-        conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
-        ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
+        conv_state, ssm_state = mem.recurrent_state.snapshot(req_idx)
         self._copy_conv_state_to_page(conv_state, conv_page, mem, tp_index)
         self._copy_ssm_state_to_page(ssm_state, ssm_page, mem, tp_index)
         return
@@ -456,9 +448,7 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
-        conv_req_idx, ssm_req_idx = self._get_req_state_indexes(req_idx)
-        conv_state = mem.req_to_conv_state.buffer[:, conv_req_idx, ..., : self.conv_shape[-1]]
-        ssm_state = mem.req_to_ssm_state.buffer[:, ssm_req_idx, ...]
+        conv_state, ssm_state = mem.recurrent_state.restore_target(req_idx)
         self._copy_page_to_conv_state(conv_page, conv_state, mem, tp_index)
         self._copy_page_to_ssm_state(ssm_page, ssm_state, mem, tp_index)
         return

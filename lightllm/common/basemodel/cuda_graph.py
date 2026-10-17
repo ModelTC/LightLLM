@@ -250,7 +250,7 @@ class CudaGraph:
             return self._replay(infer_state)
 
     @torch.no_grad()
-    def warmup(self, model):
+    def warmup(self, model, logits_row_stride=1):
         logger.info("Begin capture cudagraph, use the --disable_cudagraph to disable it.")
         # for typing easy
         from .basemodel import TpPartBaseModel
@@ -286,6 +286,10 @@ class CudaGraph:
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                 **model._gen_special_model_input(batch_size),
             )
+            if logits_row_stride > 1:
+                model_input.b_logits_rows = torch.arange(
+                    logits_row_stride - 1, batch_size, logits_row_stride, dtype=torch.int64, device="cuda"
+                )
             model_output: ModelOutput = model.forward(model_input)
             del model_output
             del input_ids
