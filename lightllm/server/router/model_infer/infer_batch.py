@@ -12,6 +12,7 @@ from lightllm.common.req_manager import ReqManager, HybridAttentionReqManager
 from lightllm.utils.infer_utils import mark_start, mark_end
 from lightllm.server.core.objs import Req, SamplingParams, FinishStatus, ShmReqManager
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache, TreeNode
+from lightllm.server.router.dynamic_prompt.tool_call_cache import contains_tool_call
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedRadixCache,
     HybridAttPagedTreeNode,
@@ -186,6 +187,22 @@ class InferenceContext:
             req.shared_kv_node = None
         return
 
+    def _retain_tool_call_prefix(self, req: "InferReq", cache_node):
+        retention = self.radix_cache.tool_call_retention
+        if retention is None:
+            return
+        if req.finish_status.is_stopped() and not req.sampling_param.disable_prompt_cache:
+            markers = req.sampling_param.shm_param.tool_call_cache_markers.to_list()
+            if markers:
+                generated = req.get_input_token_ids()[
+                    req.shm_req.input_len : req.shm_req.input_len + req.finish_output_len
+                ]
+                if contains_tool_call(generated, markers):
+                    retention.protect(cache_node)
+                    return
+        if req.finish_status.is_stopped() or req.finish_status.is_finished_length():
+            retention.complete(cache_node)
+
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
         page_size = self.args.page_size
         cache_kv_len = req.cur_kv_len // page_size * page_size
@@ -197,7 +214,8 @@ class InferenceContext:
         # .cpu() 是 流内阻塞操作
         value = self.req_manager.req_to_token_indexs[req.req_idx][:cache_kv_len].detach().cpu()
 
-        prefix_len, _ = self.radix_cache.insert(key, value)
+        prefix_len, cache_node = self.radix_cache.insert(key, value)
+        self._retain_tool_call_prefix(req, cache_node)
         old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
         free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
         if req.shared_kv_node is not None:
@@ -237,13 +255,14 @@ class InferenceContext:
             state_idxs = [None for _ in range(page_num)]
             state_idxs[-1] = req.tail_small_page_buffer_id
             req.tail_small_page_buffer_id = None
-            prefix_len, _ = self.radix_cache.insert(
+            prefix_len, cache_node = self.radix_cache.insert(
                 key,
                 value,
                 block_hashs=block_hashs,
                 block_state_idxs=state_idxs,
                 len_to_big_page_id=req.hybrid_len_to_big_page_id,
             )
+            self._retain_tool_call_prefix(req, cache_node)
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
@@ -266,13 +285,14 @@ class InferenceContext:
             assert tail_big_page_token_num % hash_page_size == 0
             block_hashs = req.shm_req.hybrid_token_hash_list.get_all()[:cur_page_num]
             state_idxs = [None for _ in range(cur_page_num)]
-            prefix_len, _ = self.radix_cache.insert(
+            prefix_len, cache_node = self.radix_cache.insert(
                 key,
                 value,
                 block_hashs=block_hashs,
                 block_state_idxs=state_idxs,
                 len_to_big_page_id=req.hybrid_len_to_big_page_id,
             )
+            self._retain_tool_call_prefix(req, cache_node)
             old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
             free_token_index.append(self.req_manager.req_to_token_indexs[req.req_idx][old_prefix_len:prefix_len])
             if req.shared_kv_node is not None:
@@ -371,7 +391,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -632,6 +651,7 @@ class InferReq:
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()
+        self.finish_output_len = 0
 
         # 申请 hybrid attention 模型使用的缓存资源
         if g_infer_context.is_hybrid_att_model:
@@ -1039,6 +1059,11 @@ class InferReqUpdatePack:
 
         if extra_post_req_handle_func is not None:
             extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)
+
+        if finish_status.is_finished():
+            # Later MTP packs can still advance cur_output_len / KV after EOS.
+            # Cache hints must only inspect the accepted response, like the API.
+            req_obj.finish_output_len = self.output_len
 
         if is_master_in_dp:
             # shm_cur_kv_len shm_cur_output_len 是 router 调度进程需要读的信息

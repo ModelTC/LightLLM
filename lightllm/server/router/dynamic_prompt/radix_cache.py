@@ -5,6 +5,7 @@ import collections
 from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
+from .tool_call_cache import ToolCallCacheRetention
 
 
 class UniqueTimeIdGenerator:
@@ -30,12 +31,14 @@ class TreeNode:
         self.token_mem_index_value: torch.Tensor = None  # 用于记录存储的 token_index 为每个元素在 token mem 中的index位置
         self.ref_counter = 0
         self.time_id = time_gen.generate_time_id()  # 用于标识时间周期
+        self.cache_protected = False
+        self.cache_retention = None
 
         self.node_value_len = 0
         self.node_prefix_total_len = 0
 
     def get_compare_key(self):
-        return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
+        return (0 if self.ref_counter == 0 else 1, len(self.children), self.cache_protected, self.time_id)
 
     def get_child_key(self, token_ids: torch.Tensor):
         first_page = token_ids[: self.page_size]
@@ -64,6 +67,8 @@ class TreeNode:
         new_len = len(self.token_mem_index_value)
         self.node_value_len = new_len
         self.node_prefix_total_len = self.parent.node_prefix_total_len + new_len
+        if self.cache_retention is not None:
+            self.cache_retention.split(self, split_parent_node)
         return split_parent_node
 
     def add_and_return_new_child(self, token_id_key, token_mem_index_value):
@@ -136,6 +141,30 @@ class RadixCache:
         self.refed_tokens_num.arr[0] = 0
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
+        self.tool_call_retention = None
+
+    def enable_tool_call_retention(self, duration, fraction):
+        self.tool_call_retention = ToolCallCacheRetention(
+            duration,
+            int(self.total_token_num * fraction),
+            self.evict_tree_set.discard,
+            lambda node: self.evict_tree_set.add(node) if node.is_leaf() else None,
+            self._fit_retention_prefix,
+        )
+
+    def _fit_retention_prefix(self, node, token_budget):
+        limit = token_budget // self.page_size * self.page_size
+        if limit == 0:
+            return None
+        while node.parent is not None and node.parent.node_prefix_total_len >= limit:
+            node = node.parent
+        if node.node_prefix_total_len <= limit:
+            return node
+        self.evict_tree_set.discard(node)
+        prefix = node.split_node(limit - node.parent.node_prefix_total_len)
+        if node.is_leaf():
+            self.evict_tree_set.add(node)
+        return prefix
 
     def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         if value is None:
@@ -351,6 +380,8 @@ class RadixCache:
         num_evicted = 0
         while num_evicted < need_remove_tokens:
             node: TreeNode = self.evict_tree_set.pop(0)
+            if self.tool_call_retention is not None:
+                self.tool_call_retention.forget(node)
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
             ), "error evict tree node state"
@@ -381,6 +412,8 @@ class RadixCache:
             or parent_node.ref_counter != 0
             or len(parent_node.children) != 1
             or child_node.ref_counter != 0
+            or child_node.cache_protected
+            or parent_node.cache_protected
         ):
             return None
 

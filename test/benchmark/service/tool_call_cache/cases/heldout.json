@@ -1,0 +1,12 @@
+[
+  {"name": "low-pressure", "options": {"sessions": 4, "turns": 10, "split": "test", "context_scale": 0.025, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "trace-c8", "options": {"sessions": 8, "turns": 12, "split": "test", "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "trace-c16", "options": {"sessions": 16, "turns": 12, "split": "test", "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "ordinary-c8", "options": {"sessions": 8, "turns": 12, "split": "test", "mix": "ordinary", "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "mixed25", "options": {"sessions": 8, "turns": 12, "split": "test", "mix": "mixed25", "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "abandoned", "options": {"sessions": 16, "turns": 8, "split": "test", "abandon_fraction": 0.5, "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "slow-tools", "options": {"sessions": 8, "turns": 4, "split": "test", "context_scale": 0.05, "wait_scale": 0.1, "min_tool_wait": 4, "max_wait": 6}},
+  {"name": "high-pressure-c24", "options": {"sessions": 24, "turns": 8, "split": "test", "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "variable-output-trace", "options": {"sessions": 8, "turns": 6, "split": "test", "context_scale": 0.05, "output_scale": 0.5, "max_output_target": 256, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "variable-output-ordinary", "options": {"sessions": 8, "turns": 6, "split": "test", "mix": "ordinary", "context_scale": 0.05, "output_scale": 0.5, "max_output_target": 256, "wait_scale": 0.1, "max_wait": 5}}
+]

@@ -5,6 +5,7 @@ from sortedcontainers import SortedSet, SortedDict
 from lightllm.common.state_cache_manager import StateCacheManager
 from .shared_arr import SharedArray
 from .radix_cache import time_gen
+from .tool_call_cache import ToolCallCacheRetention
 
 
 class HybridAttPagedTreeNode:
@@ -26,6 +27,8 @@ class HybridAttPagedTreeNode:
 
         self.ref_counter = 0
         self.time_id = time_gen.generate_time_id()
+        self.cache_protected = False
+        self.cache_retention = None
 
         self.node_value_len = 0
         self.node_prefix_total_len = 0
@@ -48,13 +51,13 @@ class HybridAttPagedTreeNode:
             else:
                 keya = 1
         # 对于叶节点，非大页节点，如果不存在buffer_idx 的时候，说明无法被复用了，所以应该提前被回收掉，放在evict_tree_set的前面。
-        return (0 if self.ref_counter == 0 else 1, keya, self.time_id)
+        return (0 if self.ref_counter == 0 else 1, keya, self.cache_protected, self.time_id)
 
     def get_compare_key_for_buffer_idx(self):
         assert self.is_big_page_node() is False
         # 对于有 buffer_id 的节点的回收处理比较器
         assert self.small_page_buffer_idx is not None
-        return (self.time_id,)
+        return (self.cache_protected, self.time_id)
 
     def add_and_return_new_child(
         self,
@@ -145,12 +148,33 @@ class HybridAttPagedRadixCache:
         self._evict_tree_set_for_state_cache: Set[HybridAttPagedTreeNode] = SortedSet(
             key=lambda x: x.get_compare_key_for_buffer_idx()
         )
+        self.tool_call_retention = None
 
         self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
         self.small_page_buffers: StateCacheManager = small_page_buffers
+
+    def enable_tool_call_retention(self, duration, fraction):
+        self.tool_call_retention = ToolCallCacheRetention(
+            duration,
+            int(self.total_token_num * fraction),
+            self._discard_node,
+            self._add_node,
+            self._fit_retention_prefix,
+        )
+
+    @staticmethod
+    def _is_resumable(node):
+        return node.is_big_page_node() or node.small_page_buffer_idx is not None
+
+    def _fit_retention_prefix(self, node, token_budget):
+        while node.parent is not None:
+            if node.node_prefix_total_len <= token_budget and self._is_resumable(node):
+                return node
+            node = node.parent
+        return None
 
     def _discard_node(self, node: HybridAttPagedTreeNode):
         if node.is_leaf():
@@ -604,6 +628,8 @@ class HybridAttPagedRadixCache:
         assert node.small_page_buffer_idx is not None
         self.small_page_buffers.free_state_cache(free_indexes=[node.small_page_buffer_idx])
         node.small_page_buffer_idx = None
+        if self.tool_call_retention is not None and node.cache_protected:
+            self.tool_call_retention.invalidate_checkpoint(node, self._is_resumable)
 
         self._add_node(node)
         return
@@ -617,6 +643,8 @@ class HybridAttPagedRadixCache:
         while num_evicted < need_remove_tokens:
             node: HybridAttPagedTreeNode = self._evict_tree_set.pop(0)
             self._discard_node(node)
+            if self.tool_call_retention is not None:
+                self.tool_call_retention.forget(node)
 
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node

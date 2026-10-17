@@ -138,6 +138,11 @@ def _launch_subprocesses(args: StartArgs):
         args.graph_max_len_in_batch = args.max_req_total_len
 
     # mode setting check.
+    assert math.isfinite(args.tool_call_cache_retention_seconds) and args.tool_call_cache_retention_seconds >= 0
+    assert math.isfinite(args.tool_call_cache_max_fraction) and 0 < args.tool_call_cache_max_fraction <= 1
+    if args.tool_call_cache_retention_seconds > 0:
+        assert not args.disable_dynamic_prompt_cache, "tool-call retention requires dynamic prompt caching"
+
     is_hybrid_model = is_hybrid_att_model(args.model_dir)
     if is_hybrid_model:
         # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。

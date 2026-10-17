@@ -394,6 +394,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             )
 
     sampling_params = SamplingParams()
+    if tools and getattr(g_objs.args, "tool_call_cache_retention_seconds", 0) > 0:
+        sampling_params_dict["tool_call_cache_markers"] = FunctionCallParser.cache_marker_token_ids(
+            g_objs.args.tool_call_parser or "llama3", g_objs.httpserver_manager.tokenizer
+        )
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
     await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 

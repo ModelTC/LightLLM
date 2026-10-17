@@ -788,7 +788,6 @@ class KimiK2Detector(BaseFormatDetector):
                     parsed_args_diff = argument_diff.split("<|tool_call_end|>", 1)[0]
 
                     if parsed_args_diff:
-
                         calls.append(
                             ToolCallItem(
                                 tool_index=self.current_tool_id,
@@ -1966,6 +1965,25 @@ class FunctionCallParser:
 
         self.detector = detector
         self.tools = tools
+
+    @classmethod
+    def cache_marker_token_ids(cls, tool_call_parser, tokenizer):
+        """Tokenize advisory start markers without parsing on inference ranks."""
+        from .core.objs.sampling_params import ToolCallCacheMarkers
+
+        detector = cls.ToolCallParserEnum[tool_call_parser]()
+        markers = [detector.bot_token, getattr(detector, "tool_call_start_token", "")]
+        if tool_call_parser == "qwen3_coder":
+            markers.append("<function=")
+        result = []
+        for marker in dict.fromkeys(markers):
+            if marker:
+                ids = tokenizer.encode(marker, add_special_tokens=False)
+                # A tokenizer with an unexpected marker encoding must not break
+                # ordinary chat handling merely because this hint is enabled.
+                if 0 < len(ids) <= ToolCallCacheMarkers.MAX_LENGTH:
+                    result.append(ids)
+        return result
 
     def has_tool_call(self, text: str) -> bool:
         """
