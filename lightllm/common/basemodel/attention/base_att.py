@@ -1,4 +1,5 @@
 import threading
+import weakref
 
 import torch
 from abc import ABC, abstractmethod
@@ -114,11 +115,32 @@ class AttControl:
     linear_att_decode_dict: Dict = None
 
 
+class _InferStateRef:
+    """Keep the dataclass constructor/access API without owning InferStateInfo.
+
+    InferStateInfo owns attention states; CUDA graph caches own captured
+    InferStateInfo objects for as long as replay needs them.
+    """
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return None
+        ref = instance._infer_state_ref
+        if ref is None:
+            return None
+        infer_state = ref()
+        if infer_state is None:
+            raise ReferenceError("attention state's InferStateInfo has been released")
+        return infer_state
+
+    def __set__(self, instance, infer_state):
+        instance._infer_state_ref = None if infer_state is None else weakref.ref(infer_state)
+
+
 @dataclass
 class BasePrefillAttState(ABC):
-
     backend: BaseAttBackend = None
-    infer_state: "InferStateInfo" = None
+    infer_state: "InferStateInfo" = _InferStateRef()
 
     @abstractmethod
     def init_state(self):
@@ -139,7 +161,7 @@ class BasePrefillAttState(ABC):
 @dataclass
 class BaseDecodeAttState(ABC):
     backend: BaseAttBackend = None
-    infer_state: "InferStateInfo" = None
+    infer_state: "InferStateInfo" = _InferStateRef()
 
     @abstractmethod
     def init_state(self):
