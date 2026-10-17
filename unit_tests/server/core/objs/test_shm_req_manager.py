@@ -16,7 +16,8 @@ from lightllm.server.core.objs.shm_req_manager import ShmReqManager
 @pytest.fixture(scope="module", autouse=True)
 def setup_env():
     monkeypatch = pytest.MonkeyPatch()
-    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_shm_req_manager_service_0")
+    service_name = "test_shm_req_manager_" + uuid.uuid4().hex
+    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: service_name)
     original = os.environ.get("LIGHTLLM_START_ARGS")
     set_env_start_args(
         EasyDict(

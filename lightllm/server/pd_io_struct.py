@@ -197,6 +197,8 @@ class PDChunckedTransTask:
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
+    # D publishes task metadata before allocating the destination KV.
+    defer_allocation: bool = False
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
@@ -294,6 +296,7 @@ class PDChunckedTransTaskRet:
     error_info: str = None
     first_gen_token_id: Optional[int] = None
     first_gen_token_logprob: Optional[float] = None
+    allocation_requested: bool = False
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
@@ -302,6 +305,7 @@ class PDChunckedTransTaskRet:
 @dataclass
 class PDChunckedTransTaskGroup:
     task_list: List[PDChunckedTransTask] = field(default_factory=list)
+    allocation_update: bool = False
 
 
 @dataclass

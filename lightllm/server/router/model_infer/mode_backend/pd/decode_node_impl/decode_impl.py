@@ -1,4 +1,7 @@
 import random
+import copy
+import torch
+import torch.distributed as dist
 import torch.multiprocessing as mp
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
@@ -61,6 +64,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
         主要用于在 nixl pd 分离模式下, 由子类继承重载, prefill 和 decode 节点过滤 kv 传输错误，或者 kv
         传输没有完成的请求。
         """
+        self._allocate_ready_kv(req_ids)
         ans_list: List[InferReq] = []
         for request_id in req_ids:
             req_obj: InferReq = g_infer_context.requests_mapping[request_id]
@@ -126,19 +130,35 @@ class PDDecodeNode(ChunkedPrefillBackend):
         """
         group = PDChunckedTransTaskGroup()
         input_len = req_obj.shm_req.input_len
+        assert self.args.pd_kv_page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
+        deferred = input_len - req_obj.cur_kv_len > 1
+        req_obj.pd_first_chunk_ready = False
+        req_obj.pd_pending_kv_group = None
+        if deferred and req_obj.hold_kv_len:
+            # Waiting requests must not pin partial prefixes and prevent each
+            # other from acquiring their complete destination. Full hits keep
+            # the existing no-transfer path.
+            if g_infer_context.is_hybrid_att_model:
+                torch.cuda.current_stream().synchronize()
+            free_indexes = []
+            g_infer_context._free_req_mem_without_radix_insert(free_indexes, req_obj)
+            for indexes in free_indexes:
+                if len(indexes):
+                    self.model.mem_manager.free(indexes)
+            req_obj.cur_kv_len = req_obj.hold_kv_len = 0
+            if self.is_master_in_dp:
+                req_obj.shm_req.shm_cur_kv_len = req_obj.shm_req.prompt_cache_len = 0
+        if self.is_master_in_dp:
+            req_obj.shm_req.pd_waiting_for_kv = deferred
         # 当 decode 节点不能匹配足够的kv的时候，才进行真实的 kv 传输。
         if input_len - req_obj.cur_kv_len > 1:
             trans_page_size = self.args.pd_kv_page_size
             assert trans_page_size % self.args.page_size == 0, "pd_kv_page_size must be divisible by page_size"
             req_obj.pd_trans_kv_start_index = req_obj.cur_kv_len
             assert req_obj.hold_kv_len == req_obj.cur_kv_len
-            need_mem_size = req_obj._kv_cache_alloc_need(input_len)
-
-            mem_indexes = self._alloc_req_kv_mem(req_obj, need_mem_size)
-            assert mem_indexes is not None
-            # 传输只覆盖真实 KV；最后一个模型页面中尚未使用的部分继续留在
-            # req_to_token_indexs 中，供后续 decode 直接切片使用。
-            mem_indexes = mem_indexes[: input_len - req_obj.cur_kv_len]
+            # Metadata only: these placeholders cannot reach a copy kernel
+            # until the first WRITE request has obtained a real allocation.
+            mem_indexes = [-1] * (input_len - req_obj.cur_kv_len)
 
             while req_obj.pd_trans_kv_start_index < input_len:
                 cur_page_size = min(trans_page_size, input_len - req_obj.pd_trans_kv_start_index)
@@ -148,16 +168,13 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 page_mem_indexes = mem_indexes[start_index - req_obj.cur_kv_len : end_index - req_obj.cur_kv_len]
                 self._create_pd_trans_task(
                     req_obj=req_obj,
-                    mem_indexes=page_mem_indexes.tolist(),
+                    mem_indexes=page_mem_indexes,
                     kv_start_index=start_index,
                     kv_end_index=end_index,
                     group=group,
                 )
                 # update
                 req_obj.pd_trans_kv_start_index += cur_page_size
-
-            req_obj.cur_kv_len += len(mem_indexes)
-            assert req_obj.cur_kv_len == input_len
 
             # 混合注意力模型还需接收请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
             # 通过本地 req_idx 定位运行态 buffer 的恢复位置。
@@ -184,9 +201,62 @@ class PDDecodeNode(ChunkedPrefillBackend):
                 group=group,
             )
 
+        if deferred:
+            req_obj.pd_pending_kv_group = group
+            for task in group.task_list:
+                task.defer_allocation = True
         if self.is_master_in_dp:
             self.info_queue.put(group)
         return
+
+    @staticmethod
+    def _kv_growth_reservation(req, args):
+        # Match Router's output estimate and page/MTP/asynchronous-exit margin.
+        output_len = req.cur_output_len
+        params = req.sampling_param.shm_param
+        estimate = (
+            params.max_new_tokens if params.ignore_eos else min(params.max_new_tokens, max(int(1.1 * output_len), 64))
+        )
+        a_len = max(req.shm_req.input_len + output_len + 1, req.cur_kv_len + 1)
+        b_len = max(0, estimate - output_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
+        return max(0, a_len + b_len - max(req.shm_req.input_len, req.hold_kv_len))
+
+    def _allocate_ready_kv(self, req_ids):
+        for request_id in req_ids:
+            req = g_infer_context.requests_mapping[request_id]
+            group = getattr(req, "pd_pending_kv_group", None)
+            if group is None or not req.pd_first_chunk_ready or req.infer_aborted or req.pd_task_failed_num:
+                continue
+            needed = req._kv_cache_alloc_need(req.shm_req.input_len)
+            growth = sum(
+                PDDecodeNode._kv_growth_reservation(r, self.args)
+                for r in g_infer_context.requests_mapping.values()
+                if getattr(r, "pd_pending_kv_group", None) is None
+            ) + PDDecodeNode._kv_growth_reservation(req, self.args)
+            available = g_infer_context.get_can_alloc_token_num() - growth
+            if self.dp_world_size > 1:
+                from lightllm.distributed import dist_group_manager
+
+                budget = torch.tensor([available], dtype=torch.int64, device="cuda")
+                dist.all_reduce(budget, op=dist.ReduceOp.MIN, group=dist_group_manager.get_default_group().device_group)
+                available = budget.item()
+            if needed > available:
+                continue
+            if needed:
+                self._alloc_req_kv_mem(req, needed)
+            indexes = self.model.req_manager.req_to_token_indexs[req.req_idx, : req.shm_req.input_len].tolist()
+            tasks = []
+            for original in group.task_list:
+                task = copy.copy(original)
+                task.defer_allocation = False
+                if task.page_kind == "kv":
+                    task.mem_indexes = indexes[task.start_kv_index : task.end_kv_index]
+                tasks.append(task)
+            req.cur_kv_len = req.shm_req.input_len
+            req.pd_pending_kv_group = None
+            if self.is_master_in_dp:
+                req.shm_req.pd_waiting_for_kv = False
+                self.info_queue.put(PDChunckedTransTaskGroup(tasks, allocation_update=True))
 
     def _create_pd_trans_task(
         self,

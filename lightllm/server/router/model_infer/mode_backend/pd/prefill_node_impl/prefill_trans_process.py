@@ -182,22 +182,38 @@ class _PrefillTransModule:
 
             assert isinstance(obj, PDChunckedTransTask), f"unsupported prefill transfer task type: {type(obj)}"
 
-            page_index = self.page_index_queue.get()
             trans_task = obj
-            trans_task.src_page_index = page_index
 
             # 初次校验 time out
             if trans_task.time_out():
                 trans_task.error_info = "time out in recv_task_loop"
                 self.failed_queue.put(trans_task)
             else:
-                self.local_copy_kv_queue.put(trans_task)
+                self._request_write(trans_task)
+
+    def _request_write(self, trans_task):
+        # A request waiting for D capacity must not hold a source-ring page:
+        # admitted requests may need that page to finish and release D capacity.
+        key = trans_task.get_key()
+        try:
+            with self.waiting_dict_lock:
+                self.waiting_dict[key] = trans_task
+            self.transporter.send_write_request_task_to_decode_node(trans_task)
+        except BaseException as exc:
+            with self.waiting_dict_lock:
+                self.waiting_dict.pop(key, None)
+            trans_task.error_info = f"send WRITE request to decode failed: {exc}"
+            self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
+            self.failed_queue.put(trans_task)
 
     @log_exception
     def local_copy_kv_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.local_copy_kv_queue.get()
+            assert trans_task.dst_page_index is not None, "source copy requires WRITE READY"
+            # Once granted, drain WRITE/DONE even if cancellation arrives here.
+            trans_task.src_page_index = self.page_index_queue.get()
 
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
@@ -222,25 +238,8 @@ class _PrefillTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             sync_event, trans_task = self.ready_transfer_queue.get()
-            trans_task: PDChunckedTransTask = trans_task
-            sync_event: torch.cuda.Event = sync_event
             sync_event.synchronize()
-            key = trans_task.get_key()
-            try:
-                with self.waiting_dict_lock:
-                    self.waiting_dict[key] = trans_task
-                self.transporter.send_write_request_task_to_decode_node(trans_task)
-                if self.args.pd_detail_log:
-                    logger.debug(f"send WRITE request to decode: {key}")
-            except BaseException as e:
-                with self.waiting_dict_lock:
-                    self.waiting_dict.pop(key, None)
-                logger.error(f"send WRITE request to decode failed: {trans_task.to_str()}")
-                logger.exception(str(e))
-                trans_task.error_info = f"send WRITE request to decode failed: {str(e)}"
-                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
-                self.failed_queue.put(trans_task)
-                continue
+            self.write_peer_kv_queue.put(trans_task)
         return
 
     @log_exception
@@ -275,7 +274,7 @@ class _PrefillTransModule:
                                 trans_task = self.waiting_dict.pop(key, None)
                             if trans_task is not None:
                                 trans_task.dst_page_index = notify_obj.dst_page_index
-                                self.write_peer_kv_queue.put(trans_task)
+                                self.local_copy_kv_queue.put(trans_task)
                                 if self.args.pd_detail_log:
                                     logger.debug(
                                         f"recv WRITE ready from decode request_id={trans_task.request_id} "

@@ -209,6 +209,9 @@ class _DecodeTransModule:
         while True:
             trans_task_group: PDChunckedTransTaskGroup = self.recv_task_group_queue.get()
 
+            if trans_task_group.allocation_update:
+                self._apply_kv_allocation(trans_task_group)
+                continue
             with self.waiting_dict_lock:
                 for task in trans_task_group.task_list:
                     if task.need_transfer_page():
@@ -287,14 +290,8 @@ class _DecodeTransModule:
                         # 到了请求页面的阶段
                         remote_trans_task = notify_obj
                         if remote_trans_task.write_stage == "request":
-                            with self.waiting_dict_lock:
-                                local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
+                            local_trans_task = self._handle_write_request(remote_trans_task)
                             if local_trans_task is not None:
-                                local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
-                                local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
-                                local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
-                                local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
-                                self.request_page_task_queue.put(local_trans_task)
                                 if self.args.pd_detail_log:
                                     logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
                             else:
@@ -343,6 +340,41 @@ class _DecodeTransModule:
             self._check_tasks_time_out()
             if not notifies_dict:
                 time.sleep(0.001)
+
+    def _handle_write_request(self, remote):
+        with self.waiting_dict_lock:
+            task = self.waiting_dict.get(remote.get_key())
+            if task is None:
+                return None
+            # Duplicate WRITE controls must not enqueue a second copy/page.
+            if getattr(task, "_write_requested", False):
+                return task
+            task._write_requested = True
+            task.prefill_agent_name = remote.prefill_agent_name
+            task.prefill_agent_metadata = remote.prefill_agent_metadata
+            task.prefill_num_pages = remote.prefill_num_pages
+            task.prefill_page_reg_desc = remote.prefill_page_reg_desc
+            if task.defer_allocation:
+                ret = task.createRetObj()
+                ret.allocation_requested = True
+                self.task_out_queue.put(ret)
+            else:
+                self.waiting_dict.pop(task.get_key())
+                self.request_page_task_queue.put(task)
+            return task
+
+    def _apply_kv_allocation(self, group):
+        with self.waiting_dict_lock:
+            for update in group.task_list:
+                task = self.waiting_dict.get(update.get_key())
+                # Abort or timeout may have won the race against allocation.
+                if task is None or not task.defer_allocation:
+                    continue
+                task.mem_indexes = update.mem_indexes
+                task.defer_allocation = False
+                if getattr(task, "_write_requested", False):
+                    self.waiting_dict.pop(task.get_key())
+                    self.request_page_task_queue.put(task)
 
     def _check_tasks_time_out(self):
         with self.waiting_dict_lock:

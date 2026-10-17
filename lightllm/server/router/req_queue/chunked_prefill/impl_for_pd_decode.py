@@ -15,12 +15,15 @@ class PDDecodeQueue(BaseQueue):
         # get_tuple_tokens 统一处理输出长度估算，并计入分页对齐、MTP 和异步退出所需的余量，
         # 确保新请求准入时也为这些额外的 KV 占用预留容量。
         a_len, b_len = req.get_tuple_tokens(self.is_busy(), self.router.router_statics.ema_req_out_len)
-        estimated_peak_token_num = estimated_peak_token_num + (a_len + b_len)
-        ok_token_num = estimated_peak_token_num < self.max_total_tokens
+        # Pending prefill requests do not reserve the full D destination. Each
+        # request must still fit on its own; actual allocation is checked by D
+        # when its first WRITE arrives. The existing request limit bounds P work.
+        ok_token_num = a_len + b_len < self.max_total_tokens
         batch_req_num += 1
         ok_req_num = batch_req_num <= self.running_max_req_size
 
         if ok_token_num and ok_req_num:
+            req.pd_waiting_for_kv = True
             self.router.shared_token_load.set_estimated_peak_token_count(estimated_peak_token_num, self.dp_index)
             self.router.shared_token_load.set_dynamic_max_load(
                 estimated_peak_token_num / self.max_total_tokens,
@@ -37,6 +40,9 @@ class PDDecodeQueue(BaseQueue):
         if batch is not None:
             for req in batch.reqs:
                 if req.sample_params.suggested_dp_index == self.dp_index:
+                    if getattr(req, "pd_waiting_for_kv", False):
+                        estimated_peak_token_num += req.get_used_tokens()
+                        continue
                     if req.is_infer_decode():
                         # 请求进入 decode 阶段后，可以结合已经运行的 token 数量和预计剩余输出长度，
                         # 使用连续批处理峰值算法估算其动态 KV 占用。
@@ -98,7 +104,6 @@ class PDDecodeQueue(BaseQueue):
         return new_batch
 
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
-
         estimated_peak_token_num = self._caclu_batch_estimated_peak_token_num(current_batch)
 
         return (estimated_peak_token_num, estimated_peak_token_num / self.max_total_tokens)

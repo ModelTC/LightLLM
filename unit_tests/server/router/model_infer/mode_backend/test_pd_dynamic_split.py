@@ -201,14 +201,15 @@ def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length(page_size, mon
     assert queue._caclu_batch_estimated_peak_token_num(batch) == 156 + page_size
     req.get_tuple_tokens.assert_called_once_with(False, 128)
     req.get_tuple_tokens.reset_mock()
-    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 156 + page_size, 1)
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 0, 1)
     req.get_tuple_tokens.assert_called_once_with(False, 128)
 
     # 接近上下文上限的请求可能只剩很少输出额度，预计输出长度仍受 max_new_tokens 约束，
     # 并在此基础上计入分页、MTP 和异步退出余量，避免因 EMA 偏大而永久滞留在 Decode 等待队列。
+    req.pd_waiting_for_kv = False  # Model has acquired its destination.
     req.sample_params.max_new_tokens = 20
     assert queue._caclu_batch_estimated_peak_token_num(batch) == 48 + page_size
-    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 48 + page_size, 1)
+    assert queue._can_add_new_req(req, estimated_peak_token_num=0, batch_req_num=0) == (True, 0, 1)
 
     req.sample_params.max_new_tokens = 1024
     req.get_tuple_tokens.reset_mock()
