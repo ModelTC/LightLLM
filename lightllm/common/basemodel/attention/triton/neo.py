@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from typing import Tuple
 
@@ -8,7 +9,7 @@ from .fp import TritonAttBackend, TritonPrefillAttState, TritonDecodeAttState
 
 class NeoTritonAttBackend(TritonAttBackend):
     def create_att_prefill_state(self, infer_state) -> "NeoTritonPrefillAttState":
-        return NeoTritonPrefillAttState(backend=self, infer_state=infer_state)
+        return NeoTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

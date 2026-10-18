@@ -58,7 +58,8 @@ class InferStateInfo:
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
         self.prompt_logics: Optional[torch.Tensor] = None
         self.multimodal_params: dict = None
-        self.is_cuda_graph: bool = False  # 标记是否是cuda graph的捕获推理
+        self.is_cuda_graph_capture: bool = False  # 标记是否用于 decode CUDA Graph 捕获
+        self.is_cuda_graph_replay: bool = False  # 标记是否为 decode CUDA Graph 回放准备输入
         self.dist_group: CustomProcessGroup = None
 
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
@@ -141,6 +142,35 @@ class InferStateInfo:
             self.decode_att_state.init_state()
             if self.decode_att_state1 is not None:
                 self.decode_att_state1.init_state()
+        self.check_att_states()
+
+    def check_att_states(self) -> None:
+        """检查 attention state，防止其强引用 InferStateInfo 而形成循环引用。
+
+        InferStateInfo 已经通过下列四个属性强引用主、辅 attention state。
+        如果 attention state 再把 infer_state 存到普通属性中，就会形成
+        infer_state -> attention state -> infer_state 的强引用闭环。
+        即使一次推理结束、外部引用全部释放，引用计数也无法立即回收这两个对象，
+        必须等待 Python 的循环 GC。循环 GC 主要由 Python 对象分配和阈值驱动，
+        不能保证在 GPU 显存紧张时及时运行。
+
+        这些对象还持有本次推理的 Tensor。对象延迟回收会使相关 Tensor 的显存
+        继续被占用，无法及时交还给 PyTorch 分配器复用；多次推理累积后可能抬高
+        显存峰值，甚至触发 OOM。集中进行循环 GC 还可能造成推理延迟抖动。
+        因此，即使循环最终能够被 GC 回收，也不能依赖它管理推理临时状态的生命周期。
+
+        InferStateInfo 的生命周期应由推理调用方或 CUDA Graph 缓存负责：
+        调用方使用期间、图仍需回放期间保留强引用，结束使用后即可释放。
+        attention state 只通过 _infer_state_weak_ref 和 infer_state 属性访问它，
+        不应额外延长其生命周期。这里在 attention state 初始化完成后统一检查，
+        尽早发现新后端或后续修改误存的 InferStateInfo 强引用。
+
+        注意：检查仅扫描非空 attention state 的第一层实例属性，不递归检查容器或
+        回调闭包；实现后端时也应避免通过这些位置间接保存 infer_state 的强引用。
+        """
+        for state in (self.prefill_att_state, self.prefill_att_state1, self.decode_att_state, self.decode_att_state1):
+            if state is not None:
+                state.check_no_infer_state()
 
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
         for attr_name, attr_value in vars(new_infer_state).items():

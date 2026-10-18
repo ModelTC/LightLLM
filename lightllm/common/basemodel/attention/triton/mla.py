@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Tuple
@@ -6,10 +7,10 @@ from typing import Tuple
 
 class MlaTritonAttBackend(BaseAttBackend):
     def create_att_prefill_state(self, infer_state) -> "MlaTritonPrefillAttState":
-        return MlaTritonPrefillAttState(backend=self, infer_state=infer_state)
+        return MlaTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "MlaTritonDecodeAttState":
-        return MlaTritonDecodeAttState(backend=self, infer_state=infer_state)
+        return MlaTritonDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
