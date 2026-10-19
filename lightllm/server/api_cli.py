@@ -848,6 +848,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         For DSpark and DFlash this value is derived from the draft checkpoint block_size.""",
     )
     parser.add_argument(
+        "--mtp_windowed",
+        action="store_true",
+        help="Use a sliding window for draft KV in DFlash-style MTP.",
+    )
+    parser.add_argument("--mtp_window_size", type=int, default=512)
+    parser.add_argument(
         "--mtp_dynamic_verify",
         action="store_true",
         help="""Enable dynamic speculative scheduling.""",
