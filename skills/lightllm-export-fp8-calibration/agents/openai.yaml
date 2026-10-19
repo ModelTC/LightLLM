@@ -1,0 +1,6 @@
+interface:
+  display_name: "LightLLM FP8 Calibration Export"
+  short_description: "创建并验收新的 LightLLM FP8 QKV 校准导出"
+  default_prompt: "Use $lightllm-export-fp8-calibration to create a fresh, verified FP8 calibration export for my model pair."
+policy:
+  allow_implicit_invocation: true
