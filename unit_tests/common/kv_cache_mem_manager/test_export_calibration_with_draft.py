@@ -1,4 +1,5 @@
 import json
+import weakref
 from types import SimpleNamespace
 import pytest
 import torch
@@ -41,15 +42,22 @@ def _q_manager(layer_num=3, head_num=2, target="q"):
 def _fa3_state(state_class, manager, layer_index, request_ids, cu_seqlens_q, **infer_state):
     req_manager = SimpleNamespace(HOLD_REQUEST_ID=-1)
     model = SimpleNamespace(mem_manager=manager, req_manager=req_manager)
-    backend = SimpleNamespace(model=model, _find_layer_index=lambda **_: layer_index)
+    backend = SimpleNamespace(model=model, infer_page_size=1, _find_layer_index=lambda **_: layer_index)
+    # The current attention state owns only a weak reference.  Keep the fake
+    # alive from the test model, matching the real model's request lifetime.
+    class FakeInferState(SimpleNamespace):
+        pass
+
+    fake_infer_state = FakeInferState(
+        b_req_idx=torch.tensor(request_ids, dtype=torch.int32),
+        b_seq_len=torch.tensor(infer_state.get("b_seq_len", [101] * len(request_ids)), dtype=torch.int32),
+        max_q_seq_len=infer_state.get("max_q_seq_len", 2),
+        is_prefill=infer_state.get("is_prefill", False),
+    )
+    model._test_infer_state_owner = fake_infer_state
     state = state_class(
         backend=backend,
-        infer_state=SimpleNamespace(
-            b_req_idx=torch.tensor(request_ids, dtype=torch.int32),
-            b_seq_len=torch.tensor(infer_state.get("b_seq_len", [101] * len(request_ids)), dtype=torch.int32),
-            max_q_seq_len=infer_state.get("max_q_seq_len", 2),
-            is_prefill=infer_state.get("is_prefill", False),
-        ),
+        _infer_state_weak_ref=weakref.ref(fake_infer_state),
     )
     state.cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32)
     state.cu_seqlens_k = torch.tensor(cu_seqlens_q, dtype=torch.int32)

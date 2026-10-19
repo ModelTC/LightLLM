@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+import lightllm.models.qwen3_dspark.model as dspark_model
 from lightllm.common.basemodel import batch_objs
 from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector, ModelOutput
 from lightllm.models.qwen3_5_dflash.model import Qwen3_5DFlashModel
@@ -55,6 +56,106 @@ def test_dspark_without_block_size_uses_mtp_step(model_class, mtp_step):
     model._verify_params()
 
     assert model.config["block_size"] == mtp_step
+
+
+def test_dspark_initializes_its_own_rotary_cache(monkeypatch):
+    model = Qwen3DSparkModel.__new__(Qwen3DSparkModel)
+    model.config = {"block_size": 3, "mask_token_id": 7}
+    calls = []
+
+    def init_rotary(self):
+        calls.append(self.config)
+        self._cos_cached = "draft-cos"
+        self._sin_cached = "draft-sin"
+
+    monkeypatch.setattr(LlamaTpPartModel, "_init_custom", init_rotary)
+    model._init_custom()
+
+    assert calls == [model.config]
+    assert model._cos_cached == "draft-cos"
+    assert model._sin_cached == "draft-sin"
+    assert model.block_size == 3
+    assert model.mask_token_id == 7
+
+
+class _FakeLMHead:
+    def __init__(self, loaded, *, dim=8, vocab_size=32):
+        self.loaded = loaded
+        self.dim = dim
+        self.vocab_size = vocab_size
+        self.tp_rank_ = 0
+        self.tp_world_size_ = 4
+        self.tp_vocab_start_id = 0
+        self.tp_vocab_end_id = 8
+
+    def verify_load(self):
+        return self.loaded
+
+
+class _FakePrePost:
+    def __init__(self, lm_head, other_loaded=True):
+        self.lm_head_weight_ = lm_head
+        self.other_loaded = other_loaded
+
+    def verify_load(self):
+        assert self.other_loaded, "other draft weight missing"
+        assert self.lm_head_weight_.verify_load(), "lm head missing"
+
+
+def _weight_load_model(draft_lm_head, target_lm_head, other_loaded=True):
+    model = Qwen3DSparkModel.__new__(Qwen3DSparkModel)
+    model.data_type = torch.float32
+    model.weight_dir_ = "unused"
+    model.pre_post_weight = _FakePrePost(draft_lm_head, other_loaded)
+    model.trans_layers_weight = []
+    model.main_model = SimpleNamespace(pre_post_weight=_FakePrePost(target_lm_head))
+    return model
+
+
+def test_dspark_reuses_compatible_target_lm_head_when_checkpoint_omits_it(monkeypatch):
+    monkeypatch.setattr(dspark_model, "load_hf_weights", lambda **_: None)
+    target_head = _FakeLMHead(True)
+    model = _weight_load_model(_FakeLMHead(False), target_head)
+
+    model.load_weights(None)
+
+    assert model.pre_post_weight.lm_head_weight_ is target_head
+
+
+def test_dspark_keeps_checkpoint_lm_head_when_present(monkeypatch):
+    monkeypatch.setattr(dspark_model, "load_hf_weights", lambda **_: None)
+    draft_head = _FakeLMHead(True)
+    model = _weight_load_model(draft_head, _FakeLMHead(True))
+
+    model.load_weights(None)
+
+    assert model.pre_post_weight.lm_head_weight_ is draft_head
+
+
+def test_dspark_lm_head_fallback_does_not_hide_other_missing_weights(monkeypatch):
+    monkeypatch.setattr(dspark_model, "load_hf_weights", lambda **_: None)
+    model = _weight_load_model(_FakeLMHead(False), _FakeLMHead(True), other_loaded=False)
+
+    with pytest.raises(AssertionError, match="other draft weight missing"):
+        model.load_weights(None)
+
+
+@pytest.mark.parametrize("incompatibility", ["dim", "vocab", "tp", "unloaded"])
+def test_dspark_lm_head_fallback_rejects_incompatible_target(monkeypatch, incompatibility):
+    monkeypatch.setattr(dspark_model, "load_hf_weights", lambda **_: None)
+    target_head = _FakeLMHead(True)
+    if incompatibility == "dim":
+        target_head.dim = 9
+    elif incompatibility == "vocab":
+        target_head.vocab_size = 33
+    elif incompatibility == "tp":
+        target_head.tp_vocab_end_id = 7
+    else:
+        target_head.loaded = False
+    model = _weight_load_model(_FakeLMHead(False), target_head)
+
+    with pytest.raises(ValueError, match="target LM head is incompatible"):
+        model.load_weights(None)
 
 
 @pytest.mark.parametrize(

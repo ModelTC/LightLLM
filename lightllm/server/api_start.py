@@ -145,8 +145,13 @@ def _launch_subprocesses(args: StartArgs):
     # mode setting check.
     is_hybrid_model = is_hybrid_att_model(args.model_dir)
     if is_hybrid_model:
-        # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
-        assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
+        # Normal services need a prefix cache for hybrid state snapshots.  The
+        # isolated BF16 calibration reference intentionally disables prefix
+        # reuse and has a radix=None guard for that path.
+        is_internal_normal_calibration = args.export_fp8kv_calibration and args.run_mode == "normal"
+        assert (
+            not args.disable_dynamic_prompt_cache or is_internal_normal_calibration
+        ), "hybrid attention models require dynamic prompt cache"
         assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
     if args.diverse_mode:
         # diverse 按普通 KV 前缀插入缓存，尚不支持混合注意力模型的状态页和哈希边界。

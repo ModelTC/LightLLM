@@ -53,6 +53,49 @@ def test_hybrid_rejects_unsupported_modes(launch_args, run_mode, output_constrai
         _launch_subprocesses(args)
 
 
+def test_normal_internal_calibration_allows_disabled_dynamic_prompt_cache(launch_args):
+    args = launch_args(
+        "qwen3_5_text",
+        run_mode="normal",
+        export_fp8kv_calibration=True,
+        calibration_target="qkv",
+        llm_kv_type="None",
+        disable_dynamic_prompt_cache=True,
+        disable_cudagraph=True,
+    )
+    with pytest.raises(RuntimeError, match="startup validation passed"):
+        _launch_subprocesses(args)
+
+
+@pytest.mark.parametrize("run_mode", ["prefill", "decode"])
+def test_non_normal_internal_calibration_keeps_hybrid_dynamic_cache_requirement(launch_args, run_mode):
+    args = launch_args(
+        "qwen3_5_text",
+        run_mode=run_mode,
+        export_fp8kv_calibration=True,
+        calibration_target="qkv",
+        llm_kv_type="None",
+        disable_dynamic_prompt_cache=True,
+    )
+    with pytest.raises(AssertionError, match="hybrid attention models require dynamic prompt cache"):
+        _launch_subprocesses(args)
+
+
+def test_internal_calibration_keeps_hybrid_chunked_prefill_requirement(launch_args):
+    args = launch_args(
+        "qwen3_5_text",
+        run_mode="normal",
+        export_fp8kv_calibration=True,
+        calibration_target="qkv",
+        llm_kv_type="None",
+        disable_dynamic_prompt_cache=True,
+        disable_cudagraph=True,
+        disable_chunked_prefill=True,
+    )
+    with pytest.raises(AssertionError, match="hybrid attention models require chunked prefill"):
+        _launch_subprocesses(args)
+
+
 @pytest.mark.parametrize("output_constraint_mode", ["none", "xgrammar"])
 @pytest.mark.parametrize(
     "model_type, options",

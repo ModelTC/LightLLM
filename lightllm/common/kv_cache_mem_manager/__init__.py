@@ -10,6 +10,7 @@ from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemM
 from .export_calibration_mem_manager import ExportCalibrationMemoryManager
 from .qwen3next_mem_manager import Qwen3NextMemManager
 from .glm5_next_mem_manager import Glm5NextMemManager
+from .draft_mem_manager import DraftMemoryManagerView
 
 __all__ = [
     "KvCacheAllocator",
@@ -25,4 +26,5 @@ __all__ = [
     "ExportCalibrationMemoryManager",
     "Qwen3NextMemManager",
     "Glm5NextMemManager",
+    "DraftMemoryManagerView",
 ]
