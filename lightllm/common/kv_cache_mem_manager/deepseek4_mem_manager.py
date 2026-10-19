@@ -63,7 +63,12 @@ class DeepseekV4MemoryManager(MemoryManager):
         ]
         args = get_env_start_args()
         big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        self.big_page_buffers = DeepseekV4StateCacheManager(triton.cdiv(size, big_page_tokens), self.cache_config)
+        # Reserve the same CPU-cache load/offload staging slots as the other hybrid models.
+        self.big_page_buffers = DeepseekV4StateCacheManager(
+            triton.cdiv(size, big_page_tokens) + 2, self.cache_config, keep_num=2
+        )
+        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
+        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
 
     def _free_buffers(self):
         self.kv_buffer = self.big_page_buffers = None

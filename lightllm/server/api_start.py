@@ -95,6 +95,10 @@ def _launch_subprocesses(args: StartArgs):
     else:
         args.enable_multimodal = True
 
+    if model_type == "deepseek_v4" and not args.disable_vision:
+        # V4 Vision opens bidirectional attention inside each complete image block.
+        args.disable_chunked_mm_input = True
+
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
         args.cpu_kv_cache_shm_id = uuid.uuid1().int % 123456789

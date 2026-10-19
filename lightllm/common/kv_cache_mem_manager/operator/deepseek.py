@@ -6,7 +6,10 @@ from .base import BaseMemManagerOperator
 from lightllm.utils.log_utils import init_logger
 
 if TYPE_CHECKING:
-    from ..mem_manager import MemoryManager
+    from ..deepseek4_mem_manager import DeepseekV4MemoryManager
+    from lightllm.common.req_manager.deepseek4 import DeepseekV4ReqManager
+    from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+    from lightllm.server.router.model_infer.infer_batch import InferReq
 
 logger = init_logger(__name__)
 
@@ -86,103 +89,146 @@ class FP8PerTokenGroupQuantDeepseek3_2MemOperator(BaseMemManagerOperator):
 
 
 class DeepseekV4MemOperator(BaseMemManagerOperator):
-    def copy_kv_from_other_dp_ranks(
-        self, mem_managers, move_token_indexes, token_dp_indexes, mem_indexes, dp_size_in_node, rank_in_dp
-    ):
-        """The standard DP copy interface; request checkpoints use the hybrid path."""
-        from lightllm.utils.device_utils import kv_trans_use_p2p
-        from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp
-
-        if not hasattr(self, "mem_ptrs_tensor"):
-            if not kv_trans_use_p2p():
-                raise RuntimeError("DeepSeek-V4 DP prompt-cache fetch requires P2P KV transfer")
-            self.mem_ptrs_tensor = torch.tensor(
-                [
-                    [source.kv_buffer[layer].data_ptr() for source in mem_managers]
-                    for layer in range(self.mem_manager.layer_num)
-                ],
-                dtype=torch.uint64,
-                device="cpu",
-                pin_memory=True,
-            )
-        assert move_token_indexes.numel() == mem_indexes.numel() == token_dp_indexes.numel()
-        for layer, buffer in enumerate(self.mem_manager.kv_buffer):
-            kv_trans_for_dp(
-                input_mems=self.mem_ptrs_tensor[layer].cuda(non_blocking=True),
-                input_idx=move_token_indexes,
-                input_dp_idx=token_dp_indexes,
-                output=buffer.unsqueeze(0),
-                output_idx=mem_indexes,
-                dp_size_in_node=dp_size_in_node,
-                rank_in_dp=rank_in_dp,
-            )
-
     def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
         """Copy exactly the requested token slots; request state has a separate owner."""
+        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
+
+        # Copy history only.
+        # The request manager restores SWA and compressor state from checkpoints.
         src = src_mem_index.to(device="cuda", dtype=torch.int64, non_blocking=True)
         dst = dst_mem_index.to(device="cuda", dtype=torch.int64, non_blocking=True)
         for buffer in self.mem_manager.kv_buffer:
-            buffer.index_copy_(0, dst, buffer.index_select(0, src))
+            copy_kv_buffer_to_kv_buffer(src, dst, buffer.view(1, buffer.shape[0], -1))
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        # _get_qkv() calls req_manager.pack_mla_kv_to_cache_fused_norm_rope().
+        # One kernel runs RMSNorm, RoPE, FP8 packing, and SWA writes.
+        # This avoids extra tensors and kernel launches.
+        # Prefill and decode skip _post_cache_kv(). They do not call this method.
+        # The compressor and indexer write history to mem_manager.kv_buffer.
         raise NotImplementedError("DeepSeek-V4 writes packed KV using request-owned SWA slots")
 
-    def offload_gpu_kv_to_cpu_cache(self, mem_indexes, page_indexes, page_readies, cpu_cache_client, req):
+    def offload_gpu_kv_to_cpu_cache(
+        self,
+        mem_indexes: torch.Tensor,
+        page_indexes: torch.Tensor,
+        page_readies: torch.Tensor,
+        cpu_cache_client: "CpuKvCacheClient",
+        req: "InferReq",
+    ) -> None:
         from lightllm.utils.dist_utils import get_current_rank_in_dp
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages, copy_checkpoints_to_pages
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages, copy_checkpoint_pages
+        from lightllm.utils.custom_kernel_utis import tensor_copy_3dim
 
         # All ranks retain their checkpoints until the common completion event.
         torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
         # MLA KV and compression states are replicated across TP ranks.
         if get_current_rank_in_dp() != 0:
             return
-        manager = self.mem_manager
-        requests = g_infer_context.req_manager
-        radix = g_infer_context.radix_cache
-        page_tokens = manager.cache_config.cpu_cache_token_page_size
-        shared_ids = radix.get_big_page_ids_by_node(req.shared_kv_node)
-        checkpoints = []
-        for page in range(page_indexes.numel()):
-            end = (page + 1) * page_tokens
-            if end > mem_indexes.numel():
-                checkpoint = requests.small_page_buffers.buffer[req.tail_small_page_buffer_id]
+
+        mem_manager: "DeepseekV4MemoryManager" = self.mem_manager
+        req_manager: "DeepseekV4ReqManager" = g_infer_context.req_manager
+        page_token_num = mem_manager.cache_config.cpu_cache_token_page_size
+
+        shared_big_page_buffer_ids = g_infer_context.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
+        big_page_buffer_ids_cpu: List[int] = []
+        for page_index in range(page_indexes.numel()):
+            seq_len = (page_index + 1) * page_token_num
+            if seq_len > mem_indexes.numel():
+                big_page_buffer_id = mem_manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID
+                assert req.tail_small_page_buffer_id is not None
+                src_states = req_manager.small_page_buffers.get_state_cache(buffer_idx=req.tail_small_page_buffer_id)
+                dst_states = mem_manager.big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_id)
+                # Keep pinned checkpoint copies ordered on the offload stream.
+                for dst_state, src_state in zip(dst_states, src_states):
+                    if src_state.numel():
+                        tensor_copy_3dim(dst_state, src_state)
+            elif page_index < len(shared_big_page_buffer_ids):
+                big_page_buffer_id = shared_big_page_buffer_ids[page_index]
             else:
-                slot = shared_ids[page] if page < len(shared_ids) else req.hybrid_len_to_big_page_id[end]
-                checkpoint = manager.big_page_buffers.buffer[slot]
-            checkpoints.append(checkpoint.data_ptr())
-        pointers = torch.tensor(checkpoints, dtype=torch.uint64, device="cpu", pin_memory=True).cuda(non_blocking=True)
-        pages = cpu_cache_client.cpu_kv_cache_tensor.view(cpu_cache_client.cpu_kv_cache_tensor.shape[0], -1)
-        copy_history_pages(manager, mem_indexes, page_indexes, pages, to_pages=True, readies=page_readies)
-        copy_checkpoints_to_pages(manager, page_indexes, page_readies, pointers, pages)
+                big_page_buffer_id = req.hybrid_len_to_big_page_id[seq_len]
+            big_page_buffer_ids_cpu.append(big_page_buffer_id)
 
-    def load_cpu_cache_to_gpu(self, mem_indexes, page_indexes, cpu_cache_client, req):
+        big_page_buffer_ids_gpu = torch.tensor(big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu").cuda(
+            non_blocking=True
+        )
+        cpu_cache_tensor = cpu_cache_client.cpu_kv_cache_tensor.view(cpu_cache_client.cpu_kv_cache_tensor.shape[0], -1)
+        copy_history_pages(
+            manager=mem_manager,
+            indexes=mem_indexes,
+            page_ids=page_indexes,
+            pages=cpu_cache_tensor,
+            to_pages=True,
+            readies=page_readies,
+        )
+        copy_checkpoint_pages(
+            manager=mem_manager,
+            checkpoint_ids=big_page_buffer_ids_gpu,
+            page_ids=page_indexes,
+            pages=cpu_cache_tensor,
+            to_pages=True,
+            readies=page_readies,
+        )
+
+    def load_cpu_cache_to_gpu(
+        self,
+        mem_indexes: torch.Tensor,
+        page_indexes: torch.Tensor,
+        cpu_cache_client: "CpuKvCacheClient",
+        req: "InferReq",
+    ) -> None:
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages, copy_checkpoint_pages
+        from lightllm.utils.custom_kernel_utis import tensor_copy_3dim
 
-        manager = self.mem_manager
-        requests = g_infer_context.req_manager
-        config = manager.cache_config
-        page_tokens = config.cpu_cache_token_page_size
-        checkpoint_offset = config.get_cpu_cache_full_att_bytes()
-        pages = cpu_cache_client.cpu_kv_cache_tensor.view(cpu_cache_client.cpu_kv_cache_tensor.shape[0], -1)
-        copy_history_pages(manager, mem_indexes, page_indexes, pages, to_pages=False)
-        page_ids = page_indexes.tolist()
-        full_pages = mem_indexes.numel() // page_tokens
-        first_end = req.cur_kv_len // page_tokens * page_tokens - (full_pages - 1) * page_tokens
-        slots = manager.big_page_buffers.alloc_state_cache(full_pages)
-        if slots is None:
+        mem_manager: "DeepseekV4MemoryManager" = self.mem_manager
+        req_manager: "DeepseekV4ReqManager" = g_infer_context.req_manager
+        page_token_num = mem_manager.cache_config.cpu_cache_token_page_size
+
+        cpu_cache_tensor = cpu_cache_client.cpu_kv_cache_tensor.view(cpu_cache_client.cpu_kv_cache_tensor.shape[0], -1)
+        copy_history_pages(
+            manager=mem_manager,
+            indexes=mem_indexes,
+            page_ids=page_indexes,
+            pages=cpu_cache_tensor,
+            to_pages=False,
+        )
+
+        big_page_num = mem_indexes.numel() // page_token_num
+        first_seq_len = req.cur_kv_len // page_token_num * page_token_num - (big_page_num - 1) * page_token_num
+        big_page_buffer_ids_cpu = mem_manager.big_page_buffers.alloc_state_cache(big_page_num)
+        if big_page_buffer_ids_cpu is None:
             raise RuntimeError("No hybrid checkpoint slots available for CPU cache load")
-        for i, slot in enumerate(slots):
-            manager.big_page_buffers.buffer[slot].copy_(pages[page_ids[i], checkpoint_offset:])
-            req.hybrid_len_to_big_page_id[first_end + i * page_tokens] = slot
-        if mem_indexes.numel() % page_tokens:
-            if req.cur_kv_len == req.hybrid_cache_len:
-                g_infer_context.radix_cache.free_one_small_page_buffer()
-                tail = requests.small_page_buffers.alloc_one_state_cache()
-                if tail is not None:
-                    req.tail_small_page_buffer_id = tail
-                    requests.small_page_buffers.buffer[tail].copy_(pages[page_ids[-1], checkpoint_offset:])
-        # The common loader keeps these CPU pages referenced until its stream sync.
-        checkpoint = manager.big_page_buffers.view(pages[page_ids[-1], checkpoint_offset:])
-        requests.restore_state_from_tensors(req, checkpoint)
+        for page_index, big_page_buffer_id in enumerate(big_page_buffer_ids_cpu):
+            seq_len = first_seq_len + page_index * page_token_num
+            req.hybrid_len_to_big_page_id[seq_len] = big_page_buffer_id
+
+        has_tail_page = mem_indexes.numel() % page_token_num != 0
+        if has_tail_page:
+            big_page_buffer_ids_cpu.append(mem_manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID)
+
+        big_page_buffer_ids_gpu = torch.tensor(big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu").cuda(
+            non_blocking=True
+        )
+        copy_checkpoint_pages(
+            manager=mem_manager,
+            checkpoint_ids=big_page_buffer_ids_gpu,
+            page_ids=page_indexes,
+            pages=cpu_cache_tensor,
+            to_pages=False,
+        )
+
+        if has_tail_page and req.cur_kv_len == req.hybrid_cache_len:
+            g_infer_context.radix_cache.free_one_small_page_buffer()
+            small_page_buffer_id = req_manager.small_page_buffers.alloc_one_state_cache()
+            if small_page_buffer_id is not None:
+                req.tail_small_page_buffer_id = small_page_buffer_id
+                src_states = mem_manager.big_page_buffers.get_state_cache(buffer_idx=big_page_buffer_ids_cpu[-1])
+                dst_states = req_manager.small_page_buffers.get_state_cache(buffer_idx=small_page_buffer_id)
+                # Retain the tail before the shared load slot is reused.
+                for dst_state, src_state in zip(dst_states, src_states):
+                    if src_state.numel():
+                        tensor_copy_3dim(dst_state, src_state)
+
+        req_manager.restore_big_page_state(big_page_buffer_idx=big_page_buffer_ids_cpu[-1], req=req)

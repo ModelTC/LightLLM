@@ -362,6 +362,14 @@ Scheduling Parameters
 
     Whether to disable chunked prefill
 
+.. option:: --disable_chunked_mm_input
+
+    Process each image or audio token block in one prefill step while still chunking text.
+    Disabled by default; enabled automatically for DeepSeek-V4 Vision. If a chunk would split an item,
+    process the preceding text first and the complete item in the next step.
+    A complete item may exceed ``chunked_prefill_size`` but must fit ``batch_max_tokens``;
+    requests exceeding this budget are rejected. Prefix-cache hits also retreat to complete item boundaries.
+
 .. option:: --diverse_mode
 
     Multi-result output mode

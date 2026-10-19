@@ -378,6 +378,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument(
+        "--disable_chunked_mm_input",
+        "--disable-chunked-mm-input",
+        action="store_true",
+        help="Keep each image/audio token block in one prefill step; text can still be chunked. "
+        "A complete block may exceed chunked_prefill_size but must fit batch_max_tokens. "
+        "Enabled automatically for DeepSeek-V4 Vision.",
+    )
+    parser.add_argument(
         "--short_prefill_token_threshold",
         type=int,
         default=None,

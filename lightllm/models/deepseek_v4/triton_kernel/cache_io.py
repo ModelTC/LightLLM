@@ -112,34 +112,48 @@ def copy_history_pages(
 
 @triton.jit
 def _copy_checkpoints(
+    checkpoints,
+    checkpoint_ids,
     pages,
     page_ids,
     readies,
-    pointers,
+    CHECKPOINT_STRIDE: tl.constexpr,
     STRIDE: tl.constexpr,
     OFFSET: tl.constexpr,
     NBYTES: tl.constexpr,
+    TO_PAGES: tl.constexpr,
+    HAS_READIES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     page = tl.program_id(0)
-    if tl.load(readies + page):
-        return
-    source = tl.load(pointers + page).to(tl.pointer_type(tl.uint8))
-    target = pages + tl.load(page_ids + page).to(tl.int64) * STRIDE + OFFSET
+    if HAS_READIES:
+        if tl.load(readies + page):
+            return
+    checkpoint = checkpoints + tl.load(checkpoint_ids + page).to(tl.int64) * CHECKPOINT_STRIDE
+    cpu_page = pages + tl.load(page_ids + page).to(tl.int64) * STRIDE + OFFSET
     offset = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
-    tl.store(target + offset, tl.load(source + offset, offset < NBYTES, 0), offset < NBYTES)
+    if TO_PAGES:
+        tl.store(cpu_page + offset, tl.load(checkpoint + offset, offset < NBYTES, 0), offset < NBYTES)
+    else:
+        tl.store(checkpoint + offset, tl.load(cpu_page + offset, offset < NBYTES, 0), offset < NBYTES)
 
 
-def copy_checkpoints_to_pages(manager, page_ids, readies, pointers, pages):
-    nbytes = manager.big_page_buffers.buffer.shape[-1]
+def copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, *, to_pages, readies=None):
+    checkpoints = manager.big_page_buffers.buffer
+    assert checkpoint_ids.numel() == page_ids.numel()
+    nbytes = checkpoints.shape[-1]
     _copy_checkpoints[(page_ids.numel(), triton.cdiv(nbytes, 8192))](
+        checkpoints,
+        checkpoint_ids,
         pages,
         page_ids,
         readies,
-        pointers,
+        CHECKPOINT_STRIDE=checkpoints.stride(0),
         STRIDE=pages.stride(0),
         OFFSET=manager.cache_config.get_cpu_cache_full_att_bytes(),
         NBYTES=nbytes,
+        TO_PAGES=to_pages,
+        HAS_READIES=readies is not None,
         BLOCK=8192,
         num_warps=4,
     )

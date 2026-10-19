@@ -203,12 +203,6 @@ class ModeBackend:
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-        # Hybrid DP prompt-cache checkpoints live in process-local CPU memory.
-        self.node_gloo_group = (
-            create_new_group_for_current_node("gloo")
-            if self.is_hybrid_att_model and self.args.enable_dp_prompt_cache_fetch
-            else None
-        )
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。

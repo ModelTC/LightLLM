@@ -21,6 +21,7 @@ from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, clamp_mm_prefix_len, get_mm_input_spans
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
@@ -631,11 +632,13 @@ class InferReq:
         # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
-        self.image_block_spans = [
-            (image["block_start_idx"], image["block_end_idx"])
-            for image in self.multimodal_params.get("images", [])
-            if image.get("block_start_idx") is not None
-        ]
+        self.mm_input_spans = (
+            get_mm_input_spans(
+                self.get_input_token_ids(), self.multimodal_params, max_tokens=self.args.batch_max_tokens
+            )
+            if getattr(self.args, "disable_chunked_mm_input", False)
+            else []
+        )
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()
@@ -644,11 +647,9 @@ class InferReq:
         if g_infer_context.is_hybrid_att_model:
             block_num = self.shm_req.hybrid_token_hash_list.size
             self.hybrid_cache_len = block_num * self.args.linear_att_hash_page_size
-            for image_start, image_end in reversed(self.image_block_spans):
-                if image_start < self.hybrid_cache_len < image_end:
-                    self.hybrid_cache_len = (
-                        image_start // self.args.linear_att_hash_page_size * self.args.linear_att_hash_page_size
-                    )
+            self.hybrid_cache_len = clamp_mm_prefix_len(
+                self.hybrid_cache_len, self.mm_input_spans, self.args.linear_att_hash_page_size
+            )
             self.hybrid_len_to_big_page_id = SortedDict()
 
         return
@@ -662,6 +663,13 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
+            if self.mm_input_spans:
+                while True:
+                    _, matched_len, _ = g_infer_context.radix_cache.match_prefix(key, update_refs=False)
+                    limit = clamp_mm_prefix_len(matched_len, self.mm_input_spans, self.args.page_size)
+                    if limit == matched_len:
+                        break
+                    key = key[:limit]
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
                 self.shared_kv_node = share_node
@@ -695,18 +703,15 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
             assert len(key) == len(block_hashs) * hash_page_size
-            if self.image_block_spans:
+            if self.mm_input_spans:
                 while True:
                     _, matched_len, _ = g_infer_context.radix_cache.match_prefix(
                         key, block_hashs=block_hashs, update_refs=False
                     )
-                    for image_start, image_end in self.image_block_spans:
-                        if image_start < matched_len < image_end:
-                            limit = image_start // hash_page_size * hash_page_size
-                            key, block_hashs = key[:limit], block_hashs[: limit // hash_page_size]
-                            break
-                    else:
+                    limit = clamp_mm_prefix_len(matched_len, self.mm_input_spans, hash_page_size)
+                    if limit == matched_len:
                         break
+                    key, block_hashs = key[:limit], block_hashs[: limit // hash_page_size]
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
                 key, block_hashs=block_hashs, update_refs=True
             )
@@ -859,10 +864,10 @@ class InferReq:
     def _get_chunked_input_end(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        for image_start, image_end in self.image_block_spans:
-            if image_start < chunked_end < image_end:
-                chunked_end = image_start if chunked_start < image_start else image_end
-                break
+        if self.mm_input_spans:
+            chunked_end = adjust_mm_chunk_end(
+                chunked_start, chunked_end, self.mm_input_spans, self.args.batch_max_tokens
+            )
         return chunked_end
 
     def get_chuncked_input_token_ids(self):
@@ -885,10 +890,8 @@ class InferReq:
         end = min(end, big_page_end)
         if self.cur_kv_len < self.hybrid_cache_len < end:
             end = self.hybrid_cache_len
-        for image_start, image_end in self.image_block_spans:
-            if image_start < end < image_end:
-                end = image_start if self.cur_kv_len < image_start else image_end
-                break
+        if self.mm_input_spans:
+            end = adjust_mm_chunk_end(self.cur_kv_len, end, self.mm_input_spans, self.args.batch_max_tokens)
         return end
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank: int = -1):

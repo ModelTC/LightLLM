@@ -79,9 +79,9 @@ class MultiLevelKvCacheModule(object):
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
             page_len_start_list = [0] + page_len_list
             assert len(page_list) <= len(page_len_list)
-            # Bidirectional image blocks must be resumed at a complete boundary.
-            for image_start, image_end in reversed(getattr(req, "image_block_spans", ())):
-                while page_list and image_start < page_len_list[len(page_list) - 1] < image_end:
+            # Indivisible multimodal blocks must be resumed at a complete boundary.
+            for block_start, block_end in reversed(getattr(req, "mm_input_spans", ())):
+                while page_list and block_start < page_len_list[len(page_list) - 1] < block_end:
                     page_list = page_list[:-1]
 
             if page_list:

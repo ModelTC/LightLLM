@@ -347,6 +347,13 @@ PD 分离模式参数
 
     是否禁用分块预填充
 
+.. option:: --disable_chunked_mm_input
+
+    保证每个图像或音频 token 块在同一次 prefill 中处理，文字部分仍可分块。默认关闭，
+    DeepSeek-V4 Vision 自动开启。切分点落在多模态块内部时，先处理块前的文字，下一轮处理完整块。
+    完整块可以超过 ``chunked_prefill_size``，但必须能放进 ``batch_max_tokens``；超过该预算的请求会被拒绝。
+    前缀缓存命中同样会退到完整块边界。
+
 .. option:: --diverse_mode
 
     多结果输出模式

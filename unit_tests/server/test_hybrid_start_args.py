@@ -67,3 +67,22 @@ def test_supported_models_pass_startup_validation(launch_args, output_constraint
     args = launch_args(model_type, output_constraint_mode=output_constraint_mode, **options)
     with pytest.raises(RuntimeError, match="startup validation passed"):
         _launch_subprocesses(args)
+
+
+@pytest.mark.parametrize(
+    "model_type,vision_enabled,explicit,expected",
+    [
+        ("deepseek_v4", True, False, True),
+        ("deepseek_v4", False, False, False),
+        ("qwen3_5", True, False, False),
+        ("qwen3_5", True, True, True),
+    ],
+)
+def test_multimodal_chunking_defaults_follow_model_requirements(
+    launch_args, model_type, vision_enabled, explicit, expected
+):
+    args = launch_args(model_type, disable_chunked_mm_input=explicit)
+    args.disable_vision = not vision_enabled
+    with pytest.raises(RuntimeError, match="startup validation passed"):
+        _launch_subprocesses(args)
+    assert args.disable_chunked_mm_input is expected

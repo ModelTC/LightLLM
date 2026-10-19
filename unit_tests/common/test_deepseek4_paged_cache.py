@@ -93,6 +93,22 @@ def test_attention_input_params_select_token_buffers(cache):
             assert history.untyped_storage().data_ptr() == token_buffer.data_ptr()
 
 
+def test_big_page_pool_reserves_cpu_cache_staging_slots(cache):
+    manager, _ = cache
+    pool = manager.big_page_buffers
+    args = get_env_start_args()
+    page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+    capacity = (manager.size + page_tokens - 1) // page_tokens
+    assert pool.size == capacity + 2 and pool.keep_num == 2
+    assert manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID == capacity
+    assert manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID == capacity + 1
+    slots = pool.alloc_state_cache(capacity)
+    assert slots == list(range(capacity))
+    assert pool.alloc_one_state_cache() is None
+    pool.free_state_cache(slots)
+    assert pool.get_free_cache_num() == capacity
+
+
 def test_copy_mem_to_mem_preserves_token_slot_indices(cache):
     manager, _ = cache
     source = torch.tensor([3, 257, 509], device="cuda")
@@ -101,10 +117,6 @@ def test_copy_mem_to_mem_preserves_token_slot_indices(cache):
         buffer.zero_()
         buffer[source] = torch.arange(1, 4, device="cuda", dtype=torch.uint8)[:, None, None]
     manager.operator.copy_mem_to_mem(source, destination)
-    for buffer in manager.kv_buffer:
-        torch.testing.assert_close(buffer[destination], buffer[source], rtol=0, atol=0)
-        buffer[destination] = 0
-    manager.operator.copy_kv_from_other_dp_ranks([manager], source, torch.zeros_like(source), destination, 1, 0)
     for buffer in manager.kv_buffer:
         torch.testing.assert_close(buffer[destination], buffer[source], rtol=0, atol=0)
 
@@ -737,35 +749,6 @@ def test_pd_transport_completion_covers_peer_gpu_state(cache, length):
         requests.free([source, destination], torch.cat([src, dst]))
 
 
-def test_dp_history_transfer_excludes_request_state(cache):
-    manager, requests = cache
-    source, src = _reserve(manager, requests, 512)
-    destination, dst = _reserve(manager, requests, 512)
-    _randomize_history(manager)
-    runtime = [
-        requests.swa_buffer,
-        _state_buffer(requests, "c4"),
-        _state_buffer(requests, "c4_indexer"),
-        _state_buffer(requests, "c128"),
-    ]
-    before = [buffer.clone() for buffer in runtime]
-    manager.operator.copy_kv_from_other_dp_ranks(
-        [manager], src, torch.zeros(src.numel(), dtype=torch.int32, device="cuda"), dst, 1, 0
-    )
-    assert manager.operator.mem_ptrs_tensor.shape == (len(manager.kv_buffer), 1)
-    assert manager.operator.mem_ptrs_tensor[:, 0].tolist() == [buffer.data_ptr() for buffer in manager.kv_buffer]
-    for pool, ratio in zip(_history_pools(manager), (4, 4, 128)):
-        torch.testing.assert_close(
-            _read_packed_rows(pool, 0, src[ratio - 1 :: ratio].long() // ratio),
-            _read_packed_rows(pool, 0, dst[ratio - 1 :: ratio].long() // ratio),
-            rtol=0,
-            atol=0,
-        )
-    for actual, expected in zip(runtime, before):
-        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    requests.free([source, destination], torch.cat([src, dst]))
-
-
 @pytest.mark.parametrize("ratio,layer", [(4, 0), (128, 1)])
 @pytest.mark.parametrize("length", [512, 2048])
 @pytest.mark.parametrize("cache", [(256, 0), (256, 1), (256, 5)], indirect=True)
@@ -1060,7 +1043,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
         req.tail_small_page_buffer_id = None
         req.hybrid_len_to_big_page_id = SortedDict()
         req.hybrid_cache_len = (total_len - 1) // hash_page_size * hash_page_size
-        req.image_block_spans = []
+        req.mm_input_spans = []
         req.cache_tiers = {CacheTier.GPU}
         req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
         req.prompt_selected_logprobs = SimpleNamespace(copy_capture_slots_if_needed=lambda **kwargs: None)
@@ -1120,7 +1103,10 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
         requests.free_req(fork.req_idx)
     radix.free_radix_cache_to_get_enough_token(manager.size)
     assert manager.allocator.can_use_mem_size == manager.size
-    assert manager.big_page_buffers.get_free_cache_num() == manager.big_page_buffers.size
+    assert (
+        manager.big_page_buffers.get_free_cache_num()
+        == manager.big_page_buffers.size - manager.big_page_buffers.keep_num
+    )
     assert small.get_free_cache_num() == small.size
 
 
@@ -1235,222 +1221,9 @@ def test_empty_dspark_commit_is_local_but_proposal_keeps_common_padding_path(mon
     assert proposal_calls == [model_input]
 
 
-def _checkpoint_transfer_worker(rank, rendezvous, history_queue, kind):
-    import os
-    from pathlib import Path
-    from datetime import timedelta
-    from sortedcontainers import SortedDict
-    import torch.distributed as dist
-    from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4StateCacheManager
-    from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import (
-        transfer_hybrid_checkpoints,
-    )
-    from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
-    torch.cuda.set_device(rank)
-    config_dir = Path(rendezvous).parent / f"config-{rank}"
-    config_dir.mkdir()
-    (config_dir / "config.json").write_text(json.dumps({"vocab_size": 100}))
-    os.environ.update(
-        LIGHTLLM_CURRENT_RANK_IN_NODE=str(rank),
-        LIGHTLLM_UNIQUE_SERVICE_NAME_ID="test_dsv4_dp_checkpoint",
-        LIGHTLLM_START_ARGS=json.dumps(
-            dict(
-                page_size=256,
-                run_mode="normal",
-                linear_att_hash_page_size=256,
-                linear_att_page_block_num=8,
-                max_req_total_len=4096,
-                model_dir=str(config_dir),
-                penalty_counter_mode="cpu_counter",
-                output_constraint_mode="none",
-                mtp_step=3,
-                mtp_dynamic_verify=False,
-                enable_ep_moe=False,
-                enable_prefill_decode_mixed=False,
-            )
-        ),
-    )
-    get_env_start_args.cache_clear()
-    if kind == "deepseek_v4":
-        manager = DeepseekV4MemoryManager(
-            8192,
-            torch.bfloat16,
-            1,
-            512,
-            2,
-            DeepseekV4CacheConfig([4, 128]),
-        )
-        requests = DeepseekV4ReqManager(2, 4096, None, manager.cache_config, max_forward_tokens=4096, mtp_step=3)
-    else:
-        from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
-        from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
-        from lightllm.common.req_manager.linear_att import ReqManagerForMamba
-
-        config = LinearAttCacheConfig(
-            tp_world_size=1,
-            full_att_all_num_kv_heads=1,
-            full_att_dtype=torch.bfloat16,
-            full_att_num_kv_heads=1,
-            full_att_head_dim=8,
-            global_linear_k_heads=1,
-            global_linear_v_heads=1,
-            num_linear_k_heads=1,
-            num_linear_v_heads=1,
-            head_linear_k_dim=8,
-            head_linear_v_dim=8,
-            conv_kernel_size=4,
-            linear_layer_num=1,
-            conv_state_dtype=torch.bfloat16,
-            ssm_state_dtype=torch.float32,
-            full_attention_interval=2,
-            all_layer_num=2,
-        )
-        manager = Qwen3NextMemManager(8192, torch.bfloat16, 1, 8, 1, config)
-        requests = ReqManagerForMamba(2, 4096, None, config)
-    requests.bind_mem_manager(manager)
-    req_idx, slots = _reserve(manager, requests, 4096)
-    dist.init_process_group(
-        "gloo", init_method="file://" + rendezvous, rank=rank, world_size=2, timeout=timedelta(seconds=60)
-    )
-    try:
-        if kind == "deepseek_v4":
-            # The receiver reads a single CUDA IPC allocation on the other GPU.
-            if rank == 0:
-                from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import reduce_tensor
-
-                torch.multiprocessing.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
-                _randomize_history(manager)
-                torch.cuda.synchronize()
-                history_queue.put((manager.kv_buffer, slots))
-            else:
-                source_buffers, source_slots = history_queue.get()
-                source = SimpleNamespace(kv_buffer=source_buffers)
-                manager.operator.copy_kv_from_other_dp_ranks(
-                    [source],
-                    source_slots.to(slots.device),
-                    torch.zeros(slots.numel(), dtype=torch.int32, device=slots.device),
-                    slots,
-                    1,
-                    0,
-                )
-                for buffer, source_buffer in zip(manager.kv_buffer, source_buffers):
-                    expected = source_buffer[source_slots.long()]
-                    torch.testing.assert_close(buffer[slots.long()].cpu(), expected.cpu(), rtol=0, atol=0)
-                del source, source_buffer, source_buffers, source_slots, expected
-            dist.barrier()
-
-        buffers = manager.big_page_buffers
-        small = requests.create_small_page_cache_manager(4)
-        if rank == 0:
-            for value in (31, 32):
-                slot = buffers.alloc_one_state_cache()
-                for tensor in buffers.get_state_cache(slot):
-                    tensor.fill_(value)
-        backend = SimpleNamespace(
-            args=SimpleNamespace(linear_att_hash_page_size=256, linear_att_page_block_num=8, max_req_total_len=4096),
-            node_gloo_group=dist.group.WORLD,
-            model=SimpleNamespace(mem_manager=manager, req_manager=requests),
-            small_page_buffers=small,
-            radix_cache=SimpleNamespace(
-                get_big_page_ids_by_node=lambda node: [0, 1], free_one_small_page_buffer=lambda: None
-            ),
-        )
-        check = (
-            DeepseekV4StateCacheManager(1, manager.cache_config)
-            if kind == "deepseek_v4"
-            else LinearAttCacheManager(1, config)
-        )
-        for end, start, advance in (
-            (4096, 0, 0),
-            (4096, 2048, 0),
-            (3840, 0, 0),
-            (3840, 2048, 0),
-            (4096, 0, 1),
-            (3840, 0, 1),
-        ):
-            req = SimpleNamespace(
-                req_id=42,
-                req_idx=req_idx,
-                cur_kv_len=end + advance if rank == 0 else start,
-                shared_kv_node=object(),
-                hybrid_len_to_big_page_id=SortedDict(),
-                hybrid_cache_len=end,
-                tail_small_page_buffer_id=None,
-            )
-            value = 32 if end == 4096 else 33
-            if rank == 0:
-                for tensor in check.get_state_cache(0):
-                    tensor.fill_(value)
-                req.cur_kv_len = end
-                requests.restore_state(req, check, 0)
-                if advance:
-                    if end % 2048:
-                        req.tail_small_page_buffer_id = small.alloc_one_state_cache()
-                        requests.save_state(req_idx, req.tail_small_page_buffer_id, small, checkpoint_len=end)
-                        torch.cuda.synchronize()
-                    for tensor in check.get_state_cache(0):
-                        tensor.fill_(99)
-                    req.cur_kv_len = end + advance
-                    requests.restore_state(req, check, 0)
-            elif start:
-                index = buffers.alloc_one_state_cache()
-                for tensor in buffers.get_state_cache(index):
-                    tensor.fill_(31)
-                req.hybrid_len_to_big_page_id[2048] = index
-            g_infer_context.requests_mapping = {42: req}
-            tasks = (
-                []
-                if rank == 0
-                else [SimpleNamespace(max_kv_len_mem_manager_index=0, req=req, mem_indexes=range(end - start))]
-            )
-            transfer_hybrid_checkpoints(backend, tasks)
-            torch.cuda.synchronize()
-            if rank == 1:
-                assert list(req.hybrid_len_to_big_page_id) == list(range(2048, end + 1, 2048))
-                for length, index in req.hybrid_len_to_big_page_id.items():
-                    assert all(
-                        tensor.eq(31 if length == 2048 else 32).all() for tensor in buffers.get_state_cache(index)
-                    )
-                requests.save_state(req_idx, 0, check, end)
-                torch.cuda.synchronize()
-                assert all(tensor.eq(value).all() for tensor in check.get_state_cache(0))
-                if end == 3840:
-                    assert req.tail_small_page_buffer_id is not None
-                    assert all(
-                        tensor.eq(value).all() for tensor in small.get_state_cache(req.tail_small_page_buffer_id)
-                    )
-                    small.free_state_cache([req.tail_small_page_buffer_id])
-                buffers.free_state_cache(list(req.hybrid_len_to_big_page_id.values()))
-            elif advance and req.tail_small_page_buffer_id is not None:
-                small.free_state_cache([req.tail_small_page_buffer_id])
-            dist.barrier()
-    finally:
-        dist.destroy_process_group()
-
-
-@pytest.mark.skipif(torch.cuda.device_count() < 2, reason="requires two CUDA devices")
-@pytest.mark.parametrize("kind", ["deepseek_v4", "linear"])
-def test_dp_checkpoint_transfer_between_processes(tmp_path, kind):
-    context = torch.multiprocessing.get_context("spawn")
-    torch.multiprocessing.spawn(
-        _checkpoint_transfer_worker, args=(str(tmp_path / "rendezvous"), context.Queue(), kind), nprocs=2, join=True
-    )
-
-
 @pytest.mark.parametrize(
-    "live,cache_len,tail,expected",
-    [(512, 4096, None, 512), (513, 512, 0, 512), (2051, 4096, None, 2048), (4097, 3840, 0, 3840), (127, 4096, None, 0)],
+    "length,prefix", [(768, 0), (768, 256), (2816, 0), (2816, 2304), (4096, 0), (4096, 256), (4096, 2304)]
 )
-def test_dp_hybrid_advertises_only_available_continuation(live, cache_len, tail, expected):
-    from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import _hybrid_transfer_len
-
-    req = SimpleNamespace(cur_kv_len=live, hybrid_cache_len=cache_len, tail_small_page_buffer_id=tail)
-    args = SimpleNamespace(linear_att_hash_page_size=256, linear_att_page_block_num=8)
-    assert _hybrid_transfer_len(req, args) == expected
-
-
-@pytest.mark.parametrize("length,prefix", [(768, 0), (768, 256), (4096, 0), (4096, 256), (4096, 2304)])
 @pytest.mark.parametrize("exhaust_small_pool", [False, True])
 def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     cache, monkeypatch, length, prefix, exhaust_small_pool
@@ -1572,6 +1345,13 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         torch.testing.assert_close(
             flat[i, manager.cache_config.get_cpu_cache_full_att_bytes() :], expected, rtol=0, atol=0
         )
+    if tail is not None:
+        torch.testing.assert_close(
+            manager.big_page_buffers.buffer[manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID],
+            expected_checkpoints[-1],
+            rtol=0,
+            atol=0,
+        )
 
     destination = requests.alloc()
     dst = torch.empty(0, dtype=torch.int32, device="cuda")
@@ -1616,6 +1396,23 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     torch.cuda.synchronize()
     assert restored.cur_kv_len == restored.hold_kv_len == length
     assert released == list(range(1, len(ends) + 1))
+    if length % page_tokens:
+        torch.testing.assert_close(
+            manager.big_page_buffers.buffer[manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID],
+            expected_checkpoints[-1],
+            rtol=0,
+            atol=0,
+        )
+        if exhaust_small_pool:
+            assert restored.tail_small_page_buffer_id is None
+        else:
+            assert restored.tail_small_page_buffer_id is not None
+            torch.testing.assert_close(
+                requests.small_page_buffers.buffer[restored.tail_small_page_buffer_id],
+                expected_checkpoints[-1],
+                rtol=0,
+                atol=0,
+            )
     dst = requests.req_to_token_indexs[destination, :length]
     for pool in _history_pools(manager):
         torch.testing.assert_close(
@@ -1633,7 +1430,10 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         [x for x in (tail, restored.tail_small_page_buffer_id) if x is not None] + busy_small_slots
     )
     assert manager.allocator.can_use_mem_size == manager.size
-    assert manager.big_page_buffers.get_free_cache_num() == manager.big_page_buffers.size
+    assert (
+        manager.big_page_buffers.get_free_cache_num()
+        == manager.big_page_buffers.size - manager.big_page_buffers.keep_num
+    )
 
 
 def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
@@ -1692,7 +1492,7 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
 
 
 def test_cpu_cache_preserves_already_published_pages(cache):
-    from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages, copy_checkpoints_to_pages
+    from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages, copy_checkpoint_pages
 
     manager, requests = cache
     req, slots = _reserve(manager, requests, 2048)
@@ -1703,14 +1503,14 @@ def test_cpu_cache_preserves_already_published_pages(cache):
     readies = torch.ones(1, dtype=torch.bool, device="cuda")
     state_id = manager.big_page_buffers.alloc_one_state_cache()
     manager.big_page_buffers.buffer[state_id].fill_(7)
-    pointers = torch.tensor([manager.big_page_buffers.buffer[state_id].data_ptr()], dtype=torch.uint64, device="cuda")
+    checkpoint_ids = torch.tensor([state_id], dtype=torch.int64, device="cuda")
     copy_history_pages(manager, slots, page_ids, pages, to_pages=True, readies=readies)
-    copy_checkpoints_to_pages(manager, page_ids, readies, pointers, pages)
+    copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, to_pages=True, readies=readies)
     torch.cuda.synchronize()
     assert pages.eq(221).all()
     readies.zero_()
     copy_history_pages(manager, slots, page_ids, pages, to_pages=True, readies=readies)
-    copy_checkpoints_to_pages(manager, page_ids, readies, pointers, pages)
+    copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, to_pages=True, readies=readies)
     torch.cuda.synchronize()
     offset = 0
     for pool in manager.kv_buffer:

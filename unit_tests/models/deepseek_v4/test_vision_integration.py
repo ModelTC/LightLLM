@@ -65,11 +65,11 @@ def test_chunk_boundary_moves_before_complete_image_block():
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
     req = InferReq.__new__(InferReq)
-    req.args = SimpleNamespace(chunked_prefill_size=8192)
+    req.args = SimpleNamespace(chunked_prefill_size=8192, batch_max_tokens=8192)
     req.cur_kv_len = 0
     req.cur_output_len = 0
     req.shm_req = SimpleNamespace(input_len=10_000)
-    req.image_block_spans = [(8100, 8400)]
+    req.mm_input_spans = [(8100, 8400)]
 
     assert req._get_chunked_input_end() == 8100
 
@@ -81,11 +81,11 @@ def test_chunk_boundary_between_adjacent_images_never_splits_the_previous_image(
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
     req = InferReq.__new__(InferReq)
-    req.args = SimpleNamespace(chunked_prefill_size=640)
+    req.args = SimpleNamespace(chunked_prefill_size=640, batch_max_tokens=640)
     req.cur_kv_len = 0
     req.cur_output_len = 0
     req.shm_req = SimpleNamespace(input_len=768)
-    req.image_block_spans = [(0, 384), (384, 768)]
+    req.mm_input_spans = [(0, 384), (384, 768)]
 
     assert req._get_chunked_input_end() == 384
 
@@ -97,11 +97,11 @@ def test_atomic_image_block_can_exceed_chunk_size():
     from lightllm.server.router.model_infer.infer_batch import InferReq
 
     req = InferReq.__new__(InferReq)
-    req.args = SimpleNamespace(chunked_prefill_size=256)
+    req.args = SimpleNamespace(chunked_prefill_size=256, batch_max_tokens=1024)
     req.cur_kv_len = 0
     req.cur_output_len = 0
     req.shm_req = SimpleNamespace(input_len=1000)
-    req.image_block_spans = [(100, 800)]
+    req.mm_input_spans = [(100, 800)]
 
     assert req._get_chunked_input_end() == 100
 
@@ -142,7 +142,7 @@ def test_radix_match_retries_when_page_alignment_lands_in_earlier_image(monkeypa
     req.cur_kv_len = 0
     req.cur_output_len = 0
     req.req_idx = 0
-    req.image_block_spans = [(450, 600), (700, 900)]
+    req.mm_input_spans = [(450, 600), (700, 900)]
     req.shared_kv_node = None
     req.tail_small_page_buffer_id = None
     req.shm_req = SimpleNamespace(
@@ -165,13 +165,47 @@ def test_radix_match_retries_when_page_alignment_lands_in_earlier_image(monkeypa
     assert req.shm_req.prompt_cache_len == 256
 
 
-def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch):
+@pytest.mark.parametrize("atomic,expected", [(False, 550), (True, 450)])
+def test_full_attention_prefix_match_respects_multimodal_chunking(monkeypatch, atomic, expected):
+    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+
+    calls = []
+
+    def match_prefix(key, update_refs=False):
+        calls.append((len(key), update_refs))
+        length = min(len(key), 550)
+        return SimpleNamespace(node_prefix_total_len=length), length, torch.arange(length)
+
+    monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", False)
+    monkeypatch.setattr(g_infer_context, "radix_cache", SimpleNamespace(match_prefix=match_prefix))
+    monkeypatch.setattr(
+        g_infer_context,
+        "req_manager",
+        SimpleNamespace(req_to_token_indexs=torch.empty((1, 800), dtype=torch.int64)),
+    )
+    req = InferReq.__new__(InferReq)
+    req.args = SimpleNamespace(page_size=1)
+    req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
+    req.cur_kv_len = req.cur_output_len = req.hold_kv_len = req.req_idx = 0
+    req.mm_input_spans = [(450, 600)] if atomic else []
+    req.shm_req = SimpleNamespace(input_len=800, shm_prompt_ids=SimpleNamespace(arr=list(range(800))))
+
+    req._match_radix_cache()
+
+    assert req.cur_kv_len == req.hold_kv_len == expected
+    assert calls == ([(799, False), (450, False), (450, True)] if atomic else [(799, True)])
+
+
+@pytest.mark.parametrize("disable_chunked_mm_input,expected", [(False, 768), (True, 256)])
+def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch, disable_chunked_mm_input, expected):
     from lightllm.server.router.model_infer import infer_batch
 
     shm_req = SimpleNamespace(
         link_prompt_ids_shm_array=lambda: None,
         link_logprobs_shm_array=lambda: None,
         hybrid_token_hash_list=SimpleNamespace(size=3),
+        input_len=1025,
+        shm_prompt_ids=SimpleNamespace(arr=list(range(1025))),
     )
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(
@@ -193,7 +227,9 @@ def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch):
     monkeypatch.setattr(infer_batch, "PromptSelectedLogprobsExt", lambda req: None)
     monkeypatch.setattr(infer_batch, "FinalTokenMetadataExt", lambda req: None)
     req = infer_batch.InferReq.__new__(infer_batch.InferReq)
-    req.args = SimpleNamespace(linear_att_hash_page_size=256)
+    req.args = SimpleNamespace(
+        linear_att_hash_page_size=256, disable_chunked_mm_input=disable_chunked_mm_input, batch_max_tokens=1024
+    )
     req.shm_index, req.vocab_size = 0, 100
     req.multimodal_params = SimpleNamespace(
         to_dict=lambda: {
@@ -204,7 +240,7 @@ def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch):
         }
     )
     req._init_all_state()
-    assert req.hybrid_cache_len == 256
+    assert req.hybrid_cache_len == expected
 
 
 def test_vision_model_allows_cpu_cache():
@@ -355,7 +391,7 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
         req_idx=0,
         cur_kv_len=loaded_start,
         hold_kv_len=loaded_start,
-        image_block_spans=spans,
+        mm_input_spans=spans,
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
         shm_req=SimpleNamespace(
             input_len=8192,

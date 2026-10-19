@@ -89,12 +89,14 @@ PD 传输页 `--pd_kv_page_size` 和 CPU cache 页也必须是分配页大小的
 - CPU cache 完全沿用通用分配、异步卸载、加载和磁盘缓存流程。模型 operator 复制原始 packed history
   和已有 CPU checkpoint，无专用 cache module、session、lease 或增量 staging。
   启用 CPU cache 时，CPU 页与大页 checkpoint 使用相同边界；未配置大页时自动建立对应边界。
+- Vision 自动启用通用 `--disable_chunked_mm_input`：图像块完整 prefill，文字仍可分块，
+  前缀缓存命中避开图像块内部。单个块必须能放进 `batch_max_tokens`。
 - 大小页 CPU checkpoint 按时间顺序保存必要的 SWA token、C4 和 indexer 尾部，
   不包含物理页位置，也不重复保存压缩历史。恢复沿用主线接口，从请求的 `cur_kv_len` 确定 token 位置；
-  跨 DP 复用同一恢复接口。保存接口显式接收目标边界，以支持长 prefill 内的多个 checkpoint。
+  保存接口显式接收目标边界，以支持长 prefill 内的多个 checkpoint。
 - PD 复用现有 `kv` / `att_state` 任务：前者传输压缩历史，后者传输窗口和未闭合压缩组，支持任意传输终点。
   P/D 可以使用不同的 MTP 环大小，传输时按绝对位置恢复运行态；推理 backend 无模型专用 checkpoint 回调。
   PD continuation 布局有变化，P/D 节点需要使用相同代码版本。
 
 验证覆盖分页边界、长 prefill 的窗口前缀和中间 checkpoint、大小页命中和分叉、推测拒绝后重试、
-CUDA Graph 索引、通用 CPU cache 异步卸载与恢复、PD 传输及跨进程 CUDA IPC/Gloo checkpoint 恢复。
+CUDA Graph 索引、通用 CPU cache 异步卸载与恢复及 PD 传输。
