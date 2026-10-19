@@ -12,8 +12,9 @@ from lightllm.server.req_id_generator import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
-from typing import Any, Dict, List, Union
+from typing import Any, Dict, List, Optional, Union
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
 from .logprob_utils import logprob_info
 from .token_metadata import ReqFinalTokenMetadata
 
@@ -116,7 +117,12 @@ class Req(ctypes.Structure):
         ("disk_prompt_cache_len", ctypes.c_int),  # 用于记录从磁盘命中的长度
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
-        # 这个标记变量是http_server 写入，其他进程读取，用于标记该请求是否因为断网被aborted。
+        # 请求停止信号，主要由 HTTP 写入，Router 读取后通知推理进程执行 abort 并回收资源。
+        # 来源包括客户端断开、主动取消，以及 HTTP 匹配到 stop 后停止当前候选的生成。
+        # 该字段属于单个 Req：HTTP stop 匹配只设置命中的子请求，整组取消则逐个设置所有子请求。
+        # 多机 TP 时，Router 会把主节点的 abort 信号同步到其他节点的同一请求。
+        # True 只表示已发出停止信号，不表示推理已经退出，也不直接决定 API 的 finish_reason。
+        # HTTP 因 stop 发起 abort 时，输出缓冲记录的结束原因仍为 stop；后续 abort marker 只用于收尾。
         ("is_aborted", ctypes.c_bool),
         # 当FinishStatus 是正常结束状态时，finish_token_index 用于标识结束的
         # token 的index位置
@@ -138,12 +144,6 @@ class Req(ctypes.Structure):
         ("mtp_verify_step_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
-        # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
-        # 然后router发停止命令给推理进程，推理进程停止输出
-        ("stop_str_matched", ctypes.c_bool),
-        # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
-        # 该变量为 detokenization 进程写入，http_server 读取
-        ("stop_str_matched_token_index", ctypes.c_int),
         # hybrid 模型按 checkpoint 粒度提前计算输入 hash，供大小页 radix 匹配。
         ("hybrid_token_hash_list", TokenHashList),
         # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
@@ -209,8 +209,6 @@ class Req(ctypes.Structure):
         self.mtp_verify_token_num = 0
         self.mtp_verify_step_num = 0
         self._mtp_step = get_env_start_args().mtp_step
-        self.stop_str_matched = False
-        self.stop_str_matched_token_index = -1
 
         self.post_init()
 
@@ -277,6 +275,29 @@ class Req(ctypes.Structure):
         hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().linear_att_hash_page_size)
         self.hybrid_token_hash_list.fill(hash_values)
         return
+
+    def set_compiled_grammar(self, payload: bytes) -> None:
+        """在请求转发 Router 前，将 HTTP 侧编译好的语法写入当前请求槽的共享内存。"""
+        if not payload:
+            return
+        # 共享内存按请求槽复用，只在旧请求释放该槽后重建。
+        # 按编译结果的实际长度创建内存块，读取侧直接使用块长度，无需在 Req 中另存长度字段。
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", len(payload), force_mode="create")
+        try:
+            shm.buf[: len(payload)] = payload
+        finally:
+            shm.close()
+
+    def get_compiled_grammar(self) -> Optional[bytes]:
+        # 无约束请求跳过读取，避免请求槽复用时误读旧请求留下的语法。
+        if not self.sample_params.constraint_out_params.has_constraint():
+            return None
+        # 只连接写入侧已发布的内存块，读取整个块即可取得完整编译结果。
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", -1, force_mode="link")
+        try:
+            return bytes(shm.buf)
+        finally:
+            shm.close()
 
     def create_prompt_ids_shm_array(self):
         name = f"shm_prompts_{self.index_in_shm_mem}"
@@ -425,8 +446,9 @@ class Req(ctypes.Structure):
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        # Infer put_back 前会写好 finish_status；ref_count_ok 已保证 Infer 已退出，
-        # 无需再 or stop_str_matched。
+        # 回收请求需同时确认：推理端已写入结束状态，detokenization 已完成并设置 can_released_mark，
+        # 其他进程已归还 Req 引用（只剩主管理进程的一个引用），且 HTTP 已取走共享输出队列中的所有 token。
+        # Infer 在归还引用前写好 finish_status；因此 ref_count_ok 与结束状态共同确认推理端已退出。
         if self.finish_status.is_finished() and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
             return True
 
@@ -484,10 +506,7 @@ class ChunkedPrefillReq(Req):
         # 2. page_size：KV cache 按页分配，预留一页以覆盖逻辑 token 长度与实际分配容量之间的对齐开销。
         # 3. 2 * (mtp_step + 1)：按每轮最多推进 mtp_step + 1 个 token，预留两轮推理的容量，
         #    为 MTP 和 overlap 执行留出空间；mtp_step 为 0 时仍保留两个普通 decode token 的余量。
-        # 4. 16：为异步操作造成的请求退出延迟额外预留 token 容量。例如 stop_str 需要先由 detokenization
-        #    进程匹配，再由 router 通知推理端停止请求；在状态传播、停止处理及 KV 释放完成之前，
-        #    请求仍可能继续推进推理或占用 KV。这 16 个 token 是吸收此类延迟的保守余量，
-        #    避免调度时过早将这部分容量分配给其他请求；它不表示固定的等待时间或异步延迟上限。
+        # 4. 16：为 HTTP stop/abort 跨进程通知及推理退出的延迟预留 token 容量。
         b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
 
         return (a_len, b_len)

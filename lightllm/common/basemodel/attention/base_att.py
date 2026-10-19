@@ -1,4 +1,5 @@
 import threading
+import weakref
 
 import torch
 from abc import ABC, abstractmethod
@@ -55,10 +56,10 @@ class BaseAttBackend:
                 BaseAttBackend._workspace_buffers[buffer_key] = workspace_buffer
             return workspace_buffer
 
-    def create_att_prefill_state(self) -> "BasePrefillAttState":
+    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "BasePrefillAttState":
         raise NotImplementedError("not impl")
 
-    def create_att_decode_state(self) -> "BaseDecodeAttState":
+    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "BaseDecodeAttState":
         raise NotImplementedError("not impl")
 
     def uses_dynamic_spec_verify_layout(self) -> bool:
@@ -71,7 +72,7 @@ class BaseAttBackend:
 
     def uses_causal_attention(self) -> bool:
         args = get_env_start_args()
-        is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash")
+        is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash", "dflash2")
         return not is_parallel_block_draft
 
     def _find_layer_index(
@@ -115,15 +116,45 @@ class AttControl:
 
 
 @dataclass
-class BasePrefillAttState(ABC):
+class BaseAttState(ABC):
+    """Attention metadata with a weak reference to its owning InferStateInfo."""
 
     backend: BaseAttBackend = None
-    infer_state: "InferStateInfo" = None
+    # InferStateInfo 已强引用本状态，这里反向使用弱引用，避免形成强引用环。
+    # 否则状态及其 Tensor 需等待循环 GC 回收，可能延迟显存复用、增加显存峰值。
+    # InferStateInfo 的生命周期由推理调用方或 CUDA Graph 缓存管理，不由 attention state 延长。
+    _infer_state_weak_ref: Optional[weakref.ReferenceType["InferStateInfo"]] = None
+
+    @property
+    def infer_state(self) -> Optional["InferStateInfo"]:
+        if self._infer_state_weak_ref is None:
+            return None
+        infer_state = self._infer_state_weak_ref()
+        if infer_state is None:
+            raise ReferenceError("attention state's InferStateInfo has been released")
+        return infer_state
+
+    def check_no_infer_state(self) -> None:
+        """Reject InferStateInfo stored directly in any instance attribute.
+
+        This shallow check does not inspect containers or callback closures.
+        """
+        # InferStateInfo imports attention states, so import it only when checking.
+        from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+        for name, value in vars(self).items():
+            if isinstance(value, InferStateInfo):
+                raise RuntimeError(
+                    f"{type(self).__name__}.{name} must not retain InferStateInfo; use _infer_state_weak_ref instead"
+                )
 
     @abstractmethod
-    def init_state(self):
+    def init_state(self) -> None:
         pass
 
+
+@dataclass
+class BasePrefillAttState(BaseAttState):
     @abstractmethod
     def prefill_att(
         self,
@@ -137,15 +168,9 @@ class BasePrefillAttState(ABC):
 
 
 @dataclass
-class BaseDecodeAttState(ABC):
-    backend: BaseAttBackend = None
-    infer_state: "InferStateInfo" = None
-
-    @abstractmethod
-    def init_state(self):
-        pass
-
+class BaseDecodeAttState(BaseAttState):
     def copy_for_decode_cuda_graph(self, new_state: "BaseDecodeAttState"):
+        """Copy tensor metadata into the buffers owned by the captured graph."""
         for attr_name, attr_value in vars(new_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)

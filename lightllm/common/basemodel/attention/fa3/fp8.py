@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from ..base_att import AttControl
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
@@ -24,10 +25,10 @@ class Fp8Fa3AttBackend(Fa3AttBackend):
         )
 
     def create_att_prefill_state(self, infer_state) -> "Fp8Fa3PrefillAttState":
-        return Fp8Fa3PrefillAttState(backend=self, infer_state=infer_state)
+        return Fp8Fa3PrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "Fp8Fa3DecodeAttState":
-        return Fp8Fa3DecodeAttState(backend=self, infer_state=infer_state)
+        return Fp8Fa3DecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

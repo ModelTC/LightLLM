@@ -1,4 +1,5 @@
 import inspect
+import logging
 import pickle
 import setproctitle
 import torch.multiprocessing as mp
@@ -90,8 +91,9 @@ class DecodeKVMoveManager(BaseKVMoveManager):
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task_group)
-                if isinstance(task_group, PDChunckedTransTaskGroup):
-                    logger.info(
+                # A task group covers the whole request, so this log does not require pd_detail_log.
+                if isinstance(task_group, PDChunckedTransTaskGroup) and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
                         f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}"
                     )
 

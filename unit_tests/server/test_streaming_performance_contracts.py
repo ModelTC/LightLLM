@@ -59,12 +59,13 @@ def _install_manager(monkeypatch, rows, failure=None, reasoning_parser=None):
         if failure:
             raise failure
 
-    monkeypatch.setattr(g_objs, "httpserver_manager", SimpleNamespace(tokenizer=Mock(), generate=generate))
+    monkeypatch.setattr(
+        g_objs, "httpserver_manager", SimpleNamespace(tokenizer=Mock(), generate=generate, output_grammar_compiler=None)
+    )
     monkeypatch.setattr(g_objs, "args", StartArgs(tool_call_parser="qwen3_coder"))
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser=reasoning_parser))
     monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="prompt"))
     monkeypatch.setattr(SamplingParams, "init", lambda *_a, **_kw: None)
-    monkeypatch.setattr(SamplingParams, "verify", lambda *_a: None)
 
 
 def _chat_response(monkeypatch, rows, failure=None, tools=None):
@@ -271,6 +272,7 @@ def test_pd_batch_end_is_last_emitted_token_not_filtered_duplicate():
         first = await asyncio.wait_for(stream.__anext__(), 1)
         second = await asyncio.wait_for(stream.__anext__(), 1)
         assert first[1] == "first" and first[2]["_pd_stream_batch_end"] is False
+        assert first[2]["needs_prefill_first_token"] is False
         assert second[1] == "second" and second[2]["_pd_stream_batch_end"] is True
         await stream.aclose()
 

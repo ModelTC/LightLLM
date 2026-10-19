@@ -9,7 +9,7 @@ python -m lightllm.server.api_server --model_dir /Meta-Llama-3-8B-Instruct  \
                                      --port 8017                   \
                                      --tp 1                         \
                                      --max_total_token_num 100000 \
-                                     --simple_constraint_mode
+                                     --output_constraint_mode xgrammar
 """
 
 
@@ -51,16 +51,6 @@ for i in range(20):
             "max_new_tokens": 200,
             "regular_constraint": r"(Yes|No) Reason is [a-zA-Z\s]+",
         },
-    }
-    thread = RequestThread(url, headers, data)
-    thread.start()
-
-time.sleep(10)
-
-for i in range(20):
-    data = {
-        "inputs": "Are dog a man? ",
-        "parameters": {"do_sample": False, "ignore_eos": True, "max_new_tokens": 200, "allowed_token_ids": [2, 3]},
     }
     thread = RequestThread(url, headers, data)
     thread.start()

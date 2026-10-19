@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 
 import torch
 
@@ -11,10 +12,10 @@ from .flashmla_sparse import (
 
 class Glm5NextSparseAttBackend(NsaFlashMlaSparseAttBackend):
     def create_att_prefill_state(self, infer_state):
-        return Glm5NextSparsePrefillState(backend=self, infer_state=infer_state)
+        return Glm5NextSparsePrefillState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state):
-        return Glm5NextSparseDecodeState(backend=self, infer_state=infer_state)
+        return Glm5NextSparseDecodeState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

@@ -1,3 +1,4 @@
+import weakref
 import inspect
 import sys
 from types import ModuleType, SimpleNamespace
@@ -5,6 +6,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
@@ -31,12 +33,12 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
         _rearrange_mixed_qkv=lambda mixed: (q, q, q),
         prefill_kernel=lambda *args, **kwargs: (None, final_state),
     )
+    infer_state = InferStateInfo()
+    infer_state.b1_cu_q_seq_len = torch.tensor([0, 1], dtype=torch.int32)
+    infer_state.b_ready_cache_len = 0
     state = gdn.LinearAttPrefillAttState(
         backend=backend,
-        infer_state=SimpleNamespace(
-            b1_cu_q_seq_len=torch.tensor([0, 1], dtype=torch.int32),
-            b_ready_cache_len=0,
-        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
     )
     state.b_conv_buffer_idx = torch.tensor([0], dtype=torch.int64)
     state.b_ssm_buffer_idx = torch.tensor([0], dtype=torch.int64)
@@ -65,27 +67,27 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
     )
-    infer_state = SimpleNamespace(
-        batch_size=b_req_idx.shape[0],
-        b_req_idx=b_req_idx,
-        b_mtp_index=torch.zeros_like(b_req_idx),
-        req_manager=SimpleNamespace(
-            HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
-            req_to_mtp_state_index=req_to_mtp_state_index,
-        ),
+    infer_state = InferStateInfo()
+    infer_state.batch_size = b_req_idx.shape[0]
+    infer_state.b_req_idx = b_req_idx
+    infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
+    infer_state.req_manager = SimpleNamespace(
+        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
+        req_to_mtp_state_index=req_to_mtp_state_index,
     )
-    return gdn.LinearAttDecodeAttState(
+    state = gdn.LinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,
             uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
         ),
-        infer_state=infer_state,
+        _infer_state_weak_ref=weakref.ref(infer_state),
     )
+    return state, infer_state
 
 
 def test_decode_state_initializes_normal_layout():
     b_req_idx = torch.tensor([2, 4], dtype=torch.int32)
-    state = _create_decode_state(draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx)
+    state, infer_state = _create_decode_state(draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx)
 
     state.init_state()
 
@@ -98,7 +100,7 @@ def test_decode_state_initializes_normal_layout():
 def test_decode_state_initializes_fixed_mtp_layout():
     b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
-    state = _create_decode_state(
+    state, infer_state = _create_decode_state(
         draft_step=2,
         dynamic_layout=False,
         b_req_idx=b_req_idx,
@@ -129,7 +131,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
         return expected_cu_q_seq_len, expected_conv_buffer_idx, expected_num_accepted_tokens
 
     monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", build_params)
-    state = _create_decode_state(
+    state, infer_state = _create_decode_state(
         draft_step=2,
         dynamic_layout=True,
         b_req_idx=b_req_idx,

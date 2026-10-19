@@ -1,5 +1,9 @@
 import asyncio
+import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
 
 from lightllm.server import api_openai
 from lightllm.server.api_models import ChatCompletionRequest, CompletionRequest
@@ -7,12 +11,30 @@ from lightllm.server.api_openai import (
     _build_completion_response,
     _collect_generation_results,
 )
+from lightllm.server.core.objs import StopStrMatchMode, FinishStatus
+from lightllm.server.httpserver.manager import HttpServerManager
+from lightllm.server.pd_io_struct import NodeRole
+
+
+def _manager(tokenizer, generate, args):
+    manager = HttpServerManager.__new__(HttpServerManager)
+    manager.output_grammar_compiler = None
+    manager.tokenizer = tokenizer
+    manager._generate = lambda prompt, params, multimodal, request, *_args: generate(
+        prompt, params, multimodal, request
+    )
+    manager.args = args
+    manager.pd_mode = NodeRole.NORMAL
+    manager.is_multinode_tp_slave = False
+    manager.stop_request = AsyncMock()
+    return manager
 
 
 class _FinishStatus:
     def __init__(self, finished=False, reason=None):
         self.finished = finished
         self.reason = reason
+        self.status = FinishStatus.FINISHED_LENGTH if finished else FinishStatus.NO_FINISH
 
     def is_finished(self):
         return self.finished
@@ -43,9 +65,7 @@ def test_collect_generation_results_keeps_choices_separate(monkeypatch):
         max_tokens=2,
         logprobs=1,
     )
-    sampling_params = SimpleNamespace(stop_sequences=SimpleNamespace(size=0))
-
-    results = asyncio.run(_collect_generation_results(generate_results(), request, "Prompt", sampling_params))
+    results = asyncio.run(_collect_generation_results(generate_results(), request, "Prompt"))
 
     assert [result["text"] for result in results] == ["A1", "B2", "C3"]
     assert [result["completion_tokens"] for result in results] == [2, 2, 2]
@@ -97,15 +117,23 @@ def test_non_streaming_chat_usage_sums_all_choices(monkeypatch):
 
     class _SamplingParams:
         def init(self, **_kwargs):
-            pass
+            self.stop_sequences = SimpleNamespace(size=0)
 
         def verify(self):
             pass
 
+        async def verify_cpu_async(self, compiler):
+            assert compiler is None
+
     async def build_prompt(_request, _tools):
         return "Prompt"
 
-    manager = SimpleNamespace(tokenizer=None, generate=lambda *_args, **_kwargs: generate_results())
+    manager = SimpleNamespace(
+        tokenizer=None,
+        output_grammar_compiler=None,
+        args=SimpleNamespace(enable_rl=False),
+        generate=lambda *_args, **_kwargs: generate_results(),
+    )
     monkeypatch.setattr(api_openai, "SamplingParams", _SamplingParams)
     monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
@@ -128,3 +156,190 @@ def test_non_streaming_chat_usage_sums_all_choices(monkeypatch):
     assert response.usage.completion_tokens == 6
     assert response.usage.total_tokens == 10
     assert response.usage.prompt_tokens_details.cached_tokens == 1
+
+
+@pytest.mark.parametrize("api", ["chat", "completion"])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("include", [None, False, True])
+def test_include_stop_str_in_output_api(monkeypatch, api, stream, include):
+    from lightllm.server.api_http import g_objs
+
+    def generate(prompt, sampling_params, multimodal_params, request):
+        assert sampling_params.include_stop_str_in_output is (include is True)
+        assert sampling_params.stop_sequences.to_stop_str_list() == ["END"]
+
+        async def results():
+            metadata = {"prompt_tokens": 4, "prompt_cache_len": 0, "logprobs": {}}
+            for index, text in enumerate(["helloE", "NDextra"], 1):
+                finish = FinishStatus(FinishStatus.FINISHED_STOP if index == 2 else FinishStatus.NO_FINISH)
+                yield 80, text, {**metadata, "id": index, "logprob": -index}, finish
+
+        return results()
+
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    monkeypatch.setattr(
+        g_objs,
+        "httpserver_manager",
+        _manager(
+            tokenizer,
+            generate,
+            SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False),
+        ),
+    )
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
+
+    async def build_prompt(*args):
+        return "Prompt"
+
+    monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
+    kwargs = {"include_stop_str_in_output": include} if include is not None else {}
+
+    async def run():
+        common = dict(model="test-model", stop=["END"], stream=stream, max_completion_tokens=10, **kwargs)
+        if api == "chat":
+            request = ChatCompletionRequest(messages=[{"role": "user", "content": "Hello"}], **common)
+            response = await api_openai.chat_completions_impl(request, SimpleNamespace())
+        else:
+            request = CompletionRequest(prompt="Prompt", **common)
+            response = await api_openai.completions_impl(request, SimpleNamespace())
+
+        if stream:
+            body = "".join(
+                [chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator]
+            )
+            events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: {")]
+            choices = [choice for event in events for choice in event["choices"]]
+            text = (
+                "".join(choice["delta"].get("content") or "" for choice in choices)
+                if api == "chat"
+                else "".join(choice.get("text", "") for choice in choices)
+            )
+            assert choices[-1]["finish_reason"] == "stop"
+        else:
+            text = response.choices[0].message.content if api == "chat" else response.choices[0].text
+            assert response.choices[0].finish_reason == "stop"
+            assert response.usage.completion_tokens == 2
+        assert text == ("helloEND" if include else "hello")
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("api", ["chat", "completion"])
+def test_stop_scope_is_set_by_chat_api(monkeypatch, thinking, enabled, stream, api):
+    from lightllm.server.api_http import g_objs
+    from lightllm.server import reasoning_parser
+
+    def generate(prompt, sampling_params, multimodal_params, request):
+        assert sampling_params._initial_reasoning_state == (int(thinking) if api == "chat" else -1)
+        skip_reasoning = api == "chat" and not enabled
+        assert sampling_params.stop_str_match_mode.get_mode() == (
+            StopStrMatchMode.CONTENT_ONLY if skip_reasoning else StopStrMatchMode.ALL_TEXT
+        )
+
+        async def results():
+            yield 80, "hello", {"prompt_tokens": 4, "id": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        return results()
+
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    monkeypatch.setattr(
+        g_objs,
+        "httpserver_manager",
+        _manager(
+            tokenizer,
+            generate,
+            SimpleNamespace(reasoning_parser="qwen3", enable_rl=False, enable_return_routed_experts=False),
+        ),
+    )
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser="qwen3"))
+    monkeypatch.setattr(api_openai, "is_stop_matching_in_reasoning_enabled", lambda: enabled)
+    monkeypatch.setattr(api_openai, "_is_force_thinking_mode", lambda request: thinking)
+    monkeypatch.setattr(reasoning_parser, "get_token_id", lambda token: 1001)
+
+    async def build_prompt(*args):
+        return "Prompt"
+
+    monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
+
+    async def run():
+        kwargs = dict(model="test-model", stop=["END"], max_completion_tokens=10, stream=stream)
+        if api == "chat":
+            request = ChatCompletionRequest(messages=[{"role": "user", "content": "Hello"}], **kwargs)
+            response = await api_openai.chat_completions_impl(request, SimpleNamespace())
+        else:
+            request = CompletionRequest(prompt="Prompt", **kwargs)
+            response = await api_openai.completions_impl(request, SimpleNamespace())
+        if stream:
+            body = [chunk async for chunk in response.body_iterator]
+            assert body
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("api", ["chat", "completion"])
+@pytest.mark.parametrize("stream", [False, True])
+def test_openai_maps_backend_abort_to_stop(monkeypatch, api, stream):
+    from lightllm.server.api_http import g_objs
+
+    backend_finish = FinishStatus(FinishStatus.FINISHED_ABORTED)
+
+    async def generate(prompt, sampling_params, multimodal_params, request):
+        metadata = {"prompt_tokens": 4, "prompt_cache_len": 1, "logprobs": {}, "logprob": -0.1}
+        yield 80, "helloENDextra", {**metadata, "id": 0}, FinishStatus()
+        yield 80, "late", {**metadata, "id": 11}, FinishStatus()
+        yield 80, "", {**metadata, "id": None, "logprob": None}, backend_finish
+
+    monkeypatch.setattr(
+        g_objs,
+        "httpserver_manager",
+        _manager(
+            SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text]),
+            generate,
+            SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=True),
+        ),
+    )
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: SimpleNamespace(reasoning_parser=None))
+    log = Mock()
+    monkeypatch.setattr(api_openai.logger, "info", log)
+
+    async def build_prompt(*args):
+        return "Prompt"
+
+    monkeypatch.setattr(api_openai, "build_prompt", build_prompt)
+
+    async def run():
+        kwargs = dict(model="test-model", stop="END", stream=stream)
+        if api == "chat":
+            request = ChatCompletionRequest(messages=[{"role": "user", "content": "Hello"}], **kwargs)
+            response = await api_openai.chat_completions_impl(request, SimpleNamespace())
+        else:
+            request = CompletionRequest(prompt="Prompt", **kwargs)
+            response = await api_openai.completions_impl(request, SimpleNamespace())
+        if stream:
+            body = "".join(
+                [chunk.decode() if isinstance(chunk, bytes) else chunk async for chunk in response.body_iterator]
+            )
+            events = [json.loads(line[6:]) for line in body.splitlines() if line.startswith("data: {")]
+            assert not any("error" in event for event in events)
+            choices = [choice for event in events for choice in event["choices"]]
+            text = (
+                "".join(choice["delta"].get("content") or "" for choice in choices)
+                if api == "chat"
+                else "".join(choice.get("text", "") for choice in choices)
+            )
+            assert choices[-1]["finish_reason"] == "stop"
+            assert events[-1]["usage"]["completion_tokens"] == 3
+        else:
+            text = response.choices[0].message.content if api == "chat" else response.choices[0].text
+            assert response.choices[0].finish_reason == "stop"
+            assert response.usage.completion_tokens == 3
+        assert text == "hellolate"
+        assert backend_finish.status == FinishStatus.FINISHED_ABORTED
+        log.assert_called_once()
+        assert "abort to stop" in log.call_args.args[0]
+        assert "sub_req_id=80" in log.call_args.args[0]
+
+    asyncio.run(run())

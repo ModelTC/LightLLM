@@ -7,6 +7,7 @@ from easydict import EasyDict
 
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 
 
@@ -127,7 +128,7 @@ def test_fixed_pd_nodes_are_ready_only_with_exact_node_counts():
     manager = PDManager(StartArgs(pd_master_mode="2p1d"))
     assert manager.is_pd_nodes_ready() is False
 
-    manager.prefill_nodes = [object(), object()]
+    manager.prefill_nodes = [SimpleNamespace(client_ip_port="p1:8000"), SimpleNamespace(client_ip_port="p2:8000")]
     manager.decode_nodes = [object()]
     assert manager.is_pd_nodes_ready() is True
 
@@ -291,10 +292,14 @@ def test_pd_master_restores_request_count_when_preload_fails():
             raise RuntimeError("preload failed")
 
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
     manager.running_request_count = 0
 
+    params = SamplingParams()
+    params.init(None)
+
     async def consume_generate():
-        async for _ in manager.generate("prompt", None, FailingMultimodalParams(), None):
+        async for _ in manager.generate("prompt", params, FailingMultimodalParams(), None):
             pass
 
     with pytest.raises(RuntimeError, match="preload failed"):
@@ -303,9 +308,14 @@ def test_pd_master_restores_request_count_when_preload_fails():
     assert manager.running_request_count == 0
 
 
-def test_pd_master_request_count_covers_async_generator_lifecycle():
+@pytest.mark.parametrize("parser", [None, "qwen3"])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_pd_master_request_count_covers_async_generator_lifecycle(monkeypatch, parser, enabled):
+    monkeypatch.setenv("LIGHTLLM_STOP_IN_REASONING", "1" if enabled else "0")
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
     manager.running_request_count = 0
+    manager.args.reasoning_parser = parser
     inner_generator_closed = False
 
     async def fake_generate(prompt, sampling_params, multimodal_params, request):
@@ -316,10 +326,12 @@ def test_pd_master_request_count_covers_async_generator_lifecycle():
         finally:
             inner_generator_closed = True
 
-    manager._generate = fake_generate
+    manager._generate_choices = fake_generate
 
     async def consume_one_result_and_close():
-        results_generator = manager.generate(None, None, None, None)
+        params = SamplingParams()
+        params.init(None)
+        results_generator = manager.generate(None, params, None, None)
         assert await results_generator.__anext__() == "result"
         assert manager.running_request_count == 1
         await results_generator.aclose()
@@ -327,6 +339,34 @@ def test_pd_master_request_count_covers_async_generator_lifecycle():
     asyncio.run(consume_one_result_and_close())
     assert manager.running_request_count == 0
     assert inner_generator_closed is True
+
+
+@pytest.mark.parametrize("include", [False, True])
+def test_pd_master_forwards_filtered_choices(include):
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
+    manager.running_request_count = 0
+    manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
+    params = SamplingParams()
+    params.init(manager.tokenizer, stop_sequences="END", n=2, best_of=2, include_stop_str_in_output=include)
+
+    async def fake_generate(*args):
+        # Prefill's first token and subsequent decode tokens arrive in one stream.
+        yield 80, "first", {"id": 1}, FinishStatus()
+        yield 81, "second", {"id": 2}, FinishStatus()
+        yield 80, "END" if include else "", {"id": 3}, FinishStatus(FinishStatus.FINISHED_STOP)
+        yield 81, "EN", {"id": 4}, FinishStatus(FinishStatus.FINISHED_LENGTH)
+
+    manager._generate_choices = fake_generate
+
+    async def collect():
+        return [result async for result in manager.generate("prompt", params, None, None)]
+
+    results = asyncio.run(collect())
+    assert "".join(result[1] for result in results if result[0] == 80) == ("firstEND" if include else "first")
+    assert "".join(result[1] for result in results if result[0] == 81) == "secondEN"
+    assert sorted(result[2]["id"] for result in results) == [1, 2, 3, 4]
+    assert manager.running_request_count == 0
 
 
 def test_fixed_pd_master_health_endpoint_combines_ready_and_health_status(monkeypatch):
@@ -360,7 +400,7 @@ def test_fixed_pd_master_health_endpoint_combines_ready_and_health_status(monkey
     }
     assert pd_node_health_check_count == 0
 
-    pd_manager.prefill_nodes = [object(), object()]
+    pd_manager.prefill_nodes = [SimpleNamespace(client_ip_port="p1:8000"), SimpleNamespace(client_ip_port="p2:8000")]
     pd_manager.decode_nodes = [object()]
     response = asyncio.run(api_http.healthcheck(None))
     assert response.status_code == 200
@@ -401,3 +441,17 @@ def test_elastic_pd_master_health_does_not_check_individual_pd_nodes(monkeypatch
     assert response.status_code == 200
     assert response_body["message"] == "Ok"
     assert "pd_nodes_healthy" not in response_body
+
+
+@pytest.mark.parametrize("run_mode", ["pd_master", "prefill", "decode"])
+@pytest.mark.parametrize("feature", ["enable_rl", "enable_return_routed_experts", "enable_prompt_logprobs"])
+def test_pd_rejects_final_metadata_features_before_startup(monkeypatch, run_mode, feature):
+    from lightllm.server import api_start
+
+    def unexpected_startup(*args, **kwargs):
+        pytest.fail("Unsupported PD features must be rejected before process setup")
+
+    monkeypatch.setattr(api_start.mp, "set_start_method", unexpected_startup)
+    start = api_start.pd_master_start if run_mode == "pd_master" else api_start._launch_subprocesses
+    with pytest.raises(ValueError, match="PD mode does not support"):
+        start(StartArgs(run_mode=run_mode, **{feature: True}))

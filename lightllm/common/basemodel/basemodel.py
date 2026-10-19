@@ -612,9 +612,10 @@ class TpPartBaseModel:
 
         model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
         infer_state = self._create_inferstate(model_input)
-        # attention backend 会根据该标记准备 CUDA Graph capture 专用状态，
+        # attention backend 会根据执行方式准备 capture、replay 或 eager 状态，
         # 因此必须在 init_att_state 之前完成赋值。
-        infer_state.is_cuda_graph = need_capture
+        infer_state.is_cuda_graph_capture = need_capture
+        infer_state.is_cuda_graph_replay = use_cuda_graph and not need_capture
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
 
@@ -717,7 +718,7 @@ class TpPartBaseModel:
         del post_output
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
-        if infer_state.is_cuda_graph:
+        if infer_state.is_cuda_graph_capture:
             model_output.to_no_ref_tensor()
 
         return model_output
@@ -826,12 +827,14 @@ class TpPartBaseModel:
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            infer_state0.is_cuda_graph = need_capture
+            infer_state0.is_cuda_graph_capture = need_capture
+            infer_state0.is_cuda_graph_replay = not need_capture
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
-            infer_state1.is_cuda_graph = need_capture
+            infer_state1.is_cuda_graph_capture = need_capture
+            infer_state1.is_cuda_graph_replay = not need_capture
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -963,7 +966,7 @@ class TpPartBaseModel:
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
 
-        if infer_state.is_cuda_graph:
+        if infer_state.is_cuda_graph_capture:
             model_output.to_no_ref_tensor()
             model_output1.to_no_ref_tensor()
 
