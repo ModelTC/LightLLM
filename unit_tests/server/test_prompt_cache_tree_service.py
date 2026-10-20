@@ -1,6 +1,8 @@
 """Prompt cache tree local and RPyC component behavior."""
 
 import asyncio
+import os
+import signal
 import socket
 import threading
 import uuid
@@ -79,6 +81,39 @@ def test_remote_client_uses_symmetric_sampled_operations(monkeypatch):
     asyncio.run(run())
     tree._prefix_match_sampled.assert_called_once_with(_key(prompt), len(prompt), SAMPLE_STRIDE)
     tree._insert_sampled.assert_called_once_with(_key(prompt), "prefill", SAMPLE_STRIDE)
+
+
+def test_cancelled_tree_operation_waits_for_the_client_lock_and_still_executes(monkeypatch):
+    monkeypatch.setattr(prompt_cache_tree_client, "unix_connect", Mock())
+    tree = _remote_tree("test-prompt-cache-cancellation")
+    tree._insert_sampled = Mock()
+
+    async def run():
+        await tree.async_lock.acquire()
+        task = asyncio.create_task(tree.insert_sampled("key", "prefill", SAMPLE_STRIDE))
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        tree.async_lock.release()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    tree._insert_sampled.assert_called_once_with("key", "prefill", SAMPLE_STRIDE)
+
+
+def test_tree_rpc_failure_terminates_the_worker(monkeypatch):
+    monkeypatch.setattr(prompt_cache_tree_client, "unix_connect", Mock())
+    terminate = Mock()
+    monkeypatch.setattr(prompt_cache_tree_client.os, "kill", terminate)
+    tree = _remote_tree("test-prompt-cache-failure")
+    tree._insert_sampled = Mock(side_effect=ConnectionError("connection lost"))
+
+    with pytest.raises(ConnectionError, match="connection lost"):
+        asyncio.run(tree.insert_sampled("key", "prefill", SAMPLE_STRIDE))
+
+    terminate.assert_called_once_with(os.getpid(), signal.SIGTERM)
 
 
 def test_tree_state_does_not_create_node_statistics():

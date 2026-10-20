@@ -1,17 +1,21 @@
 """Worker-side access to the local or shared prompt cache tree."""
 
 import asyncio
+import os
+import signal
 import threading
 
 from rpyc.utils.classic import obtain
 from rpyc.utils.factory import unix_connect
 
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.log_utils import init_logger
 from lightllm.utils.net_utils import get_pd_master_unix_socket_address
 from ..async_utils import await_cancellation_safe
 from .prompt_cache_tree import PromptCacheMatchResult, PromptCacheTree
 
 RPC_TIMEOUT_SECONDS = 5
+logger = init_logger(__name__)
 
 
 class LocalPromptCacheTreeClient:
@@ -47,26 +51,36 @@ class RemotePromptCacheTreeClient:
         )
 
     async def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
-        async with self.async_lock:
-            return await await_cancellation_safe(
-                asyncio.to_thread(
-                    self._prefix_match_sampled,
-                    key,
-                    input_char_count,
-                    sample_stride,
-                )
-            )
+        return await self._run_rpc(
+            self._prefix_match_sampled,
+            key,
+            input_char_count,
+            sample_stride,
+        )
 
     async def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
-        async with self.async_lock:
-            await await_cancellation_safe(
-                asyncio.to_thread(
-                    self._insert_sampled,
-                    key,
-                    prefill_node,
-                    sample_stride,
-                )
-            )
+        await self._run_rpc(
+            self._insert_sampled,
+            key,
+            prefill_node,
+            sample_stride,
+        )
+
+    async def _run_rpc(self, operation, *args):
+        async def run_serialized():
+            async with self.async_lock:
+                return await asyncio.to_thread(operation, *args)
+
+        try:
+            # 树查询和写入共用一个连接；等待锁和 RPC 执行期间均延后传播取消。
+            return await await_cancellation_safe(run_serialized())
+        except asyncio.CancelledError:
+            raise
+        except BaseException:
+            # Prompt Cache 是多 worker 共享选点状态，连接异常后不能退化为各进程私有状态。
+            logger.exception("Shared prompt cache tree RPC failed; terminating worker")
+            os.kill(os.getpid(), signal.SIGTERM)
+            raise
 
     def _prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
         with self.lock:

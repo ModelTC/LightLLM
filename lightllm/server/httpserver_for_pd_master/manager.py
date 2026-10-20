@@ -420,12 +420,13 @@ class HttpServerManagerForPDMaster:
                     assert sub_req_id == block_group_request_id
 
                     # 收到当前分段的任意输出，说明该请求已经完成 P 节点的 prefill 派发阶段。
-                    # 立即扣减在途计数，通过置空确保每段只释放一次。
+                    # 先置空再扣减，确保远程减法完成后传播取消时，finally 不会重复释放。
                     if pending_prefill_load_chars is not None:
-                        await self.pd_node_stats.sub_dispatched_info(
-                            p_node=p_node, chars=pending_prefill_load_chars, req_num=1
-                        )
+                        dispatched_prompt_chars = pending_prefill_load_chars
                         pending_prefill_load_chars = None
+                        await self.pd_node_stats.sub_dispatched_info(
+                            p_node=p_node, chars=dispatched_prompt_chars, req_num=1
+                        )
 
                     if raw_finish_status.is_finished_pd_decode_capacity():
                         # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
@@ -471,7 +472,9 @@ class HttpServerManagerForPDMaster:
         finally:
             self.active_req_ids.discard(origin_request_id)
             if p_node is not None and pending_prefill_load_chars is not None:
-                await self.pd_node_stats.sub_dispatched_info(p_node=p_node, chars=pending_prefill_load_chars, req_num=1)
+                dispatched_prompt_chars = pending_prefill_load_chars
+                pending_prefill_load_chars = None
+                await self.pd_node_stats.sub_dispatched_info(p_node=p_node, chars=dispatched_prompt_chars, req_num=1)
             await self.remove_req(block_group_request_id)
         return
 

@@ -2,6 +2,8 @@
 
 import asyncio
 import errno
+import os
+import signal
 import socket
 import threading
 import uuid
@@ -166,6 +168,62 @@ def test_cancelled_update_finishes_before_following_update(monkeypatch):
     asyncio.run(run())
     assert operations == ["add_dispatched_info", "sub_dispatched_info"]
     assert _query(state, node.connection_key)[node.connection_key] == (0, 0)
+
+
+def test_cancelled_update_waits_for_the_client_lock_and_still_executes(monkeypatch):
+    monkeypatch.setattr(pd_node_stats_client, "unix_connect", Mock())
+    state = PDNodeStatsState()
+    client = _remote_client()
+    client._add_dispatched_info = state.add_dispatched_info
+    node = _node()
+
+    async def run():
+        await client.async_lock.acquire()
+        task = asyncio.create_task(client.add_dispatched_info(p_node=node, chars=10, req_num=1))
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        client.async_lock.release()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert _query(state, node.connection_key)[node.connection_key] == (10, 1)
+
+
+def test_rpc_failure_terminates_the_worker(monkeypatch):
+    monkeypatch.setattr(pd_node_stats_client, "unix_connect", Mock())
+    terminate = Mock()
+    monkeypatch.setattr(pd_node_stats_client.os, "kill", terminate)
+    client = _remote_client()
+    client._add_dispatched_info = Mock(side_effect=ConnectionError("connection lost"))
+
+    with pytest.raises(ConnectionError, match="connection lost"):
+        asyncio.run(client.add_dispatched_info(p_node=_node(), chars=10, req_num=1))
+
+    terminate.assert_called_once_with(os.getpid(), signal.SIGTERM)
+
+
+def test_rpc_failure_after_cancellation_still_terminates_the_worker(monkeypatch):
+    monkeypatch.setattr(pd_node_stats_client, "unix_connect", Mock())
+    terminate = Mock()
+    monkeypatch.setattr(pd_node_stats_client.os, "kill", terminate)
+    client = _remote_client()
+    client._add_dispatched_info = Mock(side_effect=ConnectionError("connection lost"))
+
+    async def run():
+        await client.async_lock.acquire()
+        task = asyncio.create_task(client.add_dispatched_info(p_node=_node(), chars=10, req_num=1))
+        await asyncio.sleep(0)
+        task.cancel()
+        await asyncio.sleep(0)
+        client.async_lock.release()
+        with pytest.raises(ConnectionError, match="connection lost"):
+            await task
+
+    asyncio.run(run())
+    terminate.assert_called_once_with(os.getpid(), signal.SIGTERM)
 
 
 @pytest.fixture

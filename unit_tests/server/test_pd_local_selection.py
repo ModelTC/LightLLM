@@ -777,3 +777,33 @@ def test_cancelled_request_clears_counters_before_removing_request(backend):
     assert _pending(state, prefill) == (0, 0)
     assert not manager.active_req_ids
     manager.remove_req.assert_awaited_once()
+
+
+def test_cancellation_after_counter_release_does_not_release_twice(backend):
+    manager, state = _generator_manager(backend)
+    prefill = manager.pd_manager.prefill_nodes[0]
+
+    async def run():
+        released = asyncio.Event()
+        original_sub_dispatched_info = manager.pd_node_stats.sub_dispatched_info
+
+        async def sub_dispatched_info(**kwargs):
+            await original_sub_dispatched_info(**kwargs)
+            released.set()
+            await asyncio.Event().wait()
+
+        manager.pd_node_stats.sub_dispatched_info = AsyncMock(side_effect=sub_dispatched_info)
+
+        async def generate_segment(_p_node, _d_node, _start_time, _prompt, params, _multimodal, _request):
+            yield params.group_request_id, "x", {"prompt_tokens": 1}, FinishStatus()
+
+        manager._wait_to_token_package = generate_segment
+        task = asyncio.create_task(_consume(manager, _params()))
+        await asyncio.wait_for(released.wait(), timeout=2)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert _pending(state, prefill) == (0, 0)
+    manager.pd_node_stats.sub_dispatched_info.assert_awaited_once()
