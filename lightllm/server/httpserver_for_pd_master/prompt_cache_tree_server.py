@@ -21,7 +21,6 @@ class PromptCacheTreeState(rpyc.Service):
             sample_stride=self.config.sample_stride,
             max_node_count=self.config.max_node_count,
             evict_node_batch=self.config.evict_node_batch,
-            recursion_limit=self.config.recursion_limit,
         )
 
     @rpyc.exposed

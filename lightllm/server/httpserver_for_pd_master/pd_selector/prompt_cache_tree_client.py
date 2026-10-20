@@ -22,7 +22,6 @@ class LocalPromptCacheTreeClient:
             sample_stride=config.sample_stride,
             max_node_count=config.max_node_count,
             evict_node_batch=config.evict_node_batch,
-            recursion_limit=config.recursion_limit,
         )
 
     async def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
