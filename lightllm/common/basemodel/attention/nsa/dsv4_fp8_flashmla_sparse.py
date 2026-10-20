@@ -67,10 +67,10 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         return padded_out[:, 0]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":
-        return _PrefillAttState(backend=self, infer_state=infer_state)
+        return _PrefillAttState(backend=self)
 
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "_DecodeAttState":
-        return _DecodeAttState(backend=self, infer_state=infer_state)
+        return _DecodeAttState(backend=self)
 
 
 @dataclasses.dataclass

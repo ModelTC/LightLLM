@@ -97,6 +97,7 @@ class StartArgs:
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
     detail_log: bool = field(default=False)
+    pd_detail_log: bool = field(default=False)
     router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
@@ -105,7 +106,10 @@ class StartArgs:
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
     disable_chunked_mm_input: bool = field(default=False)
-    short_prefill_token_threshold: Optional[int] = field(default=None)
+    # "auto" resolves to hrrn for Prefill nodes and default otherwise.
+    prefill_queue_strategy: str = field(
+        default="auto", metadata={"choices": ["auto", "default", "promote_shortest", "hrrn"]}
+    )
     diverse_mode: bool = field(default=False)
     target_vocab_topk_sampling: Optional[int] = field(
         default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}

@@ -16,7 +16,8 @@ from ..pd_io_struct import PD_Client_Obj, PDUpKVStatus, ObjType, PDDecodeNodeInf
 from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
-from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
+from ..httpserver.req_id_generator_client import ReqIDGenerator
+from ..httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import Request
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -50,6 +51,7 @@ class HttpServerManagerForPDMaster:
         self.id_gen = ReqIDGenerator()
 
         self.pd_manager = PDManager(args)
+        self.pd_node_stats = self.pd_manager.selector.pd_node_stats
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}
         # 活跃子请求的对外 ID 集合，跨 P/D 分段保持不变。
@@ -141,7 +143,7 @@ class HttpServerManagerForPDMaster:
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
-        return self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
+        return await self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
 
     async def _wait_for_pd_master_request_slot(self) -> None:
         """PD Master 请求准入的预留接口，当前不执行限流。"""
@@ -249,7 +251,7 @@ class HttpServerManagerForPDMaster:
         origin_request_id: int,
         input_token_num: int,
     ):
-        """节点繁忙时重新选择 P/D 节点，并在配置的探测周期内重试。"""
+        """处理节点繁忙错误；配置正数探测周期时重新选择 P/D 节点并重试。"""
         retry_start_time = time.monotonic()
         has_yielded_result = False
 
@@ -316,12 +318,20 @@ class HttpServerManagerForPDMaster:
         self.active_req_ids.add(origin_request_id)
 
         try:
-            p_node, d_node, selection_extra_info = await self.select_p_d_node(
-                prompt, origin_sampling_params, multimodal_params
-            )
-            if not p_node or not d_node:
-                logger.error(f"{origin_request_id}: No p_node or d_node found")
-                raise Exception(f"{origin_request_id}: No p_node or d_node found")
+            remaining_max_new_tokens = origin_sampling_params.max_new_tokens
+            # cache-aware 会在读取共享统计和写入预占之间发生多次 await。同一 worker
+            # 内若不串行化，突发请求可能全部依据同一份旧快照选中同一 P 节点。
+            # 该锁只约束本 worker 的首次选点和预占，不覆盖后续网络转发与推理。
+            async with self.pd_manager.selector.selection_lock:
+                p_node, d_node, selection_extra_info = await self.select_p_d_node(
+                    prompt, origin_sampling_params, multimodal_params
+                )
+                if not p_node or not d_node:
+                    logger.error(f"{origin_request_id}: No p_node or d_node found")
+                    raise Exception(f"{origin_request_id}: No p_node or d_node found")
+
+                pending_prefill_load_chars = len(prompt)
+                await self.pd_node_stats.add_dispatched_info(p_node=p_node, chars=pending_prefill_load_chars, req_num=1)
 
             cache_age_seconds = None
             if selection_extra_info.cache_last_insert_time is not None:
@@ -344,7 +354,6 @@ class HttpServerManagerForPDMaster:
 
             history_gen_token_strs = []
             origin_prompt_cache_len = None
-            remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
             # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
             # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的输入长度。
@@ -356,13 +365,15 @@ class HttpServerManagerForPDMaster:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.info(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
+                logger.debug(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
                 sampling_params.max_new_tokens = remaining_max_new_tokens
-                # 首段仅在输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍在
-                # 有效时间窗内时提升优先级，避免短请求或可能已被 P 节点淘汰的陈旧
-                # KV cache 插队。第二段及后续分段仍统一使用高优先级，避免因临时资源
-                # 紧张导致分段续跑失败。
-                sampling_params.pd_high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
+                # high_priority_request 只影响 HTTP 资源申请和 Router 等待队列：首段仅在
+                # 输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍有效时提升；
+                # 第二段及后续分段统一提升，避免因临时资源紧张导致分段续跑失败。
+                sampling_params.high_priority_request = segment_index > 0 or has_fresh_high_cache_hit
+                # infer_high_priority 是 PD 内部通信字段，不接受外部请求设置。
+                # 仅第二段及后续分段在推理进程中优先排队。
+                sampling_params.infer_high_priority = -1 if segment_index > 0 else 0
                 # 仅在 Master 开启限流时下发资源等待超时。续跑分段已经产生了部分结果，
                 # 使用独立配置的等待时间，提高请求最终完成的成功率。
                 if self.enable_pd_node_self_request_limit:
@@ -374,7 +385,11 @@ class HttpServerManagerForPDMaster:
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
                 block_prompt = prompt + "".join(history_gen_token_strs)
-                pending_prefill_load_chars = len(block_prompt)
+                if segment_index > 0:
+                    pending_prefill_load_chars = len(block_prompt)
+                    await self.pd_node_stats.add_dispatched_info(
+                        p_node=p_node, chars=pending_prefill_load_chars, req_num=1
+                    )
                 sampling_params.constraint_out_params.pd_previous_output_len = 0
                 if history_gen_token_strs and sampling_params.constraint_out_params.has_constraint():
                     block_token_num = await asyncio.to_thread(
@@ -392,8 +407,6 @@ class HttpServerManagerForPDMaster:
                     sampling_params.constraint_out_params.pd_previous_output_len = max(
                         0, block_token_num - input_token_num
                     )
-                p_node.dispatched_prompt_chars += pending_prefill_load_chars
-                p_node.dispatched_req_num += 1
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,
@@ -417,13 +430,13 @@ class HttpServerManagerForPDMaster:
                     assert sub_req_id == block_group_request_id
 
                     # 收到当前分段的任意输出，说明该请求已经完成 P 节点的 prefill 派发阶段。
-                    # 立即归还 selector 中记录的在途 prompt 字符数和请求数，并通过置空确保每段只更新一次。
+                    # 先置空再扣减，确保远程减法完成后传播取消时，finally 不会重复释放。
                     if pending_prefill_load_chars is not None:
-                        p_node.dispatched_prompt_chars = max(
-                            0, p_node.dispatched_prompt_chars - pending_prefill_load_chars
-                        )
-                        p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
+                        dispatched_prompt_chars = pending_prefill_load_chars
                         pending_prefill_load_chars = None
+                        await self.pd_node_stats.sub_dispatched_info(
+                            p_node=p_node, chars=dispatched_prompt_chars, req_num=1
+                        )
 
                     if raw_finish_status.is_finished_pd_decode_capacity():
                         # 容量不足状态是 PD 内部分段边界：吞掉模拟结束 token，继续生成剩余 token。
@@ -444,7 +457,7 @@ class HttpServerManagerForPDMaster:
                             # 尚未进入推理、已失败或 Decode 完整命中而跳过 Prefill 的请求
                             # 被后续请求误判为可复用的 P 缓存。首个返回 token 可能来自
                             # Decode，不能仅根据 node_mode 判断 P 是否完成推理。
-                            self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
+                            await self.pd_manager.selector.insert_prompt_cache(prompt, p_node)
                     metadata["prompt_cache_len"] = origin_prompt_cache_len or 0
                     yield origin_request_id, request_output, metadata, raw_finish_status
 
@@ -469,8 +482,9 @@ class HttpServerManagerForPDMaster:
         finally:
             self.active_req_ids.discard(origin_request_id)
             if p_node is not None and pending_prefill_load_chars is not None:
-                p_node.dispatched_prompt_chars = max(0, p_node.dispatched_prompt_chars - pending_prefill_load_chars)
-                p_node.dispatched_req_num = max(0, p_node.dispatched_req_num - 1)
+                dispatched_prompt_chars = pending_prefill_load_chars
+                pending_prefill_load_chars = None
+                await self.pd_node_stats.sub_dispatched_info(p_node=p_node, chars=dispatched_prompt_chars, req_num=1)
             await self.remove_req(block_group_request_id)
         return
 
@@ -585,7 +599,7 @@ class HttpServerManagerForPDMaster:
         req_status.raise_if_error()
 
         prompt_ids = prefill_prompt_ids_event.prompt_ids
-        logger.info(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
+        logger.debug(f"group_request_id: {group_request_id} get prefill prompt ids len {len(prompt_ids)}")
 
         sampling_params.max_new_tokens = old_max_new_tokens
         await d_node.websocket.send_bytes(
@@ -1090,7 +1104,7 @@ class PDManager:
             logger.warning(f"udpate node load info failed, load_info: {load_info} error: {str(e)}")
         return
 
-    def select_p_d_node(
+    async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
-        return self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)
+        return await self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)

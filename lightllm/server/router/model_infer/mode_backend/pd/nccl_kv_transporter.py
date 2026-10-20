@@ -58,6 +58,7 @@ class NcclKVTransporter:
         self.tp_idx = tp_idx
         self.kv_move_buffer = kv_move_buffer
         args = get_env_start_args()
+        self.args = args
         assert args.run_mode in ["prefill", "decode"], args.run_mode
         self.is_prefill_node = args.run_mode == "prefill"
         self.capture_telemetry = False
@@ -315,11 +316,11 @@ class _NcclPeer:
         event = torch.cuda.Event()
         event.record(stream)
 
-        logger.info(
-            f"NCCL send page posted request_id={trans_task.request_id} "
-            f"src_page={trans_task.src_page_index} dst_agent={self.peer_name} "
-            f"transfer_nbytes={trans_task.transfer_nbytes}"
-        )
+        if self.transporter.args.pd_detail_log:
+            logger.debug(
+                f"NCCL send page posted request_id={trans_task.request_id} "
+                f"src_page={trans_task.src_page_index} dst_agent={self.peer_name}"
+            )
         return _NcclXferHandle(peer_name=self.peer_name, event=event)
 
     def start_recv(self, trans_task: PDChunckedTransTask):
@@ -373,9 +374,10 @@ class _NcclPeer:
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
-            logger.info(
-                f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"
-            )
+            if self.transporter.args.pd_detail_log:
+                logger.debug(
+                    f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"
+                )
         except BaseException as e:
             trans_task.error_info = str(e)
             logger.exception(str(e))

@@ -17,7 +17,7 @@ from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedTreeNode,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
@@ -37,6 +37,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class InferenceContext:
+    backend: Optional["ModeBackend"] = None
     req_manager: ReqManager = None  # gpu 请求管理
     radix_cache: Union[HybridAttPagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理

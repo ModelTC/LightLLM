@@ -13,6 +13,8 @@ from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import PDManager
 from lightllm.server.pd_io_struct import ObjType, PD_Master_Obj
 
+pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
+
 
 def _registration(args, dp_index=None, mode="prefill"):
     info = {
@@ -39,8 +41,8 @@ def test_split_connections_register_select_update_and_reconnect_independently():
 
     prompt = "x" * 1025
     cached_node = manager.prefill_nodes[3]
-    manager.selector.insert_prompt_cache(prompt, cached_node)
-    selected, _, extra = manager.selector.select_p_d_node(prompt, None, None)
+    asyncio.run(manager.selector.insert_prompt_cache(prompt, cached_node))
+    selected, _, extra = asyncio.run(manager.selector.select_p_d_node(prompt, None, None))
     assert selected is cached_node
     assert extra.estimated_cache_hit_rate == 1.0
     for rank in range(4):
@@ -221,13 +223,16 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
 
 
 @pytest.mark.parametrize("dp_index", [None, 0, 3])
-def test_reported_load_key_matches_registered_connection_without_rewriting(monkeypatch, dp_index):
+@pytest.mark.parametrize("with_source", [False, True], ids=["legacy", "connection-source"])
+def test_reported_load_key_matches_registered_connection_without_rewriting(monkeypatch, dp_index, with_source):
     from fastapi import WebSocketDisconnect
     from lightllm.server import api_http, api_http_pd
 
-    args = StartArgs(dp=8, nnodes=2)
+    args = StartArgs(dp=8, nnodes=2, pd_node_id=1)
     manager = PDManager(args)
     info = _registration(args, dp_index)
+    if with_source:
+        info["connection_id"] = f"load-source-{dp_index}"
     monkeypatch.setattr(
         api_http,
         "g_objs",

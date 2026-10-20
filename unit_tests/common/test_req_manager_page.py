@@ -185,8 +185,7 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
     backend.batch_max_tokens = batch_max_tokens
     backend.is_master_in_dp = True
     backend._timer_merge_radix_tree = lambda: None
-    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
-    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
     context.get_can_alloc_token_num = lambda: can_alloc_token_num
     context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
     context.filter_reqs = lambda finished_reqs: None
@@ -225,10 +224,11 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
 
     backend._alloc_req_kv_mem = _record_alloc
 
-    prefill_reqs, decode_reqs = backend._get_classed_reqs(req_ids=[0, 1])
+    prefill_reqs, decode_reqs, prefill_tokens = backend._get_classed_reqs(req_ids=[0, 1])
 
     assert prefill_reqs == [reqs[0]]
     assert decode_reqs == []
+    assert prefill_tokens == 3
     assert context.req_manager.mem_manager.alloc_sizes == expected_alloc_sizes
     assert reqs[0].hold_kv_len == 8
     assert not reqs[0].wait_pause
@@ -246,8 +246,7 @@ def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
     backend.batch_max_tokens = 8
     backend.is_master_in_dp = True
     backend._timer_merge_radix_tree = lambda: None
-    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
-    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
     context.get_can_alloc_token_num = lambda: 12
     context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
     context.filter_reqs = lambda finished_reqs: None
@@ -282,10 +281,11 @@ def test_decode_scheduler_uses_non_blocking_request_table_copy(monkeypatch):
 
     backend._alloc_req_kv_mem = _record_alloc
 
-    prefill_reqs, decode_reqs = backend._get_classed_reqs(req_ids=[0])
+    prefill_reqs, decode_reqs, prefill_tokens = backend._get_classed_reqs(req_ids=[0])
 
     assert prefill_reqs == []
     assert decode_reqs == [req]
+    assert prefill_tokens == 0
     assert req.hold_kv_len == 16
     assert context.req_manager.mem_manager.alloc_sizes == [12]
     assert copy_modes == [True]
@@ -308,8 +308,7 @@ def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_step
     backend.batch_max_tokens = 8
     backend.is_master_in_dp = True
     backend._timer_merge_radix_tree = lambda: None
-    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
-    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
     context.get_can_alloc_token_num = lambda: 32
     context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
     context.filter_reqs = lambda finished_reqs: None
@@ -332,7 +331,7 @@ def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_step
     backend._filter_not_ready_reqs = lambda req_ids: [req]
 
     for _ in range(expected_alloc_token_num):
-        _, decode_reqs = backend._get_classed_reqs(req_ids=[0])
+        _, decode_reqs, _ = backend._get_classed_reqs(req_ids=[0])
         assert decode_reqs == [req]
         req.cur_kv_len += 1
 

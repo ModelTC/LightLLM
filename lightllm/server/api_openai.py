@@ -421,7 +421,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         reasoning_parser_dict: Dict[int, ReasoningParser] = {}
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
-            from .req_id_generator import convert_sub_id_to_group_id
+            from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             count_output_tokens_dict[sub_req_id] += 1
@@ -546,7 +546,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
         has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
-        from .req_id_generator import convert_sub_id_to_group_id
+        from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
         prompt_tokens = 0
         completion_tokens = 0
@@ -994,7 +994,7 @@ async def _handle_streaming_completion(
     )
 
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        from .req_id_generator import convert_sub_id_to_group_id
+        from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
         prompt_tokens = 0
         completion_tokens = 0
