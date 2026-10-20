@@ -4,7 +4,7 @@ import weakref
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING, Tuple, Union, Dict
+from typing import Optional, TYPE_CHECKING, Tuple, Dict
 
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
@@ -75,16 +75,6 @@ class BaseAttBackend:
         is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash", "dflash2")
         return not is_parallel_block_draft
 
-    def _find_layer_index(
-        self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]
-    ) -> int:
-        kv_buffer = att_state.infer_state.mem_manager.kv_buffer
-        layer_count = len(kv_buffer)
-        find_dict = {kv_buffer[i].data_ptr(): i for i in range(layer_count)}
-        key = min(k.data_ptr(), v.data_ptr())
-        assert key in find_dict
-        return find_dict[key]
-
 
 @dataclass
 class AttControl:
@@ -113,6 +103,8 @@ class AttControl:
     linear_att_prefill_dict: Dict = None
     linear_att_decode: bool = False
     linear_att_decode_dict: Dict = None
+    # 静态 FP8 标定按此逻辑层号查询 State 的物理行；其他后端可不使用。
+    logical_layer_id: Optional[int] = None
 
 
 @dataclass

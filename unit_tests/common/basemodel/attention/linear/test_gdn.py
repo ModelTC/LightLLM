@@ -6,16 +6,15 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
-from lightllm.common.recurrent_state import RecurrentState
-from lightllm.common.req_manager import ReqManager, ReqManagerForMamba
-from lightllm.server.router.model_infer.infer_batch import InferenceContext
-from lightllm.common.state_cache_manager import LinearAttCacheConfig
+from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator
 
@@ -65,33 +64,6 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     assert torch.equal(ssm_states, final_state.to(cache_dtype))
 
 
-def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None):
-    model = SimpleNamespace(
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
-    )
-    # Only CPU metadata is needed for these layout tests.
-    req_manager = object.__new__(ReqManagerForMamba)
-    req_manager.recurrent_state = object.__new__(RecurrentState)
-    req_manager.HOLD_REQUEST_ID = req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1
-    req_manager.recurrent_state.accepted_index = req_to_mtp_state_index
-    req_manager.recurrent_state.updates = None
-    infer_state = InferStateInfo()
-    infer_state.batch_size = b_req_idx.shape[0]
-    infer_state.b_req_idx = b_req_idx
-    infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
-    infer_state.req_manager = req_manager
-    state = gdn.LinearAttDecodeAttState(
-        backend=SimpleNamespace(
-            model=model,
-            req_manager=req_manager,
-            uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-    return state, infer_state
-
-
 def test_decode_state_initializes_normal_layout():
     b_req_idx = torch.tensor([2, 4], dtype=torch.int32)
     state, infer_state = _create_decode_state(draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx)
@@ -104,7 +76,8 @@ def test_decode_state_initializes_normal_layout():
     assert state.b_num_accepted_tokens is None
 
 
-def test_decode_state_initializes_fixed_mtp_layout():
+@pytest.mark.parametrize("role", ["main", "draft0"])
+def test_decode_state_initializes_fixed_mtp_layout(role: str):
     b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     state, infer_state = _create_decode_state(
@@ -112,6 +85,7 @@ def test_decode_state_initializes_fixed_mtp_layout():
         dynamic_layout=False,
         b_req_idx=b_req_idx,
         req_to_mtp_state_index=req_to_mtp_state_index,
+        role=role,
     )
 
     state.init_state()
@@ -125,7 +99,8 @@ def test_decode_state_initializes_fixed_mtp_layout():
     )
 
 
-def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
+@pytest.mark.parametrize("role", ["main", "draft0"])
+def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
     b_req_idx = torch.tensor([2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     expected_cu_q_seq_len = torch.tensor([0, 2, 5, 5, 5, 5], dtype=torch.int32)
@@ -143,6 +118,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
         dynamic_layout=True,
         b_req_idx=b_req_idx,
         req_to_mtp_state_index=req_to_mtp_state_index,
+        role=role,
     )
 
     state.init_state()
@@ -164,55 +140,10 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
     assert build_calls[0]["hold_req_id"] == 5
 
 
-def test_decode_state_passes_actual_verify_lengths_to_ssm_cache(monkeypatch):
-    state, infer_state = _create_decode_state(
-        draft_step=3,
-        dynamic_layout=True,
-        b_req_idx=torch.tensor([0, 0, 1, 1, 1]),
-        req_to_mtp_state_index=torch.zeros(3, dtype=torch.int32),
-    )
-    cu = torch.tensor([0, 2, 5], dtype=torch.int32)
-    reqs = torch.tensor([0, 1], dtype=torch.int32)
-    positions = torch.tensor([5, 6], dtype=torch.int32)
-    monkeypatch.setattr(
-        gdn, "build_dynamic_mtp_linear_att_state_params", lambda **kwargs: (cu, reqs, torch.ones(2, dtype=torch.int32))
-    )
-
-    def prepare_decode(actual_reqs, actual_cu):
-        assert actual_reqs is reqs and actual_cu is cu
-        return positions
-
-    state.backend.req_manager.recurrent_state.updates = SimpleNamespace(
-        prepare_decode=prepare_decode,
-        accept_updates=lambda *args: pytest.fail("speculative updates must wait for acceptance"),
-    )
-    state.init_state()
-    assert not hasattr(state, "b_ssm_history_positions")
-    assert state.b_ssm_buffer_idx is reqs
-
-
 def test_linear_backend_is_abstract_and_triton_supplies_chunk_kernel():
     assert inspect.isabstract(gdn.LinearAttBackend)
     backend = object.__new__(TritonLinearAttBackend)
     assert backend.get_prefill_kernel() is fla_ops.chunk_gated_delta_rule
-
-
-@pytest.mark.parametrize("manager_class", [ReqManager, ReqManagerForMamba])
-def test_linear_backend_checks_req_manager_at_construction(monkeypatch, manager_class):
-    manager = object.__new__(manager_class)
-    model = SimpleNamespace(req_manager=manager, config={}, tp_world_size_=1)
-    backend = object.__new__(TritonLinearAttBackend)
-    monkeypatch.setattr(backend, "_init_linear_layer_metadata", lambda **kwargs: None)
-
-    if manager_class is ReqManager:
-        with pytest.raises(TypeError, match="LinearAttBackend requires ReqManagerForMamba, got ReqManager$"):
-            backend.__init__(model)
-    else:
-        backend.__init__(model)
-        assert backend.req_manager is manager
-        infer_state = InferStateInfo()
-        assert backend.create_att_prefill_state(infer_state).backend.req_manager is manager
-        assert backend.create_att_decode_state(infer_state).backend.req_manager is manager
 
 
 @pytest.fixture
@@ -248,8 +179,9 @@ def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear
 
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     linear_config = SimpleNamespace(
-        num_linear_k_heads=2,
-        num_linear_v_heads=4,
+        tp_world_size=2,
+        global_linear_k_heads=4,
+        global_linear_v_heads=8,
         head_linear_k_dim=8,
         head_linear_v_dim=16,
         conv_state_dtype=torch.bfloat16,
@@ -257,7 +189,7 @@ def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     )
     load_calls = []
     monkeypatch.setattr(
-        LinearAttCacheConfig,
+        Qwen3NextResourceConfig,
         "load_from_args",
         staticmethod(lambda: load_calls.append(True) or linear_config),
     )
@@ -365,11 +297,10 @@ def test_missing_linear_decode_backend_arg_defaults_to_triton(auto_linear_backen
 
 def test_gdn_decode_backend_uses_priority_list(monkeypatch, auto_linear_backend_args):
     validate_calls = []
-    optimized_backend = type("OptimizedLinearDecodeAttBackend", (), {})
     monkeypatch.setattr(
         linear_create_utils,
         "linear_decode_att_backend_classes",
-        {"optimized": optimized_backend, "triton": TritonLinearAttBackend},
+        {"optimized": "linear.flashqla:FlashQlaLinearAttBackend", "triton": "linear.triton:TritonLinearAttBackend"},
     )
     monkeypatch.setattr(
         linear_create_utils,
@@ -381,7 +312,7 @@ def test_gdn_decode_backend_uses_priority_list(monkeypatch, auto_linear_backend_
         index=1, priority_list=("optimized", "triton")
     )
 
-    assert backend_class is optimized_backend
+    assert backend_class is FlashQlaLinearAttBackend
     assert validate_calls == ["optimized"]
 
 
@@ -395,12 +326,10 @@ def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypat
 
 def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_backend_args):
     validate_calls = []
-    flashqla2_backend = type("FlashQla2LinearAttBackend", (), {})
-    flashqla3_backend = type("FlashQla3LinearAttBackend", (), {})
     monkeypatch.setattr(
         linear_create_utils,
         "linear_prefill_att_backend_classes",
-        {"flashqla2": flashqla2_backend, "flashqla3": flashqla3_backend},
+        {"flashqla2": "linear.triton:TritonLinearAttBackend", "flashqla3": "linear.flashqla:FlashQlaLinearAttBackend"},
     )
     monkeypatch.setattr(
         linear_create_utils,
@@ -412,27 +341,49 @@ def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_
         index=1, priority_list=("flashqla2", "flashqla3")
     )
 
-    assert backend_class is flashqla3_backend
+    assert backend_class is FlashQlaLinearAttBackend
     assert validate_calls == ["flashqla2", "flashqla3"]
 
 
-@pytest.mark.parametrize("input_len", [4096, 8192])
-def test_hybrid_checkpoint_is_noop_when_prompt_cache_disabled(input_len):
-    context = InferenceContext()
-    context.is_hybrid_att_model = True
-    context.radix_cache = None
-    context.args = SimpleNamespace(
-        linear_att_hash_page_size=1024, linear_att_page_block_num=8, disable_chunked_prefill=False
+def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None, role="main"):
+    model = SimpleNamespace(
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
     )
-    req = SimpleNamespace(
-        req_idx=0,
-        get_chuncked_input_token_len=lambda: input_len,
-        hybrid_cache_len=input_len,
-        hybrid_len_to_big_page_id={},
-        tail_small_page_buffer_id=None,
+    infer_state = InferStateInfo()
+    infer_state.batch_size = b_req_idx.shape[0]
+    infer_state.b_req_idx = b_req_idx
+    infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
+    infer_state.req_manager = SimpleNamespace(
+        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
     )
-
-    context.save_hybrid_state_to_cache(torch.tensor([0]), [req])
-
-    assert req.hybrid_len_to_big_page_id == {}
-    assert req.tail_small_page_buffer_id is None
+    infer_state.att_state_role = role
+    if req_to_mtp_state_index is not None:
+        request_capacity = req_to_mtp_state_index.numel()
+        resources = AttentionStateManager(request_capacity=request_capacity)
+        config = ConvSSMStateConfig(
+            logical_layer_ids=(3,),
+            global_k_heads=1,
+            global_v_heads=1,
+            key_dim=2,
+            value_dim=2,
+            conv_width=2,
+            conv_dtype=torch.float32,
+            ssm_dtype=torch.float32,
+        )
+        for model_role in ("main", "draft0"):
+            linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
+            linear.mtp_state_index = (
+                req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
+            )
+            resources.register_state(model_role, linear)
+        resources.finish_state_registration()
+        infer_state.att_state_manager = resources
+    state = gdn.LinearAttDecodeAttState(
+        backend=SimpleNamespace(
+            model=model,
+            uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
+        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
+    )
+    return state, infer_state

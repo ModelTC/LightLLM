@@ -13,6 +13,7 @@ from rpyc import SocketStream
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
@@ -148,6 +149,7 @@ class MetricClient(threading.Thread):
 
 
 def start_metric_manager(args: StartArgs, pipe_writer):
+    start_parent_check_thread()
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::metric_manager")

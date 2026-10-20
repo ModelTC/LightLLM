@@ -1,6 +1,10 @@
 from lightllm.utils.shm_utils import ServiceSharedMemory, get_service_shm_name
 
 
+# Virtual image/audio IDs occupy this reserved range rather than the text vocabulary.
+MULTIMODAL_TOKEN_ID_START = 100000000
+
+
 def create_shm(name, data):
     name = get_service_shm_name(name)
     try:

@@ -1,4 +1,5 @@
 import os
+import multiprocessing as mp
 import time
 import threading
 import psutil
@@ -42,7 +43,9 @@ def kill_child_processes(parent_pid):
 
 
 def check_parent_alive():
-    parent_pid = os.getppid()
+    # A late-starting worker may already have been reparented after its parent exited.
+    parent = mp.parent_process()
+    parent_pid = parent.pid if parent is not None else os.getppid()
     while True:
         if not is_process_active(parent_pid):
             logger.warning(f"parent is dead, kill self {os.getpid()}")

@@ -203,6 +203,8 @@ try:
             pack_gqa=None,
             sm_margin=0,
             sinks=None,
+            sparse_mask_fine=None,
+            only_qv=False,
         )
         return o
 
@@ -220,8 +222,8 @@ def flash_attention_fwd(q, k, v, o, cu_seqlens, max_seqlen):
     if _flash_attn_v3_available and (is_hopper() or is_4090()):
         try:
             flash_attention_v3_fwd(q, k, v, o, cu_seqlens, max_seqlen)
+            return
         except Exception as e:
             print(f"Failed to use sgl_kernel: {e}")
             _flash_attn_v3_available = False
-    else:
-        _flash_attention_triton_fwd(q, k, v, o, cu_seqlens, max_seqlen)
+    _flash_attention_triton_fwd(q, k, v, o, cu_seqlens, max_seqlen)

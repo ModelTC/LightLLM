@@ -2,8 +2,9 @@
 import torch
 import numpy as np
 import collections
-from typing import Tuple, Dict, Set, List, Optional, Union
+from typing import Tuple, Dict, Set, List, Optional, Union, Sequence
 from sortedcontainers import SortedSet
+from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 from .shared_arr import SharedArray
 
 
@@ -109,19 +110,16 @@ def match(t1: torch.Tensor, t2: torch.Tensor) -> int:
 
 
 class RadixCache:
-    def __init__(self, total_token_num, rank_in_node, mem_manager=None, page_size: int = 1):
-        from lightllm.common.kv_cache_mem_manager import MemoryManager
-
+    def __init__(self, total_token_num, rank_in_node, att_state_manager=None, page_size: int = 1):
         self.total_token_num = total_token_num
-        self.mem_manager: MemoryManager = mem_manager
+        self.att_state_manager = att_state_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
         if page_size < 1:
             raise ValueError(f"page_size must be >= 1, got {page_size}")
-        if mem_manager is not None and page_size != mem_manager.page_size:
-            raise ValueError(
-                f"RadixCache page_size {page_size} must match mem_manager page_size {mem_manager.page_size}"
-            )
+        allocator = None if att_state_manager is None else att_state_manager.full_att_allocator
+        if allocator is not None and page_size != allocator.page_size:
+            raise ValueError(f"RadixCache page_size {page_size} must match allocator page_size {allocator.page_size}")
         self.page_size = page_size
 
         self.root_node = TreeNode(page_size=page_size)
@@ -247,13 +245,16 @@ class RadixCache:
                 self.evict_tree_set.add(new_node)
             return 0, new_node
 
-    def match_prefix(self, key, update_refs=False):
+    def match_prefix(self, key, update_refs=False, mm_input_spans: Sequence[Tuple[int, int]] = ()):
         aligned_len = len(key) // self.page_size * self.page_size
         if aligned_len == 0:
             return None, 0, None
         key = key[:aligned_len]
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
+        tree_node, ans_value_list = self._trim_unusable_match_tail(
+            tree_node, ans_value_list, mm_input_spans=mm_input_spans, update_refs=update_refs
+        )
         if tree_node != self.root_node:
             if len(ans_value_list) != 0:
                 value = torch.concat(ans_value_list)
@@ -264,6 +265,32 @@ class RadixCache:
             if update_refs:
                 self.dec_node_ref_counter(self.root_node)
             return None, 0, None
+
+    def _trim_unusable_match_tail(
+        self,
+        tree_node: TreeNode,
+        ans_value_list: list,
+        mm_input_spans: Sequence[Tuple[int, int]],
+        update_refs: bool = False,
+    ):
+        """沿父节点回退到图片外，只撤销尾部引用，保留匹配时的访问时间。"""
+        while tree_node is not self.root_node:
+            node_end = tree_node.node_prefix_total_len
+            if clamp_mm_cache_len(node_end, mm_input_spans) == node_end:
+                break
+
+            if update_refs:
+                if tree_node.is_leaf():
+                    self.evict_tree_set.discard(tree_node)
+                tree_node.ref_counter -= 1
+                if tree_node.ref_counter == 0:
+                    self.refed_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
+                if tree_node.is_leaf():
+                    self.evict_tree_set.add(tree_node)
+
+            ans_value_list.pop()
+            tree_node = tree_node.parent
+        return tree_node, ans_value_list
 
     def _match_prefix_helper(
         self, node: TreeNode, key: torch.Tensor, ans_value_list: list, update_refs=False
@@ -516,9 +543,9 @@ class RadixCache:
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
-        assert self.mem_manager is not None
-        if need_token_num > self.mem_manager.allocator.can_use_mem_size:
-            need_evict_token_num = need_token_num - self.mem_manager.allocator.can_use_mem_size
+        allocator = self.att_state_manager.full_att_allocator
+        if need_token_num > allocator.can_use_mem_size:
+            need_evict_token_num = need_token_num - allocator.can_use_mem_size
             release_mems = []
 
             def release_mem(mem_index):
@@ -527,7 +554,7 @@ class RadixCache:
 
             self.evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
-            self.mem_manager.free(mem_index)
+            allocator.free(mem_index)
         return
 
 

@@ -1,3 +1,4 @@
+import queue
 import threading
 import psutil
 import torch.multiprocessing as mp
@@ -38,7 +39,7 @@ class KVTransProcess:
                 up_status_in_queue,
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"
-            assert self.task_out_queue.get(timeout=60) == "get_mem_managers_ok"
+            assert self.task_out_queue.get(timeout=60) == "get_resources_ok"
 
             return True
 
@@ -57,6 +58,24 @@ class KVTransProcess:
                 return True
         except:
             return False
+
+    def wait_until_ready(self):
+        for _ in range(600):
+            try:
+                status = self.task_out_queue.get(timeout=1)
+            except queue.Empty:
+                if not self.process.is_alive():
+                    logger.error(f"KV trans process for device {self.device_id} exited during initialization")
+                    return False
+                continue
+
+            if status != "module_ready":
+                logger.error(f"KV trans module for device {self.device_id} failed to initialize: {status}")
+                return False
+            return True
+
+        logger.error(f"KV trans module for device {self.device_id} initialization timed out")
+        return False
 
     def killself(self):
         self.process.kill()

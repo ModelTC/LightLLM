@@ -74,7 +74,7 @@ class FusedMoeWeight(BaseWeightTpl):
     def _init_config(self, network_config: Dict[str, Any]):
         self.n_group = network_config.get("n_group", 0)
         self.use_grouped_topk = self.n_group > 0
-        self.norm_topk_prob = network_config["norm_topk_prob"]
+        self.norm_topk_prob = network_config.get("norm_topk_prob", False)
         self.topk_group = network_config.get("topk_group", 0)
         self.num_experts_per_tok = network_config["num_experts_per_tok"]
         self.routed_scaling_factor = network_config.get("routed_scaling_factor", 1.0)
@@ -164,6 +164,32 @@ class FusedMoeWeight(BaseWeightTpl):
             clamp_up_add_one=clamp_up_add_one,
         )
 
+    def experts_with_topk(
+        self,
+        input_tensor: torch.Tensor,
+        topk_weights: torch.Tensor,
+        topk_ids: torch.Tensor,
+        is_prefill: Optional[bool] = None,
+        infer_state=None,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
+    ) -> torch.Tensor:
+        moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
+        if moe_capture_callback is not None:
+            moe_capture_callback(topk_ids)
+        return self.fuse_moe_impl.fused_experts_with_topk(
+            input_tensor=input_tensor,
+            w13=self.w13,
+            w2=self.w2,
+            topk_weights=topk_weights,
+            topk_ids=topk_ids,
+            is_prefill=is_prefill,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
+        )
+
     def low_latency_dispatch(
         self,
         hidden_states: torch.Tensor,
@@ -181,6 +207,23 @@ class FusedMoeWeight(BaseWeightTpl):
             n_group=self.n_group,
             scoring_func=self.scoring_func,
         )
+
+    def low_latency_dispatch_with_topk(
+        self,
+        hidden_states: torch.Tensor,
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ):
+        assert self.enable_ep_moe, "low_latency_dispatch_with_topk is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.low_latency_dispatch_with_topk(
+            hidden_states=hidden_states,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+        )
+
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor):
+        assert self.enable_ep_moe, "quantize_dispatch_input is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.quantize_dispatch_input(hidden_states=hidden_states, w13=self.w13)
 
     def select_experts_and_quant_input(
         self,
@@ -217,7 +260,14 @@ class FusedMoeWeight(BaseWeightTpl):
         )
 
     def masked_group_gemm(
-        self, recv_x: Tuple[torch.Tensor], masked_m: torch.Tensor, dtype: torch.dtype, expected_m: int
+        self,
+        recv_x: Tuple[torch.Tensor],
+        masked_m: torch.Tensor,
+        dtype: torch.dtype,
+        expected_m: int,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
         assert self.enable_ep_moe, "masked_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.masked_group_gemm(
@@ -227,6 +277,9 @@ class FusedMoeWeight(BaseWeightTpl):
             masked_m=masked_m,
             dtype=dtype,
             expected_m=expected_m,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
 
     def prefilled_group_gemm(
@@ -239,6 +292,9 @@ class FusedMoeWeight(BaseWeightTpl):
         recv_topk_weights: torch.Tensor,
         hidden_dtype=torch.bfloat16,
         microbatch_index: int = 0,
+        alpha: Optional[float] = None,
+        limit: Optional[float] = None,
+        clamp_up_add_one: bool = True,
     ):
         assert self.enable_ep_moe, "prefilled_group_gemm is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.prefilled_group_gemm(
@@ -252,6 +308,9 @@ class FusedMoeWeight(BaseWeightTpl):
             w2=self.w2,
             hidden_dtype=hidden_dtype,
             microbatch_index=microbatch_index,
+            alpha=alpha,
+            limit=limit,
+            clamp_up_add_one=clamp_up_add_one,
         )
 
     def low_latency_combine(

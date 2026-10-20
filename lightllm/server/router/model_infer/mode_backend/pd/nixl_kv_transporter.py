@@ -1,5 +1,4 @@
 import pickle
-import copy
 import os
 import threading
 import time
@@ -62,17 +61,18 @@ class NixlKVTransporter:
         return self.nixl_agent.get_new_notifs()
 
     def _register_kv_move_buffer(self, kv_move_buffer: Tensor):
-        self.num_pages, self.page_size, self.num_layers, self.kv_head_num, self.head_dims = kv_move_buffer.shape
-        self.dtype_byte_size = kv_move_buffer.element_size()
-        self.page_len = self.page_size * self.num_layers * self.kv_head_num * self.head_dims * self.dtype_byte_size
+        self.num_pages = kv_move_buffer.shape[0]
+        self.page_bytes = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
         self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
         self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
 
     def _create_paged_xfer_handles(self, reg_desc: "nixlBind.nixlRegDList", page_num: int, agent_name: str = ""):
-        base_addr, _, device_id, _ = reg_desc[0]
+        base_addr, registered_bytes, device_id, _ = reg_desc[0]
+        # NIXL 原生描述记录整块注册内存的字节数，按对端页数检查单页容量是否一致。
+        assert registered_bytes == page_num * self.page_bytes, "PD peers must use the same page byte capacity"
         pages_data = []
         for page_id in range(page_num):
-            pages_data.append((base_addr + page_id * self.page_len, self.page_len, device_id))
+            pages_data.append((base_addr + page_id * self.page_bytes, self.page_bytes, device_id))
         descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
         return self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
 
@@ -130,10 +130,8 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_decode_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+        new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
         new_trans_task.write_stage = "done"
-        new_trans_task.mem_indexes = None
-        new_trans_task.xfer_handle = None
         new_trans_task.decode_agent_metadata = None
         new_trans_task.decode_page_reg_desc = None
         new_trans_task.prefill_agent_name = self.agent_name
@@ -153,10 +151,8 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_decode_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+        new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
         new_trans_task.write_stage = "request"
-        new_trans_task.mem_indexes = None
-        new_trans_task.xfer_handle = None
         new_trans_task.prefill_agent_name = self.agent_name
         new_trans_task.prefill_agent_metadata = self.agent_metadata
         new_trans_task.prefill_num_pages = self.num_pages
@@ -174,10 +170,8 @@ class NixlKVTransporter:
             _remote_agent = trans_task.create_prefill_agent_obj()
             self.connect_add_remote_agent(_remote_agent)
 
-        new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+        new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
         new_trans_task.write_stage = "ready"
-        new_trans_task.mem_indexes = None
-        new_trans_task.xfer_handle = None
         new_trans_task.decode_agent_name = self.agent_name
         new_trans_task.decode_agent_metadata = self.agent_metadata
         new_trans_task.decode_num_pages = self.num_pages
@@ -201,10 +195,8 @@ class NixlKVTransporter:
                 _remote_agent = trans_task.create_prefill_agent_obj()
                 self.connect_add_remote_agent(_remote_agent)
             assert trans_task.error_info is not None
-            new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+            new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
             new_trans_task.write_stage = "error"
-            new_trans_task.mem_indexes = None
-            new_trans_task.xfer_handle = None
             new_trans_task.decode_agent_name = self.agent_name
             new_trans_task.decode_agent_metadata = self.agent_metadata
             new_trans_task.decode_num_pages = self.num_pages
@@ -227,10 +219,8 @@ class NixlKVTransporter:
                 _remote_agent = trans_task.create_decode_agent_obj()
                 self.connect_add_remote_agent(_remote_agent)
             assert trans_task.error_info is not None
-            new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
+            new_trans_task: PDChunckedTransTask = trans_task.copy_for_notify()
             new_trans_task.write_stage = "error"
-            new_trans_task.mem_indexes = None
-            new_trans_task.xfer_handle = None
             new_trans_task.prefill_agent_name = self.agent_name
             new_trans_task.prefill_agent_metadata = self.agent_metadata
             new_trans_task.prefill_num_pages = self.num_pages

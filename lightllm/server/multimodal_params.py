@@ -31,6 +31,8 @@ class AudioItem:
         self.start_index_in_embed_cache = None
         # the audio token num
         self.token_num = None
+        # the start index of the audio in the final input_ids
+        self.start_idx = None
         # the data md5 sum
         self.md5 = None
         # the audio length
@@ -88,6 +90,7 @@ class AudioItem:
         ret["uuid"] = self.uuid
         ret["token_id"] = self.token_id
         ret["token_num"] = self.token_num
+        ret["start_idx"] = self.start_idx
         ret["start_index_in_embed_cache"] = self.start_index_in_embed_cache
         ret["md5"] = self.md5
         return ret

@@ -169,6 +169,30 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
     assert terminate_calls == [True]
 
 
+def test_setup_signal_handlers_uses_configured_graceful_shutdown_signal(monkeypatch):
+    http_server_process = FakeHttpServerProcess()
+    process_manager = start_utils.SubmoduleManager()
+    registered_handlers = {}
+    monkeypatch.setattr(
+        start_utils.signal,
+        "signal",
+        lambda sig, handler: registered_handlers.__setitem__(sig, handler),
+    )
+    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: None)
+
+    process_manager.setup_signal_handlers(
+        http_server_process,
+        graceful_shutdown_signal=start_utils.signal.SIGUSR1,
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        registered_handlers[start_utils.signal.SIGTERM](start_utils.signal.SIGTERM, None)
+
+    assert exc_info.value.code == 0
+    assert http_server_process.sent_signals == [start_utils.signal.SIGUSR1]
+    assert http_server_process.wait_timeouts == [60]
+
+
 def test_setup_exit_controller_starts_cleanup_process_without_registering_signals(monkeypatch):
     process_manager = start_utils.SubmoduleManager()
     cleanup_process_calls = []

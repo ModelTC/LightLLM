@@ -65,7 +65,7 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     model = model_class.__new__(model_class)
     model._cos_cached = torch.arange(24).view(6, 4)
     model._sin_cached = model._cos_cached + 100
-    model.mem_manager = object()
+    model.att_state_manager = object()
     model.pre_post_weight = object()
 
     target_hiddens = torch.arange(6, dtype=torch.float32).view(2, 3)
@@ -104,7 +104,9 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     assert isinstance(output, ModelOutput)
     assert output.logits.shape == (2, 1)
     infer_state = observed_states[0]
-    assert infer_state.mem_manager is model.mem_manager
+    assert not hasattr(infer_state, "full_att_state")
+    assert infer_state.att_state_manager is model.att_state_manager
+    assert infer_state.is_draft_model
     assert infer_state.mem_index is mem_indexes
     assert torch.equal(infer_state.position_cos, model._cos_cached[[2, 4]])
     assert torch.equal(infer_state.position_sin, model._sin_cached[[2, 4]])
@@ -297,49 +299,39 @@ def test_fixed_dspark_does_not_require_confidence_head(monkeypatch):
     model._verify_params()
 
 
-def test_qwen35_dspark_adapter_uses_current_checkpoint_rope_layout(monkeypatch):
-    def init_dspark_config(self):
-        self.config = {
-            "dflash_config": {"mask_token_id": 1},
-            "rope_parameters": {
-                "rope_theta": 1_000_000,
-                "factor": 32.0,
-                "original_max_position_embeddings": 8192,
-                "rope_type": "yarn",
-            },
-        }
+def test_qwen35_dspark_adapter_uses_current_checkpoint_rope_layout():
+    raw_config = {
+        "dflash_config": {"mask_token_id": 1},
+        "rope_parameters": {
+            "rope_theta": 1_000_000,
+            "factor": 32.0,
+            "original_max_position_embeddings": 8192,
+            "rope_type": "yarn",
+        },
+    }
+    config = Qwen3_5DSparkModel.normalize_model_config(raw_config)
 
-    monkeypatch.setattr(Qwen3DSparkModel, "_init_config", init_dspark_config)
-    model = Qwen3_5DSparkModel.__new__(Qwen3_5DSparkModel)
-
-    model._init_config()
-
-    assert model.config["rope_scaling"] == model.config["rope_parameters"]
-    assert model.config["rope_theta"] == 1_000_000
-    assert model.config["partial_rotary_factor"] == 1.0
-    assert model.config["mask_token_id"] == 1
+    assert config["rope_scaling"] == config["rope_parameters"]
+    assert config["rope_theta"] == 1_000_000
+    assert config["partial_rotary_factor"] == 1.0
+    assert config["mask_token_id"] == 1
 
 
-def test_qwen35_dspark_adapter_preserves_custom_partial_rotary_layout(monkeypatch):
-    def init_dspark_config(self):
-        self.config = {
-            "dflash_config": {"mask_token_id": 1},
-            "rope_parameters": {
-                "mrope_interleaved": True,
-                "mrope_section": [11, 11, 10],
-                "partial_rotary_factor": 0.25,
-                "rope_theta": 10_000_000,
-                "rope_type": "default",
-            },
-        }
+def test_qwen35_dspark_adapter_preserves_custom_partial_rotary_layout():
+    raw_config = {
+        "dflash_config": {"mask_token_id": 1},
+        "rope_parameters": {
+            "mrope_interleaved": True,
+            "mrope_section": [11, 11, 10],
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10_000_000,
+            "rope_type": "default",
+        },
+    }
+    config = Qwen3_5DSparkModel.normalize_model_config(raw_config)
 
-    monkeypatch.setattr(Qwen3DSparkModel, "_init_config", init_dspark_config)
-    model = Qwen3_5DSparkModel.__new__(Qwen3_5DSparkModel)
-
-    model._init_config()
-
-    assert model.config["partial_rotary_factor"] == 0.25
-    assert model.config["rope_scaling"] == model.config["rope_parameters"]
+    assert config["partial_rotary_factor"] == 0.25
+    assert config["rope_scaling"] == config["rope_parameters"]
 
 
 def test_qwen3_parallel_block_draft_applies_partial_rotary_factor(monkeypatch):
@@ -386,6 +378,12 @@ def test_qwen3_parallel_block_draft_applies_partial_rotary_factor(monkeypatch):
     assert rotary_factors == [0.25, 0.25]
 
 
+def _cuda_empty(*size, **kwargs):
+    kwargs.setdefault("device", "cuda")
+    return torch.empty(*size, **kwargs)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vanilla_markov_local_sampling_matches_full_logits():
     post_infer = Qwen3DSparkPostLayerInfer.__new__(Qwen3DSparkPostLayerInfer)
     post_infer.block_size_ = 3
@@ -395,7 +393,7 @@ def test_vanilla_markov_local_sampling_matches_full_logits():
 
     vocab_size = 5
     request_count = 2
-    local_logits = torch.randn(vocab_size, request_count * post_infer.block_size_)
+    local_logits = torch.randn(vocab_size, request_count * post_infer.block_size_, device="cuda")
 
     class MarkovEmbedding:
         def __init__(self, weight):
@@ -412,15 +410,15 @@ def test_vanilla_markov_local_sampling_matches_full_logits():
         def __call__(self, input, alloc_func):
             return self.weight @ input
 
-    markov_w1 = torch.randn(vocab_size, post_infer.markov_rank_)
-    markov_w2 = torch.randn(vocab_size, post_infer.markov_rank_)
+    markov_w1 = torch.randn(vocab_size, post_infer.markov_rank_, device="cuda")
+    markov_w2 = torch.randn(vocab_size, post_infer.markov_rank_, device="cuda")
     layer_weight = SimpleNamespace(
         markov_w1_weight_=MarkovEmbedding(markov_w1),
         markov_w2_weight_=MarkovLMHead(markov_w2),
     )
-    anchor_token_ids = torch.tensor([1, 3])
-    block_hidden = torch.empty(request_count, post_infer.block_size_, 0)
-    post_infer.alloc_tensor = torch.empty
+    anchor_token_ids = torch.tensor([1, 3], device="cuda")
+    block_hidden = torch.empty(request_count, post_infer.block_size_, 0, device="cuda")
+    post_infer.alloc_tensor = _cuda_empty
 
     sampled_tokens = post_infer._sample_markov(
         local_logits=local_logits,
@@ -442,6 +440,7 @@ def test_vanilla_markov_local_sampling_matches_full_logits():
     torch.testing.assert_close(sampled_tokens, expected_tokens)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_vanilla_markov_tp4_sampling_matches_full_logits(monkeypatch):
     torch.manual_seed(0)
     post_infer = Qwen3DSparkPostLayerInfer.__new__(Qwen3DSparkPostLayerInfer)
@@ -449,7 +448,7 @@ def test_vanilla_markov_tp4_sampling_matches_full_logits(monkeypatch):
     post_infer.markov_rank_ = 4
     post_infer.markov_head_type_ = "vanilla"
     post_infer.tp_world_size_ = 4
-    post_infer.alloc_tensor = torch.empty
+    post_infer.alloc_tensor = _cuda_empty
 
     vocab_size = 11
     request_count = 2
@@ -458,10 +457,10 @@ def test_vanilla_markov_tp4_sampling_matches_full_logits(monkeypatch):
     local_start = int(split_indexes[tp_rank])
     local_end = int(split_indexes[tp_rank + 1])
 
-    base_logits = torch.randn(request_count, post_infer.block_size_, vocab_size)
-    markov_w1 = torch.randn(vocab_size, post_infer.markov_rank_)
-    markov_w2 = torch.randn(vocab_size, post_infer.markov_rank_)
-    anchor_token_ids = torch.tensor([1, 7])
+    base_logits = torch.randn(request_count, post_infer.block_size_, vocab_size, device="cuda")
+    markov_w1 = torch.randn(vocab_size, post_infer.markov_rank_, device="cuda")
+    markov_w2 = torch.randn(vocab_size, post_infer.markov_rank_, device="cuda")
+    anchor_token_ids = torch.tensor([1, 7], device="cuda")
 
     class MarkovEmbedding:
         weight = markov_w1
@@ -507,7 +506,7 @@ def test_vanilla_markov_tp4_sampling_matches_full_logits(monkeypatch):
 
     sampled_tokens = post_infer._sample_markov(
         local_logits=local_logits,
-        block_hidden=torch.empty(request_count, post_infer.block_size_, 0),
+        block_hidden=torch.empty(request_count, post_infer.block_size_, 0, device="cuda"),
         infer_state=SimpleNamespace(dist_group=None),
         anchor_token_ids=anchor_token_ids,
         layer_weight=layer_weight,

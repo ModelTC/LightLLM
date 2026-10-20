@@ -4,6 +4,7 @@ import triton
 import triton.language as tl
 
 from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
+from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
 
 
 @triton.jit
@@ -31,6 +32,7 @@ def _silu_and_mul_post_quant_kernel(
     alpha: tl.constexpr = None,
     limit: tl.constexpr = None,
     CLAMP_UP_ADD_ONE: tl.constexpr = True,
+    USE_UE8M0_SCALE: tl.constexpr = False,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -75,6 +77,8 @@ def _silu_and_mul_post_quant_kernel(
             gate_up = gate_up.to(input_ptr.dtype.element_ty).to(tl.float32)
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
         output_s = _absmax / fp8_max
+        if USE_UE8M0_SCALE:
+            output_s = tl.exp2(tl.ceil(tl.log2(output_s)))
         output_q = tl.clamp(gate_up / output_s, fp8_min, fp8_max).to(output_ptr.dtype.element_ty)
         tl.store(
             output_ptr_offs + token_index * stride_output_1,
@@ -157,6 +161,7 @@ def silu_and_mul_masked_post_quant_fwd(
         alpha=alpha,
         limit=limit,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,
+        USE_UE8M0_SCALE=get_env_use_ue8m0_scales(),
         num_warps=num_warps,
     )
     return

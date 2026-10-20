@@ -229,7 +229,7 @@ def create_cache_placement_controller(
 
         if args.enable_disk_cache:
             disk_capacity_bytes = int(args.disk_cache_storage_size * (1024 ** 3))
-            disk_capacity_tokens = disk_capacity_bytes // cpu_cache_meta.calcu_one_page_size() * page_size_tokens
+            disk_capacity_tokens = disk_capacity_bytes // cpu_cache_meta.page_bytes * page_size_tokens
         else:
             disk_capacity_tokens = 0
 

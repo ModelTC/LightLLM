@@ -44,6 +44,12 @@ class BaseKVMoveManager:
                 start_func=start_trans_process_func,
                 up_status_in_queue=up_status_in_queue,
             )
+
+        for trans_process in self.kv_trans_processes:
+            if not trans_process.wait_until_ready():
+                raise RuntimeError(f"KV trans module for device {trans_process.device_id} failed to initialize")
+
+        for trans_process in self.kv_trans_processes:
             threading.Thread(target=self.task_ret_handle_loop, args=(trans_process,), daemon=True).start()
 
         # 通过 io buffer 将命令写入到推理进程中

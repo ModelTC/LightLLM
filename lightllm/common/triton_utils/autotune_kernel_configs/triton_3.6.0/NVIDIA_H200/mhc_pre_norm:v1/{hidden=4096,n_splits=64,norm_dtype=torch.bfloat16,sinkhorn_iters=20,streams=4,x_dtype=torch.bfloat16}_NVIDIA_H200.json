@@ -1,0 +1,22 @@
+{
+  "1": {
+    "num_warps": 8,
+    "unroll_sinkhorn": true
+  },
+  "128": {
+    "num_warps": 4,
+    "unroll_sinkhorn": true
+  },
+  "16": {
+    "num_warps": 4,
+    "unroll_sinkhorn": true
+  },
+  "32": {
+    "num_warps": 8,
+    "unroll_sinkhorn": true
+  },
+  "8": {
+    "num_warps": 8,
+    "unroll_sinkhorn": true
+  }
+}

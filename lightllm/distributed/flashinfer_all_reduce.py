@@ -102,6 +102,9 @@ class FlashInferAllReduce:
                 hidden_dim=hidden_dim,
                 dtype=dtype,
                 comm_backend=TorchDistBackend(group=self.group),
+                # TRT-LLM symmetric-memory rendezvous must use the same TP
+                # subgroup as world_size/rank; otherwise it defaults to WORLD.
+                group=self.group,
             )
         except Exception as e:
             logger.warning("FlashInferAllReduce workspace init failed: %s. Disabling.", e)

@@ -1,8 +1,15 @@
-import copy
+from typing import TYPE_CHECKING
+import torch
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
+
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
@@ -13,96 +20,39 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
     # infer class
     transformer_layer_infer_class = Deepseek3_2TransformerLayerInfer
 
+    @classmethod
+    def create_full_att_states(
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        *,
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """DeepSeek V3.2 使用包含 indexer 字段的 packed MLA，编码由 MLA 创建入口选择。"""
+        from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+        config = cls.normalize_model_config(model_config)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_packed_mla_state(
+            config=PackedMLALogicalConfig(
+                logical_layer_groups=logical_layer_groups,
+                latent_dim=config["kv_lora_rank"] + config["qk_rope_head_dim"],
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
+                format="packed_group128_fp8" if args.llm_kv_type == "fp8kv_dsa" else "packed_bf16",
+                indexer_dim=config.get("indexer_dim", 128),
+            ),
+            page_size=args.page_size,
+            device="meta",
+        )
+        return [state]
+
     def _init_att_backend(self):
         self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)
         self.decode_att_backend = get_nsa_decode_att_backend_class(index=0)(model=self)
         return
-
-
-class DeepSeekV32Tokenizer:
-    """Tokenizer wrapper for DeepSeek-V3.2 that uses the Python-based
-    encoding_dsv32 module instead of Jinja chat templates.
-
-    DeepSeek-V3.2's tokenizer_config.json does not ship with a Jinja chat
-    template, so ``apply_chat_template`` would fail without either a manually
-    supplied ``--chat_template`` file or this wrapper.
-    """
-
-    def __init__(self, tokenizer):
-        self.tokenizer = tokenizer
-        # Cache added vocabulary for performance (HuggingFace can be slow).
-        self._added_vocab = None
-
-    # ------------------------------------------------------------------
-    # Attribute delegation – everything not overridden goes to the inner
-    # tokenizer so that encode/decode/vocab_size/eos_token_id/… all work.
-    # ------------------------------------------------------------------
-    def __getattr__(self, name):
-        return getattr(self.tokenizer, name)
-
-    def get_added_vocab(self):
-        if self._added_vocab is None:
-            self._added_vocab = self.tokenizer.get_added_vocab()
-        return self._added_vocab
-
-    # ------------------------------------------------------------------
-    # Core override: route apply_chat_template through encode_messages.
-    # ------------------------------------------------------------------
-    def apply_chat_template(
-        self,
-        conversation=None,
-        messages=None,
-        tools=None,
-        tokenize=False,
-        add_generation_prompt=True,
-        thinking=None,
-        **kwargs,
-    ):
-        from lightllm.models.deepseek3_2.encoding_dsv32 import encode_messages, render_tools
-
-        msgs = conversation if conversation is not None else messages
-        if msgs is None:
-            raise ValueError("Either 'conversation' or 'messages' must be provided")
-
-        # Deep copy to avoid mutating the caller's messages.
-        msgs = copy.deepcopy(msgs)
-
-        # Determine thinking mode.
-        thinking_mode = "thinking" if thinking else "chat"
-
-        # Inject tools into the first system message (or create one) so that
-        # encode_messages / render_message picks them up.
-        if tools:
-            # build_prompt passes tools as bare function dicts:
-            #   [{"name": "f", "description": "...", "parameters": {...}}]
-            # encoding_dsv32's render_message expects OpenAI wrapper format:
-            #   [{"type": "function", "function": {...}}]
-            wrapped_tools = []
-            for t in tools:
-                if "function" in t:
-                    wrapped_tools.append(t)
-                else:
-                    wrapped_tools.append({"type": "function", "function": t})
-
-            injected = False
-            for msg in msgs:
-                if msg.get("role") == "system":
-                    existing = msg.get("tools") or []
-                    msg["tools"] = existing + wrapped_tools
-                    injected = True
-                    break
-
-            if not injected:
-                # Prepend a system message that carries the tools.
-                msgs.insert(0, {"role": "system", "content": "", "tools": wrapped_tools})
-
-        prompt = encode_messages(
-            msgs,
-            thinking_mode=thinking_mode,
-            drop_thinking=kwargs.get("drop_thinking", True),
-            add_default_bos_token=kwargs.get("add_default_bos_token", True),
-        )
-
-        if tokenize:
-            return self.tokenizer.encode(prompt, add_special_tokens=False)
-        return prompt

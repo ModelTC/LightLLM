@@ -77,6 +77,7 @@ class QWenVLTokenizer(BaseMultiModalTokenizer):
             assert token_num == self.image_length, "invalid token num: {} vs {}!".format(token_num, self.image_length)
 
             input_ids.append(self.image_start_id)
+            multimodal_params.images[image_id].start_idx = len(input_ids)
             input_ids.extend(range(token_id, token_id + token_num))
             input_ids.append(self.image_end_id)
             end += 1

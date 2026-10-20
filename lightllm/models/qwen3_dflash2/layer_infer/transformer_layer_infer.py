@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.basemodel.attention import AttControl
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash2.triton_kernel import grouped_dynamic_conv
@@ -13,7 +14,13 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         self.sliding_window_ = int(network_config.get("sliding_window", 0) or 0)
 
     def _token_attention_kernel(self, q, infer_state, layer_weight):
-        k, v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        k, v = state.get_layer_view(logical_layer_id=self.layer_num_)
         k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
         v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
@@ -26,6 +33,7 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
             k=k,
             v=v,
             att_control=AttControl(
+                logical_layer_id=self.layer_num_,
                 use_sliding_window=use_sliding_window,
                 sliding_window=(window, window) if use_sliding_window else (-1, -1),
             ),
@@ -34,8 +42,14 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
-        storage_head_num = infer_state.mem_manager.head_num
-        storage_head_dim = infer_state.mem_manager.head_dim
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        storage_head_num = state.config.head_num
+        storage_head_dim = state.config.head_dim
         storage_kv = cache_kv.view(cache_kv.shape[0], 2 * storage_head_num, storage_head_dim)
         return super()._post_cache_kv(storage_kv, infer_state, layer_weight)
 

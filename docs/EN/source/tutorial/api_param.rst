@@ -10,6 +10,10 @@ API Call Details
 
 Get the current server running status
 
+The public endpoint of a multiprocess PD master aggregates HAProxy's periodic health checks of
+all workers and returns HTTP 503 if any worker fails. A direct request to a worker port reports
+that worker's local state.
+
 **Call Example**: 
 
 .. code-block:: console

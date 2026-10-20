@@ -8,7 +8,7 @@ from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
 from .token_chunck_hash_list import TokenHashList, CpuCachePageList, TokenPageLenList
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
@@ -265,14 +265,18 @@ class Req(ctypes.Structure):
     def _fill_input_token_hash(self):
         self.token_hash_list = TokenHashList()
         self.token_hash_list.clear()
-        hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().cpu_cache_token_page_size)
+        hash_values = compute_token_list_hash(
+            self.get_prompt_ids_numpy(), get_env_start_args().cpu_cache_token_page_size
+        )
         self.token_hash_list.fill(hash_values)
         return
 
     def _fill_hybrid_token_hash(self):
         self.hybrid_token_hash_list = TokenHashList()
         self.hybrid_token_hash_list.clear()
-        hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().linear_att_hash_page_size)
+        hash_values = compute_token_list_hash(
+            self.get_prompt_ids_numpy(), get_env_start_args().linear_att_hash_page_size
+        )
         self.hybrid_token_hash_list.fill(hash_values)
         return
 

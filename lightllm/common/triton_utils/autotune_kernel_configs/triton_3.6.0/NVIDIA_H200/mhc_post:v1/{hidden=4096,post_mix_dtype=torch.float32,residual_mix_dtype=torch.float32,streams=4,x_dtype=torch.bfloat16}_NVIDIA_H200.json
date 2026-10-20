@@ -1,0 +1,34 @@
+{
+  "1": {
+    "BLOCK_H": 256,
+    "num_warps": 8
+  },
+  "128": {
+    "BLOCK_H": 256,
+    "num_warps": 4
+  },
+  "16": {
+    "BLOCK_H": 512,
+    "num_warps": 4
+  },
+  "2048": {
+    "BLOCK_H": 512,
+    "num_warps": 2
+  },
+  "32": {
+    "BLOCK_H": 512,
+    "num_warps": 4
+  },
+  "512": {
+    "BLOCK_H": 512,
+    "num_warps": 4
+  },
+  "8": {
+    "BLOCK_H": 512,
+    "num_warps": 4
+  },
+  "8192": {
+    "BLOCK_H": 1024,
+    "num_warps": 4
+  }
+}

@@ -183,7 +183,7 @@ def reference_attention(inputs):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("kv_len", [17, 8192, 16384])
 @pytest.mark.parametrize("block_batch", [1, 3, 4])
-@pytest.mark.parametrize("head_dim", [64, 128])
+@pytest.mark.parametrize("head_dim", [64, 128, 256])
 def test_shared_groups_match_fp32_reference(monkeypatch, kv_len, block_batch, head_dim):
     monkeypatch.setenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", str(kv_len))
     inputs = rebuild(make_inputs("cuda", block_batch=block_batch, head_dim=head_dim, token_count=7 * kv_len))

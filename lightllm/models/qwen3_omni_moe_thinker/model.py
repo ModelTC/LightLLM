@@ -102,6 +102,7 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.audios[audio_id].token_id
                     token_num = multimodal_params.audios[audio_id].token_num
+                    multimodal_params.audios[audio_id].start_idx = len(input_ids)
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.audio_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]
@@ -130,6 +131,10 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
                     token_id = multimodal_params.images[image_id].token_id
                     token_num = multimodal_params.images[image_id].token_num
                     multimodal_params.images[image_id].start_idx = len(input_ids)
+                    # Image expansion shifts the audio positions recorded in the first pass.
+                    for audio in multimodal_params.audios:
+                        if audio.start_idx >= len(input_ids):
+                            audio.start_idx += token_num
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.image_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]

@@ -11,6 +11,9 @@
 
 获取当前的服务器的运行状态
 
+单机多进程 PD Master 的公开入口汇总 HAProxy 对全部 worker 的周期健康探测，任一
+worker 探测失败时返回 HTTP 503；直接访问 worker 端口时返回该进程的本地状态。
+
 **调用示例**： 
 
 .. code-block:: console

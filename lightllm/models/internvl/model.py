@@ -139,6 +139,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.images[image_id].token_id
                     token_num = multimodal_params.images[image_id].token_num
+                    multimodal_params.images[image_id].start_idx = len(input_ids)
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.image_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]
@@ -168,6 +169,11 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.audios[audio_id].token_id
                     token_num = multimodal_params.audios[audio_id].token_num
+                    multimodal_params.audios[audio_id].start_idx = len(input_ids)
+                    # Audio expansion shifts the image positions recorded in the first pass.
+                    for image in multimodal_params.images:
+                        if image.start_idx >= len(input_ids):
+                            image.start_idx += token_num
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.audio_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]

@@ -1,3 +1,4 @@
+import os
 import yaml
 import collections
 from .registry import QUANTMETHODS
@@ -51,6 +52,8 @@ class Quantcfg:
         activation_scheme = network_config.get("activation_scheme", "dynamic")
         self.static_activation = activation_scheme == "static"
         self.hf_quantization_config = hf_quantization_config
+        if hf_quantization_config.get("scale_fmt") == "ue8m0":
+            os.environ["LIGHTLLM_USE_UE8M0_SCALES"] = "1"
         self.hf_quantization_method = hf_quantization_config["quant_method"]
         self._mapping_quant_method()
 

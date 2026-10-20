@@ -25,9 +25,9 @@ def _per_token_group_quant_fp8(
     eps,
     fp8_min,
     fp8_max,
-    xs_m,
     xs_n,
-    xs_row_major: tl.constexpr,
+    xs_stride_m,
+    xs_stride_n,
     BLOCK: tl.constexpr,
     NEED_MASK: tl.constexpr,
     USE_UE8M0_SCALE: tl.constexpr,
@@ -48,22 +48,16 @@ def _per_token_group_quant_fp8(
         tl.store(y_q_ptr + offsets, y_q, mask=mask)
         exponents = (y_s.to(tl.int32, bitcast=True) >> 23) & 255
         packed = tl.sum(tl.where(group_ids < xs_n, exponents << (byte_ids * 8), 0), axis=0)
-        if xs_row_major:
-            scale_offset = row_id * ((xs_n + 3) // 4) + packed_col
-        else:
-            scale_offset = row_id + packed_col * xs_m
+        scale_offset = row_id * xs_stride_m + packed_col * xs_stride_n
         tl.store(y_s_ptr + scale_offset, packed)
         return
 
     g_id = tl.program_id(0)
     y_ptr += g_id * y_stride
     y_q_ptr += g_id * y_stride
-    if xs_row_major:
-        y_s_ptr += g_id
-    else:
-        row_id = g_id // xs_n
-        col_id = g_id % xs_n
-        y_s_ptr += col_id * xs_m + row_id  # col major
+    row_id = g_id // xs_n
+    col_id = g_id % xs_n
+    y_s_ptr += row_id * xs_stride_m + col_id * xs_stride_n
 
     cols = tl.arange(0, BLOCK)  # N <= BLOCK
 
@@ -108,9 +102,9 @@ def lightllm_per_token_group_quant_fp8(
     assert x.shape[-1] % group_size == 0, "the last dimension of `x` cannot be divisible by `group_size`"
     assert x.is_contiguous(), "`x` is not contiguous"
 
-    xs_row_major = x_s.is_contiguous()
-    xs_m = x_s.stride(1) if use_packed_ue8m0 else x_s.shape[0]
     xs_n = x.shape[-1] // group_size
+    x_s = x_s.view(-1, x_s.shape[-1])
+    xs_stride_m, xs_stride_n = x_s.stride()
     finfo = torch.finfo(dtype)
     fp8_max = finfo.max
 
@@ -132,9 +126,9 @@ def lightllm_per_token_group_quant_fp8(
         eps,
         fp8_min=fp8_min,
         fp8_max=fp8_max,
-        xs_m=xs_m,
         xs_n=xs_n,
-        xs_row_major=xs_row_major,
+        xs_stride_m=xs_stride_m,
+        xs_stride_n=xs_stride_n,
         BLOCK=BLOCK,
         NEED_MASK=BLOCK != group_size,
         USE_UE8M0_SCALE=use_ue8m0_scales,
@@ -158,37 +152,25 @@ def per_token_group_quant_fp8(
 ):
     use_sgl = HAS_SGL_KERNEL and (not use_ue8m0_scales or use_packed_ue8m0)
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
-    x_s = None
-    # Adapted from
-    # https://github.com/sgl-project/sglang/blob/7e257cd666c0d639626487987ea8e590da1e9395/python/sglang/srt/layers/quantization/fp8_kernel.py#L290
     # Packed UE8M0 uses SGL's INT32, column-major TMA-aligned scale layout.
     if use_packed_ue8m0:
         groups = x.shape[-1] // group_size
         aligned_size = (x.shape[-2] + 3) // 4 * 4
         x_s = alloc_func(((groups + 3) // 4, aligned_size), device=x.device, dtype=torch.int32).t()[: x.shape[-2], :]
-    elif use_sgl:
-        # 创建scale张量
-        if column_major_scales:
-            if scale_tma_aligned:
-                # 对齐到4 * sizeof(float)
-                aligned_size = (x.shape[-2] + 3) // 4 * 4
-                x_s = alloc_func(
-                    x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
-                    device=x.device,
-                    dtype=torch.float32,
-                ).permute(-1, -2)[: x.shape[-2], :]
-            else:
-                x_s = alloc_func(
-                    (x.shape[-1] // group_size,) + x.shape[:-1],
-                    device=x.device,
-                    dtype=torch.float32,
-                ).permute(-1, -2)
-        else:
+    elif column_major_scales:
+        if scale_tma_aligned:
+            aligned_size = (x.shape[-2] + 3) // 4 * 4
             x_s = alloc_func(
-                x.shape[:-1] + (x.shape[-1] // group_size,),
+                x.shape[:-2] + (x.shape[-1] // group_size, aligned_size),
                 device=x.device,
                 dtype=torch.float32,
-            )
+            ).permute(-1, -2)[: x.shape[-2], :]
+        else:
+            x_s = alloc_func(
+                (x.shape[-1] // group_size,) + x.shape[:-1],
+                device=x.device,
+                dtype=torch.float32,
+            ).permute(-1, -2)
     else:
         x_s = alloc_func(
             x.shape[:-1] + (x.shape[-1] // group_size,),
@@ -209,13 +191,11 @@ def per_token_group_quant_fp8(
             group_size,
             x_q,
             x_s,
-            eps=1e-10,
+            eps=1e-10 if use_ue8m0_scales else eps,
             dtype=dtype,
             use_ue8m0_scales=use_ue8m0_scales,
             use_packed_ue8m0=use_packed_ue8m0,
         )
-        if not use_packed_ue8m0 and column_major_scales and scale_tma_aligned:
-            x_s = tma_align_input_scale(x_s)
     return x_q, x_s
 
 

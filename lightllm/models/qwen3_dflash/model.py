@@ -1,9 +1,7 @@
 import torch
 
-from lightllm.common.basemodel.attention import (
-    Fa3AttBackend,
-    Fp8Fa3AttBackend,
-)
+from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
+from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -47,13 +45,6 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self._sin_cached = self.main_model._sin_cached
         self.block_size = int(self.config["block_size"])
         self.mask_token_id = int(self.config["mask_token_id"])
-
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
-    def _init_mem_manager(self):
-        # Draft KV uses target-owned cache slots.
-        self.mem_manager = self.main_model.mem_manager
 
     def _init_att_backend(self):
         super()._init_att_backend()
@@ -100,7 +91,9 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
-        infer_state.mem_manager = self.mem_manager
+        infer_state.att_state_manager = self.att_state_manager
+        infer_state.att_state_role = self.att_state_role
+        infer_state.is_draft_model = True
         infer_state.mem_index = self._select_mem_indexes(model_input)
 
         # 这里调用的是 DFlash 覆写后的 context_forward：pre layer 只投影 target hidden，

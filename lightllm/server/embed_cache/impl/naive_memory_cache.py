@@ -9,7 +9,7 @@ import time
 from collections import deque
 from typing import List, Dict
 import multiprocessing.shared_memory as shm
-from ..utils import get_shm_name_data, free_shm
+from ..utils import MULTIMODAL_TOKEN_ID_START, get_shm_name_data, free_shm
 from lightllm.utils.log_utils import init_logger
 from sortedcontainers import SortedSet
 
@@ -71,7 +71,7 @@ class InMemoryCache:
                         "prompt cache as a correctness-first fallback."
                     )
                 else:
-                    self.token_id_range_start = 100000000
+                    self.token_id_range_start = MULTIMODAL_TOKEN_ID_START
                     self.token_id_range_end = 2 ** 63 - 1
             else:
                 while True:
@@ -273,7 +273,7 @@ class InMemoryCache:
         ``token_id_range_end`` is an exclusive boundary, matching the range
         exhaustion check in ``_check_and_set_new_id_range``.
         """
-        available_range_start = 100000000
+        available_range_start = MULTIMODAL_TOKEN_ID_START
         available_range_end = 2 ** 63 - 1
 
         random.seed(time.time())

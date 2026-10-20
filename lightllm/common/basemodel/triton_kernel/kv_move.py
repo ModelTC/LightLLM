@@ -8,6 +8,8 @@ def _copy_kv_buffer_to_kv_buffer(
     mem_num,
     src_mem_index,
     dst_mem_index,
+    src_index_stride: tl.constexpr,
+    dst_index_stride: tl.constexpr,
     kv_buffer,
     kv_buffer_stride_l,
     kv_buffer_stride_s,
@@ -24,8 +26,8 @@ def _copy_kv_buffer_to_kv_buffer(
     kv_buffer_stride_d = tl.cast(kv_buffer_stride_d, dtype=tl.int64)
 
     for i in range(start_index, mem_num, grid_num):
-        src_mem = tl.load(src_mem_index + i)
-        dst_mem = tl.load(dst_mem_index + i)
+        src_mem = tl.load(src_mem_index + i * src_index_stride)
+        dst_mem = tl.load(dst_mem_index + i * dst_index_stride)
         for j in range(tl.cdiv(kv_buffer_tail_dim, BLOCK)):
             offs = j * BLOCK + tl.arange(0, BLOCK)
             mask = offs < kv_buffer_tail_dim
@@ -58,6 +60,8 @@ def copy_kv_buffer_to_kv_buffer(
         mem_num=len(src_mem_index),
         src_mem_index=src_mem_index,
         dst_mem_index=dst_mem_index,
+        src_index_stride=src_mem_index.stride(0),
+        dst_index_stride=dst_mem_index.stride(0),
         kv_buffer=kv_buffer,
         kv_buffer_stride_l=kv_buffer.stride(0),
         kv_buffer_stride_s=kv_buffer.stride(1),

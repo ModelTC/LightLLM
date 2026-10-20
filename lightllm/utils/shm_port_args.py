@@ -8,8 +8,10 @@ LightLLM 启动时有两类端口：
              未设置时访问会直接报错，不会动态分配。
   [dynamic]  args 中为 None，需要运行时动态申请（如 router_port、metric_port）。
 
+多 worker PD master 的 worker HTTP 端口由 launcher 整组规划，Metric Server 端口由 launcher 分配。
+
 本类把这两类端口统一成属性访问接口，并在进程间通过命名 POSIX shm 共享
-「已动态分配」的结果，避免启动阶段预先批量占坑，也避免多进程重复分配冲突。
+「已动态分配」的结果，避免多进程重复分配冲突。
 
 存储与并发
 ----------
@@ -109,6 +111,11 @@ class ShmPortArgs:
     @property
     def config_server_port(self) -> int:
         return self._get_user_set_port("config_server_port")
+
+    @property
+    def pd_master_multi_ports(self) -> List[int]:
+        ports = self._get_or_alloc("pd_master_multi_ports", count=get_env_start_args().httpserver_workers)
+        return [ports] if isinstance(ports, int) else ports
 
     # [user_set] config server visual redis port
     @property

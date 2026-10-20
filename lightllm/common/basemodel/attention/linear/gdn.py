@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.bounded_att import GDNState
 import dataclasses
 import weakref
 from abc import ABC, abstractmethod
@@ -215,8 +216,19 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step == 0:
             self._init_normal_decode_state()
-        elif self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(draft_step + 1)
+            return
+
+        # MTP 元数据按模型初始化，沿用每个角色只有一个 GDN State 的约束。
+        # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
+        (state,) = (
+            state
+            for state in self.infer_state.att_state_manager.get_bounded_attention_states(
+                self.infer_state.att_state_role
+            )
+            if isinstance(state, GDNState)
+        )
+        if self.backend.uses_dynamic_spec_verify_layout():
+            self._init_dynamic_mtp_decode_state(draft_step + 1, req_to_mtp_state_index=state.mtp_state_index)
         else:
             self._init_fixed_mtp_decode_state(draft_step)
         self.backend.req_manager.recurrent_state.prepare_decode(
@@ -227,7 +239,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx
 
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int):
+    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
         (
             self.b1_mtp_cu_q_seq_len,
             self.b_conv_buffer_idx,
@@ -240,7 +252,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
-    def _init_fixed_mtp_decode_state(self, draft_step: int):
+    def _init_fixed_mtp_decode_state(self, draft_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
         mtp_size = draft_step + 1
         batch_size = self.infer_state.batch_size
         assert batch_size % mtp_size == 0, (

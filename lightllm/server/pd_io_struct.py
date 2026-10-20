@@ -3,7 +3,7 @@ import time
 import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
 from lightllm.utils.log_utils import init_logger
@@ -192,8 +192,9 @@ class PDChunckedTransTask:
     transfer_time_out_secs: int = 66
     # kv: 通过 mem_indexes 传输 [start_kv_index, end_kv_index) 的 token KV。
     # att_state: 混合注意力模型的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
-    # start_kv_index == end_kv_index 标记状态对应的 token 位置，mem_indexes 为空。
-    # 通过本地 req_idx 定位运行态 buffer，具体打包和恢复由模型 mem_manager 负责。
+    # start_kv_index == end_kv_index 标记 prefill 状态对应的 token 位置，mem_indexes 为空。
+    # tail PD 读写用该位置在固定逻辑窗口与本地 MTP ring 之间转换，不另存长度字段。
+    # 通过本地 req_idx 定位运行态 buffer，具体打包和恢复由模型 AttentionStateManager 负责。
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
@@ -229,6 +230,13 @@ class PDChunckedTransTask:
 
     def transfer_time(self):
         return time.time() - self.start_trans_time
+
+    def copy_for_notify(self) -> "PDChunckedTransTask":
+        task = copy.copy(self)
+        task.__dict__.pop("shared_time_out_mark", None)
+        task.mem_indexes = None
+        task.xfer_handle = None
+        return task
 
     def get_key(self) -> str:
         # page_kind 参与 P/D 任务匹配，发送端和接收端必须使用一致的协议取值。

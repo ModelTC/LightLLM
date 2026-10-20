@@ -35,7 +35,13 @@ from lightllm.utils.envs_utils import (
     get_lightllm_websocket_max_message_size,
     is_stop_matching_in_reasoning_enabled,
 )
-from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    GenerationError,
+    InvalidRequestError,
+    SERVER_BUSY_MESSAGE,
+    ServerBusyError,
+)
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -89,6 +95,15 @@ async def _safe_stream_wrapper(stream_generator):
             # the application-level handler returns HTTP 400.
             raise InvalidRequestError(str(e)) from e
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
+    except GenerationError as e:
+        # Early-header mode starts the response before the first body chunk.
+        if not first_chunk_sent and not get_env_start_args().disable_delay_response_start:
+            raise
+        error_data = json.dumps(
+            {"error": {"message": str(e), "type": "server_error", "code": "stream_error"}}, ensure_ascii=False
+        )
         yield f"data: {error_data}\n\n"
         yield "data: [DONE]\n\n"
     except ServerBusyError as e:
@@ -180,6 +195,13 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
         return False
     if reasoning_parser in ["deepseek-v3"]:
         return request.chat_template_kwargs is not None and request.chat_template_kwargs.get("thinking") is True
+    if reasoning_parser in ["deepseek-v4"]:
+        chat_template_kwargs = request.chat_template_kwargs or {}
+        if "thinking" in chat_template_kwargs:
+            return chat_template_kwargs["thinking"] is True
+        if request.reasoning_effort is not None:
+            return request.reasoning_effort != "none"
+        return True
     if reasoning_parser in ["qwen3", "glm45", "nano_v3", "interns1", "gemma4"]:
         # qwen3, glm45, nano_v3, interns1, and gemma4 are reasoning by default;
         return not request.chat_template_kwargs or request.chat_template_kwargs.get("enable_thinking", True) is True
@@ -414,7 +436,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         reasoning_parser_dict: Dict[int, ReasoningParser] = {}
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
             finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
-            from .req_id_generator import convert_sub_id_to_group_id
+            from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
             count_output_tokens_dict[sub_req_id] += 1
@@ -539,7 +561,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         has_emitted_tool_calls: Dict[int, bool] = collections.defaultdict(bool)
         has_emitted_first_chunk: Dict[int, bool] = collections.defaultdict(bool)
         stream_tool_call_ids: Dict[Tuple[int, int], str] = {}
-        from .req_id_generator import convert_sub_id_to_group_id
+        from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
         prompt_tokens = 0
         completion_tokens = 0
@@ -554,6 +576,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
+            if current_finish_reason == "error" and completion_tokens == 1:
+                raise GenerationError("Generation failed before producing output")
 
             # Emit the initial role-only chunk once per choice, as required by the
             # OpenAI SSE spec: role appears only in the first delta with content="".
@@ -987,7 +1011,7 @@ async def _handle_streaming_completion(
     )
 
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        from .req_id_generator import convert_sub_id_to_group_id
+        from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
         prompt_tokens = 0
         completion_tokens = 0

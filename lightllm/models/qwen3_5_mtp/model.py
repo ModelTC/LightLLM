@@ -14,7 +14,7 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
     transformer_weight_class = Qwen3_5MTPTransformerLayerWeight
     transformer_layer_infer_class = Qwen35TransformerLayerInfer
 
-    # MTP draft model: reuses the main model's req/mem managers and rope caches, and is
+    # MTP draft model: reuses the main model's request/attention resources and rope caches, and is
     # marked so the decode CUDA-graph / padding paths detect it (is_mtp_draft_model).
     is_mtp_draft_model = True
 
@@ -29,22 +29,12 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
         self._sin_cached = self.main_model._sin_cached
         return
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-        return
-
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
-        return
-
-    def _init_config(self):
-        super()._init_config()
-        # MTP draft model: reuses the main model's config, but overrides the following:
-        # 因为 qwen3.5 的 mtp 和 main 是存储在一起的，所以需要进行修复。
-        self.config["full_attention_interval"] = 1
-        self.config["num_hidden_layers"] = 1
-        self.config["n_layer"] = 1
-        return
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """原生 MTP 只包含一个 full-attention 层，与 main 共用 checkpoint。"""
+        config = super().normalize_model_config(model_config)
+        config.update(full_attention_interval=1, num_hidden_layers=1, n_layer=1, layer_types=["full_attention"])
+        return config
 
     def _init_some_value(self):
         super()._init_some_value()

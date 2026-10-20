@@ -10,6 +10,7 @@ from typing import Dict, List
 from fastapi.responses import JSONResponse
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.visualserver.objs import VIT_Obj
+from lightllm.server.embed_cache.utils import MULTIMODAL_TOKEN_ID_START
 from ..pd_io_struct import PD_Master_Obj
 from .nccl_tcp_store import start_tcp_store_server
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name
@@ -28,7 +29,7 @@ global_req_id = 0
 global_req_id_lock = Lock()
 
 # This is a global ID for multimodal embedding, starting from 100000000
-global_multimodal_embedding_id = 100000000
+global_multimodal_embedding_id = MULTIMODAL_TOKEN_ID_START
 global_multimodal_embedding_id_lock = Lock()
 
 
@@ -147,7 +148,7 @@ async def allocate_global_unique_multimodal_id_range():
     range_size = 8000000
     with global_multimodal_embedding_id_lock:
         if global_multimodal_embedding_id + range_size > 2 ** 63 - 1:
-            global_multimodal_embedding_id = 100000000
+            global_multimodal_embedding_id = MULTIMODAL_TOKEN_ID_START
         start_id = global_multimodal_embedding_id
         global_multimodal_embedding_id += range_size
         end_id = global_multimodal_embedding_id

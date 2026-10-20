@@ -35,16 +35,6 @@ def setup():
     triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
 
 
-def _reference_kda(q, k, v, gate, beta, a, bias, state):
-    q = q.float() * torch.rsqrt(q.float().square().sum(-1, keepdim=True) + 1e-6) / q.shape[-1] ** 0.5
-    k = k.float() * torch.rsqrt(k.float().square().sum(-1, keepdim=True) + 1e-6)
-    decay = (-5 * torch.sigmoid(a.exp()[:, None] * (gate.float() + bias))).exp()
-    state = state * decay[..., None]
-    delta = (v.float() - torch.einsum("hkv,hk->hv", state, k)) * beta.float().sigmoid()[:, None]
-    state = state + k[..., None] * delta[:, None, :]
-    return torch.einsum("hkv,hk->hv", state, q), state
-
-
 @pytest.mark.parametrize("tokens", [1, 3, 65, 129])
 def test_kda_chunk_and_decode_match_recurrence(tokens):
     heads, dim = 2, 128
@@ -145,7 +135,16 @@ def test_kda_gate_cumsum_packed_shape(seq_lens, safe_gate, strided):
 
 @pytest.mark.parametrize(
     "q_lens",
-    [(3, 2, 4), (0, 1, 0, 1, 0), (1,) * 64, (257, 1, 513, 0), (8129,) + (1,) * 63],
+    [
+        (3, 2, 4),
+        (0, 1, 0, 1, 0),
+        (1,) * 64,
+        (257, 1, 513, 0),
+        (8129,) + (1,) * 63,
+        (3, 0, 1, 2) * 31 + (3, 0, 1),
+        (3, 0, 1, 2) * 32,
+        (3, 0, 1, 2) * 32 + (3,),
+    ],
 )
 def test_kpool_ranges_cuda_graph_with_changing_query_boundaries(q_lens):
     # Move the longest query across the batch while replaying the same graph.
@@ -324,7 +323,7 @@ def test_gather_paged_pools_valid_pages_and_graph_replay(max_pools):
     def check(pages, block_table):
         page_bytes = pages.view(pages.shape[0], -1)
         for row, (req, length) in enumerate(zip(req_idx.tolist(), lengths.tolist())):
-            page_ids = block_table[row, : max(1, triton.cdiv(length, 64))].long()
+            page_ids = block_table[row, : triton.cdiv(length, 64)].long()
             keys = page_bytes[page_ids, : 64 * 128].reshape(-1, 128)
             scales = page_bytes[page_ids, 64 * 128 :].contiguous().view(torch.float32).flatten()
             locs = locations[req, :length].long()
@@ -337,14 +336,14 @@ def test_gather_paged_pools_valid_pages_and_graph_replay(max_pools):
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         pages, block_table = gather_paged_pools(packed, table, req_idx, lengths, max_pools)
-    # Empty rows initialize only their dummy page, even at 1M graph capacity.
+    # Empty HOLD rows initialize one dummy page, even with a 1M graph capacity.
     pages.fill_(127)
     lengths.zero_()
     graph.replay()
-    check(pages, block_table)
-    untouched = torch.ones(pages.shape[0], dtype=torch.bool, device=pages.device)
-    untouched[block_table[:, 0].long()] = False
-    assert (pages[untouched] == 127).all()
+    page_bytes = pages.view(3, -1, 64 * 132)
+    assert not page_bytes[:, 0, : 64 * 128].any()
+    assert (page_bytes[:, 0, 64 * 128 :].contiguous().view(torch.float32) == 1).all()
+    assert (page_bytes[:, 1:] == 127).all()
     for counts in ([513, 65, max_pools], [1, 0, 3]):
         lengths.copy_(torch.tensor(counts, device="cuda", dtype=torch.int32))
         req_idx.copy_(torch.tensor([1, 3, 0], device="cuda", dtype=torch.int32))
@@ -588,18 +587,26 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     storage = torch.zeros(tokens + 9, 1, 584, device="cuda", dtype=torch.bfloat16)
     tail = torch.zeros(2, 4, 256, device="cuda", dtype=torch.bfloat16)
     ragged = torch.randperm(tokens + 9, device="cuda", dtype=torch.int32)[:tokens]
-    manager = SimpleNamespace(
-        get_indexer_k_buffer=lambda _: storage.view(torch.uint8)[:, :, -132:],
+    full_att_state = SimpleNamespace(
+        get_layer_view=lambda logical_layer_id: SimpleNamespace(indexer_k=storage.view(torch.uint8)[:, :, -132:]),
     )
     infer = SimpleNamespace(
-        mem_manager=manager,
+        att_state_role="main",
+        att_state_manager=SimpleNamespace(
+            get_state=lambda state_type_filter, **kwargs: (
+                SimpleNamespace(get_layer_view=lambda logical_layer_id: tail)
+                if "compressor_indexer" in state_type_filter
+                else full_att_state
+            ),
+        ),
+        is_draft_model=False,
         is_prefill=True,
         b_mtp_index=torch.zeros(1, device="cuda", dtype=torch.int32),
         mem_index=ragged,
         # A large capacity also exercises query chunking and uninitialized
         # logits beyond each query's actual pool range.
         max_kv_seq_len=max_kv_seq_len,
-        req_manager=SimpleNamespace(req_to_token_indexs=ragged[None], get_indexer_tail_buffer=lambda _: tail),
+        req_manager=SimpleNamespace(req_to_token_indexs=ragged[None]),
         b_req_idx=torch.zeros(1, device="cuda", dtype=torch.int32),
         b_seq_len=torch.tensor([tokens], device="cuda", dtype=torch.int32),
         b1_cu_q_seq_len=torch.tensor([0, tokens], device="cuda", dtype=torch.int32),
@@ -611,7 +618,9 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         ragged_mem_index=ragged,
     )
     indexer = Glm5NextNsaInfer(
-        0, {"index_topk": 2048, "index_n_heads": heads, "index_head_dim": dim, "rms_norm_eps": 1e-5}, 1
+        0,
+        {"index_topk": 2048, "index_n_heads": heads, "index_head_dim": dim, "rms_norm_eps": 1e-5, "index_kpool": 4},
+        1,
     )
     _, full = indexer._get_indices(hidden, hidden, infer, state, weights)
     assert full[-1, 2048].item() == tokens - 1  # Always-selected incomplete tail.
@@ -619,11 +628,11 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     assert full[-1, :2049].unique().numel() == 2049
     assert (full[-1, :2049] < tokens).all()
     # Restore an aligned prefix using only token KV, then decode across the
-    # next pool boundary. The runtime tail starts empty, as on a page restore.
+    # next pool boundary. Stale window data is irrelevant at a complete group boundary.
     prefix = 2060
     storage = storage.clone()
     storage[ragged[prefix:].long()] = 0
-    tail.zero_()
+    tail.fill_(19)
     infer.is_prefill = False
     infer.b1_cu_q_seq_len[1] = 1
     infer.max_q_seq_len = 1
@@ -647,3 +656,13 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     scores = (logits * q_scale * (heads ** -0.5 * dim ** -0.5)).sum(0)
     expected_groups = set(scores.topk(512).indices.tolist())
     assert set((decoded[0, :2048:4] // 4).tolist()) == expected_groups
+
+
+def _reference_kda(q, k, v, gate, beta, a, bias, state):
+    q = q.float() * torch.rsqrt(q.float().square().sum(-1, keepdim=True) + 1e-6) / q.shape[-1] ** 0.5
+    k = k.float() * torch.rsqrt(k.float().square().sum(-1, keepdim=True) + 1e-6)
+    decay = (-5 * torch.sigmoid(a.exp()[:, None] * (gate.float() + bias))).exp()
+    state = state * decay[..., None]
+    delta = (v.float() - torch.einsum("hkv,hk->hv", state, k)) * beta.float().sigmoid()[:, None]
+    state = state + k[..., None] * delta[:, None, :]
+    return torch.einsum("hkv,hk->hv", state, q), state
