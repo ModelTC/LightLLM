@@ -17,6 +17,7 @@ import psutil
 
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.multiprocess import _build_haproxy_config
+from lightllm.utils import start_utils
 from lightllm.utils.start_utils import kill_recursive
 from unit_tests.server.pd_master_test_utils import get_test_haproxy_binary
 
@@ -210,18 +211,44 @@ def test_real_haproxy_propagates_client_disconnect_to_the_request_worker(haproxy
     assert state["stream_disconnected"].wait(timeout=3), "Backend continued producing after the client disconnected"
 
 
-def test_real_haproxy_graceful_shutdown_drains_an_active_sse_response(haproxy_proxy):
+def test_launcher_sigterm_drains_an_active_sse_response(haproxy_proxy, monkeypatch):
     base_url, opener, state = haproxy_proxy
+    registered_handlers = {}
+    shutdown_result = []
+    process_manager = start_utils.SubmoduleManager()
+    monkeypatch.setattr(
+        start_utils.signal,
+        "signal",
+        lambda sig, handler: registered_handlers.__setitem__(sig, handler),
+    )
+    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: None)
+    process_manager.setup_signal_handlers(
+        state["haproxy"],
+        graceful_shutdown_signal=signal.SIGUSR1,
+    )
+
+    def stop_launcher():
+        try:
+            registered_handlers[signal.SIGTERM](signal.SIGTERM, None)
+        except SystemExit as error:
+            shutdown_result.append(error.code)
+
     with opener.open(base_url + "/stream", timeout=3) as response:
         assert response.readline() == b"data: first\n"
         assert response.readline() == b"\n"
-        state["haproxy"].send_signal(signal.SIGUSR1)
+
+        shutdown_thread = threading.Thread(target=stop_launcher)
+        shutdown_thread.start()
         time.sleep(0.1)
         assert state["haproxy"].poll() is None, "HAProxy exited before the active stream completed"
         assert state["runtime"].is_dir()
+
         state["release_stream"].set()
         assert response.read() == b"data: last\n\n"
-    assert state["haproxy"].wait(timeout=5) == 0
+    shutdown_thread.join(timeout=5)
+    assert not shutdown_thread.is_alive()
+    assert shutdown_result == [0]
+    assert state["haproxy"].returncode == 0
 
 
 def _probe_response(opener, base_url, path, method="GET"):

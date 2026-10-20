@@ -9,6 +9,7 @@ import json
 import multiprocessing
 import os
 from pathlib import Path
+import signal
 import subprocess
 import tempfile
 
@@ -76,7 +77,9 @@ def start_multiprocess_pd_master(
         managed_proxy = psutil.Process(proxy_process.pid)
         process_manager.processes.append(managed_proxy)
         process_manager.process_names[managed_proxy] = "pd_master_haproxy"
-        process_manager.setup_signal_handlers(proxy_process)
+        # launcher 收到 SIGTERM/SIGHUP 后，先让 HAProxy 停止接收新连接并等待
+        # 已建立的 SSE 请求结束。HAProxy 退出后，统一进程管理器再清理后端 worker。
+        process_manager.setup_signal_handlers(proxy_process, graceful_shutdown_signal=signal.SIGUSR1)
         if args.health_monitor:
             from lightllm.server.health_monitor.manager import start_health_check_process
 

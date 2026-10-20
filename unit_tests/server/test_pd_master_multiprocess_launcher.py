@@ -1,5 +1,6 @@
 import argparse
 import json
+import signal
 import sys
 import uuid
 from types import SimpleNamespace
@@ -349,6 +350,10 @@ def test_launcher_uses_process_manager_before_releasing_runtime_and_ports(monkey
             haproxy_binary="/bundled/haproxy",
         )
         manager.supervise_processes.assert_called_once_with(proxy)
+        manager.setup_signal_handlers.assert_called_once_with(
+            proxy,
+            graceful_shutdown_signal=signal.SIGUSR1,
+        )
         assert manager.processes == [managed_proxy]
         assert manager.process_names == {managed_proxy: "pd_master_haproxy"}
     else:
