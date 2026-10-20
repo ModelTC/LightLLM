@@ -134,6 +134,32 @@ def test_discovered_multiprocess_master_does_not_query_worker_ports(monkeypatch)
     assert requests == ["http://seed:8000/get_server_info"]
 
 
+def test_single_worker_discovery_keeps_the_reachable_external_endpoint(monkeypatch):
+    requests = []
+
+    def handler(request):
+        requests.append(str(request.url))
+        return httpx.Response(
+            200,
+            json={
+                "run_mode": "pd_master",
+                "httpserver_workers": 1,
+                "pd_master_multi_ports": [8080],
+                "pd_node_id": 100,
+                "port": 8080,
+            },
+        )
+
+    _install_http(monkeypatch, handler)
+    monkeypatch.setattr(
+        pd_loop, "get_shm_port_args", lambda: SimpleNamespace(pd_master_port=28080, config_server_port=9000)
+    )
+    args = SimpleNamespace(config_server_host=None, config_server_port=None, pd_master_ip="master")
+
+    assert asyncio.run(pd_loop._get_pd_master_objs(args)) == {100: PD_Master_Obj(100, "master:28080")}
+    assert requests == ["http://master:28080/get_server_info"]
+
+
 def test_config_server_discovery_keeps_the_original_registry_protocol_and_uses_http(monkeypatch):
     requests = []
     registered = {100: PD_Master_Obj(100, "master:8100"), 101: PD_Master_Obj(101, "master:8101")}

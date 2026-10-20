@@ -227,11 +227,10 @@ async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_O
 
         worker_count = info["httpserver_workers"]
         if worker_count == 1:
-            # 单 worker 模式：使用实际节点 ID，直接连接指定的 master 地址。
-            worker_port = info["port"]
+            # 单 worker 可能通过端口映射或代理对外暴露。保留已经成功访问的
+            # endpoint，只从响应中读取节点 ID，避免改连进程内部监听端口。
             node_id = info["pd_node_id"]
-            worker_endpoint = format_host_port(args.pd_master_ip, worker_port)
-            return {node_id: PD_Master_Obj(node_id=node_id, host_ip_port=worker_endpoint)}
+            return {node_id: PD_Master_Obj(node_id=node_id, host_ip_port=endpoint)}
 
         if worker_count > 1:
             # 本机多 worker 使用监听端口作为节点 ID，可由端口列表直接构建连接表。
