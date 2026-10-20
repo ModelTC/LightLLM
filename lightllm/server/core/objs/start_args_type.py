@@ -103,6 +103,7 @@ class StartArgs:
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
+    disable_chunked_mm_input: bool = field(default=False)
     # "auto" resolves to hrrn for Prefill nodes and default otherwise.
     prefill_queue_strategy: str = field(
         default="auto", metadata={"choices": ["auto", "default", "promote_shortest", "hrrn"]}

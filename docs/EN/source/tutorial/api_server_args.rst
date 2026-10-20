@@ -363,6 +363,15 @@ Scheduling Parameters
 
     Whether to disable chunked prefill
 
+.. option:: --disable_chunked_mm_input
+
+    Enabled automatically for Neo, DeepSeek-V4 and Gemma4; opt-in for other models.
+    Process each image/audio token block within one prefill step,
+    while text can still be chunked. A complete block may exceed ``chunked_prefill_size``
+    but must fit ``batch_max_tokens``. With vision enabled, startup requires
+    ``batch_max_tokens >= max_image_token_count``.
+    GPU, CPU and disk cache restore points stay outside multimodal blocks.
+
 .. option:: --prefill_queue_strategy
 
     Prefill ordering policy in the inference backend before resource allocation. Defaults

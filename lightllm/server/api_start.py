@@ -24,6 +24,7 @@ from lightllm.utils.config_utils import (
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
+    get_default_disable_chunked_mm_input,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -285,6 +286,16 @@ def _launch_subprocesses(args: StartArgs):
         assert args.batch_max_tokens >= args.chunked_prefill_size, (
             "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
+        )
+
+    args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
+        args.model_dir
+    )
+    if args.disable_chunked_mm_input and not args.disable_vision:
+        assert args.batch_max_tokens >= args.max_image_token_count, (
+            "--disable_chunked_mm_input requires batch_max_tokens >= max_image_token_count, "
+            f"but got {args.batch_max_tokens}, {args.max_image_token_count}. "
+            "Increase --batch_max_tokens or reduce --max_image_token_count."
         )
 
     # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。

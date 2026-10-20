@@ -386,6 +386,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument(
+        "--disable_chunked_mm_input",
+        action="store_true",
+        help="Keep image/audio blocks in one prefill step. Enabled by default for Neo, DeepSeek-V4 and Gemma4.",
+    )
+    parser.add_argument(
         "--prefill_queue_strategy",
         choices=("auto", "default", "promote_shortest", "hrrn"),
         default="auto",
