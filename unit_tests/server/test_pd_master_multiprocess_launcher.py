@@ -171,9 +171,7 @@ def test_haproxy_config_streams_without_request_replay():
     ("host", "expected_address"),
     [("0.0.0.0", "0.0.0.0:8100"), ("::", "[::]:8100")],
 )
-def test_haproxy_worker_addresses_follow_the_configured_listen_host(
-    host, expected_address
-):
+def test_haproxy_worker_addresses_follow_the_configured_listen_host(host, expected_address):
     config = multiprocess._build_haproxy_config(_args(host=host), _worker_ports())
 
     assert f"server worker_0 {expected_address}" in config
@@ -368,5 +366,3 @@ def test_launcher_uses_process_manager_before_releasing_runtime_and_ports(monkey
     ports.close.assert_called_once_with()
     if failure_stage != "backend":
         assert config_check.call_args.args[0][0:3] == ["/bundled/haproxy", "-c", "-f"]
-
-

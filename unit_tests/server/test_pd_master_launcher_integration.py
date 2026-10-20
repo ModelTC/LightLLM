@@ -31,9 +31,7 @@ def test_real_launcher_discovers_workers_before_pd_readiness_and_fails_as_a_grou
             assert info["port"] == public_port
             assert info["pd_node_id"] == endpoint["node_id"]
             assert info["httpserver_workers"] == len(master.workers)
-            assert set(info["pd_master_multi_ports"]) == {
-                worker["port"] for worker in master.workers
-            }
+            assert set(info["pd_master_multi_ports"]) == {worker["port"] for worker in master.workers}
             assert info["config_server_host"] is None
             assert info["config_server_port"] is None
             assert "pd_master_ipc_name" not in info

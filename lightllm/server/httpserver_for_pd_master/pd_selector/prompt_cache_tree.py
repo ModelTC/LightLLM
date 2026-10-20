@@ -128,9 +128,7 @@ class PromptCacheTree:
             child = None
             self._evict_if_needed()
 
-    def prefix_match_sampled(
-        self, key: str, input_char_count: int, sample_stride: int
-    ) -> PromptCacheMatchResult:
+    def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
         """匹配已经按 sample_stride 抽稀的 prompt key。
 
         Args:
@@ -168,16 +166,12 @@ class PromptCacheTree:
             if matched <= 0:
                 matched_char_count = 0
             else:
-                matched_char_count = min(
-                    (matched - 1) * sample_stride + 1, input_char_count
-                )
+                matched_char_count = min((matched - 1) * sample_stride + 1, input_char_count)
             return PromptCacheMatchResult(
                 prefill_node=prefill_node,
                 matched_char_count=matched_char_count,
                 input_char_count=input_char_count,
-                last_insert_time=node.last_insert_time
-                if node is not self.root
-                else None,
+                last_insert_time=node.last_insert_time if node is not self.root else None,
             )
 
     def evict_lru_nodes(self) -> int:

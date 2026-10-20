@@ -42,9 +42,7 @@ class _LocalIDGenerator:
 
 
 def _client(ipc_name):
-    socket_address = get_abstract_unix_socket_address(
-        "req_id_generator", ipc_name
-    )
+    socket_address = get_abstract_unix_socket_address("req_id_generator", ipc_name)
     with patch.object(
         req_id_generator_client,
         "get_req_id_generator_socket_address",
@@ -78,9 +76,7 @@ def test_req_id_generator_rpc_performance():
     state = StandaloneReqIDGeneratorState()
     server = ThreadedServer(
         state,
-        socket_path=get_abstract_unix_socket_address(
-            "req_id_generator", ipc_name
-        ),
+        socket_path=get_abstract_unix_socket_address("req_id_generator", ipc_name),
         protocol_config={"allow_pickle": True},
     )
     server_thread = threading.Thread(target=server.start, daemon=True)
@@ -92,21 +88,14 @@ def test_req_id_generator_rpc_performance():
 
         local_generator = _LocalIDGenerator()
         _, _, local_elapsed_ns = _measure_calls(local_generator.generate_id, iterations)
-        request_ids, rpc_latencies_ns, rpc_elapsed_ns = _measure_calls(
-            clients[0].generate_id, iterations
-        )
+        request_ids, rpc_latencies_ns, rpc_elapsed_ns = _measure_calls(clients[0].generate_id, iterations)
 
         calls_per_client = iterations // client_count
         concurrent_call_count = calls_per_client * client_count
         concurrent_start_ns = time.perf_counter_ns()
         with ThreadPoolExecutor(max_workers=client_count) as executor:
-            futures = [
-                executor.submit(_measure_calls, client.generate_id, calls_per_client)
-                for client in clients
-            ]
-            concurrent_ids = [
-                request_id for future in futures for request_id in future.result()[0]
-            ]
+            futures = [executor.submit(_measure_calls, client.generate_id, calls_per_client) for client in clients]
+            concurrent_ids = [request_id for future in futures for request_id in future.result()[0]]
         concurrent_elapsed_ns = time.perf_counter_ns() - concurrent_start_ns
 
         assert len(set(request_ids)) == len(request_ids)
@@ -117,9 +106,7 @@ def test_req_id_generator_rpc_performance():
         local_ns_per_call = local_elapsed_ns / iterations
         rpc_ns_per_call = rpc_elapsed_ns / iterations
         rpc_calls_per_second = iterations * 1e9 / rpc_elapsed_ns
-        concurrent_calls_per_second = (
-            concurrent_call_count * 1e9 / concurrent_elapsed_ns
-        )
+        concurrent_calls_per_second = concurrent_call_count * 1e9 / concurrent_elapsed_ns
         rpc_latency_us = sorted(rpc_latencies_ns)
         rpc_p50_us = statistics.median(rpc_latency_us) / 1e3
         rpc_p95_us = rpc_latency_us[int(len(rpc_latency_us) * 0.95)] / 1e3
@@ -133,9 +120,7 @@ def test_req_id_generator_rpc_performance():
             f"range_size={CLIENT_REQUEST_ID_RANGE_SIZE}"
         )
 
-        minimum_calls_per_second = float(
-            os.getenv("LIGHTLLM_REQ_ID_MIN_CALLS_PER_SECOND", "0")
-        )
+        minimum_calls_per_second = float(os.getenv("LIGHTLLM_REQ_ID_MIN_CALLS_PER_SECOND", "0"))
         if minimum_calls_per_second:
             assert rpc_calls_per_second >= minimum_calls_per_second
     finally:

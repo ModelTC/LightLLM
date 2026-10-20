@@ -56,12 +56,8 @@ def test_local_client_owns_an_independent_tree(monkeypatch):
 
     async def run():
         await first.insert_sampled(_key(prompt), "prefill", SAMPLE_STRIDE)
-        match = await first.prefix_match_sampled(
-            _key(prompt), len(prompt), SAMPLE_STRIDE
-        )
-        missing = await second.prefix_match_sampled(
-            _key(prompt), len(prompt), SAMPLE_STRIDE
-        )
+        match = await first.prefix_match_sampled(_key(prompt), len(prompt), SAMPLE_STRIDE)
+        missing = await second.prefix_match_sampled(_key(prompt), len(prompt), SAMPLE_STRIDE)
         assert match.prefill_node == "prefill"
         assert missing.prefill_node is None
 
@@ -77,19 +73,12 @@ def test_remote_client_uses_symmetric_sampled_operations(monkeypatch):
     tree._insert_sampled = Mock()
 
     async def run():
-        assert (
-            await tree.prefix_match_sampled(_key(prompt), len(prompt), SAMPLE_STRIDE)
-            is result
-        )
+        assert await tree.prefix_match_sampled(_key(prompt), len(prompt), SAMPLE_STRIDE) is result
         await tree.insert_sampled(_key(prompt), "prefill", SAMPLE_STRIDE)
 
     asyncio.run(run())
-    tree._prefix_match_sampled.assert_called_once_with(
-        _key(prompt), len(prompt), SAMPLE_STRIDE
-    )
-    tree._insert_sampled.assert_called_once_with(
-        _key(prompt), "prefill", SAMPLE_STRIDE
-    )
+    tree._prefix_match_sampled.assert_called_once_with(_key(prompt), len(prompt), SAMPLE_STRIDE)
+    tree._insert_sampled.assert_called_once_with(_key(prompt), "prefill", SAMPLE_STRIDE)
 
 
 def test_tree_state_does_not_create_node_statistics():
@@ -132,9 +121,7 @@ def test_real_rpc_clients_share_prompt_cache(rpc_tree_cluster):
 
     async def run():
         await clients[0].insert_sampled(_key(prompt), "prefill", SAMPLE_STRIDE)
-        match = await clients[1].prefix_match_sampled(
-            _key(prompt), len(prompt), SAMPLE_STRIDE
-        )
+        match = await clients[1].prefix_match_sampled(_key(prompt), len(prompt), SAMPLE_STRIDE)
         assert match.prefill_node == "prefill"
         assert match.matched_char_count > len(prompt) // 2
         transport = clients[0].connection._channel.stream.sock
@@ -150,17 +137,13 @@ def test_concurrent_prompts_remain_separate(rpc_tree_cluster):
     async def run():
         await asyncio.gather(
             *(
-                clients[index].insert_sampled(
-                    _key(prompt), f"prefill-{index}", SAMPLE_STRIDE
-                )
+                clients[index].insert_sampled(_key(prompt), f"prefill-{index}", SAMPLE_STRIDE)
                 for index, prompt in enumerate(prompts)
             )
         )
         matches = await asyncio.gather(
             *(
-                clients[index + 2].prefix_match_sampled(
-                    _key(prompt), len(prompt), SAMPLE_STRIDE
-                )
+                clients[index + 2].prefix_match_sampled(_key(prompt), len(prompt), SAMPLE_STRIDE)
                 for index, prompt in enumerate(prompts)
             )
         )
@@ -200,9 +183,7 @@ def test_tree_and_statistics_servers_use_independent_sockets_and_state():
         tree_thread.join(timeout=5)
         assert not tree_thread.is_alive()
         assert stats_thread.is_alive()
-        assert stats_state.get_dispatched_info(["prefill"]) == {
-            "prefill": (0, 0)
-        }
+        assert stats_state.get_dispatched_info(["prefill"]) == {"prefill": (0, 0)}
     finally:
         if tree.connection is not None:
             tree.connection.close()

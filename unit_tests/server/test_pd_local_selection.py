@@ -47,9 +47,7 @@ COUNTER_METHODS = ("add_dispatched_info", "sub_dispatched_info")
 def local_pd_master_mode(monkeypatch):
     start_args = SimpleNamespace(httpserver_workers=1)
     monkeypatch.setattr(pd_node_stats_client, "get_env_start_args", lambda: start_args)
-    monkeypatch.setattr(
-        prompt_cache_tree_client, "get_env_start_args", lambda: start_args
-    )
+    monkeypatch.setattr(prompt_cache_tree_client, "get_env_start_args", lambda: start_args)
 
 
 def _node(
@@ -94,38 +92,24 @@ def _assert_backend_client(selector):
 def _set_nodes(manager, prefill_nodes, decode_nodes):
     manager.pd_manager.prefill_nodes = prefill_nodes
     manager.pd_manager.decode_nodes = decode_nodes
-    manager.pd_manager.url_to_pd_nodes = {
-        node.connection_key: node for node in [*prefill_nodes, *decode_nodes]
-    }
+    manager.pd_manager.url_to_pd_nodes = {node.connection_key: node for node in [*prefill_nodes, *decode_nodes]}
     manager.pd_manager.selector.update_nodes(prefill_nodes, decode_nodes)
 
 
-def _manager(
-    strategy="cache_aware", *, prefill_nodes=None, decode_nodes=None, mock_prefix=True
-):
+def _manager(strategy="cache_aware", *, prefill_nodes=None, decode_nodes=None, mock_prefix=True):
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = SimpleNamespace(
-        select_p_d_node_strategy=strategy, pd_master_mode="elastic"
-    )
+    manager.args = SimpleNamespace(select_p_d_node_strategy=strategy, pd_master_mode="elastic")
     manager.pd_manager = PDManager(manager.args)
     _set_nodes(
         manager,
-        prefill_nodes
-        if prefill_nodes is not None
-        else [_node(100, "p1:8000"), _node(101, "p2:8000")],
-        decode_nodes
-        if decode_nodes is not None
-        else [_node(200, "d:8000", mode="decode")],
+        prefill_nodes if prefill_nodes is not None else [_node(100, "p1:8000"), _node(101, "p2:8000")],
+        decode_nodes if decode_nodes is not None else [_node(200, "d:8000", mode="decode")],
     )
     if mock_prefix:
         selector = manager.pd_manager.selector
-        selector.pd_node_stats.update_dispatched_info = AsyncMock(
-            wraps=selector.pd_node_stats.update_dispatched_info
-        )
+        selector.pd_node_stats.update_dispatched_info = AsyncMock(wraps=selector.pd_node_stats.update_dispatched_info)
         if strategy == "cache_aware":
-            selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(
-                return_value=_match()
-            )
+            selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(return_value=_match())
     manager.pd_node_stats = manager.pd_manager.selector.pd_node_stats
     return manager
 
@@ -138,9 +122,7 @@ def test_shared_tree_is_used_for_selection_and_cache_metadata(monkeypatch, busy)
     decode = _node(200, "d:8000", mode="decode")
     selector.update_nodes([other, cached], [decode])
     _assert_backend_client(selector)
-    selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(
-        return_value=_match(cached)
-    )
+    selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(return_value=_match(cached))
 
     p_node, d_node, extra = asyncio.run(selector.select_p_d_node(PROMPT, None, None))
 
@@ -154,9 +136,7 @@ def test_cache_metadata_comes_from_the_selection_query(monkeypatch):
     cached, other = _node(100, "p2:8000"), _node(101, "p1:8000")
     selector.update_nodes([other, cached], [_node(200, "d:8000", mode="decode")])
     _assert_backend_client(selector)
-    selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(
-        return_value=_match(cached)
-    )
+    selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(return_value=_match(cached))
 
     selected, _, extra = asyncio.run(selector.select_p_d_node(PROMPT, None, None))
 
@@ -170,18 +150,14 @@ def test_cache_metadata_comes_from_the_selection_query(monkeypatch):
 
 
 @pytest.mark.parametrize("restarted", [False, True])
-def test_cache_hint_survives_endpoint_reconnect_or_process_restart(
-    monkeypatch, restarted
-):
+def test_cache_hint_survives_endpoint_reconnect_or_process_restart(monkeypatch, restarted):
     original = _node(100, "p2:8000", connection_id="old-socket")
     current = _node(300 if restarted else 100, "p2:8000", connection_id="new-socket")
     other = _node(101, "p1:8000")
     selector = LoadBalancedCacheAwareSelector(None)
     selector.update_nodes([other, current], [_node(200, "d:8000", mode="decode")])
     _assert_backend_client(selector)
-    selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(
-        return_value=_match(original)
-    )
+    selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(return_value=_match(original))
 
     selected, _, extra = asyncio.run(selector.select_p_d_node(PROMPT, None, None))
 
@@ -191,9 +167,7 @@ def test_cache_hint_survives_endpoint_reconnect_or_process_restart(
 
 
 @pytest.mark.parametrize("match_kind", ["miss", "remote_worker"])
-def test_shared_match_never_falls_back_to_local_tree_or_remote_candidates(
-    monkeypatch, match_kind
-):
+def test_shared_match_never_falls_back_to_local_tree_or_remote_candidates(monkeypatch, match_kind):
     busy = _node(100, "p1:8000", chars=2000, requests=1)
     available = _node(101, "p2:8000", chars=100, requests=1)
     selector = LoadBalancedCacheAwareSelector(None)
@@ -206,12 +180,8 @@ def test_shared_match_never_falls_back_to_local_tree_or_remote_candidates(
         )
     )
     _assert_backend_client(selector)
-    shared_match = (
-        _match() if match_kind == "miss" else _match(_node(999, "remote:8000"))
-    )
-    selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(
-        return_value=shared_match
-    )
+    shared_match = _match() if match_kind == "miss" else _match(_node(999, "remote:8000"))
+    selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(return_value=shared_match)
 
     selected, _, extra = asyncio.run(selector.select_p_d_node(PROMPT, None, None))
 
@@ -275,18 +245,14 @@ def test_round_robin_progress_is_local_to_each_worker():
 
 
 @pytest.mark.parametrize("selector_type", [RandomSelector, AdaptiveLoadSelector])
-def test_random_and_adaptive_keep_their_local_load_preferences(
-    monkeypatch, selector_type
-):
+def test_random_and_adaptive_keep_their_local_load_preferences(monkeypatch, selector_type):
     monkeypatch.setattr(pd_selector, "random", random.Random(23))
     busy, available = _node(100, "p1:8000", load=1.0), _node(101, "p2:8000", load=0.0)
     selector = selector_type(None)
     selector.update_nodes([busy, available], [_node(200, "d:8000", mode="decode")])
 
     async def select_many():
-        return [
-            (await selector.select_p_d_node(PROMPT, None, None))[0] for _ in range(100)
-        ]
+        return [(await selector.select_p_d_node(PROMPT, None, None))[0] for _ in range(100)]
 
     selections = asyncio.run(select_many())
 
@@ -298,19 +264,13 @@ def test_random_and_adaptive_keep_their_local_load_preferences(
         assert 20 < available_count < 80
 
 
-@pytest.mark.parametrize(
-    "strategy", ["random", "round_robin", "adaptive_load", "cache_aware"]
-)
-def test_only_cache_aware_policy_queries_prefix_data_and_all_policies_choose_local_nodes(
-    monkeypatch, strategy
-):
+@pytest.mark.parametrize("strategy", ["random", "round_robin", "adaptive_load", "cache_aware"])
+def test_only_cache_aware_policy_queries_prefix_data_and_all_policies_choose_local_nodes(monkeypatch, strategy):
     manager = _manager(strategy)
     local_nodes = manager.pd_manager.prefill_nodes
     if strategy == "cache_aware":
         _assert_backend_client(manager.pd_manager.selector)
-        manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.return_value = _match(
-            local_nodes[-1]
-        )
+        manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.return_value = _match(local_nodes[-1])
 
     selected, decode, _ = asyncio.run(manager.select_p_d_node(PROMPT, None, None))
 
@@ -323,9 +283,7 @@ def test_only_cache_aware_policy_queries_prefix_data_and_all_policies_choose_loc
             len(PROMPT),
             manager.pd_manager.selector.policy.config.sample_stride,
         )
-        manager.pd_manager.selector.pd_node_stats.update_dispatched_info.assert_awaited_once_with(
-            p_nodes=local_nodes
-        )
+        manager.pd_manager.selector.pd_node_stats.update_dispatched_info.assert_awaited_once_with(p_nodes=local_nodes)
     else:
         manager.pd_manager.selector.pd_node_stats.update_dispatched_info.assert_not_awaited()
 
@@ -342,9 +300,7 @@ def test_manager_uses_shared_node_load_and_local_balancing_threshold_for_selecti
         cached.dispatched_prompt_chars, cached.dispatched_req_num = 500, 1
         available.dispatched_prompt_chars, available.dispatched_req_num = 100, 1
 
-    manager.pd_manager.selector.pd_node_stats.update_dispatched_info.side_effect = (
-        update_dispatched_info
-    )
+    manager.pd_manager.selector.pd_node_stats.update_dispatched_info.side_effect = update_dispatched_info
     manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.return_value = _match(cached)
 
     manager.pd_manager.selector.policy.config.balance_rel_threshold = 1.1
@@ -359,14 +315,10 @@ def test_manager_uses_shared_node_load_and_local_balancing_threshold_for_selecti
 
 
 @pytest.mark.parametrize("replacement_load", [(0, 0), (999, 9)])
-def test_query_completion_uses_current_connections_without_overwriting_their_load(
-    monkeypatch, replacement_load
-):
+def test_query_completion_uses_current_connections_without_overwriting_their_load(monkeypatch, replacement_load):
     async def run():
         old_p, old_d = _node(100, "p:8000"), _node(200, "d:8000", mode="decode")
-        new_p = _node(
-            300, "p:8000", chars=replacement_load[0], requests=replacement_load[1]
-        )
+        new_p = _node(300, "p:8000", chars=replacement_load[0], requests=replacement_load[1])
         new_d = _node(400, "d:8000", mode="decode")
         manager = _manager(prefill_nodes=[old_p], decode_nodes=[old_d])
         _assert_backend_client(manager.pd_manager.selector)
@@ -380,9 +332,7 @@ def test_query_completion_uses_current_connections_without_overwriting_their_loa
                 await complete.wait()
                 old_p.dispatched_prompt_chars, old_p.dispatched_req_num = 800, 2
 
-        manager.pd_manager.selector.pd_node_stats.update_dispatched_info.side_effect = (
-            update_dispatched_info
-        )
+        manager.pd_manager.selector.pd_node_stats.update_dispatched_info.side_effect = update_dispatched_info
         manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.return_value = _match(old_p)
         task = asyncio.create_task(manager.select_p_d_node(PROMPT, None, None))
         await asyncio.wait_for(started.wait(), timeout=2)
@@ -416,11 +366,7 @@ def test_selection_query_uses_current_decode_and_rejects_a_replaced_prefill(repl
             manager.pd_manager.decode_nodes,
         )
         selected_prefill = prefill[0]
-        replacement = (
-            _node(300, "p1:8000")
-            if replaced == "prefill"
-            else _node(400, "d:8000", mode="decode")
-        )
+        replacement = _node(300, "p1:8000") if replaced == "prefill" else _node(400, "d:8000", mode="decode")
         started, complete = asyncio.Event(), asyncio.Event()
 
         async def query(*_args):
@@ -450,13 +396,9 @@ def test_selection_query_uses_current_decode_and_rejects_a_replaced_prefill(repl
 
 @pytest.fixture(params=["local", "rpyc"])
 def backend(request, monkeypatch):
-    start_args = SimpleNamespace(
-        httpserver_workers=2 if request.param == "rpyc" else 1
-    )
+    start_args = SimpleNamespace(httpserver_workers=2 if request.param == "rpyc" else 1)
     monkeypatch.setattr(pd_node_stats_client, "get_env_start_args", lambda: start_args)
-    monkeypatch.setattr(
-        prompt_cache_tree_client, "get_env_start_args", lambda: start_args
-    )
+    monkeypatch.setattr(prompt_cache_tree_client, "get_env_start_args", lambda: start_args)
     monkeypatch.setattr(
         pd_node_stats_client,
         "get_pd_master_unix_socket_address",
@@ -513,14 +455,10 @@ def _generator_manager(backend, strategy="round_robin"):
 def _pending(state, node):
     if state.stats is None:
         return node.dispatched_prompt_chars, node.dispatched_req_num
-    return state.stats.get_dispatched_info([node.connection_key])[
-        node.connection_key
-    ]
+    return state.stats.get_dispatched_info([node.connection_key])[node.connection_key]
 
 
-def test_backend_tree_queries_preserve_cache_hint_for_restarted_endpoint(
-    monkeypatch, backend
-):
+def test_backend_tree_queries_preserve_cache_hint_for_restarted_endpoint(monkeypatch, backend):
     async def run():
         manager, state = _generator_manager(backend, "cache_aware")
         cached, other = _node(100, "p2:8000"), _node(101, "p1:8000")
@@ -534,9 +472,7 @@ def test_backend_tree_queries_preserve_cache_hint_for_restarted_endpoint(
         )
         injected_tree = selector.policy.prompt_cache_tree
         tree = (
-            selector.policy.prompt_cache_tree.prompt_cache_tree
-            if state.tree is None
-            else state.tree.prompt_cache_tree
+            selector.policy.prompt_cache_tree.prompt_cache_tree if state.tree is None else state.tree.prompt_cache_tree
         )
         prefix_match = Mock(wraps=tree.prefix_match_sampled)
         monkeypatch.setattr(tree, "prefix_match_sampled", prefix_match)
@@ -591,10 +527,7 @@ def test_cache_feedback_and_dynamic_thresholds_stay_private_to_each_worker(backe
     )
     assert first_policy.config.balance_rel_threshold == pytest.approx(1.55)
     assert second_policy.config.balance_rel_threshold == pytest.approx(1.45)
-    assert (
-        first_policy.balance_rel_threshold_controller
-        is not second_policy.balance_rel_threshold_controller
-    )
+    assert first_policy.balance_rel_threshold_controller is not second_policy.balance_rel_threshold_controller
     if stats_calls is not None:
         stats_calls.assert_not_called()
         tree_calls.assert_not_called()
@@ -619,28 +552,17 @@ def _params(max_new_tokens=3):
 
 
 async def _consume(manager, params):
-    return [
-        item
-        async for item in manager._generate_one_attempt(
-            "prompt", params, None, None, 0, 80, 2
-        )
-    ]
+    return [item async for item in manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2)]
 
 
-@pytest.mark.parametrize(
-    "strategy", ["random", "round_robin", "adaptive_load", "cache_aware"]
-)
+@pytest.mark.parametrize("strategy", ["random", "round_robin", "adaptive_load", "cache_aware"])
 @pytest.mark.parametrize("needs_prefill", [True, False])
-def test_segment_counters_clear_at_first_token_and_restart_for_continuation(
-    backend, strategy, needs_prefill
-):
+def test_segment_counters_clear_at_first_token_and_restart_for_continuation(backend, strategy, needs_prefill):
     manager, state = _generator_manager(backend, strategy)
     prefill = manager.pd_manager.prefill_nodes[0]
     segments = []
 
-    async def generate_segment(
-        p_node, d_node, start_time, prompt, params, multimodal, request
-    ):
+    async def generate_segment(p_node, d_node, start_time, prompt, params, multimodal, request):
         segments.append(prompt)
         assert _pending(state, p_node) == (len(prompt), 1)
         yield (
@@ -654,11 +576,7 @@ def test_segment_counters_clear_at_first_token_and_restart_for_continuation(
             FinishStatus(),
         )
         assert _pending(state, p_node) == (0, 0)
-        finish = (
-            FinishStatus.FINISHED_PD_DECODE_CAPACITY
-            if len(segments) == 1
-            else FinishStatus.FINISHED_STOP
-        )
+        finish = FinishStatus.FINISHED_PD_DECODE_CAPACITY if len(segments) == 1 else FinishStatus.FINISHED_STOP
         yield params.group_request_id, "", {"prompt_tokens": 100}, FinishStatus(finish)
 
     manager._wait_to_token_package = generate_segment
@@ -680,9 +598,7 @@ def test_segment_counters_clear_at_first_token_and_restart_for_continuation(
     selector = manager.pd_manager.selector
     selector.record_prompt_cache_hit_rate.assert_called_once_with(0.2)
     if strategy == "cache_aware":
-        assert selector.policy.balance_rel_threshold_controller._cache_hit_rates == [
-            0.2
-        ]
+        assert selector.policy.balance_rel_threshold_controller._cache_hit_rates == [0.2]
         if needs_prefill:
             sample_stride = manager.pd_manager.selector.policy.config.sample_stride
             selector.policy.prompt_cache_tree.insert_sampled.assert_awaited_once_with(
@@ -696,9 +612,7 @@ def test_error_output_records_hit_rate_without_inserting_cache(backend):
     manager, state = _generator_manager(backend, "cache_aware")
     prefill = manager.pd_manager.prefill_nodes[0]
 
-    async def generate_segment(
-        p_node, d_node, start_time, prompt, params, multimodal, request
-    ):
+    async def generate_segment(p_node, d_node, start_time, prompt, params, multimodal, request):
         yield (
             params.group_request_id,
             "",
@@ -738,9 +652,7 @@ def test_error_before_first_token_clears_segment_counters(backend):
     assert not manager.active_req_ids
     manager.abort.assert_awaited_once()
     manager.remove_req.assert_awaited_once()
-    manager.pd_node_stats.sub_dispatched_info.assert_awaited_once_with(
-        p_node=prefill, chars=len("prompt"), req_num=1
-    )
+    manager.pd_node_stats.sub_dispatched_info.assert_awaited_once_with(p_node=prefill, chars=len("prompt"), req_num=1)
 
 
 @pytest.mark.parametrize("failure", ["before_segment", "zero_output_budget"])
@@ -770,9 +682,7 @@ def test_no_segment_means_no_counter_updates(monkeypatch, backend, failure):
 
 
 @pytest.mark.parametrize("replaced", ["prefill", "decode"])
-def test_connection_closed_during_counter_update_fails_at_dispatch_and_clears_load(
-    backend, replaced
-):
+def test_connection_closed_during_counter_update_fails_at_dispatch_and_clears_load(backend, replaced):
     async def run():
         manager, state = _generator_manager(backend)
         prefill, decode = (

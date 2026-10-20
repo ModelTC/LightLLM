@@ -52,12 +52,8 @@ def _remote_client(ipc_name="test-pd-node-stats"):
 def test_ipc_address_uses_the_launcher_ipc_name(monkeypatch):
     monkeypatch.setattr(pd_node_stats_client, "unix_connect", Mock())
     client = _remote_client("deployment-a")
-    assert client.socket_path == get_abstract_unix_socket_address(
-        "pd_node_stats", "deployment-a"
-    )
-    assert client.socket_path != get_abstract_unix_socket_address(
-        "pd_node_stats", "deployment-b"
-    )
+    assert client.socket_path == get_abstract_unix_socket_address("pd_node_stats", "deployment-a")
+    assert client.socket_path != get_abstract_unix_socket_address("pd_node_stats", "deployment-b")
 
 
 def test_local_client_updates_node_objects_without_rpc(monkeypatch):
@@ -156,13 +152,9 @@ def test_cancelled_update_finishes_before_following_update(monkeypatch):
     client._sub_dispatched_info = sub_dispatched_info
 
     async def run():
-        first = asyncio.create_task(
-            client.add_dispatched_info(p_node=node, chars=10, req_num=1)
-        )
+        first = asyncio.create_task(client.add_dispatched_info(p_node=node, chars=10, req_num=1))
         assert await asyncio.to_thread(started.wait, 5)
-        second = asyncio.create_task(
-            client.sub_dispatched_info(p_node=node, chars=10, req_num=1)
-        )
+        second = asyncio.create_task(client.sub_dispatched_info(p_node=node, chars=10, req_num=1))
         first.cancel()
         await asyncio.sleep(0)
         assert not first.done() and not second.done()
@@ -262,9 +254,7 @@ def test_real_rpc_combined_updates_are_atomic(rpc_stats_cluster):
     async def run():
         await asyncio.gather(
             *(
-                clients[index % len(clients)].add_dispatched_info(
-                    p_node=node, chars=1, req_num=1
-                )
+                clients[index % len(clients)].add_dispatched_info(p_node=node, chars=1, req_num=1)
                 for index in range(200)
             )
         )

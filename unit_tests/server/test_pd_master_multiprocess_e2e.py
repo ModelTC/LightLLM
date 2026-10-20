@@ -428,9 +428,7 @@ async def _run_high_load(master, request_count, concurrency):
         assert len(peers.requests) == request_count
         request_ids = [request_id for _, request_id in peers.requests]
         assert len(set(request_ids)) == request_count
-        assert {owner for owner, _ in peers.requests} == {
-            worker["node_id"] for worker in master.workers
-        }
+        assert {owner for owner, _ in peers.requests} == {worker["node_id"] for worker in master.workers}
 
         sorted_latencies = sorted(latencies)
         return {
@@ -450,23 +448,15 @@ async def _run_high_load(master, request_count, concurrency):
 )
 def test_multiprocess_pd_master_high_load_speedup(tmp_path):
     """Compare the complete HTTP -> PD master -> fake P/D protocol path."""
-    available_cpus = (
-        len(os.sched_getaffinity(0))
-        if hasattr(os, "sched_getaffinity")
-        else (os.cpu_count() or 1)
-    )
+    available_cpus = len(os.sched_getaffinity(0)) if hasattr(os, "sched_getaffinity") else (os.cpu_count() or 1)
     if available_cpus < 2:
         pytest.skip("the multiprocess benchmark requires at least two available CPUs")
 
     request_count = int(os.getenv("LIGHTLLM_PD_MASTER_PERF_REQUESTS", "2000"))
     concurrency = int(os.getenv("LIGHTLLM_PD_MASTER_PERF_CONCURRENCY", "128"))
-    multi_worker_count = int(
-        os.getenv("LIGHTLLM_PD_MASTER_PERF_WORKERS", str(min(4, available_cpus)))
-    )
+    multi_worker_count = int(os.getenv("LIGHTLLM_PD_MASTER_PERF_WORKERS", str(min(4, available_cpus))))
     if not 2 <= multi_worker_count <= available_cpus:
-        raise ValueError(
-            "LIGHTLLM_PD_MASTER_PERF_WORKERS must be between 2 and the available CPU count"
-        )
+        raise ValueError("LIGHTLLM_PD_MASTER_PERF_WORKERS must be between 2 and the available CPU count")
     results = {}
 
     for worker_count in (1, multi_worker_count):
@@ -481,9 +471,7 @@ def test_multiprocess_pd_master_high_load_speedup(tmp_path):
             ],
         ) as master:
             try:
-                results[worker_count] = asyncio.run(
-                    _run_high_load(master, request_count, concurrency)
-                )
+                results[worker_count] = asyncio.run(_run_high_load(master, request_count, concurrency))
             except BaseException:
                 print(master.log_path.read_text()[-12000:])
                 raise

@@ -92,9 +92,7 @@ def test_get_server_info_serializes_runtime_easydict(monkeypatch):
     "runtime,worker_ports",
     [(False, None), (True, None), (True, [8100, 8101])],
 )
-def test_pd_master_server_info_reports_worker_ports_without_changing_start_args(
-    monkeypatch, runtime, worker_ports
-):
+def test_pd_master_server_info_reports_worker_ports_without_changing_start_args(monkeypatch, runtime, worker_ports):
     from lightllm.server import api_http
 
     worker_count = 1 if worker_ports is None else len(worker_ports)
@@ -573,8 +571,8 @@ def test_multiworker_starts_required_services_in_order(monkeypatch):
     tree_server = Mock(name="tree_server")
     started_services = []
     manager = Mock()
-    manager.start_submodule_processes.side_effect = (
-        lambda *, start_funcs, start_args: started_services.append(start_funcs[0])
+    manager.start_submodule_processes.side_effect = lambda *, start_funcs, start_args: started_services.append(
+        start_funcs[0]
     )
     launch = Mock(return_value="completed")
     publish = Mock()
