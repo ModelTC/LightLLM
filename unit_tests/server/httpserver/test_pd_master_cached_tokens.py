@@ -2,14 +2,18 @@ import asyncio
 import copy
 import pickle
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 import numpy as np
 
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
+from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
+from lightllm.server.pd_io_struct import PD_Client_Obj
+
+pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
 
 def _make_manager(monkeypatch):
@@ -26,6 +30,8 @@ def _make_manager(monkeypatch):
         reasoning_parser=None,
         enable_rl=False,
         enable_return_routed_experts=False,
+        select_p_d_node_strategy="cache_aware",
+        pd_master_mode="elastic",
     )
     mgr.enable_pd_node_self_request_limit = True
     mgr.pd_node_resource_wait_timeout_seconds = -1
@@ -41,7 +47,6 @@ def _make_manager(monkeypatch):
         counter[0] += 1
         return counter[0]
 
-    mgr.id_gen = SimpleNamespace(generate_id=gen_id)
     mgr.metric_client = SimpleNamespace(counter_inc=lambda *a, **k: None, histogram_observe=lambda *a, **k: None)
     mgr.tokens = lambda prompt, *a, **k: 10 + len(prompt) - len("hello")
     mgr.tokenizer = SimpleNamespace(encode=lambda text, _multimodal=None, **kwargs: [1, 2])
@@ -49,18 +54,41 @@ def _make_manager(monkeypatch):
     mgr.recorded_cache_hit_rates = []
     mgr.inserted_prompt_caches = []
     mgr.segment_inputs = []
-    mgr.pd_manager = SimpleNamespace(
-        selector=SimpleNamespace(
-            record_prompt_cache_hit_rate=mgr.recorded_cache_hit_rates.append,
-            insert_prompt_cache=lambda prompt, p_node: mgr.inserted_prompt_caches.append((prompt, p_node)),
-        )
-    )
-    from unittest.mock import AsyncMock
+    mgr.pd_manager = PDManager(mgr.args)
+    mgr.pd_node_stats = mgr.pd_manager.selector.pd_node_stats
+    mgr.id_gen = SimpleNamespace(generate_id=gen_id)
+    original_record_hit_rate = mgr.pd_manager.selector.record_prompt_cache_hit_rate
+    prompt_cache_tree = mgr.pd_manager.selector.policy.prompt_cache_tree
+    original_insert_cache = prompt_cache_tree.insert_sampled
 
-    p_node = SimpleNamespace(
-        dispatched_prompt_chars=0, dispatched_req_num=0, websocket=SimpleNamespace(send_bytes=AsyncMock())
+    def record_hit_rate(hit_rate):
+        mgr.recorded_cache_hit_rates.append(hit_rate)
+        original_record_hit_rate(hit_rate)
+
+    async def insert_cache(prompt_key, connection_key, sample_stride):
+        mgr.inserted_prompt_caches.append((prompt_key, connection_key))
+        await original_insert_cache(prompt_key, connection_key, sample_stride)
+
+    mgr.pd_manager.selector.record_prompt_cache_hit_rate = record_hit_rate
+    prompt_cache_tree.insert_sampled = insert_cache
+    p_node = PD_Client_Obj(
+        node_id=100,
+        client_ip_port="prefill:8000",
+        mode="prefill",
+        start_args={},
+        websocket=SimpleNamespace(send_bytes=AsyncMock()),
     )
-    d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+    d_node = PD_Client_Obj(
+        node_id=200,
+        client_ip_port="decode:8000",
+        mode="decode",
+        start_args={},
+        websocket=SimpleNamespace(send_bytes=AsyncMock()),
+    )
+    mgr.pd_manager.prefill_nodes = [p_node]
+    mgr.pd_manager.decode_nodes = [d_node]
+    mgr.pd_manager.url_to_pd_nodes = {node.connection_key: node for node in [p_node, d_node]}
+    mgr.pd_manager.selector.update_nodes([p_node], [d_node])
     mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, d_node, PDSelectionExtraInfo()))
     mgr.remove_req = lambda *a, **k: asyncio.sleep(0)
     return mgr
@@ -129,7 +157,7 @@ def test_single_block_prefill_hit_persists_past_decode_zeros(monkeypatch):
     assert cached and all(c == 30 for c in cached), cached
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.3)]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "hello"
+    assert mgr.inserted_prompt_caches[0][0] == "h"
 
 
 @pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
@@ -196,7 +224,7 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
     assert cached == [50, 50, 50, 50], cached
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.5)]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "hello"
+    assert mgr.inserted_prompt_caches[0][0] == "h"
     # 无约束请求不需要计算语法状态重放长度。
     assert mgr.segment_inputs == [
         ("hello", 0),
@@ -333,7 +361,6 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
 def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
-
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(
@@ -424,7 +451,7 @@ def test_completed_prefill_inserts_cache_when_first_output_is_decode(monkeypatch
     )
     assert cached == [30, 30, 30]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "hello"
+    assert mgr.inserted_prompt_caches[0][0] == "h"
 
 
 @pytest.mark.parametrize("include", [False, True])
@@ -439,8 +466,6 @@ def test_completed_prefill_inserts_cache_when_first_output_is_decode(monkeypatch
     ],
 )
 def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, continuation, node_finish):
-    from unittest.mock import AsyncMock
-
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = parser
     manager.tokenizer = SimpleNamespace(
@@ -518,8 +543,6 @@ def test_pd_stop_request_marks_only_matching_choice(monkeypatch):
 
 
 def test_pd_abort_removes_output_channel_by_default(monkeypatch):
-    from unittest.mock import AsyncMock
-
     manager = _make_manager(monkeypatch)
     p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
     d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
@@ -533,8 +556,6 @@ def test_pd_abort_removes_output_channel_by_default(monkeypatch):
 
 
 def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch):
-    from unittest.mock import AsyncMock
-
     manager = _make_manager(monkeypatch)
     manager.tokenizer = SimpleNamespace(encode=lambda text, _multimodal=None, **kwargs: [ord(c) for c in text])
     params = SamplingParams()
@@ -689,8 +710,6 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
 
 
 def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
-    from unittest.mock import AsyncMock
-
     manager = _make_manager(monkeypatch)
     manager.tokenizer = SimpleNamespace(encode=lambda text, _multimodal=None, **kwargs: [ord(c) for c in text])
     params = SamplingParams()

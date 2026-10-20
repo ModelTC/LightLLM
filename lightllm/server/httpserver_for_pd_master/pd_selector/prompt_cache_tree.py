@@ -40,7 +40,7 @@ class PromptCacheTree:
     """
     用于 cache-aware 选点的 prompt 前缀缓存树。
 
-    prompt 先按 sample_stride 抽稀成 key，再递归按单字符建树/匹配。
+    调用方先按 sample_stride 将 prompt 抽稀成 key，树再按单字符建树/匹配。
     recursion_limit 在初始化时通过 sys.setrecursionlimit 调大 Python 调用栈深度。
     整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
     """
@@ -79,28 +79,28 @@ class PromptCacheTree:
         self._lock = RLock()
         self._time_mark_lock = Lock()
 
-    def _to_key(self, text: str) -> str:
-        return text[:: self.sample_stride]
-
     def _is_leaf(self, node: _PromptCacheNode) -> bool:
         return node is not self.root and not node.children
 
-    def insert(self, text: str, prefill_node: str) -> None:
-        """将 text 的前缀路径写入树，并关联到 prefill_node。
+    def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+        """将抽稀后的 prompt key 写入树，并关联到 prefill_node。
 
         路径上的节点会更新 last_prefill_node 与 LRU 时间戳；写入后若超
         max_node_count 会立即按 LRU 驱逐一批叶节点。
 
         Args:
-            text: 原始 prompt 文本。
+            key: 已按 sample_stride 抽稀的 prompt key。
             prefill_node: 处理该 prompt 的 prefill 连接标识（connection_key），不可为 None。
+            sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
 
         Raises:
             ValueError: prefill_node 为 None 时抛出。
         """
+        assert (
+            sample_stride == self.sample_stride
+        ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
         if prefill_node is None:
             raise ValueError("prefill_node must not be None")
-        key = self._to_key(text)
         with self._lock:
             self._insert_at(self.root, key, 0, prefill_node)
             self._evict_if_needed()
@@ -149,18 +149,24 @@ class PromptCacheTree:
             self._remove_leaf_node(node)
             removed += 1
 
-    def prefix_match(self, text: str) -> PromptCacheMatchResult:
-        """
-        对 text 做前缀匹配。
+    def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+        """匹配已经按 sample_stride 抽稀的 prompt key。
+
+        Args:
+            key: 已按 sample_stride 抽稀的 prompt key。
+            input_char_count: 原始 prompt 的字符数。
+            sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
 
         返回说明：
           - matched_char_count：匹配到的原始 prompt 字符数；
-          - input_char_count：原始 prompt 字符数 len(text)；
+          - input_char_count：原始 prompt 字符数；
           - prefill_node 为 None：匹配停在 root（无任何 key 字符命中）；
-          - prefill_node 为非空 str：匹配停在非 root 节点，取该节点的 last_prefill_node。
+          - prefill_node 为非空 str：匹配停在非 root 节点，取该节点的 last_prefill_node；
           - last_insert_time：命中节点最近一次由 prompt 插入更新的单调时钟时间戳。
         """
-        key = self._to_key(text)
+        assert (
+            sample_stride == self.sample_stride
+        ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
         with self._lock:
             node, matched = self._match_at(self.root, key, 0)
             if node is self.root:
@@ -170,11 +176,11 @@ class PromptCacheTree:
             if matched <= 0:
                 matched_char_count = 0
             else:
-                matched_char_count = min((matched - 1) * self.sample_stride + 1, len(text))
+                matched_char_count = min((matched - 1) * sample_stride + 1, input_char_count)
             return PromptCacheMatchResult(
                 prefill_node=prefill_node,
                 matched_char_count=matched_char_count,
-                input_char_count=len(text),
+                input_char_count=input_char_count,
                 last_insert_time=node.last_insert_time if node is not self.root else None,
             )
 

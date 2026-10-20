@@ -5,9 +5,15 @@ import subprocess
 import math
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
+from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_unique_server_name,
+    set_env_start_args,
+    set_unique_server_name,
+)
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
@@ -439,6 +445,10 @@ def _launch_subprocesses(args: StartArgs):
         ],
         start_args=[(args,)],
     )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
 
     router_process, _ = process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
@@ -526,6 +536,10 @@ def pd_master_start(args: StartArgs):
         ],
         start_args=[(args,)],
     )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
 
     command = [
         "hypercorn",
@@ -552,6 +566,52 @@ def pd_master_start(args: StartArgs):
 
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
+
+
+def pd_master_multi_worker_start(args: StartArgs):
+    """Start multiple PD master workers on one host behind HAProxy."""
+    _validate_pd_features(args)
+    from .httpserver_for_pd_master.multiprocess import (
+        start_multiprocess_pd_master,
+        validate_multiprocess_pd_master_args,
+    )
+    from .httpserver_for_pd_master.pd_node_stats_server import start_pd_node_stats_server
+    from .httpserver_for_pd_master.prompt_cache_tree_server import start_prompt_cache_tree_server
+
+    haproxy_binary = validate_multiprocess_pd_master_args(args)
+    _set_envs_and_config(args)
+    set_unique_server_name(args)
+
+    auto_set_max_req_total_len(args)
+    auto_set_response_parsers(args)
+    process_manager.setup_exit_controller()
+    set_env_start_args(args)
+    get_env_start_args.cache_clear()
+    ports = get_shm_port_args(create=True)
+    worker_ports = ports.pd_master_multi_ports
+    validate_ports([args.port, ports.metric_port, *worker_ports])
+    logger.info("PD master worker ports: %s", worker_ports)
+    process_manager.start_submodule_processes(
+        start_funcs=[start_metric_manager],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_pd_node_stats_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_prompt_cache_tree_server],
+        start_args=[(args,)],
+    )
+    return start_multiprocess_pd_master(
+        args,
+        ports=ports,
+        haproxy_binary=haproxy_binary,
+    )
 
 
 def visual_only_start(args):

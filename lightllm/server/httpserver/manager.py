@@ -21,7 +21,7 @@ from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole, ObjType, PDDecodeNodeInfo
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
-from ..req_id_generator import ReqIDGenerator
+from .req_id_generator_client import ReqIDGenerator
 from .async_queue import AsyncQueue
 from .stop_seq_match import wrap_stop_match_stream
 from .grammar import create_output_grammar_compiler
@@ -937,7 +937,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
     async def stop_request(self, request_id: int):
         """停止指定 choice，保留同组其他请求。"""
-        from ..req_id_generator import convert_sub_id_to_group_id
+        from .req_id_generator_server import convert_sub_id_to_group_id
 
         req_status = self.req_id_to_out_inf.get(convert_sub_id_to_group_id(request_id))
         if req_status is not None:

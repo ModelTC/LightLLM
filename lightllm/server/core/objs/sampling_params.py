@@ -3,7 +3,7 @@ import json
 import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
-from lightllm.server.req_id_generator import MAX_BEST_OF
+from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
 from lightllm.utils.envs_utils import get_env_start_args
 from .pd_kv_trans_params import PDKVTransParamObj
 

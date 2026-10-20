@@ -1,10 +1,11 @@
 import random
 from dataclasses import dataclass
-from typing import Union, List, Tuple, Dict, Optional
+from typing import Union, List, Tuple, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
+from lightllm.utils.error_utils import ServerBusyError
 from lightllm.utils.log_utils import init_logger
 
 
@@ -21,15 +22,18 @@ class PDSelectionExtraInfo:
 
 class PDSelector:
     def __init__(self, pd_manager):
+        from ..pd_node_stats_client import create_pd_node_stats_client
+
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []
         self.pd_manager = pd_manager
+        self.pd_node_stats = create_pd_node_stats_client()
 
     def update_nodes(self, prefill_nodes, decode_nodes):
         self.prefill_nodes = prefill_nodes
         self.decode_nodes = decode_nodes
 
-    def select_p_d_node(
+    async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         raise NotImplementedError("Subclass must implement this method")
@@ -38,7 +42,7 @@ class PDSelector:
         """记录推理侧返回的 prompt cache 命中率；非 cache-aware 策略无需处理。"""
         return
 
-    def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj) -> None:
+    async def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj) -> None:
         """记录成功进入推理的 prompt；非 cache-aware 策略无需处理。"""
         return
 
@@ -46,7 +50,7 @@ class PDSelector:
 class RandomSelector(PDSelector):
     """随机选择器"""
 
-    def select_p_d_node(
+    async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         p_node = random.choice(self.prefill_nodes)
@@ -62,7 +66,7 @@ class RoundRobinSelector(PDSelector):
         self.prefill_node_index: int = 0
         self.decode_node_index: int = 0
 
-    def select_p_d_node(
+    async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         self.prefill_node_index = self.prefill_node_index % len(self.prefill_nodes)
@@ -77,7 +81,7 @@ class RoundRobinSelector(PDSelector):
 class AdaptiveLoadSelector(PDSelector):
     """基于负载使用情况的选择器"""
 
-    def select_p_d_node(
+    async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         p_node = self._importance_sampling(self.prefill_nodes)
@@ -93,20 +97,27 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
     """Cache-aware prefill 选点：按抽稀后的 prompt 前缀匹配 + 负载均衡。"""
 
     def __init__(self, pd_manager):
+        from .prompt_cache_tree_client import create_prompt_cache_tree_client
         from .cache_aware import CacheAwareConfig, CacheAwarePolicy
 
         super().__init__(pd_manager)
-        self.policy = CacheAwarePolicy(CacheAwareConfig())
+        config = CacheAwareConfig()
+        self.policy = CacheAwarePolicy(
+            prompt_cache_tree=create_prompt_cache_tree_client(config=config),
+            config=config,
+        )
 
-    def select_p_d_node(
+    async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
-        p_node = self.policy.select_worker(self.prefill_nodes, request_text=prompt)
+        await self.pd_node_stats.update_dispatched_info(p_nodes=self.prefill_nodes)
+        p_node, selection_extra_info = await self.policy.select_worker(self.prefill_nodes, request_text=prompt)
+        # 前缀查询期间 P 节点可能已经重连；即使 connection_key 相同，旧对象持有的 WebSocket 也已失效。
+        # 必须按对象身份确认选中节点仍是当前连接，让上层通过 ServerBusyError 重新选点。
+        if not any(node is p_node for node in self.prefill_nodes):
+            raise ServerBusyError("Selected PD connection changed during cache lookup")
         d_node = self._importance_sampling(self.decode_nodes)
-        # 选点完成后再查询一次前缀树；只有 cache 实际属于最终选中的 P 节点
-        # 时才返回命中率，避免负载均衡改派节点后误判为高命中。
-        selection_extra_info = self.policy.get_estimated_cache_info(p_node, prompt)
 
         logger.debug(
             f"LoadBalancedCacheAwareSelector: selected p_node={p_node.client_ip_port}, "
@@ -119,5 +130,8 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
         self.policy.record_prompt_cache_hit_rate(cache_hit_rate)
 
-    def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj) -> None:
-        self.policy.insert_prompt_cache(prompt, p_node)
+    async def insert_prompt_cache(self, prompt: str, p_node: PD_Client_Obj) -> None:
+        sample_stride = self.policy.config.sample_stride
+        await self.policy.prompt_cache_tree.insert_sampled(
+            prompt[::sample_stride], p_node.connection_key, sample_stride
+        )
