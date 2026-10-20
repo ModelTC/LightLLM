@@ -1,5 +1,6 @@
 import argparse
 import json
+from pathlib import Path
 import signal
 import sys
 import uuid
@@ -147,11 +148,14 @@ def test_worker_port_table_preserves_dynamically_allocated_internal_ports(monkey
 
 
 def test_haproxy_config_streams_without_request_replay():
-    config = multiprocess._build_haproxy_config(_args(), _worker_ports())
+    state_path = Path("/tmp/lightllm-test-health.state")
+    config = multiprocess._build_haproxy_config(_args(), _worker_ports(), state_path)
 
     assert "balance leastconn" in config
     assert "nbthread 2" in config
     assert "fd-hard-limit 131072" in config
+    assert f"server-state-file {state_path}" in config
+    assert config.count("load-server-state-from-file global") == 3
     assert "maxconn 65536" not in config
     assert "server worker_0 10.0.0.1:8100" in config
     assert "server worker_1 10.0.0.1:8101" in config
@@ -175,9 +179,29 @@ def test_haproxy_config_streams_without_request_replay():
     [("0.0.0.0", "0.0.0.0:8100"), ("::", "[::]:8100")],
 )
 def test_haproxy_worker_addresses_follow_the_configured_listen_host(host, expected_address):
-    config = multiprocess._build_haproxy_config(_args(host=host), _worker_ports())
+    config = multiprocess._build_haproxy_config(
+        _args(host=host), _worker_ports(), Path("/tmp/lightllm-test-health.state")
+    )
 
     assert f"server worker_0 {expected_address}" in config
+
+
+def test_initial_health_state_only_contains_down_health_backends():
+    state = multiprocess._build_initial_health_state(_worker_ports())
+    state_lines = state.splitlines()
+
+    assert state_lines[0] == "1"
+    assert "pd_master_workers" not in state
+    assert len(state_lines) == 2 + 3 * len(_worker_ports())
+    for backend_name in ("pd_master_liveness", "pd_master_readiness", "pd_master_health"):
+        backend_lines = [line for line in state_lines if f" {backend_name} " in line]
+        assert len(backend_lines) == len(_worker_ports())
+        for line in backend_lines:
+            fields = line.split()
+            assert fields[4] == "-"  # srv_addr: keep the configured server address
+            assert fields[5] == "0"  # srv_op_state: DOWN
+            assert fields[12] == "0"  # srv_check_health: no successful check
+            assert fields[13] == "6"  # srv_check_state: configured and enabled
 
 
 @pytest.mark.parametrize("config", [{"config_server_host": "10.0.0.2"}, {"config_server_port": 9000}])

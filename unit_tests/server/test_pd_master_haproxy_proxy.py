@@ -16,7 +16,10 @@ import pytest
 import psutil
 
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.server.httpserver_for_pd_master.multiprocess import _build_haproxy_config
+from lightllm.server.httpserver_for_pd_master.multiprocess import (
+    _build_haproxy_config,
+    _build_initial_health_state,
+)
 from lightllm.utils import start_utils
 from lightllm.utils.start_utils import kill_recursive
 from unit_tests.server.pd_master_test_utils import get_test_haproxy_binary
@@ -34,8 +37,10 @@ def test_real_haproxy_starts_with_a_low_fd_hard_limit(tmp_path):
         port=public_port,
         httpserver_workers=2,
     )
+    state_file = tmp_path / "haproxy-low-fd.state"
+    state_file.write_text(_build_initial_health_state([1, 2]), encoding="utf-8")
     config = tmp_path / "haproxy-low-fd.cfg"
-    config.write_text(_build_haproxy_config(args, [1, 2]), encoding="utf-8")
+    config.write_text(_build_haproxy_config(args, [1, 2], state_file), encoding="utf-8")
     error_log_path = tmp_path / "haproxy-low-fd.stderr"
     # 同时降低 soft/hard limit，验证 HAProxy 会按实际 FD 上限自动缩小 maxconn。
     command = [
@@ -69,18 +74,21 @@ def test_real_haproxy_starts_with_a_low_fd_hard_limit(tmp_path):
 
 
 @pytest.fixture
-def haproxy_proxy(tmp_path):
+def haproxy_proxy(tmp_path, request):
     binary = get_test_haproxy_binary()
     state = {
         "requests": [],
         "lock": threading.Lock(),
         "release_stream": threading.Event(),
+        "release_initial_probes": threading.Event(),
         "stream_disconnected": threading.Event(),
         "runtime": tmp_path,
         "probe_status": {worker: {path: 200 for path in ("/liveness", "/readiness", "/health")} for worker in range(2)},
         "probe_delays": {},
         "probe_observations": [],
     }
+    if getattr(request, "param", None) != "block_initial_health_checks":
+        state["release_initial_probes"].set()
 
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -113,6 +121,8 @@ def haproxy_proxy(tmp_path):
             with state["lock"]:
                 status = state["probe_status"][self.server.worker_id].get(self.path, 200)
                 delay = state["probe_delays"].get((self.server.worker_id, self.path), 0)
+            if self.path in ("/liveness", "/readiness", "/health"):
+                state["release_initial_probes"].wait(timeout=15)
             if delay:
                 time.sleep(delay)
             with state["lock"]:
@@ -160,8 +170,10 @@ def haproxy_proxy(tmp_path):
             httpserver_workers=2,
         )
         worker_ports = [server.server_port for server in servers]
+        state_file = tmp_path / "haproxy-health.state"
+        state_file.write_text(_build_initial_health_state(worker_ports), encoding="utf-8")
         config = tmp_path / "haproxy.cfg"
-        config.write_text(_build_haproxy_config(args, worker_ports), encoding="utf-8")
+        config.write_text(_build_haproxy_config(args, worker_ports, state_file), encoding="utf-8")
         executable = str(Path(binary).resolve())
         check = subprocess.run([executable, "-c", "-f", str(config)], capture_output=True, text=True, timeout=5)
         assert check.returncode == 0, check.stderr
@@ -185,6 +197,7 @@ def haproxy_proxy(tmp_path):
             yield base_url, opener, state
     finally:
         state["release_stream"].set()
+        state["release_initial_probes"].set()
         if haproxy is not None:
             if haproxy.poll() is None:
                 haproxy.send_signal(signal.SIGUSR1)
@@ -317,6 +330,21 @@ def _wait_for_probe_response(opener, base_url, path, status, timeout=15):
         time.sleep(0.05)
 
 
+@pytest.mark.parametrize("haproxy_proxy", ["block_initial_health_checks"], indirect=True)
+def test_real_haproxy_reports_unready_until_every_initial_probe_succeeds(haproxy_proxy):
+    base_url, opener, state = haproxy_proxy
+
+    # 后端首次探测仍在处理中时，三类健康接口及 healthz 别名必须全部返回 503。
+    for path in ("/liveness", "/readiness", "/health", "/healthz"):
+        assert _probe_response(opener, base_url, path)[0] == 503
+    with opener.open(base_url + "/worker", timeout=3) as response:
+        assert response.status == 200
+
+    state["release_initial_probes"].set()
+    for path in ("/liveness", "/readiness", "/health", "/healthz"):
+        assert _wait_for_probe_response(opener, base_url, path, 200)[0] == 200
+
+
 @pytest.mark.parametrize(
     "path,failure,success_body,error_body",
     [
@@ -327,7 +355,9 @@ def _wait_for_probe_response(opener, base_url, path, status, timeout=15):
 )
 def test_real_haproxy_requires_every_worker_for_each_probe(haproxy_proxy, path, failure, success_body, error_body):
     base_url, opener, state = haproxy_proxy
-    assert json.loads(_wait_for_probe_response(opener, base_url, path, 200)[1]) == success_body
+    for initial_path in ("/liveness", "/readiness", "/health"):
+        _wait_for_probe_response(opener, base_url, initial_path, 200)
+    assert json.loads(_probe_response(opener, base_url, path)[1]) == success_body
 
     def change_worker_status(worker, status):
         with state["lock"]:

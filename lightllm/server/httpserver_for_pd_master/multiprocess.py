@@ -65,8 +65,10 @@ def start_multiprocess_pd_master(
         worker_ports = ports.pd_master_multi_ports
         _start_backends(len(worker_ports))
 
+        server_state_path = Path(runtime_dir) / "haproxy-health.state"
+        server_state_path.write_text(_build_initial_health_state(worker_ports), encoding="utf-8")
         config_path = Path(runtime_dir) / "haproxy.cfg"
-        config_path.write_text(_build_haproxy_config(args, worker_ports), encoding="utf-8")
+        config_path.write_text(_build_haproxy_config(args, worker_ports, server_state_path), encoding="utf-8")
         logger.info("PD master HAProxy configuration file %s", config_path)
         subprocess.run([haproxy_binary, "-c", "-f", str(config_path)], check=True, timeout=10)
         # -db 使 HAProxy 保持前台运行，便于统一进程管理器直接监督。
@@ -90,7 +92,7 @@ def start_multiprocess_pd_master(
         process_manager.supervise_processes(proxy_process)
 
 
-def _build_haproxy_config(args: StartArgs, worker_ports: list[int]) -> str:
+def _build_haproxy_config(args: StartArgs, worker_ports: list[int], server_state_path: Path) -> str:
     """生成 PD master 多 worker 的 HAProxy 配置。"""
     worker_servers = [
         f"    server worker_{worker_index} {format_host_port(args.host, worker_port)}"
@@ -104,6 +106,7 @@ def _build_haproxy_config(args: StartArgs, worker_ports: list[int]) -> str:
     config = [
         "global",
         "    log stdout format raw local0",
+        f"    server-state-file {server_state_path}",
         # 让 HAProxy 根据进程的 FD 硬上限自动计算 maxconn，同时限制其最多使用的 FD 数量。
         "    fd-hard-limit 131072",
         f"    nbthread {proxy_threads}",
@@ -155,6 +158,8 @@ def _build_haproxy_config(args: StartArgs, worker_ports: list[int]) -> str:
             [
                 "",
                 f"backend {backend_name}",
+                # 首次探测成功前保持 DOWN，避免 HAProxy 启动窗口误报健康。
+                "    load-server-state-from-file global",
                 f"    option httpchk GET /{name}",
                 "    http-check expect status 200",
                 f"    timeout check {timeout}",
@@ -169,6 +174,60 @@ def _build_haproxy_config(args: StartArgs, worker_ports: list[int]) -> str:
         )
 
     return "\n".join(config) + "\n"
+
+
+def _build_initial_health_state(worker_ports: list[int]) -> str:
+    """生成 HAProxy 2.8 server-state 文件，将健康检查节点初始化为 DOWN。"""
+    state_lines = [
+        "1",
+        (
+            "# be_id be_name srv_id srv_name srv_addr srv_op_state srv_admin_state "
+            "srv_uweight srv_iweight srv_time_since_last_change srv_check_status "
+            "srv_check_result srv_check_health srv_check_state srv_agent_state "
+            "bk_f_forced_id srv_f_forced_id srv_fqdn srv_port srvrecord srv_use_ssl "
+            "srv_check_port srv_check_addr srv_agent_addr srv_agent_port"
+        ),
+    ]
+
+    # 只写入三个健康 backend。普通请求 backend 不加载该文件，因此 worker 在
+    # 首次健康探测期间仍可接收业务请求。HAProxy state v1 中：
+    #   srv_op_state=0     表示 DOWN；
+    #   srv_check_health=0 表示尚无成功探测；
+    #   srv_check_state=6  表示健康检查已配置且启用。
+    # forced_id 均为 0，HAProxy 会按 backend/server 名称匹配对应配置项。
+    for backend_id, name in enumerate(("liveness", "readiness", "health"), start=4):
+        backend_name = f"pd_master_{name}"
+        for server_id, worker_port in enumerate(worker_ports, start=1):
+            fields = (
+                backend_id,
+                backend_name,
+                server_id,
+                f"worker_{server_id - 1}",
+                "-",  # srv_addr: keep the address from the HAProxy configuration
+                0,  # srv_op_state: DOWN
+                0,  # srv_admin_state
+                1,  # srv_uweight
+                1,  # srv_iweight
+                0,  # srv_time_since_last_change
+                1,  # srv_check_status: HCHK_STATUS_INI
+                0,  # srv_check_result
+                0,  # srv_check_health
+                6,  # srv_check_state: configured and enabled
+                0,  # srv_agent_state
+                0,  # bk_f_forced_id
+                0,  # srv_f_forced_id
+                "-",  # srv_fqdn
+                worker_port,
+                "-",  # srvrecord
+                0,  # srv_use_ssl
+                0,  # srv_check_port
+                "-",  # srv_check_addr
+                "-",  # srv_agent_addr
+                0,  # srv_agent_port
+            )
+            state_lines.append(" ".join(str(field) for field in fields))
+
+    return "\n".join(state_lines) + "\n"
 
 
 def _start_pd_master_worker() -> None:
