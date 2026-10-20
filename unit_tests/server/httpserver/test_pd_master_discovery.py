@@ -185,7 +185,7 @@ def test_config_server_http_errors_do_not_fall_back_to_a_direct_master(monkeypat
 
 
 @pytest.mark.parametrize("failure", ["network", "invalid_pickle", "base_exception"])
-def test_discovery_exception_is_throttled_without_falling_back(monkeypatch, failure):
+def test_discovery_retries_only_regular_exceptions(monkeypatch, failure):
     class DiscoveryFailure(BaseException):
         pass
 
@@ -201,8 +201,13 @@ def test_discovery_exception_is_throttled_without_falling_back(monkeypatch, fail
     monkeypatch.setattr(pd_loop.asyncio, "sleep", sleep)
     args = SimpleNamespace(config_server_host="config", config_server_port=9000, pd_master_ip="seed")
 
-    assert asyncio.run(pd_loop._get_pd_master_objs(args)) is None
-    sleep.assert_awaited_once_with(10)
+    if failure == "base_exception":
+        with pytest.raises(DiscoveryFailure):
+            asyncio.run(pd_loop._get_pd_master_objs(args))
+        sleep.assert_not_awaited()
+    else:
+        assert asyncio.run(pd_loop._get_pd_master_objs(args)) is None
+        sleep.assert_awaited_once_with(10)
 
 
 def test_discovery_follows_config_registry_registration_and_removal(monkeypatch):
@@ -256,7 +261,7 @@ def test_ipv6_config_server_address_is_bracketed_for_http(monkeypatch):
     assert requests == ["http://[2001:db8::1]:9000/registered_objects"]
 
 
-def test_discovery_cancellation_closes_http_client_and_uses_failure_retry(monkeypatch):
+def test_discovery_cancellation_closes_http_client_without_retry(monkeypatch):
     async def run():
         started = asyncio.Event()
         closed = asyncio.Event()
@@ -280,8 +285,9 @@ def test_discovery_cancellation_closes_http_client_and_uses_failure_retry(monkey
         task = asyncio.create_task(pd_loop._get_pd_master_objs(args))
         await started.wait()
         task.cancel()
-        assert await task is None
-        sleep.assert_awaited_once_with(10)
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        sleep.assert_not_awaited()
         assert closed.is_set()
 
     asyncio.run(run())

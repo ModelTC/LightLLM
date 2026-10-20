@@ -252,7 +252,7 @@ async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_O
                 return await get_from_config_server(client, endpoint)
             else:
                 return await get_from_pd_master(client)
-    except BaseException as e:
+    except Exception as e:
         logger.exception(str(e))
         await asyncio.sleep(10)
         return None
