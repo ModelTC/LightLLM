@@ -95,6 +95,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 下方应用层心跳已负责存活检测，禁用协议层 keepalive，避免繁忙连接被误断。
                 ping_interval=None,
             ) as websocket:
+
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
@@ -324,6 +325,7 @@ async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
 
 # 获取节点负载信息
 def _get_load_info(dp_index: Optional[int] = None) -> dict:
+
     from lightllm.server.api_http import g_objs
 
     assert g_objs.shared_token_load is not None, "shared_token_load is not initialized"

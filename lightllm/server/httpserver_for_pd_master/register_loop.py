@@ -21,9 +21,11 @@ async def register_loop(manager: HttpServerManagerForPDMaster):
 
     ports = get_shm_port_args()
     while True:
+
         try:
             uri = f"ws://{manager.args.config_server_host}:{ports.config_server_port}/pd_master_register"
             async with websockets.connect(uri, max_queue=(2048 * 1024, 2048 * 1023)) as websocket:
+
                 sock = websocket.transport.get_extra_info("socket")
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
