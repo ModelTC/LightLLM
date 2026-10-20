@@ -49,8 +49,7 @@ def _classify_without_token_capacity(monkeypatch, req, support_overlap=True):
     backend.logger = logger
     backend._timer_merge_radix_tree = MagicMock()
     backend._filter_not_ready_reqs = MagicMock(return_value=reqs)
-    backend._reorder_pd_high_priority_reqs = MagicMock(side_effect=lambda reqs: reqs)
-    backend._reorder_long_prefill_reqs = MagicMock(side_effect=lambda reqs: reqs)
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=MagicMock(side_effect=lambda reqs, **kwargs: reqs))
 
     infer_context = base_backend.g_infer_context
     monkeypatch.setattr(infer_context, "get_can_alloc_token_num", MagicMock(return_value=0))
@@ -154,14 +153,13 @@ def test_pd_decode_capacity_limit_never_extends_original_length(monkeypatch):
 
 @pytest.mark.parametrize(
     "overrides",
-    [{}, {"diverse_mode": True}, {"output_constraint_mode": "outlines"}, {"first_token_constraint_mode": True}],
+    [{}, {"diverse_mode": True}, {"output_constraint_mode": "xgrammar"}],
 )
 def test_pd_nodes_use_pd_queue(overrides):
     base_args = {
         "diverse_mode": False,
         "token_healing_mode": False,
         "output_constraint_mode": "none",
-        "first_token_constraint_mode": False,
         "disable_chunked_prefill": False,
     }
 

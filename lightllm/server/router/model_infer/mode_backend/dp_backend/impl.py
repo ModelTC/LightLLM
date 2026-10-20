@@ -32,8 +32,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         spec_mode = get_env_start_args().mtp_mode
         if spec_mode is not None:
-            if spec_mode in ("dspark", "dflash"):
-                raise NotImplementedError("DP backend does not support DFlash/DSpark parallel block drafting yet.")
+            if spec_mode in ("dspark", "dflash", "dflash2"):
+                raise NotImplementedError(
+                    "DP backend does not support DFlash/DFlash2/DSpark parallel block drafting yet."
+                )
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
             else:
@@ -123,7 +125,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
                 self._try_read_new_reqs()
 
-                prefill_reqs, decode_reqs = self._get_classed_reqs(
+                prefill_reqs, decode_reqs, prefill_tokens = self._get_classed_reqs(
                     no_decode=self.classed_req_no_decode,
                     strict_prefill=self.classed_req_strict_prefill,
                     recover_paused=self.control_state_machine.try_recover_paused_reqs(),
@@ -144,6 +146,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
                     g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    self.processed_prefill_tokens += prefill_tokens
                     self.prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,
@@ -179,6 +182,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
             self._capture_prompt_logprobs_if_needed(model_input, run_reqs, model_output.prompt_logics)
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             if run_reqs_num > 0:
                 (
                     _,
@@ -192,7 +200,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                     run_reqs=run_reqs,
                     is_prefill=True,
                     b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
-                    mask_func=None,
                 )
                 g_infer_context.save_hybrid_state_to_cache(
                     b_req_idx=model_input.b_req_idx,
@@ -202,8 +209,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 sync_event.record()
 
         if run_reqs_num > 0:
-            # 第二阶段
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
             # 第三阶段
@@ -221,7 +226,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             event_pack.notify_pre_post_handle()
         return
@@ -232,6 +236,11 @@ class DPChunkedPrefillBackend(ModeBackend):
         run_reqs_num = len(run_reqs)
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output = self.model.forward(model_input)
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             if run_reqs_num > 0:
                 (
                     _,
@@ -244,14 +253,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_mtp_index=model_input.b_mtp_index,
                     run_reqs=run_reqs,
                     is_prefill=False,
-                    mask_func=None,
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
         if run_reqs_num > 0:
-            # 第二阶段
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
 
             # 第三阶段
@@ -269,7 +275,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             event_pack.notify_pre_post_handle()
         return
@@ -299,6 +304,10 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_mtp_index = torch.cat((model_input0.b_mtp_index, model_input1.b_mtp_index), dim=0)
             b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
 
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             if req_num0 + req_num1 > 0:
                 (
                     _,
@@ -312,7 +321,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                     run_reqs=run_reqs,
                     is_prefill=True,
                     b_prefill_has_output_cpu=b_has_out_cpu,
-                    mask_func=None,
                 )
 
                 if g_infer_context.is_hybrid_att_model:
@@ -322,8 +330,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 sync_event.record()
 
         if req_num0 + req_num1 > 0:
-            # 第二阶段
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
             # 第三阶段
@@ -342,7 +348,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             event_pack.notify_pre_post_handle()
         return
@@ -354,6 +359,11 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             model_output0, model_output1 = self.model.microbatch_overlap_decode(model_input0, model_input1)
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             if req_num0 + req_num1 > 0:
                 logits = torch.cat((model_output0.logits, model_output1.logits), dim=0)
                 b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
@@ -369,14 +379,11 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_mtp_index=b_mtp_index,
                     run_reqs=run_reqs,
                     is_prefill=False,
-                    mask_func=None,
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 
         if req_num0 + req_num1 > 0:
-            # 第二阶段
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=False)
 
             # 第三阶段
@@ -394,7 +401,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             event_pack.notify_pre_post_handle()
         return
@@ -413,6 +419,10 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_req_idx = model_input.b_req_idx
             b_mtp_index = model_input.b_mtp_index
 
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             if req_num > 0:
                 (
                     next_token_ids,
@@ -426,7 +436,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                     run_reqs=run_reqs,
                     is_prefill=True,
                     b_prefill_has_output_cpu=b_has_out_cpu,
-                    mask_func=None,
                 )
             else:
                 next_token_ids = torch.empty((0,), dtype=torch.int64, device=model_input.b_req_idx.device)
@@ -445,9 +454,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
-
-            # 第二阶段
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
             # 第三阶段
@@ -467,7 +473,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             event_pack.notify_pre_post_handle()
         return
@@ -496,11 +501,16 @@ class DPChunkedPrefillBackend(ModeBackend):
                 selected_rows = async_selected_row_mask_cpu.tensor.tolist()
                 run_reqs = [req for req, selected in zip(run_reqs, selected_rows) if selected]
 
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             if req_num > 0:
                 next_token_ids, next_token_logprobs = sample(
                     model_output.logits,
                     run_reqs,
                     self.eos_id,
+                    b_mtp_index=model_input.b_mtp_index,
                 )
                 next_token_ranks = self._get_next_token_ranks(model_output.logits, next_token_ids)
 
@@ -576,8 +586,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
-            # 第二阶段
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             if spec_plan.skip_verify_sync:
                 verify_ok_reqs = run_reqs
             else:
@@ -616,7 +624,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             # 第四阶段
             event_pack.notify_pre_post_handle()
         else:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
             event_pack.notify_pre_post_handle()
@@ -650,6 +657,10 @@ class DPChunkedPrefillBackend(ModeBackend):
             b_mtp_index = torch.cat((model_input0.b_mtp_index, model_input1.b_mtp_index), dim=0)
             b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
 
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             if req_num > 0:
                 (
                     next_token_ids,
@@ -686,7 +697,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             update_packs = self._pre_post_handle(run_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
             event_pack.notify_forward_and_wait_post_handle()
@@ -703,7 +713,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
             event_pack.notify_pre_post_handle()
         else:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             event_pack.notify_pre_post_handle()
         return
@@ -756,6 +765,11 @@ class DPChunkedPrefillBackend(ModeBackend):
             logits0 = model_output0.logits
             logits1 = model_output1.logits
             run_reqs = run_reqs0 + run_reqs1
+
+        # 第二阶段
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+
+        with torch.cuda.stream(g_infer_context.get_overlap_stream()):
             if req_num > 0:
                 assert len(run_reqs) == verify_row_num
                 logits = torch.empty(
@@ -765,7 +779,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
                 logits[:verify_row_num0, :].copy_(logits0, non_blocking=True)
                 logits[verify_row_num0:, :].copy_(logits1, non_blocking=True)
-                next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+                b_mtp_index = torch.cat((model_input0.b_mtp_index, model_input1.b_mtp_index), dim=0)
+                next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id, b_mtp_index=b_mtp_index)
                 next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
                 (
                     next_token_ids_cpu,
@@ -774,10 +789,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 ) = self._async_copy_next_token_infos_to_pin_mem(next_token_ids, next_token_logprobs, next_token_ranks)
 
                 b_req_idx = torch.cat((model_input0.b_req_idx, model_input1.b_req_idx), dim=0)
-                b_mtp_index = torch.cat(
-                    (model_input0.b_mtp_index, model_input1.b_mtp_index),
-                    dim=0,
-                )
                 b_req_mtp_start_loc = gen_b_req_mtp_start_loc(
                     b_mtp_index=b_mtp_index,
                     num_reqs=req_num,
@@ -846,7 +857,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             sync_event.record()
 
         if req_num > 0:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             verify_event.synchronize()
             mtp_utils.record_request_mtp_metrics(
                 backend=self,
@@ -884,7 +894,6 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
             event_pack.notify_pre_post_handle()
         else:
-            event_pack.notify_post_handle_and_wait_pre_post_handle()
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
             event_pack.notify_pre_post_handle()

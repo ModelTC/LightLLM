@@ -25,15 +25,18 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
+from lightllm.server.router.model_infer.structured_output.state import ConstraintState
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+    from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
 
 logger = init_logger(__name__)
 
 
 @dataclass
 class InferenceContext:
+    backend: Optional["ModeBackend"] = None
     req_manager: ReqManager = None  # gpu 请求管理
     radix_cache: Union[HybridAttPagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
@@ -42,6 +45,7 @@ class InferenceContext:
     vocab_size = None
     cpu_embed_cache_client: Optional[CpuEmbedCacheClient] = None
     cache_placement_controller: Optional[CachePlacementController] = None
+    output_constraint_state_factory: Optional["OutputConstraintStateFactory"] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
     cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
@@ -70,8 +74,26 @@ class InferenceContext:
         self.vocab_size = vocab_size
 
         self.is_hybrid_att_model = isinstance(self.req_manager, HybridAttentionReqManager)
+        self.output_constraint_state_factory = self._init_output_constraint_state_factory()
 
         return
+
+    def _init_output_constraint_state_factory(self) -> Optional["OutputConstraintStateFactory"]:
+        if self.args.output_constraint_mode != "xgrammar":
+            return None
+        from lightllm.server.router.model_infer.structured_output.state_factory import OutputConstraintStateFactory
+        from lightllm.server.tokenizer import get_tokenizer
+
+        # HTTP workers already compiled the grammar. Inference needs only the
+        # shared tokenizer information to deserialize their artifacts.
+        tokenizer = get_tokenizer(
+            self.args.model_dir, self.args.tokenizer_mode, trust_remote_code=self.args.trust_remote_code
+        )
+        return OutputConstraintStateFactory(
+            tokenizer=tokenizer,
+            vocab_size=self.vocab_size,
+            eos_ids=self.args.eos_id,
+        )
 
     def init_cpu_embed_cache_client(self):
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
@@ -91,12 +113,13 @@ class InferenceContext:
         req_objs = []
         request_ids = []
         for r in requests:
-            r_id, r_index, multimodal_params, _ = r
+            r_id, r_index, multimodal_params, dp_rank_in_node = r
             assert r_id not in self.requests_mapping.keys()
             r_obj = InferReq(
                 req_id=r_id,
                 req_idx=self.req_manager.alloc(),
                 shm_index=r_index,
+                dp_rank_in_node=dp_rank_in_node,
                 multimodal_params=multimodal_params,
                 vocab_size=self.vocab_size,
                 init_prefix_cache=init_prefix_cache,
@@ -461,30 +484,8 @@ class InferSamplingParams:
         if self.shm_param.top_k == -1:
             self.shm_param.top_k = vocab_size
 
-        # output constraint states
-        self.regular_constraint = self.shm_param.regular_constraint.to_str()
-        self.guided_grammar = self.shm_param.guided_grammar.to_str()
-        self.guided_json = self.shm_param.guided_json.to_str()
-        if len(self.regular_constraint) == 0:
-            self.regular_constraint = None
-        if len(self.guided_grammar) == 0:
-            self.guided_grammar = None
-        if len(self.guided_json) == 0:
-            self.guided_json = None
-
-        self.fsm_current_state: int = 0
-        self.allowed_token_ids = self.shm_param.allowed_token_ids.to_list()
-        if len(self.allowed_token_ids) == 0:
-            self.allowed_token_ids = None
-
         # if provided, invalid_token_ids are masked to -inf during sampling (see generic_post_process.sample)
         self.invalid_token_ids = self.shm_param.invalid_token_ids.to_list()
-
-        # this check is not very good to placed here. to do...
-        if self.allowed_token_ids is not None:
-            if not all(e < vocab_size for e in self.allowed_token_ids):
-                logger.error("allowed_token_ids contain tokenid >= vobsize, we remove these token ids")
-                self.allowed_token_ids = [e for e in self.allowed_token_ids if e < vocab_size]
 
         if len(self.invalid_token_ids) > 0:
             if not all(e < vocab_size for e in self.invalid_token_ids):
@@ -500,14 +501,6 @@ class InferSamplingParams:
         # only pd mode used.
         self.pd_master_node_id: int = self.shm_param.pd_master_node_id.get()
         return
-
-    def has_constraint_setting(self) -> bool:
-        return (
-            self.regular_constraint is not None
-            or self.allowed_token_ids is not None
-            or self.guided_grammar is not None
-            or self.guided_json is not None
-        )
 
 
 class InferReq:
@@ -530,6 +523,7 @@ class InferReq:
         req_id: int,
         req_idx: int,
         shm_index: int,
+        dp_rank_in_node: int,
         multimodal_params: MultimodalParams,
         vocab_size: int = -1,
         init_prefix_cache: bool = True,
@@ -538,6 +532,9 @@ class InferReq:
         self.req_id = req_id
         self.req_idx = req_idx
         self.shm_index = shm_index
+        # 请求归属的节点内 DP 组编号，用于区分本组生成请求与跨 DP 缓存共享的临时请求。
+        # 其他 DP 组的临时请求只参与 KV cache 复用，无需初始化输出约束状态机。
+        self.dp_rank_in_node = dp_rank_in_node
         self.multimodal_params = multimodal_params
         self.vocab_size = vocab_size
         # cur_kv_len is the logical length already written; hold_kv_len is the
@@ -612,6 +609,11 @@ class InferReq:
         self.shm_req.link_prompt_ids_shm_array()
         self.shm_req.link_logprobs_shm_array()
         self.sampling_param: InferSamplingParams = InferSamplingParams(self.shm_req, self.vocab_size)
+        self.output_constraint: Optional[ConstraintState] = None
+        state_factory = g_infer_context.output_constraint_state_factory
+        # 只为归属当前 DP 组的生成请求创建约束状态；跨 DP 缓存共享的临时请求保持 None。
+        if state_factory is not None and self.dp_rank_in_node == g_infer_context.backend.dp_rank_in_node:
+            self.output_constraint = state_factory.create_state(self.shm_req, self.sampling_param)
 
         # 更新 pd 分离模式下， prefill 节点需要开始传输的起始位置
         if self.sampling_param.pd_decode_node is not None:
@@ -624,7 +626,8 @@ class InferReq:
 
         g_infer_context.req_manager.req_sampling_params_manager.init_req_sampling_params(self)
 
-        self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_list()
+        # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
+        self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
@@ -924,6 +927,9 @@ class InferReq:
         return
 
     def _stop_sequences_matched(self, output_len: int):
+        # 显式 token ID stop 始终生效，包括 reasoning 阶段；stop_str_match_mode 只控制字符串。
+        if not self.stop_sequences:
+            return False
         for stop_token_ids in self.stop_sequences:
             stop_len = len(stop_token_ids)
             if stop_len > 0:
@@ -1020,6 +1026,16 @@ class InferReqUpdatePack:
 
         # 更新判断请求的 finished 状态
         req_obj.update_finish_status(eos_ids=eos_ids, output_len=self.output_len)
+
+        constraint = req_obj.output_constraint
+        if constraint is not None:
+            # Commit local output and PD's first token before the next sampling step.
+            # MTP commits only accepted tokens; speculative mask traversal is rolled back.
+            constraint.commit(next_token_id)
+            if constraint.error is not None:
+                finish_status.set_status(FinishStatus.FINISHED_ERROR)
+            elif constraint.is_terminated():
+                finish_status.set_status(FinishStatus.FINISHED_STOP)
 
         if extra_post_req_handle_func is not None:
             extra_post_req_handle_func(req_obj, next_token_id, next_token_logprob)

@@ -14,7 +14,7 @@ from array import array
 from frozendict import frozendict
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
-from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator
+from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator, Sequence
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
@@ -23,6 +23,8 @@ from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from ..req_id_generator import ReqIDGenerator
 from .async_queue import AsyncQueue
+from .stop_seq_match import wrap_stop_match_stream
+from .grammar import create_output_grammar_compiler
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
@@ -112,6 +114,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
         self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.output_grammar_compiler = create_output_grammar_compiler(args, self.tokenizer)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
         # key 存在表示 PD 请求正在登记，value 表示登记期间是否已收到 ABORT。
@@ -262,24 +265,23 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     self.cache_client.root.release(ids_to_release)
         return
 
-    def tokens(self, prompt, multimodal_params, samping_params: SamplingParams, kwargs=None):
+    def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
         kwargs = {} if kwargs is None else kwargs
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
-        img_count = 0
         audio_tokens = 0
         audio_count = 0
         for img in multimodal_params.images:
-            img_count += 1
-            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, samping_params)
+            self.tokenizer.init_imageitem_extral_params(img, multimodal_params, sampling_params)
             token_num = self.tokenizer.get_image_token_length(img)
             self._assert_image_token_count(token_num)
             image_tokens += token_num
         for audio in multimodal_params.audios:
             audio_count += 1
-            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, samping_params)
+            self.tokenizer.init_audioitem_extral_params(audio, multimodal_params, sampling_params)
             audio_tokens += self.tokenizer.get_audio_token_length(audio)
-        return len(prompt_ids) + image_tokens + img_count + audio_tokens + audio_count
+        # Image boundaries are already in prompt_ids; expansion only inserts image tokens.
+        return len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
     async def loop_for_request(self):
         assert self.args.node_rank > 0
@@ -333,7 +335,22 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 req.is_aborted = True
             logger.warning(f"applied pending abort for group_request_id {group_req_id}")
 
-    async def generate(
+    def generate(
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
+        request: Request,
+        pd_upload_websocket: ClientConnection = None,
+        pd_event: asyncio.Event = None,
+    ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
+        """客户端输出统一包裹 stop；P/D 节点和 TP slave 转发原始流。"""
+        generator = self._generate(prompt, sampling_params, multimodal_params, request, pd_upload_websocket, pd_event)
+        if self.pd_mode.is_normal() and not self.is_multinode_tp_slave:
+            return wrap_stop_match_stream(self, generator, sampling_params, prompt)
+        return generator
+
+    async def _generate(
         self,
         prompt: Union[str, List[int]],
         sampling_params: SamplingParams,
@@ -346,6 +363,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
+        # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
+        compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
         request_headers = request.headers if request is not None else {}
         group_request_id = self.alloc_req_id(sampling_params)
         audio_count = len(multimodal_params.audios) if multimodal_params is not None else 0
@@ -414,7 +433,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             if pd_upload_websocket is not None and self.pd_mode.is_P():
                 # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
                 # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
-                logger.info(
+                logger.debug(
                     f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
                 await pd_upload_websocket.send(
@@ -444,11 +463,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储。PD 高优先级请求仍以更短的间隔重试；资源等待上限
+            # 申请资源并存储。高优先级请求仍以更短的间隔重试；资源等待上限
             # 完全由 PD Master 下发，与请求优先级无关。
             alloced_req_indexes = await self._alloc_shm_req_indexes(
                 sampling_params.n,
-                pd_high_priority_request=sampling_params.pd_high_priority_request,
+                high_priority_request=sampling_params.high_priority_request,
                 pd_node_resource_wait_timeout_seconds=sampling_params.pd_node_resource_wait_timeout_seconds,
             )
             req_objs: List[Req] = []
@@ -461,6 +480,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     self.tokenizer,
                     chunked_prefill_size=self.args.chunked_prefill_size,
                 )
+                # None 表示没有输出约束；有约束时需在转发 Router 前发布编译结果，供推理进程加载。
+                if compiled_grammar is not None:
+                    req_obj.set_compiled_grammar(compiled_grammar)
                 req_objs.append(req_obj)
             self._log_stage_timing(
                 group_request_id,
@@ -559,15 +581,18 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def _alloc_shm_req_indexes(
         self,
         req_num: int,
-        pd_high_priority_request: bool = False,
+        high_priority_request: bool = False,
         pd_node_resource_wait_timeout_seconds: int = -1,
     ) -> List[int]:
-        """为一个请求申请全部 shm_req 索引，申请失败时回滚已分配的索引。
+        """为一个请求一次性申请全部 shm_req 索引，等待时不占用部分槽。
 
         PD Master 下发非负值时启用资源等待超时，负数表示无限等待。多机 TP slave
         不独立限流，由 master 节点统一判断。请求优先级只影响重试间隔，不影响超时值。
         """
-        alloced_req_indexes = []
+        if req_num > self.args.running_max_req_size:
+            raise ValueError(
+                f"req_num ({req_num}) must not exceed running_max_req_size ({self.args.running_max_req_size})"
+            )
         alloc_timeout_seconds = None
         # 多机 TP 各 rank 必须保持请求执行一致；slave 若按本地计时独立超时退出，可能导致
         # master/其他 rank 继续进入 collective 而发生状态不一致或阻塞，因此超时由 master 统一决策。
@@ -575,32 +600,25 @@ class HttpServerManager(HttpRlManagerHelper, object):
             alloc_timeout_seconds = pd_node_resource_wait_timeout_seconds
         alloc_deadline = time.monotonic() + alloc_timeout_seconds if alloc_timeout_seconds is not None else None
 
-        try:
-            while len(alloced_req_indexes) < req_num:
-                alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
-                sleep_time_factor = 0.2 if pd_high_priority_request else 1
-                sleep_time = 0.1
-                while alloc_req_index is None:
-                    if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
-                        logger.warning(
-                            f"{self.args.run_mode} node shm_req allocation timed out after "
-                            f"{alloc_timeout_seconds} seconds"
-                        )
-                        raise ServerBusyError(
-                            f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
-                            f"within {alloc_timeout_seconds} seconds"
-                        )
-                    await asyncio.sleep(sleep_time * sleep_time_factor)
-                    sleep_time = min(1, sleep_time * 1.1)
-                    alloc_req_index = await self.shm_req_manager.async_alloc_req_index()
-                alloced_req_indexes.append(alloc_req_index)
-            return alloced_req_indexes
-        except BaseException:
-            # 批量申请中途失败时，释放已申请的索引，避免 shm_req 资源泄漏。
-            for req_index in alloced_req_indexes:
-                await self.shm_req_manager.async_release_req_index(req_index)
-            raise
+        # 空闲槽不足时整组重试，避免多个 n > 1 的请求各占部分槽后互相等待。
+        alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
+        # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
+        sleep_time_factor = 0.2 if high_priority_request else 1
+        sleep_time = 0.1
+        while alloced_req_indexes is None:
+            if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
+                logger.warning(
+                    f"{self.args.run_mode} node shm_req allocation timed out after "
+                    f"{alloc_timeout_seconds} seconds"
+                )  # fmt: skip
+                raise ServerBusyError(
+                    f"PD {self.args.run_mode} node is busy: unable to allocate a shm_req object "
+                    f"within {alloc_timeout_seconds} seconds"
+                )
+            await asyncio.sleep(sleep_time * sleep_time_factor)
+            sleep_time = min(1, sleep_time * 1.1)
+            alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
+        return alloced_req_indexes
 
     async def _log_req_header(self, request_headers, group_request_id: int):
         x_request_id = request_headers.get("X-Request-Id", "")
@@ -690,7 +708,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             self.max_req_total_len,
         )
 
-    async def _check_and_repair_length(self, prompt_ids: List[int], sampling_params: SamplingParams):
+    async def _check_and_repair_length(self, prompt_ids: Sequence[int], sampling_params: SamplingParams):
         if not prompt_ids:
             raise InvalidRequestError("The input prompt must not be empty.")
         prompt_tokens = len(prompt_ids)
@@ -882,7 +900,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_verify_steps, 1)
                         mtp_avg_accepted_tokens_per_step = mtp_accepted_token_num / max(mtp_total_verify_steps, 1)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.info(
+                        logger.debug(
                             f"X-Request-Id:{x_request_id} "
                             f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
                             f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
@@ -930,6 +948,16 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         return
                 req_status.out_token_info_list.clear()
         return
+
+    async def stop_request(self, request_id: int):
+        """停止指定 choice，保留同组其他请求。"""
+        from ..req_id_generator import convert_sub_id_to_group_id
+
+        req_status = self.req_id_to_out_inf.get(convert_sub_id_to_group_id(request_id))
+        if req_status is not None:
+            for req in req_status.group_req_objs.shm_req_objs:
+                if req.request_id == request_id and not req.finish_status.is_finished():
+                    req.is_aborted = True
 
     async def abort(self, group_req_id: int) -> bool:
         req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
@@ -1014,9 +1042,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
             asyncio.create_task(self.loop_for_request())
 
         if self.pd_mode.is_P_or_D():
-            from lightllm.server.httpserver.pd_loop import pd_handle_loop
+            from lightllm.server.httpserver.pd_loop import pd_handle_loop, timer_log
 
-            asyncio.create_task(pd_handle_loop(self))
+            asyncio.create_task(timer_log(self))
+            if self.pd_mode.is_P() and self.args.use_dp_split_mode_connect_pd_master:
+                for dp_index in range(max(1, self.args.dp // self.args.nnodes)):
+                    asyncio.create_task(pd_handle_loop(self, dp_index))
+            else:
+                asyncio.create_task(pd_handle_loop(self))
 
         while True:
             try:
@@ -1059,17 +1092,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                 if self.args.use_reward_model:
                                     metadata["score"] = float(req.reward_score)
 
-                                finished_token_index = (
-                                    req.stop_str_matched_token_index if req.stop_str_matched else req.finish_token_index
-                                )
-
-                                if finished_token_index != src_index:
+                                if req.finish_token_index != src_index:
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                                 else:
-                                    if req.stop_str_matched:
-                                        finish_status = FinishStatus(FinishStatus.FINISHED_STOP)
-                                    else:
-                                        finish_status = FinishStatus(req.finish_status.status)
+                                    finish_status = FinishStatus(req.finish_status.status)
 
                                     await req.merge_final_token_metadata(
                                         metadata,

@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional
@@ -7,10 +8,10 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_g
 
 class TritonAttBackend(BaseAttBackend):
     def create_att_prefill_state(self, infer_state) -> "TritonPrefillAttState":
-        return TritonPrefillAttState(backend=self, infer_state=infer_state)
+        return TritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "TritonDecodeAttState":
-        return TritonDecodeAttState(backend=self, infer_state=infer_state)
+        return TritonDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

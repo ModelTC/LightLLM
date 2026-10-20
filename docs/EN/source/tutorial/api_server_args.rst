@@ -37,11 +37,9 @@ Vocabulary Parallel Sampling
     Features that depend on the original scores of non-candidate tokens cannot recover exact full-vocabulary
     results. Examples include the complete token ranks required by ``--enable_rl`` or a large logit bias that
     would have promoted a non-candidate token into the selected set.
-    ``--target_vocab_topk_sampling`` cannot be combined with ``--output_constraint_mode outlines/xgrammar``
-    or ``--first_token_constraint_mode``; inference nodes reject these combinations with a startup assertion.
-    Non-candidate scores are ``-10000000.0``, while constraint masks set forbidden-token scores to ``-1000000.0``.
-    If all allowed tokens are pruned, forbidden tokens receive higher scores. Disable target candidate pruning
-    when using these output constraints. This check does not restrict ``--draft_vocab_topk_sampling``.
+    ``--target_vocab_topk_sampling`` requires ``--output_constraint_mode none``;
+    combining it with ``xgrammar`` causes a startup error.
+    This check does not restrict ``--draft_vocab_topk_sampling``.
     Use matching settings on PD master, prefill, and decode services.
 
     Output layers must use the standard Llama ``token_forward``, ``_token_forward``, and
@@ -153,10 +151,11 @@ PD disaggregation Mode Parameters
     that requests which have already produced partial results complete successfully. When set to a non-negative value,
     a timeout reports ``Server is busy``; a request that has
     entered the Router but not inference is proactively marked aborted, and PD Master converts this to HTTP 429.
-    While this feature is enabled, PD Master selects P/D nodes again and retries after receiving ``Server is busy``.
-    The maximum probing period is controlled by ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` and defaults to
-    120 seconds. Once response tokens have been streamed to the client, the request is not restarted because doing so
-    would duplicate output. With ``--disable_pd_node_self_request_limit``, PD Master no longer supplies a finite
+    While this feature is enabled, PD Master returns ``Server is busy`` without retrying by default.
+    ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` controls the maximum retry probing period and defaults to ``0``;
+    set it to a positive value to make PD Master select P/D nodes again and retry within that period. Once response
+    tokens have been streamed to the client, the request is not restarted even when a positive timeout is configured,
+    because doing so would duplicate output. With ``--disable_pd_node_self_request_limit``, PD Master no longer supplies a finite
     resource wait timeout; all P/D nodes wait indefinitely, and a ``Server is busy`` raised for another reason is
     returned immediately without retrying.
     In multi-node TP deployments, only the master node evaluates the timeout; slave nodes wait indefinitely.
@@ -166,7 +165,7 @@ PD disaggregation Mode Parameters
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` (4096 by default), so short requests do not gain priority
     solely from a high cache-hit rate.
 
-    Startup example:
+    The following example explicitly enables busy retries for up to 120 seconds:
 
     .. code-block:: bash
 
@@ -364,6 +363,54 @@ Scheduling Parameters
 
     Whether to disable chunked prefill
 
+.. option:: --prefill_queue_strategy
+
+    Prefill ordering policy in the inference backend before resource allocation. Defaults
+    to ``auto`` (automatic selection by run mode). The policy first moves pause-pending, paused, finished, aborted,
+    or cleanup-marked requests to the end in arrival order. It then identifies active decode requests,
+    keeps them at the left in arrival order, and excludes them from subsequent sorting. ``infer_high_priority`` and
+    the selected policy apply only to the prefill requests on the right.
+
+    Prefill requests carry an internal ``infer_high_priority`` field. It defaults to ``0``,
+    cannot be set by external requests, and is assigned a negative value to continuation
+    segments through internal PD-disaggregation communication.
+
+    * ``auto``: select the policy automatically based on ``--run_mode``:
+      use ``default`` for standalone normal mode (``normal``) and Decode nodes (``decode``),
+      and ``hrrn`` for Prefill nodes (``prefill``). Omitting this option is equivalent to
+      setting ``auto``. Explicitly selecting one of the policies
+      below overrides automatic selection.
+    * ``default``: stably sort by ``infer_high_priority`` from smallest to largest and preserve
+      FCFS order within the same value.
+    * ``promote_shortest``: keep negative-priority prefill requests first in arrival order.
+      Among non-negative-priority normal requests, move only the request with the fewest
+      remaining prefill tokens to the front of the normal queue. Preserve the relative order
+      of all other normal requests. Fully processed prompts of unfinished requests count as zero. This mode is mainly
+      intended for Prefill nodes in PD-disaggregated deployments to improve TTFT for some short
+      requests.
+    * ``hrrn``: keep negative-priority prefill requests first, then order normal requests with
+      token-based Highest Response Ratio Next. Aging starts when a normal request first participates in HRRN ordering.
+      The response ratio uses the number of prefill
+      tokens processed while a request has waited and the uncached prefill tokens captured when it first
+      participates in HRRN ordering.
+      It favors short requests while gradually aging long-waiting requests to prevent starvation.
+      This mode is intended for Prefill nodes in PD-disaggregated deployments with highly varied
+      request lengths. This strategy is based on
+      `SGLang PR #32911 <https://github.com/sgl-project/sglang/pull/32911>`_; thanks to its authors
+      and the SGLang community for sharing their work.
+
+    For example, append ``--prefill_queue_strategy hrrn`` to your launch command.
+    Compare TTFT, TPOT, and tail latency under representative traffic before choosing a
+    policy; changing policies does not guarantee an SLA improvement.
+
+    To extend, subclass ``PrefillQueueStrategy`` in
+    ``lightllm/server/router/model_infer/mode_backend/prefill_queue_strategy``, implement
+    ``reorder_prefill``, and
+    add the class to ``PREFILL_QUEUE_STRATEGIES``. Update the CLI and ``StartArgs`` choices to expose its name.
+    Implementations must preserve the request set, request state, and input list, and
+    produce deterministic ordering across TP ranks. Each strategy receives the current
+    ``ModeBackend`` instance and can read scheduling state through ``self.backend``.
+
 .. option:: --diverse_mode
 
     Multi-result output mode
@@ -379,14 +426,20 @@ Output Constraint Parameters
 
     Set the output constraint backend, optional values:
     
-    * ``outlines``: Use outlines backend
-    * ``xgrammar``: Use xgrammar backend
-    * ``none``: No output constraint (default)
+    * ``xgrammar``: Default; enabled per request, supporting JSON Schema, JSON objects, EBNF, and regex
+    * ``none``: Disable the output constraint backend
 
-.. option:: --first_token_constraint_mode
+    Supports TP/DP, MTP, and microbatch overlap. The Outlines backend has been removed;
+    ``regular_constraint`` uses XGrammar regex syntax.
 
-    Constrain the allowed range of the first token
-    Use environment variable FIRST_ALLOWED_TOKENS to set the range, e.g., FIRST_ALLOWED_TOKENS=1,2
+    ChatCompletion JSON Schema / JSON object constraints apply after thinking ends,
+    as indicated by the configured reasoning parser's closing marker.
+    With thinking disabled, constraints apply from the first output token.
+
+.. option:: --grammar_compile_timeout
+
+    HTTP grammar compilation wait timeout in seconds. Defaults to ``30.0`` and must be positive.
+    Invalid grammars, compilation failures, or timeouts return HTTP 400 before inference or streaming starts.
 
 Multimodal Parameters
 ---------------------

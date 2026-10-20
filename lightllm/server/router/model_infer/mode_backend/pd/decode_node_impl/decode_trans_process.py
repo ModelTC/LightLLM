@@ -298,7 +298,8 @@ class _DecodeTransModule:
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
                                 self.request_page_task_queue.put(local_trans_task)
-                                logger.info(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
+                                if self.args.pd_detail_log:
+                                    logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # This does not necessarily mean the WRITE protocol state is corrupted.
                                 # A common benign case is: decode has already received an abort for this
@@ -325,7 +326,8 @@ class _DecodeTransModule:
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
-                                logger.info(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
+                                if self.args.pd_detail_log:
+                                    logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -426,13 +428,14 @@ class _DecodeTransModule:
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
 
-            if trans_task.start_trans_time is not None:
-                logger.info(
-                    f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
-                    f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
-                )
-            else:
-                logger.info(f"trans task ret success:{ret}")
+            if self.args.pd_detail_log:
+                if trans_task.start_trans_time is not None:
+                    logger.debug(
+                        f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
+                        f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
+                    )
+                else:
+                    logger.debug(f"trans task ret success:{ret}")
 
     @log_exception
     def fail_loop(self):
@@ -449,7 +452,7 @@ class _DecodeTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.info(f"trans task ret fail:{ret}")
+            logger.warning(f"trans task ret fail:{ret}")
 
             if trans_task.error_info is not None:
                 # 提前终结所有有问题的属于同一个请求的任务。

@@ -38,15 +38,17 @@ def test_abort_before_request_registration_is_applied_and_released():
     asyncio.run(run())
 
 
-def test_old_disconnect_does_not_remove_new_registration():
+@pytest.mark.parametrize("dp_index", [None, 0, 1])
+def test_old_disconnect_does_not_remove_new_registration(dp_index):
     args = StartArgs()
     manager = PDManager(args)
     info = dict(node_id=1, client_ip_port="10.0.0.1:8000", mode="prefill", start_args=vars(args))
+    info["dp_index"] = dp_index
     old = manager.register_pd(info, Mock())
     new = manager.register_pd({**info, "node_id": 2}, Mock())
     manager.remove_pd(old)
     assert old.websocket is None
-    assert manager.url_to_pd_nodes[new.client_ip_port] is new
+    assert manager.url_to_pd_nodes[new.connection_key] is new
     assert manager.prefill_nodes == [new]
     manager.remove_pd(new)
     assert not manager.prefill_nodes

@@ -1,3 +1,4 @@
+import weakref
 import dataclasses
 import math
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ import pytest
 import torch
 import triton
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import set_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
@@ -526,10 +528,11 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
     prefill_state = Glm5NextSparsePrefillState()
     prefill = prefill_state._nsa_prefill_att(q, kv, control)
     torch.testing.assert_close(prefill.float(), expected, atol=0.012, rtol=0.015)
+    infer_state = InferStateInfo()
+    infer_state.b1_cu_q_seq_len = torch.arange(10, dtype=torch.int32, device="cuda")
+    infer_state.max_q_seq_len = 1
     decode = Glm5NextSparseDecodeState(
-        infer_state=SimpleNamespace(
-            b1_cu_q_seq_len=torch.arange(10, dtype=torch.int32, device="cuda"), max_q_seq_len=1
-        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
         nsa_cache_seqlens=lengths,
         nsa_cu_seqlens_k_new=torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
     )

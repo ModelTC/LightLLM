@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
@@ -11,10 +12,10 @@ class Int4kvTritonAttBackend(BaseAttBackend):
         self.quant_group_size: int = get_env_start_args().llm_kv_quant_group_size
 
     def create_att_prefill_state(self, infer_state) -> "Int4kvTritonPrefillAttState":
-        return Int4kvTritonPrefillAttState(backend=self, infer_state=infer_state)
+        return Int4kvTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "Int4kvTritonDecodeAttState":
-        return Int4kvTritonDecodeAttState(backend=self, infer_state=infer_state)
+        return Int4kvTritonDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
