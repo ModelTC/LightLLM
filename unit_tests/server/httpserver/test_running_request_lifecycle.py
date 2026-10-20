@@ -41,7 +41,7 @@ def _make_manager(mode: NodeRole):
     manager._log_stage_timing = MagicMock()
     manager._log_req_header = AsyncMock()
     manager._encode = AsyncMock(return_value=[10, 11, 12])
-    manager._check_and_repair_length = AsyncMock(side_effect=lambda prompt_ids, _params: prompt_ids)
+    manager._check_and_repair_length = MagicMock()
     manager._release_multimodal_resources = AsyncMock()
     manager.abort = AsyncMock()
     manager._register_running_request = AsyncMock()

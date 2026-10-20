@@ -60,7 +60,7 @@ def test_closing_pd_choice_stream_closes_all_forwarders(choice_count):
                 closed.add(req_id)
 
         manager._generate_one = generate_one
-        with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
+        with patch.object(HttpServerManager, "_check_and_repair_length", new=MagicMock()):
             generator = manager._generate_choices("prompt", params, multimodal, None)
             await generator.__anext__()
             await generator.aclose()
@@ -116,7 +116,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
 
         manager._wait_to_token_package = wait_to_token_package
 
-        with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
+        with patch.object(HttpServerManager, "_check_and_repair_length", new=MagicMock()):
             results = []
             async for result in manager._generate_choices("prompt", sampling_params, multimodal_params, request):
                 results.append(result)
@@ -181,7 +181,7 @@ def test_pd_master_n_one_uses_the_same_choice_merge_path():
 
         manager._generate_one = generate_one
 
-        with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
+        with patch.object(HttpServerManager, "_check_and_repair_length", new=MagicMock()):
             results = []
             async for result in manager._generate_choices("prompt", sampling_params, multimodal_params, request):
                 results.append(result)
@@ -219,7 +219,7 @@ def test_pd_master_does_not_record_aborted_or_error_request_as_success(failed_fi
 
         manager._generate_one = generate_one
 
-        with patch.object(HttpServerManager, "_check_and_repair_length", new=AsyncMock()):
+        with patch.object(HttpServerManager, "_check_and_repair_length", new=MagicMock()):
             results = []
             async for result in manager._generate_choices("prompt", sampling_params, multimodal_params, request):
                 results.append(result)
