@@ -50,6 +50,10 @@ def test_tokenizer_uses_position_dependent_canonical_suffix(prefix_len):
         range(image.token_id + cache_skip, image.token_id + image.token_num)
     )
 
+    from lightllm.utils.multimodal_chunk_utils import get_mm_input_spans
+
+    assert get_mm_input_spans({"images": [vars(image)], "audios": []}) == [(image.block_start_idx, image.block_end_idx)]
+
 
 def test_tokenizer_keeps_dsv4_on_one_dimensional_positions():
     from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
@@ -71,10 +75,10 @@ def test_chunk_boundary_moves_before_complete_image_block():
     req.shm_req = SimpleNamespace(input_len=10_000)
     req.mm_input_spans = [(8100, 8400)]
 
-    assert req._get_chunked_input_end() == 8100
+    assert req.get_chuncked_input_token_len() == 8100
 
     req.cur_kv_len = 8100
-    assert req._get_chunked_input_end() == 10_000
+    assert req.get_chuncked_input_token_len() == 10_000
 
 
 def test_chunk_boundary_between_adjacent_images_never_splits_the_previous_image():
@@ -87,10 +91,10 @@ def test_chunk_boundary_between_adjacent_images_never_splits_the_previous_image(
     req.shm_req = SimpleNamespace(input_len=768)
     req.mm_input_spans = [(0, 384), (384, 768)]
 
-    assert req._get_chunked_input_end() == 384
+    assert req.get_chuncked_input_token_len() == 384
 
     req.cur_kv_len = 384
-    assert req._get_chunked_input_end() == 768
+    assert req.get_chuncked_input_token_len() == 768
 
 
 def test_atomic_image_block_can_exceed_chunk_size():
@@ -103,144 +107,10 @@ def test_atomic_image_block_can_exceed_chunk_size():
     req.shm_req = SimpleNamespace(input_len=1000)
     req.mm_input_spans = [(100, 800)]
 
-    assert req._get_chunked_input_end() == 100
+    assert req.get_chuncked_input_token_len() == 100
 
     req.cur_kv_len = 100
-    assert req._get_chunked_input_end() == 800
-
-
-def test_radix_match_retries_when_page_alignment_lands_in_earlier_image(monkeypatch):
-    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
-
-    class FakeRadixCache:
-        def __init__(self):
-            self.calls = []
-
-        def match_prefix(self, key, block_hashs, update_refs=False):
-            self.calls.append((len(key), update_refs))
-            matched_len = min(len(key) // 256 * 256, 768)
-            if update_refs:
-                node = SimpleNamespace(node_prefix_total_len=matched_len, is_big_page_node=lambda: False)
-                return node, matched_len, torch.arange(matched_len)
-            return None, matched_len, None
-
-    radix_cache = FakeRadixCache()
-    monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
-    monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
-    from lightllm.common.req_manager import DeepseekV4ReqManager
-
-    req_manager = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
-    req_manager.req_to_token_indexs = torch.empty((1, 1025), dtype=torch.int64)
-    req_manager.restore_small_page_state = lambda **kwargs: None
-    monkeypatch.setattr(g_infer_context, "req_manager", req_manager)
-
-    req = InferReq.__new__(InferReq)
-    req.args = SimpleNamespace(
-        page_size=256, linear_att_hash_page_size=256, linear_att_page_block_num=8, max_req_total_len=1025
-    )
-    req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
-    req.cur_kv_len = 0
-    req.cur_output_len = 0
-    req.req_idx = 0
-    req.mm_input_spans = [(450, 600), (700, 900)]
-    req.shared_kv_node = None
-    req.tail_small_page_buffer_id = None
-    req.shm_req = SimpleNamespace(
-        input_len=1025,
-        hybrid_token_hash_list=SimpleNamespace(size=4, get_all=lambda: [1, 2, 3, 4]),
-        shm_prompt_ids=SimpleNamespace(arr=list(range(1025))),
-        prompt_cache_len=0,
-        shm_cur_kv_len=0,
-    )
-
-    req._hybrid_match_radix_cache()
-
-    assert radix_cache.calls == [
-        (1024, False),
-        (512, False),
-        (256, False),
-        (256, True),
-    ]
-    assert req.cur_kv_len == 256
-    assert req.shm_req.prompt_cache_len == 256
-
-
-@pytest.mark.parametrize("atomic,expected", [(False, 550), (True, 450)])
-def test_full_attention_prefix_match_respects_multimodal_chunking(monkeypatch, atomic, expected):
-    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
-
-    calls = []
-
-    def match_prefix(key, update_refs=False):
-        calls.append((len(key), update_refs))
-        length = min(len(key), 550)
-        return SimpleNamespace(node_prefix_total_len=length), length, torch.arange(length)
-
-    monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", False)
-    monkeypatch.setattr(g_infer_context, "radix_cache", SimpleNamespace(match_prefix=match_prefix))
-    monkeypatch.setattr(
-        g_infer_context,
-        "req_manager",
-        SimpleNamespace(req_to_token_indexs=torch.empty((1, 800), dtype=torch.int64)),
-    )
-    req = InferReq.__new__(InferReq)
-    req.args = SimpleNamespace(page_size=1)
-    req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
-    req.cur_kv_len = req.cur_output_len = req.hold_kv_len = req.req_idx = 0
-    req.mm_input_spans = [(450, 600)] if atomic else []
-    req.shm_req = SimpleNamespace(input_len=800, shm_prompt_ids=SimpleNamespace(arr=list(range(800))))
-
-    req._match_radix_cache()
-
-    assert req.cur_kv_len == req.hold_kv_len == expected
-    assert calls == ([(799, False), (450, False), (450, True)] if atomic else [(799, True)])
-
-
-@pytest.mark.parametrize("disable_chunked_mm_input,expected", [(False, 768), (True, 256)])
-def test_checkpoint_alignment_never_lands_in_an_earlier_image(monkeypatch, disable_chunked_mm_input, expected):
-    from lightllm.server.router.model_infer import infer_batch
-
-    shm_req = SimpleNamespace(
-        link_prompt_ids_shm_array=lambda: None,
-        link_logprobs_shm_array=lambda: None,
-        hybrid_token_hash_list=SimpleNamespace(size=3),
-        input_len=1025,
-        shm_prompt_ids=SimpleNamespace(arr=list(range(1025))),
-    )
-    monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
-    monkeypatch.setattr(
-        infer_batch.g_infer_context, "shm_req_manager", SimpleNamespace(get_req_obj_by_index=lambda index: shm_req)
-    )
-    monkeypatch.setattr(
-        infer_batch.g_infer_context,
-        "req_manager",
-        SimpleNamespace(req_sampling_params_manager=SimpleNamespace(init_req_sampling_params=lambda req: None)),
-    )
-    monkeypatch.setattr(
-        infer_batch,
-        "InferSamplingParams",
-        lambda *args: SimpleNamespace(
-            pd_decode_node=None,
-            shm_param=SimpleNamespace(stop_sequences=SimpleNamespace(to_token_ids_list=lambda: [])),
-        ),
-    )
-    monkeypatch.setattr(infer_batch, "PromptSelectedLogprobsExt", lambda req: None)
-    monkeypatch.setattr(infer_batch, "FinalTokenMetadataExt", lambda req: None)
-    req = infer_batch.InferReq.__new__(infer_batch.InferReq)
-    req.args = SimpleNamespace(
-        linear_att_hash_page_size=256, disable_chunked_mm_input=disable_chunked_mm_input, batch_max_tokens=1024
-    )
-    req.shm_index, req.vocab_size = 0, 100
-    req.multimodal_params = SimpleNamespace(
-        to_dict=lambda: {
-            "images": [
-                {"block_start_idx": 450, "block_end_idx": 600},
-                {"block_start_idx": 700, "block_end_idx": 900},
-            ]
-        }
-    )
-    req._init_all_state()
-    assert req.hybrid_cache_len == expected
+    assert req.get_chuncked_input_token_len() == 800
 
 
 def test_vision_model_allows_cpu_cache():

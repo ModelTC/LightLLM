@@ -70,19 +70,35 @@ def test_supported_models_pass_startup_validation(launch_args, output_constraint
 
 
 @pytest.mark.parametrize(
-    "model_type,vision_enabled,explicit,expected",
+    "model_type,disable_mm,disable_vision,batch_tokens,passes",
     [
-        ("deepseek_v4", True, False, True),
-        ("deepseek_v4", False, False, False),
-        ("qwen3_5", True, False, False),
-        ("qwen3_5", True, True, True),
+        ("qwen3", True, False, 512, False),
+        ("qwen3", True, False, 1024, True),
+        ("qwen3", True, False, 2048, True),
+        ("qwen3", True, False, None, True),
+        ("qwen3", False, False, 512, True),
+        ("qwen3", True, True, 512, True),
+        ("neo_chat", False, False, 512, False),
+        ("deepseek_v4", False, False, 512, False),
+        ("gemma4", False, False, 512, False),
+        ("neo_chat", False, False, 1024, True),
+        ("qwen3_vl", False, False, 512, True),
+        ("qwen3_5", False, False, 512, True),
     ],
 )
-def test_multimodal_chunking_defaults_follow_model_requirements(
-    launch_args, model_type, vision_enabled, explicit, expected
+def test_whole_image_blocks_fit_batch_at_startup(
+    launch_args, model_type, disable_mm, disable_vision, batch_tokens, passes
 ):
-    args = launch_args(model_type, disable_chunked_mm_input=explicit)
-    args.disable_vision = not vision_enabled
-    with pytest.raises(RuntimeError, match="startup validation passed"):
-        _launch_subprocesses(args)
-    assert args.disable_chunked_mm_input is expected
+    args = launch_args(
+        model_type,
+        disable_chunked_mm_input=disable_mm,
+        batch_max_tokens=batch_tokens,
+        max_image_token_count=1024,
+    )
+    args.disable_vision = disable_vision
+    if passes:
+        with pytest.raises(RuntimeError, match="startup validation passed"):
+            _launch_subprocesses(args)
+    else:
+        with pytest.raises(AssertionError, match="batch_max_tokens >= max_image_token_count"):
+            _launch_subprocesses(args)

@@ -38,7 +38,6 @@ from .rl_controller import HttpRlController
 from .manager_ext import HttpRlManagerHelper
 from lightllm.utils.statics_utils import MovingAverage
 from lightllm.utils.config_utils import get_vocab_size
-from lightllm.utils.multimodal_chunk_utils import get_mm_input_spans
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.error_utils import (
     ClientDisconnected,
@@ -403,11 +402,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
             prompt_tokens = len(prompt_ids)
             prompt_ids = await self._check_and_repair_length(prompt_ids, sampling_params)
-            if getattr(self.args, "disable_chunked_mm_input", False) and multimodal_params is not None:
-                try:
-                    get_mm_input_spans(prompt_ids, multimodal_params.to_dict(), max_tokens=self.args.batch_max_tokens)
-                except ValueError as exc:
-                    raise InvalidRequestError(str(exc)) from exc
             # 监控
             self.metric_client.counter_inc("lightllm_request_count")
             self.metric_client.histogram_observe("lightllm_request_input_length", prompt_tokens)

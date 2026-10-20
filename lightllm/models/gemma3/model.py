@@ -65,6 +65,7 @@ class Gemma3Tokenizer(BaseMultiModalTokenizer):
             assert token_num == self.image_length, "invalid token num: {} vs {}!".format(token_num, self.image_length)
 
             input_ids.append(self.boi_token_index)
+            multimodal_params.images[image_id].start_idx = len(input_ids)
             input_ids.extend(range(token_id, token_id + self.mm_tokens_per_image))
             input_ids.append(self.eoi_token_index)
             input_ids.extend(ids)

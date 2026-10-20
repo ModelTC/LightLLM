@@ -359,10 +359,11 @@ PD 分离模式参数
 
 .. option:: --disable_chunked_mm_input
 
-    保证每个图像或音频 token 块在同一次 prefill 中处理，文字部分仍可分块。默认关闭，
-    DeepSeek-V4 Vision 自动开启。切分点落在多模态块内部时，先处理块前的文字，下一轮处理完整块。
-    完整块可以超过 ``chunked_prefill_size``，但必须能放进 ``batch_max_tokens``；超过该预算的请求会被拒绝。
-    前缀缓存命中同样会退到完整块边界。
+    Neo、DeepSeek-V4 和 Gemma4 默认开启，其他模型默认关闭，可通过此参数开启。
+    开启后，每个图像或音频 token 块在同一次 prefill 中处理，文本仍可分块。
+    完整块可以超过 ``chunked_prefill_size``，但必须能放入 ``batch_max_tokens``；
+    启用图像时，要求 ``batch_max_tokens >= max_image_token_count``。
+    GPU、CPU 和磁盘缓存的恢复点都会避开块内部。
 
 .. option:: --prefill_queue_strategy
 

@@ -21,7 +21,7 @@ from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, clamp_mm_prefix_len, get_mm_input_spans
+from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
@@ -442,9 +442,12 @@ class InferenceContext:
                 assert big_page_id is not None
                 assert length not in req.hybrid_len_to_big_page_id
                 req.hybrid_len_to_big_page_id[length] = big_page_id
-                big_page_buffer_ids.append(big_page_id)
-                checkpoint_lens.append(length)
-                req_rows.append(row)
+                # 完整图片可能跨过多个大页：保留所有槽位，正常分块只保存 chunk 尾状态。
+                # V4 关闭分块时仍使用原有的中间状态快照。
+                if length == chunk_end or self.args.disable_chunked_prefill:
+                    big_page_buffer_ids.append(big_page_id)
+                    checkpoint_lens.append(length)
+                    req_rows.append(row)
 
         if big_page_buffer_ids:
             selected_rows = torch.tensor(req_rows, dtype=torch.int64, device=b_req_idx.device)
@@ -458,7 +461,10 @@ class InferenceContext:
         # Request-state snapshot at the final small-page boundary.
         for req in reqs:
             # 判断本次prefill 完以后 kv 的长度是否到达 hybrid checkpoint 的存储边界。
-            if req.cur_kv_len < req.hybrid_cache_len <= req.get_chuncked_input_token_len():
+            chunk_end = req.get_chuncked_input_token_len()
+            if chunk_end == req.hybrid_cache_len or (
+                self.args.disable_chunked_prefill and req.cur_kv_len < req.hybrid_cache_len < chunk_end
+            ):
                 assert req.tail_small_page_buffer_id is None
                 if req.hybrid_cache_len % big_page_token_num != 0:
                     self.radix_cache.free_one_small_page_buffer()
@@ -633,13 +639,7 @@ class InferReq:
         # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
-        self.mm_input_spans = (
-            get_mm_input_spans(
-                self.get_input_token_ids(), self.multimodal_params, max_tokens=self.args.batch_max_tokens
-            )
-            if getattr(self.args, "disable_chunked_mm_input", False)
-            else []
-        )
+        self.mm_input_spans = get_mm_input_spans(self.multimodal_params) if self.args.disable_chunked_mm_input else []
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()
@@ -648,9 +648,6 @@ class InferReq:
         if g_infer_context.is_hybrid_att_model:
             block_num = self.shm_req.hybrid_token_hash_list.size
             self.hybrid_cache_len = block_num * self.args.linear_att_hash_page_size
-            self.hybrid_cache_len = clamp_mm_prefix_len(
-                self.hybrid_cache_len, self.mm_input_spans, self.args.linear_att_hash_page_size
-            )
             self.hybrid_len_to_big_page_id = SortedDict()
 
         return
@@ -664,14 +661,9 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-            if self.mm_input_spans:
-                while True:
-                    _, matched_len, _ = g_infer_context.radix_cache.match_prefix(key, update_refs=False)
-                    limit = clamp_mm_prefix_len(matched_len, self.mm_input_spans, self.args.page_size)
-                    if limit == matched_len:
-                        break
-                    key = key[:limit]
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
+                key, update_refs=True, mm_input_spans=self.mm_input_spans
+            )
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
@@ -704,17 +696,8 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
             assert len(key) == len(block_hashs) * hash_page_size
-            if self.mm_input_spans:
-                while True:
-                    _, matched_len, _ = g_infer_context.radix_cache.match_prefix(
-                        key, block_hashs=block_hashs, update_refs=False
-                    )
-                    limit = clamp_mm_prefix_len(matched_len, self.mm_input_spans, hash_page_size)
-                    if limit == matched_len:
-                        break
-                    key, block_hashs = key[:limit], block_hashs[: limit // hash_page_size]
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
-                key, block_hashs=block_hashs, update_refs=True
+                key, block_hashs=block_hashs, update_refs=True, mm_input_spans=self.mm_input_spans
             )
             if share_node is not None:
                 assert self.tail_small_page_buffer_id is None
@@ -788,7 +771,9 @@ class InferReq:
                             self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         else:
                             # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
-                            share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
+                            share_node = radix_cache.deref_to_first_big_page_node(
+                                node=share_node, mm_input_spans=self.mm_input_spans
+                            )
                             if share_node is not None:
                                 assert share_node.is_big_page_node()
                                 # 大页匹配
@@ -862,38 +847,47 @@ class InferReq:
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
 
-    def _get_chunked_input_end(self):
+    def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        if self.mm_input_spans:
-            chunked_end = adjust_mm_chunk_end(
-                chunked_start, chunked_end, self.mm_input_spans, self.args.batch_max_tokens
-            )
-        return chunked_end
-
-    def get_chuncked_input_token_ids(self):
-        return self.shm_req.shm_prompt_ids.arr[0 : self._get_chunked_input_end()]
+        chunked_end = adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
+        return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_ids_for_hybrid_att(self):
-        return self.shm_req.shm_prompt_ids.arr[0 : self.get_chuncked_input_token_len_for_hybrid_att()]
+        if self.args.disable_chunked_prefill:
+            return InferReq.get_chuncked_input_token_ids(self)
+        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
+
+        chunked_start = self.cur_kv_len
+        chunked_end = chunked_start + self.args.chunked_prefill_size
+        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
+        total_end = self.get_cur_total_len()
+        end = min(total_end, chunked_end, big_page_end)
+
+        if chunked_start < self.hybrid_cache_len < end:
+            # hybrid checkpoint 对应需要存储的部分。
+            end = self.hybrid_cache_len
+
+        end = adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
+        return self.shm_req.shm_prompt_ids.arr[0:end]
 
     def get_chuncked_input_token_len(self):
-        return self._get_chunked_input_end()
+        chunked_start = self.cur_kv_len
+        chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
+        return adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
 
     def get_chuncked_input_token_len_for_hybrid_att(self):
-        end = self._get_chunked_input_end()
         if self.args.disable_chunked_prefill:
-            return end
-        if g_infer_context.radix_cache is None:
-            return end
+            return InferReq.get_chuncked_input_token_len(self)
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
-        big_page_end = (self.cur_kv_len // big_page_token_num + 1) * big_page_token_num
-        end = min(end, big_page_end)
-        if self.cur_kv_len < self.hybrid_cache_len < end:
+        chunked_start = self.cur_kv_len
+        chunked_end = chunked_start + self.args.chunked_prefill_size
+        big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
+        total_end = self.get_cur_total_len()
+        end = min(total_end, chunked_end, big_page_end)
+        if chunked_start < self.hybrid_cache_len < end:
             end = self.hybrid_cache_len
-        if self.mm_input_spans:
-            end = adjust_mm_chunk_end(self.cur_kv_len, end, self.mm_input_spans, self.args.batch_max_tokens)
-        return end
+        return adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank: int = -1):
         index = self.shm_req.input_len + output_len

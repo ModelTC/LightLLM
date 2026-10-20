@@ -1363,6 +1363,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         req_idx=destination,
         cur_kv_len=prefix,
         hold_kv_len=prefix,
+        mm_input_spans=[],
         hybrid_cache_len=length,
         hybrid_len_to_big_page_id={},
         tail_small_page_buffer_id=None,
