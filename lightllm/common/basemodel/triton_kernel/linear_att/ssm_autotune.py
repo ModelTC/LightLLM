@@ -55,9 +55,31 @@ def run_key(cache, q, cu_seqlens):
     return tokens, cu_seqlens.numel() - 1 if cu_seqlens is not None else tokens
 
 
+def scratch_size_bytes(cache, batch, sequences, inputs):
+    # All cache tensors are request-owned; retain every layer and the HOLD slot.
+    slots = cache.state.shape[1]
+    pool_bytes = sum(x.numel() * x.element_size() for x in vars(cache).values() if isinstance(x, torch.Tensor))
+    input_bytes = sum(
+        (1 + sum((size - 1) * stride for size, stride in zip(x.shape, x.stride()))) * x.element_size()
+        for x in inputs
+        if x.numel()
+    )
+    snapshot_bytes = cache.state.numel() * cache.state.element_size() // slots
+    return pool_bytes // slots * (batch + 1) + input_bytes + snapshot_bytes + 32 * (batch + sequences + 1)
+
+
 def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None):
     tokens, sequences = run_key(cache, q, cu_seqlens)
     batch = min(sequences, triton.cdiv(tokens, cache.verify_width)) if cu_seqlens is not None else tokens
+    if q.is_cuda:
+        required = scratch_size_bytes(cache, batch, sequences, (q, k, v, a, b, a_log, bias))
+        free, _ = torch.cuda.mem_get_info(q.device)
+        available = free + torch.cuda.memory_reserved(q.device) - torch.cuda.memory_allocated(q.device)
+        # Leave half for benchmark intermediates, CUDA Graphs and allocator fragmentation.
+        if required > available // 2:
+            raise torch.cuda.OutOfMemoryError(
+                f"SSM tuning scratch needs {required} bytes, exceeding its {available // 2}-byte budget"
+            )
     layers, _, hv, kd, vd = cache.state.shape
     state = torch.empty((layers, batch + 1, hv, kd, vd), device=q.device, dtype=cache.state.dtype).normal_(0, 0.02)
     if mode == "replay":

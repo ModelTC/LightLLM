@@ -120,6 +120,12 @@ def _launch_subprocesses(args: StartArgs):
             not args.disable_cudagraph or args.run_mode == "prefill"
         ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
 
+    # Prepare remote configuration before any model-dependent defaults or validation.
+    if args.model_dir and "s3://" in args.model_dir:
+        from lightllm.utils.petrel_helper import s3_model_prepare
+
+        s3_model_prepare(args.model_dir)
+
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
@@ -388,12 +394,6 @@ def _launch_subprocesses(args: StartArgs):
         assert (
             args.cpu_cache_token_page_size % args.page_size == 0
         ), "--cpu_cache_token_page_size must be divisible by --page_size"
-
-    # help to manage data stored on Ceph
-    if "s3://" in args.model_dir:
-        from lightllm.utils.petrel_helper import s3_model_prepare
-
-        s3_model_prepare(args.model_dir)
 
     # 如果args.eos_id 是 None, 从 config.json 中读取 eos_token_id 相关的信息，赋值给 args
     if args.eos_id is None:
