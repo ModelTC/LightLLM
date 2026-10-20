@@ -22,6 +22,52 @@ from lightllm.utils.start_utils import kill_recursive
 from unit_tests.server.pd_master_test_utils import get_test_haproxy_binary
 
 
+def test_real_haproxy_starts_with_a_low_fd_hard_limit(tmp_path):
+    binary = str(Path(get_test_haproxy_binary()).resolve())
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        public_port = listener.getsockname()[1]
+
+    args = StartArgs(
+        run_mode="pd_master",
+        host="127.0.0.1",
+        port=public_port,
+        httpserver_workers=2,
+    )
+    config = tmp_path / "haproxy-low-fd.cfg"
+    config.write_text(_build_haproxy_config(args, [1, 2]), encoding="utf-8")
+    error_log_path = tmp_path / "haproxy-low-fd.stderr"
+    # 同时降低 soft/hard limit，验证 HAProxy 会按实际 FD 上限自动缩小 maxconn。
+    command = [
+        "/bin/bash",
+        "-c",
+        'ulimit -n 1024 && exec "$@"',
+        "lightllm-haproxy-low-fd",
+        binary,
+        "-db",
+        "-f",
+        str(config),
+    ]
+    with error_log_path.open("wb") as error_log:
+        haproxy = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=error_log)
+        try:
+            deadline = time.monotonic() + 5
+            while True:
+                assert haproxy.poll() is None, error_log_path.read_text()
+                try:
+                    with socket.create_connection(("127.0.0.1", public_port), timeout=0.2):
+                        break
+                except OSError:
+                    assert time.monotonic() < deadline, error_log_path.read_text()
+                    time.sleep(0.02)
+        finally:
+            if haproxy.poll() is None:
+                haproxy.send_signal(signal.SIGUSR1)
+            haproxy.wait(timeout=5)
+
+    assert haproxy.returncode == 0
+
+
 @pytest.fixture
 def haproxy_proxy(tmp_path):
     binary = get_test_haproxy_binary()

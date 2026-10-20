@@ -151,6 +151,8 @@ def test_haproxy_config_streams_without_request_replay():
 
     assert "balance leastconn" in config
     assert "nbthread 2" in config
+    assert "fd-hard-limit 131072" in config
+    assert "maxconn 65536" not in config
     assert "server worker_0 10.0.0.1:8100" in config
     assert "server worker_1 10.0.0.1:8101" in config
     assert "bind 10.0.0.1:8000" in config

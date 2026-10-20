@@ -104,7 +104,8 @@ def _build_haproxy_config(args: StartArgs, worker_ports: list[int]) -> str:
     config = [
         "global",
         "    log stdout format raw local0",
-        "    maxconn 65536",
+        # 让 HAProxy 根据进程的 FD 硬上限自动计算 maxconn，同时限制其最多使用的 FD 数量。
+        "    fd-hard-limit 131072",
         f"    nbthread {proxy_threads}",
         "",
         "defaults",
