@@ -108,7 +108,7 @@ def _compact(
         state += k[:, None] * d[None, :]
         if not COMMIT:
             q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
-            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K**-0.5)
+            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
             tl.store(Out + (t * HV + hv) * V + vv, tl.sum(state * q[:, None], 0), vv < V)
         state = state.to(State.dtype.element_ty).to(tl.float32)
     if COMMIT:

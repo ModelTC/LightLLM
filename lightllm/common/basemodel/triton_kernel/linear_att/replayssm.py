@@ -291,7 +291,7 @@ def _replay(
             qk /= tl.sqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
         else:
             qk *= tl.rsqrt(tl.sum(qk * qk, axis=1) + 1.0e-6)[:, None]
-        qk *= tl.where(tt < BW, K**-0.5, 1.0)[:, None]
+        qk *= tl.where(tt < BW, K ** -0.5, 1.0)[:, None]
         if KDA:
             history = ll < n
             gates = tl.load(
@@ -474,7 +474,7 @@ def _replay(
             q = tl.load(Q + t * SQ + h * K + kk, kk < K, 0).to(tl.float32)
             raw_k = tl.load(Kp + t * SK + h * K + kk, kk < K, 0).to(tl.float32)
             v = tl.load(Vp + t * SV + hv * V + vv, vv < V, 0).to(tl.float32)
-            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K**-0.5)
+            q = q / tl.sqrt(tl.sum(q * q) + 1.0e-6) * (K ** -0.5)
             k = raw_k / tl.sqrt(tl.sum(raw_k * raw_k) + 1.0e-6)
             if KDA:
                 x = tl.load(A + t * SA + hv * K + kk, kk < K, 0).to(tl.float32) + bias

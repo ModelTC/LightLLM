@@ -99,7 +99,7 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         pd_kv_move_buffer_size = self.get_pd_kv_move_buffer_size()
-        available_memory_bytes = available_memory * 1024**3 - pd_kv_move_buffer_size
+        available_memory_bytes = available_memory * 1024 ** 3 - pd_kv_move_buffer_size
         self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
