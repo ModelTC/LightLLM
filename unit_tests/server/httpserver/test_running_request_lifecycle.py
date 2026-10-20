@@ -38,6 +38,7 @@ def _make_manager(mode: NodeRole):
     manager.rl_controller = None
     manager.output_grammar_compiler = None
     manager.req_id_to_out_inf = {}
+    manager._pd_registration_abort_flags = {}
     manager._log_stage_timing = MagicMock()
     manager._log_req_header = AsyncMock()
     manager._encode = AsyncMock(return_value=[10, 11, 12])

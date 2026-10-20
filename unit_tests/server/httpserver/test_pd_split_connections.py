@@ -51,11 +51,11 @@ def test_split_connections_register_select_update_and_reconnect_independently():
     manager.register_pd(replacement_info, replacement_socket)
     replacement = manager.url_to_pd_nodes["p:8000/dp3"]
     assert replacement.connection_key == cached_node.connection_key
-    manager.remove_pd(_registration(args, 3))
+    manager.remove_pd(cached_node)
     assert manager.url_to_pd_nodes["p:8000/dp3"] is replacement
     assert replacement in manager.prefill_nodes
     assert replacement in manager.selector.prefill_nodes
-    manager.remove_pd(replacement_info)
+    manager.remove_pd(replacement)
     assert len(manager.prefill_nodes) == 3
     assert "p:8000/dp3" not in manager.url_to_pd_nodes
 
@@ -67,14 +67,14 @@ def test_unsplit_reconnection_ignores_old_connection_id_cleanup(mode):
     info = dict(_registration(args, mode=mode), connection_id="old")
     new_info = dict(info, connection_id="new")
     old_socket, new_socket = object(), object()
-    manager.register_pd(info, old_socket)
+    old = manager.register_pd(info, old_socket)
     manager.register_pd(new_info, new_socket)
     key = f"{info['client_ip_port']}/dpNone"
     replacement = manager.url_to_pd_nodes[key]
-    manager.remove_pd(info)
+    manager.remove_pd(old)
     assert manager.url_to_pd_nodes[key] is replacement
     assert replacement.websocket is new_socket
-    manager.remove_pd(new_info)
+    manager.remove_pd(replacement)
     assert key not in manager.url_to_pd_nodes
 
 
@@ -152,7 +152,14 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
 
     async def run():
         args = StartArgs(run_mode="prefill", dp=8, nnodes=2)
-        manager = SimpleNamespace(args=args, host_ip="p", pd_mode=SimpleNamespace(value="prefill"))
+        manager = SimpleNamespace(
+            args=args,
+            host_ip="p",
+            pd_mode=SimpleNamespace(value="prefill"),
+            begin_pd_request_registration=MagicMock(),
+            cancel_pd_request_registration=MagicMock(),
+            abort=AsyncMock(return_value=True),
+        )
         monkeypatch.setattr(
             api_http,
             "g_objs",
@@ -274,7 +281,7 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     asyncio.run(api_http_pd.register_and_keep_alive(websocket))
     assert len(updated_nodes) == 1
     assert updated_nodes[0].dp_index == dp_index
-    assert updated_nodes[0].websocket is websocket
+    assert updated_nodes[0].websocket is None
     assert updated_nodes[0].run_status.total_token_usage_rate == 0.7
 
 

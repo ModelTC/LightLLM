@@ -21,6 +21,7 @@ def _make_manager(monkeypatch):
     mgr = object.__new__(HttpServerManagerForPDMaster)
     mgr.active_req_ids = set()
     mgr.req_id_to_out_inf = {}
+    mgr._abort_notify_tasks = set()
     mgr.args = SimpleNamespace(
         disable_pd_master_decode_capacity_limit=True,
         reasoning_parser=None,
@@ -57,10 +58,8 @@ def _make_manager(monkeypatch):
     )
     from unittest.mock import AsyncMock
 
-    p_node = SimpleNamespace(
-        dispatched_prompt_chars=0, dispatched_req_num=0, websocket=SimpleNamespace(send_bytes=AsyncMock())
-    )
-    d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+    p_node = SimpleNamespace(dispatched_prompt_chars=0, dispatched_req_num=0, send_control_message=AsyncMock())
+    d_node = SimpleNamespace(send_control_message=AsyncMock())
     mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, d_node, PDSelectionExtraInfo()))
     mgr.remove_req = lambda *a, **k: asyncio.sleep(0)
     return mgr
@@ -521,15 +520,15 @@ def test_pd_abort_removes_output_channel_by_default(monkeypatch):
     from unittest.mock import AsyncMock
 
     manager = _make_manager(monkeypatch)
-    p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
-    d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+    p_node = SimpleNamespace(send_control_message=AsyncMock())
+    d_node = SimpleNamespace(send_control_message=AsyncMock())
     manager.req_id_to_out_inf = {88: SimpleNamespace(p_node=p_node, d_node=d_node), 96: object()}
 
     asyncio.run(manager.abort(88))
 
     assert set(manager.req_id_to_out_inf) == {96}
     for node in (p_node, d_node):
-        node.websocket.send_bytes.assert_awaited_once()
+        node.send_control_message.assert_awaited_once()
 
 
 def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch):
