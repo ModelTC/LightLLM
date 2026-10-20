@@ -1,6 +1,8 @@
+import weakref
 import pytest
 import torch
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 
@@ -192,18 +194,17 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
     manager = SimpleNamespace(
         req_to_mtp_state_index=accepted_offsets, HOLD_REQUEST_ID=3, get_mamba_cache=lambda layer: (conv, ssm)
     )
-    infer = SimpleNamespace(
-        batch_size=tokens,
-        b_req_idx=torch.tensor(request_rows, device="cuda", dtype=torch.int32),
-        b_mtp_index=torch.tensor(offsets, device="cuda", dtype=torch.int32),
-        req_manager=manager,
-    )
+    infer = InferStateInfo()
+    infer.batch_size = tokens
+    infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)
+    infer.b_mtp_index = torch.tensor(offsets, device="cuda", dtype=torch.int32)
+    infer.req_manager = manager
     weight = SimpleNamespace(
         get_merged_kda_conv_weight=lambda: conv_weight,
         linear_A_log=SimpleNamespace(weight=a),
         linear_dt_bias=SimpleNamespace(weight=bias),
     )
-    state = KDADecodeAttState(backend=backend, infer_state=infer)
+    state = KDADecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
     state.init_state()
     actual = state.decode_att(
         None,

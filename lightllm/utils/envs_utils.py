@@ -79,6 +79,12 @@ def enable_env_vars(args):
 
 
 @lru_cache(maxsize=None)
+def is_stop_matching_in_reasoning_enabled() -> bool:
+    """是否允许用户配置的 stop 在 reasoning 阶段参与匹配。"""
+    return os.getenv("LIGHTLLM_STOP_IN_REASONING", "False").upper() in ["ON", "TRUE", "1"]
+
+
+@lru_cache(maxsize=None)
 def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
     # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大。
     # 如果未显式配置，则默认至少覆盖当前进程的 `batch_max_tokens`，避免 DeepEP V2 在 autotune
@@ -283,6 +289,8 @@ def get_added_mtp_kv_layer_num() -> int:
         return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
     if mtp_mode == "dflash":
         return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dflash2":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
 
     raise ValueError(f"unsupported mtp_mode: {mtp_mode}")
 
@@ -327,8 +335,8 @@ def get_pd_node_continuation_resource_wait_timeout_seconds() -> int:
 
 @lru_cache(maxsize=None)
 def get_pd_node_busy_retry_timeout_seconds() -> int:
-    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒。"""
-    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 120)))
+    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒；0 表示不重试。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 0)))
 
 
 @lru_cache(maxsize=None)

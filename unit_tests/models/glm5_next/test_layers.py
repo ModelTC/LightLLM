@@ -1,3 +1,4 @@
+import weakref
 import dataclasses
 import json
 from types import SimpleNamespace
@@ -6,6 +7,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
 from lightllm.common.quantization import Quantcfg
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
@@ -166,15 +168,14 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     for row, length in enumerate(lengths.tolist()):
         indices[row, :length] = slots[:length]
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (indices, indices))
-    state = SimpleNamespace(
-        get_topk_indices_params={"hidden_states": None, "q_lora": None},
-        mem_manager=SimpleNamespace(get_att_input_params=lambda layer_index: kv),
-        prefill_att_state=Glm5NextSparsePrefillState(),
-        b1_cu_q_seq_len=torch.arange(4, device="cuda", dtype=torch.int32),
-        max_q_seq_len=1,
-    )
+    state = InferStateInfo()
+    state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
+    state.mem_manager = SimpleNamespace(get_att_input_params=lambda layer_index: kv)
+    state.prefill_att_state = Glm5NextSparsePrefillState()
+    state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
+    state.max_q_seq_len = 1
     state.decode_att_state = Glm5NextSparseDecodeState(
-        infer_state=state,
+        _infer_state_weak_ref=weakref.ref(state),
         nsa_cache_seqlens=lengths,
         nsa_cu_seqlens_k_new=F.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
     )

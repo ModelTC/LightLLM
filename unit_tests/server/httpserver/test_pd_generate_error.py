@@ -13,7 +13,7 @@ from lightllm.server.httpserver_for_pd_master.manager import (
     ReqStatus,
 )
 from lightllm.server.pd_io_struct import ObjType
-from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
+from lightllm.utils.error_utils import InvalidRequestError, PDPrefillNodeStopGenToken, ServerBusyError
 
 
 class _FailingManager:
@@ -370,3 +370,64 @@ def test_pd_master_abort_uses_explicit_nodes_when_request_status_is_missing():
         d_node.websocket.send_bytes.assert_awaited_once_with(pickle.dumps((ObjType.ABORT, 123)))
 
     asyncio.run(run())
+
+
+def test_pd_invalid_request_error_round_trip():
+    class InvalidManager:
+        args = SimpleNamespace(run_mode="prefill")
+
+        async def generate(self, **_kwargs):
+            raise InvalidRequestError("invalid image tag num: 0 images vs 1 tags")
+            yield
+
+    async def run():
+        sampling_params = SamplingParams()
+        sampling_params.group_request_id = 123
+        websocket = AsyncMock()
+        await _pd_process_generate(
+            manager=InvalidManager(),
+            prompt="prompt",
+            sampling_params=sampling_params,
+            multimodal_params=MagicMock(),
+            forwarding_queue=AsyncMock(),
+            pd_upload_websocket=websocket,
+            pd_event=asyncio.Event(),
+        )
+        kind, req_id, error_info = pickle.loads(websocket.send.await_args.args[0])
+        assert kind == ObjType.PD_UPLOAD_GENERATE_ERROR
+        assert req_id == 123
+        status = ReqStatus(req_id, MagicMock(), MagicMock())
+        await status.set_error(error_info)
+        with pytest.raises(InvalidRequestError, match="invalid image tag num: 0 images vs 1 tags"):
+            status.raise_if_error()
+
+    asyncio.run(run())
+
+
+def test_pd_stream_validation_returns_bad_request(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from lightllm.server import api_stream_obj
+    from lightllm.server.api_http import g_objs, invalid_request_exception_handler
+    from lightllm.server.api_openai import _safe_stream_wrapper
+
+    monkeypatch.setattr(
+        api_stream_obj, "get_env_start_args", lambda: SimpleNamespace(disable_delay_response_start=False)
+    )
+    monkeypatch.setattr(g_objs, "metric_client", MagicMock())
+    app = FastAPI()
+    app.add_exception_handler(InvalidRequestError, invalid_request_exception_handler)
+
+    async def generate():
+        status = ReqStatus(123, MagicMock(), MagicMock())
+        await status.set_error("InvalidRequestError: invalid image tag num: 0 images vs 1 tags")
+        status.raise_if_error()
+        yield
+
+    @app.get("/")
+    async def stream():
+        return api_stream_obj.CustomStreamingResponse(_safe_stream_wrapper(generate()), media_type="text/event-stream")
+
+    response = TestClient(app).get("/")
+    assert response.status_code == 400
+    assert "invalid image tag num" in response.text

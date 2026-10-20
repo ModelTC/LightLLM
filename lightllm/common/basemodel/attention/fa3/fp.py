@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
@@ -76,10 +77,10 @@ class Fa3AttBackend(BaseAttBackend):
         )
 
     def create_att_prefill_state(self, infer_state) -> "Fa3PrefillAttState":
-        return Fa3PrefillAttState(backend=self, infer_state=infer_state)
+        return Fa3PrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "Fa3DecodeAttState":
-        return Fa3DecodeAttState(backend=self, infer_state=infer_state)
+        return Fa3DecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

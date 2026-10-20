@@ -1,3 +1,4 @@
+import weakref
 import collections
 import inspect
 import json
@@ -9,6 +10,7 @@ import torch
 import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonDecodeAttState
 from lightllm.common.basemodel.triton_kernel.att.decode_att.int4kv import (
     int4kv_flash_decoding_stage1 as stage1_module,
@@ -133,15 +135,15 @@ def test_static_key_separates_quant_groups_without_head_or_block_counts():
 
 def test_decode_passes_saved_length_to_stage1(monkeypatch):
     inputs = make_inputs()
+    infer_state = InferStateInfo()
+    infer_state.batch_size = 2
+    infer_state.max_kv_seq_len = 8193
+    infer_state.b_req_idx = inputs["B_req_idx"]
+    infer_state.b_seq_len = inputs["B_Seqlen"]
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"])
     state = Int4kvTritonDecodeAttState(
         backend=SimpleNamespace(),
-        infer_state=SimpleNamespace(
-            batch_size=2,
-            max_kv_seq_len=8193,
-            b_req_idx=inputs["B_req_idx"],
-            b_seq_len=inputs["B_Seqlen"],
-            req_manager=SimpleNamespace(req_to_token_indexs=inputs["Req_to_tokens"]),
-        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
     )
     state.init_state()
     state.infer_state.max_kv_seq_len = 32768

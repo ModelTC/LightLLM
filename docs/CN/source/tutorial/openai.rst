@@ -18,6 +18,52 @@ LightLLM 提供了与 OpenAI API 完全兼容的接口，支持所有标准的 O
         --port 8088 \
         --tp 1
 
+停止字符串
+----------
+
+``/v1/chat/completions`` 和 ``/v1/completions`` 支持 ``stop`` 和
+``include_stop_str_in_output``。默认返回文本不包含匹配到的 stop 字符串，
+设置 ``include_stop_str_in_output=true`` 可保留 stop。两种设置都会移除同一
+token 内 stop 之后的文本。流式、非流式以及 PD 部署遵循相同设置。
+字符串 stop 保留原文，不会编码成 token ID 序列，也不会在推理层按 token ID 匹配。
+
+使用 OpenAI Python 客户端时，通过 ``extra_body`` 传入：
+
+.. code-block:: python
+
+    response = client.chat.completions.create(
+        model="your_model_name",
+        messages=[{"role": "user", "content": "你好"}],
+        stop=["END"],
+        extra_body={"include_stop_str_in_output": True},
+    )
+
+例如生成 ``helloEND`` 时，默认返回 ``hello``，开启后返回 ``helloEND``。
+
+使用 ``/v1/chat/completions`` 且配置了 reasoning parser（自动识别或使用 ``--reasoning_parser``）时，用户设置的
+字符串 stop 默认只作用于最终回答的 ``content``，reasoning 中出现相同字符串不会结束生成。
+即使设置 ``separate_reasoning=False`` 合并返回两个部分，停止范围也遵循这个规则。
+EOS 和输出 token 长度上限仍可在任意阶段结束生成。
+
+如需让字符串 stop 在 reasoning 中也生效，在启动服务前设置：
+
+.. code-block:: bash
+
+    export LIGHTLLM_STOP_IN_REASONING=1
+
+默认为 ``0``，``1``、``true``、``ON`` 均可开启。修改后需要重启服务；PD 部署在接收
+OpenAI 请求的 master 上设置，停止范围通过请求采样参数传递给 P/D 节点。
+``/v1/completions`` 对全部生成文本匹配 stop；Chat 接口未配置 reasoning parser 时也采用此行为。
+
+上述阶段范围仅影响字符串 stop。原生接口 ``parameters.stop_sequences`` 中显式传入的
+token ID 序列由推理层和 HTTP 输出层独立匹配，可在 reasoning 和回答阶段结束生成；
+不受此环境变量和 ``include_stop_str_in_output`` 影响。
+
+RL、返回 routed experts 和 prompt logprobs 仅支持普通模式。此类请求命中 stop 时仍通知后端停止，
+字符串命中包按 ``include_stop_str_in_output`` 截断文本，但保留后端结束状态；后续包原样放行，
+直到后端结束包返回最终 metadata。因此命中后仍可能返回在途 token，最终结束原因由后端决定。
+PD 分离模式启动时拒绝这些功能开关；请求参数不能启用对应的服务端功能。
+
 基础对话示例
 ------------
 

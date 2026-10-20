@@ -23,6 +23,7 @@ class StartArgs:
     pd_master_ip: str = field(default="0.0.0.0")
     pd_master_port: int = field(default=1212)
     pd_master_mode: str = field(default="elastic")
+    use_dp_split_mode_connect_pd_master: bool = field(default=False)
     disable_pd_node_self_request_limit: bool = field(default=False)
     disable_pd_cache_high_priority: bool = field(default=False)
     pd_trans_mode: str = field(default="nccl", metadata={"choices": ["nccl", "nixl"]})
@@ -94,6 +95,7 @@ class StartArgs:
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
     detail_log: bool = field(default=False)
+    pd_detail_log: bool = field(default=False)
     router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
@@ -101,7 +103,10 @@ class StartArgs:
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
-    short_prefill_token_threshold: Optional[int] = field(default=None)
+    # "auto" resolves to hrrn for Prefill nodes and default otherwise.
+    prefill_queue_strategy: str = field(
+        default="auto", metadata={"choices": ["auto", "default", "promote_shortest", "hrrn"]}
+    )
     diverse_mode: bool = field(default=False)
     target_vocab_topk_sampling: Optional[int] = field(
         default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
@@ -109,8 +114,8 @@ class StartArgs:
     draft_vocab_topk_sampling: Optional[int] = field(
         default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
     )
-    output_constraint_mode: str = field(default="none", metadata={"choices": ["outlines", "xgrammar", "none"]})
-    first_token_constraint_mode: bool = field(default=False)
+    output_constraint_mode: str = field(default="xgrammar", metadata={"choices": ["xgrammar", "none"]})
+    grammar_compile_timeout: float = field(default=30.0)
     enable_multimodal: bool = field(default=False)
     disable_vision: Optional[bool] = field(default=None)
     disable_audio: Optional[bool] = field(default=None)
@@ -201,6 +206,7 @@ class StartArgs:
                 "eagle3",
                 "dspark",
                 "dflash",
+                "dflash2",
                 None,
             ]
         },

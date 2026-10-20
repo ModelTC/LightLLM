@@ -1,3 +1,4 @@
+import weakref
 from types import SimpleNamespace
 
 import pytest
@@ -6,6 +7,7 @@ import torch
 if not torch.cuda.is_available():
     pytest.skip("requires CUDA", allow_module_level=True)
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.triton import int8kv as int8kv_module
 from lightllm.common.basemodel.attention.triton.int8kv import Int8kvTritonDecodeAttState
 from lightllm.common.basemodel.triton_kernel import diverse_utils
@@ -34,12 +36,11 @@ def test_build_diverse_shared_group_markers(monkeypatch, node_ids, expected_mark
 def test_int8kv_decode_state_rebuilds_diverse_metadata(monkeypatch):
     monkeypatch.setattr(int8kv_module, "enable_diverse_mode_gqa_decode_fast_kernel", lambda: True)
     monkeypatch.setattr(diverse_utils, "get_diverse_max_batch_shared_group_size", lambda: 3)
-    infer_state = SimpleNamespace(
-        max_kv_seq_len=8192,
-        b_shared_seq_len=torch.tensor([8, 8, 5, 0], dtype=torch.int32, device="cuda"),
-        b_shared_radix_node_id=torch.tensor([10, 10, 20, -1], dtype=torch.int64, device="cuda"),
-    )
-    state = Int8kvTritonDecodeAttState(backend=SimpleNamespace(), infer_state=infer_state)
+    infer_state = InferStateInfo()
+    infer_state.max_kv_seq_len = 8192
+    infer_state.b_shared_seq_len = torch.tensor([8, 8, 5, 0], dtype=torch.int32, device="cuda")
+    infer_state.b_shared_radix_node_id = torch.tensor([10, 10, 20, -1], dtype=torch.int64, device="cuda")
+    state = Int8kvTritonDecodeAttState(backend=SimpleNamespace(), _infer_state_weak_ref=weakref.ref(infer_state))
 
     state.init_state()
 

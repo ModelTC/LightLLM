@@ -34,10 +34,8 @@ APIServer 参数详解
 
     依赖非候选原始分数的功能无法恢复完整词表的精确结果，例如 ``--enable_rl`` 所需的完整
     token rank，或通过较大 logit bias 将非候选 token 提升到候选范围内的场景。
-    ``--target_vocab_topk_sampling`` 不能与 ``--output_constraint_mode outlines/xgrammar``
-    或 ``--first_token_constraint_mode`` 同时启用，推理节点启动时会触发断言。
-    原因是非候选分数为 ``-10000000.0``，约束屏蔽分数为 ``-1000000.0``；
-    若合法 token 全部被裁掉，禁止的 token 反而会得分更高。使用这些输出约束时请关闭 target 候选裁剪。
+    启用 ``--target_vocab_topk_sampling`` 时须设置 ``--output_constraint_mode none``；
+    与 ``xgrammar`` 同时启用会在启动时报错。
     ``--draft_vocab_topk_sampling`` 不受此项检查限制。
     PD 部署应在 master、prefill 和 decode 上使用相同配置。
 
@@ -145,16 +143,17 @@ PD 分离模式参数
     请求最终完成的成功率。
     设置为非负数时，超时会导致 ``Server is busy``；
     其中已进入 Router 但仍未进入推理系统的请求会主动标记为 aborted，由 PD Master 转换为 HTTP 429。
-    本功能启用时，PD Master 收到 ``Server is busy`` 会重新选择 P/D 节点并重试；最长探测周期由
-    ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` 控制，默认 120 秒。若请求已经向客户端输出 token，
-    则不再从头重试，以免产生重复内容。设置 ``--disable_pd_node_self_request_limit`` 后，PD Master 不再下发
+    本功能启用时，PD Master 收到 ``Server is busy`` 默认直接返回，不进行重试。
+    ``LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS`` 控制最长重试探测周期，默认值为 ``0``；设置为正数后，
+    PD Master 才会在该周期内重新选择 P/D 节点并重试。若请求已经向客户端输出 token，则即使配置了正数也不再
+    从头重试，以免产生重复内容。设置 ``--disable_pd_node_self_request_limit`` 后，PD Master 不再下发
     有限的资源等待时间；P/D 节点永久等待，其他原因产生的 ``Server is busy`` 也会直接返回，不触发重试。
     多机 TP 场景仅由 master 节点执行超时判断，slave 节点永久等待。cache 命中记录允许提升优先级的最大年龄由
     ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS`` 控制，默认 36 秒。cache 命中提权还要求输入
     token 数达到 ``LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS`` 配置的门槛（默认 4096），避免短请求仅因
     cache 命中率高而提升优先级。
 
-    启动示例：
+    以下示例显式开启最长 120 秒的节点繁忙重试：
 
     .. code-block:: bash
 
@@ -349,6 +348,44 @@ PD 分离模式参数
 
     是否禁用分块预填充
 
+.. option:: --prefill_queue_strategy
+
+    推理后端在资源分配前使用的 prefill 排序策略，默认值为 ``auto``（按运行模式自动选择）。
+    策略先将等待暂停、已暂停、已结束、已中止或已标记清理的请求按原始相对顺序放到队尾，再识别其余
+    decode 请求，将其稳定地放在队列最左侧且不参与后续排序；
+    ``infer_high_priority`` 和所选策略只作用于右侧的 prefill 请求。
+
+    prefill 请求带有内部字段 ``infer_high_priority``。该字段默认为 ``0``，不接受外部请求设置；
+    PD 分离模式会为续跑分段设置负值，使其在推理进程中优先于普通请求。
+
+    * ``auto``：根据 ``--run_mode`` 自动选择：单机普通模式
+      （``normal``）和 Decode 节点（``decode``）使用 ``default``，Prefill 节点
+      （``prefill``）使用 ``hrrn``。省略本参数与显式设置 ``auto`` 相同。
+      显式指定下列策略时，不会被自动选择覆盖。
+    * ``default``：按 ``infer_high_priority`` 从小到大稳定排序，相同值内保持 FCFS 顺序。
+    * ``promote_shortest``：负优先级 prefill 请求按到达顺序排在前面；在非负优先级的
+      普通请求中选择剩余 prefill token 最少的一个，将其移动到普通请求队头，其余普通
+      请求保持相对顺序。尚未结束但已完成 prompt 计算的请求按零计算。该模式主要适合 PD 分离的
+      Prefill 节点，用于改善部分短请求的 TTFT 和首字体验。
+    * ``hrrn``：负优先级 prefill 请求仍排在最前面；普通请求按基于 token aging 的最高
+      响应比优先（Highest Response Ratio Next）策略排序。等待量从请求首次参与 HRRN 排序时开始累计。
+      响应比使用请求等待期间已处理的
+      prefill token 数与该请求首次参与 HRRN 排序时未缓存的 prefill token 数计算，既倾向于较短请求，也会随等待量
+      增加逐步提升长请求优先级，避免纯最短任务优先造成饥饿。该模式适合 PD 分离的 Prefill
+      节点中请求长度差异较大的流量。该策略参考了
+      `SGLang PR #32911 <https://github.com/sgl-project/sglang/pull/32911>`_，感谢原作者及 SGLang 社区的贡献。
+
+    例如，在原启动命令中添加 ``--prefill_queue_strategy hrrn``。
+    应结合实际流量的 TTFT、TPOT 和尾延迟压测选择策略，策略本身不保证 SLA 改善。
+    完整的调度流程、算法细节和排序示例见 :doc:`Prefill 排队策略 <prefill_queue_strategy>`。
+
+    扩展策略时，在 ``lightllm/server/router/model_infer/mode_backend/prefill_queue_strategy`` 中继承
+    ``PrefillQueueStrategy`` 并实现 ``reorder_prefill``，然后加入 ``PREFILL_QUEUE_STRATEGIES``
+    映射，并同步更新 CLI 和 ``StartArgs`` 的可选值，
+    即可通过启动参数选择。实现必须保持请求集合、请求状态和输入列表不变，
+    并保证各 TP rank 的排序结果一致。策略构造函数会接收当前 ``ModeBackend`` 实例，
+    可通过 ``self.backend`` 读取调度所需的全局状态。
+
 .. option:: --diverse_mode
 
     多结果输出模式
@@ -365,14 +402,19 @@ PD 分离模式参数
 
     设置输出约束后端，可选值：
     
-    * ``outlines``: 使用 outlines 后端
-    * ``xgrammar``: 使用 xgrammar 后端
-    * ``none``: 无输出约束（默认）
+    * ``xgrammar``: 默认值，按请求启用，支持 JSON Schema、JSON object、EBNF 和 regex
+    * ``none``: 关闭输出约束后端
 
-.. option:: --first_token_constraint_mode
+    支持 TP/DP、MTP 和 microbatch overlap。Outlines 后端已移除，
+    ``regular_constraint`` 使用 XGrammar 的 regex 语法。
 
-    约束第一个 token 的允许范围
-    使用环境变量 FIRST_ALLOWED_TOKENS 设置范围，例如 FIRST_ALLOWED_TOKENS=1,2
+    ChatCompletion 的 JSON Schema / JSON object 约束在 thinking 结束后生效，
+    以配置的 reasoning parser 结束标记为准；关闭 thinking 时从首个输出 token 生效。
+
+.. option:: --grammar_compile_timeout
+
+    HTTP 侧 grammar 编译等待超时，默认 ``30.0`` 秒，必须大于 0。
+    非法语法、编译失败或超时会在推理和流式响应开始前返回 HTTP 400。
 
 多模态参数
 ----------

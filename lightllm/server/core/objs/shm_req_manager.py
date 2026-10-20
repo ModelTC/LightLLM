@@ -7,7 +7,7 @@ from .shm_array import ShmArray
 from .atomic_array_lock import AtomicShmArrayLock, AtomicLockItem
 from .atomic_lock import AtomicShmLock
 from .start_args_type import StartArgs
-from typing import List
+from typing import List, Optional
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.shm_utils import create_or_link_shm
 
@@ -92,6 +92,20 @@ class ShmReqManager:
     async def async_alloc_req_index(self):
         return self.alloc_req_index()
 
+    def alloc_req_indexes(self, req_num: int) -> Optional[List[int]]:
+        """一次性申请 req_num 个索引；空闲槽不足时返回 None，不占用部分槽。"""
+        if req_num <= 0:
+            raise ValueError("req_num must be positive")
+        with self.manager_lock:
+            indexes = self.linked_req_manager.alloc_many(req_num)
+            if indexes is not None:
+                assert np.all(self.alloc_state_shm.arr[indexes] == 0)
+                self.alloc_state_shm.arr[indexes] = 1
+            return indexes
+
+    async def async_alloc_req_indexes(self, req_num: int) -> Optional[List[int]]:
+        return self.alloc_req_indexes(req_num)
+
     def release_req_index(self, req_index_in_mem):
         assert req_index_in_mem < self.max_req_num
         with self.manager_lock:
@@ -164,6 +178,18 @@ class ReqLinkedListManager:
             self._values[0, self.NEXT_INDEX] = self._values[alloc_idx, self.NEXT_INDEX]
             return alloc_idx - 1  # 返回实际索引
         return None
+
+    def alloc_many(self, req_num: int) -> Optional[List[int]]:
+        """调用方持有 manager_lock；确认空闲索引足够后才更新链表头。"""
+        indexes = []
+        next_index = self._values[0, self.NEXT_INDEX]
+        for _ in range(req_num):
+            if next_index == -1:
+                return None
+            indexes.append(next_index - 1)
+            next_index = self._values[next_index, self.NEXT_INDEX]
+        self._values[0, self.NEXT_INDEX] = next_index
+        return indexes
 
     def is_empty(self) -> bool:
         """Check if the linked list is empty."""

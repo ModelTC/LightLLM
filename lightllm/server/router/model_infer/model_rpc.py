@@ -15,10 +15,7 @@ from rpyc.utils.server import ThreadedServer
 from rpyc.utils.factory import unix_connect
 from lightllm.server.router.model_infer.mode_backend import (
     ChunkedPrefillBackend,
-    FirstTokenConstraintBackend,
-    OutlinesConstraintBackend,
     RewardModelBackend,
-    XgrammarBackend,
     DPChunkedPrefillBackend,
     DiversehBackend,
     PDChunkedPrefillForPrefillNode,
@@ -60,11 +57,7 @@ class ModelRpcServer(rpyc.Service):
         self.world_size = kvargs["world_size"]
         use_reward_model = self.args.use_reward_model
         diverse_mode = self.args.diverse_mode
-        is_first_token_constraint_mode = self.args.first_token_constraint_mode
 
-        is_outlines_constraint_mode = self.args.output_constraint_mode == "outlines"
-        is_xgrammar_constraint_mode = self.args.output_constraint_mode == "xgrammar"
-        assert not (is_outlines_constraint_mode and is_xgrammar_constraint_mode), "only one constraint mode can be true"
         is_prefill_node = self.args.run_mode == "prefill"
         is_decode_node = self.args.run_mode == "decode"
 
@@ -86,12 +79,6 @@ class ModelRpcServer(rpyc.Service):
             self.backend = RewardModelBackend()
         elif diverse_mode:
             self.backend = DiversehBackend()
-        elif is_outlines_constraint_mode:
-            self.backend = OutlinesConstraintBackend()
-        elif is_xgrammar_constraint_mode:
-            self.backend = XgrammarBackend()
-        elif is_first_token_constraint_mode:
-            self.backend = FirstTokenConstraintBackend()
         else:
             self.backend = ChunkedPrefillBackend()
 
