@@ -70,7 +70,14 @@ class RemotePromptCacheTreeClient:
 
     def _prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
         with self.lock:
-            return obtain(self.connection.root.prefix_match_sampled(key, input_char_count, sample_stride))
+            result = obtain(self.connection.root.prefix_match_sampled(key, input_char_count, sample_stride))
+        prefill_node, matched_char_count, input_char_count, last_insert_time = result
+        return PromptCacheMatchResult(
+            prefill_node=prefill_node,
+            matched_char_count=matched_char_count,
+            input_char_count=input_char_count,
+            last_insert_time=last_insert_time,
+        )
 
     def _insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
         with self.lock:

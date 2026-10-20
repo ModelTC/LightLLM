@@ -37,7 +37,7 @@ def _counts(node):
 
 
 def _query(state, *keys):
-    return state.get_dispatched_info(list(keys))
+    return dict(zip(keys, state.get_dispatched_info(tuple(keys))))
 
 
 def _remote_client(ipc_name="test-pd-node-stats"):
@@ -83,7 +83,7 @@ def test_remote_client_sends_only_connection_keys(monkeypatch):
     client = _remote_client()
     client._add_dispatched_info = Mock()
     client._sub_dispatched_info = Mock()
-    client._get_dispatched_info = Mock(return_value={"p/dp0": (17, 1)})
+    client._get_dispatched_info = Mock(return_value=((17, 1),))
     node = _node()
 
     async def run():
@@ -94,7 +94,7 @@ def test_remote_client_sends_only_connection_keys(monkeypatch):
     asyncio.run(run())
     client._add_dispatched_info.assert_called_once_with(node.connection_key, 17, 1)
     client._sub_dispatched_info.assert_called_once_with(node.connection_key, 3, 1)
-    client._get_dispatched_info.assert_called_once_with([node.connection_key])
+    client._get_dispatched_info.assert_called_once_with((node.connection_key,))
     assert _counts(node) == (17, 1)
 
 

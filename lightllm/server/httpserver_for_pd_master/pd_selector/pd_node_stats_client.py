@@ -50,11 +50,13 @@ class RemotePDNodeStats:
             result = await await_cancellation_safe(
                 asyncio.to_thread(
                     self._get_dispatched_info,
-                    [node.connection_key for node in p_nodes],
+                    tuple(node.connection_key for node in p_nodes),
                 )
             )
-        for node in p_nodes:
-            node.dispatched_prompt_chars, node.dispatched_req_num = result[node.connection_key]
+        if len(result) != len(p_nodes):
+            raise RuntimeError("Shared PD node statistics returned an invalid result")
+        for node, dispatched_info in zip(p_nodes, result):
+            node.dispatched_prompt_chars, node.dispatched_req_num = dispatched_info
 
     async def add_dispatched_info(self, p_node: PD_Client_Obj, chars: int, req_num: int) -> None:
         async with self.async_lock:
@@ -78,7 +80,7 @@ class RemotePDNodeStats:
                 )
             )
 
-    def _get_dispatched_info(self, connection_keys: list[str]):
+    def _get_dispatched_info(self, connection_keys: tuple[str, ...]) -> tuple[tuple[int, int], ...]:
         with self.lock:
             return obtain(self.connection.root.get_dispatched_info(connection_keys))
 

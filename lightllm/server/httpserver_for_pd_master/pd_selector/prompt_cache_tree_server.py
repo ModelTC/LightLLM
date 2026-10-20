@@ -27,7 +27,14 @@ class PromptCacheTreeState(rpyc.Service):
     def prefix_match_sampled(self, key, input_char_count, sample_stride):
         key, input_char_count, sample_stride = obtain((key, input_char_count, sample_stride))
         with self.lock:
-            return self.prompt_cache_tree.prefix_match_sampled(key, input_char_count, sample_stride)
+            result = self.prompt_cache_tree.prefix_match_sampled(key, input_char_count, sample_stride)
+            # 仅返回基础类型组成的 tuple，使 RPyC 通过 brine 按值传输，避免返回 dataclass Netref。
+            return (
+                result.prefill_node,
+                result.matched_char_count,
+                result.input_char_count,
+                result.last_insert_time,
+            )
 
     @rpyc.exposed
     def insert_sampled(self, key, prefill_node, sample_stride) -> None:

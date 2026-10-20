@@ -87,7 +87,7 @@ def test_tree_state_does_not_create_node_statistics():
     prompt = "prefix" * 200
     tree_state.insert_sampled(_key(prompt), "prefill", SAMPLE_STRIDE)
     match = tree_state.prefix_match_sampled(_key(prompt), len(prompt), SAMPLE_STRIDE)
-    assert match.prefill_node == "prefill"
+    assert match[0] == "prefill"
     assert not stats_state.stats
 
 
@@ -183,7 +183,7 @@ def test_tree_and_statistics_servers_use_independent_sockets_and_state():
         tree_thread.join(timeout=5)
         assert not tree_thread.is_alive()
         assert stats_thread.is_alive()
-        assert stats_state.get_dispatched_info(["prefill"]) == {"prefill": (0, 0)}
+        assert stats_state.get_dispatched_info(("prefill",)) == ((0, 0),)
     finally:
         if tree.connection is not None:
             tree.connection.close()

@@ -431,7 +431,11 @@ def _generator_manager(backend, strategy="round_robin"):
         if strategy == "cache_aware":
             states.tree = PromptCacheTreeState()
             tree = manager.pd_manager.selector.policy.prompt_cache_tree
-            tree._prefix_match_sampled = states.tree.prefix_match_sampled
+
+            def prefix_match_sampled(*args):
+                return PromptCacheMatchResult(*states.tree.prefix_match_sampled(*args))
+
+            tree._prefix_match_sampled = prefix_match_sampled
             tree._insert_sampled = states.tree.insert_sampled
     for name in COUNTER_METHODS:
         stats = manager.pd_manager.selector.pd_node_stats
@@ -455,7 +459,7 @@ def _generator_manager(backend, strategy="round_robin"):
 def _pending(state, node):
     if state.stats is None:
         return node.dispatched_prompt_chars, node.dispatched_req_num
-    return state.stats.get_dispatched_info([node.connection_key])[node.connection_key]
+    return state.stats.get_dispatched_info((node.connection_key,))[0]
 
 
 def test_backend_tree_queries_preserve_cache_hint_for_restarted_endpoint(monkeypatch, backend):
@@ -506,7 +510,11 @@ def test_cache_feedback_and_dynamic_thresholds_stay_private_to_each_worker(backe
     stats_calls = tree_calls = None
     if state.stats is not None:
         stats_calls = Mock(wraps=state.stats.get_dispatched_info)
-        tree_calls = Mock(wraps=state.tree.prefix_match_sampled)
+
+        def prefix_match_sampled(*args):
+            return PromptCacheMatchResult(*state.tree.prefix_match_sampled(*args))
+
+        tree_calls = Mock(wraps=prefix_match_sampled)
         for manager in (first, second):
             selector = manager.pd_manager.selector
             selector.pd_node_stats._get_dispatched_info = stats_calls

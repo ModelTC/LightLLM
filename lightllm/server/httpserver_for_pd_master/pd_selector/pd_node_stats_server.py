@@ -30,14 +30,15 @@ class PDNodeStatsState(rpyc.Service):
         self.stats: OrderedDict[str, NodeStats] = OrderedDict()
 
     @rpyc.exposed
-    def get_dispatched_info(self, connection_keys) -> dict[str, tuple[int, int]]:
+    def get_dispatched_info(self, connection_keys: tuple[str, ...]) -> tuple[tuple[int, int], ...]:
         connection_keys = obtain(connection_keys)
         with self.lock:
-            snapshot = {}
+            # tuple 可由 RPyC 的 brine 直接按值传输，避免 dict/list Netref 带来的额外远程访问。
+            snapshot = []
             for key in connection_keys:
                 entry = self._get_stats(key)
-                snapshot[key] = (entry.pending_chars, entry.pending_requests)
-            return snapshot
+                snapshot.append((entry.pending_chars, entry.pending_requests))
+            return tuple(snapshot)
 
     @rpyc.exposed
     def add_dispatched_info(self, connection_key, chars, req_num) -> None:
