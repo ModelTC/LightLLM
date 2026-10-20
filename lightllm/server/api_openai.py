@@ -35,7 +35,13 @@ from lightllm.utils.envs_utils import (
     get_lightllm_websocket_max_message_size,
     is_stop_matching_in_reasoning_enabled,
 )
-from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    GenerationError,
+    InvalidRequestError,
+    SERVER_BUSY_MESSAGE,
+    ServerBusyError,
+)
 
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -554,6 +560,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
             delta = request_output
             current_finish_reason = finish_status.get_finish_reason()
+            if current_finish_reason == "error" and completion_tokens == 1:
+                raise GenerationError("Generation failed before producing output")
 
             # Emit the initial role-only chunk once per choice, as required by the
             # OpenAI SSE spec: role appears only in the first delta with content="".
