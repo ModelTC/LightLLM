@@ -26,6 +26,8 @@ Methods:
 """
 
 from abc import ABC, abstractmethod
+from transformers.utils import to_py_obj
+from lightllm.server.embed_cache.utils import MULTIMODAL_TOKEN_ID_START
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.multimodal_params import AudioItem, ImageItem, MultimodalParams
 
@@ -39,6 +41,14 @@ class BaseMultiModalTokenizer(ABC):
         if name in obj_dict:
             return obj_dict[name]
         return getattr(self.tokenizer, name)
+
+    def decode(self, token_ids, **kwargs):
+        # Incremental detokenization may include virtual IDs from the prompt tail.
+        token_ids = to_py_obj(token_ids)
+        if isinstance(token_ids, int):
+            token_ids = [token_ids]
+        token_ids = [token_id for token_id in token_ids if token_id < MULTIMODAL_TOKEN_ID_START]
+        return self.tokenizer.decode(token_ids, **kwargs)
 
     @abstractmethod
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
