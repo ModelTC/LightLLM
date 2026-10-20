@@ -1,4 +1,6 @@
+import asyncio
 import random
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Union, List, Tuple, Optional
 
@@ -28,6 +30,9 @@ class PDSelector:
         self.decode_nodes: List[PD_Client_Obj] = []
         self.pd_manager = pd_manager
         self.pd_node_stats = create_pd_node_stats_client()
+        # 只有依赖共享在途统计的策略需要覆盖“读取、选点、预占”全过程。
+        # 其他策略使用异步空上下文，避免无意义地串行化请求。
+        self.selection_lock = nullcontext()
 
     def update_nodes(self, prefill_nodes, decode_nodes):
         self.prefill_nodes = prefill_nodes
@@ -101,6 +106,7 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         from .cache_aware import CacheAwareConfig, CacheAwarePolicy
 
         super().__init__(pd_manager)
+        self.selection_lock = asyncio.Lock()
         config = CacheAwareConfig()
         self.policy = CacheAwarePolicy(
             prompt_cache_tree=create_prompt_cache_tree_client(config=config),

@@ -318,12 +318,20 @@ class HttpServerManagerForPDMaster:
         self.active_req_ids.add(origin_request_id)
 
         try:
-            p_node, d_node, selection_extra_info = await self.select_p_d_node(
-                prompt, origin_sampling_params, multimodal_params
-            )
-            if not p_node or not d_node:
-                logger.error(f"{origin_request_id}: No p_node or d_node found")
-                raise Exception(f"{origin_request_id}: No p_node or d_node found")
+            remaining_max_new_tokens = origin_sampling_params.max_new_tokens
+            # cache-aware 会在读取共享统计和写入预占之间发生多次 await。同一 worker
+            # 内若不串行化，突发请求可能全部依据同一份旧快照选中同一 P 节点。
+            # 该锁只约束本 worker 的首次选点和预占，不覆盖后续网络转发与推理。
+            async with self.pd_manager.selector.selection_lock:
+                p_node, d_node, selection_extra_info = await self.select_p_d_node(
+                    prompt, origin_sampling_params, multimodal_params
+                )
+                if not p_node or not d_node:
+                    logger.error(f"{origin_request_id}: No p_node or d_node found")
+                    raise Exception(f"{origin_request_id}: No p_node or d_node found")
+
+                pending_prefill_load_chars = len(prompt)
+                await self.pd_node_stats.add_dispatched_info(p_node=p_node, chars=pending_prefill_load_chars, req_num=1)
 
             cache_age_seconds = None
             if selection_extra_info.cache_last_insert_time is not None:
@@ -346,7 +354,6 @@ class HttpServerManagerForPDMaster:
 
             history_gen_token_strs = []
             origin_prompt_cache_len = None
-            remaining_max_new_tokens = origin_sampling_params.max_new_tokens
             segment_index = 0
             # 后续分段的 prompt 会追加已生成内容；始终保留所有分段中最小的 prompt token 数，
             # 对外 usage 才能反映用户的原始输入长度，而不是最后一次续跑的输入长度。
@@ -378,7 +385,11 @@ class HttpServerManagerForPDMaster:
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
                 block_prompt = prompt + "".join(history_gen_token_strs)
-                pending_prefill_load_chars = len(block_prompt)
+                if segment_index > 0:
+                    pending_prefill_load_chars = len(block_prompt)
+                    await self.pd_node_stats.add_dispatched_info(
+                        p_node=p_node, chars=pending_prefill_load_chars, req_num=1
+                    )
                 sampling_params.constraint_out_params.pd_previous_output_len = 0
                 if history_gen_token_strs and sampling_params.constraint_out_params.has_constraint():
                     block_token_num = await asyncio.to_thread(
@@ -396,7 +407,6 @@ class HttpServerManagerForPDMaster:
                     sampling_params.constraint_out_params.pd_previous_output_len = max(
                         0, block_token_num - input_token_num
                     )
-                await self.pd_node_stats.add_dispatched_info(p_node=p_node, chars=pending_prefill_load_chars, req_num=1)
                 results_generator = self._wait_to_token_package(
                     p_node,
                     d_node,

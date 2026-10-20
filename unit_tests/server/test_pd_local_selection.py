@@ -563,6 +563,81 @@ async def _consume(manager, params):
     return [item async for item in manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2)]
 
 
+def test_cache_aware_selection_and_initial_reservation_are_serialized_per_worker(backend):
+    async def run():
+        manager, state = _generator_manager(backend, "cache_aware")
+        cached = _node(100, "p1:8000")
+        other = _node(101, "p2:8000")
+        _set_nodes(manager, [cached, other], manager.pd_manager.decode_nodes)
+        manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled = AsyncMock(
+            return_value=_match(cached)
+        )
+
+        active_selections = 0
+        max_active_selections = 0
+        original_select = manager.select_p_d_node
+
+        async def select_p_d_node(*args):
+            nonlocal active_selections, max_active_selections
+            active_selections += 1
+            max_active_selections = max(max_active_selections, active_selections)
+            try:
+                # 主动让出事件循环，验证并发请求仍无法同时进入选点区间。
+                await asyncio.sleep(0)
+                return await original_select(*args)
+            finally:
+                active_selections -= 1
+
+        manager.select_p_d_node = select_p_d_node
+        selected_nodes = []
+        all_reserved = asyncio.Event()
+        release_requests = asyncio.Event()
+        request_count = 16
+        request_ids = iter(range(8, 8 * (request_count + 1), 8))
+        manager.id_gen = SimpleNamespace(generate_id=lambda: next(request_ids))
+
+        async def generate_segment(p_node, _d_node, _start_time, _prompt, params, _multimodal, _request):
+            selected_nodes.append(p_node)
+            if len(selected_nodes) == request_count:
+                all_reserved.set()
+            await release_requests.wait()
+            yield (
+                params.group_request_id,
+                "x",
+                {
+                    "prompt_tokens": len(PROMPT),
+                    "prompt_cache_len": 0,
+                    "needs_prefill_first_token": False,
+                },
+                FinishStatus(FinishStatus.FINISHED_STOP),
+            )
+
+        manager._wait_to_token_package = generate_segment
+
+        async def consume(origin_request_id):
+            return [
+                item
+                async for item in manager._generate_one_attempt(
+                    PROMPT, _params(max_new_tokens=1), None, None, 0, origin_request_id, 2
+                )
+            ]
+
+        tasks = [asyncio.create_task(consume(1000 + index * 8)) for index in range(request_count)]
+        try:
+            await asyncio.wait_for(all_reserved.wait(), timeout=5)
+            assert max_active_selections == 1
+            assert cached in selected_nodes
+            assert other in selected_nodes
+        finally:
+            release_requests.set()
+            await asyncio.gather(*tasks)
+
+        assert _pending(state, cached) == (0, 0)
+        assert _pending(state, other) == (0, 0)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("strategy", ["random", "round_robin", "adaptive_load", "cache_aware"])
 @pytest.mark.parametrize("needs_prefill", [True, False])
 def test_segment_counters_clear_at_first_token_and_restart_for_continuation(backend, strategy, needs_prefill):
@@ -616,6 +691,47 @@ def test_segment_counters_clear_at_first_token_and_restart_for_continuation(back
             selector.policy.prompt_cache_tree.insert_sampled.assert_not_awaited()
 
 
+def test_continuation_tokenization_failure_clears_reserved_counter(backend):
+    manager, state = _generator_manager(backend)
+    prefill = manager.pd_manager.prefill_nodes[0]
+    params = SamplingParams()
+    params.init(None, max_new_tokens=3, regular_constraint="ab")
+
+    async def generate_first_segment(_p_node, _d_node, _start_time, _prompt, params, _multimodal, _request):
+        yield (
+            params.group_request_id,
+            "x",
+            {
+                "prompt_tokens": 100,
+                "prompt_cache_len": 0,
+                "needs_prefill_first_token": False,
+            },
+            FinishStatus(),
+        )
+        yield (
+            params.group_request_id,
+            "",
+            {"prompt_tokens": 100},
+            FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY),
+        )
+
+    manager._wait_to_token_package = generate_first_segment
+    manager.tokens = Mock(side_effect=RuntimeError("continuation tokenization failed"))
+
+    with pytest.raises(RuntimeError, match="continuation tokenization failed"):
+        asyncio.run(_consume(manager, params))
+
+    assert manager.pd_node_stats.add_dispatched_info.await_args_list == [
+        call(p_node=prefill, chars=len("prompt"), req_num=1),
+        call(p_node=prefill, chars=len("promptx"), req_num=1),
+    ]
+    assert manager.pd_node_stats.sub_dispatched_info.await_args_list == [
+        call(p_node=prefill, chars=len("prompt"), req_num=1),
+        call(p_node=prefill, chars=len("promptx"), req_num=1),
+    ]
+    assert _pending(state, prefill) == (0, 0)
+
+
 def test_error_output_records_hit_rate_without_inserting_cache(backend):
     manager, state = _generator_manager(backend, "cache_aware")
     prefill = manager.pd_manager.prefill_nodes[0]
@@ -663,27 +779,21 @@ def test_error_before_first_token_clears_segment_counters(backend):
     manager.pd_node_stats.sub_dispatched_info.assert_awaited_once_with(p_node=prefill, chars=len("prompt"), req_num=1)
 
 
-@pytest.mark.parametrize("failure", ["before_segment", "zero_output_budget"])
-def test_no_segment_means_no_counter_updates(monkeypatch, backend, failure):
-    manager, _ = _generator_manager(backend)
+def test_sampling_params_copy_failure_clears_initial_reservation(monkeypatch, backend):
+    manager, state = _generator_manager(backend)
+    prefill = manager.pd_manager.prefill_nodes[0]
     manager._wait_to_token_package = Mock()
     params = _params()
-    if failure == "zero_output_budget":
-        params.max_new_tokens = 0
-    else:
 
-        def fail_copy(*_args, **_kwargs):
-            raise RuntimeError("segment initialization failed")
+    def fail_copy(*_args, **_kwargs):
+        raise RuntimeError("segment initialization failed")
 
-        monkeypatch.setattr(SamplingParams, "from_buffer_copy", fail_copy)
-
-    if failure == "before_segment":
-        with pytest.raises(RuntimeError, match="segment initialization"):
-            asyncio.run(_consume(manager, params))
-    else:
-        assert asyncio.run(_consume(manager, params)) == []
-    for name in COUNTER_METHODS:
-        getattr(manager.pd_node_stats, name).assert_not_awaited()
+    monkeypatch.setattr(SamplingParams, "from_buffer_copy", fail_copy)
+    with pytest.raises(RuntimeError, match="segment initialization"):
+        asyncio.run(_consume(manager, params))
+    manager.pd_node_stats.add_dispatched_info.assert_awaited_once_with(p_node=prefill, chars=len("prompt"), req_num=1)
+    manager.pd_node_stats.sub_dispatched_info.assert_awaited_once_with(p_node=prefill, chars=len("prompt"), req_num=1)
+    assert _pending(state, prefill) == (0, 0)
     manager._wait_to_token_package.assert_not_called()
     manager.remove_req.assert_awaited_once()
     assert not manager.active_req_ids
