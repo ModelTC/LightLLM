@@ -12,7 +12,7 @@ from lightllm.server.httpserver_for_pd_master.manager import (
     HttpServerManagerForPDMaster,
     PDManager,
 )
-from lightllm.server.httpserver_for_pd_master import pd_node_stats_client
+from lightllm.server.httpserver_for_pd_master.pd_selector import pd_node_stats_client
 from lightllm.server.httpserver_for_pd_master.pd_selector import pd_selector
 from lightllm.server.httpserver_for_pd_master.pd_selector import prompt_cache_tree_client
 from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_client import (
@@ -29,10 +29,10 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import (
 from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import (
     PromptCacheMatchResult,
 )
-from lightllm.server.httpserver_for_pd_master.pd_node_stats_server import (
+from lightllm.server.httpserver_for_pd_master.pd_selector.pd_node_stats_server import (
     PDNodeStatsState,
 )
-from lightllm.server.httpserver_for_pd_master.prompt_cache_tree_server import (
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import (
     PromptCacheTreeState,
 )
 from lightllm.server.pd_io_struct import PD_Client_Obj

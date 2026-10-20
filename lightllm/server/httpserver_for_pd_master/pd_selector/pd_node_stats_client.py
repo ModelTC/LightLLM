@@ -9,7 +9,7 @@ from rpyc.utils.factory import unix_connect
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.net_utils import get_pd_master_unix_socket_address
-from .async_utils import await_cancellation_safe
+from ..async_utils import await_cancellation_safe
 
 RPC_TIMEOUT_SECONDS = 5
 

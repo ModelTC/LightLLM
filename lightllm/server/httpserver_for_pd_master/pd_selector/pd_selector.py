@@ -22,7 +22,7 @@ class PDSelectionExtraInfo:
 
 class PDSelector:
     def __init__(self, pd_manager):
-        from ..pd_node_stats_client import create_pd_node_stats_client
+        from .pd_node_stats_client import create_pd_node_stats_client
 
         self.prefill_nodes: List[PD_Client_Obj] = []
         self.decode_nodes: List[PD_Client_Obj] = []

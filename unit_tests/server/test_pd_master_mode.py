@@ -9,7 +9,7 @@ from easydict import EasyDict
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
-from lightllm.server.httpserver_for_pd_master import pd_node_stats_client
+from lightllm.server.httpserver_for_pd_master.pd_selector import pd_node_stats_client
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 from lightllm.server.httpserver_for_pd_master.pd_selector import prompt_cache_tree_client
 
@@ -558,8 +558,8 @@ def test_multiworker_preflight_failure_precedes_environment_and_process_initiali
 def test_multiworker_starts_required_services_in_order(monkeypatch):
     from lightllm.server import api_start
     from lightllm.server.httpserver_for_pd_master import multiprocess
-    from lightllm.server.httpserver_for_pd_master import pd_node_stats_server
-    from lightllm.server.httpserver_for_pd_master import prompt_cache_tree_server
+    from lightllm.server.httpserver_for_pd_master.pd_selector import pd_node_stats_server
+    from lightllm.server.httpserver_for_pd_master.pd_selector import prompt_cache_tree_server
 
     args = StartArgs(run_mode="pd_master", port=8000, httpserver_workers=2)
     ports = SimpleNamespace(

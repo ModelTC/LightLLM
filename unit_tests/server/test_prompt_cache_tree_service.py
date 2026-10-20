@@ -10,7 +10,7 @@ import pytest
 from rpyc.utils.server import ThreadedServer
 
 from lightllm.server.httpserver_for_pd_master.pd_selector import prompt_cache_tree_client
-from lightllm.server.httpserver_for_pd_master.pd_node_stats_server import PDNodeStatsState
+from lightllm.server.httpserver_for_pd_master.pd_selector.pd_node_stats_server import PDNodeStatsState
 from lightllm.server.httpserver_for_pd_master.pd_selector.cache_aware import (
     CacheAwareConfig,
 )
@@ -22,7 +22,7 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_clie
     RemotePromptCacheTreeClient,
     create_prompt_cache_tree_client,
 )
-from lightllm.server.httpserver_for_pd_master.prompt_cache_tree_server import PromptCacheTreeState
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import PromptCacheTreeState
 from lightllm.utils.net_utils import get_abstract_unix_socket_address
 
 SAMPLE_STRIDE = CacheAwareConfig().sample_stride

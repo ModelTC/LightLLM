@@ -575,8 +575,8 @@ def pd_master_multi_worker_start(args: StartArgs):
         start_multiprocess_pd_master,
         validate_multiprocess_pd_master_args,
     )
-    from .httpserver_for_pd_master.pd_node_stats_server import start_pd_node_stats_server
-    from .httpserver_for_pd_master.prompt_cache_tree_server import start_prompt_cache_tree_server
+    from .httpserver_for_pd_master.pd_selector.pd_node_stats_server import start_pd_node_stats_server
+    from .httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import start_prompt_cache_tree_server
 
     haproxy_binary = validate_multiprocess_pd_master_args(args)
     _set_envs_and_config(args)

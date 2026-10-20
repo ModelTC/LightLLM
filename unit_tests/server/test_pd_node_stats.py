@@ -10,14 +10,14 @@ from unittest.mock import Mock, patch
 import pytest
 from rpyc.utils.server import ThreadedServer
 
-from lightllm.server.httpserver_for_pd_master import pd_node_stats_client
-from lightllm.server.httpserver_for_pd_master import pd_node_stats_server
-from lightllm.server.httpserver_for_pd_master.pd_node_stats_client import (
+from lightllm.server.httpserver_for_pd_master.pd_selector import pd_node_stats_client
+from lightllm.server.httpserver_for_pd_master.pd_selector import pd_node_stats_server
+from lightllm.server.httpserver_for_pd_master.pd_selector.pd_node_stats_client import (
     LocalPDNodeStats,
     RemotePDNodeStats,
     create_pd_node_stats_client,
 )
-from lightllm.server.httpserver_for_pd_master.pd_node_stats_server import PDNodeStatsState
+from lightllm.server.httpserver_for_pd_master.pd_selector.pd_node_stats_server import PDNodeStatsState
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.utils.net_utils import get_abstract_unix_socket_address
 

@@ -6,8 +6,8 @@ import rpyc
 from rpyc.utils.classic import obtain
 
 from lightllm.utils.net_utils import get_pd_master_unix_socket_address
-from .pd_selector.cache_aware import CacheAwareConfig
-from .pd_selector.prompt_cache_tree import PromptCacheTree
+from .cache_aware import CacheAwareConfig
+from .prompt_cache_tree import PromptCacheTree
 
 
 @rpyc.service
