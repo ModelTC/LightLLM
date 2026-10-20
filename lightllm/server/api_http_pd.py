@@ -38,6 +38,7 @@ async def register_and_keep_alive(websocket: WebSocket):
     try:
         heartbeat_timeout_seconds = 30
         while True:
+            # Keep the receive timeout in this task, avoiding wait_for's extra task per message.
             with anyio.fail_after(heartbeat_timeout_seconds):
                 data = await websocket.receive_bytes()
             obj = pickle.loads(data)

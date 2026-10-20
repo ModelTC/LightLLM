@@ -128,7 +128,7 @@ def _serialize_chat_sse_chunk(
     response_nulls=(),
     finish_reason=None,
 ):
-    """Serialize a chat streaming chunk without constructing Pydantic models."""
+    """Build chat SSE JSON without per-token Pydantic models, preserving required null fields."""
     choice = {"index": int(choice_index), "delta": delta}
     if finish_reason is not None:
         choice["finish_reason"] = finish_reason
@@ -1029,6 +1029,7 @@ async def _handle_streaming_completion(
         emitted_choices = set()
 
         def pop_pending_chunk():
+            """Pack buffered per-choice text into one SSE event, then reset the buffer and counters."""
             nonlocal pending_tokens, pending_chars
             stream_resp = {
                 "id": str(group_request_id),
@@ -1077,6 +1078,8 @@ async def _handle_streaming_completion(
                 pending_chars += len(output_text)
                 is_first_chunk = choice_index not in emitted_choices
                 emitted_choices.add(choice_index)
+                # Flush the first chunk, batch end and finish immediately; cap buffering at 32 tokens or 64K chars.
+                # Without PD batch metadata, flush each token instead of waiting for more output.
                 if (
                     is_first_chunk
                     or metadata.pop("_pd_stream_batch_end", True)
