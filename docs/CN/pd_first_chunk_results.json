@@ -1,0 +1,301 @@
+{
+  "scope": "Prior frozen source6 policy experiment, not a benchmark of this simplified PR. One seed and one policy order. No confidence interval or sustainable-capacity claim.",
+  "model": "GLM-4.7-Flash",
+  "hardware": "2 x NVIDIA H200, same host, P and D on separate GPUs",
+  "backend": "NIXL",
+  "tp": 1,
+  "dp": 1,
+  "p_token_capacity": 131072,
+  "d_token_capacity": 24576,
+  "active_decode_slots": 8,
+  "staging_slots": 8,
+  "cpu_staging_mb": 0,
+  "requests_per_workload": 24,
+  "seed": 20261018,
+  "order": "early before first_chunk",
+  "eos": "fixed output lengths; ignore EOS",
+  "versions": {
+    "torch": "2.9.1",
+    "nixl": "0.8.0",
+    "transformers": "4.57.1"
+  },
+  "driver": "580.95.05",
+  "model_config_sha256": "dc9b97c7c9bed726a2e6939da4234d5c43abb3edec8812068c9a1af1dbc13acb",
+  "source_manifest_sha256": "423d9eca1eaba442edc5be2686bb18be0f1564be122971ccebfd8f700d70288f",
+  "important_difference": "The experimental harness used additional pending request slots. This PR keeps running_max_req_size as the total pending-plus-active limit and does not include the research controller. The PR shares the first-WRITE allocation and control-before-source-page mechanism; these prior gains do not certify its exact performance.",
+  "policies": {
+    "gpu_early": "Allocate full prompt destination before P starts",
+    "gpu_chunk": "Allocate full prompt destination after first WRITE control"
+  },
+  "results": [
+    {
+      "workload": "uniform",
+      "gpu_early": {
+        "result_sha256": "6ba91fa6d4a6f037070ad3dd8747d5ffdf8661c25d314bf7a184c0107e033f00",
+        "output_tokens_per_second": 87.14829553142836,
+        "ttft_p95_seconds": 32.13978150133043,
+        "elapsed_seconds": 35.25025912746787,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 3072
+      },
+      "gpu_chunk": {
+        "result_sha256": "0640f3541167a7ec7e29c53c057f2adc6ef460da28405f671886a19a4d864561",
+        "output_tokens_per_second": 92.2288240784785,
+        "ttft_p95_seconds": 30.32664207015186,
+        "elapsed_seconds": 33.308458941057324,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 3072
+      },
+      "throughput_change_percent": 5.829750904557773,
+      "ttft_p95_change_percent": -5.64141803858722,
+      "input_token_counts": {
+        "8192": 24
+      },
+      "output_token_counts": {
+        "128": 24
+      },
+      "arrival_span_seconds": 0.0
+    },
+    {
+      "workload": "mixed",
+      "gpu_early": {
+        "result_sha256": "1b244ea1a53e09df56f2bcaf2007aa3be729f24fb08f7a31097d50e8a2a26b96",
+        "output_tokens_per_second": 91.88238450348594,
+        "ttft_p95_seconds": 23.66651526354252,
+        "elapsed_seconds": 33.4340474139899,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 3072
+      },
+      "gpu_chunk": {
+        "result_sha256": "7400f3e1d28e6116f00ede7464e930df7c1b1e6221694fcc545ba2961039d4b7",
+        "output_tokens_per_second": 114.89481665902203,
+        "ttft_p95_seconds": 18.57020811736583,
+        "elapsed_seconds": 26.737498603761196,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 3072
+      },
+      "throughput_change_percent": 25.045532154929017,
+      "ttft_p95_change_percent": -21.533829925639214,
+      "input_token_counts": {
+        "512": 18,
+        "16384": 6
+      },
+      "output_token_counts": {
+        "128": 24
+      },
+      "arrival_span_seconds": 0.0
+    },
+    {
+      "workload": "hol",
+      "gpu_early": {
+        "result_sha256": "706b5042da3c875cc554ec7df7812074878752f0f1e57eb6999d4936c36bc181",
+        "output_tokens_per_second": 74.28319064915766,
+        "ttft_p95_seconds": 31.77629759479313,
+        "elapsed_seconds": 41.355251075699925,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 3072
+      },
+      "gpu_chunk": {
+        "result_sha256": "9054015f2cf3c88333a77d57ec64d227ad931675cdef75b472f2889d80795f38",
+        "output_tokens_per_second": 90.51521862665857,
+        "ttft_p95_seconds": 25.7437109847553,
+        "elapsed_seconds": 33.939044136554,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 3072
+      },
+      "throughput_change_percent": 21.85154923428827,
+      "ttft_p95_change_percent": -18.984548442252546,
+      "input_token_counts": {
+        "512": 16,
+        "16384": 8
+      },
+      "output_token_counts": {
+        "128": 24
+      },
+      "arrival_span_seconds": 1.050000000745058
+    },
+    {
+      "workload": "poisson",
+      "gpu_early": {
+        "result_sha256": "22cad277609369020bf7e99866eca1038880a73aa38b185eacc40347b35dd529",
+        "output_tokens_per_second": 57.13355997820248,
+        "ttft_p95_seconds": 31.238957579340777,
+        "elapsed_seconds": 53.76874819584191,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 3072
+      },
+      "gpu_chunk": {
+        "result_sha256": "a5a371de068c84ba2f8c1c33f05781a0222f5e12edca5f867be9baf1ed79e6ad",
+        "output_tokens_per_second": 70.22368858048742,
+        "ttft_p95_seconds": 22.72415256761014,
+        "elapsed_seconds": 43.745921954512596,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 3072
+      },
+      "throughput_change_percent": 22.911452756101802,
+      "ttft_p95_change_percent": -27.25700750450688,
+      "input_token_counts": {
+        "512": 4,
+        "2048": 2,
+        "8192": 11,
+        "16384": 7
+      },
+      "output_token_counts": {
+        "128": 24
+      },
+      "arrival_span_seconds": 15.848889715969563
+    },
+    {
+      "workload": "decode_heavy",
+      "gpu_early": {
+        "result_sha256": "e83f800c94deab2953bffb4468e95a6e1a0531491955e8751d3b1a988f3bbc1f",
+        "output_tokens_per_second": 447.6405377247885,
+        "ttft_p95_seconds": 44.03119232384488,
+        "elapsed_seconds": 54.901193991303444,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 24576
+      },
+      "gpu_chunk": {
+        "result_sha256": "8d2ae7277b9437527828ba5eb00fcd1fcf6993f95d957e5819645717e921d942",
+        "output_tokens_per_second": 449.5448892626482,
+        "ttft_p95_seconds": 43.49166233371943,
+        "elapsed_seconds": 54.66862283833325,
+        "success_requests": 24,
+        "failed_requests": 0,
+        "output_tokens": 24576
+      },
+      "throughput_change_percent": 0.42541981285675323,
+      "ttft_p95_change_percent": -1.2253358622615895,
+      "input_token_counts": {
+        "2048": 24
+      },
+      "output_token_counts": {
+        "1024": 24
+      },
+      "arrival_span_seconds": 0.0
+    }
+  ],
+  "length_classes": [
+    {
+      "workload": "decode_heavy",
+      "length_class": "all",
+      "offered": 24,
+      "primary_ttft_p95": 43.49166233371943,
+      "baseline_ttft_p95": 44.03119232384488,
+      "ttft_p95_change_percent": -1.2253358622615895
+    },
+    {
+      "workload": "decode_heavy",
+      "length_class": "medium_513_8191",
+      "offered": 24,
+      "primary_ttft_p95": 43.49166233371943,
+      "baseline_ttft_p95": 44.03119232384488,
+      "ttft_p95_change_percent": -1.2253358622615895
+    },
+    {
+      "workload": "hol",
+      "length_class": "all",
+      "offered": 24,
+      "primary_ttft_p95": 25.7437109847553,
+      "baseline_ttft_p95": 31.77629759479313,
+      "ttft_p95_change_percent": -18.984548442252546
+    },
+    {
+      "workload": "hol",
+      "length_class": "long_ge8192",
+      "offered": 8,
+      "primary_ttft_p95": 28.828938372619447,
+      "baseline_ttft_p95": 35.823672516550864,
+      "ttft_p95_change_percent": -19.525452452424542
+    },
+    {
+      "workload": "hol",
+      "length_class": "short_le512",
+      "offered": 16,
+      "primary_ttft_p95": 6.112647349946201,
+      "baseline_ttft_p95": 5.3281121691688895,
+      "ttft_p95_change_percent": 14.724449408498241
+    },
+    {
+      "workload": "mixed",
+      "length_class": "all",
+      "offered": 24,
+      "primary_ttft_p95": 18.57020811736583,
+      "baseline_ttft_p95": 23.66651526354252,
+      "ttft_p95_change_percent": -21.533829925639214
+    },
+    {
+      "workload": "mixed",
+      "length_class": "long_ge8192",
+      "offered": 6,
+      "primary_ttft_p95": 22.030091661959887,
+      "baseline_ttft_p95": 28.32498893653974,
+      "ttft_p95_change_percent": -22.22382959683816
+    },
+    {
+      "workload": "mixed",
+      "length_class": "short_le512",
+      "offered": 18,
+      "primary_ttft_p95": 2.571160242240876,
+      "baseline_ttft_p95": 2.5909266166388987,
+      "ttft_p95_change_percent": -0.7629075355157888
+    },
+    {
+      "workload": "poisson",
+      "length_class": "all",
+      "offered": 24,
+      "primary_ttft_p95": 22.72415256761014,
+      "baseline_ttft_p95": 31.238957579340777,
+      "ttft_p95_change_percent": -27.25700750450688
+    },
+    {
+      "workload": "poisson",
+      "length_class": "long_ge8192",
+      "offered": 18,
+      "primary_ttft_p95": 23.546161868236954,
+      "baseline_ttft_p95": 32.54225955121218,
+      "ttft_p95_change_percent": -27.644354777571458
+    },
+    {
+      "workload": "poisson",
+      "length_class": "medium_513_8191",
+      "offered": 2,
+      "primary_ttft_p95": 0.2154140630736947,
+      "baseline_ttft_p95": 0.16015200838446617,
+      "ttft_p95_change_percent": 34.506001670965404
+    },
+    {
+      "workload": "poisson",
+      "length_class": "short_le512",
+      "offered": 4,
+      "primary_ttft_p95": 0.2519119707867503,
+      "baseline_ttft_p95": 0.1455808464437723,
+      "ttft_p95_change_percent": 73.03922661560172
+    },
+    {
+      "workload": "uniform",
+      "length_class": "all",
+      "offered": 24,
+      "primary_ttft_p95": 30.32664207015186,
+      "baseline_ttft_p95": 32.13978150133043,
+      "ttft_p95_change_percent": -5.64141803858722
+    },
+    {
+      "workload": "uniform",
+      "length_class": "long_ge8192",
+      "offered": 24,
+      "primary_ttft_p95": 30.32664207015186,
+      "baseline_ttft_p95": 32.13978150133043,
+      "ttft_p95_change_percent": -5.64141803858722
+    }
+  ]
+}

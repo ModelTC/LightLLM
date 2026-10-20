@@ -1,4 +1,5 @@
 import pytest
+import uuid
 import easydict
 from types import SimpleNamespace
 from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
@@ -10,7 +11,8 @@ from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args
 @pytest.fixture(scope="module", autouse=True)
 def setup_module_env():
     with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_req_service_0")
+        service_name = "test_req_" + uuid.uuid4().hex
+        monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: service_name)
         monkeypatch.setenv("LIGHTLLM_START_ARGS", "{}")
         set_env_start_args(
             easydict.EasyDict(
@@ -66,6 +68,12 @@ def test_detach_shm_arrays(req):
 def test_get_used_tokens(req):
     req.shm_cur_kv_len = 5
     assert req.get_used_tokens() == 5
+
+
+def test_init_resets_pending_pd_allocation(req):
+    req.pd_waiting_for_kv = True
+    req.init(2, [1, 2, 3], {"max_new_tokens": 1}, None, chunked_prefill_size=128)
+    assert not req.pd_waiting_for_kv
 
 
 def test_final_token_metadata_read_returns_actual_prompt_tokens(req):

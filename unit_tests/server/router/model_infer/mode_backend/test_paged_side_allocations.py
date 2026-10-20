@@ -32,55 +32,66 @@ def _reserve_into_table(table, req, alloc_sizes, next_index, alloc_token_num):
 
 
 @pytest.mark.parametrize("is_hybrid_att_model", [False, True])
-def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatch, is_hybrid_att_model):
+def test_pd_decode_reserves_model_pages_only_after_first_write(monkeypatch, is_hybrid_att_model):
+    from queue import Queue
+
     table = torch.full((1, 16), -1, dtype=torch.int32)
-    table[0, :4] = torch.arange(4, dtype=torch.int32)
     alloc_sizes = []
-    next_index = [4]
-    tasks = []
+    next_index = [0]
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
-    backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
+    backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4, mtp_step=0)
     backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
-    backend.is_master_in_dp = False
+    backend.is_master_in_dp = True
+    backend.node_world_size = backend.dp_world_size = 1
+    backend.dp_rank_in_node = 0
+    backend.info_queue = Queue()
     backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(table, req, alloc_sizes, next_index, size)
-
-    def create_task(**kwargs):
-        tasks.append(
-            (
-                kwargs["kv_start_index"],
-                kwargs["kv_end_index"],
-                kwargs["mem_indexes"],
-                kwargs.get("page_kind", "kv"),
-            )
-        )
-        kwargs["group"].task_list.append(SimpleNamespace())
-
-    backend._create_pd_trans_task = create_task
     monkeypatch.setattr(decode_impl.g_infer_context, "is_hybrid_att_model", is_hybrid_att_model)
+    monkeypatch.setattr(decode_impl.g_infer_context, "get_can_alloc_token_num", lambda: 100)
     req = _bind_alloc_need(
         SimpleNamespace(
+            req_id=1,
             req_idx=0,
-            cur_kv_len=4,
-            hold_kv_len=4,
-            pd_trans_kv_start_index=0,
+            cur_kv_len=0,
+            hold_kv_len=0,
+            pd_task_num=0,
+            pd_task_failed_num=0,
+            pd_trans_device_id=-1,
+            infer_aborted=False,
+            cur_output_len=0,
             shm_req=SimpleNamespace(input_len=10),
+            sampling_param=SimpleNamespace(
+                pd_master_node_id=0, shm_param=SimpleNamespace(max_new_tokens=1, ignore_eos=True)
+            ),
         ),
         page_size=4,
     )
+    monkeypatch.setattr(decode_impl.g_infer_context, "requests_mapping", {1: req})
 
     backend._decode_node_gen_trans_tasks(req)
-
-    assert alloc_sizes == [8]
+    group = backend.info_queue.get_nowait()
+    assert alloc_sizes == []
+    assert req.cur_kv_len == req.hold_kv_len == 0
+    assert req.shm_req.pd_waiting_for_kv
+    assert all(t.defer_allocation for t in group.task_list)
+    backend._allocate_ready_kv([1])
+    assert alloc_sizes == []
+    req.pd_first_chunk_ready = True
+    backend._allocate_ready_kv([1])
+    assert alloc_sizes == [12]
     assert req.cur_kv_len == 10
     assert req.hold_kv_len == 12
-    expected_tasks = [
-        (4, 8, [4, 5, 6, 7], "kv"),
-        (8, 10, [8, 9], "kv"),
-    ]
+    update = backend.info_queue.get_nowait()
+    assert update.allocation_update
+    assert not req.shm_req.pd_waiting_for_kv
+    expected_tasks = [(0, 4, [0, 1, 2, 3], "kv"), (4, 8, [4, 5, 6, 7], "kv"), (8, 10, [8, 9], "kv")]
     if is_hybrid_att_model:
         expected_tasks.append((10, 10, [], "att_state"))
-    assert tasks == expected_tasks
+    assert [(t.start_kv_index, t.end_kv_index, t.mem_indexes, t.page_kind) for t in update.task_list] == expected_tasks
+    assert all(not t.defer_allocation for t in update.task_list)
     assert table[0, :12].tolist() == list(range(12))
+    backend._allocate_ready_kv([1])
+    assert alloc_sizes == [12]
 
 
 def test_pd_decode_rejects_unaligned_transfer_page_size():

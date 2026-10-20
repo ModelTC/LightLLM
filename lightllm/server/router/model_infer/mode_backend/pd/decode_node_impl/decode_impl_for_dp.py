@@ -30,6 +30,9 @@ class PDDPForDecodeNode(DPChunkedPrefillBackend):
     def _decode_node_gen_trans_tasks(self, req_obj: InferReq):
         return PDDecodeNode._decode_node_gen_trans_tasks(self, req_obj=req_obj)
 
+    def _allocate_ready_kv(self, req_ids):
+        return PDDecodeNode._allocate_ready_kv(self, req_ids)
+
     def _create_pd_trans_task(
         self,
         req_obj: InferReq,

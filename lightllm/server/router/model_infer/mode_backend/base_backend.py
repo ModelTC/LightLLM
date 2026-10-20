@@ -544,6 +544,9 @@ class ModeBackend:
             for obj in cmds:
                 if obj.request_id in g_infer_context.requests_mapping:
                     req: InferReq = g_infer_context.requests_mapping[obj.request_id]
+                    if obj.allocation_requested:
+                        req.pd_first_chunk_ready = True
+                        continue
                     if obj.has_error:
                         req.pd_task_failed_num += 1
                     else:
