@@ -52,7 +52,7 @@ class ServiceReadiness:
                 self.flag.set_value(1)
                 self.ready = self.ever_ready = True
         else:
-            if status != 503 and not self.ever_ready and not self.probe_failure_logged:
+            if status not in (None, 503) and not self.ever_ready and not self.probe_failure_logged:
                 logger.warning(
                     "event=service.probe_failed address=%s status=%s",
                     self.address,
@@ -91,6 +91,8 @@ class SubmoduleManager:
         ready_flag = SharedInt("service_ready")
         ready_flag.set_value(0)
         bind_host = args.config_server_host if args.run_mode == "config_server" else args.host
+        if bind_host is None:
+            return
         ports = get_shm_port_args()
         port = ports.config_server_port if args.run_mode == "config_server" else ports.port
         host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(bind_host, bind_host)

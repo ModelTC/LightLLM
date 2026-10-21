@@ -571,7 +571,8 @@ def test_pd_master_cli_dispatches_to_the_requested_startup_mode(monkeypatch, wor
     single, multiple = Mock(), Mock()
     monkeypatch.setattr(api_start, "pd_master_start", single)
     monkeypatch.setattr(api_start, "pd_master_multi_worker_start", multiple)
-    monkeypatch.setattr(api_server, "set_log_node_role", Mock())
+    configure = Mock()
+    monkeypatch.setattr(api_server, "configure_logging_from_args", configure)
     monkeypatch.setattr(api_server.torch.multiprocessing, "set_start_method", Mock())
     args = StartArgs(run_mode="pd_master", httpserver_workers=workers)
 
@@ -585,6 +586,7 @@ def test_pd_master_cli_dispatches_to_the_requested_startup_mode(monkeypatch, wor
         expected, unexpected = (single, multiple) if workers == 1 else (multiple, single)
         expected.assert_called_once_with(args)
         unexpected.assert_not_called()
+    configure.assert_called_once_with(args)
 
 
 def test_multiworker_preflight_failure_precedes_environment_and_process_initialization(monkeypatch):

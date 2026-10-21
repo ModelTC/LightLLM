@@ -288,13 +288,15 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
             except ServerBusyError:
                 # 关闭节点自限流时，不启用与该策略配套的 busy 重试，直接透传异常。
                 if not self.enable_pd_node_self_request_limit:
-                    log_request_summary(origin_request_id, status="busy", timing_scope="end_to_end")
+                    if not has_yielded_result:
+                        log_request_summary(origin_request_id, status="busy", timing_scope="end_to_end")
                     raise
 
                 # 已向客户端输出 token 后不能从头生成，否则会产生重复内容。
                 elapsed_seconds = time.monotonic() - retry_start_time
                 if has_yielded_result or elapsed_seconds >= self.pd_node_busy_retry_timeout_seconds:
-                    log_request_summary(origin_request_id, status="busy", timing_scope="end_to_end")
+                    if not has_yielded_result:
+                        log_request_summary(origin_request_id, status="busy", timing_scope="end_to_end")
                     raise
 
                 # 发起下一次尝试前检查客户端连接，避免为已断开的请求继续占用 P/D 节点资源。
@@ -688,7 +690,9 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                 finish_reasons = {"stop"}
             elif not isinstance(error, GeneratorExit) or not finish_reasons:
                 interrupted = isinstance(error, (ClientDisconnected, asyncio.CancelledError, GeneratorExit))
-                finish_reasons.add("abort" if interrupted else "error")
+                finish_reasons.add(
+                    "busy" if isinstance(error, ServerBusyError) else "abort" if interrupted else "error"
+                )
             raise
         finally:
             # 分段可能因 stop、容量切换或取消而提前关闭，已有输出也需要记录总结。

@@ -35,6 +35,7 @@ from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, Asyn
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import (
     request_finish_fields,
+    summarize_exception,
     init_logger,
     log_request_summary,
     log_debug_event,
@@ -566,10 +567,15 @@ class HttpServerManager(HttpRlManagerHelper, object):
                     if cancelled
                     else "timeout"
                     if isinstance(e, asyncio.TimeoutError)
+                    else "busy"
+                    if isinstance(e, ServerBusyError)
+                    else "rejected"
+                    if isinstance(e, InvalidRequestError)
                     else "error"
                 ),
                 timing_scope=self.args.run_mode if self.args.run_mode in ("prefill", "decode") else "end_to_end",
                 error_type=type(e).__name__,
+                reason=summarize_exception(e),
             )
 
             # error need to release multimodel resources.

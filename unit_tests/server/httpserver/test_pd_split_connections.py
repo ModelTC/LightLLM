@@ -348,3 +348,29 @@ def test_split_option_defaults_off_and_is_prefill_only():
     assert StartArgs().use_dp_split_mode_connect_pd_master is False
     with pytest.raises(ValueError, match="only supports prefill"):
         launch_server(StartArgs(run_mode="decode", use_dp_split_mode_connect_pd_master=True))
+
+
+def test_pd_master_waiting_is_logged_only_on_transitions(monkeypatch):
+    from unittest.mock import Mock
+
+    logger = Mock()
+    monkeypatch.setattr(pd_loop, "logger", logger)
+    masters = {1: PD_Master_Obj(1, "master:8000")}
+    lookup = AsyncMock(side_effect=[None, None, {}, masters, masters, None])
+    monkeypatch.setattr(pd_loop, "_get_pd_master_objs", lookup)
+    monkeypatch.setattr(pd_loop, "_pd_handle_task", AsyncMock())
+
+    async def tick(_seconds):
+        if lookup.await_count == 6:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(pd_loop.asyncio, "sleep", tick)
+
+    async def run():
+        manager = SimpleNamespace(args=StartArgs(host="p", run_mode="prefill"))
+        with pytest.raises(asyncio.CancelledError):
+            await pd_loop.pd_handle_loop(manager)
+
+    asyncio.run(run())
+    events = [call.kwargs["extra"]["event"] for call in logger.info.call_args_list if "extra" in call.kwargs]
+    assert events == ["pd.waiting_for_master", "pd.masters_changed", "pd.waiting_for_master"]

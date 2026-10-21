@@ -380,13 +380,21 @@ def log_http_access(method, path, status, duration_ms, http_request_id=None):
 def log_request_summary(request_id, **fields):
     status = fields.get("status", "completed")
     failed = status in {"error", "timeout", "failed", "busy"}
+    rejected = status == "rejected"
     cancelled = status in {"cancelled", "abort"}
     logger = logging.getLogger("lightllm.requests")
     stage = fields.get("timing_scope") in {"prefill", "decode"}
-    if not failed and not cancelled and not should_log_request(request_id):
+    if not failed and not rejected and not cancelled and not should_log_request(request_id):
         return
     event = fields.pop(
-        "event", "request.failed" if failed else "request.cancelled" if cancelled else "request.completed"
+        "event",
+        "request.failed"
+        if failed
+        else "request.rejected"
+        if rejected
+        else "request.cancelled"
+        if cancelled
+        else "request.completed",
     )
     client_id = fields.pop("x_request_id", None) or get_http_request_id()
     if client_id != "-":
@@ -397,7 +405,15 @@ def log_request_summary(request_id, **fields):
         for key, value in fields.items()
         if not (("cache" in key and not value) or (key.startswith("mtp_") and not mtp_enabled))
     }
-    method = logger.error if failed else logger.debug if stage or cancelled else logger.info
+    method = (
+        logger.warning
+        if status == "busy" or rejected
+        else logger.error
+        if failed
+        else logger.debug
+        if stage or cancelled
+        else logger.info
+    )
     method(
         "event=%s request_id=%s %s",
         event,
@@ -414,6 +430,8 @@ def request_finish_fields(reasons):
     status = (
         "error"
         if "error" in reasons
+        else "busy"
+        if "busy" in reasons
         else "abort"
         if "abort" in reasons
         else "continued"

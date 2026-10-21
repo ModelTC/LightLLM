@@ -49,14 +49,17 @@ async def pd_handle_loop(manager: HttpServerManager, dp_index: Optional[int] = N
         manager.host_ip = manager.args.host
 
     id_to_handle_task: Dict[int, asyncio.Task] = {}
-    previous_master_ids = None
+    previous_master_ids = object()
 
     while True:
         try:
             id_to_pd_master_obj = await _get_pd_master_objs(manager.args)
-            master_ids = tuple(sorted(id_to_pd_master_obj)) if id_to_pd_master_obj is not None else None
+            master_ids = tuple(sorted(id_to_pd_master_obj or {}))
             if master_ids != previous_master_ids:
-                log_debug_event(logger, "pd.masters_changed", master_ids=master_ids)
+                event = "pd.masters_changed" if master_ids else "pd.waiting_for_master"
+                logger.info(
+                    "event=%s master_ids=%s", event, master_ids, extra={"event": event, "master_ids": master_ids}
+                )
                 previous_master_ids = master_ids
 
             if id_to_pd_master_obj is not None:

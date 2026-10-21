@@ -329,7 +329,11 @@ def test_readiness_waits_for_bound_endpoint_and_pd_topology(monkeypatch):
     args = SimpleNamespace(run_mode="pd_master", model_name="test-model")
     state = start_utils.ServiceReadiness(flag, args, "http://127.0.0.1:8000", 10)
     state.observe(None)
+    logger.warning.assert_not_called()
+    assert not state.probe_failure_logged
+    state.observe(500)
     logger.warning.assert_called_once()
+    assert logger.warning.call_args.kwargs["extra"]["http_status"] == 500
     logger.warning.reset_mock()
     state.observe(503)
     state.observe(503)
@@ -364,7 +368,8 @@ def test_readiness_monitor_probes_bound_address(monkeypatch, mode, host, expecte
 
     manager = start_utils.SubmoduleManager()
     flag = Mock()
-    monkeypatch.setattr(shared_arr, "SharedInt", lambda name: flag)
+    shared_int = Mock(return_value=flag)
+    monkeypatch.setattr(shared_arr, "SharedInt", shared_int)
     monkeypatch.setattr(shm_port_args, "get_shm_port_args", lambda: SimpleNamespace(port=8000, config_server_port=9000))
     monkeypatch.setattr(start_utils.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
     session = MagicMock()
@@ -374,12 +379,25 @@ def test_readiness_monitor_probes_bound_address(monkeypatch, mode, host, expecte
         assert url == expected
         assert timeout == 1
         assert session.trust_env is False
-        manager.readiness_stop.set()
         return SimpleNamespace(status_code=200)
 
+    monkeypatch.setattr(manager.readiness_stop, "wait", lambda timeout: manager.readiness_stop.set())
     session.get.side_effect = probe
     monkeypatch.setattr(requests, "Session", lambda: session)
     args = SimpleNamespace(run_mode=mode, host=host, config_server_host="127.0.0.2", model_name="test")
     manager.start_readiness_monitor(FakeHttpServerProcess(), args)
     session.get.assert_called_once()
-    flag.set_value.assert_called_once_with(0)
+    shared_int.assert_called_once_with("service_ready")
+    assert [call.args for call in flag.set_value.call_args_list] == [(0,), (1,)]
+
+
+def test_readiness_monitor_leaves_missing_config_host_to_supervisor(monkeypatch):
+    from unittest.mock import Mock
+    from lightllm.server.router.dynamic_prompt import shared_arr
+
+    monkeypatch.setattr(shared_arr, "SharedInt", Mock())
+    thread = Mock()
+    monkeypatch.setattr(start_utils.threading, "Thread", thread)
+    args = SimpleNamespace(run_mode="config_server", config_server_host=None)
+    start_utils.SubmoduleManager().start_readiness_monitor(FakeHttpServerProcess(), args)
+    thread.assert_not_called()

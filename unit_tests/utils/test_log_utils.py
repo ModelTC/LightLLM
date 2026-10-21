@@ -54,6 +54,7 @@ import textwrap
 
 def _run_logging(code, **settings):
     env = {key: value for key, value in os.environ.items() if not key.startswith("LIGHTLLM_LOG_")}
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get("PYTHONPATH", "")
     env["LIGHTLLM_LOG_REQUEST_SAMPLE_RATE"] = "1"
     env.update({key: str(value) for key, value in settings.items()})
     result = subprocess.run(
@@ -663,3 +664,23 @@ def test_default_request_sampling_is_stable_and_bounded():
         assert 5 <= sum(first) <= 40
         """
     )
+
+
+@pytest.mark.parametrize(
+    "status,level,event",
+    [
+        ("busy", logging.WARNING, "request.failed"),
+        ("rejected", logging.WARNING, "request.rejected"),
+        ("error", logging.ERROR, "request.failed"),
+    ],
+)
+def test_failure_summary_level_and_sampling(monkeypatch, caplog, status, level, event):
+    monkeypatch.setattr(log_utils, "should_log_request", lambda request_id: False)
+    logger = logging.getLogger("lightllm.requests")
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    with caplog.at_level(logging.DEBUG, logger="lightllm.requests"):
+        log_utils.log_request_summary(123, status=status, reason="bounded reason")
+    record = caplog.records[-1]
+    assert record.levelno == level
+    assert record.event == event
+    assert record.reason == "bounded reason"

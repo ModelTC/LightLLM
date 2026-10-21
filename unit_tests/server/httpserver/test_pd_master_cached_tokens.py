@@ -911,7 +911,7 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
     asyncio.run(asyncio.wait_for(run(), timeout=2))
 
 
-@pytest.mark.parametrize("bad_metadata", [False, True])
+@pytest.mark.parametrize("bad_metadata", [False, True, "busy"])
 def test_pd_failure_emits_one_summary_with_output_counts(monkeypatch, bad_metadata):
     import time
     from unittest.mock import AsyncMock, MagicMock
@@ -930,6 +930,10 @@ def test_pd_failure_emits_one_summary_with_output_counts(monkeypatch, bad_metada
     async def raw_stream(_p, _d, _prompt, sp, *_args):
         metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
         yield sp.group_request_id, "first", dict(metadata), FinishStatus()
+        if bad_metadata == "busy":
+            from lightllm.utils.error_utils import ServerBusyError
+
+            raise ServerBusyError("decode busy")
         if bad_metadata:
             yield sp.group_request_id + 1, "bad", dict(metadata), FinishStatus()
         else:
@@ -938,12 +942,16 @@ def test_pd_failure_emits_one_summary_with_output_counts(monkeypatch, bad_metada
     manager.fetch_pd_stream = raw_stream
 
     async def run():
-        with pytest.raises(AssertionError if bad_metadata else RuntimeError):
+        from lightllm.utils.error_utils import ServerBusyError
+
+        error = ServerBusyError if bad_metadata == "busy" else AssertionError if bad_metadata else RuntimeError
+        with pytest.raises(error):
             async for _ in manager._generate_one("prompt", params, None, request, time.time(), 80, 10):
                 pass
         summary.assert_called_once()
-        assert summary.call_args.kwargs["status"] == "error"
-        assert summary.call_args.kwargs["output_tokens"] == (2 if bad_metadata else 1)
+        assert summary.call_args.kwargs["status"] == ("busy" if bad_metadata == "busy" else "error")
+        assert summary.call_args.kwargs["output_tokens"] == (2 if bad_metadata is True else 1)
+        assert not manager._summary_states
         assert not manager.active_req_ids
 
     asyncio.run(run())
