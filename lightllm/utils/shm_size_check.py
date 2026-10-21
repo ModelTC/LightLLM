@@ -3,7 +3,7 @@ import os
 import shutil
 import time
 import threading
-from lightllm.server.core.objs.req import ChunkedPrefillReq, TokenHealingReq
+from lightllm.server.core.objs.req import ChunkedPrefillReq
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.server.tokenizer import get_tokenizer
 from lightllm.utils.config_utils import get_hidden_size
@@ -92,10 +92,7 @@ def _get_recommended_shm_size_gb(args, max_image_resolution=(3940, 2160), dtype_
     input_token_logprob_size_bytes = args.running_max_req_size * 8 * 2 * args.max_req_total_len
 
     # 估算Req所需的shm大小
-    if args.token_healing_mode:
-        req_class_size = ctypes.sizeof(TokenHealingReq)
-    else:
-        req_class_size = ctypes.sizeof(ChunkedPrefillReq)
+    req_class_size = ctypes.sizeof(ChunkedPrefillReq)
     req_shm_size_bytes = req_class_size * args.running_max_req_size
 
     if not args.enable_multimodal:

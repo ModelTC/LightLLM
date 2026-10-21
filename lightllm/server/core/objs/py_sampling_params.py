@@ -5,7 +5,9 @@
 import os
 from typing import List, Optional, Union, Tuple
 from transformers import GenerationConfig
-from lightllm.server.req_id_generator import MAX_BEST_OF
+from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
+from lightllm.utils.grammar_utils import validate_grammar
+from .sampling_params import MAX_SEED, StopStrMatchMode
 
 
 _SAMPLING_EPS = 1e-5
@@ -22,7 +24,7 @@ class SamplingParams:
     _temperature: float = 1.0
     _top_p: float = 1.0
     _top_k: int = -1  # -1 is for all
-    _stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None
+    _stop_sequences: Optional[Union[str, List[Union[str, List[int]]]]] = None
 
     def __init__(
         self,
@@ -40,7 +42,8 @@ class SamplingParams:
         image_max_patch_num: int = -1,
         max_new_tokens: int = 65535,
         min_new_tokens: int = 1,
-        stop_sequences: Optional[Union[str, List[str], List[List[int]]]] = None,  # 停止句子条件
+        # 字符串保留原文供 detokenization / HTTP 匹配；显式 token ID 序列始终由推理层匹配。
+        stop_sequences: Optional[Union[str, List[Union[str, List[int]]]]] = None,
         skip_special_tokens: bool = True,  # whether to skip special tokens when decoding
         add_special_tokens: bool = True,  # whether to add special tokens when encoding
         add_spaces_between_special_tokens: bool = True,  # whether to add spaces between special tokens when decoding
@@ -50,17 +53,24 @@ class SamplingParams:
         regular_constraint: Optional[str] = None,  # Regular expressions constrain the output.
         guided_grammar: Optional[str] = None,  # EBNF constrain the output.
         guided_json: Optional[Union[str, dict]] = None,  # JSON schema constrain the output.
-        # If provided, the engine will construct a logits,
-        # processor which only retains scores for the given token ids. Defaults to None.
-        # allowed_token_ids only can be used in "--output_constraint_mode outlines" started server.
-        allowed_token_ids: Optional[List[int]] = None,
+        # if provided, the invalid token ids will be ignored during generation
+        invalid_token_ids: Optional[List[int]] = None,
         # p d mode used params
         group_request_id: Optional[int] = None,
-        # move kv to deocde node, only used in pd mode
-        move_kv_to_decode_node: Optional[dict] = None,
         # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         suggested_dp_index: Optional[int] = None,
         seed: Optional[int] = -1,
+        # 是否保留命中的字符串 stop；False 时移除 stop，True 时保留。
+        # 两种设置都会移除同一 token 中 stop 后的文本；不影响 token ID stop 序列。
+        include_stop_str_in_output: bool = False,
+        # stop 检测的初始推理状态提示：-1 使用 parser 默认值，0 为回答，1 为思考。
+        # 用于初始化当前请求或 PD 续跑段；运行时状态由 StopStrMatchBuffer 维护。
+        _initial_reasoning_state: int = -1,
+        # stop 匹配策略，取值见 StopStrMatchMode；由接口入口设置，随请求传递到各进程和 P/D 节点。
+        # 默认 ALL_TEXT；Chat 接口需要跳过 reasoning 时使用 CONTENT_ONLY。
+        stop_str_match_mode: int = StopStrMatchMode.ALL_TEXT,
+        guided_reasoning_end: Optional[List[int]] = None,
+        pd_previous_output_len: int = 0,
     ) -> None:
         self.best_of = best_of
         self.n = n
@@ -81,6 +91,10 @@ class SamplingParams:
         self.max_new_tokens = max_new_tokens
         self.min_new_tokens = min_new_tokens
         self.stop_sequences = stop_sequences if stop_sequences is not None else SamplingParams._stop_sequences
+        self.stop_str_match_mode = StopStrMatchMode(stop_str_match_mode)
+        self.include_stop_str_in_output = include_stop_str_in_output
+        # 运行时状态由 StopStrMatchBuffer 维护，此参数仅用于初始化。
+        self._initial_reasoning_state = _initial_reasoning_state
         self.skip_special_tokens = skip_special_tokens
         self.add_special_tokens = add_special_tokens
         self.add_spaces_between_special_tokens = add_spaces_between_special_tokens
@@ -88,11 +102,12 @@ class SamplingParams:
         self.regular_constraint = regular_constraint
         self.guided_grammar = guided_grammar
         self.guided_json = guided_json
-        self.allowed_token_ids = allowed_token_ids
+        self.guided_reasoning_end = guided_reasoning_end
+        self.pd_previous_output_len = pd_previous_output_len
+        self.invalid_token_ids = invalid_token_ids
         self.group_request_id = group_request_id
-        self.move_kv_to_decode_node = move_kv_to_decode_node
         self.suggested_dp_index = suggested_dp_index
-        self.seed = seed
+        self.seed = self._normalize_and_verify_seed(seed)
         if self.do_sample is False:
             self.temperature = 1.0
             self.top_p = 1.0
@@ -111,13 +126,18 @@ class SamplingParams:
     def load_generation_cfg(cls, weight_dir):
         try:
             generation_cfg = GenerationConfig.from_pretrained(weight_dir, trust_remote_code=True).to_dict()
-            cls._do_sample = generation_cfg.get("do_sample", False)
-            cls._presence_penalty = generation_cfg.get("presence_penalty", 0.0)
-            cls._frequency_penalty = generation_cfg.get("frequency_penalty", 0.0)
-            cls._repetition_penalty = generation_cfg.get("repetition_penalty", 1.0)
-            cls._temperature = generation_cfg.get("temperature", 1.0)
-            cls._top_p = generation_cfg.get("top_p", 1.0)
-            cls._top_k = generation_cfg.get("top_k", -1)
+
+            def _cfg(key, default):
+                v = generation_cfg.get(key)
+                return v if v is not None else default
+
+            cls._do_sample = _cfg("do_sample", False)
+            cls._presence_penalty = _cfg("presence_penalty", 0.0)
+            cls._frequency_penalty = _cfg("frequency_penalty", 0.0)
+            cls._repetition_penalty = _cfg("repetition_penalty", 1.0)
+            cls._temperature = _cfg("temperature", 1.0)
+            cls._top_p = _cfg("top_p", 1.0)
+            cls._top_k = _cfg("top_k", -1)
             cls._stop_sequences = generation_cfg.get("stop", None)
         except:
             pass
@@ -149,7 +169,6 @@ class SamplingParams:
             raise ValueError(
                 f"min_new_tokens must <= max_new_tokens, but got min {self.min_new_tokens}, max {self.max_new_tokens}."
             )
-
         if len(self.exponential_decay_length_penalty) != 2:
             raise ValueError(
                 f"exponential_decay_length_penalty must be a tuple of (int, float), \
@@ -180,73 +199,39 @@ class SamplingParams:
         if self.regular_constraint is not None:
             # check regex format
             try:
-                import interegular
-
-                interegular.parse_pattern(self.regular_constraint)
+                validate_grammar("regex", self.regular_constraint)
             except Exception as e:
                 raise ValueError(f"regular_expression '{self.regular_constraint}' has parse_pattern_error: {str(e)}")
 
         if not (self.group_request_id is None or isinstance(self.group_request_id, int)):
             raise ValueError(f"group_request_id must be None or int ,but get {self.group_request_id}")
 
-        if not (self.move_kv_to_decode_node is None or isinstance(self.move_kv_to_decode_node, dict)):
-            raise ValueError(f"move_kv_to_decode_node must be None or dict, but get {self.move_kv_to_decode_node}")
-
         if not (self.suggested_dp_index is None or isinstance(self.suggested_dp_index, int)):
             raise ValueError(f"suggested_dp_index must be None or int, but get {self.suggested_dp_index}")
 
         self._verify_stop_sentences()
 
-        self._verify_allowed_token_ids()
-
         return
 
-    def _verify_allowed_token_ids(self):
-        if self.allowed_token_ids is not None:
-            if (not isinstance(self.allowed_token_ids, list)) or (
-                not all(isinstance(token_id, int) for token_id in self.allowed_token_ids)
-            ):
-                raise ValueError(f"allowed_token_ids need format List[int], but get {self.allowed_token_ids}")
-            if self.regular_constraint is not None:
-                raise ValueError("allowed_token_ids and regular_constraint can not be used in same time")
-        return
+    @staticmethod
+    def _normalize_and_verify_seed(seed: Optional[int]) -> int:
+        seed = -1 if seed is None else seed
+        if not -1 <= seed <= MAX_SEED:
+            raise ValueError(f"seed must be -1 (random), or an integer in [0, {MAX_SEED}], got {seed}")
+        return seed
 
     def _verify_stop_sentences(self):
         if self.stop_sequences is not None:
             if isinstance(self.stop_sequences, str):
                 return
             if isinstance(self.stop_sequences, list):
-                all_str = all(isinstance(stop_info, str) for stop_info in self.stop_sequences)
-                all_int_list = all(
-                    (isinstance(stop_info, list) and isinstance(x, int) for x in stop_info)
+                if all(
+                    isinstance(stop_info, str)
+                    or (isinstance(stop_info, list) and all(isinstance(x, int) for x in stop_info))
                     for stop_info in self.stop_sequences
-                )
-                if all_str or all_int_list:
+                ):
                     return
-            raise ValueError("stop_sequences only support str, list[str], list[list[int]] type")
-
-    def stop_sentences_to_token_ids(self, tokenizer):
-        if self.stop_sequences is None:
-            self.stop_sequences = []
-        else:
-            if isinstance(self.stop_sequences, str):
-                self.stop_sequences = [self.stop_sequences]
-            new_stop_sequences = []
-            for stop_info in self.stop_sequences:
-                if isinstance(stop_info, str):
-                    stop_str_ids = self._stop_str_to_token_ids(stop_info, tokenizer)
-                    if stop_str_ids is not None and len(stop_str_ids) > 0:
-                        new_stop_sequences.append(stop_str_ids)
-                if isinstance(stop_info, list):
-                    if all(isinstance(x, int) for x in stop_info):
-                        if len(stop_info) > 0:
-                            new_stop_sequences.append(stop_info)
-            self.stop_sequences = new_stop_sequences
-        return
-
-    def _stop_str_to_token_ids(self, stop_str: str, tokenizer):
-        stop_str_ids = tokenizer.encode(stop_str, add_special_tokens=False)
-        return stop_str_ids
+            raise ValueError("stop_sequences only support str or a list of strings and token ID lists")
 
     def to_dict(self):
         ret = {}
@@ -263,13 +248,17 @@ class SamplingParams:
         ret["ignore_eos"] = self.ignore_eos
         ret["max_new_tokens"] = self.max_new_tokens
         ret["stop_sequences"] = self.stop_sequences
+        ret["stop_str_match_mode"] = self.stop_str_match_mode.get_mode()
+        ret["include_stop_str_in_output"] = self.include_stop_str_in_output
+        ret["_initial_reasoning_state"] = self._initial_reasoning_state
         ret["best_of"] = self.best_of
         ret["input_penalty"] = self.input_penalty
         ret["regular_constraint"] = self.regular_constraint
         ret["guided_grammar"] = self.guided_grammar
         ret["guided_json"] = self.guided_json
-        ret["allowed_token_ids"] = self.allowed_token_ids
-        ret["move_kv_to_decode_node"] = self.move_kv_to_decode_node
+        ret["guided_reasoning_end"] = self.guided_reasoning_end
+        ret["pd_previous_output_len"] = self.pd_previous_output_len
+        ret["invalid_token_ids"] = self.invalid_token_ids
         ret["seed"] = self.seed
         return ret
 

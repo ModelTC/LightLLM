@@ -8,6 +8,8 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from typing import Any, Dict, List, Optional, Union, Literal, ClassVar, TypeAlias
 from transformers import GenerationConfig
 
+MAX_SEED = (1 << 63) - 1
+
 
 class ImageURL(BaseModel):
     url: str
@@ -134,6 +136,7 @@ class CompletionRequest(BaseModel):
     logprobs: Optional[int] = None
     echo: Optional[bool] = False
     stop: Optional[Union[str, List[str]]] = None
+    include_stop_str_in_output: bool = False
     presence_penalty: Optional[float] = 0.0
     frequency_penalty: Optional[float] = 0.0
     best_of: Optional[int] = 1
@@ -153,7 +156,7 @@ class CompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
-    seed: Optional[int] = -1
+    seed: Optional[int] = Field(default=None, ge=-1, le=MAX_SEED)
 
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
@@ -198,6 +201,7 @@ class ChatCompletionRequest(BaseModel):
     stream: Optional[bool] = False
     stream_options: Optional[StreamOptions] = None
     stop: Optional[Union[str, List[str]]] = None
+    include_stop_str_in_output: bool = False
     max_tokens: Optional[int] = Field(
         default=65536, deprecated="max_tokens is deprecated, please use max_completion_tokens instead"
     )
@@ -223,7 +227,7 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # OpenAI parameters for reasoning and others
-    reasoning_effort: Optional[Literal["low", "medium", "high"]] = None
+    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False
@@ -233,7 +237,7 @@ class ChatCompletionRequest(BaseModel):
     top_k: Optional[int] = -1
     repetition_penalty: Optional[float] = 1.0
     ignore_eos: Optional[bool] = False
-    seed: Optional[int] = -1
+    seed: Optional[int] = Field(default=None, ge=-1, le=MAX_SEED)
     role_settings: Optional[Dict[str, str]] = None
     character_settings: Optional[List[Dict[str, str]]] = None
 
@@ -271,7 +275,13 @@ class ChatCompletionRequest(BaseModel):
 
     @model_validator(mode="after")
     def sync_thinking_chat_template_kwargs(self):
-        """Mirror thinking <-> enable_thinking when only one is set (Qwen vs DeepSeek templates)."""
+        """Resolve reasoning effort and mirror the thinking template aliases."""
+        if self.reasoning_effort is not None:
+            if self.chat_template_kwargs is None:
+                self.chat_template_kwargs = {}
+            if "thinking" not in self.chat_template_kwargs and "enable_thinking" not in self.chat_template_kwargs:
+                self.chat_template_kwargs["enable_thinking"] = self.reasoning_effort != "none"
+
         if not self.chat_template_kwargs:
             return self
         if "thinking" not in self.chat_template_kwargs and "enable_thinking" in self.chat_template_kwargs:
@@ -286,11 +296,16 @@ class PromptTokensDetails(BaseModel):
     audio_tokens: int = 0
 
 
+class CompletionTokensDetails(BaseModel):
+    reasoning_tokens: int = 0
+
+
 class UsageInfo(BaseModel):
     prompt_tokens: int = 0
     completion_tokens: Optional[int] = 0
     total_tokens: int = 0
     prompt_tokens_details: Optional[PromptTokensDetails] = None
+    completion_tokens_details: Optional[CompletionTokensDetails] = None
 
 
 class ChatMessage(BaseModel):
@@ -301,14 +316,6 @@ class ChatMessage(BaseModel):
     tool_calls: Optional[List[ToolCall]] = Field(default=None, examples=[None])
     # OpenRouter-style: generated images alongside text; content may include "<image>" placeholders
     images: Optional[List[MessageContent]] = None
-
-    @model_validator(mode="after")
-    def _sync_reasoning_aliases(self):
-        if self.reasoning and not self.reasoning_content:
-            self.reasoning_content = self.reasoning
-        elif self.reasoning_content and not self.reasoning:
-            self.reasoning = self.reasoning_content
-        return self
 
 
 class ChatCompletionResponseChoice(BaseModel):
@@ -337,14 +344,6 @@ class DeltaMessage(BaseModel):
     reasoning: Optional[str] = None
     reasoning_content: Optional[str] = None
     images: Optional[List[MessageContent]] = None
-
-    @model_validator(mode="after")
-    def _sync_reasoning_aliases(self):
-        if self.reasoning and not self.reasoning_content:
-            self.reasoning_content = self.reasoning
-        elif self.reasoning_content and not self.reasoning:
-            self.reasoning = self.reasoning_content
-        return self
 
 
 class ChatCompletionStreamResponseChoice(BaseModel):

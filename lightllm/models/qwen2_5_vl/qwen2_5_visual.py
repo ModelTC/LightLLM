@@ -221,7 +221,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
         elif self.data_type in ["fp32", "float32"]:
             self.data_type = torch.float32
         else:
-            raise ValueError(f"Unsupport datatype {self.data_type}!")
+            raise ValueError(f"Unsupported datatype {self.data_type}!")
         return
 
     def rot_pos_emb(self, grid_thw):
@@ -346,7 +346,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
             image_data = resize_image(image_data)
             pixel_values, image_grid_thw = self.processor.preprocess(image_data)
         else:
-            raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+            raise Exception("Unsupported input types: {} for {}".format(type(img), img))
         return pixel_values.to(dtype=self.data_type), image_grid_thw
 
     def load_model(self, weight_dir):
@@ -387,7 +387,7 @@ class Qwen2_5_VisionTransformerPretrainedModel(nn.Module):
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
-                raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+                raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             # must devide merge_length
             cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size ** 2)

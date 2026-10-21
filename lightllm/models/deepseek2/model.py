@@ -1,6 +1,5 @@
 import torch
 from typing import final
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -14,7 +13,6 @@ from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class
 logger = init_logger(__name__)
 
 
-@ModelRegistry(["deepseek_v2", "deepseek_v3"])
 class Deepseek2TpPartModel(LlamaTpPartModel):
     # weight class
     transformer_weight_class = Deepseek2TransformerLayerWeight
@@ -48,7 +46,13 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_yarn_rotary()
-        dist_group_manager.new_deepep_group(self.config["n_routed_experts"], self.config["hidden_size"])
+        dist_group_manager.new_deepep_group(
+            n_routed_experts=self.config["n_routed_experts"],
+            hidden_size=self.config["hidden_size"],
+            expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
+            num_experts_per_tok=self.config.get("num_experts_per_tok", 1),
+            moe_intermediate_size=self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+        )
 
     def _verify_params(self):
         return super()._verify_params()

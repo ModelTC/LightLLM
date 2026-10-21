@@ -7,17 +7,37 @@ from .deepgemm import *
 from .awq import *
 from .no_quant import *
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
 
+EXPERT_DTYPE_TO_QUANT_TYPE = {
+    "fp8": "fp8w8a8-b128-deepgemm",
+    "fp4": "fp4fp8-b32-deepgemm",
+}
+SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
+
 
 class Quantcfg:
-    def __init__(self, network_config, quant_type="none", custom_cfg_path=None):
+    def __init__(self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None):
         self.layer_num = network_config["n_layer"]
         self.quant_type = quant_type
-        self.network_config_ = network_config
+        self.start_args_expert_dtype = expert_dtype
+        self.config_expert_dtype = network_config.get("expert_dtype", None)
+        # Parse quant_cfg first so model config only fills missing per-layer fused_moe entries;
+        # an explicit startup argument is applied afterward and overrides every layer.
         self._parse_custom_cfg(custom_cfg_path)
         self._parse_network_config(network_config)
+
+    def _get_expert_quant_type(self, expert_dtype):
+        quant_type = EXPERT_DTYPE_TO_QUANT_TYPE.get(expert_dtype)
+        if quant_type is None:
+            raise ValueError(
+                f"unsupported expert_dtype `{expert_dtype}`; expected one of {list(SUPPORTED_EXPERT_DTYPES)}"
+            )
+        if expert_dtype == "fp4" and not is_sm100_gpu():
+            raise RuntimeError("expert_dtype `fp4` requires an SM100 GPU; please use `fp8` on non-SM100 GPUs.")
+        return quant_type
 
     def _parse_network_config(self, network_config):
         hf_quantization_config = network_config.get("quantization_config", None)
@@ -25,6 +45,7 @@ class Quantcfg:
             self.quantized_weight = False
             self.static_activation = False
             self.hf_quantization_config = None
+            self._mapping_expert_quant_method()
             return
         self.quantized_weight = True
         activation_scheme = network_config.get("activation_scheme", "dynamic")
@@ -33,6 +54,30 @@ class Quantcfg:
         self.hf_quantization_method = hf_quantization_config["quant_method"]
         self._mapping_quant_method()
 
+    def _mapping_expert_quant_method(self):
+        expert_dtype = self.start_args_expert_dtype or self.config_expert_dtype
+        if expert_dtype is None:
+            return
+
+        target = self._get_expert_quant_type(expert_dtype)
+        for layer_num in range(self.layer_num):
+            layer_quant_cfg = self.quant_cfg[layer_num]
+            if self.start_args_expert_dtype is not None:
+                # 优先级 1：启动参数显式指定 expert_dtype，覆盖其他来源的配置。
+                layer_quant_cfg["fused_moe"] = target
+            elif "fused_moe" in layer_quant_cfg:
+                # 优先级 2：未指定启动参数时，保留 quant_cfg 中已有的逐层配置。
+                continue
+            else:
+                # 优先级 3：前两个来源均未指定时，使用 config.json 中的 expert_dtype。
+                layer_quant_cfg["fused_moe"] = target
+
+        source = "startup arguments" if self.start_args_expert_dtype is not None else "model config"
+        logger.info(
+            f"select fused_moe quant way from {source} expert_dtype=`{expert_dtype}`: {target}; "
+            "priority is startup arguments > quant_cfg > model config."
+        )
+
     def _mapping_quant_method(self):
         if self.hf_quantization_method == "fp8":
             block_size = self.hf_quantization_config.get("weight_block_size", None)
@@ -40,10 +85,12 @@ class Quantcfg:
                 from lightllm.common.quantization.deepgemm import HAS_DEEPGEMM
 
                 if HAS_DEEPGEMM:
-                    self.quant_type = "deepgemm-fp8w8a8-b128"
+                    self.quant_type = "fp8w8a8-b128-deepgemm"
                 else:
-                    self.quant_type = "vllm-fp8w8a8-b128"
+                    self.quant_type = "fp8w8a8-b128-vllm"
                 logger.info(f"select fp8w8a8-b128 quant way: {self.quant_type}")
+            self._mapping_expert_quant_method()
+
         elif self.hf_quantization_method == "awq":
             self.quant_type = "awq"
             if is_awq_marlin_compatible(self.hf_quantization_config):

@@ -15,6 +15,8 @@ import re
 from dataclasses import dataclass
 from typing import Iterator, List, Tuple, Dict, Optional, Type
 
+from lightllm.utils.config_utils import get_token_id
+
 
 @dataclass
 class Event:
@@ -598,6 +600,11 @@ class BaseReasoningFormatDetector:
         self._buffer = ""
         self.stripped_think_start = False
 
+    @property
+    def grammar_start_token(self) -> str:
+        """Generated delimiter after which the final answer's grammar applies."""
+        return self.think_end_token
+
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         """
         One-time parsing: Detects and parses reasoning sections in the provided text.
@@ -781,6 +788,11 @@ class GptOssDetector(BaseReasoningFormatDetector):
         )
         self.parser = HarmonyParser()
 
+    @property
+    def grammar_start_token(self) -> str:
+        # Closing analysis is followed by a new message header, not answer text.
+        return "<|channel|>final<|message|>"
+
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         events = self.parser.parse(text)
         # Flush the buffer for one-shot parsing
@@ -862,6 +874,37 @@ class NanoV3Detector(BaseReasoningFormatDetector):
         )
 
 
+class Gemma4Detector(BaseReasoningFormatDetector):
+    """
+    Detector for Google Gemma-4 thinking models.
+
+    Format: ``<|channel>thought\\n...reasoning...\\n<channel|>answer``.
+    Role label ``thought\\n`` is baked into the start token (cf.
+    GptOssDetector) so the base class strips it for free.
+
+    Note: ``<|channel>`` and ``<channel|>`` are special tokens (ids 100/101).
+    The API layer forces ``skip_special_tokens=False`` when this parser is
+    active so the delimiters survive decoding (see ``api_openai.py``).
+    """
+
+    THINK_START_TOKEN = "<|channel>thought\n"
+    THINK_END_TOKEN = "<channel|>"
+
+    @property
+    def grammar_start_token(self) -> str:
+        return self.THINK_END_TOKEN + "answer"
+
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
+        # force_reasoning ignored: Gemma-4's template never starts generation
+        # inside an open channel (ReasoningParser pins it to False too).
+        super().__init__(
+            self.THINK_START_TOKEN,
+            self.THINK_END_TOKEN,
+            force_reasoning=False,
+            stream_reasoning=stream_reasoning,
+        )
+
+
 class ReasoningParser:
     """
     Parser that handles both streaming and non-streaming scenarios for extracting
@@ -887,6 +930,7 @@ class ReasoningParser:
         "step3": DeepSeekR1Detector,
         "nano_v3": NanoV3Detector,
         "interns1": Qwen3Detector,
+        "gemma4": Gemma4Detector,
     }
 
     def __init__(
@@ -898,13 +942,17 @@ class ReasoningParser:
         if not model_type:
             raise ValueError("Model type must be specified")
 
+        requested_force_reasoning = force_reasoning
         detector_class = self.DetectorMap.get(model_type.lower())
         if not detector_class:
             raise ValueError(f"Unsupported model type: {model_type}")
 
-        # Special cases where we override force_reasoning
-        if model_type.lower() in {"qwen3-thinking", "gpt-oss", "minimax"}:
-            force_reasoning = True
+        elif model_type.lower() == "gemma4":
+            # Gemma-4's chat template never positions generation inside an open
+            # channel — see Gemma4Detector docstring. Pin to False so a
+            # request_enable_reasoning=True from the caller can't accidentally
+            # mark the parser as already inside reasoning.
+            force_reasoning = False
 
         # Only pass force_reasoning if explicitly set, let detectors use their defaults
         kwargs = {"stream_reasoning": stream_reasoning}
@@ -912,6 +960,20 @@ class ReasoningParser:
             kwargs["force_reasoning"] = force_reasoning
 
         self.detector = detector_class(**kwargs)
+        self.reasoning_tokens = 0
+        reasoning_enabled = self.detector._in_reasoning or requested_force_reasoning is True
+        self._counting_reasoning = reasoning_enabled and model_type.lower() != "minimax-append-think"
+        self._think_end_token_id = get_token_id(self.detector.think_end_token)
+
+    def update_reasoning_token_count(self, token_id: int) -> None:
+        """Count one generated token until the reasoning closing delimiter."""
+        if not self._counting_reasoning:
+            return
+
+        if token_id == self._think_end_token_id:
+            self._counting_reasoning = False
+        else:
+            self.reasoning_tokens += 1
 
     def parse_non_stream(self, full_text: str) -> Tuple[Optional[str], Optional[str]]:
         """Non-streaming call: one-time parsing"""

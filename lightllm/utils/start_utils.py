@@ -1,8 +1,16 @@
+import os
+import ctypes
+import signal
+import subprocess
 import sys
 import os
+import time
 import multiprocessing as mp
 import psutil
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.process_check import is_process_active
+from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.service_shm_cleanup import start_launcher_shm_cleanup_process
 
 logger = init_logger(__name__)
 
@@ -10,6 +18,7 @@ logger = init_logger(__name__)
 class SubmoduleManager:
     def __init__(self):
         self.processes = []
+        self.process_names = {}
 
     def start_submodule_processes(self, start_funcs=[], start_args=[], start_envs=None):
         assert len(start_funcs) == len(start_args)
@@ -18,6 +27,7 @@ class SubmoduleManager:
         assert len(start_funcs) == len(start_envs)
         pipe_readers = []
         processes = []
+        managed_processes = []
 
         for start_func, start_arg, start_env in zip(start_funcs, start_args, start_envs):
             pipe_reader, pipe_writer = mp.Pipe(duplex=False)
@@ -28,6 +38,11 @@ class SubmoduleManager:
             _start_process_with_env(process, start_env)
             pipe_readers.append(pipe_reader)
             processes.append(process)
+            # 初始化完成前也可能收到退出信号，因此子进程启动后立即纳入管理。
+            managed_process = psutil.Process(process.pid)
+            managed_processes.append(managed_process)
+            self.processes.append(managed_process)
+            self.process_names[managed_process] = managed_process.name()
 
         # Wait for all processes to initialize
         for index, pipe_reader in enumerate(pipe_readers):
@@ -41,28 +56,44 @@ class SubmoduleManager:
                 logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
 
         assert all([proc.is_alive() for proc in processes])
-        self.processes.extend(processes)
-        return
+        return managed_processes
+
+    def register_process_tree(self, root_process):
+        """Add persistent LightLLM descendants to supervision.
+
+        A managed process may create short-lived helper processes while loading
+        models or compiling kernels. Those helpers retain a generic process name,
+        while persistent LightLLM services set a ``lightllm::`` process title.
+        """
+        for process in root_process.children(recursive=True):
+            try:
+                process_name = process.name()
+            except (psutil.NoSuchProcess, psutil.ZombieProcess):
+                # A short-lived child may exit while the process tree is scanned.
+                continue
+
+            if not process_name.startswith("lightllm::"):
+                continue
+
+            if not process.is_running() or not is_process_active(process.pid):
+                continue
+
+            self.processes.append(process)
+            self.process_names[process] = process_name
 
     def terminate_all_processes(self):
         from lightllm.utils.envs_utils import get_env_start_args
 
-        def kill_recursive(proc):
-            try:
-                parent = psutil.Process(proc.pid)
-                children = parent.children(recursive=True)
-                for child in children:
-                    logger.info(f"Killing child process {child.pid}")
-                    child.kill()
-                logger.info(f"Killing parent process {proc.pid}")
-                parent.kill()
-            except psutil.NoSuchProcess:
-                logger.warning(f"Process {proc.pid} does not exist.")
-
         for proc in self.processes:
-            if proc.is_alive():
+            if proc.is_running():
                 kill_recursive(proc)
-                proc.join()
+
+        # Signal every process before waiting. Registered router descendants may
+        # remain zombies under another parent, so bound the total wait time.
+        _, alive = psutil.wait_procs(self.processes, timeout=5)
+        alive_pids = [proc.pid for proc in alive if is_process_active(proc.pid)]
+        if alive_pids:
+            logger.warning(f"Processes still alive after SIGKILL: {alive_pids}")
 
         # recover the gpu compute mode
         is_enable_mps = get_env_start_args().enable_mps
@@ -70,7 +101,115 @@ class SubmoduleManager:
             from lightllm.utils.device_utils import stop_mps
 
             stop_mps()
-        logger.info("All processes terminated gracefully.")
+        if not alive_pids:
+            logger.info("All processes terminated gracefully.")
+
+    def setup_exit_controller(self):
+        """启动 launcher 的独立资源清理进程。
+
+        在 service name 和启动参数写入环境后、创建共享内存或启动子进程前调用。
+        launcher 退出后由独立进程回收资源。
+        """
+        if sys.platform == "linux":
+            # 接管 router 退出后的 model/KV 后代，使现有 wait_procs 能真正回收它们，
+            # 避免交给不执行 wait 的容器 PID 1（如 sleep infinity）。
+            prctl = ctypes.CDLL(None, use_errno=True).prctl
+            prctl.argtypes = [ctypes.c_int, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong, ctypes.c_ulong]
+            if prctl(36, 1, 0, 0, 0) != 0:  # PR_SET_CHILD_SUBREAPER
+                error = ctypes.get_errno()
+                raise OSError(error, f"Failed to enable child subreaper: {os.strerror(error)}")
+        start_launcher_shm_cleanup_process(get_unique_server_name())
+
+    def setup_signal_handlers(self, http_server_process=None, graceful_shutdown_signal=signal.SIGTERM):
+        """在子进程启动完成后安装退出信号处理函数，覆盖启动阶段的处理函数。"""
+
+        def signal_handler(sig, _frame):
+            if sig == signal.SIGINT:
+                logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
+                if http_server_process is not None:
+                    kill_recursive(http_server_process)
+
+                self.terminate_all_processes()
+                logger.info("All processes have been forcefully terminated.")
+                sys.exit(0)
+
+            if sig == signal.SIGTERM:
+                logger.info("Received SIGTERM, shutting down gracefully...")
+            else:
+                logger.info("Received SIGHUP (terminal closed), shutting down gracefully...")
+
+            if http_server_process is not None and http_server_process.poll() is None:
+                http_server_process.send_signal(graceful_shutdown_signal)
+                try:
+                    http_server_process.wait(timeout=60)
+                    logger.info("HTTP server exited gracefully")
+                except subprocess.TimeoutExpired:
+                    logger.warning("HTTP server did not exit in time, killing it...")
+                    kill_recursive(http_server_process)
+
+            self.terminate_all_processes()
+            logger.info("All processes have been terminated gracefully.")
+            sys.exit(0)
+
+        signal.signal(signal.SIGTERM, signal_handler)
+        signal.signal(signal.SIGINT, signal_handler)
+        signal.signal(signal.SIGHUP, signal_handler)
+
+        logger.info(f"start process pid {os.getpid()}")
+        if http_server_process is not None:
+            logger.info(f"http server pid {http_server_process.pid}")
+
+    def supervise_processes(self, http_server_process=None):
+        """Watch the HTTP server, when present, and all registered submodules.
+
+        Signal-driven shutdown is handled by the launcher. Reaching an exited
+        process here therefore means that the service can no longer operate
+        correctly. Clean up the remaining process tree and raise so the container's
+        main process exits with a non-zero status.
+        """
+        supervisor_interval_seconds = 5.0
+        while True:
+            if http_server_process is not None:
+                http_return_code = http_server_process.poll()
+                if http_return_code is not None:
+                    message = f"HTTP server exited unexpectedly with return code {http_return_code}"
+                    logger.error(message)
+                    self._cleanup_after_process_failure(http_server_process)
+                    raise RuntimeError(message)
+
+            dead_processes = [
+                process for process in self.processes if not process.is_running() or not is_process_active(process.pid)
+            ]
+            if dead_processes:
+                dead_process_descriptions = []
+                for process in dead_processes:
+                    try:
+                        exitcode = process.wait(timeout=0)
+                    except psutil.TimeoutExpired:
+                        exitcode = None
+                    dead_process_descriptions.append(
+                        f"name={self.process_names[process]} pid={process.pid} exitcode={exitcode}"
+                    )
+                dead_process_descriptions = ", ".join(dead_process_descriptions)
+                message = f"Critical LightLLM submodule exited unexpectedly: {dead_process_descriptions}"
+                logger.error(message)
+                self._cleanup_after_process_failure(http_server_process)
+                raise RuntimeError(message)
+
+            time.sleep(supervisor_interval_seconds)
+
+    def _cleanup_after_process_failure(self, http_server_process):
+        """Best-effort cleanup before the launcher exits with a failure."""
+        if http_server_process is not None and http_server_process.poll() is None:
+            try:
+                kill_recursive(http_server_process)
+            except Exception:
+                logger.exception("Failed to terminate the HTTP server process tree")
+
+        try:
+            self.terminate_all_processes()
+        except Exception:
+            logger.exception("Failed to terminate all LightLLM submodule processes")
 
 
 def _start_process_with_env(process, env):
@@ -130,13 +269,17 @@ def kill_recursive(proc):
     try:
         parent = psutil.Process(proc.pid)
         children = parent.children(recursive=True)
-        for child in children:
-            logger.info(f"Killing child process {child.pid}")
-            child.kill()
-        logger.info(f"Killing parent process {proc.pid}")
-        parent.kill()
     except psutil.NoSuchProcess:
         logger.warning(f"Process {proc.pid} does not exist.")
+        return
+
+    for process in [*reversed(children), parent]:
+        try:
+            logger.info(f"Killing process {process.pid}")
+            process.kill()
+        except psutil.NoSuchProcess:
+            # A concurrent exit must not skip the remaining children or parent.
+            logger.warning(f"Process {process.pid} does not exist.")
 
 
 process_manager = SubmoduleManager()

@@ -2,6 +2,7 @@
 # Uses sgl_kernel.flash_mla and sgl_kernel.flash_attn from the sglang kernel library.
 
 import dataclasses
+import weakref
 import torch
 from typing import Tuple, TYPE_CHECKING
 
@@ -22,10 +23,10 @@ class NsaFlashMlaSparseAttBackend(BaseAttBackend):
         ]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparsePrefillAttState":
-        return NsaFlashMlaSparsePrefillAttState(backend=self, infer_state=infer_state)
+        return NsaFlashMlaSparsePrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparseDecodeAttState":
-        return NsaFlashMlaSparseDecodeAttState(backend=self, infer_state=infer_state)
+        return NsaFlashMlaSparseDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
@@ -51,7 +52,7 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
             b_q_seq_len=self.infer_state.b_q_seq_len,
             b_req_idx=self.infer_state.b_req_idx,
             req_to_token_index=self.infer_state.req_manager.req_to_token_indexs,
-            q_token_num=self.infer_state.total_token_num - self.infer_state.prefix_total_token_num,
+            q_token_num=self.infer_state.input_ids.shape[0],
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
@@ -79,17 +80,17 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
         nsa_dict = att_control.nsa_prefill_dict
-        topk_indices = nsa_dict["topk_indices"]
+        topk_mem_indices = nsa_dict["topk_mem_indices"]
         softmax_scale = nsa_dict["softmax_scale"]
         kv_lora_rank = nsa_dict["kv_lora_rank"]
 
-        if topk_indices.ndim == 2:
-            topk_indices = topk_indices.unsqueeze(1)
+        if topk_mem_indices.ndim == 2:
+            topk_mem_indices = topk_mem_indices.unsqueeze(1)
 
         mla_out, _, _ = flash_mla_sparse_fwd(
             q=q,
             kv=kv,
-            indices=topk_indices,
+            indices=topk_mem_indices,
             sm_scale=softmax_scale,
             d_v=kv_lora_rank,
         )

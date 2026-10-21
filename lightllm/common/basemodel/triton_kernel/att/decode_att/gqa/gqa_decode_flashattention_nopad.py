@@ -116,11 +116,11 @@ def _fwd_kernel(
 @torch.no_grad()
 def gqa_decode_attention_fwd(q, k, v, o, req_to_tokens, b_req_idx, b_seq_len):
 
-    BLOCK = 32
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256}
+    BLOCK = 16 if Lk == 256 else 32
 
     sm_scale = 1.0 / (Lq ** 0.5)  # 计算scale系数
     batch = b_req_idx.shape[0]

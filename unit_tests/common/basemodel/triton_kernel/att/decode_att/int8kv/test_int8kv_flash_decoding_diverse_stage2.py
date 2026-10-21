@@ -140,9 +140,9 @@ def test_flash_decode_stage2_execution(shared_seq_len):
 
 
 if __name__ == "__main__":
-    import importlib
+    # 可选：对 Triton diverse stage2 做 cudagraph bench（仅本仓库内核，无外部 CUDA 扩展）。
+
     import triton
-    from lightllm.utils.light_utils import light_ops
 
     batch_sizes = [8, 16, 32, 64]
     seq_lens = [32, 64, 128, 256]
@@ -150,7 +150,6 @@ if __name__ == "__main__":
     results = []
     for batch in batch_sizes:
         for seq in seq_lens:
-            # Clear GPU cache to reduce CUDA Graph capture failures.
             torch.cuda.empty_cache()
 
             setup_tensors = create_tensors(
@@ -161,133 +160,33 @@ if __name__ == "__main__":
                 kv_len=seq,
                 req_to_tokens_len=seq,
             )
+            st = setup_tensors
 
-            # Outputs for CUDA implementation
-            mid_out_cuda = setup_tensors["mid_out"].clone()
-            mid_out_logsumexp_cuda = setup_tensors["mid_out_logsumexp"].clone()
+            def bench_stage2():
+                flash_decode_stage2(
+                    q=st["q"],
+                    k=st["k"],
+                    k_scale=st["k_scale"],
+                    v=st["v"],
+                    v_scale=st["v_scale"],
+                    Req_to_tokens=st["Req_to_tokens"],
+                    B_req_idx=st["B_req_idx"],
+                    B_Seqlen=st["b_seq_len"],
+                    b_shared_seq_len=st["b_shared_seq_len"],
+                    max_len_in_batch=st["max_len_in_batch"],
+                    mid_out=st["mid_out"],
+                    mid_out_logsumexp=st["mid_out_logsumexp"],
+                    block_seq=st["block_seq"],
+                )
 
-            # Outputs for Triton implementation
-            mid_out_triton = setup_tensors["mid_out"].clone()
-            mid_out_logsumexp_triton = setup_tensors["mid_out_logsumexp"].clone()
-
-            # Run CUDA to get reference
-            light_ops.group8_int8kv_flashdecoding_diverse_stage2(
-                setup_tensors["block_seq"],
-                mid_out_cuda,
-                mid_out_logsumexp_cuda,
-                1.0 / (setup_tensors["head_dim"] ** 0.5),
-                setup_tensors["q"],
-                setup_tensors["k"],
-                setup_tensors["k_scale"],
-                setup_tensors["v"],
-                setup_tensors["v_scale"],
-                setup_tensors["Req_to_tokens"],
-                setup_tensors["B_req_idx"],
-                setup_tensors["b_seq_len"],
-                setup_tensors["b_shared_seq_len"],
-                setup_tensors["max_len_in_batch"],
-            )
-
-            # Run Triton
-            flash_decode_stage2(
-                q=setup_tensors["q"],
-                k=setup_tensors["k"],
-                k_scale=setup_tensors["k_scale"],
-                v=setup_tensors["v"],
-                v_scale=setup_tensors["v_scale"],
-                Req_to_tokens=setup_tensors["Req_to_tokens"],
-                B_req_idx=setup_tensors["B_req_idx"],
-                B_Seqlen=setup_tensors["b_seq_len"],
-                b_shared_seq_len=setup_tensors["b_shared_seq_len"],
-                max_len_in_batch=setup_tensors["max_len_in_batch"],
-                mid_out=mid_out_triton,
-                mid_out_logsumexp=mid_out_logsumexp_triton,
-                block_seq=setup_tensors["block_seq"],
-            )
-
-            # Compare results
-            diff_mid_out = torch.abs(mid_out_cuda - mid_out_triton)
-            diff_logsumexp = torch.abs(mid_out_logsumexp_cuda - mid_out_logsumexp_triton)
-            max_diff_out = diff_mid_out.max().item()
-            max_diff_logsumexp = diff_logsumexp.max().item()
-            mean_diff_out = diff_mid_out.mean().item()
-            mean_diff_logsumexp = diff_logsumexp.mean().item()
-
-            cos_sim_out = torch.nn.functional.cosine_similarity(
-                mid_out_cuda.flatten(), mid_out_triton.flatten(), dim=0
-            ).item()
-            cos_sim_logsumexp = torch.nn.functional.cosine_similarity(
-                mid_out_logsumexp_cuda.flatten(), mid_out_logsumexp_triton.flatten(), dim=0
-            ).item()
-
-            print(f"\n[batch={batch}, seq={seq}] Consistency check:")
-            print("  mid_out:")
-            print(f"    max_diff: {max_diff_out:.6f}, mean_diff: {mean_diff_out:.6f}, cosine_sim: {cos_sim_out:.8f}")
-            print("  logsumexp:")
-            print(
-                f"    max_diff: {max_diff_logsumexp:.6f}, "
-                f"mean_diff: {mean_diff_logsumexp:.6f}, "
-                f"cosine_sim: {cos_sim_logsumexp:.8f}"
-            )
-
-            # Performance
-            fn_cuda = lambda: light_ops.group8_int8kv_flashdecoding_diverse_stage2(
-                setup_tensors["block_seq"],
-                setup_tensors["mid_out"],
-                setup_tensors["mid_out_logsumexp"],
-                1.0 / (setup_tensors["head_dim"] ** 0.5),
-                setup_tensors["q"],
-                setup_tensors["k"],
-                setup_tensors["k_scale"],
-                setup_tensors["v"],
-                setup_tensors["v_scale"],
-                setup_tensors["Req_to_tokens"],
-                setup_tensors["B_req_idx"],
-                setup_tensors["b_seq_len"],
-                setup_tensors["b_shared_seq_len"],
-                setup_tensors["max_len_in_batch"],
-            )
-            ms_cuda = triton.testing.do_bench_cudagraph(fn_cuda, rep=100)
-
-            fn_triton = lambda: flash_decode_stage2(
-                q=setup_tensors["q"],
-                k=setup_tensors["k"],
-                k_scale=setup_tensors["k_scale"],
-                v=setup_tensors["v"],
-                v_scale=setup_tensors["v_scale"],
-                Req_to_tokens=setup_tensors["Req_to_tokens"],
-                B_req_idx=setup_tensors["B_req_idx"],
-                B_Seqlen=setup_tensors["b_seq_len"],
-                b_shared_seq_len=setup_tensors["b_shared_seq_len"],
-                max_len_in_batch=setup_tensors["max_len_in_batch"],
-                mid_out=setup_tensors["mid_out"],
-                mid_out_logsumexp=setup_tensors["mid_out_logsumexp"],
-                block_seq=setup_tensors["block_seq"],
-            )
-            ms_triton = triton.testing.do_bench_cudagraph(fn_triton, rep=100)
-
-            results.append(
-                {
-                    "batch_size": batch,
-                    "seq_len": seq,
-                    "triton_ms": ms_triton,
-                    "cuda_ms": ms_cuda,
-                }
-            )
+            ms = triton.testing.do_bench_cudagraph(bench_stage2, rep=100)
+            results.append({"batch_size": batch, "seq_len": seq, "flash_decode_stage2_ms": ms})
             print(results[-1])
-
             del setup_tensors
 
     print(f"\n{'='*80}")
-    print("SUMMARY - Performance Comparison")
-    print(f"{'='*80}")
-    print(f"{'batch_size':<8} {'seq_len':<12} {'triton_ms':<12} {'cuda_ms':<12} {'vs cuda':<10}")
+    print(f"{'batch_size':<10} {'seq_len':<10} {'flash_decode_stage2_ms':<22}")
     print(f"{'-'*80}")
     for r in results:
-        vs_cuda = f"{r['cuda_ms']/r['triton_ms']:.2f}x"
-        emoji = "🎉" if r["triton_ms"] < r["cuda_ms"] else ""
-        print(
-            f"{r['batch_size']:<8} {r['seq_len']:<12} {r['triton_ms']:<12.3f} {r['cuda_ms']:<12.3f}"
-            f"{vs_cuda:<10} {emoji}"
-        )
+        print(f"{r['batch_size']:<10} {r['seq_len']:<10} {r['flash_decode_stage2_ms']:<22.4f}")
     print(f"{'='*80}")

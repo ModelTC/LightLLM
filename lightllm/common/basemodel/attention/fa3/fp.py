@@ -1,54 +1,86 @@
 import dataclasses
+import weakref
 import torch
+import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from typing import Optional, TYPE_CHECKING
-from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-
-try:
-    from flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_neo
-    import inspect
-
-    # Verify this is the neo-patched FA3 build (with image_token_tag support),
-    _sig = inspect.signature(flash_attn_with_kvcache_neo)
-    if "image_token_tag" not in _sig.parameters:
-        raise ImportError("flash_attn_interface found but missing image_token_tag support (need neo build)")
-
-    HAS_FLASH_ATTN_INTERFACE = True
-except ImportError:
-    flash_attn_with_kvcache_neo = None
-    HAS_FLASH_ATTN_INTERFACE = False
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
+from lightllm.utils.sgl_utils import flash_attn_with_kvcache, flash_attn_with_kvcache_autotune
+from lightllm.common.basemodel.triton_kernel.fa3_utils import (
+    build_dynamic_spec_fa3_decode_params,
+    page_table_copy,
+)
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
+from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
 
 
 class Fa3AttBackend(BaseAttBackend):
+    """Common fixed page-table storage for FA3 attention backends."""
+
+    page_table_buffers = None
+
     def __init__(self, model):
         super().__init__(model=model)
-        self.get_page_table_buffer()  # init
+        self._init_infer_page_size()
 
-    def get_page_table_buffer(self):
-        """
-        用于减少 decode graph 捕获的时候, 造成显存二次方增长的情况.
-        """
+    def _init_infer_page_size(self):
+        self.infer_page_size = self.model.args.page_size
+        assert self.model.args.page_size % self.infer_page_size == 0, (
+            f"model page_size {self.model.args.page_size} "
+            f"must be divisible by infer_page_size {self.infer_page_size}"
+        )
+
+    # 延迟到首次获取 page table 时再初始化，避免 PD 分离模式下的 prefill 节点
+    # 分配仅供 decode 使用的 buffer，减少显存浪费。
+    def _init_page_table_buffers(self):
+        if self.page_table_buffers is not None:
+            return
+
         model = self.model
-        if not hasattr(self, "_shared_page_table_buffer"):
-            self._shared_page_table_buffer = [
-                torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
-                    get_current_device_id()
-                ),
-                torch.empty(model.graph_max_batch_size * model.graph_max_len_in_batch, dtype=torch.int32).to(
-                    get_current_device_id()
-                ),
-            ]
-        return self._shared_page_table_buffer
+        args = model.args
+        # Dynamic verification may keep the target row and all MTP draft rows for
+        # every running request. TPSP and CUDA Graph may pad that physical batch
+        # further, so the fixed buffer must cover both execution paths.
+        running_max_batch_size = args.running_max_req_size * (args.mtp_step + 1)
+        if args.enable_tpsp_mix_mode:
+            tp_size = model.tp_world_size_
+            running_max_batch_size = (running_max_batch_size + tp_size - 1) // tp_size * tp_size
+        self.page_table_max_batch_size = max(running_max_batch_size, model.graph_max_batch_size)
+        # max_seq_length is max_req_total_len plus the MTP headroom reserved when
+        # the model is initialized.
+        self.supported_max_seq_len = model.max_seq_length
+        buffer_count = 2 if args.enable_decode_microbatch_overlap else 1
+        workspace_size = self.page_table_max_batch_size * triton.cdiv(self.supported_max_seq_len, self.infer_page_size)
+        self.page_table_buffers = [
+            self.get_gpu_workspace_buffer(
+                key_name=f"fa3_page_table_{buffer_index}",
+                workspace_size=workspace_size,
+                dtype=torch.int32,
+            )
+            for buffer_index in range(buffer_count)
+        ]
+
+    def get_page_table_view(self, att_batch_size, max_kv_len, microbatch_index):
+        """Lazily initialize storage and return a contiguous page-table view."""
+        self._init_page_table_buffers()
+        if att_batch_size > self.page_table_max_batch_size:
+            raise RuntimeError(
+                f"FA3 attention batch size {att_batch_size} exceeds page-table capacity "
+                f"{self.page_table_max_batch_size}"
+            )
+        if max_kv_len > self.supported_max_seq_len:
+            raise RuntimeError(
+                f"FA3 max KV sequence length {max_kv_len} exceeds page-table capacity " f"{self.supported_max_seq_len}"
+            )
+        max_page_len = triton.cdiv(max_kv_len, self.infer_page_size)
+        return self.page_table_buffers[microbatch_index][: att_batch_size * max_page_len].reshape(
+            att_batch_size, max_page_len
+        )
 
     def create_att_prefill_state(self, infer_state) -> "Fa3PrefillAttState":
-        return Fa3PrefillAttState(backend=self, infer_state=infer_state)
+        return Fa3PrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "Fa3DecodeAttState":
-        return Fa3DecodeAttState(backend=self, infer_state=infer_state)
+        return Fa3DecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
@@ -56,19 +88,25 @@ class Fa3PrefillAttState(BasePrefillAttState):
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
+    causal: bool = None
 
     def init_state(self):
+        self.causal = self.backend.uses_causal_attention()
         self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
         self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
         self.page_table = torch.empty(
-            (self.infer_state.batch_size, self.infer_state.max_kv_seq_len),
+            (
+                self.infer_state.batch_size,
+                triton.cdiv(self.infer_state.max_kv_seq_len, self.backend.infer_page_size),
+            ),
             dtype=torch.int32,
             device=self.infer_state.input_ids.device,
         )
-        self.page_table.copy_(
-            self.infer_state.req_manager.req_to_token_indexs[
-                self.infer_state.b_req_idx, : self.infer_state.max_kv_seq_len
-            ]
+        page_table_copy(
+            page_table=self.page_table,
+            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
+            b_req_idx=self.infer_state.b_req_idx,
+            page_size=self.backend.infer_page_size,
         )
 
     def prefill_att(
@@ -139,15 +177,15 @@ class Fa3PrefillAttState(BasePrefillAttState):
 
         o = flash_attn_with_kvcache(
             q=q,
-            k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
-            v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
+            k_cache=k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
+            v_cache=v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.infer_state.b_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.infer_state.max_q_seq_len,
             softmax_scale=sm_scale,
-            causal=True,
+            causal=self.causal,
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,
@@ -166,65 +204,99 @@ class Fa3DecodeAttState(BaseDecodeAttState):
     b_att_seq_len: torch.Tensor = None
     # 在是否开启mtp 的不同模式下，其设置不同的值，可以加速算子的运行。
     decode_max_q_seq_len: int = None
+    decode_max_kv_seq_len: int = None
+    causal: bool = None
 
     def init_state(self):
         self.backend: Fa3AttBackend = self.backend
-        args_mtp_step = get_env_start_args().mtp_step
-
-        if args_mtp_step > 0:
-            # 修正 mtp 在 fa3 下的输入。
-            mtp_size = args_mtp_step + 1
-            b_q_seq_len = torch.full(
-                (self.infer_state.b_seq_len.shape[0] // mtp_size,),
-                fill_value=mtp_size,
-                dtype=torch.int32,
-                device=self.infer_state.b_seq_len.device,
-            )
-            b_kv_seq_len = self.infer_state.b_seq_len[mtp_size - 1 :: mtp_size]
-            b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
-            self.cu_seqlens_q = b1_cu_q_seq_len.int()
-            self.cu_seqlens_k = b1_cu_kv_seq_len.int()
+        self.causal = self.backend.uses_causal_attention()
+        draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
+        if self.backend.uses_dynamic_spec_verify_layout():
+            b_att_req_idx = self._init_dynamic_spec_verify_state(draft_step)
+        elif draft_step > 0:
+            b_att_req_idx = self._init_fixed_spec_decode_state(draft_step)
         else:
-            self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
-            self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
+            b_att_req_idx = self._init_normal_decode_state()
 
-        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
-        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
+        self._init_page_table(b_att_req_idx)
 
+    def _init_dynamic_spec_verify_state(self, draft_step: int) -> torch.Tensor:
+        b_mark_mtp_shared_group = build_mtp_shared_group_markers(
+            self.infer_state.b_req_idx,
+            hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+        )
+        b_q_seq_len, b_kv_seq_len, b_att_req_idx, self.b_att_seq_len = build_dynamic_spec_fa3_decode_params(
+            b_req_idx=self.infer_state.b_req_idx,
+            b_seq_len=self.infer_state.b_seq_len,
+            b_mark_mtp_shared_group=b_mark_mtp_shared_group,
+            att_batch_size=self.infer_state.batch_size,
+            hold_req_id=self.backend.model.req_manager.HOLD_REQUEST_ID,
+        )
+        self._init_spec_decode_cu_seqlens(b_q_seq_len, b_kv_seq_len)
+        self.decode_max_q_seq_len = draft_step + 1
+        return b_att_req_idx
+
+    def _init_fixed_spec_decode_state(self, draft_step: int) -> torch.Tensor:
+        mtp_size = draft_step + 1
+        assert self.infer_state.batch_size % mtp_size == 0, (
+            "FA3 fixed-layout decode requires batch_size to be divisible by draft_step + 1, "
+            f"got batch_size={self.infer_state.batch_size}, draft_step={draft_step}."
+        )
+
+        b_q_seq_len = torch.full(
+            (self.infer_state.b_seq_len.shape[0] // mtp_size,),
+            fill_value=mtp_size,
+            dtype=torch.int32,
+            device=self.infer_state.b_seq_len.device,
+        )
+        b_kv_seq_len = self.infer_state.b_seq_len[draft_step::mtp_size]
+        b_att_req_idx = self.infer_state.b_req_idx[draft_step::mtp_size]
+        self.b_att_seq_len = b_kv_seq_len.contiguous()
+        self._init_spec_decode_cu_seqlens(b_q_seq_len, b_kv_seq_len)
+        self.decode_max_q_seq_len = mtp_size
+        return b_att_req_idx
+
+    def _init_normal_decode_state(self) -> torch.Tensor:
+        self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
+        self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
+        self.b_att_seq_len = self.infer_state.b_seq_len
+        self.decode_max_q_seq_len = 1
+        return self.infer_state.b_req_idx
+
+    def _init_spec_decode_cu_seqlens(self, b_q_seq_len: torch.Tensor, b_kv_seq_len: torch.Tensor):
+        b1_cu_q_seq_len, b1_cu_kv_seq_len = gen_cumsum_pad0_tensor(b_q_seq_len, b_kv_seq_len)
+        self.cu_seqlens_q = b1_cu_q_seq_len.int()
+        self.cu_seqlens_k = b1_cu_kv_seq_len.int()
+
+    def _init_page_table(self, b_att_req_idx: torch.Tensor):
+        att_batch_size = b_att_req_idx.shape[0]
         model = self.backend.model
-        # 可以使用 cuda graph的时候从 buffer中申请
-        if (
-            self.infer_state.batch_size <= model.graph_max_batch_size
-            and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
+        actual_max_kv_len = self.infer_state.max_kv_seq_len
+        # Graph 捕获会将 infer_state.max_kv_seq_len 改为容量上限，提前保存真实长度用于 FA3 配置查找。
+        self.decode_max_kv_seq_len = actual_max_kv_len
+        actual_max_page_len = triton.cdiv(actual_max_kv_len, self.backend.infer_page_size)
+        page_table_width = actual_max_kv_len
+        if model.graph is not None and model.graph.can_run(
+            batch_size=self.infer_state.batch_size,
+            max_len_in_batch=actual_max_kv_len,
         ):
-            page_buffer = self.backend.get_page_table_buffer()
-            self.page_table = page_buffer[self.infer_state.microbatch_index][
-                : att_batch_size * model.graph_max_len_in_batch
-            ].reshape(att_batch_size, model.graph_max_len_in_batch)
-        else:
-            self.page_table = torch.empty(
-                (att_batch_size, self.infer_state.max_kv_seq_len),
-                dtype=torch.int32,
-                device=self.infer_state.input_ids.device,
-            )
+            # CUDA Graph replay uses the shape and strides captured with the
+            # graph-wide maximum KV length. Keep that fixed row stride while
+            # writing only the valid portion of each runtime row below.
+            page_table_width = model.graph.graph_max_len_in_batch
 
-        if args_mtp_step > 0:
-            page_table_copy(
-                page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
-                req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=self.infer_state.b_req_idx[args_mtp_step :: (args_mtp_step + 1)],
-            )
-            self.b_att_seq_len = self.infer_state.b_seq_len[args_mtp_step :: (args_mtp_step + 1)].contiguous()
-            self.decode_max_q_seq_len = args_mtp_step + 1
-        else:
-            page_table_copy(
-                page_table=self.page_table[:, : self.infer_state.max_kv_seq_len],
-                req_to_token_indexs=model.req_manager.req_to_token_indexs,
-                b_req_idx=self.infer_state.b_req_idx,
-            )
-            self.b_att_seq_len = self.infer_state.b_seq_len
-            self.decode_max_q_seq_len = 1
-        return
+        self.page_table = self.backend.get_page_table_view(
+            att_batch_size=att_batch_size,
+            max_kv_len=page_table_width,
+            microbatch_index=self.infer_state.microbatch_index,
+        )
+
+        page_table_copy(
+            page_table=self.page_table[:, :actual_max_page_len],
+            req_to_token_indexs=model.req_manager.req_to_token_indexs,
+            b_req_idx=b_att_req_idx,
+            page_size=self.backend.infer_page_size,
+        )
 
     def copy_for_decode_cuda_graph(self, new_state: "Fa3DecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -267,17 +339,18 @@ class Fa3DecodeAttState(BaseDecodeAttState):
         k_descale, v_descale = None, None  # disable quantization
         Lq = q.shape[-1]
         sm_scale = 1.0 / (Lq ** 0.5)
-        o = flash_attn_with_kvcache(
+        o = flash_attn_with_kvcache_autotune(
             q=q,
-            k_cache=k.view(k.shape[0], 1, k.shape[1], k.shape[2]),
-            v_cache=v.view(v.shape[0], 1, v.shape[1], v.shape[2]),
+            k_cache=k.view(-1, self.backend.infer_page_size, k.shape[1], k.shape[2]),
+            v_cache=v.view(-1, self.backend.infer_page_size, v.shape[1], v.shape[2]),
             page_table=self.page_table,
             cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
-            cu_seqlens_k_new=self.cu_seqlens_k,
+            cu_seqlens_k_new=None,  # KV 已提前写入缓存，此处不追加新的 K/V。
             max_seqlen_q=self.decode_max_q_seq_len,
+            max_seqlen_k=self.decode_max_kv_seq_len,
             softmax_scale=sm_scale,
-            causal=True,
+            causal=self.causal,
             window_size=window_size,
             softcap=0.0,
             k_descale=k_descale,

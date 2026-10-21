@@ -1,22 +1,33 @@
 import pytest
 import easydict
-from lightllm.server.core.objs.req import Req, TokenHealingReq, ChunkedPrefillReq, SamplingParams
-from lightllm.utils.envs_utils import set_env_start_args
+from types import SimpleNamespace
+from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
+from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
+from lightllm.utils import shm_utils
+from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args
 
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_module_env():
-    set_env_start_args(
-        easydict.EasyDict(
-            {
-                "mtp_step": 0,
-                "llm_prefill_att_backend": ["None"],
-                "llm_decode_att_backend": ["None"],
-                "cpu_cache_token_page_size": 256,
-                "enable_cpu_cache": False,
-            }
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_req_service_0")
+        monkeypatch.setenv("LIGHTLLM_START_ARGS", "{}")
+        set_env_start_args(
+            easydict.EasyDict(
+                {
+                    "mtp_step": 0,
+                    "llm_prefill_att_backend": ["None"],
+                    "llm_decode_att_backend": ["None"],
+                    "cpu_cache_token_page_size": 256,
+                    "enable_cpu_cache": False,
+                    "model_dir": "",
+                    "page_size": 4,
+                }
+            )
         )
-    )
+        get_env_start_args.cache_clear()
+        yield
+        get_env_start_args.cache_clear()
 
 
 @pytest.fixture
@@ -31,8 +42,25 @@ def test_req_init(req):
     assert req.input_len == 3
 
 
+def test_req_init_validates_dictionary_params():
+    with pytest.raises(ValueError, match="max_new_tokens must be at least 1"):
+        Req().init(1, [1], {"max_new_tokens": 0}, None)
+
+
 def test_create_prompt_ids_shm_array(req):
     assert hasattr(req, "shm_prompt_ids")
+
+
+def test_detach_shm_arrays(req):
+    prompt_ids = req.shm_prompt_ids
+    logprobs = req.shm_logprobs
+
+    req.detach_shm_arrays()
+
+    assert prompt_ids.shm is None
+    assert logprobs.shm is None
+    assert not hasattr(req, "shm_prompt_ids")
+    assert not hasattr(req, "shm_logprobs")
 
 
 def test_get_used_tokens(req):
@@ -40,22 +68,59 @@ def test_get_used_tokens(req):
     assert req.get_used_tokens() == 5
 
 
-def test_token_healing_req_post_init():
-    token_healing_req = TokenHealingReq()
-    token_healing_req.init(1, [1, 2, 3, 4], {"max_new_tokens": 1}, None)
-    assert token_healing_req.sample_params.max_new_tokens == 9
+def test_final_token_metadata_read_returns_actual_prompt_tokens(req):
+    req.sample_params.prompt_logprobs = 0
+    req.shm_logprobs.arr["logprob"][1] = -0.5
+    req.shm_logprobs.arr["logprob"][2] = -1.25
+    req.shm_logprobs.arr["rank"][1] = 315
+    req.shm_logprobs.arr["rank"][2] = 4
+
+    metadata = ReqFinalTokenMetadata(req).read()
+
+    assert metadata["prompt_token_ids"] == [1, 2, 3]
+    assert metadata["prompt_logprobs"] == [
+        None,
+        {2: {"logprob": -0.5, "rank": 315, "decoded_token": None}},
+        {3: {"logprob": -1.25, "rank": 4, "decoded_token": None}},
+    ]
 
 
-# def test_chunked_req_get_tuple_tokens():
-#     chunked_req = ChunkedPrefillReq()
-#     chunked_req.init(1, [1, 2, 3], {"max_new_tokens": 1}, None, chunked_prefill_size=256)
-#     result = chunked_req.get_tuple_tokens(False, 10)
-#     assert isinstance(result, tuple)
+def test_chunked_req_get_tuple_tokens_adds_page_and_async_reserve():
+    req = SimpleNamespace(
+        input_len=10,
+        shm_cur_output_len=0,
+        shm_cur_kv_len=0,
+        sample_params=SimpleNamespace(ignore_eos=True, max_new_tokens=5),
+    )
+
+    assert ChunkedPrefillReq.get_tuple_tokens(req, False, 10) == (11, 26)
 
 
 def test_finish_status(req):
     req.finish_status.set_status(req.finish_status.FINISHED_STOP)
     assert req.finish_status.is_finished()
+    assert not req.finish_status.is_error_finished()
+    assert req.finish_status.get_finish_reason() == "stop"
+
+    req.finish_status.set_status(req.finish_status.FINISHED_LENGTH)
+    assert req.finish_status.is_finished()
+    assert not req.finish_status.is_error_finished()
+
+    req.finish_status.set_status(req.finish_status.FINISHED_ABORTED)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_error_finished()
+
+    req.finish_status.set_status(req.finish_status.FINISHED_ERROR)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_finished_error()
+    assert req.finish_status.is_error_finished()
+    assert req.finish_status.get_finish_reason() == "error"
+
+    req.finish_status.set_status(req.finish_status.FINISHED_PD_DECODE_CAPACITY)
+    assert req.finish_status.is_finished()
+    assert req.finish_status.is_finished_pd_decode_capacity()
+    assert not req.finish_status.is_error_finished()
+    assert req.finish_status.get_finish_reason() == "length"
 
 
 if __name__ == "__main__":

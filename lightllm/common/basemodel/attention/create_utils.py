@@ -1,4 +1,5 @@
 """Attention backend selection utilities."""
+
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.backend_validator import validate
@@ -8,9 +9,11 @@ from .triton.fp import TritonAttBackend
 from .triton.int4kv import Int4kvTritonAttBackend
 from .triton.int8kv import Int8kvTritonAttBackend
 from .triton.mla import MlaTritonAttBackend
+from .triton.neo import NeoTritonAttBackend
 from .fa3.fp import Fa3AttBackend
 from .fa3.fp8 import Fp8Fa3AttBackend
 from .fa3.mla import MlaFa3AttBackend
+from .fa3.neo import NeoFa3AttBackend, HAS_FLASH_ATTN_INTERFACE
 from .flashinfer.fp8 import Fp8FlashInferAttBackend
 from .flashinfer.fp import FlashInferAttBackend
 from .flashinfer.mla import MlaFlashInferAttBackend
@@ -62,6 +65,21 @@ nsa_data_type_to_backend = {
     },
 }
 
+neo_data_type_to_backend = (
+    {
+        "None": {
+            "triton": NeoTritonAttBackend,
+            "fa3": NeoFa3AttBackend,
+        }
+    }
+    if HAS_FLASH_ATTN_INTERFACE
+    else {
+        "None": {
+            "triton": NeoTritonAttBackend,
+        }
+    }
+)
+
 
 def _auto_select_backend(
     llm_dtype: str,
@@ -70,10 +88,15 @@ def _auto_select_backend(
 ) -> type:
     """Auto-select the best available backend with validation.
 
-    Priority: FA3 > FlashInfer > Triton
+    Priority follows the provided priority_list.
     Each backend is validated in a subprocess with ground truth checks.
     """
     backend_map = kv_type_to_backend
+
+    args = get_env_start_args()
+    if args.enable_ep_moe:
+        logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
+        priority_list = [name for name in priority_list if name != "flashinfer"]
 
     for backend_name in priority_list:
         if backend_name in backend_map[llm_dtype] and validate(backend_name):
@@ -83,6 +106,14 @@ def _auto_select_backend(
     # Fallback to triton without validation (should not happen)
     logger.warning("No backend validation succeeded, falling back to triton")
     return backend_map[llm_dtype]["triton"]
+
+
+def _get_decode_backend_priority(priority_list: list, mtp_step: int) -> list:
+    """Return the auto-selection priority for decode attention."""
+    # With MTP, FA3 can make better use of Tensor Core compute and delivers better decode performance.
+    if mtp_step <= 0 or "fa3" not in priority_list:
+        return priority_list
+    return ["fa3"] + [backend_name for backend_name in priority_list if backend_name != "fa3"]
 
 
 def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
@@ -95,13 +126,14 @@ def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashi
         return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
 
-def get_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
+def get_decode_att_backend_class(index=0, priority_list: list = ["flashinfer", "fa3", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
         return data_type_to_backend[llm_dtype][backend_str]
     else:
+        priority_list = _get_decode_backend_priority(priority_list, args.mtp_step)
         return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
 
@@ -115,13 +147,14 @@ def get_mla_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "fl
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
 
-def get_mla_decode_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
+def get_mla_decode_att_backend_class(index=0, priority_list: list = ["flashinfer", "fa3", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
         return mla_data_type_to_backend[llm_dtype][backend_str]
     else:
+        priority_list = _get_decode_backend_priority(priority_list, args.mtp_step)
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
 
@@ -143,3 +176,13 @@ def get_nsa_decode_att_backend_class(index=0, priority_list: list = ["flashmla_s
         return nsa_data_type_to_backend[llm_dtype][backend_str]
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
+
+
+def get_neo_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "triton"]) -> BaseAttBackend:
+    args = get_env_start_args()
+    llm_dtype = args.llm_kv_type
+    backend_str = args.llm_prefill_att_backend[index]
+    if backend_str != "auto":
+        return neo_data_type_to_backend[llm_dtype][backend_str]
+    else:
+        return _auto_select_backend(llm_dtype, kv_type_to_backend=neo_data_type_to_backend, priority_list=priority_list)

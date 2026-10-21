@@ -41,6 +41,8 @@ def _fwd_kernel(
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_M: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    USE_SLIDING_WINDOW: tl.constexpr,
+    SLIDING_WINDOW_LEFT: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -60,6 +62,7 @@ def _fwd_kernel(
     offs_n = tl.arange(0, BLOCK_N)
     offs_d = tl.arange(0, BLOCK_DMODEL)
     offs_m = block_start_loc + tl.arange(0, BLOCK_M)
+    q_pos = offs_m + prompt_cache_len
     off_q = (
         (cur_batch_in_all_start_index + offs_m[:, None]) * stride_qbs
         + cur_head * stride_qh
@@ -76,20 +79,33 @@ def _fwd_kernel(
     block_mask = tl.where(block_start_loc < cur_batch_seq_len, 1, 0)
     block_end_loc = tl.minimum(block_start_loc + BLOCK_M + prompt_cache_len, cur_batch_seq_len + prompt_cache_len)
 
-    # causal mask
-    for start_n in range(0, block_mask * block_end_loc, BLOCK_N):
+    if USE_SLIDING_WINDOW:
+        kv_start_index = block_start_loc + prompt_cache_len - SLIDING_WINDOW_LEFT
+        kv_start_index = tl.maximum(kv_start_index, 0)
+        block_kv_len = block_end_loc - kv_start_index
+    else:
+        kv_start_index = 0
+        block_kv_len = block_end_loc
+
+    # causal (+ sliding-window) mask
+    for start_n in range(0, block_mask * block_kv_len, BLOCK_N):
         start_n = tl.multiple_of(start_n, BLOCK_N)
+        k_pos = kv_start_index + start_n + offs_n
         # -- compute qk ----
         kv_loc = tl.load(
-            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * (start_n + offs_n),
-            mask=(start_n + offs_n) < block_end_loc,
+            Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + stride_req_to_tokens_s * k_pos,
+            mask=k_pos < block_end_loc,
             other=0,
         ).to(tl.int64)
         off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
-        k = tl.load(K + off_k, mask=(start_n + offs_n[None, :]) < block_end_loc, other=0.0)
+        k = tl.load(K + off_k, mask=k_pos[None, :] < block_end_loc, other=0.0)
         qk = tl.dot(q, k)
 
-        mask = offs_m[:, None] + prompt_cache_len >= (start_n + offs_n[None, :])
+        if USE_SLIDING_WINDOW:
+            # FA-style left inclusive offset + causal (right=0).
+            mask = ((q_pos[:, None] - k_pos[None, :]) <= SLIDING_WINDOW_LEFT) & (q_pos[:, None] >= k_pos[None, :])
+        else:
+            mask = q_pos[:, None] >= k_pos[None, :]
         qk = tl.where(mask, qk * sm_scale, -1.0e8)
         m_ij = tl.maximum(m_i, tl.max(qk, 1))
         qk -= m_ij[:, None]
@@ -103,7 +119,7 @@ def _fwd_kernel(
         acc = acc * alpha[:, None]
         # update acc
         off_v = kv_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
-        v = tl.load(V + off_v, mask=(start_n + offs_n[:, None]) < block_end_loc, other=0.0)
+        v = tl.load(V + off_v, mask=k_pos[:, None] < block_end_loc, other=0.0)
         p = p.to(v.dtype)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
@@ -121,13 +137,30 @@ def _fwd_kernel(
 
 @torch.no_grad()
 def context_attention_fwd(
-    q, k, v, o, b_req_idx, b_start_loc, b_seq_len, b_prompt_cache_len, max_input_len, req_to_token_indexs
+    q,
+    k,
+    v,
+    o,
+    b_req_idx,
+    b_start_loc,
+    b_seq_len,
+    b_prompt_cache_len,
+    max_input_len,
+    req_to_token_indexs,
+    sliding_window=(-1, -1),
 ):
     BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
-    assert Lk in {16, 32, 64, 128, 256}
+    assert Lk in {16, 32, 64, 128, 256, 512}
+    # Larger head_dim needs smaller tiles to fit in SM shared memory.
+    # H100/H200 has ~228KB shared memory per SM; a 128x512 bf16 tile already
+    # consumes 128KB, leaving no room for K/V/scores buffers.
+    if Lk >= 512:
+        BLOCK_M = min(BLOCK_M, 32)
+    elif Lk >= 256:
+        BLOCK_M = min(BLOCK_M, 64)
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
@@ -140,6 +173,14 @@ def context_attention_fwd(
     BLOCK_N = BLOCK_M
     num_warps = 4 if Lk <= 64 else 8
     num_stages = 1
+
+    if sliding_window == (-1, -1):
+        use_sliding_window = False
+        sliding_window_left = -1
+    else:
+        use_sliding_window = True
+        assert int(sliding_window[1]) == 0, "sliding_window right must be 0"
+        sliding_window_left = int(sliding_window[0])
 
     _fwd_kernel[grid](
         q,
@@ -171,6 +212,8 @@ def context_attention_fwd(
         BLOCK_DMODEL=Lk,
         BLOCK_M=BLOCK_M,
         BLOCK_N=BLOCK_N,
+        USE_SLIDING_WINDOW=use_sliding_window,
+        SLIDING_WINDOW_LEFT=sliding_window_left,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -291,7 +334,14 @@ def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, ma
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
-    assert Lk in {16, 32, 64, 128, 256}
+    assert Lk in {16, 32, 64, 128, 256, 512}
+    # Larger head_dim needs smaller tiles to fit in SM shared memory.
+    # H100/H200 has ~228KB shared memory per SM; a 128x512 bf16 tile already
+    # consumes 128KB, leaving no room for K/V/scores buffers.
+    if Lk >= 512:
+        BLOCK_M = min(BLOCK_M, 32)
+    elif Lk >= 256:
+        BLOCK_M = min(BLOCK_M, 64)
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
@@ -463,7 +513,14 @@ def context_attention_fwd_contiguous_kv(
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
     assert Lq == Lk and Lk == Lv
-    assert Lk in {16, 32, 64, 128, 256}
+    assert Lk in {16, 32, 64, 128, 256, 512}
+    # Larger head_dim needs smaller tiles to fit in SM shared memory.
+    # H100/H200 has ~228KB shared memory per SM; a 128x512 bf16 tile already
+    # consumes 128KB, leaving no room for K/V/scores buffers.
+    if Lk >= 512:
+        BLOCK_M = min(BLOCK_M, 32)
+    elif Lk >= 256:
+        BLOCK_M = min(BLOCK_M, 64)
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。

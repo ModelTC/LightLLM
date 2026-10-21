@@ -1,0 +1,225 @@
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass, field
+from threading import Lock, RLock
+from typing import Dict, Optional
+
+from sortedcontainers import SortedDict
+
+
+@dataclass(slots=True)
+class PromptCacheMatchResult:
+    """prefix_match 的返回结果。"""
+
+    # 匹配终点关联的 prefill 连接标识（connection_key），可区分同一服务的不同 DP 连接；
+    # 匹配停在 root 时为 None。该标识记录历史处理位置，不保证 KV cache 仍然驻留。
+    prefill_node: Optional[str]
+    # 匹配到的原始 prompt 字符数：从 text[0] 到最后一个命中采样点（含）的连续前缀长度。
+    matched_char_count: int
+    # 输入 prompt 的原始字符数 len(text)。
+    input_char_count: int
+    # 命中节点最近一次由 prompt 插入更新的单调时钟时间戳；未命中时为 None。
+    last_insert_time: Optional[float]
+
+
+@dataclass(slots=True)
+class _PromptCacheNode:
+    """单字符边的 trie 节点：parent --edge_char--> self。"""
+
+    children: Dict[str, "_PromptCacheNode"] = field(default_factory=dict)
+    parent: Optional["_PromptCacheNode"] = None
+    edge_char: Optional[str] = None
+    last_prefill_node: Optional[str] = None
+    last_insert_time: Optional[float] = None
+    last_time_mark: int = 0
+
+
+class PromptCacheTree:
+    """
+    用于 cache-aware 选点的 prompt 前缀缓存树。
+
+    调用方先按 sample_stride 将 prompt 抽稀成 key，树再按单字符建树/匹配。
+    整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
+    """
+
+    def __init__(
+        self,
+        sample_stride: int = 512,
+        max_node_count: int = 1_000_000,
+        evict_node_batch: int = 10_000,
+    ) -> None:
+        """
+        Args:
+            sample_stride: 每隔多少个字符抽 1 个作为 trie key。
+            max_node_count: 树中允许的最大节点数（不含 root）；超限时触发 LRU 驱逐。
+            evict_node_batch: 每次驱逐时在超出量基础上额外腾出的节点缓冲数。
+        """
+        if sample_stride < 1:
+            raise ValueError(f"sample_stride must be >= 1, got {sample_stride}")
+        if max_node_count < 0:
+            raise ValueError(f"max_node_count must be >= 0, got {max_node_count}")
+        if evict_node_batch < 1:
+            raise ValueError(f"evict_node_batch must be >= 1, got {evict_node_batch}")
+        self.sample_stride = sample_stride
+        self.max_node_count = max_node_count
+        self.evict_node_batch = evict_node_batch
+        self.root = _PromptCacheNode()
+        self._node_count = 0
+        self._leaf_lru: SortedDict[int, _PromptCacheNode] = SortedDict()
+        self._lock = RLock()
+        self._time_mark_lock = Lock()
+
+    def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+        """将抽稀后的 prompt key 写入树，并关联到 prefill_node。
+
+        路径上的节点会更新 last_prefill_node 与 LRU 时间戳；写入后若超
+        max_node_count 会立即按 LRU 驱逐一批叶节点。
+
+        Args:
+            key: 已按 sample_stride 抽稀的 prompt key。
+            prefill_node: 处理该 prompt 的 prefill 连接标识（connection_key），不可为 None。
+            sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
+
+        Raises:
+            ValueError: prefill_node 为 None 时抛出。
+        """
+        assert (
+            sample_stride == self.sample_stride
+        ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
+        if prefill_node is None:
+            raise ValueError("prefill_node must not be None")
+        with self._lock:
+            # 使用循环沿 key 向下构建路径，避免 key 很长时递归层数超过 Python
+            # 调用栈上限。path 按访问顺序保存根节点和每个命中的子节点，后面
+            # 通过逆序遍历模拟原递归实现从终点逐层返回根节点的过程。
+            node = self.root
+            path = [self.root]
+            for ch in key:
+                child = node.children.get(ch)
+                if child is None:
+                    child = _PromptCacheNode(
+                        parent=node,
+                        edge_char=ch,
+                        last_insert_time=time.monotonic(),
+                    )
+                    child.last_time_mark = self._gen_time_mark()
+                    node.children[ch] = child
+                    self._node_count += 1
+                node = child
+                path.append(node)
+
+            # 逆序遍历路径：终点叶节点先进入 LRU，祖先随后移除自己的旧叶节点
+            # 记录。该顺序与原递归 finally 块的回溯顺序一致，可以保证新增分支
+            # 后，已经变成非叶节点的父节点不会残留在 _leaf_lru 中。
+            for node in reversed(path):
+                if node is not self.root:
+                    node.last_prefill_node = prefill_node
+                    node.last_insert_time = time.monotonic()
+                if node.last_time_mark in self._leaf_lru:
+                    self._leaf_lru.pop(node.last_time_mark, None)
+                node.last_time_mark = self._gen_time_mark()
+                if self._is_leaf(node):
+                    self._leaf_lru[node.last_time_mark] = node
+
+            # 驱逐前释放临时路径和最后一个 child 持有的节点引用，使随后从树中
+            # 删除的节点可以立即回收，不必等到 insert_sampled 返回后再释放。
+            path.clear()
+            child = None
+            self._evict_if_needed()
+
+    def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+        """匹配已经按 sample_stride 抽稀的 prompt key。
+
+        Args:
+            key: 已按 sample_stride 抽稀的 prompt key。
+            input_char_count: 原始 prompt 的字符数。
+            sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
+
+        返回说明：
+          - matched_char_count：匹配到的原始 prompt 字符数；
+          - input_char_count：原始 prompt 字符数；
+          - prefill_node 为 None：匹配停在 root（无任何 key 字符命中）；
+          - prefill_node 为非空 str：匹配停在非 root 节点，取该节点的 last_prefill_node；
+          - last_insert_time：命中节点最近一次由 prompt 插入更新的单调时钟时间戳。
+        """
+        assert (
+            sample_stride == self.sample_stride
+        ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
+        with self._lock:
+            # 逐字符沿树向下查找。循环中的 matched 表示已经连续匹配的采样
+            # 字符数；遇到第一个不存在的子节点后立即停止，当前 node 就是
+            # 最长匹配前缀的终点。整个过程不消耗 Python 递归调用栈。
+            node = self.root
+            matched = 0
+            for ch in key:
+                child = node.children.get(ch)
+                if child is None:
+                    break
+                node = child
+                matched += 1
+
+            if node is self.root:
+                prefill_node = None
+            else:
+                prefill_node = node.last_prefill_node
+            if matched <= 0:
+                matched_char_count = 0
+            else:
+                matched_char_count = min((matched - 1) * sample_stride + 1, input_char_count)
+            return PromptCacheMatchResult(
+                prefill_node=prefill_node,
+                matched_char_count=matched_char_count,
+                input_char_count=input_char_count,
+                last_insert_time=node.last_insert_time if node is not self.root else None,
+            )
+
+    def evict_lru_nodes(self) -> int:
+        """节点数超上限时，按 LRU 从叶节点批量删除。
+
+        删除数量为 ``_node_count - max_node_count + evict_node_batch``，
+        使节点数降到 max_node_count 以下并留出缓冲。
+
+        Returns:
+            实际删除的叶节点数量；未超上限时返回 0。
+        """
+        with self._lock:
+            if self._node_count <= self.max_node_count:
+                return 0
+            need = self._node_count - self.max_node_count + self.evict_node_batch
+            removed = 0
+            while removed < need and self._leaf_lru:
+                _, node = self._leaf_lru.peekitem(0)
+                self._remove_leaf_node(node)
+                removed += 1
+            return removed
+
+    def _is_leaf(self, node: _PromptCacheNode) -> bool:
+        return node is not self.root and not node.children
+
+    def _gen_time_mark(self) -> int:
+        with self._time_mark_lock:
+            time_mark = getattr(self, "_time_mark", -1) + 1
+            self._time_mark = time_mark
+            return time_mark
+
+    def _evict_if_needed(self) -> None:
+        if self._node_count <= self.max_node_count:
+            return
+        need = self._node_count - self.max_node_count + self.evict_node_batch
+        removed = 0
+        while removed < need and self._leaf_lru:
+            _, node = self._leaf_lru.peekitem(0)
+            self._remove_leaf_node(node)
+            removed += 1
+
+    def _remove_leaf_node(self, node: _PromptCacheNode) -> None:
+        assert self._is_leaf(node)
+        parent = node.parent
+        assert parent is not None and node.edge_char is not None
+
+        self._leaf_lru.pop(node.last_time_mark, None)
+        parent.children.pop(node.edge_char, None)
+        self._node_count -= 1
+        if self._is_leaf(parent):
+            self._leaf_lru[parent.last_time_mark] = parent

@@ -9,6 +9,9 @@ from lightllm.common.basemodel import TpPartBaseModel
 
 class Qwen3MOEMTPModel(Qwen3MOEModel):
 
+    # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
+    is_mtp_draft_model = True
+
     pre_and_post_weight_class = Qwen3MOEMTPPreAndPostLayerWeight
     pre_layer_infer_class = Deepseek3MTPPreLayerInfer
 

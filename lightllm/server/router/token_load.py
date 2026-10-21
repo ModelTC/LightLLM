@@ -20,7 +20,7 @@ class TokenLoad:
             f"{name}_ext_infos",
             shape=(
                 self.dp_size_in_node,
-                2,
+                1,
             ),
             dtype=np.int64,
         )
@@ -39,19 +39,6 @@ class TokenLoad:
 
     def get_estimated_peak_token_count(self, index: int) -> int:
         return self.shared_token_infos.arr[index, 0]
-
-    # 记录系统被临时固定的不能被使用的token数，主要在于 pd 分离的模式下
-    # 推理系统需要在 kv 传输时临时固定一些 token， 防止调度系统估计失误，导致调度问题
-    def set_frozened_token_count(self, obj: int, index: int):
-        self.shared_token_infos.arr[index, 1] = obj
-        return
-
-    def get_frozened_token_count(self, index: int) -> int:
-        return self.shared_token_infos.arr[index, 1]
-
-    def add_frozened_token_count(self, value: int, index: int):
-        self.shared_token_infos.arr[index, 1] += value
-        return
 
     # current_load 当前使用token量，估计的负载
     def set_current_load(self, value, index: int):

@@ -30,7 +30,7 @@ from pydantic import BaseModel, Field
 from .api_models import Tool
 
 logger = logging.getLogger(__name__)
-ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "True").upper() in ["ON", "TRUE", "1"]
+ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "False").upper() in ["ON", "TRUE", "1"]
 
 TOOLS_TAG_LIST = [
     "<|plugin|>",
@@ -60,14 +60,16 @@ class StreamingParseResult:
 
 
 def _find_common_prefix(s1: str, s2: str) -> str:
-    prefix = ""
-    min_length = min(len(s1), len(s2))
-    for i in range(0, min_length):
-        if s1[i] == s2[i]:
-            prefix += s1[i]
+    # Binary search on slice comparisons, which run in C, instead of building
+    # the prefix one character at a time. Invariant: s1[:low] == s2[:low].
+    low, high = 0, min(len(s1), len(s2))
+    while low < high:
+        mid = (low + high + 1) // 2
+        if s1[low:mid] == s2[low:mid]:
+            low = mid
         else:
-            break
-    return prefix
+            high = mid - 1
+    return s1[:low]
 
 
 def _partial_json_loads(input_str: str, flags: Allow) -> Tuple[Any, int]:
@@ -1234,17 +1236,16 @@ class Glm47Detector(BaseFormatDetector):
         self.func_detail_regex = re.compile(
             r"<tool_call>([^<\n]+?)(?:\n|(?=<arg_key>)|(?=</tool_call>))(.*?)</tool_call>", re.DOTALL
         )
+        self.func_name_regex = re.compile(r"<tool_call>([^<\n]+?)(?:\n|(?=<arg_key>)|(?=</tool_call>))")
+        self._streaming_tool_name: Optional[str] = None
         # Extract arg_key/arg_value pairs
         self.func_arg_regex = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
-
-        self._last_arguments = ""
-        self._normal_text_buffer = ""
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a GLM-4.7 format tool call."""
         return self.bot_token in text
 
-    def _parse_xml_arguments(self, arg_text: str) -> dict:
+    def _parse_xml_arguments(self, arg_text: str, tool: Tool) -> dict:
         """
         Parse XML-style arguments into a dictionary.
 
@@ -1258,10 +1259,15 @@ class Glm47Detector(BaseFormatDetector):
             return {}
 
         args = {}
+        properties = (tool.function.parameters or {}).get("properties", {})
         matches = self.func_arg_regex.findall(arg_text)
         for key, value in matches:
             key = key.strip()
-            value = value.strip()
+            # XML string values are literal: file content and edit targets may
+            # contain meaningful whitespace or text that happens to be JSON.
+            if properties.get(key, {}).get("type") == "string":
+                args[key] = value
+                continue
             # Try to parse value as JSON for complex types (arrays, objects, numbers, booleans)
             try:
                 parsed_value = json.loads(value)
@@ -1308,11 +1314,11 @@ class Glm47Detector(BaseFormatDetector):
                     continue
 
                 # Parse XML arguments to JSON
-                func_args = self._parse_xml_arguments(arg_text)
+                func_args = self._parse_xml_arguments(arg_text, tools[tool_indices[func_name]])
 
                 calls.append(
                     ToolCallItem(
-                        tool_index=tool_indices[func_name],
+                        tool_index=len(calls),
                         name=func_name,
                         parameters=json.dumps(func_args, ensure_ascii=False),
                     )
@@ -1324,134 +1330,52 @@ class Glm47Detector(BaseFormatDetector):
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
-        """
-        Streaming incremental parsing for GLM-4.7 tool calls.
-
-        This handles the streaming case where tool calls arrive incrementally.
-        """
+        """Buffer XML arguments while emitting tool deltas to keep the stream alive."""
         self._buffer += new_text
-        current_text = self._buffer
-
-        # Check if we have a tool call starting
-        if not self.has_tool_call(current_text):
-            # Check for partial bot_token at the end
-            partial_len = self._ends_with_partial_token(current_text, self.bot_token)
-            if partial_len:
-                # Might be partial bot_token, keep buffering
-                return StreamingParseResult()
-
-            # No tool call, emit as normal text
-            self._buffer = ""
-            # Clean up any stray end tokens
-            if self.eot_token in new_text:
-                new_text = new_text.replace(self.eot_token, "")
-            return StreamingParseResult(normal_text=new_text)
-
-        # Build tool indices if not already built
-        if not hasattr(self, "_tool_indices"):
-            self._tool_indices = self._get_tool_indices(tools)
-
+        normal_text = ""
         calls: List[ToolCallItem] = []
+        while self._buffer:
+            start = self._buffer.find(self.bot_token)
+            if start == -1:
+                keep = self._ends_with_partial_token(self._buffer, self.bot_token)
+                end = len(self._buffer) - keep
+                normal_text += self._buffer[:end]
+                self._buffer = self._buffer[end:]
+                break
 
-        try:
-            # Check if we have a complete tool call
-            if self.eot_token in current_text:
-                # We have at least one complete tool call
-                # Parse all complete tool calls
-                result = self.detect_and_parse(current_text, tools)
+            normal_text += self._buffer[:start]
+            self._buffer = self._buffer[start:]
+            end = self._buffer.find(self.eot_token)
+            if end == -1:
+                # Match the buffered Qwen3-Coder flow: announce the name once,
+                # then send empty argument deltas until the XML call is complete.
+                # Long Write/Bash arguments must not leave the HTTP stream idle.
+                name = None
+                if self._streaming_tool_name is None:
+                    match = self.func_name_regex.match(self._buffer)
+                    if match and match.group(1).strip() in self._get_tool_indices(tools):
+                        name = match.group(1).strip()
+                        self._streaming_tool_name = name
+                        self.current_tool_id += 1
+                if self._streaming_tool_name is not None:
+                    calls.append(ToolCallItem(tool_index=self.current_tool_id, name=name, parameters=""))
+                break
 
-                # Find the end of the last complete tool call
-                last_end = current_text.rfind(self.eot_token)
-                if last_end != -1:
-                    remaining = current_text[last_end + len(self.eot_token) :]
-                    self._buffer = remaining.lstrip()
+            end += len(self.eot_token)
+            # Waiting for the closing tag avoids re-emitting partial JSON or
+            # rewriting already sent arguments when another XML key arrives.
+            result = self.detect_and_parse(self._buffer[:end], tools)
+            for call in result.calls:
+                if self._streaming_tool_name is None:
+                    self.current_tool_id += 1
                 else:
-                    self._buffer = ""
+                    call.name = None
+                call.tool_index = self.current_tool_id
+                calls.append(call)
+            self._streaming_tool_name = None
+            self._buffer = self._buffer[end:]
 
-                # Reset state for next tool call
-                self.current_tool_id = -1
-                self.current_tool_name_sent = False
-                self._last_arguments = ""
-
-                return result
-
-            # We have a partial tool call - try to stream it
-            # Extract what we can from the partial tool call
-            tool_call_start = current_text.find(self.bot_token)
-            if tool_call_start == -1:
-                return StreamingParseResult()
-
-            # Get content after <tool_call>
-            content_after_start = current_text[tool_call_start + len(self.bot_token) :]
-
-            # Try to extract function name (first line after <tool_call>)
-            newline_pos = content_after_start.find("\n")
-            if newline_pos == -1:
-                # Still waiting for function name to complete
-                return StreamingParseResult()
-
-            func_name = content_after_start[:newline_pos].strip()
-
-            # Initialize state if this is the first tool call
-            if self.current_tool_id == -1:
-                self.current_tool_id = 0
-                self.prev_tool_call_arr = []
-                self.streamed_args_for_tool = [""]
-
-            # Ensure we have enough entries
-            while len(self.prev_tool_call_arr) <= self.current_tool_id:
-                self.prev_tool_call_arr.append({})
-            while len(self.streamed_args_for_tool) <= self.current_tool_id:
-                self.streamed_args_for_tool.append("")
-
-            # Check if function name is valid
-            if func_name and func_name in self._tool_indices:
-                if not self.current_tool_name_sent:
-                    # Send function name first
-                    calls.append(
-                        ToolCallItem(
-                            tool_index=self.current_tool_id,
-                            name=func_name,
-                            parameters="",
-                        )
-                    )
-                    self.current_tool_name_sent = True
-                    self.prev_tool_call_arr[self.current_tool_id] = {
-                        "name": func_name,
-                        "arguments": {},
-                    }
-                else:
-                    # Stream arguments incrementally
-                    arg_text = content_after_start[newline_pos + 1 :]
-                    current_args = self._parse_xml_arguments(arg_text)
-
-                    if current_args:
-                        current_args_json = json.dumps(current_args, ensure_ascii=False)
-                        prev_args = self.prev_tool_call_arr[self.current_tool_id].get("arguments", {})
-                        prev_args_json = json.dumps(prev_args, ensure_ascii=False) if prev_args else ""
-
-                        if current_args_json != prev_args_json:
-                            # Calculate the diff
-                            sent = len(self.streamed_args_for_tool[self.current_tool_id])
-                            argument_diff = current_args_json[sent:]
-
-                            if argument_diff:
-                                calls.append(
-                                    ToolCallItem(
-                                        tool_index=self.current_tool_id,
-                                        name=None,
-                                        parameters=argument_diff,
-                                    )
-                                )
-                                self.streamed_args_for_tool[self.current_tool_id] += argument_diff
-
-                            self.prev_tool_call_arr[self.current_tool_id]["arguments"] = current_args
-
-            return StreamingParseResult(normal_text="", calls=calls)
-
-        except Exception as e:
-            logger.error(f"Error in GLM-4.7 parse_streaming_increment: {e}")
-            return StreamingParseResult(normal_text="", calls=calls)
+        return StreamingParseResult(normal_text=normal_text, calls=calls)
 
 
 class DeepSeekV32Detector(BaseFormatDetector):
@@ -1759,6 +1683,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
             r"<parameter=(.*?)(?:</parameter>|(?=<parameter=)|(?=</function>)|$)", re.DOTALL
         )
         self._normal_text_buffer = ""
+        self._current_tool_name: Optional[str] = None
 
     def has_tool_call(self, text: str) -> bool:
         return "<function=" in text or self.bot_token in text
@@ -1819,7 +1744,7 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
         func_name = function_str[:end_index].strip()
         tool_indices = self._get_tool_indices(tools)
-        if func_name not in tool_indices:
+        if not func_name or (ENABLE_TOOL_NAME_CHECK and func_name not in tool_indices):
             logger.warning(f"Model attempted to call undefined function: {func_name}")
             return None
 
@@ -1843,10 +1768,26 @@ class Qwen3CoderDetector(BaseFormatDetector):
             param_dict[param_name] = self._convert_param_value(param_value, param_name, param_config, func_name)
 
         return ToolCallItem(
-            tool_index=tool_indices[func_name],
+            tool_index=tool_indices.get(func_name, -1),
             name=func_name,
             parameters=json.dumps(param_dict, ensure_ascii=False),
         )
+
+    def _get_incomplete_function_name(self, text: str) -> Optional[str]:
+        """Return a complete, valid function name from an unfinished tool-call block."""
+        function_start = text.find("<function=")
+        if function_start == -1:
+            return None
+
+        name_start = function_start + len("<function=")
+        name_end = text.find(">", name_start)
+        if name_end == -1:
+            return None
+
+        function_name = text[name_start:name_end].strip()
+        if not function_name or (ENABLE_TOOL_NAME_CHECK and function_name not in self._tool_indices):
+            return None
+        return function_name
 
     def _build_partial_arguments_json(self, func_name: str, partial_body: str, tools: List[Tool]) -> Optional[str]:
         """Build the current argument JSON from a partial XML tool-call body."""
@@ -1943,6 +1884,31 @@ class Qwen3CoderDetector(BaseFormatDetector):
 
             eot_pos = current_text.find(self.eot_token)
             if eot_pos == -1:
+                if not self.current_tool_name_sent:
+                    function_name = self._get_incomplete_function_name(current_text)
+                    if function_name is None:
+                        return StreamingParseResult(normal_text=normal_text, calls=calls)
+
+                    if self.current_tool_id == -1:
+                        self.current_tool_id = 0
+                    self.current_tool_name_sent = True
+                    self._current_tool_name = function_name
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            name=function_name,
+                            parameters="",
+                        )
+                    )
+                else:
+                    # Keep the connection active for every decoded chunk without
+                    # exposing a partial XML value as malformed JSON arguments.
+                    calls.append(
+                        ToolCallItem(
+                            tool_index=self.current_tool_id,
+                            parameters="",
+                        )
+                    )
                 return StreamingParseResult(normal_text=normal_text, calls=calls)
 
             complete_block = current_text[: eot_pos + len(self.eot_token)]
@@ -1956,9 +1922,17 @@ class Qwen3CoderDetector(BaseFormatDetector):
                 item = self._parse_function_call(func_str, tools)
                 if item:
                     item.tool_index = self.current_tool_id
+                    if self.current_tool_name_sent and item.name == self._current_tool_name:
+                        # The head was already emitted. Send the complete arguments as
+                        # one continuation delta and do not repeat the function name.
+                        item.name = None
+                        self.current_tool_name_sent = False
+                        self._current_tool_name = None
                     calls.append(item)
                     self.current_tool_id += 1
 
+            self.current_tool_name_sent = False
+            self._current_tool_name = None
             self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 
 

@@ -37,7 +37,7 @@ class _BaseQuantizationMethod(QuantizationMethod):
         raise NotImplementedError("Not implemented")
 
 
-@QUANTMETHODS.register(["triton-fp8w8a8g128", "fp8w8a8g128"], platform="cuda")
+@QUANTMETHODS.register(["fp8w8a8g128-triton", "fp8w8a8g128"], platform="cuda")
 class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -116,7 +116,7 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
 
     @property
     def method_name(self):
-        return f"triton-fp8w8a8g{self.act_quant_group_size}"
+        return f"fp8w8a8g{self.act_quant_group_size}-triton"
 
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
@@ -137,7 +137,7 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(["triton-fp8w8a8g64", "fp8w8a8g64"], platform="cuda")
+@QUANTMETHODS.register(["fp8w8a8g64-triton", "fp8w8a8g64"], platform="cuda")
 class FP8w8a8g64QuantizationMethod(FP8w8a8g128QuantizationMethod):
     def __init__(self):
         super().__init__()

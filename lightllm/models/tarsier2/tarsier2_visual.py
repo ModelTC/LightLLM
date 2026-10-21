@@ -187,7 +187,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
                 projector_hidden_act,
             )
         elif projection_head == "auto_map":
-            raise Exception("Unsupport projection_head auto_map")
+            raise Exception("Unsupported projection_head auto_map")
         elif projection_head is None:
             self.multi_modal_projector = lambda x, *args, **kwargs: x
         self.llm_model_type = text_config["model_type"]
@@ -259,7 +259,7 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
-                raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+                raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             # must devide merge_length
             cur_num = img_tensors[-1].shape[0] // (self.merge_size ** 2)

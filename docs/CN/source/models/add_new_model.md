@@ -549,68 +549,33 @@ class BloomTpPartModel(TpPartBaseModel):
         return 
 ~~~
 
-### (4) 在server服务层加入对模型的支持
+### (4) 注册模型
 
-***lightllm/server/router/model_infer/model_rpc.py***
+在 `lightllm/models/builtin.py` 中添加内置注册，使用 `module:Class` 路径，避免导入模型实现：
 
-~~~python
-import asyncio
-import rpyc
-import torch
-import traceback
-from datetime import timedelta
-from typing import Dict, List, Tuple
-from transformers.configuration_utils import PretrainedConfig
-from lightllm.server.router.model_infer.infer_batch import InferBatch
-from rpyc.utils.classic import obtain
+```python
+ModelRegistry.register("bloom", "lightllm.models.bloom.model:BloomTpPartModel")
+```
 
-from lightllm.models.bloom.model import BloomTpPartModel
-from lightllm.utils.infer_utils import set_random_seed
-from lightllm.utils.infer_utils import calculate_time, mark_start, mark_end
-from lightllm.common.configs.config import setting
-from .post_process import sample
+这里的 `model_type` 来自 checkpoint 的 `config.json`。同一个实现可注册多个类型；多模态模型使用 `is_multimodal=True`。当一个类型有条件变体时，在此处添加 `condition`，例如 reward 模型使用 `is_reward_model()`，嵌套语言模型使用 `llm_model_type_is(...)`。命中的条件变体优先于默认实现；多个特例条件同时命中会报错。
 
-class ModelRpcServer(rpyc.Service):
+兜底实现也可以限定适用范围：同时设置 `condition` 和 `is_fallback=True`。例如 Llava 兜底排除 Tarsier 架构，但仍允许外部条件变体覆盖它。用真实 checkpoint 配置核对家族标识与嵌套字段；只有文本模型类型相同，不足以判断是同一种多模态架构。
 
-    def exposed_init_model(self, rank_id, world_size, weight_dir, max_total_token_num, load_way, mode):
-        import torch
-        import torch.distributed as dist
-        if world_size != 1:
-            trans_list = [obtain(e) for e in (rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)]
-            rank_id, world_size, weight_dir, max_total_token_num, load_way, mode = trans_list
+`ModeBackend.init_model` 读取配置后调用 `get_model`，类查询使用 `get_model_class`，两者共享同一选择逻辑。选择成功后才导入实现。不需要在 router 中增加分支，也不需要在 `models/__init__.py` 或内置模型类上重复添加 import/decorator。
 
-        self.tp_rank = rank_id
-        self.world_size = world_size
-        self.load_way = load_way
-        self.mode = mode
-        self.cache = {}
+Draft 模型单独注册 checkpoint 类型和投机模式，例如：
 
-        dist.init_process_group('nccl', init_method=f'tcp://127.0.0.1:{setting["nccl_port"]}', rank=rank_id, world_size=world_size)
-        torch.cuda.set_device(rank_id)
+```python
+DraftModelRegistry.register(
+    "qwen3", "dspark", "lightllm.models.qwen3_dspark.model:Qwen3DSparkModel"
+)
+```
 
-        model_cfg, _ = PretrainedConfig.get_config_dict(
-            weight_dir
-        )
-        try:
-            self.model_type = model_cfg["model_type"]
-            if self.model_type == "bloom":
-                self.model = BloomTpPartModel(rank_id, world_size, weight_dir, max_total_token_num, load_way, mode)
-                raise Exception(f"can not support {self.model_type} now")
-        except Exception as e:
-            print("#" * 16)
-            print("load model error:", str(e), e, type(e))
-            raise e
-        
-        set_random_seed(2147483647)
-        return
-    ...
-~~~
+注册成功仅表示可以选择模型类；视觉/音频 encoder、tokenizer 和相关配置适配仍需按模型需求实现。现有 `@ModelRegistry(...)` 和 `@DraftModelRegistry(...)` 接口保留给显式导入的外部扩展类。
 
+使用有代表性的 checkpoint 配置，测试模型选择、条件优先级和实际类加载。运行：
 
-
-
-
-
-
-
+```bash
+exp -m "验证模型注册与兼容性" python -m pytest unit_tests/models/test_registry.py -q
+```
 

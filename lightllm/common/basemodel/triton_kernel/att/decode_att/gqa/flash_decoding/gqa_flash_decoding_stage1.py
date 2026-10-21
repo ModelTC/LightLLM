@@ -2,7 +2,8 @@ import torch
 import triton
 import triton.language as tl
 from typing import Optional
-from lightllm.common.triton_utils.autotuner import autotune, Autotuner
+from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType, AutotuneLevel
+from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len, get_triton_autotune_level
 
 
 @triton.jit
@@ -39,6 +40,8 @@ def _fwd_kernel_flash_decode_stage1(
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    USE_SLIDING_WINDOW: tl.constexpr,
+    LEFT_SLIDING_WINDOW_SIZE: tl.constexpr,
 ):
     cur_batch = tl.program_id(0)
     cur_kv_head = tl.program_id(1)
@@ -46,6 +49,12 @@ def _fwd_kernel_flash_decode_stage1(
     grid_block_num = tl.num_programs(2)
 
     cur_batch_seq_len = tl.load(B_Seqlen + cur_batch)
+    if USE_SLIDING_WINDOW:
+        kv_start_index = tl.maximum(cur_batch_seq_len - 1 - LEFT_SLIDING_WINDOW_SIZE, 0)
+        cur_batch_seq_len = cur_batch_seq_len - kv_start_index
+    else:
+        kv_start_index = 0
+
     req_total_block_num = tl.cdiv(cur_batch_seq_len, BLOCK_SEQ)
     if block_index >= req_total_block_num:
         return
@@ -77,7 +86,7 @@ def _fwd_kernel_flash_decode_stage1(
             offs_n_new = start_n * BLOCK_N + offs_n
             n_mask = offs_n_new < cur_batch_end_index
             k_loc = tl.load(
-                Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + offs_n_new,
+                Req_to_tokens + stride_req_to_tokens_b * cur_batch_req_idx + kv_start_index + offs_n_new,
                 mask=n_mask,
                 other=0,
             ).to(tl.int64)
@@ -110,14 +119,8 @@ def _fwd_kernel_flash_decode_stage1(
         + offs_d[None, :]
     )
     off_mid_o_logexpsum = cur_batch * stride_mid_o_eb + cur_q_head_range * stride_mid_o_eh + block_index
-    tl.store(
-        Mid_O + off_mid_o,
-        acc / sum_exp[:, None],
-    )
-    tl.store(
-        Mid_O_LogExpSum + off_mid_o_logexpsum,
-        max_logic + tl.log(sum_exp),
-    )
+    tl.store(Mid_O + off_mid_o, acc / sum_exp[:, None])
+    tl.store(Mid_O_LogExpSum + off_mid_o_logexpsum, max_logic + tl.log(sum_exp))
     return
 
 
@@ -136,11 +139,12 @@ def get_test_configs():
     return configs
 
 
-def get_static_key(q, k, block_seq):
+def get_static_key(q, k, block_seq, sliding_window):
     key_params = {
         "gqa_group_size": int(q.shape[1] // k.shape[1]),
         "q_head_dim": int(q.shape[2]),
         "block_seq": block_seq,
+        "sliding_window": tuple(sliding_window),
         "out_dtype": str(q.dtype),
     }
     return key_params
@@ -148,15 +152,79 @@ def get_static_key(q, k, block_seq):
 
 def get_run_key(q, max_len_in_batch):
     batch_size = q.shape[0]
-    return batch_size * 1000 * 1000 * 1000 + max_len_in_batch
+    # 正常执行使用调用方在 CPU 上保存的真实 KV 长度，不读取 GPU 长度张量或 Graph 的容量上限。
+    max_kv_len = int(max_len_in_batch)
+    if Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION) and get_triton_autotune_level() in [
+        AutotuneLevel.ADAPTIVE_AUTOTUNE,
+        AutotuneLevel.FORCE_AUTOTUNE,
+    ]:
+        max_kv_len = get_decode_attn_autotune_seq_len()
+    # 调优和正常查找统一按 512 token 向上分桶，同一区间复用配置匹配结果。
+    max_kv_len = (max_kv_len + 511) // 512 * 512
+    return batch_size * 1000 * 1000 * 1000 + max_kv_len
+
+
+def rebuild_inputs(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    Req_to_tokens: torch.Tensor,
+    B_req_idx: torch.Tensor,
+    B_Seqlen: torch.Tensor,
+    max_len_in_batch: int,
+    mid_out: torch.Tensor,
+    mid_out_logsumexp: torch.Tensor,
+    block_seq: int,
+    sliding_window=(-1, -1),
+    **kwargs,
+):
+    # Graph 初始化时真实请求很短，Req_to_tokens 的宽度则是容量上限，都不代表期望调优的长度。
+    # 仅在实际搜索配置前重建一次输入，构造开销不计入 benchmark；正常执行和 Graph 捕获使用原输入。
+    batch_size = q.shape[0]
+    # 与调优时的 run key 共用该环境变量，默认 32768 token；实际计算保持精确长度，不做 512 分桶。
+    max_len_in_batch = get_decode_attn_autotune_seq_len()
+    assert k.shape[0] == v.shape[0], "K/V caches must have the same number of tokens"
+    num_tokens = k.shape[0]
+    if num_tokens == 0:
+        raise ValueError("GQA decode autotuning requires a non-empty KV cache")
+
+    # 新建每个请求到物理 token 的映射，不能直接扩展 B_Seqlen 后读取原映射中未初始化的条目。
+    # 物理 token 充足时各请求使用不同位置，不足时取模循环复用，保证所有索引均落在 K/V 缓存内。
+    # 复用已有 K/V 可以避免分配完整的长请求缓存，但可能提高 GPU 缓存命中率，影响调优的访存特征。
+    Req_to_tokens = torch.arange(batch_size * max_len_in_batch, dtype=Req_to_tokens.dtype, device=Req_to_tokens.device)
+    Req_to_tokens = Req_to_tokens.remainder_(num_tokens).view(batch_size, max_len_in_batch)
+    # 新映射只有 batch_size 行，请求索引也必须重建，避免继续使用原全局请求表中的行号。
+    B_req_idx = torch.arange(batch_size, dtype=B_req_idx.dtype, device=B_req_idx.device)
+    B_Seqlen = torch.full_like(B_Seqlen, max_len_in_batch)
+
+    # 保留 Q、滑窗语义、BLOCK_SEQ 和中间缓冲区布局；一个 program 可循环处理多个 KV 块，
+    # 无需按调优长度扩容 mid_out。调优结束后 stage1 使用原始输入重新覆盖有效中间块，
+    # stage2 仍按相同 BLOCK_SEQ 和缓冲区中的 block_num 归约。
+    return (
+        q,
+        k,
+        v,
+        Req_to_tokens,
+        B_req_idx,
+        B_Seqlen,
+        max_len_in_batch,
+        mid_out,
+        mid_out_logsumexp,
+        block_seq,
+        sliding_window,
+    ), kwargs
 
 
 @autotune(
-    kernel_name="_fwd_kernel_gqa_flash_decode_stage1:v3",
+    kernel_name="_fwd_kernel_gqa_flash_decode_stage1:v4",
+    kernel_type=AutotuneKernelType.DECODE_ATTENTION,
     configs_gen_func=get_test_configs,
     static_key_func=get_static_key,
     run_key_func=get_run_key,
-    mutates_args=["mid_out", "mid_out_logsumexp"],
+    rebuild_input_func=rebuild_inputs,
+    # stage1 对有效中间块执行覆盖写，候选配置不会读取已有输出，正式执行也会重新覆盖真实请求的有效块。
+    # 不标记这两个大缓冲区，避免每个候选配置 benchmark 时反复 clone，增加显存峰值和拷贝开销。
+    # mutates_args=["mid_out", "mid_out_logsumexp"],
 )
 @torch.no_grad()
 def flash_decode_stage1(
@@ -170,6 +238,7 @@ def flash_decode_stage1(
     mid_out,
     mid_out_logsumexp,
     block_seq,
+    sliding_window=(-1, -1),
     run_config: Optional[dict] = None,
 ):
     """ """
@@ -185,12 +254,21 @@ def flash_decode_stage1(
     # shape constraints
     Lq, Lk = q.shape[-1], k.shape[-1]
     assert Lq == Lk
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256, 512}
+    if Lk >= 256:
+        BLOCK_N = min(BLOCK_N, 16)
+    assert BLOCK_SEQ % BLOCK_N == 0
     sm_scale = 1.0 / (Lk ** 0.5)
     batch, kv_head_num = B_req_idx.shape[0], k.shape[1]
     block_num = mid_out.shape[2]
     grid = (batch, kv_head_num, block_num)
     gqa_group_size = q.shape[1] // k.shape[1]
+    sliding_window_left = int(sliding_window[0])
+    use_sliding_window = sliding_window_left >= 0
+
+    # 当前 不支持 right sliding window
+    if use_sliding_window:
+        assert sliding_window[1] == 0
 
     _fwd_kernel_flash_decode_stage1[grid](
         q,
@@ -225,6 +303,8 @@ def flash_decode_stage1(
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=Lk,
         BLOCK_N=BLOCK_N,
+        USE_SLIDING_WINDOW=use_sliding_window,
+        LEFT_SLIDING_WINDOW_SIZE=sliding_window_left,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -232,8 +312,6 @@ def flash_decode_stage1(
 
 
 if __name__ == "__main__":
-    from lightllm.utils.envs_utils import get_triton_autotune_level
-
     if get_triton_autotune_level() != 2:
         raise Exception("you need set env LIGHTLLM_TRITON_AUTOTUNE_LEVEL=2 to start program.")
 
@@ -244,11 +322,11 @@ if __name__ == "__main__":
     out_dtype = torch.bfloat16
 
     batch_sizes = [1, 8, 16, 32, 64, 128]
-    decode_lengths = [1024, 2048, 8192, 16384]
+    decode_lengths = [get_decode_attn_autotune_seq_len()]
 
     q_head_num = gqa_group_size
 
-    Autotuner.start_autotune_warmup()
+    Autotuner.start_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
     # autotuing kernel
     for batch_size in batch_sizes:
         for length in decode_lengths:

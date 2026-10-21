@@ -1,32 +1,57 @@
 from lightllm.utils.log_utils import init_logger
+from typing import Optional
 
 logger = init_logger(__name__)
+
+SERVER_BUSY_MESSAGE = "Server is busy, please try again later"
+
+
+class InvalidRequestError(ValueError):
+    """Request validation failed before generation started."""
+
+
+class GenerationError(Exception):
+    """Generation stopped because of an internal server failure."""
 
 
 class ServerBusyError(Exception):
     """Custom exception for server busy/overload situations"""
 
-    def __init__(self, message="Server is busy, please try again later", status_code=503):
+    def __init__(self, message=SERVER_BUSY_MESSAGE, status_code=429):
         """
         Initialize the ServerBusyError
 
         Args:
             message (str): Error message to display
-            status_code (int): HTTP status code (default 503 Service Unavailable)
+            status_code (int): HTTP status code (default 429 Too Many Requests)
         """
         super().__init__(message)
         self.message = message
-        self.status_code = status_code  # HTTP 503 Service Unavailable
+        self.status_code = status_code  # HTTP 429 Too Many Requests
 
     def __str__(self):
         """String representation of the error"""
         return f"{self.message} (Status code: {self.status_code})"
 
 
-class NixlPrefillNodeStopGenToken(Exception):
-    def __init__(self, group_request_id, message="Nixl prefill node stop gen token"):
+class ClientDisconnected(Exception):
+    """Raised when the client closed the HTTP connection mid-request, as
+    detected by ``request.is_disconnected()``. This is an expected control-flow
+    signal — handlers should clean up quietly without logging a stack trace.
+    Internal-module aborts (e.g. visual proxy failures) must NOT raise this —
+    they should surface as real server errors."""
+
+    def __init__(self, group_request_id: Optional[int] = None, reason: str = "client disconnected"):
+        prefix = f"req_id {group_request_id} " if group_request_id is not None else ""
+        super().__init__(f"{prefix}{reason}")
+        self.group_request_id = group_request_id
+        self.reason = reason
+
+
+class PDPrefillNodeStopGenToken(Exception):
+    def __init__(self, group_request_id, message="PD prefill node stop gen token"):
         """
-        Initialize the NixlPrefillNodeStopGenToken
+        Initialize the PDPrefillNodeStopGenToken
 
         Args:
             message (str): Error message to display

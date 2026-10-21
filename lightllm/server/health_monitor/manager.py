@@ -12,6 +12,7 @@ import time
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
 
@@ -97,7 +98,7 @@ def start_health_check_process(args, pipe_writer):
     logger.info(f"health monitor care process ids {all_process_ids}")
 
     global consecutive_failures
-    host, port = args.host, args.port
+    host, port = args.host, get_shm_port_args().port
     url = f"http://{host}:{port}/health".format(host=host, port=port)
     interval_seconds = int(os.environ.get("HEALTH_CHECK_INTERVAL_SECONDS", 88))
     logger.info("Waiting for the server to start up.")

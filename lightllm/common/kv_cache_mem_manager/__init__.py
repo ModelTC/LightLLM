@@ -1,3 +1,4 @@
+from .allocator import KvCacheAllocator
 from .mem_manager import MemoryManager, ReadOnlyStaticsMemoryManager
 from .ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
 from .ppl_int4kv_mem_manager import PPLINT4KVMemoryManager
@@ -7,8 +8,10 @@ from .fp8_per_token_group_quant_deepseek3_2mem_manager import FP8PerTokenGroupQu
 from .fp8_static_per_head_quant_mem_manager import FP8StaticPerHeadQuantMemManager
 from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemManager
 from .qwen3next_mem_manager import Qwen3NextMemManager
+from .glm5_next_mem_manager import Glm5NextMemManager
 
 __all__ = [
+    "KvCacheAllocator",
     "MemoryManager",
     "ReadOnlyStaticsMemoryManager",
     "PPLINT4KVMemoryManager",
@@ -19,4 +22,5 @@ __all__ = [
     "FP8StaticPerHeadQuantMemManager",
     "FP8StaticPerTensorQuantMemManager",
     "Qwen3NextMemManager",
+    "Glm5NextMemManager",
 ]

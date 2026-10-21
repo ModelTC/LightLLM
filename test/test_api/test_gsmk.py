@@ -85,34 +85,26 @@ def download_and_cache_file(url: str, filename: Optional[str] = None):
 
 
 def call_generate_lightllm(prompt, temperature, max_tokens, stop=None, url=None):
-    """Call LightLLM API for text generation."""
+    """Call LightLLM through its OpenAI-compatible chat API."""
     assert url is not None
 
     data = {
-        "inputs": prompt,
-        "parameters": {
-            "temperature": temperature,
-            "max_new_tokens": max_tokens,
-            "stop_sequences": stop,
-            "repetition_penalty": 1.0,
-            "top_p": 1.0,
-            "top_k": 1,
-        },
+        "model": "default_model_name",
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": temperature,
+        "max_tokens": max_tokens,
+        "stop": stop,
+        "top_p": 1.0,
     }
-    res = requests.post(url, json=data)
+    res = requests.post(url, json=data, timeout=600)
     assert res.status_code == 200, f"API request failed with status code {res.status_code}: {res.text}"
 
     response_json = res.json()
-    if "generated_text" not in response_json:
-        raise ValueError(f"Invalid API response format. Expected 'generated_text' key, got: {response_json.keys()}")
-    if not isinstance(response_json["generated_text"], list) or len(response_json["generated_text"]) == 0:
-        raise ValueError(
-            "Invalid API response format. 'generated_text' should be a non-empty list, "
-            f"got: {response_json['generated_text']}"
-        )
-
-    pred = response_json["generated_text"][0]
-    return pred
+    choices = response_json.get("choices")
+    if not choices:
+        raise ValueError(f"Invalid chat completion response: {response_json}")
+    message = choices[0]["message"]
+    return (message.get("reasoning") or "") + (message.get("content") or "")
 
 
 def get_one_example(lines, i, include_answer):
@@ -156,7 +148,9 @@ def parse_args():
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--num-shots", type=int, default=5)
     parser.add_argument("--num-questions", type=int, default=200)
+    parser.add_argument("--max-tokens", type=int, default=1024)
     parser.add_argument("--result-file", type=str, default="result.jsonl")
+    parser.add_argument("--output-file", type=str, default="tmp_output_lightllm.txt")
     parser.add_argument("--data-path", type=str, default="test.jsonl")
     parser.add_argument(
         "--system-prompt", action="store_true", help="Prepend an 8192-character system prompt to each request"
@@ -166,7 +160,7 @@ def parse_args():
 
 def main(args):
     # LightLLM API URL
-    url = f"{args.host}:{args.port}/generate"
+    url = f"{args.host}:{args.port}/v1/chat/completions"
 
     # Read data
     url_data = "https://raw.githubusercontent.com/openai/grade-school-math/master/grade_school_math/data/test.jsonl"
@@ -207,7 +201,7 @@ def main(args):
         answer = call_generate_lightllm(
             prompt=system_prefix + few_shot_examples + questions[i],
             temperature=0,
-            max_tokens=1024,
+            max_tokens=args.max_tokens,
             stop=["Question", "Assistant:", "<|separator|>", "Human:", "\n\nQuestion"],
             url=url,
         )
@@ -242,7 +236,7 @@ def main(args):
     print(f"Latency: {latency:.3f} s")
 
     # Dump results
-    dump_state_text("tmp_output_lightllm.txt", states)
+    dump_state_text(args.output_file, states)
 
     with open(args.result_file, "a") as fout:
         value = {

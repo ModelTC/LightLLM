@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
@@ -11,10 +12,10 @@ class Int4kvTritonAttBackend(BaseAttBackend):
         self.quant_group_size: int = get_env_start_args().llm_kv_quant_group_size
 
     def create_att_prefill_state(self, infer_state) -> "Int4kvTritonPrefillAttState":
-        return Int4kvTritonPrefillAttState(backend=self, infer_state=infer_state)
+        return Int4kvTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "Int4kvTritonDecodeAttState":
-        return Int4kvTritonDecodeAttState(backend=self, infer_state=infer_state)
+        return Int4kvTritonDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
@@ -115,8 +116,11 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class Int4kvTritonDecodeAttState(BaseDecodeAttState):
+    decode_max_kv_seq_len: int = None
+
     def init_state(self):
-        pass
+        # Graph 捕获会改写 infer_state 的长度上限，提前保存真实长度用于配置查找。
+        self.decode_max_kv_seq_len = self.infer_state.max_kv_seq_len
 
     def copy_for_decode_cuda_graph(self, new_state: "Int4kvTritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -166,5 +170,6 @@ class Int4kvTritonDecodeAttState(BaseDecodeAttState):
             cache_k_scale=k_scale,
             cache_v=v,
             cache_v_scale=v_scale,
+            max_kv_seq_len=self.decode_max_kv_seq_len,
             alloc_tensor_func=alloc_func,
         )

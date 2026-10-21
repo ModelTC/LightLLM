@@ -52,6 +52,20 @@ LightLLM支持多种多模态模型的推理，下面以InternVL为例，对多�
 
 .. note:: 为了使每一个GPU的显存负载相同，需要visual_dp * visual_tp = tp，例如tp=2，则visual_dp=1, visual_tp=2。
 
+PD 分离模式限制
+---------------
+
+在多模态 PD 分离部署中，``pd_master`` 会在计算输入 token 数前预处理图片，并将结果转发给
+``prefill`` 节点。因此，``pd_master`` 和每个 ``prefill`` 节点必须使用相同的
+``--max_image_pixels`` 和 ``--disable_image_resize`` 有效值。
+
+Prefill 注册时会自动校验这两个参数；任意一项不一致都会拒绝注册，避免 PD Master 的 token
+估算与 Prefill 实际图片预处理结果不一致。Decode 节点不负责图片预处理，不受这项限制。
+
+.. note::
+   启动脚本应为 PD Master 和所有多模态 Prefill 节点显式传入相同参数。比较的是启动配置处理后的
+   最终有效值，而不只是命令行中是否出现该选项。
+
 ViT部署方式
 -----------
 

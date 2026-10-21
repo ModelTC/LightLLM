@@ -138,6 +138,53 @@ def ref_q_per_head_fp8_quant(q, seq_lens):
     return q_q, scales
 
 
+@triton.jit
+def _apply_static_quantization_kernel(
+    Q,
+    Q_out,
+    Scales,
+    stride_q_t,
+    stride_q_h,
+    stride_out_t,
+    stride_out_h,
+    D: tl.constexpr,
+    FP8_MIN: tl.constexpr,
+    FP8_MAX: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+):
+    t_id = tl.program_id(0)
+    h_id = tl.program_id(1)
+    offsets = tl.arange(0, BLOCK_D)
+    scale = tl.load(Scales + h_id)
+    q = tl.load(Q + t_id * stride_q_t + h_id * stride_q_h + offsets, mask=offsets < D, other=0.0)
+    q = tl.clamp(q / scale, FP8_MIN, FP8_MAX).to(tl.float8e4nv)
+    tl.store(Q_out + t_id * stride_out_t + h_id * stride_out_h + offsets, q, mask=offsets < D)
+
+
+@torch.no_grad()
+def q_per_head_static_fp8_quant(q: torch.Tensor, scales: torch.Tensor) -> torch.Tensor:
+    """Quantize [tokens, KV-heads, grouped-Q-dim] with fixed per-KV-head scales."""
+    if q.ndim != 3 or scales.ndim != 1 or q.shape[1] != scales.numel() or q.stride(-1) != 1 or scales.stride(0) != 1:
+        raise ValueError("static Q quant expects contiguous-last-dim q=[T,H,D] and one scale per H")
+    q_out = torch.empty_like(q, dtype=torch.float8_e4m3fn)
+    _apply_static_quantization_kernel[(q.shape[0], q.shape[1])](
+        q,
+        q_out,
+        scales,
+        q.stride(0),
+        q.stride(1),
+        q_out.stride(0),
+        q_out.stride(1),
+        D=q.shape[2],
+        FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,
+        FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
+        BLOCK_D=triton.next_power_of_2(q.shape[2]),
+        num_warps=4,
+        num_stages=2,
+    )
+    return q_out
+
+
 if __name__ == "__main__":
     B, T, H, D = 200, 1000, 4, 7 * 128
     seq_lens = torch.ones((B,), dtype=torch.int32).cuda() * T // B

@@ -1,6 +1,5 @@
 import os
 import json
-from lightllm.models.registry import ModelRegistry, llm_model_type_is
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.build_utils import repair_config
 from lightllm.server.core.objs import SamplingParams
@@ -140,6 +139,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.images[image_id].token_id
                     token_num = multimodal_params.images[image_id].token_num
+                    multimodal_params.images[image_id].start_idx = len(input_ids)
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.image_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]
@@ -169,6 +169,11 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.audios[audio_id].token_id
                     token_num = multimodal_params.audios[audio_id].token_num
+                    multimodal_params.audios[audio_id].start_idx = len(input_ids)
+                    # Audio expansion shifts the image positions recorded in the first pass.
+                    for image in multimodal_params.images:
+                        if image.start_idx >= len(input_ids):
+                            image.start_idx += token_num
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.audio_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]
@@ -186,7 +191,6 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("phi3"))
 class InternVLPhi3TpPartModel(Phi3TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLPhi3PreAndPostLayerWeight
@@ -210,7 +214,6 @@ class InternVLPhi3TpPartModel(Phi3TpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("internlm2"))
 class InternVLInternlm2TpPartModel(Internlm2TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLInternlm2PreAndPostLayerWeight
@@ -234,7 +237,6 @@ class InternVLInternlm2TpPartModel(Internlm2TpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("llama"))
 class InternVLLlamaTpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
@@ -258,7 +260,6 @@ class InternVLLlamaTpPartModel(LlamaTpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("qwen2"))
 class InternVLQwen2TpPartModel(Qwen2TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
@@ -282,7 +283,6 @@ class InternVLQwen2TpPartModel(Qwen2TpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is(["deepseek_v2", "deepseek_v3"]))
 class InternVLDeepSeek2TpPartModel(Deepseek2TpPartModel):
     # support Deepseek2,3,R1
     # weight class
@@ -307,7 +307,6 @@ class InternVLDeepSeek2TpPartModel(Deepseek2TpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("qwen3"))
 class InternVLQwen3TpPartModel(Qwen3TpPartModel):
     # weight class
     pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
@@ -331,7 +330,6 @@ class InternVLQwen3TpPartModel(Qwen3TpPartModel):
         return
 
 
-@ModelRegistry(["internvl_chat"], is_multimodal=True, condition=llm_model_type_is("qwen3_moe"))
 class InternVLQwen3MOETpPartModel(Qwen3MOEModel):
     # weight class
     pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight

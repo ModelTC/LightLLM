@@ -7,6 +7,9 @@ from lightllm.common.basemodel import TpPartBaseModel
 
 class Deepseek3MTPModel(Deepseek2TpPartModel):
 
+    # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
+    is_mtp_draft_model = True
+
     pre_and_post_weight_class = Deepseek3MTPPreAndPostLayerWeight
     pre_layer_infer_class = Deepseek3MTPPreLayerInfer
 

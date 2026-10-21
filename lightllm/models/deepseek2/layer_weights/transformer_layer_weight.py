@@ -37,9 +37,9 @@ class Deepseek2TransformerLayerWeight(TransformerLayerWeight):
         self.num_attention_heads = self.network_config_["num_attention_heads"]
         self.kv_lora_rank = self.network_config_["kv_lora_rank"]
         self.num_fused_shared_experts = 0
-        if get_env_start_args().enable_fused_shared_experts and self.is_moe:
-            # enable_fused_shared_experts can only work with tensor parallelism
-            assert not get_env_start_args().enable_ep_moe, "enable_fused_shared_experts can only work with tp mode."
+        start_args = get_env_start_args()
+        if start_args.enable_fused_shared_experts and not start_args.enable_ep_moe and self.is_moe:
+            # fused shared experts can only work with tensor parallelism
             self.num_fused_shared_experts = self.network_config_.get("n_shared_experts", 0)
         self.n_embed = self.network_config_["hidden_size"]
         self.n_inter = self.network_config_["intermediate_size"]

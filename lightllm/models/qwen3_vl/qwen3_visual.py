@@ -199,7 +199,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
         elif self.data_type in ["fp32", "float32"]:
             self.data_type = torch.float32
         else:
-            raise ValueError(f"Unsupport datatype {self.data_type}!")
+            raise ValueError(f"Unsupported datatype {self.data_type}!")
         return
 
     def concat_img_embed_and_deepstack_features(self, image_embed, deepstack_feature_lists, valid_ids):
@@ -316,6 +316,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                 idx_list[i].extend(indices[i].tolist())
                 weight_list[i].extend(weights[i].tolist())
 
+        # TODO: Avoid constructing CUDA tensors directly from Python list data.
         idx_tensor = torch.tensor(idx_list, dtype=torch.long, device=self.pos_embed.weight.device)
         weight_tensor = torch.tensor(
             weight_list, dtype=self.pos_embed.weight.dtype, device=self.pos_embed.weight.device
@@ -386,7 +387,7 @@ class Qwen3VisionTransformerPretrainedModel(nn.Module):
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_thw)
             else:
-                raise Exception("Unsupport input types: {} for {}".format(type(img), img))
+                raise Exception("Unsupported input types: {} for {}".format(type(img), img))
 
             # must devide merge_length
             cur_num = img_tensors[-1].shape[0] // (self.spatial_merge_size ** 2)

@@ -254,8 +254,8 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
                     image_data,
                     patch_size=self.patch_size,
                     downsample_ratio=self.downsample_ratio,
-                    min_pixels=img.extra_params["min_pixels"],
-                    max_pixels=img.extra_params["max_pixels"],
+                    min_pixels=img.extra_params.get("min_pixels", self.min_pixels),
+                    max_pixels=img.extra_params.get("max_pixels", self.max_pixels),
                 )
                 img_tensors.append(pixel_values)
                 img_grids.append(image_grid_hw)

@@ -1,7 +1,6 @@
 import os
 import json
 from lightllm.common.build_utils import repair_config
-from lightllm.models.registry import ModelRegistry, llm_model_type_is
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
@@ -21,10 +20,11 @@ from lightllm.models.neo_chat_moe.layer_weights.pre_and_post_layer_weight import
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.neo_chat_moe.infer_struct import NeoChatInferStateInfo
 from lightllm.common.basemodel.attention import (
-    get_prefill_att_backend_class,
+    get_neo_prefill_att_backend_class,
     get_decode_att_backend_class,
     BaseAttBackend,
 )
+from lightllm.models.neo_chat.model import NeoModelBase
 
 IMG_START_TOKEN = "<img>"
 IMG_END_TOKEN = "</img>"
@@ -165,8 +165,7 @@ class NeoChatTokenizer(BaseMultiModalTokenizer):
         return query_condition, query_uncondition
 
 
-@ModelRegistry(["neo_chat"], is_multimodal=True, condition=llm_model_type_is("qwen3_moe"))
-class NeoTpMOEPartModel(Qwen3MOEModel):
+class NeoTpMOEPartModel(NeoModelBase, Qwen3MOEModel):
 
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
     transformer_layer_infer_class = NeoChatMOETransformerLayerInfer
@@ -184,12 +183,10 @@ class NeoTpMOEPartModel(Qwen3MOEModel):
         pass
 
     def _init_att_backend(self):
-        self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0, priority_list=["fa3"])(
-            model=self
-        )
-        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0, priority_list=["fa3"])(
-            model=self
-        )
+        self.prefill_att_backend: BaseAttBackend = get_neo_prefill_att_backend_class(
+            index=0, priority_list=["fa3", "triton"]
+        )(model=self)
+        self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

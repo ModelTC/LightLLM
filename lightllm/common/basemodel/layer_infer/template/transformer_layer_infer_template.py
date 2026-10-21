@@ -103,11 +103,13 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     ) -> torch.Tensor:
         if torch.cuda.is_current_stream_capturing():
             q = q.contiguous()
-            cache_kv = cache_kv.contiguous()
-            _q, _cache_kv = (
-                tensor_to_no_ref_tensor(q),
-                tensor_to_no_ref_tensor(cache_kv),
-            )
+            # cache_kv is None for layers that own no K/V slot (e.g. gemma4
+            # KV-shared layers, which read K/V from a prior layer's cache and
+            # ignore this arg in _context_attention_kernel). Skip the
+            # graph-input plumbing for it instead of crashing on None.
+            cache_kv = cache_kv.contiguous() if cache_kv is not None else None
+            _q = tensor_to_no_ref_tensor(q)
+            _cache_kv = tensor_to_no_ref_tensor(cache_kv) if cache_kv is not None else None
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
             pre_capture_graph.__exit__(None, None, None)
 

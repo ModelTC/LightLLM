@@ -1,0 +1,57 @@
+{
+  "12": {
+    "BV": 16,
+    "num_stages": 4,
+    "num_warps": 1
+  },
+  "144": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "192": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "204": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 2
+  },
+  "24": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "36": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "48": {
+    "BV": 32,
+    "num_stages": 4,
+    "num_warps": 1
+  },
+  "60": {
+    "BV": 32,
+    "num_stages": 4,
+    "num_warps": 1
+  },
+  "72": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 1
+  },
+  "84": {
+    "BV": 32,
+    "num_stages": 4,
+    "num_warps": 1
+  },
+  "96": {
+    "BV": 32,
+    "num_stages": 3,
+    "num_warps": 2
+  }
+}

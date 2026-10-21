@@ -1,9 +1,8 @@
 import ctypes
 import numpy as np
-from multiprocessing import shared_memory
 from typing import List, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.auto_shm_cleanup import register_posix_shm_for_cleanup
+from lightllm.utils.shm_utils import ServiceSharedMemory, get_service_shm_name
 
 logger = init_logger(__name__)
 
@@ -290,13 +289,12 @@ class _HashLinkItem(_LinkedListItem):
         self.key_high = (value >> 64) & 0xFFFFFFFFFFFFFFFF
 
 
-def _create_shm(name: str, byte_size: int, auto_cleanup: bool = False):
+def _create_shm(name: str, byte_size: int):
+    name = get_service_shm_name(name)
     try:
-        shm = shared_memory.SharedMemory(name=name, create=True, size=byte_size)
-        if auto_cleanup:
-            register_posix_shm_for_cleanup(name)
+        shm = ServiceSharedMemory(name=name, create=True, size=byte_size)
         logger.info(f"create lock shm {name}")
     except:
-        shm = shared_memory.SharedMemory(name=name, create=False, size=byte_size)
+        shm = ServiceSharedMemory(name=name, create=False, size=byte_size)
         logger.info(f"link lock shm {name}")
     return shm

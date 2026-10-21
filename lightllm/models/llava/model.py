@@ -2,7 +2,6 @@ import os
 import re
 import json
 import numpy as np
-from lightllm.models.registry import ModelRegistry
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
@@ -69,6 +68,7 @@ class LlavaTokenizer(BaseMultiModalTokenizer):
             token_num = multimodal_params.images[image_id].token_num
             assert token_num == self.image_length, "invalid token num: {} vs {}!".format(token_num, self.image_length)
 
+            multimodal_params.images[image_id].start_idx = len(input_ids)
             input_ids.extend(range(token_id, token_id + token_num))
             input_ids.extend(ids)
             image_id += 1
@@ -78,7 +78,6 @@ class LlavaTokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-@ModelRegistry("llava", is_multimodal=True)
 class LlavaTpPartModel(LlamaTpPartModel):
     # weight class
     pre_and_post_weight_class = LlavaPreAndPostLayerWeight

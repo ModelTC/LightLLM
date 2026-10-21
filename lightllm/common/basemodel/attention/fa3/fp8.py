@@ -1,53 +1,55 @@
 import dataclasses
+import weakref
 import torch
 from ..base_att import AttControl
-from typing import Optional, TYPE_CHECKING
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_fp8_quant
-from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
-from typing import Union
+from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_static_fp8_quant
+from lightllm.utils.log_utils import init_logger
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
-if HAS_VLLM:
-    scaled_fp8_quant = vllm_ops.scaled_fp8_quant
-else:
-    scaled_fp8_quant = None
+
+logger = init_logger(__name__)
 
 
 class Fp8Fa3AttBackend(Fa3AttBackend):
-    def __init__(self, model):
-        super().__init__(model=model)
+    def _init_infer_page_size(self):
+        # TODO: FP8 FA3 完成多 token 推理页适配后，改为继承模型 page_size。
+        self.infer_page_size = 1
+        assert self.model.args.page_size % self.infer_page_size == 0, (
+            f"model page_size {self.model.args.page_size} "
+            f"must be divisible by infer_page_size {self.infer_page_size}"
+        )
+        logger.warning(
+            f"Fp8Fa3AttBackend temporarily uses infer_page_size=1 with model page_size={self.model.args.page_size}; "
+            "multi-token FP8 inference pages are not implemented yet."
+        )
 
     def create_att_prefill_state(self, infer_state) -> "Fp8Fa3PrefillAttState":
-        return Fp8Fa3PrefillAttState(backend=self, infer_state=infer_state)
+        return Fp8Fa3PrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "Fp8Fa3DecodeAttState":
-        return Fp8Fa3DecodeAttState(backend=self, infer_state=infer_state)
+        return Fp8Fa3DecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
 class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
-    # 临时共享变量
-    mid_token_batch_ids: torch.Tensor = None
     k_descale: torch.Tensor = None
     v_descale: torch.Tensor = None
 
     def init_state(self):
         super().init_state()
-        device = self.infer_state.input_ids.device
         batch_size = self.infer_state.batch_size
         mem_manager = self.backend.model.mem_manager
 
         offline_scales: torch.Tensor = mem_manager.scales
         head_num = mem_manager.head_num
-        self.mid_token_batch_ids = torch.repeat_interleave(
-            torch.arange(batch_size, device=device), self.infer_state.b_q_seq_len
-        )
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-
+        self.k_descale = (
+            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        )
 
     def prefill_att(
         self,
@@ -77,16 +79,13 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         q_head_num = q.shape[1]
         q_head_dim = q.shape[2]
         k_head_num = k.shape[1]
-        q, q_scale = q_per_head_fp8_quant(
-            q.reshape(q.shape[0], k_head_num, -1),
-            self.infer_state.b_seq_len,
-            self.cu_seqlens_q,
-            token_batch_ids=self.mid_token_batch_ids,
-        )
         k_head_dim = k.shape[2]
         cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
+        static_q_scales = self.backend.model.mem_manager.q_scales[layer_index]
+        q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales)
+        q_scale = static_q_scales.view(1, k_head_num).expand(self.infer_state.b_seq_len.shape[0], k_head_num)
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, q_head_dim),
             k_cache=cache_k,
@@ -96,7 +95,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             cu_seqlens_q=self.cu_seqlens_q,
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.infer_state.max_q_seq_len,
-            causal=True,
+            causal=self.causal,
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale,
@@ -113,23 +112,22 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
     v_descale: torch.Tensor = None
 
     def init_state(self):
-        super().init_state()
         self.backend: Fp8Fa3AttBackend = self.backend
 
-        args_mtp_step = get_env_start_args().mtp_step
-        att_batch_size = self.infer_state.batch_size // (args_mtp_step + 1)
-        assert self.infer_state.batch_size % (args_mtp_step + 1) == 0
-
-        device = self.infer_state.input_ids.device
-        batch_size = att_batch_size
         mem_manager = self.backend.model.mem_manager
+        super().init_state()
 
+        att_batch_size = self.b_att_seq_len.shape[0]
         offline_scales: torch.Tensor = mem_manager.scales
         head_num = mem_manager.head_num
 
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        self.v_descale = offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
+        self.k_descale = (
+            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], att_batch_size, head_num)
+        )
+        self.v_descale = (
+            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], att_batch_size, head_num)
+        )
 
         return
 
@@ -172,22 +170,23 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
 
         q_head_num = q.shape[1]
-        if scaled_fp8_quant is None:
-            raise ImportError("scaled_fp8_quant is unavailable. Please install vllm to enable FP8 decode attention.")
-        q, q_scale = scaled_fp8_quant(q.reshape(q.shape[0] * k_head_num, -1), use_per_token_if_dynamic=True)
+        att_batch_size = self.b_att_seq_len.shape[0]
+        static_q_scales = self.backend.model.mem_manager.q_scales
+        q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales[layer_index])
+        q_scale = static_q_scales[layer_index].view(1, k_head_num).expand(att_batch_size, k_head_num)
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, k_head_dim),
             k_cache=cache_k,
             v_cache=cache_v,
             page_table=self.page_table,
-            cache_seqlens=self.infer_state.b_seq_len,
+            cache_seqlens=self.b_att_seq_len,
             cu_seqlens_q=self.cu_seqlens_q,
             cu_seqlens_k_new=self.cu_seqlens_k,
             max_seqlen_q=self.decode_max_q_seq_len,
-            causal=False,
+            causal=self.causal,
             window_size=(-1, -1),
             softcap=0.0,
-            q_descale=q_scale.view(self.infer_state.batch_size, k_head_num),
+            q_descale=q_scale.view(att_batch_size, k_head_num),
             k_descale=self.k_descale[layer_index],
             v_descale=self.v_descale[layer_index],
             return_softmax_lse=False,

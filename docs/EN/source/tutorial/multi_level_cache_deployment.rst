@@ -37,10 +37,25 @@ LightLLM's multi-level cache system adopts a hierarchical design:
 
 **Working Principle:**
 
-1. The current mechanism creates an exact backup copy of GPU cache data in CPU cache, not just storing content that doesn't fit in GPU cache
+1. Cache placement is controlled by ``--cache_placement_strategy``, which selects either legacy cascading copies or adaptive tier placement
 2. L1, L2, and L3 caches all use LRU eviction strategy for data management
 3. To avoid frequent disk writes in L3 cache, you can use the LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH environment variable to control the minimum length threshold for writes. If set to 0, all L2 data will be written to L3 cache
 4. During queries, L1 is checked first to find the longest matching prefix, then L2 is queried to continue extending the longest matching prefix, and finally L3 is queried for the remaining part
+
+Cache Placement Strategies
+~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``--cache_placement_strategy`` controls where completed-request KV Cache is stored:
+
+- ``adaptive`` (default): During cold start, it first collects 128 requests to quickly establish an initial boundary between GPU and the lower-tier cache path. It then keeps a sliding window of the latest 512 requests and updates the boundary every 36 placement steps. Short requests stay on GPU; long requests move to CPU, or follow the asynchronous CPU → Disk path when Disk is enabled. Because Disk must pass through CPU, the effective lower-tier capacity is the larger of CPU and Disk capacity rather than their sum. By default, only 80% of physical GPU token capacity is used for placement estimation, leaving capacity for running requests. Until the initial small window is full and a boundary is available, placement uses ``legacy`` behavior.
+- ``legacy``: Preserves the previous cascading-copy behavior. A request always remains in GPU cache and is also copied to every enabled lower tier. Enabling CPU cache stores it in GPU and CPU; enabling Disk cache as well stores it in GPU, CPU, and Disk.
+
+When ``--enable_cpu_cache`` is not enabled, this option does not change runtime behavior and every completed request uses GPU cache only.
+
+.. note::
+
+   Disk cache is populated asynchronously through CPU cache, so ``--enable_cpu_cache`` must also be enabled when using Disk cache.
+   The ``LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH`` minimum write threshold applies to both strategies.
 
 **Applicable Scenarios:**
 
@@ -69,7 +84,8 @@ Suitable for most scenarios, significantly increasing cache capacity while maint
         --mem_fraction 0.88 \
         --enable_cpu_cache \
         --cpu_cache_storage_size 400 \
-        --cpu_cache_token_page_size 64
+        --cpu_cache_token_page_size 64 \
+        --cache_placement_strategy adaptive
 
 **Parameter Description:**
 
@@ -98,6 +114,9 @@ CPU Cache Parameters
   - Smaller page sizes (e.g., 64) are suitable for fine-grained cache management, reducing memory fragmentation and improving hit rates
   - Larger page sizes (e.g., 256) are suitable for bulk data migration, improving transfer efficiency
   - This value needs to balance memory utilization and transfer overhead
+
+- ``--cache_placement_strategy adaptive``: **Cache placement strategy**. Adaptive tier placement is the default; use ``legacy`` to retain the previous GPU + CPU cascading-copy behavior
+- ``LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO=0.8``: Ratio of physical GPU token capacity used by adaptive placement estimation. The default is ``0.8`` and the valid range is ``(0, 1]``
 
 **Performance Optimization Suggestions:**
 
@@ -132,6 +151,7 @@ Suitable for ultra-long text or extremely high-concurrency scenarios, providing 
         --enable_cpu_cache \
         --cpu_cache_storage_size 400 \
         --cpu_cache_token_page_size 256 \
+        --cache_placement_strategy adaptive \
         --enable_disk_cache \
         --disk_cache_storage_size 1000 \
         --disk_cache_dir /mnt/ssd/disk_cache_dir
@@ -155,6 +175,12 @@ In addition to the two-level cache, add the following parameters:
   - If not set, the system temporary directory will be used
   - Strongly recommended to use SSD/NVMe storage, avoid using HDD (performance difference can be 10-100x)
   - Ensure the directory has sufficient read/write permissions and disk space
+
+To use the legacy three-level cascading-copy behavior, change the strategy argument to:
+
+.. code-block:: bash
+
+    --cache_placement_strategy legacy
 
 Related Documentation
 ---------------------

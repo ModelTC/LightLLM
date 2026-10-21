@@ -1,73 +1,65 @@
+import multiprocessing as mp
 import os
-import sys
-import time
 import uuid
 import subprocess
-import signal
-from lightllm.utils.net_utils import alloc_can_use_network_port, PortLocker
-from lightllm.utils.start_utils import process_manager, kill_recursive
+import math
+from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
+from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
-from lightllm.utils.envs_utils import get_lightllm_gunicorn_keep_alive
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_unique_server_name,
+    set_env_start_args,
+    set_unique_server_name,
+)
+from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
 from .router.manager import start_router_process
-from lightllm.utils.process_check import is_process_active
 from lightllm.utils.multinode_utils import send_and_receive_node_ip
 from lightllm.utils.redis_utils import start_redis_service
 from lightllm.utils.shm_size_check import check_recommended_shm_size
-from lightllm.utils.config_utils import has_audio_module, has_vision_module, is_linear_att_mixed_model
+from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.config_utils import (
+    has_audio_module,
+    has_vision_module,
+    is_hybrid_att_model,
+    auto_set_max_req_total_len,
+    auto_set_fused_shared_experts,
+    auto_set_response_parsers,
+    get_running_max_req_size_per_dp,
+    get_default_disable_chunked_mm_input,
+)
+from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
 logger = init_logger(__name__)
 
 
-def setup_signal_handlers(http_server_process, process_manager):
-    def signal_handler(sig, frame):
-        if sig == signal.SIGINT:
-            logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
-            if http_server_process:
-                kill_recursive(http_server_process)
-
-            process_manager.terminate_all_processes()
-            logger.info("All processes have been forcefully terminated.")
-            sys.exit(0)
-        elif sig == signal.SIGTERM:
-            logger.info("Received SIGTERM, shutting down gracefully...")
-            if http_server_process and http_server_process.poll() is None:
-                http_server_process.send_signal(signal.SIGTERM)
-
-                start_time = time.time()
-                while (time.time() - start_time) < 60:
-                    if not is_process_active(http_server_process.pid):
-                        logger.info("httpserver exit")
-                        break
-                    time.sleep(1)
-
-                if time.time() - start_time < 60:
-                    logger.info("HTTP server has exited gracefully")
-                else:
-                    logger.warning("HTTP server did not exit in time, killing it...")
-                    kill_recursive(http_server_process)
-
-            process_manager.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully.")
-            sys.exit(0)
-
-    signal.signal(signal.SIGTERM, signal_handler)
-    signal.signal(signal.SIGINT, signal_handler)
-
-    logger.info(f"start process pid {os.getpid()}")
-    if http_server_process:
-        logger.info(f"http server pid {http_server_process.pid}")
-    return
+def _set_envs_and_config(args: StartArgs):
+    mp.set_start_method("spawn", force=True)
 
 
-def normal_or_p_d_start(args):
-    from lightllm.server.core.objs.start_args_type import StartArgs
+def _launch_subprocesses(args: StartArgs):
+    _validate_pd_features(args)
+    _set_envs_and_config(args)
 
-    args: StartArgs = args
+    if args.target_vocab_topk_sampling is not None:
+        # 在加载模型和启动子进程前拒绝该组合，避免候选裁剪使输出约束失效。
+        # 数值冲突与后续兼容方案见 LlamaPostLayerInfer._target_lm_head_and_gather。
+        assert args.output_constraint_mode == "none", (
+            "--target_vocab_topk_sampling cannot be combined with --output_constraint_mode xgrammar "
+            "Disable --target_vocab_topk_sampling when using output constraints."
+        )
 
+    if args.mtp_mode is not None:
+        assert (
+            not args.disable_cudagraph or args.run_mode == "prefill"
+        ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
+
+    auto_set_max_req_total_len(args)
+    auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
 
     if args.enable_mps:
@@ -75,8 +67,10 @@ def normal_or_p_d_start(args):
 
         enable_mps()
 
-    if args.run_mode not in ["normal", "prefill", "decode", "nixl_prefill", "nixl_decode", "visual_only"]:
+    if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
+
+    _auto_set_prefill_queue_strategy(args)
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
@@ -91,7 +85,7 @@ def normal_or_p_d_start(args):
             args.disable_audio = True
 
     # pd 分离模式下，不启动多模态的模块
-    if args.run_mode in ["decode", "nixl_decode"]:
+    if args.run_mode == "decode":
         args.disable_audio = True
         args.disable_vision = True
 
@@ -109,24 +103,27 @@ def normal_or_p_d_start(args):
 
     # 调度参数的自动设置, 人工设置则听人工的
     if args.router_token_ratio is None:
-        if args.run_mode in ["normal"]:
+        if args.run_mode in ["normal", "decode"]:
             args.router_token_ratio = 0.85
         else:
-            # pd 分离模式下，不开启高级调度
+            # PD 分离模式下，prefill 节点不开启高级调度
             args.router_token_ratio = 0.0
     # 部分模式还不能支持与高级动态调度算法协同，to do.
     if args.diverse_mode:
         assert args.router_token_ratio == 0.0
+        assert args.page_size == 1, "diverse mode only supports page_size == 1"
 
     # performance_mode 参数处理
     if args.performance_mode == "personal":
-        args.running_max_req_size = 3
+        args.running_max_req_size = 6
         args.batch_max_tokens = 2048
         args.chunked_prefill_size = 1024
-        args.mem_fraction = 0.85
+        args.embed_cache_storage_size = 0.8
+        args.graph_max_batch_size = 6
         logger.info(
             f"performance_mode is personal, set running_max_req_size to 3,"
-            f"batch_max_tokens to 2048, chunked_prefill_size to 1024, mem_fraction to 0.85"
+            f"batch_max_tokens to 2048, chunked_prefill_size to 1024,"
+            f"graph_max_batch_size to 32"
         )
 
     if not args.disable_shm_warning:
@@ -135,12 +132,6 @@ def normal_or_p_d_start(args):
         args.multi_modal_x2i_cache_shm_id = uuid.uuid1().int % 123456789
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
-    # 确保单机上多实列不冲突
-    if args.zmq_mode == "ipc:///tmp/":
-        zmq_mode = f"{args.zmq_mode}_{get_unique_server_name()}_"
-        args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
-        args.zmq_mode = zmq_mode
-        logger.info(f"zmq mode head: {args.zmq_mode}")
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
 
@@ -156,22 +147,19 @@ def normal_or_p_d_start(args):
         args.graph_max_len_in_batch = args.max_req_total_len
 
     # mode setting check.
-    if args.output_constraint_mode != "none":
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
-    if args.token_healing_mode:
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
+    is_hybrid_model = is_hybrid_att_model(args.model_dir)
+    if is_hybrid_model:
+        # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
+        assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
+        assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
     if args.diverse_mode:
-        assert args.disable_dynamic_prompt_cache is False
-        assert args.disable_chunked_prefill is False
+        # diverse 按普通 KV 前缀插入缓存，尚不支持混合注意力模型的状态页和哈希边界。
+        assert not is_hybrid_model, "--diverse_mode does not support hybrid attention models"
+        assert not args.disable_dynamic_prompt_cache, "--diverse_mode requires dynamic prompt cache"
+        assert not args.disable_chunked_prefill, "--diverse_mode requires chunked prefill"
     if args.use_reward_model:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-    if args.return_all_prompt_logprobs:
-        assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
-        assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
-
     # FP8 KV cache mode checks
     if args.llm_kv_type in ["fp8kv_sph", "fp8kv_spt"]:
         assert (
@@ -181,17 +169,58 @@ def normal_or_p_d_start(args):
     if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
         args.enable_tpsp_mix_mode = True
 
+    if args.enable_prefill_decode_mixed:
+        assert args.run_mode == "normal", "--enable_prefill_decode_mixed only supports run_mode normal"
+
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
 
+    if args.enable_ep_moe:
+        allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}
+        for backend in args.llm_prefill_att_backend:
+            assert backend in allowed_ep_prefill_att_backends, (
+                "When --enable_ep_moe is enabled, --llm_prefill_att_backend must be one of "
+                f"{sorted(allowed_ep_prefill_att_backends)}; flashinfer is not supported."
+            )
+        allowed_ep_decode_att_backends = {"auto", "fa3", "triton"}
+        for backend in args.llm_decode_att_backend:
+            assert backend in allowed_ep_decode_att_backends, (
+                "When --enable_ep_moe is enabled, --llm_decode_att_backend must be one of "
+                f"{sorted(allowed_ep_decode_att_backends)}; flashinfer is not supported."
+            )
+
+    if args.page_size < 1:
+        raise ValueError(f"--page_size must be >= 1, got {args.page_size}")
+    if args.run_mode in ("prefill", "decode"):
+        assert args.pd_kv_page_size % args.page_size == 0, "--pd_kv_page_size must be divisible by --page_size"
+
+    if args.page_size > 1:
+        # hybrid radix cache 的共享边界按 linear_att_hash_page_size 划分。只有该
+        # 边界同时落在模型 KV 页面边界上，hold_kv_len 才能保持统一的分页语义。
+        if is_hybrid_model and args.linear_att_hash_page_size % args.page_size != 0:
+            raise ValueError(
+                "--linear_att_hash_page_size must be divisible by --page_size when paged KV cache is enabled"
+            )
     # mtp params check
     if args.mtp_mode is not None:
-        assert args.mtp_draft_model_dir is not None
+        if args.mtp_draft_model_dir is None:
+            assert args.mtp_mode not in (
+                "eagle3",
+                "dspark",
+                "dflash",
+                "dflash2",
+            ), f"--mtp_draft_model_dir is required for {args.mtp_mode} mode"
+            args.mtp_draft_model_dir = [args.model_dir] * args.mtp_step
         assert args.mtp_step > 0
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
 
+    # automatically set visual_dp based on visual_tp and the per-node world size.
+    # In visual proxy mode keep the caller-provided visual_dp / visual_tp.
+    node_world_size = args.tp // args.nnodes
+    if not args.visual_use_proxy_mode and args.visual_tp < node_world_size and node_world_size % args.visual_tp == 0:
+        args.visual_dp = node_world_size // args.visual_tp
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
@@ -252,27 +281,52 @@ def normal_or_p_d_start(args):
         if args.batch_max_tokens is None:
             args.batch_max_tokens = args.max_req_total_len
         else:
-            assert args.batch_max_tokens >= args.max_req_total_len, f"batch_max_tokens must >= max_req_total_len"
-            f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
+            assert args.batch_max_tokens >= args.max_req_total_len, (
+                f"batch_max_tokens must >= max_req_total_len, "
+                f"but got {args.batch_max_tokens}, {args.max_req_total_len}"
+            )
     else:
         # chunked 模式下
         if args.batch_max_tokens is None:
             args.batch_max_tokens = 16384 // args.dp
         if args.chunked_prefill_size is None:
             args.chunked_prefill_size = args.batch_max_tokens // 2
-        assert (
-            args.batch_max_tokens >= args.chunked_prefill_size
-        ), "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
-        f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
+        assert args.batch_max_tokens >= args.chunked_prefill_size, (
+            "chunked prefill mode, batch_max_tokens must >= chunked_prefill_size, "
+            f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
+        )
 
-    # linear att cache 参数自动设置
+    args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
+        args.model_dir
+    )
+    if args.disable_chunked_mm_input and not args.disable_vision:
+        assert args.batch_max_tokens >= args.max_image_token_count, (
+            "--disable_chunked_mm_input requires batch_max_tokens >= max_image_token_count, "
+            f"but got {args.batch_max_tokens}, {args.max_image_token_count}. "
+            "Increase --batch_max_tokens or reduce --max_image_token_count."
+        )
+
+    # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
-        # linear_att_cache_size 只会在 qwen3.5 等混合线性层模型中生效。
-        args.linear_att_cache_size = args.running_max_req_size * 2
+        # 小页池大小只对 hybrid 模型生效。
+        default_cache_size = args.running_max_req_size * 2
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        per_dp_cache_size = max(1, math.ceil(args.running_max_req_size / dp_size_in_node) * 2)
+        args.linear_att_cache_size = min(default_cache_size, per_dp_cache_size)
 
-    if args.enable_cpu_cache and is_linear_att_mixed_model(args.model_dir):
+    if args.run_mode == "decode":
+        # PD Decode 节点只接收 prompt 末尾位置的 hybrid checkpoint，不具备
+        # 中间大页边界对应的 state。因此 Decode 节点必须使用默认值关闭大页功能，
+        # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
+        args.linear_att_page_block_num = 10000000
+
+    if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir):
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for linear hybrid att model")
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    if args.enable_cpu_cache:
+        assert (
+            args.cpu_cache_token_page_size % args.page_size == 0
+        ), "--cpu_cache_token_page_size must be divisible by --page_size"
 
     # help to manage data stored on Ceph
     if "s3://" in args.model_dir:
@@ -286,21 +340,7 @@ def normal_or_p_d_start(args):
 
         args.eos_id = get_eos_token_ids(args.model_dir)
 
-    # 如果 tool_call_parser 是 None，尝试根据模型类型自动设置
-    if args.tool_call_parser is None:
-        from lightllm.utils.config_utils import get_tool_call_parser_for_model
-
-        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
-        if args.tool_call_parser:
-            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
-
-    # 如果 reasoning_parser 是 None，尝试根据模型类型自动设置
-    if args.reasoning_parser is None:
-        from lightllm.utils.config_utils import get_reasoning_parser_for_model
-
-        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
-        if args.reasoning_parser:
-            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+    auto_set_response_parsers(args)
 
     if args.data_type is None:
         from lightllm.utils.config_utils import get_dtype
@@ -308,85 +348,21 @@ def normal_or_p_d_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    already_uesd_ports = [args.port]
-    if args.nccl_port is not None:
-        already_uesd_ports.append(args.nccl_port)
-    if args.pd_decode_rpyc_port is not None:
-        already_uesd_ports.append(args.pd_decode_rpyc_port)
-    if args.visual_nccl_ports is not None:
-        already_uesd_ports.extend(args.visual_nccl_ports[: args.visual_dp])
-    if not args.disable_audio and args.audio_nccl_ports is not None:
-        already_uesd_ports.extend(args.audio_nccl_ports[: args.audio_dp])
+    set_unique_server_name(args)
 
-    # 提前锁定端口，防止在单个机器上启动多个实列的时候，要到模型启动的时候才能
-    # 捕获到端口设置冲突的问题
-    ports_locker = PortLocker(already_uesd_ports)
-    ports_locker.lock_port()
+    # 确保单机上多实列不冲突
+    if args.zmq_mode == "ipc:///tmp/":
+        zmq_mode = f"{args.zmq_mode}_{get_unique_server_name()}_"
+        args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
+        args.zmq_mode = zmq_mode
+        logger.info(f"zmq mode head: {args.zmq_mode}")
 
-    node_world_size = args.tp // args.nnodes
-    can_use_ports = alloc_can_use_network_port(
-        num=13 + node_world_size + args.visual_dp * args.visual_tp + args.visual_dp + args.audio_dp,
-        used_ports=already_uesd_ports,
-    )
-    logger.info(f"alloced ports: {can_use_ports}")
-    (
-        nccl_port,
-        router_port,
-        detokenization_port,
-        http_server_port,
-        visual_port,
-        audio_port,
-        cache_port,
-        metric_port,
-        multi_level_kv_cache_port,
-        pd_decode_rpyc_port,
-        x2i_port,
-        http_server_port_for_x2i,
-        x2i_worker_task_port,
-    ) = can_use_ports[0:13]
-    can_use_ports = can_use_ports[13:]
-
-    if args.visual_nccl_ports is None:
-        args.visual_nccl_ports = can_use_ports[: args.visual_dp]
-        can_use_ports = can_use_ports[args.visual_dp :]
-    else:
-        args.visual_nccl_ports = args.visual_nccl_ports[: args.visual_dp]
-
-    if args.audio_nccl_ports is None:
-        args.audio_nccl_ports = can_use_ports[: args.audio_dp]
-        can_use_ports = can_use_ports[args.audio_dp :]
-    else:
-        args.audio_nccl_ports = args.audio_nccl_ports[: args.audio_dp]
-
-    # 将申请好的端口放入args参数中
-    if args.nccl_port is None:
-        args.nccl_port = nccl_port
-    if args.pd_decode_rpyc_port is None:
-        args.pd_decode_rpyc_port = pd_decode_rpyc_port
-    args.router_port = router_port
-    args.detokenization_port = detokenization_port
-    args.http_server_port = http_server_port
-    args.visual_port = visual_port
-    args.audio_port = audio_port
-    args.cache_port = cache_port
-    args.metric_port = metric_port
-    args.multi_level_kv_cache_port = multi_level_kv_cache_port
-    args.x2i_port = x2i_port
-    args.http_server_port_for_x2i = http_server_port_for_x2i
-    args.x2i_worker_task_port = x2i_worker_task_port
-    # 申请在 p d 分离模式下，会用的端口
-    args.pd_node_infer_rpyc_ports = can_use_ports[0:node_world_size]
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
-    # p 节点用来建立torch kv 传输分布组的可用端口范围
-    args.pd_p_allowed_port_min = 20000
-    args.pd_p_allowed_port_max = 30000
-
     # p d 分离模式下，decode节点的调度间隙是0
     if args.run_mode == "decode":
         args.router_max_wait_tokens = 0
 
-    send_and_receive_node_ip(args)  # 多机用于收发node ip
     # dp 必须 > 1
     if args.enable_dp_prompt_cache_fetch and args.dp <= 1:
         args.enable_dp_prompt_cache_fetch = False
@@ -400,10 +376,32 @@ def normal_or_p_d_start(args):
         X2VConfig.get(args)
         args.x2i_enable_cfg = get_enable_cfg()
 
+    auto_configure_allreduce_flags_from_args(args)
+    local_request_capacity = get_running_max_req_size_per_dp(args)
+
+    # Limit CUDA Graph batches to the local request capacity.
+    if not args.disable_cudagraph and args.graph_max_batch_size > local_request_capacity:
+        logger.warning(
+            f"graph_max_batch_size {args.graph_max_batch_size} exceeds per-DP request capacity "
+            f"{local_request_capacity}; set graph_max_batch_size to {local_request_capacity}."
+        )
+        args.graph_max_batch_size = local_request_capacity
+
+    # 校验用户已设置端口冲突（对齐原 PortManager 启动检查范围）
+    ports_to_check = [args.port]
+    if args.dp == 1 and args.nnodes > 1:
+        ports_to_check.extend([args.multinode_httpmanager_port, args.multinode_router_gloo_port])
+    if args.node_rank == 0 and args.nccl_port is not None:
+        ports_to_check.append(args.nccl_port)
+    validate_ports(ports_to_check)
+
+    set_env_start_args(args)
+    process_manager.setup_exit_controller()
+    get_shm_port_args(create=True)
+    # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
+    send_and_receive_node_ip(args)
     set_env_start_args(args)
     logger.info(f"all start args:{args}")
-
-    ports_locker.release_port()
 
     if args.enable_multimodal:
         process_manager.start_submodule_processes(
@@ -414,7 +412,6 @@ def normal_or_p_d_start(args):
         )
 
     if not args.disable_vision:
-
         if not args.visual_use_proxy_mode:
             from .visualserver.manager import start_visual_process
 
@@ -481,22 +478,40 @@ def normal_or_p_d_start(args):
         ],
         start_args=[(args,)],
     )
-
     process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
+
+    router_process, _ = process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
         start_args=[
             (args,),
             (args,),
         ],
     )
+    process_manager.register_process_tree(router_process)
+
+    return process_manager
+
+
+def _hypercorn_config_args(args: StartArgs):
+    if args.hypercorn_config is not None:
+        return ["--config", args.hypercorn_config]
+    return ["--keep-alive", "10"]
+
+
+def normal_or_p_d_start(args: StartArgs):
+    process_manager = _launch_subprocesses(args)
 
     # 启动 Hypercorn
     command = [
         "hypercorn",
+        *_hypercorn_config_args(args),
         "--workers",
         f"{args.httpserver_workers}",
         "--bind",
-        f"{args.host}:{args.port}",
+        f"{args.host}:{get_shm_port_args().port}",
         "--log-level",
         "info",
         "--access-logfile",
@@ -504,8 +519,6 @@ def normal_or_p_d_start(args):
         "--error-logfile",
         "-",
         "lightllm.server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     # 启动子进程
@@ -520,15 +533,19 @@ def normal_or_p_d_start(args):
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
-    return
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)
 
 
-def pd_master_start(args):
+def pd_master_start(args: StartArgs):
+    _validate_pd_features(args)
+    _set_envs_and_config(args)
     set_unique_server_name(args)
     if args.run_mode != "pd_master":
         return
+
+    auto_set_max_req_total_len(args)
+    auto_set_response_parsers(args)
 
     # when use config_server to support multi pd_master node, we
     # need generate unique node id for each pd_master node.
@@ -539,19 +556,12 @@ def pd_master_start(args):
         args.pd_node_id = 0
 
     logger.info(f"use tgi api: {args.use_tgi_api}")
-    logger.info(f"all start args:{args}")
 
-    can_use_ports = alloc_can_use_network_port(
-        num=1,
-        used_ports=[
-            args.port,
-        ],
-    )
-    metric_port = can_use_ports[0]
-
-    args.metric_port = metric_port
-
+    validate_ports([args.port])
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
+    get_shm_port_args(create=True)
+    logger.info(f"all start args:{args}")
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -559,13 +569,18 @@ def pd_master_start(args):
         ],
         start_args=[(args,)],
     )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
 
     command = [
         "hypercorn",
+        *_hypercorn_config_args(args),
         "--workers",
         "1",
         "--bind",
-        f"{args.host}:{args.port}",
+        f"{args.host}:{get_shm_port_args().port}",
         "--log-level",
         "info",
         "--access-logfile",
@@ -573,8 +588,6 @@ def pd_master_start(args):
         "--error-logfile",
         "-",
         "lightllm.server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     http_server_process = subprocess.Popen(command)
@@ -584,24 +597,66 @@ def pd_master_start(args):
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)
+
+
+def pd_master_multi_worker_start(args: StartArgs):
+    """Start multiple PD master workers on one host behind HAProxy."""
+    _validate_pd_features(args)
+    from .httpserver_for_pd_master.multiprocess import (
+        start_multiprocess_pd_master,
+        validate_multiprocess_pd_master_args,
+    )
+    from .httpserver_for_pd_master.pd_selector.pd_node_stats_server import start_pd_node_stats_server
+    from .httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import start_prompt_cache_tree_server
+
+    haproxy_binary = validate_multiprocess_pd_master_args(args)
+    _set_envs_and_config(args)
+    set_unique_server_name(args)
+
+    auto_set_max_req_total_len(args)
+    auto_set_response_parsers(args)
+    process_manager.setup_exit_controller()
+    set_env_start_args(args)
+    get_env_start_args.cache_clear()
+    ports = get_shm_port_args(create=True)
+    worker_ports = ports.pd_master_multi_ports
+    validate_ports([args.port, ports.metric_port, *worker_ports])
+    logger.info("PD master worker ports: %s", worker_ports)
+    process_manager.start_submodule_processes(
+        start_funcs=[start_metric_manager],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_pd_node_stats_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_prompt_cache_tree_server],
+        start_args=[(args,)],
+    )
+    return start_multiprocess_pd_master(
+        args,
+        ports=ports,
+        haproxy_binary=haproxy_binary,
+    )
 
 
 def visual_only_start(args):
     from lightllm.server.core.objs.start_args_type import StartArgs
 
     args: StartArgs = args
+    _set_envs_and_config(args)
     if args.afs_image_embed_dir is not None:
         os.makedirs(args.afs_image_embed_dir, mode=0o777, exist_ok=True)
         os.chmod(args.afs_image_embed_dir, 0o777)
 
-    already_uesd_ports = []
-    already_uesd_ports.append(args.visual_rpyc_port)
-    can_use_ports = alloc_can_use_network_port(
-        num=5 + args.visual_dp * args.visual_tp + args.visual_dp,
-        used_ports=already_uesd_ports,
-    )
+    set_unique_server_name(args)
 
     if args.visual_gpu_ids is None:
         args.visual_gpu_ids = list(range(args.visual_dp * args.visual_tp))
@@ -613,15 +668,16 @@ def visual_only_start(args):
         args.data_type = get_dtype(args.model_dir)
         assert args.data_type in ["fp16", "float16", "bf16", "bfloat16", "fp32", "float32"]
 
-    logger.info(f"alloced ports: {can_use_ports}")
-
-    args.visual_nccl_ports = can_use_ports[: args.visual_dp]
-    can_use_ports = can_use_ports[args.visual_dp :]
     args.visual_node_id = uuid.uuid4().int
 
-    logger.info(f"all start args:{args}")
-
+    ports_to_check = []
+    if args.visual_rpyc_port is not None:
+        ports_to_check.append(args.visual_rpyc_port)
+    validate_ports(ports_to_check)
     set_env_start_args(args)
+    process_manager.setup_exit_controller()
+    get_shm_port_args(create=True)
+    logger.info(f"all start args:{args}")
 
     from .visualserver.visual_only_manager import start_visual_process
 
@@ -633,15 +689,8 @@ def visual_only_start(args):
             (args,),
         ],
     )
-    setup_signal_handlers(None, process_manager)
-    try:
-        while True:
-            time.sleep(1)
-    except KeyboardInterrupt:
-        logger.info("Received keyboard interrupt, shutting down...")
-        process_manager.terminate_all_processes()
-        logger.info("All processes have been terminated gracefully.")
-        sys.exit(0)
+    process_manager.setup_signal_handlers()
+    process_manager.supervise_processes()
 
 
 def config_server_start(args):
@@ -649,19 +698,25 @@ def config_server_start(args):
     if args.run_mode != "config_server":
         return
 
+    ports_to_check = [args.config_server_port]
+    if args.config_server_visual_redis_port is not None:
+        ports_to_check.append(args.config_server_visual_redis_port)
+    validate_ports(ports_to_check)
+    set_env_start_args(args)
+    process_manager.setup_exit_controller()
+    get_shm_port_args(create=True)
     logger.info(f"all start args:{args}")
 
     if args.config_server_visual_redis_port is not None:
         start_redis_service(args)
 
-    set_env_start_args(args)
-
     command = [
         "hypercorn",
+        *_hypercorn_config_args(args),
         "--workers",
         "1",
         "--bind",
-        f"{args.config_server_host}:{args.config_server_port}",
+        f"{args.config_server_host}:{get_shm_port_args().config_server_port}",
         "--log-level",
         "info",
         "--access-logfile",
@@ -669,10 +724,22 @@ def config_server_start(args):
         "--error-logfile",
         "-",
         "lightllm.server.config_server.api_http:app",
-        "--keep-alive",
-        f"{get_lightllm_gunicorn_keep_alive()}",
     ]
 
     http_server_process = subprocess.Popen(command)
-    setup_signal_handlers(http_server_process, process_manager)
-    http_server_process.wait()
+    process_manager.setup_signal_handlers(http_server_process)
+    process_manager.supervise_processes(http_server_process)
+
+
+def _validate_pd_features(args: StartArgs):
+    if args.run_mode in ("pd_master", "prefill", "decode") and (
+        args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
+    ):
+        raise ValueError("PD mode does not support RL, routed experts or prompt logprobs")
+
+
+def _auto_set_prefill_queue_strategy(args: StartArgs) -> None:
+    """自动选择 prefill 排队策略；显式指定策略时保留用户配置。"""
+    if args.prefill_queue_strategy == "auto":
+        args.prefill_queue_strategy = "hrrn" if args.run_mode == "prefill" else "default"
+        logger.info(f"run_mode={args.run_mode}, auto set prefill_queue_strategy to {args.prefill_queue_strategy}")

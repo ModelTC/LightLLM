@@ -1,3 +1,6 @@
+# FlashInfer cubin wheels are published on the official FlashInfer index.
+--extra-index-url https://flashinfer.ai/whl
+
 anyio==3.7.1
 black==23.12.0
 boltons==23.0.0
@@ -23,7 +26,7 @@ h11==0.14.0
 humanfriendly==10.0
 humanize==4.7.0
 idna==3.4
-Jinja2==3.1.2
+Jinja2==3.1.6
 jmespath==1.0.1
 jsonpatch==1.32
 jsonpointer==2.0
@@ -33,12 +36,13 @@ mpmath==1.3.0
 multiprocessing-logging==0.3.4
 networkx==3.1
 ninja==1.11.1
-numpy==1.25.1
+numpy==2.1.3
 packaging==24.2
 pip==23.0.1
 pluggy==1.2.0
 plumbum==1.8.2
-protobuf==4.22.3
+# CUTLASS DSL 4.6 requires protobuf >= 6.30.2, < 7.
+protobuf==6.33.5
 pycparser==2.21
 pydantic==2.10.3
 pyOpenSSL==23.2.0
@@ -47,7 +51,7 @@ python-dateutil==2.8.2
 python-dotenv==1.0.0
 PyYAML==6.0.1
 pyzmq==25.1.1b2
-regex==2023.6.3
+regex==2026.5.9
 requests==2.31.0
 rpyc==5.3.1
 ruamel.yaml==0.17.32
@@ -59,9 +63,9 @@ six==1.16.0
 sniffio==1.3.0
 sortedcontainers==2.4.0
 toolz==0.12.0
-torch==2.9.1
+torch==2.11.0
 tqdm==4.65.0
-transformers==4.57.1
+transformers==5.8.0
 tokenizers==0.22.1
 urllib3==1.26.16
 uvicorn==0.19.0
@@ -70,8 +74,8 @@ wheel==0.40.0
 zstandard==0.23.0
 safetensors==0.4.5
 Pillow==10.4.0
-tiktoken==0.7.0
-matplotlib==3.8.2
+tiktoken==0.8.0
+matplotlib==3.10.0
 psutil==5.9.4
 prometheus_client==0.20.0
 cchardet==2.1.7
@@ -80,20 +84,32 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 hypercorn==0.18.0
-flashinfer-python==0.6.8.post1
-sgl-kernel==0.3.21
+# Native HTTP/SSE entry point for multiprocess PD master, bundled with its shared libraries.
+ray-haproxy==2.8.25; sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64")
+# SM90 NoPE MLA (512 latent dimensions, zero RoPE dimensions).
+flashinfer-python[cu13]==0.6.18
+flashinfer-cubin==0.6.18
+cuda-tile==1.4.0
+nvidia-cutlass-dsl==4.6.2
+nvidia-cudnn-frontend==1.25.0
+nccl4py==0.3.1
+# FA3 only_qv supports NoPE MLA on Hopper; 0.4.5 keeps Torch 2.11 compatibility.
+sglang-kernel==0.4.5
 httpx==0.28.1
 librosa==0.11.0
-cuda_bindings==12.9.0
+cuda_bindings==13.2.0
 orjson==3.11.2
 setproctitle==1.3.6
 xxhash==3.6.0
-torchvision==0.24.1
-interegular==0.3.3
+torchvision==0.26.0
+# XGrammar needs >=0.1.11; TileLang 0.1.9 fails to import with TVM-FFI 0.1.14.post1.
+apache-tvm-ffi==0.1.11
+xgrammar==0.2.8
 partial_json_parser==0.2.1.1.post6
 websockets==15.0.1
-cupy-cuda12x==13.6.0
-nixl==0.8.0
-xformers==0.0.33.post2
+cupy-cuda13x==14.0.1
+nixl==1.2.0
+xformers==0.0.35
 redis==7.3.0
-litellm>=1.52.0,<1.85
+litellm>=1.84.8,<1.85
+torch_memory_saver==0.0.9.post1

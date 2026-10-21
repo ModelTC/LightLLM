@@ -5,7 +5,6 @@ import copy
 from functools import lru_cache
 from io import BytesIO
 from lightllm.common.build_utils import repair_config
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
 
@@ -89,35 +88,8 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
 
         # <img><image_pad></img> -> <img></img>
         origin_ids = [token for token in origin_ids if token not in (self.image_token_id, self.audio_token_id)]
-        # <img></img> --> <img>id,id+1...id+num</img>
-        input_ids = []
-        image_id = 0
-        while True:
-            try:
-                start_idx = origin_ids.index(self.image_start_id)
-                if start_idx + 1 >= len(origin_ids):
-                    break
-                if origin_ids[start_idx + 1] == self.image_end_id:
-                    input_ids.extend(origin_ids[: start_idx + 1])
-                    token_id = multimodal_params.images[image_id].token_id
-                    token_num = multimodal_params.images[image_id].token_num
-                    multimodal_params.images[image_id].start_idx = len(input_ids)
-                    input_ids.extend(range(token_id, token_id + token_num))
-                    input_ids.append(self.image_end_id)
-                    origin_ids = origin_ids[start_idx + 2 :]
-                    image_id += 1
-                else:
-                    raise ValueError("image token error")
-            except ValueError:
-                break
-        if multimodal_params:
-            image_cnt = len(multimodal_params.images)
-            if image_cnt != image_id:
-                raise ValueError(image_cnt == image_id, f"invalid image tag num: {image_cnt} vs {image_id}!")
-        input_ids.extend(origin_ids)
 
         # audio
-        origin_ids = input_ids
         input_ids = []
         audio_id = 0
         start_idx = 0
@@ -130,6 +102,7 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
                     input_ids.extend(origin_ids[: start_idx + 1])
                     token_id = multimodal_params.audios[audio_id].token_id
                     token_num = multimodal_params.audios[audio_id].token_num
+                    multimodal_params.audios[audio_id].start_idx = len(input_ids)
                     input_ids.extend(range(token_id, token_id + token_num))
                     input_ids.append(self.audio_end_id)
                     origin_ids = origin_ids[start_idx + 2 :]
@@ -144,10 +117,41 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
                 raise ValueError(audio_cnt == audio_id, f"invalid audio tag num: {audio_cnt} vs {audio_id}!")
         input_ids.extend(origin_ids)
 
+        # <img></img> --> <img>id,id+1...id+num</img>
+        origin_ids = input_ids
+        input_ids = []
+        image_id = 0
+        while True:
+            try:
+                start_idx = origin_ids.index(self.image_start_id)
+                if start_idx + 1 >= len(origin_ids):
+                    break
+                if origin_ids[start_idx + 1] == self.image_end_id:
+                    input_ids.extend(origin_ids[: start_idx + 1])
+                    token_id = multimodal_params.images[image_id].token_id
+                    token_num = multimodal_params.images[image_id].token_num
+                    multimodal_params.images[image_id].start_idx = len(input_ids)
+                    # Image expansion shifts the audio positions recorded in the first pass.
+                    for audio in multimodal_params.audios:
+                        if audio.start_idx >= len(input_ids):
+                            audio.start_idx += token_num
+                    input_ids.extend(range(token_id, token_id + token_num))
+                    input_ids.append(self.image_end_id)
+                    origin_ids = origin_ids[start_idx + 2 :]
+                    image_id += 1
+                else:
+                    raise ValueError("image token error")
+            except ValueError:
+                break
+        if multimodal_params:
+            image_cnt = len(multimodal_params.images)
+            if image_cnt != image_id:
+                raise ValueError(image_cnt == image_id, f"invalid image tag num: {image_cnt} vs {image_id}!")
+        input_ids.extend(origin_ids)
+
         return input_ids
 
 
-@ModelRegistry(["qwen3_omni_moe"], is_multimodal=True)
 class Qwen3OmniMOETpPartModel(Qwen3VLMOETpPartModel):
 
     pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer

@@ -78,8 +78,8 @@ You can also install Lightllm from source:
     $ git clone https://github.com/ModelTC/lightllm.git
     $ cd lightllm
     $
-    $ # Install Lightllm dependencies (cuda 12.8)
-    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu124
+    $ # Install Lightllm dependencies (CUDA 13.0)
+    $ pip install -r requirements.txt --extra-index-url https://download.pytorch.org/whl/cu130
     $
     $ # Install Lightllm dependencies (Moore Threads GPU)
     $ ./generate_requirements_musa.sh
@@ -87,3 +87,20 @@ You can also install Lightllm from source:
     $
     $ # Install Lightllm
     $ python setup.py install
+
+Installation with uv
+--------------------
+
+You can also install Lightllm with `uv <https://docs.astral.sh/uv/>`_:
+
+.. code-block:: console
+
+    $ # Create a new virtual environment with Python 3.10
+    $ uv venv --python 3.10
+    $ source .venv/bin/activate
+    $
+    $ # Install Lightllm dependencies (CUDA 13.0)
+    $ uv pip install -r requirements.txt --torch-backend=cu130
+    $
+    $ # Install Lightllm
+    $ uv pip install -e .

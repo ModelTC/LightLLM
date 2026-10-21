@@ -2,7 +2,6 @@ import os
 import pickle
 from lightllm.server.core.objs.atomic_lock import AtomicShmLock
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.shm_utils import create_or_link_shm
 
@@ -14,8 +13,8 @@ logger = init_logger(__name__)
 class ShmObjsIOBuffer:
     def __init__(self, tail_str=""):
         self.args = get_env_start_args()
-        self.name = f"{get_unique_server_name()}_ShmReqsBufferParams_{tail_str}"
-        self.lock = AtomicShmLock(lock_name=f"{get_unique_server_name()}_ShmReqsBufferParams_atomlock_{tail_str}")
+        self.name = f"ShmReqsBufferParams_{tail_str}"
+        self.lock = AtomicShmLock(lock_name=f"ShmReqsBufferParams_atomlock_{tail_str}")
         self._create_or_link_shm()
         self.node_world_size = self.args.tp // self.args.nnodes
 

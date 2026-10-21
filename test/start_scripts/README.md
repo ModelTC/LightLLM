@@ -27,8 +27,6 @@ This directory contains various startup scripts for deploying DeepSeek models wi
 - `multi_pd_master/config_server.sh` - Configuration server
 - `multi_pd_master/pd_master_1.sh` - PD Master 1
 - `multi_pd_master/pd_master_2.sh` - PD Master 2
-- `multi_pd_master/pd_prefill.sh` - Prefill service
-- `multi_pd_master/pd_decode.sh` - Decode service
 
 ## Usage Instructions
 
@@ -89,9 +87,8 @@ sh multi_pd_master/config_server.sh <config_server_host>
 sh multi_pd_master/pd_master_1.sh <host> <config_server_host>
 sh multi_pd_master/pd_master_2.sh <host> <config_server_host>
 
-# Step 3: Start Prefill and Decode services
-sh multi_pd_master/pd_prefill.sh <host> <config_server_host>
-sh multi_pd_master/pd_decode.sh <host> <config_server_host>
+# Step 3: Start Prefill and Decode services with the prefill/decode run modes.
+# Multi-PD startup scripts for these nodes are not provided in this directory.
 ```
 
 ## Configuration Guide
@@ -99,12 +96,13 @@ sh multi_pd_master/pd_decode.sh <host> <config_server_host>
 ### Environment Variables
 
 - `LOADWORKER`: Model loading thread count, recommended 8-18
-- `DISABLE_KV_TRANS_USE_P2P`: Disable P2P communication optimization to transfer kv data
 - `CUDA_VISIBLE_DEVICES`: Specify GPU devices to use
 
 ### Important Parameters
 
 - `--model_dir`: Model file path
+- `--pd_master_mode`: PD master topology mode; use `elastic` (default) for dynamically changing nodes or a fixed topology such as `2p4d` for exactly 2 Prefill and 4 Decode nodes
+- `--pd_trans_mode`: KV transporter backend for PD disaggregation; choose `nccl` (default) or `nixl`, and use the same value for prefill and decode services
 - `--tp`: Tensor parallelism degree
 - `--dp`: Data parallelism degree
 - `--enable_ep_mode`: enable expert parallel 

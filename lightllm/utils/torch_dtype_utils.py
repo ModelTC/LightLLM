@@ -9,4 +9,4 @@ def get_torch_dtype(data_type: str) -> torch.dtype:
     elif data_type in ["fp32", "float32"]:
         return torch.float32
     else:
-        raise ValueError(f"Unsupport datatype {data_type}!")
+        raise ValueError(f"Unsupported datatype {data_type}!")

@@ -278,7 +278,7 @@ class Graph:
                         for j in range(i + 1, len(items)):
                             if items[j].can_accept_input(cur_t):
                                 print("check failed node:", node)
-                                raise Exception("lr1 check fialed")
+                                raise ValueError("lr1 check failed")
 
         return
 

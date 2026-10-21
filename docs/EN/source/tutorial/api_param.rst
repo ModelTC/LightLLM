@@ -10,6 +10,10 @@ API Call Details
 
 Get the current server running status
 
+The public endpoint of a multiprocess PD master aggregates HAProxy's periodic health checks of
+all workers and returns HTTP 503 if any worker fails. A direct request to a worker port reports
+that worker's local state.
+
 **Call Example**: 
 
 .. code-block:: console
@@ -94,6 +98,61 @@ Stream return text completion results
     data:{"token": {"id": 374, "text": " is", "logprob": -0.59185391664505, "special": false, "count_output_tokens": 2, "prompt_tokens": 4}, "generated_text": null, "finished": false, "finish_reason": null, "details": null}
 
     data:{"token": {"id": 279, "text": " the", "logprob": -1.5594439506530762, "special": false, "count_output_tokens": 3, "prompt_tokens": 4}, "generated_text": null, "finished": true, "finish_reason": "length", "details": null}
+
+Stop conditions
+~~~~~~~~~~~~~~~
+
+For ``/generate`` and ``/generate_stream``, set ``parameters.stop_sequences`` to a
+string or a list of strings. ``parameters.include_stop_str_in_output`` defaults to
+``false``: the matched stop string and any following text in the same token are
+removed. Set it to ``true`` to retain the stop string. This option applies to
+string stops only.
+
+Strings retain their original text and are never encoded into token ID sequences.
+String stops are matched and trimmed in HTTP output. ``ALL_TEXT`` matches all
+generated text; ``CONTENT_ONLY`` skips reasoning and matches answer content.
+
+Explicit token ID sequences are also supported, for example
+``"stop_sequences": [[100, 101]]``; replace these IDs with the values used by your
+model. These stops match independently in inference and HTTP output, including reasoning,
+regardless of ``stop_str_match_mode`` or ``LIGHTLLM_STOP_IN_REASONING``.
+HTTP output matches token ID stops before string stops. Each choice retains a bounded
+tail of actual generated IDs across P/D capacity segments, including special tokens
+whose decoded text is empty. A match preserves token text and metadata and changes
+only the finish status to stop. IDs from the user prompt do not participate in matching.
+``include_stop_str_in_output`` does not change token ID stop output behavior.
+Strings and token ID sequences may be mixed, for example ``["END", [100, 101]]``.
+RL, routed-expert output, and prompt-logprob requests are supported only in normal
+mode. A stop match still requests backend shutdown. The matched string packet is trimmed
+according to ``include_stop_str_in_output`` but retains the backend finish status.
+Subsequent packets pass through unchanged until the backend finishes with final metadata.
+In-flight tokens may therefore appear after the match, and the backend determines the final finish reason.
+PD mode rejects the corresponding startup flags; request parameters cannot enable these server features.
+
+.. list-table:: Stop matching scope
+   :header-rows: 1
+
+   * - ``stop_str_match_mode``
+     - String stops
+     - Explicit token ID stops
+   * - ``1`` / ``ALL_TEXT`` (default)
+     - All generated text
+     - All generated tokens
+   * - ``2`` / ``CONTENT_ONLY``
+     - Answer content only, excluding reasoning
+     - All generated tokens
+
+Both streaming and non-streaming output follow this setting. When the output
+ends with a prefix of any stop string, streaming holds the complete tokens
+covering that prefix until the match is resolved. This prevents a stop split
+across tokens from leaking into output.
+An unmatched tail is returned when generation finishes. Token IDs, logprobs,
+output token counts, and the finish reason retain their original meanings.
+
+``/generate`` and ``/generate_stream`` match string stops against all generated text by default,
+including reasoning text, even when a reasoning parser is configured.
+For reasoning / content stop scope in OpenAI ``/v1/chat/completions``, see the
+:ref:`OpenAI API examples <openai_api>`.
 
 :code:`POST /get_score`
 ~~~~~~~~~~~~~~~~~~~~~~~

@@ -101,6 +101,10 @@ def apply_deepstack_features(
     """
     apply deepstack features for all images in qwen3-vl/qwen3-vl-moe
     """
+    # deepstack 层数取自 cache.shape[1]-1（Qwen3 为 3），并按 pre_layer 收集的
+    # img_*（实际含 images+audios）对对应 token 叠加 cache[:, layer_num+1, :]。
+    # 音频本身没有 deepstack，语义上叠加量应为 0；依赖 copy_to_cache 在音频写入
+    # 时将 cache[:, 1:, :] 置零，使误走此路径时数值上等价于不叠加。
 
     deepstack_num_layers = infer_state.cpu_embed_cache_tensor.shape[1] - 1
 

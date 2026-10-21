@@ -11,7 +11,7 @@ logger = init_logger(__name__)
 
 
 def set_unique_server_name(args):
-    node_uuid = uuid.uuid1().hex[0:8]
+    node_uuid = uuid.uuid4().hex[0:16]
 
     if args.run_mode == "pd_master":
         os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = str(node_uuid) + "_pd_master"
@@ -50,6 +50,11 @@ def get_env_start_args():
 
 
 @lru_cache(maxsize=None)
+def get_model_infer_recursion_limit() -> int:
+    return int(os.getenv("LIGHTLLM_MODEL_INFER_RECURSION_LIMIT", "4000"))
+
+
+@lru_cache(maxsize=None)
 def get_llm_data_type() -> torch.dtype:
     data_type: str = get_env_start_args().data_type
     if data_type in ["fp16", "float16"]:
@@ -59,7 +64,7 @@ def get_llm_data_type() -> torch.dtype:
     elif data_type in ["fp32", "float32"]:
         data_type = torch.float32
     else:
-        raise ValueError(f"Unsupport datatype {data_type}!")
+        raise ValueError(f"Unsupported datatype {data_type}!")
     return data_type
 
 
@@ -69,13 +74,28 @@ def enable_env_vars(args):
 
 
 @lru_cache(maxsize=None)
-def get_deepep_num_max_dispatch_tokens_per_rank():
+def is_stop_matching_in_reasoning_enabled() -> bool:
+    """是否允许用户配置的 stop 在 reasoning 阶段参与匹配。"""
+    return os.getenv("LIGHTLLM_STOP_IN_REASONING", "False").upper() in ["ON", "TRUE", "1"]
+
+
+@lru_cache(maxsize=None)
+def get_deepep_num_max_dispatch_tokens_per_rank_prefill():
+    # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大。
+    # 如果未显式配置，则默认至少覆盖当前进程的 `batch_max_tokens`，避免 DeepEP V2 在 autotune
+    # warmup 或大 prefill batch 时因为 buffer 上界过小而报错。
+    configured = os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_PREFILL", None)
+    if configured is not None:
+        return int(configured)
+
+    batch_max_tokens = get_env_start_args().batch_max_tokens or 256
+    return ((int(batch_max_tokens) + 7) // 8) * 8
+
+
+@lru_cache(maxsize=None)
+def get_deepep_num_max_dispatch_tokens_per_rank_decode():
     # 该参数需要大于单卡最大batch size，且是8的倍数。该参数与显存占用直接相关，值越大，显存占用越大，如果出现显存不足，可以尝试调小该值
-    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK", 256))
-
-
-def get_lightllm_gunicorn_keep_alive():
-    return int(os.getenv("LIGHTLMM_GUNICORN_KEEP_ALIVE", 10))
+    return int(os.getenv("NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE", 256))
 
 
 @lru_cache(maxsize=None)
@@ -84,7 +104,7 @@ def get_lightllm_websocket_max_message_size():
     Get the maximum size of the WebSocket message.
     :return: Maximum size in bytes.
     """
-    return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 16 * 1024 * 1024))
+    return int(os.getenv("LIGHTLLM_WEBSOCKET_MAX_SIZE", 128 * 1024 * 1024))
 
 
 # get_redundancy_expert_ids and get_redundancy_expert_num are primarily
@@ -152,6 +172,15 @@ def get_triton_autotune_level():
     return int(os.getenv("LIGHTLLM_TRITON_AUTOTUNE_LEVEL", 0))
 
 
+@lru_cache(maxsize=None)
+def get_decode_attn_autotune_seq_len() -> int:
+    """Decode attention 调优的代表性 KV 长度（token），默认 32768；调优时的 run key 按该长度分桶。"""
+    seq_len = int(os.getenv("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN", "32768"))
+    if seq_len <= 0:
+        raise ValueError("LIGHTLLM_DECODE_ATTN_AUTOTUNE_SEQ_LEN must be positive")
+    return seq_len
+
+
 g_model_init_done = False
 
 
@@ -197,8 +226,23 @@ def enable_diverse_mode_gqa_decode_fast_kernel() -> bool:
 
 
 @lru_cache(maxsize=None)
+def enable_triton_mtp_kernel() -> bool:
+    """
+    启用 Triton MTP 解码专用 kernel
+    通过启动参数 --mtp_step > 0 和 --llm_decode_att_backend=triton 控制
+    """
+    return (get_env_start_args().mtp_step > 0) and ("triton" in get_env_start_args().llm_decode_att_backend)
+
+
+@lru_cache(maxsize=None)
 def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
+
+
+def get_cache_placement_gpu_capacity_ratio() -> float:
+    ratio = float(os.getenv("LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO", 0.8))
+    assert 0 < ratio <= 1
+    return ratio
 
 
 @lru_cache(maxsize=None)
@@ -214,17 +258,94 @@ def enable_huge_page():
 
 
 @lru_cache(maxsize=None)
-def get_added_mtp_kv_layer_num() -> int:
-    # mtp 模式下需要在mem manger上扩展draft model使用的layer
-    added_mtp_layer_num = 0
-    if get_env_start_args().mtp_mode == "eagle_with_att":
-        added_mtp_layer_num += 1
-    elif get_env_start_args().mtp_mode == "vanilla_with_att":
-        added_mtp_layer_num += get_env_start_args().mtp_step
-
-    return added_mtp_layer_num
+def enable_cpu_cache_numa_interleave() -> bool:
+    """是否启用 CPU KV cache 共享内存的 NUMA 交错分配策略。"""
+    return enable_env_vars("LIGHTLLM_ENABLE_NUMA_INTERLEAVE")
 
 
 @lru_cache(maxsize=None)
-def get_pd_split_max_new_tokens() -> int:
-    return int(os.getenv("LIGHTLLM_PD_SPLIT_MAX_NEW_TOKENS", 2048))
+def get_added_mtp_kv_layer_num() -> int:
+    args = get_env_start_args()
+    mtp_mode = args.mtp_mode
+
+    if mtp_mode is None:
+        return 0
+    if mtp_mode == "vanilla_no_att":
+        return 0
+    if mtp_mode == "eagle_no_att":
+        return 0
+    if mtp_mode == "vanilla_with_att":
+        return args.mtp_step
+    if mtp_mode == "eagle_with_att":
+        return 1
+    if mtp_mode == "eagle3":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dspark":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dflash":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+    if mtp_mode == "dflash2":
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
+
+    raise ValueError(f"unsupported mtp_mode: {mtp_mode}")
+
+
+@lru_cache(maxsize=None)
+def get_mtp_weight_layer_num() -> int:
+    args = get_env_start_args()
+    mtp_mode = args.mtp_mode
+
+    if mtp_mode is None:
+        return 0
+    if mtp_mode == "vanilla_no_att":
+        return args.mtp_step
+    if mtp_mode == "eagle_no_att":
+        return 1
+    return get_added_mtp_kv_layer_num()
+
+
+def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
+    with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
+        draft_config = json.load(json_file)
+    # Use the effective draft backbone config when the checkpoint stores it nested.
+    draft_config.update(draft_config.get("dflash_config", {}))
+    # A draft model may contain multiple attention layers; each layer needs a
+    # separate KV-cache slot after the target model's layers.
+    layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
+    assert layer_num is not None, f"missing num_hidden_layers or n_layer in draft config: {draft_model_dir}"
+    return int(layer_num)
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_resource_wait_timeout_seconds() -> int:
+    """P/D 节点的资源等待超时，单位为秒；负数表示永久等待。"""
+    return int(os.getenv("LIGHTLLM_PD_NODE_RESOURCE_WAIT_TIMEOUT_SECONDS", 20))
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_continuation_resource_wait_timeout_seconds() -> int:
+    """P/D 节点处理续跑分段时的资源等待超时，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_CONTINUATION_RESOURCE_WAIT_TIMEOUT_SECONDS", 60)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_node_busy_retry_timeout_seconds() -> int:
+    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒；0 表示不重试。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 0)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_cache_high_priority_max_age_seconds() -> int:
+    """cache 命中请求提升为 PD 高优先级时允许的最大缓存年龄，单位为秒。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MAX_AGE_SECONDS", 180)))
+
+
+@lru_cache(maxsize=None)
+def get_pd_cache_high_priority_min_prompt_tokens() -> int:
+    """cache 命中请求提升为 PD 高优先级时要求的最小 prompt token 数。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_CACHE_HIGH_PRIORITY_MIN_PROMPT_TOKENS", 2048)))
+
+
+@lru_cache(maxsize=None)
+def get_lightllm_url_pool_maxsize() -> int:
+    return int(os.getenv("LIGHTLLM_URL_POOL_MAXSIZE", 512))

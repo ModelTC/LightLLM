@@ -14,6 +14,189 @@ def get_config_json(model_path: str):
     return json_obj
 
 
+def get_running_max_req_size_per_dp(args) -> int:
+    """Return the request capacity for one local DP rank."""
+    if args.running_max_req_size < 1:
+        raise ValueError("running_max_req_size must be >= 1")
+
+    local_dp_size = max(1, args.dp // args.nnodes)
+    # Cache fetch and beam groups need the full capacity.
+    requires_global_capacity = args.enable_dp_prompt_cache_fetch or args.diverse_mode
+    if local_dp_size > 1 and not requires_global_capacity:
+        return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
+    return args.running_max_req_size
+
+
+def _derive_max_req_total_len_from_model_config(model_dir: str) -> Optional[int]:
+    """
+    Derive `max_req_total_len` from model config.json.
+
+    Keep the derivation aligned with LightLLM's RoPE initialization logic:
+    - If `max_sequence_length` exists: use it directly.
+    - Otherwise: use `max_position_embeddings * rope_scaling.factor` (factor defaults to 1.0).
+    """
+
+    try:
+        cfg = get_config_json(model_dir)
+    except Exception as e:
+        logger.warning(f"failed to load config.json for max_req_total_len derive: {e}")
+        return None
+
+    candidates = [cfg]
+
+    llm_cfg = cfg.get("llm_config")
+    if isinstance(llm_cfg, dict):
+        candidates.append(llm_cfg)
+
+    text_cfg = cfg.get("text_config")
+    if isinstance(text_cfg, dict):
+        candidates.append(text_cfg)
+
+    thinker_cfg = cfg.get("thinker_config")
+    if isinstance(thinker_cfg, dict):
+        thinker_text_cfg = thinker_cfg.get("text_config")
+        if isinstance(thinker_text_cfg, dict):
+            candidates.append(thinker_text_cfg)
+
+    def _find_key(key: str):
+        for c in candidates:
+            if isinstance(c, dict) and key in c and c[key] is not None:
+                return c.get(key)
+        return None
+
+    def _find_rope_scaling() -> dict:
+        rope_scaling = _find_key("rope_scaling")
+        if rope_scaling is None:
+            return {}
+        if isinstance(rope_scaling, dict):
+            return rope_scaling
+        return {}
+
+    max_sequence_length = _find_key("max_sequence_length")
+    if max_sequence_length is not None:
+        try:
+            val = int(max_sequence_length)
+            if val > 0:
+                return val
+        except Exception:
+            return None
+
+    max_position_embeddings = _find_key("max_position_embeddings")
+    if max_position_embeddings is None:
+        return None
+
+    rope_scaling = _find_rope_scaling()
+    rope_type = None
+    for k in ("rope_type", "type", "__type"):
+        v = rope_scaling.get(k)
+        if isinstance(v, str) and v.strip():
+            rope_type = v.strip().lower()
+            break
+
+    # Align with `lightllm/models/llama/model.py` RoPE initialization:
+    # - `yarn/dynamic/su/llama3`: do NOT multiply by `rope_scaling.factor` for max length.
+    # - `default/mrope` (and unknown): multiply by factor when present.
+    no_factor_types = {"yarn", "dynamic", "su", "llama3"}
+    multiply_factor = True
+    if rope_type is not None and rope_type in no_factor_types:
+        multiply_factor = False
+
+    try:
+        factor_raw = rope_scaling.get("factor", 1.0)
+        factor = 1.0 if factor_raw is None else float(factor_raw)
+    except Exception:
+        factor = 1.0
+
+    try:
+        max_pos = float(max_position_embeddings)
+        val = int(max_pos * factor) if multiply_factor else int(max_pos)
+        if val > 0:
+            logger.info(
+                "auto set max_req_total_len=%s (rope_type=%s,max_position_embeddings=%s,factor=%s, multiply_factor=%s)",
+                val,
+                rope_type,
+                max_position_embeddings,
+                factor,
+                multiply_factor,
+            )
+            return val
+    except Exception:
+        return None
+
+    return None
+
+
+def auto_set_max_req_total_len(args) -> None:
+    """
+    Ensure `args.max_req_total_len` is an int.
+
+    If the user provides a value, keep it.
+    If it's None, auto-derive from config.json; fallback to 16384.
+    """
+
+    default_fallback = 16384
+    if args.max_req_total_len is not None:
+        return
+
+    model_dir = args.model_dir
+    if not model_dir:
+        logger.warning("model_dir is empty; fallback max_req_total_len=16384")
+        args.max_req_total_len = default_fallback
+        return
+
+    try:
+        derived = _derive_max_req_total_len_from_model_config(model_dir)
+    except Exception as e:
+        logger.warning(f"failed to derive max_req_total_len from model config: {e}")
+        derived = None
+
+    if derived is None:
+        logger.warning(f"cannot derive max_req_total_len from model config; fallback to {default_fallback}")
+        args.max_req_total_len = default_fallback
+        return
+
+    args.max_req_total_len = int(derived)
+    logger.info(f"auto derived max_req_total_len={args.max_req_total_len} from model config")
+
+
+def auto_set_fused_shared_experts(args) -> None:
+    """
+    Route fused shared experts to supported model families and write the final
+    decision to `args.enable_fused_shared_experts`.
+    """
+
+    if args.enable_fused_shared_experts:
+        logger.info("skip auto setting fused shared experts: already enabled")
+        return
+
+    if args.enable_ep_moe:
+        logger.info("do not enable fused shared experts: EP MoE uses a separate implementation")
+        return
+
+    model_dir = args.model_dir
+    if not model_dir:
+        logger.info("do not enable fused shared experts: model_dir is empty")
+        return
+
+    model_type = get_model_type(model_dir)
+    supported_model_types = {
+        "deepseek_v3",
+        "deepseek_v31",
+        "deepseek_v32",
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_text",
+        "qwen3_5_moe",
+        "qwen3_5_moe_text",
+    }
+    if model_type not in supported_model_types:
+        logger.info(f"do not enable fused shared experts: unsupported model_type={model_type}")
+        return
+
+    args.enable_fused_shared_experts = True
+    logger.info(f"auto enable fused shared experts for model_type={model_type}")
+
+
 def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
     config_json = get_config_json(model_path)
     for key in key_name:
@@ -25,8 +208,11 @@ def _get_config_llm_keyvalue(model_path: str, key_name: list[str]):
                 value = config_json["llm_config"][key]
             except:
                 value = config_json.get("text_config", {}).get(key)
-        if config_json.get("thinker_config") is not None:
-            value = config_json.get("thinker_config", {}).get("text_config").get(key)
+        thinker_config = config_json.get("thinker_config")
+        if isinstance(thinker_config, dict):
+            thinker_text_config = thinker_config.get("text_config")
+            if isinstance(thinker_text_config, dict):
+                value = thinker_text_config.get(key, value)
         if value is not None:
             return value
 
@@ -79,6 +265,23 @@ def get_layer_num(model_path: str) -> int:
 
 
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
+    # gemma4 special eos_token_id
+    try:
+        model_type = get_model_type(model_path)
+        assert model_type == "gemma4"
+
+        generation_config_path = os.path.join(model_path, "generation_config.json")
+        with open(generation_config_path, "r") as file:
+            eos_token_id = json.load(file).get("eos_token_id")
+
+        assert eos_token_id is not None
+        if isinstance(eos_token_id, int):
+            return [eos_token_id]
+        elif isinstance(eos_token_id, list):
+            return list(eos_token_id)
+    except:
+        pass
+
     try:
         # qwen3-omini special eos_token_id
         config_json = get_config_json(model_path)
@@ -89,16 +292,36 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
 
     # Qwen3.5 checkpoints can have an eos_token_id in config that differs from
     # tokenizer.eos_token_id. In practice tokenizer.eos_token_id is the reliable
-    # stop id (<|im_end|>) for detokenization/stop behavior.
+    # stop id (<|im_end|>, <|endoftext|>) for detokenization/stop behavior.
     try:
         config_json = get_config_json(model_path)
         model_type = config_json.get("model_type") or config_json.get("text_config", {}).get("model_type")
         if model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}:
             from transformers import AutoTokenizer
 
+            eos_token_ids = []
+
             tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=False)
             if tokenizer.eos_token_id is not None:
-                return [int(tokenizer.eos_token_id)]
+                eos_token_ids.append(int(tokenizer.eos_token_id))
+
+            generation_config_path = os.path.join(model_path, "generation_config.json")
+            if os.path.exists(generation_config_path):
+                with open(generation_config_path, "r") as file:
+                    generation_eos_token_id = json.load(file).get("eos_token_id")
+                if isinstance(generation_eos_token_id, int):
+                    eos_token_ids.append(generation_eos_token_id)
+                elif isinstance(generation_eos_token_id, list):
+                    eos_token_ids.extend(generation_eos_token_id)
+
+            config_eos_token_id = _get_config_llm_keyvalue(model_path=model_path, key_name=["eos_token_id"])
+            if isinstance(config_eos_token_id, int):
+                eos_token_ids.append(config_eos_token_id)
+            elif isinstance(config_eos_token_id, list):
+                eos_token_ids.extend(config_eos_token_id)
+
+            if eos_token_ids:
+                return list(set(eos_token_ids))
     except Exception:
         pass
 
@@ -110,6 +333,12 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
 
     assert False, "error eos_token_id format in config.json"
     return
+
+
+def get_token_id(token: str) -> int:
+    from lightllm.server.build_prompt import tokenizer
+
+    return int(tokenizer.convert_tokens_to_ids(token))
 
 
 def get_model_architectures(model_path: str):
@@ -157,7 +386,10 @@ def get_fixed_kv_len():
     start_args = get_env_start_args()
     model_cfg = get_config_json(start_args.model_dir)
     if "prompt_cache_token_ids" in model_cfg:
-        return len(model_cfg["prompt_cache_token_ids"])
+        fixed_kv_len = len(model_cfg["prompt_cache_token_ids"])
+        # 固定 KV 最终会插入 radix cache，只加载完整的模型 KV 页面；不足一页
+        # 的尾部直接截断，因此 router 也只扣除实际常驻的页面容量。
+        return fixed_kv_len // start_args.page_size * start_args.page_size
     else:
         return 0
 
@@ -181,7 +413,7 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen2_5_VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
-        elif model_type in ["qwen3_vl", "qwen3_vl_moe"]:
+        elif model_type in ["qwen3_vl", "qwen3_vl_moe", "glm5_next"]:
             # Qwen3VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
@@ -195,6 +427,9 @@ def has_vision_module(model_path: str) -> bool:
             return True
         elif model_type == "gemma3":
             return True
+        elif model_type == "gemma4":
+            model_cfg["vision_config"]
+            return model_cfg["vision_config"] is not None
         elif (
             model_cfg.get("thinker_config", {}).get("vision_config", {}).get("model_type")
             == "qwen3_omni_moe_vision_encoder"
@@ -242,13 +477,18 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "glm5_next", "glm5_next_text"]:
             return True
         else:
             return False
     except:
         logger.info(f"model path: {model_path} does not has linear hybrid attention")
         return False
+
+
+def is_hybrid_att_model(model_path: str) -> bool:
+    """Models whose non-full attention state follows hybrid checkpoint pages."""
+    return is_linear_att_mixed_model(model_path)
 
 
 def get_model_type(model_path: str) -> Optional[str]:
@@ -262,6 +502,16 @@ def get_model_type(model_path: str) -> Optional[str]:
         return None
 
 
+def get_default_disable_chunked_mm_input(model_path: str) -> bool:
+    return get_model_type(model_path) in ("neo_chat", "deepseek_v4", "gemma4")
+
+
+@lru_cache(maxsize=None)
+def get_model_type_v1() -> Optional[str]:
+    start_args = get_env_start_args()
+    return get_model_type(start_args.model_dir)
+
+
 def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     """Auto-detect tool_call_parser based on model type"""
     model_type = get_model_type(model_path)
@@ -273,7 +523,15 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
         return "qwen3_coder"
 
     # Qwen3 series
-    if model_type in ["qwen3", "qwen3_moe", "qwen3_vl", "qwen3_vl_moe", "qwen3_vl_text", "qwen3_vl_moe_text"]:
+    if model_type in [
+        "qwen3",
+        "qwen3_moe",
+        "qwen3_omni_moe",
+        "qwen3_vl",
+        "qwen3_vl_moe",
+        "qwen3_vl_text",
+        "qwen3_vl_moe_text",
+    ]:
         return "qwen25"
 
     # DeepSeek V3
@@ -305,6 +563,7 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         "qwen3_vl_moe",
         "qwen3_vl_text",
         "qwen3_vl_moe_text",
+        "qwen3_omni_moe",
         "qwen3_5",
         "qwen3_5_moe",
         "qwen3_5_text",
@@ -320,4 +579,35 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
     if model_type == "deepseek_r1":
         return "deepseek-r1"
 
+    # Gemma-4 (all variants share the same Harmony-like <|channel>...<channel|> format)
+    if model_type == "gemma4":
+        return "gemma4"
+
     return None
+
+
+def auto_set_response_parsers(args) -> None:
+    """Infer response parsers from model config unless explicitly configured."""
+    if args.tool_call_parser is None:
+        args.tool_call_parser = get_tool_call_parser_for_model(args.model_dir)
+        if args.tool_call_parser:
+            logger.info(f"Auto set tool_call_parser to {args.tool_call_parser} based on model type")
+
+    if args.reasoning_parser is None:
+        args.reasoning_parser = get_reasoning_parser_for_model(args.model_dir)
+        if args.reasoning_parser:
+            logger.info(f"Auto set reasoning_parser to {args.reasoning_parser} based on model type")
+
+
+@lru_cache(maxsize=None)
+def ffn_use_tanh_approximate_gelu() -> bool:
+    try:
+        start_args = get_env_start_args()
+        model_type = get_model_type(start_args.model_dir)
+        if model_type in ["gemma4"]:
+            logger.info("Gemma4 uses tanh-approximate-gelu for FFN")
+            return True
+    except:
+        pass
+
+    return False

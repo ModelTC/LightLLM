@@ -8,6 +8,7 @@ nvidia-cuda-mps-control -d
 MOE_MODE=EP LOADWORKER=18 python -m lightllm.server.api_server \
 --model_dir /path/DeepSeek-R1 \
 --run_mode "decode" \
+--pd_trans_mode nccl \
 --host $host \
 --port 8121 \
 --nccl_port 12322 \

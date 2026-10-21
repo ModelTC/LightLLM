@@ -1,4 +1,11 @@
-from .pd_selector import PDSelector, RandomSelector, RoundRobinSelector, AdaptiveLoadSelector
+from .pd_selector import (
+    PDSelector,
+    RandomSelector,
+    RoundRobinSelector,
+    AdaptiveLoadSelector,
+    LoadBalancedCacheAwareSelector,
+    PDSelectionExtraInfo,
+)
 
 
 def create_selector(selector_type: str, pd_manager) -> PDSelector:
@@ -8,5 +15,7 @@ def create_selector(selector_type: str, pd_manager) -> PDSelector:
         return RoundRobinSelector(pd_manager)
     elif selector_type == "adaptive_load":
         return AdaptiveLoadSelector(pd_manager)
+    elif selector_type == "cache_aware":
+        return LoadBalancedCacheAwareSelector(pd_manager)
     else:
         raise ValueError(f"Invalid selector type: {selector_type}")

@@ -8,7 +8,7 @@ from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.distributed import dist_group_manager, lightllm_capture_graph, CustomProcessGroup
+from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from .infer_struct import InferStateInfo
 from .cuda_graph import CudaGraph
@@ -30,15 +30,21 @@ class PrefillCudaGraph:
         self.args = get_env_start_args()
         self.enable_prefill_microbatch_overlap = self.args.enable_prefill_microbatch_overlap
         self.max_handle_token_num = self.args.prefill_cudagraph_max_handle_token
+        if self.args.batch_max_tokens is not None:
+            self.max_handle_token_num = min(self.max_handle_token_num, self.args.batch_max_tokens)
 
-        graph_handle_token_nums = []
-        for i in range(2048):
-            token_num = int(2 ** (2 * i))
-            if 1 < token_num < self.max_handle_token_num:
-                graph_handle_token_nums.append(token_num)
+        graph_handle_token_nums = (
+            list(range(4, 33, 4))
+            + list(range(48, 257, 16))
+            + list(range(288, 513, 32))
+            + list(range(576, 1024 + 1, 64))
+            + list(range(1280, 4096 + 1, 256))
+            + list(range(4608, self.max_handle_token_num + 1, 512))
+        )
+        graph_handle_token_nums = [e for e in graph_handle_token_nums if e <= self.max_handle_token_num]
         graph_handle_token_nums.append(self.max_handle_token_num)
 
-        graph_handle_token_nums = list(set(graph_handle_token_nums))
+        graph_handle_token_nums = list(set[int](graph_handle_token_nums))
         graph_handle_token_nums.sort()
         if self.args.enable_tpsp_mix_mode:
             graph_handle_token_nums = [
@@ -71,21 +77,34 @@ class PrefillCudaGraph:
     def _capture_prefill(
         self, prefill_func, input_tensors: List[torch.Tensor], infer_state: InferStateInfo
     ) -> List[torch.Tensor]:
-        handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
-        dist_group: CustomProcessGroup = infer_state.dist_group
-        with lightllm_capture_graph(dist_group):
-            infer_state.mem_pool = self.mempool
-            infer_state.prefill_cuda_graph_create_graph_obj()
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
-            graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
-            graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
+        handle_token_num = infer_state.input_ids.shape[0]
+        infer_state.mem_pool = self.mempool
+        infer_state.prefill_cuda_graph_create_graph_obj()
+        infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
+        graph_input_tensors: List[torch.Tensor] = [torch.empty_like(e) for e in input_tensors]
+        graph_out_tensors: List[torch.Tensor] = prefill_func(graph_input_tensors, infer_state)
+        graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
+        infer_state.prefill_cuda_graph_get_current_capture_graph().__exit__(None, None, None)
 
         graph_input_tensors = [tensor_to_no_ref_tensor(e) for e in graph_input_tensors]
         graph_out_tensors = [tensor_to_no_ref_tensor(e) for e in graph_out_tensors]
 
-        self.graph[handle_token_num] = (infer_state, graph_input_tensors, graph_out_tensors)
+        graph_hidden_collector = infer_state.hidden_collector
+        hidden_tensor_count, hidden_tensor_nbytes = graph_hidden_collector.release_graph_tensor_ownership()
+        logger.info(
+            f"Prefill CUDA Graph hidden collector 已完成 capture 状态托管："
+            f"handle_token_num={handle_token_num}, "
+            f"collector={graph_hidden_collector.__class__.__name__}, "
+            f"no_ref_tensor_count={hidden_tensor_count}, "
+            f"no_ref_tensor_nbytes={hidden_tensor_nbytes}。"
+            f"这些 tensor 的固定地址由 graph memory pool 管理，collector 仅保留无所有权引用供 replay 使用。"
+        )
+        self.graph[handle_token_num] = (
+            infer_state,
+            graph_input_tensors,
+            graph_out_tensors,
+            graph_hidden_collector,
+        )
         self.replay(input_tensors, infer_state)
 
         return graph_out_tensors
@@ -128,13 +147,20 @@ class PrefillCudaGraph:
             )
 
     def _replay(self, input_tensors: List[torch.Tensor], infer_state: InferStateInfo) -> List[torch.Tensor]:
-        handle_token_num = infer_state.total_token_num - infer_state.prefix_total_token_num
-        graph_infer_state, graph_input_tensors, graph_output_tensors = self.graph[handle_token_num]
+        handle_token_num = infer_state.input_ids.shape[0]
+        graph_infer_state, graph_input_tensors, graph_output_tensors, graph_hidden_collector = self.graph[
+            handle_token_num
+        ]
         graph_infer_state: InferStateInfo = graph_infer_state
         for graph_in_tensor, in_tensor in zip(graph_input_tensors, input_tensors):
             graph_in_tensor.copy_(in_tensor)
 
         graph_infer_state.copy_for_prefill_cuda_graph(new_infer_state=infer_state)
+        # 首次 capture 后 replay 时，infer_state 与 graph_infer_state 是同一对象，
+        # 需要先创建运行时实例，避免 finish_output 清空 graph 中保存的 capture collector。
+        if infer_state.hidden_collector is graph_hidden_collector:
+            infer_state.hidden_collector = graph_hidden_collector.new_instance()
+        infer_state.hidden_collector.restore_graph_state(graph_hidden_collector)
         graph_infer_state.prefill_replay(infer_state)
 
         return graph_output_tensors
@@ -167,12 +193,12 @@ class PrefillCudaGraph:
         for handle_token_num in self.graph_handle_token_nums[::-1]:
             logger.info(f"Capture prefill cudagraph, handle_token_num: {handle_token_num}")
             total_token_num = handle_token_num
-            input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device="cuda")
-            mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
+            input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
             b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
             b_seq_len.fill_(total_token_num)
             b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
             b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
 
@@ -183,22 +209,20 @@ class PrefillCudaGraph:
                 max_kv_seq_len=total_token_num,
                 max_cache_len=0,
                 input_ids=input_ids,
-                mem_indexes=mem_indexes,
                 b_req_idx=b_req_idx,
                 b_mtp_index=b_mtp_index,
                 b_seq_len=b_seq_len,
+                b_is_decode_req=b_is_decode_req,
                 b_ready_cache_len=b_ready_cache_len,
                 b_prefill_start_loc=b_prefill_start_loc,
                 is_prefill=True,
                 b_prefill_has_output_cpu=[False],
-                prefix_total_token_num=0,
                 multimodal_params=[{"images": [], "audios": []}],
                 **model._gen_special_model_input(token_num=total_token_num),
             )
             model_output: ModelOutput = model.forward(model_input)
             del model_output
             del input_ids
-            del mem_indexes
             del b_req_idx
             del b_seq_len
 
@@ -227,12 +251,12 @@ class PrefillCudaGraph:
             for micro_batch_index in [0, 1]:
                 # dummy prefill, capture the cudagraph
                 total_token_num = handle_token_num
-                input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int32, device="cuda")
-                mem_indexes = model.mem_manager.alloc(len(input_ids)).cuda()
+                input_ids = torch.tensor([1 for _ in range(total_token_num)], dtype=torch.int64, device="cuda")
                 b_req_idx = torch.tensor([model.req_manager.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
                 b_seq_len = torch.empty(1, dtype=torch.int32, device="cuda")
                 b_seq_len.fill_(total_token_num)
                 b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
                 b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
 
@@ -243,15 +267,14 @@ class PrefillCudaGraph:
                     max_kv_seq_len=total_token_num,
                     max_cache_len=0,
                     input_ids=input_ids,
-                    mem_indexes=mem_indexes,
                     b_req_idx=b_req_idx,
                     b_mtp_index=b_mtp_index,
                     b_seq_len=b_seq_len,
+                    b_is_decode_req=b_is_decode_req,
                     b_ready_cache_len=b_ready_cache_len,
                     b_prefill_start_loc=b_prefill_start_loc,
                     is_prefill=True,
                     b_prefill_has_output_cpu=[False],
-                    prefix_total_token_num=0,
                     multimodal_params=[{"images": [], "audios": []}],
                     **model._gen_special_model_input(token_num=total_token_num),
                 )

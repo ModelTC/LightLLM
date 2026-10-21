@@ -3,7 +3,6 @@ import math
 import torch
 import string
 import numpy as np
-import pandas as pd
 from PIL import Image
 import torch.distributed as dist
 import torchvision.transforms as T

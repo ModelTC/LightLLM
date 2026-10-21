@@ -1,5 +1,4 @@
 import torch
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.glm4_moe_lite.layer_infer.transformer_layer_infer import Glm4MoeLiteTransformerLayerInfer
 from lightllm.models.glm4_moe_lite.layer_weights.transformer_layer_weight import Glm4MoeLiteTransformerLayerWeight
@@ -8,7 +7,6 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
-@ModelRegistry("glm4_moe_lite")
 class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
 
     transformer_weight_class = Glm4MoeLiteTransformerLayerWeight
@@ -25,7 +23,13 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
 
     def _init_custom(self):
         self._init_to_get_yarn_rotary()
-        dist_group_manager.new_deepep_group(self.config["n_routed_experts"], self.config["hidden_size"])
+        dist_group_manager.new_deepep_group(
+            n_routed_experts=self.config["n_routed_experts"],
+            hidden_size=self.config["hidden_size"],
+            expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
+            num_experts_per_tok=self.config.get("num_experts_per_tok", 1),
+            moe_intermediate_size=self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+        )
 
     def _init_to_get_yarn_rotary(self):
         rope_scaling = self.config.get("rope_scaling")

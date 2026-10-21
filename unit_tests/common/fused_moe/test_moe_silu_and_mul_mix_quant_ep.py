@@ -13,7 +13,6 @@ def is_fp8_native_supported():
 if not is_fp8_native_supported():
     pytest.skip(reason="not support fp8 test in this gpu card", allow_module_level=True)
 
-import random
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
     silu_and_mul_masked_post_quant_fwd,
 )
@@ -45,10 +44,9 @@ def test_silu_and_mul_masked(expert_num, token_num, hidden_dim):
         (expert_num, token_num, hidden_dim // 2 // quant_group_size), dtype=torch.float32, device="cuda"
     )
 
-    true_out_tensor_mid = torch.randn((expert_num, token_num, hidden_dim // 2), dtype=torch.float16, device="cuda")
+    true_out_tensor_mid = torch.empty((expert_num, token_num, hidden_dim // 2), dtype=in_tensor.dtype, device="cuda")
 
-    masked_m = [random.randint(0, token_num) for _ in range(expert_num)]
-    masked_m = torch.tensor(masked_m, dtype=torch.int32, device="cuda")
+    masked_m = torch.full((expert_num,), token_num, dtype=torch.int32, device="cuda")
 
     silu_and_mul_fwd(in_tensor.view(-1, hidden_dim), true_out_tensor_mid.view(-1, hidden_dim // 2))
     true_out_tensor, true_out_scale_tensor = per_token_group_quant_fp8(
@@ -62,21 +60,81 @@ def test_silu_and_mul_masked(expert_num, token_num, hidden_dim):
     true_out_tensor = true_out_tensor.view(out_tensor.shape)
     true_out_scale_tensor = true_out_scale_tensor.view(out_scale_tensor.shape)
 
+    hidden_dim_scale_count = hidden_dim // 2 // quant_group_size
     for expert_id, expert_token_num in enumerate(masked_m.cpu().numpy()):
+        true_scale = true_out_scale_tensor[expert_id, :expert_token_num, :hidden_dim_scale_count]
+        out_scale = out_scale_tensor[expert_id, :expert_token_num, :hidden_dim_scale_count]
         assert torch.allclose(
-            true_out_tensor[expert_id, :expert_token_num, :].to(torch.float32),
-            out_tensor[expert_id, :expert_token_num, :].to(torch.float32),
+            true_scale,
+            out_scale,
             atol=1e-3,
             rtol=1e-2,
         )
-        hidden_dim_scale_count = hidden_dim // 2 // quant_group_size
-        assert torch.allclose(
-            true_out_scale_tensor[expert_id, :expert_token_num, :hidden_dim_scale_count],
-            out_scale_tensor[expert_id, :expert_token_num, :hidden_dim_scale_count],
-            atol=1e-3,
-            rtol=1e-2,
-        )
+
+        true_out = true_out_tensor[expert_id, :expert_token_num, :].to(torch.float32)
+        out = out_tensor[expert_id, :expert_token_num, :].to(torch.float32)
+        true_dequant = true_out * true_scale.repeat_interleave(quant_group_size, dim=-1)
+        out_dequant = out * out_scale.repeat_interleave(quant_group_size, dim=-1)
+        assert torch.allclose(true_dequant, out_dequant, atol=1e-1, rtol=1e-1)
     return
+
+
+def test_silu_and_mul_masked_skips_padded_tokens():
+    expert_num = 3
+    token_num = 4
+    hidden_dim = 256
+    quant_group_size = 128
+    masked_m = torch.tensor([0, 2, token_num], dtype=torch.int32, device="cuda")
+
+    in_tensor = torch.randn((expert_num, token_num, hidden_dim), dtype=torch.bfloat16, device="cuda")
+    out_tensor = torch.empty((expert_num, token_num, hidden_dim // 2), dtype=torch.float8_e4m3fn, device="cuda")
+    out_scale_tensor = torch.empty(
+        (expert_num, token_num, hidden_dim // 2 // quant_group_size), dtype=torch.float32, device="cuda"
+    )
+    out_tensor.fill_(1.0)
+    out_scale_tensor.fill_(7.0)
+
+    silu_and_mul_masked_post_quant_fwd(in_tensor, out_tensor, out_scale_tensor, quant_group_size, masked_m)
+    torch.cuda.synchronize()
+
+    for expert_id, expert_token_num in enumerate(masked_m.cpu().tolist()):
+        assert torch.equal(
+            out_tensor[expert_id, expert_token_num:, :],
+            torch.ones_like(out_tensor[expert_id, expert_token_num:, :]),
+        )
+        assert torch.equal(
+            out_scale_tensor[expert_id, expert_token_num:, :],
+            torch.full_like(out_scale_tensor[expert_id, expert_token_num:, :], 7.0),
+        )
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("alpha,limit,add_one", [(1.0, 10.0, False), (1.702, 7.0, True)])
+def test_clamped_swiglu_quantization_matches_reference(dtype, alpha, limit, add_one):
+    torch.manual_seed(53)
+    x = (torch.randn(3, 5, 4096, device="cuda") * 16).to(dtype)
+    masked_m = torch.tensor([0, 2, 5], dtype=torch.int32, device="cuda")
+    out = torch.full((3, 5, 2048), 1.0, dtype=torch.float8_e4m3fn, device="cuda")
+    scales = torch.full((3, 5, 16), 7.0, dtype=torch.float32, device="cuda")
+
+    silu_and_mul_masked_post_quant_fwd(
+        x, out, scales, 128, masked_m, alpha=alpha, limit=limit, clamp_up_add_one=add_one
+    )
+
+    gate, up = x.float().chunk(2, dim=-1)
+    gate = gate.clamp(max=limit)
+    gate = (gate * torch.sigmoid(alpha * gate)).to(dtype).float()
+    activation = (gate * (up.clamp(-limit, limit) + int(add_one))).to(dtype).float()
+    groups = activation.reshape(3, 5, 16, 128)
+    expected_scales = groups.abs().amax(-1).clamp(min=1e-10) / 448
+    expected_q = (groups / expected_scales.unsqueeze(-1)).clamp(-448, 448).to(torch.float8_e4m3fn)
+    expected = (expected_q.float() * expected_scales.unsqueeze(-1)).reshape(3, 5, 2048)
+    actual = out.float() * scales.repeat_interleave(128, dim=-1)
+    for expert, count in enumerate(masked_m.tolist()):
+        torch.testing.assert_close(scales[expert, :count], expected_scales[expert, :count], atol=1e-6, rtol=1e-5)
+        torch.testing.assert_close(actual[expert, :count], expected[expert, :count], atol=0.05, rtol=0.02)
+        assert torch.all(out[expert, count:].float() == 1)
+        assert torch.all(scales[expert, count:] == 7)
 
 
 if __name__ == "__main__":

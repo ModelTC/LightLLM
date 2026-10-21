@@ -1,43 +1,65 @@
 import os
 import math
 import ctypes
+import asyncio
 import numpy as np
 import time
 from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
 from .token_chunck_hash_list import TokenHashList, CpuCachePageList, PastKVCachePageList, TokenPageLenList
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.config_utils import is_linear_att_mixed_model
+from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.kv_cache_utils import compute_token_list_hash
-from typing import List, Any, Union
+from typing import Any, Dict, List, Optional, Union
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.shm_utils import create_or_link_shm
+from .logprob_utils import logprob_info
+from .token_metadata import ReqFinalTokenMetadata
 
 logger = init_logger(__name__)
 
 
 class FinishStatus(ctypes.Structure):
+    """请求结束状态。API 侧通过 ``get_finish_reason()`` 映射为字符串。
+
+    - ``NO_FINISH``: 未结束
+    - ``FINISHED_STOP``: 正常停止（EOS / stop 序列等），finish_reason=``stop``
+    - ``FINISHED_LENGTH``: 达到 max_new_tokens 等长度上限，finish_reason=``length``
+    - ``FINISHED_PD_DECODE_CAPACITY``: PD Decode 因 token 容量不足提前结束当前分段。
+      该状态仅用于 PD 内部分段续跑，不应直接暴露给 API 用户。
+    - ``FINISHED_ABORTED``: 客户端/调度主动 abort，finish_reason=``abort``
+    - ``FINISHED_ERROR``: 服务端内部错误导致无法继续生成，finish_reason=``error``。
+      典型场景：PD 分离 decode 节点 KV 传输失败。与 abort 区分：非用户取消，
+      而是传输/系统故障；若同一请求已 abort，应优先标 ``FINISHED_ABORTED``。
+    """
+
     _pack_ = 4
     _fields_ = [("status", ctypes.c_int)]
 
     NO_FINISH = 0
     FINISHED_STOP = 1
     FINISHED_LENGTH = 2
+    # PD Decode 因 token 容量不足时，用此状态结束当前 segment。PD Master 会吞掉
+    # 模拟结束 token，并携带剩余 max_new_tokens 继续下一个 segment。值 5 用于保持旧状态编号兼容。
+    FINISHED_PD_DECODE_CAPACITY = 5
+    FINISHED_ABORTED = 3
+    # 内部错误结束（如 PD KV 传输失败）；见类文档。
+    FINISHED_ERROR = 4
 
     def __init__(self, init_state=NO_FINISH):
         self.status = init_state
 
     def set_status(self, new_status):
-        assert 0 <= new_status <= 2
+        assert 0 <= new_status <= self.FINISHED_PD_DECODE_CAPACITY
         self.status = new_status
 
     def get_status(self):
         return self.status
 
     def is_finished(self):
-        return self.FINISHED_STOP <= self.status <= self.FINISHED_LENGTH
+        return self.FINISHED_STOP <= self.status <= self.FINISHED_PD_DECODE_CAPACITY
 
     def is_stopped(self):
         return self.status == self.FINISHED_STOP
@@ -45,27 +67,28 @@ class FinishStatus(ctypes.Structure):
     def is_finished_length(self):
         return self.status == self.FINISHED_LENGTH
 
+    def is_finished_error(self):
+        return self.status == self.FINISHED_ERROR
+
+    def is_finished_pd_decode_capacity(self):
+        return self.status == self.FINISHED_PD_DECODE_CAPACITY
+
+    def is_error_finished(self):
+        return self.status in (self.FINISHED_ABORTED, self.FINISHED_ERROR)
+
     def get_finish_reason(self):
         if self.status == self.FINISHED_STOP:
             return "stop"
         elif self.status == self.FINISHED_LENGTH:
             return "length"
+        elif self.status == self.FINISHED_ABORTED:
+            return "abort"
+        elif self.status == self.FINISHED_ERROR:
+            return "error"
+        elif self.status == self.FINISHED_PD_DECODE_CAPACITY:
+            # 该内部状态正常会被 PD Master 吞掉；泄漏时按 length 降级处理。
+            return "length"
         return None
-
-
-class PrefixTokenIdsStruct(ctypes.Structure):
-    _pack_ = 4
-    _fields_ = [("size", ctypes.c_int), ("data", ctypes.c_int64 * 10)]
-
-    def __init__(self):
-        self.size = 0
-
-    def set_token_ids(self, ids: List[int]):
-        self.size = len(ids)
-        self.data[: len(ids)] = ids
-
-    def get_token_ids(self):
-        return list(self.data[: self.size])
 
 
 class Req(ctypes.Structure):
@@ -74,6 +97,10 @@ class Req(ctypes.Structure):
         ("index_in_shm_mem", ctypes.c_int),
         ("ref_count", ctypes.c_int),  # 个人不要操作这个计数  # 个人不要操作这个引用计数
         ("recv_time", ctypes.c_double),  # 用于记录请求到达服务的时间，主要用于调试
+        # Router 收到请求和请求被调度为新 batch 的单调时钟时间戳，用于 HTTP server
+        # 判断请求是否在 Router 等待过久。时间戳写入共享内存，供不同进程读取。
+        ("router_arrival_time", ctypes.c_double),
+        ("infer_start_time", ctypes.c_double),
         ("request_id", ctypes.c_int64),  # 引用计数
         ("group_req_id", ctypes.c_int64),
         ("input_len", ctypes.c_int),
@@ -90,7 +117,12 @@ class Req(ctypes.Structure):
         ("disk_prompt_cache_len", ctypes.c_int),  # 用于记录从磁盘命中的长度
         ("is_paused", ctypes.c_bool),  # 标记一个Req因为显存资源管理的原因被临时暂停了。
         ("finish_status", FinishStatus),
-        # 这个标记变量是http_server 写入，其他进程读取，用于标记该请求是否因为断网被aborted。
+        # 请求停止信号，主要由 HTTP 写入，Router 读取后通知推理进程执行 abort 并回收资源。
+        # 来源包括客户端断开、主动取消，以及 HTTP 匹配到 stop 后停止当前候选的生成。
+        # 该字段属于单个 Req：HTTP stop 匹配只设置命中的子请求，整组取消则逐个设置所有子请求。
+        # 多机 TP 时，Router 会把主节点的 abort 信号同步到其他节点的同一请求。
+        # True 只表示已发出停止信号，不表示推理已经退出，也不直接决定 API 的 finish_reason。
+        # HTTP 因 stop 发起 abort 时，输出缓冲记录的结束原因仍为 stop；后续 abort marker 只用于收尾。
         ("is_aborted", ctypes.c_bool),
         # 当FinishStatus 是正常结束状态时，finish_token_index 用于标识结束的
         # token 的index位置
@@ -98,7 +130,6 @@ class Req(ctypes.Structure):
         ("out_tokens_queue", CircularQueue),
         ("sample_params", SamplingParams),
         ("chunked_prefill_size", ctypes.c_int),  # 只有chunked prefill模式才使用的参数
-        ("prefix_token_ids", PrefixTokenIdsStruct),  # 只有 token_headling 模式使用的参数
         # can_released_mark的作用是：
         # 只有整个流程中的最后一个处理模块，一般是 detokenization 进程，标记这个参数为True后，主管理进程才能真
         # 的释放请求对像。
@@ -109,19 +140,15 @@ class Req(ctypes.Structure):
         ("cumlogprob", ctypes.c_float),
         # mtp draft model 多输出命中接受的token数量
         ("mtp_accepted_token_num", ctypes.c_int),
+        ("mtp_verify_token_num", ctypes.c_int),
+        ("mtp_verify_step_num", ctypes.c_int),
         # mtp_step 保存一个mtp使用的常量参数，用于快速访问，不会被外部输入初始化
         ("_mtp_step", ctypes.c_int),
-        # stop_str_matched 用于判断停止字符串是否匹配成功,  detokenization 进程写入，router 进程读取
-        # 然后router发停止命令给推理进程，推理进程停止输出
-        ("stop_str_matched", ctypes.c_bool),
-        # 当 stop_str_matched 条件满足的时候，对应的最后一个生成 token 所在的index位置。
-        # 该变量为 detokenization 进程写入，http_server 读取
-        ("stop_str_matched_token_index", ctypes.c_int),
-        # 用于在 包含linear att 混合模型中，进行输入的提前hash，方便在对应的page radix tree中进行快速操作。
-        ("linear_att_token_hash_list", TokenHashList),
+        # hybrid 模型按 checkpoint 粒度提前计算输入 hash，供大小页 radix 匹配。
+        ("hybrid_token_hash_list", TokenHashList),
         # 用于在开启cpu cache 或者 硬盘 cache时，预先计算，分块输入token的hash值。
         ("token_hash_list", TokenHashList),
-        # 用于存储每个cpu cache 页面对应的真实token数量，用于linear att的qwen3.5等模型的碎片化处理最后一个页面的问题
+        # 每个 CPU cache 页的真实 token 数，包含 hybrid 模型不足大页的尾页。
         ("token_hash_page_len_list", TokenPageLenList),
         # 用于保存查找匹配到的可以被复用的cpu cache 页面信息。
         ("cpu_cache_match_page_indexes", CpuCachePageList),
@@ -149,6 +176,8 @@ class Req(ctypes.Structure):
         self.index_in_shm_mem: int = self.index_in_shm_mem
         self.ref_count: int = self.ref_count
         self.recv_time: float = time.time()
+        self.router_arrival_time = 0.0
+        self.infer_start_time = 0.0
 
         self.request_id = request_id
         self.group_req_id = convert_sub_id_to_group_id(request_id)
@@ -171,8 +200,6 @@ class Req(ctypes.Structure):
         else:
             self.sample_params = SamplingParams()
             self.sample_params.init(tokenizer=tokenizer, **sample_param)
-        self.prefix_token_ids = PrefixTokenIdsStruct()
-
         self.out_tokens_queue = CircularQueue()
         self.input_len = len(prompt_ids)
         self.alloc_shm_numpy_len = self.input_len + self.sample_params.max_new_tokens + 1024  # + 1024 for safe
@@ -181,17 +208,17 @@ class Req(ctypes.Structure):
         self.chunked_prefill_size = chunked_prefill_size
         self.shm_prompt_ids.arr[0 : len(prompt_ids)] = prompt_ids
         self.mtp_accepted_token_num = 0
+        self.mtp_verify_token_num = 0
+        self.mtp_verify_step_num = 0
         self._mtp_step = get_env_start_args().mtp_step
-        self.stop_str_matched = False
-        self.stop_str_matched_token_index = -1
 
         self.post_init()
 
         args = get_env_start_args()
-        if is_linear_att_mixed_model(args.model_dir):
-            self._fill_linear_att_token_hash()
+        if is_hybrid_att_model(args.model_dir):
+            self._fill_hybrid_token_hash()
             if args.enable_cpu_cache:
-                cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_linear_att_cpu_cache_page_len_list()
+                cpu_cache_hash_list, cpu_cache_page_len_list = self._calcu_hybrid_cpu_cache_page_len_list()
                 self.token_hash_list = TokenHashList()
                 self.token_hash_list.clear()
                 self.token_hash_list.fill(cpu_cache_hash_list)
@@ -215,12 +242,12 @@ class Req(ctypes.Structure):
         # 子类继承进行一些额外的初始化操作
         pass
 
-    def _calcu_linear_att_cpu_cache_page_len_list(self):
-        token_hash_list = self.linear_att_token_hash_list.get_all()
-        linear_att_hash_page_size = get_env_start_args().linear_att_hash_page_size
+    def _calcu_hybrid_cpu_cache_page_len_list(self):
+        token_hash_list = self.hybrid_token_hash_list.get_all()
+        hash_page_size = get_env_start_args().linear_att_hash_page_size
         block_num = get_env_start_args().linear_att_page_block_num
         cpu_cache_page_size = get_env_start_args().cpu_cache_token_page_size
-        assert cpu_cache_page_size == linear_att_hash_page_size * block_num
+        assert cpu_cache_page_size == hash_page_size * block_num
         cpu_cache_hash_list = []
         cpu_cache_page_len_list = []
         cum_sum_len = 0
@@ -232,7 +259,7 @@ class Req(ctypes.Structure):
             elif i == len(token_hash_list) - 1:
                 cpu_cache_hash_list.append(token_hash_list[len(token_hash_list) - 1])
                 page_num = (i % block_num) + 1
-                cum_sum_len += page_num * linear_att_hash_page_size
+                cum_sum_len += page_num * hash_page_size
                 cpu_cache_page_len_list.append(cum_sum_len)
 
         return cpu_cache_hash_list, cpu_cache_page_len_list
@@ -244,39 +271,118 @@ class Req(ctypes.Structure):
         self.token_hash_list.fill(hash_values)
         return
 
-    def _fill_linear_att_token_hash(self):
-        self.linear_att_token_hash_list = TokenHashList()
-        self.linear_att_token_hash_list.clear()
+    def _fill_hybrid_token_hash(self):
+        self.hybrid_token_hash_list = TokenHashList()
+        self.hybrid_token_hash_list.clear()
         hash_values = compute_token_list_hash(self.get_prompt_ids(), get_env_start_args().linear_att_hash_page_size)
-        self.linear_att_token_hash_list.fill(hash_values)
+        self.hybrid_token_hash_list.fill(hash_values)
         return
 
+    def set_compiled_grammar(self, payload: bytes) -> None:
+        """在请求转发 Router 前，将 HTTP 侧编译好的语法写入当前请求槽的共享内存。"""
+        if not payload:
+            return
+        # 共享内存按请求槽复用，只在旧请求释放该槽后重建。
+        # 按编译结果的实际长度创建内存块，读取侧直接使用块长度，无需在 Req 中另存长度字段。
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", len(payload), force_mode="create")
+        try:
+            shm.buf[: len(payload)] = payload
+        finally:
+            shm.close()
+
+    def get_compiled_grammar(self) -> Optional[bytes]:
+        # 无约束请求跳过读取，避免请求槽复用时误读旧请求留下的语法。
+        if not self.sample_params.constraint_out_params.has_constraint():
+            return None
+        # 只连接写入侧已发布的内存块，读取整个块即可取得完整编译结果。
+        shm = create_or_link_shm(f"shm_grammar_{self.index_in_shm_mem}", -1, force_mode="link")
+        try:
+            return bytes(shm.buf)
+        finally:
+            shm.close()
+
     def create_prompt_ids_shm_array(self):
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_prompts_{self.index_in_shm_mem}"
+        name = f"shm_prompts_{self.index_in_shm_mem}"
         self.shm_prompt_ids = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.int64)
         self.shm_prompt_ids.create_shm()
         return
 
     def link_prompt_ids_shm_array(self):
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_prompts_{self.index_in_shm_mem}"
+        name = f"shm_prompts_{self.index_in_shm_mem}"
         self.shm_prompt_ids = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.int64)
         self.shm_prompt_ids.link_shm()
         return
 
     def create_logprobs_shm_array(self):
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
-        self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
+        name = f"shm_logprobs_{self.index_in_shm_mem}"
+        self.shm_logprobs = ShmArray(
+            name,
+            (self.alloc_shm_numpy_len,),
+            dtype=[("logprob", np.float32), ("rank", np.int32)],
+        )
         self.shm_logprobs.create_shm()
+        # rank=-1 表示该位置没有请求或没有计算 rank 元信息。
+        self.shm_logprobs.arr["logprob"][:] = 0.0
+        self.shm_logprobs.arr["rank"][:] = -1
         return
 
     def link_logprobs_shm_array(self):
-        service_uni_name = get_unique_server_name()
-        name = f"{service_uni_name}_shm_logprobs_{self.index_in_shm_mem}"
-        self.shm_logprobs = ShmArray(name, (self.alloc_shm_numpy_len,), dtype=np.float32)
+        name = f"shm_logprobs_{self.index_in_shm_mem}"
+        self.shm_logprobs = ShmArray(
+            name,
+            (self.alloc_shm_numpy_len,),
+            dtype=[("logprob", np.float32), ("rank", np.int32)],
+        )
         self.shm_logprobs.link_shm()
+        return
+
+    def detach_shm_arrays(self):
+        """Detach process-local request-scoped SHM handles before slot reuse."""
+        for attr_name in ("shm_prompt_ids", "shm_logprobs"):
+            shm_array = getattr(self, attr_name, None)
+            if shm_array is not None:
+                shm_array.detach_shm()
+                delattr(self, attr_name)
+
+    async def merge_final_token_metadata(
+        self,
+        metadata: Dict[str, Any],
+        tokenizer: Any,
+        enable_return_routed_experts: bool = False,
+        timeout: float = 60.0,
+    ) -> None:
+        """等待并读取 final token metadata，按需合并进 HTTP 输出 ``metadata``。
+
+        仅在需要 ``prompt_logprobs`` / ``routed_experts`` 时执行；失败或超时
+        不改动 ``metadata``（仅打 warning）。
+        """
+        # 阶段 1：判断本请求是否需要 final token metadata。
+        need_prompt_logprobs = self.sample_params.prompt_logprobs >= 0
+        if not (need_prompt_logprobs or enable_return_routed_experts):
+            return
+
+        # 阶段 2：等待 Infer 写完 metadata 并释放。
+        # Infer 在 dump 之后才会置 shm_infer_released=True，以此作为可读信号。
+        start_time = time.time()
+        while not self.shm_infer_released:
+            if time.time() - start_time > timeout:
+                logger.warning(f"wait final_token_metadata ready timeout, req_id={self.request_id}, timeout={timeout}s")
+                return
+            await asyncio.sleep(0.005)
+
+        # 阶段 3：从 shm 读取并解码（read 内部已尽量吞掉 shm 缺失等错误）。
+        try:
+            meta = ReqFinalTokenMetadata(self).read(tokenizer)
+        except Exception as e:
+            logger.warning(f"Failed to read final token metadata for req {self.request_id}: {e}")
+            return
+
+        # 阶段 4：按需合并进 HTTP 输出 metadata。
+        if need_prompt_logprobs:
+            metadata["prompt_logprobs"] = meta["prompt_logprobs"]
+            metadata["prompt_token_ids"] = meta["prompt_token_ids"]
+        if meta.get("routed_experts") is not None:
+            metadata["routed_experts"] = meta["routed_experts"]
         return
 
     def get_prompt_ids(self):
@@ -294,17 +400,58 @@ class Req(ctypes.Structure):
             self.sample_params.suggested_dp_index,
         )
 
+    def mark_simulated_finished(
+        self,
+        finish_status: int = FinishStatus.FINISHED_ABORTED,
+        output_len: int = 0,
+    ) -> bool:
+        """模拟/强制结束：补齐 finish token 与 finish_status，供 detoken / HTTP 收尾。
+
+        用于 waiting abort、Infer abort 释放兜底、PD KV 失败强制结束等路径。
+
+        注意：会写 ``finish_status`` / ``candetoken_out_len`` 等 shm 字段，Infer 侧仅
+        ``is_master_in_dp`` 节点可调用；router waiting abort 由调度进程独占写，同理。
+
+        无论当前 ``output_len`` 为多少，都在已有输出末尾再追加一个 EOS 作为 finish token，
+        最终输出长度变为 ``output_len + 1``。``candetoken_out_len`` 最后写，避免 detoken
+        读到不完整状态。
+
+        Returns:
+            是否实际写入了结束状态；shm 已 finished 时不覆盖，返回 False。
+        """
+        if self.finish_status.is_finished():
+            return False
+
+        if not hasattr(self, "shm_prompt_ids"):
+            self.link_prompt_ids_shm_array()
+        if not hasattr(self, "shm_logprobs"):
+            self.link_logprobs_shm_array()
+
+        # Append one EOS after existing outputs: [...prompt][...gen][eos]
+        new_output_len = output_len + 1
+        finish_token_index = self.input_len + new_output_len - 1
+        eos_ids = get_env_start_args().eos_id
+        token_id = eos_ids[0] if eos_ids else 0
+        self.shm_prompt_ids.arr[finish_token_index] = token_id
+        self.shm_logprobs.arr["logprob"][finish_token_index] = 0.0
+        self.shm_logprobs.arr["rank"][finish_token_index] = -1
+
+        self.finish_token_index = finish_token_index
+        self.finish_status.set_status(finish_status)
+        self.shm_cur_output_len = new_output_len
+        # candetoken_out_len 最后写，避免 detoken 提前读到不完整状态
+        self.candetoken_out_len = new_output_len
+        return True
+
     def can_release(self):
         # 只有管理节点有一个引用
         ref_count_ok = self.ref_count == 1
         can_released_mark = self.can_released_mark
 
-        if self.is_aborted and can_released_mark and ref_count_ok:
-            return True
-
-        ok_finished_gen_req = self.finish_status.is_finished() or self.stop_str_matched
-
-        if ok_finished_gen_req and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
+        # 回收请求需同时确认：推理端已写入结束状态，detokenization 已完成并设置 can_released_mark，
+        # 其他进程已归还 Req 引用（只剩主管理进程的一个引用），且 HTTP 已取走共享输出队列中的所有 token。
+        # Infer 在归还引用前写好 finish_status；因此 ref_count_ok 与结束状态共同确认推理端已退出。
+        if self.finish_status.is_finished() and can_released_mark and ref_count_ok and self.out_tokens_queue.is_empty():
             return True
 
         return False
@@ -315,29 +462,18 @@ class Req(ctypes.Structure):
     def get_tuple_tokens(self, is_busy, ema_req_out_len):
         raise NotImplementedError("Subclasses should implement this method")
 
-    def get_decode_need_tokens(self):
-        raise NotImplementedError("Subclasses should implement this method")
-
-    def get_first_router_need_tokens(self):
-        raise NotImplementedError("Subclasses should implement this method")
-
-    def get_all_prompt_metadata(self):
-        """
-        return_all_prompt_logprobs mode use to return all logprobs cacul ppl
-        """
-        if hasattr(self, "_cache_prompt_metadata"):
-            return self._cache_prompt_metadata
-        metadata = {}
-        cur_ids = self.shm_prompt_ids.arr[0 : self.input_len]
-        all_prompts = []
-        for index in range(len(cur_ids) - 1):
-            tmp_dict = {int(cur_ids[index + 1]): float(self.shm_logprobs.arr[index + 1])}
-            all_prompts.append([int(cur_ids[index]), tmp_dict])
-
-        metadata["prompt_logprobs"] = all_prompts
-        metadata["prompt_token_ids"] = [int(e) for e in cur_ids]
-        self._cache_prompt_metadata = metadata
-        return metadata
+    def get_output_logprobs_metadata(self, src_index: int, tokenizer=None):
+        token_id = int(self.shm_prompt_ids.arr[src_index])
+        rank = int(self.shm_logprobs.arr["rank"][src_index])
+        rank = None if rank < 0 else rank
+        return {
+            token_id: logprob_info(
+                tokenizer,
+                token_id,
+                self.shm_logprobs.arr["logprob"][src_index],
+                rank,
+            )
+        }
 
     def is_infer_decode(self) -> bool:
         """
@@ -353,26 +489,11 @@ class Req(ctypes.Structure):
         return
 
 
-# 由于目前加入了很多异步调度的方法，为了缓解异步调度带来的很多
-# 估计不准确的问题，通过加长输出的长度，进行偏向保守一些的调度
-# 理论上不会多估计太多的 token 占用量, 同时得到较高的token显存
-# 使用率
-ADDED_OUTPUT_LEN = 16
-
-
 class ChunkedPrefillReq(Req):
     _pack_ = 4
 
     def get_tuple_tokens(self, is_busy, ema_req_out_len):
         args = get_env_start_args()
-        # chuncked prefill 推理的过程中，存在很多模式的延迟 step 推理的控制， 用于
-        # 保证更好的包间数据或者是提升 dp 模式下prefill 的效率，但是在估计 token 显存
-        # 占用量的过程中，分chuncked 需要考虑其因为分 chuncked带来的生命期的延长，具体
-        # 体现就是在 b_len 的计算中，xxx * (max_waiting_token + 1) 的部分，这部分
-        # 就是通过模拟加长其输出token长度，来延长其在估计阶段的生命周期。max_waiting_token
-        # 的计算是保守的，每次chuncked prefill 延迟的最大步数为两种模式之合，因为
-        # 这个并不会导致预估的token占用量大幅增加，所以可以放心使用。
-        max_waiting_token = args.router_max_wait_tokens
         has_out_len = self.shm_cur_output_len
         if self.sample_params.ignore_eos:
             cur_max_new_token_len = self.sample_params.max_new_tokens
@@ -382,56 +503,12 @@ class ChunkedPrefillReq(Req):
             cur_max_new_token_len = min(self.sample_params.max_new_tokens, max(int(1.1 * has_out_len), ema_req_out_len))
 
         a_len = max(self.input_len + has_out_len + 1, self.shm_cur_kv_len + 1)
-        b_len = (
-            (self.input_len + has_out_len - self.shm_cur_kv_len + self.chunked_prefill_size - 1)
-            // self.chunked_prefill_size
-            * (max_waiting_token + 1)
-            + cur_max_new_token_len
-            - has_out_len
-            - 1
-        )
-        b_len = max(0, b_len) + ADDED_OUTPUT_LEN
+        # b_len 用于调度时估算请求后续需要的 token 容量，各项含义如下：
+        # 1. 预计生成总量减去已输出的 has_out_len，以及 a_len 已预留的 1 个 token；用 max(0, ...) 避免负数。
+        # 2. page_size：KV cache 按页分配，预留一页以覆盖逻辑 token 长度与实际分配容量之间的对齐开销。
+        # 3. 2 * (mtp_step + 1)：按每轮最多推进 mtp_step + 1 个 token，预留两轮推理的容量，
+        #    为 MTP 和 overlap 执行留出空间；mtp_step 为 0 时仍保留两个普通 decode token 的余量。
+        # 4. 16：为 HTTP stop/abort 跨进程通知及推理退出的延迟预留 token 容量。
+        b_len = max(0, cur_max_new_token_len - has_out_len - 1) + args.page_size + 2 * (args.mtp_step + 1) + 16
 
         return (a_len, b_len)
-
-    def get_decode_need_tokens(self):
-        """
-        chunkedprefill 调度模式的实现
-        """
-        # 当开启 mtp 模式以后，每一次 decode 需要的 token 数量会增加
-        need_tokens = min(self.input_len + self.shm_cur_output_len - self.shm_cur_kv_len, self.chunked_prefill_size)
-        if need_tokens == 1 and self._mtp_step > 0:
-            # self._mtp_step > 0 时，说明开启了mtp 模式，每次decode需要额外的mem token 资源
-            # "vanilla_with_att" 模式需要的 mem 用量为 self._mtp_step + 1
-            # "eagle_with_att" 模式需要的 mem 用量为 （self._mtp_step + 1）* 2
-            # 为了简化统一 返回 （self._mtp_step + 1）* 2
-            need_tokens = (self._mtp_step + 1) * 2
-
-        return need_tokens
-
-    def get_first_router_need_tokens(self):
-
-        return min(self.input_len + self.shm_cur_output_len, self.chunked_prefill_size)
-
-
-class TokenHealingReq(ChunkedPrefillReq):
-    _pack_ = 4
-
-    def post_init(
-        self,
-    ):
-        for prefix_token_num in range(2, -1, -1):
-            if self.input_len > prefix_token_num:
-                self.input_len -= prefix_token_num
-                self.prefix_token_ids.set_token_ids(
-                    self.shm_prompt_ids.arr[self.input_len : (self.input_len + prefix_token_num)]
-                )
-                break
-
-        # 因为原始的输出token数量，会被中间的前缀补全占用decode次数，
-        # 所以默认多添加一些decode步数, token healing mode 下，由于
-        # 估计的生成token数据对应的生存周期可能会不准确,所以为了缓解调
-        # 度带来的显存估计问题，对于生成token的长度 + 6来缓解可能的估计
-        # 错误问题。
-        self.sample_params.max_new_tokens = self.sample_params.max_new_tokens + self.prefix_token_ids.size + 6
-        return

@@ -37,10 +37,25 @@ LightLLM 的多级缓存系统采用分层设计:
 
 **工作原理:**
 
-1. 目前的机制是会将GPU cache中的数据原模原样备份一份到CPU cache中，并非只存储GPU cache放不下的内容
+1. 缓存放置行为由 ``--cache_placement_strategy`` 控制，可选择兼容旧行为的逐层备份或自适应分层放置
 2. L1、L2、L3 cache都基于LRU淘汰策略进行数据管理
 3. 为了避免L3缓存频繁写盘，可通过LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH环境变量控制写入的最小长度阈值，如果设为0，则所有L2数据都会写入L3缓存
 4. 查询时，会先查询L1找出命中的最长前缀，再去L2查询以继续增加最长匹配前缀，最后再去L3查询剩余部分
+
+缓存放置策略
+~~~~~~~~~~~~
+
+``--cache_placement_strategy`` 用于选择请求完成后的 KV Cache 放置策略，可选值如下：
+
+- ``adaptive``（默认）：冷启动阶段先收集 128 个请求，快速生成 GPU 与低层缓存路径之间的首个长度分界点；之后保留最近 512 个请求的滑动窗口，每 36 个放置步更新一次分界点。短请求放入 GPU，长请求放入 CPU；开启 Disk 时，长请求沿 CPU → Disk 路径异步落盘。由于 Disk 必须经过 CPU，计算比例时低层有效容量取 CPU 与 Disk 容量的较大值，而不是二者之和。默认只使用物理 GPU token 容量的 80% 进行放置估算，为运行态请求预留容量。首次小窗口尚未填满、没有可用分界点时，使用 ``legacy`` 行为完成冷启动。
+- ``legacy``：兼容原有的逐层备份行为。请求始终保留在 GPU cache，同时复制到所有已开启的下级缓存；开启 CPU cache 时写入 GPU 和 CPU，同时开启 Disk cache 时写入 GPU、CPU 和 Disk。
+
+未开启 ``--enable_cpu_cache`` 时，该参数不会改变运行行为，所有完成请求都只写入 GPU cache。
+
+.. note::
+
+   Disk cache 是通过 CPU cache 异步写入的，因此使用 Disk cache 时仍需同时开启 ``--enable_cpu_cache``。
+   ``LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH`` 的最小写盘长度限制对两种策略都生效。
 
 **适用场景:**
 
@@ -69,7 +84,8 @@ LightLLM 的多级缓存系统采用分层设计:
         --mem_fraction 0.88 \
         --enable_cpu_cache \
         --cpu_cache_storage_size 400 \
-        --cpu_cache_token_page_size 64
+        --cpu_cache_token_page_size 64 \
+        --cache_placement_strategy adaptive
 
 **参数说明:**
 
@@ -98,6 +114,9 @@ CPU 缓存参数
   - 较小的页大小 (如 64) 适合细粒度的缓存管理,减少内存碎片,提高命中率
   - 较大的页大小 (如 256) 适合大批量数据迁移,提高传输效率
   - 该值需要权衡内存利用率和传输开销
+
+- ``--cache_placement_strategy adaptive``: **缓存放置策略**，默认使用自适应分层；如需保持原有的 GPU + CPU 逐层备份行为，设置为 ``legacy``
+- ``LIGHTLLM_CACHE_PLACEMENT_GPU_CAPACITY_RATIO=0.8``: **GPU 容量估算比例**，adaptive 默认使用物理 GPU token 容量的 ``0.8`` 进行放置估算，合法范围为 ``(0, 1]``
 
 **性能优化建议:**
 
@@ -132,6 +151,7 @@ CPU 缓存参数
         --enable_cpu_cache \
         --cpu_cache_storage_size 400 \
         --cpu_cache_token_page_size 256 \
+        --cache_placement_strategy adaptive \
         --enable_disk_cache \
         --disk_cache_storage_size 1000 \
         --disk_cache_dir /mnt/ssd/disk_cache_dir
@@ -156,6 +176,12 @@ CPU 缓存参数
   - 强烈建议使用 SSD/NVMe 存储,避免使用 HDD (性能差距可达 10-100 倍)
   - 确保目录具有足够的读写权限和磁盘空间
   - 注意使用磁盘缓存时, 保证使用的SSD硬盘是长寿命的硬盘, 否则可能会快速消耗其使用寿命。
+
+如需使用兼容旧行为的三级逐层备份策略，将启动参数改为：
+
+.. code-block:: bash
+
+    --cache_placement_strategy legacy
 
 相关文档
 --------

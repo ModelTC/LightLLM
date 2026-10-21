@@ -14,7 +14,6 @@ from lightllm.server.router.model_infer.mode_backend.overlap_events import Overl
 from lightllm.common.basemodel.triton_kernel.gather_token_id import scatter_token
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from ..chunked_prefill.impl import ChunkedPrefillBackend
-from lightllm.common.basemodel.infer_lock import g_infer_state_lock
 from lightllm.utils.envs_utils import get_env_start_args
 
 
@@ -22,12 +21,13 @@ class DiversehBackend(ChunkedPrefillBackend):
     def __init__(self) -> None:
         super().__init__()
 
-        if get_env_start_args().mtp_mode:
-            # 当前只有 mistral mtp 可以使用 diverse mode 的 mtp 功能。
-            self.prefill = self.beam_prefill
-            assert get_env_start_args().mtp_mode in ["vanilla_no_att", "eagle_no_att"]
-        else:
-            self.prefill = self.beam_prefill
+        self.prefill = self.beam_prefill
+        spec_mode = get_env_start_args().mtp_mode
+        if spec_mode is not None:
+            assert spec_mode in [
+                "vanilla_no_att",
+                "eagle_no_att",
+            ]
 
         self.classed_req_strict_prefill = True
 
@@ -64,6 +64,7 @@ class DiversehBackend(ChunkedPrefillBackend):
             b_mtp_index = model_input.b_mtp_index[batch_idx]
 
             next_token_ids, next_token_logprobs = sample(logits, run_reqs, self.eos_id)
+            next_token_ranks = self._get_next_token_ranks(logits, next_token_ids)
 
             scatter_token(
                 next_token_ids=next_token_ids,
@@ -73,8 +74,14 @@ class DiversehBackend(ChunkedPrefillBackend):
                 b_has_out=b_has_out,
             )
 
-            next_token_ids_cpu, next_token_logprobs_cpu = self._async_copy_next_token_infos_to_pin_mem(
-                next_token_ids=next_token_ids, next_token_logprobs=next_token_logprobs
+            (
+                next_token_ids_cpu,
+                next_token_logprobs_cpu,
+                next_token_ranks_cpu,
+            ) = self._async_copy_next_token_infos_to_pin_mem(
+                next_token_ids=next_token_ids,
+                next_token_logprobs=next_token_logprobs,
+                next_token_ranks=next_token_ranks,
             )
 
             sync_event = torch.cuda.Event()
@@ -91,6 +98,7 @@ class DiversehBackend(ChunkedPrefillBackend):
             run_reqs=run_reqs,
             next_token_ids=next_token_ids_cpu,
             next_token_logprobs=next_token_logprobs_cpu,
+            next_token_ranks=next_token_ranks_cpu,
             run_reqs_update_packs=update_packs,
             extra_post_req_handle_func=self.extra_post_req_handle_func,
         )
@@ -105,7 +113,8 @@ class DiversehBackend(ChunkedPrefillBackend):
         run_reqs = []
         for i in range(len(master_reqs)):
             master_req = master_reqs[i]
-            slave_reqs = master_req.slave_reqs
+            # overlap 模式会延迟一轮释放终止请求，本轮不能再为已标记的 slave 复制 logits。
+            slave_reqs = [req for req in master_req.slave_reqs if not req.filter_mark]
             slave_num = len(slave_reqs)
             batch_idx.append(i)
             run_reqs.append(master_req)
@@ -140,7 +149,7 @@ class DiversehBackend(ChunkedPrefillBackend):
                     pack = InferReqUpdatePack(req_obj=req_obj, output_len=0)
                     update_func_objs.append(pack)
                     pre_master_req_pack = pack
-                    # TODO 如果 diverse mode 需要支持 nixl pd 分离，则应该每个分块prefill后都进行相关的复制，
+                    # TODO 如果 diverse mode 需要支持 pd 分离，则应该每个分块prefill后都进行相关的复制，
                     # 暂时不支持 diverse mode 和 pd 模式的混合
                     continue
 
@@ -167,7 +176,6 @@ class DiversehBackend(ChunkedPrefillBackend):
         return update_func_objs
 
     def _master_req_to_radix_cache(self, master_req: InferReq):
-        g_infer_state_lock.acquire()
         key = master_req.get_input_token_ids()[0 : master_req.cur_kv_len]
         key = torch.tensor(key, dtype=torch.int64, device="cpu")
         value = self.model.req_manager.req_to_token_indexs[master_req.req_idx][: master_req.cur_kv_len].detach().cpu()
@@ -189,11 +197,9 @@ class DiversehBackend(ChunkedPrefillBackend):
         share_node, kv_len, value = self.radix_cache.match_prefix(key, update_refs=False)
         assert share_node == new_shared_kv_node and kv_len == master_req.cur_kv_len
         self.model.req_manager.req_to_token_indexs[master_req.req_idx][0 : master_req.cur_kv_len] = value
-        g_infer_state_lock.release()
         return
 
     def _copy_master_req_to_slave_req(self, slave_req: InferReq):
-        g_infer_state_lock.acquire()
         master_req = slave_req.related_master_req
         assert master_req is not None
 
@@ -208,11 +214,11 @@ class DiversehBackend(ChunkedPrefillBackend):
         # torch.cuda.current_stream().synchronize()
         slave_req.shared_kv_node = master_req.shared_kv_node
         slave_req.cur_kv_len = kv_len
+        # slave 在 prefill 阶段没有独立分配 KV，共享完成后需要同步其已持有的 KV 长度。
+        slave_req.hold_kv_len = kv_len
         slave_req.cur_output_len = master_req.cur_output_len
         if self.is_master_in_dp:
             slave_req.shm_req.shm_cur_kv_len = slave_req.cur_kv_len
 
         assert kv_len <= slave_req.shm_req.input_len
-
-        g_infer_state_lock.release()
         return

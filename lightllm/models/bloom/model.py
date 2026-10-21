@@ -1,4 +1,3 @@
-from lightllm.models.registry import ModelRegistry
 from lightllm.models.bloom.layer_infer.pre_layer_infer import BloomPreLayerInfer
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
 from lightllm.models.bloom.layer_infer.transformer_layer_infer import BloomTransformerLayerInfer
@@ -8,7 +7,6 @@ from lightllm.common.basemodel import InferStateInfo, TpPartBaseModel
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
 
 
-@ModelRegistry("bloom")
 class BloomTpPartModel(TpPartBaseModel):
     # weight class
     pre_and_post_weight_class = BloomPreAndPostLayerWeight

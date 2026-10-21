@@ -52,6 +52,24 @@ Advanced Configuration Parameters
 
 .. note:: To ensure equal memory load on each GPU, visual_dp * visual_tp = tp is required. For example, if tp=2, then visual_dp=1, visual_tp=2.
 
+PD Disaggregation Restrictions
+------------------------------
+
+In a multimodal PD deployment, ``pd_master`` preprocesses images before estimating
+the input token count and forwards the result to the ``prefill`` node. Consequently,
+``pd_master`` and every ``prefill`` node must use the same effective values for
+``--max_image_pixels`` and ``--disable_image_resize``.
+
+These two parameters are checked when a Prefill node registers. A mismatch rejects
+the registration, preventing PD Master's token estimate from differing from the
+image preprocessing performed by Prefill. Decode nodes do not preprocess images and
+are not subject to this restriction.
+
+.. note::
+   Launch scripts should explicitly pass identical values to PD Master and every
+   multimodal Prefill node. Registration compares the final effective startup values,
+   not merely whether an option was present on the command line.
+
 ViT Deployment Methods
 -----------------------
 

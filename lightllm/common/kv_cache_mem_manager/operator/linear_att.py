@@ -6,7 +6,6 @@ from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.linear_att_cache_manager.config_objs import LinearAttCacheConfig
 
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
@@ -22,7 +21,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
     def __init__(self, mem_manager):
         super().__init__(mem_manager)
-        self.linear_config = LinearAttCacheConfig.load_from_args()
+        self.linear_config = mem_manager.linear_config
 
     def load_cpu_cache_to_gpu(
         self,
@@ -46,9 +45,9 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
         big_page_buffer_ids_cpu = []
         for i in range(big_page_num):
-            page_id = mem_manager.linear_att_big_page_buffers.alloc_one_state_cache()
+            page_id = mem_manager.big_page_buffers.alloc_one_state_cache()
             assert page_id is not None
-            req.linear_att_len_to_big_page_id[max_kv_len] = page_id
+            req.hybrid_len_to_big_page_id[max_kv_len] = page_id
             big_page_buffer_ids_cpu.append(page_id)
             max_kv_len -= args.cpu_cache_token_page_size
             assert max_kv_len % args.cpu_cache_token_page_size == 0
@@ -81,8 +80,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             big_page_buffer_ids=big_page_buffer_ids_gpu,
             page_indexes=page_indexes,
             gpu_full_att_kv_state=mem_manager.kv_buffer,
-            cpu_kv_conv_state=mem_manager.linear_att_big_page_buffers.conv_state_cache.buffer,
-            cpu_kv_ssm_state=mem_manager.linear_att_big_page_buffers.ssm_state_cache.buffer,
+            cpu_kv_conv_state=mem_manager.big_page_buffers.conv_state_cache.buffer,
+            cpu_kv_ssm_state=mem_manager.big_page_buffers.ssm_state_cache.buffer,
             cpu_cache_tensor=cpu_cache_client.cpu_kv_cache_tensor,
             tp_rank=get_current_rank_in_dp(),
             tp_world_size=get_dp_world_size(),
@@ -92,7 +91,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        g_infer_context.req_manager.copy_big_page_buffer_to_linear_att_state(
+        g_infer_context.req_manager.restore_big_page_state(
             big_page_buffer_idx=big_page_buffer_ids_cpu[-1],
             req=req,
         )
@@ -107,14 +106,17 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
+        args = get_env_start_args()
         if not hasattr(self, "big_page_ids_buffer_store"):
             self.big_page_ids_buffer_store = torch.empty((1024 * 1024 * 4,), dtype=torch.int64, device="cuda")
+            # 多申请3个cpu cache token page size，用于处理碎页情况，碎页情况需要将对应的大页数据拷贝到临时的大页上，
+            # 再从大页上拷贝到对应的运行态页面上
             self.mem_indexes_buffer = torch.empty(
-                (get_env_start_args().max_req_total_len + 1024,), dtype=torch.int32, device="cuda"
+                (args.max_req_total_len + 3 * args.cpu_cache_token_page_size,), dtype=torch.int32, device="cuda"
             )
 
         assert mem_indexes.is_cuda and page_indexes.is_cuda and page_readies.is_cuda
-        args = get_env_start_args()
+
         assert len(mem_indexes) % args.linear_att_hash_page_size == 0
         assert triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) == len(page_indexes)
 
@@ -128,24 +130,25 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         max_kv_len = (len(mem_indexes) // args.cpu_cache_token_page_size) * args.cpu_cache_token_page_size
         start_kv_len = (len(big_page_buffer_ids_cpu) + 1) * args.cpu_cache_token_page_size
         for seq_len in range(start_kv_len, max_kv_len + 1, args.cpu_cache_token_page_size):
-            page_id = req.linear_att_len_to_big_page_id[seq_len]
+            page_id = req.hybrid_len_to_big_page_id[seq_len]
             big_page_buffer_ids_cpu.append(page_id)
 
         if len(mem_indexes) % args.cpu_cache_token_page_size != 0:
             # 存在不满大页的碎页的页面存在需要复制的情况
             dst_len = triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) * args.cpu_cache_token_page_size
+            assert dst_len <= self.mem_indexes_buffer.shape[0]
             dst_mem_indexes = self.mem_indexes_buffer[0:dst_len].fill_(-1)
             dst_mem_indexes[0 : len(mem_indexes)].copy_(mem_indexes, non_blocking=True)
             mem_indexes = dst_mem_indexes
-            assert req.tail_linear_att_small_page_buffer_id is not None
+            assert req.tail_small_page_buffer_id is not None
             from lightllm.common.basemodel.triton_kernel.linear_att_cpu_cache_copy import (
                 copy_linear_att_state_to_linear_att_state,
             )
 
-            src_conv_state, src_ssm_state = g_infer_context.radix_cache.linear_att_small_page_buffers.get_state_cache(
-                buffer_idx=req.tail_linear_att_small_page_buffer_id
+            src_conv_state, src_ssm_state = g_infer_context.radix_cache.small_page_buffers.get_state_cache(
+                buffer_idx=req.tail_small_page_buffer_id
             )
-            dst_conv_state, dst_ssm_state = mem_manager.linear_att_big_page_buffers.get_state_cache(
+            dst_conv_state, dst_ssm_state = mem_manager.big_page_buffers.get_state_cache(
                 buffer_idx=mem_manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID,
             )
             copy_linear_att_state_to_linear_att_state(
@@ -175,8 +178,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             page_readies=page_readies,
             big_page_buffer_ids=big_page_buffer_ids_gpu,
             gpu_kv_full_att_state=mem_manager.kv_buffer,
-            cpu_kv_conv_state=mem_manager.linear_att_big_page_buffers.conv_state_cache.buffer,
-            cpu_kv_ssm_state=mem_manager.linear_att_big_page_buffers.ssm_state_cache.buffer,
+            cpu_kv_conv_state=mem_manager.big_page_buffers.conv_state_cache.buffer,
+            cpu_kv_ssm_state=mem_manager.big_page_buffers.ssm_state_cache.buffer,
             cpu_cache_tensor=cpu_cache_client.cpu_kv_cache_tensor,
             tp_rank=get_current_rank_in_dp(),
             tp_world_size=get_dp_world_size(),
@@ -187,7 +190,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
 
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
         # Qwen3Next 需要调整 layer_index
-        layer_index = layer_index // self.linear_config.full_attention_interval
+        layer_index = self.linear_config.get_full_att_kv_layer_index(layer_index)
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
