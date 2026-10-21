@@ -402,7 +402,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--pd_detail_log",
         action="store_true",
         help=(
-            "enable verbose per-block PD KV transfer debug logs. "
+            "Deprecated: use module DEBUG logging for bounded PD KV transfer summaries. "
             "Request-level debug logs and warning/error logs do not require this flag."
         ),
     )

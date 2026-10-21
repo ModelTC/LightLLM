@@ -107,11 +107,10 @@ class FlashInferAllReduce:
                 group=self.group,
             )
         except Exception as e:
-            if self.rank == 0:
-                logger.warning(
-                    "event=allreduce.unavailable backend=flashinfer reason=%r action=disable_backend",
-                    summarize_exception(e),
-                )
+            logger.warning(
+                "event=allreduce.unavailable backend=flashinfer reason=%r action=disable_backend",
+                summarize_exception(e),
+            )
             logger.debug("FlashInfer workspace initialization diagnostics", exc_info=True)
             self.disabled = True
             self._workspace = None

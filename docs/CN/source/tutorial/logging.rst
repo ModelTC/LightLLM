@@ -137,7 +137,7 @@ JSON 每行一个对象，额外字段可用于检索；异常 traceback 位于 
 升级说明
 --------
 
-原来的默认 DEBUG 改为 INFO。需要原有详细输出时显式设置 DEBUG，推荐只打开相关模块。
+默认级别仍为 INFO，详细运行诊断现在使用 DEBUG。需要原有详细输出时显式设置 DEBUG，推荐只打开相关模块。
 成功请求完成摘要默认采样 1%；HTTP access 按需显式开启。
 设置日志目录后统一写入 ``process.<PID>.log``，不再额外创建 ``default.log``；
 轮转备份为 ``process.<PID>.log.1`` 等。fork 子进程会切换到自己的 PID 文件。

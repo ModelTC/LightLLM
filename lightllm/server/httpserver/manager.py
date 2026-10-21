@@ -556,7 +556,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 yield sub_req_id, request_output, metadata, finish_status
 
         except (asyncio.CancelledError, BaseException) as e:
-            cancelled = isinstance(e, (ClientDisconnected, asyncio.CancelledError, GeneratorExit))
+            cancelled = isinstance(
+                e, (ClientDisconnected, asyncio.CancelledError, GeneratorExit, PDPrefillNodeStopGenToken)
+            )
             log_request_summary(
                 group_request_id,
                 status="cancelled" if cancelled else "timeout" if isinstance(e, asyncio.TimeoutError) else "error",

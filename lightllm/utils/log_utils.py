@@ -246,7 +246,7 @@ def _setup_logger():
             logger.removeHandler(handler)
         for handler in handlers:
             logger.addHandler(handler)
-        logger.setLevel(level)
+        logger.setLevel(min(level, logging.WARNING) if name == "py.warnings" else level)
     for handler in old_handlers:
         handler.close()
     _request_sample_rate = request_rate
@@ -259,7 +259,7 @@ def init_logger(name: str):
     if name != "lightllm" and not name.startswith("lightllm."):
         # Scripts also use this API with __name__ == '__main__'.
         _external_loggers.add(name)
-        logger.setLevel(_root_logger.level)
+        logger.setLevel(min(_root_logger.level, logging.WARNING) if name == "py.warnings" else _root_logger.level)
         for handler in _root_logger.handlers:
             if getattr(handler, "_lightllm_owned", False):
                 logger.addHandler(handler)
@@ -283,6 +283,11 @@ def configure_logging_from_args(args):
     access = getattr(args, "enable_http_access_log", None)
     if access is not None:
         os.environ["LIGHTLLM_LOG_HTTP_ACCESS"] = "1" if access else "0"
+    if getattr(args, "pd_detail_log", False):
+        logging.getLogger(__name__).warning(
+            "--pd_detail_log is deprecated; use LIGHTLLM_LOG_MODULE_LEVELS to enable DEBUG "
+            "for PD transfer modules. Transfer diagnostics now use bounded summaries."
+        )
     _level(os.getenv("LIGHTLLM_LOG_HTTP_LEVEL", "WARNING"))
     os.environ["LIGHTLLM_LOG_NODE_RANK"] = str(args.node_rank)
     os.environ["LIGHTLLM_LOG_TP_SIZE"] = str(max(1, getattr(args, "tp", 1) // getattr(args, "dp", 1)))

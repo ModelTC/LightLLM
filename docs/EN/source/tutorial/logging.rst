@@ -120,7 +120,7 @@ for tracebacks. Text mode prefixes every physical message/traceback line.
 Migration
 ---------
 
-The former DEBUG default is now INFO. Completion summaries are enabled by default; HTTP access is opt-in.
+The default level remains INFO; detailed runtime diagnostics now use DEBUG. Completion summaries are enabled by default; HTTP access is opt-in.
 File logging writes only ``process.<PID>.log`` and numbered rotation backups, without
 creating ``default.log``. Forked workers switch to their own PID files. Backup limits
 apply per PID; deployment tooling must expire historical PID files. Container deployments

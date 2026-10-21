@@ -406,7 +406,7 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
     sampling_params.best_of = 1
     sampling_params.max_new_tokens = 1
 
-    async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args):
+    async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args, **_kwargs):
         yield (
             sp.group_request_id,
             "",
@@ -830,9 +830,7 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, late_status):
         summaries = summary.call_args_list
         assert len(summaries) == 1
         assert summaries[0].args[0] == 1
-        assert summaries[0].kwargs["status"] == (
-            "continued" if late_status == FinishStatus.FINISHED_PD_DECODE_CAPACITY else "abort"
-        )
+        assert summaries[0].kwargs["status"] == "abort"
         manager.metric_client.histogram_observe.assert_any_call("lightllm_request_generated_tokens", 2)
 
     asyncio.run(run())

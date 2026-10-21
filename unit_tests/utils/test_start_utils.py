@@ -344,3 +344,40 @@ def test_readiness_waits_for_bound_endpoint_and_pd_topology(monkeypatch):
     assert flag.set_value.call_args.args == (0,)
     state.observe(200)
     assert logger.info.call_args.kwargs["extra"]["event"] == "service.recovered"
+
+
+@pytest.mark.parametrize(
+    "mode,host,expected",
+    [
+        ("normal", "0.0.0.0", "http://127.0.0.1:8000/readiness"),
+        ("pd_master", "::", "http://[::1]:8000/readiness"),
+        ("config_server", "0.0.0.0", "http://127.0.0.2:9000/readiness"),
+    ],
+)
+def test_readiness_monitor_probes_bound_address(monkeypatch, mode, host, expected):
+    import requests
+    from unittest.mock import Mock, MagicMock
+    from lightllm.server.router.dynamic_prompt import shared_arr
+    from lightllm.utils import shm_port_args
+
+    manager = start_utils.SubmoduleManager()
+    flag = Mock()
+    monkeypatch.setattr(shared_arr, "SharedInt", lambda name: flag)
+    monkeypatch.setattr(shm_port_args, "get_shm_port_args", lambda: SimpleNamespace(port=8000, config_server_port=9000))
+    monkeypatch.setattr(start_utils.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
+    session = MagicMock()
+    session.__enter__.return_value = session
+
+    def probe(url, timeout):
+        assert url == expected
+        assert timeout == 1
+        assert session.trust_env is False
+        manager.readiness_stop.set()
+        return SimpleNamespace(status_code=200)
+
+    session.get.side_effect = probe
+    monkeypatch.setattr(requests, "Session", lambda: session)
+    args = SimpleNamespace(run_mode=mode, host=host, config_server_host="127.0.0.2", model_name="test")
+    manager.start_readiness_monitor(FakeHttpServerProcess(), args)
+    session.get.assert_called_once()
+    assert flag.set_value.call_args.args == (1,)

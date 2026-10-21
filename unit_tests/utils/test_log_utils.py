@@ -570,3 +570,32 @@ def test_compact_stats_text_retains_exact_json_window():
     assert "output_tokens=" not in text and "window_s=" not in text
     record = json.loads(_run_logging(code, LIGHTLLM_LOG_FORMAT="json"))
     assert record["output_tokens"] == 40 and record["window_s"] == 2
+
+
+def test_python_warnings_survive_error_service_level_and_reconfiguration():
+    output = _run_logging(
+        """
+        import warnings
+        from lightllm.utils.log_utils import _setup_logger
+        warnings.warn("before-reconfigure", RuntimeWarning)
+        _setup_logger()
+        warnings.warn("after-reconfigure", RuntimeWarning)
+        """,
+        LIGHTLLM_LOG_LEVEL="ERROR",
+    )
+    assert output.count("before-reconfigure") == 1
+    assert output.count("after-reconfigure") == 1
+
+
+def test_legacy_pd_detail_flag_explains_bounded_debug_replacement():
+    output = _run_logging(
+        """
+        import argparse
+        from lightllm.server.api_cli import add_cli_args
+        from lightllm.utils.log_utils import configure_logging_from_args
+        args = add_cli_args(argparse.ArgumentParser()).parse_args(["--pd_detail_log"])
+        configure_logging_from_args(args)
+        """
+    )
+    assert output.count("--pd_detail_log is deprecated") == 1
+    assert "bounded summaries" in output

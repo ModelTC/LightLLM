@@ -81,9 +81,12 @@ class SubmoduleManager:
 
         ready_flag = SharedInt("service_ready")
         ready_flag.set_value(0)
-        host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(args.host, args.host)
+        bind_host = args.config_server_host if args.run_mode == "config_server" else args.host
+        ports = get_shm_port_args()
+        port = ports.config_server_port if args.run_mode == "config_server" else ports.port
+        host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(bind_host, bind_host)
         host = f"[{host}]" if ":" in host else host
-        address = f"http://{host}:{get_shm_port_args().port}"
+        address = f"http://{host}:{port}"
         started = float(os.getenv("LIGHTLLM_SERVICE_START_TIME", str(time.monotonic())))
         self.readiness_stop.clear()
 

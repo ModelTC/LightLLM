@@ -270,7 +270,10 @@ def test_prefill_encode_failure_is_outside_running_request_count():
     asyncio.run(run())
 
 
-def test_prefill_full_cache_hit_never_enters_running_request_count():
+def test_prefill_full_cache_hit_never_enters_running_request_count(monkeypatch):
+    summary = MagicMock()
+    monkeypatch.setattr("lightllm.server.httpserver.manager.log_request_summary", summary)
+
     async def run():
         manager = _make_manager(NodeRole.P)
         websocket = AsyncMock()
@@ -284,6 +287,7 @@ def test_prefill_full_cache_hit_never_enters_running_request_count():
         manager._register_running_request.assert_not_awaited()
         manager._unregister_running_request.assert_not_awaited()
         websocket.send.assert_awaited_once()
+        assert summary.call_args.kwargs["status"] == "cancelled"
 
     asyncio.run(run())
 

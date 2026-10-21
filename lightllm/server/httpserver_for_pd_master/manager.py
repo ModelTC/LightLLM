@@ -672,7 +672,8 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     break
 
         except BaseException as error:
-            if not isinstance(error, GeneratorExit) or not finish_reasons:
+            stopped = origin_request_id is not None and origin_request_id not in self.active_req_ids
+            if not isinstance(error, GeneratorExit) or not finish_reasons or stopped:
                 interrupted = isinstance(error, (ClientDisconnected, asyncio.CancelledError, GeneratorExit))
                 finish_reasons.add("abort" if interrupted else "error")
             raise
