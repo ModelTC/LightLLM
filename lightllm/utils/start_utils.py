@@ -45,8 +45,7 @@ class SubmoduleManager:
             init_state = pipe_reader.recv()
             if init_state != "init ok":
                 logger.error(f"init func {start_funcs[index].__name__} : {str(init_state)}")
-                for proc in processes:
-                    proc.kill()
+                self._cleanup_after_process_failure(None)
                 sys.exit(1)
             else:
                 logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
