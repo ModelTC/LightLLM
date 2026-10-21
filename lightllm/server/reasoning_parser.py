@@ -756,6 +756,70 @@ class Qwen3Detector(BaseReasoningFormatDetector):
         )
 
 
+class Glm45Detector(Qwen3Detector):
+    """GLM tool calls implicitly end thinking, even without ``</think>``."""
+
+    tool_start_token = "<tool_call>"
+    tool_end_token = "</tool_call>"
+
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
+        super().__init__(stream_reasoning=stream_reasoning, force_reasoning=force_reasoning)
+        self._in_tool_call = False
+
+    def detect_and_parse(self, text: str) -> StreamingParseResult:
+        detector = type(self)(stream_reasoning=self.stream_reasoning, force_reasoning=self._in_reasoning)
+        result = detector.parse_streaming_increment(text)
+        remaining = detector.flush()
+        return StreamingParseResult(
+            reasoning_text=(result.reasoning_text + remaining.reasoning_text).strip(),
+            normal_text=result.normal_text + remaining.normal_text,
+        )
+
+    def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
+        self._buffer += new_text
+        reasoning_parts = []
+        normal_parts = []
+        markers = [self.think_start_token, self.think_end_token, self.tool_start_token]
+
+        while self._buffer:
+            if self._in_tool_call:
+                end = self._buffer.find(self.tool_end_token)
+                if end == -1:
+                    text, self._buffer = prefix_hold(self._buffer, [self.tool_end_token])
+                    normal_parts.append(text)
+                    break
+                end += len(self.tool_end_token)
+                normal_parts.append(self._buffer[:end])
+                self._buffer = self._buffer[end:]
+                self._in_tool_call = False
+                continue
+
+            positions = [(self._buffer.find(marker), marker) for marker in markers]
+            positions = [(position, marker) for position, marker in positions if position != -1]
+            parts = reasoning_parts if self._in_reasoning else normal_parts
+            if not positions:
+                # A delimiter may share a chunk with reasoning or span chunks.
+                text, self._buffer = prefix_hold(self._buffer, markers)
+                parts.append(text)
+                break
+
+            position, marker = min(positions)
+            parts.append(self._buffer[:position])
+            if marker == self.tool_start_token:
+                self._in_reasoning = False
+                self._in_tool_call = True
+                # Preserve the opener and literal thinking tags in tool arguments.
+                normal_parts.append(marker)
+            else:
+                self._in_reasoning = marker == self.think_start_token
+            self._buffer = self._buffer[position + len(marker) :]
+
+        return StreamingParseResult(
+            reasoning_text="".join(reasoning_parts),
+            normal_text="".join(normal_parts),
+        )
+
+
 class KimiDetector(BaseReasoningFormatDetector):
     """
     Detector for Kimi Thinking model.
@@ -919,7 +983,7 @@ class ReasoningParser:
     DetectorMap: Dict[str, Type[BaseReasoningFormatDetector]] = {
         "deepseek-r1": DeepSeekR1Detector,
         "deepseek-v3": Qwen3Detector,
-        "glm45": Qwen3Detector,
+        "glm45": Glm45Detector,
         "gpt-oss": GptOssDetector,
         "kimi": KimiDetector,
         "kimi_k2": DeepSeekR1Detector,
