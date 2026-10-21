@@ -117,10 +117,6 @@ class NewLineFormatter(logging.Formatter):
     def format(self, record):
         _add_context(record)
         record = logging.makeLogRecord(record.__dict__.copy())
-        if record.name == "py.warnings":
-            # Python warning source snippets and trailing blank lines add no value
-            # to the console. JSON retains the original warning and source.
-            record.msg, record.args = record.getMessage().splitlines()[0], ()
         record.compact_context = _compact_context(record)
         record.source = (
             f"{record.filename}:{record.lineno} "
@@ -181,7 +177,7 @@ class ProcessFileHandler(logging.handlers.RotatingFileHandler):
 
 def _level(value):
     value = str(value).upper()
-    if value not in {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}:
+    if value not in {"DEBUG", "INFO", "WARNING", "WARN", "ERROR", "CRITICAL", "FATAL", "NOTSET"}:
         raise ValueError(f"Invalid LightLLM log level: {value}")
     return getattr(logging, value)
 
@@ -431,6 +427,8 @@ def get_http_logging_args(application_access=False):
     """Hypercorn access and error logging are independent of service verbosity."""
     level = os.getenv("LIGHTLLM_LOG_HTTP_LEVEL", "warning")
     _level(level)
+    if http_access_enabled() and not application_access and _level(level) > logging.INFO:
+        level = "info"
     args = ["--log-level", level.lower(), "--error-logfile", "-"]
     if http_access_enabled() and not application_access:
         args.extend(["--access-logfile", "-"])

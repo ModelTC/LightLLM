@@ -727,7 +727,8 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 
 
 @pytest.mark.parametrize(
-    "exit_mode, token_count", [("finish", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)]
+    "exit_mode, token_count",
+    [("finish", 2), ("capacity", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)],
 )
 def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_count):
     import math
@@ -754,7 +755,9 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_co
         yield 80, "first", dict(metadata), FinishStatus()
         if exit_mode == "error":
             raise RuntimeError("decode failed")
-        yield 80, "last", dict(metadata), FinishStatus(FinishStatus.FINISHED_LENGTH)
+        yield 80, "last", dict(metadata), FinishStatus(
+            FinishStatus.FINISHED_PD_DECODE_CAPACITY if exit_mode == "capacity" else FinishStatus.FINISHED_LENGTH
+        )
 
     manager.fetch_pd_stream = raw_stream
 
@@ -777,7 +780,13 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_co
         assert summaries[0].kwargs["x_request_id"] == "summary-test"
         assert summaries[0].kwargs["output_tokens"] == token_count
         assert summaries[0].kwargs["status"] == (
-            "error" if exit_mode == "error" else "abort" if exit_mode == "close" else "completed"
+            "error"
+            if exit_mode == "error"
+            else "abort"
+            if exit_mode == "close"
+            else "continued"
+            if exit_mode == "capacity"
+            else "completed"
         )
         manager.first_time_costs.add.assert_called_once()
         manager.per_token_costs.add.assert_called_once()
@@ -795,7 +804,8 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_co
 
 
 @pytest.mark.parametrize("late_status", [FinishStatus.NO_FINISH, FinishStatus.FINISHED_PD_DECODE_CAPACITY])
-def test_pd_stopped_choice_records_segment_summary(monkeypatch, late_status):
+@pytest.mark.parametrize("close_directly", [False, True])
+def test_pd_stopped_choice_records_segment_summary(monkeypatch, late_status, close_directly):
     import time
     from unittest.mock import AsyncMock, MagicMock
 
@@ -823,15 +833,21 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, late_status):
         await manager.stop_request(80)
         # stop_request 只做标记，恢复生成时才停止当前 P/D 分段。
         manager.abort.assert_not_awaited()
-        with pytest.raises(StopAsyncIteration):
-            await generator.__anext__()
+        if close_directly:
+            await generator.aclose()
+        else:
+            with pytest.raises(StopAsyncIteration):
+                await generator.__anext__()
         assert not manager.active_req_ids
         manager.abort.assert_awaited_once()
         summaries = summary.call_args_list
         assert len(summaries) == 1
         assert summaries[0].args[0] == 1
-        assert summaries[0].kwargs["status"] == "abort"
-        manager.metric_client.histogram_observe.assert_any_call("lightllm_request_generated_tokens", 2)
+        assert summaries[0].kwargs["status"] == "completed"
+        assert summaries[0].kwargs["finish_reason"] == "stop"
+        manager.metric_client.histogram_observe.assert_any_call(
+            "lightllm_request_generated_tokens", 1 if close_directly else 2
+        )
 
     asyncio.run(run())
 
@@ -893,3 +909,41 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
         assert not manager.active_req_ids
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+@pytest.mark.parametrize("bad_metadata", [False, True])
+def test_pd_failure_emits_one_summary_with_output_counts(monkeypatch, bad_metadata):
+    import time
+    from unittest.mock import AsyncMock, MagicMock
+
+    manager = _make_manager(monkeypatch)
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.metric_client = MagicMock()
+    manager.abort = AsyncMock()
+    summary = MagicMock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
+    request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
+
+    async def raw_stream(_p, _d, _prompt, sp, *_args):
+        metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
+        yield sp.group_request_id, "first", dict(metadata), FinishStatus()
+        if bad_metadata:
+            yield sp.group_request_id + 1, "bad", dict(metadata), FinishStatus()
+        else:
+            raise RuntimeError("decode failed")
+
+    manager.fetch_pd_stream = raw_stream
+
+    async def run():
+        with pytest.raises(AssertionError if bad_metadata else RuntimeError):
+            async for _ in manager._generate_one("prompt", params, None, request, time.time(), 80, 10):
+                pass
+        summary.assert_called_once()
+        assert summary.call_args.kwargs["status"] == "error"
+        assert summary.call_args.kwargs["output_tokens"] == (2 if bad_metadata else 1)
+        assert not manager.active_req_ids
+
+    asyncio.run(run())

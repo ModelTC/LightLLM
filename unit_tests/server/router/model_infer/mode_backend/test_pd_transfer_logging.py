@@ -10,8 +10,8 @@ from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import 
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_trans_process
 
 
-@pytest.mark.parametrize("side", ["prefill", "decode"])
-def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side):
+@pytest.mark.parametrize("side, tokens", [("prefill", 3), ("decode", 3), ("decode", 0)])
+def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side, tokens):
     transporter = NixlKVTransporter.__new__(NixlKVTransporter)
     transporter.nixl_agent = Mock()
     transporter._create_paged_xfer_handles = Mock()
@@ -37,7 +37,7 @@ def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side
         request_id=123,
         page_kind="kv",
         create_time=0,
-        transfer_kv_num=lambda: 3,
+        transfer_kv_num=lambda: tokens,
         createRetObj=lambda: SimpleNamespace(),
     )
 
@@ -58,6 +58,42 @@ def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side
     assert worker.task_out_queue.qsize() == 2
     assert worker.page_index_queue.qsize() == 2
     assert transporter.release_xfer_handle.call_count == 2
-    assert stats.add.call_count == 2
-    assert stats.add.call_args.kwargs["bytes_total"] == transporter.page_len
+    assert stats.add.call_count == (2 if tokens else 0)
+    if tokens:
+        assert stats.add.call_args.kwargs["bytes_total"] == transporter.page_len
     stats.flush.assert_called_once()
+
+
+@pytest.mark.parametrize("error_info", ["aborted req", "transfer timed out"])
+def test_decode_transfer_cancellation_is_debug_and_failures_are_error(monkeypatch, error_info):
+    worker = decode_trans_process._DecodeTransModule.__new__(decode_trans_process._DecodeTransModule)
+    worker.device_id = 0
+    worker.page_index_queue = queue.Queue()
+    worker.task_out_queue = queue.Queue()
+    worker.transporter = Mock()
+    worker._abort = Mock()
+    logger = Mock()
+    monkeypatch.setattr(decode_trans_process, "logger", logger)
+    monkeypatch.setattr(decode_trans_process.torch.cuda, "set_device", lambda _: None)
+    task = SimpleNamespace(
+        dst_page_index=None,
+        xfer_handle=None,
+        request_id=123,
+        error_info=error_info,
+        createRetObj=lambda: "result",
+    )
+
+    class StopLoop(Exception):
+        pass
+
+    worker.failed_queue = Mock()
+    worker.failed_queue.get.side_effect = [task, StopLoop()]
+    with pytest.raises(StopLoop):
+        worker.fail_loop()
+    worker._abort.assert_called_once_with(request_id=123, error_info=error_info)
+    worker.transporter.send_error_info_to_prefill_node.assert_called_once_with(trans_task=task)
+    if error_info == "aborted req":
+        logger.error.assert_not_called()
+        logger.debug.assert_called_once_with("KV transfer cancelled: %s", "result")
+    else:
+        logger.error.assert_called_once_with("KV transfer failed: %s", "result")

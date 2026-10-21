@@ -78,7 +78,7 @@ def init_vision_distributed_env(kvargs):
     set_dp_size(dp_size)
     set_dp_world_size(tp_world_size)
     set_current_rank_in_dp(tp_rank_id)
-    set_log_context(tp_rank=tp_rank_id, dp_rank=kvargs.get("dp_rank_id", "-"))
+    set_log_context(tp_rank=tp_rank_id, tp_size=tp_world_size, dp_rank=kvargs.get("dp_rank_id", "-"))
     device_id = kvargs["device_id"]
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)
@@ -114,7 +114,7 @@ def init_audio_distributed_env(kvargs):
     set_dp_size(1)
     set_dp_world_size(tp_world_size)
     set_current_rank_in_dp(tp_rank_id)
-    set_log_context(tp_rank=tp_rank_id, dp_rank=kvargs.get("dp_rank_id", "-"))
+    set_log_context(tp_rank=tp_rank_id, tp_size=tp_world_size, dp_rank=kvargs.get("dp_rank_id", "-"))
     device_id = kvargs["device_id"]
     set_current_device_id(device_id)
     torch.cuda.set_device(device_id)

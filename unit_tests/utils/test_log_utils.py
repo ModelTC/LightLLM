@@ -599,3 +599,67 @@ def test_legacy_pd_detail_flag_explains_bounded_debug_replacement():
     )
     assert output.count("--pd_detail_log is deprecated") == 1
     assert "bounded summaries" in output
+
+
+@pytest.mark.parametrize("level, expected", [("warn", 30), ("fatal", 50), ("notset", 0)])
+def test_standard_logging_level_aliases(level, expected):
+    _run_logging(
+        f"from lightllm.utils import log_utils; assert log_utils._root_logger.level == {expected}",
+        LIGHTLLM_LOG_LEVEL=level,
+    )
+
+
+def test_config_server_access_switch_enables_hypercorn_info(monkeypatch):
+    from hypercorn.config import Config
+    from hypercorn.logging import Logger
+
+    monkeypatch.setenv("LIGHTLLM_LOG_HTTP_ACCESS", "1")
+    monkeypatch.delenv("LIGHTLLM_LOG_HTTP_LEVEL", raising=False)
+    args = log_utils.get_http_logging_args()
+    config = Config()
+    config.loglevel = args[args.index("--log-level") + 1]
+    config.accesslog = "-"
+    assert Logger(config).access_logger.isEnabledFor(logging.INFO)
+
+
+def test_multiline_warning_text_is_preserved():
+    record = logging.LogRecord("py.warnings", logging.WARNING, __file__, 1, "first\nsecond", (), None)
+    formatted = log_utils.NewLineFormatter("%(message)s").format(record)
+    assert "first" in formatted and "second" in formatted
+
+
+@pytest.mark.parametrize("kind", ["vision", "audio"])
+def test_multimodal_rank_context_uses_its_own_tp_size(monkeypatch, kind):
+    from lightllm.utils import dist_utils
+
+    context = {}
+    for setter in ("set_dp_size", "set_dp_world_size", "set_current_rank_in_dp", "set_current_device_id"):
+        monkeypatch.setattr(dist_utils, setter, lambda _value: None)
+    monkeypatch.setattr(dist_utils, "set_log_context", lambda **fields: context.update(fields))
+
+    class StopBeforeCuda(Exception):
+        pass
+
+    def stop(_device):
+        raise StopBeforeCuda()
+
+    monkeypatch.setattr(dist_utils.torch.cuda, "set_device", stop)
+    init = dist_utils.init_vision_distributed_env if kind == "vision" else dist_utils.init_audio_distributed_env
+    params = {"vit_tp": 4, "audio_tp": 4, "tp_rank_id": 3, "device_id": 0}
+    with pytest.raises(StopBeforeCuda):
+        init(params)
+    assert context == {"tp_rank": 3, "tp_size": 4, "dp_rank": "-"}
+
+
+def test_default_request_sampling_is_stable_and_bounded():
+    _run_logging(
+        """
+        import os
+        os.environ.pop("LIGHTLLM_LOG_REQUEST_SAMPLE_RATE", None)
+        from lightllm.utils import log_utils
+        assert log_utils._request_sample_rate == 0.01
+        first = [log_utils.should_log_request(i) for i in range(2000)]
+        assert first == [log_utils.should_log_request(i) for i in range(2000)]
+        assert 5 <= sum(first) <= 40
+        """
+    )

@@ -329,6 +329,8 @@ def test_readiness_waits_for_bound_endpoint_and_pd_topology(monkeypatch):
     args = SimpleNamespace(run_mode="pd_master", model_name="test-model")
     state = start_utils.ServiceReadiness(flag, args, "http://127.0.0.1:8000", 10)
     state.observe(None)
+    logger.warning.assert_called_once()
+    logger.warning.reset_mock()
     state.observe(503)
     state.observe(503)
     assert logger.info.call_count == 1
@@ -380,4 +382,4 @@ def test_readiness_monitor_probes_bound_address(monkeypatch, mode, host, expecte
     args = SimpleNamespace(run_mode=mode, host=host, config_server_host="127.0.0.2", model_name="test")
     manager.start_readiness_monitor(FakeHttpServerProcess(), args)
     session.get.assert_called_once()
-    assert flag.set_value.call_args.args == (1,)
+    flag.set_value.assert_called_once_with(0)

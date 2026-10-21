@@ -24,6 +24,7 @@ class ServiceReadiness:
         self.ready = False
         self.ever_ready = False
         self.waiting_logged = False
+        self.probe_failure_logged = False
 
     def observe(self, status):
         if status == 200:
@@ -51,6 +52,14 @@ class ServiceReadiness:
                 self.flag.set_value(1)
                 self.ready = self.ever_ready = True
         else:
+            if status != 503 and not self.ever_ready and not self.probe_failure_logged:
+                logger.warning(
+                    "event=service.probe_failed address=%s status=%s",
+                    self.address,
+                    status,
+                    extra={"event": "service.probe_failed", "address": self.address, "http_status": status},
+                )
+                self.probe_failure_logged = True
             if self.ready:
                 self.flag.set_value(0)
                 self.ready = False
@@ -97,9 +106,12 @@ class SubmoduleManager:
                 while not self.readiness_stop.is_set() and http_server_process.poll() is None:
                     try:
                         response = session.get(address + "/readiness", timeout=1)
-                        state.observe(response.status_code)
+                        status = response.status_code
                     except requests.RequestException:
-                        state.observe(None)
+                        status = None
+                    if self.readiness_stop.is_set() or http_server_process.poll() is not None:
+                        break
+                    state.observe(status)
                     self.readiness_stop.wait(0.5)
 
         threading.Thread(target=monitor, name="service-readiness", daemon=True).start()

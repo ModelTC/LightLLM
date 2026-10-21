@@ -1,5 +1,6 @@
 import importlib.util
 import sys
+import warnings
 from unittest.mock import Mock
 from types import ModuleType, SimpleNamespace
 
@@ -37,7 +38,7 @@ def test_recognizes_neo_interface_without_replacing_regular_fa3(monkeypatch):
 
 
 @pytest.mark.parametrize("interface_kind", ["missing", "regular", "legacy_tag"])
-def test_unavailable_neo_import_is_silent_and_explicit_use_explains_installation(monkeypatch, interface_kind):
+def test_unavailable_neo_import_is_silent_and_explicit_use_explains_installation(monkeypatch, capsys, interface_kind):
     def regular_attention(q):
         return q
 
@@ -47,7 +48,11 @@ def test_unavailable_neo_import_is_silent_and_explicit_use_explains_installation
     attention_func = {"missing": None, "regular": regular_attention, "legacy_tag": legacy_attention}[interface_kind]
     logger = Mock()
     monkeypatch.setattr("lightllm.utils.log_utils.init_logger", lambda name: logger)
-    module = _load_neo(monkeypatch, attention_func)
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        module = _load_neo(monkeypatch, attention_func)
+    assert not captured
+    assert capsys.readouterr() == ("", "")
 
     assert not module.HAS_FLASH_ATTN_INTERFACE
     assert module.flash_attn_with_kvcache_neo is None

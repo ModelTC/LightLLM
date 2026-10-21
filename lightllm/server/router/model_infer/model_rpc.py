@@ -82,7 +82,12 @@ class ModelRpcServer(rpyc.Service):
         else:
             self.backend = ChunkedPrefillBackend()
 
-        log_info_on_leader(logger, "event=engine.backend_selected backend=%s", self.backend.__class__.__name__)
+        log_info_on_leader(
+            logger,
+            "event=engine.backend_selected backend=%s",
+            self.backend.__class__.__name__,
+            extra={"event": "engine.backend_selected", "backend": self.backend.__class__.__name__},
+        )
         self.backend.init_model(kvargs)
         self.rl_backend_ops = RlBackendOps(self.backend) if self.args.enable_rl else None
 

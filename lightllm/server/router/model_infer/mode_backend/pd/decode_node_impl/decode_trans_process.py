@@ -466,7 +466,9 @@ class _DecodeTransModule:
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
 
-            if logger.isEnabledFor(logging.DEBUG):
+            if logger.isEnabledFor(logging.DEBUG) and (
+                trans_task.page_kind != "kv" or trans_task.transfer_kv_num() != 0
+            ):
                 debug_stats.add(
                     request_id=trans_task.request_id,
                     pages=1,
@@ -495,7 +497,10 @@ class _DecodeTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.error(f"KV transfer failed: {ret}")
+            if trans_task.error_info == "aborted req":
+                logger.debug("KV transfer cancelled: %s", ret)
+            else:
+                logger.error("KV transfer failed: %s", ret)
 
             if trans_task.error_info is not None:
                 # 提前终结所有有问题的属于同一个请求的任务。
