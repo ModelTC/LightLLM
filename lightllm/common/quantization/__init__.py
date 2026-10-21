@@ -11,6 +11,14 @@ from lightllm.utils.device_utils import is_sm100_gpu
 
 logger = init_logger(__name__)
 
+
+def _get_quant_platform() -> str:
+    # cuda-like platforms (cuda, musa) share the cuda registrations, other platforms register their own methods.
+    from lightllm.platform import get_device_type, get_platform_name
+
+    return "cuda" if get_device_type() == "cuda" else get_platform_name()
+
+
 EXPERT_DTYPE_TO_QUANT_TYPE = {
     "fp8": "fp8w8a8-b128-deepgemm",
     "fp4": "fp4fp8-b32-deepgemm",
@@ -125,6 +133,6 @@ class Quantcfg:
 
     def get_quant_method(self, layer_num, name):
         quant_type = self.get_quant_type(layer_num, name)
-        quant_method = QUANTMETHODS.get(quant_type)
+        quant_method = QUANTMETHODS.get(quant_type, platform=_get_quant_platform())
         quant_method.hf_quantization_config = self.hf_quantization_config
         return quant_method

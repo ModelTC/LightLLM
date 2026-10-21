@@ -14,3 +14,8 @@ register_platform(
     "ascend",
     backend="lightllm.platform.backends.ascend:AscendBackend",
 )
+
+register_platform(
+    "xpu",
+    backend="lightllm.platform.backends.xpu:XpuBackend",
+)

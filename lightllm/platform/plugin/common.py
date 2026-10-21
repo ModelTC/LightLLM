@@ -1,4 +1,5 @@
 import importlib
+import os
 from dataclasses import dataclass
 from importlib.metadata import entry_points, EntryPoint
 from typing import Any, Iterable, List, Mapping
@@ -49,6 +50,9 @@ class Plugin:
             importlib.import_module(module)
 
     def _name_from_cli(self) -> tuple[str, ...]:
+        if "LIGHTLLM_START_ARGS" not in os.environ:
+            # No start args outside the server (unit tests, offline tools), so no plugins are requested.
+            return ()
         start_args = get_env_start_args()
         return _to_str_tuple(getattr(start_args, f"extra_{self.name}", None))
 

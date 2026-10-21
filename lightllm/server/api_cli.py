@@ -987,9 +987,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--hardware_platform",
         type=str,
-        default="cuda",
-        choices=["cuda", "musa"],
-        help="""Hardware platform: cuda | musa""",
+        default="auto",
+        choices=["auto", "cuda", "musa", "xpu"],
+        help="""Hardware platform: auto | cuda | musa | xpu. auto detects it from the installed torch build:
+                CUDA, ROCm and MUSA builds run as cuda, XPU builds as xpu.""",
     )
     parser.add_argument(
         "--enable_torch_fallback",

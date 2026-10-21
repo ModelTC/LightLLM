@@ -22,6 +22,26 @@ from .nsa.fp8_flashmla_sparse import NsaFlashMlaFp8SparseAttBackend
 
 logger = init_logger(__name__)
 
+
+def _platform_supported_backends():
+    """Backend names the hardware platform can run, None means no restriction (cuda)."""
+    from lightllm.platform import get_hardware_backend
+
+    return get_hardware_backend().runtime.supported_att_backends
+
+
+def _get_explicit_backend(kv_type_to_backend: Dict[str, Dict[str, BaseAttBackend]], llm_dtype: str, backend_str: str):
+    supported = _platform_supported_backends()
+    if supported is not None and backend_str not in supported:
+        from lightllm.platform import get_platform_name
+
+        raise ValueError(
+            f"Attention backend {backend_str} is not supported on platform {get_platform_name()}, "
+            f"supported backends: {list(supported)}"
+        )
+    return kv_type_to_backend[llm_dtype][backend_str]
+
+
 # Backend class mappings by data type
 data_type_to_backend = {
     "None": {
@@ -98,6 +118,18 @@ def _auto_select_backend(
         logger.info("Expert parallelism with MoE enabled, excluding flashinfer attention backend")
         priority_list = [name for name in priority_list if name != "flashinfer"]
 
+    supported = _platform_supported_backends()
+    if supported is not None:
+        # The subprocess validation only checks cuda kernels, so pick the first backend the platform supports.
+        for backend_name in priority_list:
+            if backend_name in supported and backend_name in backend_map[llm_dtype]:
+                logger.info(f"Auto-selected {backend_name} backend (platform supported)")
+                return backend_map[llm_dtype][backend_name]
+        raise ValueError(
+            f"No attention backend in {priority_list} for kv type {llm_dtype} is supported on this platform, "
+            f"supported backends: {list(supported)}"
+        )
+
     for backend_name in priority_list:
         if backend_name in backend_map[llm_dtype] and validate(backend_name):
             logger.info(f"Auto-selected {backend_name} backend (validated)")
@@ -121,7 +153,7 @@ def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashi
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
-        return data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend(data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
 
@@ -131,7 +163,7 @@ def get_decode_att_backend_class(index=0, priority_list: list = ["flashinfer", "
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
-        return data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend(data_type_to_backend, llm_dtype, backend_str)
     else:
         priority_list = _get_decode_backend_priority(priority_list, args.mtp_step)
         return _auto_select_backend(llm_dtype, kv_type_to_backend=data_type_to_backend, priority_list=priority_list)
@@ -142,7 +174,7 @@ def get_mla_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "fl
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
-        return mla_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend(mla_data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
 
@@ -152,7 +184,7 @@ def get_mla_decode_att_backend_class(index=0, priority_list: list = ["flashinfer
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
-        return mla_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend(mla_data_type_to_backend, llm_dtype, backend_str)
     else:
         priority_list = _get_decode_backend_priority(priority_list, args.mtp_step)
         return _auto_select_backend(llm_dtype, kv_type_to_backend=mla_data_type_to_backend, priority_list=priority_list)
@@ -163,7 +195,7 @@ def get_nsa_prefill_att_backend_class(index=0, priority_list: list = ["flashmla_
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
-        return nsa_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend(nsa_data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
 
@@ -173,7 +205,7 @@ def get_nsa_decode_att_backend_class(index=0, priority_list: list = ["flashmla_s
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_decode_att_backend[index]
     if backend_str != "auto":
-        return nsa_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend(nsa_data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=nsa_data_type_to_backend, priority_list=priority_list)
 
@@ -183,6 +215,6 @@ def get_neo_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "tr
     llm_dtype = args.llm_kv_type
     backend_str = args.llm_prefill_att_backend[index]
     if backend_str != "auto":
-        return neo_data_type_to_backend[llm_dtype][backend_str]
+        return _get_explicit_backend(neo_data_type_to_backend, llm_dtype, backend_str)
     else:
         return _auto_select_backend(llm_dtype, kv_type_to_backend=neo_data_type_to_backend, priority_list=priority_list)

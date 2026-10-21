@@ -4,10 +4,11 @@ import collections
 import dataclasses
 import numpy as np
 import torch._C
-from typing import Dict, Iterable, Literal, Tuple, Union, List, Set
+from typing import Dict, Iterable, Literal, Optional, Tuple, Union, List, Set
 from torch.storage import UntypedStorage
 from dataclasses import field
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 logger = init_logger(__name__)
 
@@ -75,7 +76,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self,
             shape: Union[torch.Size, Iterable[int]],
             dtype: torch.dtype,
-            device: str = "cuda",
+            device: Optional[str] = None,
         ) -> torch.Tensor:
             return self.alloc_tensor(
                 shape=shape,
@@ -87,7 +88,7 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             self,
             shape: Union[torch.Size, Tuple[int, ...]],
             data_type: torch.dtype,
-            device: str = "cuda",
+            device: Optional[str] = None,
         ) -> torch.Tensor:
             # shape 类型转换
             if isinstance(shape, list):
@@ -95,6 +96,8 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
 
             # cache manager 没有被正常使用时
             if not self.cache_env_ok:
+                if device is None:
+                    device = get_device_type()
                 return torch.empty(shape, dtype=data_type, device=device, requires_grad=False)
 
             # 回收可能消亡的 tensor
@@ -124,6 +127,8 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
                 ans.storage_weak_ptr = buf_node.storage_weak_ptr
                 return ans
 
+            if device is None:
+                device = get_device_type()
             buf_tensor = torch.empty((size,), dtype=data_type, device=device, requires_grad=False)
             # 用于调试显存占用的重要日志
             # self.managed_total_tensor_bytes +=  buf_tensor.element_size() * buf_tensor.numel()
@@ -156,16 +161,20 @@ else:
             self,
             shape: Union[torch.Size, Iterable[int]],
             dtype: torch.dtype,
-            device: str = "cuda",
+            device: Optional[str] = None,
         ) -> torch.Tensor:
+            if device is None:
+                device = get_device_type()
             return torch.empty(shape, dtype=dtype, device=device, requires_grad=False)
 
         def alloc_tensor(
             self,
             shape: Union[torch.Size, Iterable[int]],
             data_type: torch.dtype,
-            device: str = "cuda",
+            device: Optional[str] = None,
         ) -> torch.Tensor:
+            if device is None:
+                device = get_device_type()
             return torch.empty(shape, dtype=data_type, device=device, requires_grad=False)
 
 

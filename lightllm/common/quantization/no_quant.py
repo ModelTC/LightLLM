@@ -3,8 +3,10 @@ from typing import Optional, List, Union, Tuple
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
 from lightllm.common.quantization.registry import QUANTMETHODS
+from lightllm.platform import get_device_type
 
 
+@QUANTMETHODS.register("none", platform="xpu")
 @QUANTMETHODS.register("none", platform="musa")
 @QUANTMETHODS.register("none", platform="cuda")
 class NoQuantization(QuantizationMethod):
@@ -39,7 +41,9 @@ class NoQuantization(QuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype).cuda(device_id)
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=dtype).to(
+            torch.device(get_device_type(), device_id)
+        )
         mm_param = WeightPack(weight=weight, weight_scale=None, weight_zero_point=None)
         # weight layout is (out_dim, in_dim), so the split dimension is -2.
         mm_param_list = self._split_weight_pack(

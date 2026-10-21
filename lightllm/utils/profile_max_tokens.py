@@ -8,6 +8,7 @@ import argparse
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_mtp_weight_layer_num
+from lightllm.platform import get_device_module, get_device_type, get_hardware_backend
 
 data_type_dict = {"float32": 4, "float16": 2, "bfloat16": 2, "fp32": 4, "fp16": 2, "bf16": 2, "int8": 1, "int4": 0.5}
 
@@ -16,10 +17,10 @@ def get_available_gpu_memory(world_size):
     """
     Get available memory.
     """
-    torch.cuda.empty_cache()
-    free_gpu_memory, _ = torch.cuda.mem_get_info(get_current_device_id())
+    get_device_module().empty_cache()
+    free_gpu_memory, _ = get_hardware_backend().runtime.mem_get_info(get_current_device_id())
     if world_size > 1:
-        tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(f"cuda:{get_current_device_id()}")
+        tensor = torch.tensor(free_gpu_memory, dtype=torch.float32).to(f"{get_device_type()}:{get_current_device_id()}")
         torch.distributed.all_reduce(tensor, op=torch.distributed.ReduceOp.MIN)
         free_gpu_memory = tensor.item()
     return free_gpu_memory / (1024 ** 3)
@@ -29,7 +30,7 @@ def get_total_gpu_memory():
     """
     Get the total GPU memory of the machine
     """
-    total_memory = torch.cuda.get_device_properties(0).total_memory
+    total_memory = get_device_module().get_device_properties(0).total_memory
     return total_memory / (1024 ** 3)  # Convert to GB
 
 
@@ -40,7 +41,7 @@ def get_mtp_adjusted_mem_fraction(
     mtp_layer_num: int,
 ) -> float:
     mtp_weight_bytes = target_weight_bytes * mtp_layer_num / target_layer_num
-    total_gpu_bytes = torch.cuda.get_device_properties(get_current_device_id()).total_memory
+    total_gpu_bytes = get_device_module().get_device_properties(get_current_device_id()).total_memory
     adjusted_mem_fraction = mem_fraction - mtp_weight_bytes / total_gpu_bytes
 
     # 不同 rank 的权重分片大小和 GPU 总显存可能不同。取全局最小值，保证所有
@@ -49,7 +50,7 @@ def get_mtp_adjusted_mem_fraction(
         adjusted_mem_fraction_tensor = torch.tensor(
             adjusted_mem_fraction,
             dtype=torch.float32,
-            device=f"cuda:{get_current_device_id()}",
+            device=f"{get_device_type()}:{get_current_device_id()}",
         )
         torch.distributed.all_reduce(
             adjusted_mem_fraction_tensor,
@@ -71,9 +72,9 @@ def profile_mtp_weight_memory(model):
         yield
         return
 
-    weight_memory_before = torch.cuda.memory_allocated()
+    weight_memory_before = get_device_module().memory_allocated()
     yield
-    target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
+    target_weight_bytes = get_device_module().memory_allocated() - weight_memory_before
     model.mem_fraction = get_mtp_adjusted_mem_fraction(
         mem_fraction=model.mem_fraction,
         target_weight_bytes=target_weight_bytes,
@@ -106,18 +107,18 @@ def load_model(model_dir, tp_size, data_type):
         tp_size: Tensor Parallel size (number of GPUs)
         data_type: Data type (float32, float16, bf16)
     """
-    torch.cuda.empty_cache()
+    get_device_module().empty_cache()
     gc.collect()
 
     # Memory usage before loading the model
-    before_memory = torch.cuda.memory_allocated()
+    before_memory = get_device_module().memory_allocated()
     # Load the model
     os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(tp_size))
     _ = AutoModelForCausalLM.from_pretrained(
         model_dir, torch_dtype=torch.bfloat16, device_map="auto", trust_remote_code=True
     )
     # Memory usage after loading the model
-    after_memory = torch.cuda.memory_allocated()
+    after_memory = get_device_module().memory_allocated()
     model_size = (after_memory - before_memory) / (1024 ** 3)  # Convert to GB
     model_size = model_size / 2 * data_type_dict[data_type]
     return model_size

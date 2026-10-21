@@ -240,7 +240,7 @@ class StartArgs:
     enable_rl: bool = field(default=False)
     enable_torch_memory_saver: bool = field(default=False)
     enable_weight_cpu_backup: bool = field(default=False)
-    hardware_platform: str = field(default="cuda", metadata={"choices": ["cuda", "musa"]})
+    hardware_platform: str = field(default="auto", metadata={"choices": ["auto", "cuda", "musa", "xpu"]})
     enable_torch_fallback: bool = field(default=False)
     enable_triton_fallback: bool = field(default=False)
 

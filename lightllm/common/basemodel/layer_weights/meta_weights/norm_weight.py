@@ -66,6 +66,12 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         # triton implementation is supported by musa.
         return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
+    def _xpu_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        # triton implementation is supported by xpu (intel triton).
+        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+
     def __call__(
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
@@ -127,6 +133,17 @@ class GatedRMSNormWeight(RMSNormWeight):
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         # triton implementation is supported by musa.
+        return self._triton_forward(input=input, gate_value=gate_value, eps=eps, out=out, alloc_func=alloc_func)
+
+    def _xpu_forward(
+        self,
+        input: torch.Tensor,
+        gate_value: torch.Tensor,
+        eps: float,
+        out: Optional[torch.Tensor] = None,
+        alloc_func=torch.empty,
+    ) -> torch.Tensor:
+        # triton implementation is supported by xpu (intel triton).
         return self._triton_forward(input=input, gate_value=gate_value, eps=eps, out=out, alloc_func=alloc_func)
 
     def __call__(
@@ -199,6 +216,12 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
         self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
     ) -> torch.Tensor:
         # triton implementation is supported by musa.
+        return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
+
+    def _xpu_forward(
+        self, input: torch.Tensor, eps: float, out: Optional[torch.Tensor] = None, alloc_func=torch.empty
+    ) -> torch.Tensor:
+        # triton implementation is supported by xpu (intel triton).
         return self._triton_forward(input=input, eps=eps, out=out, alloc_func=alloc_func)
 
     def __call__(
@@ -337,6 +360,10 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
 
     def _musa_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
         # musa implementation is supported by musa triton on musa platform
+        return self._triton_forward(q=q, k=k, eps=eps)
+
+    def _xpu_forward(self, q: torch.Tensor, k: torch.Tensor, eps: float) -> tuple:
+        # triton implementation is supported by xpu (intel triton).
         return self._triton_forward(q=q, k=k, eps=eps)
 
     def __call__(

@@ -1,3 +1,5 @@
+from typing import Callable, Union
+
 from lightllm.platform.base.graph import HardwareBackendGraph
 from lightllm.platform.base.runtime import HardwareBackendRuntime
 from lightllm.platform.ops import PlatformOps
@@ -10,10 +12,12 @@ class HardwareBackend:
         self,
         runtime: HardwareBackendRuntime,
         graph: HardwareBackendGraph,
-        ops: PlatformOps,
+        ops: Union[PlatformOps, Callable[[], PlatformOps]],
     ) -> None:
         self._runtime = runtime
         self._graph = graph
+        # ops may be a factory, the op tables import the kernels and are only built on first use, so
+        # processes that only need the runtime (device type, dist backend) stay light.
         self._ops = ops
 
     @property
@@ -30,4 +34,6 @@ class HardwareBackend:
 
     @property
     def ops(self) -> PlatformOps:
+        if not isinstance(self._ops, PlatformOps):
+            self._ops = self._ops()
         return self._ops

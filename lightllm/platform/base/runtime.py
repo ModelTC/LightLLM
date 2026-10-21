@@ -8,6 +8,9 @@ DeviceLike = Union[int, str, torch.device]
 
 
 class HardwareBackendRuntime(ABC):
+    # Attention backend names (llm and vit) usable on this platform, None means no restriction.
+    supported_att_backends: Optional[Tuple[str, ...]] = None
+
     @property
     @abstractmethod
     def device_type(self) -> str:
@@ -17,6 +20,11 @@ class HardwareBackendRuntime(ABC):
     @abstractmethod
     def dist_backend(self) -> str:
         pass
+
+    @property
+    def device_module(self) -> Any:
+        """The torch device module (torch.cuda, torch.xpu, ...) used for plain device API calls."""
+        return getattr(torch, self.device_type)
 
     def dist_init_kwargs(self, target_device: torch.device) -> dict[str, Any]:
         return {}
