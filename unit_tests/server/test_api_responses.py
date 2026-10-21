@@ -1131,6 +1131,55 @@ def native_chat_pipeline(monkeypatch):
     return SimpleNamespace(set_finish=manager_generate, closed=closed, generators=generators, args=args)
 
 
+@pytest.mark.parametrize("parser_name", ["qwen3", "deepseek-v4"])
+@pytest.mark.parametrize("finish", ["stop", "length"])
+@pytest.mark.parametrize("separate", [False, True])
+@pytest.mark.parametrize("tail", ["answer <", "answer </thi", "answer <thi"])
+def test_native_chat_flushes_terminal_reasoning_buffer_before_finish(
+    native_chat_pipeline, monkeypatch, parser_name, finish, separate, tail
+):
+    from types import SimpleNamespace
+    from lightllm.server import api_http, api_openai
+    from lightllm.server.core.objs import FinishStatus
+
+    native_chat_pipeline.args.reasoning_parser = parser_name
+    monkeypatch.setattr("lightllm.server.reasoning_parser.get_token_id", lambda token: 99)
+    monkeypatch.setattr("lightllm.server.build_prompt.tokenizer_supports_force_thinking", lambda: True)
+    native_chat_pipeline.set_finish(None)
+
+    async def generate(*args, **kwargs):
+        yield 80, "plan</think>", {"prompt_tokens": 4}, FinishStatus()
+        status = FinishStatus.FINISHED_STOP if finish == "stop" else FinishStatus.FINISHED_LENGTH
+        yield 80, tail, {"prompt_tokens": 4}, FinishStatus(status)
+
+    monkeypatch.setattr(api_http.g_objs.httpserver_manager, "generate", generate)
+
+    async def run():
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            separate_reasoning=separate,
+            chat_template_kwargs={"thinking": True, "enable_thinking": True},
+        )
+        response = await api_openai.chat_completions_impl(request, SimpleNamespace())
+        chunks = [chunk async for chunk in response.body_iterator]
+        payloads = [
+            json.loads(line[6:])
+            for chunk in chunks
+            for line in (chunk.decode() if isinstance(chunk, bytes) else chunk).splitlines()
+            if line.startswith("data: ") and line != "data: [DONE]"
+        ]
+        choices = [choice for payload in payloads for choice in payload.get("choices", [])]
+        content = "".join(choice["delta"].get("content") or "" for choice in choices)
+        reasoning = "".join(choice["delta"].get("reasoning") or "" for choice in choices)
+        assert content == (tail if separate else "plan" + tail)
+        assert reasoning == ("plan" if separate else "")
+        assert [choice["finish_reason"] for choice in choices if choice.get("finish_reason")] == [finish]
+        assert choices[-1]["delta"].get("content", "").endswith(tail)
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("stream", [False, True])
 @pytest.mark.parametrize("duplicate", [False, True])
 @pytest.mark.parametrize("implicit", [False, True])

@@ -676,6 +676,12 @@ async def chat_completions_impl(
                 reasoning_text, delta = _process_reasoning_stream(
                     choice_index, delta, reasoning_parser_dict, metadata, request
                 )
+                if current_finish_reason is not None:
+                    # Release partial delimiter text before routing this final
+                    # delta or emitting a chunk that already contains finish_reason.
+                    flush_reasoning, flush_text = reasoning_parser_dict[choice_index].flush()
+                    reasoning_text = (reasoning_text or "") + (flush_reasoning or "")
+                    delta = (delta or "") + (flush_text or "")
                 if reasoning_text:
                     if request.separate_reasoning:
                         append_sse_chunk(
@@ -829,21 +835,6 @@ async def chat_completions_impl(
             # Emit a per-choice final chunk with finish_reason (for tool_calls path
             # or when no delta was emitted alongside finish_reason).
             if current_finish_reason is not None:
-                # Flush any buffered reasoning content that was never released
-                # (e.g., max_completion_tokens hit before </think/> was seen).
-                if get_env_start_args().reasoning_parser:
-                    parser = reasoning_parser_dict.get(choice_index)
-                    if parser is not None:
-                        flush_reasoning, flush_text = parser.flush()
-                        if flush_reasoning:
-                            if request.separate_reasoning:
-                                flush_delta = {"reasoning": flush_reasoning}
-                            else:
-                                # vLLM compat: emit buffered thinking as content
-                                flush_delta = {"content": flush_reasoning}
-                            append_sse_chunk(make_chat_sse_chunk(choice_index, flush_delta, _choice_nulls))
-                        if flush_text:
-                            append_sse_chunk(make_chat_sse_chunk(choice_index, {"content": flush_text}, _choice_nulls))
                 if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
                     current_finish_reason = "tool_calls"
                 append_sse_chunk(
