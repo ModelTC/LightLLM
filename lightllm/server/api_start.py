@@ -65,7 +65,7 @@ def _launch_subprocesses(args: StartArgs):
         return
 
     model_type = get_model_type(args.model_dir)
-    if model_type == "deepseek_v4":
+    if model_type in ("deepseek_v4", "deepseek_v41"):
         from lightllm.common.state_cache_manager.deepseek4 import DSV4_HISTORY_TOKEN_ALIGNMENT
 
         if args.page_size == 1:

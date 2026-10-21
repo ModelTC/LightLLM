@@ -11,6 +11,7 @@ class DeepSeekV4Tokenizer:
     # chat_template_kwargs={"thinking": true}. It has no Jinja chat_template string,
     # so advertise thinking support explicitly for tokenizer_supports_force_thinking().
     supports_thinking = True
+    supported_reasoning_efforts = ("max", "high", None)
 
     def __init__(self, tokenizer, model_dir, model_config=None):
         self.tokenizer = tokenizer
@@ -159,7 +160,7 @@ class DeepSeekV4Tokenizer:
         effort = kwargs.get("reasoning_effort")
         if thinking and effort is None:
             effort = os.getenv("LIGHTLLM_DSV4_THINKING_EFFORT", "high")
-        if effort not in ("max", "high", None):
+        if effort not in self.supported_reasoning_efforts:
             effort = None
         encoding = self._get_encoding_module()
         prompt = encoding.encode_messages(

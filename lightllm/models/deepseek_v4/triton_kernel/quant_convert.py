@@ -10,7 +10,7 @@ def dequant_fp8_block_to_bf16(weight_e4m3: torch.Tensor, scale_e8m0: torch.Tenso
     return weight_dequant(w, s, block_size)
 
 
-def prepare_fp8_weights(weights: dict, matrix_weights, data_type: torch.dtype) -> None:
+def prepare_fp8_weights(weights: dict, matrix_weights, data_type: torch.dtype, block_size: int = 128) -> None:
     """Prepare checkpoint FP8 weights and scales for each matrix's runtime format in place."""
     for matrix_weight in matrix_weights:
         weight_names = matrix_weight.weight_names
@@ -22,9 +22,11 @@ def prepare_fp8_weights(weights: dict, matrix_weights, data_type: torch.dtype) -
             checkpoint_scale_name = weight_name.removesuffix(".weight") + ".scale"
             if checkpoint_scale_name not in weights:
                 continue
+            if checkpoint_scale_name == scale_name:
+                continue
             scale = weights[checkpoint_scale_name]
             if scale_name is None:
-                weights[weight_name] = dequant_fp8_block_to_bf16(weights[weight_name], scale).to(data_type)
+                weights[weight_name] = dequant_fp8_block_to_bf16(weights[weight_name], scale, block_size).to(data_type)
             else:
                 # Quantized paths can load scales before the weight's shard arrives.
                 weights[scale_name] = scale.to(torch.float32)

@@ -1,5 +1,7 @@
 import dataclasses
 import json
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 import torch
@@ -109,7 +111,7 @@ def test_marlin_rejects_clamp_at_call(monkeypatch):
         n_routed_experts=4,
         num_fused_shared_experts=0,
         routed_scaling_factor=1.0,
-        quant_method=None,
+        quant_method=SimpleNamespace(method_name="awq_marlin"),
         redundancy_expert_num=0,
         redundancy_expert_ids_tensor=None,
         routed_expert_counter_tensor=None,
@@ -132,3 +134,26 @@ def test_marlin_rejects_clamp_at_call(monkeypatch):
             limit=10.0,
             clamp_up_add_one=False,
         )
+
+
+@pytest.mark.parametrize("pending", ["weights", "scale", "bias"])
+def test_moe_finalizes_once_after_all_checkpoint_parts_load(pending):
+    finalize = Mock()
+    pack = SimpleNamespace(load_ok=[pending != "weights", True, True])
+    scale = SimpleNamespace(load_ok=pending != "scale")
+    bias = SimpleNamespace(load_ok=pending != "bias")
+    weight = SimpleNamespace(
+        w1_list=[pack],
+        w2_list=[],
+        w3_list=[],
+        per_expert_scale=scale,
+        e_score_correction_bias=bias,
+        quant_method=SimpleNamespace(finalize_moe_weight=finalize),
+        _moe_weight_finalized=False,
+    )
+    assert not FusedMoeWeight.verify_load(weight)
+    finalize.assert_not_called()
+    pack.load_ok[0] = scale.load_ok = bias.load_ok = True
+    assert FusedMoeWeight.verify_load(weight)
+    assert FusedMoeWeight.verify_load(weight)
+    finalize.assert_called_once_with(weight)

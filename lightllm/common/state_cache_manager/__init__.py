@@ -13,7 +13,7 @@ def get_hybrid_cache_config():
     args = get_env_start_args()
     model_cfg, _ = PretrainedConfig.get_config_dict(args.model_dir)
     model_type = model_cfg["model_type"]
-    if model_type == "deepseek_v4":
+    if model_type in ("deepseek_v4", "deepseek_v41"):
         return DeepseekV4CacheConfig.load_from_args()
     if model_type in ("glm5_next", "glm5_next_text"):
         return Glm5NextCacheConfig.from_model_config(model_cfg, args)

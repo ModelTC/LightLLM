@@ -18,6 +18,7 @@ ModelRegistry.register("bloom", "lightllm.models.bloom.model:BloomTpPartModel")
 ModelRegistry.register(["deepseek_v2", "deepseek_v3"], "lightllm.models.deepseek2.model:Deepseek2TpPartModel")
 ModelRegistry.register(["deepseek_v32"], "lightllm.models.deepseek3_2.model:Deepseek3_2TpPartModel")
 ModelRegistry.register("deepseek_v4", "lightllm.models.deepseek_v4.model:DeepseekV4TpPartModel")
+ModelRegistry.register("deepseek_v41", "lightllm.models.deepseek_v41.model:DeepseekV41TpPartModel")
 ModelRegistry.register(
     "deepseek_v4",
     "lightllm.models.deepseek_v4.model:DeepseekV4VisionTpPartModel",

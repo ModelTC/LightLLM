@@ -31,10 +31,7 @@ from lightllm.models.llama.yarn_rotary_utils import (
     linear_ramp_mask,
 )
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args, get_redundancy_expert_num
-from lightllm.utils.config_utils import (
-    get_deepseek_v4_compress_rates,
-    normalize_deepseek_v4_config,
-)
+from lightllm.utils.config_utils import normalize_deepseek_v4_config
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -104,13 +101,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
-        cache_config = DeepseekV4CacheConfig(
-            get_deepseek_v4_compress_rates(self.config, layer_num),
+        cache_config = DeepseekV4CacheConfig.from_model_config(
+            self.config,
+            layer_num,
             self.args.cpu_cache_token_page_size or 2048,
-            self.config["head_dim"],
-            self.config["index_head_dim"],
-            sliding_window=self.config["sliding_window"],
-            rope_head_dim=self.config["qk_rope_head_dim"],
         )
         self.req_manager = DeepseekV4ReqManager(
             self.max_req_num,
@@ -214,8 +208,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # gemma4 two-variant convention; the fused CUDA Q/K kernels consume them directly, while
         # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the inverse
         # rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
-        # Sliding-window and compressed layers both use DeepSeek YaRN correction; only the
-        # RoPE base differs (rope_theta vs compress_rope_theta), matching SGLang/vLLM.
+        # V4 uses YaRN for both variants; V4.1 uses the base frequencies for pure SWA.
         # Kept fp32 for accuracy (the apply upcasts anyway).
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
@@ -231,9 +224,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         rope_type = rs.get("rope_type", rs.get("type", "default"))
         orig_max = rs.get("original_max_position_embeddings", 0)
 
-        def build_inv_freq(base):
+        def build_inv_freq(base, apply_yarn=True):
             freqs = 1.0 / (base ** freq_exponents)
-            if rope_type == "yarn" and orig_max > 0:
+            if apply_yarn and rope_type == "yarn" and orig_max > 0:
                 beta_fast = rs.get("beta_fast", 32)
                 beta_slow = rs.get("beta_slow", 1)
                 factor = rs.get("factor", 1)
@@ -244,7 +237,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 freqs = freqs / factor * (1 - smooth) + freqs * smooth
             return freqs
 
-        sliding_freqs = build_inv_freq(cfg["rope_theta"])
+        sliding_freqs = build_inv_freq(cfg["rope_theta"], apply_yarn=cfg["model_type"] != "deepseek_v41")
         f = torch.outer(positions, sliding_freqs)  # [max_seq, dim//2]
         self._freqs_cis_sliding = torch.complex(f.cos(), f.sin())
 

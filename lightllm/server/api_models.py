@@ -3,7 +3,7 @@ from typing_extensions import deprecated
 import uuid
 
 from pydantic import BaseModel, Field, field_validator, model_validator
-from typing import Any, Dict, List, Optional, Union, Literal, ClassVar
+from typing import Annotated, Any, Dict, List, Optional, Union, Literal, ClassVar
 
 from lightllm.utils.config_utils import get_generation_config_dict
 
@@ -226,7 +226,12 @@ class ChatCompletionRequest(BaseModel):
     parallel_tool_calls: Optional[bool] = True
 
     # OpenAI parameters for reasoning and others
-    reasoning_effort: Optional[Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]] = None
+    reasoning_effort: Optional[
+        Union[
+            Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"],
+            Annotated[int, Field(strict=True, ge=1, le=100)],
+        ]
+    ] = None
     chat_template_kwargs: Optional[Dict] = None
     separate_reasoning: Optional[bool] = True
     stream_reasoning: Optional[bool] = False

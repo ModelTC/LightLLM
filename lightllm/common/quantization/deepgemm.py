@@ -239,3 +239,81 @@ def _deepgemm_fp8_nt(a_tuple, b_tuple, out):
         if hasattr(deep_gemm, "fp8_gemm_nt"):
             return deep_gemm.fp8_gemm_nt((a_tuple[0], a_tuple[1]), (b_tuple[0], b_tuple[1]), out)
     raise RuntimeError("deep_gemm does not provide fp8 NT GEMM kernel in this version")
+
+
+@QUANTMETHODS.register("mxfp4w4a16-b32-marlin", platform="cuda")
+class MXFP4MoEQuantizationMethod(QuantizationMethod):
+    """Checkpoint MXFP4 experts, repacked once for Hopper's weight-only Marlin."""
+
+    def __init__(self):
+        super().__init__()
+        self.block_size = 32
+        self.weight_scale_suffix = "scale"
+        self.has_weight_scale = True
+        self.has_weight_zero_point = False
+
+    @property
+    def method_name(self):
+        return "mxfp4w4a16-b32-marlin"
+
+    def quantize(self, weight, output):
+        raise NotImplementedError("MXFP4 Marlin loads prequantized expert checkpoints")
+
+    def apply(self, *args, **kwargs):
+        raise NotImplementedError("MXFP4 Marlin is an expert weight format")
+
+    def _create_weight(self, out_dims, in_dim, dtype, device_id, num_experts=1):
+        # TP8 on V4.1 leaves 288 intermediate channels; Marlin needs 128-aligned tiles.
+        padded_dims = [(n + 127) // 128 * 128 for n in out_dims]
+        padded_k = (in_dim + 127) // 128 * 128
+        padded_n = sum(padded_dims)
+        weight = torch.zeros((num_experts, padded_n, padded_k // 2), dtype=torch.int8)
+        scales = torch.ones((num_experts, padded_n, padded_k // 32), dtype=torch.float32).to(torch.float8_e8m0fnu)
+        pack = WeightPack(weight=weight, weight_scale=scales)
+        # Reserve runtime bytes before KV-cache profiling; repacking determines the final views.
+        device = f"cuda:{device_id}"
+        pack.marlin_weight = torch.empty_like(weight.view(torch.int32), device=device)
+        pack.marlin_weight_scale = torch.empty_like(scales, device=device)
+        children = self._split_weight_pack(
+            pack,
+            weight_out_dims=padded_dims,
+            weight_split_dim=-2,
+            weight_scale_out_dims=padded_dims,
+            weight_scale_split_dim=-2,
+        )
+        return pack, children
+
+    def load_weight(self, weight, pack):
+        n, k = weight.shape[-2:]
+        pack.weight[..., :n, :k].copy_(weight)
+        pack.load_ok[0] = True
+
+    def load_weight_scale(self, scale, pack):
+        n, k = scale.shape[-2:]
+        pack.weight_scale[..., :n, :k].copy_(scale)
+        pack.load_ok[1] = True
+
+    def finalize_moe_weight(self, moe_weight):
+        from types import SimpleNamespace
+        from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import prepare_moe_mxfp4_layer_for_marlin
+
+        device = moe_weight.w13.marlin_weight.device
+        w13, w2 = moe_weight.w13, moe_weight.w2
+        packed = prepare_moe_mxfp4_layer_for_marlin(
+            SimpleNamespace(params_dtype=moe_weight.data_type_),
+            w13.weight.view(torch.uint8).to(device),
+            w2.weight.view(torch.uint8).to(device),
+            w13.weight_scale.to(device),
+            w2.weight_scale.to(device),
+            None,
+            None,
+        )
+        for pack, weight, scale in ((w13, packed[0], packed[2]), (w2, packed[1], packed[3])):
+            pack.weight = pack.marlin_weight.view_as(weight)
+            pack.weight_scale = pack.marlin_weight_scale.view_as(scale)
+            pack.weight.copy_(weight)
+            pack.weight_scale.copy_(scale)
+            pack.marlin_weight = pack.marlin_weight_scale = None
+        # Drop the CPU staging views held by the loader after the final repack.
+        moe_weight.w1_list = moe_weight.w2_list = moe_weight.w3_list = []
+        moe_weight.w1 = moe_weight.w3 = None

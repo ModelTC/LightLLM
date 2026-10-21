@@ -519,6 +519,35 @@ def test_hold_page_is_separate_from_request_rings(cache):
         requests.free_req(req)
 
 
+def test_swa_checkpoint_and_prefix_copy_use_64bit_layer_offsets(cache):
+    from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4StateCacheManager
+    from lightllm.models.deepseek_v4.triton_kernel.swa_cache import prepare_prefill_workspace
+
+    config = DeepseekV4CacheConfig((0,) * 40)
+    requests = DeepseekV4ReqManager(256, 2048, None, config, max_forward_tokens=8208)
+    assert requests.swa_buffer.numel() > 2 ** 31
+    for layer in range(config.layer_num):
+        requests.swa_buffer[layer, :128].fill_(layer + 1)
+    checkpoints = DeepseekV4StateCacheManager(1, config)
+    requests.save_state(0, 0, checkpoints, checkpoint_len=512)
+    torch.cuda.synchronize()
+    expected = torch.arange(1, 41, dtype=torch.uint8).view(40, 1, 1).expand(40, 128, config.kv_bytes)
+    torch.testing.assert_close(checkpoints.get_state_cache(0)[0], expected, rtol=0, atol=0)
+
+    requests.restore_state(SimpleNamespace(req_idx=1, cur_kv_len=512), checkpoints, 0)
+    prepare_prefill_workspace(
+        requests,
+        torch.tensor([1], dtype=torch.int32, device="cuda"),
+        torch.tensor([512], dtype=torch.int32, device="cuda"),
+        torch.tensor([768], dtype=torch.int32, device="cuda"),
+        microbatch_index=0,
+    )
+    checkpoints.buffer.zero_()
+    requests.save_state(1, 0, checkpoints, checkpoint_len=512)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(checkpoints.get_state_cache(0)[0], expected, rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("length", [256, 512, 2048])
 def test_shared_history_restores_private_continuation(cache, length):
     manager, requests = cache

@@ -68,7 +68,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         self.prefill_checkpoint_capacity = max_forward_tokens // cache_config.history_token_alignment + max_request_num
         checkpoint_slots = prefill_regions * self.prefill_checkpoint_capacity
         self.prefill_c4_checkpoints = self.prefill_indexer_checkpoints = None
-        if cache_config.n_c4 and checkpoint_slots:
+        if cache_config.state_cache_shapes["c4_shape"][0] and checkpoint_slots:
             self.prefill_c4_checkpoints = torch.empty(
                 (cache_config.n_c4, checkpoint_slots, short_ratio, 4 * cache_config.head_dim),
                 dtype=torch.float32,
@@ -123,6 +123,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         freqs_cis,
         positions,
         runtime_slots=None,
+        is_v41=False,
     ):
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_k_norm_rope_flashmla
         from lightllm.models.deepseek_v4.triton_kernel.cache_io import view_swa_kv
@@ -138,6 +139,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
             out_loc2=runtime_slots,
             kvcache=swa,
             page_size=self.cache_config.swa_token_alignment,
+            is_v41=is_v41,
         )
 
     def get_att_input_params(self, layer_index):
@@ -161,7 +163,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         swa, c4, indexer = state_cache_manager.get_state_cache(buffer_idx)
         positions = torch.arange(checkpoint_len - config.sliding_window, checkpoint_len, device="cuda")
         swa.copy_(gather_swa_tokens(self, req_idx, positions), non_blocking=True)
-        if not config.n_c4:
+        if not c4.numel():
             return
         positions = torch.arange(checkpoint_len - config.short_compress_ratio, checkpoint_len, device="cuda")
         state_slots = positions % self.c4_state_tokens
@@ -189,7 +191,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         swa, c4, indexer = checkpoint
         positions = torch.arange(req.cur_kv_len - config.sliding_window, req.cur_kv_len, device="cuda")
         scatter_swa_tokens(self, req.req_idx, positions, swa.cuda(non_blocking=True))
-        if config.n_c4:
+        if c4.numel():
             positions = torch.arange(req.cur_kv_len - config.short_compress_ratio, req.cur_kv_len, device="cuda")
             slots = positions % self.c4_state_tokens
             self.req_to_c4_state[:, req.req_idx].index_copy_(1, slots, c4.cuda(non_blocking=True))

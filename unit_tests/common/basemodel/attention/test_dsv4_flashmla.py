@@ -131,7 +131,7 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
     kernel = attention.flashmla.flash_mla_with_kvcache
 
     def flashmla_with_out(**kwargs):
-        assert kwargs["out"] is not None
+        assert ("out" in kwargs) == backend.flashmla_supports_out
         return kernel(**kwargs)
 
     monkeypatch.setattr(attention.flashmla, "flash_mla_with_kvcache", flashmla_with_out)

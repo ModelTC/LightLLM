@@ -134,16 +134,17 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         from lightllm.models.deepseek_v4.triton_kernel.build_compress_index_dsv4 import build_compress_index
 
         long_ratio = self.req_manager.cache_config.long_compress_ratio
-        cap = compressed_kv_capacity(self._dsv4_index_max_kv_seq_len(model), long_ratio)
-        self.dsv4_c128_indices, self.dsv4_c128_lengths = workspace.c128(self.microbatch_index, pos.numel(), cap)
-        build_compress_index(
-            self.dsv4_sparse_req_idx,
-            self.position_ids,
-            self.req_manager.req_to_token_indexs,
-            long_ratio,
-            self.dsv4_c128_indices,
-            self.dsv4_c128_lengths,
-        )
+        if long_ratio == 128:
+            cap = compressed_kv_capacity(self._dsv4_index_max_kv_seq_len(model), long_ratio)
+            self.dsv4_c128_indices, self.dsv4_c128_lengths = workspace.c128(self.microbatch_index, pos.numel(), cap)
+            build_compress_index(
+                self.dsv4_sparse_req_idx,
+                self.position_ids,
+                self.req_manager.req_to_token_indexs,
+                long_ratio,
+                self.dsv4_c128_indices,
+                self.dsv4_c128_lengths,
+            )
         # prefill-cudagraph 桶填充的 HOLD 尾请求的 q 行数。其注意力读 HOLD 槽位(内容被并发写
         # 竞争,每轮不同),输出必须清零,否则 pad 行 hidden 不确定 -> MoE 路由抖动 -> 共享 expert
         # 批次组成变化 -> 真实行 GEMM 归约顺序变化(ulp 级),44 层放大后翻转低置信 token。

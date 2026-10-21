@@ -22,7 +22,7 @@ def get_indexer_k_buffer(manager, layer):
     config = manager.cache_config
     buffer = manager.get_att_input_params(layer)
     storage = buffer.view(-1, config.history_token_alignment * buffer.shape[-1])
-    entries = config.history_token_alignment // config.short_compress_ratio
+    entries = config.history_token_alignment // config.compress_rates[layer]
     begin = config.packed_kv_bytes(entries)
     return storage[:, begin : begin + entries * config.indexer_bytes]
 

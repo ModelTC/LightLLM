@@ -363,3 +363,99 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
     --url http://127.0.0.1:8088/generate_stream
 
 以上所有脚本可以参考 `test/start_scripts/multi_pd_master/` 目录下的脚本。
+
+5. DeepSeek-V4.1-Flash 文本支持
+-----------------------------
+
+V4.1 通过模型注册表选择 ``DeepseekV41TpPartModel``，复用 V4 的请求分页、
+请求级 SWA 状态、FlashMLA attention、MoE、TP 通信和服务入口。模型差异集中在
+独立的 ``lightllm/models/deepseek_v41/`` 中；通过继承和导入复用 V4 的已有实现：
+
+* C2 非重叠门控压缩与 C1 投影；仅配置声明的 source layer 分配全局 KV/indexer K。
+* 层间复用 sparse selection，以及 candidate block + top-k 两级 indexer。
+* single-pass mHC：消费前一个子层的 pre 系数，输出当前子层的 pre 系数。
+* Engram 使用 CPU pinned FP8 表、GPU UVA gather 和现有 TP all-reduce；
+  哈希历史跟随完整 token 槽位，GPU 前缀命中时复用对应历史。
+
+Hopper 的 dense 投影保留 FP8 block-32 权重，复用 Triton FP8×FP8 GEMM，输入按 group-32 动态量化；
+MXFP4 专家通过现有量化选择器使用 vLLM Marlin W4A16，并补齐 TP 切分后的非对齐维度。
+对于转换后的 FP8 block-128 checkpoint，dense 投影和专家复用已有 DeepGEMM FP8×FP8 路径，
+UE8M0 权重 scale 由现有加载器读取。
+主 attention 复用 V4 的 584-byte FP8/BF16 cache，SWA 复用请求管理器的 RMSNorm/RoPE/FP8 融合写入。
+压缩 KV 通过一个 kernel 完成 RoPE 和真实 FP4 打包（per-16 E4M3 scale），写入时由同一 scatter kernel
+转换为 Hopper FlashMLA 所需的 FP8/BF16 格式，不再生成独立的 BF16 假量化张量。
+indexer Q/K 使用真实 packed MXFP4（per-32 UE8M0 scale），K 每条存储 64-byte 数据和 4-byte scale；
+Hopper scorer 在寄存器中解包后执行 BF16 点积，不进行额外的 FP8 K 量化。
+主 KV 的 cache 兼容路径仍有额外的量化误差；MXFP4 checkpoint 的 Marlin 专家使用 BF16 激活，
+与原生 FP8 路径不同。目前不能据此声称与原生 FP4 cache 等精度或等性能。
+
+依赖现有 FlashMLA，以及提供 MXFP4 ``fused_marlin_moe``、``clamp_limit`` 和
+``get_accelerator_view_from_cpu_tensor`` 的 vLLM。
+safetensors 需要支持 checkpoint 中的 ``F8_E8M0`` 类型（实测 0.8.0 可读取，0.4.5 无法读取）。
+模型目录需要包含官方 ``encoding/encoding.py`` 和 tokenizer 文件。
+两个 Engram 表合计约需 203 GB（约 189 GiB）CPU pinned memory（TP 分摊），加载专家时另有 CPU staging 开销。
+
+单机 TP8 文本启动示例（在已具备上述依赖的环境中）：
+
+.. code-block:: bash
+
+    cd /mtc/wanzihao/lightllm-dsv41
+    export PYTHONPATH=$PWD
+    export LOADWORKER=16
+    export LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1
+    ulimit -Sn 1048576
+    python -m lightllm.server.api_server \
+        --model_dir /path/DeepSeek-V4.1-Flash \
+        --tp 8 \
+        --batch_max_tokens 8192 \
+        --chunked_prefill_size 8192 \
+        --port 18902
+
+Engram 表使用按实际字节数分配的内存映射，预触页后注册为 pinned memory，
+避免 PyTorch pinned allocator 将每张约 23.6 GiB 的 TP4 分片向上取整到 32 GiB。
+DP ranks 通过现有服务共享内存机制复用同一节点上的 TP 分片，每张表仅加载一次。
+
+当前开放 normal text TP 和 DP/EP，支持 chunked prefill、GPU prefix cache、decode 和 decode CUDA Graph。
+GPU prefix cache 复用现有 hybrid checkpoint；256-token 边界已闭合 C2 分组，快照仅需 SWA 状态。
+暂不支持视觉、PD、DSpark/MTP、CPU cache、prefill CUDA Graph、microbatch overlap 和 TP/SP 混合模式，
+启动时会检查不兼容配置。CED decoder SWA bounded replay 在最后一个 KV source 层之后，
+将每个请求的后续层输入缩减为本次 prefill 的最后 128 个 token，并将 SWA 可见范围限制在回放段内。
+最后一个 KV source 层仍处理全部输入，完整写入全局 KV；请求分页和 prefix cache 的推进保持原有路径。
+该回放近似重建 decoder SWA 状态；请求完整 prompt logprobs 时保留完整前向。
+API 自动选择 V4.1 DSML parser；数值 ``reasoning_effort`` 范围为 1–100，
+聊天模板使用官方编码器。流式工具调用会在完整 calls 块到齐后发送 JSON 参数。
+
+双机各 8 卡 H100 的 DP16/EP16 使用 ``tools/launch_deepseek_v41_dpep16.sh``：
+在两台机器的同一 checkout 上分别传入 ``0 NODE0_IP`` 和 ``1 NODE0_IP``。
+脚本使用转换后的 FP8 block-128 checkpoint；``--tp 16 --dp 16 --enable_ep_moe``
+对应 16 个全局 rank、每个 DP rank 内 attention TP1、专家 EP16。
+跨机 legacy DeepEP low-latency 路径在 NVSHMEM 3.5.19+ 上需要
+`DeepEP PR #696 <https://github.com/deepseek-ai/DeepEP/pull/696>`_ 的 RC QP 索引修复。
+本次 H100 环境使用 CUDA 13、PyTorch 2.11、NVSHMEM 3.6.5 和包含该修复的 DeepEP wheel；
+脚本显式指定当前环境的 NCCL/NVSHMEM 路径，覆盖 wheel 中记录的构建环境路径。
+
+验证用例：
+
+.. code-block:: bash
+
+    python -m pytest unit_tests/models/deepseek_v41/test_v41_model.py \
+        unit_tests/server/test_deepseek_v41.py
+
+GPU 用例覆盖 FP4 打包/舍入、跨 chunk C2、分页 causal/candidate indexer、KV source 共享、
+MXFP4 专家补齐、Engram UVA/跨页哈希、DP 共享表和 shifted mHC；
+小型 FP4/FP8 量化模型通过真实权重加载器，比较整段/分块 prefill、decode 以及 CUDA Graph replay 的 logits。
+此前兼容路径使用完整 V4.1 Flash 权重在 4×H200、TP4、关闭 CUDA Graph 的配置下通过文本 smoke：
+短算术、翻译、中文问答，以及 1220-token 输入的分块 prefill；四个请求均正常结束。
+这些测试不替代精度评测或性能基准。
+
+2026-10-21，转换后的 FP8 block-128/UE8M0 完整模型在双机 16×H100、DP16/EP16 上
+通过 16 个 rank 的 decode CUDA Graph 捕获和两个节点的真实生成验证。
+GSM8K 全量 test 1319 题、训练集 8-shot、raw completion、greedy、并发 256，
+GPU prompt cache 开启，两个节点均分请求：1206/1319（91.43%），耗时 206.6 秒，
+无请求错误、无答案解析失败、无长度截断。
+
+开启 decoder bounded replay、移除固定 ``max_total_token_num`` 后，同配置热缓存回归
+为 1218/1319（92.34%），耗时 61.8 秒，无请求错误、答案解析失败或截断。
+本次自动容量估算按实际历史缓存布局 1656 bytes/token 计算，每个 DP rank 最终分配
+12,318,976 个 token slots（约 19 GiB）；SWA 和压缩器状态在估算前已分配。
+该容量估算使用剩余显存和 ``mem_fraction`` 预算，不包含完整 forward 峰值测量。

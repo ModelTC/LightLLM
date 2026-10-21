@@ -34,6 +34,29 @@ class FuseMoeMarlin(FuseMoeTriton):
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
     ):
+        if self.quant_method.method_name == "mxfp4w4a16-b32-marlin":
+            from vllm.model_executor.layers.fused_moe.activation import MoEActivation
+            from vllm.model_executor.layers.fused_moe.experts.marlin_moe import fused_marlin_moe
+            from vllm.scalar_type import scalar_types
+
+            if alpha not in (None, 1.0) or (limit is not None and clamp_up_add_one):
+                raise ValueError("MXFP4 Marlin supports standard clamped SwiGLU")
+            return fused_marlin_moe(
+                hidden_states=input_tensor,
+                w1=w13.weight,
+                w2=w2.weight,
+                bias1=None,
+                bias2=None,
+                w1_scale=w13.weight_scale,
+                w2_scale=w2.weight_scale,
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                quant_type_id=scalar_types.float4_e2m1f.id,
+                global_num_experts=self.n_routed_experts,
+                activation=MoEActivation.SILU,
+                clamp_limit=limit,
+                workspace=self.workspace,
+            )
         if alpha is not None or limit is not None:
             raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")
 

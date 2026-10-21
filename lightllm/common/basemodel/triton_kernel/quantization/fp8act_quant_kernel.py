@@ -149,7 +149,8 @@ def per_token_group_quant_fp8(
     use_ue8m0_scales: bool = False,
     use_packed_ue8m0: bool = False,
 ):
-    use_sgl = HAS_SGL_KERNEL and (not use_ue8m0_scales or use_packed_ue8m0)
+    # SGL's quantization kernel only supports its fixed 1e-10 lower bound.
+    use_sgl = HAS_SGL_KERNEL and eps == 1e-10 and (not use_ue8m0_scales or use_packed_ue8m0)
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
     # Packed UE8M0 uses SGL's INT32, column-major TMA-aligned scale layout.
     if use_packed_ue8m0:
@@ -181,7 +182,7 @@ def per_token_group_quant_fp8(
         finfo = torch.finfo(dtype)
         # 使用SGL kernel进行量化
         sgl_ops.sgl_per_token_group_quant_fp8(
-            x, x_q, x_s, group_size, 1e-10, finfo.min, finfo.max, scale_ue8m0=use_packed_ue8m0, enable_v2=True
+            x, x_q, x_s, group_size, eps, finfo.min, finfo.max, scale_ue8m0=use_packed_ue8m0, enable_v2=True
         )
     else:
         # 使用LightLLM kernel进行量化
@@ -190,7 +191,7 @@ def per_token_group_quant_fp8(
             group_size,
             x_q,
             x_s,
-            eps=1e-10 if use_ue8m0_scales else eps,
+            eps=eps,
             dtype=dtype,
             use_ue8m0_scales=use_ue8m0_scales,
             use_packed_ue8m0=use_packed_ue8m0,

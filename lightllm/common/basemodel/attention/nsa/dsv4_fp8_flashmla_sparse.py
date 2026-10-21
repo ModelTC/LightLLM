@@ -1,4 +1,5 @@
 import dataclasses
+import inspect
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -19,6 +20,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         # Sparse FlashMLA uses 64-head tiles; TP can leave fewer local Q heads.
         self.padded_q_head_num = ((self.tp_q_head_num + 63) // 64) * 64
         self.compress_ratios = tuple(dict.fromkeys(model.config["compress_ratios"]))
+        self.flashmla_supports_out = "out" in inspect.signature(flashmla.flash_mla_with_kvcache).parameters
 
     def _flashmla_att(
         self,
@@ -62,8 +64,11 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             extra_k_cache=compressed_cache,
             extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
             extra_topk_length=nsa_dict.get("extra_lengths"),
-            out=out.unsqueeze(1),
+            **({"out": out.unsqueeze(1)} if self.flashmla_supports_out else {}),
         )
+        if not self.flashmla_supports_out:
+            out.copy_(padded_out[:, 0])
+            return out
         return padded_out[:, 0]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":

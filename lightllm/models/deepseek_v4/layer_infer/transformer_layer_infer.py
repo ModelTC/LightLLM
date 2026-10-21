@@ -351,7 +351,16 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         else:
             q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
             q[:, self.tp_q_head_num_ :, :].zero_()
-        fused_q_norm_rope(q_in, q[:, : self.tp_q_head_num_, :], self.eps_, self.freqs_cis, infer_state.position_ids)
+        is_v41 = self.network_config_["model_type"] == "deepseek_v41"
+        # V4.1 keeps the low-rank Q norm but omits V4's additional per-head norm.
+        fused_q_norm_rope(
+            q_in,
+            q[:, : self.tp_q_head_num_, :],
+            self.eps_,
+            self.freqs_cis,
+            infer_state.position_ids,
+            apply_norm=not is_v41,
+        )
         # kv: RMSNorm + RoPE + FP8 pack + scatter into SWA in one Triton kernel.
         infer_state.req_manager.pack_mla_kv_to_cache_fused_norm_rope(
             layer_index=self.layer_num_,
@@ -362,6 +371,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             eps=self.eps_,
             freqs_cis=self.freqs_cis,
             positions=infer_state.position_ids,
+            is_v41=is_v41,
         )
         return q, qa, input
 
@@ -369,6 +379,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         # o: [T, tp_q_head_num_, head_dim_] after inverse rope -> grouped low-rank O -> [T, embed_dim_]
         position_cos, position_sin = self._select_rope(infer_state)
         rotary_emb_fwd(o[..., -self.qk_rope_head_dim :], None, position_cos, position_sin, inverse=True)
+        return self._project_o(o, infer_state, layer_weight)
+
+    def _project_o(self, o, infer_state, layer_weight):
         T = o.shape[0]
         if layer_weight.o_proj_fp8:
             # one group per rank -> a single fp8 GEMM (deepgemm .mm quantizes o to fp8 internally)

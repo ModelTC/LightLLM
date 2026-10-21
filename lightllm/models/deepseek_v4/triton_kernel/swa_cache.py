@@ -98,7 +98,7 @@ def _copy_prefix(
     PACKED_BYTES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    batch, block, layer = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    batch, block, layer = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
     req = tl.load(req_ids + batch)
     target_slot = tl.load(workspace_offsets + req)
     if req == HOLD_REQ or target_slot < 0:
@@ -174,7 +174,7 @@ def _copy_swa_tokens(
     GATHER: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    token, layer = tl.program_id(0), tl.program_id(1)
+    token, layer = tl.program_id(0), tl.program_id(1).to(tl.int64)
     slot = tl.load(slots + token).to(tl.int64)
     position = tl.load(positions + token)
     byte = tl.arange(0, BLOCK)

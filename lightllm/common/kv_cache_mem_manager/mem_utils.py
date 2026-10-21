@@ -20,7 +20,7 @@ logger = init_logger(__name__)
 def select_mem_manager_class():
     # case 1
     # 先判断是否是 deepseek 系列的模型
-    if get_model_type(get_env_start_args().model_dir) == "deepseek_v4":
+    if get_model_type(get_env_start_args().model_dir) in ("deepseek_v4", "deepseek_v41"):
         from . import DeepseekV4MemoryManager
 
         mem_class = DeepseekV4MemoryManager

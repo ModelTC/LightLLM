@@ -94,10 +94,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         # [groups*o_lora -> hidden]).
         per_group_in = self.n_heads * self.head_dim // self.o_groups
         # When o_groups == tp_world_size (e.g. tp8) each rank owns exactly one group, so the
-        # grouped O-proj can collapse to a single GEMM. SGLang only enables the fp8 wo_a GEMM
-        # on Blackwell; on Hopper it keeps BF16, and this checkpoint stores wo_a as BF16.
-        # For >1 group per rank (tp < o_groups) the per-group inputs differ (block-diagonal), so
-        # keep the BF16 grouped bmm.
+        # grouped O-proj can collapse to a single FP8 GEMM on Blackwell.
+        # Otherwise use BF16 grouped bmm.
         major, _ = torch.cuda.get_device_capability()
         self.o_proj_fp8 = (self.o_groups // self.tp_world_size_) == 1 and major >= 10
         if self.o_proj_fp8:
@@ -173,6 +171,10 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             tp_rank=0,
             tp_world_size=1,
         )
+        self._init_indexer_k()
+
+    def _init_indexer_k(self):
+        p = f"{self.prefix}.attn.indexer"
         coff = 2  # indexer compressor always uses ratio 4 (overlap)
         # wkv/wgate share the same input -> one fused bf16 GEMM producing the [kv | gate] layout
         # directly (same as the attention compressor_wkv_gate_).
@@ -298,7 +300,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         matrix_weights = (
             weight for weight in self.__dict__.values() if isinstance(weight, (MMWeightTpl, BMMWeightTpl))
         )
-        prepare_fp8_weights(weights, matrix_weights, self.data_type_)
+        block_size = self.network_config_.get("quantization_config", {}).get("weight_block_size", [128, 128])[0]
+        prepare_fp8_weights(weights, matrix_weights, self.data_type_, block_size)
 
         # MXFP4 loads expert .scale unchanged; FP8 expert kernels expect their own suffix.
         expert_scale_suffix = self.experts.quant_method.weight_scale_suffix

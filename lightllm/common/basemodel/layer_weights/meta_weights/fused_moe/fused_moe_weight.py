@@ -69,6 +69,7 @@ class FusedMoeWeight(BaseWeightTpl):
             auto_update_redundancy_expert=self.auto_update_redundancy_expert,
         )
         self.lock = threading.Lock()
+        self._moe_weight_finalized = False
         self._create_weight()
 
     def _init_config(self, network_config: Dict[str, Any]):
@@ -357,7 +358,11 @@ class FusedMoeWeight(BaseWeightTpl):
         e_score_correction_bias_load_ok = (
             True if self.e_score_correction_bias is None else getattr(self.e_score_correction_bias, "load_ok", False)
         )
-        return weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        load_ok = weight_load_ok and per_expert_scale_load_ok and e_score_correction_bias_load_ok
+        if load_ok and not self._moe_weight_finalized:
+            self.quant_method.finalize_moe_weight(self)
+            self._moe_weight_finalized = True
+        return load_ok
 
     def _create_weight(self):
         intermediate_size = self.split_inter_size
