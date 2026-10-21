@@ -36,6 +36,70 @@ def mock_token_ids(monkeypatch):
     )
 
 
+@pytest.fixture
+def complete_chat(monkeypatch):
+    args = StartArgs(reasoning_parser="glm45", tool_call_parser="glm47")
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
+    monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="<|assistant|><think>"))
+
+    def complete(chunks, finish_status=FinishStatus.FINISHED_STOP, **request_kwargs):
+        async def generate(*args, **kwargs):
+            for index, (text, token_id) in enumerate(chunks):
+                finish = FinishStatus(finish_status) if index == len(chunks) - 1 else FinishStatus()
+                yield 0, text, {"id": token_id, "prompt_tokens": 1}, finish
+
+        manager = SimpleNamespace(tokenizer=SimpleNamespace(), generate=generate, output_grammar_compiler=None)
+        monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(args=args, httpserver_manager=manager))
+        request = ChatCompletionRequest(model="glm", messages=[], tools=TOOLS, **request_kwargs)
+
+        async def run():
+            response = await api_openai.chat_completions_impl(request, None)
+            result = SimpleNamespace(reasoning="", content="", calls=[], finish_reason=None)
+            if not request.stream:
+                choice = response.choices[0]
+                result.reasoning = choice.message.reasoning or ""
+                result.content = choice.message.content or ""
+                result.calls = [
+                    {"id": call.id, "name": call.function.name, "arguments": call.function.arguments}
+                    for call in choice.message.tool_calls or []
+                ]
+                result.finish_reason = choice.finish_reason
+                return result
+
+            calls = {}
+            done = False
+            async for chunk in response.body_iterator:
+                chunk = chunk.decode() if isinstance(chunk, bytes) else chunk
+                if chunk.strip() == "data: [DONE]":
+                    done = True
+                    continue
+                for choice in json.loads(chunk.removeprefix("data: "))["choices"]:
+                    delta = choice["delta"]
+                    result.reasoning += delta.get("reasoning") or ""
+                    result.content += delta.get("content") or ""
+                    for call in delta.get("tool_calls") or []:
+                        index = call["index"]
+                        name = call["function"].get("name")
+                        if name is not None:
+                            assert index not in calls  # Send each name and ID once.
+                            assert call["id"]
+                            calls[index] = {"id": call["id"], "name": name, "arguments": ""}
+                        assert index in calls
+                        if call.get("id") is not None:
+                            assert call["id"] == calls[index]["id"]
+                        calls[index]["arguments"] += call["function"].get("arguments") or ""
+                    result.finish_reason = choice.get("finish_reason") or result.finish_reason
+            assert done
+            assert list(calls) == list(range(len(calls)))
+            result.calls = list(calls.values())
+            return result
+
+        return asyncio.run(run())
+
+    return complete
+
+
 @pytest.mark.parametrize(
     "prefix,force_reasoning",
     [
@@ -118,84 +182,31 @@ def test_glm_tools_inside_reasoning_do_not_enable_string_stops():
 @pytest.mark.parametrize("separate_reasoning", [False, True])
 @pytest.mark.parametrize("reasoning_end", ["missing", "before_tool", "after_tool"])
 @pytest.mark.parametrize("chunk_size", [1, 4096])
-def test_chat_completion_exposes_glm_tool_calls(monkeypatch, stream, separate_reasoning, reasoning_end, chunk_size):
-    args = StartArgs(reasoning_parser="glm45", tool_call_parser="glm47")
-    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
-    monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="<|assistant|><think>"))
+def test_chat_completion_exposes_glm_tool_calls(complete_chat, stream, separate_reasoning, reasoning_end, chunk_size):
     segments = [("Need a file.", 1)]
     if reasoning_end == "before_tool":
         segments.append(("</think>", 99))
     segments.extend([("<tool_call>", 77), (TOOL_CALL[len("<tool_call>") :], 2)] * 2)
     if reasoning_end == "after_tool":
         segments.append(("</think>", 99))
-
     chunks = [
         (text[start : start + chunk_size], token_id if start + chunk_size >= len(text) else 1)
         for text, token_id in segments
         for start in range(0, len(text), chunk_size)
     ]
-
-    async def generate(*args, **kwargs):
-        for index, (text, token_id) in enumerate(chunks):
-            finish = FinishStatus(FinishStatus.FINISHED_STOP) if index == len(chunks) - 1 else FinishStatus()
-            yield 0, text, {"id": token_id, "prompt_tokens": 1}, finish
-
-    manager = SimpleNamespace(tokenizer=SimpleNamespace(), generate=generate, output_grammar_compiler=None)
-    monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(args=args, httpserver_manager=manager))
-    request = ChatCompletionRequest(
-        model="glm",
-        messages=[],
-        tools=TOOLS,
+    result = complete_chat(
+        chunks,
         stream=stream,
         separate_reasoning=separate_reasoning,
-        # GLM-5.3's always-on template ignores this toggle; its rendered
-        # generation prompt must determine the extraction state instead.
+        # GLM-5.3's template opens thinking even with this toggle disabled.
         chat_template_kwargs={"enable_thinking": False},
     )
-
-    async def run():
-        response = await api_openai.chat_completions_impl(request, None)
-        if not stream:
-            choice = response.choices[0]
-            assert [call.function.name for call in choice.message.tool_calls] == ["Write", "Write"]
-            assert len({call.id for call in choice.message.tool_calls}) == 2
-            return (
-                choice.message.reasoning,
-                choice.message.content,
-                [call.function.arguments for call in choice.message.tool_calls],
-                choice.finish_reason,
-            )
-
-        reasoning, content, calls, finish_reason = "", "", {}, None
-        async for chunk in response.body_iterator:
-            chunk = chunk.decode() if isinstance(chunk, bytes) else chunk
-            if chunk.strip() == "data: [DONE]":
-                continue
-            payload = json.loads(chunk.removeprefix("data: "))
-            for choice in payload["choices"]:
-                delta = choice["delta"]
-                reasoning += delta.get("reasoning") or ""
-                content += delta.get("content") or ""
-                for call in delta.get("tool_calls") or []:
-                    index = call["index"]
-                    if call["function"].get("name") is not None:
-                        assert index not in calls
-                        assert call["function"]["name"] == "Write"
-                        assert call["id"]
-                        calls[index] = {"id": call["id"], "arguments": ""}
-                    assert index in calls
-                    calls[index]["arguments"] += call["function"].get("arguments") or ""
-                finish_reason = choice.get("finish_reason") or finish_reason
-        assert list(calls) == [0, 1]
-        assert len({call["id"] for call in calls.values()}) == 2
-        return reasoning, content, [call["arguments"] for call in calls.values()], finish_reason
-
-    reasoning, content, arguments, finish_reason = asyncio.run(run())
-    assert reasoning == ("Need a file." if separate_reasoning else "")
-    assert content == ("" if separate_reasoning else "Need a file.")
-    assert [json.loads(argument) for argument in arguments] == [{"content": VALUE}] * 2
-    assert finish_reason == "tool_calls"
+    assert result.reasoning == ("Need a file." if separate_reasoning else "")
+    assert result.content == ("" if separate_reasoning else "Need a file.")
+    assert [call["name"] for call in result.calls] == ["Write", "Write"]
+    assert len({call["id"] for call in result.calls}) == 2
+    assert [json.loads(call["arguments"]) for call in result.calls] == [{"content": VALUE}] * 2
+    assert result.finish_reason == "tool_calls"
 
 
 @pytest.mark.parametrize(
@@ -227,53 +238,22 @@ def test_glm_grammar_activation_follows_rendered_prompt(monkeypatch, thinking):
     request = ChatCompletionRequest(model="glm", messages=[], chat_template_kwargs={"enable_thinking": not thinking})
     prompt = "<|assistant|><think>" + ("" if thinking else "</think>")
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: {"</think>": [99]}[text])
-    assert api_openai._is_force_thinking_mode(request, prompt) is thinking
-    assert api_openai._get_guided_reasoning_end(request, tokenizer, prompt) == ([99] if thinking else [])
+    force_reasoning = api_openai._is_force_thinking_mode(request, prompt)
+    assert force_reasoning is thinking
+    assert api_openai._get_guided_reasoning_end(request, tokenizer, force_reasoning) == ([99] if thinking else [])
 
 
 @pytest.mark.parametrize("suffix", ["<", "</arg_va"])
 @pytest.mark.parametrize("separate_reasoning", [False, True])
-def test_truncated_tool_argument_suffix_does_not_leak_as_content(monkeypatch, suffix, separate_reasoning):
-    args = StartArgs(reasoning_parser="glm45", tool_call_parser="glm47")
-    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
-    monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="<|assistant|><think>"))
-
-    async def generate(*args, **kwargs):
-        yield 0, "Need a file.", {"id": 1, "prompt_tokens": 1}, FinishStatus()
-        yield 0, "<tool_call>Write<arg_key>content</arg_key><arg_value>body", {
-            "id": 2,
-            "prompt_tokens": 1,
-        }, FinishStatus()
-        yield 0, suffix, {"id": 3, "prompt_tokens": 1}, FinishStatus(FinishStatus.FINISHED_LENGTH)
-
-    manager = SimpleNamespace(tokenizer=SimpleNamespace(), generate=generate, output_grammar_compiler=None)
-    monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(args=args, httpserver_manager=manager))
-    request = ChatCompletionRequest(
-        model="glm", messages=[], tools=TOOLS, stream=True, separate_reasoning=separate_reasoning
+def test_truncated_tool_argument_suffix_does_not_leak_as_content(complete_chat, suffix, separate_reasoning):
+    result = complete_chat(
+        [("Need a file.", 1), ("<tool_call>Write<arg_key>content</arg_key><arg_value>body", 2), (suffix, 3)],
+        finish_status=FinishStatus.FINISHED_LENGTH,
+        stream=True,
+        separate_reasoning=separate_reasoning,
     )
-
-    async def run():
-        response = await api_openai.chat_completions_impl(request, None)
-        reasoning, content, names, arguments, finishes = [], [], [], [], []
-        async for chunk in response.body_iterator:
-            chunk = chunk.decode() if isinstance(chunk, bytes) else chunk
-            if chunk.strip() == "data: [DONE]":
-                continue
-            for choice in json.loads(chunk.removeprefix("data: "))["choices"]:
-                delta = choice["delta"]
-                reasoning.append(delta.get("reasoning") or "")
-                content.append(delta.get("content") or "")
-                if choice.get("finish_reason"):
-                    finishes.append(choice["finish_reason"])
-                for call in delta.get("tool_calls") or []:
-                    assert call["index"] == 0
-                    if call["function"].get("name"):
-                        names.append(call["function"]["name"])
-                    arguments.append(call["function"].get("arguments") or "")
-        assert "".join(reasoning) == ("Need a file." if separate_reasoning else "")
-        assert "".join(content) == ("" if separate_reasoning else "Need a file.")
-        assert names == ["Write"]
-        assert "".join(arguments) == ""
-        assert finishes == ["length"]
-
-    asyncio.run(run())
+    assert result.reasoning == ("Need a file." if separate_reasoning else "")
+    assert result.content == ("" if separate_reasoning else "Need a file.")
+    assert [call["name"] for call in result.calls] == ["Write"]
+    assert result.calls[0]["arguments"] == ""
+    assert result.finish_reason == "length"

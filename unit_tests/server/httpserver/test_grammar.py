@@ -44,7 +44,7 @@ def http_client(compiler, monkeypatch):
     monkeypatch.setattr(api_http.g_objs, "g_generate_stream_func", lightllm_generate_stream)
     monkeypatch.setattr(api_http.g_objs, "metric_client", SimpleNamespace(counter_inc=lambda *args: None))
     monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="test"))
-    monkeypatch.setattr(api_openai, "_is_force_thinking_mode", lambda request: False)
+    monkeypatch.setattr(api_openai, "_is_force_thinking_mode", lambda request, prompt=None: False)
     yield httpx.AsyncClient(transport=httpx.ASGITransport(app=api_http.app), base_url="http://test")
     generate.assert_not_called()
 

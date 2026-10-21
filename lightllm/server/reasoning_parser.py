@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Iterator, List, Tuple, Dict, Optional, Type
 
 from lightllm.utils.config_utils import get_token_id
-from lightllm.server.glm_xml_parser import GlmToolCallScanner
+from lightllm.server.function_call_parser import GlmToolCallScanner
 
 
 @dataclass
@@ -761,7 +761,6 @@ class Glm45Detector(Qwen3Detector):
     """GLM tool calls implicitly end thinking, even without ``</think>``."""
 
     tool_start_token = "<tool_call>"
-    tool_end_token = "</tool_call>"
 
     def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
         super().__init__(stream_reasoning=stream_reasoning, force_reasoning=force_reasoning)

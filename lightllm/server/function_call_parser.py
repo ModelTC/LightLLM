@@ -13,6 +13,7 @@
 
 import ast
 import json
+import math
 import os
 import orjson
 import logging
@@ -20,7 +21,7 @@ import re
 from abc import ABC, abstractmethod
 from json import JSONDecodeError, JSONDecoder
 from json.decoder import WHITESPACE
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Type
 
 import partial_json_parser
 from partial_json_parser.core.exceptions import MalformedJSON
@@ -28,7 +29,6 @@ from partial_json_parser.core.options import Allow
 from pydantic import BaseModel, Field
 
 from .api_models import Tool
-from .glm_xml_parser import GlmToolCallScanner, iter_glm_tool_call_spans, parse_glm_xml_value
 
 logger = logging.getLogger(__name__)
 ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "False").upper() in ["ON", "TRUE", "1"]
@@ -1187,6 +1187,44 @@ class DeepSeekV3Detector(BaseFormatDetector):
             return StreamingParseResult(normal_text=current_text)
 
 
+class GlmToolCallScanner:
+    """Track a GLM tool envelope without interpreting tags inside argument values.
+
+    The caller forwards all input until the outer closing tag. Only a possible
+    delimiter prefix is retained here for scanning the next chunk; those bytes
+    have already been forwarded and are excluded from the consumed count.
+    """
+
+    def __init__(self):
+        self._in_arg_value = False
+        self._pending = ""
+
+    def scan(self, new_text: str) -> Tuple[int, bool]:
+        pending_length = len(self._pending)
+        text = self._pending + new_text
+        self._pending = ""
+        offset = 0
+        while offset < len(text):
+            markers = ("</arg_value>",) if self._in_arg_value else ("<arg_value>", "</tool_call>")
+            positions = [(text.find(marker, offset), marker) for marker in markers]
+            positions = [(position, marker) for position, marker in positions if position != -1]
+            if not positions:
+                max_hold = min(len(text) - offset, max(map(len, markers)) - 1)
+                for length in range(max_hold, 0, -1):
+                    if any(marker.startswith(text[-length:]) for marker in markers):
+                        self._pending = text[-length:]
+                        break
+                return len(new_text), False
+
+            position, marker = min(positions)
+            offset = position + len(marker)
+            if marker == "</tool_call>":
+                return offset - pending_length, True
+            self._in_arg_value = marker == "<arg_value>"
+
+        return len(new_text), False
+
+
 class Glm47Detector(BaseFormatDetector):
     """
     Detector for GLM-4.7/GLM-4.7-Flash model function call format.
@@ -1222,6 +1260,15 @@ class Glm47Detector(BaseFormatDetector):
     Reference: https://github.com/vllm-project/vllm/blob/main/vllm/tool_parsers/glm4_moe_tool_parser.py
     """
 
+    _TYPE_ALIASES = {
+        **dict.fromkeys(("str", "text", "varchar", "char", "enum"), "string"),
+        **dict.fromkeys(("int", "int32", "int64", "uint", "uint32", "uint64", "long", "short", "unsigned"), "integer"),
+        **dict.fromkeys(("float", "float32", "float64", "double"), "number"),
+        "bool": "boolean",
+        "dict": "object",
+        **dict.fromkeys(("arr", "list", "sequence"), "array"),
+    }
+
     def __init__(self):
         super().__init__()
         self.bot_token = "<tool_call>"
@@ -1246,6 +1293,91 @@ class Glm47Detector(BaseFormatDetector):
         """Check if the text contains a GLM-4.7 format tool call."""
         return self.bot_token in text
 
+    @classmethod
+    def _schema_types(cls, schema: Any) -> set[str]:
+        if not isinstance(schema, dict):
+            return {"string"}
+        types = set()
+        declared = schema.get("type")
+        if isinstance(declared, str):
+            types.add(declared)
+        elif isinstance(declared, list):
+            types.update(item for item in declared if isinstance(item, str))
+        for value in schema.get("enum", []) if isinstance(schema.get("enum"), list) else []:
+            if value is None:
+                types.add("null")
+            elif isinstance(value, bool):
+                types.add("boolean")
+            elif isinstance(value, int):
+                types.add("integer")
+            elif isinstance(value, float):
+                types.add("number")
+            elif isinstance(value, str):
+                types.add("string")
+            elif isinstance(value, list):
+                types.add("array")
+            elif isinstance(value, dict):
+                types.add("object")
+        for field in ("anyOf", "oneOf", "allOf"):
+            choices = schema.get(field)
+            if isinstance(choices, list):
+                for choice in choices:
+                    types.update(cls._schema_types(choice))
+        return types or {"string"}
+
+    @classmethod
+    def _finite_json(cls, value: Any) -> bool:
+        if isinstance(value, float):
+            return math.isfinite(value)
+        if isinstance(value, dict):
+            return all(cls._finite_json(item) for item in value.values())
+        if isinstance(value, list):
+            return all(cls._finite_json(item) for item in value)
+        return True
+
+    @classmethod
+    def _convert_param_value(cls, value: str, schema: Any) -> Any:
+        """Match vLLM's schema-based coercion without changing literal strings.
+
+        Union types use null/integer/number/boolean/object/array/string priority.
+        Unspecified fields remain strings. Non-finite numbers remain raw text so
+        the resulting arguments are always valid JSON.
+        """
+        types = {
+            cls._TYPE_ALIASES.get(item.strip().lower(), item.strip().lower()) for item in cls._schema_types(schema)
+        }
+        for candidate in ("null", "integer", "number", "boolean", "object", "array", "string"):
+            if candidate not in types:
+                continue
+            try:
+                if candidate == "null" and value.lower() == "null":
+                    return None
+                if candidate == "integer":
+                    return int(value)
+                if candidate == "number":
+                    number = float(value)
+                    if math.isfinite(number):
+                        return number if number != int(number) else int(number)
+                if candidate == "boolean":
+                    normalized = value.strip().lower()
+                    if normalized in ("true", "1"):
+                        return True
+                    if normalized in ("false", "0"):
+                        return False
+                if candidate in ("object", "array"):
+                    parsed = json.loads(value)
+                    if cls._finite_json(parsed):
+                        return parsed
+                if candidate == "string":
+                    return value
+            except (ValueError, TypeError):
+                continue
+        try:
+            parsed = json.loads(value)
+            return parsed if cls._finite_json(parsed) else value
+        except ValueError:
+            return value
+
     def _parse_xml_arguments(self, arg_text: str, tool: Tool) -> dict:
         """
         Parse XML-style arguments into a dictionary.
@@ -1266,8 +1398,19 @@ class Glm47Detector(BaseFormatDetector):
         matches = self.func_arg_regex.findall(arg_text)
         for key, value in matches:
             key = key.strip()
-            args[key] = parse_glm_xml_value(value, properties.get(key))
+            args[key] = self._convert_param_value(value, properties.get(key))
         return args
+
+    def _iter_tool_call_spans(self, text: str) -> Iterator[Tuple[int, int]]:
+        start = text.find(self.bot_token)
+        while start != -1:
+            body_start = start + len(self.bot_token)
+            consumed, complete = GlmToolCallScanner().scan(text[body_start:])
+            if not complete:
+                return
+            end = body_start + consumed
+            yield start, end
+            start = text.find(self.bot_token, end)
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -1277,18 +1420,15 @@ class Glm47Detector(BaseFormatDetector):
         :param tools: List of available tools.
         :return: StreamingParseResult with normal_text and parsed calls.
         """
-        idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
-
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=text, calls=[])
 
         tool_indices = self._get_tool_indices(tools)
         calls = []
         normal_parts = []
         cursor = 0
 
-        for start, end in iter_glm_tool_call_spans(text):
+        for start, end in self._iter_tool_call_spans(text):
             normal_parts.append(text[cursor:start])
             cursor = end
             match_result = text[start:end]

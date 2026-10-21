@@ -205,9 +205,13 @@ def _is_force_thinking_mode(request: ChatCompletionRequest, prompt: Optional[str
     return True  # default
 
 
-def _get_guided_reasoning_end(request: ChatCompletionRequest, tokenizer, prompt: Optional[str] = None) -> List[int]:
+def _get_guided_reasoning_end(
+    request: ChatCompletionRequest, tokenizer, force_reasoning: Optional[bool] = None
+) -> List[int]:
     """Use the same thinking mode as the chat template for grammar activation."""
-    if not _is_force_thinking_mode(request, prompt):
+    if force_reasoning is None:
+        force_reasoning = _is_force_thinking_mode(request)
+    if not force_reasoning:
         return []
     parser_name = get_env_start_args().reasoning_parser
     detector = ReasoningParser.DetectorMap[parser_name.lower()]()
@@ -221,14 +225,14 @@ def _process_reasoning_stream(
     reasoning_parser_dict: Dict[int, ReasoningParser],
     metadata: Dict[str, Any],
     request: ChatCompletionRequest,
-    force_reasoning: Optional[bool] = None,
+    force_reasoning: bool,
 ) -> tuple[Optional[str], str]:
     """Process reasoning content and update its token usage."""
     if index not in reasoning_parser_dict:
         reasoning_parser_dict[index] = ReasoningParser(
             get_env_start_args().reasoning_parser,
             request.stream_reasoning,
-            _is_force_thinking_mode(request) if force_reasoning is None else force_reasoning,
+            force_reasoning,
         )
     parser = reasoning_parser_dict[index]
     token_id = metadata.get("id")
@@ -411,7 +415,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
         if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
             sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
-                request, g_objs.httpserver_manager.tokenizer, prompt
+                request, g_objs.httpserver_manager.tokenizer, request_enable_reasoning
             )
 
     sampling_params = SamplingParams()
@@ -602,14 +606,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     reasoning_parser_dict,
                     metadata,
                     request,
-                    request_enable_reasoning if get_env_start_args().reasoning_parser == "glm45" else None,
+                    request_enable_reasoning,
                 )
-                if current_finish_reason is not None and get_env_start_args().reasoning_parser == "glm45":
-                    # Route a buffered GLM suffix through the tool parser too;
-                    # truncating inside an XML argument must not leak content.
-                    flush_reasoning, flush_text = reasoning_parser_dict[choice_index].flush()
-                    reasoning_text = (reasoning_text or "") + (flush_reasoning or "")
-                    delta = (delta or "") + (flush_text or "")
                 if reasoning_text:
                     if request.separate_reasoning:
                         choice_data = ChatCompletionStreamResponseChoice(
@@ -791,7 +789,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             if current_finish_reason is not None:
                 # Flush any buffered reasoning content that was never released
                 # (e.g., max_completion_tokens hit before </think/> was seen).
-                if get_env_start_args().reasoning_parser and get_env_start_args().reasoning_parser != "glm45":
+                if get_env_start_args().reasoning_parser:
                     parser = reasoning_parser_dict.get(choice_index)
                     if parser is not None:
                         flush_reasoning, flush_text = parser.flush()
