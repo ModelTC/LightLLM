@@ -112,6 +112,12 @@ async def _safe_stream_wrapper(stream_generator):
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
         return
+    except GenerationError as e:
+        if not first_chunk_sent:
+            raise
+        error_data = json.dumps({"error": {"message": str(e), "type": "server_error"}}, ensure_ascii=False)
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
     finally:
         with CancelScope(shield=True):
             await stream_generator.aclose()
@@ -219,6 +225,8 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
         chat_template_kwargs = request.chat_template_kwargs or {}
         if "thinking" in chat_template_kwargs:
             return chat_template_kwargs["thinking"] is True
+        if "enable_thinking" in chat_template_kwargs:
+            return chat_template_kwargs["enable_thinking"] is True
         if request.reasoning_effort is not None:
             return request.reasoning_effort != "none"
         return True
@@ -259,7 +267,7 @@ def _process_reasoning_stream(
     parser = reasoning_parser_dict[index]
     token_id = metadata.get("id")
     if token_id is not None:
-        parser.update_reasoning_token_count(int(token_id))
+        parser.update_reasoning_token_count(int(token_id), delta)
     return parser.parse_stream_chunk(delta)
 
 
@@ -481,7 +489,7 @@ async def chat_completions_impl(
                     reasoning_parser_dict[sub_req_id] = parser
                 token_id = metadata.get("id")
                 if token_id is not None:
-                    parser.update_reasoning_token_count(int(token_id))
+                    parser.update_reasoning_token_count(int(token_id), request_output)
             if finish_status.is_finished():
                 finish_reason_dict[sub_req_id] = finish_status.get_finish_reason()
                 prompt_tokens_dict[sub_req_id] = metadata["prompt_tokens"]
@@ -535,6 +543,8 @@ async def chat_completions_impl(
                                 function=FunctionResponse(name=call_info.name, arguments=call_info.parameters),
                             )
                         )
+                except GenerationError:
+                    raise
                 except Exception as e:
                     logger.error(f"Exception: {e}")
                     return create_error_response(
@@ -690,7 +700,9 @@ async def chat_completions_impl(
                 for call_item in calls:
                     has_emitted_tool_calls[sub_req_id] = True
                     # transform call_item -> FunctionResponse + ToolCall
-                    if current_finish_reason == "stop":
+                    # DSML detectors already emit complete argument deltas, including
+                    # when the tool head and arguments arrive in the final chunk.
+                    if current_finish_reason == "stop" and tool_parser not in ("deepseekv32", "deepseekv4"):
                         det = fc_parser.detector
                         ti = call_item.tool_index
                         if ti >= 0 and ti < len(det.prev_tool_call_arr) and ti < len(det.streamed_args_for_tool):

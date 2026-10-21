@@ -1,9 +1,100 @@
 from unittest.mock import patch
+from types import SimpleNamespace
 
 import pytest
 
 from lightllm.server.reasoning_parser import ReasoningParser
 from lightllm.server.httpserver.stop_seq_match import ReasoningStateMachine
+
+
+def _parse_chunks(parser, chunks):
+    outputs = [parser.parse_stream_chunk(chunk) for chunk in chunks]
+    outputs.append(parser.flush())
+    return tuple("".join(output[index] or "" for output in outputs) for index in (0, 1))
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2, 3, 5, 1000])
+def test_fragmented_reasoning_end_preserves_answer(chunk_size):
+    text = "plan</think>answer"
+    parser = _create_parser("qwen3", True)
+    assert _parse_chunks(parser, [text[i : i + chunk_size] for i in range(0, len(text), chunk_size)]) == (
+        "plan",
+        "answer",
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("prefix", ["", "plan\n\n", "<think>plan\n"])
+def test_dsv4_tool_block_implicitly_ends_reasoning(stream, prefix):
+    tool = '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="lookup">\n</｜DSML｜invoke>\n</｜DSML｜tool_calls>'
+    text = prefix + tool
+    expected_reasoning = prefix.replace("<think>", "").rstrip()
+    if stream:
+        # Every two-chunk boundary, including all positions within the DSML tag.
+        for split in range(len(text) + 1):
+            parser = _create_parser("deepseek-v4", True)
+            reasoning, normal = _parse_chunks(parser, [text[:split], text[split:]])
+            assert reasoning.rstrip() == expected_reasoning
+            assert normal == tool
+    else:
+        assert _create_parser("deepseek-v4", True).parse_non_stream(text) == (expected_reasoning, tool)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "I might use <｜DSML｜tool_calls> later.",
+        'plan\n<｜DSML｜invoke name="lookup">draft</｜DSML｜invoke>',
+        "plan\n<｜DSML｜tool_call",
+        "plan\n <｜DSML｜tool_calls>draft",
+    ],
+)
+def test_dsv4_thinking_mentions_do_not_become_tool_calls(text):
+    parser = _create_parser("deepseek-v4", True)
+    assert _parse_chunks(parser, list(text)) == (text, "")
+    assert _create_parser("deepseek-v4", True).parse_non_stream(text) == (text, "")
+
+
+def test_dsv4_tool_exit_does_not_change_qwen_reasoning():
+    text = "plan\n<｜DSML｜tool_calls>"
+    assert _parse_chunks(_create_parser("qwen3", True), list(text)) == (text, "")
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_dsv4_tool_parameter_think_tags_are_literal(thinking):
+    tool = (
+        '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="lookup">\n'
+        '<｜DSML｜parameter name="value" string="true"><think>literal</think></｜DSML｜parameter>\n'
+        "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+    )
+    text = ("plan\n\n" if thinking else "") + tool
+    parser = _create_parser("deepseek-v4", thinking)
+    reason, normal = _parse_chunks(parser, list(text))
+    assert reason.rstrip() == ("plan" if thinking else "")
+    assert normal == tool
+    assert _create_parser("deepseek-v4", thinking).parse_non_stream(text) == (reason.rstrip(), tool)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_dsv4_reasoning_count_stops_before_implicit_tool_opener(stream):
+    parser = _create_parser("deepseek-v4", True)
+    pieces = ["plan\n", "<", "｜DSML｜", "tool_calls>", "tool body"]
+    for token_id, piece in enumerate(pieces, 1):
+        parser.update_reasoning_token_count(token_id, piece)
+        if stream:
+            parser.parse_stream_chunk(piece)
+    assert parser.reasoning_tokens == 1
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_dsv4_enable_thinking_alias_is_honored(thinking):
+    from lightllm.server.api_openai import _is_force_thinking_mode
+
+    request = SimpleNamespace(chat_template_kwargs={"enable_thinking": thinking}, reasoning_effort=None)
+    with patch(
+        "lightllm.server.api_openai.get_env_start_args", return_value=SimpleNamespace(reasoning_parser="deepseek-v4")
+    ):
+        assert _is_force_thinking_mode(request) is thinking
 
 
 def _create_parser(model_type: str, force_reasoning: bool) -> ReasoningParser:

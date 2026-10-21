@@ -12,6 +12,7 @@
 # limitations under the License.
 
 import re
+from collections import deque
 from dataclasses import dataclass
 from typing import Iterator, List, Tuple, Dict, Optional, Type
 
@@ -591,14 +592,27 @@ class BaseReasoningFormatDetector:
         think_end_token: str,
         force_reasoning: bool = False,
         stream_reasoning: bool = True,
+        tool_start_token: Optional[str] = None,
     ):
         self.think_start_token = think_start_token
         self.think_end_token = think_end_token
         self._in_reasoning = force_reasoning
         self.stream_reasoning = stream_reasoning
+        self.tool_start_token = tool_start_token
 
         self._buffer = ""
         self.stripped_think_start = False
+        self._reasoning_line_start = True
+
+    def _find_tool_start(self, text: str, at_line_start: bool = True) -> int:
+        if self.tool_start_token is None:
+            return -1
+        index = text.find(self.tool_start_token)
+        while index != -1:
+            if (index == 0 and at_line_start) or (index > 0 and text[index - 1] == "\n"):
+                return index
+            index = text.find(self.tool_start_token, index + 1)
+        return -1
 
     @property
     def grammar_start_token(self) -> str:
@@ -611,16 +625,33 @@ class BaseReasoningFormatDetector:
         Returns both reasoning content and normal text separately.
         """
         in_reasoning = self._in_reasoning or self.think_start_token in text
+        if self.tool_start_token is not None and not self._in_reasoning:
+            tool_index = self._find_tool_start(text)
+            if tool_index != -1 and (
+                self.think_start_token not in text or tool_index < text.index(self.think_start_token)
+            ):
+                return StreamingParseResult(normal_text=text)
 
         if not in_reasoning:
             return StreamingParseResult(normal_text=text)
 
         # The text is considered to be in a reasoning block.
         processed_text = text.replace(self.think_start_token, "").strip()
+        if self.tool_start_token is not None:
+            # Think tags inside DSML parameter values are literal tool input.
+            processed_text = text.lstrip().removeprefix(self.think_start_token)
+
+        end_index = processed_text.find(self.think_end_token)
+        tool_index = self._find_tool_start(processed_text)
+        if tool_index != -1 and (end_index == -1 or tool_index < end_index):
+            return StreamingParseResult(
+                reasoning_text=processed_text[:tool_index].strip(),
+                normal_text=processed_text[tool_index:].strip(),
+            )
 
         if self.think_end_token not in processed_text:
             # Assume reasoning was truncated before `</think>` token
-            return StreamingParseResult(reasoning_text=processed_text)
+            return StreamingParseResult(reasoning_text=processed_text.strip())
 
         # Extract reasoning content
         splits = processed_text.split(self.think_end_token, maxsplit=1)
@@ -659,44 +690,65 @@ class BaseReasoningFormatDetector:
         self._buffer += new_text
         current_text = self._buffer
 
-        # If the current text is a prefix of the think token, keep buffering
-        # until we can confirm or refute the tag.
-        if any(
-            token.startswith(current_text) and token != current_text
-            for token in [self.think_start_token, self.think_end_token]
-        ):
-            return StreamingParseResult()
-
         # Strip `<think>` token if present
-        if not self.stripped_think_start and self.think_start_token in current_text:
-            current_text = current_text.replace(self.think_start_token, "")
+        strip_start = not self.stripped_think_start and self.think_start_token in current_text
+        if self.tool_start_token is not None:
+            strip_start = strip_start and current_text.lstrip().startswith(self.think_start_token)
+        if strip_start:
+            current_text = (
+                current_text.lstrip().removeprefix(self.think_start_token)
+                if self.tool_start_token is not None
+                else current_text.replace(self.think_start_token, "")
+            )
             self.stripped_think_start = True
             self._in_reasoning = True
+            self._reasoning_line_start = True
 
-        # Handle end of reasoning block
-        if self._in_reasoning and self.think_end_token in current_text:
-            end_idx = current_text.find(self.think_end_token)
+        end_idx = current_text.find(self.think_end_token)
+        tool_idx = self._find_tool_start(current_text, self._reasoning_line_start) if self._in_reasoning else -1
+        if self._in_reasoning and tool_idx != -1 and (end_idx == -1 or tool_idx < end_idx):
+            self._buffer = ""
+            self._in_reasoning = False
+            self.stripped_think_start = True
+            return StreamingParseResult(
+                reasoning_text=current_text[:tool_idx].rstrip(), normal_text=current_text[tool_idx:]
+            )
+
+        # Handle end of reasoning block.
+        if self._in_reasoning and end_idx != -1:
 
             reasoning_text = current_text[:end_idx]
 
             self._buffer = ""
             self._in_reasoning = False
+            if self.tool_start_token is not None:
+                self.stripped_think_start = True
             normal_text = current_text[end_idx + len(self.think_end_token) :]
 
             return StreamingParseResult(normal_text=normal_text, reasoning_text=reasoning_text.rstrip())
 
-        # Always stream reasoning content immediately.
-        # stream_reasoning flag is ignored for streaming responses.
+        # Hold only the suffix that could complete a delimiter in the next chunk.
+        tokens = [self.think_end_token]
+        if not self.stripped_think_start:
+            tokens.append(self.think_start_token)
+        if self._in_reasoning and self.tool_start_token is not None:
+            tokens.append(self.tool_start_token)
+        holdback = 0
+        for token in tokens:
+            for length in range(min(len(current_text), len(token) - 1), 0, -1):
+                if current_text.endswith(token[:length]):
+                    holdback = max(holdback, length)
+                    break
+        emit_end = len(current_text) - holdback
+        self._buffer = current_text[emit_end:]
+        emitted = current_text[:emit_end]
         if self._in_reasoning:
-            self._buffer = ""
-            return StreamingParseResult(reasoning_text=current_text)
-
-        # If we're not in a reasoning block return as normal text
-        if not self._in_reasoning:
-            self._buffer = ""
-            return StreamingParseResult(normal_text=current_text)
-
-        return StreamingParseResult()
+            if emitted:
+                self._reasoning_line_start = emitted.endswith("\n")
+            return StreamingParseResult(reasoning_text=emitted)
+        if self.tool_start_token is not None and emitted.strip():
+            self.stripped_think_start = True
+        return StreamingParseResult(normal_text=emitted)
 
 
 class DeepSeekR1Detector(BaseReasoningFormatDetector):
@@ -753,6 +805,19 @@ class Qwen3Detector(BaseReasoningFormatDetector):
             "</think>",
             force_reasoning=force_reasoning,
             stream_reasoning=stream_reasoning,
+        )
+
+
+class DeepSeekV4ReasoningDetector(BaseReasoningFormatDetector):
+    """A line-start DSML tool block can end V4 reasoning without </think>."""
+
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
+        super().__init__(
+            "<think>",
+            "</think>",
+            force_reasoning=force_reasoning,
+            stream_reasoning=stream_reasoning,
+            tool_start_token="<｜DSML｜tool_calls>",
         )
 
 
@@ -919,7 +984,7 @@ class ReasoningParser:
     DetectorMap: Dict[str, Type[BaseReasoningFormatDetector]] = {
         "deepseek-r1": DeepSeekR1Detector,
         "deepseek-v3": Qwen3Detector,
-        "deepseek-v4": Qwen3Detector,
+        "deepseek-v4": DeepSeekV4ReasoningDetector,
         "glm45": Qwen3Detector,
         "gpt-oss": GptOssDetector,
         "kimi": KimiDetector,
@@ -965,8 +1030,12 @@ class ReasoningParser:
         reasoning_enabled = self.detector._in_reasoning or requested_force_reasoning is True
         self._counting_reasoning = reasoning_enabled and model_type.lower() != "minimax-append-think"
         self._think_end_token_id = get_token_id(self.detector.think_end_token)
+        # Keep only enough token spans to locate the beginning of an implicit
+        # tool delimiter, including when its text spans several generated tokens.
+        self._tool_token_window = deque()
+        self._tool_window_line_start = True
 
-    def update_reasoning_token_count(self, token_id: int) -> None:
+    def update_reasoning_token_count(self, token_id: int, token_text: str = "") -> None:
         """Count one generated token until the reasoning closing delimiter."""
         if not self._counting_reasoning:
             return
@@ -974,6 +1043,28 @@ class ReasoningParser:
         if token_id == self._think_end_token_id:
             self._counting_reasoning = False
         else:
+            if self.detector.tool_start_token is not None and token_text:
+                self._tool_token_window.append((token_text, self.reasoning_tokens))
+                window = "".join(part for part, _ in self._tool_token_window)
+                boundary = self.detector._find_tool_start(window, self._tool_window_line_start)
+                if boundary != -1:
+                    offset = 0
+                    for part, count_before in self._tool_token_window:
+                        if offset + len(part) > boundary:
+                            self.reasoning_tokens = count_before
+                            self._counting_reasoning = False
+                            self._tool_token_window.clear()
+                            return
+                        offset += len(part)
+                remaining = len(window)
+                while len(self._tool_token_window) > 1:
+                    part, _ = self._tool_token_window[0]
+                    if remaining - len(part) < len(self.detector.tool_start_token) + 1:
+                        break
+                    self._tool_token_window.popleft()
+                    remaining -= len(part)
+                    if part:
+                        self._tool_window_line_start = part.endswith("\n")
             self.reasoning_tokens += 1
 
     def parse_non_stream(self, full_text: str) -> Tuple[Optional[str], Optional[str]]:

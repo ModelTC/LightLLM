@@ -28,6 +28,7 @@ from partial_json_parser.core.options import Allow
 from pydantic import BaseModel, Field
 
 from .api_models import Tool
+from lightllm.utils.error_utils import GenerationError
 
 logger = logging.getLogger(__name__)
 ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "False").upper() in ["ON", "TRUE", "1"]
@@ -1423,7 +1424,7 @@ class DeepSeekV32Detector(BaseFormatDetector):
         )
         # Regex for parameter extraction
         self.param_regex = re.compile(
-            rf'<{_de}parameter\s+name="([^"]+)"\s+string="(true|false)"\s*>(.*?)</{_de}parameter>',
+            rf'<{_de}parameter\s+name="([^"]+)"(?:\s+string="(true|false)")?\s*>(.*?)</{_de}parameter>',
             re.DOTALL,
         )
         # Regex for partial invoke (name known, body still streaming)
@@ -1445,6 +1446,8 @@ class DeepSeekV32Detector(BaseFormatDetector):
         """Convert DSML parameter tuples (name, is_str, value) to a JSON arguments string."""
         args = {}
         for name, is_str, value in params:
+            if name in args:
+                raise GenerationError(f"Duplicate DSML tool parameter: {name}")
             if is_str == "true":
                 args[name] = value
             else:
@@ -1675,6 +1678,8 @@ class DeepSeekV32Detector(BaseFormatDetector):
 
                 return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)
 
+        except GenerationError:
+            raise
         except Exception as e:
             logger.error(f"Error in DeepSeekV32 parse_streaming_increment: {e}")
             return StreamingParseResult(normal_text="".join(normal_text_parts), calls=calls)

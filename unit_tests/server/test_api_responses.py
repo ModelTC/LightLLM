@@ -1099,10 +1099,10 @@ def native_chat_pipeline(monkeypatch):
     closed = []
     generators = []
 
-    def manager_generate(finish=None):
+    def manager_generate(finish=None, output="text"):
         async def generate(*a, **kw):
             try:
-                yield 80, "text" if finish != "abort" else "", {"prompt_tokens": 4}, FinishStatus(
+                yield 80, output if finish != "abort" else "", {"prompt_tokens": 4}, FinishStatus(
                     {
                         None: FinishStatus.NO_FINISH,
                         "abort": FinishStatus.FINISHED_ABORTED,
@@ -1129,6 +1129,57 @@ def native_chat_pipeline(monkeypatch):
         )
 
     return SimpleNamespace(set_finish=manager_generate, closed=closed, generators=generators, args=args)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("duplicate", [False, True])
+@pytest.mark.parametrize("implicit", [False, True])
+@pytest.mark.parametrize("value", ["hello", "<think>literal</think>"])
+def test_native_dsv4_implicit_tool_exit_and_parameter_errors(
+    native_chat_pipeline, monkeypatch, stream, duplicate, implicit, value
+):
+    from types import SimpleNamespace
+    from lightllm.server.api_responses import responses_impl
+    from lightllm.utils.error_utils import GenerationError
+
+    native_chat_pipeline.args.reasoning_parser = "deepseek-v4"
+    monkeypatch.setattr("lightllm.server.reasoning_parser.get_token_id", lambda token: 99)
+    parameter = f'<｜DSML｜parameter name="value" string="true">{value}</｜DSML｜parameter>\n'
+    output = (
+        ("plan\n\n" if implicit else "plan</think>\n\n")
+        + '<｜DSML｜tool_calls>\n<｜DSML｜invoke name="lookup">\n'
+        + parameter * (2 if duplicate else 1)
+        + "</｜DSML｜invoke>\n</｜DSML｜tool_calls>"
+    )
+    native_chat_pipeline.set_finish("stop", output)
+
+    async def request_json():
+        return {"input": "hi", "stream": stream, "tools": [{"type": "function", "name": "lookup", "parameters": {}}]}
+
+    async def run():
+        if duplicate and not stream:
+            with pytest.raises(GenerationError, match="Duplicate"):
+                await responses_impl(SimpleNamespace(json=request_json))
+            return
+        response = await responses_impl(SimpleNamespace(json=request_json))
+        if stream:
+            events = [json.loads(chunk.decode().split("data: ", 1)[1]) async for chunk in response.body_iterator]
+            result = events[-1]["response"]
+        else:
+            result = json.loads(response.body)
+        if duplicate:
+            assert result["status"] == "failed"
+            assert not any(event["type"] == "response.function_call_arguments.done" for event in events)
+        else:
+            assert result["status"] == "completed"
+            calls = [item for item in result["output"] if item["type"] == "function_call"]
+            assert len(calls) == 1 and calls[0]["name"] == "lookup"
+            assert json.loads(calls[0]["arguments"]) == {"value": value}
+            thought = next(item for item in result["output"] if item["type"] == "reasoning")
+            assert thought["content"][0]["text"].rstrip() == "plan"
+
+    asyncio.run(run())
+    assert native_chat_pipeline.closed == [True]
 
 
 @pytest.mark.parametrize("stream", [False, True])
