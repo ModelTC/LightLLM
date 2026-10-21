@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Iterator, List, Tuple, Dict, Optional, Type
 
 from lightllm.utils.config_utils import get_token_id
+from lightllm.server.glm_xml_parser import GlmToolCallScanner
 
 
 @dataclass
@@ -765,6 +766,20 @@ class Glm45Detector(Qwen3Detector):
     def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
         super().__init__(stream_reasoning=stream_reasoning, force_reasoning=force_reasoning)
         self._in_tool_call = False
+        self._tool_scanner = GlmToolCallScanner()
+
+    @classmethod
+    def initial_reasoning_state(cls, prompt: str) -> Optional[bool]:
+        # GLM-5.3 always opens thinking, even if enable_thinking=False was
+        # requested. Inspect only the final assistant turn, never past turns.
+        turns = prompt.rsplit("<|assistant|>", 1)
+        if len(turns) != 2:
+            return None
+        tail = turns[-1]
+        if any(marker in tail for marker in ("<|system|>", "<|user|>", "<|observation|>")):
+            return None
+        start, end = tail.rfind("<think>"), tail.rfind("</think>")
+        return start > end if start != -1 or end != -1 else None
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         detector = type(self)(stream_reasoning=self.stream_reasoning, force_reasoning=self._in_reasoning)
@@ -783,14 +798,11 @@ class Glm45Detector(Qwen3Detector):
 
         while self._buffer:
             if self._in_tool_call:
-                end = self._buffer.find(self.tool_end_token)
-                if end == -1:
-                    text, self._buffer = prefix_hold(self._buffer, [self.tool_end_token])
-                    normal_parts.append(text)
+                consumed, complete = self._tool_scanner.scan(self._buffer)
+                normal_parts.append(self._buffer[:consumed])
+                self._buffer = self._buffer[consumed:]
+                if not complete:
                     break
-                end += len(self.tool_end_token)
-                normal_parts.append(self._buffer[:end])
-                self._buffer = self._buffer[end:]
                 self._in_tool_call = False
                 continue
 
@@ -808,6 +820,7 @@ class Glm45Detector(Qwen3Detector):
             if marker == self.tool_start_token:
                 self._in_reasoning = False
                 self._in_tool_call = True
+                self._tool_scanner = GlmToolCallScanner()
                 # Preserve the opener and literal thinking tags in tool arguments.
                 normal_parts.append(marker)
             else:

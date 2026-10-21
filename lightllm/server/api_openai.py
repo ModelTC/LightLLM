@@ -180,13 +180,17 @@ def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
     return idx
 
 
-def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
+def _is_force_thinking_mode(request: ChatCompletionRequest, prompt: Optional[str] = None) -> bool:
     """Whether this request uses forced thinking / reasoning (parser + template)."""
     from .build_prompt import tokenizer_supports_force_thinking
 
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
+    if reasoning_parser == "glm45" and prompt is not None:
+        state = ReasoningParser.DetectorMap["glm45"].initial_reasoning_state(prompt)
+        if state is not None:
+            return state
     # Always-thinking models may have no thinking switch in their chat template.
     # Their answer grammar must wait for the reasoning delimiter nonetheless.
     if reasoning_parser in ["deepseek-r1", "qwen3-thinking", "gpt-oss", "minimax"]:
@@ -201,9 +205,9 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     return True  # default
 
 
-def _get_guided_reasoning_end(request: ChatCompletionRequest, tokenizer) -> List[int]:
+def _get_guided_reasoning_end(request: ChatCompletionRequest, tokenizer, prompt: Optional[str] = None) -> List[int]:
     """Use the same thinking mode as the chat template for grammar activation."""
-    if not _is_force_thinking_mode(request):
+    if not _is_force_thinking_mode(request, prompt):
         return []
     parser_name = get_env_start_args().reasoning_parser
     detector = ReasoningParser.DetectorMap[parser_name.lower()]()
@@ -217,13 +221,14 @@ def _process_reasoning_stream(
     reasoning_parser_dict: Dict[int, ReasoningParser],
     metadata: Dict[str, Any],
     request: ChatCompletionRequest,
+    force_reasoning: Optional[bool] = None,
 ) -> tuple[Optional[str], str]:
     """Process reasoning content and update its token usage."""
     if index not in reasoning_parser_dict:
         reasoning_parser_dict[index] = ReasoningParser(
             get_env_start_args().reasoning_parser,
             request.stream_reasoning,
-            _is_force_thinking_mode(request),
+            _is_force_thinking_mode(request) if force_reasoning is None else force_reasoning,
         )
     parser = reasoning_parser_dict[index]
     token_id = metadata.get("id")
@@ -353,6 +358,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     multimodal_params = _build_multimodal_params(request)
     tools = _select_chat_template_tools(request)
     prompt = await build_prompt(request, tools)
+    request_enable_reasoning = _is_force_thinking_mode(request, prompt)
     sampling_params_dict = {
         "do_sample": request.do_sample,
         "presence_penalty": request.presence_penalty,
@@ -387,7 +393,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         sampling_params_dict["stop_sequences"] = request.stop
         if get_env_start_args().reasoning_parser:
             # The prompt may already open reasoning; generated tokens may omit the opening marker.
-            sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
+            sampling_params_dict["_initial_reasoning_state"] = int(request_enable_reasoning)
             # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
             sampling_params_dict["stop_str_match_mode"] = (
                 StopStrMatchMode.ALL_TEXT if is_stop_matching_in_reasoning_enabled() else StopStrMatchMode.CONTENT_ONLY
@@ -405,7 +411,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
         if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
             sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
-                request, g_objs.httpserver_manager.tokenizer
+                request, g_objs.httpserver_manager.tokenizer, prompt
             )
 
     sampling_params = SamplingParams()
@@ -419,7 +425,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     # Non-streaming case
     if not request.stream:
         reasoning_parser = get_env_start_args().reasoning_parser
-        request_enable_reasoning = _is_force_thinking_mode(request) if reasoning_parser else False
         final_output_dict = collections.defaultdict(list)
         count_output_tokens_dict = collections.defaultdict(lambda: 0)
         finish_reason_dict = {}
@@ -592,8 +597,19 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # Handle reasoning content
             if get_env_start_args().reasoning_parser:
                 reasoning_text, delta = _process_reasoning_stream(
-                    choice_index, delta, reasoning_parser_dict, metadata, request
+                    choice_index,
+                    delta,
+                    reasoning_parser_dict,
+                    metadata,
+                    request,
+                    request_enable_reasoning if get_env_start_args().reasoning_parser == "glm45" else None,
                 )
+                if current_finish_reason is not None and get_env_start_args().reasoning_parser == "glm45":
+                    # Route a buffered GLM suffix through the tool parser too;
+                    # truncating inside an XML argument must not leak content.
+                    flush_reasoning, flush_text = reasoning_parser_dict[choice_index].flush()
+                    reasoning_text = (reasoning_text or "") + (flush_reasoning or "")
+                    delta = (delta or "") + (flush_text or "")
                 if reasoning_text:
                     if request.separate_reasoning:
                         choice_data = ChatCompletionStreamResponseChoice(
@@ -775,7 +791,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             if current_finish_reason is not None:
                 # Flush any buffered reasoning content that was never released
                 # (e.g., max_completion_tokens hit before </think/> was seen).
-                if get_env_start_args().reasoning_parser:
+                if get_env_start_args().reasoning_parser and get_env_start_args().reasoning_parser != "glm45":
                     parser = reasoning_parser_dict.get(choice_index)
                     if parser is not None:
                         flush_reasoning, flush_text = parser.flush()
