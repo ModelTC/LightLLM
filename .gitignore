@@ -7,6 +7,7 @@ dist
 .vscode
 tmp/
 requirements-musa.txt
+requirements-xpu.txt
 logs/
 
 /benchmark/
