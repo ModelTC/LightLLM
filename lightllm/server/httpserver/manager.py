@@ -113,9 +113,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
             self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=True, init_shm_data=False)
             self.send_to_x2i = context.socket(zmq.PUSH)
-            self.send_to_x2i.connect(f"{args.zmq_mode}127.0.0.1:{args.x2i_port}")
+            self.send_to_x2i.connect(f"{args.zmq_mode}127.0.0.1:{ports.x2i_port}")
             self.recv_from_x2i = context.socket(zmq.PULL)
-            self.recv_from_x2i.bind(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
+            self.recv_from_x2i.bind(f"{args.zmq_mode}127.0.0.1:{ports.http_server_port_for_x2i}")
             self.req_id_to_x2i_reqs: Dict[int, X2IReqStatus] = {}
             self.x2i_http_request_state = X2IHttpRequestState(create=False)
 

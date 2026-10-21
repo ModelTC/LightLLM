@@ -20,7 +20,7 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, X2IHttpRequestState
 from lightllm.utils.dist_utils import set_current_device_id
 from lightllm.utils.start_utils import start_submodule_processes
-from lightllm.utils.net_utils import alloc_can_use_network_port
+from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .past_kv_cache_client import PastKVCacheClient
@@ -44,16 +44,17 @@ class X2IManager:
         self,
         args: StartArgs,
     ):
+        ports = get_shm_port_args()
         context = zmq.Context(2)
         self.args = args
 
         # from http server
         self.zmq_recv_socket = context.socket(zmq.PULL)
-        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{args.x2i_port}")
+        self.zmq_recv_socket.bind(f"{args.zmq_mode}127.0.0.1:{ports.x2i_port}")
 
         # to http server
         self.send_to_httpserver = context.socket(zmq.PUSH)
-        self.send_to_httpserver.connect(f"{args.zmq_mode}127.0.0.1:{args.http_server_port_for_x2i}")
+        self.send_to_httpserver.connect(f"{args.zmq_mode}127.0.0.1:{ports.http_server_port_for_x2i}")
 
         self.use_naive_x2i = args.x2i_use_naive_impl
         self.x2i_server_used_gpus = args.x2i_server_used_gpus
@@ -61,7 +62,7 @@ class X2IManager:
         if not self.use_naive_x2i:
             # send to workers
             self.worker_pub = context.socket(zmq.PUSH)
-            self.worker_pub.bind(f"{args.zmq_mode}127.0.0.1:{args.x2i_worker_task_port}")
+            self.worker_pub.bind(f"{args.zmq_mode}127.0.0.1:{ports.x2i_worker_task_port}")
 
         self.x2i_http_request_state = X2IHttpRequestState(create=True)
 
@@ -99,10 +100,7 @@ class X2IManager:
 
             x2v_dp_size = self.x2i_server_used_gpus // x2v_world_size
 
-            x2v_dp_nccl_ports = alloc_can_use_network_port(
-                num=x2v_dp_size,
-                from_port_num=15000,
-            )
+            x2v_dp_nccl_ports = get_shm_port_args().x2v_dp_nccl_ports(x2v_dp_size)
 
             cuda_visible_devices = [
                 x.strip() for x in os.environ.get("CUDA_VISIBLE_DEVICES").strip().split(",") if x.strip()

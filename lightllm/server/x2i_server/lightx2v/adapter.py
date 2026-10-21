@@ -18,6 +18,7 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.server.core.objs.x2i_params import X2IParams, X2IResponse, X2ICacheRelease, CfgNormType, OutputFormatType, X2IHttpRequestState
+from lightllm.utils.shm_port_args import get_shm_port_args
 from ..past_kv_cache_client import PastKVCacheClient
 from ..rng_state_cache import RngStateCache
 
@@ -87,15 +88,17 @@ class LightX2VServer:
         self.world_size = world_size
         self.nccl_port = nccl_port
 
+        ports = get_shm_port_args()
+
         # receive task from manager
         if self.rank == 0:
             context = zmq.asyncio.Context(2)
             self.task_socket = context.socket(zmq.PULL)
-            self.task_socket.connect(f"{args.zmq_mode}127.0.0.1:{self.args.x2i_worker_task_port}")
+            self.task_socket.connect(f"{args.zmq_mode}127.0.0.1:{ports.x2i_worker_task_port}")
 
             # send result back
             self.result_socket = context.socket(zmq.PUSH)
-            self.result_socket.connect(f"{args.zmq_mode}127.0.0.1:{self.args.http_server_port_for_x2i}")
+            self.result_socket.connect(f"{args.zmq_mode}127.0.0.1:{ports.http_server_port_for_x2i}")
 
         self.past_kv_cache_client = PastKVCacheClient(only_create_meta_data=False, init_shm_data=False)
         self.x2i_http_request_state = X2IHttpRequestState(create=False)

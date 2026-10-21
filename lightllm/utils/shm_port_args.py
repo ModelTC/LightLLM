@@ -223,6 +223,10 @@ class ShmPortArgs:
     def x2i_worker_task_port(self) -> int:
         return self._get_from_args_or_alloc("x2i_worker_task_port")
 
+    def x2v_dp_nccl_ports(self, count: int) -> List[int]:
+        ports = self._get_from_args_or_alloc("x2v_dp_nccl_ports", count=count)
+        return [ports] if isinstance(ports, int) else ports
+
     def close(self) -> None:
         if self.shm is not None:
             self.shm.close()

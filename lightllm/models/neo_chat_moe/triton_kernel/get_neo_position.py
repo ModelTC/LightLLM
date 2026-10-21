@@ -78,13 +78,7 @@ def _get_neo_position_triton(
         for j in range(text_start, q_seq_len, BLOCK_SIZE):
             off = j + tl.arange(0, BLOCK_SIZE)
             t_pos = tl.load(position_ids + off + start_loc, mask=(off < q_seq_len), other=0.0) + image_delta
-            h_pos = tl.load(position_ids + position_ids_stride0 + off + start_loc, mask=(off < q_seq_len), other=0.0)
-            w_pos = tl.load(
-                position_ids + position_ids_stride0 * 2 + off + start_loc, mask=(off < q_seq_len), other=0.0
-            )
             tl.store(position_ids + off + start_loc, t_pos, mask=(off < q_seq_len))
-            tl.store(position_ids + position_ids_stride0 + off + start_loc, h_pos, mask=(off < q_seq_len))
-            tl.store(position_ids + position_ids_stride0 * 2 + off + start_loc, w_pos, mask=(off < q_seq_len))
     return
 
 

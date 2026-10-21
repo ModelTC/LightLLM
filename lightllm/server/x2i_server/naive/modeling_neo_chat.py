@@ -1,4 +1,3 @@
-from typing import List, Optional, Tuple, Union
 import math
 import torch.utils.checkpoint
 from torch import nn
@@ -17,14 +16,10 @@ import torchvision.io as io
 
 from .configuration_neo_chat import NEOChatConfig
 from .modeling_neo_vit import NEOVisionModel
-from .modeling_qwen3 import Qwen3ForCausalLM, create_block_causal_mask
+from .modeling_qwen3 import Qwen3ForCausalLM
 from .modeling_fm_modules import (
-    PositionEmbedding,
     TimestepEmbedder,
     FlowMatchingHead,
-    RMSNorm,
-    NerfEmbedder,
-    SimpleMLPAdaLN,
     ConvDecoder,
 )
 

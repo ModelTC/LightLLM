@@ -211,7 +211,7 @@ class X2IParams(ctypes.Structure):
 class X2IHttpRequestState:
     def __init__(self, create: bool = True):
         self.shm_array = ShmArray(f"{get_unique_server_name()}_x2i_http_request_state", (2048, ), np.int32)
-        from lightllm.server.req_id_generator import MAX_BEST_OF
+        from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
         self.max_best_of = MAX_BEST_OF
         self.init(create)
 

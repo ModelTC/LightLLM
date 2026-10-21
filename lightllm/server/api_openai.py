@@ -252,69 +252,6 @@ def _process_tools_stream(index: int, delta: str, parser_dict: Dict, request: Ch
     return normal_text, calls
 
 
-def _get_images_and_audios(request: ChatCompletionRequest):
-    images, audios = [], []
-    for message in request.messages:
-        if isinstance(message.content, list):
-            for content in message.content:
-                if content.type == "image_url" and content.image_url is not None:
-                    img = content.image_url.url
-                    if img.startswith("http://") or img.startswith("https://"):
-                        images.append({"type": "url", "data": img})
-                    elif img.startswith("data:image"):
-                        # "data:image/jpeg;base64,{base64_image}"
-                        data_str = img.split(";", 1)[1]
-                        if data_str.startswith("base64,"):
-                            data = data_str[7:]
-                            images.append({"type": "base64", "data": data})
-                        else:
-                            raise ValueError("Unrecognized image input.")
-                    elif img.startswith("file://"):
-                        # Local file path with file:// prefix
-                        file_path = img[7:]  # Remove "file://" prefix
-                        with open(file_path, "rb") as f:
-                            images.append({"type": "base64", "data": base64.b64encode(f.read()).decode("utf-8")})
-                    else:
-                        raise ValueError(
-                            "Unrecognized image input. Supports local path, http url, base64, and PIL.Image."
-                        )
-                elif content.type == "audio_url" and content.audio_url is not None:
-                    audio = content.audio_url.url
-                    if audio.startswith("http://") or audio.startswith("https://"):
-                        audios.append({"type": "url", "data": audio})
-                    elif audio.startswith("data:audio"):
-                        data_str = audio.split(";", 1)[1]
-                        if data_str.startswith("base64,"):
-                            data = data_str[7:]
-                            audios.append({"type": "base64", "data": data})
-                        else:
-                            raise ValueError("Unrecognized audio input.")
-                    else:
-                        raise ValueError("Unrecognized audio input. Supports local path, http url, base64.")
-    return images, audios
-
-
-def _get_tools(request: ChatCompletionRequest):
-    tools = None
-    if request.tools and request.tool_choice != "none":
-        # request.skip_special_tokens = False
-        # exclude_none=True so optional default-None fields (e.g. ``response``)
-        # don't surface in the chat-template render — Function.model_dump()
-        # otherwise emits {"response": None}, which chat.jinja's
-        # render_extra_keys turns into ``<response>null</response>`` and adds
-        # ~7 tokens per tool, drifting prompts away from other engines/clients
-        # that pass tools without that field.
-        if not isinstance(request.tool_choice, str):
-            tools = [
-                item.function.model_dump(exclude_none=True)
-                for item in request.tools
-                if item.function.name == request.tool_choice.function.name
-            ]
-        else:
-            tools = [item.function.model_dump(exclude_none=True) for item in request.tools]
-    return tools
-
-
 def _split_tool_argument_delta(arguments: Optional[str]) -> List[str]:
     """Split a complete JSON argument string into OpenAI-style deltas."""
     if not arguments:
@@ -417,66 +354,8 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     created_time = int(time.time())
     multimodal_params = _build_multimodal_params(request)
-    tools = _select_chat_template_tools(request)
-    prompt = await build_prompt(request, tools)
-    sampling_params_dict = {
-        "do_sample": request.do_sample,
-        "presence_penalty": request.presence_penalty,
-        "frequency_penalty": request.frequency_penalty,
-        "repetition_penalty": request.repetition_penalty,
-        "temperature": request.temperature,
-        "top_p": request.top_p,
-        "top_k": request.top_k,
-        "ignore_eos": request.ignore_eos,
-        "n": request.n,
-        "best_of": request.n,
-        "add_special_tokens": False,
-        "seed": request.seed,
-        "include_stop_str_in_output": request.include_stop_str_in_output,
-    }
 
-    # Gemma-4's reasoning delimiters (<|channel>=100, <channel|>=101) are
-    # special tokens. The default skip_special_tokens=True would drop them
-    # from the decoded stream and the Gemma4Detector would be unable to
-    # find the reasoning boundary. Mirrors vllm's
-    # Gemma4ReasoningParser.adjust_request behaviour. Only applied when no
-    # explicit value is supplied so callers can still opt back into the
-    # default if they want.
-    if get_env_start_args().reasoning_parser == "gemma4" and "skip_special_tokens" not in sampling_params_dict:
-        sampling_params_dict["skip_special_tokens"] = False
-
-    if request.max_completion_tokens is not None:
-        sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
-    elif request.max_tokens is not None:
-        sampling_params_dict["max_new_tokens"] = request.max_tokens
-    if request.stop is not None:
-        sampling_params_dict["stop_sequences"] = request.stop
-        if get_env_start_args().reasoning_parser:
-            # The prompt may already open reasoning; generated tokens may omit the opening marker.
-            sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
-            # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
-            sampling_params_dict["stop_str_match_mode"] = (
-                StopStrMatchMode.ALL_TEXT if is_stop_matching_in_reasoning_enabled() else StopStrMatchMode.CONTENT_ONLY
-            )
-
-    # Structured output handling
-    if request.response_format:
-        if request.response_format.type == "json_schema":
-            obj = request.response_format.json_schema
-            if obj:
-                # guided_json takes str instead of dict obj
-                sampling_params_dict["guided_json"] = json.dumps(obj.json_schema)
-        elif request.response_format.type == "json_object":
-            sampling_params_dict["guided_grammar"] = "json"
-
-        if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
-            sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
-                request, g_objs.httpserver_manager.tokenizer
-            )
-
-    sampling_params = SamplingParams()
-    sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
-    await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
+    prompt, sampling_params = _get_text_generator_input(request)
 
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
@@ -926,10 +805,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 async def _get_text_generator_input(request: ChatCompletionRequest):
     from .api_http import g_objs
 
-    images, audios = _get_images_and_audios(request)
-    multimodal_params_dict = {"images": images, "audios": audios}
-
-    tools = _get_tools(request)
+    tools = _select_chat_template_tools(request)
     prompt = await build_prompt(request, tools)
 
     sampling_params_dict = {
@@ -941,13 +817,39 @@ async def _get_text_generator_input(request: ChatCompletionRequest):
         "top_p": request.top_p,
         "top_k": request.top_k,
         "ignore_eos": request.ignore_eos,
-        "max_new_tokens": request.max_tokens,
-        "stop_sequences": request.stop,
+        # "max_new_tokens": request.max_tokens,
+        # "stop_sequences": request.stop,
         "n": request.n,
         "best_of": request.n,
         "add_special_tokens": False,
         "seed": request.seed,
+        "include_stop_str_in_output": request.include_stop_str_in_output,
     }
+    # Gemma-4's reasoning delimiters (<|channel>=100, <channel|>=101) are
+    # special tokens. The default skip_special_tokens=True would drop them
+    # from the decoded stream and the Gemma4Detector would be unable to
+    # find the reasoning boundary. Mirrors vllm's
+    # Gemma4ReasoningParser.adjust_request behaviour. Only applied when no
+    # explicit value is supplied so callers can still opt back into the
+    # default if they want.
+    if get_env_start_args().reasoning_parser == "gemma4" and "skip_special_tokens" not in sampling_params_dict:
+        sampling_params_dict["skip_special_tokens"] = False
+
+    if request.max_completion_tokens is not None:
+        sampling_params_dict["max_new_tokens"] = request.max_completion_tokens
+    elif request.max_tokens is not None:
+        sampling_params_dict["max_new_tokens"] = request.max_tokens
+    if request.stop is not None:
+        sampling_params_dict["stop_sequences"] = request.stop
+        if get_env_start_args().reasoning_parser:
+            # The prompt may already open reasoning; generated tokens may omit the opening marker.
+            sampling_params_dict["_initial_reasoning_state"] = int(_is_force_thinking_mode(request))
+            # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
+            sampling_params_dict["stop_str_match_mode"] = (
+                StopStrMatchMode.ALL_TEXT if is_stop_matching_in_reasoning_enabled() else StopStrMatchMode.CONTENT_ONLY
+            )
+
+
     # Structured output handling
     if request.response_format:
         if request.response_format.type == "json_schema":
@@ -958,15 +860,18 @@ async def _get_text_generator_input(request: ChatCompletionRequest):
         elif request.response_format.type == "json_object":
             sampling_params_dict["guided_grammar"] = "json"
 
+        if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
+            sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
+                request, g_objs.httpserver_manager.tokenizer
+            )
+
     sampling_params = SamplingParams()
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
-
-    sampling_params.verify()
-    multimodal_params = MultimodalParams(**multimodal_params_dict)
+    await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
     logger.info(f"call text generator with prompt: {prompt} and {sampling_params_dict}")
 
-    return prompt, sampling_params, multimodal_params
+    return prompt, sampling_params
 
 
 def _raw_image_to_data_url(image: Union[str, bytes], image_type: str) -> str:
@@ -1008,6 +913,7 @@ def _apply_image_generation_stop(
     if chat_request.chat_template_kwargs.get("enable_thinking", False) and image_only:
         stop.append("</think>")  # TODO: from model config
     chat_request.stop = stop
+    chat_request.include_stop_str_in_output = True
 
 
 async def _chat_completion_image_only(
@@ -1081,7 +987,8 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
 
     created_time = int(time.time())
 
-    prompt, sampling_params, multimodal_params = await _get_text_generator_input(chat_request)
+    multimodal_params = _build_multimodal_params(request)
+    prompt, sampling_params = await _get_text_generator_input(chat_request)
     input_image_num = len(multimodal_params.images)
 
     x2i_params = X2IParams()
@@ -1094,7 +1001,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
         return await _chat_completion_image_only(request, raw_request, prompt, multimodal_params, x2i_params)
 
     if not request.stream:
-        from .req_id_generator import convert_sub_id_to_group_id
+        from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
         full_text = ""
         response_images: List[MessageContent] = []
@@ -1187,7 +1094,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
 
     async def stream_result() -> AsyncGenerator[bytes, None]:
         nonlocal prompt
-        from .req_id_generator import convert_sub_id_to_group_id
+        from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
         prompt_tokens = 0
         completion_tokens = 0

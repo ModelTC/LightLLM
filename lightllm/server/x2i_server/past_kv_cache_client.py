@@ -41,7 +41,6 @@ class PastKVCacheClient(object):
                 self.attach_shm_handle = None
             else:
                 self.attach_shm_handle = self._attach_shm_cpu_kv_cache()
-                self.attach_shm_handle.wait()
         return
 
     def allocate_pages(self, req_id: int, need_tokens: int, img_tokens: int = 0, img_len: int = 0) -> List[int]:

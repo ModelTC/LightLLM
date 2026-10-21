@@ -72,7 +72,9 @@ class LlamaTpPartModel(TpPartBaseModel):
         rope_scaling = self.config.get("rope_scaling", None)
         if rope_scaling is None:
             self._init_to_get_rotary()
-        elif "rope_type" in rope_scaling:
+            return
+
+        if "rope_type" in rope_scaling:
             scaling_type = rope_scaling["rope_type"]
         elif "type" in rope_scaling:
             scaling_type = rope_scaling["type"]
