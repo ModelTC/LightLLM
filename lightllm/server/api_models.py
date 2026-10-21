@@ -95,6 +95,7 @@ class ToolCall(BaseModel):
 
 class ChatCompletionMessageGenericParam(BaseModel):
     role: Literal["system", "assistant", "tool", "function"]
+    phase: Optional[Literal["commentary", "final_answer"]] = None
     content: Union[str, List[MessageContent], None] = Field(default=None)
     tool_call_id: Optional[str] = None
     name: Optional[str] = None

@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+from builtins import anext
+import re
 import time
 import uuid
+from json import JSONDecoder, JSONDecodeError
 import ujson as json
 from http import HTTPStatus
 from typing import Any, AsyncGenerator, Dict, List, Optional
@@ -9,6 +12,8 @@ from typing import Any, AsyncGenerator, Dict, List, Optional
 from fastapi import Request
 from fastapi.responses import JSONResponse, Response
 
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.error_utils import SERVER_BUSY_MESSAGE, ServerBusyError
 from lightllm.utils.log_utils import init_logger
 
 from .api_errors import create_error_response, is_rate_limit_error
@@ -47,6 +52,8 @@ def _content_parts_to_chat(parts: List[Any]) -> List[Dict[str, Any]]:
 
 
 def _reasoning_item_text(item: Dict[str, Any]) -> str:
+    if item.get("encrypted_content"):
+        raise ValueError("reasoning.encrypted_content is not supported; resend plaintext reasoning content")
     for field in ("content", "summary"):
         parts = item.get(field)
         if isinstance(parts, str):
@@ -71,18 +78,24 @@ def _input_items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
         if not isinstance(item, dict):
             raise ValueError("input items must be objects")
         itype = item.get("type")
-        if itype == "function_call":
+        if itype in ("function_call", "custom_tool_call"):
             if assistant_message is None:
                 assistant_message = {"role": "assistant", "content": ""}
                 messages.append(assistant_message)
+            name = item.get("name")
+            if item.get("namespace"):
+                name = f"{item['namespace']}__{name}"
+            arguments = item.get("arguments") or ""
+            if itype == "custom_tool_call":
+                arguments = json.dumps({"input": item.get("input") or ""}, ensure_ascii=False)
             assistant_message.setdefault("tool_calls", []).append(
                 {
                     "id": item.get("call_id") or item.get("id"),
                     "type": "function",
-                    "function": {"name": item.get("name"), "arguments": item.get("arguments") or ""},
+                    "function": {"name": name, "arguments": arguments},
                 }
             )
-        elif itype == "function_call_output":
+        elif itype in ("function_call_output", "custom_tool_call_output"):
             assistant_message = None
             output = item.get("output")
             if isinstance(output, list):
@@ -93,6 +106,8 @@ def _input_items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
         elif itype == "reasoning":
             reasoning_text = _reasoning_item_text(item)
             if reasoning_text:
+                if assistant_message is not None and assistant_message.get("phase") == "final_answer":
+                    assistant_message = None
                 if assistant_message is None:
                     assistant_message = {"role": "assistant", "content": ""}
                     messages.append(assistant_message)
@@ -104,32 +119,92 @@ def _input_items_to_messages(items: List[Any]) -> List[Dict[str, Any]]:
             content = item.get("content")
             if isinstance(content, list):
                 content = _content_parts_to_chat(content)
-            if role == "assistant" and assistant_message is not None:
-                assistant_message["content"] = content if content is not None else ""
+            if role == "assistant":
+                phase = item.get("phase")
+                if phase not in (None, "commentary", "final_answer"):
+                    raise ValueError(f"Unsupported assistant phase: {phase}")
+                if (
+                    assistant_message is not None
+                    and "phase" in assistant_message
+                    and assistant_message["phase"] != phase
+                ):
+                    assistant_message = None
+                if assistant_message is None:
+                    assistant_message = {"role": "assistant", "content": ""}
+                    messages.append(assistant_message)
+                if phase is not None:
+                    assistant_message["phase"] = phase
+                previous_content = assistant_message["content"]
+                if not previous_content:
+                    assistant_message["content"] = content if content is not None else ""
+                elif content:
+                    if isinstance(previous_content, str) and isinstance(content, str):
+                        assistant_message["content"] = previous_content + content
+                    else:
+                        if isinstance(previous_content, str):
+                            previous_content = [{"type": "text", "text": previous_content}]
+                        if isinstance(content, str):
+                            content = [{"type": "text", "text": content}]
+                        assistant_message["content"] = previous_content + content
             else:
                 messages.append({"role": role, "content": content})
-            assistant_message = None
+                assistant_message = None
         else:
             raise ValueError(f"Unsupported input item type: {itype}")
     return messages
 
 
+def _tool_entries(tools, namespace=None):
+    """Normalize Responses tool names for the shared function-tool path."""
+    for tool in tools:
+        if tool.get("type") == "namespace":
+            if namespace is not None or not tool.get("name"):
+                raise ValueError("Tool namespaces must be named and cannot be nested")
+            yield from _tool_entries(tool.get("tools") or [], tool["name"])
+            continue
+        if tool.get("type") not in ("function", "custom"):
+            raise ValueError(f"Unsupported tool type: {tool.get('type')}")
+        definition = tool.get("function", tool)
+        name = definition.get("name")
+        if not name:
+            raise ValueError("Tools require a name")
+        yield f"{namespace}__{name}" if namespace else name, definition, namespace, tool["type"]
+
+
 def _tools_to_chat(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     chat_tools = []
-    for tool in tools:
-        if tool.get("type") != "function":
-            logger.warning("Ignoring unsupported tool type: %s", tool.get("type"))
-            continue
-        if "function" in tool:
-            chat_tools.append(tool)
-            continue
+    names = set()
+    for name, definition, namespace, kind in _tool_entries(tools):
+        if name in names:
+            raise ValueError(f"Duplicate tool name: {name}")
+        names.add(name)
+        if definition.get("strict"):
+            raise ValueError("Tool strict=true is not supported")
+        description = definition.get("description")
+        parameters = definition.get("parameters")
+        if kind == "custom":
+            fmt = definition.get("format") or {}
+            if fmt.get("type") not in (None, "text", "grammar"):
+                raise ValueError(f"Unsupported custom tool format: {fmt.get('type')}")
+            if fmt.get("type") == "grammar":
+                # The function shim describes the freeform grammar to the model;
+                # it does not enforce that grammar during decoding.
+                description = (
+                    description or ""
+                ) + f"\nInput format ({fmt.get('syntax', 'lark')}):\n{fmt.get('definition', '')}"
+            parameters = {
+                "type": "object",
+                "properties": {"input": {"type": "string"}},
+                "required": ["input"],
+                "additionalProperties": False,
+            }
         chat_tools.append(
             {
                 "type": "function",
                 "function": {
-                    "name": tool.get("name"),
-                    "description": tool.get("description"),
-                    "parameters": tool.get("parameters"),
+                    "name": name,
+                    "description": description,
+                    "parameters": parameters,
                 },
             }
         )
@@ -159,13 +234,21 @@ def _text_format_to_response_format(body: Dict[str, Any]) -> Optional[Dict[str, 
 
 
 def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
+    extra_body = body.get("extra_body")
+    if isinstance(extra_body, dict):
+        body = {**extra_body, **body}
     truncation = body.get("truncation")
     if truncation not in (None, "disabled"):
         raise ValueError("Only truncation='disabled' is supported")
 
     effort = (body.get("reasoning") or {}).get("effort")
-    if effort is not None and effort not in ("low", "medium", "high"):
-        raise ValueError("reasoning.effort must be one of: low, medium, high")
+    if effort is not None and effort not in ("none", "minimal", "low", "medium", "high", "xhigh", "max"):
+        raise ValueError("Unsupported reasoning.effort")
+    if body.get("include"):
+        raise ValueError("Responses include is not supported")
+    summary = (body.get("reasoning") or {}).get("summary")
+    if summary not in (None, "auto", "concise", "detailed"):
+        raise ValueError("Unsupported reasoning.summary")
 
     messages: List[Dict[str, Any]] = []
     if body.get("instructions"):
@@ -203,6 +286,18 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         ("max_output_tokens", "max_completion_tokens"),
         ("parallel_tool_calls", "parallel_tool_calls"),
         ("user", "user"),
+        ("seed", "seed"),
+        ("top_k", "top_k"),
+        ("repetition_penalty", "repetition_penalty"),
+        ("presence_penalty", "presence_penalty"),
+        ("frequency_penalty", "frequency_penalty"),
+        ("stop", "stop"),
+        ("ignore_eos", "ignore_eos"),
+        ("do_sample", "do_sample"),
+        ("include_stop_str_in_output", "include_stop_str_in_output"),
+        ("chat_template_kwargs", "chat_template_kwargs"),
+        ("separate_reasoning", "separate_reasoning"),
+        ("stream_reasoning", "stream_reasoning"),
     ):
         if body.get(src) is not None:
             chat[dst] = body[src]
@@ -211,8 +306,11 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         chat["tools"] = _tools_to_chat(body["tools"])
     tool_choice = body.get("tool_choice")
     if tool_choice is not None:
-        if isinstance(tool_choice, dict) and tool_choice.get("type") == "function":
-            chat["tool_choice"] = {"type": "function", "function": {"name": tool_choice.get("name")}}
+        if isinstance(tool_choice, dict) and tool_choice.get("type") in ("function", "custom"):
+            name = tool_choice.get("name") or (tool_choice.get("function") or {}).get("name")
+            if tool_choice.get("namespace"):
+                name = f"{tool_choice['namespace']}__{name}"
+            chat["tool_choice"] = {"type": "function", "function": {"name": name}}
         else:
             chat["tool_choice"] = tool_choice
 
@@ -223,10 +321,17 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
     if response_format:
         chat["response_format"] = response_format
 
-    extra_body = body.get("extra_body")
     if isinstance(extra_body, dict):
-        for k, v in extra_body.items():
-            chat.setdefault(k, v)
+        for key, value in extra_body.items():
+            chat.setdefault(key, value)
+
+    choice = chat.get("tool_choice", "auto")
+    names = {tool["function"]["name"] for tool in chat.get("tools") or []}
+    if choice == "required" and not names:
+        raise ValueError("tool_choice=required needs at least one tool")
+    if isinstance(choice, dict):
+        if choice.get("type") != "function" or (choice.get("function") or {}).get("name") not in names:
+            raise ValueError("tool_choice must name a declared function or custom tool")
 
     return chat
 
@@ -282,6 +387,60 @@ def _usage_to_responses(usage: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _custom_tool_input(arguments: str, partial: bool = False) -> str:
+    """Unwrap the function shim, including incomplete JSON string escapes."""
+    if not partial:
+        value = json.loads(arguments)
+        if not isinstance(value, dict) or set(value) != {"input"} or not isinstance(value["input"], str):
+            raise ValueError("Custom tool arguments must contain a single string input")
+        return value["input"]
+    match = re.match(r'\s*\{\s*"input"\s*:\s*(")', arguments)
+    if match is None:
+        return ""
+    value = arguments[match.start(1) :]
+    try:
+        return JSONDecoder().raw_decode(value)[0]
+    except JSONDecodeError:
+        # A partial escape is at most a UTF-16 surrogate pair (12 bytes).
+        for end in range(len(value), max(0, len(value) - 12), -1):
+            try:
+                text = json.loads(value[:end] + '"')
+                if text and 0xD800 <= ord(text[-1]) <= 0xDFFF:
+                    continue
+                return text
+            except ValueError:
+                continue
+        return ""
+
+
+def _tool_call_item(name, arguments, call_id, tool_map, status):
+    definition, namespace, kind = tool_map.get(name, ({"name": name}, None, "function"))
+    item = {
+        "type": "custom_tool_call" if kind == "custom" else "function_call",
+        "id": f"{'ctc' if kind == 'custom' else 'fc'}_{uuid.uuid4().hex}",
+        "call_id": call_id or f"call_{uuid.uuid4().hex[:24]}",
+        "name": definition["name"],
+        "status": status,
+    }
+    if namespace:
+        item["namespace"] = namespace
+    if kind == "custom":
+        item["input"] = _custom_tool_input(arguments, partial=status != "completed")
+    else:
+        item["arguments"] = arguments
+    return item
+
+
+def _reasoning_output(text, body, item_id, status):
+    return {
+        "type": "reasoning",
+        "id": item_id,
+        "status": status,
+        "summary": [{"type": "summary_text", "text": text}] if (body.get("reasoning") or {}).get("summary") else [],
+        "content": [{"type": "reasoning_text", "text": text}],
+    }
+
+
 def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dict[str, Any]:
     if hasattr(chat_response, "model_dump"):
         openai_dict = chat_response.model_dump(exclude_none=True)
@@ -295,19 +454,17 @@ def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dic
     choice = (openai_dict.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     finish_reason = choice.get("finish_reason")
-    output_status = "incomplete" if finish_reason == "length" else "completed"
+    failed = finish_reason in ("error", "abort")
+    output_status = "incomplete" if finish_reason == "length" or failed else "completed"
+    tool_map = {
+        name: (definition, namespace, kind)
+        for name, definition, namespace, kind in _tool_entries(body.get("tools") or [])
+    }
 
     output: List[Dict[str, Any]] = []
     reasoning_text = message.get("reasoning") or message.get("reasoning_content")
     if reasoning_text:
-        output.append(
-            {
-                "type": "reasoning",
-                "id": ids["reasoning"],
-                "summary": [],
-                "content": [{"type": "reasoning_text", "text": reasoning_text}],
-            }
-        )
+        output.append(_reasoning_output(reasoning_text, body, ids["reasoning"], output_status))
     text = message.get("content")
     if text:
         output.append(
@@ -316,25 +473,20 @@ def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dic
                 "id": ids["message"],
                 "status": output_status,
                 "role": "assistant",
+                "phase": "commentary" if message.get("tool_calls") else "final_answer",
                 "content": [{"type": "output_text", "text": text, "annotations": []}],
             }
         )
     for tc in message.get("tool_calls") or []:
         fn = tc.get("function") or {}
-        output.append(
-            {
-                "type": "function_call",
-                "id": f"fc_{uuid.uuid4().hex}",
-                "call_id": tc.get("id"),
-                "name": fn.get("name"),
-                "arguments": fn.get("arguments") or "",
-                "status": output_status,
-            }
-        )
+        output.append(_tool_call_item(fn.get("name"), fn.get("arguments") or "", tc.get("id"), tool_map, output_status))
 
     result["output"] = output
     result["usage"] = _usage_to_responses(openai_dict.get("usage") or {})
-    if finish_reason == "length":
+    if failed:
+        result["status"] = "failed"
+        result["error"] = {"code": "server_error", "message": "Generation failed"}
+    elif finish_reason == "length":
         result["status"] = "incomplete"
         result["incomplete_details"] = {"reason": "max_output_tokens"}
     else:
@@ -345,206 +497,269 @@ def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dic
 async def _openai_sse_to_responses_events(
     openai_body_iterator,
     body: Dict[str, Any],
+    delay_response_start: bool = True,
 ) -> AsyncGenerator[bytes, None]:
     seq = 0
 
     def event(event_type: str, data: Dict[str, Any]) -> bytes:
         nonlocal seq
-        seq += 1
         data = {"type": event_type, "sequence_number": seq, **data}
+        seq += 1
         return f"event: {event_type}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n".encode("utf-8")
 
     ids = _new_ids()
     response = _response_envelope(body, ids["response"], int(time.time()))
-
-    yield event("response.created", {"response": response})
-    yield event("response.in_progress", {"response": response})
-
-    output_index = -1
-    current: Optional[tuple] = None
+    tool_map = {
+        name: (definition, namespace, kind)
+        for name, definition, namespace, kind in _tool_entries(body.get("tools") or [])
+    }
+    wants_summary = bool((body.get("reasoning") or {}).get("summary"))
+    current = None
+    tool_states = {}
     finish_reason = None
-    usage: Dict[str, Any] = {}
-    failed_error: Optional[Dict[str, Any]] = None
+    usage = {}
+    failed_error = None
 
-    def close_current():
-        nonlocal current
-        if current is None:
-            return
-        kind, item = current
-        current = None
+    def close_item(state, phase="final_answer"):
+        item, index = state["item"], state["index"]
+        kind = item["type"]
+        status = "incomplete" if finish_reason == "length" else "completed"
+        common = {"item_id": item["id"], "output_index": index}
         if kind == "message":
+            item["phase"] = phase
             text = item["content"][0]["text"]
-            yield event(
-                "response.output_text.done",
-                {"item_id": item["id"], "output_index": output_index, "content_index": 0, "text": text},
-            )
+            yield event("response.output_text.done", {**common, "content_index": 0, "text": text})
             yield event(
                 "response.content_part.done",
                 {
-                    "item_id": item["id"],
-                    "output_index": output_index,
+                    **common,
                     "content_index": 0,
                     "part": {"type": "output_text", "text": text, "annotations": []},
                 },
             )
         elif kind == "reasoning":
-            yield event(
-                "response.reasoning_text.done",
-                {
-                    "item_id": item["id"],
-                    "output_index": output_index,
-                    "content_index": 0,
-                    "text": item["content"][0]["text"],
-                },
-            )
+            text = item["content"][0]["text"]
+            item.update(_reasoning_output(text, body, item["id"], status))
+            if wants_summary:
+                yield event("response.reasoning_summary_text.done", {**common, "summary_index": 0, "text": text})
+                yield event(
+                    "response.reasoning_summary_part.done",
+                    {
+                        **common,
+                        "summary_index": 0,
+                        "part": {"type": "summary_text", "text": text},
+                    },
+                )
+            else:
+                yield event("response.reasoning_text.done", {**common, "content_index": 0, "text": text})
+                yield event(
+                    "response.content_part.done",
+                    {
+                        **common,
+                        "content_index": 0,
+                        "part": {"type": "reasoning_text", "text": text},
+                    },
+                )
+        elif kind == "custom_tool_call":
+            item["input"] = _custom_tool_input(state["arguments"], partial=status == "incomplete")
+            yield event("response.custom_tool_call_input.done", {**common, "input": item["input"]})
         elif kind == "function_call":
             yield event(
                 "response.function_call_arguments.done",
                 {
-                    "item_id": item["id"],
-                    "output_index": output_index,
+                    **common,
                     "name": item["name"],
                     "arguments": item["arguments"],
                 },
             )
-        item["status"] = "incomplete" if finish_reason == "length" else "completed"
+        item["status"] = status
+        yield event("response.output_item.done", {"output_index": index, "item": item})
+
+    def open_item(item):
+        index = len(response["output"])
         response["output"].append(item)
-        yield event("response.output_item.done", {"output_index": output_index, "item": item})
-
-    def open_item(kind: str, item: Dict[str, Any]):
-        nonlocal current, output_index
-        yield from close_current()
-        output_index += 1
-        current = (kind, item)
-        added_item = {**item, "content": []} if kind == "message" else item
-        yield event("response.output_item.added", {"output_index": output_index, "item": added_item})
-        if kind == "message":
-            yield event(
-                "response.content_part.added",
-                {
-                    "item_id": item["id"],
-                    "output_index": output_index,
-                    "content_index": 0,
-                    "part": {"type": "output_text", "text": "", "annotations": []},
-                },
+        state = {"item": item, "index": index}
+        common = {"item_id": item["id"], "output_index": index}
+        added = {**item, "content": []} if item["type"] in ("message", "reasoning") else item
+        events = [event("response.output_item.added", {"output_index": index, "item": added})]
+        if item["type"] == "message":
+            events.append(
+                event(
+                    "response.content_part.added",
+                    {
+                        **common,
+                        "content_index": 0,
+                        "part": {"type": "output_text", "text": "", "annotations": []},
+                    },
+                )
             )
-
-    async for raw_chunk in openai_body_iterator:
-        if not raw_chunk:
-            continue
-        if isinstance(raw_chunk, (bytes, bytearray)):
-            raw_chunk = raw_chunk.decode("utf-8", errors="replace")
-        for line in raw_chunk.split("\n"):
-            line = line.strip()
-            if not line.startswith("data: "):
-                continue
-            payload = line[len("data: ") :]
-            if payload == "[DONE]":
-                continue
-            try:
-                chunk = json.loads(payload)
-            except Exception:
-                logger.debug("Skipping non-JSON SSE payload: %r", payload)
-                continue
-
-            if "error" in chunk and "choices" not in chunk:
-                failed_error = chunk["error"]
-                break
-
-            if chunk.get("usage"):
-                usage = chunk["usage"]
-            choices = chunk.get("choices") or []
-            if not choices:
-                continue
-            choice = choices[0]
-            delta = choice.get("delta") or {}
-            if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-
-            reasoning_piece = delta.get("reasoning") or delta.get("reasoning_content")
-            if reasoning_piece:
-                if current is None or current[0] != "reasoning":
-                    item = {
-                        "type": "reasoning",
-                        "id": f"rs_{uuid.uuid4().hex}",
-                        "summary": [],
-                        "content": [{"type": "reasoning_text", "text": ""}],
-                        "status": "in_progress",
-                    }
-                    for e in open_item("reasoning", item):
-                        yield e
-                item = current[1]
-                item["content"][0]["text"] += reasoning_piece
-                yield event(
-                    "response.reasoning_text.delta",
-                    {
-                        "item_id": item["id"],
-                        "output_index": output_index,
-                        "content_index": 0,
-                        "delta": reasoning_piece,
-                    },
-                )
-
-            content_piece = delta.get("content")
-            if content_piece:
-                if current is None or current[0] != "message":
-                    item = {
-                        "type": "message",
-                        "id": f"msg_{uuid.uuid4().hex}",
-                        "status": "in_progress",
-                        "role": "assistant",
-                        "content": [{"type": "output_text", "text": "", "annotations": []}],
-                    }
-                    for e in open_item("message", item):
-                        yield e
-                item = current[1]
-                item["content"][0]["text"] += content_piece
-                yield event(
-                    "response.output_text.delta",
-                    {
-                        "item_id": item["id"],
-                        "output_index": output_index,
-                        "content_index": 0,
-                        "delta": content_piece,
-                    },
-                )
-
-            for tc in delta.get("tool_calls") or []:
-                fn = tc.get("function") or {}
-                if fn.get("name"):
-                    item = {
-                        "type": "function_call",
-                        "id": f"fc_{uuid.uuid4().hex}",
-                        "call_id": tc.get("id") or f"call_{uuid.uuid4().hex[:24]}",
-                        "name": fn["name"],
-                        "arguments": "",
-                        "status": "in_progress",
-                    }
-                    for e in open_item("function_call", item):
-                        yield e
-                args = fn.get("arguments")
-                if args and current is not None and current[0] == "function_call":
-                    item = current[1]
-                    item["arguments"] += args
-                    yield event(
-                        "response.function_call_arguments.delta",
-                        {"item_id": item["id"], "output_index": output_index, "delta": args},
+        elif item["type"] == "reasoning":
+            if wants_summary:
+                events.append(
+                    event(
+                        "response.reasoning_summary_part.added",
+                        {
+                            **common,
+                            "summary_index": 0,
+                            "part": {"type": "summary_text", "text": ""},
+                        },
                     )
-        if failed_error is not None:
-            break
+                )
+            else:
+                events.append(
+                    event(
+                        "response.content_part.added",
+                        {
+                            **common,
+                            "content_index": 0,
+                            "part": {"type": "reasoning_text", "text": ""},
+                        },
+                    )
+                )
+        return state, events
 
-    if failed_error is not None:
-        response["status"] = "failed"
-        error_code = "rate_limit_error" if is_rate_limit_error(failed_error) else "server_error"
-        response["error"] = {"code": error_code, "message": failed_error.get("message", "generation failed")}
-        yield event("response.failed", {"response": response})
-        return
+    iterator = openai_body_iterator.__aiter__()
+    started = False
+    try:
+        # Run lazy admission before committing HTTP 200. The deployment opt-out
+        # still allows immediate response.created for clients needing headers.
+        first_chunk = await anext(iterator, None) if delay_response_start else None
+        started = True
+        yield event("response.created", {"response": response})
+        yield event("response.in_progress", {"response": response})
+        raw_chunk = first_chunk
+        while True:
+            if raw_chunk is None:
+                raw_chunk = await anext(iterator, None)
+                if raw_chunk is None:
+                    break
+            if isinstance(raw_chunk, (bytes, bytearray)):
+                raw_chunk = raw_chunk.decode("utf-8")
+            for line in raw_chunk.splitlines():
+                if not line.startswith("data: "):
+                    continue
+                payload = line[len("data: ") :]
+                if payload == "[DONE]":
+                    continue
+                chunk = json.loads(payload)
+                if "error" in chunk and not chunk.get("choices"):
+                    failed_error = chunk["error"]
+                    break
+                if chunk.get("usage"):
+                    usage = chunk["usage"]
+                choices = chunk.get("choices") or []
+                if not choices:
+                    continue
+                choice = choices[0]
+                delta = choice.get("delta") or {}
+                finish_reason = choice.get("finish_reason") or finish_reason
+                for kind, piece in (
+                    ("reasoning", delta.get("reasoning") or delta.get("reasoning_content")),
+                    ("message", delta.get("content")),
+                ):
+                    if not piece:
+                        continue
+                    if current is None or current["item"]["type"] != kind:
+                        if current is not None:
+                            for output_event in close_item(current, phase="commentary"):
+                                yield output_event
+                        if kind == "reasoning":
+                            item = _reasoning_output("", body, f"rs_{uuid.uuid4().hex}", "in_progress")
+                        else:
+                            item = {
+                                "type": "message",
+                                "id": f"msg_{uuid.uuid4().hex}",
+                                "status": "in_progress",
+                                "role": "assistant",
+                                "content": [{"type": "output_text", "text": "", "annotations": []}],
+                            }
+                        current, opening_events = open_item(item)
+                        for output_event in opening_events:
+                            yield output_event
+                    item = current["item"]
+                    item["content"][0]["text"] += piece
+                    common = {"item_id": item["id"], "output_index": current["index"], "delta": piece}
+                    if kind == "reasoning" and wants_summary:
+                        yield event("response.reasoning_summary_text.delta", {**common, "summary_index": 0})
+                    else:
+                        event_type = (
+                            "response.reasoning_text.delta" if kind == "reasoning" else "response.output_text.delta"
+                        )
+                        yield event(event_type, {**common, "content_index": 0})
 
-    for e in close_current():
-        yield e
+                for tc in delta.get("tool_calls") or []:
+                    fn = tc.get("function") or {}
+                    index = tc.get("index", 0)
+                    if index not in tool_states:
+                        if not fn.get("name"):
+                            raise ValueError("Tool argument delta has no preceding tool name")
+                        if current is not None:
+                            for output_event in close_item(current, phase="commentary"):
+                                yield output_event
+                            current = None
+                        item = _tool_call_item(fn["name"], "", tc.get("id"), tool_map, "in_progress")
+                        state, opening_events = open_item(item)
+                        state.update(arguments="", emitted_input="")
+                        tool_states[index] = state
+                        for output_event in opening_events:
+                            yield output_event
+                    state = tool_states[index]
+                    item = state["item"]
+                    args = fn.get("arguments") or ""
+                    state["arguments"] += args
+                    common = {"item_id": item["id"], "output_index": state["index"]}
+                    if item["type"] == "custom_tool_call":
+                        text = _custom_tool_input(state["arguments"], partial=True)
+                        piece = text[len(state["emitted_input"]) :]
+                        state["emitted_input"] = text
+                        item["input"] = text
+                        if piece:
+                            yield event("response.custom_tool_call_input.delta", {**common, "delta": piece})
+                    else:
+                        item["arguments"] = state["arguments"]
+                        if args:
+                            yield event("response.function_call_arguments.delta", {**common, "delta": args})
+            raw_chunk = None
+            if failed_error is not None:
+                break
+        if failed_error is None and finish_reason in (None, "error", "abort"):
+            failed_error = {
+                "message": "Generation failed" if finish_reason else "Generation stream ended without a finish reason"
+            }
+        if failed_error is None:
+            # Validate custom payloads before emitting any terminal tool events.
+            if finish_reason != "length":
+                for state in tool_states.values():
+                    if state["item"]["type"] == "custom_tool_call":
+                        _custom_tool_input(state["arguments"])
+            if current is not None:
+                for output_event in close_item(current):
+                    yield output_event
+            for state in tool_states.values():
+                for output_event in close_item(state):
+                    yield output_event
+    except Exception as exc:
+        if not started:
+            raise
+        logger.exception("Responses stream failed")
+        failed_error = (
+            {"message": SERVER_BUSY_MESSAGE, "code": exc.status_code}
+            if isinstance(exc, ServerBusyError)
+            else {"message": str(exc)}
+        )
+    finally:
+        await iterator.aclose()
 
     response["usage"] = _usage_to_responses(usage)
-    if finish_reason == "length":
+    if failed_error is not None:
+        for item in response["output"]:
+            if item["status"] == "in_progress":
+                item["status"] = "incomplete"
+        response["status"] = "failed"
+        error_code = "rate_limit_exceeded" if is_rate_limit_error(failed_error) else "server_error"
+        response["error"] = {"code": error_code, "message": failed_error.get("message", "generation failed")}
+        yield event("response.failed", {"response": response})
+    elif finish_reason == "length":
         response["status"] = "incomplete"
         response["incomplete_details"] = {"reason": "max_output_tokens"}
         yield event("response.incomplete", {"response": response})
@@ -563,6 +778,8 @@ async def responses_impl(raw_request: Request) -> Response:
         return create_error_response(HTTPStatus.BAD_REQUEST, f"Invalid JSON body: {exc}")
     if not isinstance(body, dict):
         return create_error_response(HTTPStatus.BAD_REQUEST, "Request body must be a JSON object")
+    if isinstance(body.get("extra_body"), dict):
+        body = {**body["extra_body"], **body}
 
     if body.get("previous_response_id"):
         return create_error_response(
@@ -591,7 +808,11 @@ async def responses_impl(raw_request: Request) -> Response:
         if not isinstance(downstream, CustomStreamingResponse):
             return downstream
         return CustomStreamingResponse(
-            _openai_sse_to_responses_events(downstream.body_iterator, body),
+            _openai_sse_to_responses_events(
+                downstream.body_iterator,
+                body,
+                delay_response_start=not get_env_start_args().disable_delay_response_start,
+            ),
             media_type="text/event-stream",
         )
 
