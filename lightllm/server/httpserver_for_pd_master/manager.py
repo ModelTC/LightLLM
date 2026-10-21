@@ -638,7 +638,10 @@ class HttpServerManagerForPDMaster:
                 for sub_req_id, request_output, metadata, finish_status in token_list:
                     output_index = metadata.get("count_output_tokens")
                     # 因为 pd 的 prefill 和 decode 节点都有可能上报首token，所以需要做一下过滤。
-                    if output_index == 1:
+                    # Prefill 已返回首 token 后，Decode 若在出首 token 前遇到 KV 传输错误或取消，
+                    # 仍可能以 count_output_tokens=1 上报 error/abort 的模拟结束 token。
+                    # 该终态必须透传，否则会被当作重复首 token 丢弃，导致 HTTP 请求一直等待结束。
+                    if output_index == 1 and not finish_status.is_error_finished():
                         if first_token_gen is False:
                             first_token_gen = True
                             node_run_mode = metadata.get("node_mode")
