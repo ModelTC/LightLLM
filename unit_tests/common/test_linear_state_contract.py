@@ -5,31 +5,27 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.recurrent_state import RecurrentState
-from lightllm.common.recurrent_state_types import SSMRunConfig
+from lightllm.common.linear_state import LinearStateManager, SSMRunConfig
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig, LinearAttCacheConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 def test_published_config_is_detached_immutable_and_pickleable():
     tuning = {"BV": 8, "num_warps": 1}
-    config = SSMRunConfig.from_mapping(tuning)
+    config = SSMRunConfig(**tuning)
     tuning.update(BV=128, num_warps=4, num_stages=1)
-    assert dict(config) == {"BV": 8, "num_warps": 1, "num_stages": 3}
+    assert config == SSMRunConfig(BV=8, num_warps=1, num_stages=3)
     with pytest.raises(FrozenInstanceError):
         config.BV = 128
-    with pytest.raises(TypeError):
-        config["BV"] = 128
     restored = pickle.loads(pickle.dumps(config))
     assert restored == config
-    assert dict(restored) == dict(config)
 
 
 def test_config_rejects_unrepresented_kernel_options():
-    with pytest.raises(ValueError, match="Unknown SSM kernel configuration fields"):
-        SSMRunConfig.from_mapping({"BV": 32, "num_warps": 1, "future_layout_option": 2})
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        SSMRunConfig(**{"BV": 32, "num_warps": 1, "future_layout_option": 2})
     with pytest.raises(TypeError, match="must be an integer"):
-        SSMRunConfig.from_mapping({"BV": [32], "num_warps": 1})
+        SSMRunConfig(BV=[32], num_warps=1)
 
 
 @pytest.fixture
@@ -57,14 +53,14 @@ def linear_config():
 
 @pytest.mark.parametrize("layer,row", [(0, 0), (1, 1), (3, 2), (4, 3), (6, 4), (7, 5)])
 def test_layer_buffers_follow_packed_linear_layers(linear_config, layer, row):
-    owner = object.__new__(RecurrentState)
+    owner = object.__new__(LinearStateManager)
     owner.linear_config = linear_config
     conv = torch.arange(6).view(6, 1)
     ssm = conv + 10
     owner.conv_state = SimpleNamespace(buffer=conv)
     owner.ssm_state = SimpleNamespace(buffer=ssm)
     assert linear_config.get_linear_layer_index(layer) == row
-    actual_conv, actual_ssm = owner.layer_buffers(layer)
+    actual_conv, actual_ssm = owner.get_layer_buffers(layer)
     assert actual_conv.item() == row
     assert actual_ssm.item() == row + 10
 
@@ -98,8 +94,27 @@ def test_model_configuration_retains_nondefault_kda_gate_bound():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("mode", ["compact", "replay"])
-def test_kda_updater_receives_gate_bound_at_construction(linear_config, mode):
+def test_kda_backend_receives_gate_bound_at_construction(linear_config, mode):
     linear_config.gate_lower_bound = -2.5
     args = SimpleNamespace(mtp_step=2, ssm_state_mode=mode, ssm_replay_config={})
-    owner = RecurrentState(2, linear_config, args, kda=True)
-    assert owner.updates.lower_bound == -2.5
+    owner = LinearStateManager(2, linear_config, args, kda=True)
+    assert owner.ssm_backend.gate_lower_bound == -2.5
+
+
+@pytest.mark.parametrize("mode", ["compact", "replay", "parallel"])
+def test_ssm_backend_publishes_detached_run_config(mode):
+    from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
+    from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
+
+    ssm_backend = object.__new__(CompactSSMBackend if mode == "compact" else ReplaySSMBackend)
+    tuning = {"BV": 32, "num_warps": 2}
+    ssm_backend.run_config = tuning
+    ssm_backend._config_is_fixed = True
+    ssm_backend.compute_mode = "parallel" if mode == "parallel" else "inline"
+    config = ssm_backend.get_run_config(*([None] * 7))
+    assert isinstance(config, SSMRunConfig)
+    tuning["BV"] = 128
+    assert config.BV == 32
+    assert config.num_stages == 3
+    with pytest.raises(FrozenInstanceError):
+        config.BV = 128

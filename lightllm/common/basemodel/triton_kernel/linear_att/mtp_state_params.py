@@ -7,10 +7,8 @@ import triton.language as tl
 def _build_dynamic_mtp_linear_att_state_params_kernel(
     b_req_idx,
     b_mtp_index,
-    req_to_mtp_state_index,
     out_cu_q_seq_len,
     out_conv_buffer_idx,
-    out_num_accepted_tokens,
     batch_size,
     hold_req_id,
     SEQUENCE_CAPACITY: tl.constexpr,
@@ -31,29 +29,20 @@ def _build_dynamic_mtp_linear_att_state_params_kernel(
     # Both the request-pool capacity and graph token bucket are static.
     tl.store(out_cu_q_seq_len + offsets, actual_token_num, mask=cu_mask)
     tl.store(out_conv_buffer_idx + offsets, hold_req_id, mask=sequence_mask)
-    tl.store(out_num_accepted_tokens + offsets, 1, mask=sequence_mask)
     tl.debug_barrier()
 
     # mtp_index restarts at zero on the first row of every request group.
     is_start = valid_row & (mtp_index == 0)
     sequence_index = tl.cumsum(tl.where(is_start, 1, 0), axis=0) - 1
-    accepted_state_index = tl.load(
-        req_to_mtp_state_index + req_idx,
-        mask=is_start,
-        other=0,
-    )
-
     tl.store(out_cu_q_seq_len + sequence_index, offsets, mask=is_start)
     tl.store(out_conv_buffer_idx + sequence_index, req_idx, mask=is_start)
-    tl.store(out_num_accepted_tokens + sequence_index, accepted_state_index + 1, mask=is_start)
 
 
 def build_dynamic_mtp_linear_att_state_params(
     b_req_idx: torch.Tensor,
     b_mtp_index: torch.Tensor,
-    req_to_mtp_state_index: torch.Tensor,
     hold_req_id: int,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Convert compact MTP verify rows to variable-length GDN sequences.
 
     Rows remain request-major after dynamic verification trimming, but each request can
@@ -71,13 +60,11 @@ def build_dynamic_mtp_linear_att_state_params(
         request 4 -> rows [3, 4), query length 1
         request 9 -> rows [4, 6), query length 2
 
-    Runtime ``H`` rows are graph padding and do not form query sequences. If
-    ``req_to_mtp_state_index`` stores ``{7: 2, 4: 0, 9: 1}``, the fixed-shape
-    outputs are::
+    Runtime ``H`` rows are graph padding and do not form query sequences.
+    The fixed-shape outputs are::
 
         b1_cu_q_seq_len       = [0, 3, 4, 6, 6, 6, 6, 6, 6]
         b_conv_buffer_idx     = [7, 4, 9, H, H, H, H, H]
-        b_num_accepted_tokens = [3, 1, 2, 1, 1, 1, 1, 1]
 
     ``b_conv_buffer_idx`` therefore changes from one request id per query row
     to one request id per GDN sequence. Repeated cumulative lengths describe
@@ -87,25 +74,22 @@ def build_dynamic_mtp_linear_att_state_params(
     one HOLD slot; the number of real sequences cannot exceed the other slots.
     """
 
-    assert b_req_idx.is_cuda and b_mtp_index.is_cuda and req_to_mtp_state_index.is_cuda
+    assert b_req_idx.is_cuda and b_mtp_index.is_cuda
     assert b_req_idx.ndim == 1 and b_req_idx.shape == b_mtp_index.shape
     assert b_req_idx.dtype == torch.int32 and b_mtp_index.dtype == torch.int32
     batch_size = b_req_idx.shape[0]
     assert batch_size > 0
-    sequence_capacity = min(batch_size, req_to_mtp_state_index.numel() - 1)
+    sequence_capacity = min(batch_size, hold_req_id)
     assert sequence_capacity > 0
 
     b1_cu_q_seq_len = torch.empty((sequence_capacity + 1,), dtype=torch.int32, device=b_req_idx.device)
     b_conv_buffer_idx = torch.empty((sequence_capacity,), dtype=torch.int32, device=b_req_idx.device)
-    b_num_accepted_tokens = torch.empty_like(b_conv_buffer_idx)
 
     _build_dynamic_mtp_linear_att_state_params_kernel[(1,)](
         b_req_idx=b_req_idx,
         b_mtp_index=b_mtp_index,
-        req_to_mtp_state_index=req_to_mtp_state_index,
         out_cu_q_seq_len=b1_cu_q_seq_len,
         out_conv_buffer_idx=b_conv_buffer_idx,
-        out_num_accepted_tokens=b_num_accepted_tokens,
         batch_size=batch_size,
         hold_req_id=int(hold_req_id),
         SEQUENCE_CAPACITY=sequence_capacity,
@@ -113,4 +97,4 @@ def build_dynamic_mtp_linear_att_state_params(
         num_warps=8,
         num_stages=1,
     )
-    return b1_cu_q_seq_len, b_conv_buffer_idx, b_num_accepted_tokens
+    return b1_cu_q_seq_len, b_conv_buffer_idx

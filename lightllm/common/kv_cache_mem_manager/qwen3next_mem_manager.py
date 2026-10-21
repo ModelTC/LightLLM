@@ -73,9 +73,9 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def write_to_shm(self, req_manager):
-        # RecurrentState contains only IPC-safe state/operator configuration;
+        # LinearStateManager contains only IPC-safe state/operator configuration;
         # worker execution resources must remain outside this shared object.
-        self.recurrent_state = req_manager.recurrent_state
+        self.linear_state_manager = req_manager.linear_state_manager
         # super().write_to_shm() 会用 ForkingPickler 序列化本对象，torch 在 dump 时会把
         # CPU tensor 的 storage 原地迁到共享内存，使本进程大页 state cache 原本
         # pinned(cudaHostAlloc) 的内存退化为普通 shm mmap，之后 Triton kernel 携带该指针
@@ -223,7 +223,7 @@ class Qwen3NextLinearAttPageHelper:
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         assert len(dp_mems) == dp_world_size
         for mem in dp_mems:
-            assert hasattr(mem, "recurrent_state")
+            assert hasattr(mem, "linear_state_manager")
             assert mem.linear_config.linear_layer_num == self.linear_config.linear_layer_num
             assert mem.linear_config.conv_kernel_size == self.linear_config.conv_kernel_size
             assert mem.linear_config.head_linear_k_dim == self.linear_config.head_linear_k_dim
@@ -272,7 +272,7 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
-        conv_state, ssm_state = mem.recurrent_state.snapshot(req_idx)
+        conv_state, ssm_state = mem.linear_state_manager.get_accepted_state(req_idx)
         self._copy_conv_state_to_page(conv_state, conv_page, mem, tp_index)
         self._copy_ssm_state_to_page(ssm_state, ssm_page, mem, tp_index)
         return
@@ -450,7 +450,7 @@ class Qwen3NextLinearAttPageHelper:
         conv_page: torch.Tensor,
         ssm_page: torch.Tensor,
     ):
-        conv_state, ssm_state = mem.recurrent_state.restore_target(req_idx)
+        conv_state, ssm_state = mem.linear_state_manager.prepare_restore(req_idx)
         self._copy_page_to_conv_state(conv_page, conv_state, mem, tp_index)
         self._copy_page_to_ssm_state(ssm_page, ssm_state, mem, tp_index)
         return

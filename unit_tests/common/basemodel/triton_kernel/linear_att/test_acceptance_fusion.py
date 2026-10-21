@@ -3,8 +3,8 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
-from lightllm.common.recurrent_state import RecurrentState
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
+from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.req_manager.linear_att import ReqManagerForMamba
 
 
@@ -21,24 +21,26 @@ def make(n, width):
         mtps.extend(range(l))
     tensor = lambda x: torch.tensor(x, device="cuda", dtype=torch.int32)
     args = [tensor(starts), tensor(reqs), tensor(mtps), tensor([1] * len(reqs)), width]
-    cache = ReplaySSMCache.__new__(ReplaySSMCache)
-    cache.cursors = tensor([7] * (hold + 1))
-    cache.hold = hold
-    cache.capacity = max(4, triton.next_power_of_2(width))
-    cache.verify_width = width
+    ssm_backend = ReplaySSMBackend.__new__(ReplaySSMBackend)
+    ssm_backend.cursors = tensor([7] * (hold + 1))
+    ssm_backend.hold_req_id = hold
+    ssm_backend.capacity = max(4, triton.next_power_of_2(width))
+    ssm_backend.verify_width = width
     manager = ReqManagerForMamba.__new__(ReqManagerForMamba)
-    manager.recurrent_state = object.__new__(RecurrentState)
-    manager.recurrent_state.accepted_index = tensor([-9] * (hold + 1))
-    manager.recurrent_state.updates = cache
+    manager.linear_state_manager = object.__new__(LinearStateManager)
+    manager.linear_state_manager.accepted_state_index = tensor([-9] * (hold + 1))
+    manager.linear_state_manager.ssm_backend = ssm_backend
     return manager, args, (ids, lengths, starts)
 
 
-def old(m, args):
-    update(m.recurrent_state.accepted_index, *args)
-    m.recurrent_state.updates.accept_updates(args[1][args[0].long()], m.recurrent_state.accepted_index)
+def accept_unfused(m, args):
+    update(m.linear_state_manager.accepted_state_index, *args)
+    m.linear_state_manager.ssm_backend.accept_updates(
+        args[1][args[0].long()], m.linear_state_manager.accepted_state_index
+    )
 
 
-def new(m, args):
+def accept_fused(m, args):
     m.update_mtp_state(*args)
 
 
@@ -50,80 +52,84 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
             m, args, (ids, lengths, starts) = make(n, width)
             ref, _, _ = make(n, width)
             # Compile both paths before graph capture, then reset before replay.
-            old(ref, args)
-            new(m, args)
+            accept_unfused(ref, args)
+            accept_fused(m, args)
             torch.cuda.synchronize()
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
-                new(m, args)
-            expected_index = [-9] * len(m.recurrent_state.accepted_index)
+                accept_fused(m, args)
+            expected_index = [-9] * len(m.linear_state_manager.accepted_state_index)
             expected_cursor = [7] * len(expected_index)
-            m.recurrent_state.accepted_index.fill_(-9)
-            ref.recurrent_state.accepted_index.fill_(-9)
-            m.recurrent_state.updates.cursors.fill_(7)
-            ref.recurrent_state.updates.cursors.fill_(7)
+            m.linear_state_manager.accepted_state_index.fill_(-9)
+            ref.linear_state_manager.accepted_state_index.fill_(-9)
+            m.linear_state_manager.ssm_backend.cursors.fill_(7)
+            ref.linear_state_manager.ssm_backend.cursors.fill_(7)
             for step in range(24):
                 mask = []
                 for i, (r, l) in enumerate(zip(ids, lengths)):
                     count = (step + i) % (l + 1)
                     mask.extend([1] * count + [0] * (l - count))
                     expected_index[r] = count - 1
-                    if r != m.recurrent_state.updates.hold:
+                    if r != m.linear_state_manager.ssm_backend.hold_req_id:
                         expected_cursor[r] += count if width > 1 else 1
                 args[3].copy_(torch.tensor(mask, device="cuda", dtype=torch.int32))
-                old(ref, args)
+                accept_unfused(ref, args)
                 if step % 2:
                     graph.replay()
                 else:
-                    new(m, args)
-                assert torch.equal(m.recurrent_state.accepted_index, ref.recurrent_state.accepted_index)
-                assert torch.equal(m.recurrent_state.updates.cursors, ref.recurrent_state.updates.cursors)
-                assert m.recurrent_state.accepted_index.tolist() == expected_index
-                assert m.recurrent_state.updates.cursors.tolist() == expected_cursor
+                    accept_fused(m, args)
+                assert torch.equal(
+                    m.linear_state_manager.accepted_state_index, ref.linear_state_manager.accepted_state_index
+                )
+                assert torch.equal(
+                    m.linear_state_manager.ssm_backend.cursors, ref.linear_state_manager.ssm_backend.cursors
+                )
+                assert m.linear_state_manager.accepted_state_index.tolist() == expected_index
+                assert m.linear_state_manager.ssm_backend.cursors.tolist() == expected_cursor
                 checks += 1
-            # Native optional-pointer path and manager dispatch leave metadata-only cache absent.
-            m.recurrent_state.updates = None
-            new(m, args)
-            assert m.recurrent_state.accepted_index.tolist() == expected_index
+            # Native optional-pointer path and manager dispatch leave metadata-only backend absent.
+            m.linear_state_manager.ssm_backend = None
+            accept_fused(m, args)
+            assert m.linear_state_manager.accepted_state_index.tolist() == expected_index
 
-    # Non-Replay caches must still receive the accepted request IDs and indexes.
+    # Non-Replay backends must still receive the accepted request IDs and indexes.
     class CompactProbe:
         def accept_updates(self, reqs, index):
             self.seen = (reqs.clone(), index.clone())
 
     m, args, (ids, _, _) = make(7, 4)
     probe = CompactProbe()
-    m.recurrent_state.updates = probe
-    new(m, args)
+    m.linear_state_manager.ssm_backend = probe
+    accept_fused(m, args)
     assert probe.seen[0].tolist() == ids
-    assert torch.equal(probe.seen[1], m.recurrent_state.accepted_index)
+    assert torch.equal(probe.seen[1], m.linear_state_manager.accepted_state_index)
     print("ACCEPT_EQUIVALENCE_CHECKS=" + str(checks), flush=True)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-@pytest.mark.parametrize("projection_mode", ["inline", "precompute"])
-def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, projection_mode):
+@pytest.mark.parametrize("compute_mode", ["inline", "precompute"])
+def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, compute_mode):
     torch.manual_seed(93)
     initial = torch.randn(2, 8, 4, 32, 32, device="cuda").to(dtype) * 0.01
-    caches = [
-        ReplaySSMCache(
+    ssm_backends = [
+        ReplaySSMBackend(
             initial.clone(),
             8,
             4,
             torch.bfloat16,
             num_key_heads=2,
-            projection_mode=projection_mode,
+            compute_mode=compute_mode,
             run_config={"BV": 32, "num_warps": 1, "num_stages": 1},
         )
         for _ in range(2)
     ]
     managers = []
-    for cache in caches:
+    for ssm_backend in ssm_backends:
         manager = ReqManagerForMamba.__new__(ReqManagerForMamba)
-        manager.recurrent_state = object.__new__(RecurrentState)
-        manager.recurrent_state.updates = cache
-        manager.recurrent_state.accepted_index = torch.zeros(8, dtype=torch.int32, device="cuda")
+        manager.linear_state_manager = object.__new__(LinearStateManager)
+        manager.linear_state_manager.ssm_backend = ssm_backend
+        manager.linear_state_manager.accepted_state_index = torch.zeros(8, dtype=torch.int32, device="cuda")
         managers.append(manager)
     reqs = torch.full((4,), 7, dtype=torch.int32, device="cuda")
     cu = torch.tensor([0, 3, 6, 9, 12], dtype=torch.int32, device="cuda")
@@ -139,10 +145,10 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, projec
     args = [cu[:-1], token_reqs, mtp_indexes, accepted_mask, 4]
 
     def cycle(i):
-        cache = caches[i]
-        cache.prepare_decode(reqs, cu)
-        outputs = [cache.forward(layer, q, k, v, a, b, alog, alog, reqs, cu) for layer in range(2)]
-        (old if i == 0 else new)(managers[i], args)
+        ssm_backend = ssm_backends[i]
+        ssm_backend.prepare_decode(reqs, cu)
+        outputs = [ssm_backend.forward(layer, q, k, v, a, b, alog, alog, reqs, cu)[0] for layer in range(2)]
+        (accept_unfused if i == 0 else accept_fused)(managers[i], args)
         return outputs
 
     graphs, outputs = [], []
@@ -180,21 +186,23 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, projec
             graph.replay()
         for left, right in zip(outputs[0], outputs[1]):
             assert torch.equal(left, right)
-        assert torch.equal(caches[0].state, caches[1].state)
-        assert torch.equal(caches[0].cursors, caches[1].cursors)
-        assert torch.equal(managers[0].recurrent_state.accepted_index, managers[1].recurrent_state.accepted_index)
+        assert torch.equal(ssm_backends[0].state, ssm_backends[1].state)
+        assert torch.equal(ssm_backends[0].cursors, ssm_backends[1].cursors)
+        assert torch.equal(
+            managers[0].linear_state_manager.accepted_state_index, managers[1].linear_state_manager.accepted_state_index
+        )
         if iteration % 7 == 0:
-            assert torch.equal(caches[0].snapshot_accepted_state(3), caches[1].snapshot_accepted_state(3))
+            assert torch.equal(ssm_backends[0].get_accepted_state(3), ssm_backends[1].get_accepted_state(3))
         if iteration % 11 == 10:
-            for cache in caches:
-                cache.merge_accepted_updates(reqs[:3])
-            assert torch.equal(caches[0].state, caches[1].state)
+            for ssm_backend in ssm_backends:
+                ssm_backend.merge_accepted_updates(reqs[:3])
+            assert torch.equal(ssm_backends[0].state, ssm_backends[1].state)
         if iteration == 19:
             for manager in managers:
-                manager.recurrent_state.updates.clear_history(1)
-                manager.recurrent_state.updates.state[:, 1].zero_()
-                manager.recurrent_state.accepted_index[1] = 0
-    for cache in caches:
-        cache.merge_accepted_updates(reqs[:3])
-    assert torch.equal(caches[0].state, caches[1].state)
-    assert torch.equal(caches[0].state[:, [0, 2, 4, 5, 7]], initial[:, [0, 2, 4, 5, 7]])
+                manager.linear_state_manager.ssm_backend.clear_history(1)
+                manager.linear_state_manager.ssm_backend.state[:, 1].zero_()
+                manager.linear_state_manager.accepted_state_index[1] = 0
+    for ssm_backend in ssm_backends:
+        ssm_backend.merge_accepted_updates(reqs[:3])
+    assert torch.equal(ssm_backends[0].state, ssm_backends[1].state)
+    assert torch.equal(ssm_backends[0].state[:, [0, 2, 4, 5, 7]], initial[:, [0, 2, 4, 5, 7]])

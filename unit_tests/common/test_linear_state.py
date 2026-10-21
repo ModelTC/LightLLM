@@ -4,7 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextLinearAttPageHelper
-from lightllm.common.recurrent_state import RecurrentState
+from lightllm.common.linear_state import LinearStateManager
 from lightllm.common.req_manager.linear_att import ReqManagerForMamba
 from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 
@@ -35,32 +35,34 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(m
         all_layer_num=3,
     )
     args = SimpleNamespace(mtp_step=step, ssm_state_mode=mode, ssm_replay_config={"cache_len": 4})
-    state = RecurrentState(3, config, args)
+    state = LinearStateManager(3, config, args)
     manager = object.__new__(ReqManagerForMamba)
-    manager.recurrent_state = state
+    manager.linear_state_manager = state
     cache = LinearAttCacheManager(3, config)
     manager.mem_manager = SimpleNamespace(big_page_buffers=cache)
-    mem = SimpleNamespace(linear_config=config, recurrent_state=state)
+    mem = SimpleNamespace(linear_config=config, linear_state_manager=state)
     helper = Qwen3NextLinearAttPageHelper(mem)
     src, dst, offset = 1, 2, min(1, step)
     width = config.get_mtp_conv_state_shape(step)[-1]
     state.conv_state.buffer.copy_(torch.arange(width, device="cuda").to(torch.bfloat16))
     for slot in range(state.ssm_state.buffer.shape[1]):
         state.ssm_state.buffer[:, slot].fill_(slot + 1)
-    if state.accepted_index is not None:
-        state.accepted_index[src] = offset
+    if state.accepted_state_index is not None:
+        state.accepted_state_index[src] = offset
     expected_conv = state.conv_state.buffer[:, src, ..., offset : offset + 3].clone()
-    expected_ssm = state.ssm_state.buffer[:, src * state.slots_per_req + (offset if mode == "native" else 0)].clone()
+    expected_ssm = state.ssm_state.buffer[
+        :, src * state.ssm_slots_per_req + (offset if mode == "native" else 0)
+    ].clone()
     if mode == "replay":
         # One pending accepted update: beta=0 leaves only decay of the base.
-        state.updates.raw_keys.zero_()
-        state.updates.raw_values.zero_()
-        state.updates.gates.fill_(-0.5)
-        state.updates.betas.zero_()
-        state.updates.cursors[src] = 1
+        state.ssm_backend.raw_keys.zero_()
+        state.ssm_backend.raw_values.zero_()
+        state.ssm_backend.gates.fill_(-0.5)
+        state.ssm_backend.betas.zero_()
+        state.ssm_backend.cursors[src] = 1
         expected_ssm = (expected_ssm.float() * torch.exp(torch.tensor(-0.5))).to(dtype)
     before = state.ssm_state.buffer.clone()
-    snapshot = state.snapshot(src)
+    snapshot = state.get_accepted_state(src)
     torch.testing.assert_close(snapshot.ssm, expected_ssm, rtol=2e-5, atol=2e-5)
     expected_ssm = snapshot.ssm.clone()
 
@@ -78,13 +80,13 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(m
     torch.testing.assert_close(ssm_page, expected_ssm, rtol=0, atol=0)
     assert torch.equal(state.ssm_state.buffer, before)
     if mode == "replay":
-        assert state.updates.cursors[src].item() == 1
+        assert state.ssm_backend.cursors[src].item() == 1
 
     def dirty_destination():
-        if state.accepted_index is not None:
-            state.accepted_index[dst] = step
+        if state.accepted_state_index is not None:
+            state.accepted_state_index[dst] = step
         if mode == "replay":
-            state.updates.cursors[dst] = 3
+            state.ssm_backend.cursors[dst] = 3
 
     for restore in (
         lambda: manager.restore_state(SimpleNamespace(req_idx=dst), cache, 0),
@@ -92,13 +94,13 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(m
     ):
         dirty_destination()
         restore()
-        actual = state.snapshot(dst)
+        actual = state.get_accepted_state(dst)
         torch.testing.assert_close(actual.conv, expected_conv, rtol=0, atol=0)
         torch.testing.assert_close(actual.ssm, expected_ssm, rtol=0, atol=0)
-        if state.accepted_index is not None:
-            assert state.accepted_index[dst].item() == 0
+        if state.accepted_state_index is not None:
+            assert state.accepted_state_index[dst].item() == 0
         if mode == "replay":
-            assert state.updates.cursors[dst].item() == 0
+            assert state.ssm_backend.cursors[dst].item() == 0
 
     # A skipped checkpoint must not overwrite another cache owner.
     untouched = tuple(x.clone() for x in cache.get_state_cache(2))
@@ -108,5 +110,5 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(m
         assert torch.equal(actual, expected)
     state.reset(dst)
     assert not state.conv_state.buffer[:, dst].any()
-    start = dst * state.slots_per_req
-    assert not state.ssm_state.buffer[:, start : start + state.slots_per_req].any()
+    start = dst * state.ssm_slots_per_req
+    assert not state.ssm_state.buffer[:, start : start + state.ssm_slots_per_req].any()

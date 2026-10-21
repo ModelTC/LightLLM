@@ -22,7 +22,7 @@ def verify_mtp_tokens(
     b_req_idx: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
     b_mtp_index: torch.Tensor,
-    recurrent_state_batches=None,
+    linear_state_batches=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Verify target tokens and update recurrent MTP state when required."""
     # 保留原调用接口中的步序参数；当前状态提交直接使用验证返回的接受长度。
@@ -40,7 +40,7 @@ def verify_mtp_tokens(
             b_mtp_index=b_mtp_index,
             accepted_index=accepted_index,
             verify_width=backend.max_draft_step + 1,
-            recurrent_state_batches=recurrent_state_batches,
+            linear_state_batches=linear_state_batches,
         )
     return accept_lengths, accepted_index
 

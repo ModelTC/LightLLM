@@ -1,4 +1,4 @@
-"""Tune a complete SSM update cycle without touching the serving state pool."""
+"""Tune one layer's SSM update cycle using the shared autotuner."""
 
 import ast
 
@@ -19,60 +19,63 @@ def get_configs():
     ]
 
 
-def static_key(cache, mode, q, k, v, a, b, cu_seqlens):
+def static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens):
     axis = 1 if cu_seqlens is not None else 0
-    layers, _, hv, kd, vd = cache.state.shape
+    _, _, hv, kd, vd = ssm_backend.state.shape
     # Keep filenames short, but distinguish packed projections, TP layouts,
     # state precision, recurrent rule and history capacity.
     key = {
         "mode": mode,
-        "v": 5,
-        "shape": str((layers, q.shape[-2], hv, cache.num_key_heads, kd, vd, cache.verify_width)),
-        "dtype": str((q.dtype, cache.state.dtype)),
+        "v": 6,
+        "shape": str((q.shape[-2], hv, ssm_backend.num_key_heads, kd, vd, ssm_backend.verify_width)),
+        "dtype": str((q.dtype, ssm_backend.state.dtype)),
         "strides": str((q.stride(axis), k.stride(axis), v.stride(axis), a.stride(0), b.stride(0))),
-        "history": cache.capacity if mode == "replay" else 0,
-        "gate": int(cache.kda),
+        "history": ssm_backend.capacity if mode == "replay" else 0,
+        "gate": int(ssm_backend.kda),
         "varlen": cu_seqlens is not None,
     }
-    if cache.kda:
-        key["lower"] = cache.lower_bound
+    if ssm_backend.kda:
+        key["lower"] = ssm_backend.gate_lower_bound
     if mode == "replay":
-        key["history_dtype"] = str(cache.keys.dtype)
-        if cache.projection_mode == "parallel":
+        key["history_dtype"] = str(ssm_backend.keys.dtype)
+        if ssm_backend.compute_mode == "parallel":
             key["projection"] = "parallel"
-            key["fold"] = cache.fold_method
+            key["fold"] = ssm_backend.fold_method
             return key
         key["projection"] = (
-            ("kda_mma" if cache.kda else "gdn_mma")
-            if cache.projection_mode == "precompute" and cache.verify_width > 1
+            ("kda_mma" if ssm_backend.kda else "gdn_mma")
+            if ssm_backend.compute_mode == "precompute" and ssm_backend.verify_width > 1
             else "inline"
         )
     return key
 
 
-def run_key(cache, q, cu_seqlens):
+def run_key(ssm_backend, q, cu_seqlens):
     tokens = q.shape[1 if cu_seqlens is not None else 0]
     return tokens, cu_seqlens.numel() - 1 if cu_seqlens is not None else tokens
 
 
-def scratch_size_bytes(cache, batch, sequences, inputs):
-    # All cache tensors are request-owned; retain every layer and the HOLD slot.
-    slots = cache.state.shape[1]
-    pool_bytes = sum(x.numel() * x.element_size() for x in vars(cache).values() if isinstance(x, torch.Tensor))
+def scratch_size_bytes(ssm_backend, batch, sequences, inputs):
+    # State/history have a leading layer axis; cursors are shared across layers.
+    layers, slots = ssm_backend.state.shape[:2]
+    pool_bytes = sum(
+        x.numel() * x.element_size() // (layers if x.ndim > 1 else 1)
+        for x in vars(ssm_backend).values()
+        if isinstance(x, torch.Tensor)
+    )
     input_bytes = sum(
         (1 + sum((size - 1) * stride for size, stride in zip(x.shape, x.stride()))) * x.element_size()
         for x in inputs
         if x.numel()
     )
-    snapshot_bytes = cache.state.numel() * cache.state.element_size() // slots
-    return pool_bytes // slots * (batch + 1) + input_bytes + snapshot_bytes + 32 * (batch + sequences + 1)
+    return pool_bytes // slots * (batch + 1) + input_bytes + 32 * (batch + sequences + 1)
 
 
-def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None):
-    tokens, sequences = run_key(cache, q, cu_seqlens)
-    batch = min(sequences, triton.cdiv(tokens, cache.verify_width)) if cu_seqlens is not None else tokens
+def rebuild_inputs(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None):
+    tokens, sequences = run_key(ssm_backend, q, cu_seqlens)
+    batch = min(sequences, triton.cdiv(tokens, ssm_backend.verify_width)) if cu_seqlens is not None else tokens
     if q.is_cuda:
-        required = scratch_size_bytes(cache, batch, sequences, (q, k, v, a, b, a_log, bias))
+        required = scratch_size_bytes(ssm_backend, batch, sequences, (q, k, v, a, b, a_log, bias))
         free, _ = torch.cuda.mem_get_info(q.device)
         available = free + torch.cuda.memory_reserved(q.device) - torch.cuda.memory_allocated(q.device)
         # Leave half for benchmark intermediates, CUDA Graphs and allocator fragmentation.
@@ -80,28 +83,28 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
             raise torch.cuda.OutOfMemoryError(
                 f"SSM tuning scratch needs {required} bytes, exceeding its {available // 2}-byte budget"
             )
-    layers, _, hv, kd, vd = cache.state.shape
-    state = torch.empty((layers, batch + 1, hv, kd, vd), device=q.device, dtype=cache.state.dtype).normal_(0, 0.02)
+    _, _, hv, kd, vd = ssm_backend.state.shape
+    state = torch.empty((1, batch + 1, hv, kd, vd), device=q.device, dtype=ssm_backend.state.dtype).normal_(0, 0.02)
     if mode == "replay":
-        scratch = type(cache)(
+        scratch = type(ssm_backend)(
             state,
-            cache.capacity,
-            cache.verify_width,
+            ssm_backend.capacity,
+            ssm_backend.verify_width,
             q.dtype,
-            num_key_heads=cache.num_key_heads,
-            kda=cache.kda,
-            lower_bound=cache.lower_bound,
-            projection_mode=cache.projection_mode,
-            fold_method=cache.fold_method,
+            num_key_heads=ssm_backend.num_key_heads,
+            kda=ssm_backend.kda,
+            gate_lower_bound=ssm_backend.gate_lower_bound,
+            compute_mode=ssm_backend.compute_mode,
+            fold_method=ssm_backend.fold_method,
         )
     else:
-        scratch = type(cache)(
+        scratch = type(ssm_backend)(
             state,
-            cache.verify_width,
+            ssm_backend.verify_width,
             q.dtype,
-            num_key_heads=cache.num_key_heads,
-            kda=cache.kda,
-            lower_bound=cache.lower_bound,
+            num_key_heads=ssm_backend.num_key_heads,
+            kda=ssm_backend.kda,
+            gate_lower_bound=ssm_backend.gate_lower_bound,
         )
     # Benchmark callbacks must not recursively select a configuration.
     scratch._config_is_fixed = True
@@ -115,14 +118,13 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
             torch.full((sequences - batch,), batch, dtype=torch.int32, device=q.device),
         )
     )
-    cu = (torch.arange(sequences + 1, dtype=torch.int32, device=q.device) * cache.verify_width).clamp_max(tokens)
+    cu = (torch.arange(sequences + 1, dtype=torch.int32, device=q.device) * ssm_backend.verify_width).clamp_max(tokens)
     lengths = cu[1 : batch + 1] - cu[:batch]
     accepted = torch.cat((lengths - 1, lengths.new_zeros(1)))
     partial = accepted.clone()
-    partial[:-1] = torch.minimum(reqs[:batch] % cache.verify_width, lengths - 1)
-    snapshot = torch.empty((layers, hv, kd, vd), device=q.device, dtype=state.dtype)
+    partial[:-1] = torch.minimum(reqs[:batch] % ssm_backend.verify_width, lengths - 1)
     return (), dict(
-        cache=scratch,
+        ssm_backend=scratch,
         mode=mode,
         q=inputs[0],
         k=inputs[1],
@@ -132,7 +134,7 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
         a_log=inputs[5],
         bias=inputs[6],
         cu_seqlens=cu if cu_seqlens is not None else None,
-        workload=(reqs, accepted, partial, snapshot),
+        workload=(reqs, accepted, partial),
     )
 
 
@@ -146,44 +148,39 @@ def rebuild_inputs(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, wor
     rebuild_input_func=rebuild_inputs,
     warmup_all_exist_config=False,
 )
-def select_config(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None):
+def select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None, workload=None, run_config=None):
     """Return a layout; only rebuilt disposable inputs execute the timed cycle."""
     if workload is None:
         return run_config
-    cache.run_config = run_config
-    reqs, accepted, partial, snapshot = workload
+    ssm_backend.run_config = run_config
+    reqs, accepted, partial = workload
     if mode == "replay":
-        cache.cursors.zero_()
+        ssm_backend.cursors.zero_()
         # Include an entire history period and the subsequent fold. Repeating
         # just the first round would benchmark an empty history forever.
         tokens = q.shape[1 if cu_seqlens is not None else 0]
-        rounds = cache.capacity // min(cache.verify_width, tokens) + 1
+        rounds = ssm_backend.capacity // min(ssm_backend.verify_width, tokens) + 1
     else:
-        rounds = 2  # Partial acceptance and full acceptance, both across all layers.
+        rounds = 2  # Partial acceptance followed by full acceptance.
     for step in range(rounds):
-        cache.prepare_decode(reqs, cu_seqlens)
-        for linear_layer_idx in range(cache.state.shape[0]):
-            cache.forward(linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
-        cache.accept_updates(reqs, partial if mode != "replay" and step == 0 else accepted)
-        if mode == "replay" and step == rounds - 2:
-            cache._materialize_accepted_state(reqs[:1], snapshot, snapshot=True)
-    if mode == "replay":
-        cache.merge_accepted_updates(reqs)
+        ssm_backend.prepare_decode(reqs, cu_seqlens)
+        ssm_backend.forward(0, q, k, v, a, b, a_log, bias, reqs, cu_seqlens)
+        ssm_backend.accept_updates(reqs, partial if mode != "replay" and step == 0 else accepted)
     return run_config
 
 
-def configure_cache(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens):
-    default = cache.run_config or {"BV": 32, "num_warps": 1}
-    if cache._config_is_fixed:
+def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens):
+    default = ssm_backend.run_config or {"BV": 32, "num_warps": 1}
+    if ssm_backend._config_is_fixed:
         return default
-    key = (tuple(static_key(cache, mode, q, k, v, a, b, cu_seqlens).items()), run_key(cache, q, cu_seqlens))
-    if key in cache.batch_configs:
-        return cache.batch_configs[key]
+    key = (tuple(static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens).items()), run_key(ssm_backend, q, cu_seqlens))
+    if key in ssm_backend.batch_configs:
+        return ssm_backend.batch_configs[key]
     if not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
         return default
-    config = select_config(cache, mode, q, k, v, a, b, a_log, bias, cu_seqlens)
+    config = select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens)
     config = dict(config or default)
     # Each captured graph keeps its own layout, even after other buckets warm up.
-    cache.batch_configs[key] = config
+    ssm_backend.batch_configs[key] = config
     logger.info(f"SSM {mode} update-cycle config: {config}, warmup batch: {key[1]}")
     return config

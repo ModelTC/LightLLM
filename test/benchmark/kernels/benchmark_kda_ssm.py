@@ -14,8 +14,8 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMCache
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm_compact import CompactSSMCache
+from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
+from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs
 
 
@@ -35,19 +35,19 @@ def workload(args, batch, width, dtype, mode, acceptance):
     snapshot = torch.empty(layers, heads, dim, dim, dtype=dtype, device="cuda")
     slots = (batch + 1) * (width if mode == "native" else 1)
     state = torch.randn(layers, slots, heads, dim, dim, dtype=dtype, device="cuda") * 0.01
-    cache = None
+    ssm_backend = None
     if mode == "compact":
-        cache = CompactSSMCache(state, width, q.dtype, kda=True)
+        ssm_backend = CompactSSMBackend(state, width, q.dtype, kda=True)
     elif mode != "native":
-        cache = ReplaySSMCache(state, 8, width, q.dtype, kda=True, projection_mode=mode)
-    if cache is not None:
-        cache._config_is_fixed = True
+        ssm_backend = ReplaySSMBackend(state, 8, width, q.dtype, kda=True, compute_mode=mode)
+    if ssm_backend is not None:
+        ssm_backend._config_is_fixed = True
     indexes = reqs[:, None] * width + torch.arange(width, device="cuda", dtype=torch.int32)
     if width == 1:
         indexes = reqs
     bytes_used = (
-        sum(x.numel() * x.element_size() for x in vars(cache).values() if isinstance(x, torch.Tensor))
-        if cache
+        sum(x.numel() * x.element_size() for x in vars(ssm_backend).values() if isinstance(x, torch.Tensor))
+        if ssm_backend
         else state.numel() * state.element_size()
     )
 
@@ -55,10 +55,10 @@ def workload(args, batch, width, dtype, mode, acceptance):
 
     def cycle():
         for _ in range(args.rounds):
-            if cache is not None:
-                cache.prepare_decode(reqs, cu)
+            if ssm_backend is not None:
+                ssm_backend.prepare_decode(reqs, cu)
             for layer in range(layers):
-                if cache is None:
+                if ssm_backend is None:
                     fused_recurrent_kda(
                         q,
                         k,
@@ -73,16 +73,16 @@ def workload(args, batch, width, dtype, mode, acceptance):
                         num_accepted_tokens=counts if cu is not None else None,
                     )
                 else:
-                    cache.forward(layer, q, k, v, gate, beta, alog, bias, reqs, cu)
-            if cache is not None:
-                cache.accept_updates(reqs, accepted)
-        if isinstance(cache, ReplaySSMCache):
-            cache._materialize_accepted_state(reqs[:1], snapshot, snapshot=True)
-            cache.merge_accepted_updates(reqs)
+                    ssm_backend.forward(layer, q, k, v, gate, beta, alog, bias, reqs, cu)
+            if ssm_backend is not None:
+                ssm_backend.accept_updates(reqs, accepted)
+        if isinstance(ssm_backend, ReplaySSMBackend):
+            ssm_backend._materialize_accepted_state(reqs[:1], snapshot, snapshot=True)
+            ssm_backend.merge_accepted_updates(reqs)
         else:
-            snapshot.copy_(state[:, native_index] if cache is None else state[:, 0])
+            snapshot.copy_(state[:, native_index] if ssm_backend is None else state[:, 0])
 
-    return cache, cycle, bytes_used
+    return ssm_backend, cycle, bytes_used
 
 
 def main():
@@ -111,15 +111,17 @@ def main():
             for width in args.width:
                 for acceptance in ["full", "partial"] if width > 1 else ["full"]:
                     for mode in ["native", "compact", "inline", "precompute"] if width > 1 else ["native", "inline"]:
-                        cache, cycle, size = workload(args, batch, width, getattr(torch, dtype_name), mode, acceptance)
+                        ssm_backend, cycle, size = workload(
+                            args, batch, width, getattr(torch, dtype_name), mode, acceptance
+                        )
                         candidates = []
-                        if cache is not None:
+                        if ssm_backend is not None:
                             for config in get_configs() if args.tune else [{"BV": 32, "num_warps": 2, "num_stages": 1}]:
-                                cache.run_config = config
+                                ssm_backend.run_config = config
                                 cycle()
                                 ms = triton.testing.do_bench_cudagraph(cycle, rep=50)
                                 candidates.append(dict(config=config, ms=ms))
-                            cache.run_config = min(candidates, key=lambda r: r["ms"])["config"]
+                            ssm_backend.run_config = min(candidates, key=lambda r: r["ms"])["config"]
                         cycle()
                         samples = [
                             triton.testing.do_bench_cudagraph(cycle, rep=100) / args.rounds for _ in range(args.repeats)
@@ -133,13 +135,13 @@ def main():
                             state_history_bytes=size,
                             ms_per_round=statistics.median(samples),
                             samples_ms=samples,
-                            config=cache.run_config if cache else None,
+                            config=ssm_backend.run_config if ssm_backend else None,
                             candidates=candidates,
                         )
                         rows.append(row)
                         args.output.write_text(json.dumps(report, indent=2) + "\n")
                         print(json.dumps(row), flush=True)
-                        del cache, cycle
+                        del ssm_backend, cycle
                         gc.collect()
                         torch.cuda.empty_cache()
 

@@ -333,14 +333,14 @@ def test_selected_draft_logits_unpad_preserves_physical_hidden_rows(origin):
         logits=torch.arange(12).view(3, 4),
         logits_token_ids=torch.arange(12).view(3, 4),
         mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(45).view(15, 3)),
-        logits_row_stride=5,
+        input_rows_per_logit=5,
     )
     unpadded = model._create_unpad_decode_model_output(output, origin)
     assert unpadded.logits.shape == (origin // 5, 4)
     assert unpadded.logits_token_ids.shape == (origin // 5, 4)
     assert unpadded.mtp_collector.spec_hidden.shape == (origin, 3)
     assert output.mtp_collector.spec_hidden.shape == (15, 3)
-    assert unpadded.logits_row_stride == 5
+    assert unpadded.input_rows_per_logit == 5
 
 
 @pytest.mark.parametrize("disabled", [None, "dynamic", "overlap", "tp", "projection", "model", "target"])
@@ -358,7 +358,7 @@ def test_draft_tail_scope(disabled):
     model.args.enable_decode_microbatch_overlap = disabled == "overlap"
     if disabled == "projection":
         model.args.ssm_replay_config = {"compute_mode": "inline"}
-    assert model.use_replayssm_draft_tail() == (disabled is None)
+    assert model.should_project_draft_tail_logits() == (disabled is None)
 
 
 def _create_empty_decode_input():

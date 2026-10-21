@@ -9,7 +9,9 @@ import torch
 import triton
 import triton.language as tl
 
-from .ssm_autotune import configure_cache
+from lightllm.common.linear_state import SSMRunConfig
+
+from .ssm_autotune import resolve_run_config
 
 
 @triton.jit
@@ -115,13 +117,21 @@ def _compact(
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
 
 
-class CompactSSMCache:
+class CompactSSMBackend:
     def __init__(
-        self, state, verify_width, activation_dtype, *, num_key_heads=None, kda=False, lower_bound=-5.0, run_config=None
+        self,
+        state,
+        verify_width,
+        activation_dtype,
+        *,
+        num_key_heads=None,
+        kda=False,
+        gate_lower_bound=-5.0,
+        run_config=None,
     ):
         self.state = state
         self.kda = kda
-        self.lower_bound = lower_bound
+        self.gate_lower_bound = gate_lower_bound
         self.verify_width = verify_width
         # Verify and accepted-state reconstruction must share the same layout.
         self._config_is_fixed = run_config is not None
@@ -132,7 +142,7 @@ class CompactSSMCache:
         layers, slots, hv, k, v = state.shape
         self.num_key_heads = hv if num_key_heads is None else num_key_heads
         assert self.num_key_heads > 0 and hv % self.num_key_heads == 0
-        self.hold = slots - 1
+        self.hold_req_id = slots - 1
         shape = (layers, slots, hv, verify_width)
         self.keys = torch.empty(
             (layers, slots, self.num_key_heads, verify_width, k), device=state.device, dtype=activation_dtype
@@ -153,20 +163,23 @@ class CompactSSMCache:
         # accept_updates already merged the accepted prefix into SSM state.
         pass
 
-    def snapshot_accepted_state(self, req_idx):
+    def get_accepted_state(self, req_idx):
         return self.state[:, req_idx]
 
-    def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None):
-        return configure_cache(self, "gdn", q, k, v, a, b, a_log, bias, cu_seqlens)
+    def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None) -> SSMRunConfig:
+        config = resolve_run_config(self, "compact", q, k, v, a, b, a_log, bias, cu_seqlens)
+        return SSMRunConfig(**config)
 
     def forward(self, linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
         assert cu_seqlens is not None, "compact replay is only used for speculative verify"
         config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
+        if not isinstance(config, SSMRunConfig):
+            config = SSMRunConfig(**config)
         _, slots, hv, kd, vd = self.state.shape
         assert self.num_key_heads in (q.shape[-2], hv)
         out = torch.empty_like(v)
         # Match native reduction layouts: changing BV can alter BF16 rounding.
-        bv = config["BV"]
+        bv = config.BV
         _compact[(triton.cdiv(vd, bv), reqs.numel(), hv)](
             q,
             k,
@@ -196,23 +209,25 @@ class CompactSSMCache:
             kd,
             vd,
             self.verify_width,
-            self.hold,
+            self.hold_req_id,
             triton.next_power_of_2(kd),
             bv,
             False,
             self.kda,
-            self.lower_bound,
-            num_warps=config["num_warps"],
-            num_stages=config.get("num_stages", 3),
+            self.gate_lower_bound,
+            num_warps=config.num_warps,
+            num_stages=config.num_stages,
         )
-        return out
+        return out, config
 
-    def accept_updates(self, reqs, accepted, run_config=None):
-        """Merge this round's prefix; accepted contains per-request last accepted indexes."""
+    def accept_updates(self, reqs, accepted_state_indices, run_config=None):
+        """Merge this round's prefix; accepted_state_indices contains per-request last accepted indexes."""
         assert run_config is not None or not self.batch_configs, "compact acceptance requires the verify configuration"
         layers, slots, hv, kd, vd = self.state.shape
         config = run_config or self.run_config
-        bv = config["BV"]
+        if not isinstance(config, SSMRunConfig):
+            config = SSMRunConfig(**config)
+        bv = config.BV
         _compact[(triton.cdiv(vd, bv), reqs.numel(), layers * hv)](
             None,
             None,
@@ -228,7 +243,7 @@ class CompactSSMCache:
             self.betas,
             reqs,
             None,
-            accepted,
+            accepted_state_indices,
             None,
             0,
             0,
@@ -242,12 +257,12 @@ class CompactSSMCache:
             kd,
             vd,
             self.verify_width,
-            self.hold,
+            self.hold_req_id,
             triton.next_power_of_2(kd),
             bv,
             True,
             self.kda,
-            self.lower_bound,
-            num_warps=config["num_warps"],
-            num_stages=config.get("num_stages", 3),
+            self.gate_lower_bound,
+            num_warps=config.num_warps,
+            num_stages=config.num_stages,
         )

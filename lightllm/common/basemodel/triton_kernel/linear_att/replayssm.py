@@ -13,14 +13,16 @@ import torch
 import triton
 import triton.language as tl
 
-from .ssm_autotune import configure_cache
+from lightllm.common.linear_state import SSMRunConfig
+
+from .ssm_autotune import resolve_run_config
 
 
 @triton.jit
 def _accept_updates(
     cursors,
     reqs,
-    accepted,
+    accepted_state_indices,
     N: tl.constexpr,
     HOLD: tl.constexpr,
     WIDTH: tl.constexpr,
@@ -30,7 +32,7 @@ def _accept_updates(
     r = tl.load(reqs + i, i < N, HOLD)
     valid = (i < N) & (r != HOLD)
     cursor = tl.load(cursors + r, valid, 0)
-    count = tl.load(accepted + r, valid, 0) + 1 if WIDTH > 1 else 1
+    count = tl.load(accepted_state_indices + r, valid, 0) + 1 if WIDTH > 1 else 1
     tl.store(cursors + r, cursor + count, valid)
 
 
@@ -218,7 +220,7 @@ def _replay(
     BK: tl.constexpr,
     BV: tl.constexpr,
     VARLEN: tl.constexpr,
-    PRECOMPUTE_STATE: tl.constexpr,
+    PRECOMPUTE_PROJECTIONS: tl.constexpr,
     BW: tl.constexpr,
     FUSED_FOLD: tl.constexpr,
     KDA: tl.constexpr,
@@ -267,7 +269,7 @@ def _replay(
         tl.store(sp, state, (kk[:, None] < K) & (vv[None, :] < V))
         base, n = L - base, 0
 
-    if PRECOMPUTE_STATE:
+    if PRECOMPUTE_PROJECTIONS:
         projection_dtype: tl.constexpr = (
             tl.bfloat16 if State.dtype.element_ty == tl.bfloat16 and Q.dtype.element_ty == tl.bfloat16 else tl.float32
         )
@@ -326,7 +328,7 @@ def _replay(
                 qk.to(projection_dtype), state.to(projection_dtype), input_precision=projection_precision
             )
 
-    if PRECOMPUTE_STATE and not KDA:
+    if PRECOMPUTE_PROJECTIONS and not KDA:
         # Project the whole verify window against both accepted and new keys.
         # Only the small corrected-value solve below depends on token order.
         jj = tl.arange(0, BR)
@@ -442,7 +444,7 @@ def _replay(
             tl.store(Betas + slot * (2 * L) + records, betas, fresh)
         return
 
-    if not PRECOMPUTE_STATE or KDA:
+    if not PRECOMPUTE_PROJECTIONS or KDA:
         history = ll < n
         keys = tl.load(
             Keys + (key_slot * (2 * L) + base) * K + ll[:, None] * K + kk[None, :],
@@ -490,7 +492,7 @@ def _replay(
                 keys *= tl.exp(g)[None, :]
                 hk = tl.sum(keys * k[None, :], axis=1)
                 hq = tl.sum(keys * q[None, :], axis=1)
-                if PRECOMPUTE_STATE:
+                if PRECOMPUTE_PROJECTIONS:
                     checkpoint_sk = tl.sum(tl.where((tt == BW + t - start)[:, None], projections, 0), 0)
                     checkpoint_sq = tl.sum(tl.where((tt == t - start)[:, None], projections, 0), 0)
                 else:
@@ -585,7 +587,7 @@ def _materialize(
     tl.store(out, state, (kk[:, None] < K) & (vv[None, :] < V))
 
 
-class ReplaySSMCache:
+class ReplaySSMBackend:
     """Request-owned scratch; canonical CPU/PD checkpoints never include it."""
 
     def __init__(
@@ -597,17 +599,17 @@ class ReplaySSMCache:
         *,
         num_key_heads=None,
         kda=False,
-        lower_bound=-5.0,
-        projection_mode="inline",
+        gate_lower_bound=-5.0,
+        compute_mode="inline",
         run_config=None,
         fold_method="raw",
     ):
         assert state.dtype in (torch.float32, torch.bfloat16), "ReplaySSM requires FP32 or BF16 SSM state"
         assert verify_width > 0 and capacity >= max(4, verify_width) and capacity & (capacity - 1) == 0
-        assert projection_mode in ("inline", "precompute", "parallel")
+        assert compute_mode in ("inline", "precompute", "parallel")
         assert fold_method in ("raw", "derived")
-        assert fold_method == "raw" or projection_mode == "parallel"
-        if projection_mode == "parallel":
+        assert fold_method == "raw" or compute_mode == "parallel"
+        if compute_mode == "parallel":
             assert not kda and verify_width > 1, "Parallel ReplaySSM requires GDN MTP"
             assert state.shape[-2:] == (128, 128), "Parallel ReplaySSM requires 128x128 heads"
             assert activation_dtype == torch.bfloat16, "Parallel ReplaySSM requires BF16 activations"
@@ -615,13 +617,13 @@ class ReplaySSMCache:
         self.fold_method = fold_method
         self.state = state
         self.kda = kda
-        self.lower_bound = lower_bound
+        self.gate_lower_bound = gate_lower_bound
         self.fold_programs = (
             8 * torch.cuda.get_device_properties(state.device).multi_processor_count if state.is_cuda else 0
         )
         self.capacity = capacity
         self.verify_width = verify_width
-        self.projection_mode = projection_mode
+        self.compute_mode = compute_mode
         self.run_config = run_config
         self._config_is_fixed = run_config is not None
         self.batch_configs = {}
@@ -629,7 +631,7 @@ class ReplaySSMCache:
         # Omission preserves the redundant layout for existing callers and A/B.
         self.num_key_heads = hv if num_key_heads is None else num_key_heads
         assert self.num_key_heads > 0 and hv % self.num_key_heads == 0
-        self.hold = slots - 1
+        self.hold_req_id = slots - 1
         self.cursors = torch.zeros(slots, dtype=torch.int32, device=state.device)
         self.forward_cursors = torch.zeros_like(self.cursors)
         # Alternate halves on fold so CTAs cannot overwrite history another
@@ -641,7 +643,7 @@ class ReplaySSMCache:
             activation_dtype
             if activation_dtype == torch.bfloat16
             and verify_width > 1
-            and projection_mode == "precompute"
+            and compute_mode == "precompute"
             and capacity <= 8
             else torch.float32
         )
@@ -678,12 +680,12 @@ class ReplaySSMCache:
             cu_seqlens,
             active,
             reqs.numel(),
-            self.hold,
+            self.hold_req_id,
             self.capacity,
             cu_seqlens is not None,
             triton.next_power_of_2(reqs.numel()),
             self.verify_width,
-            self.projection_mode == "parallel",
+            self.compute_mode == "parallel",
             num_warps=4,
         )
         programs = min(self.fold_programs, triton.cdiv(vd, 32) * reqs.numel() * layers * hv)
@@ -720,14 +722,14 @@ class ReplaySSMCache:
         )
         return positions
 
-    def accept_updates(self, reqs, accepted=None):
-        """Accept this round's prefix; accepted contains per-request last accepted indexes."""
+    def accept_updates(self, reqs, accepted_state_indices=None):
+        """Accept this round's prefix; accepted_state_indices contains per-request last accepted indexes."""
         _accept_updates[(triton.cdiv(reqs.numel(), 256),)](
             self.cursors,
             reqs,
-            accepted,
+            accepted_state_indices,
             reqs.numel(),
-            self.hold,
+            self.hold_req_id,
             self.verify_width,
             256,
         )
@@ -758,7 +760,7 @@ class ReplaySSMCache:
             k,
             v,
             self.capacity,
-            self.hold,
+            self.hold_req_id,
             triton.next_power_of_2(k),
             bv,
             snapshot,
@@ -767,7 +769,7 @@ class ReplaySSMCache:
             num_stages=config.get("num_stages", 3),
         )
 
-    def snapshot_accepted_state(self, req_idx):
+    def get_accepted_state(self, req_idx):
         """Return a canonical checkpoint without changing the active state or history."""
         layers, _, hv, k, v = self.state.shape
         output = torch.empty((layers, hv, k, v), dtype=self.state.dtype, device=self.state.device)
@@ -775,21 +777,25 @@ class ReplaySSMCache:
         self._materialize_accepted_state(reqs, output, snapshot=True)
         return output
 
-    def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None):
-        if self.projection_mode == "parallel":
-            return self.run_config or {"BV": 128, "num_warps": 2, "num_stages": 1}
-        return configure_cache(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
+    def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None) -> SSMRunConfig:
+        if self.compute_mode == "parallel":
+            config = self.run_config or {"BV": 128, "num_warps": 2, "num_stages": 1}
+        else:
+            config = resolve_run_config(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
+        return SSMRunConfig(**config)
 
     def forward(self, linear_layer_idx, q, k, v, a, b, a_log, bias, reqs, cu_seqlens=None, run_config=None):
         config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
+        if not isinstance(config, SSMRunConfig):
+            config = SSMRunConfig(**config)
         hv, kd, vd = self.state.shape[-3:]
         assert self.num_key_heads in (q.shape[-2], hv)
         axis = 1 if cu_seqlens is not None else 0
         out = torch.empty_like(v)
-        bv = config["BV"]
-        precompute_state = self.verify_width > 1 and bv >= 16 and self.projection_mode in ("precompute", "parallel")
-        if self.projection_mode == "parallel":
-            assert precompute_state, "Parallel ReplaySSM requires BV >= 16"
+        bv = config.BV
+        precompute_projections = self.verify_width > 1 and bv >= 16 and self.compute_mode in ("precompute", "parallel")
+        if self.compute_mode == "parallel":
+            assert precompute_projections, "Parallel ReplaySSM requires BV >= 16"
         # Resolve tile dimensions in Python: bare max() in Triton JIT code
         # lowers to a tensor operation, which cannot define static shapes.
         bw = triton.next_power_of_2(self.verify_width)
@@ -823,19 +829,19 @@ class ReplaySSMCache:
             kd,
             vd,
             self.capacity,
-            self.hold,
+            self.hold_req_id,
             triton.next_power_of_2(kd),
             bv,
             cu_seqlens is not None,
-            precompute_state,
+            precompute_projections,
             bw,
-            reqs.numel() > 12 and self.projection_mode != "parallel",
+            reqs.numel() > 12 and self.compute_mode != "parallel",
             self.kda,
-            self.lower_bound,
-            self.projection_mode == "parallel",
+            self.gate_lower_bound,
+            self.compute_mode == "parallel",
             BQK=max(16, 2 * bw),
             BR=triton.next_power_of_2(max(16, self.capacity + bw)),
-            num_warps=config["num_warps"],
-            num_stages=config.get("num_stages", 3),
+            num_warps=config.num_warps,
+            num_stages=config.num_stages,
         )
-        return out
+        return out, config

@@ -44,7 +44,7 @@ def _set_envs_and_config(args: StartArgs):
     mp.set_start_method("spawn", force=True)
 
 
-def _validate_ssm_state_mode(args: StartArgs):
+def _validate_and_normalize_ssm_config(args: StartArgs):
     assert args.ssm_state_mode in ("native", "compact", "replay"), "Invalid ssm_state_mode"
     config = args.ssm_replay_config
     assert isinstance(config, dict), "ssm_replay_config must be a JSON object"
@@ -363,7 +363,7 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
-    _validate_ssm_state_mode(args)
+    _validate_and_normalize_ssm_config(args)
 
     args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
         args.model_dir

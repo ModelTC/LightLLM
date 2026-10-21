@@ -3,7 +3,7 @@ import json
 import pytest
 
 from lightllm.server.api_cli import make_argument_parser
-from lightllm.server.api_start import _validate_ssm_state_mode
+from lightllm.server.api_start import _validate_and_normalize_ssm_config
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
@@ -49,9 +49,9 @@ def test_ssm_mode_validation(monkeypatch, mode, dtype, step, model, capacity, er
     )
     if error:
         with pytest.raises(AssertionError, match=error):
-            _validate_ssm_state_mode(args)
+            _validate_and_normalize_ssm_config(args)
     else:
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
 
 
 @pytest.mark.parametrize("model", ["qwen3_5", "glm5_next"])
@@ -61,10 +61,10 @@ def test_gdn_kda_mtp_width_limit(monkeypatch, model, mode, step):
     monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model)
     args = StartArgs(ssm_state_mode=mode, mtp_step=step)
     if step <= 15:
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
     else:
         with pytest.raises(AssertionError, match="GDN/KDA requires mtp_step <= 15"):
-            _validate_ssm_state_mode(args)
+            _validate_and_normalize_ssm_config(args)
 
 
 @pytest.mark.parametrize("model", ["qwen3_5", "glm5_next"])
@@ -79,7 +79,7 @@ def test_replay_large_cache_does_not_bypass_mtp_width_limit(monkeypatch, model, 
         mtp_step=16,
     )
     with pytest.raises(AssertionError, match="GDN/KDA requires mtp_step <= 15"):
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
 
 
 def test_ssm_mode_defaults_and_removed_flag():
@@ -107,17 +107,17 @@ def test_programmatic_replay_config_rejected_before_model_loading(monkeypatch, o
     for key, value in overrides.items():
         setattr(args, key, value)
     with pytest.raises(AssertionError, match=error):
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
 
 
-def test_replay_projection_mode_requires_replay(monkeypatch):
+def test_replay_compute_mode_requires_replay(monkeypatch):
     monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "qwen3_5")
     parser = make_argument_parser()
     args = parser.parse_args(["--ssm_state_mode", "replay", "--ssm_replay_config", '{"compute_mode":"precompute"}'])
-    _validate_ssm_state_mode(args)
+    _validate_and_normalize_ssm_config(args)
     args.ssm_state_mode = "compact"
     with pytest.raises(AssertionError, match="requires ssm_state_mode=replay"):
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
 
 
 @pytest.mark.parametrize("fold", ["raw", "derived"])
@@ -132,10 +132,10 @@ def test_parallel_replay_configuration(monkeypatch, fold):
         mtp_mode="eagle_with_att",
         linear_att_ssm_data_type="bfloat16",
     )
-    _validate_ssm_state_mode(args)
+    _validate_and_normalize_ssm_config(args)
     args.mtp_step = 0
     with pytest.raises(AssertionError, match="requires MTP"):
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
 
 
 def test_derived_replay_requires_parallel_configuration():
@@ -143,7 +143,7 @@ def test_derived_replay_requires_parallel_configuration():
 
     args = StartArgs(ssm_state_mode="replay", ssm_replay_config={"fold_method": "derived"})
     with pytest.raises(AssertionError, match="requires parallel"):
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
 
 
 @pytest.mark.parametrize(
@@ -163,14 +163,14 @@ def test_derived_replay_requires_parallel_configuration():
 def test_invalid_replay_config(config, error):
     args = StartArgs(ssm_state_mode="replay", ssm_replay_config=config)
     with pytest.raises(AssertionError, match=error):
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
 
 
 @pytest.mark.parametrize("mode", ["native", "compact"])
 def test_replay_config_rejects_other_modes(mode):
     args = StartArgs(ssm_state_mode=mode, ssm_replay_config={"cache_len": 16})
     with pytest.raises(AssertionError, match="requires ssm_state_mode=replay"):
-        _validate_ssm_state_mode(args)
+        _validate_and_normalize_ssm_config(args)
 
 
 def test_partial_replay_config_defaults_and_serialization(monkeypatch):
@@ -180,11 +180,11 @@ def test_partial_replay_config_defaults_and_serialization(monkeypatch):
     args = make_argument_parser().parse_args(
         ["--ssm_state_mode", "replay", "--ssm_replay_config", '{"compute_mode":"precompute"}']
     )
-    _validate_ssm_state_mode(args)
+    _validate_and_normalize_ssm_config(args)
     assert args.ssm_replay_config == {"cache_len": 16, "compute_mode": "precompute", "fold_method": "raw"}
     original = StartArgs(ssm_state_mode="replay", ssm_replay_config=args.ssm_replay_config)
     restored = StartArgs(**json.loads(json.dumps(asdict(original))))
-    _validate_ssm_state_mode(restored)
+    _validate_and_normalize_ssm_config(restored)
     assert restored.ssm_replay_config == args.ssm_replay_config
     assert StartArgs().ssm_replay_config == {}
 

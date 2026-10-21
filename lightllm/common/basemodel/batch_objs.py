@@ -7,7 +7,7 @@ import torch
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 if TYPE_CHECKING:
-    from lightllm.common.recurrent_state_types import SSMRunConfig
+    from lightllm.common.linear_state import SSMRunConfig
 
 
 @dataclass
@@ -56,12 +56,12 @@ class ModelInput:
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
     # Optional accepted-tail rows for the first EAGLE draft projection.
-    b_logits_rows: Optional[torch.Tensor] = None
+    b_logits_row_idx: Optional[torch.Tensor] = None
 
     def to_cuda(self):
         self.check_input()
-        if self.b_logits_rows is not None:
-            self.b_logits_rows = self.b_logits_rows.cuda(non_blocking=True)
+        if self.b_logits_row_idx is not None:
+            self.b_logits_row_idx = self.b_logits_row_idx.cuda(non_blocking=True)
 
         # Prefill 和 decode 都必须提供的公共张量。
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
@@ -213,7 +213,7 @@ class ModelOutput:
     # Immutable SSM configuration for this forward/graph; preserved when unpadding.
     ssm_run_config: Optional["SSMRunConfig"] = None
     # Number of physical decode rows represented by each selected logits row.
-    logits_row_stride: int = 1
+    input_rows_per_logit: int = 1
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:

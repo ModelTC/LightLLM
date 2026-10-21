@@ -360,7 +360,7 @@ class TpPartBaseModel:
             alignment = math.lcm(alignment, self.tp_world_size_)
         return triton.cdiv(batch_size, alignment) * alignment
 
-    def use_replayssm_draft_tail(self):
+    def should_project_draft_tail_logits(self):
         """Project only accepted-tail rows in the first draft pass."""
         return (
             self.is_mtp_draft_model
@@ -397,7 +397,7 @@ class TpPartBaseModel:
         )
         self.draft_tail_graph = None
         if self.graph is not None:
-            if self.use_replayssm_draft_tail():
+            if self.should_project_draft_tail_logits():
                 width = self.args.mtp_step + 1
                 self.draft_tail_graph = CudaGraph(
                     batch_step_size_before_split=width,
@@ -409,7 +409,7 @@ class TpPartBaseModel:
                 )
                 # Draft passes execute sequentially, so both layouts can share the pool.
                 self.draft_tail_graph.mempool = self.graph.mempool
-                self.draft_tail_graph.warmup(self, logits_row_stride=width)
+                self.draft_tail_graph.warmup(self, input_rows_per_logit=width)
             if get_env_start_args().enable_decode_microbatch_overlap:
                 self.graph.warmup_overlap(self)
             else:
@@ -468,16 +468,16 @@ class TpPartBaseModel:
         infer_state.att_state_role = self.att_state_role
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
-        if model_input.b_logits_rows is not None:
-            assert self.use_replayssm_draft_tail() and not model_input.is_prefill
+        if model_input.b_logits_row_idx is not None:
+            assert self.should_project_draft_tail_logits() and not model_input.is_prefill
             width = self.args.mtp_step + 1
             assert model_input.batch_size % width == 0
             count = model_input.batch_size // width
-            rows = model_input.b_logits_rows
+            rows = model_input.b_logits_row_idx
             assert rows.ndim == 1 and rows.numel() <= count
             rows = F.pad(rows, (0, count - rows.numel()))
-            infer_state.b_logits_rows = rows
-            infer_state.logits_row_stride = width
+            infer_state.b_logits_row_idx = rows
+            infer_state.input_rows_per_logit = width
         infer_state.total_token_num = model_input.total_token_num
         infer_state.max_q_seq_len = model_input.max_q_seq_len
         infer_state.max_kv_seq_len = model_input.max_kv_seq_len
@@ -624,15 +624,15 @@ class TpPartBaseModel:
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=post_output.logits_token_ids,
             ssm_run_config=infer_state.ssm_run_config,
-            logits_row_stride=infer_state.logits_row_stride,
+            input_rows_per_logit=infer_state.input_rows_per_logit,
         )
         return output
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
-        stride = model_output.logits_row_stride
-        padded_batch_size = model_output.logits.shape[0] * stride
-        assert origin_batch_size % stride == 0
-        logits_size = origin_batch_size // stride
+        input_rows_per_logit = model_output.input_rows_per_logit
+        padded_batch_size = model_output.logits.shape[0] * input_rows_per_logit
+        assert origin_batch_size % input_rows_per_logit == 0
+        logits_size = origin_batch_size // input_rows_per_logit
         if padded_batch_size == origin_batch_size:
             return model_output
         new_model_output = copy.copy(model_output)
@@ -732,10 +732,10 @@ class TpPartBaseModel:
                 )
 
         origin_batch_size = model_input.batch_size
-        graph = self.draft_tail_graph if model_input.b_logits_rows is not None else self.graph
+        graph = self.draft_tail_graph if model_input.b_logits_row_idx is not None else self.graph
         # 空 DP rank 也需要完整的 dummy verify group；TP/SP 切分不能破坏 MTP 分组。
         infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size))
-        if model_input.b_logits_rows is not None:
+        if model_input.b_logits_row_idx is not None:
             width = self.args.mtp_step + 1
             infer_batch_size = triton.cdiv(infer_batch_size, width) * width
 

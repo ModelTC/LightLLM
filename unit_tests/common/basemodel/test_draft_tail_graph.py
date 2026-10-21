@@ -70,16 +70,16 @@ def draft_model(monkeypatch):
 
     def forward(state):
         hidden = state.input_ids[:, None].float()
-        logits = hidden if state.b_logits_rows is None else hidden.index_select(0, state.b_logits_rows)
+        logits = hidden if state.b_logits_row_idx is None else hidden.index_select(0, state.b_logits_row_idx)
         return ModelOutput(
             logits=logits,
-            logits_row_stride=state.logits_row_stride,
+            input_rows_per_logit=state.input_rows_per_logit,
             mtp_collector=ModelMtpOutputCollector(spec_hidden=hidden),
         )
 
     model._token_forward = forward
     model._init_cudagraph()
-    assert warmups == [(model.draft_tail_graph, {"logits_row_stride": 5}), (model.graph, {})]
+    assert warmups == [(model.draft_tail_graph, {"input_rows_per_logit": 5}), (model.graph, {})]
     return model
 
 
@@ -97,7 +97,7 @@ def make_input(rows, accepted=None):
         b_shared_seq_len=torch.zeros(rows, dtype=torch.int32),
         b_shared_radix_node_id=torch.zeros(rows, dtype=torch.int64),
         multimodal_params=[{} for _ in range(rows)],
-        b_logits_rows=accepted,
+        b_logits_row_idx=accepted,
     )
 
 
@@ -113,9 +113,9 @@ def test_first_draft_selects_accepted_tail_across_padding(draft_model, eager, re
         output = model._decode(model_input)
         torch.testing.assert_close(output.logits[:, 0], accepted.float())
         torch.testing.assert_close(output.mtp_collector.spec_hidden[:, 0], model_input.input_ids.float())
-        assert output.logits_row_stride == 5
+        assert output.input_rows_per_logit == 5
         assert model_input.batch_size == requests * 5
-        assert model_input.b_logits_rows is accepted
+        assert model_input.b_logits_row_idx is accepted
     if not eager and requests == 52:
         assert 320 in model.draft_tail_graph.graph
         assert not model.graph.graph
@@ -130,7 +130,7 @@ def test_later_draft_keeps_one_output_per_request(draft_model, rows):
         model_input = make_input(rows)
         model_input.input_ids += step
         output = model._decode(model_input)
-        assert output.logits_row_stride == 1
+        assert output.input_rows_per_logit == 1
         torch.testing.assert_close(output.logits[:, 0], model_input.input_ids.float())
         assert output.mtp_collector.spec_hidden.shape == (rows, 1)
     if rows == 160:
@@ -162,6 +162,6 @@ def test_tail_graph_warmup_marks_selected_rows(monkeypatch):
         forward=lambda model_input: seen.append(model_input),
     )
     graph = cuda_graph.CudaGraph(5, 5, 5, max_batch_size=10)
-    graph.warmup(model, logits_row_stride=5)
+    graph.warmup(model, input_rows_per_logit=5)
     assert [x.batch_size for x in seen] == [10, 5]
-    assert [x.b_logits_rows.tolist() for x in seen] == [[4, 9], [4]]
+    assert [x.b_logits_row_idx.tolist() for x in seen] == [[4, 9], [4]]

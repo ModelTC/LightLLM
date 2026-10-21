@@ -39,7 +39,7 @@ def prepare_prompt(index, rep):
     return prefix + suffix
 
 
-def one(index, rep, ids, barrier, cohort_start):
+def stream_request(index, rep, ids, barrier, cohort_start):
     payload = {
         "inputs": ids,
         "parameters": {
@@ -83,12 +83,12 @@ def one(index, rep, ids, barrier, cohort_start):
     )
 
 
-def run(batch, rep):
+def run_concurrent_requests(batch, rep):
     prompts = [prepare_prompt(i, rep) for i in range(batch)]
     barrier = threading.Barrier(batch)
     start = time.perf_counter()
     with concurrent.futures.ThreadPoolExecutor(max_workers=batch) as pool:
-        samples = list(pool.map(lambda i: one(i, rep, prompts[i], barrier, start), range(batch)))
+        samples = list(pool.map(lambda i: stream_request(i, rep, prompts[i], barrier, start), range(batch)))
     elapsed = time.perf_counter() - start
     begin = max(r["token_times_s"][0] for r in samples) + 0.5
     end = min(r["token_times_s"][-1] for r in samples) - 0.5
@@ -109,11 +109,11 @@ def run(batch, rep):
 # Warm every measured graph bucket before timing, with the same requests on both revisions.
 for batch in args.batch:
     for warm in range(args.warmups):
-        run(batch, 99 + warm)
+        run_concurrent_requests(batch, 99 + warm)
 rows = []
 for batch in args.batch:
     for rep in range(args.repeats):
-        row = run(batch, rep)
+        row = run_concurrent_requests(batch, rep)
         rows.append(row)
         Path(args.output).write_text(json.dumps(rows, indent=2))
         print(json.dumps({k: v for k, v in row.items() if k != "requests"}), flush=True)
