@@ -97,6 +97,15 @@ async def _safe_stream_wrapper(stream_generator):
         error_data = json.dumps({"error": {"message": str(e), "type": "invalid_request_error"}}, ensure_ascii=False)
         yield f"data: {error_data}\n\n"
         yield "data: [DONE]\n\n"
+    except GenerationError as e:
+        # Early-header mode starts the response before the first body chunk.
+        if not first_chunk_sent and not get_env_start_args().disable_delay_response_start:
+            raise
+        error_data = json.dumps(
+            {"error": {"message": str(e), "type": "server_error", "code": "stream_error"}}, ensure_ascii=False
+        )
+        yield f"data: {error_data}\n\n"
+        yield "data: [DONE]\n\n"
     except ServerBusyError as e:
         logger.debug("Server busy detail: %s", e.message)
         if not first_chunk_sent:

@@ -1,3 +1,4 @@
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
 
@@ -34,11 +35,16 @@ def test_generation_failure_before_first_chunk_returns_http_500(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "finish_status, expected_status",
-    [(FinishStatus.FINISHED_ERROR, 500), (FinishStatus.FINISHED_STOP, 200)],
+    "early_headers, finish_status, expected_status",
+    [
+        (False, FinishStatus.FINISHED_ERROR, 500),
+        (True, FinishStatus.FINISHED_ERROR, 200),
+        (False, FinishStatus.FINISHED_STOP, 200),
+        (True, FinishStatus.FINISHED_STOP, 200),
+    ],
 )
-def test_chat_first_result_sets_http_status(monkeypatch, finish_status, expected_status):
-    args = StartArgs()
+def test_chat_first_result_sets_http_status(monkeypatch, early_headers, finish_status, expected_status):
+    args = StartArgs(disable_delay_response_start=early_headers)
 
     async def generate(*_args, **_kwargs):
         yield 0, "answer", {"prompt_tokens": 2, "prompt_cache_len": 0}, FinishStatus(finish_status)
@@ -68,6 +74,18 @@ def test_chat_first_result_sets_http_status(monkeypatch, finish_status, expected
     assert response.status_code == expected_status
     if expected_status == 500:
         assert "Generation failed" in response.json()["error"]["message"]
+    elif finish_status == FinishStatus.FINISHED_ERROR:
+        assert response.headers["content-type"].startswith("text/event-stream")
+        events = response.text.strip().split("\n\n")
+        assert len(events) == 2
+        assert json.loads(events[0].removeprefix("data: ")) == {
+            "error": {
+                "message": "Generation failed before producing output",
+                "type": "server_error",
+                "code": "stream_error",
+            }
+        }
+        assert events[1] == "data: [DONE]"
     else:
         assert "answer" in response.text
         assert "data: [DONE]" in response.text
