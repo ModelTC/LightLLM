@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -46,11 +47,11 @@ def gen_sampling_params(b_req_idx: torch.Tensor, req_sampling_params_manager):
     req_sampling_params_manager: ReqSamplingParamsManager = req_sampling_params_manager
 
     batch_size = b_req_idx.shape[0]
-    b_presence_penalty = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
-    b_frequency_penalty = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
-    b_repetition_penalty = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
-    b_temperature = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
-    b_exponential_decay_length_penalty = torch.empty((batch_size,), dtype=torch.float32, device="cuda")
+    b_presence_penalty = torch.empty((batch_size,), dtype=torch.float32, device=get_device_type())
+    b_frequency_penalty = torch.empty((batch_size,), dtype=torch.float32, device=get_device_type())
+    b_repetition_penalty = torch.empty((batch_size,), dtype=torch.float32, device=get_device_type())
+    b_temperature = torch.empty((batch_size,), dtype=torch.float32, device=get_device_type())
+    b_exponential_decay_length_penalty = torch.empty((batch_size,), dtype=torch.float32, device=get_device_type())
 
     BLOCK = 256
 

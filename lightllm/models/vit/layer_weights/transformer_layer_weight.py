@@ -12,6 +12,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     TpRMSNormWeight,
 )
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.platform import get_device_type
 
 
 class ViTTransformerLayerWeight(TransformerLayerWeight):
@@ -21,7 +22,7 @@ class ViTTransformerLayerWeight(TransformerLayerWeight):
 
     def _cuda(self, cpu_tensor):
         device_id = get_current_device_id()
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(device_id)
+        return cpu_tensor.contiguous().to(self.data_type_).to(torch.device(get_device_type(), device_id))
 
     def _parse_config(self):
         self.padding_hidden_size = self.network_config_["padding_hidden_size"]

@@ -3,6 +3,7 @@ from typing import Optional
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from .int8kv_flash_decoding_stage1 import flash_decode_stage1
 from .int8kv_flash_decoding_stage2 import flash_decode_stage2
+from lightllm.platform import get_device_type
 
 
 @torch.no_grad()
@@ -37,8 +38,10 @@ def token_decode_attention_flash_decoding(
     else:
         block_num = 32
 
-    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device="cuda")
-    mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=torch.float32, device="cuda")
+    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device=get_device_type())
+    mid_o_logexpsum = alloc_tensor_func(
+        [batch_size, q_head_num, block_num], dtype=torch.float32, device=get_device_type()
+    )
 
     flash_decode_stage1(
         q=q.view(calcu_shape1),

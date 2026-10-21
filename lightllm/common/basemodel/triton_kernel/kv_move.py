@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -46,7 +47,11 @@ def copy_kv_buffer_to_kv_buffer(
     kv_buffer: torch.Tensor,
 ):
     assert len(src_mem_index) == len(dst_mem_index)
-    assert src_mem_index.is_cuda and dst_mem_index.is_cuda and kv_buffer.is_cuda
+    assert (
+        (src_mem_index.device.type == get_device_type())
+        and (dst_mem_index.device.type == get_device_type())
+        and (kv_buffer.device.type == get_device_type())
+    )
     kv_buffer = kv_buffer.view(kv_buffer.shape[0], kv_buffer.shape[1], -1).view(dtype=torch.uint8)
     BLOCK = 4096
     layer_num = kv_buffer.shape[0]

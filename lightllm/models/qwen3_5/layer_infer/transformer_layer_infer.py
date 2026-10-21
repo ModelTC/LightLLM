@@ -9,6 +9,7 @@ from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
 )
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
+from lightllm.platform import get_device_type
 
 
 class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
@@ -17,7 +18,7 @@ class Qwen35TransformerLayerInfer(Qwen3NextTransformerLayerInfer):
         # Initialize mrope section from config
         rope_scaling = network_config.get("rope_scaling", {})
         mrope_section = rope_scaling.get("mrope_section", [11, 11, 10])
-        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
+        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device=get_device_type())
 
     def _get_qkv(
         self,

@@ -23,6 +23,7 @@ from transformers.image_utils import (
 from torchvision.transforms.v2 import functional as F
 
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_module, get_device_type
 
 logger = init_logger(__name__)
 
@@ -177,10 +178,10 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
     @torch.inference_mode()
     def preprocess(self, image) -> Tuple[torch.Tensor, torch.Tensor]:
         try:
-            return self._preprocess_bydevice(image, device="cuda")
+            return self._preprocess_bydevice(image, device=get_device_type())
         except Exception as e:
             logger.warning(f"Exception during image preprocessing on CUDA: {str(e)}")
-            torch.cuda.current_stream().synchronize()
+            get_device_module().current_stream().synchronize()
             return self._preprocess_bydevice(image, device="cpu")
 
     def _preprocess_bydevice(self, image, device="cuda") -> Tuple[torch.Tensor, torch.Tensor]:
@@ -226,7 +227,7 @@ class Qwen2VLImageProcessor(BaseImageProcessorFast):
         processed_grids = {}
 
         for shape, stacked_images in grouped_images.items():
-            stacked_images = stacked_images.to("cuda", non_blocking=True)
+            stacked_images = stacked_images.to(get_device_type(), non_blocking=True)
 
             resized_height, resized_width = stacked_images.shape[-2:]
 

@@ -58,6 +58,7 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.logprobs_capture import scatter_prompt_logprobs_to_cpu
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 logger = init_logger(__name__)
 
@@ -118,8 +119,12 @@ class PromptLogprobsCaptureManager:
         self.top_logprobs = torch.empty(
             (kv_cache_size, self.max_topk), dtype=torch.float32, device="cpu", pin_memory=True
         )
-        self.top_token_ids_ptr = torch.tensor([self.top_token_ids.data_ptr()], dtype=torch.uint64, device="cuda")
-        self.top_logprobs_ptr = torch.tensor([self.top_logprobs.data_ptr()], dtype=torch.uint64, device="cuda")
+        self.top_token_ids_ptr = torch.tensor(
+            [self.top_token_ids.data_ptr()], dtype=torch.uint64, device=get_device_type()
+        )
+        self.top_logprobs_ptr = torch.tensor(
+            [self.top_logprobs.data_ptr()], dtype=torch.uint64, device=get_device_type()
+        )
 
         pinned_bytes = self.top_token_ids.numel() * self.top_token_ids.element_size()
         pinned_bytes += self.top_logprobs.numel() * self.top_logprobs.element_size()
@@ -149,7 +154,7 @@ class PromptLogprobsCaptureManager:
     def extract(self, mem_indexes: torch.Tensor, topk: int) -> Tuple[np.ndarray, np.ndarray]:
         if not self.is_buffer_initialized():
             return
-        indexes = mem_indexes.cpu() if mem_indexes.is_cuda else mem_indexes
+        indexes = mem_indexes.cpu() if (mem_indexes.device.type == get_device_type()) else mem_indexes
         return (
             self.top_token_ids[indexes, :topk].numpy(),
             self.top_logprobs[indexes, :topk].numpy(),
@@ -163,7 +168,9 @@ class PromptLogprobsCaptureManager:
     ) -> None:
         if not self.is_buffer_initialized():
             return
-        source = source_indexes.cpu() if source_indexes.is_cuda else source_indexes
-        destination = destination_indexes.cpu() if destination_indexes.is_cuda else destination_indexes
+        source = source_indexes.cpu() if (source_indexes.device.type == get_device_type()) else source_indexes
+        destination = (
+            destination_indexes.cpu() if (destination_indexes.device.type == get_device_type()) else destination_indexes
+        )
         self.top_token_ids[destination, :topk] = self.top_token_ids[source, :topk]
         self.top_logprobs[destination, :topk] = self.top_logprobs[source, :topk]

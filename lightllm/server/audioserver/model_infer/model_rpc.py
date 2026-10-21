@@ -15,6 +15,7 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.dist_utils import init_audio_distributed_env
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_module, get_device_type
 
 
 logger = init_logger(__name__)
@@ -50,7 +51,7 @@ class AudioModelRpcServer(rpyc.Service):
                 raise Exception(f"can not support {self.model_type} now")
 
             self.model.load_model(weight_dir, model_cfg)
-            self.model = self.model.cuda()
+            self.model = self.model.to(get_device_type())
             self.model.check_long_audio_infer()
 
             self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
@@ -149,7 +150,7 @@ class AudioModelRpcServer(rpyc.Service):
         """
         与 visual _infer_worker 一致：推理后对每个 item 单独放入 store_queue，由 store 线程批处理再 commit。
         """
-        torch.cuda.set_device(self.device_id)
+        get_device_module().set_device(self.device_id)
         while True:
             try:
                 if self.tp_rank_id == 0:
@@ -181,7 +182,7 @@ class AudioModelRpcServer(rpyc.Service):
             self.cpu_embed_cache_client.copy_to_cache(
                 embed_tensor=_emb, start_index_in_cache=audio.start_index_in_embed_cache
             )
-            audio.cuda_event = torch.cuda.Event()
+            audio.cuda_event = get_device_module().Event()
             audio.cuda_event.record()
         return
 

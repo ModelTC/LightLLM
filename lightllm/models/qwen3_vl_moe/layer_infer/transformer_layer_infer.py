@@ -7,13 +7,14 @@ from lightllm.models.qwen3_moe.layer_weights.transformer_layer_weight import Qwe
 from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.triton_kernel.deepstack_multimodal_emb import apply_deepstack_features
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+from lightllm.platform import get_device_type, get_hardware_backend
 
 
 class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.mrope_section = torch.tensor(
-            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
+            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device=get_device_type()
         )
 
     def _get_qkv(
@@ -77,7 +78,7 @@ class Qwen3VLMOETransformerLayerInfer(Qwen3MOETransformerLayerInfer):
         infer_state: InferStateInfo,
         layer_num: int,
     ):
-        if torch.cuda.is_current_stream_capturing():
+        if get_hardware_backend().graph.is_capturing():
             input_embeddings = input_embeddings.contiguous()
             _input_embeddings = tensor_to_no_ref_tensor(input_embeddings)
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()

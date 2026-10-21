@@ -30,6 +30,7 @@ from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.torch_ops_utils import direct_register_custom_op
 from lightllm.common.triton_utils.autotuner import autotune
+from lightllm.platform import get_device_type
 
 FFN_MOE_CHUNK_SIZE = 32 * 1024
 
@@ -455,7 +456,7 @@ def moe_align2(token_num_mul_topk_num: int, exports_token_num: torch.Tensor, blo
     max_num_tokens_padded = token_num_mul_topk_num + exports_token_num.shape[0] * (block_m - 1)
     max_num_m_blocks = min(token_num_mul_topk_num, triton.cdiv(max_num_tokens_padded, block_m))
     # first is expert, second is m_index, third is token_start_index
-    mblocks_to_tuple_info = torch.empty((max_num_m_blocks, 3), dtype=torch.int32, device="cuda")
+    mblocks_to_tuple_info = torch.empty((max_num_m_blocks, 3), dtype=torch.int32, device=get_device_type())
 
     expert_num = exports_token_num.shape[0]
 
@@ -896,7 +897,7 @@ def grouped_matmul(
     if support_tma:
         # TMA descriptors require a global memory allocation
         def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-            return torch.empty(size, device="cuda", dtype=torch.int8)
+            return torch.empty(size, device=get_device_type(), dtype=torch.int8)
 
         triton.set_allocator(alloc_fn)
 
@@ -1063,9 +1064,9 @@ def fused_experts_impl(
         curr_topk_ids = topk_ids[begin_chunk_idx:end_chunk_idx]
         curr_topk_weights = topk_weights[begin_chunk_idx:end_chunk_idx]
 
-        expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device="cuda")
-        expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device="cuda")
-        expert_to_token_num = torch.empty((E,), dtype=torch.int32, device="cuda")
+        expert_to_tokens = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.int32, device=get_device_type())
+        expert_to_weights = torch.empty((E, topk_num * tokens_in_chunk), dtype=torch.float32, device=get_device_type())
+        expert_to_token_num = torch.empty((E,), dtype=torch.int32, device=get_device_type())
         moe_align_fused(
             expert_to_token_index=expert_to_tokens,
             expert_to_weight=expert_to_weights,

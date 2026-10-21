@@ -2,6 +2,7 @@ from lightllm.common.state_cache_manager import LayerCache
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .linear_att import ReqManagerForMamba
+from lightllm.platform import get_device_type
 
 
 class Glm5NextReqManager(ReqManagerForMamba):
@@ -19,7 +20,7 @@ class Glm5NextReqManager(ReqManagerForMamba):
             dtype=linear_config.full_att_dtype,
             shape=(linear_config.index_kpool + self.mtp_step, 2 * linear_config.index_head_dim),
             layer_num=linear_config.get_full_att_kv_layer_num_with_draft_model(),
-            device="cuda",
+            device=get_device_type(),
         )
 
     def get_indexer_tail_buffer(self, layer_index):

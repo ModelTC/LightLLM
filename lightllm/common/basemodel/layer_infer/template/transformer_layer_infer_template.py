@@ -6,6 +6,7 @@ from ...infer_struct import InferStateInfo
 from lightllm.distributed import all_reduce
 from typing import Tuple
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+from lightllm.platform import get_device_module, get_hardware_backend
 
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
@@ -101,7 +102,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
     def _context_attention_wrapper_run(
         self, q: torch.Tensor, cache_kv: torch.Tensor, infer_state: InferStateInfo, layer_weight
     ) -> torch.Tensor:
-        if torch.cuda.is_current_stream_capturing():
+        if get_hardware_backend().graph.is_capturing():
             q = q.contiguous()
             # cache_kv is None for layers that own no K/V slot (e.g. gemma4
             # KV-shared layers, which read K/V from a prior layer's cache and
@@ -115,7 +116,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
 
             def get_o_shape_dtype_device():
                 # 在一个新的 graph 中尝试运行，并不是为了捕获图，是为了尝试得到 o 的形状等信息
-                with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
+                with get_hardware_backend().graph.graph(get_hardware_backend().graph.create_graph()):
                     __o = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
                     o_shape = __o.shape
                     o_dtype = __o.dtype
@@ -125,7 +126,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
                     import gc
 
                     gc.collect()
-                    torch.cuda.empty_cache()
+                    get_device_module().empty_cache()
                 return o_shape, o_dtype, o_device
 
             o_shape, o_dtype, o_device = get_o_shape_dtype_device()

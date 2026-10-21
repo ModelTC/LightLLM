@@ -6,6 +6,7 @@ from lightllm.common.state_cache_manager import LayerCache, LinearAttCacheConfig
 from lightllm.utils.envs_utils import get_env_start_args
 
 from .hybrid_base import HybridAttentionReqManager
+from lightllm.platform import get_device_type
 
 
 if TYPE_CHECKING:
@@ -19,7 +20,9 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         # 因为在mtp的推理中，需要标记每个请求对应的mtp index状态(conv state 和 ssm state)，在mtp对应序列中
         # 的真实位置，所以需要需要一个标记来记录，不然算子无法找到真实的处理起点。
         self.req_to_mtp_state_index = (
-            torch.zeros((max_request_num + 1,), dtype=torch.int32, device="cuda") if self.mtp_step > 0 else None
+            torch.zeros((max_request_num + 1,), dtype=torch.int32, device=get_device_type())
+            if self.mtp_step > 0
+            else None
         )
         # 突然想到， 在linear att 开启mtp的模式中，现在的prefill linear att 算子默认是从0的位置读取信息进行操作
         # 所以不能支持 prefill decode mixed 操作了，因为一个decode过的请求，重新用prefill 算子跑，会出现读错linear
@@ -37,14 +40,14 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             dtype=self.linear_config.conv_state_dtype,
             shape=self.linear_config.get_mtp_conv_state_shape(mtp_step=self.mtp_step),
             layer_num=self.linear_config.linear_layer_num,
-            device="cuda",
+            device=get_device_type(),
         )
         self.req_to_ssm_state = LayerCache(
             size=(max_request_num + 1) * (self.mtp_step + 1),
             dtype=self.linear_config.ssm_state_dtype,
             shape=self.linear_config.get_ssm_state_shape(),
             layer_num=self.linear_config.linear_layer_num,
-            device="cuda",
+            device=get_device_type(),
         )
         return
 
@@ -66,7 +69,9 @@ class ReqManagerForMamba(HybridAttentionReqManager):
     def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
-        buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
+        buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").to(
+            get_device_type(), non_blocking=True
+        )
         state_cache_manager = self.big_page_buffers
         copy_linear_att_state_to_kv_buffer(
             b_req_idx=b_req_idx,

@@ -13,6 +13,7 @@ from lightllm.server.router.model_infer.mtp_speculative.planner.base import (
     _InferCostMsTable,
 )
 from lightllm.utils.dist_utils import get_global_world_size
+from lightllm.platform import get_device_module, get_device_type, get_dist_backend
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -77,10 +78,10 @@ class LightSpecPlanner(BaseMtpPlanner):
         if backend.args.dp > 1 and len(self.draft_steps) > 1:
             self._draft_step_group = dist.new_group(
                 ranks=list(range(get_global_world_size())),
-                backend="nccl",
+                backend=get_dist_backend(),
             )
-            self._draft_step_tensor = torch.zeros((1,), dtype=torch.int32, device="cuda")
-            self._draft_step_stream = torch.cuda.Stream()
+            self._draft_step_tensor = torch.zeros((1,), dtype=torch.int32, device=get_device_type())
+            self._draft_step_stream = get_device_module().Stream()
 
     def plan(self, decode_reqs: List, origin_batch_size: int) -> SpecDecodePlan:
         req_num = len(decode_reqs)
@@ -147,7 +148,7 @@ class LightSpecPlanner(BaseMtpPlanner):
         draft_step = int(plan.draft_step)
         if self._draft_step_group is not None:
             assert self._draft_step_stream is not None
-            with torch.cuda.stream(self._draft_step_stream):
+            with get_device_module().stream(self._draft_step_stream):
                 self._draft_step_tensor.fill_(draft_step)
                 dist.all_reduce(
                     self._draft_step_tensor,

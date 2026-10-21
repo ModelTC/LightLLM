@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -71,7 +72,7 @@ def build_diverse_shared_group_markers(
     的组，最后两个 ``-1`` 则分别作为独立的一行组。
     """
 
-    assert b_shared_radix_node_id.is_cuda
+    assert b_shared_radix_node_id.device.type == get_device_type()
     batch_size = b_shared_radix_node_id.shape[0]
     if batch_size == 0:
         return torch.empty((0,), dtype=torch.int32, device=b_shared_radix_node_id.device)

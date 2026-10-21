@@ -5,6 +5,7 @@ from .int8kv_flash_decoding_diverse_stage1 import flash_decode_stage1
 from .int8kv_flash_decoding_diverse_stage2 import flash_decode_stage2
 from .int8kv_flash_decoding_diverse_stage3 import flash_diverse_decode_stage3
 from lightllm.utils.envs_utils import get_diverse_max_batch_shared_group_size
+from lightllm.platform import get_device_module, get_device_type
 
 
 def token_decode_attention_flash_decoding(
@@ -22,9 +23,9 @@ def token_decode_attention_flash_decoding(
     b_mark_shared_group = infer_state.decode_att_state.b_mark_shared_group
 
     if "stream1" not in shared_streams_dict:
-        shared_streams_dict["stream1"] = torch.cuda.Stream()
+        shared_streams_dict["stream1"] = get_device_module().Stream()
     if "stream2" not in shared_streams_dict:
-        shared_streams_dict["stream2"] = torch.cuda.Stream()
+        shared_streams_dict["stream2"] = get_device_module().Stream()
 
     stream1 = shared_streams_dict["stream1"]
     stream2 = shared_streams_dict["stream2"]
@@ -40,16 +41,18 @@ def token_decode_attention_flash_decoding(
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
 
     mid_o = alloc_tensor_func(
-        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2, head_dim], dtype=torch.float32, device="cuda"
+        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2, head_dim],
+        dtype=torch.float32,
+        device=get_device_type(),
     )
     mid_o_logexpsum = alloc_tensor_func(
-        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2], dtype=torch.float32, device="cuda"
+        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 2], dtype=torch.float32, device=get_device_type()
     )
 
-    current_stream = torch.cuda.current_stream()
+    current_stream = get_device_module().current_stream()
 
     stream1.wait_stream(current_stream)
-    with torch.cuda.stream(stream1):
+    with get_device_module().stream(stream1):
         flash_decode_stage1(
             q=q.view(calcu_shape1),
             k=cache_k,
@@ -67,7 +70,7 @@ def token_decode_attention_flash_decoding(
             max_batch_group_size=get_diverse_max_batch_shared_group_size(),
         )
     stream2.wait_stream(current_stream)
-    with torch.cuda.stream(stream2):
+    with get_device_module().stream(stream2):
         flash_decode_stage2(
             q=q.view(calcu_shape1),
             k=cache_k,

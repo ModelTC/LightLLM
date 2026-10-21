@@ -16,6 +16,7 @@ from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.envs_utils import get_env_start_args
 from functools import partial
+from lightllm.platform import get_hardware_backend
 
 logger = init_logger(__name__)
 
@@ -248,7 +249,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
 
-        if torch.cuda.is_current_stream_capturing():
+        if get_hardware_backend().graph.is_capturing():
             core_attn_out, z = self._linear_prefill_cuda_graph_wrapper(mixed_qkvzba, infer_state, layer_weight)
         else:
             core_attn_out, z = infer_state.prefill_att_state1.prefill_att(

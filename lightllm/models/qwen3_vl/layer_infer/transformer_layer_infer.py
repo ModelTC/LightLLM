@@ -8,6 +8,7 @@ from lightllm.models.qwen3_vl.infer_struct import Qwen3VLInferStateInfo
 from lightllm.models.qwen3_vl.triton_kernel.deepstack_multimodal_emb import apply_deepstack_features
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+from lightllm.platform import get_device_type, get_hardware_backend
 
 
 class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
@@ -15,7 +16,7 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
         self.mrope_section = torch.tensor(
-            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device="cuda"
+            network_config["rope_scaling"]["mrope_section"], dtype=torch.int32, device=get_device_type()
         )
 
     def _get_qkv(
@@ -79,7 +80,7 @@ class Qwen3VLTransformerLayerInfer(Qwen2VLTransformerLayerInfer):
         infer_state: InferStateInfo,
         layer_num: int,
     ):
-        if torch.cuda.is_current_stream_capturing():
+        if get_hardware_backend().graph.is_capturing():
             input_embeddings = input_embeddings.contiguous()
             _input_embeddings = tensor_to_no_ref_tensor(input_embeddings)
             pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()

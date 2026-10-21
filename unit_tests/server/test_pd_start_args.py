@@ -3,6 +3,9 @@ import pytest
 from lightllm.server.api_start import _launch_subprocesses
 from lightllm.server.core.objs.start_args_type import StartArgs
 
+# These tests check the cuda start-up validation, the xpu start policy would reject their modes first.
+pytestmark = pytest.mark.usefixtures("cuda_platform")
+
 
 def test_pd_kv_page_size_must_be_divisible_by_model_page_size(monkeypatch):
     monkeypatch.setattr("lightllm.server.api_start._set_envs_and_config", lambda args: None)

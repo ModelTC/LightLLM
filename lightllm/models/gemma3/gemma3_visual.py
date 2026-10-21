@@ -10,6 +10,7 @@ from io import BytesIO
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 
 logger = init_logger(__name__)
@@ -71,9 +72,9 @@ class Gemma3VisionModel:
                         ] = d.get_tensor(k).to(torch.bfloat16)
 
     def cuda(self):
-        self.vision_tower = self.vision_tower.cuda()
+        self.vision_tower = self.vision_tower.to(get_device_type())
         for k, v in self.projector_weights.items():
-            self.projector_weights[k] = v.cuda()
+            self.projector_weights[k] = v.to(get_device_type())
         return self
 
     def gemma3_rms_norm(self, input, weight, eps: float = 1e-6):
@@ -88,7 +89,7 @@ class Gemma3VisionModel:
 
     # batch images infer
     def forward(self, x):
-        x = x.to(torch.bfloat16).cuda()
+        x = x.to(torch.bfloat16).to(get_device_type())
         x = self.vision_tower(x, output_hidden_states=True).last_hidden_state
 
         batch_size, _, seq_length = x.shape
