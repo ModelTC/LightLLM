@@ -1,4 +1,5 @@
 import asyncio
+import anyio
 import copy
 import pickle
 from types import SimpleNamespace
@@ -14,6 +15,46 @@ from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtr
 from lightllm.server.pd_io_struct import PD_Client_Obj
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
+
+
+def test_cancel_during_pd_selection_finishes_abort_and_removal():
+    async def run():
+        manager = object.__new__(HttpServerManagerForPDMaster)
+        manager.active_req_ids = set()
+        manager.pd_manager = SimpleNamespace(selector=SimpleNamespace(selection_lock=asyncio.Lock()))
+        started = anyio.Event()
+        cleaned = []
+
+        async def select(*args):
+            started.set()
+            await anyio.sleep_forever()
+
+        async def abort(*args, **kwargs):
+            await anyio.sleep(0)
+            cleaned.append("abort")
+
+        async def remove(*args, **kwargs):
+            await anyio.sleep(0)
+            cleaned.append("remove")
+
+        manager.select_p_d_node = select
+        manager.abort = abort
+        manager.remove_req = remove
+
+        async def generate():
+            async for _ in manager._generate_one_attempt(
+                "prompt", SimpleNamespace(max_new_tokens=1), None, None, 0.0, 123, 2
+            ):
+                pass
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(generate)
+            await started.wait()
+            tasks.cancel_scope.cancel()
+        assert cleaned == ["abort", "remove"]
+        assert not manager.active_req_ids
+
+    asyncio.run(run())
 
 
 def _make_manager(monkeypatch):
@@ -95,6 +136,48 @@ def _make_manager(monkeypatch):
     mgr.select_p_d_node = lambda *a, **k: asyncio.sleep(0, result=(p_node, d_node, PDSelectionExtraInfo()))
     mgr.remove_req = lambda *a, **k: asyncio.sleep(0)
     return mgr
+
+
+def test_cancel_during_pd_token_wait_notifies_nodes_and_releases_load(monkeypatch):
+    async def run():
+        manager = _make_manager(monkeypatch)
+        started = anyio.Event()
+        cleaned = []
+
+        async def wait(*args):
+            started.set()
+            await anyio.sleep_forever()
+            yield  # This is the backend token iterator.
+
+        async def release_load(**kwargs):
+            await anyio.sleep(0)
+            cleaned.append(kwargs)
+
+        manager._wait_to_token_package = wait
+        manager.pd_node_stats.sub_dispatched_info = release_load
+        params = SamplingParams()
+        params.init(None, max_new_tokens=1)
+
+        async def generate():
+            async for _ in manager._generate_one_attempt("prompt", params, None, None, 0.0, 123, 2):
+                pass
+
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(generate)
+            await started.wait()
+            tasks.cancel_scope.cancel()
+
+        p_node = manager.pd_manager.prefill_nodes[0]
+        d_node = manager.pd_manager.decode_nodes[0]
+        for node in (p_node, d_node):
+            node.websocket.send_bytes.assert_awaited_once()
+            message_type, request_id = pickle.loads(node.websocket.send_bytes.call_args.args[0])
+            assert message_type.name == "ABORT"
+            assert request_id == 1
+        assert cleaned == [{"p_node": p_node, "chars": len("prompt"), "req_num": 1}]
+        assert not manager.active_req_ids
+
+    asyncio.run(run())
 
 
 def _collect(

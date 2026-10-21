@@ -20,6 +20,7 @@ headers immediately.
 """
 
 import time
+from anyio import CancelScope
 
 from fastapi.responses import StreamingResponse
 from starlette.types import Send
@@ -68,47 +69,51 @@ class CustomStreamingResponse(StreamingResponse):
     """
 
     async def stream_response(self, send: Send) -> None:
-        start_args = get_env_start_args()
-        # Some clients and proxies require headers before first-token work is
-        # complete. Let deployments opt out of the delayed response start.
-        if start_args.disable_delay_response_start:
-            await super().stream_response(send)
-            return
-        record_pd_send_metrics = start_args.run_mode == "pd_master"
+        try:
+            start_args = get_env_start_args()
+            # Some clients and proxies require headers before first-token work is
+            # complete. Let deployments opt out of the delayed response start.
+            if start_args.disable_delay_response_start:
+                await super().stream_response(send)
+                return
+            record_pd_send_metrics = start_args.run_mode == "pd_master"
 
-        async def send_chunk(chunk):
-            if not isinstance(chunk, (bytes, memoryview)):
-                chunk = chunk.encode(self.charset)
-            send_start = time.monotonic()
-            await send({"type": "http.response.body", "body": chunk, "more_body": True})
-            if record_pd_send_metrics:
-                _record_pd_send_metrics(time.monotonic() - send_start, len(chunk))
+            async def send_chunk(chunk):
+                if not isinstance(chunk, (bytes, memoryview)):
+                    chunk = chunk.encode(self.charset)
+                send_start = time.monotonic()
+                await send({"type": "http.response.body", "body": chunk, "more_body": True})
+                if record_pd_send_metrics:
+                    _record_pd_send_metrics(time.monotonic() - send_start, len(chunk))
 
-        async def send_response_start():
-            # Read status and headers at send time. The first body iteration
-            # may update them while performing admission or request setup.
-            await send(
-                {
-                    "type": "http.response.start",
-                    "status": self.status_code,
-                    "headers": self.raw_headers,
-                }
-            )
+            async def send_response_start():
+                # Read status and headers at send time. The first body iteration
+                # may update them while performing admission or request setup.
+                await send(
+                    {
+                        "type": "http.response.start",
+                        "status": self.status_code,
+                        "headers": self.raw_headers,
+                    }
+                )
 
-        # Iterating here starts the otherwise-lazy generation pipeline. A
-        # An error raised before the first yield escapes without an
-        # http.response.start event, allowing FastAPI to handle it.
-        async for first_chunk in self.body_iterator:
-            await send_response_start()
-            await send_chunk(first_chunk)
-            break
-        else:
-            # An empty iterator is still a valid response and needs headers.
-            await send_response_start()
+            # Iterating here starts the otherwise-lazy generation pipeline. A
+            # An error raised before the first yield escapes without an
+            # http.response.start event, allowing FastAPI to handle it.
+            async for first_chunk in self.body_iterator:
+                await send_response_start()
+                await send_chunk(first_chunk)
+                break
+            else:
+                # An empty iterator is still a valid response and needs headers.
+                await send_response_start()
 
-        # The first chunk has already been sent; continue from the same
-        # iterator without restarting or duplicating it.
-        async for chunk in self.body_iterator:
-            await send_chunk(chunk)
+            # The first chunk has already been sent; continue from the same
+            # iterator without restarting or duplicating it.
+            async for chunk in self.body_iterator:
+                await send_chunk(chunk)
 
-        await send({"type": "http.response.body", "body": b"", "more_body": False})
+            await send({"type": "http.response.body", "body": b"", "more_body": False})
+        finally:
+            with CancelScope(shield=True):
+                await self.body_iterator.aclose()

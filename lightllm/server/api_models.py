@@ -319,7 +319,7 @@ class ChatMessage(BaseModel):
 class ChatCompletionResponseChoice(BaseModel):
     index: int
     message: ChatMessage
-    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "error", "abort"]] = None
 
 
 class ChatCompletionResponse(BaseModel):
@@ -346,7 +346,7 @@ class DeltaMessage(BaseModel):
 class ChatCompletionStreamResponseChoice(BaseModel):
     index: int
     delta: DeltaMessage
-    finish_reason: Optional[Literal["stop", "length", "tool_calls"]] = None
+    finish_reason: Optional[Literal["stop", "length", "tool_calls", "error", "abort"]] = None
 
 
 class ChatCompletionStreamResponse(BaseModel):

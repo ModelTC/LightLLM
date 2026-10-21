@@ -8,6 +8,8 @@ import os
 from io import BytesIO
 import pickle
 import uuid
+from contextlib import aclosing
+from anyio import CancelScope
 
 from lightllm.server.reasoning_parser import ReasoningParser
 
@@ -110,6 +112,9 @@ async def _safe_stream_wrapper(stream_generator):
         logger.warning(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
         return
+    finally:
+        with CancelScope(shield=True):
+            await stream_generator.aclose()
 
 
 def _serialize_sse_chunk(chunk, choice_nulls=(), response_nulls=()):
@@ -363,7 +368,9 @@ def _select_chat_template_tools(request: ChatCompletionRequest) -> Optional[List
     return tools
 
 
-async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Request) -> Response:
+async def chat_completions_impl(
+    request: ChatCompletionRequest, raw_request: Request, *, preserve_abort: bool = False
+) -> Response:
     from .api_http import g_objs
 
     if request.logit_bias is not None:
@@ -457,7 +464,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         completion_tokens = 0
         reasoning_parser_dict: Dict[int, ReasoningParser] = {}
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
-            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
+            finish_status = _convert_openai_finish_status(finish_status, sub_req_id, preserve_abort=preserve_abort)
             from .httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
             group_request_id = convert_sub_id_to_group_id(sub_req_id)
@@ -628,7 +635,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         completion_tokens = 0
         cached_tokens = 0
         async for sub_req_id, request_output, metadata, finish_status in results_generator:
-            finish_status = _convert_openai_finish_status(finish_status, sub_req_id)
+            finish_status = _convert_openai_finish_status(finish_status, sub_req_id, preserve_abort=preserve_abort)
             prompt_tokens = metadata["prompt_tokens"]
             cached_tokens = metadata.get("prompt_cache_len", 0)
             completion_tokens += 1
@@ -870,15 +877,16 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         yield "data: [DONE]\n\n".encode("utf-8")
 
     async def stream_results() -> AsyncGenerator[bytes, None]:
-        try:
-            async for chunk in stream_results_inner():
-                yield chunk
-        except ClientDisconnected:
-            raise
-        except Exception:
-            while pending_sse_chunks:
-                yield pop_sse_chunk()
-            raise
+        async with aclosing(results_generator), aclosing(stream_results_inner()) as inner:
+            try:
+                async for chunk in inner:
+                    yield chunk
+            except ClientDisconnected:
+                raise
+            except Exception:
+                while pending_sse_chunks:
+                    yield pop_sse_chunk()
+                raise
 
     background_tasks = BackgroundTasks()
     return CustomStreamingResponse(
@@ -1311,9 +1319,9 @@ def _build_logprobs_data(result: Dict, request: CompletionRequest, tokenizer) ->
     }
 
 
-def _convert_openai_finish_status(finish_status, sub_req_id):
-    if finish_status.status == FinishStatus.FINISHED_ABORTED:
-        # TODO: OpenAI 响应模型暂不接受 abort，先映射为 stop；后续统一取消与应用侧 stop 的对外语义。
+def _convert_openai_finish_status(finish_status, sub_req_id, *, preserve_abort=False):
+    if finish_status.status == FinishStatus.FINISHED_ABORTED and not preserve_abort:
+        # 普通 Chat/Completions 保持既有行为；Responses 内部保留 abort 以报告生成失败。
         logger.info(f"OpenAI maps finish_reason=abort to stop for compatibility, sub_req_id={sub_req_id}")
         return FinishStatus(FinishStatus.FINISHED_STOP)
     return finish_status

@@ -5,17 +5,12 @@ from types import SimpleNamespace
 
 from lightllm.server import api_openai
 from lightllm.server.api_models import CompletionRequest
+from lightllm.server.core.objs import FinishStatus
 
 
-class _FinishStatus:
+class _FinishStatus(FinishStatus):
     def __init__(self, reason=None):
-        self.reason = reason
-
-    def get_finish_reason(self):
-        return self.reason
-
-    def is_finished(self):
-        return self.reason is not None
+        super().__init__({None: self.NO_FINISH, "stop": self.FINISHED_STOP, "length": self.FINISHED_LENGTH}[reason])
 
 
 def _collect_chunks(response):

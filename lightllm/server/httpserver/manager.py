@@ -12,6 +12,7 @@ import datetime
 import pickle
 from array import array
 from frozendict import frozendict
+from anyio import CancelScope
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator, Sequence
@@ -558,17 +559,19 @@ class HttpServerManager(HttpRlManagerHelper, object):
             # 对于还没有形成正式请求对象管理的多模态资源，需要单独自己释放
             # 已经放入到 req_id_to_out_inf 中的请求对象，由统一的回收循环
             # 进行回收。
-            if group_request_id not in self.req_id_to_out_inf:
-                await self._release_multimodal_resources(multimodal_params)
-            await self.abort(group_request_id)
+            with CancelScope(shield=True):
+                if group_request_id not in self.req_id_to_out_inf:
+                    await self._release_multimodal_resources(multimodal_params)
+                await self.abort(group_request_id)
             raise e
         finally:
             # RL：兜底注销 generation admission（含中途异常 / abort 提前 return），
             # 防止 pending 请求泄漏导致 pause 无法正确结束。
-            if self.rl_controller is not None:
-                await self.rl_controller.unregister_generation_admission(group_request_id)
-            if running_request_registered:
-                await self._unregister_running_request()
+            with CancelScope(shield=True):
+                if self.rl_controller is not None:
+                    await self.rl_controller.unregister_generation_admission(group_request_id)
+                if running_request_registered:
+                    await self._unregister_running_request()
         return
 
     def _count_multimodal_tokens(self, multimodal_params: MultimodalParams) -> Tuple[int, int]:

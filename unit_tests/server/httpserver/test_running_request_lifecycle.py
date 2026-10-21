@@ -1,4 +1,5 @@
 import asyncio
+import anyio
 import pickle
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -215,6 +216,44 @@ async def _drain_generate(manager, sampling_params, multimodal_params, websocket
         pd_event=pd_event,
     ):
         pass
+
+
+@pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.P, NodeRole.D])
+def test_cancel_during_encode_finishes_resource_cleanup(mode):
+    async def run():
+        manager = _make_manager(mode)
+        started = anyio.Event()
+        cleaned = []
+
+        async def encode(*args):
+            started.set()
+            await anyio.sleep_forever()
+
+        def cleanup(name):
+            async def finish(*args):
+                await anyio.sleep(0)
+                cleaned.append(name)
+
+            return finish
+
+        manager._encode = encode
+        manager._release_multimodal_resources = cleanup("multimodal")
+        manager.abort = cleanup("abort")
+        manager._unregister_running_request = cleanup("running")
+        manager.rl_controller = SimpleNamespace(
+            wait_if_generation_paused=AsyncMock(return_value=False),
+            unregister_generation_admission=cleanup("admission"),
+        )
+        async with anyio.create_task_group() as tasks:
+            tasks.start_soon(_drain_generate, manager, _sampling_params(), _multimodal_params())
+            await started.wait()
+            tasks.cancel_scope.cancel()
+        expected = ["multimodal", "abort", "admission"]
+        if mode != NodeRole.P:
+            expected.append("running")
+        assert cleaned == expected
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize("mode", [NodeRole.NORMAL, NodeRole.D])

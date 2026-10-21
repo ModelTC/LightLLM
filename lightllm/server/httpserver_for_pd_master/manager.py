@@ -8,6 +8,7 @@ import ujson as json
 import pickle
 import httpx
 from contextlib import aclosing
+from anyio import CancelScope
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
 from typing import Union, List, Tuple, Dict, Optional
@@ -482,19 +483,23 @@ class HttpServerManagerForPDMaster:
             if isinstance(e, ClientDisconnected):
                 logger.warning(f"group_request_id: {origin_request_id} {e.reason}")
 
-            try:
-                await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
-            except:
-                await self.abort(block_group_request_id)
+            with CancelScope(shield=True):
+                try:
+                    await self.abort(block_group_request_id, p_node=p_node, d_node=d_node)
+                except:
+                    await self.abort(block_group_request_id)
             raise e
 
         finally:
             self.active_req_ids.discard(origin_request_id)
-            if p_node is not None and pending_prefill_load_chars is not None:
-                dispatched_prompt_chars = pending_prefill_load_chars
-                pending_prefill_load_chars = None
-                await self.pd_node_stats.sub_dispatched_info(p_node=p_node, chars=dispatched_prompt_chars, req_num=1)
-            await self.remove_req(block_group_request_id)
+            with CancelScope(shield=True):
+                if p_node is not None and pending_prefill_load_chars is not None:
+                    dispatched_prompt_chars = pending_prefill_load_chars
+                    pending_prefill_load_chars = None
+                    await self.pd_node_stats.sub_dispatched_info(
+                        p_node=p_node, chars=dispatched_prompt_chars, req_num=1
+                    )
+                await self.remove_req(block_group_request_id)
         return
 
     async def _merge_choice_generators(self, generators):

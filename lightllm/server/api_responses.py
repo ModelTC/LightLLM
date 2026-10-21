@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from builtins import anext
-import re
 import time
 import uuid
 from json import JSONDecoder, JSONDecodeError
@@ -302,8 +301,8 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         if body.get(src) is not None:
             chat[dst] = body[src]
 
-    if body.get("tools"):
-        chat["tools"] = _tools_to_chat(body["tools"])
+    if "tools" in body:
+        chat["tools"] = _tools_to_chat(body["tools"] or [])
     tool_choice = body.get("tool_choice")
     if tool_choice is not None:
         if isinstance(tool_choice, dict) and tool_choice.get("type") in ("function", "custom"):
@@ -322,8 +321,8 @@ def _responses_to_chat_request(body: Dict[str, Any]) -> Dict[str, Any]:
         chat["response_format"] = response_format
 
     if isinstance(extra_body, dict):
-        for key, value in extra_body.items():
-            chat.setdefault(key, value)
+        for key in extra_body:
+            chat.setdefault(key, body[key])
 
     choice = chat.get("tool_choice", "auto")
     names = {tool["function"]["name"] for tool in chat.get("tools") or []}
@@ -390,27 +389,73 @@ def _usage_to_responses(usage: Dict[str, Any]) -> Dict[str, Any]:
 def _custom_tool_input(arguments: str, partial: bool = False) -> str:
     """Unwrap the function shim, including incomplete JSON string escapes."""
     if not partial:
-        value = json.loads(arguments)
-        if not isinstance(value, dict) or set(value) != {"input"} or not isinstance(value["input"], str):
+        # Preserve object pairs so duplicate input keys cannot change a payload
+        # after its first value has already been streamed to the client.
+        pairs = JSONDecoder(object_pairs_hook=list).decode(arguments)
+        if (
+            not arguments.lstrip().startswith("{")
+            or len(pairs) != 1
+            or pairs[0][0] != "input"
+            or not isinstance(pairs[0][1], str)
+        ):
             raise ValueError("Custom tool arguments must contain a single string input")
-        return value["input"]
-    match = re.match(r'\s*\{\s*"input"\s*:\s*(")', arguments)
-    if match is None:
-        return ""
-    value = arguments[match.start(1) :]
-    try:
-        return JSONDecoder().raw_decode(value)[0]
-    except JSONDecodeError:
-        # A partial escape is at most a UTF-16 surrogate pair (12 bytes).
-        for end in range(len(value), max(0, len(value) - 12), -1):
-            try:
-                text = json.loads(value[:end] + '"')
+        text = pairs[0][1]
+    else:
+        value = arguments.lstrip()
+        if not value.startswith("{"):
+            return ""
+        value = value[1:].lstrip()
+        decoder = JSONDecoder()
+        try:
+            key, end = decoder.raw_decode(value)
+        except JSONDecodeError:
+            return ""
+        if key != "input":
+            raise ValueError("Custom tool arguments must contain a single string input")
+        value = value[end:].lstrip()
+        if not value:
+            return ""
+        if not value.startswith(":"):
+            raise ValueError("Invalid custom tool input separator")
+        value = value[1:].lstrip()
+        if not value:
+            return ""
+        if not value.startswith('"'):
+            raise ValueError("Custom tool input must be a string")
+        try:
+            text = decoder.raw_decode(value)[0]
+        except JSONDecodeError:
+            # Buffer a partial escape, including a UTF-16 surrogate pair.
+            for end in range(len(value), max(0, len(value) - 12), -1):
+                try:
+                    text = decoder.decode(value[:end] + '"')
+                except JSONDecodeError:
+                    continue
                 if text and 0xD800 <= ord(text[-1]) <= 0xDFFF:
                     continue
-                return text
-            except ValueError:
-                continue
-        return ""
+                break
+            else:
+                return ""
+    # Validate before storing text in a response item: otherwise even the
+    # failure response would contain the undecodable surrogate.
+    text.encode("utf-8")
+    return text
+
+
+def _validate_tool_calls(names, body, complete=True):
+    choice = body.get("tool_choice", "auto")
+    if body.get("parallel_tool_calls") is False and len(names) > 1:
+        raise ValueError("parallel_tool_calls=false permits at most one tool call")
+    if choice == "none" and names:
+        raise ValueError("tool_choice=none does not permit tool calls")
+    if complete and choice == "required" and not names:
+        raise ValueError("tool_choice=required produced no tool call")
+    if isinstance(choice, dict):
+        name = choice.get("name") or (choice.get("function") or {}).get("name")
+        if choice.get("namespace"):
+            name = f"{choice['namespace']}__{name}"
+        if (complete and not names) or any(actual != name for actual in names):
+            raise ValueError("Generation did not honor the named tool_choice")
 
 
 def _tool_call_item(name, arguments, call_id, tool_map, status):
@@ -455,6 +500,12 @@ def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dic
     message = choice.get("message") or {}
     finish_reason = choice.get("finish_reason")
     failed = finish_reason in ("error", "abort")
+    failure_message = "Generation failed"
+    if not failed and finish_reason != "length":
+        try:
+            _validate_tool_calls([tc["function"]["name"] for tc in message.get("tool_calls") or []], body)
+        except ValueError as exc:
+            failed, failure_message = True, str(exc)
     output_status = "incomplete" if finish_reason == "length" or failed else "completed"
     tool_map = {
         name: (definition, namespace, kind)
@@ -485,7 +536,7 @@ def _chat_response_to_responses(chat_response: Any, body: Dict[str, Any]) -> Dic
     result["usage"] = _usage_to_responses(openai_dict.get("usage") or {})
     if failed:
         result["status"] = "failed"
-        result["error"] = {"code": "server_error", "message": "Generation failed"}
+        result["error"] = {"code": "server_error", "message": failure_message}
     elif finish_reason == "length":
         result["status"] = "incomplete"
         result["incomplete_details"] = {"reason": "max_output_tokens"}
@@ -693,13 +744,16 @@ async def _openai_sse_to_responses_events(
                     if index not in tool_states:
                         if not fn.get("name"):
                             raise ValueError("Tool argument delta has no preceding tool name")
+                        _validate_tool_calls(
+                            [state["name"] for state in tool_states.values()] + [fn["name"]], body, complete=False
+                        )
                         if current is not None:
                             for output_event in close_item(current, phase="commentary"):
                                 yield output_event
                             current = None
                         item = _tool_call_item(fn["name"], "", tc.get("id"), tool_map, "in_progress")
                         state, opening_events = open_item(item)
-                        state.update(arguments="", emitted_input="")
+                        state.update(arguments="", emitted_input="", name=fn["name"])
                         tool_states[index] = state
                         for output_event in opening_events:
                             yield output_event
@@ -729,6 +783,7 @@ async def _openai_sse_to_responses_events(
         if failed_error is None:
             # Validate custom payloads before emitting any terminal tool events.
             if finish_reason != "length":
+                _validate_tool_calls([state["name"] for state in tool_states.values()], body)
                 for state in tool_states.values():
                     if state["item"]["type"] == "custom_tool_call":
                         _custom_tool_input(state["arguments"])
@@ -802,7 +857,7 @@ async def responses_impl(raw_request: Request) -> Response:
         logger.exception("Failed to translate Responses API request")
         return create_error_response(HTTPStatus.BAD_REQUEST, f"Invalid request: {exc}")
 
-    downstream = await chat_completions_impl(chat_request, raw_request)
+    downstream = await chat_completions_impl(chat_request, raw_request, preserve_abort=True)
 
     if chat_request.stream:
         if not isinstance(downstream, CustomStreamingResponse):

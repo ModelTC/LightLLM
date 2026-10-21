@@ -902,7 +902,8 @@ def test_route_roundtrips_custom_tool_through_chat_models(monkeypatch, legacy_ex
     async def request_json():
         return body
 
-    async def generate(request, raw_request):
+    async def generate(request, raw_request, *, preserve_abort=False):
+        assert preserve_abort
         assert request.top_k == 1
         assert request.chat_template_kwargs["thinking"] is False
         assert request.tools[0].function.parameters["properties"]["input"]["type"] == "string"
@@ -930,3 +931,305 @@ def test_route_roundtrips_custom_tool_through_chat_models(monkeypatch, legacy_ex
     result = asyncio.run(api_responses.responses_impl(SimpleNamespace(json=request_json)))
     output = json.loads(result.body)["output"]
     assert output[0]["type"] == "custom_tool_call" and output[0]["input"] == payload
+
+
+@pytest.mark.parametrize("top_tools", [[], None])
+def test_top_level_empty_tools_override_legacy_extra_body(top_tools):
+    request = ChatCompletionRequest(
+        **_responses_to_chat_request(
+            {
+                "input": "hi",
+                "tools": top_tools,
+                "extra_body": {"tools": [{"type": "function", "function": {"name": "hidden", "strict": True}}]},
+            }
+        )
+    )
+    assert not request.tools
+
+
+def test_top_level_null_sampling_parameter_overrides_legacy_extra_body():
+    request = _responses_to_chat_request({"input": "hi", "temperature": None, "extra_body": {"temperature": 0.2}})
+    assert request["temperature"] is None
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"input":"first","input":"second"}',
+        '{"input":"\\ud83d"}',
+        '{"input":"a\\ude00b"}',
+    ],
+)
+def test_malformed_custom_input_fails_without_completing_tool(arguments):
+    events = _collect_events(
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [
+                            {"index": 0, "id": "call_1", "function": {"name": "patch", "arguments": arguments}}
+                        ]
+                    }
+                }
+            ]
+        },
+        body={"input": "hi", "tools": [{"type": "custom", "name": "patch"}]},
+    )
+    assert events[-1]["type"] == "response.failed"
+    assert not any(e["type"] == "response.custom_tool_call_input.done" for e in events)
+    assert not any(e["type"] == "response.output_item.done" for e in events)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        '{"\\u0069nput":"payload"}',
+        ' { "in\\u0070ut" : "中文\\n😀" } ',
+    ],
+)
+def test_escaped_custom_input_keys_preserve_streamed_payload(arguments):
+    payloads = [
+        {
+            "choices": [
+                {
+                    "delta": {
+                        "tool_calls": [{"index": 0, "id": "call_1", "function": {"name": "patch", "arguments": ""}}]
+                    }
+                }
+            ]
+        }
+    ]
+    payloads += [
+        {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": char}}]}}]} for char in arguments
+    ]
+    events = _collect_events(*payloads, body={"input": "hi", "tools": [{"type": "custom", "name": "patch"}]})
+    streamed = "".join(e["delta"] for e in events if e["type"] == "response.custom_tool_call_input.delta")
+    assert events[-1]["type"] == "response.completed"
+    assert streamed == json.loads(arguments)["input"] == events[-1]["response"]["output"][0]["input"]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize(
+    "choice,parallel,names",
+    [
+        ("required", True, []),
+        ({"type": "function", "name": "read"}, True, ["write"]),
+        ({"type": "function", "name": "read"}, True, []),
+        ("auto", False, ["read", "write"]),
+    ],
+)
+def test_output_tool_constraints_are_enforced_before_completion(stream, choice, parallel, names):
+    body = {
+        "input": "hi",
+        "tool_choice": choice,
+        "parallel_tool_calls": parallel,
+        "tools": [{"type": "function", "name": name, "parameters": {}} for name in ["read", "write"]],
+    }
+    calls = [
+        {"index": i, "id": f"call_{i}", "function": {"name": name, "arguments": "{}"}} for i, name in enumerate(names)
+    ]
+    if stream:
+        events = _collect_events(
+            {
+                "choices": [
+                    {
+                        "delta": {"content": "text", "tool_calls": calls},
+                        "finish_reason": "tool_calls" if calls else "stop",
+                    }
+                ]
+            },
+            body=body,
+        )
+        assert events[-1]["type"] == "response.failed"
+        assert not any(
+            e["type"] in ("response.function_call_arguments.done", "response.custom_tool_call_input.done")
+            for e in events
+        )
+        response = events[-1]["response"]
+    else:
+        response = _chat_response_to_responses(
+            {
+                "choices": [
+                    {
+                        "message": {"content": "text", "tool_calls": calls},
+                        "finish_reason": "tool_calls" if calls else "stop",
+                    }
+                ]
+            },
+            body,
+        )
+    assert response["status"] == "failed"
+    assert all(i["status"] != "completed" for i in response["output"] if i["type"] == "function_call")
+
+
+def test_truncated_required_tool_request_remains_incomplete():
+    events = _collect_events(
+        {"choices": [{"delta": {"reasoning": "plan"}, "finish_reason": "length"}]},
+        body={"input": "hi", "tool_choice": "required"},
+    )
+    assert events[-1]["type"] == "response.incomplete"
+
+
+@pytest.fixture
+def native_chat_pipeline(monkeypatch):
+    from types import SimpleNamespace
+    from lightllm.server import api_http, api_openai, api_responses, api_stream_obj
+    from lightllm.server.core.objs import FinishStatus
+
+    class Sampling:
+        def init(self, **kwargs):
+            pass
+
+        async def verify_cpu_async(self, compiler):
+            pass
+
+    args = SimpleNamespace(
+        reasoning_parser=None, tool_call_parser="deepseekv4", disable_delay_response_start=False, run_mode="normal"
+    )
+    monkeypatch.setattr(api_openai, "SamplingParams", Sampling)
+
+    async def prompt(request, tools):
+        return "Prompt"
+
+    monkeypatch.setattr(api_openai, "build_prompt", prompt)
+    for module in [api_openai, api_responses, api_stream_obj]:
+        monkeypatch.setattr(module, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(api_http.g_objs, "args", args, raising=False)
+    monkeypatch.setattr(api_http.g_objs, "metric_client", SimpleNamespace(counter_inc=lambda *a: None))
+    closed = []
+    generators = []
+
+    def manager_generate(finish=None):
+        async def generate(*a, **kw):
+            try:
+                yield 80, "text" if finish != "abort" else "", {"prompt_tokens": 4}, FinishStatus(
+                    {
+                        None: FinishStatus.NO_FINISH,
+                        "abort": FinishStatus.FINISHED_ABORTED,
+                        "stop": FinishStatus.FINISHED_STOP,
+                        "error": FinishStatus.FINISHED_ERROR,
+                    }[finish]
+                )
+                if finish is None:
+                    await asyncio.Event().wait()
+            finally:
+                await asyncio.sleep(0)
+                closed.append(True)
+
+        def start(*a, **kw):
+            generator = generate(*a, **kw)
+            generators.append(generator)
+            return generator
+
+        monkeypatch.setattr(
+            api_http.g_objs,
+            "httpserver_manager",
+            SimpleNamespace(tokenizer=None, output_grammar_compiler=None, generate=start),
+            raising=False,
+        )
+
+    return SimpleNamespace(set_finish=manager_generate, closed=closed, generators=generators, args=args)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("finish", ["abort", "error"])
+def test_native_chat_preserves_failure_for_responses(native_chat_pipeline, stream, finish):
+    from types import SimpleNamespace
+    from lightllm.server.api_responses import responses_impl
+    from lightllm.utils.error_utils import GenerationError
+
+    native_chat_pipeline.set_finish(finish)
+
+    async def request_json():
+        return {"input": "hi", "stream": stream}
+
+    async def run():
+        response = await responses_impl(SimpleNamespace(json=request_json))
+        if stream:
+            if finish == "error":
+                with pytest.raises(GenerationError, match="before producing output"):
+                    _ = [chunk async for chunk in response.body_iterator]
+            else:
+                events = [json.loads(e.decode().split("data: ", 1)[1]) async for e in response.body_iterator]
+                assert events[-1]["type"] == "response.failed"
+        else:
+            assert json.loads(response.body)["status"] == "failed"
+
+    asyncio.run(run())
+    assert native_chat_pipeline.closed == [True]
+
+
+def test_plain_chat_abort_compatibility_is_preserved(native_chat_pipeline):
+    from types import SimpleNamespace
+    from lightllm.server.api_openai import chat_completions_impl
+
+    native_chat_pipeline.set_finish("abort")
+    response = asyncio.run(
+        chat_completions_impl(ChatCompletionRequest(messages=[], max_completion_tokens=32), SimpleNamespace())
+    )
+    assert response.choices[0].finish_reason == "stop"
+
+
+@pytest.mark.parametrize("early_headers", [False, True])
+@pytest.mark.parametrize("cancel_during_send", [False, True])
+def test_native_responses_closes_backend_before_http_stream_exits(
+    native_chat_pipeline, early_headers, cancel_during_send
+):
+    import anyio
+    from types import SimpleNamespace
+    from lightllm.server.api_responses import responses_impl
+
+    native_chat_pipeline.set_finish(None)
+    native_chat_pipeline.args.disable_delay_response_start = early_headers
+
+    async def request_json():
+        return {"input": "hi", "stream": True}
+
+    async def run():
+        response = await responses_impl(SimpleNamespace(json=request_json))
+        with anyio.CancelScope() as scope:
+
+            async def send(message):
+                if message["type"] == "http.response.body":
+                    if cancel_during_send:
+                        scope.cancel()
+                        await anyio.sleep(0)
+                    raise RuntimeError("send failed")
+
+            if cancel_during_send:
+                await response.stream_response(send)
+            else:
+                with pytest.raises(RuntimeError, match="send failed"):
+                    await response.stream_response(send)
+        assert native_chat_pipeline.closed == ([True] if not early_headers else [])
+        # With immediate headers, no backend has been started yet.
+        if not early_headers:
+            assert all(g.ag_frame is None for g in native_chat_pipeline.generators)
+
+    asyncio.run(run())
+
+
+def test_native_responses_closes_started_backend_with_immediate_headers(native_chat_pipeline):
+    import anyio
+    from types import SimpleNamespace
+    from lightllm.server.api_responses import responses_impl
+
+    native_chat_pipeline.set_finish(None)
+    native_chat_pipeline.args.disable_delay_response_start = True
+
+    async def request_json():
+        return {"input": "hi", "stream": True}
+
+    async def run():
+        response = await responses_impl(SimpleNamespace(json=request_json))
+        with anyio.CancelScope() as scope:
+
+            async def send(message):
+                if message["type"] == "http.response.body" and b"response.output_text.delta" in message["body"]:
+                    scope.cancel()
+                    await anyio.sleep(0)
+
+            await response.stream_response(send)
+        assert native_chat_pipeline.closed == [True]
+
+    asyncio.run(run())
