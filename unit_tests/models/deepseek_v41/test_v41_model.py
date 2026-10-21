@@ -4,12 +4,12 @@ import pytest
 import torch
 
 from lightllm.models.deepseek_v41.triton_kernel.attention import (
-    rotary_quantize_fp4,
     pool_pairs,
     destindex_copy_kv_dsv41,
     index_logits,
 )
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
+from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_indexer_rope_quant
 from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer
 from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k_dsv4 import destindex_copy_indexer_k_dsv4
 
@@ -76,58 +76,67 @@ def test_v41_mxfp4_uses_quant_selector_on_hopper(expert_dtype):
     assert quant.get_quant_method(0, "wq_a").method_name == "fp8w8a8-b32-triton"
 
 
-def _fp4_reference(x, group_size):
-    blocks = x.float().unflatten(-1, (-1, group_size))
-    amax = blocks.abs().amax(-1, keepdim=True)
-    if group_size == 16:
-        scale = (amax / 6).clamp(2 ** -9, 448).to(torch.float8_e4m3fn).float()
-    else:
-        scale = torch.exp2(torch.ceil(torch.log2(amax.clamp_min(6 * 2 ** -126) / 6)))
-    value = (blocks / scale).clamp(-6, 6)
-    step = torch.where(value.abs() < 2, 0.5, torch.where(value.abs() < 4, 1.0, 2.0))
-    value = torch.round(value.abs() / step) * step * value.sign()
-    return (value * scale).flatten(-2).to(x.dtype)
-
-
-def _decode_packed_fp4(packed, group_size):
-    data, scales = packed
-    codes = torch.stack((data & 15, data >> 4), -1).flatten(-2).long()
-    levels = torch.tensor([0, 0.5, 1, 1.5, 2, 3, 4, 6], device=data.device)
-    values = levels[codes & 7] * torch.where(codes < 8, 1, -1)
-    scale = scales.view(torch.float8_e4m3fn).float() if group_size == 16 else torch.exp2(scales.float() - 127)
-    return (values * scale.repeat_interleave(group_size, -1)).bfloat16()
-
-
-def test_fp4_main_quantization_uses_e4m3_scales_and_ties_to_even():
-    x = torch.tensor(
-        [0.0, 0.25, 0.75, 1.25, 1.75, 2.5, 3.5, 5.0, 6.0, -0.25, -0.75, -1.25, -1.75, -2.5, -3.5, -5.0], device="cuda"
+def test_fp8_history_capacity_counts_shared_sources_and_indexer_scales():
+    config = DeepseekV4CacheConfig.from_model_config(
+        dict(
+            model_type="deepseek_v41",
+            num_hidden_layers=40,
+            compress_ratios=[0, 0, *([2] * 18), *([1] * 19), 0],
+            kv_source_layer_ids=[2, 8, 14, 20],
+            head_dim=512,
+            index_head_dim=128,
+            sliding_window=128,
+            qk_rope_head_dim=64,
+        ),
+        40,
+        2048,
     )
-    expected = torch.tensor(
-        [0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 4.0, 4.0, 6.0, 0.0, -1.0, -1.0, -2.0, -2.0, -4.0, -4.0], device="cuda"
-    )
-    x = x.repeat(32).bfloat16()[None, :]
-    freqs = torch.ones((1, 32), dtype=torch.complex64, device="cuda")
-    packed = rotary_quantize_fp4(x, freqs, torch.zeros(1, dtype=torch.int32, device="cuda"), 16)
-    assert packed[0].shape == (1, 256) and packed[1].shape == (1, 32)
-    torch.testing.assert_close(_decode_packed_fp4(packed, 16), expected.repeat(32).bfloat16()[None, :], atol=0, rtol=0)
+    assert config.indexer_bytes == 132
+    assert config.history_widths == (360, 360, 360, 720)
+    assert sum(config.history_widths) == 1800
+    assert config.layer_to_history_idx[38] == config.layer_to_history_idx[20]
+
+
+def _rope_reference(x, freqs, positions):
+    rotated = x.clone()
+    tail = torch.view_as_complex(x[..., -64:].float().unflatten(-1, (-1, 2)))
+    frequency = freqs[positions.long()]
+    if x.ndim == 3:
+        frequency = frequency[:, None, :]
+    rotated[..., -64:] = torch.view_as_real(tail * frequency).flatten(-2).bfloat16()
+    return rotated
+
+
+def _indexer_fp8_reference(x):
+    values = x.float()
+    scale = values.abs().amax(-1, keepdim=True).clamp_min(1e-4) / 448
+    return (values / scale).to(torch.float8_e4m3fn).float() * scale
+
+
+def _assert_native_fp8_gemm_accuracy(actual, expected):
+    # Hopper FP8 WGMMA accumulates with less precision than the former FP16 fallback.
+    # Bound its error against an FP64 product of the decoded quantized inputs.
+    expected = expected.double()
+    error = actual.double() - expected
+    assert error.norm() <= 1e-4 * expected.norm()
+    assert error.abs().max() <= 1e-3 * expected.square().mean().sqrt()
 
 
 @pytest.mark.parametrize("tokens", [1, 17])
-@pytest.mark.parametrize("group_size,heads,dim", [(16, 1, 512), (32, 2, 128)])
+@pytest.mark.parametrize("heads", [1, 32])
 @pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
-def test_packed_fp4_rope_matches_reference(tokens, group_size, heads, dim, position_dtype):
-    x = torch.randn((tokens, heads, dim), device="cuda", dtype=torch.bfloat16)
+def test_indexer_fp8_rope_matches_reference(tokens, heads, position_dtype):
+    x = torch.randn((tokens, heads, 128), device="cuda", dtype=torch.bfloat16)
     x[0].zero_()
     angles = torch.randn((32, 32), device="cuda")
     freqs = torch.polar(torch.ones_like(angles), angles)
     positions = torch.randint(0, 32, (tokens,), dtype=position_dtype, device="cuda")
-    rotated = x.clone()
-    tail = torch.view_as_complex(x[..., -64:].float().unflatten(-1, (-1, 2)))
-    rotated[..., -64:] = torch.view_as_real(tail * freqs[positions.long(), None, :]).flatten(-2).bfloat16()
-    packed = rotary_quantize_fp4(x, freqs, positions, group_size)
-    torch.testing.assert_close(
-        _decode_packed_fp4(packed, group_size), _fp4_reference(rotated, group_size), atol=0, rtol=0
-    )
+    weights = torch.ones(tokens, heads, device="cuda")
+    q, scale = fused_q_indexer_rope_quant(x, weights, 1.0, freqs, positions, apply_hadamard=False)
+    assert q.dtype == torch.float8_e4m3fn
+    assert q.shape == x.shape
+    expected = _indexer_fp8_reference(_rope_reference(x, freqs, positions))
+    torch.testing.assert_close(q.float() * scale, expected, atol=0, rtol=1e-6)
 
 
 @pytest.mark.parametrize("tokens", [1, 17, 513])
@@ -167,16 +176,13 @@ def test_swa_fused_norm_rope_fp8_scatter_matches_reference(tokens, position_dtyp
     normalized = rmsnorm_forward(kv, weight, eps)
     cos, sin = freqs.real[positions.long()].contiguous(), freqs.imag[positions.long()].contiguous()
     rotary_emb_fwd(normalized[:, None, -64:], None, cos, sin)
-    blocks = normalized.float().unflatten(-1, (-1, 32))
-    scale = torch.exp2(torch.ceil(torch.log2(blocks.abs().amax(-1, keepdim=True).clamp_min(1e-4) / 448)))
-    rounded = ((blocks / scale).to(torch.float8_e4m3fn).float() * scale).flatten(-2).bfloat16()
-    groups = rounded[:, :448].float().reshape(tokens, 7, 64)
+    groups = normalized[:, :448].float().reshape(tokens, 7, 64)
     raw_scale = groups.abs().amax(-1).clamp_min(1e-4) / 448
     bits = raw_scale.contiguous().view(torch.int32)
     exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).int()
     scale64 = torch.exp2(exponent.float() - 127)
     fp8 = (groups / scale64[..., None]).to(torch.float8_e4m3fn).reshape(tokens, 448)
-    data = torch.cat((fp8.view(torch.uint8), rounded[:, 448:].contiguous().view(torch.uint8)), dim=-1)
+    data = torch.cat((fp8.view(torch.uint8), normalized[:, 448:].contiguous().view(torch.uint8)), dim=-1)
     for targets in (slots, runtime) if runtime_tail else (slots,):
         valid = targets >= 0
         page, offset = targets[valid].long() // 128, targets[valid].long() % 128
@@ -257,7 +263,7 @@ def test_pure_swa_uses_base_rope_while_compressed_attention_keeps_yarn():
 
 @pytest.mark.parametrize("split", [1, 3, 5])
 def test_c2_carries_partial_groups_across_chunk_boundaries(split):
-    kv, scores = torch.randn(7, 512, device="cuda"), torch.randn(7, 512, device="cuda")
+    kv, scores = torch.randn(7, 1024, device="cuda").split(512, -1)
     positions = torch.arange(7, dtype=torch.int32, device="cuda")
     req = torch.zeros(7, dtype=torch.int32, device="cuda")
     state = torch.zeros(2, 2, 512, device="cuda")
@@ -286,47 +292,49 @@ def test_c2_does_not_cross_request_boundaries_or_commit_hold():
 @pytest.mark.parametrize("ratio", [1, 2])
 def test_indexer_reads_paged_source_keys_with_causal_mask(ratio):
     n, heads = 5, 2
-    cache = torch.zeros((1, (256 // ratio) * 68), dtype=torch.uint8, device="cuda")
+    cache = torch.zeros((1, (256 // ratio) * 132), dtype=torch.uint8, device="cuda")
     raw = torch.randn(n, 128, dtype=torch.bfloat16, device="cuda")
     slots = torch.arange(n, dtype=torch.int32, device="cuda") * ratio + ratio - 1
     freqs = torch.ones((16, 32), dtype=torch.complex64, device="cuda")
-    key = rotary_quantize_fp4(raw, freqs, slots)
-    destindex_copy_indexer_k_dsv4(key, slots, slots, cache, 256 // ratio, ratio)
+    destindex_copy_indexer_k_dsv4(raw, slots, slots, cache, 256 // ratio, ratio, freqs_cis=freqs)
     queries = torch.randn(2, heads, 128, dtype=torch.bfloat16, device="cuda")
     weights = torch.randn(2, heads, device="cuda")
     req = torch.zeros(2, dtype=torch.int32, device="cuda")
     positions = torch.tensor([ratio - 1, n * ratio - 1], dtype=torch.int32, device="cuda")
     table = torch.arange(256, dtype=torch.int32, device="cuda")[None, :]
-    query = rotary_quantize_fp4(queries, freqs, positions)
-    actual = index_logits(query, weights, cache, req, positions, table, ratio, n)
-    expected = torch.einsum("thd,kd->thk", _fp4_reference(queries, 32).float(), _fp4_reference(raw, 32).float()).relu()
+    query, folded_weights = fused_q_indexer_rope_quant(queries, weights, 1.0, freqs, positions, apply_hadamard=False)
+    actual = index_logits(query, folded_weights.squeeze(-1), cache, req, positions, table, ratio, n)
+    expected = torch.einsum("thd,kd->thk", _indexer_fp8_reference(queries), _indexer_fp8_reference(raw)).relu()
     expected = (expected * weights[..., None]).sum(1)
     expected[0, 1:] = -float("inf")
     torch.testing.assert_close(actual, expected, atol=0.03, rtol=0.01)
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
-@pytest.mark.parametrize("candidates", [False, True])
-def test_fp4_indexer_page_scatter_candidates_and_cuda_graph(ratio, candidates):
+@pytest.mark.parametrize("use_candidate_blocks", [False, True])
+def test_fp8_indexer_page_scatter_candidate_blocks_and_cuda_graph(ratio, use_candidate_blocks):
     tokens, heads = 259, 32
     page_size = 256 // ratio
-    cache = torch.full((3, page_size * 68), 165, dtype=torch.uint8, device="cuda")
+    cache = torch.full((3, page_size * 132), 165, dtype=torch.uint8, device="cuda")
     positions = torch.arange(tokens * ratio, dtype=torch.int32, device="cuda")
     physical = torch.randperm(3, device="cuda").repeat_interleave(256) * 256
     physical += torch.arange(256, device="cuda").repeat(3)
     slots = physical[: tokens * ratio].int()
     raw = torch.randn((tokens * ratio, 128), dtype=torch.bfloat16, device="cuda")
-    freqs = torch.ones((tokens * ratio, 32), dtype=torch.complex64, device="cuda")
-    key = rotary_quantize_fp4(raw, freqs, positions)
-    destindex_copy_indexer_k_dsv4(key, slots, positions, cache, page_size, ratio)
+    angles = torch.randn(tokens * ratio, 32, device="cuda")
+    freqs = torch.polar(torch.ones_like(angles), angles)
+    destindex_copy_indexer_k_dsv4(raw, slots, positions, cache, page_size, ratio, freqs_cis=freqs)
     closed = torch.arange(ratio - 1, tokens * ratio, ratio, device="cuda")
     expected_cache = torch.full_like(cache, 165)
     compressed = slots[closed].long() // ratio
     pages, offsets = compressed // page_size, compressed % page_size
-    expected_cache[pages[:, None], offsets[:, None] * 64 + torch.arange(64, device="cuda")] = key[0][closed]
-    expected_cache[pages[:, None], page_size * 64 + offsets[:, None] * 4 + torch.arange(4, device="cuda")] = key[1][
-        closed
-    ]
+    keys = _rope_reference(raw[closed], freqs, positions[closed] - ratio + 1).float()
+    scales = keys.abs().amax(-1).clamp_min(1e-4) / 448
+    quantized = (keys / scales[:, None]).to(torch.float8_e4m3fn).view(torch.uint8)
+    expected_cache[pages[:, None], offsets[:, None] * 128 + torch.arange(128, device="cuda")] = quantized
+    expected_cache[pages[:, None], page_size * 128 + offsets[:, None] * 4 + torch.arange(4, device="cuda")] = (
+        scales[:, None].contiguous().view(torch.uint8)
+    )
     torch.testing.assert_close(cache, expected_cache, atol=0, rtol=0)
 
     query = torch.randn((3, heads, 128), dtype=torch.bfloat16, device="cuda")
@@ -334,17 +342,21 @@ def test_fp4_indexer_page_scatter_candidates_and_cuda_graph(ratio, candidates):
     query_pos = torch.tensor([0, 129 * ratio - 1, tokens * ratio - 1], dtype=torch.int32, device="cuda")
     req = torch.zeros(3, dtype=torch.int32, device="cuda")
     table = physical.int()[None, :]
-    candidate_blocks = torch.tensor([[0, 1, -1], [0, 16, -1], [32, 0, 16]], device="cuda") if candidates else None
-    count = 24 if candidates else tokens
+    candidate_blocks = (
+        torch.tensor([[0, 1, -1], [0, 16, -1], [32, 0, 16]], device="cuda") if use_candidate_blocks else None
+    )
+    count = 24 if use_candidate_blocks else tokens
 
     def run():
-        packed_q = rotary_quantize_fp4(query, freqs, query_pos)
-        return index_logits(packed_q, weights, cache, req, query_pos, table, ratio, count, candidate_blocks)
+        q, folded_weights = fused_q_indexer_rope_quant(query, weights, 1.0, freqs, query_pos, apply_hadamard=False)
+        return index_logits(q, folded_weights.squeeze(-1), cache, req, query_pos, table, ratio, count, candidate_blocks)
 
     def reference():
-        score = torch.einsum("thd,kd->thk", _fp4_reference(query, 32).float(), _fp4_reference(raw[closed], 32).float())
+        q = _indexer_fp8_reference(_rope_reference(query, freqs, query_pos))
+        k = _indexer_fp8_reference(_rope_reference(raw[closed], freqs, positions[closed] - ratio + 1))
+        score = torch.einsum("thd,kd->thk", q, k)
         score = (score.relu() * weights[..., None]).sum(1)
-        if candidates:
+        if use_candidate_blocks:
             logical = (candidate_blocks[..., None] * 8 + torch.arange(8, device="cuda")).flatten(1)
             score = score.gather(1, logical.clamp(0, tokens - 1))
         else:
@@ -360,26 +372,36 @@ def test_fp4_indexer_page_scatter_candidates_and_cuda_graph(ratio, candidates):
     torch.testing.assert_close(actual, reference(), atol=0.03, rtol=0.01)
 
 
-def test_main_cache_writer_preserves_rope_and_layer_ownership():
-    cache = torch.zeros((2, 1, DeepseekV4CacheConfig((0, 0)).packed_kv_bytes(128)), dtype=torch.uint8, device="cuda")
+@pytest.mark.parametrize("ratio", [1, 2])
+def test_main_cache_writer_preserves_rope_and_layer_ownership(ratio):
+    page_size = 256 // ratio
+    cache = torch.zeros(
+        (2, 2, DeepseekV4CacheConfig((0, 0)).packed_kv_bytes(page_size)), dtype=torch.uint8, device="cuda"
+    )
     kv = torch.randn(3, 512, dtype=torch.bfloat16, device="cuda")
-    kv[:, 0] = -1e-5  # FP4 negative zero must retain its sign through the FlashMLA conversion.
-    slots = torch.tensor([1, 5, 127], dtype=torch.int32, device="cuda")
-    freqs = torch.ones((128, 32), dtype=torch.complex64, device="cuda")
-    packed = rotary_quantize_fp4(kv, freqs, slots, 16)
-    destindex_copy_kv_dsv41(packed, slots, slots, cache[1], 1, 128)
-    rounded = _fp4_reference(kv, 16)
-    blocks = rounded[:, :448].float().reshape(3, 7, 64)
+    kv[0].zero_()
+    kv[:, 0] = -1e-5
+    slots = torch.tensor([ratio - 1, 256 + ratio - 1, 511], dtype=torch.int32, device="cuda")
+    positions = torch.tensor([0, 5, 127], dtype=torch.int32, device="cuda")
+    angles = torch.randn(128, 32, device="cuda")
+    freqs = torch.polar(torch.ones_like(angles), angles)
+    destindex_copy_kv_dsv41(kv, freqs, slots, positions, cache[1], ratio, page_size)
+    valid = (positions + 1) % ratio == 0
+    rounded = _rope_reference(kv[valid], freqs, positions[valid] - ratio + 1)
+    count = int(valid.sum())
+    blocks = rounded[:, :448].float().reshape(count, 7, 64)
     scale = blocks.abs().amax(-1).clamp_min(1e-4) / 448
     bits = scale.contiguous().view(torch.int32)
     exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).int()
     scale = torch.exp2(exponent.float() - 127)
-    fp8 = (blocks / scale[..., None]).to(torch.float8_e4m3fn).reshape(3, 448)
+    fp8 = (blocks / scale[..., None]).to(torch.float8_e4m3fn).reshape(count, 448)
     expected = torch.zeros_like(cache[1])
-    expected[0, : 128 * 576].view(128, 576)[slots.long()] = torch.cat(
+    compressed = slots[valid].long() // ratio
+    pages, offsets = compressed // page_size, compressed % page_size
+    expected[pages[:, None], offsets[:, None] * 576 + torch.arange(576, device="cuda")] = torch.cat(
         (fp8.view(torch.uint8), rounded[:, 448:].contiguous().view(torch.uint8)), -1
     )
-    expected[0, 128 * 576 + slots.long()[:, None] * 8 + torch.arange(7, device="cuda")] = exponent.byte()
+    expected[pages[:, None], page_size * 576 + offsets[:, None] * 8 + torch.arange(7, device="cuda")] = exponent.byte()
     torch.testing.assert_close(cache[1], expected, atol=0, rtol=0)
     assert cache[0].count_nonzero() == 0
 
@@ -442,7 +464,7 @@ def test_block32_fp8_loader_and_native_gemm(scale_first, tokens):
     out = torch.empty(tokens, 64, device="cuda", dtype=torch.float32)
     actual = method.apply(x, pack, out=out, use_custom_tensor_mananger=False)
     assert actual is out
-    torch.testing.assert_close(actual, expected, atol=2e-4, rtol=1e-4)
+    _assert_native_fp8_gemm_accuracy(actual, expected)
     # Autotune candidates with K=64/128 must still respect the checkpoint's K=32 scales.
     for tile_k in (32, 64, 128):
         w8a8_block_fp8_matmul(
@@ -452,9 +474,9 @@ def test_block32_fp8_loader_and_native_gemm(scale_first, tokens):
             pack.weight_scale.T,
             out,
             (32, 32),
-            run_config=dict(BLOCK_M=32, BLOCK_N=64, BLOCK_K=tile_k, GROUP_M=8, num_warps=4, num_stages=3),
+            run_config=dict(BLOCK_M=64, BLOCK_N=64, BLOCK_K=tile_k, GROUP_M=8, num_warps=4, num_stages=3),
         )
-        torch.testing.assert_close(out, expected, atol=2e-4, rtol=1e-4)
+        _assert_native_fp8_gemm_accuracy(out, expected)
 
 
 @pytest.mark.parametrize("m,n,k", [(1, 1792, 5120), (17, 4096, 1280), (256, 288, 5120)])
@@ -473,27 +495,40 @@ def test_block32_native_gemm_model_shapes_and_batch_invariance(m, n, k):
     expected = (dx.double() @ dw.double()).float()
     out = torch.empty(m, n, device="cuda", dtype=torch.float32)
     layer.mm(x, out=out, use_custom_tensor_mananger=False)
-    torch.testing.assert_close(out, expected, atol=2e-5, rtol=1e-4)
+    _assert_native_fp8_gemm_accuracy(out, expected)
     single = torch.empty_like(out[:1])
     layer.mm(x[:1], out=single, use_custom_tensor_mananger=False)
     torch.testing.assert_close(single, out[:1], atol=0, rtol=0)
 
 
 def test_c2_first_token_has_no_compressed_history():
-    from lightllm.models.deepseek_v41.layer_infer.transformer_layer_infer import DeepseekV41TransformerLayerInfer
+    from lightllm.models.deepseek_v4.layer_infer.indexer import DeepseekV4IndexInfer
 
-    layer = DeepseekV41TransformerLayerInfer.__new__(DeepseekV41TransformerLayerInfer)
-    layer.layer_num_, layer.compress_ratio, layer.index_topk = 0, 2, 512
-    layer.network_config_ = {"index_n_heads": 2}
-    layer.uses_candidates = layer.is_candidate_source = False
-    layer.qk_rope_head_dim = 64
-    layer.freqs_cis = torch.ones((1, 32), dtype=torch.complex64, device="cuda")
-    config = DeepseekV4CacheConfig((2,), short_compress_ratio=2, long_compress_ratio=1, indexer_bits=4)
+    indexer = DeepseekV4IndexInfer(
+        0,
+        dict(
+            model_type="deepseek_v41",
+            rms_norm_eps=1e-20,
+            compress_ratios=[2],
+            index_topk=512,
+            index_head_dim=128,
+            qk_rope_head_dim=64,
+            index_n_heads=2,
+            index_source_layer_ids=[0],
+            candidate_source_layer_id=20,
+            candidate_topk_blocks=2048,
+        ),
+        1,
+    )
+    indexer.freqs_cis = torch.ones((1, 32), dtype=torch.complex64, device="cuda")
+    config = DeepseekV4CacheConfig((2,), short_compress_ratio=2, long_compress_ratio=1)
     cache = torch.zeros((256, 1, config.history_widths[0]), dtype=torch.uint8, device="cuda")
     state = SimpleNamespace(
         position_ids=torch.tensor([0], device="cuda"),
         dsv4_sparse_req_idx=torch.tensor([0], device="cuda"),
         v41_index_capacity=1,
+        dsv4_swa_indices=torch.full((1, 128), -1, dtype=torch.int32, device="cuda"),
+        dsv4_swa_lengths=torch.ones(1, dtype=torch.int32, device="cuda"),
         mem_manager=SimpleNamespace(cache_config=config, get_att_input_params=lambda layer: cache),
         req_manager=SimpleNamespace(
             cache_config=config,
@@ -502,11 +537,13 @@ def test_c2_first_token_has_no_compressed_history():
         ),
     )
     weight = SimpleNamespace(
-        idx_wq_b_=SimpleNamespace(mm=lambda x: torch.zeros((x.shape[0], 256), dtype=x.dtype, device=x.device)),
-        idx_weights_proj_=SimpleNamespace(mm=lambda x, out: out.zero_()),
+        idx_wq_b_=SimpleNamespace(
+            mm=lambda x, **kwargs: torch.zeros((x.shape[0], 256), dtype=x.dtype, device=x.device)
+        ),
+        idx_weights_proj_=SimpleNamespace(mm=lambda x, out, **kwargs: out.zero_()),
     )
     x = torch.zeros((1, 128), dtype=torch.bfloat16, device="cuda")
-    metadata = layer._build_index_metadata(x, x[:, :32], state, weight)
+    metadata = indexer.build_metadata(x, x[:, :32], state, weight)
     assert metadata["extra_indices"].shape == (1, 1, 512)
     assert (metadata["extra_indices"] == -1).all()
     assert metadata["extra_lengths"].item() == 0
@@ -636,7 +673,7 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     state.dsv4_swa_indices = torch.arange(332 * 128, dtype=torch.int32, device="cuda").view(332, 128)
     state.dsv4_swa_lengths = torch.full((332,), 128, dtype=torch.int32, device="cuda")
     state.v41_sparse_selection = {"extra_indices": torch.arange(332, device="cuda")[:, None, None]}
-    state.v41_candidates = torch.arange(332, device="cuda")[:, None]
+    state.candidate_blocks = torch.arange(332, device="cuda")[:, None]
     state.engram_hashes = torch.arange(332, device="cuda")[:, None, None]
     state._dsv4_prefill_pad_q_len = 129
     original_swa = state.dsv4_swa_indices.clone()
@@ -651,7 +688,7 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     assert decoder.b_q_start_loc.tolist() == [0, 128, 131]
     assert decoder._dsv4_prefill_pad_q_len == 128
     torch.testing.assert_close(decoder.engram_hashes[:, 0, 0], expected_rows)
-    torch.testing.assert_close(decoder.v41_candidates[:, 0], expected_rows)
+    torch.testing.assert_close(decoder.candidate_blocks[:, 0], expected_rows)
     torch.testing.assert_close(decoder.v41_sparse_selection["extra_indices"][:, 0, 0], expected_rows)
     expected_lengths = torch.tensor([*range(1, 129), 1, 2, 3, *range(1, 129)], device="cuda", dtype=torch.int64)
     torch.testing.assert_close(decoder.dsv4_swa_lengths, expected_lengths)

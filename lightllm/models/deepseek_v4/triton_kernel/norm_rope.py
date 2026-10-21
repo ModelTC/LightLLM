@@ -93,7 +93,7 @@ def _k_norm_rope_cache_kernel(
         norm = tl.rsqrt(tl.sum(x * x, axis=0) / 512 + EPS)
     x = x * norm * w
     if IS_V41:
-        # V4.1 rounds RMSNorm to BF16 before RoPE, then quantizes the full vector.
+        # V4.1 rounds RMSNorm to BF16 before RoPE.
         x = x.to(tl.bfloat16).to(tl.float32)
     groups = tl.arange(0, 8)
     cols = tl.arange(0, 64)
@@ -108,13 +108,6 @@ def _k_norm_rope_cache_kernel(
     )
     if IS_V41:
         rope = rope.to(tl.bfloat16).to(tl.float32)
-        grouped = tl.where(groups[:, None] == 7, rope, grouped)
-        blocks = tl.reshape(grouped, (16, 32))
-        fp8_scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(blocks), axis=1), 1e-4) / 448)))
-        grouped = tl.reshape(
-            (blocks / fp8_scale[:, None]).to(tl.float8e4nv).to(tl.float32) * fp8_scale[:, None], (8, 64)
-        )
-        rope = grouped
     scale = tl.maximum(tl.max(tl.abs(grouped), axis=1), 1e-4) / 448
     bits = scale.to(tl.uint32, bitcast=True)
     exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).to(tl.uint32)
@@ -143,7 +136,7 @@ def _k_norm_rope_cache_kernel(
 
 
 @triton.jit
-def _indexer_rope_hadamard_quant_kernel(
+def _indexer_rope_quant_kernel(
     q_input,
     weight,
     freqs_cis,
@@ -153,6 +146,7 @@ def _indexer_rope_hadamard_quant_kernel(
     num_rows,
     NUM_HEADS: tl.constexpr,
     WEIGHT_SCALE: tl.constexpr,
+    APPLY_HADAMARD: tl.constexpr,
     BLOCK_R: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
@@ -171,9 +165,12 @@ def _indexer_rope_hadamard_quant_kernel(
     x = tl.reshape(tl.join(real * cos - imag * sin, real * sin + imag * cos), (BLOCK_R, 128))
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
-    for stage in tl.static_range(7):
-        x = _butterfly_stage(x, 64 >> stage, 1 << stage, BLOCK_R, 128)
-    x = x * 0.08838834764831845
+    if APPLY_HADAMARD:
+        for stage in tl.static_range(7):
+            x = _butterfly_stage(x, 64 >> stage, 1 << stage, BLOCK_R, 128)
+        x = x * 0.08838834764831845
+    else:
+        x = x.to(tl.bfloat16).to(tl.float32)
     scale = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-4) / 448
     tl.store(
         q_fp8 + row[:, None] * 128 + dim[None, :], tl.clamp(x / scale[:, None], -448, 448), mask=row[:, None] < num_rows
@@ -219,7 +216,7 @@ def fused_k_norm_rope_flashmla(
 
     Each uint8 page stores 576 data bytes per slot followed by 8 scale bytes per
     slot. NoPE uses FP8 with UE8M0 scales; the last 64 dimensions use BF16 RoPE.
-    V4.1 first applies group-32 FP8 quantization to the entire post-RoPE KV.
+    V4.1 rounds RMSNorm and RoPE to BF16 before the cache quantization.
     """
     if kv.shape[0]:
         if is_v41:
@@ -252,7 +249,7 @@ def fused_k_norm_rope_flashmla(
 
 
 @torch.no_grad()
-def fused_q_indexer_rope_hadamard_quant(
+def fused_q_indexer_rope_quant(
     q_input,
     weight,
     weight_scale,
@@ -260,8 +257,9 @@ def fused_q_indexer_rope_hadamard_quant(
     positions,
     q_fp8=None,
     weights_out=None,
+    apply_hadamard=True,
 ):
-    """RoPE/Hadamard-128 and FP8 quantization for contiguous BF16 indexer Q.
+    """RoPE, optional Hadamard-128 and FP8 quantization for contiguous BF16 indexer Q.
 
     q_input: [T, heads, 128], weight: [T, heads]. Return FP8 Q and FP32
     weights [T, heads, 1] folded with weight_scale and the quantization scale.
@@ -273,7 +271,7 @@ def fused_q_indexer_rope_hadamard_quant(
     rows = q_input.shape[0] * q_input.shape[1]
     if rows:
         block_r = 1 if rows <= 256 else min(32, triton.next_power_of_2(max(1, rows // 1024)))
-        _indexer_rope_hadamard_quant_kernel[(triton.cdiv(rows, block_r),)](
+        _indexer_rope_quant_kernel[(triton.cdiv(rows, block_r),)](
             q_input,
             weight,
             torch.view_as_real(freqs_cis).flatten(-2),
@@ -283,6 +281,7 @@ def fused_q_indexer_rope_hadamard_quant(
             rows,
             NUM_HEADS=q_input.shape[1],
             WEIGHT_SCALE=float(weight_scale),
+            APPLY_HADAMARD=apply_hadamard,
             BLOCK_R=block_r,
             num_warps=1,
             num_stages=1,

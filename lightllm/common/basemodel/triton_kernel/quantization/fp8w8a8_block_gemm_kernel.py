@@ -71,7 +71,8 @@ def _block_scaled_block_gemm(
         offs_ks = k * BLOCK_K // group_k
         a_s = tl.load(Ascale_ptrs + offs_ks * stride_Ascale_k)
         b_s = tl.load(Bscale_ptrs + offs_ks * stride_Bscale_k)
-        acc += tl.dot(a, b, max_num_imprecise_acc=0 if group_k == 32 else None) * a_s[:, None] * b_s[None, :]
+        # Hopper needs at least 32 for native FP8 WGMMA; zero promotes operands to FP16.
+        acc += tl.dot(a, b, max_num_imprecise_acc=32 if group_k == 32 else None) * a_s[:, None] * b_s[None, :]
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 

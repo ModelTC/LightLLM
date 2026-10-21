@@ -382,12 +382,13 @@ MXFP4 专家通过现有量化选择器使用 vLLM Marlin W4A16，并补齐 TP �
 对于转换后的 FP8 block-128 checkpoint，dense 投影和专家复用已有 DeepGEMM FP8×FP8 路径，
 UE8M0 权重 scale 由现有加载器读取。
 主 attention 复用 V4 的 584-byte FP8/BF16 cache，SWA 复用请求管理器的 RMSNorm/RoPE/FP8 融合写入。
-压缩 KV 通过一个 kernel 完成 RoPE 和真实 FP4 打包（per-16 E4M3 scale），写入时由同一 scatter kernel
-转换为 Hopper FlashMLA 所需的 FP8/BF16 格式，不再生成独立的 BF16 假量化张量。
-indexer Q/K 使用真实 packed MXFP4（per-32 UE8M0 scale），K 每条存储 64-byte 数据和 4-byte scale；
-Hopper scorer 在寄存器中解包后执行 BF16 点积，不进行额外的 FP8 K 量化。
-主 KV 的 cache 兼容路径仍有额外的量化误差；MXFP4 checkpoint 的 Marlin 专家使用 BF16 激活，
-与原生 FP8 路径不同。目前不能据此声称与原生 FP4 cache 等精度或等性能。
+压缩 KV 在同一个 kernel 内完成 RoPE、FP8 量化和 scatter，直接写入 FlashMLA cache。
+SWA 同样直接量化到最终缓存格式，不再先做一次 group-32 FP8 舍入再还原浮点。
+indexer 复用 V4 的 FP8 Q 量化和 K 写入；V4.1 跳过 Hadamard，K 每条使用 128-byte FP8 数据
+和一个 FP32 scale，scorer 直接执行 FP8×FP8 点积。Hopper 的 query tile 至少包含 64 个 head 槽位，
+满足 FP8 warpgroup MMA 的形状要求；超出实际 head 数的槽位不参与结果。
+attention/indexer 路径不再打包或解包 FP4。原始 MXFP4 checkpoint 的专家仍通过 Marlin 使用 BF16 激活；
+转换后的 FP8 checkpoint 则按量化配置选择 FP8 专家实现。
 
 依赖现有 FlashMLA，以及提供 MXFP4 ``fused_marlin_moe``、``clamp_limit`` 和
 ``get_accelerator_view_from_cpu_tensor`` 的 vLLM。
@@ -441,14 +442,14 @@ API 自动选择 V4.1 DSML parser；数值 ``reasoning_effort`` 范围为 1–10
     python -m pytest unit_tests/models/deepseek_v41/test_v41_model.py \
         unit_tests/server/test_deepseek_v41.py
 
-GPU 用例覆盖 FP4 打包/舍入、跨 chunk C2、分页 causal/candidate indexer、KV source 共享、
+GPU 用例覆盖直接 FP8 RoPE/cache 写入、跨 chunk C2、分页 causal/candidate indexer、KV source 共享、
 MXFP4 专家补齐、Engram UVA/跨页哈希、DP 共享表和 shifted mHC；
 小型 FP4/FP8 量化模型通过真实权重加载器，比较整段/分块 prefill、decode 以及 CUDA Graph replay 的 logits。
 此前兼容路径使用完整 V4.1 Flash 权重在 4×H200、TP4、关闭 CUDA Graph 的配置下通过文本 smoke：
 短算术、翻译、中文问答，以及 1220-token 输入的分块 prefill；四个请求均正常结束。
 这些测试不替代精度评测或性能基准。
 
-2026-10-21，转换后的 FP8 block-128/UE8M0 完整模型在双机 16×H100、DP16/EP16 上
+2026-10-21，切换直接 FP8 attention 之前，转换后的 FP8 block-128/UE8M0 完整模型在双机 16×H100、DP16/EP16 上
 通过 16 个 rank 的 decode CUDA Graph 捕获和两个节点的真实生成验证。
 GSM8K 全量 test 1319 题、训练集 8-shot、raw completion、greedy、并发 256，
 GPU prompt cache 开启，两个节点均分请求：1206/1319（91.43%），耗时 206.6 秒，
@@ -456,6 +457,13 @@ GPU prompt cache 开启，两个节点均分请求：1206/1319（91.43%），耗
 
 开启 decoder bounded replay、移除固定 ``max_total_token_num`` 后，同配置热缓存回归
 为 1218/1319（92.34%），耗时 61.8 秒，无请求错误、答案解析失败或截断。
-本次自动容量估算按实际历史缓存布局 1656 bytes/token 计算，每个 DP rank 最终分配
+该次自动容量估算按旧历史缓存布局 1656 bytes/token 计算，每个 DP rank 最终分配
 12,318,976 个 token slots（约 19 GiB）；SWA 和压缩器状态在估算前已分配。
 该容量估算使用剩余显存和 ``mem_fraction`` 预算，不包含完整 forward 峰值测量。
+直接 FP8 indexer 使用的历史缓存布局为 1800 bytes/token，自动容量估算随实际布局更新；
+旧布局的缓存容量和 GSM8K 分数不代表切换后的结果。
+
+切换为直接 FP8 attention/indexer 后，双机 H100 DP16/EP16 的实际缓存容量为每个 DP rank
+11,333,376 个 token slots（约 19 GiB）。同样的 GSM8K 配置，冷前缀运行
+1199/1319（90.90%）、52.5 秒，热前缀运行 1197/1319（90.75%）、49.7 秒，
+均无请求错误、答案解析失败或截断。新结果低于之前一次 92.34% 的结果，尚未证明精度等价。

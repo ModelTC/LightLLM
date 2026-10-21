@@ -87,7 +87,7 @@ def test_indexer_rope_hadamard_quant_and_preallocated_outputs(batch, heads):
         q[0, 0].zero_()
     output = torch.empty_like(q, dtype=torch.float8_e4m3fn)
     out_weights = torch.empty(batch, heads, 1, device="cuda")
-    got, got_weights = norm_rope.fused_q_indexer_rope_hadamard_quant(q, weights, 0.01, freqs, pos, output, out_weights)
+    got, got_weights = norm_rope.fused_q_indexer_rope_quant(q, weights, 0.01, freqs, pos, output, out_weights)
     assert got is output and got_weights is out_weights
     rotated = q.float()
     rotated[..., -64:] = rope_reference(q, freqs, pos)

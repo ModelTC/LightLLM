@@ -24,7 +24,6 @@ class DeepseekV4CacheConfig:
     indexer_layer_ids: tuple[int, ...] | None = None
     short_compress_ratio: int = 4
     long_compress_ratio: int = 128
-    indexer_bits: int = 8
 
     # FlashMLA packing constraints; request capacities and indexes remain token-based.
     swa_token_alignment = 128
@@ -75,8 +74,7 @@ class DeepseekV4CacheConfig:
             * self.scale_alignment_bytes
         )
         self.kv_bytes = self.kv_data_bytes + self.kv_scale_bytes
-        # V4: 128 FP8 values + one FP32 scale; V4.1: 128 FP4 values + four UE8M0 scales.
-        self.indexer_bytes = self.indexer_head_dim * self.indexer_bits // 8 + torch.float32.itemsize
+        self.indexer_bytes = self.indexer_head_dim + torch.float32.itemsize
         self.swa_storage_width = self.packed_kv_bytes(self.swa_token_alignment) // self.swa_token_alignment
         # A token buffer must also admit a packed view with data-row-aligned strides.
         width_alignment = self.kv_data_bytes // math.gcd(self.kv_data_bytes, self.history_token_alignment)
@@ -125,7 +123,6 @@ class DeepseekV4CacheConfig:
                 indexer_layer_ids=tuple(config["kv_source_layer_ids"]),
                 short_compress_ratio=2,
                 long_compress_ratio=1,
-                indexer_bits=4,
             )
         return cls(
             get_deepseek_v4_compress_rates(config, layer_num),

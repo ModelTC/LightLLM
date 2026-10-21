@@ -1,5 +1,7 @@
+import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from pydantic import ValidationError
@@ -99,3 +101,38 @@ def test_parallel_calls_and_surrounding_text(chunk_size):
     assert content == "before  after"
     assert [call["name"] for call in calls.values()] == ["lookup", "lookup"]
     assert [json.loads(call["arguments"]) for call in calls.values()] == [{"id": 1}, {"id": 2}]
+
+
+def test_non_stream_chat_returns_v41_tool_calls(monkeypatch):
+    from lightllm.server import api_http, api_openai
+    from lightllm.server.core.objs import FinishStatus
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    text = (
+        '<｜DSML｜ calls><｜DSML｜ invoke name="lookup">'
+        '<｜DSML｜ parameter name="city" string="true">北京</｜DSML｜ parameter>'
+        "</｜DSML｜ invoke></｜DSML｜ calls>"
+    )
+
+    async def generate(*args, **kwargs):
+        yield 0, text, {"id": 1, "prompt_tokens": 1}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+    args = StartArgs(reasoning_parser=None, tool_call_parser="deepseekv41")
+    manager = SimpleNamespace(tokenizer=None, output_grammar_compiler=None, generate=generate)
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="prompt"))
+    monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(args=args, httpserver_manager=manager))
+    request = ChatCompletionRequest(
+        model="v41",
+        messages=[],
+        tools=[Tool.model_validate({"type": "function", "function": {"name": "lookup", "parameters": {}}})],
+        tool_choice="auto",
+    )
+    response = asyncio.run(api_openai.chat_completions_impl(request, None))
+    choice = response.choices[0]
+    assert choice.finish_reason == "tool_calls"
+    assert choice.message.content == ""
+    assert len(choice.message.tool_calls) == 1
+    call = choice.message.tool_calls[0]
+    assert call.function.name == "lookup"
+    assert json.loads(call.function.arguments) == {"city": "北京"}

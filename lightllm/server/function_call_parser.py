@@ -41,6 +41,7 @@ TOOLS_TAG_LIST = [
     "<｜tool▁calls▁begin｜>",
     "<｜DSML｜function_calls>",
     "<｜DSML｜tool_calls>",
+    "<｜DSML｜ calls>",
 ]
 
 

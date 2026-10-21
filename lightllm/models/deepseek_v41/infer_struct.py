@@ -9,7 +9,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
         self.v41_sparse_selection = None
-        self.v41_candidates = None
+        self.candidate_blocks = None
         self.v41_index_capacity = self._dsv4_index_max_kv_seq_len(model)
         self.engram_hashes = model.engram_hasher(self) if model.engram_hasher is not None else None
         self.decoder_state = None
@@ -54,7 +54,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             torch.arange(window, device=rows.device)[None, :] >= state.dsv4_swa_lengths[:, None], -1
         )
         state.v41_sparse_selection = {name: value[rows] for name, value in self.v41_sparse_selection.items()}
-        state.v41_candidates = self.v41_candidates[rows]
+        state.candidate_blocks = self.candidate_blocks[rows]
         if self.engram_hashes is not None:
             state.engram_hashes = self.engram_hashes[rows]
         state._dsv4_prefill_pad_q_len = min(self._dsv4_prefill_pad_q_len, window)
