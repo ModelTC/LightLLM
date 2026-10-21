@@ -20,7 +20,7 @@ from lightllm.server.httpserver.stop_seq_match import (
 )
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.router.model_infer import infer_batch
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 
 
 class _ReasoningTokenizer:

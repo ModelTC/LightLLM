@@ -80,7 +80,15 @@ Basic Configuration Parameters
 
 .. option:: --httpserver_workers
 
-    HTTP server worker process count, default is ``1``
+    HTTP server worker process count, default is ``1``.
+    With ``--run_mode pd_master``, a value greater than ``1`` starts independent PD master workers
+    behind one HAProxy HTTP/SSE entry point. The launcher assigns all internal worker ports before
+    starting the workers and starts a shared request ID service.
+    P/D nodes point ``--pd_master_ip`` and ``--pd_master_port`` at the public entry point,
+    read the worker ports through ``/get_server_info``, and use each port as its node ID when connecting.
+    The multiprocess master itself does not accept external config server parameters.
+    This mode requires HAProxy.
+    See :ref:`tutorial/pd_master_multiprocess_en`.
 
 .. option:: --disable_delay_response_start
 
@@ -110,13 +118,17 @@ PD disaggregation Mode Parameters
 
     PD master node IP address, default is ``0.0.0.0``
     
-    This parameter needs to be set when run_mode is set to prefill or decode
+    In prefill or decode mode without config server settings, query ``/get_server_info`` at this
+    address and read ``pd_master_multi_ports``. Multiprocess mode uses each port as the corresponding
+    worker's ``pd_node_id``.
 
 .. option:: --pd_master_port
 
     PD master node port, default is ``1212``
     
-    This parameter needs to be set when run_mode is set to prefill or decode
+    In prefill or decode mode without config server settings, use this master port. Single-worker
+    mode connects using the returned ``pd_node_id``; multiprocess mode connects directly to every
+    returned worker port.
 
 .. option:: --pd_master_mode
 
