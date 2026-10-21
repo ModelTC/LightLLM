@@ -47,7 +47,6 @@ def _init_env(
     task_out_queue: mp.Queue,
     up_status_in_queue: Optional[mp.SimpleQueue],
 ):
-    module_ready = False
     install_fatal_thread_excepthook()
     start_parent_check_thread()
     import lightllm.utils.rpyc_fix_utils as _
@@ -102,14 +101,12 @@ def _init_env(
         )
         assert manager is not None
         task_out_queue.put("module_ready")
-        module_ready = True
 
         while True:
             time.sleep(100)
 
     except Exception as e:
-        if not module_ready:
-            task_out_queue.put("init_failed")
+        task_out_queue.put("init_failed")
         logger.exception(str(e))
         logger.error(f"Fatal error happened in kv trans process: {e}")
         pass
