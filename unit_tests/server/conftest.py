@@ -1,4 +1,20 @@
+import json
+
 import pytest
+
+
+@pytest.fixture
+def single_http_worker_start_args(monkeypatch):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    monkeypatch.setenv(
+        "LIGHTLLM_START_ARGS",
+        json.dumps(vars(StartArgs(httpserver_workers=1))),
+    )
+    get_env_start_args.cache_clear()
+    yield
+    get_env_start_args.cache_clear()
 
 
 @pytest.fixture

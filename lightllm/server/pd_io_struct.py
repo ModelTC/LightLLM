@@ -4,7 +4,7 @@ import time
 import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
 from lightllm.utils.log_utils import init_logger

@@ -6,6 +6,28 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def get_abstract_unix_socket_address(service_name: str, ipc_name: str) -> bytes:
+    """Build a Linux IPC address that the kernel releases when its sockets close."""
+    return f"\0lightllm_{ipc_name}_{service_name}".encode()
+
+
+def get_pd_master_unix_socket_address(service_name: str) -> bytes:
+    """Build a shared PD master IPC address from the service name."""
+    from lightllm.utils.envs_utils import get_unique_server_name
+
+    unique_server_name = get_unique_server_name()
+    if unique_server_name is None:
+        raise RuntimeError("Unique server name is not initialized")
+    return get_abstract_unix_socket_address(service_name, unique_server_name)
+
+
+def format_host_port(host: str, port: int) -> str:
+    """Format an HTTP/WebSocket authority, including bracketed IPv6 hosts."""
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"{host}:{port}"
+
+
 def get_hostname_ip():
     try:
         result = subprocess.run(["hostname", "-i"], capture_output=True, text=True, check=True)

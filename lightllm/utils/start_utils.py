@@ -143,7 +143,7 @@ class SubmoduleManager:
                 raise OSError(error, f"Failed to enable child subreaper: {os.strerror(error)}")
         start_launcher_shm_cleanup_process(get_unique_server_name())
 
-    def setup_signal_handlers(self, http_server_process=None):
+    def setup_signal_handlers(self, http_server_process=None, graceful_shutdown_signal=signal.SIGTERM):
         """在子进程启动完成后安装退出信号处理函数，覆盖启动阶段的处理函数。"""
 
         def signal_handler(sig, _frame):
@@ -164,7 +164,7 @@ class SubmoduleManager:
 
             try:
                 if http_server_process is not None and http_server_process.poll() is None:
-                    http_server_process.send_signal(signal.SIGTERM)
+                    http_server_process.send_signal(graceful_shutdown_signal)
                     try:
                         http_server_process.wait(timeout=60)
                         logger.info("HTTP server exited gracefully")

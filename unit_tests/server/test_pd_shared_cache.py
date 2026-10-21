@@ -13,6 +13,16 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import LoadBalancedCacheAwareSelector
 from lightllm.server.pd_io_struct import PD_Client_Obj
 
+pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
+
+
+def _prefix_match(tree, prompt):
+    return tree.prefix_match_sampled(prompt[:: tree.sample_stride], len(prompt), tree.sample_stride)
+
+
+async def _estimated(selector, worker, prompt):
+    return (await selector.policy.select_worker([worker], prompt))[1]
+
 
 def _selector(master=1, workers=2, high_priority=False, model="/models/test"):
     args = StartArgs(
@@ -83,12 +93,12 @@ def test_four_masters_share_success_hints_in_one_order_and_choose_same_p():
     # including each publisher's own echoed event.
     for index, target in ((0, 1), (1, 0)):
         selector = selectors[index]
-        selector.insert_prompt_cache(prompt, selector.prefill_nodes[target])
-        assert selector.policy.prompt_cache_tree.prefix_match(prompt).prefill_node is None
+        asyncio.run(selector.insert_prompt_cache(prompt, selector.prefill_nodes[target]))
+        assert _prefix_match(selector.shared_cache.tree, prompt).prefill_node is None
         relay.publish(peers[index], states[index].outgoing.get_nowait())
     for peer, state, selector in zip(peers, states, selectors):
         _drain(peer, state)
-        p, _, extra = selector.select_p_d_node(prompt, None, None)
+        p, _, extra = asyncio.run(selector.select_p_d_node(prompt, None, None))
         assert p is selector.prefill_nodes[0]
         assert extra.estimated_cache_hit_rate > 0.5
         assert state.cursor == 2
@@ -110,7 +120,7 @@ def test_global_load_keeps_own_latest_counters_without_double_counting(other_mas
     loads = a.shared_cache.cluster_loads(a.prefill_nodes)
     assert loads[a.prefill_nodes[0].connection_key] == [10, 100000]
     assert loads[a.prefill_nodes[1].connection_key] == [1, 123]
-    assert a.select_p_d_node("uncached prompt", None, None)[0] is a.prefill_nodes[1]
+    assert asyncio.run(a.select_p_d_node("uncached prompt", None, None))[0] is a.prefill_nodes[1]
     assert a.prefill_nodes[0].dispatched_req_num == 0
     assert a.prefill_nodes[0].dispatched_prompt_chars == 0
 
@@ -137,7 +147,7 @@ def test_unknown_remote_load_falls_back_to_worker_reported_load(problem):
     with patch.object(
         selector, "_importance_sampling", side_effect=[selector.prefill_nodes[1], selector.decode_nodes[0]]
     ):
-        assert selector.select_p_d_node("hello world", None, None)[0] is selector.prefill_nodes[1]
+        assert asyncio.run(selector.select_p_d_node("hello world", None, None))[0] is selector.prefill_nodes[1]
 
 
 def test_metadata_disconnect_retains_load_until_master_registration_is_gone():
@@ -192,10 +202,10 @@ def test_worker_restart_at_same_address_invalidates_hint_but_connection_change_d
     state.apply(event)
     worker = selector.prefill_nodes[0]
     worker.connection_id = "new-master-connection"
-    assert selector.policy.get_estimated_cache_info(worker, prompt).estimated_cache_hit_rate == 1
+    assert asyncio.run(_estimated(selector, worker, prompt)).estimated_cache_hit_rate == 1
     worker.node_id += 1000
-    assert selector.policy.get_estimated_cache_info(worker, prompt).estimated_cache_hit_rate == 0
-    assert selector.policy._get_cache_worker(selector.prefill_nodes, prompt) is None
+    assert asyncio.run(_estimated(selector, worker, prompt)).estimated_cache_hit_rate == 0
+    assert (asyncio.run(selector.policy._get_cache_worker(selector.prefill_nodes, prompt)))[0] is None
 
 
 def test_dp_ranks_are_distinct_cache_targets():
@@ -207,9 +217,9 @@ def test_dp_ranks_are_distinct_cache_targets():
     peer = _connect(relay, state)
     relay.publish(peer, _hint(key="xxx", worker=worker.connection_key))
     _drain(peer, state)
-    assert selector.policy.get_estimated_cache_info(worker, "x" * 1025).estimated_cache_hit_rate == 1
+    assert asyncio.run(_estimated(selector, worker, "x" * 1025)).estimated_cache_hit_rate == 1
     worker.dp_index = 4
-    assert selector.policy.get_estimated_cache_info(worker, "x" * 1025).estimated_cache_hit_rate == 0
+    assert asyncio.run(_estimated(selector, worker, "x" * 1025)).estimated_cache_hit_rate == 0
 
 
 def test_reconnect_replays_missing_events_without_refreshing_old_hint_age():
@@ -224,10 +234,10 @@ def test_reconnect_replays_missing_events_without_refreshing_old_hint_age():
     relay.publish(publisher, _hint(key="yyy", seq=2))
     _connect(relay, state)
     assert state.cursor == 2
-    result = selector.policy.prompt_cache_tree.prefix_match("x" * 1025)
+    result = _prefix_match(selector.shared_cache.tree, "x" * 1025)
     assert result.prefill_node is not None
     assert time.monotonic() - result.last_insert_time >= 120
-    assert selector.policy.prompt_cache_tree.prefix_match("y" * 1025).prefill_node is not None
+    assert _prefix_match(selector.shared_cache.tree, "y" * 1025).prefill_node is not None
 
 
 def test_duplicate_hint_does_not_change_order_owner_age_or_lru():
@@ -238,14 +248,14 @@ def test_duplicate_hint_does_not_change_order_owner_age_or_lru():
     hint = _hint(key="xxx")
     relay.publish(peer, hint)
     _drain(peer, state)
-    tree = selector.policy.prompt_cache_tree
+    tree = selector.shared_cache.tree
     mark = tree._time_mark
-    before = tree.prefix_match("x" * 1025)
+    before = _prefix_match(tree, "x" * 1025)
     relay.publish(peer, hint)
     assert peer.queue.empty()
     state.apply(json.loads(relay.history[0][2]))
     assert tree._time_mark == mark
-    assert tree.prefix_match("x" * 1025) == before
+    assert _prefix_match(tree, "x" * 1025) == before
 
 
 @pytest.mark.parametrize("restart", [False, True])
@@ -257,7 +267,7 @@ def test_unrecoverable_gap_or_relay_restart_clears_old_tree_and_queued_hints(res
     relay.publish(peer, _hint(key="xxx"))
     _drain(peer, state)
     relay.unsubscribe(peer)
-    selector.insert_prompt_cache("unsent" * 200, selector.prefill_nodes[0])
+    asyncio.run(selector.insert_prompt_cache("unsent" * 200, selector.prefill_nodes[0]))
     assert not state.outgoing.empty()
     if restart:
         relay = CacheMetadataRelay(max_log_bytes=500)
@@ -267,8 +277,8 @@ def test_unrecoverable_gap_or_relay_restart_clears_old_tree_and_queued_hints(res
     _connect(relay, state)
     assert state.outgoing.empty()
     assert state.cursor == relay.sequence
-    assert selector.policy.prompt_cache_tree.prefix_match("x" * 1025).prefill_node is None
-    assert selector.policy.prompt_cache_tree.prefix_match("y" * 1025).prefill_node is not None
+    assert _prefix_match(selector.shared_cache.tree, "x" * 1025).prefill_node is None
+    assert _prefix_match(selector.shared_cache.tree, "y" * 1025).prefill_node is not None
 
 
 def test_future_timestamp_is_not_eligible_for_fresh_cache_priority():
@@ -276,7 +286,7 @@ def test_future_timestamp_is_not_eligible_for_fresh_cache_priority():
     state = selector.shared_cache
     _connect(CacheMetadataRelay(), state)
     state.apply({**_hint(key="xxx", observed_at=time.time() + 100), "seq": 1})
-    result = selector.policy.get_estimated_cache_info(selector.prefill_nodes[0], "x" * 1025)
+    result = asyncio.run(_estimated(selector, selector.prefill_nodes[0], "x" * 1025))
     assert result.estimated_cache_hit_rate == 1
     assert result.cache_last_insert_time is None
 
@@ -285,10 +295,12 @@ def test_single_p_with_priority_disabled_skips_tree_and_metadata_queue():
     selector = _selector(workers=1)
     assert not selector.shared_cache.enabled()
     selector.shared_cache.ready = True
-    selector.insert_prompt_cache("x" * 1025, selector.prefill_nodes[0])
+    asyncio.run(selector.insert_prompt_cache("x" * 1025, selector.prefill_nodes[0]))
     assert selector.shared_cache.outgoing.empty()
-    with patch.object(selector.policy.prompt_cache_tree, "prefix_match", side_effect=AssertionError("unneeded lookup")):
-        assert selector.select_p_d_node("x" * 1025, None, None)[0] is selector.prefill_nodes[0]
+    with patch.object(
+        selector.shared_cache.tree, "prefix_match_sampled", side_effect=AssertionError("unneeded lookup")
+    ):
+        assert asyncio.run(selector.select_p_d_node("x" * 1025, None, None))[0] is selector.prefill_nodes[0]
     assert _selector(workers=1, high_priority=True).shared_cache.enabled()
 
 
@@ -304,7 +316,7 @@ def test_bounded_queues_do_not_block_publishers_and_slow_subscriber_can_replay()
     assert slow.queue.qsize() == slow.queue.maxsize
     selector.shared_cache.ready = True
     for _ in range(300):
-        selector.insert_prompt_cache("xx", selector.prefill_nodes[0])
+        asyncio.run(selector.insert_prompt_cache("xx", selector.prefill_nodes[0]))
     assert state.outgoing.qsize() == 256
     assert state.dropped_hints == 44
     replacement, initial = relay.subscribe("slow", 2, relay.epoch, 0)
@@ -347,10 +359,10 @@ def test_real_websocket_clients_share_hints_and_cancel_cleanly():
                 clients.append(asyncio.create_task(selector.shared_cache.run()))
             await wait_for(lambda: all(selector.shared_cache.ready for selector in selectors))
             prompt = "shared over actual websocket " * 100
-            a.insert_prompt_cache(prompt, a.prefill_nodes[1])
+            (await a.insert_prompt_cache(prompt, a.prefill_nodes[1]))
             await wait_for(lambda: all(selector.shared_cache.cursor == 1 for selector in selectors))
             await wait_for(lambda: b.shared_cache.cluster_loads(b.prefill_nodes) is not None)
-            assert b.select_p_d_node(prompt, None, None)[0] is b.prefill_nodes[1]
+            assert (await b.select_p_d_node(prompt, None, None))[0] is b.prefill_nodes[1]
             assert a.shared_cache.cursor == b.shared_cache.cursor == 1
             # Disconnect only B's metadata socket; A keeps publishing and B catches up.
             relay = relays[a.shared_cache.namespace]
@@ -358,11 +370,11 @@ def test_real_websocket_clients_share_hints_and_cancel_cleanly():
             old_peer.overflow.set()
             await wait_for(lambda: not b.shared_cache.ready)
             second_prompt = "new prefix after disconnect " * 100
-            a.insert_prompt_cache(second_prompt, a.prefill_nodes[0])
+            (await a.insert_prompt_cache(second_prompt, a.prefill_nodes[0]))
             await wait_for(lambda: a.shared_cache.cursor == 2)
             await wait_for(lambda: b.shared_cache.ready and b.shared_cache.cursor == 2)
             assert relay.subscribers[b.shared_cache.owner] is not old_peer
-            assert b.select_p_d_node(second_prompt, None, None)[0] is b.prefill_nodes[0]
+            assert (await b.select_p_d_node(second_prompt, None, None))[0] is b.prefill_nodes[0]
             # Control characters expand during JSON encoding; dropping the hint
             # must not repeatedly disconnect the metadata stream.
             a.shared_cache.outgoing.put_nowait(_hint(key="\0" * 16384, seq=99))

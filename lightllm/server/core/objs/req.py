@@ -8,7 +8,7 @@ from .sampling_params import SamplingParams
 from .out_token_circlequeue import CircularQueue
 from .shm_array import ShmArray
 from .token_chunck_hash_list import TokenHashList, CpuCachePageList, TokenPageLenList
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.config_utils import is_hybrid_att_model, get_model_type
 from lightllm.utils.kv_cache_utils import compute_token_list_hash

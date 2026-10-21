@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from threading import Lock, RLock
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 from sortedcontainers import SortedDict
 
@@ -41,7 +41,7 @@ class PromptCacheTree:
     """
     用于 cache-aware 选点的 prompt 前缀缓存树。
 
-    prompt 先按 sample_stride 抽稀成 key，再按单字符建树/匹配。
+    调用方先按 sample_stride 将 prompt 抽稀成 key，树再按单字符建树/匹配。
     整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
     """
 
@@ -72,26 +72,24 @@ class PromptCacheTree:
         self._lock = RLock()
         self._time_mark_lock = Lock()
 
-    def _to_key(self, text: str) -> str:
-        return text[:: self.sample_stride]
-
-    def _is_leaf(self, node: _PromptCacheNode) -> bool:
-        return node is not self.root and not node.children
-
-    def insert(self, text: str, prefill_node: str) -> None:
-        """将 text 的前缀路径写入树，并关联到 prefill_node。
+    def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+        """将抽稀后的 prompt key 写入树，并关联到 prefill_node。
 
         路径上的节点会更新 last_prefill_node 与 LRU 时间戳；写入后若超
         max_node_count 会立即按 LRU 驱逐一批叶节点。
 
         Args:
-            text: 原始 prompt 文本。
+            key: 已按 sample_stride 抽稀的 prompt key。
             prefill_node: 处理该 prompt 的 prefill 连接标识（connection_key），不可为 None。
+            sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
 
         Raises:
             ValueError: prefill_node 为 None 时抛出。
         """
-        self.insert_key(self._to_key(text), prefill_node, time.monotonic())
+        assert (
+            sample_stride == self.sample_stride
+        ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
+        self.insert_key(key, prefill_node, time.monotonic())
 
     def clear(self) -> None:
         """Discard historical hints when the relay can no longer replay a gap."""
@@ -103,84 +101,80 @@ class PromptCacheTree:
     def insert_key(
         self, key: str, prefill_node: str, last_insert_time: Optional[float], prefill_node_epoch: Optional[int] = None
     ) -> None:
-        """Insert an already sampled key, preserving the original observation age."""
+        """Insert a sampled relay hint without refreshing its age or worker incarnation."""
         if prefill_node is None:
             raise ValueError("prefill_node must not be None")
         with self._lock:
-            self._insert_at(self.root, key, 0, prefill_node, last_insert_time, prefill_node_epoch)
-            self._evict_if_needed()
-
-    def _insert_at(
-        self,
-        node: _PromptCacheNode,
-        key: str,
-        depth: int,
-        prefill_node: str,
-        last_insert_time: Optional[float],
-        prefill_node_epoch: Optional[int],
-    ) -> None:
-        path = []
-        try:
-            while True:
-                path.append(node)
-                if depth >= len(key):
-                    break
-
-                ch = key[depth]
+            # 使用循环沿 key 向下构建路径，避免 key 很长时递归层数超过 Python
+            # 调用栈上限。path 按访问顺序保存根节点和每个命中的子节点，后面
+            # 通过逆序遍历模拟原递归实现从终点逐层返回根节点的过程。
+            node = self.root
+            path = [self.root]
+            for ch in key:
                 child = node.children.get(ch)
                 if child is None:
                     child = _PromptCacheNode(
                         parent=node,
                         edge_char=ch,
+                        last_insert_time=last_insert_time,
                     )
                     child.last_time_mark = self._gen_time_mark()
                     node.children[ch] = child
                     self._node_count += 1
-
                 node = child
-                depth += 1
-        finally:
-            for path_node in reversed(path):
-                if path_node is not self.root:
-                    path_node.last_prefill_node = prefill_node
-                    path_node.last_insert_time = last_insert_time
-                    path_node.prefill_node_epoch = prefill_node_epoch
-                if path_node.last_time_mark in self._leaf_lru:
-                    self._leaf_lru.pop(path_node.last_time_mark, None)
-                path_node.last_time_mark = self._gen_time_mark()
-                if self._is_leaf(path_node):
-                    self._leaf_lru[path_node.last_time_mark] = path_node
+                path.append(node)
 
-    def _gen_time_mark(self) -> int:
-        with self._time_mark_lock:
-            time_mark = getattr(self, "_time_mark", -1) + 1
-            self._time_mark = time_mark
-            return time_mark
+            # 逆序遍历路径：终点叶节点先进入 LRU，祖先随后移除自己的旧叶节点
+            # 记录。该顺序与原递归 finally 块的回溯顺序一致，可以保证新增分支
+            # 后，已经变成非叶节点的父节点不会残留在 _leaf_lru 中。
+            for node in reversed(path):
+                if node is not self.root:
+                    node.last_prefill_node = prefill_node
+                    node.last_insert_time = last_insert_time
+                    node.prefill_node_epoch = prefill_node_epoch
+                if node.last_time_mark in self._leaf_lru:
+                    self._leaf_lru.pop(node.last_time_mark, None)
+                node.last_time_mark = self._gen_time_mark()
+                if self._is_leaf(node):
+                    self._leaf_lru[node.last_time_mark] = node
 
-    def _evict_if_needed(self) -> None:
-        if self._node_count <= self.max_node_count:
-            return
-        need = self._node_count - self.max_node_count + self.evict_node_batch
-        removed = 0
-        while removed < need and self._leaf_lru:
-            _, node = self._leaf_lru.peekitem(0)
-            self._remove_leaf_node(node)
-            removed += 1
+            # 驱逐前释放临时路径和最后一个 child 持有的节点引用，使随后从树中
+            # 删除的节点可以立即回收，不必等到 insert_sampled 返回后再释放。
+            path.clear()
+            child = None
+            self._evict_if_needed()
 
-    def prefix_match(self, text: str) -> PromptCacheMatchResult:
-        """
-        对 text 做前缀匹配。
+    def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+        """匹配已经按 sample_stride 抽稀的 prompt key。
+
+        Args:
+            key: 已按 sample_stride 抽稀的 prompt key。
+            input_char_count: 原始 prompt 的字符数。
+            sample_stride: 调用方生成 key 时使用的抽样步长，必须与树配置一致。
 
         返回说明：
           - matched_char_count：匹配到的原始 prompt 字符数；
-          - input_char_count：原始 prompt 字符数 len(text)；
+          - input_char_count：原始 prompt 字符数；
           - prefill_node 为 None：匹配停在 root（无任何 key 字符命中）；
-          - prefill_node 为非空 str：匹配停在非 root 节点，取该节点的 last_prefill_node。
+          - prefill_node 为非空 str：匹配停在非 root 节点，取该节点的 last_prefill_node；
           - last_insert_time：命中节点最近一次由 prompt 插入更新的单调时钟时间戳。
         """
-        key = self._to_key(text)
+        assert (
+            sample_stride == self.sample_stride
+        ), f"sample_stride mismatch: tree={self.sample_stride}, input={sample_stride}"
         with self._lock:
-            node, matched = self._match_at(self.root, key, 0)
+            # 逐字符沿树向下查找。循环中的 matched 表示已经连续匹配的采样
+            # 字符数；遇到第一个不存在的子节点后立即停止，当前 node 就是
+            # 最长匹配前缀的终点。整个过程不消耗 Python 递归调用栈。
+            node = self.root
+            matched = 0
+            for ch in key:
+                child = node.children.get(ch)
+                if child is None:
+                    break
+                node = child
+                matched += 1
+
             if node is self.root:
                 prefill_node = None
             else:
@@ -188,23 +182,14 @@ class PromptCacheTree:
             if matched <= 0:
                 matched_char_count = 0
             else:
-                matched_char_count = min((matched - 1) * self.sample_stride + 1, len(text))
+                matched_char_count = min((matched - 1) * sample_stride + 1, input_char_count)
             return PromptCacheMatchResult(
                 prefill_node=prefill_node,
                 matched_char_count=matched_char_count,
-                input_char_count=len(text),
+                input_char_count=input_char_count,
                 last_insert_time=node.last_insert_time if node is not self.root else None,
                 prefill_node_epoch=node.prefill_node_epoch if node is not self.root else None,
             )
-
-    def _match_at(self, node: _PromptCacheNode, key: str, depth: int) -> Tuple[_PromptCacheNode, int]:
-        while depth < len(key):
-            child = node.children.get(key[depth])
-            if child is None:
-                break
-            node = child
-            depth += 1
-        return node, depth
 
     def evict_lru_nodes(self) -> int:
         """节点数超上限时，按 LRU 从叶节点批量删除。
@@ -225,6 +210,25 @@ class PromptCacheTree:
                 self._remove_leaf_node(node)
                 removed += 1
             return removed
+
+    def _is_leaf(self, node: _PromptCacheNode) -> bool:
+        return node is not self.root and not node.children
+
+    def _gen_time_mark(self) -> int:
+        with self._time_mark_lock:
+            time_mark = getattr(self, "_time_mark", -1) + 1
+            self._time_mark = time_mark
+            return time_mark
+
+    def _evict_if_needed(self) -> None:
+        if self._node_count <= self.max_node_count:
+            return
+        need = self._node_count - self.max_node_count + self.evict_node_batch
+        removed = 0
+        while removed < need and self._leaf_lru:
+            _, node = self._leaf_lru.peekitem(0)
+            self._remove_leaf_node(node)
+            removed += 1
 
     def _remove_leaf_node(self, node: _PromptCacheNode) -> None:
         assert self._is_leaf(node)

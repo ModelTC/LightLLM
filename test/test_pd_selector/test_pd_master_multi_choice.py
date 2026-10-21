@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from contextlib import aclosing
+from contextlib import aclosing, nullcontext
 from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
@@ -11,6 +11,7 @@ from lightllm.server.core.objs import FinishStatus, SamplingParams
 from lightllm.server.httpserver.manager import HttpServerManager
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
+from lightllm.server.httpserver_for_pd_master.pd_selector.pd_node_stats_client import LocalPDNodeStats
 from lightllm.utils.error_utils import ClientDisconnected, ServerBusyError
 
 
@@ -19,6 +20,9 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.active_req_ids = set()
     manager.req_id_to_out_inf = {}
     manager.pd_manager = MagicMock()
+    manager.pd_node_stats = LocalPDNodeStats()
+    manager.pd_manager.selector.selection_lock = nullcontext()
+    manager.pd_manager.selector.insert_prompt_cache = AsyncMock()
     manager.id_gen = MagicMock()
     manager.id_gen.generate_id.return_value = 800
     manager.metric_client = MagicMock()

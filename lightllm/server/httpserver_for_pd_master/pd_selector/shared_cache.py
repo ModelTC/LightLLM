@@ -21,6 +21,9 @@ class SharedCacheState:
 
     def __init__(self, selector, args):
         self.selector = selector
+        # Config-server replication uses the worker-local tree. Multiprocess
+        # masters instead use the PR's shared RPyC tree and cannot enter this path.
+        self.tree = selector.policy.prompt_cache_tree.prompt_cache_tree
         self.owner = uuid.uuid4().hex  # HTTP-worker incarnation, not just the master address.
         self.master_id = args.pd_node_id
         self.namespace = hashlib.sha256(
@@ -64,7 +67,7 @@ class SharedCacheState:
         kind = message["kind"]
         if kind in ("reset", "resume"):
             if kind == "reset":
-                self.selector.policy.prompt_cache_tree.clear()
+                self.tree.clear()
                 # Unsent hints predate the reset and could overwrite newer retained history.
                 while not self.outgoing.empty():
                     self.outgoing.get_nowait()
@@ -81,9 +84,7 @@ class SharedCacheState:
             # Cross-host monotonic clocks cannot be compared. A future wall-clock
             # observation is retained for affinity, but is ineligible for freshness priority.
             inserted_at = time.monotonic() - age if age >= 0 else None
-            self.selector.policy.prompt_cache_tree.insert_key(
-                message["key"], message["worker"], inserted_at, message["node_id"]
-            )
+            self.tree.insert_key(message["key"], message["worker"], inserted_at, message["node_id"])
             self.cursor = message["seq"]
         elif kind == "loads":
             self.remote_loads = message["owners"]

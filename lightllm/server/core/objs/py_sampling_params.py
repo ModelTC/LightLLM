@@ -5,7 +5,7 @@
 import os
 from typing import List, Optional, Union, Tuple
 from lightllm.utils.config_utils import get_generation_config_diff_dict
-from lightllm.server.req_id_generator import MAX_BEST_OF
+from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
 from lightllm.utils.grammar_utils import validate_grammar
 from .sampling_params import MAX_SEED, StopStrMatchMode
 

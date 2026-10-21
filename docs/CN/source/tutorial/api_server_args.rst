@@ -77,6 +77,12 @@ APIServer 参数详解
 .. option:: --httpserver_workers
 
     HTTP 服务器工作进程数，默认为 ``1``
+    在 ``pd_master`` 模式下，大于 1 时启用 :doc:`pd_master_multiprocess`，
+    使用 HAProxy 统一入口和多个独立请求 worker。launcher 在启动 worker 前统一分配全部内网端口，
+    并启动共享的请求 ID 服务。P/D 将
+    ``--pd_master_ip`` 和 ``--pd_master_port`` 指向公开入口，通过 ``/get_server_info``
+    获取 worker 端口列表，以端口作为节点 ID 并直接连接。
+    多 worker master 本身不支持外部 config server 参数。
 
 .. option:: --disable_delay_response_start
 
@@ -104,13 +110,16 @@ PD 分离模式参数
 
     PD 主节点 IP 地址，默认为 ``0.0.0.0``
     
-    当 run_mode 设置为 prefill 或 decode 时需要设置此参数
+    当 run_mode 设置为 prefill 或 decode 且未配置 config server 时，查询该地址的
+    ``/get_server_info`` 并读取 ``pd_master_multi_ports``。多 worker 模式直接以每个端口
+    作为对应 worker 的 ``pd_node_id``。
 
 .. option:: --pd_master_port
 
     PD 主节点端口，默认为 ``1212``
     
-    当 run_mode 设置为 prefill 或 decode 时需要设置此参数
+    当 run_mode 设置为 prefill 或 decode 且未配置 config server 时，使用该 master 端口。
+    单 worker 使用返回的 ``pd_node_id`` 直连；多 worker 根据返回的端口列表直连每个 worker。
 
 .. option:: --pd_master_mode
 
