@@ -175,10 +175,11 @@ class ModelMtpOutputCollector:
 
 @dataclass
 class PostLayerOutput:
-    """输出层 logits，以及可选的候选列到 token ID 的映射。"""
+    """输出层 logits、可选的候选 token ID 映射和供 collector 收集的最终 hidden。"""
 
     logits: torch.Tensor
     logits_token_ids: Optional[torch.Tensor] = None
+    final_hidden: Optional[torch.Tensor] = None
 
 
 @dataclass

@@ -8,6 +8,7 @@ from typing import Tuple, Any, Optional, List
 from .triton_kernel.gen_prefill_params import gen_prefill_params
 from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
+from lightllm.common.mtp_config import FinalHiddenPolicy
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
@@ -69,6 +70,7 @@ class InferStateInfo:
         # 当前 forward 独占的 hidden state 收集器。普通推理使用短生命周期实例；
         # Prefill CUDA Graph 使用随 graph infer state 长期保存的实例。
         self.hidden_collector = None
+        self.final_hidden_policy = FinalHiddenPolicy.NONE
 
         # 衍生使用的管理变量，为了方便扩展接入其他的高性能attention推理算子，在
         # inferstate 基类上添加下面的标记变量，用于扩展。
