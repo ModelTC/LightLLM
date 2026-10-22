@@ -219,9 +219,10 @@ def test_prefill_abort_only_fails_tasks_not_submitted_to_transporter():
     }
 
 
+@pytest.mark.parametrize("debug", [False, True])
 @pytest.mark.parametrize("telemetry", [False, True])
 @pytest.mark.parametrize("notify_fails", [False, True])
-def test_completed_transfer_reaches_recycling_queue_with_compact_logging(monkeypatch, telemetry, notify_fails):
+def test_completed_transfer_reaches_recycling_queue_with_compact_logging(monkeypatch, telemetry, notify_fails, debug):
     task = SimpleNamespace(
         xfer_handle=object(),
         request_id=123,
@@ -242,7 +243,7 @@ def test_completed_transfer_reaches_recycling_queue_with_compact_logging(monkeyp
         postDuration=2,
     )
     logger = MagicMock()
-    logger.isEnabledFor.return_value = True
+    logger.isEnabledFor.return_value = debug
     monkeypatch.setattr(prefill_trans_process, "logger", logger)
     if notify_fails:
         module.transporter.send_write_done_task_to_decode_node.side_effect = ConnectionError("peer gone")
@@ -255,11 +256,12 @@ def test_completed_transfer_reaches_recycling_queue_with_compact_logging(monkeyp
     else:
         assert module.success_queue.get_nowait() is task
         assert module.failed_queue.empty()
-    if telemetry:
+    if telemetry and debug:
         module.transporter.nixl_agent.get_xfer_telemetry.assert_called_once_with(task.xfer_handle)
         assert logger.debug.call_args.kwargs["extra"]["bytes_total"] == 4096
     else:
         module.transporter.nixl_agent.get_xfer_telemetry.assert_not_called()
+        logger.debug.assert_not_called()
 
 
 @pytest.mark.parametrize("rank", [0, 1])

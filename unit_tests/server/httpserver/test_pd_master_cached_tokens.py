@@ -1051,3 +1051,46 @@ def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypa
         assert not manager.active_req_ids
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("headers, expected", [({"X-Request-Id": "header-id"}, "header-id"), ({}, "context-id")])
+def test_fetch_pd_stream_sends_request_context_to_both_nodes(headers, expected):
+    from lightllm.server.pd_io_struct import ObjType
+    from lightllm.utils.log_utils import set_http_request_id, reset_http_request_id
+
+    class StopAfterDispatch(Exception):
+        pass
+
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(pd_node_id=1)
+        manager.req_id_to_out_inf = {}
+        params = SamplingParams()
+        params.group_request_id = 123
+        params.max_new_tokens = 8
+        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+
+        async def wait(event, *args, stage, **kwargs):
+            if stage == "prefill":
+                event.prompt_ids = [1, 2, 3]
+            else:
+                raise StopAfterDispatch()
+
+        manager._wait_for_event_or_disconnect = wait
+        token = set_http_request_id("context-id")
+        try:
+            stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, None, SimpleNamespace(headers=headers))
+            with pytest.raises(StopAfterDispatch):
+                await anext(stream)
+        finally:
+            reset_http_request_id(token)
+        for node, prompt, max_tokens in ((p_node, "prompt", 1), (d_node, [1, 2, 3], 8)):
+            node.websocket.send_bytes.assert_awaited_once()
+            kind, (sent_prompt, sent_params, _), metadata = pickle.loads(node.websocket.send_bytes.call_args.args[0])
+            assert kind == ObjType.REQ
+            assert sent_prompt == prompt
+            assert sent_params.max_new_tokens == max_tokens
+            assert metadata == {"http_request_id": expected}
+
+    asyncio.run(run())

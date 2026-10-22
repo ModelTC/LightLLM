@@ -108,3 +108,24 @@ def test_transfer_cancellation_is_debug_and_failures_are_error(monkeypatch, erro
         logger.debug.assert_called_once_with("KV transfer cancelled: %s", "result")
     else:
         logger.error.assert_called_once_with("KV transfer failed: %s", "result")
+
+
+def test_missing_nixl_fails_before_initializing_transport(monkeypatch):
+    from lightllm.server.router.model_infer.mode_backend.pd import nixl_kv_transporter, kv_transporter
+
+    monkeypatch.setattr(nixl_kv_transporter, "NixlWrapper", None)
+    with pytest.raises(ImportError, match="pd_trans_mode=nixl requires NIXL; install NIXL"):
+        NixlKVTransporter(node_id=1, tp_idx=0, kv_move_buffer=None)
+    with pytest.raises(ImportError, match="select pd_trans_mode=nccl"):
+        kv_transporter.create_kv_transporter(SimpleNamespace(pd_trans_mode="nixl"), 1, 0, None)
+
+
+def test_nixl_factory_forwards_transport_arguments(monkeypatch):
+    from lightllm.server.router.model_infer.mode_backend.pd import nixl_kv_transporter, kv_transporter
+
+    constructor = Mock()
+    monkeypatch.setattr(nixl_kv_transporter, "NixlKVTransporter", constructor)
+    buffer = object()
+    result = kv_transporter.create_kv_transporter(SimpleNamespace(pd_trans_mode="nixl"), 7, 2, buffer)
+    constructor.assert_called_once_with(node_id=7, tp_idx=2, kv_move_buffer=buffer)
+    assert result is constructor.return_value

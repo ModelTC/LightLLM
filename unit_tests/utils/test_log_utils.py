@@ -534,6 +534,7 @@ def test_errors_bypass_sampling_and_pd_stages_are_debug():
         log_request_summary(1, status="completed", timing_scope="end_to_end")
         log_request_summary(2, status="error", timing_scope="decode")
         log_request_summary(3, status="cancelled", timing_scope="end_to_end")
+        log_request_summary(6, status="continued", timing_scope="end_to_end")
         """,
         LIGHTLLM_LOG_FORMAT="json",
         LIGHTLLM_LOG_REQUEST_SAMPLE_RATE=0,

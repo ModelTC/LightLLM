@@ -525,14 +525,16 @@ def test_pd_request_context_isolated_and_reset_on_failure():
     from lightllm.utils.log_utils import get_http_request_id
 
     async def run():
+        observed = []
+
         class ContextManager:
             args = SimpleNamespace(run_mode="prefill")
 
             async def generate(self, **kwargs):
-                assert get_http_request_id() in ("client-a", "client-b")
-                expected = get_http_request_id()
+                expected = kwargs["prompt"]
+                observed.append((expected, "before", get_http_request_id()))
                 await asyncio.sleep(0)
-                assert get_http_request_id() == expected
+                observed.append((expected, "after", get_http_request_id()))
                 if expected == "client-b":
                     raise RuntimeError("test failure")
                 yield 123, "token", {}, FinishStatus(FinishStatus.FINISHED_STOP)
@@ -540,19 +542,32 @@ def test_pd_request_context_isolated_and_reset_on_failure():
         async def generate(client_id):
             params = SamplingParams()
             params.group_request_id = 123
+            upload = AsyncMock()
             await _pd_process_generate(
                 ContextManager(),
-                "prompt",
+                client_id,
                 params,
                 None,
                 AsyncMock(),
-                AsyncMock(),
+                upload,
                 asyncio.Event(),
                 http_request_id=client_id,
             )
             assert get_http_request_id() == "-"
+            if client_id == "client-b":
+                upload.send.assert_awaited_once()
+                assert pickle.loads(upload.send.call_args.args[0]) == (
+                    ObjType.PD_UPLOAD_GENERATE_ERROR,
+                    123,
+                    "RuntimeError: test failure",
+                )
+            else:
+                upload.send.assert_not_awaited()
 
         await asyncio.gather(generate("client-a"), generate("client-b"))
+        assert sorted(observed) == sorted(
+            (client, phase, client) for client in ("client-a", "client-b") for phase in ("before", "after")
+        )
         assert get_http_request_id() == "-"
 
     asyncio.run(run())

@@ -161,8 +161,9 @@ def test_pd_handle_loop_passes_its_fixed_rank_to_each_master(monkeypatch, dp_ind
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("with_metadata", [False, True])
 @pytest.mark.parametrize("dp_index", [None, 0, 3])
-def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypatch, dp_index):
+def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypatch, dp_index, with_metadata):
     from lightllm.server import api_http
 
     async def run():
@@ -188,8 +189,10 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
         params.suggested_dp_index = -1
         dispatched = asyncio.Event()
         payloads = []
+        received_ids = []
 
         async def generate(**kwargs):
+            received_ids.append(kwargs["http_request_id"])
             req_params = kwargs["sampling_params"]
             assert req_params.suggested_dp_index == (-1 if dp_index is None else dp_index)
             assert kwargs["pd_upload_websocket"] is websocket
@@ -202,7 +205,8 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
             nonlocal requests
             requests += 1
             if requests == 1:
-                return pickle.dumps((ObjType.REQ, ("prompt", params, None)))
+                payload = (ObjType.REQ, ("prompt", params, None))
+                return pickle.dumps(payload + ({"http_request_id": "client-id"},) if with_metadata else payload)
             await dispatched.wait()
             while not any(isinstance(payload, tuple) and payload[0] == ObjType.TOKEN_PACKS for payload in payloads):
                 await asyncio.sleep(0)
@@ -231,6 +235,7 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
         monkeypatch.setattr(pd_loop.websockets, "connect", connect)
         monkeypatch.setattr(pd_loop, "_pd_process_generate", generate)
         await asyncio.wait_for(pd_loop._pd_handle_task(manager, PD_Master_Obj(1, "master:8000"), dp_index), 2)
+        assert received_ids == ["client-id" if with_metadata else None]
         assert payloads[0].get("dp_index") == dp_index
         assert "dp_index" in payloads[0]
         for payload in payloads[1:]:

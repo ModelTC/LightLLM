@@ -568,6 +568,12 @@ def test_httpserver_workers_follow_run_mode_and_topology(
 def test_pd_master_cli_dispatches_to_the_requested_startup_mode(monkeypatch, workers):
     from lightllm.server import api_server, api_start
 
+    import os
+
+    monkeypatch.setenv("LIGHTLLM_SERVICE_START_TIME", "old")
+    monkeypatch.setattr(api_server.time, "monotonic", lambda: 42.5)
+    logger = Mock()
+    monkeypatch.setattr(api_server, "logger", logger)
     single, multiple = Mock(), Mock()
     monkeypatch.setattr(api_start, "pd_master_start", single)
     monkeypatch.setattr(api_start, "pd_master_multi_worker_start", multiple)
@@ -587,6 +593,13 @@ def test_pd_master_cli_dispatches_to_the_requested_startup_mode(monkeypatch, wor
         expected.assert_called_once_with(args)
         unexpected.assert_not_called()
     configure.assert_called_once_with(args)
+    assert os.environ["LIGHTLLM_SERVICE_START_TIME"] == "42.5"
+    logger.info.assert_called_once()
+    assert logger.info.call_args.kwargs["extra"] == {
+        "event": "service.starting",
+        "run_mode": "pd_master",
+        "model": args.model_name,
+    }
 
 
 def test_multiworker_preflight_failure_precedes_environment_and_process_initialization(monkeypatch):
