@@ -1,8 +1,10 @@
 import dataclasses
 import weakref
-import torch
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
+
+import torch
+
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
@@ -19,13 +21,14 @@ from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
 )
 
 if TYPE_CHECKING:
+    from lightllm.common.linear_state import LinearStateCommit, SSMRunConfig
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
     from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import Qwen3NextTransformerLayerWeight
 
 
-class LinearAttBackend(BaseAttBackend, ABC):
+class GDNLinearAttBackend(BaseAttBackend, ABC):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         self._init_linear_layer_metadata(network_config=model.config, tp_world_size=model.tp_world_size_)
@@ -99,27 +102,25 @@ class LinearAttBackend(BaseAttBackend, ABC):
             value = value.view(1, seq_len, self.tp_num_v_heads, self.head_v_dim)
             return query, key, value
 
-    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "LinearAttPrefillAttState":
-        return LinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+    def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "GDNLinearAttPrefillAttState":
+        return GDNLinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
-    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "LinearAttDecodeAttState":
-        return LinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
+    def create_att_decode_state(self, infer_state: "InferStateInfo") -> "GDNLinearAttDecodeAttState":
+        return GDNLinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
-class LinearAttPrefillAttState(BasePrefillAttState):
-
+class GDNLinearAttPrefillAttState(BasePrefillAttState):
+    backend: GDNLinearAttBackend = None
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
-        backend: LinearAttBackend = self.backend
-        mtp_step = backend.mtp_step
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
         # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)
+        linear_state_manager = self.infer_state.req_manager.linear_state_manager
+        self.b_conv_buffer_idx, self.b_ssm_buffer_idx = linear_state_manager.prepare_prefill(self.infer_state.b_req_idx)
         return
 
     def prefill_att(
@@ -137,7 +138,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         mixed_qkvzba: torch.Tensor = linear_att_dict["mixed_qkvzba"]
         layer_weight = linear_att_dict["layer_weight"]
         layer_num = linear_att_dict["layer_num"]
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
 
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
@@ -163,7 +164,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         g, beta = fused_gdn_gating(layer_weight.linear_A_log.weight, a, b, layer_weight.linear_dt_bias.weight)
         mixed_qkv = mixed_qkv.transpose(0, 1)
 
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
         out_tensor = causal_conv1d_fn(
             mixed_qkv,
             layer_weight.linear_conv1d.mm_param.weight,
@@ -199,38 +200,45 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class LinearAttDecodeAttState(BaseDecodeAttState):
-
+class GDNLinearAttDecodeAttState(BaseDecodeAttState):
+    run_config: Optional["SSMRunConfig"] = None
+    backend: GDNLinearAttBackend = None
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
+
+    def get_linear_state_commit(self) -> Optional["LinearStateCommit"]:
+        return self.infer_state.req_manager.linear_state_manager.create_commit(self.run_config)
 
     def init_state(self):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step == 0:
             self._init_normal_decode_state()
         elif self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(draft_step + 1)
+            self._init_dynamic_mtp_decode_state()
         else:
             self._init_fixed_mtp_decode_state(draft_step)
+        linear_state_manager = self.infer_state.req_manager.linear_state_manager
+        if draft_step == 0:
+            linear_state_manager.prepare_decode(self.b_conv_buffer_idx, single_token=True)
+        else:
+            (
+                self.b_conv_buffer_idx,
+                self.b_ssm_buffer_idx,
+                self.b_num_accepted_tokens,
+            ) = linear_state_manager.prepare_mtp_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx
 
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int):
-        (
-            self.b1_mtp_cu_q_seq_len,
-            self.b_conv_buffer_idx,
-            self.b_num_accepted_tokens,
-        ) = build_dynamic_mtp_linear_att_state_params(
+    def _init_dynamic_mtp_decode_state(self):
+        (self.b1_mtp_cu_q_seq_len, self.b_conv_buffer_idx,) = build_dynamic_mtp_linear_att_state_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
             hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
-        self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_fixed_mtp_decode_state(self, draft_step: int):
         mtp_size = draft_step + 1
@@ -249,19 +257,6 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             device=self.infer_state.b_req_idx.device,
         )
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
-        self._init_mtp_ssm_buffer_idx(mtp_size)
-
-    def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
-        att_batch_size = self.b_conv_buffer_idx.shape[0]
-        # Each request owns mtp_size consecutive recurrent-state slots.
-        b_ssm_buffer_start_idx = (self.b_conv_buffer_idx * mtp_size).view(att_batch_size, 1)
-        state_offsets = torch.arange(
-            mtp_size,
-            device=self.infer_state.b_req_idx.device,
-            dtype=self.infer_state.b_req_idx.dtype,
-        ).view(1, mtp_size)
-        self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
 
     def decode_att(
         self,
@@ -278,7 +273,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         mixed_qkvzba = linear_att_dict["mixed_qkvzba"]
         layer_weight = linear_att_dict["layer_weight"]
         layer_num = linear_att_dict["layer_num"]
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
 
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
@@ -319,7 +314,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
     ):
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
 
         # Recurrent processing with fused gating. Decode uses a specialized
         # conv+pack kernel to avoid materializing the post-conv qkv tensor
@@ -340,6 +335,24 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
+        ssm_backend = self.infer_state.req_manager.linear_state_manager.ssm_backend
+        if ssm_backend is not None:
+            linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(
+                layer_weight.layer_num_
+            )
+            core_attn_out, self.run_config = ssm_backend.forward(
+                linear_layer_idx,
+                query,
+                key,
+                value,
+                a,
+                b,
+                layer_weight.linear_A_log.weight,
+                layer_weight.linear_dt_bias.weight,
+                self.b_conv_buffer_idx,
+                run_config=self.run_config,
+            )
+            return core_attn_out, z
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
             q=query,
             k=key,
@@ -369,7 +382,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             causal_conv1d_update as causal_conv1d_update_mtp,
         )
 
-        backend: LinearAttBackend = self.backend
+        backend: GDNLinearAttBackend = self.backend
 
         cu_seqlens_q = self.b1_mtp_cu_q_seq_len
         mixed_qkv = causal_conv1d_update_mtp(
@@ -385,6 +398,25 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         )
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
+        ssm_backend = self.infer_state.req_manager.linear_state_manager.ssm_backend
+        if ssm_backend is not None:
+            linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(
+                layer_weight.layer_num_
+            )
+            core_attn_out, self.run_config = ssm_backend.forward(
+                linear_layer_idx,
+                query,
+                key,
+                value,
+                a,
+                b,
+                layer_weight.linear_A_log.weight,
+                layer_weight.linear_dt_bias.weight,
+                self.b_conv_buffer_idx,
+                cu_seqlens_q,
+                run_config=self.run_config,
+            )
+            return core_attn_out
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"
         # #8b: b_num_accepted_tokens >= 1 is guaranteed upstream: init/cache restore set 1,
         # and MTP decode only writes values in [1, mtp_step+1]. The old per-layer per-step

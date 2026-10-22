@@ -38,12 +38,14 @@ def test_nope_cache_config_uses_native_mla_width():
 @pytest.mark.parametrize("small_page", [False, True])
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 @pytest.mark.parametrize("mtp_step", [0, 2])
-def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step):
+@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
+def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step, mode):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
     args = StartArgs(
         tp=tp_world_size,
+        ssm_state_mode=mode,
         data_type="bfloat16",
         linear_att_hash_page_size=4,
         linear_att_page_block_num=2,
@@ -96,17 +98,38 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     slot = cache.alloc_one_state_cache()
     source_req = SimpleNamespace(req_idx=0)
     req.init_hybrid_attention_state(source_req)
-    req.req_to_conv_state.buffer[:, 0].normal_()
-    req.req_to_ssm_state.buffer[:, 0].normal_()
-    conv = req.req_to_conv_state.buffer[:, 0, ..., :3].clone()
-    ssm = req.req_to_ssm_state.buffer[:, 0].clone()
+    req.linear_state_manager.conv_state.buffer[:, 0].normal_()
+    req.linear_state_manager.ssm_state.buffer[:, 0].normal_()
+    conv = req.linear_state_manager.conv_state.buffer[:, 0, ..., :3].clone()
+    ssm_backend = req.linear_state_manager.ssm_backend
+    if ssm_backend is not None:
+        # Save an accepted suffix, not merely an already folded checkpoint.
+        heads, dim = config.num_linear_v_heads, config.head_linear_k_dim
+        width = mtp_step + 1
+        q = torch.randn(1, width, heads, dim, dtype=torch.bfloat16, device="cuda")
+        gate = torch.randn(width, heads * dim, dtype=torch.bfloat16, device="cuda")
+        beta = torch.randn(width, heads, dtype=torch.bfloat16, device="cuda")
+        alog = torch.zeros(heads, device="cuda")
+        bias = torch.zeros(heads * dim, device="cuda")
+        ids = torch.tensor([0], dtype=torch.int32, device="cuda")
+        cu = torch.tensor([0, width], dtype=torch.int32, device="cuda")
+        ssm_backend.prepare_decode(ids, cu)
+        for layer in range(config.linear_layer_num):
+            ssm_backend.forward(layer, q, q, q, gate, beta, alog, bias, ids, cu)
+        accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
+        ssm_backend.accept_updates(ids, accepted)
+        ssm = ssm_backend.get_accepted_state(0).clone()
+        if mtp_step:
+            req.linear_state_manager.accepted_state_index[2] = mtp_step
+    else:
+        ssm = req.linear_state_manager.ssm_state.buffer[:, 0].clone()
     if small_page:
-        req.save_state(0, slot, cache)
+        req.save_small_page_state(0, slot)
     else:
         req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot])
     torch.cuda.synchronize()
-    req.req_to_conv_state.buffer[:, 0].zero_()
-    req.req_to_ssm_state.buffer[:, 0].zero_()
+    req.linear_state_manager.conv_state.buffer[:, 0].zero_()
+    req.linear_state_manager.ssm_state.buffer[:, 0].zero_()
     req.req_to_indexer_tail.buffer.normal_()
     unchanged = req.req_to_indexer_tail.buffer[:, [0, 1, 3]].clone()
     dest_req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot))
@@ -115,16 +138,26 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     else:
         req.restore_big_page_state(slot, dest_req)
     torch.cuda.synchronize()
-    assert torch.equal(req.req_to_conv_state.buffer[:, 2, ..., :3], conv)
-    assert torch.equal(req.req_to_ssm_state.buffer[:, 2 * (mtp_step + 1)], ssm)
+    if ssm_backend is not None:
+        assert ssm_backend.kda
+        if mode == "replay":
+            assert ssm_backend.cursors[2] == 0
+        if mtp_step:
+            assert req.linear_state_manager.accepted_state_index[2] == 0
+    assert torch.equal(req.linear_state_manager.conv_state.buffer[:, 2, ..., :3], conv)
+    assert torch.equal(
+        req.linear_state_manager.ssm_state.buffer[:, 2 * req.linear_state_manager.ssm_slots_per_req], ssm
+    )
     # Both page sizes are aligned to complete pools. Restoring a prefix must
     # discard stale tail values from a previously allocated request slot.
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
     req.req_to_indexer_tail.buffer[:, 2].normal_()
     req.init_hybrid_attention_state(dest_req)
-    assert not req.req_to_conv_state.buffer[:, 2].any()
-    assert not req.req_to_ssm_state.buffer[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
+    assert not req.linear_state_manager.conv_state.buffer[:, 2].any()
+    assert not req.linear_state_manager.ssm_state.buffer[
+        :, 2 * req.linear_state_manager.ssm_slots_per_req : 3 * req.linear_state_manager.ssm_slots_per_req
+    ].any()
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
     # KV moves carry MLA latents and pooled FP8 bytes; raw keys/gates only

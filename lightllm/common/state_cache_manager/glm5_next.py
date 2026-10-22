@@ -47,6 +47,7 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
             full_attention_interval=4,
             all_layer_num=layers,
             draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num() if args.mtp_mode is not None else 0,
+            gate_lower_bound=linear.get("gate_lower_bound", -5.0),
             index_kpool=config["index_kpool"],
             index_head_dim=config["index_head_dim"],
         )
