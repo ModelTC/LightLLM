@@ -394,7 +394,8 @@ class SamplingParams(ctypes.Structure):
         self.exponential_decay_length_penalty.initialize(kwargs.get("exponential_decay_length_penalty", (1, 1.0)))
 
         self.pd_kv_trans_params = PDKVTransParamObj()
-        self.pd_kv_trans_params.set(kwargs.get("pd_kv_trans_params", None))
+        # PD 内部字段（pd_kv_trans_params 会被 pickle.loads），不能由外部请求参数设置。
+        self.pd_kv_trans_params.set(None)
         self.pd_master_node_id = NodeUUId()
         self.pd_master_node_id.initialize(kwargs.get("pd_master_node_id", 0))
 
