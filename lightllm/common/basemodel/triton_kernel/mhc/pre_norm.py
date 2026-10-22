@@ -60,8 +60,7 @@ def _hc_normalized_projection_kernel(
             (mix_offsets[None, :] < MIX_SIZE) & (k_offsets[:, None] < FLATTENED_HIDDEN),
             0,
         )
-        # GLM projects the FP32-normalized input. Moving the RMS factor after
-        # the dot, or rounding this tile to TF32/BF16, changes that computation.
+        # Normalize in FP32 before the IEEE projection, independent of TF32 settings.
         normalized = values * rms[:, None]
         accumulator = tl.dot(normalized, weights, accumulator, input_precision="ieee")
         k_offsets += BLOCK_K
@@ -265,8 +264,7 @@ def hc_pre_norm(
         hc_eps: pre sigmoid 后的偏移量及 Sinkhorn 的稳定项。
         sinkhorn_iters: Sinkhorn 迭代次数。
         post_multiplier: post sigmoid 的乘数，默认 2.0。
-        glm5_numerics: GLM-5.3 的 FP32 先归一化后投影路径；post/residual 系数
-            舍入到激活 dtype，pre 系数仍保留 fp32。
+        glm5_numerics: FP32 先归一化后投影；pre 系数保持 fp32，post/residual 舍入到激活 dtype。
 
     Returns:
         (layer_input, residual_mix, post_mix)：形状为 [T, H]、[T, S, S]、[T, S]。

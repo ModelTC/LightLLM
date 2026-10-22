@@ -23,6 +23,7 @@ def _hc_post_4stream_kernel(
     post_stride_m: tl.constexpr,
     out_stride_m: tl.constexpr,
     BLOCK_H: tl.constexpr,
+    GLM5_NUMERICS: tl.constexpr,
 ):
     """将子层输出和原始残差混合为四条新 stream：[T, H] + [T, 4, H] -> [T, 4, H]。
 
@@ -50,10 +51,10 @@ def _hc_post_4stream_kernel(
 
     post_base = post_mix + token * post_stride_m
     mix_base = residual_mix + token * mix_stride_m
-    accumulator_0 = layer_value * tl.load(post_base)
-    accumulator_1 = layer_value * tl.load(post_base + 1)
-    accumulator_2 = layer_value * tl.load(post_base + 2)
-    accumulator_3 = layer_value * tl.load(post_base + 3)
+    accumulator_0 = tl.full((BLOCK_H,), 0.0, tl.float32) if GLM5_NUMERICS else layer_value * tl.load(post_base)
+    accumulator_1 = tl.full((BLOCK_H,), 0.0, tl.float32) if GLM5_NUMERICS else layer_value * tl.load(post_base + 1)
+    accumulator_2 = tl.full((BLOCK_H,), 0.0, tl.float32) if GLM5_NUMERICS else layer_value * tl.load(post_base + 2)
+    accumulator_3 = tl.full((BLOCK_H,), 0.0, tl.float32) if GLM5_NUMERICS else layer_value * tl.load(post_base + 3)
 
     accumulator_0 += residual_0 * tl.load(mix_base)
     accumulator_0 += residual_1 * tl.load(mix_base + 4)
@@ -72,6 +73,18 @@ def _hc_post_4stream_kernel(
     accumulator_3 += residual_2 * tl.load(mix_base + 11)
     accumulator_3 += residual_3 * tl.load(mix_base + 15)
 
+    if GLM5_NUMERICS:
+        # Megatron's compiled native post rounds the residual bmm to BF16,
+        # then fuses the post expansion and addition into the final BF16 output.
+        accumulator_0 = accumulator_0.to(residual.dtype.element_ty).to(tl.float32)
+        accumulator_1 = accumulator_1.to(residual.dtype.element_ty).to(tl.float32)
+        accumulator_2 = accumulator_2.to(residual.dtype.element_ty).to(tl.float32)
+        accumulator_3 = accumulator_3.to(residual.dtype.element_ty).to(tl.float32)
+        accumulator_0 += layer_value * tl.load(post_base)
+        accumulator_1 += layer_value * tl.load(post_base + 1)
+        accumulator_2 += layer_value * tl.load(post_base + 2)
+        accumulator_3 += layer_value * tl.load(post_base + 3)
+
     output_base = output + token * out_stride_m + hidden_offsets
     tl.store(output_base, accumulator_0, mask=hidden_mask)
     tl.store(output_base + hidden, accumulator_1, mask=hidden_mask)
@@ -85,6 +98,8 @@ def hc_post(
     residual_mix: torch.Tensor,
     post_mix: torch.Tensor,
     streams: int,
+    *,
+    glm5_numerics: bool = False,
 ) -> torch.Tensor:
     """用一次 Triton launch 将子层输出混回残差 streams。
 
@@ -96,6 +111,7 @@ def hc_post(
         residual_mix: [T, S, S]，fp32 或激活 dtype；来自 hc_pre_norm。
         post_mix: [T, S]，与 residual_mix 相同 dtype；来自同一次 pre 调用。
         streams: 残差 stream 数 S；当前 Triton 入口要求 S = 4。
+        glm5_numerics: 匹配 GLM 训练默认 native post，在加子层输出前将残差混合结果舍入到激活 dtype。
 
     Returns:
         新残差 [T, S * H]，dtype 与 layer_output 相同；输入张量保持不变。
@@ -127,6 +143,7 @@ def hc_post(
         post_stride_m=post_mix.stride(0),
         out_stride_m=output.stride(0),
         BLOCK_H=block_h,
+        GLM5_NUMERICS=glm5_numerics,
         num_warps=8,
     )
     return output

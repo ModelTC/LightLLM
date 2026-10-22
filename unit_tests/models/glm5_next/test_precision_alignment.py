@@ -77,8 +77,6 @@ def test_indexer_layernorm_epsilon_preserves_pooled_topk_boundary(config, monkey
     pytest.importorskip("deep_gemm")
     if torch.cuda.get_device_capability()[0] < 9:
         pytest.skip("FP8 indexer requires Hopper or newer")
-    # Exercise the real indexer and pooling kernels without requiring vLLM's
-    # optional top-k extension. The LayerNorm and projections are not stubbed.
     monkeypatch.setattr("lightllm.models.glm5_next.indexer.HAS_VLLM", False)
     dim, heads, topk = config["index_head_dim"], config["index_n_heads"], config["index_topk"]
     weight = Glm5NextTransformerLayerWeight(3, torch.bfloat16, config, Quantcfg(config))
@@ -101,9 +99,7 @@ def test_indexer_layernorm_epsilon_preserves_pooled_topk_boundary(config, monkey
         }
     )
 
-    # At 2052 tokens, 513 complete pools compete for 512 slots. The first
-    # 511 pools win under either epsilon. The last two have different K
-    # variances: eps=1e-6 selects A, while the global RMSNorm eps selects B.
+    # 513 pools compete for 512 slots: epsilon changes the final selected pool.
     hidden = torch.cat(
         (
             (query * 2 ** -4).repeat(topk - 4, 1),
@@ -143,8 +139,7 @@ def test_indexer_layernorm_epsilon_preserves_pooled_topk_boundary(config, monkey
     torch.testing.assert_close(actual[-1, :topk].sort().values, locations[:topk], atol=0, rtol=0)
     assert (actual[-1, topk:] == -1).all()
 
-    # Verify this fixture detects the old behavior, including through the FP8
-    # indexer path, rather than only checking a constructor constant.
+    # Negative control: the previous epsilon selects the other boundary pool.
     indexer.eps = config["rms_norm_eps"]
     _, wrong = indexer._get_indices(hidden, q_lora, infer, state, weight)
     wrong_selection = torch.cat((locations[: topk - 4], locations[topk:]))
@@ -155,8 +150,7 @@ def test_indexer_layernorm_epsilon_preserves_pooled_topk_boundary(config, monkey
 def test_checkpoint_correction_bias_preserves_fp32_routing(config, monkeypatch, enable_ep_moe):
     args = StartArgs(tp=2, enable_ep_moe=enable_ep_moe, enable_fused_shared_experts=False)
     monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(args)))
-    # Construct rank 1's real weights on this GPU; routing itself needs no
-    # distributed communication and must retain all experts' global biases.
+    # Rank 1 must retain every expert's global correction bias.
     for name, value in {"GLOBAL_RANK": 1, "GLOBAL_WORLD_SIZE": 2, "DP_WORLD_SIZE": 2, "CURRENT_RANK_IN_DP": 1}.items():
         monkeypatch.setenv("LIGHTLLM_" + name, str(value))
     get_env_start_args.cache_clear()
@@ -179,8 +173,6 @@ def test_checkpoint_correction_bias_preserves_fp32_routing(config, monkeypatch, 
     logits[0, 7:9] = torch.tensor([0.0, 4e-5], dtype=torch.float32, device="cuda")
 
     def route(bias):
-        # This is the actual common selection entry used by TP expert GEMMs,
-        # EP low-latency dispatch, and EP select_experts_and_quant_input.
         return experts.fuse_moe_impl._select_experts(
             input_tensor=hidden,
             router_logits=logits,
@@ -197,14 +189,12 @@ def test_checkpoint_correction_bias_preserves_fp32_routing(config, monkeypatch, 
     expected_ids = torch.arange(8, dtype=ids.dtype, device="cuda")[None]
     torch.testing.assert_close(ids.sort(dim=-1).values, expected_ids, atol=0, rtol=0)
     torch.testing.assert_close(origin_ids, ids, atol=0, rtol=0)
-    # Bias affects selection only; combination weights use the original
-    # sigmoid scores and then normalize over the selected experts.
+    # Correction bias affects selection; weights use the original sigmoid scores.
     expected_weights = logits.sigmoid().gather(1, ids.long())
     expected_weights /= expected_weights.sum(-1, keepdim=True)
     torch.testing.assert_close(weights, expected_weights, atol=1e-7, rtol=1e-6)
 
-    # Both biases round to the same BF16 value. Reproducing the old storage
-    # conversion therefore lets expert 8 displace expert 7 at the boundary.
+    # Negative control: BF16 rounding makes expert 8 displace expert 7.
     _, rounded_ids, _ = route(experts.e_score_correction_bias.to(torch.bfloat16))
     rounded_expected = torch.tensor([list(range(7)) + [8]], dtype=rounded_ids.dtype, device="cuda")
     torch.testing.assert_close(rounded_ids.sort(dim=-1).values, rounded_expected, atol=0, rtol=0)

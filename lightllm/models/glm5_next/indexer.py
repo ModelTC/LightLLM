@@ -15,8 +15,7 @@ class Glm5NextNsaInfer:
         self.topk = network_config["index_topk"]
         self.heads = network_config["index_n_heads"]
         self.dim = network_config["index_head_dim"]
-        # The indexer's K LayerNorm has its own epsilon in the reference model;
-        # rms_norm_eps belongs to the surrounding RMSNorm layers.
+        # The indexer LayerNorm has a separate epsilon from the model RMSNorm.
         self.eps = 1e-6
 
     def select_topk_indices(self, logits, lengths, indices):
