@@ -39,6 +39,7 @@ class GDNLinearAttBackend(BaseAttBackend, ABC):
         pass
 
     def _init_linear_layer_metadata(self, network_config, tp_world_size):
+
         self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions

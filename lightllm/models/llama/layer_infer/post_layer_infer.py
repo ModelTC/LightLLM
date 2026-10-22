@@ -1,5 +1,4 @@
 import os
-
 import torch
 import torch.functional as F
 import torch.distributed as dist
@@ -256,6 +255,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     def token_forward(
         self, input_embdings: torch.Tensor, infer_state: LlamaInferStateInfo, layer_weight: LlamaPreAndPostLayerWeight
     ) -> PostLayerOutput:
+
         return self._token_forward(input_embdings=input_embdings, infer_state=infer_state, layer_weight=layer_weight)
 
     def overlap_tpsp_token_forward(
@@ -266,6 +266,7 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state1: LlamaInferStateInfo,
         layer_weight: BaseLayerWeight,
     ) -> tuple[PostLayerOutput, PostLayerOutput]:
+
         output = self.token_forward(input_embdings, infer_state, layer_weight=layer_weight)
 
         output1 = self.token_forward(input_embdings1, infer_state1, layer_weight=layer_weight)

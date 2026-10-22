@@ -2,8 +2,8 @@ from typing import Tuple
 from functools import partial
 
 import torch
-import torch.distributed as dist
 
+import torch.distributed as dist
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
     Qwen3NextTransformerLayerWeight,
 )
@@ -184,6 +184,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3NextInferStateInfo,
         layer_weight: Qwen3NextTransformerLayerWeight,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
+
         backend = infer_state.prefill_att_state1.backend
 
         mixed_qkvzba = mixed_qkvzba.contiguous()

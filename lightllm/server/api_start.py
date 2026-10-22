@@ -3,7 +3,6 @@ import os
 import uuid
 import subprocess
 import math
-
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .httpserver.req_id_generator_server import start_req_id_generator_server
