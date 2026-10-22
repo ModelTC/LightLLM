@@ -498,6 +498,17 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         page-aligned contiguous KV slots and make paged attention/cache reuse operate on full pages.""",
     )
     parser.add_argument(
+        "--req_token_index_mode",
+        type=str,
+        choices=["pin_mem_cache", "pure_gpu"],
+        default="pin_mem_cache",
+        help="""Storage mode for request token indexes. pin_mem_cache (default): allocates a pinned CPU cache
+        per request, allowing CPU reads without D2H transfers and batched GPU uploads, at the cost of pinned
+        memory usage and upload progress tracking. pure_gpu: maintains the GPU request table directly without
+        a persistent CPU index cache; CPU reads require D2H transfers and may incur synchronization waits.
+        Both modes retain the same GPU request table and have approximately the same GPU memory usage.""",
+    )
+    parser.add_argument(
         "--vit_att_backend",
         type=str,
         nargs="+",

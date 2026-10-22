@@ -176,6 +176,7 @@ class StartArgs:
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "flashinfer"]}
     )
     page_size: int = field(default=1)
+    req_token_index_mode: str = field(default="pin_mem_cache", metadata={"choices": ["pin_mem_cache", "pure_gpu"]})
     vit_att_backend: List[str] = field(
         default_factory=lambda: ["auto"], metadata={"choices": ["auto", "triton", "fa3", "sdpa", "xformers"]}
     )

@@ -49,15 +49,20 @@ class ReqManager:
         # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
         # 这样让 DP 的实现更为简化一些。
         self.req_list = _ReqLinkedList(max_request_num)
-        page_size = get_env_start_args().page_size
-        max_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
+        args = get_env_start_args()
+        page_size = args.page_size
+        self.page_size = page_size
+        aligned_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
         self.req_to_token_indexs = torch.zeros(
-            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
+            (max_request_num + 1, aligned_sequence_length), dtype=torch.int32, device="cuda"
         )
-        # Allocation and cache metadata use this CPU mirror; inference reads the GPU table.
-        self.req_to_token_indexs_cpu = torch.zeros(
-            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cpu", pin_memory=True
-        )
+        self.req_token_index_mode = args.req_token_index_mode
+        if self.req_token_index_mode == "pin_mem_cache":
+            logger.info("请求 token 索引模式 pin_mem_cache：按请求申请 pinned CPU 缓存，索引更新批量上传 GPU")
+        elif self.req_token_index_mode == "pure_gpu":
+            logger.info("请求 token 索引模式 pure_gpu：直接维护 GPU 表，CPU 读取索引时执行 D2H 同步")
+        else:
+            raise ValueError(f"未知请求 token 索引模式：{self.req_token_index_mode}")
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
@@ -79,14 +84,13 @@ class ReqManager:
         # HOLD_REQUEST_ID 对应的请求行供 DP padding、overlap microbatch 等占位请求使用。将该行
         # 按 page_size 划分后，每一页都映射到 mem_manager 额外保留的同一个物理页；这样占位请求
         # 无论访问哪一个逻辑位置，都会落到合法且不会参与正常分配的 KV cache 地址上。
-        hold_row = self.req_to_token_indexs_cpu[self.HOLD_REQUEST_ID]
-        hold_page = torch.tensor(
-            self.mem_manager.HOLD_TOKEN_MEMINDEXES,
-            dtype=hold_row.dtype,
-            device=hold_row.device,
+        assert self.mem_manager.page_size == self.page_size
+        hold_row = self.req_to_token_indexs[self.HOLD_REQUEST_ID]
+        token_offsets = torch.arange(
+            hold_row.numel(), dtype=hold_row.dtype, device=hold_row.device, requires_grad=False
         )
-        hold_row.view(-1, self.mem_manager.page_size).copy_(hold_page)
-        self.req_to_token_indexs[self.HOLD_REQUEST_ID].copy_(hold_row)
+        hold_page_start = self.mem_manager.HOLD_TOKEN_MEMINDEXES[0]
+        hold_row.copy_(token_offsets.remainder(self.page_size).add_(hold_page_start))
         return
 
     def alloc(self):

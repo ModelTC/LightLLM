@@ -1000,8 +1000,7 @@ class TpPartBaseModel:
             alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
             mem_indexes = self.mem_manager.alloc(alloc_token_num)
             req_idx = int(b_req_idx[0])
-            self.req_manager.req_to_token_indexs_cpu[req_idx, : len(mem_indexes)].copy_(mem_indexes)
-            self.req_manager.req_to_token_indexs.copy_(self.req_manager.req_to_token_indexs_cpu, non_blocking=True)
+            self.req_manager.req_to_token_indexs[req_idx, :alloc_token_num].copy_(mem_indexes, non_blocking=True)
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
             b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
@@ -1083,8 +1082,7 @@ class TpPartBaseModel:
                 alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
                 mem_indexes = self.mem_manager.alloc(alloc_token_num)
                 req_idx = int(b_req_idx[0])
-                self.req_manager.req_to_token_indexs_cpu[req_idx, : len(mem_indexes)].copy_(mem_indexes)
-                self.req_manager.req_to_token_indexs.copy_(self.req_manager.req_to_token_indexs_cpu, non_blocking=True)
+                self.req_manager.req_to_token_indexs[req_idx, :alloc_token_num].copy_(mem_indexes, non_blocking=True)
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
                 b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")

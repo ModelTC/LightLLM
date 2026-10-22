@@ -28,6 +28,7 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.append(str(REPO_ROOT))
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
+from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex, create_req_token_index
 from lightllm.common.basemodel.triton_kernel.gen_mtp_prefill_params import gen_mtp_new_input_ids
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.api_cli import make_argument_parser
@@ -158,6 +159,7 @@ class StaticBenchmarkExecutor:
         self.draft_models = draft_models
         self.token_source = token_source
         self._hold_kv_len_by_req: Dict[int, int] = {}
+        self._req_token_indexes: Dict[int, ReqTokenIndex] = {}
 
     def _case_iters(self, warmup: bool) -> int:
         return self.args.warmup_iters if warmup else self.args.bench_iters
@@ -558,32 +560,43 @@ class StaticBenchmarkExecutor:
 
     def _ensure_req_kv_capacity(self, req_idx: torch.Tensor, target_kv_lens: torch.Tensor) -> None:
         """按请求预分配完整 KV 页，并将物理索引写入请求索引表。"""
-        req_ids = req_idx.detach().cpu().tolist()
+        req_indexes = req_idx.detach().cpu().tolist()
         target_lens = target_kv_lens.detach().cpu().tolist()
-        assert len(req_ids) == len(target_lens)
+        assert len(req_indexes) == len(target_lens)
 
-        # MTP decode 会为同一个请求展开多行，只需按其中最大的逻辑长度扩容一次。
-        max_target_len_by_req = {}
-        for req_id, target_len in zip(req_ids, target_lens):
-            req_id = int(req_id)
-            max_target_len_by_req[req_id] = max(max_target_len_by_req.get(req_id, 0), int(target_len))
+        # 按 ReqManager 槽位合并 MTP 展开的多行，只按最大逻辑 token 长度扩容一次。
+        max_target_len_by_req_index = {}
+        for req_index, target_len in zip(req_indexes, target_lens):
+            req_index = int(req_index)
+            max_target_len_by_req_index[req_index] = max(max_target_len_by_req_index.get(req_index, 0), int(target_len))
 
         mem_manager = self.model.req_manager.mem_manager
         page_size = mem_manager.page_size
-        cpu_table = self.model.req_manager.req_to_token_indexs_cpu
-        gpu_table = self.model.req_manager.req_to_token_indexs
-        for req_id, target_len in max_target_len_by_req.items():
+        req_manager = self.model.req_manager
+        for req_index, target_len in max_target_len_by_req_index.items():
             new_hold_kv_len = align_up(target_len, page_size)
-            old_hold_kv_len = self._hold_kv_len_by_req.get(req_id, 0)
+            old_hold_kv_len = self._hold_kv_len_by_req.get(req_index, 0)
             if new_hold_kv_len <= old_hold_kv_len:
                 continue
 
             alloc_token_num = new_hold_kv_len - old_hold_kv_len
             mem_indexes = mem_manager.alloc(alloc_token_num)
-            cpu_indexes = cpu_table[req_id, old_hold_kv_len:new_hold_kv_len]
-            cpu_indexes.copy_(mem_indexes)
-            gpu_table[req_id, old_hold_kv_len:new_hold_kv_len].copy_(cpu_indexes, non_blocking=True)
-            self._hold_kv_len_by_req[req_id] = new_hold_kv_len
+            if req_index not in self._req_token_indexes:
+                # 静态 benchmark 不进入真实 InferReq 的共享内存生命周期，轻量对象
+                # 提供请求槽位、启动参数和输入长度，复用在线请求的索引工厂。
+                benchmark_req = SimpleNamespace(
+                    req_idx=req_index,
+                    req_manager=req_manager,
+                    args=self.args,
+                    shm_req=SimpleNamespace(input_len=target_len),
+                )
+                self._req_token_indexes[req_index] = create_req_token_index(
+                    benchmark_req, index_stream=torch.cuda.current_stream()
+                )
+            token_index = self._req_token_indexes[req_index]
+            token_index.append_token_indexes(mem_indexes)
+            token_index.get_gpu_token_indexes(old_hold_kv_len, new_hold_kv_len)
+            self._hold_kv_len_by_req[req_index] = new_hold_kv_len
 
     def _forward_prefill_input(self, model_input: ModelInput, allow_overlap: bool) -> ModelOutput:
         if allow_overlap and self.args.enable_prefill_microbatch_overlap and model_input.batch_size > 1:
@@ -736,6 +749,7 @@ class StaticBenchmarkExecutor:
         self.model.mem_manager.free_all()
         self.model.req_manager.free_all()
         self._hold_kv_len_by_req.clear()
+        self._req_token_indexes.clear()
         torch.cuda.synchronize()
         torch.cuda.empty_cache()
 

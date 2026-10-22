@@ -12,6 +12,7 @@ from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.dp_backend import dp_shared_kv_trans
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_impl
+from unit_tests.common.cpu_index_helpers import make_cpu_index_manager, bind_cpu_indexes
 
 
 def _bind_alloc_need(req, page_size):
@@ -41,7 +42,7 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     tasks = []
     backend = decode_impl.PDDecodeNode.__new__(decode_impl.PDDecodeNode)
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
-    backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs_cpu=table))
+    backend.model = SimpleNamespace(req_manager=make_cpu_index_manager(token_table=table, page_size=1))
     backend.is_master_in_dp = False
     backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(table, req, alloc_sizes, next_index, size)
 
@@ -109,28 +110,25 @@ def test_dp_cache_fetch_publishes_gpu_indexes_before_barrier_returns(monkeypatch
     torch.arange(32, out=cpu_table.view(-1))
     gpu_table = torch.full((2, 16), -1, dtype=torch.int32, device="cuda")
     gpu_table[1, :2].copy_(cpu_table[1, :2], non_blocking=True)
-    req_manager = SimpleNamespace(req_to_token_indexs_cpu=cpu_table, req_to_token_indexs=gpu_table)
+    req_manager = make_cpu_index_manager(token_table=cpu_table, req_to_token_indexs=gpu_table, page_size=4)
     reqs = [
-        SimpleNamespace(req_idx=1, cur_kv_len=4, hold_kv_len=4, move_to_gpu_index_len=2),
-        SimpleNamespace(req_idx=0, cur_kv_len=4, hold_kv_len=8, move_to_gpu_index_len=0),
+        SimpleNamespace(req_idx=1, cur_kv_len=4, hold_kv_len=4),
+        SimpleNamespace(req_idx=0, cur_kv_len=4, hold_kv_len=8),
     ]
-    stream = torch.cuda.Stream()
-    overlap_stream = torch.cuda.Stream()
-    current_stream = torch.cuda.current_stream()
-    # 测试刚创建的 GPU 表先完成初始化；生产表在模型初始化期间已经就绪。
-    overlap_stream.wait_stream(current_stream)
-    # 模拟 overlap 流上尚未完成的旧索引写入，验证 DP 上传会排在其后。
-    with torch.cuda.stream(overlap_stream):
-        torch.cuda._sleep(20_000_000)
-        gpu_table[0, :8].fill_(-2)
-    context = SimpleNamespace(req_manager=req_manager, get_overlap_stream=lambda: overlap_stream)
+    for req, gpu_index_submitted_len in zip(reqs, (2, 0)):
+        bind_cpu_indexes(req, req_manager, gpu_index_submitted_len=gpu_index_submitted_len)
+    default_stream = torch.cuda.default_stream()
+    # 索引旧写入统一在默认流；上传流必须等待它，随后默认流再等待上传完成。
+    torch.cuda._sleep(20_000_000)
+    gpu_table[0, :8].fill_(-2)
+    context = SimpleNamespace(req_manager=req_manager)
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)
     monkeypatch.setattr(base_backend, "g_infer_context", context)
     backend = SimpleNamespace(node_nccl_group=object(), is_master_in_dp=is_master_in_dp)
     order = []
 
     def upload(run_reqs):
-        assert torch.cuda.current_stream() == stream
+        assert torch.cuda.current_stream() == default_stream
         order.append("upload")
         base_backend.ModeBackend._copy_req_token_indexes_to_gpu(backend, run_reqs)
 
@@ -141,19 +139,19 @@ def test_dp_cache_fetch_publishes_gpu_indexes_before_barrier_returns(monkeypatch
         pytest.fail("DP shared must rely on NCCL barrier rather than explicitly synchronizing a stream")
 
     def wait_stream(waiting_stream, source_stream):
-        if waiting_stream == stream:
-            assert source_stream == overlap_stream
-            order.append("copy_waits_overlap")
+        if waiting_stream != default_stream:
+            assert source_stream == default_stream
+            order.append("upload_waits_default")
         else:
-            assert waiting_stream == current_stream and source_stream == stream
-            order.append("current_waits_copy")
+            assert source_stream != default_stream
+            order.append("default_waits_upload")
         original_wait_stream(waiting_stream, source_stream)
 
     def barrier(group):
         assert group is backend.node_nccl_group
-        assert order == ["copy_waits_overlap", "upload", "current_waits_copy"]
-        # 模拟同步 NCCL barrier 在 C++ 层等待当前流完成。
-        original_synchronize(current_stream)
+        assert order == ["upload", "upload_waits_default", "default_waits_upload"]
+        # 模拟同步 NCCL barrier 在 C++ 层等待默认流完成。
+        original_synchronize(default_stream)
         assert torch.equal(gpu_table[1, :4].cpu(), cpu_table[1, :4])
         assert torch.equal(gpu_table[0, :8].cpu(), cpu_table[0, :8])
         assert gpu_table[0, 8:].eq(-1).all()
@@ -166,14 +164,13 @@ def test_dp_cache_fetch_publishes_gpu_indexes_before_barrier_returns(monkeypatch
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", barrier)
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = backend
-    module.copy_stream = stream
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.full((2, 2, 2), -1, dtype=np.int64))
 
     module.fill_reqs_info(reqs)
 
-    assert order == ["copy_waits_overlap", "upload", "current_waits_copy", "barrier"]
-    assert [req.move_to_gpu_index_len for req in reqs] == [4, 8]
+    assert order == ["upload", "upload_waits_default", "default_waits_upload", "barrier"]
+    assert [req.token_index.gpu_index_submitted_len for req in reqs] == [4, 8]
     if is_master_in_dp:
         assert module.shared_req_infos.arr[:, 0].tolist() == [[4, 1], [4, 0]]
     else:
@@ -209,7 +206,7 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [10, 0]]], dtype=np.int64))
     context = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs_cpu=table),
+        req_manager=make_cpu_index_manager(token_table=table, page_size=1),
         get_can_alloc_token_num=lambda: 100,
     )
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)

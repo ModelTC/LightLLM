@@ -657,34 +657,43 @@ class ModeBackend:
         if g_infer_context.radix_cache is not None:
             g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
 
-        old_hold_kv_len = req_obj.hold_kv_len
-        new_hold_kv_len = old_hold_kv_len + alloc_token_num
         mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
-        g_infer_context.req_manager.req_to_token_indexs_cpu[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
-            mem_indexes
-        )
-        req_obj.hold_kv_len = new_hold_kv_len
+        req_obj.token_index.append_token_indexes(mem_indexes)
+        req_obj.hold_kv_len += alloc_token_num
         return mem_indexes
 
     def _copy_req_token_indexes_to_gpu(self, run_reqs: List[InferReq]):
-        """Collect pending index tails, upload them in one batch, then advance request lengths."""
-        req_manager = g_infer_context.req_manager
-        cpu_table, gpu_table = req_manager.req_to_token_indexs_cpu, req_manager.req_to_token_indexs
-        pending_copies = []
-        src_tensors, dst_tensors = [], []
-        for req in run_reqs:
-            start, end = req.move_to_gpu_index_len, req.hold_kv_len
-            assert 0 <= start <= end <= cpu_table.shape[1]
-            if start < end:
-                src_tensors.append(cpu_table[req.req_idx, start:end])
-                dst_tensors.append(gpu_table[req.req_idx, start:end])
-                pending_copies.append((req, end))
-        if not pending_copies:
+        """在本批请求共用的索引流上批量上传，调用流按需等待索引流。"""
+        # 第一阶段：空批直接返回，确认请求共用一个索引流，并记录当前调用流。
+        if not run_reqs:
             return
-
-        cuda_memcpy_pinned_h2d_batch_async(dst_tensors, src_tensors)
-        for req, end in pending_copies:
-            req.move_to_gpu_index_len = end
+        index_streams = {req.token_index._index_stream for req in run_reqs}
+        assert len(index_streams) == 1, "同一批请求必须使用同一个索引流"
+        index_stream = index_streams.pop()
+        current_stream = torch.cuda.current_stream(index_stream.device)
+        # 第二阶段：切出尚未提交的 CPU 源视图和 GPU 目标视图，记录本次提交终点。
+        cpu_index_slices, gpu_index_slices = [], []
+        pending_index_uploads = []
+        for req in run_reqs:
+            token_index = req.token_index
+            start, end = token_index.gpu_index_submitted_len, token_index.token_index_len
+            if start < end:
+                source_indexes = token_index.get_upload_indexes()
+                assert source_indexes is not None, "GPU 索引提交进度与记录长度不一致，GPU 模式应在追加时完成提交"
+                cpu_index_slices.append(source_indexes)
+                gpu_index_slices.append(token_index.gpu_indexes[start:end])
+                pending_index_uploads.append((token_index, end))
+        # 第三阶段：在索引流上批量提交 H2D，默认流适配和 pinned 源保活由拷贝封装处理。
+        if cpu_index_slices:
+            with torch.cuda.stream(index_stream):
+                cuda_memcpy_pinned_h2d_batch_async(gpu_index_slices, cpu_index_slices)
+            # 第四阶段：成功提交后再更新进度；提交完成不代表 GPU 传输已经完成。
+            for token_index, end in pending_index_uploads:
+                token_index.gpu_index_submitted_len = end
+        # 第五阶段：调用流与索引流不同时建立等待依赖，保证后续 GPU 访问能读到更新。
+        # 两种模式在没有新上传时，已提交的索引写入也可能尚未完成，仍需承接依赖。
+        if current_stream != index_stream:
+            current_stream.wait_stream(index_stream)
 
     def _get_classed_reqs(
         self,
@@ -711,7 +720,7 @@ class ModeBackend:
         4. prefill_reqs 需要进行prefill操作的请求
         5. decode_reqs 需要进行decode操作的请求
 
-        返回前将两组请求尚未上传的 token 索引提交到推理流，并更新 move_to_gpu_index_len。
+        返回前按所选模式准备两组请求的 GPU token 索引，并更新 token_index.gpu_index_submitted_len。
         """
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
@@ -872,9 +881,7 @@ class ModeBackend:
                 decode_reqs = []
 
         if prefill_reqs or decode_reqs:
-            # 使用已有推理流提交映射表更新，与前后推理操作保持顺序。
-            with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-                self._copy_req_token_indexes_to_gpu(prefill_reqs + decode_reqs)
+            self._copy_req_token_indexes_to_gpu(prefill_reqs + decode_reqs)
         return prefill_reqs, decode_reqs
 
     # 一些可以复用的通用功能函数

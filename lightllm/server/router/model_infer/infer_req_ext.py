@@ -148,12 +148,6 @@ class FinalTokenMetadataExt:
     def __init__(self, req: "InferReq") -> None:
         self._req = req
 
-    def _mem_indexes(self) -> torch.Tensor:
-        # 延迟导入，避免与 infer_batch 形成模块级循环依赖。
-        from lightllm.server.router.model_infer.infer_batch import g_infer_context
-
-        return g_infer_context.req_manager.req_to_token_indexs_cpu[self._req.req_idx]
-
     def collect_prompt_logprobs(self) -> Optional[Tuple[np.ndarray, np.ndarray]]:
         """从 PromptLogprobsCaptureManager 提取 ``prompt_logprobs>0`` 的 top-k。
 
@@ -171,7 +165,7 @@ class FinalTokenMetadataExt:
             return None
 
         mgr = PromptLogprobsCaptureManager.get_instance()
-        mem_indexes = self._mem_indexes()[: req.shm_req.input_len - 1]
+        mem_indexes = req.token_index.get_cpu_token_indexes(0, req.shm_req.input_len - 1)
         return mgr.extract(mem_indexes, topk)
 
     def collect_routed_experts(self) -> Optional[np.ndarray]:
@@ -183,7 +177,7 @@ class FinalTokenMetadataExt:
         if capture_len <= 0:
             return None
 
-        mem_indexes = self._mem_indexes()[0:capture_len]
+        mem_indexes = req.token_index.get_cpu_token_indexes(0, capture_len)
         return MoeRouteInfoManager.get_instance().extract(mem_indexes)
 
     def dump(self) -> None:

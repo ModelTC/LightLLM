@@ -112,26 +112,17 @@ class MultiLevelKvCacheModule(object):
                         # g_infer_context.get_overlap_stream().synchronize()
 
                     mem_manager = self.backend.model.mem_manager
-                    req_manager = self.backend.model.req_manager
-
                     page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu", pin_memory=True).cuda(
                         non_blocking=True
                     )
-                    # hybrid 页面加载必须按完整 page 处理，否则可能缺失恢复运行态所需的 checkpoint，所以
-                    # 这里需要进行pad操作，使操作的页面是完整的。
+                    # hybrid 加载区间必须覆盖完整缓存页，包含恢复运行态所需的 checkpoint。
                     _start = page_len_start_list[ready_page_num]
 
                     _end = req.hold_kv_len
                     assert 0 <= _start <= req.cur_kv_len <= _end, f"invalid pad range [{_start}, {_end}]"
-                    # 借用已有 GPU 索引表，避免为加载临时分配索引显存；旧前缀和新分配的
-                    # 索引从 pinned CPU 镜像一次上传，copy_ 与 KV 加载在当前流上按序执行。
-                    # 风险：加载完成前须保持 CPU 索引不变、请求槽位有效，且不能有其他流
-                    # 冲突访问此区间；修改初始化或流调度时需重新检查依赖，不能只依赖写入相同值。
-                    # 此处不更新推理流的上传进度。
-                    mem_indexes_cuda = req_manager.req_to_token_indexs[req.req_idx, _start:_end]
-                    mem_indexes_cuda.copy_(
-                        req_manager.req_to_token_indexs_cpu[req.req_idx, _start:_end], non_blocking=True
-                    )
+                    # 索引准备与 KV 加载都在默认流，按提交顺序即可保证索引就绪。
+                    # 纯 GPU 模式直接借用请求表；请求槽位在 KV 加载完成前保持有效。
+                    mem_indexes_cuda = req.token_index.get_gpu_token_indexes(_start, _end)
 
                     assert (
                         len(mem_indexes_cuda) == page_len_list[len(page_list) - 1] - page_len_start_list[ready_page_num]
@@ -283,16 +274,9 @@ class MultiLevelKvCacheModule(object):
 
             move_token_num = page_len_list[item_size - 1]
             assert req.cur_kv_len >= move_token_num
-            req_manager = self.backend.model.req_manager
-            # 借用已有 GPU 索引表作为 offload 输入，避免 .cuda() 额外分配临时索引显存。
-            # 风险警告：此处跨流借用推理索引表，“写入相同值”不能替代同步保证。
-            # 安全性依赖结束请求的延迟清理，确保此前的推理访问已结束；CPU 索引前缀在
-            # 上传期间必须保持不变，卸载完成事件确认前不得释放 KV 或复用 req_idx。
-            # copy_ 与 offload 在同一卸载流上按序执行；这里只借用表，不更新推理流的上传进度。
-            # 后续若用于运行中请求、前缀重映射，或修改 abort/清理/流调度逻辑，必须重新
-            # 检查跨流依赖，必要时增加事件等待或改用卸载流独立暂存区，请谨慎修改。
-            token_indexes = req_manager.req_to_token_indexs[req.req_idx, :move_token_num]
-            token_indexes.copy_(req_manager.req_to_token_indexs_cpu[req.req_idx, :move_token_num], non_blocking=True)
+            # getter 在请求索引流准备数据，并让当前卸载流等待，无需调用方额外同步。
+            token_indexes = req.token_index.get_gpu_token_indexes(0, move_token_num)
+            # 请求的 KV 和 req_idx 仍由卸载任务持有，直到下面的完成事件确认后才释放。
 
             mem_manager = self.backend.model.mem_manager
 
@@ -304,7 +288,7 @@ class MultiLevelKvCacheModule(object):
                 req=req,
             )
 
-            # 这个操作只是为了在offload 对应的cuda stream中，同步标记下对应的kv cache offload 操作已经完成，
+            # 多 DP rank 先在卸载流会合，再记录任务完成事件，供后续确认请求可释放。
             if self.backend.dp_world_size > 1:
                 dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
 

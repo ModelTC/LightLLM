@@ -23,9 +23,8 @@ class DPKVSharedMoudle:
 
         self.backend: DPChunkedPrefillBackend = backend
         self.max_req_num = max_req_num
-        self.copy_stream = torch.cuda.Stream()
 
-        # 0 代表 kv_len, 1 代表 radix_cache_len
+        # 每个请求、DP rank 对应两列：kv_len 和 req_idx。
         self.shared_req_infos = ShmArray(
             name="dp_shared_req_infos",
             shape=(self.max_req_num, dp_size_in_node, 2),
@@ -39,15 +38,11 @@ class DPKVSharedMoudle:
         """
         填充请求的 kv 信息到共享内存中
         """
-        # 所有 TP rank 先发布 CPU 索引，确保其他 DP rank 读取 GPU 表时数据已经就绪。
-        current_stream = torch.cuda.current_stream()
-        # 常规索引上传使用 overlap stream，本次上传需排在此前的索引更新之后。
-        self.copy_stream.wait_stream(g_infer_context.get_overlap_stream())
-        with torch.cuda.stream(self.copy_stream):
-            self.backend._copy_req_token_indexes_to_gpu(reqs)
-        current_stream.wait_stream(self.copy_stream)
-        # 同步 NCCL barrier 会等待当前流完成，保证其他 rank 读取到已上传的索引。
-        # TODO: 分析传输流依赖及 NCCL barrier 等待对 DP shared 并行效率的影响。
+        # 请求索引统一在默认流维护，原生 batch 的默认流适配由拷贝封装处理。
+        # DP 发布复用统一入口，不另建索引流或逐请求事件。
+        self.backend._copy_req_token_indexes_to_gpu(reqs)
+        # 同步 NCCL barrier 会等待默认流上排入的上传依赖完成；所有 TP rank
+        # 到达此屏障后，其他 DP rank 才能读取已发布的 GPU 索引和共享请求元数据。
         dist.barrier(group=self.backend.node_nccl_group)
         if self.backend.is_master_in_dp:
             self.shared_req_infos.arr[0 : len(reqs), self.dp_rank_in_node, self._KV_LEN_INDEX] = [
@@ -132,7 +127,6 @@ class DPKVSharedMoudle:
                 dp_size_in_node=self.backend.dp_size_in_node,
                 rank_in_dp=self.backend.rank_in_dp,
             )
-            self.backend.logger.info(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {len(mem_indexes_tensor)}")
 
         for trans_task in trans_tasks:
             trans_task.req.cur_kv_len += len(trans_task.mem_indexes)

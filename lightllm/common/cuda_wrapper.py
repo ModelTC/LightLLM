@@ -16,13 +16,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""This file is a pure Python wrapper for the cudart library.
-It avoids the need to compile a separate shared library, and is
-convenient for use when we just need to call a few functions.
-"""
+"""Python cudart wrapper with asynchronous pinned-source lifetime management."""
 
 import ctypes
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
+from threading import Lock
 from typing import Any, Dict, List, Optional
 
 # this line makes it possible to directly load `libcudart.so` using `ctypes`
@@ -38,48 +37,125 @@ logger = init_logger(__name__)
 
 cudaError_t = ctypes.c_int
 cudaMemcpyKind = ctypes.c_int
-_cuda_memcpy_batch_available = True
 
 
-def cuda_memcpy_pinned_h2d_batch_async(dst_gpu_tensors: List[torch.Tensor], src_pinned_tensors: List[torch.Tensor]):
-    """在当前非默认流上，将 pinned CPU Tensor 批量异步拷贝到 GPU Tensor，仅支持 H2D。
+class PinnedH2DBatchCopier:
+    """每个推理进程共享批量 H2D 状态，统一管理异步源保活与异常回退。"""
 
-    使用 Stream 模式；调用方保证源为 pinned 内存、目标在当前 CUDA 设备上，
-    各对 Tensor 连续且形状和 dtype 一致，并保持源数据有效且不变直到传输完成。
-    """
-    global _cuda_memcpy_batch_available
+    _native_batch_available = True
+    # 原生 batch 禁止 legacy 默认流，仅在默认流调用时按设备延迟创建上传流。
+    _upload_streams: Dict[torch.device, torch.cuda.Stream] = {}
+    # 只在原生 H2D 成功提交、需要后台保活时创建线程池，导入和 copy_ 回退均不创建。
+    _release_pool: Optional[ThreadPoolExecutor] = None
+    _release_pool_lock = Lock()
 
-    if not dst_gpu_tensors:
-        return
-    stream = torch.cuda.current_stream()
-    # CUDA 批量拷贝接口明确禁止使用 legacy 默认流（句柄为 0）。
-    # 在异常回退前检查，避免默认流调用错误被吞掉并关闭全局 batch 开关。
-    assert stream.cuda_stream != 0, "cuda_memcpy_pinned_h2d_batch_async 必须在非默认 CUDA 流上调用"
+    @classmethod
+    def copy_async(cls, dst_gpu_tensors: List[torch.Tensor], src_pinned_tensors: List[torch.Tensor]):
+        """按当前流顺序批量异步 H2D，并保护 pinned 源直到传输结束。
 
-    if _cuda_memcpy_batch_available:
+        源由 PyTorch pinned allocator 申请，各对 Tensor 连续且形状和 dtype 一致。
+        默认流的原生 batch 适配封装在内部；调用方只遵循当前流顺序，不阻塞 CPU。
+        上传完成前不能主动改写源，目标须保持有效到传输结束。
+        """
+        if not dst_gpu_tensors:
+            return
+        stream = torch.cuda.current_stream()
+        if cls._native_batch_available and stream.cuda_stream == 0:
+            # 原生 API 不接受 legacy 默认流；上传流先等待当前流，提交后再交回依赖。
+            upload_stream = cls._get_upload_stream(stream.device)
+            upload_stream.wait_stream(stream)
+            with torch.cuda.stream(upload_stream):
+                cls._copy_on_stream(dst_gpu_tensors, src_pinned_tensors, upload_stream)
+            stream.wait_stream(upload_stream)
+        else:
+            cls._copy_on_stream(dst_gpu_tensors, src_pinned_tensors, stream)
+
+    @classmethod
+    def _get_upload_stream(cls, device: torch.device) -> torch.cuda.Stream:
+        if device not in cls._upload_streams:
+            cls._upload_streams[device] = torch.cuda.Stream(device=device)
+        return cls._upload_streams[device]
+
+    @classmethod
+    def _copy_on_stream(
+        cls, dst_gpu_tensors: List[torch.Tensor], src_pinned_tensors: List[torch.Tensor], stream: torch.cuda.Stream
+    ):
+        """在已选定的当前流提交，沿用原生保活和 PyTorch 回退。"""
+        if cls._native_batch_available and cls._try_native_batch_h2d(dst_gpu_tensors, src_pinned_tensors, stream):
+            cls._protect_pinned_sources(src_pinned_tensors, stream)
+            return
+
+        # PyTorch copy_ 已经登记 host allocator，回退路径无需额外保活或登记。
+        for dst, src in zip(dst_gpu_tensors, src_pinned_tensors):
+            dst.copy_(src, non_blocking=True)
+
+    @classmethod
+    def _try_native_batch_h2d(
+        cls, dst_gpu_tensors: List[torch.Tensor], src_pinned_tensors: List[torch.Tensor], stream: torch.cuda.Stream
+    ) -> bool:
+        """尝试原生批量提交；接口准备或提交失败时禁用该路径，让调用方回退到 copy_。"""
         try:
             from cuda.bindings import runtime as cuda_runtime
 
             attrs = cuda_runtime.cudaMemcpyAttributes()
-            # 使用 Stream 模式，让源数据读取遵循当前流顺序。
-            # 调用方需保持源数据有效且不变，直到传输完成。
+            # Stream 模式让源读取遵循上传流顺序；提交成功后由完成事件和后台任务保活。
             attrs.srcAccessOrder = cuda_runtime.cudaMemcpySrcAccessOrder.cudaMemcpySrcAccessOrderStream
             dst_ptrs = [tensor.data_ptr() for tensor in dst_gpu_tensors]
             src_ptrs = [tensor.data_ptr() for tensor in src_pinned_tensors]
             byte_sizes = [tensor.numel() * tensor.element_size() for tensor in src_pinned_tensors]
-            (error,) = cuda_runtime.cudaMemcpyBatchAsync(
-                dst_ptrs, src_ptrs, byte_sizes, len(byte_sizes), [attrs], [0], 1, stream.cuda_stream
+            batch_copy = cuda_runtime.cudaMemcpyBatchAsync
+        except Exception as error:
+            cls._native_batch_available = False
+            logger.warning(
+                "Native batch H2D API unavailable; "
+                f"disabling native batch copy and falling back to PyTorch copy_: {error}"
             )
+            return False
+
+        try:
+            (error,) = batch_copy(dst_ptrs, src_ptrs, byte_sizes, len(byte_sizes), [attrs], [0], 1, stream.cuda_stream)
             if error != cuda_runtime.cudaError_t.cudaSuccess:
                 raise RuntimeError(f"cudaMemcpyBatchAsync failed: {error.name}")
         except Exception as error:
-            _cuda_memcpy_batch_available = False
-            logger.warning(f"Disabling CUDA batch copies; falling back to individual copies: {error}")
-        else:
-            return
+            cls._native_batch_available = False
+            logger.warning(
+                "Native batch H2D submission failed; "
+                f"disabling native batch copy and falling back to PyTorch copy_: {error}"
+            )
+            return False
+        return True
 
-    for dst, src in zip(dst_gpu_tensors, src_pinned_tensors):
-        dst.copy_(src, non_blocking=True)
+    @classmethod
+    def _protect_pinned_sources(cls, src_pinned_tensors: List[torch.Tensor], stream: torch.cuda.Stream):
+        """每批 raw H2D 在上传流记录一个完成事件，由复用线程池接管源 Tensor 引用。"""
+        # blocking=True 让后台线程休眠等待；Event.synchronize 会释放 GIL，不阻塞主推理线程。
+        # 事件排在 raw batch 之后，覆盖此前所有源读取；调用方的 wait_stream 负责 GPU 数据依赖。
+        event = torch.cuda.Event(blocking=True)
+        event.record(stream)
+        # 必须复制容器：调用方可能立即清空自己的列表，切片本身仍持有整块 pinned storage。
+        cls._get_release_pool().submit(cls._wait_and_release_pinned_sources, event, list(src_pinned_tensors))
+
+    @classmethod
+    def _get_release_pool(cls) -> ThreadPoolExecutor:
+        if cls._release_pool is None:
+            # 首次创建加锁，避免多个提交线程同时建立等待线程池；后续调用直接复用。
+            with cls._release_pool_lock:
+                if cls._release_pool is None:
+                    cls._release_pool = ThreadPoolExecutor(max_workers=1, thread_name_prefix="lightllm-pinned-release")
+        return cls._release_pool
+
+    @classmethod
+    def _wait_and_release_pinned_sources(cls, event: torch.cuda.Event, sources: List[torch.Tensor]):
+        """只管理 CPU 源的生命周期，不修改请求状态，也不向流提交新的 GPU 工作。"""
+        event.synchronize()
+        # 普通工作线程可安全释放 Tensor；不受 CUDA host callback 禁止调用 CUDA API 的限制。
+        # 不把 sources 返回给 Future，避免任务结束后仍被结果对象持有。
+        sources.clear()
+
+
+def cuda_memcpy_pinned_h2d_batch_async(dst_gpu_tensors: List[torch.Tensor], src_pinned_tensors: List[torch.Tensor]):
+    """按当前流顺序批量异步 H2D，默认流适配、源内存保活和回退由封装统一管理。"""
+    PinnedH2DBatchCopier.copy_async(dst_gpu_tensors, src_pinned_tensors)
 
 
 class cudaIpcMemHandle_t(ctypes.Structure):

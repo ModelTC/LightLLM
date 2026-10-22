@@ -10,6 +10,7 @@ from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
 from lightllm.server.router.model_infer.mode_backend import base_backend
+from unit_tests.common.cpu_index_helpers import make_cpu_index_manager, bind_cpu_indexes
 
 
 def _make_req_with_cached_prefix(monkeypatch, prompt_logprobs, disable_prompt_cache=False, hybrid=False):
@@ -22,7 +23,7 @@ def _make_req_with_cached_prefix(monkeypatch, prompt_logprobs, disable_prompt_ca
     req.args = SimpleNamespace(
         page_size=2, linear_att_hash_page_size=2, linear_att_page_block_num=2, max_req_total_len=16
     )
-    req.cur_kv_len = req.hold_kv_len = req.move_to_gpu_index_len = 0
+    req.cur_kv_len = req.hold_kv_len = 0
     req.shared_kv_node = req.tail_small_page_buffer_id = None
     req.shm_req = SimpleNamespace(
         sample_params=sample_params,
@@ -35,11 +36,13 @@ def _make_req_with_cached_prefix(monkeypatch, prompt_logprobs, disable_prompt_ca
     req.get_cur_total_len = lambda: 6
     node = SimpleNamespace(node_prefix_total_len=4, big_page_buffer_idx=0, is_big_page_node=lambda: True)
     match_prefix = Mock(return_value=(node, 4, torch.arange(4, dtype=torch.int32)))
-    manager = SimpleNamespace(
-        req_to_token_indexs_cpu=torch.zeros((1, 8), dtype=torch.int32),
+    manager = make_cpu_index_manager(
+        token_table=torch.zeros((1, 8), dtype=torch.int32),
         restore_big_page_state=Mock(),
         init_hybrid_attention_state=Mock(),
+        page_size=2,
     )
+    bind_cpu_indexes(req, manager)
     monkeypatch.setattr(
         infer_batch,
         "g_infer_context",
@@ -100,3 +103,27 @@ def test_cached_prompt_still_captures_logprobs_for_every_prompt_position(monkeyp
         captured = capture_manager.capture.call_args.kwargs
         assert captured["mem_indexes"].tolist() == list(range(5))
         assert captured["top_token_ids"].shape == captured["top_logprobs"].shape == (5, prompt_logprobs)
+
+
+@pytest.mark.parametrize("kind", ["prompt_logprobs", "routed_experts"])
+def test_final_metadata_extracts_owned_token_indexes_through_req_helper(monkeypatch, kind):
+    from lightllm.server.router.model_infer import infer_req_ext
+
+    req, _ = _make_req_with_cached_prefix(monkeypatch, prompt_logprobs=3)
+    req.cur_kv_len = 6
+    req.cur_output_len = 0
+    req.token_index.append_token_indexes(torch.tensor([8, 9, 2, 3, 14, 15], dtype=torch.int32))
+    manager = SimpleNamespace(extract=Mock(return_value="metadata"))
+    metadata = infer_req_ext.FinalTokenMetadataExt(req)
+    if kind == "prompt_logprobs":
+        monkeypatch.setattr(infer_req_ext.PromptLogprobsCaptureManager, "get_instance", lambda: manager)
+        result = metadata.collect_prompt_logprobs()
+    else:
+        monkeypatch.setattr(infer_req_ext.MoeRouteInfoManager, "get_instance", lambda: manager)
+        result = metadata.collect_routed_experts()
+    assert result == "metadata"
+    indexes = manager.extract.call_args.args[0]
+    assert indexes.tolist() == [8, 9, 2, 3, 14]
+    req.token_index.reset()
+    req.token_index.append_token_indexes(torch.arange(6, dtype=torch.int32))
+    assert indexes.tolist() == [8, 9, 2, 3, 14]

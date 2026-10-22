@@ -47,7 +47,7 @@ class MemoryManager:
         self.page_size = get_env_start_args().page_size
         self.size = self.size // self.page_size * self.page_size
 
-        self.allocator = KvCacheAllocator(self.size)
+        self.allocator = KvCacheAllocator(self.size, page_size=self.page_size)
 
         self._init_buffers(
             self.size,

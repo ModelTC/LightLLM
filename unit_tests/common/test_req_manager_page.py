@@ -8,6 +8,7 @@ from lightllm.common.req_manager import ReqManager
 from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
 from lightllm.server.router.model_infer.mode_backend import base_backend
+from unit_tests.common.cpu_index_helpers import make_cpu_index_manager, bind_cpu_indexes
 
 
 class _FakeMemManager:
@@ -28,15 +29,15 @@ def test_bind_mem_manager_initializes_hold_request_with_reserved_page():
     req_manager = ReqManager.__new__(ReqManager)
     req_manager.HOLD_REQUEST_ID = 2
     req_manager.req_list = SimpleNamespace(is_all_free=lambda: True)
-    req_manager.req_to_token_indexs_cpu = torch.full((3, 8), -1, dtype=torch.int32)
+    req_manager.page_size = 4
     req_manager.req_to_token_indexs = torch.full((3, 8), -1, dtype=torch.int32)
     mem_manager = SimpleNamespace(page_size=4, HOLD_TOKEN_MEMINDEXES=(100, 101, 102, 103))
 
     req_manager.bind_mem_manager(mem_manager)
 
     assert req_manager.mem_manager is mem_manager
-    assert req_manager.req_to_token_indexs_cpu[2].tolist() == [100, 101, 102, 103] * 2
-    assert req_manager.req_to_token_indexs_cpu[:2].eq(-1).all()
+    assert req_manager.req_to_token_indexs[2].tolist() == [100, 101, 102, 103] * 2
+    assert req_manager.req_to_token_indexs[:2].eq(-1).all()
 
 
 def test_hold_request_indexes_require_all_requests_released():
@@ -49,11 +50,10 @@ def test_hold_request_indexes_require_all_requests_released():
 
 def _make_context(monkeypatch):
     mem_manager = _FakeMemManager()
-    req_manager = ReqManager.__new__(ReqManager)
+    req_manager = make_cpu_index_manager(torch.full((2, 16), -1, dtype=torch.int32), page_size=4)
     req_manager.mem_manager = mem_manager
     req_manager.max_request_num = 2
-    req_manager.req_to_token_indexs_cpu = torch.full((2, 16), -1, dtype=torch.int32)
-    req_manager.req_to_token_indexs = torch.full((2, 16), -1, dtype=torch.int32)
+    req_manager.page_size = 4
 
     context = SimpleNamespace(
         args=SimpleNamespace(page_size=4),
@@ -63,23 +63,27 @@ def _make_context(monkeypatch):
     )
     monkeypatch.setattr(generic_pre_process, "g_infer_context", context)
     monkeypatch.setattr(base_backend, "g_infer_context", context)
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
     backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
     backend.args = context.args
 
     def copy_indexes(run_reqs):
         for req in run_reqs:
-            start, end = req.move_to_gpu_index_len, req.hold_kv_len
+            start, end = req.token_index.gpu_index_submitted_len, req.hold_kv_len
             req_manager.req_to_token_indexs[req.req_idx, start:end].copy_(
-                req_manager.req_to_token_indexs_cpu[req.req_idx, start:end]
+                req.token_index.get_cpu_token_indexes(start, end)
             )
-            req.move_to_gpu_index_len = end
+            req.token_index.gpu_index_submitted_len = end
 
     backend._copy_req_token_indexes_to_gpu = copy_indexes
     return context, backend
 
 
 def _make_req(req_idx):
-    req = SimpleNamespace(req_idx=req_idx, cur_kv_len=0, hold_kv_len=0, move_to_gpu_index_len=0)
+    req = InferReq.__new__(InferReq)
+    req.req_idx = req_idx
+    bind_cpu_indexes(req, infer_batch.g_infer_context.req_manager)
+    req.cur_kv_len = req.hold_kv_len = 0
     req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
     return req
 
@@ -92,7 +96,7 @@ def test_request_reuses_reserved_page_tail_before_allocating_next_page(monkeypat
     assert mem_indexes.tolist() == [0, 1, 2, 3]
     assert req.hold_kv_len == 4
     assert context.req_manager.mem_manager.alloc_sizes == [4]
-    assert context.req_manager.req_to_token_indexs_cpu[0, :4].tolist() == [0, 1, 2, 3]
+    assert context.req_manager.get_cpu_token_indexes(0, 0, 4).tolist() == [0, 1, 2, 3]
 
     req.cur_kv_len = 3
     assert backend._alloc_req_kv_mem(req, alloc_token_num=0) is None
@@ -102,7 +106,7 @@ def test_request_reuses_reserved_page_tail_before_allocating_next_page(monkeypat
     backend._alloc_req_kv_mem(req, alloc_token_num=4)
     assert req.hold_kv_len == 8
     assert context.req_manager.mem_manager.alloc_sizes == [4, 4]
-    assert context.req_manager.req_to_token_indexs_cpu[0, :8].tolist() == list(range(8))
+    assert context.req_manager.get_cpu_token_indexes(0, 0, 8).tolist() == list(range(8))
 
 
 def test_reservation_fills_each_request_table_row(monkeypatch):
@@ -113,8 +117,8 @@ def test_reservation_fills_each_request_table_row(monkeypatch):
     backend._alloc_req_kv_mem(req0, alloc_token_num=4)
     backend._alloc_req_kv_mem(req1, alloc_token_num=4)
 
-    assert generic_pre_process.g_infer_context.req_manager.req_to_token_indexs_cpu[0, :4].tolist() == [0, 1, 2, 3]
-    assert generic_pre_process.g_infer_context.req_manager.req_to_token_indexs_cpu[1, :4].tolist() == [4, 5, 6, 7]
+    assert generic_pre_process.g_infer_context.req_manager.get_cpu_token_indexes(0, 0, 4).tolist() == [0, 1, 2, 3]
+    assert generic_pre_process.g_infer_context.req_manager.get_cpu_token_indexes(1, 0, 4).tolist() == [4, 5, 6, 7]
     assert req0.hold_kv_len == req1.hold_kv_len == 4
 
 
@@ -125,9 +129,9 @@ def test_alloc_req_kv_mem_defers_gpu_table_update(monkeypatch):
     backend._alloc_req_kv_mem(req, alloc_token_num=4)
     backend._alloc_req_kv_mem(req, alloc_token_num=4)
 
-    assert context.req_manager.req_to_token_indexs_cpu[0, :8].tolist() == list(range(8))
+    assert context.req_manager.get_cpu_token_indexes(0, 0, 8).tolist() == list(range(8))
     assert context.req_manager.req_to_token_indexs.eq(-1).all()
-    assert req.move_to_gpu_index_len == 0
+    assert req.token_index.gpu_index_submitted_len == 0
 
 
 def test_need_token_num_distinguishes_compute_and_page_allocation():
@@ -199,8 +203,8 @@ def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
         req.get_chuncked_input_token_len = lambda: 6
         req.prefill_need_token_num = MethodType(InferReq.prefill_need_token_num, req)
         start_index = req.req_idx * hold_kv_len
-        context.req_manager.req_to_token_indexs_cpu[req.req_idx, :hold_kv_len] = torch.arange(
-            start_index, start_index + hold_kv_len, dtype=torch.int32
+        context.req_manager.append_token_indexes(
+            req.req_idx, torch.arange(start_index, start_index + hold_kv_len, dtype=torch.int32)
         )
     context.req_manager.mem_manager.next_index = 2 * hold_kv_len
     backend._filter_not_ready_reqs = lambda req_ids: reqs
@@ -243,7 +247,7 @@ def test_decode_scheduler_reserves_cpu_request_table(monkeypatch):
     req.finish_status = infer_batch.FinishStatus()
     req.get_cur_total_len = lambda: 5
     req.decode_need_token_num = MethodType(InferReq.decode_need_token_num, req)
-    context.req_manager.req_to_token_indexs_cpu[0, :4] = torch.arange(4, dtype=torch.int32)
+    context.req_manager.append_token_indexes(0, torch.arange(4, dtype=torch.int32))
     context.req_manager.mem_manager.next_index = 4
     backend._filter_not_ready_reqs = lambda req_ids: [req]
 
@@ -264,7 +268,8 @@ def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_step
 ):
     context, backend = _make_context(monkeypatch)
     context.args.page_size = page_size
-    context.req_manager.req_to_token_indexs_cpu = torch.full((2, 64), -1, dtype=torch.int32)
+    context.req_manager.page_size = page_size
+    context.req_manager.token_indexes_cpu = torch.full((2, (64 + page_size - 1) // page_size), -1, dtype=torch.int32)
     context.req_manager.req_to_token_indexs = torch.full((2, 64), -1, dtype=torch.int32)
     backend.args.enable_cpu_cache = False
     backend.args.enable_prefill_decode_mixed = False
@@ -292,7 +297,7 @@ def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_step
     req.finish_status = infer_batch.FinishStatus()
     req.get_cur_total_len = lambda: req.cur_kv_len + 1
     req.decode_need_token_num = MethodType(InferReq.decode_need_token_num, req)
-    context.req_manager.req_to_token_indexs_cpu[0, :page_size] = torch.arange(page_size, dtype=torch.int32)
+    context.req_manager.append_token_indexes(0, torch.arange(page_size, dtype=torch.int32))
     context.req_manager.mem_manager.next_index = page_size
     backend._filter_not_ready_reqs = lambda req_ids: [req]
 
@@ -317,7 +322,7 @@ def test_decode_reserves_mtp_headroom(monkeypatch):
     req.get_radix_cache_shared_len = lambda: 0
     req.args = context.args
 
-    context.req_manager.req_to_token_indexs_cpu[0, :4] = torch.arange(4, dtype=torch.int32)
+    context.req_manager.append_token_indexes(0, torch.arange(4, dtype=torch.int32))
     context.req_manager.mem_manager.next_index = 4
     token_num, alloc_token_num = InferReq.decode_need_token_num(req)
     assert token_num == 6
@@ -330,12 +335,14 @@ def test_decode_reserves_mtp_headroom(monkeypatch):
     assert model_input.b_seq_len.tolist() == [4, 5, 6]
     assert req.hold_kv_len == 12
     assert context.req_manager.mem_manager.alloc_sizes == [8]
-    assert context.req_manager.req_to_token_indexs_cpu[0, :12].tolist() == list(range(12))
+    assert context.req_manager.get_cpu_token_indexes(0, 0, 12).tolist() == list(range(12))
 
 
 def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
     context, backend = _make_context(monkeypatch)
     context.args.page_size = 1
+    context.req_manager.page_size = 1
+    context.req_manager.token_indexes_cpu = torch.full((2, 16), -1, dtype=torch.int32)
     req = _make_req(0)
     req.cur_kv_len = 3
     req.hold_kv_len = 3
@@ -345,7 +352,7 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
     req.get_cur_total_len = lambda: 4
     req.get_radix_cache_shared_len = lambda: 0
     req.args = context.args
-    context.req_manager.req_to_token_indexs_cpu[0, :3] = torch.arange(3, dtype=torch.int32)
+    context.req_manager.append_token_indexes(0, torch.arange(3, dtype=torch.int32))
     context.req_manager.mem_manager.next_index = 3
     token_num, alloc_token_num = InferReq.decode_need_token_num(req)
     assert token_num == alloc_token_num == 6
@@ -355,33 +362,39 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
 
     assert req.hold_kv_len == 9
     assert context.req_manager.mem_manager.alloc_sizes == [6]
-    assert context.req_manager.req_to_token_indexs_cpu[0, :9].tolist() == list(range(9))
+    assert context.req_manager.get_cpu_token_indexes(0, 0, 9).tolist() == list(range(9))
 
 
 def test_page_size_one_frees_all_preallocated_indexes():
     infer_context = InferenceContext.__new__(InferenceContext)
     infer_context.args = SimpleNamespace(page_size=1)
     infer_context.radix_cache = None
-    infer_context.req_manager = SimpleNamespace(req_to_token_indexs_cpu=torch.arange(16, dtype=torch.int32)[None, :])
+    infer_context.req_manager = make_cpu_index_manager(
+        token_table=torch.arange(16, dtype=torch.int32)[None, :], page_size=1
+    )
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=3,
         hold_kv_len=12,
         shm_req=SimpleNamespace(shm_cur_kv_len=3),
     )
+    bind_cpu_indexes(req, infer_context.req_manager)
     free_token_indexes = []
 
     infer_context.free_a_req_mem(free_token_indexes, req)
 
     assert free_token_indexes[0].tolist() == list(range(12))
     assert req.cur_kv_len == req.hold_kv_len == 0
+    assert req.token_index.token_index_len == req.token_index.gpu_index_submitted_len == 0
 
 
 def test_linear_attention_frees_reserved_page_tail(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
     infer_context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
     infer_context.radix_cache = SimpleNamespace()
-    infer_context.req_manager = SimpleNamespace(req_to_token_indexs_cpu=torch.arange(16, dtype=torch.int32)[None, :])
+    infer_context.req_manager = make_cpu_index_manager(
+        token_table=torch.arange(16, dtype=torch.int32)[None, :], page_size=1
+    )
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=5,
@@ -391,6 +404,7 @@ def test_linear_attention_frees_reserved_page_tail(monkeypatch):
         hybrid_len_to_big_page_id={},
         shared_kv_node=None,
     )
+    bind_cpu_indexes(req, infer_context.req_manager)
     free_token_indexes = []
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: infer_context.args)
@@ -404,7 +418,9 @@ def test_linear_attention_frees_preallocated_pages_before_first_forward(monkeypa
     infer_context = InferenceContext.__new__(InferenceContext)
     infer_context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
     infer_context.radix_cache = SimpleNamespace()
-    infer_context.req_manager = SimpleNamespace(req_to_token_indexs_cpu=torch.arange(8, dtype=torch.int32)[None, :])
+    infer_context.req_manager = make_cpu_index_manager(
+        token_table=torch.arange(8, dtype=torch.int32)[None, :], page_size=1
+    )
     req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=0,
@@ -414,6 +430,7 @@ def test_linear_attention_frees_preallocated_pages_before_first_forward(monkeypa
         hybrid_len_to_big_page_id={},
         shared_kv_node=None,
     )
+    bind_cpu_indexes(req, infer_context.req_manager)
     free_token_indexes = []
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: infer_context.args)
@@ -433,7 +450,6 @@ def _make_paused_req(req_idx, target_kv_len, page_size, match_kv_len=0, chunk_kv
         cur_kv_len=0,
         hold_kv_len=0,
         paused=True,
-        move_to_gpu_index_len=0,
         match_call_count=0,
         shared_kv_node=None,
         shm_req=SimpleNamespace(is_paused=True, shm_cur_kv_len=0),
@@ -459,9 +475,10 @@ def test_recover_paused_reqs_uses_page_allocation_need(monkeypatch):
     infer_context.backend = SimpleNamespace(disable_chunked_prefill=False)
     infer_context.radix_cache = None
     freed_indexes = []
-    infer_context.req_manager = SimpleNamespace(
-        req_to_token_indexs_cpu=torch.arange(16, dtype=torch.int32).reshape(2, 8),
+    infer_context.req_manager = make_cpu_index_manager(
+        token_table=torch.arange(16, dtype=torch.int32).reshape(2, 8),
         free_token=lambda indexes: freed_indexes.extend(indexes.tolist()),
+        page_size=1,
     )
     infer_context.get_can_alloc_token_num = lambda: 5
     large_req = _make_paused_req(req_idx=0, target_kv_len=5, page_size=4)
@@ -483,9 +500,8 @@ def test_recover_paused_reqs_requires_capacity_for_the_full_sequence(monkeypatch
     infer_context = InferenceContext.__new__(InferenceContext)
     infer_context.args = SimpleNamespace(page_size=4)
     infer_context.radix_cache = None
-    infer_context.req_manager = SimpleNamespace(
-        req_to_token_indexs_cpu=torch.arange(8, dtype=torch.int32)[None, :],
-        free_token=lambda indexes: None,
+    infer_context.req_manager = make_cpu_index_manager(
+        token_table=torch.arange(8, dtype=torch.int32)[None, :], free_token=lambda indexes: None, page_size=1
     )
     infer_context.get_can_alloc_token_num = lambda: 4
     req = _make_paused_req(req_idx=0, target_kv_len=8, page_size=4, chunk_kv_len=4)
