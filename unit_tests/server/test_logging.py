@@ -144,3 +144,48 @@ def test_unsafe_client_request_ids_are_replaced(value):
     request_id = new_http_request_id([(b"x-request-id", value)])
     assert len(request_id) == 32
     int(request_id, 16)
+
+
+@pytest.mark.parametrize("mode", ["normal", "prefill", "decode", "pd_master", "config_server"])
+def test_launchers_monitor_the_bound_http_process_before_supervision(monkeypatch, mode):
+    from types import SimpleNamespace
+    from unittest.mock import call
+    from lightllm.server import api_start
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    args = StartArgs(run_mode=mode, model_dir="unused", health_monitor=False)
+    manager = Mock()
+    monkeypatch.setattr(api_start, "process_manager", manager)
+    monkeypatch.setattr(api_start, "_launch_subprocesses", lambda args: manager)
+    for name in (
+        "_set_envs_and_config",
+        "set_unique_server_name",
+        "auto_set_max_req_total_len",
+        "auto_set_response_parsers",
+        "validate_ports",
+        "set_env_start_args",
+        "log_startup_config",
+    ):
+        monkeypatch.setattr(api_start, name, Mock())
+    monkeypatch.setattr(
+        api_start, "get_shm_port_args", lambda **kwargs: SimpleNamespace(port=8001, config_server_port=9001)
+    )
+    monkeypatch.setattr(api_start, "_hypercorn_config_args", lambda args: [])
+    monkeypatch.setattr(api_start, "get_http_logging_args", lambda **kwargs: [])
+    process = Mock()
+    popen = Mock(return_value=process)
+    monkeypatch.setattr(api_start.subprocess, "Popen", popen)
+    launcher = (
+        api_start.pd_master_start
+        if mode == "pd_master"
+        else api_start.config_server_start
+        if mode == "config_server"
+        else api_start.normal_or_p_d_start
+    )
+    launcher(args)
+    popen.assert_called_once()
+    assert manager.mock_calls[-3:] == [
+        call.start_readiness_monitor(process, args),
+        call.setup_signal_handlers(process),
+        call.supervise_processes(process),
+    ]

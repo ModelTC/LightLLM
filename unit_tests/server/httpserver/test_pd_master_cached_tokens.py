@@ -1007,3 +1007,47 @@ def test_busy_before_first_token_logs_only_terminal_outcome(monkeypatch, mode):
         assert not manager.active_req_ids
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("retry_enabled", [False, True])
+def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypatch, retry_enabled):
+    import time
+    from unittest.mock import MagicMock
+    from lightllm.utils.error_utils import ServerBusyError
+
+    manager = _make_manager(monkeypatch)
+    manager.enable_pd_node_self_request_limit = retry_enabled
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.abort = AsyncMock()
+    summary = MagicMock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
+    request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
+    attempts = 0
+
+    async def raw_stream(_p, _d, _prompt, sp, *_args):
+        nonlocal attempts
+        attempts += 1
+        metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
+        if attempts == 1:
+            yield sp.group_request_id, "first", dict(metadata), FinishStatus()
+            yield sp.group_request_id, "", dict(metadata), FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY)
+        else:
+            raise ServerBusyError("segment busy before first token")
+
+    manager.fetch_pd_stream = raw_stream
+
+    async def consume():
+        return [item async for item in manager._generate_one("prompt", params, None, request, time.time(), 80, 10)]
+
+    async def run():
+        with pytest.raises(ServerBusyError):
+            await consume()
+        assert [call.kwargs["status"] for call in summary.call_args_list] == ["continued", "busy"]
+        assert attempts == 2
+        assert not manager._summary_states
+        assert not manager.active_req_ids
+
+    asyncio.run(run())

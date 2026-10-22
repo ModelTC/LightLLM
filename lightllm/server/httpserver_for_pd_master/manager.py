@@ -270,6 +270,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         has_yielded_result = False
 
         while True:
+            summary_state = {}
             try:
                 generator = self._generate_one_attempt(
                     prompt,
@@ -279,6 +280,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
                     start_time,
                     origin_request_id,
                     input_token_num,
+                    summary_state=summary_state,
                 )
                 async with aclosing(generator):
                     async for result in generator:
@@ -288,14 +290,14 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
             except ServerBusyError:
                 # 关闭节点自限流时，不启用与该策略配套的 busy 重试，直接透传异常。
                 if not self.enable_pd_node_self_request_limit:
-                    if not has_yielded_result:
+                    if not summary_state.get("logged"):
                         log_request_summary(origin_request_id, status="busy", timing_scope="end_to_end")
                     raise
 
                 # 已向客户端输出 token 后不能从头生成，否则会产生重复内容。
                 elapsed_seconds = time.monotonic() - retry_start_time
                 if has_yielded_result or elapsed_seconds >= self.pd_node_busy_retry_timeout_seconds:
-                    if not has_yielded_result:
+                    if not summary_state.get("logged"):
                         log_request_summary(origin_request_id, status="busy", timing_scope="end_to_end")
                     raise
 
@@ -322,6 +324,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         start_time: float,
         origin_request_id: int,
         input_token_num: int,
+        summary_state: Optional[dict] = None,
     ):
         """执行一次完整的单 choice 生成尝试。
 
@@ -334,7 +337,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
         d_node = None
         pending_prefill_load_chars = None
         results_generator = None
-        summary_state = {}
+        summary_state = summary_state if summary_state is not None else {}
         if not hasattr(self, "_summary_states"):
             self._summary_states = {}
         self.active_req_ids.add(origin_request_id)

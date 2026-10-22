@@ -271,3 +271,104 @@ def test_reward_prefill_counts_uncached_tokens_only_on_leader(monkeypatch, count
     events.notify_post_handle_and_wait_pre_post_handle.assert_called_once_with()
     events.notify_forward_and_wait_post_handle.assert_called_once_with()
     events.notify_pre_post_handle.assert_called_once_with()
+
+
+@pytest.mark.parametrize("tp_rank", [0, 1])
+def test_init_model_attaches_only_the_dp_leaders_counter_row(monkeypatch, counters, tp_rank):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    distributed = Mock()
+    monkeypatch.setattr(base_backend, "init_distributed_env", distributed)
+    ranks = {
+        "get_node_world_size": 4,
+        "get_current_rank_in_node": 2 + tp_rank,
+        "get_current_device_id": 2 + tp_rank,
+        "get_current_rank_in_dp": tp_rank,
+        "get_global_dp_rank": 1,
+        "get_dp_rank_in_node": 1,
+        "get_dp_world_size": 2,
+        "get_global_rank": 2 + tp_rank,
+        "get_global_world_size": 4,
+        "get_dp_size": 2,
+    }
+    for name, value in ranks.items():
+        monkeypatch.setattr(base_backend, name, lambda value=value: value)
+    monkeypatch.setattr(log_utils, "set_log_context", Mock())
+
+    class ModelSetupBoundary(Exception):
+        pass
+
+    monkeypatch.setattr(base_backend.dist_group_manager, "create_groups", Mock(side_effect=ModelSetupBoundary()))
+    worker = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
+    with pytest.raises(ModelSetupBoundary):
+        worker.init_model(
+            {
+                "args": StartArgs(dp=2),
+                "world_size": 4,
+                "load_way": "HF",
+                "weight_dir": "unused",
+                "max_total_token_num": 100,
+            }
+        )
+    distributed.assert_called_once()
+    assert worker.dp_rank_in_node == 1
+    if tp_rank == 0:
+        worker.engine_counters.add(7, 3)
+        assert counters.storage.arr.tolist() == [[0, 0], [7, 3]]
+    else:
+        assert worker.engine_counters is None
+        assert counters.totals() == (0, 0)
+
+
+@pytest.mark.parametrize("node_rank,dp_size", [(0, 1), (1, 1), (0, 2), (1, 2)])
+def test_router_statistics_wait_for_readiness_and_emit_once_per_node(monkeypatch, counters, node_rank, dp_size):
+    import asyncio
+    from lightllm.server.router import manager as router
+
+    now = [0.0]
+    clock = SimpleNamespace(monotonic=lambda: now[0])
+    for module in (router, engine_stats, log_utils):
+        monkeypatch.setattr(module, "time", clock)
+    monkeypatch.setattr(log_utils, "get_log_stats_interval", lambda: 10)
+    logger = Mock()
+    monkeypatch.setattr(router, "init_logger", lambda name: logger)
+    manager = router.RouterManager.__new__(router.RouterManager)
+    manager.engine_counters = counters
+    manager.running_batch = None
+    manager.req_queue = Mock()
+    manager.req_queue.get_wait_req_num.return_value = 2
+    manager.node_rank, manager.dp_size, manager.dp_size_in_node = node_rank, dp_size, dp_size
+    manager.max_total_token_num = 100
+    manager.get_used_tokens = lambda index: 10 * (index + 1)
+    manager.radix_cache_client = SimpleNamespace(get_unrefed_tokens_num=lambda index: 5 * (index + 1))
+    manager._get_paused_req_num = lambda: 1
+    manager._get_schedule_time_interval = lambda: 0
+    manager.service_ready = SimpleNamespace(get_value=lambda: int(now[0] >= 20))
+    writer = engine_stats.EngineCounters(2, 0)
+
+    class StopLoop(Exception):
+        pass
+
+    async def step():
+        now[0] += 10
+        if now[0] > 30:
+            raise StopLoop()
+        if now[0] <= 20:
+            logger.info.assert_not_called()
+        writer.add(100, 10)
+
+    manager._step = step
+    with pytest.raises(StopLoop):
+        asyncio.run(manager.loop_for_fwd())
+    if dp_size == 1 and node_rank != 0:
+        logger.info.assert_not_called()
+        return
+    assert logger.info.call_count == 2
+    first, second = [call.kwargs["extra"] for call in logger.info.call_args_list]
+    assert first["prefill_tokens"] == 200 and second["prefill_tokens"] == 100
+    assert first["window_s"] == second["window_s"] == 10
+    assert first["output_tok_s"] == 2 and second["output_tok_s"] == 1
+    assert first["running"] == 0 and first["waiting"] == 2 and first["paused"] == 1
+    assert first["kv_active_pct_by_local_dp"] == [10.0 * (i + 1) for i in range(dp_size)]
+    assert first["kv_cached_pct_by_local_dp"] == [5.0 * (i + 1) for i in range(dp_size)]
+    assert first["kv_capacity_tokens_per_dp"] == 100

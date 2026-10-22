@@ -466,3 +466,31 @@ def test_readiness_monitor_reports_transport_reason_and_stops_after_http_exit(mo
     assert logger.warning.call_args.kwargs["extra"]["reason"] == reason
     assert [call.args for call in flag.set_value.call_args_list] == [(0,), (1,), (0,)]
     session.__exit__.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "poll_results,probe_count,ready", [([0], 0, False), ([None, 0], 1, False), ([None, None, 0], 1, True)]
+)
+def test_readiness_monitor_stops_when_http_process_exits(monkeypatch, poll_results, probe_count, ready):
+    import requests
+    from unittest.mock import Mock, MagicMock
+    from lightllm.server.router.dynamic_prompt import shared_arr
+    from lightllm.utils import shm_port_args
+
+    manager = start_utils.SubmoduleManager()
+    flag = Mock()
+    monkeypatch.setattr(shared_arr, "SharedInt", lambda name: flag)
+    monkeypatch.setattr(shm_port_args, "get_shm_port_args", lambda: SimpleNamespace(port=8000))
+    monkeypatch.setattr(start_utils.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
+    session = MagicMock()
+    session.__enter__.return_value = session
+    session.get.return_value = SimpleNamespace(status_code=200)
+    monkeypatch.setattr(requests, "Session", lambda: session)
+    monkeypatch.setattr(manager.readiness_stop, "wait", Mock())
+    process = Mock()
+    process.poll.side_effect = poll_results
+    args = SimpleNamespace(run_mode="normal", host="127.0.0.1", model_name="test")
+    manager.start_readiness_monitor(process, args)
+    assert session.get.call_count == probe_count
+    assert [call.args for call in flag.set_value.call_args_list] == ([(0,), (1,)] if ready else [(0,)])
+    session.__exit__.assert_called_once()
