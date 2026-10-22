@@ -1,0 +1,42 @@
+{
+  "scope": "Complete final archived service counters, all16 exploratory pairs plus one candidate warmup. Cumulative accounting events, not unique prefill savings; original partial live diagnostics are superseded for totals.",
+  "services": [
+    {
+      "version": "v13",
+      "source_revision": "6df137db54f97078c5e13804cc59ed9fddd482ed",
+      "requests_including_warmup": 2072,
+      "client_runs_including_warmup": 17,
+      "actual_tool_calls": 1062,
+      "final_cumulative_policy_counters": {
+        "tool_stops": 1062,
+        "consumed_tokens": 839020,
+        "budget_tokens": 1668794,
+        "expired_tokens": 120631,
+        "evicted_tokens": 3693774,
+        "completed_tokens": 519,
+        "checkpoint_tokens": 0,
+        "protected_tokens": 0,
+        "waiting_endpoints": 0
+      }
+    },
+    {
+      "version": "v14",
+      "source_revision": "8fe7ec01bb6fa85a58c77be8e003cade1ee9b19c",
+      "requests_including_warmup": 2072,
+      "client_runs_including_warmup": 17,
+      "actual_tool_calls": 1062,
+      "final_cumulative_policy_counters": {
+        "tool_stops": 1062,
+        "consumed_tokens": 750275,
+        "budget_tokens": 5296127,
+        "expired_tokens": 281274,
+        "evicted_tokens": 0,
+        "completed_tokens": 0,
+        "checkpoint_tokens": 0,
+        "protected_tokens": 0,
+        "reserved_tokens": 0,
+        "waiting_endpoints": 0
+      }
+    }
+  ]
+}

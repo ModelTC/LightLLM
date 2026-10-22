@@ -1,0 +1,158 @@
+{
+  "status": "prespecified_before_final_source_measurements",
+  "service_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+  "upstream_baseline_revision": "22888b4237aa2c895fc24176e08089cf14bc6c89",
+  "core_tree": "44f6ba376a66e84071653396ebee36e95cb939e0",
+  "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+  "runtime": {
+    "xgrammar": "0.2.8",
+    "installation": "Separate read-only dependency overlay on the pinned existing image; no image built or published. Per-file hashes enter service manifests.",
+    "prefill_queue_strategy": "default",
+    "output_constraint_mode": "xgrammar",
+    "log_level": "debug",
+    "apache-tvm-ffi": "0.1.11",
+    "telemetry_note": "Explicit equal debug logging required after excluded v8 warmup revealed upstream timing logs moved from info to debug. No final-source validation or heldout trial had started. Latency includes logging instrumentation; raw logs remain private."
+  },
+  "host": "m35",
+  "gpu_model": "NVIDIA H200",
+  "excluded_gpu_indices": [
+    2,
+    6
+  ],
+  "guards": [
+    "Reject foreign processes on selected GPUs",
+    "Reject active thermal slowdown, counter increments or resets",
+    "Take a final GPU sample after each study phase",
+    "Serialize studies; exclude startup compilation, representative warmup, expiry waits and cache floods; additionally reject logged TileLang compilation overlapping measured hybrid replay or controlled-continuation intervals",
+    "Exact paired prompts, parsed outputs, finish reasons and generated token counts; fail on mismatch"
+  ],
+  "selection_rule": "Prefer3s unless30s improves validation trace-c16 reported prefill reduction by>2pp and wall speedup by>2%, without>2% relative ordinary-request slowdown.",
+  "normal": {
+    "model": "Qwen3-4B",
+    "tp": 1,
+    "kv_capacity": 32768,
+    "fraction": 0.5,
+    "validation_seeds": [
+      42,
+      43,
+      44
+    ],
+    "heldout_seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ],
+    "primary_gpus": {
+      "candidate": [
+        0
+      ],
+      "control": [
+        1
+      ]
+    },
+    "crossover_gpus": {
+      "candidate": [
+        1
+      ],
+      "control": [
+        0
+      ]
+    },
+    "heldout_cases": 10,
+    "default_disabled_audit_cases": [
+      "ordinary-c8",
+      "trace-c16"
+    ],
+    "default_disabled_audit_seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ],
+    "default_disabled_audit_crossover": true,
+    "controlled_residency_cases": [
+      "tool",
+      "partial",
+      "ordinary",
+      "length",
+      "expired"
+    ],
+    "controlled_residency_seeds": [
+      42,
+      43,
+      44,
+      45,
+      46
+    ]
+  },
+  "hybrid": {
+    "model": "Qwen3.5-27B",
+    "tp": 2,
+    "kv_capacity": 131072,
+    "fraction": 0.5,
+    "validation_seeds": [
+      42,
+      43,
+      44
+    ],
+    "heldout_seeds": [
+      42,
+      43,
+      44
+    ],
+    "gpu_selection": "Four idle GPUs with zero recorded thermal-event counters, excluding2/6; prefer pairs(0,1),(4,5),(3,7). Exchange candidate/control pairs after primary trials.",
+    "heldout_cases": 9,
+    "controlled_partial_checkpoint": {
+      "seeds": [
+        42,
+        43,
+        44
+      ],
+      "return": "Actual generated tool result and next tool instruction",
+      "retention_seconds": 120,
+      "fraction": 0.25,
+      "expected_retained_tokens": 32768,
+      "prefix_words": 10000,
+      "cpu_preflight_prompt_tokens": 50276,
+      "max_request_tokens": 65536,
+      "construction_note": "Corrected before any hybrid experiment: actual tokenizer maps15000 numeric words to75276 tokens, beyond65536.10000 words produce50276 tokens, preserving the intended oversized-but-valid request and32768 checkpoint. CPU preflight uses transformers4.57.1; actual serving usage is checked during the probe."
+    },
+    "compilation_guard": {
+      "tilelang_cache_persisted": true,
+      "reject_timed_tilelang_compilation": true,
+      "independent_archived_log_audit": true,
+      "valid_comparison_pairs_required": 75,
+      "replacement_phase_suffix": "v10"
+    }
+  },
+  "case_sha256": {
+    "heldout-hybrid.json": "b2bbd6f42ef366474b22e925708c093e17bd37f64d447eac92bb1b4b20e6f325",
+    "heldout.json": "432541baf73ca109a29a74885294af70a226d3a4b7818386120ceb4a4299a5be",
+    "validation-hybrid.json": "618f21e3901d224166c5ce9fe3390b6ef8e8059c88cdbed8a6a426c7765507d5",
+    "validation-outputs.json": "1ea9b1fa1ec193f4dd66cab5b5447555ec5f63b92f05a10b949117a902e5fbd9",
+    "validation.json": "537d02cf154f74c90a9d13fee0527594472354e85d28bfa4796514437711625d",
+    "warmup-hybrid.json": "8e5a84762bbc825c082ffce627b5818b147dae4c42354a79a9251ee3598d8744"
+  },
+  "replay_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+  "scope": "Trace-shaped synthetic contents and closed-loop agent chains derived from pinned sanitized public traces. Earlier source versions are supplemental and are not pooled with final-source data. Controlled residency is separate from throughput evidence. Prior workload versions have been explored; final-source selection uses only the validation partition and the frozen rule.",
+  "reporting": "Publish all valid paired trials, seed-clustered descriptive intervals and neutral/negative findings; preserve failed/quarantined trials outside performance aggregation. Publish whitelisted numeric results only.",
+  "amendments": [
+    {
+      "timing": "After observing compilation in v9 hybrid validation, before any hybrid parameter selection or heldout trial",
+      "reason": "Representative warmup did not cover all TileLang batch/context-parallel specializations",
+      "unchanged": [
+        "serving revision and core tree",
+        "models and pinned image/runtime overlay",
+        "cases and seeds",
+        "cache capacities and protected fractions",
+        "3s/30s window selection rule",
+        "hardware crossover and exact paired work gates"
+      ],
+      "correction": "Quarantine v9 hybrid validation; persist completed TileLang cache entries, repeat all75 hybrid comparisons under v10 with per-pair and independent archived-log compilation overlap checks. Controlled continuation records wrapper UTC intervals. Preserve excluded cold results separately.",
+      "guard_scope": "Logged TileLang compiler begin/end events, UTC with conservative one-second timestamp precision; not a universal detector for all JIT compilers."
+    }
+  ]
+}

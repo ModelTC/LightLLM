@@ -1,0 +1,4 @@
+[
+  {"name": "variable-output-tools", "options": {"sessions": 4, "turns": 4, "split": "validation", "mix": "all-tools", "context_scale": 0.05, "output_scale": 0.5, "max_output_target": 256, "wait_scale": 0.01, "max_wait": 0.5}},
+  {"name": "variable-output-ordinary", "options": {"sessions": 4, "turns": 4, "split": "validation", "mix": "ordinary", "context_scale": 0.05, "output_scale": 0.5, "max_output_target": 256, "wait_scale": 0.01, "max_wait": 0.5}}
+]

@@ -1,0 +1,197 @@
+{
+  "all_rounds": 11135,
+  "missing_original_finish_reason": 10865,
+  "groups": {
+    "tool_use": {
+      "rounds": 182,
+      "sessions": 42,
+      "no_observed_followup": 2,
+      "overlaps_excluded": 0,
+      "first_chunk_gap_seconds": {
+        "n": 180,
+        "mean": 25.73568888372845,
+        "p50": 11.21999979019165,
+        "p90": 60.014999866485596,
+        "p95": 100.10399985313416,
+        "p99": 158.72499990463257
+      },
+      "input_readiness_gap_seconds": {
+        "n": 179,
+        "mean": 14.142994413162743,
+        "p50": 0.17300009727478027,
+        "p90": 41.05299997329712,
+        "p95": 70.50799989700317,
+        "p99": 152.34800004959106
+      },
+      "fraction_within_seconds_given_observed_followup": {
+        "1": 0.06111111111111111,
+        "5": 0.25555555555555554,
+        "10": 0.48333333333333334,
+        "30": 0.7111111111111111,
+        "60": 0.8944444444444445,
+        "300": 1.0
+      },
+      "input_ready_fraction_within_seconds_given_observed_ready": {
+        "1": 0.5977653631284916,
+        "5": 0.659217877094972,
+        "10": 0.7206703910614525,
+        "30": 0.8547486033519553,
+        "60": 0.9385474860335196,
+        "300": 1.0
+      }
+    },
+    "end_turn": {
+      "rounds": 23,
+      "sessions": 6,
+      "no_observed_followup": 1,
+      "overlaps_excluded": 0,
+      "first_chunk_gap_seconds": {
+        "n": 22,
+        "mean": 233.3515908718109,
+        "p50": 150.30599999427795,
+        "p90": 457.52300000190735,
+        "p95": 502.69999980926514,
+        "p99": 502.7000000476837
+      },
+      "input_readiness_gap_seconds": {
+        "n": 22,
+        "mean": 216.58672726154327,
+        "p50": 133.36500000953674,
+        "p90": 435.01599979400635,
+        "p95": 493.5499999523163,
+        "p99": 493.55000019073486
+      },
+      "fraction_within_seconds_given_observed_followup": {
+        "1": 0.0,
+        "5": 0.0,
+        "10": 0.0,
+        "30": 0.13636363636363635,
+        "60": 0.22727272727272727,
+        "300": 0.6818181818181818
+      },
+      "input_ready_fraction_within_seconds_given_observed_ready": {
+        "1": 0.0,
+        "5": 0.0,
+        "10": 0.045454545454545456,
+        "30": 0.18181818181818182,
+        "60": 0.2727272727272727,
+        "300": 0.6818181818181818
+      }
+    },
+    "stop_sequence": {
+      "rounds": 65,
+      "sessions": 29,
+      "no_observed_followup": 8,
+      "overlaps_excluded": 0,
+      "first_chunk_gap_seconds": {
+        "n": 57,
+        "mean": 30213.29391229362,
+        "p50": 38.27800011634827,
+        "p90": 818.4550001621246,
+        "p95": 3671.7900002002716,
+        "p99": 685804.5460000038
+      },
+      "input_readiness_gap_seconds": {
+        "n": 54,
+        "mean": 31835.386129639766,
+        "p50": 20.6780002117157,
+        "p90": 642.2560000419617,
+        "p95": 3662.5090000629425,
+        "p99": 685772.0669999123
+      },
+      "fraction_within_seconds_given_observed_followup": {
+        "1": 0.15789473684210525,
+        "5": 0.17543859649122806,
+        "10": 0.21052631578947367,
+        "30": 0.40350877192982454,
+        "60": 0.5964912280701754,
+        "300": 0.8070175438596491
+      },
+      "input_ready_fraction_within_seconds_given_observed_ready": {
+        "1": 0.18518518518518517,
+        "5": 0.25925925925925924,
+        "10": 0.35185185185185186,
+        "30": 0.5555555555555556,
+        "60": 0.6851851851851852,
+        "300": 0.8703703703703703
+      }
+    },
+    "length_known": {
+      "rounds": 0,
+      "sessions": 0,
+      "no_observed_followup": 0,
+      "overlaps_excluded": 0,
+      "first_chunk_gap_seconds": {
+        "n": 0
+      },
+      "input_readiness_gap_seconds": {
+        "n": 0
+      },
+      "fraction_within_seconds_given_observed_followup": {
+        "1": null,
+        "5": null,
+        "10": null,
+        "30": null,
+        "60": null,
+        "300": null
+      },
+      "input_ready_fraction_within_seconds_given_observed_ready": {
+        "1": null,
+        "5": null,
+        "10": null,
+        "30": null,
+        "60": null,
+        "300": null
+      }
+    },
+    "ordinary_known": {
+      "rounds": 88,
+      "sessions": 31,
+      "no_observed_followup": 9,
+      "overlaps_excluded": 0,
+      "first_chunk_gap_seconds": {
+        "n": 79,
+        "mean": 21864.44921518881,
+        "p50": 63.46199989318848,
+        "p90": 558.9610002040863,
+        "p95": 1534.0090000629425,
+        "p99": 685804.5460000038
+      },
+      "input_readiness_gap_seconds": {
+        "n": 76,
+        "mean": 22682.575776319754,
+        "p50": 37.97200012207031,
+        "p90": 493.55000019073486,
+        "p95": 1525.1330001354218,
+        "p99": 685772.0669999123
+      },
+      "fraction_within_seconds_given_observed_followup": {
+        "1": 0.11392405063291139,
+        "5": 0.12658227848101267,
+        "10": 0.1518987341772152,
+        "30": 0.3291139240506329,
+        "60": 0.4936708860759494,
+        "300": 0.7721518987341772
+      },
+      "input_ready_fraction_within_seconds_given_observed_ready": {
+        "1": 0.13157894736842105,
+        "5": 0.18421052631578946,
+        "10": 0.2631578947368421,
+        "30": 0.4473684210526316,
+        "60": 0.5657894736842105,
+        "300": 0.8157894736842105
+      }
+    }
+  },
+  "limitations": [
+    "Most original reasons are missing; missingness is not assumed random.",
+    "Final observations are censored; fractions are conditional on observed nonoverlapping followups.",
+    "Input readiness and first response chunks are different bounds, not exact HTTP arrivals.",
+    "Length terminations are reported separately; the data do not justify treating them as end_turn."
+  ],
+  "source": {
+    "repository": "cachewise-project/cachewise-coding-traces",
+    "revision": "181c435a090d328d00bbbee4c8eeb27d32f3abd2",
+    "rounds_sha256": "6084a45d0df740cc30b0eda9535e583f9e23176c9b55a6201c7a9d18398a136d"
+  }
+}

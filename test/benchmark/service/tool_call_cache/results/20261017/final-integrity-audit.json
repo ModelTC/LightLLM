@@ -1,0 +1,182 @@
+{
+  "scope": "Completed238 paired comparisons: exact source/model/dependency bytes, actual backend parity, logged TileLang overlap, selected-GPU observation boundaries and own-service cleanup. No standalone production throughput claim.",
+  "valid_paired_trials": 238,
+  "phase_counts": {
+    "validation-normal-short-v9": 9,
+    "validation-normal-long-v9": 9,
+    "heldout-normal-v9": 50,
+    "heldout-normal-cross-v9": 50,
+    "disabled-audit-v9": 10,
+    "disabled-audit-cross-v9": 10,
+    "pressure-final-v9": 25,
+    "validation-hybrid-short-v10": 9,
+    "validation-hybrid-long-v10": 9,
+    "heldout-hybrid-v10": 27,
+    "heldout-hybrid-cross-v10": 27,
+    "pressure-hybrid-continuation-v10": 3
+  },
+  "backend_verified_phases": 12,
+  "gpu_monitor_coverage": [
+    {
+      "phase": "validation-normal-short-v9",
+      "observations": 201,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "validation-normal-long-v9",
+      "observations": 240,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "heldout-normal-v9",
+      "observations": 1250,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "heldout-normal-cross-v9",
+      "observations": 1241,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "disabled-audit-v9",
+      "observations": 219,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "disabled-audit-cross-v9",
+      "observations": 218,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "pressure-final-v9",
+      "observations": 154,
+      "violations": 0,
+      "initial_boundary": "not independently timestamped",
+      "final_boundary": "verified after complete summary written after last request"
+    },
+    {
+      "phase": "validation-hybrid-short-v10",
+      "observations": 621,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "validation-hybrid-long-v10",
+      "observations": 635,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "heldout-hybrid-v10",
+      "observations": 1559,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "heldout-hybrid-cross-v10",
+      "observations": 1674,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    },
+    {
+      "phase": "pressure-hybrid-continuation-v10",
+      "observations": 235,
+      "violations": 0,
+      "initial_boundary": "verified against recorded wrapper start",
+      "final_boundary": "verified after recorded wrapper finish"
+    }
+  ],
+  "verified_runtime_dependency_files": 353,
+  "runtime_dependency_map_sha256": "94248b6261377c25095a3f2945425a3d2c8f7344a8c28f1b4974383299d99325",
+  "hybrid_compilation_audits": [
+    {
+      "phase": "validation-hybrid-short-v10",
+      "pairs": 9,
+      "contaminated_pairs": 0,
+      "server_log_sha256": {
+        "candidate": "98d34de1fdeca97b1b1a33b5178a4002047b69a5c363ddd2fc5d8a5922ab7c8b",
+        "control": "1eb3d93ad4ddbb89230d1eeefd7cb6dbd78057f5755023226f8f1f56b76ab382"
+      }
+    },
+    {
+      "phase": "validation-hybrid-long-v10",
+      "pairs": 9,
+      "contaminated_pairs": 0,
+      "server_log_sha256": {
+        "candidate": "6a3a6e6d7ec98701b1dfab592f8b2532bd2d5689084ee935700e22ee29228c10",
+        "control": "bf2e1eb06de954df4edfd8fbbbd1427e4f87ff733c2f60af3e52ad48a73060cc"
+      }
+    },
+    {
+      "phase": "heldout-hybrid-v10",
+      "pairs": 27,
+      "contaminated_pairs": 0,
+      "server_log_sha256": {
+        "candidate": "40d2c81fbd80332414933d7a4e9ee099d517eea63694f3328e5e7cdb8caeb276",
+        "control": "06e8713320867ca07ee49463846905293f3ef72460da7e6ce9311fe97600c6a9"
+      }
+    },
+    {
+      "phase": "heldout-hybrid-cross-v10",
+      "pairs": 27,
+      "contaminated_pairs": 0,
+      "server_log_sha256": {
+        "candidate": "aa7af7b0abb7dca8d3c1fd1251af47b9814d4fab903f65252ee09d9d8f81c976",
+        "control": "b3f38f37250e43806a931c7dc5aeb32c4edd74404987c3a26e8a9b90e2196f13"
+      }
+    },
+    {
+      "phase": "pressure-hybrid-continuation-v10",
+      "pairs": 3,
+      "contaminated_pairs": 0,
+      "server_log_sha256": {
+        "candidate": "fda9ffe46665039d7e06f5a700e72a663ca640dc4d437ff6c34e37a03daaecea",
+        "control": "f32ebd4f19f6a735070f9210fe8a0243bcc420280fc4c8eea3078f24c805849c"
+      }
+    }
+  ],
+  "verified_source_archives": [
+    {
+      "archive_sha256": "987155e2d11c3121e018ffe3e3826e19349ceea9a35fd32534fbb78903606955",
+      "verified_files": 1990,
+      "verified_symlinks": 0
+    },
+    {
+      "archive_sha256": "a9505c5cefe871e8389e907bb95798e8ac1b4e49a00677065cefe56bda8fbfe4",
+      "verified_files": 1959,
+      "verified_symlinks": 0
+    }
+  ],
+  "verified_models": [
+    {
+      "model": "Qwen3-4B",
+      "verified_files": 11,
+      "verified_bytes": 8060896929
+    },
+    {
+      "model": "Qwen3.5-27B",
+      "verified_files": 21,
+      "verified_bytes": 55586062652
+    }
+  ],
+  "remaining_own_service_containers": 0,
+  "last_stage_gpu_processes_observed": 4,
+  "remaining_last_stage_gpu_processes": 0,
+  "recorded_unix": 1792268639.7108974
+}

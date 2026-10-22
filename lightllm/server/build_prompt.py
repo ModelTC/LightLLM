@@ -126,7 +126,7 @@ def _normalize_multimodal_content_types(messages: list) -> None:
                 part["type"] = "audio"
 
 
-async def build_prompt(request, tools) -> str:
+async def build_prompt(request, tools, return_cache_hint=False):
     # pydantic格式转成dict， 否则，当根据tokenizer_config.json拼template时，Jinja判断无法识别
     messages = [m.model_dump(by_alias=True, exclude_none=True) for m in request.messages]
     _normalize_tool_call_arguments(messages)
@@ -164,4 +164,27 @@ async def build_prompt(request, tools) -> str:
         input_str = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=True, tools=tools)
     except Exception as e:
         raise ValueError(f"Failed to build prompt: {e}") from None
+    if return_cache_hint:
+        return input_str, _cache_generation_tail_tokens(kwargs, tools, input_str)
     return input_str
+
+
+def _cache_generation_tail_tokens(kwargs, tools, prompt):
+    """Exclude the generation-only header from a future tool-result lease.
+
+    Templates may render the historical assistant header differently (for
+    example, removing an empty think block). Tokenize only the short suffix,
+    allowing one boundary token. An unusual template simply gets no hint;
+    cache lookup still compares actual tokens and never trusts this metadata.
+    """
+    try:
+        history = tokenizer.apply_chat_template(**kwargs, tokenize=False, add_generation_prompt=False, tools=tools)
+        if not prompt.startswith(history):
+            return 0
+        suffix = prompt[len(history) :]
+        if len(suffix) > 4096:
+            return 0
+        count = len(tokenizer.encode(suffix, add_special_tokens=False)) + 1
+        return count if count <= 2048 else 0
+    except Exception:
+        return 0

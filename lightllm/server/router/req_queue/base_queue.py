@@ -13,6 +13,10 @@ logger = init_logger(__name__)
 class BaseQueue:
     def __init__(self, args: StartArgs, router, dp_index, dp_size_in_node) -> None:
         self.args = args
+        self.tool_call_admission_enabled = (
+            getattr(args, "tool_call_cache_retention_seconds", 0) > 0
+            and getattr(args, "run_mode", "normal") == "normal"
+        )
         self.dp_index = dp_index
         self.dp_size_in_node = dp_size_in_node
         from lightllm.server.router.manager import RouterManager

@@ -1,0 +1,177 @@
+{
+  "scope": "Excluded v9 hybrid validation compiler timing diagnostics, before parameter selection or heldout. All9 trial windows retained; not steady-state performance evidence. Only fixed labels, numeric UTC intervals and private-log digests.",
+  "paired_trials": 9,
+  "contaminated_pairs": 2,
+  "server_log_sha256": {
+    "candidate": "1da22426b8365a0271ddf998ca14b4e8d646a48187c2836073efc2e71a52cdb0",
+    "control": "92e8142ef17fd2211282620827e71eb30e53871690cd73deb9e9797c772a1e8d"
+  },
+  "trials": [
+    {
+      "case": "trace-c8",
+      "repeat": 0,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792248767.9849203,
+          "finished_unix": 1792248821.1384645,
+          "overlapping_compilations": []
+        },
+        "control": {
+          "started_unix": 1792248681.5123575,
+          "finished_unix": 1792248752.4983995,
+          "overlapping_compilations": [
+            {
+              "kernel": "tilelang_fused_chunk_gdr_fwd_kernel",
+              "started_unix": 1792248708.0,
+              "finished_unix_upper": 1792248722.0
+            },
+            {
+              "kernel": "tilelang_fused_chunk_gdr_fwd_kernel",
+              "started_unix": 1792248708.0,
+              "finished_unix_upper": 1792248722.0
+            }
+          ]
+        }
+      }
+    },
+    {
+      "case": "trace-c8",
+      "repeat": 1,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792248839.6865642,
+          "finished_unix": 1792248866.2621365,
+          "overlapping_compilations": []
+        },
+        "control": {
+          "started_unix": 1792248881.6009357,
+          "finished_unix": 1792248908.2302167,
+          "overlapping_compilations": []
+        }
+      }
+    },
+    {
+      "case": "trace-c8",
+      "repeat": 2,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792248985.2339303,
+          "finished_unix": 1792249030.1283062,
+          "overlapping_compilations": []
+        },
+        "control": {
+          "started_unix": 1792248923.720296,
+          "finished_unix": 1792248969.9703064,
+          "overlapping_compilations": []
+        }
+      }
+    },
+    {
+      "case": "trace-c16",
+      "repeat": 0,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792249202.0422766,
+          "finished_unix": 1792249342.4301887,
+          "overlapping_compilations": []
+        },
+        "control": {
+          "started_unix": 1792249045.452583,
+          "finished_unix": 1792249186.9565153,
+          "overlapping_compilations": []
+        }
+      }
+    },
+    {
+      "case": "trace-c16",
+      "repeat": 1,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792249360.8697233,
+          "finished_unix": 1792249469.6576483,
+          "overlapping_compilations": [
+            {
+              "kernel": "tilelang_fused_chunk_gdr_fwd_kernel",
+              "started_unix": 1792249373.0,
+              "finished_unix_upper": 1792249388.0
+            },
+            {
+              "kernel": "tilelang_fused_chunk_gdr_fwd_kernel",
+              "started_unix": 1792249373.0,
+              "finished_unix_upper": 1792249388.0
+            }
+          ]
+        },
+        "control": {
+          "started_unix": 1792249485.1647582,
+          "finished_unix": 1792249582.8190432,
+          "overlapping_compilations": []
+        }
+      }
+    },
+    {
+      "case": "trace-c16",
+      "repeat": 2,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792249772.7405472,
+          "finished_unix": 1792249931.1277533,
+          "overlapping_compilations": []
+        },
+        "control": {
+          "started_unix": 1792249598.2618272,
+          "finished_unix": 1792249757.570721,
+          "overlapping_compilations": []
+        }
+      }
+    },
+    {
+      "case": "ordinary-c8",
+      "repeat": 0,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792250001.600973,
+          "finished_unix": 1792250041.8691914,
+          "overlapping_compilations": []
+        },
+        "control": {
+          "started_unix": 1792249946.2701514,
+          "finished_unix": 1792249986.5159574,
+          "overlapping_compilations": []
+        }
+      }
+    },
+    {
+      "case": "ordinary-c8",
+      "repeat": 1,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792250060.248364,
+          "finished_unix": 1792250085.0451248,
+          "overlapping_compilations": []
+        },
+        "control": {
+          "started_unix": 1792250100.3091624,
+          "finished_unix": 1792250124.7663484,
+          "overlapping_compilations": []
+        }
+      }
+    },
+    {
+      "case": "ordinary-c8",
+      "repeat": 2,
+      "policies": {
+        "candidate": {
+          "started_unix": 1792250197.0309305,
+          "finished_unix": 1792250237.2358828,
+          "overlapping_compilations": []
+        },
+        "control": {
+          "started_unix": 1792250140.1228585,
+          "finished_unix": 1792250181.7960634,
+          "overlapping_compilations": []
+        }
+      }
+    }
+  ]
+}

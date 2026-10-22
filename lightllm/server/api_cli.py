@@ -382,6 +382,18 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--use_dynamic_prompt_cache", action="store_true", help="This argument is deprecated and no longer in use."
     )
     parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
+    parser.add_argument(
+        "--tool_call_cache_retention_seconds",
+        type=float,
+        default=0.0,
+        help="Prefer retaining prefixes after tool-call completion for this many seconds; 0 disables the policy.",
+    )
+    parser.add_argument(
+        "--tool_call_cache_max_fraction",
+        type=float,
+        default=0.5,
+        help="Maximum fraction of GPU KV capacity receiving a temporary tool-call eviction preference.",
+    )
 
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")

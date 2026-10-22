@@ -6,6 +6,8 @@ from typing import Tuple, Dict, Set, List, Optional, Union, Sequence
 from sortedcontainers import SortedSet
 from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 from .shared_arr import SharedArray
+from .tool_call_cache import ToolCallCacheRetention
+from .tool_call_prefix_hints import ToolCallPrefixHints
 
 
 class UniqueTimeIdGenerator:
@@ -31,12 +33,14 @@ class TreeNode:
         self.token_mem_index_value: torch.Tensor = None  # 用于记录存储的 token_index 为每个元素在 token mem 中的index位置
         self.ref_counter = 0
         self.time_id = time_gen.generate_time_id()  # 用于标识时间周期
+        self.cache_protected = False
+        self.cache_retention = None
 
         self.node_value_len = 0
         self.node_prefix_total_len = 0
 
     def get_compare_key(self):
-        return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
+        return (0 if self.ref_counter == 0 else 1, len(self.children), self.cache_protected, self.time_id)
 
     def get_child_key(self, token_ids: torch.Tensor):
         first_page = token_ids[: self.page_size]
@@ -65,6 +69,8 @@ class TreeNode:
         new_len = len(self.token_mem_index_value)
         self.node_value_len = new_len
         self.node_prefix_total_len = self.parent.node_prefix_total_len + new_len
+        if self.cache_retention is not None:
+            self.cache_retention.split(self, split_parent_node)
         return split_parent_node
 
     def add_and_return_new_child(self, token_id_key, token_mem_index_value):
@@ -137,6 +143,39 @@ class RadixCache:
         self.refed_tokens_num.arr[0] = 0
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
+        self.tool_call_retention = None
+        self.rank_in_node = rank_in_node
+        self.tool_call_reserved_tokens = None
+        self.tool_call_prefix_hints = None
+
+    def enable_tool_call_retention(self, duration, fraction):
+        self.tool_call_prefix_hints = ToolCallPrefixHints(self.rank_in_node, initialize=True)
+        self.tool_call_reserved_tokens = SharedArray(
+            f"tool_call_reserved_tokens_{self.rank_in_node}", (1,), dtype=np.int64
+        )
+        self.tool_call_reserved_tokens.arr[0] = 0
+        self.tool_call_retention = ToolCallCacheRetention(
+            duration,
+            int(self.total_token_num * fraction),
+            self.evict_tree_set.discard,
+            lambda node: self.evict_tree_set.add(node) if node.is_leaf() else None,
+            self._fit_retention_prefix,
+            lambda count: self.tool_call_reserved_tokens.arr.__setitem__(0, count),
+        )
+
+    def _fit_retention_prefix(self, node, token_budget):
+        limit = token_budget // self.page_size * self.page_size
+        if limit == 0:
+            return None
+        while node.parent is not None and node.parent.node_prefix_total_len >= limit:
+            node = node.parent
+        if node.node_prefix_total_len <= limit:
+            return node
+        self.evict_tree_set.discard(node)
+        prefix = node.split_node(limit - node.parent.node_prefix_total_len)
+        if node.is_leaf():
+            self.evict_tree_set.add(node)
+        return prefix
 
     def insert(self, key, value=None) -> Tuple[int, Optional[TreeNode]]:
         if value is None:
@@ -263,6 +302,8 @@ class RadixCache:
                 value = torch.concat(ans_value_list)
             else:
                 value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
+            if update_refs and self.tool_call_retention is not None:
+                self.tool_call_retention.consume(tree_node)
             return tree_node, len(value), value
         else:
             if update_refs:
@@ -336,6 +377,8 @@ class RadixCache:
             # from 0 to 1 need update refs token num
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+                if self.tool_call_retention is not None:
+                    self.tool_call_retention.reference_changed(node, True)
 
         if len(key) == 0:
             return node
@@ -363,6 +406,8 @@ class RadixCache:
                     # from 0 to 1 need update refs token num
                     if split_parent_node.ref_counter == 1:
                         self.refed_tokens_num.arr[0] += len(split_parent_node.token_mem_index_value)
+                        if self.tool_call_retention is not None:
+                            self.tool_call_retention.reference_changed(split_parent_node, True)
 
                 if child.is_leaf():
                     self.evict_tree_set.add(child)
@@ -381,6 +426,8 @@ class RadixCache:
         num_evicted = 0
         while num_evicted < need_remove_tokens:
             node: TreeNode = self.evict_tree_set.pop(0)
+            if self.tool_call_retention is not None:
+                self.tool_call_retention.forget(node, evicted=True)
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
             ), "error evict tree node state"
@@ -411,6 +458,8 @@ class RadixCache:
             or parent_node.ref_counter != 0
             or len(parent_node.children) != 1
             or child_node.ref_counter != 0
+            or child_node.cache_protected
+            or parent_node.cache_protected
         ):
             return None
 
@@ -486,6 +535,8 @@ class RadixCache:
         while node is not None:
             if node.ref_counter == 1:
                 self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
+                if self.tool_call_retention is not None:
+                    self.tool_call_retention.reference_changed(node, False)
             node.ref_counter -= 1
             node = node.parent
 
@@ -505,6 +556,8 @@ class RadixCache:
         while node is not None:
             if node.ref_counter == 0:
                 self.refed_tokens_num.arr[0] += len(node.token_mem_index_value)
+                if self.tool_call_retention is not None:
+                    self.tool_call_retention.reference_changed(node, True)
             node.ref_counter += 1
             node = node.parent
 
@@ -566,7 +619,13 @@ class _RadixCacheReadOnlyClient:
     router 端只读用的客户端，用于从共享内存中读取树结构中的信息，用于进行prompt cache 的调度估计。
     """
 
-    def __init__(self, total_token_num, rank_in_node):
+    def __init__(self, total_token_num, rank_in_node, tool_call_retention_enabled=False):
+        self.tool_call_reserved_tokens = (
+            SharedArray(f"tool_call_reserved_tokens_{rank_in_node}", (1,), dtype=np.int64)
+            if tool_call_retention_enabled
+            else None
+        )
+        self.tool_call_prefix_hints = ToolCallPrefixHints(rank_in_node) if tool_call_retention_enabled else None
         self.refed_tokens_num = SharedArray(f"refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
 
@@ -579,13 +638,20 @@ class _RadixCacheReadOnlyClient:
     def get_unrefed_tokens_num(self):
         return self.tree_total_tokens_num.arr[0] - self.refed_tokens_num.arr[0]
 
+    def get_tool_call_reserved_tokens(self):
+        return int(self.tool_call_reserved_tokens.arr[0]) if self.tool_call_reserved_tokens is not None else 0
+
 
 class RadixCacheReadOnlyClient:
-    def __init__(self, total_token_num, node_world_size, dp_world_size):
+    def __init__(self, total_token_num, node_world_size, dp_world_size, tool_call_retention_enabled=False):
         self.dp_rank_clients: List[_RadixCacheReadOnlyClient] = [
-            _RadixCacheReadOnlyClient(total_token_num, rank_in_node)
+            _RadixCacheReadOnlyClient(total_token_num, rank_in_node, tool_call_retention_enabled)
             for rank_in_node in range(0, node_world_size, dp_world_size)
         ]
+
+    def get_tool_call_prefix_hints(self, dp_rank_in_node):
+        hints = self.dp_rank_clients[dp_rank_in_node].tool_call_prefix_hints
+        return hints.snapshot() if hints is not None else None
 
     def get_refed_tokens_num(self, dp_rank_in_node):
         return self.dp_rank_clients[dp_rank_in_node].get_refed_tokens_num()
@@ -595,3 +661,6 @@ class RadixCacheReadOnlyClient:
 
     def get_unrefed_tokens_num(self, dp_rank_in_node):
         return self.dp_rank_clients[dp_rank_in_node].get_unrefed_tokens_num()
+
+    def get_tool_call_reserved_tokens(self, dp_rank_in_node):
+        return self.dp_rank_clients[dp_rank_in_node].get_tool_call_reserved_tokens()

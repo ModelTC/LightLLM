@@ -352,7 +352,12 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     created_time = int(time.time())
     multimodal_params = _build_multimodal_params(request)
     tools = _select_chat_template_tools(request)
-    prompt = await build_prompt(request, tools)
+    cache_hint_enabled = bool(tools and getattr(g_objs.args, "tool_call_cache_retention_seconds", 0) > 0)
+    cache_prompt_tail = 0
+    if cache_hint_enabled:
+        prompt, cache_prompt_tail = await build_prompt(request, tools, return_cache_hint=True)
+    else:
+        prompt = await build_prompt(request, tools)
     sampling_params_dict = {
         "do_sample": request.do_sample,
         "presence_penalty": request.presence_penalty,
@@ -409,6 +414,11 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             )
 
     sampling_params = SamplingParams()
+    if cache_hint_enabled:
+        sampling_params_dict["tool_call_cache_markers"] = FunctionCallParser.cache_marker_token_ids(
+            g_objs.args.tool_call_parser or "llama3", g_objs.httpserver_manager.tokenizer
+        )
+        sampling_params_dict["tool_call_cache_prompt_tail_tokens"] = cache_prompt_tail
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
     await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 

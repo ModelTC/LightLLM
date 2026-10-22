@@ -1,0 +1,3 @@
+# Keep generated exports available while focusing code review on the implementation.
+**/*.json linguist-generated=true
+**/*.svg linguist-generated=true

@@ -1,0 +1,26 @@
+{
+  "status": "excluded-incomplete-phase",
+  "phase": "heldout-normal-transfer-a",
+  "service_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
+  "replay_sha256": "b807f6d05db0ee5d3d829dc90da1dd5702f3d0777eab68b0894053fdf6118476",
+  "completed_matched_pairs_before_failure": 6,
+  "failed_pairs": 1,
+  "failed_case": "agent25-c16-fast",
+  "seed": 42,
+  "mismatched_requests": 1,
+  "mismatch_fields": {
+    "output_signature": 1,
+    "completion_tokens": 1
+  },
+  "equal_prompt_hash": true,
+  "finish_reasons_equal": true,
+  "ordinary_cached_tokens_each": 5,
+  "candidate_completion_tokens": 2,
+  "control_completion_tokens": 3,
+  "reason": "Free text punctuation drift on an ordinary request; do not relax strict output or token-count equality. Complete phase excluded, including earlier matching pairs.",
+  "repair": "Optional exact JSON-string schema for ordinary replies, including shaped replies; rerun complete validation and independent phases with a new frozen harness. Cache source and policy unchanged.",
+  "controller_exit": 1,
+  "own_services_cleaned": true,
+  "followup_supervisor_stopped_before_launch": true,
+  "diagnostic_experiment": "261018-110942-python3-mtc-sufubao-tool-call-cache-rework-20261"
+}
