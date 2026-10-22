@@ -434,24 +434,38 @@ def test_redundancy_expert_update_packs_scales(monkeypatch, packed_weight_layout
 
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
 @pytest.mark.parametrize("is_prefill", [False, True])
-def test_ep_moe_uses_logical_block_size_with_packed_weights(monkeypatch, is_prefill):
+@pytest.mark.parametrize("sm100", [False, True])
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
+def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_prefill, sm100, use_ue8m0_scales):
     from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep as ep
 
-    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1")
-    monkeypatch.setattr(deepgemm, "is_sm100_gpu", lambda: True)
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", str(int(use_ue8m0_scales)))
+    monkeypatch.setattr(deepgemm, "is_sm100_gpu", lambda: sm100)
     method = Quantcfg({"n_layer": 1}, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
     w13, _ = method.create_moe_weight([128, 128], 512, torch.bfloat16, 0, 2)
     w2, _ = method.create_moe_weight([512], 128, torch.bfloat16, 0, 2)
     x = torch.randn((3, 512), device="cuda", dtype=torch.bfloat16)
     q, sf = ep.quantize_fused_experts_input(x, w13, method)
     assert q.shape == x.shape and sf.shape == (3, 4)
+    assert sf.dtype == torch.float32
+    expected_scales = x.float().reshape(3, 4, 128).abs().amax(-1).clamp_min(1e-10) / 448
+    if use_ue8m0_scales:
+        expected_scales = torch.exp2(torch.ceil(torch.log2(expected_scales)))
+        expected_q = (x.float().reshape(3, 4, 128) / expected_scales.unsqueeze(-1)).to(q.dtype).reshape_as(q)
+        torch.testing.assert_close(q.float(), expected_q.float(), atol=0, rtol=0)
+    torch.testing.assert_close(sf, expected_scales)
     seen = []
     monkeypatch.setattr(ep.dist_group_manager, "ep_buffer", object(), raising=False)
     monkeypatch.setattr(ep.dist_group_manager, "ep_low_latency_buffer", object(), raising=False)
 
     def check_dispatch(**kwargs):
         seen.append(kwargs["block_size_k"])
-        assert kwargs["w1_scale"].dtype == kwargs["w2_scale"].dtype == torch.int32
+        assert (
+            kwargs["w1_scale"].dtype
+            == kwargs["w2_scale"].dtype
+            == (torch.int32 if sm100 and use_ue8m0_scales else torch.float32)
+        )
+        assert kwargs["use_ue8m0_scales"] == use_ue8m0_scales
         return x
 
     monkeypatch.setattr(ep, "fused_experts_impl", check_dispatch)

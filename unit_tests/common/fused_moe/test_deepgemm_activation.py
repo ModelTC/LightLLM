@@ -11,8 +11,9 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
 @pytest.mark.parametrize("alpha,limit,add_one", [(None, None, True), (1.0, 10.0, False), (1.702, 7.0, True)])
-def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, alpha, limit, add_one):
+def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_ue8m0_scales, alpha, limit, add_one):
     # Identity projections isolate activation/FP8 behavior from GEMM rounding.
     dim, padded = 128, 128
     x = torch.linspace(-24, 24, 5 * dim, device="cuda").view(5, dim).to(torch.float8_e4m3fn)
@@ -22,7 +23,7 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, alph
     w1_scale = torch.ones(2, 2, 1, device="cuda")
     w2_scale = torch.ones(2, 1, 1, device="cuda")
     counts = torch.tensor([3, 2], device="cuda", dtype=torch.int32)
-    activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one)
+    activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one, use_ue8m0_scales=use_ue8m0_scales)
     recv = torch.zeros(2, padded, dim, device="cuda", dtype=torch.float8_e4m3fn)
     recv[0, :3] = x[:3]
     recv[1, :2] = x[3:]
@@ -69,5 +70,7 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, alph
     gate = (gate * torch.sigmoid(gate * (alpha or 1.0))).bfloat16().float()
     activation = (gate * up).bfloat16().float()
     scales = activation.abs().amax(-1, keepdim=True).clamp(min=1e-10) / 448
+    if use_ue8m0_scales:
+        scales = torch.exp2(torch.ceil(torch.log2(scales)))
     expected = ((activation / scales).to(torch.float8_e4m3fn).float() * scales).bfloat16()
     torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.02)

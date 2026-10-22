@@ -129,6 +129,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
             num_experts=self.total_expert_num_contain_redundancy,
             use_fp8=use_fp8_w8a8,
+            round_scale=getattr(self.quant_method, "use_ue8m0_scales", False),
             async_finish=False,
             return_recv_hook=True,
         )
@@ -212,6 +213,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             w2_weight,
             w2_scale,
             expected_m=expected_m,
+            use_ue8m0_scales=getattr(self.quant_method, "use_ue8m0_scales", False),
         )
 
     def prefilled_group_gemm(
@@ -245,6 +247,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 block_size_k=self.quant_method.block_size,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
+                use_ue8m0_scales=getattr(self.quant_method, "use_ue8m0_scales", False),
             )
         else:
             gather_out = torch.empty(
