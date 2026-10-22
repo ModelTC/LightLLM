@@ -20,6 +20,24 @@ _NEO_FA3_INSTALL_HINT = (
 )
 
 
+_NEO_FA3_WARNING_EMITTED = False
+
+
+def _warn_neo_fa3_unavailable(message: str):
+    global _NEO_FA3_WARNING_EMITTED
+
+    if _NEO_FA3_WARNING_EMITTED:
+        return
+
+    import multiprocessing
+
+    if multiprocessing.current_process().name != "MainProcess":
+        return
+
+    _NEO_FA3_WARNING_EMITTED = True
+    warnings.warn(f"{multiprocessing.current_process().name}-{message}", UserWarning, stacklevel=2)
+
+
 try:
     from flash_attn_interface import flash_attn_with_kvcache as flash_attn_with_kvcache_neo
 
@@ -30,7 +48,7 @@ try:
 
     HAS_FLASH_ATTN_INTERFACE = True
 except ImportError as exc:
-    warnings.warn(
+    _warn_neo_fa3_unavailable(
         f"Neo FA3 is unavailable: {exc}. "
         "Automatic Neo prefill selection will fall back to Triton. "
         "To select Triton explicitly, use --llm_prefill_att_backend triton.\n" + _NEO_FA3_INSTALL_HINT
