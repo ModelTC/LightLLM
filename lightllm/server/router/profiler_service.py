@@ -30,6 +30,9 @@ class RouterProfilerService(rpyc.Service):
         self.profiler_cmd_queue = profiler_cmd_queue
 
     def exposed_profiler_cmd(self, cmd: str):
+        cmd = str(cmd)
+        if cmd not in ("start", "stop"):
+            raise ValueError(f"invalid profiler cmd: {cmd!r}, expected 'start' or 'stop'")
         self.profiler_cmd_queue.append(cmd)
         return
 
@@ -43,10 +46,12 @@ def start_router_profiler_server(args, profiler_cmd_queue: RouterProfilerCmdQueu
     from lightllm.utils.shm_port_args import get_shm_port_args
 
     router_profiler_port = get_shm_port_args().router_profiler_port
+    # the only client is the http server on the same host and commands are plain strings,
+    # so listen on loopback only and do not enable pickle.
     server = ThreadedServer(
         RouterProfilerService(profiler_cmd_queue),
+        hostname="127.0.0.1",
         port=router_profiler_port,
-        protocol_config={"allow_pickle": True},
     )
     thread = threading.Thread(target=server.start, daemon=True)
     thread.start()
