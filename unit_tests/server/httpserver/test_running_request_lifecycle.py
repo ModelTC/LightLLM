@@ -253,7 +253,10 @@ def test_prefill_encode_failure_is_outside_running_request_count():
     asyncio.run(run())
 
 
-def test_prefill_full_cache_hit_never_enters_running_request_count():
+def test_prefill_full_cache_hit_never_enters_running_request_count(monkeypatch):
+    summary = MagicMock()
+    monkeypatch.setattr("lightllm.server.httpserver.manager.log_request_summary", summary)
+
     async def run():
         manager = _make_manager(NodeRole.P)
         websocket = AsyncMock()
@@ -267,6 +270,7 @@ def test_prefill_full_cache_hit_never_enters_running_request_count():
         manager._register_running_request.assert_not_awaited()
         manager._unregister_running_request.assert_not_awaited()
         websocket.send.assert_awaited_once()
+        assert summary.call_args.kwargs["status"] == "completed"
 
     asyncio.run(run())
 
@@ -563,3 +567,111 @@ def test_real_supported_max_req_total_len_reserves_mtp_overlap_tokens():
     manager.args = SimpleNamespace(mtp_step=2, page_size=4)
 
     assert manager.get_real_supported_max_req_total_len() == 951
+
+
+@pytest.mark.parametrize(
+    "kind,status",
+    [
+        ("busy", "busy"),
+        ("invalid", "rejected"),
+        ("timeout", "timeout"),
+        ("error", "error"),
+        ("cancel", "cancelled"),
+        ("exit", "cancelled"),
+        ("disconnect", "cancelled"),
+    ],
+)
+@pytest.mark.parametrize("slave", [False, True])
+def test_generate_failure_summary_preserves_reason(monkeypatch, kind, status, slave):
+    from lightllm.utils.error_utils import ServerBusyError, InvalidRequestError, ClientDisconnected
+
+    summary = MagicMock()
+    monkeypatch.setattr("lightllm.server.httpserver.manager.log_request_summary", summary)
+    error_type = {
+        "busy": ServerBusyError,
+        "invalid": InvalidRequestError,
+        "timeout": asyncio.TimeoutError,
+        "error": RuntimeError,
+        "cancel": asyncio.CancelledError,
+        "exit": GeneratorExit,
+        "disconnect": ClientDisconnected,
+    }[kind]
+
+    async def run():
+        manager = _make_manager(NodeRole.NORMAL)
+        manager.is_multinode_tp_slave = slave
+        manager._encode.side_effect = (
+            ClientDisconnected(8, "request rejected reason")
+            if kind == "disconnect"
+            else error_type("request rejected reason")
+        )
+        with pytest.raises(error_type):
+            await _drain_generate(manager, _sampling_params(), _multimodal_params())
+        summary.assert_called_once()
+        assert summary.call_args.kwargs["status"] == status
+        assert summary.call_args.kwargs["reason"] == str(manager._encode.side_effect)
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("slave", [False, True])
+@pytest.mark.parametrize(
+    "last_status,expected",
+    [
+        (FinishStatus.FINISHED_LENGTH, "completed"),
+        (FinishStatus.FINISHED_ABORTED, "abort"),
+        (FinishStatus.FINISHED_ERROR, "error"),
+        (FinishStatus.FINISHED_PD_DECODE_CAPACITY, "continued"),
+    ],
+)
+def test_completion_summary_aggregates_choices_and_suppresses_tp_slave(monkeypatch, slave, last_status, expected):
+    import time
+    from lightllm.server.httpserver import manager as manager_module
+
+    manager = _make_manager(NodeRole.NORMAL)
+    manager.is_multinode_tp_slave = slave
+    manager.args.mtp_step = 1
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.latest_success_infer_time_mark = _ValueMark()
+    summary = MagicMock()
+    monkeypatch.setattr(manager_module, "log_request_summary", summary)
+    params = _sampling_params()
+    params.best_of = 2
+
+    async def run():
+        event = asyncio.Event()
+        event.set()
+        metadata = dict(
+            prompt_cache_len=1,
+            cpu_prompt_cache_len=1,
+            disk_prompt_cache_len=1,
+            mtp_accepted_token_num=1,
+            mtp_verify_token_num=2,
+            mtp_verify_step_num=1,
+        )
+        status = SimpleNamespace(
+            event=event,
+            lock=asyncio.Lock(),
+            has_timed_out_waiting_for_inference=lambda: False,
+            out_token_info_list=[
+                (123, "a", dict(metadata), FinishStatus(FinishStatus.FINISHED_STOP)),
+                (124, "b", dict(metadata), FinishStatus(last_status)),
+            ],
+        )
+        result = [
+            item async for item in manager._wait_to_token_package(time.time(), [1, 2, 3, 4], 123, params, status, None)
+        ]
+        assert len(result) == 2
+        if slave:
+            summary.assert_not_called()
+        else:
+            summary.assert_called_once()
+            fields = summary.call_args.kwargs
+            assert fields["status"] == expected
+            assert fields["output_tokens"] == 2
+            assert fields["gpu_cache_tokens"] == fields["cpu_cache_tokens"] == fields["disk_cache_tokens"] == 1
+            assert fields["mtp_accepted_tokens"] == fields["mtp_verify_steps"] == 2
+            assert fields["mtp_verify_tokens"] == 4
+
+    asyncio.run(run())

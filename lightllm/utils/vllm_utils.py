@@ -15,7 +15,7 @@ except:
     HAS_VLLM = False
     cutlass_scaled_mm = None
     vllm_ops = None
-    logger.warning(
+    logger.debug(
         "vllm is not installed, you can't use the api of it. \
                    You can solve it by running `pip install vllm`."
     )

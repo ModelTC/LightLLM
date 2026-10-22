@@ -43,7 +43,7 @@ from lightllm.utils.error_utils import (
     ServerBusyError,
 )
 
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from dataclasses import dataclass
@@ -117,7 +117,7 @@ async def _safe_stream_wrapper(stream_generator):
         yield f"data: {error_data}\n\n"
         yield "data: [DONE]\n\n"
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         # Client is gone — there's no point yielding more SSE chunks. Stop quietly.
         return
 

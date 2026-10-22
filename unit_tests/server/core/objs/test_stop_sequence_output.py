@@ -77,6 +77,7 @@ def _req(tokens, finish=FinishStatus.NO_FINISH, params=None, request_id=80):
         finish_token_index=1 + len(tokens) if finish != FinishStatus.NO_FINISH else -1,
         finish_status=FinishStatus(finish),
         is_aborted=False,
+        is_stop_matched=False,
         candetoken_out_len=len(tokens),
         out_tokens_queue=CircularQueue(),
         can_released_mark=False,
@@ -1261,3 +1262,39 @@ def test_simulated_finish_releases_prefix_and_preserves_payloads():
     ready_tokens = _drain_ready_tokens(buffer)
     assert ready_tokens == [("helloE", first_payload), ("", finish_payload)]
     assert buffer.state is buffer.State.STOPPED
+
+
+@pytest.mark.parametrize("cancel_second", [False, True])
+def test_stop_cleanup_accounting(monkeypatch, cancel_second):
+    from lightllm.server.core.objs import req as req_module
+    from lightllm.server.router.engine_stats import EngineThroughput
+    from lightllm.utils.log_utils import request_finish_fields
+
+    manager = _http_manager()
+    reqs = [_req([10, 11], request_id=80 + i) for i in range(2)]
+    manager.req_id_to_out_inf[80] = SimpleNamespace(group_req_objs=SimpleNamespace(shm_req_objs=reqs, group_req_id=80))
+    monkeypatch.setattr(req_module, "get_env_start_args", lambda: SimpleNamespace(eos_id=[0]))
+    throughput = EngineThroughput(SimpleNamespace(totals=lambda: (0, 0)))
+    reasons = set()
+    for index, req in enumerate(reqs):
+        req.shm_logprobs.arr["rank"] = np.zeros(4)
+        req.mark_simulated_finished = lambda status, output_len, req=req: Req.mark_simulated_finished(
+            req, status, output_len
+        )
+        if index == 1 and cancel_second:
+            asyncio.run(manager.abort(80))
+        else:
+            buffer = StopStrMatchBuffer(manager, _params(), [])
+            _handle_output(buffer, req.request_id, "helloEND", {"id": 10}, FinishStatus())
+            assert buffer.ready_token_list[-1][3].is_stopped()
+        assert req.is_aborted
+        infer_req = SimpleNamespace(shm_req=req, finish_status=FinishStatus(), cur_output_len=1)
+        infer_batch.InferReq.mark_shm_aborted_finished(infer_req)
+        assert req.finish_status.get_finish_reason() == "abort"
+        throughput.finish(req)
+        req.out_tokens_queue.push("", req.finish_token_index, False, 2)
+        output = asyncio.run(_read_http_tokens(manager, req))
+        reasons.add(output[-1][3].get_finish_reason())
+    assert throughput.completed == (1 if cancel_second else 2)
+    fields = request_finish_fields(reasons)
+    assert fields["status"] == ("abort" if cancel_second else "completed")

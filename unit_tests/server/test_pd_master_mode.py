@@ -514,10 +514,17 @@ def test_pd_rejects_final_metadata_features_before_startup(monkeypatch, run_mode
 def test_pd_master_cli_dispatches_to_the_requested_startup_mode(monkeypatch, workers):
     from lightllm.server import api_server, api_start
 
+    import os
+
+    monkeypatch.setenv("LIGHTLLM_SERVICE_START_TIME", "old")
+    monkeypatch.setattr(api_server.time, "monotonic", lambda: 42.5)
+    logger = Mock()
+    monkeypatch.setattr(api_server, "logger", logger)
     single, multiple = Mock(), Mock()
     monkeypatch.setattr(api_start, "pd_master_start", single)
     monkeypatch.setattr(api_start, "pd_master_multi_worker_start", multiple)
-    monkeypatch.setattr(api_server, "set_log_node_role", Mock())
+    configure = Mock()
+    monkeypatch.setattr(api_server, "configure_logging_from_args", configure)
     monkeypatch.setattr(api_server.torch.multiprocessing, "set_start_method", Mock())
     args = StartArgs(run_mode="pd_master", httpserver_workers=workers)
 
@@ -531,6 +538,14 @@ def test_pd_master_cli_dispatches_to_the_requested_startup_mode(monkeypatch, wor
         expected, unexpected = (single, multiple) if workers == 1 else (multiple, single)
         expected.assert_called_once_with(args)
         unexpected.assert_not_called()
+    configure.assert_called_once_with(args)
+    assert os.environ["LIGHTLLM_SERVICE_START_TIME"] == "42.5"
+    logger.info.assert_called_once()
+    assert logger.info.call_args.kwargs["extra"] == {
+        "event": "service.starting",
+        "run_mode": "pd_master",
+        "model": args.model_name,
+    }
 
 
 def test_multiworker_preflight_failure_precedes_environment_and_process_initialization(monkeypatch):

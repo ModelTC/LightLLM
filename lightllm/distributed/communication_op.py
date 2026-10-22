@@ -50,7 +50,7 @@ try:
     HAS_DEEPEP = True
 except:
     HAS_DEEPEP = False
-    logger.info("deep_ep is not installed, you can't use the api of it.")
+    logger.debug("deep_ep is not installed, you can't use the api of it.")
 
 
 class CustomProcessGroup:

@@ -4,6 +4,7 @@ import numpy as np
 import dataclasses
 import torch
 from typing import List
+from lightllm.utils.log_utils import DebugStatsLogger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_dp_rank_in_node
@@ -22,6 +23,7 @@ class DPKVSharedMoudle:
         from .impl import DPChunkedPrefillBackend
 
         self.backend: DPChunkedPrefillBackend = backend
+        self._debug_transfers = DebugStatsLogger(backend.logger, "kv.shared_transfer")
         self.max_req_num = max_req_num
 
         # 0 代表 kv_len, 1 代表 radix_cache_len
@@ -100,6 +102,8 @@ class DPKVSharedMoudle:
         return trans_tasks
 
     def kv_trans(self, trans_tasks: List["TransTask"]):
+        if self.backend.is_master_in_dp:
+            self._debug_transfers.flush()
         # kv 传输
         if len(trans_tasks) > 0:
             max_kv_len_mem_indexes = []
@@ -122,8 +126,8 @@ class DPKVSharedMoudle:
                 dp_size_in_node=self.backend.dp_size_in_node,
                 rank_in_dp=self.backend.rank_in_dp,
             )
-            # This copy runs during request initialization, not once per PD transfer page.
-            self.backend.logger.debug(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {len(mem_indexes_tensor)}")
+            if self.backend.is_master_in_dp:
+                self._debug_transfers.add(tokens_total=len(mem_indexes_tensor), tasks_total=len(trans_tasks))
 
         for trans_task in trans_tasks:
             trans_task.req.cur_kv_len += len(trans_task.mem_indexes)

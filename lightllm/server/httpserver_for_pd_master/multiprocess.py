@@ -20,7 +20,7 @@ from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_unique_server_name,
 )
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, get_http_logging_args, http_access_enabled
 from lightllm.utils.net_utils import format_host_port
 from lightllm.utils.shm_port_args import ShmPortArgs, get_shm_port_args
 from lightllm.utils.start_utils import process_manager
@@ -89,6 +89,7 @@ def start_multiprocess_pd_master(
                 start_funcs=[start_health_check_process],
                 start_args=[(args,)],
             )
+        process_manager.start_readiness_monitor(proxy_process, args)
         process_manager.supervise_processes(proxy_process)
 
 
@@ -113,8 +114,7 @@ def _build_haproxy_config(args: StartArgs, worker_ports: list[int], server_state
         "",
         "defaults",
         "    mode http",
-        "    log global",
-        "    option httplog",
+        *(["    log global", "    option httplog"] if http_access_enabled() else []),
         "    option http-server-close",
         "    option abortonclose",
         "    option forwardfor",
@@ -130,6 +130,7 @@ def _build_haproxy_config(args: StartArgs, worker_ports: list[int], server_state
         # 对外入口：拒绝内部 P/D 通道，健康接口进入聚合 backend。
         "frontend pd_master_public",
         f"    bind {listen_address}",
+        "    http-request set-log-level silent if { path /readiness }",
         "    acl private_pd_channel path -i /pd_register /kv_move_status",
         "    http-request return status 426 if private_pd_channel",
         "    http-request set-header X-Forwarded-Proto http",
@@ -251,12 +252,7 @@ def _start_pd_master_worker() -> None:
             "0",
             "--bind",
             format_host_port(args.host, worker_port),
-            "--log-level",
-            "info",
-            "--access-logfile",
-            "-",
-            "--error-logfile",
-            "-",
+            *get_http_logging_args(application_access=True),
             "lightllm.server.api_http:app",
         ]
     )

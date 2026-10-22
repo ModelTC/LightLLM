@@ -301,11 +301,7 @@ class _NcclPeer:
         event = torch.cuda.Event()
         event.record(stream)
 
-        if self.transporter.args.pd_detail_log:
-            logger.debug(
-                f"NCCL send page posted request_id={trans_task.request_id} "
-                f"src_page={trans_task.src_page_index} dst_agent={self.peer_name}"
-            )
+        # Page progress is summarized by the transfer worker.
         return _NcclXferHandle(peer_name=self.peer_name, event=event)
 
     def start_recv(self, trans_task: PDChunckedTransTask):
@@ -356,10 +352,7 @@ class _NcclPeer:
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
-            if self.transporter.args.pd_detail_log:
-                logger.debug(
-                    f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"
-                )
+            # Page progress is summarized by the transfer worker.
         except BaseException as e:
             trans_task.error_info = str(e)
             logger.exception(str(e))
@@ -452,7 +445,7 @@ class _NcclControlChannel:
             except OSError as e:
                 last_error = e
                 if e.errno == errno.EADDRINUSE:
-                    logger.info(f"NCCL RPyC control port {host_ip}:{cur_port} is in use, try next port")
+                    logger.debug(f"NCCL RPyC control port {host_ip}:{cur_port} is in use, try next port")
                 else:
                     logger.warning(f"Create NCCL RPyC control channel on {host_ip}:{cur_port} failed: {e}")
         raise RuntimeError(f"can not allocate NCCL control port in [{port_min}, {port_max}]") from last_error

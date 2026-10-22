@@ -39,7 +39,7 @@ try:
 
     HAS_DEEPGEMM = True
 except:
-    logger.warning("no deepep or deep_gemm")
+    logger.debug("no deepep or deep_gemm")
     HAS_DEEPGEMM = False
 
 

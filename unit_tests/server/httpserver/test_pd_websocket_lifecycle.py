@@ -79,3 +79,56 @@ def test_kv_status_is_forwarded_without_registration_or_reply(monkeypatch):
     asyncio.run(api_http_pd.kv_move_status(websocket))
     manager.update_req_status.assert_awaited_once_with(status)
     websocket.send_bytes.assert_not_awaited()
+
+
+def test_registration_disconnect_keeps_dp_connection_identity(monkeypatch):
+    from unittest.mock import Mock
+    from starlette.websockets import WebSocketDisconnect
+
+    _manager(monkeypatch)
+    logger = Mock()
+    monkeypatch.setattr(api_http_pd, "logger", logger)
+    websocket = _websocket(
+        receive_text=AsyncMock(
+            return_value=json.dumps(
+                {"mode": "prefill", "client_ip_port": "p:8000", "dp_index": 2, "connection_id": "connection-a"}
+            )
+        ),
+        receive_bytes=AsyncMock(side_effect=WebSocketDisconnect()),
+    )
+    asyncio.run(api_http_pd.register_and_keep_alive(websocket))
+    assert len(logger.info.call_args_list) == 3
+    for call in logger.info.call_args_list[1:]:
+        assert "dp_index=2 connection_id=connection-a" in call.args[0]
+
+
+@pytest.mark.parametrize("endpoint", ["kv_move_status", "register_and_keep_alive"])
+@pytest.mark.parametrize("failed", [False, True])
+def test_pd_connection_logs_distinguish_disconnect_from_failure(monkeypatch, endpoint, failed):
+    from unittest.mock import Mock
+    from fastapi import WebSocketDisconnect
+
+    manager = _manager(monkeypatch)
+    logger = Mock()
+    monkeypatch.setattr(api_http_pd, "logger", logger)
+    payload = {"mode": "prefill", "client_ip_port": "p:8000", "secret_detail": "not-for-info"}
+    websocket = _websocket(
+        receive_text=AsyncMock(return_value=json.dumps(payload)),
+        receive_bytes=AsyncMock(side_effect=RuntimeError("broken") if failed else WebSocketDisconnect()),
+    )
+    asyncio.run(getattr(api_http_pd, endpoint)(websocket))
+    logger.error.assert_not_called()
+    logger.warning.assert_not_called()
+    if failed:
+        logger.exception.assert_called_once()
+    else:
+        logger.exception.assert_not_called()
+    if endpoint == "register_and_keep_alive":
+        logger.debug.assert_called_once_with(
+            "PD registration received: peer=%s", "prefill@p:8000 dp_index=None connection_id=None"
+        )
+        manager.remove_pd.assert_awaited_once_with(payload)
+        assert logger.info.call_count == (2 if failed else 3)
+    else:
+        assert logger.info.call_count == (1 if failed else 2)
+    assert "not-for-info" not in str(logger.info.call_args_list)

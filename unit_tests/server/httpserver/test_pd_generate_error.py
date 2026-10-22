@@ -337,7 +337,7 @@ def test_pd_master_first_token_dedup_preserves_terminal_status(terminal_status, 
             "prompt",
             sampling_params,
             MultimodalParams(),
-            SimpleNamespace(is_disconnected=AsyncMock(return_value=False)),
+            SimpleNamespace(headers={}, is_disconnected=AsyncMock(return_value=False)),
         )
         try:
             first = await asyncio.wait_for(anext(stream), timeout=1)
@@ -504,3 +504,55 @@ def test_pd_stream_validation_returns_bad_request(monkeypatch):
     response = TestClient(app).get("/")
     assert response.status_code == 400
     assert "invalid image tag num" in response.text
+
+
+def test_pd_request_context_isolated_and_reset_on_failure():
+    from lightllm.utils.log_utils import get_http_request_id
+
+    async def run():
+        observed = []
+
+        class ContextManager:
+            args = SimpleNamespace(run_mode="prefill")
+
+            async def generate(self, **kwargs):
+                expected = kwargs["prompt"]
+                observed.append((expected, "before", get_http_request_id()))
+                await asyncio.sleep(0)
+                observed.append((expected, "after", get_http_request_id()))
+                if expected == "client-b":
+                    raise RuntimeError("test failure")
+                yield 123, "token", {}, FinishStatus(FinishStatus.FINISHED_STOP)
+
+        async def generate(client_id):
+            params = SamplingParams()
+            params.group_request_id = 123
+            upload = AsyncMock()
+            await _pd_process_generate(
+                ContextManager(),
+                client_id,
+                params,
+                None,
+                AsyncMock(),
+                upload,
+                asyncio.Event(),
+                http_request_id=client_id,
+            )
+            assert get_http_request_id() == "-"
+            if client_id == "client-b":
+                upload.send.assert_awaited_once()
+                assert pickle.loads(upload.send.call_args.args[0]) == (
+                    ObjType.PD_UPLOAD_GENERATE_ERROR,
+                    123,
+                    "RuntimeError: test failure",
+                )
+            else:
+                upload.send.assert_not_awaited()
+
+        await asyncio.gather(generate("client-a"), generate("client-b"))
+        assert sorted(observed) == sorted(
+            (client, phase, client) for client in ("client-a", "client-b") for phase in ("before", "after")
+        )
+        assert get_http_request_id() == "-"
+
+    asyncio.run(run())

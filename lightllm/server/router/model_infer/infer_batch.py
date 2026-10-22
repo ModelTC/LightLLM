@@ -16,7 +16,7 @@ from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedRadixCache,
     HybridAttPagedTreeNode,
 )
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
@@ -314,7 +314,7 @@ class InferenceContext:
         https://arxiv.org/abs/2403.01241
         """
         prompt_cache_token_id = list(self.radix_cache.root_node.children.values())[0].token_id_key
-        print(f"prompt_cache_token_id : {prompt_cache_token_id}")
+        log_debug_event(logger, "cache.prompt_loaded", tokens=len(prompt_cache_token_id), leader_only=True)
         index = range(len(prompt_cache_token_id))
         prompt_cache_kv_buffer = self.radix_cache.mem_manager.get_index_kv_buffer(index)
         torch.save(prompt_cache_kv_buffer, f"prompt_cache_rank_{dist.get_rank()}.pt")
@@ -354,12 +354,13 @@ class InferenceContext:
         self.infer_req_ids = [_id for _id in self.infer_req_ids if _id not in finished_req_ids_set]
 
         if self.radix_cache is not None and len(self.infer_req_ids) == 0:
-            logger.debug(
-                f"free a batch state:\n"
-                f"radix refed token num {self.radix_cache.get_refed_tokens_num()}\n"
-                f"radix hold token num {self.radix_cache.get_tree_total_tokens_num()}\n"
-                f"mem manager can alloc token num {self.req_manager.mem_manager.allocator.can_use_mem_size}\n"
-                f"mem manager total size {self.req_manager.mem_manager.allocator.size}\n"
+            log_debug_event(
+                logger,
+                "cache.idle",
+                referenced_tokens=self.radix_cache.get_refed_tokens_num(),
+                cached_tokens=self.radix_cache.get_tree_total_tokens_num(),
+                free_tokens=self.req_manager.mem_manager.allocator.can_use_mem_size,
+                leader_only=True,
             )
 
         return
@@ -372,7 +373,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -384,7 +384,7 @@ class InferenceContext:
                 req.paused = True
                 if is_master_in_dp:
                     req.shm_req.is_paused = True
-                    logger.debug(f"infer paused req id {req.req_id}")
+                    log_debug_event(logger, "request.paused", request_id=req.req_id, leader_only=True)
 
             if len(free_token_index) != 0:
                 free_token_index = custom_cat(free_token_index)
@@ -412,7 +412,7 @@ class InferenceContext:
                 req.paused = False
                 if is_master_in_dp:
                     req.shm_req.is_paused = False
-                    logger.debug(f"infer recover paused req id {req.req_id}")
+                    log_debug_event(logger, "request.resumed", request_id=req.req_id, leader_only=True)
                 can_alloc_token_num -= alloc_token_num
         return
 
@@ -996,9 +996,10 @@ class InferReqUpdatePack:
     类绑定相关处理参数，实现解耦和延迟处理。
     """
 
-    def __init__(self, req_obj: InferReq, output_len: int):
+    def __init__(self, req_obj: InferReq, output_len: int, prefill_tokens: int = 0):
         self.req_obj = req_obj
         self.output_len = output_len
+        self.prefill_tokens = prefill_tokens
 
     def handle(
         self,

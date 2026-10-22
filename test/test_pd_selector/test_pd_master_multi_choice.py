@@ -19,6 +19,10 @@ def _manager() -> HttpServerManagerForPDMaster:
     manager.active_req_ids = set()
     manager.req_id_to_out_inf = {}
     manager.pd_manager = MagicMock()
+    from lightllm.server.httpserver_for_pd_master.pd_selector.pd_node_stats_client import LocalPDNodeStats
+
+    manager.pd_node_stats = LocalPDNodeStats()
+    manager.pd_manager.selector.insert_prompt_cache = AsyncMock()
     manager.id_gen = MagicMock()
     manager.id_gen.generate_id.return_value = 800
     manager.metric_client = MagicMock()
@@ -99,6 +103,7 @@ def test_pd_master_expands_n_into_concurrent_single_choice_requests():
             choice_sampling_params,
             child_multimodal_params,
             child_request,
+            **_kwargs,
         ):
             captured_params.append(choice_sampling_params)
             started.add(choice_sampling_params.group_request_id)
@@ -255,7 +260,7 @@ def test_pd_master_hides_capacity_finish_token_and_continues_next_segment(
         segment_index = 0
         resource_wait_timeouts = []
 
-        async def wait_to_token_package(_p_node, _d_node, _start_time, prompt_ids, params, *_args):
+        async def wait_to_token_package(_p_node, _d_node, _start_time, prompt_ids, params, *_args, **_kwargs):
             nonlocal segment_index
             segment_index += 1
             resource_wait_timeouts.append(params.pd_node_resource_wait_timeout_seconds)
@@ -365,7 +370,9 @@ def test_pd_master_stopped_choice_does_not_forward_late_output(late_status):
         sampling_params = SamplingParams()
         sampling_params.max_new_tokens = 4
 
-        async def wait_to_token_package(p_node, d_node, start_time, prompt, params, multimodal_params, request):
+        async def wait_to_token_package(
+            p_node, d_node, start_time, prompt, params, multimodal_params, request, **_kwargs
+        ):
             metadata = {"id": 10, "prompt_tokens": 2}
             yield params.group_request_id, "first", dict(metadata), FinishStatus()
             await asyncio.sleep(0.01)
@@ -472,7 +479,7 @@ def test_pd_master_dynamic_split_reuses_nodes_with_remaining_length():
         dispatched_max_new_tokens = []
 
         async def wait_to_token_package(
-            selected_p_node, selected_d_node, _start_time, segment_prompt_ids, sampling_params, *_args
+            selected_p_node, selected_d_node, _start_time, segment_prompt_ids, sampling_params, *_args, **_kwargs
         ):
             dispatched_nodes.append(selected_p_node)
             dispatched_d_nodes.append(selected_d_node)
@@ -547,7 +554,7 @@ def test_pd_master_counts_segment_tokens_without_relying_on_metadata():
         manager.select_p_d_node = AsyncMock(return_value=(p_node, d_node, PDSelectionExtraInfo()))
         dispatched_max_new_tokens = []
 
-        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
+        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args, **_kwargs):
             dispatched_max_new_tokens.append(sampling_params.max_new_tokens)
             is_first_segment = len(dispatched_max_new_tokens) == 1
             token_count = 2 if is_first_segment else 1
@@ -638,7 +645,7 @@ def test_pd_master_promotes_only_fresh_high_estimated_cache_hit(
         )
         high_priority_request_flags = []
 
-        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
+        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args, **_kwargs):
             high_priority_request_flags.append(sampling_params.high_priority_request)
             yield (
                 sampling_params.group_request_id,
@@ -694,7 +701,7 @@ def test_pd_master_sets_resource_wait_timeout_when_enabled(enable_limit, expecte
         )
         captured_request_settings = []
 
-        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args):
+        async def wait_to_token_package(_p_node, _d_node, _start_time, _prompt, sampling_params, *_args, **_kwargs):
             captured_request_settings.append(
                 (
                     sampling_params.high_priority_request,
@@ -735,7 +742,7 @@ def test_pd_master_retries_generate_one_when_node_is_busy():
         manager.enable_pd_node_self_request_limit = True
         attempt_count = 0
 
-        async def generate_one_attempt(*_args):
+        async def generate_one_attempt(*_args, **_kwargs):
             nonlocal attempt_count
             attempt_count += 1
             if attempt_count == 1:
@@ -770,7 +777,7 @@ def test_pd_master_stops_busy_retry_when_client_disconnects():
         manager = _manager()
         attempt_count = 0
 
-        async def generate_one_attempt(*_args):
+        async def generate_one_attempt(*_args, **_kwargs):
             nonlocal attempt_count
             attempt_count += 1
             raise ServerBusyError("node is busy")
@@ -806,7 +813,7 @@ def test_pd_master_does_not_retry_busy_error_when_self_limit_is_disabled():
         manager.enable_pd_node_self_request_limit = False
         attempt_count = 0
 
-        async def generate_one_attempt(*_args):
+        async def generate_one_attempt(*_args, **_kwargs):
             nonlocal attempt_count
             attempt_count += 1
             raise ServerBusyError("node is busy")
@@ -837,7 +844,7 @@ def test_pd_master_stops_busy_retry_when_probe_period_expires():
         manager.pd_node_busy_retry_timeout_seconds = 0
         attempt_count = 0
 
-        async def generate_one_attempt(*_args):
+        async def generate_one_attempt(*_args, **_kwargs):
             nonlocal attempt_count
             attempt_count += 1
             raise ServerBusyError("node is busy")
@@ -868,7 +875,7 @@ def test_pd_master_does_not_retry_busy_error_after_streaming_output():
         attempt_count = 0
         results = []
 
-        async def generate_one_attempt(*_args):
+        async def generate_one_attempt(*_args, **_kwargs):
             nonlocal attempt_count
             attempt_count += 1
             yield 800, "visible", {}, FinishStatus()

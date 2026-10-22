@@ -178,8 +178,10 @@ def haproxy_proxy(tmp_path, request):
         check = subprocess.run([executable, "-c", "-f", str(config)], capture_output=True, text=True, timeout=5)
         assert check.returncode == 0, check.stderr
         command = [executable, "-db", "-f", str(config)]
-        with (tmp_path / "haproxy.stderr").open("wb") as error_log:
-            haproxy = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=error_log, start_new_session=True)
+        with (tmp_path / "haproxy.stderr").open("wb") as error_log, (tmp_path / "haproxy.stdout").open(
+            "wb"
+        ) as access_log:
+            haproxy = subprocess.Popen(command, stdout=access_log, stderr=error_log, start_new_session=True)
             state["haproxy"] = haproxy
             opener = build_opener(ProxyHandler({}))
             base_url = f"http://127.0.0.1:{public_port}"
@@ -432,3 +434,21 @@ def test_real_haproxy_allows_slow_health_checks_and_rejects_a_timed_out_worker(h
     _wait_for_probe_response(opener, base_url, "/health", 503, timeout=30)
     assert _probe_response(opener, base_url, "/liveness")[0] == 200
     assert _probe_response(opener, base_url, "/readiness")[0] == 200
+
+
+@pytest.mark.parametrize("access", ["0", "1"])
+def test_proxy_access_logging(monkeypatch, request, access):
+    monkeypatch.setenv("LIGHTLLM_LOG_HTTP_ACCESS", access)
+    base_url, opener, state = request.getfixturevalue("haproxy_proxy")
+    for path in ("/readiness", "/worker"):
+        try:
+            with opener.open(base_url + path, timeout=3) as response:
+                response.read()
+        except HTTPError as response:
+            assert response.code == 503
+            response.close()
+    state["haproxy"].send_signal(signal.SIGUSR1)
+    state["haproxy"].wait(timeout=5)
+    output = (state["runtime"] / "haproxy.stdout").read_text()
+    assert "GET /readiness" not in output
+    assert ("GET /worker" in output) == (access == "1")

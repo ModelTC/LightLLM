@@ -148,8 +148,9 @@ def test_pd_handle_loop_passes_its_fixed_rank_to_each_master(monkeypatch, dp_ind
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("with_metadata", [False, True])
 @pytest.mark.parametrize("dp_index", [None, 0, 3])
-def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypatch, dp_index):
+def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypatch, dp_index, with_metadata):
     from lightllm.server import api_http
 
     async def run():
@@ -171,8 +172,10 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
         params.suggested_dp_index = -1
         dispatched = asyncio.Event()
         payloads = []
+        received_ids = []
 
         async def generate(**kwargs):
+            received_ids.append(kwargs["http_request_id"])
             req_params = kwargs["sampling_params"]
             assert req_params.suggested_dp_index == (-1 if dp_index is None else dp_index)
             assert kwargs["pd_upload_websocket"] is websocket
@@ -185,7 +188,8 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
             nonlocal requests
             requests += 1
             if requests == 1:
-                return pickle.dumps((ObjType.REQ, ("prompt", params, None)))
+                payload = (ObjType.REQ, ("prompt", params, None))
+                return pickle.dumps(payload + ({"http_request_id": "client-id"},) if with_metadata else payload)
             await dispatched.wait()
             while not any(isinstance(payload, tuple) and payload[0] == ObjType.TOKEN_PACKS for payload in payloads):
                 await asyncio.sleep(0)
@@ -208,6 +212,7 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
         monkeypatch.setattr(pd_loop.websockets, "connect", lambda *_args, **_kwargs: Connection())
         monkeypatch.setattr(pd_loop, "_pd_process_generate", generate)
         await asyncio.wait_for(pd_loop._pd_handle_task(manager, PD_Master_Obj(1, "master:8000"), dp_index), 2)
+        assert received_ids == ["client-id" if with_metadata else None]
         assert payloads[0].get("dp_index") == dp_index
         assert "dp_index" in payloads[0]
         for payload in payloads[1:]:
@@ -292,3 +297,29 @@ def test_split_option_defaults_off_and_is_prefill_only():
     assert StartArgs().use_dp_split_mode_connect_pd_master is False
     with pytest.raises(ValueError, match="only supports prefill"):
         launch_server(StartArgs(run_mode="decode", use_dp_split_mode_connect_pd_master=True))
+
+
+def test_pd_master_waiting_is_logged_only_on_transitions(monkeypatch):
+    from unittest.mock import Mock
+
+    logger = Mock()
+    monkeypatch.setattr(pd_loop, "logger", logger)
+    masters = {1: PD_Master_Obj(1, "master:8000")}
+    lookup = AsyncMock(side_effect=[None, None, {}, masters, masters, None])
+    monkeypatch.setattr(pd_loop, "_get_pd_master_objs", lookup)
+    monkeypatch.setattr(pd_loop, "_pd_handle_task", AsyncMock())
+
+    async def tick(_seconds):
+        if lookup.await_count == 6:
+            raise asyncio.CancelledError()
+
+    monkeypatch.setattr(pd_loop.asyncio, "sleep", tick)
+
+    async def run():
+        manager = SimpleNamespace(args=StartArgs(host="p", run_mode="prefill"))
+        with pytest.raises(asyncio.CancelledError):
+            await pd_loop.pd_handle_loop(manager)
+
+    asyncio.run(run())
+    events = [call.kwargs["extra"]["event"] for call in logger.info.call_args_list if "extra" in call.kwargs]
+    assert events == ["pd.waiting_for_master", "pd.masters_changed", "pd.waiting_for_master"]

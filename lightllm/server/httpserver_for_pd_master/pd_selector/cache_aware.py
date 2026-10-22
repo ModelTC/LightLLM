@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_debug_event
 
 from .pd_selector import PDSelectionExtraInfo
 from .prompt_cache_tree import PromptCacheMatchResult
@@ -175,13 +175,6 @@ class CacheAwarePolicy:
         )
         match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
 
-        logger.debug(
-            f"CacheAwarePolicy: matched_char_count={result.matched_char_count}, "
-            f"input_char_count={result.input_char_count}, match_rate={match_rate:.4f}, "
-            f"cache_threshold={self.config.cache_threshold:.4f}, "
-            f"prefill_node={result.prefill_node}"
-        )
-
         if match_rate <= self.config.cache_threshold or result.prefill_node is None:
             return None, result
 
@@ -197,10 +190,13 @@ class CacheAwarePolicy:
             return None
 
         selected_worker = random.choice(idle_workers)
-        logger.debug(
-            f"CacheAwarePolicy: select idle worker, idle_worker_num={len(idle_workers)}, "
-            f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
-            f"selected_worker={selected_worker.client_ip_port}"
+        log_debug_event(
+            logger,
+            "pd.prefill_selected",
+            reason="idle_random",
+            candidates=len(idle_workers),
+            selected=selected_worker.client_ip_port,
+            load=selected_worker.dispatched_prompt_chars,
         )
         return selected_worker
 
@@ -224,15 +220,14 @@ class CacheAwarePolicy:
         else:
             selected_worker = cache_worker
 
-        logger.debug(
-            f"CacheAwarePolicy: cache_worker={cache_worker.client_ip_port if cache_worker else None}, "
-            f"cache_worker_load={cache_worker.dispatched_prompt_chars if cache_worker else None}, "
-            f"cache_projected_load={cache_projected_load}, "
-            f"least_loaded_worker={least_loaded_worker.client_ip_port}, "
-            f"least_loaded_worker_load={least_loaded_worker.dispatched_prompt_chars}, "
-            f"least_projected_load={least_projected_load}, "
-            f"balance_rel_threshold={self.config.balance_rel_threshold:.4f}, "
-            f"cache_worker_is_overloaded={cache_worker_is_overloaded}, "
-            f"selected_worker={selected_worker.client_ip_port}"
+        log_debug_event(
+            logger,
+            "pd.prefill_selected",
+            reason="cache_overloaded" if cache_worker_is_overloaded else ("cache" if cache_worker else "least_load"),
+            selected=selected_worker.client_ip_port,
+            load=selected_worker.dispatched_prompt_chars,
+            least_load=least_loaded_worker.dispatched_prompt_chars,
+            projected_load=selected_worker.dispatched_prompt_chars + request_load,
+            balance_threshold=self.config.balance_rel_threshold,
         )
         return selected_worker

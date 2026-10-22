@@ -1,7 +1,9 @@
+import os
+import time
 import torch
 from .api_cli import add_cli_args
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.log_utils import init_logger, set_log_node_role
+from lightllm.utils.log_utils import init_logger, configure_logging_from_args
 
 logger = init_logger(__name__)
 
@@ -9,7 +11,14 @@ logger = init_logger(__name__)
 def launch_server(args: StartArgs):
     if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
         raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
-    set_log_node_role(args.run_mode)
+    configure_logging_from_args(args)
+    os.environ["LIGHTLLM_SERVICE_START_TIME"] = str(time.monotonic())
+    logger.info(
+        "event=service.starting role=%s model=%s",
+        args.run_mode,
+        args.model_name,
+        extra={"event": "service.starting", "run_mode": args.run_mode, "model": args.model_name},
+    )
     from .api_start import (
         pd_master_start,
         pd_master_multi_worker_start,

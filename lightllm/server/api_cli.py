@@ -3,6 +3,55 @@ import argparse
 
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.formatter_class = argparse.RawTextHelpFormatter
+    logging_group = parser.add_argument_group("Logging")
+    logging_group.add_argument(
+        "--log-level",
+        "--log_level",
+        choices=["debug", "info", "warning", "error", "critical"],
+        default=None,
+        help="Service log level (LIGHTLLM_LOG_LEVEL; default: info).",
+    )
+    logging_group.add_argument(
+        "--log-format",
+        "--log_format",
+        choices=["text", "json"],
+        default=None,
+        help="Log output format (LIGHTLLM_LOG_FORMAT; default: text).",
+    )
+    logging_group.add_argument(
+        "--log-module-levels",
+        "--log_module_levels",
+        default=None,
+        help='JSON mapping, e.g. {"lightllm.server.router": "DEBUG"}. Overrides inherited levels.',
+    )
+    logging_group.add_argument(
+        "--log-request-sample-rate",
+        "--log_request_sample_rate",
+        type=float,
+        default=None,
+        help="Successful request summary sampling rate, 0..1 (default: 0.01, 1%). Failures are not sampled.",
+    )
+    logging_group.add_argument(
+        "--log-stats-interval",
+        "--log_stats_interval",
+        type=float,
+        default=None,
+        help="Engine summary interval in seconds (default: 10).",
+    )
+    logging_group.add_argument(
+        "--log-http-level",
+        "--log_http_level",
+        default=None,
+        choices=["debug", "info", "warning", "error", "critical"],
+        help="HTTP server error logger level (default: warning).",
+    )
+    logging_group.add_argument(
+        "--enable-http-access-log",
+        "--enable_http_access_log",
+        action="store_true",
+        default=None,
+        help="Enable HTTP access logs independently of service/request logs (default: disabled).",
+    )
 
     parser.add_argument(
         "--run_mode",
@@ -328,12 +377,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
     )
-    parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
+    parser.add_argument(
+        "--detail_log",
+        action="store_true",
+        help="enable sampled request metadata at DEBUG; HTTP prompt text and token IDs are omitted.",
+    )
     parser.add_argument(
         "--pd_detail_log",
         action="store_true",
         help=(
-            "enable verbose per-block PD KV transfer debug logs. "
+            "Deprecated: use module DEBUG logging for bounded PD KV transfer summaries. "
             "Request-level debug logs and warning/error logs do not require this flag."
         ),
     )

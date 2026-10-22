@@ -16,6 +16,13 @@ class StartArgs:
     httpserver_workers: int = field(default=1)
     disable_delay_response_start: bool = field(default=False)
     hypercorn_config: Optional[str] = field(default=None)
+    log_level: Optional[str] = field(default=None)
+    log_format: Optional[str] = field(default=None)
+    log_module_levels: Optional[str] = field(default=None)
+    log_request_sample_rate: Optional[float] = field(default=None)
+    log_stats_interval: Optional[float] = field(default=None)
+    log_http_level: Optional[str] = field(default=None)
+    enable_http_access_log: Optional[bool] = field(default=None)
     zmq_mode: str = field(
         default="ipc:///tmp/",
         metadata={"help": "use socket mode or ipc mode, only can be set in ['tcp://', 'ipc:///tmp/']"},

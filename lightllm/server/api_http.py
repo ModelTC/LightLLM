@@ -45,7 +45,14 @@ from .httpserver.manager import HttpServerManager
 from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import (
+    init_logger,
+    set_log_context,
+    log_http_access,
+    new_http_request_id,
+    set_http_request_id,
+    reset_http_request_id,
+)
 from lightllm.utils.error_utils import (
     ClientDisconnected,
     GenerationError,
@@ -88,6 +95,7 @@ class G_Objs:
 
     def set_args(self, args: StartArgs):
         self.args = args
+        set_log_context(component="http", node_rank=args.node_rank)
         from .api_lightllm import lightllm_generate, lightllm_generate_stream
         from .api_tgi import tgi_generate_impl, tgi_generate_stream_impl
 
@@ -123,36 +131,45 @@ g_objs = G_Objs()
 app = FastAPI()
 g_objs.app = app
 
-_ACCESS_LOG_STATUS_COLORS = {2: "\033[32m", 3: "\033[36m", 4: "\033[33m", 5: "\033[31m"}
-_ACCESS_LOG_RESET = "\033[0m"
-
 
 class _AccessLogMiddleware:
     def __init__(self, app):
         self.app = app
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] not in ("http", "websocket"):
+        if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
 
-        status_holder = {"status": 0}
+        request_id = new_http_request_id(scope.get("headers", []))
+        scope = dict(scope)
+        scope["headers"] = [(k, v) for k, v in scope.get("headers", []) if k.lower() != b"x-request-id"]
+        scope["headers"].append((b"x-request-id", request_id.encode("ascii")))
+        token = set_http_request_id(request_id)
+        started = time.monotonic()
+        status_holder = {"status": 500}
 
         async def send_wrapper(message):
             if message["type"] == "http.response.start":
                 status_holder["status"] = message["status"]
+                message = dict(message)
+                message["headers"] = [(k, v) for k, v in message.get("headers", []) if k.lower() != b"x-request-id"]
+                message["headers"].append((b"x-request-id", request_id.encode("ascii")))
             await send(message)
 
         try:
             await self.app(scope, receive, send_wrapper)
         finally:
-            if scope["type"] == "http":
-                status = status_holder["status"]
-                msg = f"{scope['method']} {scope['path']} {status}"
-                color = _ACCESS_LOG_STATUS_COLORS.get(status // 100, "")
-                if color:
-                    msg = color + msg + _ACCESS_LOG_RESET
-                logger.info(msg)
+            try:
+                log_http_access(
+                    scope["method"],
+                    scope["path"],
+                    status_holder["status"],
+                    (time.monotonic() - started) * 1000,
+                    http_request_id=request_id,
+                )
+            finally:
+                reset_http_request_id(token)
 
 
 app.add_middleware(_AccessLogMiddleware)
@@ -325,7 +342,7 @@ async def generate(request: Request) -> Response:
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
@@ -347,7 +364,7 @@ async def generate_stream(request: Request) -> Response:
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
@@ -367,7 +384,7 @@ async def get_score(request: Request) -> Response:
         logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, str(e))
@@ -403,7 +420,7 @@ async def chat_completions(request: ChatCompletionRequest, raw_request: Request)
         logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
     return resp
 
@@ -423,7 +440,7 @@ async def completions(request: CompletionRequest, raw_request: Request) -> Respo
         logger.warning("Server busy detail: %s", e.message)
         return create_server_busy_response(e)
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
     return resp
 
@@ -445,7 +462,7 @@ async def anthropic_messages(raw_request: Request) -> Response:
         g_objs.metric_client.counter_inc("lightllm_request_failure")
         return _anthropic_error_response(HTTPStatus(e.status_code), SERVER_BUSY_MESSAGE)
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
 
 
@@ -456,7 +473,7 @@ async def anthropic_count_tokens(raw_request: Request) -> Response:
     try:
         return await anthropic_count_tokens_impl(raw_request)
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
@@ -479,7 +496,7 @@ async def openai_responses(raw_request: Request) -> Response:
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
     except Exception as e:
         logger.error("An error occurred: %s", str(e), exc_info=True)
@@ -531,7 +548,7 @@ async def tokens(request: Request):
     except ValueError as e:
         return create_error_response(HTTPStatus.BAD_REQUEST, str(e))
     except ClientDisconnected as e:
-        logger.warning(str(e))
+        logger.debug(str(e))
         return Response(status_code=499)
     except Exception as e:
         return create_error_response(HTTPStatus.EXPECTATION_FAILED, f"error: {str(e)}")
@@ -593,9 +610,9 @@ async def shutdown():
 
 @app.on_event("startup")
 async def startup_event():
-    logger.info("server start up")
+    set_log_context(component="http")
     loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
     loop.create_task(g_objs.httpserver_manager.handle_loop())
-    logger.info(f"server start up ok, loop use is {asyncio.get_event_loop()}")
+    logger.info("event=http.initialized", extra={"event": "http.initialized"})
     return
