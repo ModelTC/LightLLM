@@ -52,8 +52,13 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
+    # Optional accepted-tail rows for the first EAGLE draft projection.
+    b_logits_row_idx: Optional[torch.Tensor] = None
+
     def to_cuda(self):
         self.check_input()
+        if self.b_logits_row_idx is not None:
+            self.b_logits_row_idx = self.b_logits_row_idx.cuda(non_blocking=True)
 
         # Prefill 和 decode 都必须提供的公共张量。
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
@@ -201,6 +206,9 @@ class ModelOutput:
     # 仅在 draft 模型直接返回紧凑候选词表时提供。
     # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
     logits_token_ids: Optional[torch.Tensor] = None
+
+    # Number of physical decode rows represented by each selected logits row.
+    input_rows_per_logit: int = 1
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
