@@ -247,3 +247,37 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     assert req.hold_kv_len == 132
     assert loaded_indexes == list(range(132))
     assert table[0, :132].tolist() == list(range(132))
+
+
+def test_standard_load_releases_skipped_and_matched_pages_once_after_barrier(monkeypatch):
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(is_master_in_dp=True)
+    module.init_sync_group = object()
+    events = []
+    module.cpu_cache_client = SimpleNamespace(
+        lock=SimpleNamespace(
+            acquire_sleep1ms=lambda: events.append("lock"),
+            release=lambda: events.append("unlock"),
+        ),
+        deref_pages=lambda page_list: events.append(("deref", list(page_list))),
+    )
+    reqs = [
+        SimpleNamespace(
+            cur_kv_len=0,
+            mm_input_spans=[],
+            sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=logprobs)),
+            shm_req=SimpleNamespace(
+                input_len=64,
+                disk_prompt_cache_len=0,
+                cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda page=page: [page]),
+                token_hash_page_len_list=SimpleNamespace(get_all=lambda: [64]),
+            ),
+        )
+        for page, logprobs in ((4, 0), (7, -1))
+    ]
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 128)
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: events.append("barrier"))
+
+    module.load_cpu_cache_to_reqs(reqs)
+
+    assert events == ["barrier", "lock", ("deref", [4, 7]), "unlock"]

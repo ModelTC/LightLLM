@@ -1,4 +1,4 @@
-from lightllm.common.kv_page_transfer import KVPageTransfer
+from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import create_cache_page_io
 import torch
 import time
 import inspect
@@ -108,12 +108,10 @@ class _PrefillTransModule:
         self.kv_views = kv_views
         self.state_transfers = state_transfers
 
-        self.kv_page_transfer = KVPageTransfer(self.kv_views[device_id])
-        kv_move_buffer = self.kv_page_transfer.alloc_paged_kv_move_buffer(
+        self.page_io = create_cache_page_io(self.kv_views, self.state_transfers, device_id, self.dp_world_size)
+        kv_move_buffer = self.page_io.alloc_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
-        if self.state_transfers[device_id] is not None:
-            self.state_transfers[device_id].bind_page_buffer(kv_move_buffer)
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -151,32 +149,9 @@ class _PrefillTransModule:
         return
 
     def _warmup(self):
-        for dp_index in range(self.args.dp // self.args.nnodes):
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.kv_page_transfer
-                cur_mem.write_mem_to_page_kv_move_buffer(
-                    mem_indexes=[0],
-                    page_index=0,
-                    dp_index=dp_index,
-                    kv_views=self.kv_views,
-                    dp_world_size=self.dp_world_size,
-                )
-                torch.cuda.current_stream().synchronize()
-        return
-
-    def _abort(self, request_id: int, error_info: str = "aborted req"):
-        aborted_tasks = []
-        with self.waiting_dict_lock:
-            for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.request_id == request_id and trans_task.xfer_handle is None:
-                    # 已经提交给底层 transporter 的异步传输不能直接失败，
-                    # 否则 fail_loop 可能在传输静默前归还 source page，导致脏数据。
-                    aborted_tasks.append(self.waiting_dict.pop(key))
-
-        for trans_task in aborted_tasks:
-            trans_task.error_info = error_info
-            self.failed_queue.put(trans_task)
-        return
+        with torch.cuda.stream(stream=self.copy_cuda_stream):
+            self.page_io.warmup(write=True)
+            torch.cuda.current_stream().synchronize()
 
     @log_exception
     def recv_task_loop(self):
@@ -211,21 +186,7 @@ class _PrefillTransModule:
 
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.kv_page_transfer
-                if trans_task.page_kind == "att_state":
-                    helper = self.state_transfers[self.device_id]
-                    assert helper is not None
-                    states = helper.get_dp_states(self.state_transfers, trans_task.prefill_dp_index, self.dp_world_size)
-                    helper.write_req_to_page(trans_task.src_page_index, trans_task.req_idx, states)
-                else:
-                    assert trans_task.page_kind == "kv"
-                    cur_mem.write_mem_to_page_kv_move_buffer(
-                        trans_task.mem_indexes,
-                        page_index=trans_task.src_page_index,
-                        dp_index=trans_task.prefill_dp_index,
-                        kv_views=self.kv_views,
-                        dp_world_size=self.dp_world_size,
-                    )
+                trans_task.transfer_nbytes = self.page_io.pack(trans_task)
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 

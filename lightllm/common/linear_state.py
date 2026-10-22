@@ -44,7 +44,7 @@ class LinearStateManager:
         conv_dst.copy_(self.conv_state.buffer[:, req_idx, ..., :conv_width], non_blocking=True)
         ssm_dst.copy_(self.ssm_state.buffer[:, req_idx * (self.mtp_step + 1)], non_blocking=True)
 
-    def save_checkpoints(self, b_req_idx, req_indexes, buffer_indexes, state_cache_manager):
+    def save_checkpoints(self, b_req_idx, req_indexes, buffer_indexes, state_cache_manager, checkpoint_lens=None):
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
         buffer_indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").cuda(non_blocking=True)
@@ -74,4 +74,36 @@ class LinearStateManager:
             b_mtp_index=b_mtp_index,
             accepted_index=accepted_index,
             verify_width=verify_width,
+        )
+
+    retain_loaded_tail = False
+    capture_intermediate_checkpoints = False
+
+    def create_checkpoint_pool(self, size, keep_num=0):
+        from lightllm.common.state_cache_manager import LinearAttCacheManager
+
+        return LinearAttCacheManager(size, self.linear_config, keep_num=keep_num)
+
+    def create_cpu_transfer(self, mem_manager, big_page_buffers):
+        from lightllm.common.hybrid_cache_transfer import HybridCpuCacheTransfer
+
+        return HybridCpuCacheTransfer(mem_manager.kv_buffer, self.linear_config, big_page_buffers)
+
+    def create_state_transfer(self, indexer_state_manager=None):
+        from lightllm.common.linear_state_transfer import LinearAttentionStateTransfer
+
+        return LinearAttentionStateTransfer(self, indexer_state_manager)
+
+    def save_state(self, req_idx, buffer_idx, state_cache_manager, checkpoint_len):
+        self.copy_state_to(req_idx, *state_cache_manager.get_state_cache(buffer_idx))
+
+    def restore_checkpoint(self, req_idx, restored_len, state_cache_manager, buffer_idx):
+        self.restore(req_idx, *state_cache_manager.get_state_cache(buffer_idx))
+
+    def restore_peer_state(self, req_idx, restored_len, peer_state, peer_req_idx):
+        conv_width = self.linear_config.get_conv_state_shape()[-1]
+        self.restore(
+            req_idx,
+            peer_state.req_to_conv_state.buffer[:, peer_req_idx, ..., :conv_width],
+            peer_state.req_to_ssm_state.buffer[:, peer_req_idx * (peer_state.mtp_step + 1)],
         )

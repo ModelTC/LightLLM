@@ -13,6 +13,7 @@ from lightllm.utils.shm_utils import create_or_link_shm, get_service_shm_name
 
 if TYPE_CHECKING:
     from lightllm.common.linear_state_transfer import LinearAttentionStateTransfer
+    from lightllm.common.deepseek4_cache_transfer import DeepseekV4KVTransferView, DeepseekV4StateTransferView
 
 logger = init_logger(__name__)
 
@@ -33,13 +34,18 @@ class KVTransferView:
             mem_manager.kv_is_replicated,
         )
 
+    def create_page_io(self, kv_views, state_transfers, device_id, dp_world_size):
+        from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import KVCachePageIO
+
+        return KVCachePageIO(kv_views, state_transfers, device_id, dp_world_size)
+
 
 @dataclass
 class KVTransferResources:
     # Export GPU handles only; checkpoint pools must stay pinned in the inference process.
-    kv: KVTransferView
+    kv: "KVTransferView | DeepseekV4KVTransferView"
     req_to_token_indexes: torch.Tensor
-    state_transfer: Optional["LinearAttentionStateTransfer"] = None
+    state_transfer: Optional["LinearAttentionStateTransfer | DeepseekV4StateTransferView"] = None
 
     def write_to_shm(self):
         if kv_trans_use_p2p():
@@ -52,7 +58,8 @@ class KVTransferResources:
             node_world_size = get_node_world_size()
             shm_name = f"mem_manager_{get_current_rank_in_node()}"
             obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
-            obj_size = len(obj_bytes_array[0])
+            # IPC ref-counter offsets can change the serialized size between consumers.
+            obj_size = max(map(len, obj_bytes_array))
             shm = create_or_link_shm(
                 name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"
             )
@@ -61,7 +68,7 @@ class KVTransferResources:
             shm.buf[4:8] = obj_size.to_bytes(4, "little")
             start_index = 8
             for obj_bytes in obj_bytes_array:
-                shm.buf[start_index : start_index + obj_size] = obj_bytes
+                shm.buf[start_index : start_index + obj_size] = obj_bytes.ljust(obj_size, b"\0")
                 start_index += obj_size
 
     @staticmethod

@@ -27,6 +27,7 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_hybrid_att_model,
     auto_set_max_req_total_len,
+    get_model_type,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
@@ -72,6 +73,15 @@ def _launch_subprocesses(args: StartArgs):
 
     _auto_set_prefill_queue_strategy(args)
 
+    model_type = get_model_type(args.model_dir)
+    if model_type == "deepseek_v4":
+        from lightllm.common.state_cache_manager.deepseek4 import DSV4_HISTORY_TOKEN_ALIGNMENT
+
+        if args.page_size == 1:
+            args.page_size = DSV4_HISTORY_TOKEN_ALIGNMENT
+        if args.page_size <= 0 or args.page_size % DSV4_HISTORY_TOKEN_ALIGNMENT:
+            raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_HISTORY_TOKEN_ALIGNMENT}")
+
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
         if has_vision_module(args.model_dir):
@@ -93,6 +103,10 @@ def _launch_subprocesses(args: StartArgs):
         args.enable_multimodal = False
     else:
         args.enable_multimodal = True
+
+    if model_type == "deepseek_v4" and not args.disable_vision:
+        # V4 Vision opens bidirectional attention inside each complete image block.
+        args.disable_chunked_mm_input = True
 
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
@@ -149,7 +163,8 @@ def _launch_subprocesses(args: StartArgs):
     if is_hybrid_model:
         # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
         assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
-        assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
+        if model_type != "deepseek_v4":
+            assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
     if args.diverse_mode:
         # diverse 按普通 KV 前缀插入缓存，尚不支持混合注意力模型的状态页和哈希边界。
         assert not is_hybrid_model, "--diverse_mode does not support hybrid attention models"
@@ -318,10 +333,22 @@ def _launch_subprocesses(args: StartArgs):
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir):
+    if args.enable_cpu_cache and is_hybrid_model:
+        if model_type == "deepseek_v4" and args.run_mode != "decode":
+            big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+            if big_page_tokens > args.max_req_total_len:
+                # CPU pages need the same boundary snapshots as GPU prefix caching.
+                page_tokens = (
+                    args.cpu_cache_token_page_size
+                    or math.ceil(2048 / args.linear_att_hash_page_size) * args.linear_att_hash_page_size
+                )
+                assert page_tokens % args.linear_att_hash_page_size == 0
+                args.linear_att_page_block_num = page_tokens // args.linear_att_hash_page_size
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
     if args.enable_cpu_cache:
+        if args.cpu_cache_token_page_size is None:
+            args.cpu_cache_token_page_size = 256
         assert (
             args.cpu_cache_token_page_size % args.page_size == 0
         ), "--cpu_cache_token_page_size must be divisible by --page_size"

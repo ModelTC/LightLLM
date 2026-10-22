@@ -60,7 +60,12 @@ def test_restore_prefix(hit):
         events.append("restore")
 
     manager = HybridCacheCoordinator(
-        SimpleNamespace(restore=restore, reset=lambda req_idx: events.append("reset"), conv_state=None, ssm_state=None),
+        SimpleNamespace(
+            restore_checkpoint=lambda req_idx, length, pool, slot: restore(req_idx, *pool.get_state_cache(slot)),
+            reset=lambda req_idx: events.append("reset"),
+            conv_state=None,
+            ssm_state=None,
+        ),
         SimpleNamespace(reset=lambda req_idx: events.append("tail"), state=None),
     )
     manager.small_page_buffers = SimpleNamespace(get_state_cache=lambda slot: (slot, slot))
@@ -184,7 +189,13 @@ def test_qwen_runtime_and_cache_share_config(monkeypatch, kv_type):
         pools.append((size, config, keep_num))
         return SimpleNamespace(size=size)
 
-    monkeypatch.setattr("lightllm.common.cache_coordinator.LinearAttCacheManager", checkpoint_pool)
+    monkeypatch.setattr(
+        model.cache_coordinator.state_manager,
+        "create_checkpoint_pool",
+        lambda size, keep_num=0: checkpoint_pool(size, model.linear_config, keep_num),
+        raising=False,
+    )
+    monkeypatch.setattr(model.cache_coordinator.state_manager, "create_cpu_transfer", lambda *args: None, raising=False)
     model.cache_coordinator.bind_mem_manager(model.mem_manager)
     pool = model.cache_coordinator.big_page_buffers
     model.cache_coordinator.bind_mem_manager(model.mem_manager)
@@ -290,3 +301,65 @@ def test_full_attention_uses_the_coordinator_for_restore_and_release():
     assert [part.tolist() for part in released] == [[26, 27], [24, 25]]
     assert references == [node]
     assert req.shared_kv_node is None
+
+
+@pytest.mark.parametrize("local_prefix", [0, 8])
+def test_peer_runtime_without_intermediate_checkpoints_is_not_published(local_prefix):
+    from unittest.mock import Mock
+
+    coordinator = HybridCacheCoordinator()
+    coordinator.big_page_buffers = SimpleNamespace(free_state_cache=Mock())
+    coordinator.small_page_buffers = SimpleNamespace(free_state_cache=Mock())
+    shared = SimpleNamespace(node_prefix_total_len=local_prefix) if local_prefix else None
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=28,
+        hold_kv_len=28,
+        shared_kv_node=shared,
+        hybrid_cache_len=28,
+        hybrid_len_to_big_page_id={24: 3},
+        tail_small_page_buffer_id=7,
+    )
+    args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    requests = SimpleNamespace(req_to_token_indexs=torch.arange(28).reshape(1, 28))
+    radix = SimpleNamespace(insert=Mock(), dec_node_ref_counter=Mock())
+    assert coordinator.get_cacheable_prefix_len(req, args) == local_prefix
+    freed = coordinator.release_request_cache(req, requests, radix, args, True)
+    assert torch.cat(freed).tolist() == list(range(local_prefix, 28))
+    radix.insert.assert_not_called()
+    coordinator.big_page_buffers.free_state_cache.assert_called_once_with([3])
+    coordinator.small_page_buffers.free_state_cache.assert_called_once_with([7])
+    assert not req.hybrid_len_to_big_page_id and req.tail_small_page_buffer_id is None
+
+
+def test_release_keeps_only_the_checkpoint_complete_prefix():
+    from unittest.mock import Mock
+
+    coordinator = HybridCacheCoordinator()
+    coordinator.big_page_buffers = SimpleNamespace(free_state_cache=Mock())
+    coordinator.small_page_buffers = SimpleNamespace(free_state_cache=Mock())
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=28,
+        hold_kv_len=28,
+        shared_kv_node=None,
+        hybrid_cache_len=28,
+        hybrid_len_to_big_page_id={8: 2, 24: 3},
+        tail_small_page_buffer_id=7,
+        get_input_token_ids=lambda: list(range(28)),
+        shm_req=SimpleNamespace(hybrid_token_hash_list=SimpleNamespace(get_all=lambda: list(range(7)))),
+    )
+    args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    requests = SimpleNamespace(req_to_token_indexs=torch.arange(28).reshape(1, 28))
+
+    def insert(key, value, **kwargs):
+        assert len(key) == len(value) == 8
+        assert kwargs["len_to_big_page_id"] == {8: 2}
+        kwargs["len_to_big_page_id"].clear()
+        return 0, None
+
+    assert coordinator.get_cacheable_prefix_len(req, args) == 8
+    freed = coordinator.release_request_cache(req, requests, SimpleNamespace(insert=insert), args, True)
+    assert torch.cat(freed).tolist() == list(range(8, 28))
+    coordinator.big_page_buffers.free_state_cache.assert_called_once_with([3])
+    coordinator.small_page_buffers.free_state_cache.assert_called_once_with([7])

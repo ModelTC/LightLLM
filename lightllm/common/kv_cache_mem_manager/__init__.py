@@ -5,7 +5,10 @@ from .mla_mem_manager import MlaMemoryManager, IndexedMlaMemoryManager, FP8Index
 from .static_fp8_mem_manager import FP8StaticPerHeadQuantMemManager, FP8StaticPerTensorQuantMemManager
 from .glm5_next_mem_manager import Glm5NextMemManager
 
+from .deepseek4_mem_manager import DeepseekV4MemoryManager
+
 __all__ = [
+    "DeepseekV4MemoryManager",
     "KvCacheAllocator",
     "MemoryManager",
     "ReadOnlyStaticsMemoryManager",

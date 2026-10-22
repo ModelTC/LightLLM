@@ -145,7 +145,7 @@ class PDAgentMetadata:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: Optional[bytes] = None
-    page_xfer_handles: Optional[int] = None
+    page_xfer_handles: Optional[Dict[int, object]] = None
 
 
 @dataclass
@@ -181,6 +181,7 @@ class PDChunckedTransTask:
     # transfer params
     src_page_index: Optional[int] = None
     dst_page_index: Optional[int] = None
+    transfer_nbytes: Optional[int] = None
 
     # xfer_handle
     xfer_handle: Optional[int] = None

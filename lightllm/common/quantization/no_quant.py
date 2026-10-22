@@ -31,6 +31,8 @@ class NoQuantization(QuantizationMethod):
             else:
                 out = torch.empty(shape, dtype=dtype, device=device)
         if bias is None:
+            if out.dtype != input_tensor.dtype:
+                return torch.mm(input_tensor, weight, out=out, out_dtype=out.dtype)
             return torch.mm(input_tensor, weight, out=out)
         return torch.addmm(bias, input_tensor, weight, out=out)
 

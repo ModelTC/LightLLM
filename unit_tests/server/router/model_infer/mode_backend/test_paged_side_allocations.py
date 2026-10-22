@@ -117,6 +117,7 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     )
     source_table = torch.arange(32, dtype=torch.int32).reshape(2, 16)
     backend = SimpleNamespace(
+        is_hybrid_att_model=False,
         model=SimpleNamespace(mem_manager=SimpleNamespace()),
         dp_world_size=1,
         rank_in_dp=0,

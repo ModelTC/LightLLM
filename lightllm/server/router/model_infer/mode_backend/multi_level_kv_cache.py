@@ -227,13 +227,13 @@ class MultiLevelKvCacheModule(object):
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
         with torch.cuda.stream(cpu_kv_cache_stream):
+            cpu_kv_cache_stream.wait_stream(g_infer_context.get_overlap_stream())
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
             assert len(token_hash_list) == len(page_len_list)
 
             if self.backend.is_master_in_dp:
-
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 
@@ -242,6 +242,8 @@ class MultiLevelKvCacheModule(object):
                     req=req, move_block_size=move_block_size, page_len_list=page_len_list
                 )
 
+                cacheable_len = self.backend.model.cache_coordinator.get_cacheable_prefix_len(req, self.args)
+                move_block_size = min(move_block_size, bisect.bisect_right(page_len_list, cacheable_len))
                 if move_block_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
                     req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED

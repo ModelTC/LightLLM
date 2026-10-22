@@ -21,6 +21,12 @@ from lightllm.utils.net_utils import get_hostname_ip
 logger = init_logger(__name__)
 
 
+def _page_prefix(page_tensor: Tensor, transfer_nbytes: int) -> Tensor:
+    if transfer_nbytes == page_tensor.numel() * page_tensor.element_size():
+        return page_tensor
+    return page_tensor.reshape(-1)[: transfer_nbytes // page_tensor.element_size()]
+
+
 @dataclass
 class NcclAgentMetadata:
     agent_name: str
@@ -293,7 +299,10 @@ class _NcclPeer:
 
     def send_page(self, trans_task: PDChunckedTransTask) -> _NcclXferHandle:
         assert trans_task.src_page_index is not None and trans_task.dst_page_index is not None
-        page_tensor = self.transporter.kv_move_buffer[trans_task.src_page_index]
+        assert trans_task.transfer_nbytes is not None
+        page_tensor = _page_prefix(
+            self.transporter.kv_move_buffer[trans_task.src_page_index], trans_task.transfer_nbytes
+        )
         comm = self._ensure_comm(is_server=True)
         stream = self._get_stream()
 
@@ -352,7 +361,10 @@ class _NcclPeer:
 
     def _recv_page(self, trans_task: PDChunckedTransTask):
         try:
-            page_tensor = self.transporter.kv_move_buffer[trans_task.dst_page_index]
+            assert trans_task.transfer_nbytes is not None
+            page_tensor = _page_prefix(
+                self.transporter.kv_move_buffer[trans_task.dst_page_index], trans_task.transfer_nbytes
+            )
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)

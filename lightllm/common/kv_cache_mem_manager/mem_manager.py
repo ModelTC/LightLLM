@@ -15,7 +15,6 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-
     operator_class = NormalMemOperator
     kv_layer_mapping = None
     kv_is_replicated = False
@@ -68,6 +67,11 @@ class MemoryManager:
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
+    def get_transfer_view(self, *, include_page_layout=False):
+        from lightllm.common.kv_transfer_resources import KVTransferView
+
+        return KVTransferView.from_mem_manager(self, include_page_layout=include_page_layout)
+
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         return (
@@ -97,7 +101,7 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         pd_kv_move_buffer_size = self.get_pd_kv_move_buffer_size()
-        available_memory_bytes = available_memory * 1024 ** 3 - pd_kv_move_buffer_size
+        available_memory_bytes = available_memory * 1024**3 - pd_kv_move_buffer_size
         self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")

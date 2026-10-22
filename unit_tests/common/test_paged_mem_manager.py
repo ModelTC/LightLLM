@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import pickle
 
 import pytest
 import torch
@@ -7,6 +8,32 @@ from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mla_mem_manager import MlaMemoryManager
 from lightllm.common.kv_cache_mem_manager.group_quantized_mem_manager import PPLINT4KVMemoryManager
 from lightllm.common.kv_cache_mem_manager.group_quantized_mem_manager import PPLINT8KVMemoryManager
+
+
+def test_shared_memory_exports_preserve_variable_pickle_lengths(monkeypatch, tmp_path):
+    from lightllm.common import kv_transfer_resources as module
+
+    monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", f"{tmp_path.parent.name}_{tmp_path.name}")
+    monkeypatch.setattr(module, "get_node_world_size", lambda: 4)
+    monkeypatch.setattr(module, "get_current_rank_in_node", lambda: 0)
+    monkeypatch.setattr(module, "kv_trans_use_p2p", lambda: False)
+    # CUDA IPC ref-counter offsets can cross pickle's one-byte integer boundary
+    # between exports. Each consumer still needs its own reference-counter token.
+    offsets = [254, 255, 256, 257, 258, 259, 260, 261]
+    payloads = [pickle.dumps({"ref_counter_offset": offset}) for offset in offsets]
+    serialized = iter(payloads)
+    monkeypatch.setattr(module.ForkingPickler, "dumps", lambda obj: memoryview(next(serialized)))
+    manager = module.KVTransferResources(None, None)
+    try:
+        manager.write_to_shm()
+        for offset in reversed(offsets):
+            assert manager.loads_from_shm(0) == {"ref_counter_offset": offset}
+        with pytest.raises(AssertionError):
+            manager.loads_from_shm(0)
+    finally:
+        shm = module.create_or_link_shm("mem_manager_0", -1, force_mode="link")
+        shm.close()
+        shm.unlink()
 
 
 def test_kv_cache_allocation_requires_complete_pages():

@@ -386,6 +386,7 @@ class TpPartBaseModel:
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
+        infer_state.state_manager = self.cache_coordinator.state_manager
         infer_state.linear_state_manager = self.cache_coordinator.linear_state_manager
         infer_state.indexer_state_manager = self.cache_coordinator.indexer_state_manager
 
@@ -643,7 +644,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"

@@ -92,6 +92,7 @@ class DPKVSharedMoudle:
                         max_kv_len_dp_rank=int(max_kv_len_dp_rank),
                         max_kv_len_mem_manager_index=int(max_kv_len_mem_manager_index),
                         max_kv_len_mem_indexes=max_kv_len_mem_indexes,
+                        source_req_idx=max_kv_len_req_idx,
                     )
                 )
 
@@ -124,7 +125,14 @@ class DPKVSharedMoudle:
             self.backend.logger.debug(f"dp_i {self.dp_rank_in_node} transfer kv tokens num: {len(mem_indexes_tensor)}")
 
         for trans_task in trans_tasks:
-            trans_task.req.cur_kv_len += len(trans_task.mem_indexes)
+            restored_len = trans_task.req.cur_kv_len + len(trans_task.mem_indexes)
+            self.backend.model.cache_coordinator.restore_peer_state(
+                trans_task.req.req_idx,
+                restored_len,
+                self.backend.peer_states[trans_task.max_kv_len_mem_manager_index],
+                trans_task.source_req_idx,
+            )
+            trans_task.req.cur_kv_len = restored_len
             assert trans_task.req.cur_kv_len <= trans_task.req.hold_kv_len
             if self.backend.is_master_in_dp:
                 trans_task.req.shm_req.shm_cur_kv_len = trans_task.req.cur_kv_len
@@ -137,3 +145,4 @@ class TransTask:
     max_kv_len_dp_rank: int
     max_kv_len_mem_manager_index: int
     max_kv_len_mem_indexes: torch.Tensor
+    source_req_idx: int

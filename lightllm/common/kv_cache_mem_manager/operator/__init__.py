@@ -9,3 +9,5 @@ from .fp8_quant import (
     FP8StaticPerHeadQuantMemOperator,
     FP8StaticPerTensorQuantMemOperator,
 )
+
+from .deepseek4 import DeepseekV4MemOperator

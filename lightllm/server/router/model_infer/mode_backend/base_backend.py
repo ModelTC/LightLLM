@@ -7,7 +7,7 @@ import threading
 import torch.distributed as dist
 from typing import List, Tuple, Callable, Optional, Union
 from transformers.configuration_utils import PretrainedConfig
-from lightllm.common.kv_transfer_resources import KVTransferResources, KVTransferView
+from lightllm.common.kv_transfer_resources import KVTransferResources
 from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
@@ -222,7 +222,7 @@ class ModeBackend:
 
         if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
             self.kv_transfer_resources = KVTransferResources(
-                KVTransferView.from_mem_manager(self.model.mem_manager, include_page_layout=self.is_pd_mode),
+                self.model.mem_manager.get_transfer_view(include_page_layout=self.is_pd_mode),
                 self.model.req_manager.req_to_token_indexs,
                 self.model.cache_coordinator.create_state_transfer(),
             )
@@ -293,6 +293,7 @@ class ModeBackend:
             for rank in range(self.node_world_size)
         ]
         self.kv_views = [resource.kv for resource in resources]
+        self.peer_states = [resource.state_transfer for resource in resources]
         self.req_to_token_indexes_by_rank = [resource.req_to_token_indexes for resource in resources]
         return
 
@@ -725,7 +726,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue

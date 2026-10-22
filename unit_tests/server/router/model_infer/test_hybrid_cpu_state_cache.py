@@ -287,10 +287,10 @@ def test_two_tail_loads_restore_before_reusing_temporary_slot(monkeypatch, linea
         events.append(("copy", kwargs["req"].req_idx))
         assert load(**kwargs) is None
 
-    def track_restore(req_idx, pool, slot):
+    def track_restore(req_idx, pool, slot, restored_len=None):
         assert slot == coordinator.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID
         events.append(("restore", req_idx))
-        restore(req_idx, pool, slot)
+        restore(req_idx, pool, slot, restored_len)
 
     monkeypatch.setattr(coordinator, "load_cpu_cache_to_gpu", track_load)
     monkeypatch.setattr(coordinator, "restore_state", track_restore)

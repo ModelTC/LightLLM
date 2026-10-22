@@ -238,7 +238,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -513,6 +512,8 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_ids_for_hybrid_att(self):
+        if self.args.disable_chunked_prefill:
+            return self.shm_req.shm_prompt_ids.arr[: self.get_cur_total_len()]
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
 
         chunked_start = self.cur_kv_len
@@ -534,6 +535,8 @@ class InferReq:
         return adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
 
     def get_chuncked_input_token_len_for_hybrid_att(self):
+        if self.args.disable_chunked_prefill:
+            return self.get_cur_total_len()
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         chunked_start = self.cur_kv_len
         chunked_end = chunked_start + self.args.chunked_prefill_size

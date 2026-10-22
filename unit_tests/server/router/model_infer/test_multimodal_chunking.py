@@ -14,6 +14,7 @@ def test_chunk_ids_and_lengths_use_the_same_complete_boundaries(hybrid, spans):
     req.args = SimpleNamespace(
         chunked_prefill_size=256,
         batch_max_tokens=1024,
+        disable_chunked_prefill=False,
         linear_att_hash_page_size=64,
         linear_att_page_block_num=8,
     )
@@ -82,7 +83,9 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     )
     from lightllm.common.cache_coordinator import HybridCacheCoordinator
 
-    context.cache_coordinator = HybridCacheCoordinator()
+    context.cache_coordinator = HybridCacheCoordinator(
+        state_manager=SimpleNamespace(capture_intermediate_checkpoints=False)
+    )
     context.cache_coordinator.big_page_buffers = context.radix_cache.big_page_buffers
     context.cache_coordinator.small_page_buffers = context.radix_cache.small_page_buffers
     context.cache_coordinator.save_big_page_states = lambda **kwargs: big_snapshots.append(
@@ -195,6 +198,7 @@ def test_mm_chunking_keeps_the_original_state_cache_position(monkeypatch, disabl
         linear_att_page_block_num=8,
         disable_chunked_mm_input=disable_chunked_mm_input,
         batch_max_tokens=1024,
+        disable_chunked_prefill=False,
     )
     req.shm_index, req.vocab_size = 0, 100
     req.multimodal_params = SimpleNamespace(

@@ -3,14 +3,25 @@
 from typing import List, Mapping, Sequence, Tuple
 
 
-def get_mm_input_spans(multimodal_params: Mapping) -> List[Tuple[int, int]]:
-    """Read image/audio ranges recorded by the tokenizer."""
+def get_mm_input_spans(
+    multimodal_params: Mapping, *, input_len: int = None, max_tokens: int = None
+) -> List[Tuple[int, int]]:
+    """Read whole image/audio blocks; V4 embedding offsets exclude alignment tokens."""
     spans = []
     for modality in ("images", "audios"):
         for item in multimodal_params[modality]:
-            start = item["start_idx"]
-            spans.append((start, start + item["token_num"]))
-    return spans
+            start, end = item.get("block_start_idx"), item.get("block_end_idx")
+            if start is None and end is None:
+                start = item["start_idx"]
+                end = start + item["token_num"]
+            if start is None or end is None or not 0 <= start < end:
+                raise ValueError("Multimodal input has an invalid block range")
+            if input_len is not None and end > input_len:
+                raise ValueError("Multimodal block exceeds input length")
+            if max_tokens is not None and end - start > max_tokens:
+                raise ValueError("Multimodal block exceeds batch_max_tokens")
+            spans.append((start, end))
+    return sorted(spans)
 
 
 def clamp_mm_cache_len(cache_len: int, mm_spans: Sequence[Tuple[int, int]]) -> int:
