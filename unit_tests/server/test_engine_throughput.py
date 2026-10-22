@@ -54,8 +54,16 @@ def test_running_request_rates_and_completed_count_use_window_deltas(monkeypatch
     assert first["output_tok_s"] == 6.4
     assert first["completed_req_s"] == 0  # Still running.
     writer.add(128, 32)
-    throughput.finish(SimpleNamespace(is_aborted=False, finish_status=FinishStatus(FinishStatus.FINISHED_LENGTH)))
-    throughput.finish(SimpleNamespace(is_aborted=True, finish_status=FinishStatus(FinishStatus.FINISHED_ABORTED)))
+    throughput.finish(
+        SimpleNamespace(
+            is_stop_matched=False, is_aborted=False, finish_status=FinishStatus(FinishStatus.FINISHED_LENGTH)
+        )
+    )
+    throughput.finish(
+        SimpleNamespace(
+            is_stop_matched=False, is_aborted=True, finish_status=FinishStatus(FinishStatus.FINISHED_ABORTED)
+        )
+    )
     now[0] = 20
     second = throughput.snapshot()
     assert second["prefill_tokens"] == 128 and second["output_tokens"] == 32
@@ -170,6 +178,7 @@ def test_batch_records_success_once_before_releasing_request(monkeypatch, counte
         request_id=42,
         shm_infer_released=True,
         is_aborted=False,
+        is_stop_matched=False,
         candetoken_out_len=10,
         finish_status=FinishStatus(FinishStatus.FINISHED_STOP),
     )

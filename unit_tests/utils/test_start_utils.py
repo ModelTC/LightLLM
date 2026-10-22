@@ -506,3 +506,67 @@ def test_readiness_monitor_stops_when_http_process_exits(monkeypatch, poll_resul
     assert session.get.call_count == probe_count
     assert [call.args for call in flag.set_value.call_args_list] == ([(0,), (1,)] if ready else [(0,)])
     session.__exit__.assert_called_once()
+
+
+def test_readiness_monitor_tls(monkeypatch, tmp_path):
+    import ssl
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+    from unittest.mock import Mock
+    from lightllm.server.router.dynamic_prompt import shared_arr
+    from lightllm.utils import shm_port_args
+
+    cert, key = tmp_path / "cert.pem", tmp_path / "key.pem"
+    subprocess.run(
+        [
+            "openssl",
+            "req",
+            "-x509",
+            "-newkey",
+            "rsa:2048",
+            "-nodes",
+            "-days",
+            "1",
+            "-subj",
+            "/CN=service.example",
+            "-keyout",
+            str(key),
+            "-out",
+            str(cert),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    config = tmp_path / "hypercorn.toml"
+    config.write_text(f'certfile = "{cert}"\nkeyfile = "{key}"\n')
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            assert self.path == "/readiness"
+            self.send_response(200)
+            self.end_headers()
+
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    manager = start_utils.SubmoduleManager()
+    flag = Mock()
+    monkeypatch.setattr(shared_arr, "SharedInt", lambda name: flag)
+    monkeypatch.setattr(shm_port_args, "get_shm_port_args", lambda: SimpleNamespace(port=server.server_port))
+    monkeypatch.setattr(start_utils.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
+    monkeypatch.setattr(manager.readiness_stop, "wait", lambda timeout: manager.readiness_stop.set())
+    args = SimpleNamespace(run_mode="normal", host="0.0.0.0", model_name="test", hypercorn_config=str(config))
+    try:
+        manager.start_readiness_monitor(FakeHttpServerProcess(), args)
+        assert [call.args for call in flag.set_value.call_args_list] == [(0,), (1,)]
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join()

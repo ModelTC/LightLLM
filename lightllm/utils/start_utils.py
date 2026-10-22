@@ -108,7 +108,17 @@ class SubmoduleManager:
         port = ports.config_server_port if args.run_mode == "config_server" else ports.port
         host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(bind_host, bind_host)
         host = f"[{host}]" if ":" in host else host
-        address = f"http://{host}:{port}"
+        tls_config = None
+        if getattr(args, "hypercorn_config", None) and not (
+            args.run_mode == "pd_master" and args.httpserver_workers > 1
+        ):
+            from hypercorn.__main__ import _load_config
+
+            config = _load_config(args.hypercorn_config)
+            if config.ssl_enabled:
+                tls_config = config
+        scheme = "https" if tls_config else "http"
+        address = f"{scheme}://{host}:{port}"
         started = float(os.getenv("LIGHTLLM_SERVICE_START_TIME", str(time.monotonic())))
         self.readiness_stop.clear()
 
@@ -116,6 +126,17 @@ class SubmoduleManager:
             state = ServiceReadiness(ready_flag, args, address, started)
             with requests.Session() as session:
                 session.trust_env = False
+                if tls_config:
+                    import ssl
+                    from requests.adapters import HTTPAdapter
+
+                    context = ssl.create_default_context(cafile=tls_config.certfile)
+                    context.check_hostname = False
+                    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+                    adapter = HTTPAdapter()
+                    adapter.init_poolmanager(1, 1, ssl_context=context, assert_hostname=False)
+                    session.mount("https://", adapter)
+                    session.verify = tls_config.certfile
                 while not self.readiness_stop.is_set() and http_server_process.poll() is None:
                     reason = None
                     try:

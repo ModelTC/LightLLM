@@ -1005,8 +1005,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
         req_status = self.req_id_to_out_inf.get(convert_sub_id_to_group_id(request_id))
         if req_status is not None:
             for req in req_status.group_req_objs.shm_req_objs:
-                if req.request_id == request_id and not req.finish_status.is_finished():
-                    req.is_aborted = True
+                if req.request_id == request_id:
+                    req.is_stop_matched = True
+                    if not req.finish_status.is_finished():
+                        req.is_aborted = True
 
     async def abort(self, group_req_id: int) -> bool:
         req_status: ReqStatus = self.req_id_to_out_inf.get(group_req_id, None)
@@ -1148,7 +1150,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                 if req.finish_token_index != src_index:
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                                 else:
-                                    finish_status = FinishStatus(req.finish_status.status)
+                                    finish_status = FinishStatus(
+                                        FinishStatus.FINISHED_STOP if req.is_stop_matched else req.finish_status.status
+                                    )
 
                                     await req.merge_final_token_metadata(
                                         metadata,

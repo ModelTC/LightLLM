@@ -42,7 +42,9 @@ class EngineThroughput:
         self.last_time = time.monotonic()
 
     def finish(self, req):
-        if not req.is_aborted and (req.finish_status.is_stopped() or req.finish_status.is_finished_length()):
+        if req.is_stop_matched or (
+            not req.is_aborted and (req.finish_status.is_stopped() or req.finish_status.is_finished_length())
+        ):
             self.completed += 1
 
     def has_activity(self):
