@@ -341,8 +341,8 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # gemma4 two-variant convention; the fused CUDA Q/K kernels consume them directly, while
         # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the inverse
         # rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
-        # Sliding-window and compressed layers both use DeepSeek YaRN correction; only the
-        # RoPE base differs (rope_theta vs compress_rope_theta), matching SGLang/vLLM.
+        # Pure sliding-window layers use unscaled rope_theta. Compressed layers use
+        # compress_rope_theta with YaRN for both local SWA and compressed attention.
         # Kept fp32 for accuracy (the apply upcasts anyway).
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
@@ -371,7 +371,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 freqs = freqs / factor * (1 - smooth) + freqs * smooth
             return freqs
 
-        sliding_freqs = build_inv_freq(cfg["rope_theta"])
+        sliding_freqs = 1.0 / (cfg["rope_theta"] ** freq_exponents)
         f = torch.outer(positions, sliding_freqs)  # [max_seq, dim//2]
         self._freqs_cis_sliding = torch.complex(f.cos(), f.sin())
 
