@@ -128,7 +128,9 @@ def test_json_preserves_context_multiline_and_traceback():
     assert event["tp_rank"] == 3 and event["dp_rank"] == 1
     assert event["request_id"] == 42
     assert "ValueError: failure" in event["exception"]
-    assert event["timestamp"].endswith(("+00:00", "+08:00")) or "T" in event["timestamp"]
+    from datetime import datetime
+
+    assert datetime.fromisoformat(event["timestamp"]).utcoffset() is not None
 
 
 @pytest.mark.parametrize(
@@ -149,6 +151,7 @@ def test_json_preserves_context_multiline_and_traceback():
 def test_invalid_configuration_fails_explicitly(settings):
     env = {key: value for key, value in os.environ.items() if not key.startswith("LIGHTLLM_LOG_")}
     env.update(settings)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
         [sys.executable, "-c", "from lightllm.utils import log_utils"],
         env=env,
@@ -684,3 +687,35 @@ def test_failure_summary_level_and_sampling(monkeypatch, caplog, status, level, 
     assert record.levelno == level
     assert record.event == event
     assert record.reason == "bounded reason"
+
+
+@pytest.mark.parametrize("separator", ["-", "_"])
+def test_all_logging_cli_options_survive_start_args_and_override_environment(separator):
+    output = _run_logging(
+        f"""
+        import argparse
+        import os
+        from lightllm.server.api_cli import add_cli_args
+        from lightllm.server.core.objs.start_args_type import StartArgs
+        from lightllm.utils.log_utils import configure_logging_from_args
+        flags = [
+            ("log_level", "debug"), ("log_format", "json"),
+            ("log_module_levels", '{{"lightllm.test": "ERROR"}}'),
+            ("log_request_sample_rate", "0.5"), ("log_stats_interval", "2.5"),
+            ("log_http_level", "error"),
+        ]
+        argv = []
+        for name, value in flags:
+            argv.extend(["--" + name.replace("_", {separator!r}), value])
+        argv.append("--" + "enable_http_access_log".replace("_", {separator!r}))
+        args = StartArgs(**vars(add_cli_args(argparse.ArgumentParser()).parse_args(argv)))
+        configure_logging_from_args(args)
+        for name, value in flags:
+            assert os.environ["LIGHTLLM_" + name.upper()] == value
+        assert os.environ["LIGHTLLM_LOG_HTTP_ACCESS"] == "1"
+        print("configured")
+        """,
+        LIGHTLLM_LOG_LEVEL="critical",
+        LIGHTLLM_LOG_HTTP_ACCESS="0",
+    )
+    assert output.strip() == "configured"

@@ -346,8 +346,12 @@ def test_readiness_waits_for_bound_endpoint_and_pd_topology(monkeypatch):
     assert logger.info.call_args.kwargs["extra"]["event"] == "service.ready"
     state.observe(None)
     state.observe(None)
+    logger.warning.assert_not_called()
+    state.observe(None)
     logger.warning.assert_called_once()
     assert flag.set_value.call_args.args == (0,)
+    state.observe(200)
+    assert not state.ready
     state.observe(200)
     assert logger.info.call_args.kwargs["extra"]["event"] == "service.recovered"
 
@@ -401,3 +405,64 @@ def test_readiness_monitor_leaves_missing_config_host_to_supervisor(monkeypatch)
     args = SimpleNamespace(run_mode="config_server", config_server_host=None)
     start_utils.SubmoduleManager().start_readiness_monitor(FakeHttpServerProcess(), args)
     thread.assert_not_called()
+
+
+@pytest.mark.parametrize("failure", [None, 503, 500])
+def test_readiness_tolerates_isolated_failures_and_confirms_recovery(monkeypatch, failure):
+    from unittest.mock import Mock
+
+    logger = Mock()
+    monkeypatch.setattr(start_utils, "logger", logger)
+    flag = Mock()
+    state = start_utils.ServiceReadiness(flag, SimpleNamespace(run_mode="normal", model_name="test"), "http://test", 0)
+    state.observe(200)
+    for _ in range(2):
+        state.observe(failure)
+        assert state.ready
+    state.observe(200)
+    logger.warning.assert_not_called()
+    flag.set_value.assert_called_once_with(1)
+    for _ in range(3):
+        state.observe(failure)
+    assert not state.ready
+    assert flag.set_value.call_args.args == (0,)
+    logger.warning.assert_called_once()
+    state.observe(200)
+    assert not state.ready
+    state.observe(failure)
+    state.observe(200)
+    assert not state.ready
+    state.observe(200)
+    assert state.ready
+    assert logger.info.call_args.kwargs["extra"]["event"] == "service.recovered"
+
+
+@pytest.mark.parametrize("failure,reason", [("timeout", "probe_timeout"), ("connection", "probe_connection_failed")])
+def test_readiness_monitor_reports_transport_reason_and_stops_after_http_exit(monkeypatch, failure, reason):
+    import requests
+    from unittest.mock import Mock, MagicMock
+    from lightllm.server.router.dynamic_prompt import shared_arr
+    from lightllm.utils import shm_port_args
+
+    manager = start_utils.SubmoduleManager()
+    logger = Mock()
+    flag = Mock()
+    monkeypatch.setattr(start_utils, "logger", logger)
+    monkeypatch.setattr(shared_arr, "SharedInt", lambda _: flag)
+    monkeypatch.setattr(shm_port_args, "get_shm_port_args", lambda: SimpleNamespace(port=8000))
+    monkeypatch.setattr(start_utils.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
+    session = MagicMock()
+    session.__enter__.return_value = session
+    error = requests.Timeout if failure == "timeout" else requests.ConnectionError
+    session.get.side_effect = [SimpleNamespace(status_code=200), error(), error(), error()]
+    monkeypatch.setattr(requests, "Session", lambda: session)
+    process = Mock()
+    process.poll.side_effect = [None] * 8 + [1]
+    monkeypatch.setattr(manager.readiness_stop, "wait", lambda _: None)
+    args = SimpleNamespace(run_mode="normal", host="127.0.0.1", model_name="test")
+    manager.start_readiness_monitor(process, args)
+    assert session.get.call_count == 4
+    logger.warning.assert_called_once()
+    assert logger.warning.call_args.kwargs["extra"]["reason"] == reason
+    assert [call.args for call in flag.set_value.call_args_list] == [(0,), (1,), (0,)]
+    session.__exit__.assert_called_once()

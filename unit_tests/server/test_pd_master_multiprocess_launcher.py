@@ -355,6 +355,7 @@ def test_launcher_uses_process_manager_before_releasing_runtime_and_ports(monkey
         terminate_all_processes=Mock(side_effect=terminate),
         setup_signal_handlers=Mock(),
         supervise_processes=Mock(),
+        start_readiness_monitor=Mock(),
     )
     ports.close.side_effect = lambda: events.append("close ports")
     monkeypatch.setattr(multiprocess, "process_manager", manager)
@@ -375,6 +376,7 @@ def test_launcher_uses_process_manager_before_releasing_runtime_and_ports(monkey
             ports=ports,
             haproxy_binary="/bundled/haproxy",
         )
+        manager.start_readiness_monitor.assert_called_once_with(proxy, args)
         manager.supervise_processes.assert_called_once_with(proxy)
         manager.setup_signal_handlers.assert_called_once_with(
             proxy,
@@ -389,6 +391,7 @@ def test_launcher_uses_process_manager_before_releasing_runtime_and_ports(monkey
                 ports=ports,
                 haproxy_binary="/bundled/haproxy",
             )
+        manager.start_readiness_monitor.assert_not_called()
         manager.supervise_processes.assert_not_called()
 
     manager.terminate_all_processes.assert_called_once_with()

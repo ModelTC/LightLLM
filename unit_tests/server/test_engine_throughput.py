@@ -193,3 +193,81 @@ def test_resume_excludes_idle_time_without_discarding_short_burst(monkeypatch, c
     assert snapshot["window_s"] == 10
     assert snapshot["output_tokens"] == 20
     assert snapshot["output_tok_s"] == 2
+
+
+@pytest.mark.parametrize("node_rank,dp_size", [(0, 1), (1, 1), (1, 2)])
+def test_router_first_burst_excludes_initial_idle(monkeypatch, counters, node_rank, dp_size):
+    import asyncio
+    from lightllm.server.router import manager
+
+    now = [0.0]
+    monkeypatch.setattr(manager.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(log_utils, "get_log_stats_interval", lambda: 10)
+    logger = Mock()
+    monkeypatch.setattr(manager, "init_logger", lambda name: logger)
+    router = manager.RouterManager.__new__(manager.RouterManager)
+    router.engine_counters = counters
+    router.service_ready = SimpleNamespace(get_value=lambda: 1)
+    router.req_queue = Mock()
+    router.req_queue.get_wait_req_num.return_value = 0
+    router.running_batch = None
+    router.dp_size, router.node_rank, router.dp_size_in_node = dp_size, node_rank, 2
+    router.radix_cache_client = None
+    router.max_total_token_num = 100
+    router.get_used_tokens = lambda index: (25, 50)[index]
+    router._get_paused_req_num = lambda: 0
+    router._get_schedule_time_interval = lambda: 0
+    writer = engine_stats.EngineCounters(2, 0)
+    ticks = iter([1, 5, 6, 16])
+
+    class StopLoop(Exception):
+        pass
+
+    async def step():
+        try:
+            now[0] = next(ticks)
+        except StopIteration:
+            raise StopLoop()
+        if now[0] == 6:
+            writer.add(100, 10)
+
+    router._step = step
+    with pytest.raises(StopLoop):
+        asyncio.run(router.loop_for_fwd())
+    if dp_size == 1 and node_rank != 0:
+        logger.info.assert_not_called()
+    else:
+        logger.info.assert_called_once()
+        fields = logger.info.call_args.kwargs["extra"]
+        assert fields["event"] == "engine.stats"
+        assert fields["window_s"] == 11
+        assert fields["output_tokens"] == 10
+        assert fields["output_tok_s"] == 0.91
+        assert fields["kv_active_pct_by_local_dp"] == [25.0, 50.0]
+        assert fields["kv_cached_pct_by_local_dp"] == [0.0, 0.0]
+
+
+@pytest.mark.parametrize("leader", [True, False])
+@pytest.mark.parametrize("cached", [0, 40, 100])
+def test_reward_prefill_counts_uncached_tokens_only_on_leader(monkeypatch, counters, leader, cached):
+    from lightllm.server.router.model_infer.mode_backend.chunked_prefill import impl_for_reward_model as reward
+
+    worker = reward.RewardModelBackend.__new__(reward.RewardModelBackend)
+    worker.disable_chunked_prefill = True
+    worker.is_master_in_dp = leader
+    worker.eos_id = []
+    worker.engine_counters = engine_stats.EngineCounters(2, 1) if leader else None
+    worker.model = Mock()
+    worker.model.forward.return_value = SimpleNamespace(logits=torch.tensor([0.75]))
+    req = request(100, cached=cached)
+    monkeypatch.setattr(reward, "prepare_prefill_inputs", lambda *a, **kw: ("input", [req]))
+    events = Mock()
+    worker.reward_prefill(events, [req])
+    assert counters.storage.arr.tolist() == [[0, 0], [100 - cached, 1] if leader else [0, 0]]
+    assert req.cur_output_len == 1
+    if leader:
+        assert req.shm_req.reward_score == 0.75
+        assert req.shm_req.shm_cur_output_len == 1
+    events.notify_post_handle_and_wait_pre_post_handle.assert_called_once_with()
+    events.notify_forward_and_wait_post_handle.assert_called_once_with()
+    events.notify_pre_post_handle.assert_called_once_with()

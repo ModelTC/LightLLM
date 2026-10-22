@@ -17,7 +17,7 @@ logger = init_logger(__name__)
 
 
 class ServiceReadiness:
-    """Log transitions only; steady probes never produce log traffic."""
+    """Announce initial readiness, then require three failures or two recovery probes."""
 
     def __init__(self, flag, args, address, started):
         self.flag, self.args, self.address, self.started = flag, args, address, started
@@ -25,9 +25,15 @@ class ServiceReadiness:
         self.ever_ready = False
         self.waiting_logged = False
         self.probe_failure_logged = False
+        self.consecutive_failures = 0
+        self.consecutive_successes = 0
 
-    def observe(self, status):
+    def observe(self, status, reason=None):
         if status == 200:
+            self.consecutive_failures = 0
+            self.consecutive_successes += 1
+            if self.ever_ready and not self.ready and self.consecutive_successes < 2:
+                return
             if not self.ready:
                 event = "service.recovered" if self.ever_ready else "service.ready"
                 elapsed = round(time.monotonic() - self.started, 2)
@@ -52,6 +58,8 @@ class ServiceReadiness:
                 self.flag.set_value(1)
                 self.ready = self.ever_ready = True
         else:
+            self.consecutive_successes = 0
+            self.consecutive_failures += 1
             if status not in (None, 503) and not self.ever_ready and not self.probe_failure_logged:
                 logger.warning(
                     "event=service.probe_failed address=%s status=%s",
@@ -60,13 +68,15 @@ class ServiceReadiness:
                     extra={"event": "service.probe_failed", "address": self.address, "http_status": status},
                 )
                 self.probe_failure_logged = True
-            if self.ready:
+            if self.ready and self.consecutive_failures >= 3:
+                reason = reason or ("probe_connection_failed" if status is None else "readiness_probe_failed")
                 self.flag.set_value(0)
                 self.ready = False
                 logger.warning(
-                    "event=service.unavailable reason=readiness_probe_failed status=%s",
+                    "event=service.unavailable reason=%s status=%s",
+                    reason,
                     status,
-                    extra={"event": "service.unavailable", "reason": "readiness_probe_failed", "http_status": status},
+                    extra={"event": "service.unavailable", "reason": reason, "http_status": status},
                 )
             elif status == 503 and not self.waiting_logged and not self.ever_ready:
                 logger.info(
@@ -106,14 +116,17 @@ class SubmoduleManager:
             with requests.Session() as session:
                 session.trust_env = False
                 while not self.readiness_stop.is_set() and http_server_process.poll() is None:
+                    reason = None
                     try:
                         response = session.get(address + "/readiness", timeout=1)
                         status = response.status_code
+                    except requests.Timeout:
+                        status, reason = None, "probe_timeout"
                     except requests.RequestException:
-                        status = None
+                        status, reason = None, "probe_connection_failed"
                     if self.readiness_stop.is_set() or http_server_process.poll() is not None:
                         break
-                    state.observe(status)
+                    state.observe(status, reason=reason)
                     self.readiness_stop.wait(0.5)
 
         threading.Thread(target=monitor, name="service-readiness", daemon=True).start()

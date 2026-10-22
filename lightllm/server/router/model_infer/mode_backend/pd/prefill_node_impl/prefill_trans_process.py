@@ -471,7 +471,10 @@ class _PrefillTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.error(f"KV transfer failed: {ret}")
+            if trans_task.error_info == "aborted req":
+                logger.debug("KV transfer cancelled: %s", ret)
+            else:
+                logger.error("KV transfer failed: %s", ret)
 
             if trans_task.error_info is not None:
                 self._abort(request_id=trans_task.request_id, error_info=trans_task.error_info)

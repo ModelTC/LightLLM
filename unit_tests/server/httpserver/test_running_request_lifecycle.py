@@ -679,3 +679,66 @@ def test_decode_capacity_failure_before_first_token_uses_busy_channel(mode, coun
             await output.aclose()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("slave", [False, True])
+@pytest.mark.parametrize(
+    "last_status,expected",
+    [
+        (FinishStatus.FINISHED_LENGTH, "completed"),
+        (FinishStatus.FINISHED_ABORTED, "abort"),
+        (FinishStatus.FINISHED_ERROR, "error"),
+        (FinishStatus.FINISHED_PD_DECODE_CAPACITY, "continued"),
+    ],
+)
+def test_completion_summary_aggregates_choices_and_suppresses_tp_slave(monkeypatch, slave, last_status, expected):
+    import time
+    from lightllm.server.httpserver import manager as manager_module
+
+    manager = _make_manager(NodeRole.NORMAL)
+    manager.is_multinode_tp_slave = slave
+    manager.args.mtp_step = 1
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.latest_success_infer_time_mark = _ValueMark()
+    summary = MagicMock()
+    monkeypatch.setattr(manager_module, "log_request_summary", summary)
+    params = _sampling_params()
+    params.best_of = 2
+
+    async def run():
+        event = asyncio.Event()
+        event.set()
+        metadata = dict(
+            prompt_cache_len=1,
+            cpu_prompt_cache_len=1,
+            disk_prompt_cache_len=1,
+            mtp_accepted_token_num=1,
+            mtp_verify_token_num=2,
+            mtp_verify_step_num=1,
+        )
+        status = SimpleNamespace(
+            event=event,
+            lock=asyncio.Lock(),
+            has_timed_out_waiting_for_inference=lambda: False,
+            out_token_info_list=[
+                (123, "a", dict(metadata), FinishStatus(FinishStatus.FINISHED_STOP)),
+                (124, "b", dict(metadata), FinishStatus(last_status)),
+            ],
+        )
+        result = [
+            item async for item in manager._wait_to_token_package(time.time(), [1, 2, 3, 4], 123, params, status, None)
+        ]
+        assert len(result) == 2
+        if slave:
+            summary.assert_not_called()
+        else:
+            summary.assert_called_once()
+            fields = summary.call_args.kwargs
+            assert fields["status"] == expected
+            assert fields["output_tokens"] == 2
+            assert fields["gpu_cache_tokens"] == fields["cpu_cache_tokens"] == fields["disk_cache_tokens"] == 1
+            assert fields["mtp_accepted_tokens"] == fields["mtp_verify_steps"] == 2
+            assert fields["mtp_verify_tokens"] == 4
+
+    asyncio.run(run())

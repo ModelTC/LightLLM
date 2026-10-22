@@ -955,3 +955,55 @@ def test_pd_failure_emits_one_summary_with_output_counts(monkeypatch, bad_metada
         assert not manager.active_req_ids
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["disabled", "expired", "retry_success"])
+def test_busy_before_first_token_logs_only_terminal_outcome(monkeypatch, mode):
+    import time
+    from unittest.mock import Mock, MagicMock
+    from lightllm.utils.error_utils import ServerBusyError
+
+    manager = _make_manager(monkeypatch)
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.metric_client = MagicMock()
+    manager.abort = AsyncMock()
+    manager.enable_pd_node_self_request_limit = mode != "disabled"
+    manager.pd_node_busy_retry_timeout_seconds = 0 if mode == "expired" else 120
+    summary = Mock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *_a, **_kw: []), max_new_tokens=1)
+    request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
+    attempts = []
+
+    async def raw_stream(_p, _d, _prompt, sp, *_args):
+        attempts.append(sp.group_request_id)
+        if len(attempts) == 1:
+            raise ServerBusyError("decode busy")
+        summary.assert_not_called()
+        yield sp.group_request_id, "done", {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 0}, FinishStatus(
+            FinishStatus.FINISHED_LENGTH
+        )
+
+    manager.fetch_pd_stream = raw_stream
+
+    async def run():
+        stream = manager._generate_one("prompt", params, None, request, time.time(), 80, 10)
+        if mode == "retry_success":
+            assert len([item async for item in stream]) == 1
+            assert len(attempts) == 2
+        else:
+            with pytest.raises(ServerBusyError):
+                async for _ in stream:
+                    pass
+            assert len(attempts) == 1
+        summary.assert_called_once()
+        fields = summary.call_args.kwargs
+        assert fields["status"] == ("completed" if mode == "retry_success" else "busy")
+        if mode != "retry_success":
+            assert "output_tokens" not in fields
+        assert not manager._summary_states
+        assert not manager.active_req_ids
+
+    asyncio.run(run())

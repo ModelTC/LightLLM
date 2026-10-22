@@ -89,6 +89,7 @@ def start_multiprocess_pd_master(
                 start_funcs=[start_health_check_process],
                 start_args=[(args,)],
             )
+        process_manager.start_readiness_monitor(proxy_process, args)
         process_manager.supervise_processes(proxy_process)
 
 
