@@ -123,7 +123,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         freqs_cis,
         positions,
         runtime_slots=None,
-        is_v41=False,
+        bf16_rounding=False,
     ):
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_k_norm_rope_flashmla
         from lightllm.models.deepseek_v4.triton_kernel.cache_io import view_swa_kv
@@ -139,7 +139,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
             out_loc2=runtime_slots,
             kvcache=swa,
             page_size=self.cache_config.swa_token_alignment,
-            is_v41=is_v41,
+            bf16_rounding=bf16_rounding,
         )
 
     def get_att_input_params(self, layer_index):

@@ -45,8 +45,8 @@ def _load_reference_processor():
     return module
 
 
-def _load_reference_vision():
-    spec = importlib.util.spec_from_file_location("deepseek_v4_reference_vision", REFERENCE_VISION_PATH)
+def _load_reference_vision(path):
+    spec = importlib.util.spec_from_file_location("deepseek_reference_vision", path)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
@@ -60,11 +60,15 @@ def reference_processor():
     return _load_reference_processor()
 
 
-@pytest.fixture(scope="module")
-def reference_vision():
-    if not os.path.exists(REFERENCE_VISION_PATH):
-        pytest.skip("DeepSeek-V4 reference vision tower is not available")
-    return _load_reference_vision()
+@pytest.fixture(
+    scope="module",
+    params=[REFERENCE_VISION_PATH, "/mtc/models/DeepSeek-V4.1-Flash/inference/vision.py"],
+    ids=["v4", "v41"],
+)
+def reference_vision(request):
+    if not os.path.exists(request.param):
+        pytest.skip("DeepSeek reference vision tower is not available")
+    return _load_reference_vision(request.param)
 
 
 @pytest.mark.parametrize(

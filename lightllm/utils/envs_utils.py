@@ -312,11 +312,14 @@ def get_mtp_weight_layer_num() -> int:
 def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
     with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
         draft_config = json.load(json_file)
+    from lightllm.utils.config_utils import normalize_deepseek_v4_config
 
-    if draft_config.get("model_type") == "deepseek_v4" and draft_config.get("dspark_block_size"):
-        from lightllm.utils.config_utils import normalize_deepseek_v4_config
+    normalize_deepseek_v4_config(draft_config)
 
-        normalize_deepseek_v4_config(draft_config)
+    model_type = draft_config.get("model_type")
+    if model_type == "deepseek_v41":
+        draft_config = draft_config["text_config"]
+    if model_type in ("deepseek_v4", "deepseek_v41") and draft_config.get("dspark_block_size"):
         target_layer_num = draft_config.get("num_hidden_layers", draft_config.get("n_layer"))
         compress_ratios = draft_config.get("compress_ratios")
         if target_layer_num is not None and isinstance(compress_ratios, list):

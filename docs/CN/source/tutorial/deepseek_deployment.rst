@@ -364,8 +364,8 @@ PD (Prefill-Decode) 分离模式将预填充和解码阶段分离部署，可以
 
 以上所有脚本可以参考 `test/start_scripts/multi_pd_master/` 目录下的脚本。
 
-5. DeepSeek-V4.1-Flash 文本支持
------------------------------
+5. DeepSeek-V4.1-Flash 支持
+-------------------------
 
 V4.1 通过模型注册表选择 ``DeepseekV41TpPartModel``，复用 V4 的请求分页、
 请求级 SWA 状态、FlashMLA attention、MoE、TP 通信和服务入口。模型差异集中在
@@ -416,15 +416,52 @@ Engram 表使用按实际字节数分配的内存映射，预触页后注册为 
 避免 PyTorch pinned allocator 将每张约 23.6 GiB 的 TP4 分片向上取整到 32 GiB。
 DP ranks 通过现有服务共享内存机制复用同一节点上的 TP 分片，每张表仅加载一次。
 
-当前开放 normal text TP 和 DP/EP，支持 chunked prefill、GPU prefix cache、decode 和 decode CUDA Graph。
+当前开放 normal TP 和 DP/EP，支持文本、图像、chunked prefill、GPU prefix cache、decode 和 decode CUDA Graph。
 GPU prefix cache 复用现有 hybrid checkpoint；256-token 边界已闭合 C2 分组，快照仅需 SWA 状态。
-暂不支持视觉、PD、DSpark/MTP、CPU cache、prefill CUDA Graph、microbatch overlap 和 TP/SP 混合模式，
+暂不支持 PD、DSpark 之外的 MTP、CPU cache、prefill CUDA Graph、microbatch overlap 和 TP/SP 混合模式，
 启动时会检查不兼容配置。CED decoder SWA bounded replay 在最后一个 KV source 层之后，
 将每个请求的后续层输入缩减为本次 prefill 的最后 128 个 token，并将 SWA 可见范围限制在回放段内。
 最后一个 KV source 层仍处理全部输入，完整写入全局 KV；请求分页和 prefix cache 的推进保持原有路径。
 该回放近似重建 decoder SWA 状态；请求完整 prompt logprobs 时保留完整前向。
 API 自动选择 V4.1 DSML parser；数值 ``reasoning_effort`` 范围为 1–100，
 聊天模板使用官方编码器。流式工具调用会在完整 calls 块到齐后发送 JSON 参数。
+
+视觉复用 V4 的 ViT、aligner、embedding cache 和多模态 pre-layer；嵌套 ``vision_config``
+由 V4.1 视觉模型在初始化时适配为 V4 接口参数。V4.1 的图像 token 按行排列，包含首尾标记和每行换行，
+不使用 V4 的 N-layout 或 compressor padding，checkpoint 也没有 ``image_pad`` 参数。
+ViT 内部使用双向 attention；图像 token 进入语言模型后使用因果 SWA，按视觉 bias 选择 MoE 专家。
+图像位置不参与 Engram，也会阻断跨图像的 n-gram。启动时默认根据 checkpoint 开启视觉；
+仅服务文本时可传 ``--disable_vision``。
+
+完整 V4.1 checkpoint 的视觉权重已通过严格加载校验；固定相同 RoPE 表和 SDPA math 后端时，
+640×480 图像经完整 ViT + aligner 得到的 192×5120 embedding 与官方实现逐元素一致。
+
+DSpark 复用现有 V4 draft model 的加载、KV 提交、proposer 和调度器，V4.1 适配层仅替换
+shifted-mHC proposal forward。Target 从配置声明的层输入收集 residual-stream 均值；draft 按
+``dspark_n_routed_experts`` / ``dspark_num_experts_per_tok`` 配置专家，复用目标 embedding/head，
+加载 checkpoint 中的 ``markov_head.embed/head`` 和 confidence head。
+C2 压缩使用请求管理器已有的状态环，保留 speculative verify 后仍可能被接受的偶数位置。
+在上述启动参数后追加：
+
+.. code-block:: bash
+
+    --mtp_mode dspark --mtp_step 5 --mtp_draft_model_dir /path/DeepSeek-V4.1-Flash
+
+``mtp_step`` 不得超过 checkpoint 的 ``dspark_block_size``。当前公共 proposer 要求每个 prompt
+token 都有 target hidden，因此开启 DSpark 时保留完整 prefill，不启用 CED bounded replay；
+普通推理仍使用 CED。小模型已覆盖视觉与 DSpark 组合、target verify、draft proposal、
+Markov/confidence 输出和 decode CUDA Graph。DP/EP 下，KV-only 提交不执行通信清理；
+草稿与 target 专家数量不同时，完整 proposal 结束后恢复共享 DeepEP buffer 的 target 计数区布局，
+该清理也包含在 decode CUDA Graph 中。
+
+双机各 8 卡 H100、FP8 block-128 权重、固定 ``mtp_step=5`` 的完整模型验收：
+GSM8K 8-shot、1319 题、并发 256、贪心解码得到 1207/1319（91.51%）；
+接受 90607 个草稿 token / 验证 190465 个草稿 token（47.57%），
+每轮平均接受 2.38 个草稿 token，含 target token 的平均接受长度为 3.38。
+首轮耗时 97.84 秒；相同数据的热缓存复测为 1204/1319（91.28%）、接受率 48.04%、
+耗时 34.12 秒，输入 token 缓存命中比例 85.7%，其中一题达到 1024-token 输出上限并计为错题。
+8 张合成图片的数字、颜色和形状均回答正确，草稿接受率 40.87%，双图及多轮图片请求也已通过；
+图像结果仅覆盖这些功能用例。
 
 双机各 8 卡 H100 的 DP16/EP16 使用 ``tools/launch_deepseek_v41_dpep16.sh``：
 在两台机器的同一 checkout 上分别传入 ``0 NODE0_IP`` 和 ``1 NODE0_IP``。
@@ -440,6 +477,7 @@ API 自动选择 V4.1 DSML parser；数值 ``reasoning_effort`` 范围为 1–10
 .. code-block:: bash
 
     python -m pytest unit_tests/models/deepseek_v41/test_v41_model.py \
+        unit_tests/models/deepseek_v41/test_v41_vision.py \
         unit_tests/server/test_deepseek_v41.py
 
 GPU 用例覆盖直接 FP8 RoPE/cache 写入、跨 chunk C2、分页 causal/candidate indexer、KV source 共享、

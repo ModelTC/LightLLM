@@ -1,0 +1,11 @@
+from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+from lightllm.models.deepseek_v41.model import DeepseekV41TpPartModel
+from .layer_infer.post_layer_infer import DeepseekV41DSparkPostLayerInfer
+from .layer_infer.transformer_layer_infer import DeepseekV41DSparkTransformerLayerInfer
+from .layer_weights.pre_and_post_layer_weight import DeepseekV41DSparkPreAndPostLayerWeight
+
+
+class DeepseekV41DSparkModel(DeepseekV4DSparkModel, DeepseekV41TpPartModel):
+    pre_and_post_weight_class = DeepseekV41DSparkPreAndPostLayerWeight
+    transformer_layer_infer_class = DeepseekV41DSparkTransformerLayerInfer
+    post_layer_infer_class = DeepseekV41DSparkPostLayerInfer

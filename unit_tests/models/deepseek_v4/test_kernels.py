@@ -101,14 +101,14 @@ def test_indexer_rope_hadamard_quant_and_preallocated_outputs(batch, heads):
     torch.testing.assert_close(got_weights, weights.float().unsqueeze(-1) * 0.01 * scale, rtol=4e-6, atol=1e-8)
 
 
-def router_reference(logits, factor, bias, tokens, table, image_bias, image_start):
+def router_reference(logits, factor, bias, tokens, table, image_bias, image_start, top_k=6):
     scores = torch.sqrt(logits.clamp_min(0) + torch.log(1 + torch.exp(-logits.abs())))
     scores = torch.nan_to_num(scores, nan=0)
     selection = scores + (bias if bias is not None else 0)
     if image_bias is not None:
         image = tokens >= image_start
         selection = torch.where(image[:, None], scores + image_bias, selection)
-    indices = selection.argsort(dim=-1, descending=True, stable=True)[:, :6]
+    indices = selection.argsort(dim=-1, descending=True, stable=True)[:, :top_k]
     if table is not None:
         hash_ids = table[tokens.clamp_max(table.shape[0] - 1)]
         if image_bias is None:
@@ -145,6 +145,24 @@ def test_router_modes_scaling_ties_and_underflow(experts, mode, rows, distributi
     indices = torch.empty(rows, 6, device="cuda", dtype=torch.int64)
     topk_softplus_sqrt.topk_softplus_sqrt(weights, indices, logits, 2.5, correction, tokens, table, image_bias, 32)
     ref_weights, ref_indices = router_reference(logits, 2.5, correction, tokens, table, image_bias, 32)
+    torch.testing.assert_close(indices, ref_indices, rtol=0, atol=0)
+    torch.testing.assert_close(weights, ref_weights, rtol=5e-6, atol=1e-6)
+
+
+@pytest.mark.parametrize("top_k", [2, 3])
+def test_router_draft_topk_respects_output_bounds(top_k):
+    rows, experts = 160, 128
+    logits = torch.randn(rows, experts, device="cuda")
+    bias = torch.randn(experts, device="cuda")
+    # Keep the old six-expert writer inside the allocation so an overwrite fails deterministically.
+    weight_storage = torch.full((rows * 6 + 8,), -1.0, device="cuda")
+    index_storage = torch.full((rows * 6 + 8,), -1, dtype=torch.int64, device="cuda")
+    weights = weight_storage[4 : 4 + rows * top_k].view(rows, top_k)
+    indices = index_storage[4 : 4 + rows * top_k].view(rows, top_k)
+    topk_softplus_sqrt.topk_softplus_sqrt(weights, indices, logits, 2.5, correction_bias=bias)
+    for storage in (weight_storage, index_storage):
+        assert (storage[:4] == -1).all() and (storage[4 + rows * top_k :] == -1).all()
+    ref_weights, ref_indices = router_reference(logits, 2.5, bias, None, None, None, 0, top_k=top_k)
     torch.testing.assert_close(indices, ref_indices, rtol=0, atol=0)
     torch.testing.assert_close(weights, ref_weights, rtol=5e-6, atol=1e-6)
 

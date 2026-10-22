@@ -78,7 +78,7 @@ def _k_norm_rope_cache_kernel(
     PAGE_SIZE: tl.constexpr,
     PAGE_BYTES: tl.constexpr,
     WRITE_TAIL: tl.constexpr,
-    IS_V41: tl.constexpr,
+    BF16_ROUNDING: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -87,12 +87,12 @@ def _k_norm_rope_cache_kernel(
         tl.extra.cuda.gdc_wait()
     x = tl.load(kv + row * kv_stride + dim).to(tl.float32)
     w = tl.load(kv_weight + dim).to(tl.float32)
-    if IS_V41:
+    if BF16_ROUNDING:
         norm = 1 / tl.sqrt(tl.sum(x * x, axis=0) / 512 + EPS)
     else:
         norm = tl.rsqrt(tl.sum(x * x, axis=0) / 512 + EPS)
     x = x * norm * w
-    if IS_V41:
+    if BF16_ROUNDING:
         # V4.1 rounds RMSNorm to BF16 before RoPE.
         x = x.to(tl.bfloat16).to(tl.float32)
     groups = tl.arange(0, 8)
@@ -106,7 +106,7 @@ def _k_norm_rope_cache_kernel(
     rope = tl.reshape(
         tl.join(real * cos[None, :] - imag * sin[None, :], real * sin[None, :] + imag * cos[None, :]), (8, 64)
     )
-    if IS_V41:
+    if BF16_ROUNDING:
         rope = rope.to(tl.bfloat16).to(tl.float32)
     scale = tl.maximum(tl.max(tl.abs(grouped), axis=1), 1e-4) / 448
     bits = scale.to(tl.uint32, bitcast=True)
@@ -210,7 +210,7 @@ def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, positions, apply_norm=T
 
 @torch.no_grad()
 def fused_k_norm_rope_flashmla(
-    kv, kv_weight, eps, freqs_cis, positions, out_loc, kvcache, page_size, out_loc2=None, is_v41=False
+    kv, kv_weight, eps, freqs_cis, positions, out_loc, kvcache, page_size, out_loc2=None, bf16_rounding=False
 ):
     """Normalize BF16 KV [T, 512] and write at int32 out_loc [T] in packed pages.
 
@@ -219,7 +219,7 @@ def fused_k_norm_rope_flashmla(
     V4.1 rounds RMSNorm and RoPE to BF16 before the cache quantization.
     """
     if kv.shape[0]:
-        if is_v41:
+        if bf16_rounding:
             from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_num_warps
 
             num_warps = rmsnorm_num_warps
@@ -241,7 +241,7 @@ def fused_k_norm_rope_flashmla(
             PAGE_SIZE=page_size,
             PAGE_BYTES=kvcache.shape[-1],
             WRITE_TAIL=out_loc2 is not None,
-            IS_V41=is_v41,
+            BF16_ROUNDING=bf16_rounding,
             num_warps=num_warps,
             num_stages=1,
             **pdl_kwargs(kv.device),

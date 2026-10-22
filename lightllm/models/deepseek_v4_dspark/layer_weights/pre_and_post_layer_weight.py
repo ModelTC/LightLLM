@@ -15,6 +15,10 @@ from lightllm.models.deepseek_v4.triton_kernel.quant_convert import prepare_fp8_
 class DeepseekV4DSparkPreAndPostLayerWeight(PreAndPostLayerWeight):
     """Shared vocabulary weights plus the first/last DSpark stage heads."""
 
+    has_hc_head = True
+    markov_w1_name = "markov_w1"
+    markov_w2_name = "markov_w2"
+
     def __init__(self, data_type, network_config, quant_cfg: Quantcfg):
         super().__init__(data_type, network_config)
         self.quant_cfg = quant_cfg
@@ -62,27 +66,28 @@ class DeepseekV4DSparkPreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_name=f"{last_prefix}.norm.weight",
             data_type=self.data_type_,
         )
-        self.hc_head_fn_ = ParameterWeight(
-            weight_name=f"{last_prefix}.hc_head_fn",
-            data_type=torch.float32,
-            weight_shape=(hc_mult, hc_mult * hidden),
-        )
-        self.hc_head_base_ = ParameterWeight(
-            weight_name=f"{last_prefix}.hc_head_base",
-            data_type=torch.float32,
-            weight_shape=(hc_mult,),
-        )
-        self.hc_head_scale_ = ParameterWeight(
-            weight_name=f"{last_prefix}.hc_head_scale",
-            data_type=torch.float32,
-            weight_shape=(1,),
-        )
+        if self.has_hc_head:
+            self.hc_head_fn_ = ParameterWeight(
+                weight_name=f"{last_prefix}.hc_head_fn",
+                data_type=torch.float32,
+                weight_shape=(hc_mult, hc_mult * hidden),
+            )
+            self.hc_head_base_ = ParameterWeight(
+                weight_name=f"{last_prefix}.hc_head_base",
+                data_type=torch.float32,
+                weight_shape=(hc_mult,),
+            )
+            self.hc_head_scale_ = ParameterWeight(
+                weight_name=f"{last_prefix}.hc_head_scale",
+                data_type=torch.float32,
+                weight_shape=(1,),
+            )
 
         # W1 is replicated to avoid one TP collective in every sequential Markov step.
         self.markov_w1_weight_ = EmbeddingWeight(
             dim=markov_rank,
             vocab_size=vocab,
-            weight_name=f"{last_prefix}.markov_head.markov_w1.weight",
+            weight_name=f"{last_prefix}.markov_head.{self.markov_w1_name}.weight",
             data_type=self.data_type_,
             tp_rank=0,
             tp_world_size=1,
@@ -90,7 +95,7 @@ class DeepseekV4DSparkPreAndPostLayerWeight(PreAndPostLayerWeight):
         self.markov_w2_weight_ = LMHeadWeight(
             dim=markov_rank,
             vocab_size=vocab,
-            weight_name=f"{last_prefix}.markov_head.markov_w2.weight",
+            weight_name=f"{last_prefix}.markov_head.{self.markov_w2_name}.weight",
             data_type=self.data_type_,
         )
         self.confidence_head_weight_ = ROWMMWeight(

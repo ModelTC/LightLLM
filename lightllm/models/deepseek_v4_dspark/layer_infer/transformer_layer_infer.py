@@ -38,5 +38,6 @@ class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             eps=self.eps_,
             freqs_cis=self.freqs_cis,
             positions=infer_state.position_ids,
+            bf16_rounding=self.kv_bf16_rounding,
         )
         return input_embdings

@@ -62,6 +62,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     req_manager: DeepseekV4ReqManager
     mem_manager: DeepseekV4MemoryManager
     has_vision = False
+    has_bidirectional_image_attention = False
 
     pre_and_post_weight_class = DeepseekV4PreAndPostLayerWeight
     transformer_weight_class = DeepseekV4TransformerLayerWeight
@@ -262,3 +263,4 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
 class DeepseekV4VisionTpPartModel(DeepseekV4TpPartModel):
     has_vision = True
+    has_bidirectional_image_attention = True

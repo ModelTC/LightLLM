@@ -48,7 +48,7 @@ def test_config_flattens_text_without_losing_model_identity(tmp_path):
         "quantization_config": {"expert_dtype": "fp4"},
     }
     (tmp_path / "config.json").write_text(json.dumps(config))
-    assert get_config_json(str(tmp_path))["text_config"]["hidden_size"] == 5120
+    assert get_config_json(str(tmp_path)) == config
     assert get_hidden_size(str(tmp_path)) == 5120
     model = DeepseekV41TpPartModel.__new__(DeepseekV41TpPartModel)
     model.weight_dir_ = str(tmp_path)
@@ -199,7 +199,7 @@ def test_swa_fused_norm_rope_fp8_scatter_matches_reference(tokens, position_dtyp
         freqs,
         positions,
         runtime,
-        is_v41=True,
+        bf16_rounding=True,
     )
     torch.testing.assert_close(view_swa_kv(requests.swa_buffer[0], config), expected, atol=0, rtol=0)
 
@@ -266,27 +266,58 @@ def test_c2_carries_partial_groups_across_chunk_boundaries(split):
     kv, scores = torch.randn(7, 1024, device="cuda").split(512, -1)
     positions = torch.arange(7, dtype=torch.int32, device="cuda")
     req = torch.zeros(7, dtype=torch.int32, device="cuda")
-    state = torch.zeros(2, 2, 512, device="cuda")
+    state = torch.zeros(2, 4, 2, 512, device="cuda")
     first = pool_pairs(kv[:split], scores[:split], req[:split], positions[:split], state, 1)
     second = pool_pairs(kv[split:], scores[split:], req[split:], positions[split:], state, 1)
     actual = torch.cat((first, second))[1::2]
     expected = (kv[:6].view(3, 2, 512) * scores[:6].view(3, 2, 512).softmax(1)).sum(1).bfloat16()
     torch.testing.assert_close(actual, expected, atol=0.015625, rtol=0.008)
-    torch.testing.assert_close(state[0, 0], kv[-1])
-    torch.testing.assert_close(state[0, 1], scores[-1])
+    torch.testing.assert_close(state[0, 6 % 4, 0], kv[-1])
+    torch.testing.assert_close(state[0, 6 % 4, 1], scores[-1])
 
 
 def test_c2_does_not_cross_request_boundaries_or_commit_hold():
     kv = torch.randn(4, 512, device="cuda")
     scores = torch.randn_like(kv)
-    state = torch.randn(3, 2, 512, device="cuda")
+    state = torch.randn(3, 4, 2, 512, device="cuda")
     previous = state.clone()
     req = torch.tensor([0, 0, 1, 2], dtype=torch.int32, device="cuda")
     pos = torch.tensor([0, 1, 1, 0], dtype=torch.int32, device="cuda")
     out = pool_pairs(kv, scores, req, pos, state, 2)
-    expected = previous[1, 0] + (kv[2] - previous[1, 0]) * torch.sigmoid(scores[2] - previous[1, 1])
+    expected = previous[1, 0, 0] + (kv[2] - previous[1, 0, 0]) * torch.sigmoid(scores[2] - previous[1, 0, 1])
     torch.testing.assert_close(out[2], expected.bfloat16(), atol=0.015625, rtol=0.008)
     torch.testing.assert_close(state[2], previous[2])
+
+
+@pytest.mark.parametrize("state_slots", [7, 8])
+@pytest.mark.parametrize("start", [8, 9])
+@pytest.mark.parametrize("accepted", [1, 2, 3, 4])
+def test_c2_keeps_accepted_history_after_rejecting_draft_rows(state_slots, start, accepted):
+    kv, scores = torch.randn(start + 4, 1024, device="cuda").split(512, -1)
+    state = torch.zeros(2, state_slots, 2, 512, device="cuda")
+
+    def run(kv, scores, position):
+        count = kv.shape[0]
+        return pool_pairs(
+            kv,
+            scores,
+            torch.zeros(count, dtype=torch.int32, device="cuda"),
+            torch.arange(position, position + count, dtype=torch.int32, device="cuda"),
+            state,
+            1,
+        )
+
+    run(kv[:start], scores[:start], 0)
+    run(kv[start:], scores[start:], start)
+    position = start + accepted
+    new_kv, new_scores = torch.randn(2, 1024, device="cuda").split(512, -1)
+    previous_kv, previous_score = kv[position - 1], scores[position - 1]
+    for offset in range(2):
+        actual = run(new_kv[offset : offset + 1], new_scores[offset : offset + 1], position + offset)
+        if (position + offset) % 2:
+            expected = previous_kv + (new_kv[offset] - previous_kv) * torch.sigmoid(new_scores[offset] - previous_score)
+            torch.testing.assert_close(actual[0], expected.bfloat16(), atol=0.015625, rtol=0.008)
+        previous_kv, previous_score = new_kv[offset], new_scores[offset]
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
@@ -698,18 +729,38 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     assert state.b_ready_cache_len.tolist() == [20, 1000, 128]
 
 
-@pytest.mark.parametrize("o_groups", [1, 2])
-@pytest.mark.parametrize("expert_dtype,block_size", [("fp4", 32), ("fp8", 128)])
+@pytest.mark.parametrize(
+    "expert_dtype,block_size,o_groups,vision,dspark",
+    [
+        ("fp4", 32, 1, False, False),
+        ("fp4", 32, 2, False, False),
+        ("fp8", 128, 1, False, False),
+        ("fp8", 128, 2, False, False),
+        ("fp8", 128, 1, True, False),
+        ("fp8", 128, 1, False, True),
+        ("fp8", 128, 1, True, True),
+    ],
+)
 def test_text_model_constructs_and_chunked_prefill_matches_full(
-    tmp_path, monkeypatch, o_groups, expert_dtype, block_size
+    tmp_path, monkeypatch, o_groups, expert_dtype, block_size, vision, dspark
 ):
     """Exercise the real model input, paging, shared KV, attention, MoE and output paths."""
     import json
     import uuid
     from dataclasses import asdict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.utils.envs_utils import set_env_start_args, get_env_start_args, get_unique_server_name
-    from lightllm.models.deepseek_v41.model import DeepseekV41TpPartModel
+    from lightllm.utils.envs_utils import (
+        set_env_start_args,
+        get_env_start_args,
+        get_unique_server_name,
+        get_added_mtp_kv_layer_num,
+    )
+    from lightllm.models.deepseek_v41.model import DeepseekV41TpPartModel, DeepseekV41VisionTpPartModel
+    from lightllm.models.deepseek_v41_dspark.model import DeepseekV41DSparkModel
+    from lightllm.models.deepseek_v41_dspark.layer_infer.post_layer_infer import DeepseekV41DSparkPostLayerInfer
+    from lightllm.models.deepseek_v41_dspark.layer_weights.pre_and_post_layer_weight import (
+        DeepseekV41DSparkPreAndPostLayerWeight,
+    )
     from lightllm.common.basemodel.batch_objs import ModelInput
     from lightllm.common.basemodel.layer_weights.meta_weights import MMWeightTpl, ROWBMMWeight
     from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
@@ -771,6 +822,30 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             compress_rope_theta=160000.0,
         ),
     )
+    if vision:
+        config["vision_config"] = dict(
+            num_hidden_layers=1,
+            hidden_size=8,
+            num_attention_heads=2,
+            intermediate_size=12,
+            patch_size=2,
+            rope_theta=10000,
+            downsample_ratio=1,
+            max_image_tokens=64,
+            min_pixels=0,
+            max_wh_ratio=None,
+        )
+    if dspark:
+        config["text_config"].update(
+            compress_ratios=[0, 2, 2, 1, 1, 0, 0, 0],
+            num_nextn_predict_layers=3,
+            dspark_block_size=5,
+            dspark_noise_token_id=0,
+            dspark_target_layer_ids=[2, 3, 4],
+            dspark_markov_rank=128,
+            dspark_n_routed_experts=4,
+            dspark_num_experts_per_tok=2,
+        )
     from tokenizers import Tokenizer
     from tokenizers.models import WordLevel
     from transformers import PreTrainedTokenizerFast
@@ -793,9 +868,13 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         disable_symm_mem_allreduce=True,
         disable_flashinfer_allreduce=True,
         output_constraint_mode="none",
+        mtp_mode="dspark" if dspark else None,
+        mtp_step=3 if dspark else 0,
+        mtp_draft_model_dir=[str(tmp_path)] if dspark else None,
     )
     set_env_start_args(asdict(args))
     get_env_start_args.cache_clear()
+    get_added_mtp_kv_layer_num.cache_clear()
     monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", "test_v41_" + uuid.uuid4().hex)
     get_unique_server_name.cache_clear()
     monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", True)
@@ -803,7 +882,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
     torch.distributed.init_process_group("nccl", init_method=f"file://{tmp_path}/nccl", rank=0, world_size=1)
     dist_group_manager.create_groups(1)
 
-    class TinyModel(DeepseekV41TpPartModel):
+    class TinyModel(DeepseekV41VisionTpPartModel if vision else DeepseekV41TpPartModel):
         def _autotune_warmup(self):
             pass
 
@@ -815,8 +894,12 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             weights = {}
             for layer in [self.pre_post_weight, *self.trans_layers_weight]:
                 for attr in vars(layer).values():
+                    if self.is_mtp_draft_model and (
+                        attr is self.pre_post_weight.wte_weight_ or attr is self.pre_post_weight.lm_head_weight_
+                    ):
+                        continue
                     if isinstance(attr, FusedMoeWeight):
-                        for expert in range(8):
+                        for expert in range(attr.n_routed_experts):
                             for name, shape in [("w1", (128, 128)), ("w3", (128, 128)), ("w2", (128, 128))]:
                                 prefix = f"{attr.weight_prefix}.{expert}.{name}"
                                 if expert_dtype == "fp4":
@@ -854,7 +937,10 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                             else torch.randn_like(attr.weight, device="cpu") * 0.02
                         )
                         weights[attr.weight_name] = value
-            super().load_weights(weights)
+            if self.is_mtp_draft_model:
+                DeepseekV41DSparkModel.load_weights(self, weights)
+            else:
+                super().load_weights(weights)
 
     model = None
     try:
@@ -874,11 +960,21 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             with pytest.raises(ValueError, match="prefill CUDA Graph"):
                 model._verify_params()
         tokens = torch.arange(1, 301, dtype=torch.int64) % 64
-        model.req_manager.req_to_token_indexs[0, :256] = torch.arange(256, dtype=torch.int32, device="cuda")
+        images = []
+        if vision:
+            from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
-        def prefill(start, end, req_idx=0):
+            tokens[5:17] = torch.arange(1000, 1012)
+            images = [dict(token_id=1000, token_num=12, start_idx=5, start_index_in_embed_cache=0)]
+            embed_cache = torch.randn(12, 1, 128, device="cuda", dtype=torch.bfloat16)
+            monkeypatch.setattr(
+                g_infer_context, "cpu_embed_cache_client", SimpleNamespace(cpu_embed_cache_tensor=embed_cache)
+            )
+        model.req_manager.req_to_token_indexs[0, :512] = torch.arange(512, dtype=torch.int32, device="cuda")
+
+        def prefill_input(start, end, req_idx=0):
             tensor = lambda value: torch.tensor([value], dtype=torch.int32)
-            inp = ModelInput(
+            return ModelInput(
                 batch_size=1,
                 total_token_num=end,
                 max_q_seq_len=end - start,
@@ -893,9 +989,141 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 b_prefill_start_loc=tensor(0),
                 b_prefill_has_output_cpu=[True],
                 is_prefill=True,
-                multimodal_params=[{"images": [], "audios": []}],
+                multimodal_params=[{"images": images, "audios": []}],
             )
-            return model.forward(inp).logits.clone()
+
+        def prefill(start, end, req_idx=0):
+            return model.forward(prefill_input(start, end, req_idx)).logits.clone()
+
+        if dspark:
+            from copy import copy
+            from lightllm.models.draft_registry import DraftModelRegistry
+            from lightllm.common.basemodel.cuda_graph import CudaGraph
+
+            assert DraftModelRegistry.get_model_class(config, "dspark") is DeepseekV41DSparkModel
+            assert model.req_manager.cache_config.layer_num == 8
+            captured = []
+            for index in (2, 3, 4):
+                layer = model.layers_infer[index]
+                original = layer._hc_attn_in
+
+                def record_attention_input(hidden, state, weight, original=original):
+                    streams = hidden[0] if isinstance(hidden, tuple) else hidden
+                    captured.append(streams.view(-1, 4, 128).mean(1).clone())
+                    return original(hidden, state, weight)
+
+                monkeypatch.setattr(layer, "_hc_attn_in", record_attention_input)
+            inp = prefill_input(0, 256)
+            out = model.forward(inp)
+            assert out.mtp_collector.spec_hidden.shape == (256, 384)
+            torch.testing.assert_close(out.mtp_collector.spec_hidden, torch.cat(captured, -1), atol=0, rtol=0)
+
+            class TinyDraft(DeepseekV41DSparkModel):
+                load_weights = TinyModel.load_weights
+
+                def _init_cudagraph(self):
+                    self.graph = None
+
+                def _check_max_len_infer(self):
+                    pass
+
+            draft = TinyDraft(
+                dict(
+                    weight_dir=str(tmp_path),
+                    main_model=model,
+                    mtp_previous_draft_models=[],
+                    run_mode="normal",
+                    max_total_token_num=1024,
+                    max_req_num=2,
+                    max_seq_length=512,
+                    batch_max_tokens=512,
+                    disable_cudagraph=True,
+                )
+            )
+            assert draft.req_manager is model.req_manager
+            assert draft.mem_manager is model.mem_manager
+            assert draft.block_size == 3
+            assert type(draft.post_infer) is DeepseekV41DSparkPostLayerInfer
+            assert type(draft.pre_post_weight) is DeepseekV41DSparkPreAndPostLayerWeight
+            assert [weight.n_routed_experts for weight in draft.trans_layers_weight] == [4, 4, 4]
+            assert all(layer.num_experts_per_tok == 2 for layer in draft.layers_infer)
+            assert draft.pre_post_weight.markov_w1_weight_.weight_name == "mtp.2.markov_head.embed.weight"
+            assert not hasattr(draft.pre_post_weight, "hc_head_fn_")
+            commit = copy(inp)
+            commit.mtp_draft_input_hiddens = out.mtp_collector.spec_hidden
+            with monkeypatch.context() as kv_commit:
+                kv_commit.setattr(
+                    dist_group_manager,
+                    "clear_deepep_buffer",
+                    lambda: pytest.fail("KV-only commits must not clear the target's DeepEP buffer"),
+                )
+                draft.forward(commit)
+            # Every draft stage owns target-hidden KV, without modifying target history.
+            assert model.req_manager.swa_buffer[5:].count_nonzero() > 0
+
+            def decode_input(ids, position):
+                count = len(ids)
+                return ModelInput(
+                    batch_size=count,
+                    total_token_num=count,
+                    max_q_seq_len=1,
+                    max_kv_seq_len=position + count,
+                    max_cache_len=position,
+                    input_ids=ids,
+                    b_req_idx=torch.zeros(count, dtype=torch.int32),
+                    b_mtp_index=torch.zeros(count, dtype=torch.int32),
+                    b_seq_len=torch.arange(position + 1, position + count + 1, dtype=torch.int32),
+                    b_position_delta=torch.zeros(count, dtype=torch.int32),
+                    b_shared_seq_len=torch.zeros(count, dtype=torch.int32),
+                    b_shared_radix_node_id=torch.zeros(count, dtype=torch.int32),
+                    is_prefill=False,
+                    multimodal_params=[{"images": [], "audios": []}] * count,
+                )
+
+            verify = decode_input(tokens[256:260], 256)
+            verified = model.forward(verify)
+            verify_logits = verified.logits.clone()
+            assert verified.mtp_collector.spec_hidden.shape == (4, 384)
+            commit = copy(verify)
+            commit.mtp_draft_input_hiddens = verified.mtp_collector.spec_hidden
+            draft.forward(commit)
+            history = [buffer.clone() for buffer in model.mem_manager.kv_buffer]
+            proposal = decode_input(torch.tensor([int(verified.logits[-1].argmax()), 0, 0]), 260)
+            eager = draft.forward(proposal)
+            expected_ids = eager.mtp_collector.draft_token_ids.clone()
+            expected_confidence = eager.mtp_collector.confidence_logits.clone()
+            assert expected_ids.shape == (3,)
+            assert expected_confidence.shape == (1, 3)
+            assert torch.isfinite(expected_confidence).all()
+            draft.graph = CudaGraph(3, 3, 3, max_batch_size=3, max_len_in_batch=512)
+            for _ in range(2):
+                actual = draft.forward(proposal)
+                torch.testing.assert_close(actual.mtp_collector.draft_token_ids, expected_ids, atol=0, rtol=0)
+                torch.testing.assert_close(actual.mtp_collector.confidence_logits, expected_confidence, atol=0, rtol=0)
+            assert len(draft.graph.graph) == 1
+            for actual, expected in zip(model.mem_manager.kv_buffer, history):
+                torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+            # Target verification must match autoregressive decode, including after rejected future rows.
+            model.req_manager.clear_runtime_state(0)
+            model.forward(inp)
+            sequential = torch.cat(
+                [model.forward(decode_input(tokens[pos : pos + 1], pos)).logits.clone() for pos in range(256, 260)]
+            )
+            torch.testing.assert_close(verify_logits, sequential, atol=0.0625, rtol=0.03)
+            # Match the verify layout to isolate rejected-state leakage from FlashMLA batch rounding.
+            model.req_manager.clear_runtime_state(0)
+            model.forward(inp)
+            model.forward(verify)
+            clean_resume = model.forward(decode_input(tokens[257:260], 257)).logits.clone()
+            model.req_manager.clear_runtime_state(0)
+            model.forward(inp)
+            rejected_ids = tokens[256:260].clone()
+            rejected_ids[1:] = (rejected_ids[1:] + 7) % 64
+            model.forward(decode_input(rejected_ids, 256))
+            resumed = model.forward(decode_input(tokens[257:260], 257)).logits
+            torch.testing.assert_close(resumed, clean_resume, atol=0, rtol=0)
+            return
 
         # Full prompt logits keep the complete decoder path; retain the exact
         # prefill/chunk/decode comparisons independently of approximate replay.
@@ -1020,7 +1248,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             b_prefill_start_loc=torch.tensor([0, 200], dtype=torch.int32),
             b_prefill_has_output_cpu=[True, True],
             is_prefill=True,
-            multimodal_params=[{"images": [], "audios": []}] * 2,
+            multimodal_params=[{"images": images, "audios": []}] * 2,
         )
         batched = model.forward(batch).logits.clone()
         assert counts[-1] == 131
@@ -1046,7 +1274,27 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         torch.distributed.destroy_process_group()
         dist_group_manager.groups.clear()
         get_env_start_args.cache_clear()
+        get_added_mtp_kv_layer_num.cache_clear()
         get_unique_server_name.cache_clear()
+
+
+def test_engram_image_tokens_do_not_modify_residual_streams():
+    from lightllm.models.deepseek_v41.engram import engram_forward
+
+    streams = torch.randn(3, 4, 16, device="cuda", dtype=torch.bfloat16)
+    weight = SimpleNamespace(
+        engram_embed_=SimpleNamespace(lookup=lambda _: torch.ones(3, 16, device="cuda")),
+        engram_wkv_=SimpleNamespace(mm=lambda _: torch.ones(3, 80, device="cuda")),
+        engram_q_=SimpleNamespace(weight=torch.ones(4, 16, device="cuda")),
+        engram_k_=SimpleNamespace(weight=torch.ones(4, 16, device="cuda")),
+    )
+    token_mask = torch.tensor([True, False, True], device="cuda")
+    hashes = torch.zeros(3, 1, dtype=torch.int64, device="cuda")
+    expected = engram_forward(streams, hashes, weight, 1e-6)
+    actual = engram_forward(streams, hashes, weight, 1e-6, token_mask=token_mask)
+    torch.testing.assert_close(actual[~token_mask], streams[~token_mask], atol=0, rtol=0)
+    torch.testing.assert_close(actual[token_mask], expected[token_mask], atol=0, rtol=0)
+    assert not torch.equal(actual[token_mask], streams[token_mask])
 
 
 def test_engram_host_embedding_uses_fp8_scales_and_zeroes_other_tp_rows(monkeypatch):
@@ -1097,11 +1345,13 @@ def test_engram_dp_ranks_share_host_table_and_load_once(monkeypatch):
         get_unique_server_name.cache_clear()
 
 
-def test_engram_hashes_survive_chunk_and_swa_page_boundaries(monkeypatch):
+@pytest.mark.parametrize("vision", [False, True])
+def test_engram_hashes_survive_chunk_and_swa_page_boundaries(monkeypatch, vision):
     from lightllm.models.deepseek_v41 import engram
     import numpy as np
 
     config = dict(
+        vision_n_layers=int(vision),
         engram_compressed_vocab_size=64,
         engram_pad_token_id=2,
         engram_max_ngram_size=4,
@@ -1112,6 +1362,8 @@ def test_engram_hashes_survive_chunk_and_swa_page_boundaries(monkeypatch):
     monkeypatch.setattr(engram, "build_compressed_token_map", lambda _: (list(range(64)), 64))
     hasher = engram.EngramHasher(config, None, 512)
     ids = torch.arange(135, dtype=torch.int64, device="cuda") % 64
+    if vision:
+        ids[127:130] = torch.arange(1000, 1003, device="cuda")
     # Physical pages deliberately differ from logical sequence pages.
     pages = torch.tensor([[2, 0], [1, 3]], dtype=torch.int32, device="cuda")
     table = (pages[:, :, None] * 128 + torch.arange(128, device="cuda")).flatten(1)
@@ -1130,13 +1382,15 @@ def test_engram_hashes_survive_chunk_and_swa_page_boundaries(monkeypatch):
     chunked = torch.cat([hasher(state(0, 127)), hasher(state(127, 129)), hasher(state(129, 135))])
     torch.testing.assert_close(full, chunked, atol=0, rtol=0)
     # Independent scalar n-gram reference at the sequence start and page transition.
-    for pos in (0, 1, 127, 128, 134):
+    for pos in (0, 1, 127, 128, 130, 131, 134):
         for layer, lid in enumerate(config["engram_layer_ids"]):
             bound = (np.iinfo(np.int64).max // 64) // 2
             multipliers = np.random.default_rng(10007 * lid).integers(0, bound, size=4, dtype=np.int64) * 2 + 1
             rolling = 0
+            blocked = False
             for shift in range(4):
-                token = int(ids[pos - shift]) if pos >= shift else 2
+                blocked |= pos < shift or int(ids[pos - shift]) >= 64
+                token = 2 if blocked else int(ids[pos - shift])
                 rolling ^= token * int(multipliers[shift])
                 if shift:
                     for head in range(2):

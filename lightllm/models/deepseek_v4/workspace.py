@@ -112,7 +112,8 @@ class DeepseekV4Workspace:
         self.token_capacity = int(model.batch_max_tokens)
         self.sliding_window = int(model.config["sliding_window"])
         args = get_env_start_args()
-        self.vision_swa_width = self.sliding_window + int(model.config.get("vision_max_n_token", 0))
+        image_window = model.config.get("vision_max_n_token", 0) if model.has_bidirectional_image_attention else 0
+        self.vision_swa_width = self.sliding_window + int(image_window)
         self.swa_capacity = self.vision_swa_width
         if args.mtp_mode == "dspark":
             dspark_width = self.sliding_window + int(args.mtp_step)

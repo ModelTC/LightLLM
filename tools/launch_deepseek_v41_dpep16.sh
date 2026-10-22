@@ -28,5 +28,7 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --max_req_total_len 8192 \
     --running_max_req_size 256 --graph_max_batch_size 32 \
     --enable_profiling torch_profiler \
-    --disable_vision --disable_audio \
+    --mtp_mode dspark --mtp_step 5 \
+    --mtp_draft_model_dir /mnt/vqa/models/DeepSeek-V4.1-Flash-1017-FP8 \
+    --disable_audio \
     --host 0.0.0.0 --port 18941

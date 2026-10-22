@@ -1,6 +1,8 @@
-"""Text-only V4.1 integration using the existing V4 model and service interfaces."""
+"""V4.1 integration using the existing V4 model and service interfaces."""
 
-from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel, DeepseekV4LayerHiddenCollector
+from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
+from lightllm.common.basemodel.triton_kernel.mhc import hc_contract
 from .infer_struct import DeepseekV41InferStateInfo
 from .layer_weights.pre_and_post_layer_weight import DeepseekV41PreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import DeepseekV41TransformerLayerWeight
@@ -11,6 +13,22 @@ from lightllm.common.build_utils import repair_config
 from lightllm.utils.config_utils import get_config_json
 
 
+class DeepseekV41LayerHiddenCollector(DeepseekV4LayerHiddenCollector):
+    """V4.1 DSpark consumes the residual streams entering each selected layer."""
+
+    def _load_layer_ids(self):
+        layer_ids = super()._load_layer_ids()
+        assert min(layer_ids) > 0, "V4.1 DSpark target layers must follow a transformer layer"
+        return frozenset(layer - 1 for layer in layer_ids)
+
+    def add(self, layer_index, hidden):
+        if layer_index not in self.layer_ids:
+            return
+        # A layer's completed streams are the next layer's input; ignore the shifted pre-mix.
+        streams = hidden[0] if isinstance(hidden, tuple) else hidden
+        LayerHiddenCollector.add(self, layer_index, hc_contract(streams, self.model.config["hc_mult"]))
+
+
 class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     pre_and_post_weight_class = DeepseekV41PreAndPostLayerWeight
     transformer_weight_class = DeepseekV41TransformerLayerWeight
@@ -19,14 +37,11 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     infer_state_class = DeepseekV41InferStateInfo
 
     def _init_config(self):
-        # Normalize the nested checkpoint before the base model creates its flat aliases.
-        self.config = get_config_json(self.weight_dir_)
-        text = self.config.pop("text_config", {})
-        text.pop("model_type", None)
-        for key, value in text.items():
-            self.config.setdefault(key, value)
+        config = get_config_json(self.weight_dir_)
+        self.config = {**config["text_config"], **config}
         self.config.setdefault("num_hash_layers", 0)
-        self.config.setdefault("expert_dtype", self.config.get("quantization_config", {}).get("expert_dtype"))
+        self.config.setdefault("expert_dtype", config.get("quantization_config", {}).get("expert_dtype"))
+        self.config.setdefault("vision_n_layers", (config.get("vision_config") or {}).get("num_hidden_layers", 0))
         repair_config(self.config, ["num_attention_heads", "n_head"])
         repair_config(self.config, ["hidden_size", "n_embd", "n_embed"])
         repair_config(self.config, ["num_hidden_layers", "n_layer"])
@@ -38,7 +53,7 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
         args = self.args
         if (
             args.run_mode != "normal"
-            or args.mtp_mode is not None
+            or args.mtp_mode not in (None, "dspark")
             or args.enable_cpu_cache
             or args.enable_dp_prompt_cache_fetch
             or args.enable_prefill_cudagraph
@@ -47,8 +62,8 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             or self.enable_tpsp_mix_mode
         ):
             raise ValueError(
-                "DeepSeek-V4.1 currently supports normal text serving with TP or DP/EP; "
-                "MTP, CPU cache, prefill CUDA Graph and overlap are unsupported"
+                "DeepSeek-V4.1 currently supports normal serving with TP or DP/EP; "
+                "only DSpark MTP is supported; CPU cache, prefill CUDA Graph and overlap are unsupported"
             )
         cfg = self.config
         if cfg["candidate_block_size"] != 8:
@@ -60,6 +75,12 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
         if not set(sources).issubset(index_sources):
             raise ValueError("Every DeepSeek-V4.1 KV source must also generate indices")
 
+    def _init_hidden_collector(self):
+        if not self.is_mtp_draft_model and self.mtp_manager.args.mtp_mode == "dspark":
+            self.hidden_collector_prototype = DeepseekV41LayerHiddenCollector(self)
+        else:
+            super()._init_hidden_collector()
+
     def _init_custom(self):
         super()._init_custom()
         self.engram_hasher = None
@@ -70,3 +91,7 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             self.engram_hasher = EngramHasher(
                 self.config, tokenizer, self.mem_manager.size + self.mem_manager.page_size
             )
+
+
+class DeepseekV41VisionTpPartModel(DeepseekV41TpPartModel):
+    has_vision = True

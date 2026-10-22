@@ -157,7 +157,6 @@ def test_radix_match_retries_when_page_alignment_lands_in_earlier_image(monkeypa
 
     assert radix_cache.calls == [
         (1024, False),
-        (512, False),
         (256, False),
         (256, True),
     ]

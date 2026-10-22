@@ -1166,7 +1166,9 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
         rms_norm_eps=1e-6,
     )
     indexer = indexer_module.DeepseekV4IndexInfer(0, config, 1)
-    model = SimpleNamespace(batch_max_tokens=tokens, config=config, max_seq_length=4096)
+    model = SimpleNamespace(
+        batch_max_tokens=tokens, config=config, max_seq_length=4096, has_bidirectional_image_attention=False
+    )
     state = DeepseekV4InferStateInfo()
     state.mem_manager, state.req_manager = manager, requests
     state.dsv4_workspace = DeepseekV4Workspace(model)

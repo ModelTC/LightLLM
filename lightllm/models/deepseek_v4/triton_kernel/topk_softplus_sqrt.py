@@ -19,13 +19,15 @@ def _sqrt_softplus(x):
 
 
 @triton.jit
-def _hash_route(logits, input_ids, tid2eid, rows, valid, slots, NUM_EXPERTS: tl.constexpr):
+def _hash_route(logits, input_ids, tid2eid, rows, valid, slots, NUM_EXPERTS: tl.constexpr, TOP_K: tl.constexpr):
     tokens = tl.load(input_ids + rows, mask=valid, other=0)
-    ids = tl.load(tid2eid + tokens[:, None] * 6 + slots[None, :], mask=valid[:, None] & (slots[None, :] < 6), other=0)
-    logit_values = tl.load(
-        logits + rows[:, None] * NUM_EXPERTS + ids, mask=valid[:, None] & (slots[None, :] < 6), other=0
+    ids = tl.load(
+        tid2eid + tokens[:, None] * TOP_K + slots[None, :], mask=valid[:, None] & (slots[None, :] < TOP_K), other=0
     )
-    return ids, tl.where(slots[None, :] < 6, _sqrt_softplus(logit_values), 0)
+    logit_values = tl.load(
+        logits + rows[:, None] * NUM_EXPERTS + ids, mask=valid[:, None] & (slots[None, :] < TOP_K), other=0
+    )
+    return ids, tl.where(slots[None, :] < TOP_K, _sqrt_softplus(logit_values), 0)
 
 
 @triton.jit
@@ -43,17 +45,19 @@ def _router_kernel(
     IMAGE_TOKEN_START: tl.constexpr,
     HAS_HASH_ROUTING: tl.constexpr,
     HAS_VISION_BIAS: tl.constexpr,
+    TOP_K: tl.constexpr,
+    BLOCK_K: tl.constexpr,
     BLOCK_E: tl.constexpr,
     BLOCK_R: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
     rows = tl.program_id(0) * BLOCK_R + tl.arange(0, BLOCK_R)
     valid = rows < num_tokens
-    slots = tl.arange(0, 8)
+    slots = tl.arange(0, BLOCK_K)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
     if HAS_HASH_ROUTING and not HAS_VISION_BIAS:
-        ids, selected = _hash_route(logits, input_ids, tid2eid, rows, valid, slots, NUM_EXPERTS)
+        ids, selected = _hash_route(logits, input_ids, tid2eid, rows, valid, slots, NUM_EXPERTS, TOP_K)
     else:
         image = tl.full((BLOCK_R,), False, tl.int1)
         if HAS_VISION_BIAS:
@@ -75,25 +79,27 @@ def _router_kernel(
             image_bias = tl.load(bias_vl + experts, mask=experts < NUM_EXPERTS, other=0)
             selection = tl.where(image[:, None], scores + image_bias[None, :], selection)
         remaining = tl.where(dense[:, None] & (experts[None, :] < NUM_EXPERTS), selection, -float("inf"))
-        selected = tl.full((BLOCK_R, 8), 0, tl.float32)
-        ids = tl.full((BLOCK_R, 8), 0, tl.int64)
-        for slot in tl.static_range(6):
+        selected = tl.full((BLOCK_R, BLOCK_K), 0, tl.float32)
+        ids = tl.full((BLOCK_R, BLOCK_K), 0, tl.int64)
+        for slot in tl.static_range(TOP_K):
             _, expert = tl.max(remaining, axis=1, return_indices=True)
             value = tl.sum(tl.where(experts[None, :] == expert[:, None], scores, 0), axis=1)
             selected = tl.where(slots[None, :] == slot, value[:, None], selected)
             ids = tl.where(slots[None, :] == slot, expert[:, None].to(tl.int64), ids)
             remaining = tl.where(experts[None, :] == expert[:, None], -float("inf"), remaining)
         if HAS_HASH_ROUTING:
-            hash_ids, hash_weights = _hash_route(logits, input_ids, tid2eid, rows, valid & ~image, slots, NUM_EXPERTS)
+            hash_ids, hash_weights = _hash_route(
+                logits, input_ids, tid2eid, rows, valid & ~image, slots, NUM_EXPERTS, TOP_K
+            )
             ids = tl.where(image[:, None], ids, hash_ids)
             selected = tl.where(image[:, None], selected, hash_weights)
     total = tl.sum(selected, axis=1)
     selected = selected * ROUTED_SCALING_FACTOR / tl.where(total[:, None] > 0, total[:, None], 1)
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
-    mask = valid[:, None] & (slots[None, :] < 6)
-    tl.store(topk_weights + rows[:, None] * 6 + slots[None, :], selected, mask=mask)
-    tl.store(topk_indices + rows[:, None] * 6 + slots[None, :], ids, mask=mask)
+    mask = valid[:, None] & (slots[None, :] < TOP_K)
+    tl.store(topk_weights + rows[:, None] * TOP_K + slots[None, :], selected, mask=mask)
+    tl.store(topk_indices + rows[:, None] * TOP_K + slots[None, :], ids, mask=mask)
 
 
 @torch.no_grad()
@@ -108,9 +114,9 @@ def topk_softplus_sqrt(
     bias_vl=None,
     image_token_start=0,
 ):
-    """Route FP32 logits [T, experts] to six experts, writing weights and int64 IDs.
+    """Route FP32 logits [T, experts] to the configured top-k experts, writing weights and int64 IDs.
 
-    Hash layers use tid2eid [vocab, 6]. Vision tokens select by bias_vl; other
+    Hash layers use tid2eid [vocab, top-k]. Vision tokens select by bias_vl; other
     dense rows use correction_bias. Selected scores normalize to routed_scaling_factor.
     """
     rows = logits.shape[0]
@@ -128,6 +134,8 @@ def topk_softplus_sqrt(
         bias_vl,
         rows,
         NUM_EXPERTS=logits.shape[1],
+        TOP_K=topk_indices.shape[1],
+        BLOCK_K=triton.next_power_of_2(topk_indices.shape[1]),
         ROUTED_SCALING_FACTOR=float(routed_scaling_factor),
         IMAGE_TOKEN_START=image_token_start,
         HAS_HASH_ROUTING=tid2eid is not None,

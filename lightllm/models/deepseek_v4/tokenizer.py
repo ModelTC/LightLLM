@@ -45,6 +45,7 @@ class DeepSeekV4Tokenizer:
             cfg["vision_max_n_token"],
             cfg["vision_min_pixels"],
             cfg.get("vision_max_wh_ratio"),
+            row_major=cfg.get("vision_row_major", False),
         )
         return token_num
 
@@ -72,8 +73,9 @@ class DeepSeekV4Tokenizer:
                 continue
 
             image = images[image_index]
-            cache_skip = len(input_ids) % 4
-            compress_pad = 3 - cache_skip
+            row_major = self.model_config.get("vision_row_major", False)
+            cache_skip = 0 if row_major else len(input_ids) % 4
+            compress_pad = 0 if row_major else 3 - cache_skip
             image.block_start_idx = len(input_ids)
             image.start_idx = len(input_ids) + compress_pad
             input_ids.extend(range(image.token_id + cache_skip, image.token_id + image.token_num))

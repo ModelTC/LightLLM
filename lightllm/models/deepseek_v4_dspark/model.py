@@ -7,6 +7,7 @@ from safetensors import safe_open
 from tqdm import tqdm
 
 import lightllm.utils.petrel_helper as utils
+from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight
@@ -60,6 +61,10 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         assert self.config["compress_ratios"][-draft_layer_num:] == [0] * draft_layer_num
         assert len(self.config["dspark_target_layer_ids"]) == draft_layer_num
         self.config["dspark_layer_num"] = draft_layer_num
+        self.config["n_routed_experts"] = self.config.get("dspark_n_routed_experts") or self.config["n_routed_experts"]
+        self.config["num_experts_per_tok"] = (
+            self.config.get("dspark_num_experts_per_tok") or self.config["num_experts_per_tok"]
+        )
 
         # Aliases consumed by the shared block/Markov implementation.
         self.config["block_size"] = int(self.config["dspark_block_size"])
@@ -162,15 +167,25 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             layer.sin_compress_table = self._sin_cached_compress
         self.layers_infer[0].context_wkv_weight = self.context_wkv_weight
 
+    def _prefill(self, model_input: ModelInput) -> ModelOutput:
+        if model_input.mtp_draft_input_hiddens is None:
+            return super()._prefill(model_input)
+        return self._commit_kv(model_input)
+
     def _decode(self, model_input: ModelInput) -> ModelOutput:
         if model_input.mtp_draft_input_hiddens is None:
             return super()._decode(model_input)
+        return self._commit_kv(model_input)
+
+    def _commit_kv(self, model_input: ModelInput) -> ModelOutput:
         # KV-only commits have no collectives. Empty DP ranks only participate
         # in the subsequent full draft proposal, through the ordinary padding.
-        if model_input.batch_size == 0:
+        # Bypass the ordinary prefill tail: its DeepEP cleanup can race with
+        # other ranks already entering the next target decode.
+        if model_input.input_ids.numel() == 0:
             return ModelOutput(logits=model_input.mtp_draft_input_hiddens.new_empty((0, 1)))
 
-        assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size
+        assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.input_ids.numel()
         infer_state = self._create_inferstate(model_input)
         infer_state.init_some_extra_state(self)
 
@@ -184,6 +199,14 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         return {
             "mtp_draft_input_hiddens": None,
         }
+
+    def _token_forward(self, infer_state):
+        output = super()._token_forward(infer_state)
+        if self.args.enable_ep_moe and self.config["n_routed_experts"] != self.main_model.config["n_routed_experts"]:
+            # The shared DeepEP signaling layout depends on expert count.
+            # Restore the target layout before its next dispatch, including in CUDA graphs.
+            dist_group_manager.clear_deepep_buffer()
+        return output
 
     def _autotune_warmup(self):
         return

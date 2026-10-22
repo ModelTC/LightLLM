@@ -17,6 +17,9 @@ from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_so
 
 
 class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
+    q_head_norm = True
+    kv_bf16_rounding = False
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -351,15 +354,13 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         else:
             q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
             q[:, self.tp_q_head_num_ :, :].zero_()
-        is_v41 = self.network_config_["model_type"] == "deepseek_v41"
-        # V4.1 keeps the low-rank Q norm but omits V4's additional per-head norm.
         fused_q_norm_rope(
             q_in,
             q[:, : self.tp_q_head_num_, :],
             self.eps_,
             self.freqs_cis,
             infer_state.position_ids,
-            apply_norm=not is_v41,
+            apply_norm=self.q_head_norm,
         )
         # kv: RMSNorm + RoPE + FP8 pack + scatter into SWA in one Triton kernel.
         infer_state.req_manager.pack_mla_kv_to_cache_fused_norm_rope(
@@ -371,7 +372,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             eps=self.eps_,
             freqs_cis=self.freqs_cis,
             positions=infer_state.position_ids,
-            is_v41=is_v41,
+            bf16_rounding=self.kv_bf16_rounding,
         )
         return q, qa, input
 

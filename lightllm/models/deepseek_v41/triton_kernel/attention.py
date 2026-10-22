@@ -15,6 +15,8 @@ def _pool_pairs(
     OUT,
     D: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
+    STATE_SLOT_STRIDE: tl.constexpr,
+    STATE_SLOTS: tl.constexpr,
     KV_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
 ):
@@ -26,8 +28,9 @@ def _pool_pairs(
     in_batch = (row > 0) & (previous_req == req)
     previous_kv = tl.load(KV + (row - 1) * KV_STRIDE + cols, in_batch, 0.0)
     previous_score = tl.load(SCORE + (row - 1) * SCORE_STRIDE + cols, in_batch, 0.0)
-    previous_kv += tl.load(STATE + req * STATE_STRIDE + cols, ~in_batch, 0.0)
-    previous_score += tl.load(STATE + req * STATE_STRIDE + D + cols, ~in_batch, 0.0)
+    previous_state = STATE + req * STATE_STRIDE + (pos - 1) % STATE_SLOTS * STATE_SLOT_STRIDE
+    previous_kv += tl.load(previous_state + cols, ~in_batch & (pos % 2 == 1), 0.0)
+    previous_score += tl.load(previous_state + D + cols, ~in_batch & (pos % 2 == 1), 0.0)
     current_kv = tl.load(KV + row * KV_STRIDE + cols)
     current_score = tl.load(SCORE + row * SCORE_STRIDE + cols)
     gate = tl.sigmoid(current_score - previous_score)
@@ -36,7 +39,7 @@ def _pool_pairs(
 
 
 @triton.jit
-def _commit_pair_tail(
+def _commit_pair_state(
     KV,
     SCORE,
     REQ,
@@ -46,26 +49,42 @@ def _commit_pair_tail(
     D: tl.constexpr,
     HOLD: tl.constexpr,
     STATE_STRIDE: tl.constexpr,
+    STATE_SLOT_STRIDE: tl.constexpr,
+    STATE_SLOTS: tl.constexpr,
     KV_STRIDE: tl.constexpr,
     SCORE_STRIDE: tl.constexpr,
 ):
     row = tl.program_id(0)
     req = tl.load(REQ + row)
     pos = tl.load(POS + row)
-    next_req = tl.load(REQ + row + 1, row + 1 < T, -1)
+    # Keep the newest even position for each ring slot. The period doubles for odd-sized rings.
+    period: tl.constexpr = STATE_SLOTS if STATE_SLOTS % 2 == 0 else 2 * STATE_SLOTS
+    next_req = tl.load(REQ + row + period, row + period < T, -1)
     commit = (req != HOLD) & (next_req != req) & (pos % 2 == 0)
     cols = tl.arange(0, D)
-    tl.store(STATE + req * STATE_STRIDE + cols, tl.load(KV + row * KV_STRIDE + cols), commit)
-    tl.store(STATE + req * STATE_STRIDE + D + cols, tl.load(SCORE + row * SCORE_STRIDE + cols), commit)
+    dest = STATE + req * STATE_STRIDE + pos % STATE_SLOTS * STATE_SLOT_STRIDE
+    tl.store(dest + cols, tl.load(KV + row * KV_STRIDE + cols), commit)
+    tl.store(dest + D + cols, tl.load(SCORE + row * SCORE_STRIDE + cols), commit)
 
 
 def pool_pairs(kv, score, req, positions, state, hold_request):
     out = torch.zeros_like(kv, dtype=torch.bfloat16)
     _pool_pairs[(kv.shape[0],)](
-        kv, score, req, positions, state, out, kv.shape[1], state.stride(0), kv.stride(0), score.stride(0)
+        kv,
+        score,
+        req,
+        positions,
+        state,
+        out,
+        kv.shape[1],
+        state.stride(0),
+        state.stride(1),
+        state.shape[1],
+        kv.stride(0),
+        score.stride(0),
     )
-    # Separate launch: a chunk's last even row cannot overwrite its first odd row's history.
-    _commit_pair_tail[(kv.shape[0],)](
+    # Commit after scoring so current rows cannot overwrite another query's previous-step history.
+    _commit_pair_state[(kv.shape[0],)](
         kv,
         score,
         req,
@@ -75,6 +94,8 @@ def pool_pairs(kv, score, req, positions, state, hold_request):
         kv.shape[1],
         hold_request,
         state.stride(0),
+        state.stride(1),
+        state.shape[1],
         kv.stride(0),
         score.stride(0),
     )

@@ -2,6 +2,7 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.mhc.pre_norm import hc_pre_norm_shifted
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post
 from lightllm.models.deepseek_v4.triton_kernel.cache_io import (
     get_compressed_kv_buffer,
@@ -16,10 +17,14 @@ from ..triton_kernel.attention import (
 
 
 class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
+    q_head_norm = False
+    kv_bf16_rounding = True
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.is_kv_source = layer_num in network_config["kv_source_layer_ids"]
         self.decoder_start_layer = max(network_config["kv_source_layer_ids"]) + 1
+        self.dspark_enabled = get_env_start_args().mtp_mode == "dspark"
         self.engram_index = (
             network_config["engram_layer_ids"].index(layer_num)
             if layer_num in network_config["engram_layer_ids"]
@@ -39,6 +44,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
                 infer_state.engram_hashes[:, self.engram_index],
                 layer_weight,
                 self.eps_,
+                token_mask=infer_state.input_ids < self.vocab_size if self.has_vision else None,
             ).flatten(1)
         x, res_mix, post_mix, attn_pre = hc_pre_norm_shifted(
             streams,
@@ -77,7 +83,8 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
     def context_forward(
         self, input_embdings, infer_state: DeepseekV41InferStateInfo, layer_weight: DeepseekV41TransformerLayerWeight
     ):
-        if not infer_state.return_all_prompt_logics:
+        # The shared DSpark proposer commits a hidden row for every target prompt row.
+        if not infer_state.return_all_prompt_logics and not self.dspark_enabled:
             if self.layer_num_ == self.decoder_start_layer:
                 rows = infer_state.init_decoder_state()
                 input_embdings = tuple(value[rows] for value in input_embdings)
@@ -121,7 +128,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
                 infer_state.dsv4_sparse_req_idx,
                 infer_state.position_ids,
                 infer_state.req_manager.req_to_c4_state[
-                    infer_state.req_manager.cache_config.layer_to_c4_idx[self.layer_num_], :, 0, : 2 * self.head_dim_
+                    infer_state.req_manager.cache_config.layer_to_c4_idx[self.layer_num_], :, :, : 2 * self.head_dim_
                 ].unflatten(-1, (2, self.head_dim_)),
                 infer_state.req_manager.HOLD_REQUEST_ID,
             )

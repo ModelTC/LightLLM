@@ -12,7 +12,6 @@ class DeepseekV41TransformerLayerWeight(DeepseekV4TransformerLayerWeight):
         super()._parse_config()
         self.has_compressor = self.layer_num_ in self.network_config_["kv_source_layer_ids"]
         self.has_indexer = self.layer_num_ in self.network_config_["index_source_layer_ids"]
-        self.has_vision = False
         self.has_engram = self.layer_num_ in self.network_config_["engram_layer_ids"]
 
     def _init_weight(self):

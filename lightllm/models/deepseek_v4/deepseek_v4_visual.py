@@ -163,12 +163,14 @@ class DeepseekV4VisionModel(nn.Module):
     def __init__(self, kvargs, **config):
         super().__init__()
         self.config = SimpleNamespace(**config)
+        self.row_major = config.get("vision_row_major", False)
         self.vision = ViT(self.config)
         self.aligner = Aligner(self.config)
         self.image_start = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
         self.image_end = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
         self.image_newline = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
-        self.image_pad = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
+        if not self.row_major:
+            self.image_pad = nn.Parameter(torch.empty(self.config.hidden_size, dtype=torch.bfloat16))
 
     def load_model(self, weight_dir):
         index_path = os.path.join(weight_dir, "model.safetensors.index.json")
@@ -194,11 +196,12 @@ class DeepseekV4VisionModel(nn.Module):
         uuids = []
         valid_ids = []
         valid_start = 0
+        image_pad = self.image_start if self.row_major else self.image_pad
         sentinel_table = torch.stack(
             [
                 self.image_start,
-                self.image_pad,
-                self.image_pad,
+                image_pad,
+                image_pad,
                 self.image_newline,
                 self.image_end,
             ]
@@ -216,7 +219,7 @@ class DeepseekV4VisionModel(nn.Module):
                 n_vit_h,
                 n_vit_w,
             )
-            types, perm = build_canonical_image_block(n_llm_h, n_llm_w)
+            types, perm = build_canonical_image_block(n_llm_h, n_llm_w, row_major=self.row_major)
             types = types.to(device=row_major_embeds.device)
             block = sentinel_table[types]
             block[types == IMAGE] = row_major_embeds[perm.to(device=row_major_embeds.device)]

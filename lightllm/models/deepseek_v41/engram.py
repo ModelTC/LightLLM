@@ -48,6 +48,7 @@ class EngramHasher:
         mapping, size = build_compressed_token_map(tokenizer)
         assert size == config["engram_compressed_vocab_size"], (size, config["engram_compressed_vocab_size"])
         self.token_map = torch.tensor(mapping, dtype=torch.int64, device="cuda")
+        self.has_vision = config.get("vision_n_layers", 0) > 0
         self.pad = mapping[config["engram_pad_token_id"]]
         self.history = torch.zeros(token_slots, dtype=torch.int64, device="cuda")
         self.order = config["engram_max_ngram_size"]
@@ -76,12 +77,22 @@ class EngramHasher:
         positions = state.position_ids.long()
         reqs = state.dsv4_sparse_req_idx.long()
         slots = state.mem_index.long()
-        self.history[slots] = self.token_map[state.input_ids.long()]
+        ids = state.input_ids.long()
+        if self.has_vision:
+            # Image cache IDs are out of vocabulary and break the n-gram history.
+            self.history[slots] = torch.where(
+                ids < self.token_map.numel(), self.token_map[ids.clamp_max(self.token_map.numel() - 1)], -1
+            )
+        else:
+            self.history[slots] = self.token_map[ids]
         tokens = []
+        blocked = torch.zeros_like(positions, dtype=torch.bool)
         for shift in range(self.order):
             previous = (positions - shift).clamp_min(0)
             previous_slots = state.req_manager.req_to_token_indexs[reqs, previous].long()
-            tokens.append(torch.where(positions >= shift, self.history[previous_slots], self.pad))
+            source = self.history[previous_slots]
+            blocked = blocked | (positions < shift) | (source == -1)
+            tokens.append(torch.where(blocked, self.pad, source))
         products = torch.stack(tokens, -1)[:, None, :] * self.multipliers[None, :, :]
         rolling, hashes = products[..., 0], []
         for shift in range(1, self.order):
@@ -181,7 +192,7 @@ class EngramEmbeddingWeight(BaseWeightTpl):
         return out.flatten(1)
 
 
-def engram_forward(streams, indices, weight, eps):
+def engram_forward(streams, indices, weight, eps, token_mask=None):
     embedded = weight.engram_embed_.lookup(indices)
     kv = weight.engram_wkv_.mm(embedded)
     mult, dim = streams.shape[-2:]
@@ -191,4 +202,6 @@ def engram_forward(streams, indices, weight, eps):
     dot = (h * key * weight.engram_q_.weight * weight.engram_k_.weight).sum(-1)
     dot *= torch.rsqrt(h.square().mean(-1) + eps) * torch.rsqrt(key.square().mean(-1) + eps) * dim ** -0.5
     gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
+    if token_mask is not None:
+        gate = torch.where(token_mask[:, None], gate, 0)
     return (h + gate[..., None] * value.float()[:, None, :]).to(streams.dtype)

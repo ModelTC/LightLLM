@@ -92,12 +92,12 @@ class DeepseekV4InferStateInfo(InferStateInfo):
 
         workspace = model.dsv4_workspace
         self.dsv4_workspace = workspace
-        has_vision = model.has_vision
-        swa_width = workspace.vision_swa_width if has_vision and self.is_prefill else workspace.sliding_window
+        bidirectional_images = model.has_bidirectional_image_attention and self.is_prefill
+        swa_width = workspace.vision_swa_width if bidirectional_images else workspace.sliding_window
         self.dsv4_swa_indices, self.dsv4_swa_lengths = workspace.swa(
             self.microbatch_index, pos.numel(), width=swa_width
         )
-        if has_vision and self.is_prefill:
+        if bidirectional_images:
             self.dsv4_image_left = torch.zeros_like(pos, dtype=torch.int32)
             self.dsv4_image_right = torch.zeros_like(pos, dtype=torch.int32)
             image_spans = []

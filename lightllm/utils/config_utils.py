@@ -495,6 +495,8 @@ def has_vision_module(model_path: str) -> bool:
             return True
         elif model_type == "deepseek_v4":
             return model_cfg.get("vision_n_layers", 0) > 0
+        elif model_type == "deepseek_v41":
+            return (model_cfg.get("vision_config") or {}).get("num_hidden_layers", 0) > 0
         elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
             # TarsierVisionTransformerPretrainedModel
             return True
