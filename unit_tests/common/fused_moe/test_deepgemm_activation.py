@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep as ep
+from lightllm.common.quantization import Quantcfg
 
 
 pytestmark = pytest.mark.skipif(
@@ -14,6 +15,12 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize("use_ue8m0_scales", [False, True])
 @pytest.mark.parametrize("alpha,limit,add_one", [(None, None, True), (1.0, 10.0, False), (1.702, 7.0, True)])
 def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_ue8m0_scales, alpha, limit, add_one):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0")
+    monkeypatch.delenv("LIGHTLLM_USE_UE8M0_SCALES")
+    config = {"quant_method": "fp8", "weight_block_size": [128, 128]}
+    if use_ue8m0_scales:
+        config["scale_fmt"] = "ue8m0"
+    Quantcfg({"n_layer": 1, "quantization_config": config})
     # Identity projections isolate activation/FP8 behavior from GEMM rounding.
     dim, padded = 128, 128
     x = torch.linspace(-24, 24, 5 * dim, device="cuda").view(5, dim).to(torch.float8_e4m3fn)
@@ -23,7 +30,7 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
     w1_scale = torch.ones(2, 2, 1, device="cuda")
     w2_scale = torch.ones(2, 1, 1, device="cuda")
     counts = torch.tensor([3, 2], device="cuda", dtype=torch.int32)
-    activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one, use_ue8m0_scales=use_ue8m0_scales)
+    activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one)
     recv = torch.zeros(2, padded, dim, device="cuda", dtype=torch.float8_e4m3fn)
     recv[0, :3] = x[:3]
     recv[1, :2] = x[3:]

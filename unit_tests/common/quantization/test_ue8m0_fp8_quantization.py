@@ -1,3 +1,4 @@
+import os
 import pytest
 import torch
 import torch.nn.functional as F
@@ -9,6 +10,11 @@ from lightllm.common.quantization import deepgemm
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
+
+@pytest.fixture(autouse=True)
+def preserve_ue8m0_env(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0"))
 
 
 def _unpack_scales(packed, groups):
@@ -435,13 +441,22 @@ def test_redundancy_expert_update_packs_scales(monkeypatch, packed_weight_layout
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
 @pytest.mark.parametrize("is_prefill", [False, True])
 @pytest.mark.parametrize("sm100", [False, True])
-@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
-def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_prefill, sm100, use_ue8m0_scales):
+@pytest.mark.parametrize("scale_source", ["none", "env", "config"])
+def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_prefill, sm100, scale_source):
     from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep as ep
+    from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
 
-    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", str(int(use_ue8m0_scales)))
+    monkeypatch.delenv("LIGHTLLM_USE_UE8M0_SCALES", raising=False)
+    assert not get_env_use_ue8m0_scales()
+    config = {"n_layer": 1}
+    if scale_source == "env":
+        monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1")
+    elif scale_source == "config":
+        config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128], "scale_fmt": "ue8m0"}
+    use_ue8m0_scales = scale_source != "none"
     monkeypatch.setattr(deepgemm, "is_sm100_gpu", lambda: sm100)
-    method = Quantcfg({"n_layer": 1}, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
+    method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
+    assert get_env_use_ue8m0_scales() == use_ue8m0_scales
     w13, _ = method.create_moe_weight([128, 128], 512, torch.bfloat16, 0, 2)
     w2, _ = method.create_moe_weight([512], 128, torch.bfloat16, 0, 2)
     x = torch.randn((3, 512), device="cuda", dtype=torch.bfloat16)
@@ -465,7 +480,6 @@ def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_p
             == kwargs["w2_scale"].dtype
             == (torch.int32 if sm100 and use_ue8m0_scales else torch.float32)
         )
-        assert kwargs["use_ue8m0_scales"] == use_ue8m0_scales
         return x
 
     monkeypatch.setattr(ep, "fused_experts_impl", check_dispatch)

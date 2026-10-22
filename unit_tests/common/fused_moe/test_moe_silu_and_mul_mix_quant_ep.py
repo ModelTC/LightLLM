@@ -80,7 +80,8 @@ def test_silu_and_mul_masked(expert_num, token_num, hidden_dim):
 
 
 @pytest.mark.parametrize("use_ue8m0_scales", [False, True])
-def test_silu_and_mul_masked_skips_padded_tokens(use_ue8m0_scales):
+def test_silu_and_mul_masked_skips_padded_tokens(monkeypatch, use_ue8m0_scales):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", str(int(use_ue8m0_scales)))
     expert_num = 3
     token_num = 4
     hidden_dim = 256
@@ -95,9 +96,7 @@ def test_silu_and_mul_masked_skips_padded_tokens(use_ue8m0_scales):
     out_tensor.fill_(1.0)
     out_scale_tensor.fill_(7.0)
 
-    silu_and_mul_masked_post_quant_fwd(
-        in_tensor, out_tensor, out_scale_tensor, quant_group_size, masked_m, use_ue8m0_scales=use_ue8m0_scales
-    )
+    silu_and_mul_masked_post_quant_fwd(in_tensor, out_tensor, out_scale_tensor, quant_group_size, masked_m)
     torch.cuda.synchronize()
 
     for expert_id, expert_token_num in enumerate(masked_m.cpu().tolist()):
@@ -114,7 +113,8 @@ def test_silu_and_mul_masked_skips_padded_tokens(use_ue8m0_scales):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
 @pytest.mark.parametrize("use_ue8m0_scales", [False, True])
 @pytest.mark.parametrize("alpha,limit,add_one", [(1.0, 10.0, False), (1.702, 7.0, True)])
-def test_clamped_swiglu_quantization_matches_reference(dtype, use_ue8m0_scales, alpha, limit, add_one):
+def test_clamped_swiglu_quantization_matches_reference(monkeypatch, dtype, use_ue8m0_scales, alpha, limit, add_one):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", str(int(use_ue8m0_scales)))
     torch.manual_seed(53)
     x = (torch.randn(3, 5, 4096, device="cuda") * 16).to(dtype)
     x[1, 0].zero_()
@@ -131,7 +131,6 @@ def test_clamped_swiglu_quantization_matches_reference(dtype, use_ue8m0_scales, 
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=add_one,
-        use_ue8m0_scales=use_ue8m0_scales,
     )
 
     gate, up = x.float().chunk(2, dim=-1)

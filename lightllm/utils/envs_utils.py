@@ -73,6 +73,10 @@ def enable_env_vars(args):
     return os.getenv(args, "False").upper() in ["ON", "TRUE", "1"]
 
 
+def get_env_use_ue8m0_scales() -> bool:
+    return os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
+
+
 @lru_cache(maxsize=None)
 def is_stop_matching_in_reasoning_enabled() -> bool:
     """是否允许用户配置的 stop 在 reasoning 阶段参与匹配。"""

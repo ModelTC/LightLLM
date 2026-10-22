@@ -22,6 +22,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
+    get_env_use_ue8m0_scales,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.device_utils import is_sm100_gpu
@@ -78,7 +79,6 @@ def masked_group_gemm(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    use_ue8m0_scales: bool = False,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
@@ -99,7 +99,6 @@ def masked_group_gemm(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
-        use_ue8m0_scales=use_ue8m0_scales,
     )
     del gemm_out_a
     gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
@@ -205,7 +204,7 @@ def quantize_fused_experts_input(
         hidden_states,
         block_size_k,
         dtype=w13.weight.dtype,
-        use_ue8m0_scales=quant_method.use_ue8m0_scales,
+        use_ue8m0_scales=get_env_use_ue8m0_scales(),
     )
 
 
@@ -243,7 +242,6 @@ def fused_experts(
         is_prefill=is_prefill,
         use_fp8_w8a8=True,
         use_fp8_all2all=True,
-        use_ue8m0_scales=quant_method.use_ue8m0_scales,
         use_int8_w8a16=False,
         w1_scale=w13.weight_scale,
         w2_scale=w2.weight_scale,
@@ -273,7 +271,6 @@ def fused_experts_impl(
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
     block_size_k: int = 128,
-    use_ue8m0_scales: bool = False,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -291,7 +288,7 @@ def fused_experts_impl(
     combined_x = None
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(
-            hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=use_ue8m0_scales
+            hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=get_env_use_ue8m0_scales()
         )
         allocate_on_comm_stream = previous_event is not None
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
@@ -340,7 +337,6 @@ def fused_experts_impl(
                 block_size_k=block_size_k,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(),
                 hidden_dtype=hidden_states.dtype,
-                use_ue8m0_scales=use_ue8m0_scales,
                 alpha=alpha,
                 limit=limit,
                 clamp_up_add_one=clamp_up_add_one,
@@ -387,7 +383,7 @@ def fused_experts_impl(
             num_max_dispatch_tokens_per_rank,
             num_experts,
             use_fp8=use_fp8_w8a8,
-            round_scale=use_ue8m0_scales,
+            round_scale=get_env_use_ue8m0_scales(),
             async_finish=False,
             return_recv_hook=False,
         )
@@ -401,7 +397,6 @@ def fused_experts_impl(
             w2,
             w2_scale,
             expected_m,
-            use_ue8m0_scales=use_ue8m0_scales,
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
@@ -526,7 +521,6 @@ def chunked_expanded_moe_forward(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    use_ue8m0_scales: bool = False,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     alignment = 128
@@ -614,7 +608,7 @@ def chunked_expanded_moe_forward(
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=workspace_quant_alloc,
-                use_ue8m0_scales=use_ue8m0_scales,
+                use_ue8m0_scales=get_env_use_ue8m0_scales(),
             )
             workspace_manager.free(silu_out)
             del silu_out
