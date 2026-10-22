@@ -175,6 +175,13 @@ def test_batch_records_success_once_before_releasing_request(monkeypatch, counte
     )
     batch = Batch(1, [req], 1)
     shm_manager, statics = Mock(), Mock()
+
+    def release(released):
+        assert throughput.completed == 1
+        released.is_aborted = True
+        released.finish_status = FinishStatus()
+
+    shm_manager.put_back_req_obj.side_effect = release
     batch.filter_out_finished_req(shm_manager, statics, throughput)
     batch.filter_out_finished_req(shm_manager, statics, throughput)
     assert throughput.completed == 1
@@ -375,3 +382,27 @@ def test_router_statistics_wait_for_readiness_and_emit_once_per_node(monkeypatch
     assert first["kv_active_pct_by_local_dp"] == [10.0 * (i + 1) for i in range(dp_size)]
     assert first["kv_cached_pct_by_local_dp"] == [5.0 * (i + 1) for i in range(dp_size)]
     assert first["kv_capacity_tokens_per_dp"] == 100
+
+
+def test_real_shared_counter_owner_and_worker_rows(monkeypatch):
+    import uuid
+    from lightllm.server.core.objs.shm_array import ShmArray
+    from lightllm.utils import shm_utils
+
+    name = "engine_counter_test_" + uuid.uuid4().hex
+    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: name)
+    owner = engine_stats.EngineCounters(2, owner=True)
+    workers = []
+    try:
+        for rank in range(2):
+            worker = engine_stats.EngineCounters(2, rank)
+            workers.append(worker)
+            assert isinstance(worker.storage, ShmArray)
+            assert worker.storage.shape == (2, 2)
+            worker.add(10 + rank, 2 + rank)
+        assert owner.storage.arr.tolist() == [[10, 2], [11, 3]]
+        assert owner.totals() == (21, 5)
+    finally:
+        for worker in workers:
+            worker.storage.detach_shm()
+        owner.storage.close_shm()

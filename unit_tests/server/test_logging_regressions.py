@@ -187,7 +187,8 @@ def test_dp_shared_kv_transfer_stats(monkeypatch, caplog, master, level):
         assert records[0].tokens_total == 2
 
 
-def test_router_opens_launcher_readiness_key(monkeypatch):
+@pytest.mark.parametrize("dp,nnodes,local_dp", [(1, 1, 1), (4, 2, 2), (1, 2, 1)])
+def test_router_opens_launcher_readiness_key(monkeypatch, dp, nnodes, local_dp):
     from lightllm.server.router import manager as module
     from lightllm.server.core.objs import StartArgs
 
@@ -201,13 +202,16 @@ def test_router_opens_launcher_readiness_key(monkeypatch):
 
     monkeypatch.setattr(module, "SharedInt", shared)
     monkeypatch.setattr(module, "ShmReqManager", Mock())
-    monkeypatch.setattr(module, "EngineCounters", Mock())
+    counters = Mock()
+    monkeypatch.setattr(module, "EngineCounters", counters)
     monkeypatch.setattr(module, "ReadOnlyStaticsMemoryManager", Mock(side_effect=StopInit))
     args = StartArgs()
-    args.tp = args.dp = args.nnodes = 1
+    args.tp = 8
+    args.dp, args.nnodes = dp, nnodes
     args.node_rank = 0
     with pytest.raises(StopInit):
         module.RouterManager(args)
+    counters.assert_called_once_with(local_dp, owner=True)
     assert "service_ready" in flags
     flags["service_ready"].set_value.assert_called_once_with(0)
 
@@ -528,3 +532,32 @@ def test_router_ready_event_uses_agreed_model_capacity(monkeypatch):
     assert records == [{"event": "kv_cache.ready", "capacity_tokens_per_dp": 8192, "local_dp_count": 2}]
     router.shm_max_total_token_num.set_value.assert_called_once_with(8192)
     assert router.args.max_total_token_num == 8192
+
+
+@pytest.mark.parametrize(
+    "cache_load,reason,selected_load",
+    [(120, "cache", 120), (300, "cache_overloaded", 100), (None, "least_load", 100)],
+)
+def test_busy_prefill_selection_records_decision_metadata(monkeypatch, cache_load, reason, selected_load):
+    from lightllm.server.httpserver_for_pd_master.pd_selector import cache_aware as module
+
+    policy = module.CacheAwarePolicy.__new__(module.CacheAwarePolicy)
+    policy.config = SimpleNamespace(balance_rel_threshold=1.5)
+    least = SimpleNamespace(dispatched_req_num=1, dispatched_prompt_chars=100, client_ip_port="least:8000")
+    cache = SimpleNamespace(
+        dispatched_req_num=1, dispatched_prompt_chars=cache_load or 300, client_ip_port="cache:8000"
+    )
+    event = Mock()
+    monkeypatch.setattr(module, "log_debug_event", event)
+    selected = policy._select_worker_by_cache_and_load([cache, least], cache if cache_load is not None else None, 20)
+    assert selected is (cache if reason == "cache" else least)
+    event.assert_called_once_with(
+        module.logger,
+        "pd.prefill_selected",
+        reason=reason,
+        selected=selected.client_ip_port,
+        load=selected_load,
+        least_load=100,
+        projected_load=selected_load + 20,
+        balance_threshold=1.5,
+    )

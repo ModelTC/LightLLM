@@ -48,3 +48,32 @@ def test_abort_stage_accepts_current_and_legacy_cancellation(script, monkeypatch
 
     monkeypatch.setattr(script, "post_abort", abort)
     assert getattr(script, stage)("http://unused", str(path))
+
+
+@pytest.mark.parametrize("headers,expected", [({"X-Request-Id": "client.1"}, "client.1"), ({}, "context.1")])
+def test_http_request_header_output_is_consumed_by_abort_lookup(script, monkeypatch, tmp_path, headers, expected):
+    import asyncio
+    import io
+    import logging
+    from lightllm.server.httpserver import manager as module
+
+    output = io.StringIO()
+    logger = logging.getLogger("request-header-contract")
+    monkeypatch.setattr(logger, "handlers", [logging.StreamHandler(output)])
+    monkeypatch.setattr(logger, "propagate", False)
+    monkeypatch.setattr(logger, "level", logging.DEBUG)
+    logger.setLevel(logging.DEBUG)
+    monkeypatch.setattr(module, "logger", logger)
+    monkeypatch.setattr(module, "get_http_request_id", lambda: "context.1")
+    manager = module.HttpServerManager.__new__(module.HttpServerManager)
+    asyncio.run(manager._log_req_header(headers, 80))
+    line = output.getvalue()
+    assert "event=request.received" in line
+    path = tmp_path / "server.log"
+    path.write_text(line)
+    assert script.lookup_lightllm_req_id_from_log(str(path), expected, timeout=0.1) == 80
+    output.truncate(0)
+    output.seek(0)
+    logger.setLevel(logging.INFO)
+    asyncio.run(manager._log_req_header(headers, 80))
+    assert output.getvalue() == ""

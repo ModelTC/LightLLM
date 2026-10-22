@@ -201,8 +201,6 @@ class CacheAwarePolicy:
         )
         match_rate = 0.0 if result.input_char_count == 0 else result.matched_char_count / result.input_char_count
 
-        # Cache match inputs are summarized in the final selection decision.
-
         if match_rate <= self.config.cache_threshold or result.prefill_node is None:
             return None, result
 

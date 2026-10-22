@@ -538,22 +538,26 @@ def test_errors_bypass_sampling_and_pd_stages_are_debug():
         log_request_summary(6, status="continued", timing_scope="end_to_end")
         """,
         LIGHTLLM_LOG_FORMAT="json",
+        LIGHTLLM_LOG_LEVEL="DEBUG",
         LIGHTLLM_LOG_REQUEST_SAMPLE_RATE=0,
     )
     records = [json.loads(line) for line in output.splitlines()]
-    assert len(records) == 1
-    assert records[0]["event"] == "request.failed"
-    assert records[0]["level"] == "ERROR"
+    assert [(r["request_id"], r["event"], r["level"]) for r in records] == [
+        (2, "request.failed", "ERROR"),
+        (3, "request.cancelled", "DEBUG"),
+    ]
     output = _run_logging(
         """
         from lightllm.utils.log_utils import log_request_summary
         log_request_summary(4, status="completed", timing_scope="prefill")
         log_request_summary(5, status="completed", timing_scope="end_to_end")
+        log_request_summary(7, status="completed", timing_scope="decode")
         """,
         LIGHTLLM_LOG_FORMAT="json",
+        LIGHTLLM_LOG_LEVEL="DEBUG",
     )
     records = [json.loads(line) for line in output.splitlines()]
-    assert len(records) == 1 and records[0]["request_id"] == 5
+    assert [(r["request_id"], r["level"]) for r in records] == [(4, "DEBUG"), (5, "INFO"), (7, "DEBUG")]
 
 
 def test_terminal_error_is_not_hidden_by_successful_sibling():
@@ -677,6 +681,9 @@ def test_default_request_sampling_is_stable_and_bounded():
         ("busy", logging.WARNING, "request.failed"),
         ("rejected", logging.WARNING, "request.rejected"),
         ("error", logging.ERROR, "request.failed"),
+        ("timeout", logging.ERROR, "request.failed"),
+        ("failed", logging.ERROR, "request.failed"),
+        ("cancelled", logging.DEBUG, "request.cancelled"),
     ],
 )
 def test_failure_summary_level_and_sampling(monkeypatch, caplog, status, level, event):
