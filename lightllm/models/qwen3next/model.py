@@ -81,6 +81,8 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             request_capacity=request_capacity,
             mtp_step=args.mtp_step,
             device=device,
+            ssm_state_mode=args.ssm_state_mode,
+            ssm_replay_config=args.ssm_replay_config,
         )
         return [state]
 

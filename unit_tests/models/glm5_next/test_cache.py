@@ -48,12 +48,16 @@ def test_nope_cache_config_uses_native_mla_width():
 @pytest.mark.parametrize("small_page", [False, True])
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 @pytest.mark.parametrize("mtp_step", [0, 2])
+@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
 def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     monkeypatch,
     small_page,
     tp_world_size,
     mtp_step,
+    mode,
 ):
+    if mode == "compact" and mtp_step == 0:
+        pytest.skip("compact requires MTP")
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
@@ -106,6 +110,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
         config=config,
         request_capacity=4,
         mtp_step=mtp_step,
+        ssm_state_mode=mode,
         full_state=main_full,
         full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
         draft_full_state=draft_full,
@@ -143,6 +148,16 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     linear.ssm_state[:, 0].normal_()
     conv = linear.conv_state[:, 0, ..., :3].clone()
     ssm = linear.ssm_state[:, 0].clone()
+    if mode == "replay":
+        linear.ssm_backend.raw_keys.zero_()
+        linear.ssm_backend.raw_values.zero_()
+        linear.ssm_backend.gates.fill_(-0.5)
+        linear.ssm_backend.betas.zero_()
+        linear.ssm_backend.cursors[0] = 1
+        ssm = linear.ssm_backend.get_accepted_state(0).clone()
+        linear.ssm_backend.cursors[2] = 3
+    if mtp_step:
+        linear.mtp_state_index[2] = mtp_step
     resources.save_bounded_att_runtime_to_pages(
         req_indices=[0],
         state_token_lens=[8],
@@ -162,12 +177,16 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     )
     torch.cuda.synchronize()
     assert torch.equal(linear.conv_state[:, 2, ..., :3], conv)
-    assert torch.equal(linear.ssm_state[:, 2 * (mtp_step + 1)], ssm)
+    assert torch.equal(linear.ssm_state[:, 2 * linear.ssm_slots_per_req], ssm)
+    if mode == "replay":
+        assert linear.ssm_backend.cursors[2] == 0
+    if mtp_step:
+        assert linear.mtp_state_index[2] == 0
     # 整组边界不依赖旧窗口，恢复大小页无需改动无重叠窗口。
     assert torch.equal(tail.buffer, unchanged)
     resources.reset_bounded_att_state([2])
     assert not linear.conv_state[:, 2].any()
-    assert not linear.ssm_state[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
+    assert not linear.ssm_state[:, 2 * linear.ssm_slots_per_req : 3 * linear.ssm_slots_per_req].any()
     assert not tail.buffer[:, 2, :, : tail.config.candidate_dim].any()
     assert torch.isneginf(tail.buffer[:, 2, :, tail.config.candidate_dim :]).all()
     assert torch.equal(tail.buffer[:, [0, 1, 3]], unchanged[:, [0, 1, 3]])

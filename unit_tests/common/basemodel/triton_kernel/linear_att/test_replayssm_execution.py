@@ -6,7 +6,6 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
     build_dynamic_mtp_linear_att_state_params,
 )
 from lightllm.common.linear_state import LinearStateManager
-from lightllm.common.req_manager.linear_att import ReqManagerForMamba
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -32,10 +31,9 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         )
         for cls in [ReplaySSMBackend, ReplaySSMBackend]
     ]
-    manager = object.__new__(ReqManagerForMamba)
-    manager.linear_state_manager = object.__new__(LinearStateManager)
-    manager.linear_state_manager.ssm_backend = ssm_backends[1]
-    manager.linear_state_manager.accepted_state_index = torch.zeros(5, device="cuda", dtype=torch.int32)
+    manager = object.__new__(LinearStateManager)
+    manager.ssm_backend = ssm_backends[1]
+    manager.mtp_state_index = torch.zeros(5, device="cuda", dtype=torch.int32)
     rows = torch.full((12,), 4, device="cuda", dtype=torch.int32)
     mtp = torch.zeros_like(rows)
     flags = torch.zeros_like(rows)
@@ -82,7 +80,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         if index == 0:
             ssm_backend.accept_updates(reqs, accepted)
         else:
-            manager.update_mtp_state(starts, rows, mtp, flags, 4)
+            manager.commit_accepted_state(starts, rows, mtp, flags, 4)
         return out
 
     inputs(0)
@@ -92,7 +90,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         forward_accept(index, cu, reqs)
         ssm_backend.state.copy_(initial)
         ssm_backend.cursors.zero_()
-        manager.linear_state_manager.accepted_state_index.zero_()
+        manager.mtp_state_index.zero_()
         g = torch.cuda.CUDAGraph()
         with torch.cuda.graph(g):
             if capture_metadata:
@@ -104,7 +102,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
     for ssm_backend in ssm_backends:
         ssm_backend.state.copy_(initial)
         ssm_backend.cursors.zero_()
-    manager.linear_state_manager.accepted_state_index.zero_()
+    manager.mtp_state_index.zero_()
     folds = 0
     for iteration in range(32):
         ids, lengths, counts, logical = inputs(iteration)
@@ -128,7 +126,7 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         torch.testing.assert_close(
             ssm_backends[1].state.float(), ssm_backends[0].state.float(), atol=0.002, rtol=torch.finfo(dtype).eps
         )
-        table = manager.linear_state_manager.accepted_state_index.cpu().tolist()
+        table = manager.mtp_state_index.cpu().tolist()
         for req, count in zip(ids, counts):
             assert table[req] == count - 1
         assert table[2] == table[4] == 0

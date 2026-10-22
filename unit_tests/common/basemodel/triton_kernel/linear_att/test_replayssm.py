@@ -549,130 +549,70 @@ def test_autotune_candidates_match_recurrence(dtype, run_config, mode):
 
 @pytest.mark.parametrize("save_big", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, monkeypatch, dtype):
-    from types import SimpleNamespace
-    from lightllm.common.linear_state import LinearStateManager
-    from lightllm.common.req_manager.linear_att import ReqManagerForMamba
-    from lightllm.common.state_cache_manager import LinearAttCacheManager, LayerCache
-    from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextLinearAttPageHelper
+def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, dtype):
+    from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig
+    from unit_tests.common.test_linear_state import make_state
 
     torch.manual_seed(42)
     state_rtol = 2e-5 if dtype == torch.float32 else torch.finfo(dtype).eps
-    # Real save/restore and PD helpers, with just the unrelated allocator omitted.
-    manager = object.__new__(ReqManagerForMamba)
-    manager.linear_state_manager = object.__new__(LinearStateManager)
-    config = SimpleNamespace(
-        linear_layer_num=2,
-        conv_state_dtype=torch.bfloat16,
-        ssm_state_dtype=dtype,
-        get_conv_state_shape=lambda: (192, 3),
-        get_ssm_state_shape=lambda: (2, 32, 64),
-        global_linear_k_heads=1,
-        global_linear_v_heads=2,
-        head_linear_k_dim=32,
-        head_linear_v_dim=64,
-        num_linear_k_heads=1,
-        num_linear_v_heads=2,
-        tp_world_size=1,
-        conv_kernel_size=4,
+    config = ConvSSMStateConfig(
+        logical_layer_ids=(0, 1),
+        global_k_heads=2,
+        global_v_heads=2,
+        key_dim=32,
+        value_dim=64,
+        conv_width=3,
+        conv_dtype=torch.bfloat16,
+        ssm_dtype=dtype,
     )
-    manager.linear_config = config
-    manager.linear_state_manager.linear_config = config
-    manager.mtp_step = 2
-    manager.linear_state_manager.ssm_slots_per_req = 1
-    manager.linear_state_manager.accepted_state_index = torch.zeros(4, device="cuda", dtype=torch.int32)
-    manager.linear_state_manager.accepted_state_index[1] = 1
-    manager.linear_state_manager.conv_state = LayerCache(4, torch.bfloat16, (192, 5), 2, "cuda")
-    manager.linear_state_manager.conv_state.buffer.copy_(
-        torch.randn_like(manager.linear_state_manager.conv_state.buffer)
-    )
-    manager.linear_state_manager.ssm_state = LayerCache(4, dtype, (2, 32, 64), 2, "cuda")
-    manager.linear_state_manager.ssm_state.buffer.zero_()
-    manager.linear_state_manager.ssm_backend = ReplaySSMBackend(manager.linear_state_manager.ssm_state.buffer, 16, 3)
-    ssm_backend = manager.linear_state_manager.ssm_backend
-    ssm_backend.raw_keys.normal_()
-    ssm_backend.raw_values.normal_()
-    ssm_backend.gates.uniform_(-0.1, -0.01)
-    ssm_backend.betas.uniform_(0.1, 0.9)
-    ssm_backend.cursors[1] = 2
-    active_before = manager.linear_state_manager.ssm_state.buffer[:, 1].clone()
-    expected = manager.linear_state_manager.ssm_state.buffer[:, 1].float().clone()
-    for i in range(2):
-        key = ssm_backend.raw_keys[:, 1, :, i].float()
-        key /= (key.square().sum(-1, keepdim=True) + 1e-6).sqrt()
-        expected *= ssm_backend.gates[:, 1, :, i].exp()[..., None, None]
-        delta = ssm_backend.betas[:, 1, :, i, None] * (
-            ssm_backend.raw_values[:, 1, :, i].float() - torch.einsum("lhkv,lhk->lhv", expected, key)
-        )
-        expected += key[..., None] * delta[..., None, :]
-    expected = expected.to(dtype)
-    conv_expected = manager.linear_state_manager.conv_state.buffer[:, 1, :, 1:4].clone()
-    cpu_cache = LinearAttCacheManager(2, config)
-    manager.mem_manager = SimpleNamespace(big_page_buffers=cpu_cache)
-    reqs = torch.tensor([1], device="cuda", dtype=torch.int32)
-    materialized = ssm_backend.get_accepted_state(1)
-    torch.testing.assert_close(materialized, expected, rtol=state_rtol, atol=2e-5)
-    if save_big:
-        manager.save_big_page_states(reqs, [1], [0])
-    else:
-        manager.save_state(1, 0, cpu_cache)
-    torch.cuda.synchronize()
-    conv_saved, state_saved = cpu_cache.get_state_cache(0)
-    # Transfer/restore are exact; only the independent recurrence reference has
-    # a tolerance for FP32 reduction differences crossing BF16 rounding points.
-    torch.testing.assert_close(state_saved, materialized.cpu(), rtol=0, atol=0)
-    torch.testing.assert_close(conv_saved, conv_expected.cpu(), rtol=0, atol=0)
-    torch.testing.assert_close(manager.linear_state_manager.ssm_state.buffer[:, 1], active_before, rtol=0, atol=0)
-    assert ssm_backend.cursors[1].item() == 2
-    ssm_backend.cursors[2] = 13  # stale history from a previous owner must disappear
-    manager.restore_state(SimpleNamespace(req_idx=2), cpu_cache, 0)
-    assert ssm_backend.cursors[2].item() == 0
-    assert manager.linear_state_manager.accepted_state_index[2].item() == 0
-    torch.testing.assert_close(manager.linear_state_manager.ssm_state.buffer[:, 2], materialized, rtol=0, atol=0)
-    torch.testing.assert_close(
-        manager.linear_state_manager.conv_state.buffer[:, 2, :, :3], conv_expected, rtol=0, atol=0
-    )
-
-    import lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager as memory_module
-
-    monkeypatch.setattr(memory_module, "get_env_start_args", lambda: SimpleNamespace(mtp_step=2))
-    mem = SimpleNamespace(
-        linear_config=config,
-        linear_state_manager=manager.linear_state_manager,
-    )
-    helper = Qwen3NextLinearAttPageHelper(mem)
-    # A second pending suffix exercises PD export, independently of CPU save.
-    ssm_backend.raw_keys[:, 1, :, 0].normal_()
-    ssm_backend.raw_values[:, 1, :, 0].normal_()
-    ssm_backend.gates[:, 1, :, 0].uniform_(-0.1, -0.01)
-    ssm_backend.betas[:, 1, :, 0].uniform_(0.1, 0.9)
-    ssm_backend.cursors[1] = 1
-    key = ssm_backend.raw_keys[:, 1, :, 0].float()
-    key /= (key.square().sum(-1, keepdim=True) + 1e-6).sqrt()
-    expected = active_before.float().clone()
-    expected *= ssm_backend.gates[:, 1, :, 0].exp()[..., None, None]
-    delta = ssm_backend.betas[:, 1, :, 0, None] * (
-        ssm_backend.raw_values[:, 1, :, 0].float() - torch.einsum("lhkv,lhk->lhv", expected, key)
-    )
-    expected += key[..., None] * delta[..., None, :]
-    conv_page = torch.empty(helper.conv_shape, device="cuda", dtype=torch.bfloat16)
-    expected = expected.to(dtype)
-    ssm_page = torch.empty(helper.ssm_shape, device="cuda", dtype=dtype)
-    helper._write_one_rank(mem, 0, 1, conv_page, ssm_page)
-    torch.testing.assert_close(ssm_page, expected, rtol=state_rtol, atol=2e-5)
-    torch.testing.assert_close(manager.linear_state_manager.ssm_state.buffer[:, 1], active_before, rtol=0, atol=0)
-    assert ssm_backend.cursors[1].item() == 1
-    ssm_backend.cursors[2] = 7
-    manager.linear_state_manager.accepted_state_index[2] = 2
-    helper._read_one_rank(mem, 0, 2, conv_page, ssm_page)
-    torch.testing.assert_close(manager.linear_state_manager.ssm_state.buffer[:, 2], ssm_page, rtol=0, atol=0)
-    torch.testing.assert_close(
-        manager.linear_state_manager.conv_state.buffer[:, 2, :, :3], conv_expected, rtol=0, atol=0
-    )
-    assert ssm_backend.cursors[2].item() == manager.linear_state_manager.accepted_state_index[2].item() == 0
-    manager.init_hybrid_attention_state(SimpleNamespace(req_idx=2))
-    assert torch.count_nonzero(manager.linear_state_manager.ssm_state.buffer[:, 2]).item() == 0
-    assert torch.count_nonzero(manager.linear_state_manager.conv_state.buffer[:, 2]).item() == 0
+    state, _, layout = make_state(mode="replay", config=config)
+    state.initialize_page_pools(big_page_capacity=2, small_page_capacity=2)
+    state.mtp_state_index[1] = 1
+    state.conv_state.normal_()
+    state.ssm_state.zero_()
+    backend = state.ssm_backend
+    backend.raw_keys.normal_()
+    backend.raw_values.normal_()
+    backend.gates.uniform_(-0.1, -0.01)
+    backend.betas.uniform_(0.1, 0.9)
+    active_before = state.ssm_state[:, 1].clone()
+    conv_expected = state.conv_state[:, 1, :, 1:4].clone()
+    block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
+    kind = "big" if save_big else "small"
+    pool = state.big_pages_pool if save_big else state.small_pages_pool
+    for count in (2, 1):
+        backend.cursors[1] = count
+        expected = active_before.float().clone()
+        for i in range(count):
+            key = backend.raw_keys[:, 1, :, i].float()
+            key /= (key.square().sum(-1, keepdim=True) + 1e-6).sqrt()
+            expected *= backend.gates[:, 1, :, i].exp()[..., None, None]
+            delta = backend.betas[:, 1, :, i, None] * (
+                backend.raw_values[:, 1, :, i].float() - torch.einsum("lhkv,lhk->lhv", expected, key)
+            )
+            expected += key[..., None] * delta[..., None, :]
+        materialized = backend.get_accepted_state(1)
+        torch.testing.assert_close(materialized, expected.to(dtype), rtol=state_rtol, atol=2e-5)
+        state.save_bounded_att_runtime_to_pages([1], [8], kind, [0])
+        state.write_to_pd_page(1, block, 0, 8, layout)
+        torch.cuda.synchronize()
+        torch.testing.assert_close(pool.ssm_state[0], materialized.cpu(), rtol=0, atol=0)
+        torch.testing.assert_close(pool.conv_state[0], conv_expected.cpu(), rtol=0, atol=0)
+        torch.testing.assert_close(state.ssm_state[:, 1], active_before, rtol=0, atol=0)
+        assert backend.cursors[1].item() == count
+        for restore in (
+            lambda: state.restore_bounded_att_runtime_from_pages([2], [8], kind, [0]),
+            lambda: state.read_from_pd_page(block, 2, 0, 8, layout),
+        ):
+            backend.cursors[2] = 3
+            state.mtp_state_index[2] = 2
+            restore()
+            assert backend.cursors[2].item() == state.mtp_state_index[2].item() == 0
+            torch.testing.assert_close(state.ssm_state[:, 2], materialized, rtol=0, atol=0)
+            torch.testing.assert_close(state.conv_state[:, 2, :, :3], conv_expected, rtol=0, atol=0)
+    state.reset_bounded_att_state([2])
+    assert not state.ssm_state[:, 2].any()
+    assert not state.conv_state[:, 2].any()
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])

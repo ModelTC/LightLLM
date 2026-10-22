@@ -38,7 +38,7 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     infer_state = InferStateInfo()
     infer_state.b1_cu_q_seq_len = torch.tensor([0, 1], dtype=torch.int32)
     infer_state.b_ready_cache_len = 0
-    state = gdn.LinearAttPrefillAttState(
+    state = gdn.GDNLinearAttPrefillAttState(
         backend=backend,
         _infer_state_weak_ref=weakref.ref(infer_state),
     )
@@ -110,7 +110,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
 
     def build_params(**kwargs):
         build_calls.append(kwargs)
-        return expected_cu_q_seq_len, expected_conv_buffer_idx, expected_num_accepted_tokens
+        return expected_cu_q_seq_len, expected_conv_buffer_idx
 
     monkeypatch.setattr(gdn, "build_dynamic_mtp_linear_att_state_params", build_params)
     state, infer_state = _create_decode_state(
@@ -125,7 +125,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
 
     assert state.b1_mtp_cu_q_seq_len is expected_cu_q_seq_len
     assert state.b_conv_buffer_idx is expected_conv_buffer_idx
-    assert state.b_num_accepted_tokens is expected_num_accepted_tokens
+    torch.testing.assert_close(state.b_num_accepted_tokens, expected_num_accepted_tokens)
     torch.testing.assert_close(
         state.b_ssm_buffer_idx,
         torch.tensor(
@@ -136,12 +136,11 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
     assert len(build_calls) == 1
     assert build_calls[0]["b_req_idx"] is state.infer_state.b_req_idx
     assert build_calls[0]["b_mtp_index"] is state.infer_state.b_mtp_index
-    assert build_calls[0]["req_to_mtp_state_index"] is req_to_mtp_state_index
     assert build_calls[0]["hold_req_id"] == 5
 
 
 def test_linear_backend_is_abstract_and_triton_supplies_chunk_kernel():
-    assert inspect.isabstract(gdn.LinearAttBackend)
+    assert inspect.isabstract(gdn.GDNLinearAttBackend)
     backend = object.__new__(TritonLinearAttBackend)
     assert backend.get_prefill_kernel() is fla_ops.chunk_gated_delta_rule
 
@@ -358,6 +357,8 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
         HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
     )
     infer_state.att_state_role = role
+    if req_to_mtp_state_index is None:
+        req_to_mtp_state_index = torch.zeros(int(b_req_idx.max()) + 2, dtype=torch.int32)
     if req_to_mtp_state_index is not None:
         request_capacity = req_to_mtp_state_index.numel()
         resources = AttentionStateManager(request_capacity=request_capacity)
@@ -379,7 +380,7 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
             resources.register_state(model_role, linear)
         resources.finish_state_registration()
         infer_state.att_state_manager = resources
-    state = gdn.LinearAttDecodeAttState(
+    state = gdn.GDNLinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,
             uses_dynamic_spec_verify_layout=lambda: dynamic_layout,

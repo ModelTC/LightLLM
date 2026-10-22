@@ -17,6 +17,7 @@ class Glm5NextResourceConfig(Qwen3NextResourceConfig):
     """Replicated MLA/index KV plus TP-sharded KDA checkpoints."""
 
     # Indexer 池化步长，单位为原始 token；同时决定 K-pool tail 的基准 ring 长度和恢复边界。
+    gate_lower_bound: float = -5.0
     index_kpool: int = 4
     # 单个 indexer key 的特征维度；原始 key/gate tail 的 channel 宽度为该值的两倍。
     index_head_dim: int = 128

@@ -80,6 +80,7 @@ def test_commit_without_recurrent_state_and_invalid_role():
 def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[int, ...]):
     manager = make_manager("cuda")
     backend = SimpleNamespace(
+        max_draft_step=2,
         model=SimpleNamespace(
             att_state_manager=manager,
             req_manager=SimpleNamespace(
@@ -87,7 +88,7 @@ def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[i
                     req_to_next_token_ids=torch.tensor([[-1, 10, 11]] * 3, device="cuda")
                 )
             ),
-        )
+        ),
     )
     reqs, starts, tokens, expected_mask = [], [], [], []
     for req, width, accepted in zip((2, 0, 1), widths, (3, 1, 2)):
@@ -107,3 +108,35 @@ def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[i
     assert manager.main_kda_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 1, 2]
     assert manager.main_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 1, 2]
     assert manager.draft0_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 0, 0]
+
+
+def test_verify_routes_linear_commit_context_and_other_bounded_states(monkeypatch):
+    from lightllm.server.router.model_infer.mtp_speculative import utils
+
+    reqs = torch.tensor([2, 2, 0, 0], dtype=torch.int32)
+    starts = torch.tensor([0, 2], dtype=torch.int32)
+    positions = torch.tensor([0, 1, 0, 1], dtype=torch.int32)
+    lengths = torch.tensor([2, 1], dtype=torch.int32)
+    mask = torch.tensor([1, 1, 1, 0], dtype=torch.int32)
+    monkeypatch.setattr(utils, "mtp_verify", lambda **kwargs: (lengths, mask))
+    calls = []
+    linear = object.__new__(GDNState)
+    linear.commit_accepted_state = lambda **kwargs: calls.append(kwargs)
+    other = SimpleNamespace(commit_bounded_att_state=lambda indices, steps: calls.append((indices, steps)))
+    resources = SimpleNamespace(get_bounded_attention_states=lambda role: (linear, other) if role == "main" else ())
+    backend = SimpleNamespace(
+        max_draft_step=1,
+        model=SimpleNamespace(
+            att_state_manager=resources,
+            req_manager=SimpleNamespace(req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=None)),
+        ),
+    )
+    batches = ((2, object()),)
+    utils.verify_mtp_tokens(backend, torch.zeros(4), reqs, starts, positions, linear_state_batches=batches)
+    assert calls[0]["linear_state_batches"] is batches
+    assert calls[0]["b_req_idx"] is reqs
+    assert calls[0]["b_mtp_index"] is positions
+    assert calls[0]["accepted_index"] is mask
+    assert calls[0]["verify_width"] == 2
+    assert calls[1][0].tolist() == [2, 0]
+    assert calls[1][1] is lengths

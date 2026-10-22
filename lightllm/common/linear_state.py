@@ -10,7 +10,6 @@ from typing import TYPE_CHECKING, NamedTuple, Optional, Sequence, Tuple, Union
 
 import torch
 
-from lightllm.common.state_cache_manager import LayerCache, LinearAttCacheConfig
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
@@ -40,76 +39,77 @@ class LinearStateTensors(NamedTuple):
 
 
 class LinearStateManager:
-    """Own request state and its lifecycle, without dispatching attention.
+    """Shared Conv/SSM lifecycle for GDN and KDA attention resources."""
 
-    PD currently shares this object through CUDA IPC as part of the memory
-    manager. Keep its fields limited to tensors, cache operators, and pickleable
-    static configuration. Graphs, streams, callbacks, batch contexts, and pinned
-    CPU checkpoint pools belong to their existing worker/runner owners. Adding
-    such resources requires an explicit transport view rather than serializing
-    them implicitly with this object.
-    """
-
-    def __init__(self, max_request_num, linear_config: LinearAttCacheConfig, args, *, kda=False, device="cuda"):
-        self.linear_config = linear_config
-        self.mtp_step = args.mtp_step
-        self.ssm_slots_per_req = self.mtp_step + 1 if args.ssm_state_mode == "native" else 1
-        self.accepted_state_index = (
-            torch.zeros(max_request_num + 1, dtype=torch.int32, device=device) if self.mtp_step > 0 else None
-        )
-        self.conv_state = LayerCache(
-            size=max_request_num + 1,
-            dtype=linear_config.conv_state_dtype,
-            shape=linear_config.get_mtp_conv_state_shape(mtp_step=self.mtp_step),
-            layer_num=linear_config.linear_layer_num,
+    def __init__(
+        self,
+        config,
+        request_capacity,
+        mtp_step=0,
+        device="cuda",
+        *,
+        ssm_state_mode="native",
+        ssm_replay_config=None,
+        kda=False,
+        gate_lower_bound=-5.0,
+    ):
+        self.config = config
+        self.request_capacity = request_capacity
+        self.mtp_step = mtp_step
+        self.ssm_slots_per_req = mtp_step + 1 if ssm_state_mode == "native" else 1
+        self.mtp_state_index = torch.zeros(request_capacity, dtype=torch.int32, device=device) if mtp_step else None
+        self._logical_to_storage_layer = {layer: index for index, layer in enumerate(config.logical_layer_ids)}
+        layers = len(config.logical_layer_ids)
+        self.conv_state = torch.zeros(
+            (layers, request_capacity, config.conv_channels, config.conv_width + mtp_step),
+            dtype=config.conv_dtype,
             device=device,
         )
-        self.ssm_state = LayerCache(
-            size=(max_request_num + 1) * self.ssm_slots_per_req,
-            dtype=linear_config.ssm_state_dtype,
-            shape=linear_config.get_ssm_state_shape(),
-            layer_num=linear_config.linear_layer_num,
+        self.ssm_state = torch.zeros(
+            (layers, request_capacity * self.ssm_slots_per_req, config.num_v_heads, config.key_dim, config.value_dim),
+            dtype=config.ssm_dtype,
             device=device,
         )
+        ssm_replay_config = ssm_replay_config or {}
         self.ssm_backend: Optional[Union["ReplaySSMBackend", "CompactSSMBackend"]] = None
-        if args.ssm_state_mode == "replay":
+        if ssm_state_mode == "replay":
             from lightllm.common.basemodel.triton_kernel.linear_att import replayssm
 
             self.ssm_backend = replayssm.ReplaySSMBackend(
-                self.ssm_state.buffer,
-                args.ssm_replay_config.get("cache_len", 16),
+                self.ssm_state,
+                ssm_replay_config.get("cache_len", 16),
                 self.mtp_step + 1,
-                linear_config.conv_state_dtype,
-                num_key_heads=linear_config.num_linear_k_heads,
+                config.conv_dtype,
+                num_key_heads=config.num_k_heads,
                 kda=kda,
-                gate_lower_bound=linear_config.gate_lower_bound,
-                compute_mode=args.ssm_replay_config.get("compute_mode", "inline"),
-                fold_method=args.ssm_replay_config.get("fold_method", "raw"),
+                gate_lower_bound=gate_lower_bound,
+                compute_mode=ssm_replay_config.get("compute_mode", "inline"),
+                fold_method=ssm_replay_config.get("fold_method", "raw"),
             )
-        elif args.ssm_state_mode == "compact":
+        elif ssm_state_mode == "compact":
             from lightllm.common.basemodel.triton_kernel.linear_att import compact_ssm
 
             self.ssm_backend = compact_ssm.CompactSSMBackend(
-                self.ssm_state.buffer,
+                self.ssm_state,
                 self.mtp_step + 1,
-                linear_config.conv_state_dtype,
-                num_key_heads=linear_config.num_linear_k_heads,
+                config.conv_dtype,
+                num_key_heads=config.num_k_heads,
                 kda=kda,
-                gate_lower_bound=linear_config.gate_lower_bound,
+                gate_lower_bound=gate_lower_bound,
             )
 
     def _reset_tracking(self, req_idx):
         if self.ssm_backend is not None:
             self.ssm_backend.clear_history(req_idx)
-        if self.accepted_state_index is not None:
-            self.accepted_state_index[req_idx].zero_()
+        if self.mtp_state_index is not None:
+            self.mtp_state_index[req_idx].zero_()
 
     def reset(self, req_idx):
         """Initialize a newly allocated/reused request, including speculative slots."""
         self._reset_tracking(req_idx)
-        self.conv_state.buffer[:, req_idx].zero_()
+        self.conv_state[:, req_idx].zero_()
         start = req_idx * self.ssm_slots_per_req
-        self.ssm_state.buffer[:, start : start + self.ssm_slots_per_req].zero_()
+        self.ssm_state[:, start : start + self.ssm_slots_per_req].zero_()
 
     def prepare_prefill(self, reqs):
         """Merge accepted history and return convolution and SSM buffer indexes."""
@@ -127,8 +127,8 @@ class LinearStateManager:
 
     def prepare_mtp_decode(self, reqs, cu_seqlens):
         """Return Conv/SSM indexes and prior accepted token counts; prepare replay history."""
-        accepted_token_counts = self.accepted_state_index[reqs] + 1
-        accepted_token_counts = torch.where(reqs == self.accepted_state_index.numel() - 1, 1, accepted_token_counts)
+        accepted_token_counts = self.mtp_state_index[reqs] + 1
+        accepted_token_counts = torch.where(reqs == self.mtp_state_index.numel() - 1, 1, accepted_token_counts)
         if self.ssm_backend is not None:
             ssm_indexes = reqs
         else:
@@ -166,7 +166,7 @@ class LinearStateManager:
         if isinstance(self.ssm_backend, replayssm.ReplaySSMBackend) and self.ssm_backend.verify_width > 1:
             replay_cursors = self.ssm_backend.cursors
         linear_att_mtp_state_index_update(
-            req_to_mtp_state_index=self.accepted_state_index,
+            req_to_mtp_state_index=self.mtp_state_index,
             b_req_mtp_start_loc=b_req_mtp_start_loc,
             b_req_idx=b_req_idx,
             b_mtp_index=b_mtp_index,
@@ -178,7 +178,7 @@ class LinearStateManager:
             return
         reqs = b_req_idx[b_req_mtp_start_loc.long()]
         if linear_state_batches is None or isinstance(self.ssm_backend, replayssm.ReplaySSMBackend):
-            self.ssm_backend.accept_updates(reqs, self.accepted_state_index)
+            self.ssm_backend.accept_updates(reqs, self.mtp_state_index)
             return
         assert sum(size for size, _ in linear_state_batches) == reqs.numel()
         start = 0
@@ -186,7 +186,7 @@ class LinearStateManager:
             if size:
                 self.ssm_backend.accept_updates(
                     reqs[start : start + size],
-                    self.accepted_state_index,
+                    self.mtp_state_index,
                     run_config=commit._run_config if commit is not None else None,
                 )
             start += size
@@ -200,18 +200,18 @@ class LinearStateManager:
         cross-process callers must use their existing completion events before
         recycling sources or destinations. No CPU transfer or sync is implicit.
         """
-        width = self.linear_config.get_conv_state_shape()[-1]
-        conv = self.conv_state.buffer[:, req_idx, ..., :width]
-        if self.accepted_state_index is not None:
-            offsets = torch.arange(width, device=conv.device) + self.accepted_state_index[req_idx]
-            conv = self.conv_state.buffer[:, req_idx].index_select(-1, offsets)
+        width = self.config.conv_width
+        conv = self.conv_state[:, req_idx, ..., :width]
+        if self.mtp_state_index is not None:
+            offsets = torch.arange(width, device=conv.device) + self.mtp_state_index[req_idx]
+            conv = self.conv_state[:, req_idx].index_select(-1, offsets)
         if self.ssm_backend is not None:
             ssm = self.ssm_backend.get_accepted_state(req_idx)
         elif self.ssm_slots_per_req > 1:
-            index = req_idx * self.ssm_slots_per_req + self.accepted_state_index[req_idx]
-            ssm = self.ssm_state.buffer.index_select(1, index.long().view(1))[:, 0]
+            index = req_idx * self.ssm_slots_per_req + self.mtp_state_index[req_idx]
+            ssm = self.ssm_state.index_select(1, index.long().view(1))[:, 0]
         else:
-            ssm = self.ssm_state.buffer[:, req_idx]
+            ssm = self.ssm_state[:, req_idx]
         return LinearStateTensors(conv, ssm)
 
     def prepare_restore(self, req_idx):
@@ -222,10 +222,10 @@ class LinearStateManager:
         The same stream/completion rules as ``get_accepted_state`` apply.
         """
         self._reset_tracking(req_idx)
-        width = self.linear_config.get_conv_state_shape()[-1]
+        width = self.config.conv_width
         return LinearStateTensors(
-            self.conv_state.buffer[:, req_idx, ..., :width],
-            self.ssm_state.buffer[:, req_idx * self.ssm_slots_per_req],
+            self.conv_state[:, req_idx, ..., :width],
+            self.ssm_state[:, req_idx * self.ssm_slots_per_req],
         )
 
     def restore(self, req_idx, conv, ssm):
@@ -233,34 +233,14 @@ class LinearStateManager:
         target.conv.copy_(conv, non_blocking=True)
         target.ssm.copy_(ssm, non_blocking=True)
 
-    def save_checkpoints(self, b_req_idx, req_indexes, buffer_indexes, destination):
-        """Copy current accepted prefixes into caller-allocated checkpoint slots."""
-        if self.ssm_backend is None:
-            from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
+    def get_storage_layer_index(self, logical_layer_id):
+        return self._logical_to_storage_layer[logical_layer_id]
 
-            indexes = torch.tensor(buffer_indexes, dtype=torch.int32, device="cpu").to(
-                b_req_idx.device, non_blocking=True
-            )
-            copy_linear_att_state_to_kv_buffer(
-                b_req_idx=b_req_idx,
-                big_page_buffer_ids=indexes,
-                gpu_conv_state=self.conv_state.buffer,
-                gpu_ssm_state=self.ssm_state.buffer,
-                cpu_kv_conv_state=destination.conv_state_cache.buffer,
-                cpu_kv_ssm_state=destination.ssm_state_cache.buffer,
-                mtp_step=self.ssm_slots_per_req - 1,
-                accepted_state_indices=self.accepted_state_index,
-            )
-        else:
-            for req_idx, buffer_idx in zip(req_indexes, buffer_indexes):
-                if buffer_idx != -1:
-                    self.copy_accepted_state_to(req_idx, *destination.get_state_cache(buffer_idx))
 
-    def copy_accepted_state_to(self, req_idx, conv, ssm):
-        accepted_state = self.get_accepted_state(req_idx)
-        conv.copy_(accepted_state.conv, non_blocking=True)
-        ssm.copy_(accepted_state.ssm, non_blocking=True)
-
-    def get_layer_buffers(self, layer_idx_in_all):
-        linear_layer_idx = self.linear_config.get_linear_layer_index(layer_idx_in_all)
-        return self.conv_state.buffer[linear_layer_idx], self.ssm_state.buffer[linear_layer_idx]
+def get_linear_state(infer_state, state_class):
+    (state,) = (
+        state
+        for state in infer_state.att_state_manager.get_bounded_attention_states(infer_state.att_state_role)
+        if isinstance(state, state_class)
+    )
+    return state

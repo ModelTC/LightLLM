@@ -1,4 +1,5 @@
 from lightllm.common.attention_state.bounded_att import GDNState
+from lightllm.common.linear_state import get_linear_state
 import dataclasses
 import weakref
 from abc import ABC, abstractmethod
@@ -120,7 +121,7 @@ class GDNLinearAttPrefillAttState(BasePrefillAttState):
         # 每次 _prefill 都会在 runtime infer_state 上调用 init_state。
         # prefill cuda graph 回调必须走 new_infer_state.prefill_att_state1，
         # 才能读到这里按当前 batch（含 token padding 后的 dummy request）更新的索引。
-        linear_state_manager = self.infer_state.req_manager.linear_state_manager
+        linear_state_manager = get_linear_state(self.infer_state, GDNState)
         self.b_conv_buffer_idx, self.b_ssm_buffer_idx = linear_state_manager.prepare_prefill(self.infer_state.b_req_idx)
         return
 
@@ -141,7 +142,7 @@ class GDNLinearAttPrefillAttState(BasePrefillAttState):
         layer_num = linear_att_dict["layer_num"]
         backend: GDNLinearAttBackend = self.backend
 
-        conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
+        conv_states, ssm_states = get_linear_state(self.infer_state, GDNState).get_layer_view(layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
         if backend.mtp_step > 0:
@@ -210,7 +211,7 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def get_linear_state_commit(self) -> Optional["LinearStateCommit"]:
-        return self.infer_state.req_manager.linear_state_manager.create_commit(self.run_config)
+        return get_linear_state(self.infer_state, GDNState).create_commit(self.run_config)
 
     def init_state(self):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
@@ -220,7 +221,7 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
             self._init_dynamic_mtp_decode_state()
         else:
             self._init_fixed_mtp_decode_state(draft_step)
-        linear_state_manager = self.infer_state.req_manager.linear_state_manager
+        linear_state_manager = get_linear_state(self.infer_state, GDNState)
         if draft_step == 0:
             linear_state_manager.prepare_decode(self.b_conv_buffer_idx, single_token=True)
         else:
@@ -241,7 +242,7 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
             hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
 
-    def _init_fixed_mtp_decode_state(self, draft_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
+    def _init_fixed_mtp_decode_state(self, draft_step: int) -> None:
         mtp_size = draft_step + 1
         batch_size = self.infer_state.batch_size
         assert batch_size % mtp_size == 0, (
@@ -277,7 +278,7 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
         backend: GDNLinearAttBackend = self.backend
 
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
+        conv_states, ssm_states = get_linear_state(self.infer_state, GDNState).get_layer_view(layer_num)
 
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:
@@ -336,9 +337,9 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
             backend.tp_num_v_heads,
             backend.head_v_dim,
         )
-        ssm_backend = self.infer_state.req_manager.linear_state_manager.ssm_backend
+        ssm_backend = get_linear_state(self.infer_state, GDNState).ssm_backend
         if ssm_backend is not None:
-            linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(
+            linear_layer_idx = get_linear_state(self.infer_state, GDNState).get_storage_layer_index(
                 layer_weight.layer_num_
             )
             core_attn_out, self.run_config = ssm_backend.forward(
@@ -399,9 +400,9 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
         )
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
-        ssm_backend = self.infer_state.req_manager.linear_state_manager.ssm_backend
+        ssm_backend = get_linear_state(self.infer_state, GDNState).ssm_backend
         if ssm_backend is not None:
-            linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(
+            linear_layer_idx = get_linear_state(self.infer_state, GDNState).get_storage_layer_index(
                 layer_weight.layer_num_
             )
             core_attn_out, self.run_config = ssm_backend.forward(

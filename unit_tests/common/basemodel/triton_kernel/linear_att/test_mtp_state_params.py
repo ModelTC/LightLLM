@@ -15,7 +15,7 @@ def test_dynamic_sequences_stay_within_request_capacity_under_graph(request_capa
     reqs = torch.full((token_bucket,), hold, dtype=torch.int32, device="cuda")
     mtp_index = torch.zeros_like(reqs)
     manager = object.__new__(LinearStateManager)
-    manager.accepted_state_index = torch.arange(request_capacity + 1, dtype=torch.int32, device="cuda") % 4
+    manager.mtp_state_index = torch.arange(request_capacity + 1, dtype=torch.int32, device="cuda") % 4
     manager.ssm_slots_per_req = 4
     manager.ssm_backend = None
     sequences = min(request_capacity, token_bucket)

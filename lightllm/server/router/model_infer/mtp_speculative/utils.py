@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 
+from lightllm.common.linear_state import LinearStateManager
+
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
     mtp_verify,
@@ -25,7 +27,6 @@ def verify_mtp_tokens(
     linear_state_batches=None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Verify target tokens and update recurrent MTP state when required."""
-    # 保留原调用接口中的步序参数；当前状态提交直接使用验证返回的接受长度。
 
     accept_lengths, accepted_index = mtp_verify(
         req_to_next_token_ids=backend.model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
@@ -33,15 +34,18 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    if backend.is_hybrid_att_model:
-        backend.model.req_manager.update_mtp_state(
-            b_req_mtp_start_loc=b_req_mtp_start_loc,
-            b_req_idx=b_req_idx,
-            b_mtp_index=b_mtp_index,
-            accepted_index=accepted_index,
-            verify_width=backend.max_draft_step + 1,
-            linear_state_batches=linear_state_batches,
-        )
+    for state in backend.model.att_state_manager.get_bounded_attention_states("main"):
+        if isinstance(state, LinearStateManager):
+            state.commit_accepted_state(
+                b_req_mtp_start_loc=b_req_mtp_start_loc,
+                b_req_idx=b_req_idx,
+                b_mtp_index=b_mtp_index,
+                accepted_index=accepted_index,
+                verify_width=backend.max_draft_step + 1,
+                linear_state_batches=linear_state_batches,
+            )
+        else:
+            state.commit_bounded_att_state(b_req_idx[b_req_mtp_start_loc], accept_lengths)
     return accept_lengths, accepted_index
 
 

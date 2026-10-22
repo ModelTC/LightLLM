@@ -253,6 +253,8 @@ def build_hybrid_resources(
     small_page_capacity: int,
     draft_full_state: FullAttentionState | None = None,
     tp_rank: int = 0,
+    ssm_state_mode: str = "native",
+    ssm_replay_config: dict | None = None,
 ) -> AttentionStateManager:
     """测试按既定几何参数组装通用管理器，不依赖旧模型管理器的构造/绑定流程。"""
     from lightllm.common.attention_state import AttentionStateManager
@@ -282,6 +284,9 @@ def build_hybrid_resources(
         request_capacity=request_capacity,
         mtp_step=mtp_step,
         device="cuda",
+        ssm_state_mode=ssm_state_mode,
+        ssm_replay_config=ssm_replay_config,
+        gate_lower_bound=config.gate_lower_bound if glm else -5.0,
     )
     bounded_state.initialize_page_pools(
         big_page_capacity=big_page_capacity,

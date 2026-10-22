@@ -9,6 +9,7 @@ from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
+@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
 @pytest.mark.parametrize("draft_layers", [0, 1, 3])
 @pytest.mark.parametrize(
     "layer_types,expected_indices,linear_layers",
@@ -41,6 +42,7 @@ def test_hybrid_layer_mapping_and_mtp_states(
     expected_indices: tuple[int, ...],
     linear_layers: int,
     draft_layers: int,
+    mode: str,
 ) -> None:
     model_config = dict(
         num_hidden_layers=len(layer_types),
@@ -56,7 +58,13 @@ def test_hybrid_layer_mapping_and_mtp_states(
         full_attention_interval=4,
         layer_types=layer_types,
     )
-    args = StartArgs(data_type="bfloat16", linear_att_ssm_data_type="float32")
+    args = StartArgs(
+        data_type="bfloat16",
+        linear_att_ssm_data_type="float32",
+        mtp_step=2,
+        ssm_state_mode=mode,
+        ssm_replay_config={"cache_len": 8} if mode == "replay" else {},
+    )
     config = Qwen3NextResourceConfig.from_model_config(model_config, args)
     logical_layer_ids = tuple(range(len(layer_types)))
     (full_state,) = Qwen3NextTpPartModel.create_full_att_states(
@@ -70,6 +78,10 @@ def test_hybrid_layer_mapping_and_mtp_states(
         model_logical_layer_ids=logical_layer_ids,
         device="meta",
     )
+    assert bounded_state.ssm_slots_per_req == (3 if mode == "native" else 1)
+    assert (bounded_state.ssm_backend is None) == (mode == "native")
+    if mode == "replay":
+        assert bounded_state.ssm_backend.capacity == 8
     manager = AttentionStateManager(request_capacity=1)
     manager.register_state(model_role="main", state=full_state)
     manager.register_state(model_role="main", state=bounded_state)

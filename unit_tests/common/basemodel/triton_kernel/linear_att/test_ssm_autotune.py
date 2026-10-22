@@ -325,17 +325,17 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
     from lightllm.common.basemodel.attention.linear.kda import KDALinearAttDecodeAttState
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.batch_objs import PostLayerOutput, ModelMtpOutputCollector
-    from lightllm.common.req_manager.linear_att import ReqManagerForMamba
 
     inputs = make_inputs(mode, dtype, "cuda", compute_mode=projection, kda=kda)
     ssm_backend = inputs["ssm_backend"]
     initial = ssm_backend.state.clone()
     configs = [{"BV": 8, "num_warps": 1, "num_stages": 1}, {"BV": 32, "num_warps": 2, "num_stages": 1}]
     monkeypatch.setattr(tuning, "select_config", lambda *args: configs[args[2].shape[1] > 8])
-    manager = object.__new__(ReqManagerForMamba)
-    manager.linear_state_manager = object.__new__(LinearStateManager)
-    manager.linear_state_manager.ssm_backend = ssm_backend
-    manager.linear_state_manager.accepted_state_index = torch.zeros(9, dtype=torch.int32, device="cuda")
+    from lightllm.common.attention_state.bounded_att import KDAState, GDNState
+
+    manager = object.__new__(KDAState if kda else GDNState)
+    manager.ssm_backend = ssm_backend
+    manager.mtp_state_index = torch.zeros(9, dtype=torch.int32, device="cuda")
     buckets = []
     for index, ids in enumerate(([0], [1, 3])):
         # The physical verify buckets include HOLD, but acceptance is unpadded.
@@ -371,7 +371,7 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
         with torch.cuda.graph(graph):
             outputs, config = forward(ssm_backend)
         state = InferStateInfo()
-        state.req_manager = manager
+        state.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (manager,))
         state.hidden_collector = SimpleNamespace(finish_output=lambda **kw: ModelMtpOutputCollector())
         att_class = KDALinearAttDecodeAttState if kda else GDNLinearAttDecodeAttState
         state.decode_att_state1 = att_class(_infer_state_weak_ref=weakref.ref(state), run_config=config)
@@ -405,7 +405,7 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
                 torch.testing.assert_close(outputs[layer], expected, atol=0, rtol=0)
         counts = [1 + (iteration + i) % 4 for i in range(3)]
         flags = torch.tensor([int(j < n) for n in counts for j in range(4)], dtype=torch.int32, device="cuda")
-        manager.update_mtp_state(
+        manager.commit_accepted_state(
             starts,
             rows,
             mtp,
@@ -414,7 +414,7 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
             linear_state_batches=tuple((len(b[-1]), b[2].linear_state_commit) for b in buckets),
         )
         for _, _, _, ref, _, reqs, _, ids in buckets:
-            ref.accept_updates(reqs[:-1], manager.linear_state_manager.accepted_state_index)
+            ref.accept_updates(reqs[:-1], manager.mtp_state_index)
             torch.testing.assert_close(ssm_backend.state[:, ids], ref.state[:, ids], atol=0, rtol=0)
             if mode == "replay":
                 assert torch.equal(ssm_backend.cursors[ids], ref.cursors[ids])

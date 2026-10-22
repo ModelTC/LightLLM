@@ -46,7 +46,7 @@ def make_mems(monkeypatch, request):
     get_env_start_args.cache_clear()
     set_env_start_args(dataclasses.asdict(args))
 
-    def create(tp, target_mtp_step=None):
+    def create(tp, target_mtp_step=None, mode="native"):
         local_mtp_step = mtp_step if target_mtp_step is None else target_mtp_step
         config = Glm5NextResourceConfig(
             tp_world_size=tp,
@@ -87,6 +87,7 @@ def make_mems(monkeypatch, request):
                 config=config,
                 request_capacity=4,
                 mtp_step=local_mtp_step,
+                ssm_state_mode=mode,
                 tp_rank=rank,
                 full_state=main,
                 full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
@@ -112,16 +113,23 @@ def make_mems(monkeypatch, request):
 @pytest.mark.parametrize("prefill_tp,decode_tp", [(1, 1), (4, 4), (1, 4), (4, 1)])
 @pytest.mark.parametrize("remainder", range(4))
 @pytest.mark.parametrize("decode_mtp_step", [0, 1, 5])
+@pytest.mark.parametrize("source_mode", ["native", "replay"])
+@pytest.mark.parametrize("dest_mode", ["native", "replay", "compact"])
 def test_pd_kv_and_runtime_state_roundtrip(
     make_mems,
     prefill_tp,
     decode_tp,
     remainder,
     decode_mtp_step,
+    source_mode,
+    dest_mode,
 ):
-    source, dest = make_mems(prefill_tp), make_mems(decode_tp, target_mtp_step=decode_mtp_step)
+    if dest_mode == "compact" and decode_mtp_step == 0:
+        pytest.skip("compact requires MTP")
+    source = make_mems(prefill_tp, mode=source_mode)
+    dest = make_mems(decode_tp, target_mtp_step=decode_mtp_step, mode=dest_mode)
+    dst_ssm_stride = dest[0].linear.ssm_slots_per_req
     mtp_size = get_env_start_args().mtp_step + 1
-    dst_mtp_size = decode_mtp_step + 1
     layers = sum(len(state.config.logical_layer_groups) for state in source[0].full_states)
     src_req, dst_req = 0, 2
     length = 8 + remainder
@@ -159,7 +167,15 @@ def test_pd_kv_and_runtime_state_roundtrip(
             state.storage.view(torch.uint8)[:, src_indexes] = packed[offset:end]
             offset = end
         mem.linear.conv_state[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
-        mem.linear.ssm_state[:, src_req * mtp_size].copy_(ssm[:, heads])
+        mem.linear.ssm_state[:, src_req * mem.linear.ssm_slots_per_req].copy_(ssm[:, heads])
+        if source_mode == "replay":
+            backend = mem.linear.ssm_backend
+            backend.raw_keys.zero_()
+            backend.raw_values.zero_()
+            backend.gates.fill_(-0.5)
+            backend.betas.zero_()
+            backend.cursors[src_req] = 1
+            ssm[:, heads].copy_(backend.get_accepted_state(src_req))
         offset = 0
         for state in mem.tails:
             end = offset + len(state.config.logical_layer_ids)
@@ -173,6 +189,10 @@ def test_pd_kv_and_runtime_state_roundtrip(
             state.storage.zero_()
         mem.linear.conv_state.normal_()
         mem.linear.ssm_state.normal_()
+        if dest_mode == "replay":
+            mem.linear.ssm_backend.cursors[dst_req] = 3
+        if mem.linear.mtp_state_index is not None:
+            mem.linear.mtp_state_index[dst_req] = decode_mtp_step
         for state in mem.tails:
             state.buffer.normal_()
         original_tails.append(torch.cat([state.buffer[:, dst_req] for state in mem.tails]).clone())
@@ -181,7 +201,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
                 x[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
                 for x, stride in (
                     (mem.linear.conv_state, 1),
-                    (mem.linear.ssm_state, dst_mtp_size),
+                    (mem.linear.ssm_state, dst_ssm_stride),
                     *((state.buffer, 1) for state in mem.tails),
                 )
             ]
@@ -235,18 +255,20 @@ def test_pd_kv_and_runtime_state_roundtrip(
                     source_field.tensor[:, src_indexes].contiguous().view(torch.uint8),
                 )
         assert torch.equal(mem.linear.conv_state[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3))
-        assert torch.equal(mem.linear.ssm_state[:, dst_req * dst_mtp_size], ssm[:, heads])
+        assert torch.equal(mem.linear.ssm_state[:, dst_req * dst_ssm_stride], ssm[:, heads])
         restored_tail = torch.cat([state.buffer[:, dst_req] for state in mem.tails])
         expected_tail = original_tails[rank].clone()
         for position in range(length - 4, length):
             expected_tail[:, position % (4 + decode_mtp_step)] = tail[:, position % tail.shape[1]]
         assert torch.equal(restored_tail, expected_tail)
+        if dest_mode == "replay":
+            assert mem.linear.ssm_backend.cursors[dst_req] == 0
         if mem.linear.mtp_state_index is not None:
             assert mem.linear.mtp_state_index[dst_req] == 0
         for (state, stride), expected in zip(
             (
                 (mem.linear.conv_state, 1),
-                (mem.linear.ssm_state, dst_mtp_size),
+                (mem.linear.ssm_state, dst_ssm_stride),
                 *((state.buffer, 1) for state in mem.tails),
             ),
             untouched[rank],

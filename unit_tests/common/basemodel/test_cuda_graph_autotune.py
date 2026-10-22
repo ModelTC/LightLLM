@@ -142,11 +142,12 @@ def test_linear_config_is_local_to_capture_state(capture_env, overlap, kda):
     from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
-    from lightllm.common.linear_state import LinearStateManager, SSMRunConfig
+    from lightllm.common.linear_state import SSMRunConfig
+    from lightllm.common.attention_state.bounded_att import GDNState, KDAState
 
     capture_env.args.enable_decode_microbatch_overlap = overlap
     graph = CudaGraph(1, 2, 1, max_batch_size=2)
-    manager = object.__new__(LinearStateManager)
+    manager = object.__new__(KDAState if kda else GDNState)
     manager.ssm_backend = object.__new__(CompactSSMBackend)
     att_class = KDALinearAttDecodeAttState if kda else GDNLinearAttDecodeAttState
     states = []
@@ -154,7 +155,7 @@ def test_linear_config_is_local_to_capture_state(capture_env, overlap, kda):
     for _ in range(2 if overlap else 1):
         state = InferStateInfo()
         state.input_ids = torch.ones(2, dtype=torch.int64)
-        state.req_manager = SimpleNamespace(linear_state_manager=manager)
+        state.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (manager,))
         state.hidden_collector = NoopHiddenCollector()
         state.decode_att_state = TritonDecodeAttState(_infer_state_weak_ref=weakref.ref(state))
         state.decode_att_state1 = att_class(_infer_state_weak_ref=weakref.ref(state))

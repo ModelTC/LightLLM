@@ -6,7 +6,8 @@ import pytest
 import torch
 
 from lightllm.common.linear_state import LinearStateManager, SSMRunConfig
-from lightllm.common.state_cache_manager import Glm5NextCacheConfig, LinearAttCacheConfig
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
+from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
@@ -30,49 +31,38 @@ def test_config_rejects_unrepresented_kernel_options():
 
 @pytest.fixture
 def linear_config():
-    return LinearAttCacheConfig(
-        tp_world_size=1,
-        full_att_all_num_kv_heads=1,
-        full_att_dtype=torch.bfloat16,
-        full_att_num_kv_heads=1,
-        full_att_head_dim=32,
-        global_linear_k_heads=1,
-        global_linear_v_heads=2,
-        num_linear_k_heads=1,
-        num_linear_v_heads=2,
-        head_linear_k_dim=32,
-        head_linear_v_dim=32,
-        conv_kernel_size=4,
-        linear_layer_num=6,
-        conv_state_dtype=torch.bfloat16,
-        ssm_state_dtype=torch.float32,
-        full_attention_interval=3,
-        all_layer_num=8,
+    return ConvSSMStateConfig(
+        logical_layer_ids=(0, 1, 3, 4, 6, 7),
+        global_k_heads=1,
+        global_v_heads=2,
+        key_dim=32,
+        value_dim=32,
+        conv_width=3,
+        conv_dtype=torch.bfloat16,
+        ssm_dtype=torch.float32,
     )
 
 
 @pytest.mark.parametrize("layer,row", [(0, 0), (1, 1), (3, 2), (4, 3), (6, 4), (7, 5)])
 def test_layer_buffers_follow_packed_linear_layers(linear_config, layer, row):
-    owner = object.__new__(LinearStateManager)
-    owner.linear_config = linear_config
-    conv = torch.arange(6).view(6, 1)
-    ssm = conv + 10
-    owner.conv_state = SimpleNamespace(buffer=conv)
-    owner.ssm_state = SimpleNamespace(buffer=ssm)
-    assert linear_config.get_linear_layer_index(layer) == row
-    actual_conv, actual_ssm = owner.get_layer_buffers(layer)
-    assert actual_conv.item() == row
-    assert actual_ssm.item() == row + 10
+    owner = GDNState(linear_config, request_capacity=1, device="cpu")
+    for i in range(6):
+        owner.conv_state[i].fill_(i)
+        owner.ssm_state[i].fill_(i + 10)
+    actual_conv, actual_ssm = owner.get_layer_view(layer)
+    assert (actual_conv == row).all()
+    assert (actual_ssm == row + 10).all()
 
 
 @pytest.mark.parametrize("layer", [-1, 2, 5, 8])
 def test_linear_mapping_rejects_full_attention_and_out_of_range_layers(linear_config, layer):
-    with pytest.raises(AssertionError):
-        linear_config.get_linear_layer_index(layer)
+    owner = GDNState(linear_config, request_capacity=1, device="cpu")
+    with pytest.raises(KeyError):
+        owner.get_layer_view(layer)
 
 
 def test_model_configuration_retains_nondefault_kda_gate_bound():
-    config = Glm5NextCacheConfig.from_model_config(
+    config = Glm5NextResourceConfig.from_model_config(
         {
             "kv_lora_rank": 512,
             "num_hidden_layers": 4,
@@ -95,9 +85,7 @@ def test_model_configuration_retains_nondefault_kda_gate_bound():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("mode", ["compact", "replay"])
 def test_kda_backend_receives_gate_bound_at_construction(linear_config, mode):
-    linear_config.gate_lower_bound = -2.5
-    args = SimpleNamespace(mtp_step=2, ssm_state_mode=mode, ssm_replay_config={})
-    owner = LinearStateManager(2, linear_config, args, kda=True)
+    owner = LinearStateManager(linear_config, 3, mtp_step=2, ssm_state_mode=mode, kda=True, gate_lower_bound=-2.5)
     assert owner.ssm_backend.gate_lower_bound == -2.5
 
 
@@ -126,7 +114,7 @@ def test_compact_commits_each_unpadded_partition_with_its_verify_config(monkeypa
 
     owner = object.__new__(LinearStateManager)
     owner.ssm_backend = object.__new__(CompactSSMBackend)
-    owner.accepted_state_index = torch.tensor([0, 1, 2, 0], dtype=torch.int32)
+    owner.mtp_state_index = torch.tensor([0, 1, 2, 0], dtype=torch.int32)
     configs = [SSMRunConfig(8, 1), SSMRunConfig(32, 2)]
     commits = [owner.create_commit(config) for config in configs]
     owner.ssm_backend.run_config = {"BV": 128, "num_warps": 4}
@@ -146,5 +134,5 @@ def test_compact_commits_each_unpadded_partition_with_its_verify_config(monkeypa
         linear_state_batches=((1, commits[0]), (0, None), (2, commits[1])),
     )
     assert [reqs for reqs, _, _ in calls] == [[2], [0, 1]]
-    assert all(accepted is owner.accepted_state_index for _, accepted, _ in calls)
+    assert all(accepted is owner.mtp_state_index for _, accepted, _ in calls)
     assert [config for _, _, config in calls] == configs

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Optional
 import torch
 
 from lightllm.common.attention_state.bounded_att import KDAState
+from lightllm.common.linear_state import get_linear_state
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
@@ -65,7 +66,7 @@ class KDALinearAttPrefillAttState(BasePrefillAttState):
     b_ssm_buffer_idx: torch.Tensor = None
 
     def init_state(self):
-        linear_state_manager = self.infer_state.req_manager.linear_state_manager
+        linear_state_manager = get_linear_state(self.infer_state, KDAState)
         self.b_conv_buffer_idx, self.b_ssm_buffer_idx = linear_state_manager.prepare_prefill(self.infer_state.b_req_idx)
 
     def prefill_att(
@@ -140,7 +141,7 @@ class KDALinearAttDecodeAttState(BaseDecodeAttState):
     b_num_accepted_tokens: torch.Tensor = None
 
     def get_linear_state_commit(self) -> Optional["LinearStateCommit"]:
-        return self.infer_state.req_manager.linear_state_manager.create_commit(self.run_config)
+        return get_linear_state(self.infer_state, KDAState).create_commit(self.run_config)
 
     def init_state(self):
         mtp_step = self.backend.mtp_step
@@ -150,7 +151,7 @@ class KDALinearAttDecodeAttState(BaseDecodeAttState):
             self._init_dynamic_mtp_decode_state()
         else:
             self._init_fixed_mtp_decode_state(mtp_step)
-        linear_state_manager = self.infer_state.req_manager.linear_state_manager
+        linear_state_manager = get_linear_state(self.infer_state, KDAState)
         if mtp_step == 0:
             linear_state_manager.prepare_decode(self.b_conv_buffer_idx, single_token=True)
         else:
@@ -171,7 +172,7 @@ class KDALinearAttDecodeAttState(BaseDecodeAttState):
             hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
 
-    def _init_fixed_mtp_decode_state(self, mtp_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
+    def _init_fixed_mtp_decode_state(self, mtp_step: int) -> None:
         mtp_size = mtp_step + 1
         batch_size = self.infer_state.batch_size
         assert batch_size % mtp_size == 0, (
@@ -230,9 +231,9 @@ class KDALinearAttDecodeAttState(BaseDecodeAttState):
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(*shape, backend.tp_hidden_size)
         raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
-        ssm_backend = self.infer_state.req_manager.linear_state_manager.ssm_backend
+        ssm_backend = get_linear_state(self.infer_state, KDAState).ssm_backend
         if ssm_backend is not None:
-            linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(layer_num)
+            linear_layer_idx = get_linear_state(self.infer_state, KDAState).get_storage_layer_index(layer_num)
             output, self.run_config = ssm_backend.forward(
                 linear_layer_idx,
                 q,
