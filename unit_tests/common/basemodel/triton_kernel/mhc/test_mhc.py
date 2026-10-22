@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
+import math
 import sys
-from types import ModuleType
+from types import ModuleType, SimpleNamespace
 
 import pytest
 import torch
@@ -16,7 +17,19 @@ from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-def _hc_pre_reference(x, fn, scale, base, streams, rms_eps, hc_eps, sinkhorn_iters, post_multiplier=2.0):
+def _hc_pre_reference(
+    x,
+    fn,
+    scale,
+    base,
+    streams,
+    rms_eps,
+    hc_eps,
+    sinkhorn_iters,
+    post_multiplier=2.0,
+    *,
+    normalize_before_projection=False,
+):
     """Unfused FP32 reference; returns the merged input before sublayer RMSNorm."""
     assert x.ndim == 2 and x.shape[-1] % streams == 0
     tokens, flattened_hidden = x.shape
@@ -25,7 +38,10 @@ def _hc_pre_reference(x, fn, scale, base, streams, rms_eps, hc_eps, sinkhorn_ite
 
     x_fp32 = x.float()
     inv_rms = torch.rsqrt(x_fp32.square().mean(dim=-1, keepdim=True) + rms_eps)
-    mixes = F.linear(x_fp32, fn) * inv_rms
+    if normalize_before_projection:
+        mixes = F.linear(x_fp32 * inv_rms, fn)
+    else:
+        mixes = F.linear(x_fp32, fn) * inv_rms
 
     pre_raw = mixes[:, :streams]
     post_raw = mixes[:, streams : 2 * streams]
@@ -98,3 +114,140 @@ def test_mhc_reports_missing_deepgemm(monkeypatch, missing):
 
     with pytest.raises(ImportError, match="deep_gemm"):
         hc_pre_norm(x, fn, scale, base, norm, 4, 1e-5, 1e-5, 1e-6, 20)
+
+
+@pytest.mark.parametrize("tokens,hidden,prefix", [(1, 4096, "attn"), (19, 780, "ffn"), (3073, 4096, "attn")])
+def test_glm_mhc_caller_matches_normalize_first_reference(tokens, hidden, prefix, monkeypatch):
+    from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
+
+    monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", False)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    streams = 4
+    x = torch.randn(tokens, streams * hidden, device="cuda", dtype=torch.bfloat16)
+    fn = torch.randn(24, streams * hidden, device="cuda") * 0.005
+    scale = torch.randn(3, device="cuda")
+    base = torch.randn(24, device="cuda")
+    norm = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+    merged, expected_mix, expected_post = _hc_pre_reference(
+        x, fn, scale, base, streams, 1e-5, 1e-6, 20, normalize_before_projection=True
+    )
+    merged = merged.float()
+    expected_input = (merged * torch.rsqrt(merged.square().mean(-1, keepdim=True) + 1e-5) * norm.float()).to(x.dtype)
+    expected_mix, expected_post = expected_mix.to(x.dtype), expected_post.to(x.dtype)
+
+    # Call the actual model entry point, without constructing attention/MoE weights.
+    layer = SimpleNamespace(mhc_streams=streams, eps_=1e-5, hc_eps=1e-6, hc_sinkhorn_iters=20)
+    weights = SimpleNamespace(
+        **{
+            f"hc_{prefix}_{name}": SimpleNamespace(weight=value)
+            for name, value in (("fn", fn), ("scale", scale), ("base", base))
+        }
+    )
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", True)
+    actual_input, actual_mix, actual_post = Glm5NextTransformerLayerInfer._hc_pre(
+        layer, x, weights, prefix, SimpleNamespace(weight=norm)
+    )
+    assert torch.backends.cuda.matmul.allow_tf32
+    assert actual_mix.dtype == actual_post.dtype == x.dtype
+    torch.testing.assert_close(actual_input, expected_input, atol=0.004, rtol=0.008)
+    torch.testing.assert_close(actual_mix, expected_mix, atol=1e-5, rtol=0.008)
+    torch.testing.assert_close(actual_post, expected_post, atol=1e-5, rtol=0.008)
+    layer_out = torch.randn(tokens, hidden, device="cuda", dtype=x.dtype)
+    # The training fused post kernel consumes rounded coefficients, accumulates
+    # in FP32, and rounds only the final residual output.
+    torch.testing.assert_close(
+        hc_post(layer_out, x, actual_mix, actual_post, streams),
+        _hc_post_reference(layer_out, x, actual_mix, actual_post, streams),
+        atol=0.004,
+        rtol=0.008,
+    )
+
+
+@pytest.mark.parametrize("tokens,hidden", [(1, 4096), (19, 780)])
+def test_glm_mhc_projection_retains_fp32_inputs(tokens, hidden, monkeypatch):
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    x = torch.randn(tokens, 4 * hidden, device="cuda", dtype=torch.bfloat16)
+    fn = torch.randn(24, 4 * hidden, device="cuda") * 0.005
+    x_fp32 = x.float()
+    expected = F.linear(x_fp32 * torch.rsqrt(x_fp32.square().mean(-1, keepdim=True) + 1e-5), fn)
+
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", True)
+    partials = pre_norm._hc_normalized_projection(x, fn, 1e-5)
+    assert torch.backends.cuda.matmul.allow_tf32
+    torch.testing.assert_close(partials.sum(0), expected, atol=2e-5, rtol=2e-5)
+
+
+def test_glm_mhc_normalizes_before_cancelling_large_products(monkeypatch):
+    monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", False)
+    monkeypatch.setitem(sys.modules, "deep_gemm", None)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    # All four streams are identical. These finite, exactly representable inputs
+    # stress the operation order: the unnormalized dot overflows before its
+    # opposite products cancel; normalize-first has two finite, cancelling terms.
+    x = torch.full((1, 4 * 17), 2.0**32, device="cuda", dtype=torch.bfloat16)
+    fn = torch.zeros(24, x.shape[-1], device="cuda")
+    fn[:, 0], fn[:, 1] = 2.0**110, -(2.0**110)
+    x_fp32 = x.float()
+    inv_rms = torch.rsqrt(x_fp32.square().mean(-1, keepdim=True) + 1e-5)
+    expected = F.linear(x_fp32 * inv_rms, fn)
+    old_order = F.linear(x_fp32, fn) * inv_rms
+    assert torch.isfinite(expected).all()
+    assert not torch.isfinite(old_order).all()
+    torch.testing.assert_close(pre_norm._hc_normalized_projection(x, fn, 1e-5).sum(0), expected, atol=0, rtol=0)
+    actual = hc_pre_norm(
+        x,
+        fn,
+        torch.ones(3, device="cuda"),
+        torch.zeros(24, device="cuda"),
+        torch.ones(17, device="cuda", dtype=x.dtype),
+        4,
+        1e-5,
+        1e-5,
+        1e-6,
+        20,
+        glm5_numerics=True,
+    )
+    for value in actual:
+        assert torch.isfinite(value).all()
+
+
+def test_glm_mhc_rounds_post_coefficients_before_mixing():
+    x = torch.full((1, 4 * 17), 1 / 256, device="cuda", dtype=torch.bfloat16)
+    fn = torch.zeros(24, x.shape[-1], device="cuda")
+    scale = torch.zeros(3, device="cuda")
+    base = torch.zeros(24, device="cuda")
+    base[4:8] = math.log(1.003 / 0.997)
+    norm = torch.ones(17, device="cuda", dtype=x.dtype)
+    _, mix, post = hc_pre_norm(x, fn, scale, base, norm, 4, 1e-5, 1e-5, 1e-6, 20, glm5_numerics=True)
+    assert mix.dtype == post.dtype == x.dtype
+    torch.testing.assert_close(post, torch.ones_like(post), atol=0, rtol=0)
+    torch.testing.assert_close(mix, torch.full_like(mix, 0.25), atol=0, rtol=0)
+    layer_out = torch.ones(1, 17, device="cuda", dtype=x.dtype)
+    actual = hc_post(layer_out, x, mix, post, 4)
+    torch.testing.assert_close(actual, torch.ones_like(actual), atol=0, rtol=0)
+    _, unrounded_mix, unrounded_post = _hc_pre_reference(
+        x, fn, scale, base, 4, 1e-5, 1e-6, 20, normalize_before_projection=True
+    )
+    old_result = _hc_post_reference(layer_out, x, unrounded_mix, unrounded_post, 4)
+    assert (old_result != actual).all()
+
+
+def test_glm_mhc_keeps_pre_coefficients_in_fp32():
+    x = torch.zeros(1, 4, 17, device="cuda", dtype=torch.bfloat16)
+    x[:, 0], x[:, 1] = 1, -1
+    x = x.flatten(1)
+    fn = torch.zeros(24, x.shape[-1], device="cuda")
+    scale = torch.zeros(3, device="cuda")
+    base = torch.zeros(24, device="cuda")
+    # Both coefficients round to BF16 0.5, which would erase this input entirely.
+    pre_values = torch.tensor([0.5005, 0.5], device="cuda") - 1e-6
+    base[:2] = torch.logit(pre_values)
+    norm = torch.ones(17, device="cuda", dtype=x.dtype)
+    actual, _, _ = hc_pre_norm(x, fn, scale, base, norm, 4, 1e-5, 1e-5, 1e-6, 20, glm5_numerics=True)
+    merged, _, _ = _hc_pre_reference(
+        x, fn, scale, base, 4, 1e-5, 1e-6, 20, normalize_before_projection=True
+    )
+    merged = merged.float()
+    expected = (merged * torch.rsqrt(merged.square().mean(-1, keepdim=True) + 1e-5)).to(x.dtype)
+    assert (expected > 0.1).all()
+    torch.testing.assert_close(actual, expected, atol=0.001, rtol=0.008)

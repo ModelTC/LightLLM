@@ -428,6 +428,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             norm_eps=self.eps_,
             hc_eps=self.hc_eps,
             sinkhorn_iters=self.hc_sinkhorn_iters,
+            glm5_numerics=True,
         )
 
     def _forward_mhc(self, input_embeddings, infer_state, layer_weight, *, prefill):

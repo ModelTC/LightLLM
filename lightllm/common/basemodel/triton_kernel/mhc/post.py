@@ -13,8 +13,8 @@ import triton.language as tl
 def _hc_post_4stream_kernel(
     layer_output,  # 输入 [T, H]，激活 dtype。
     residual,  # 输入 [T, 4 * H]，激活 dtype；当前子层 pre-mixing 前的残差。
-    residual_mix,  # 输入 [T, 4, 4]，fp32；最后两维为输入、输出 stream。
-    post_mix,  # 输入 [T, 4]，fp32。
+    residual_mix,  # 输入 [T, 4, 4]，fp32 或激活 dtype；最后两维为输入、输出 stream。
+    post_mix,  # 输入 [T, 4]，fp32 或激活 dtype。
     output,  # 输出 [T, 4 * H]，与 layer_output 相同 dtype。
     hidden: tl.constexpr,
     layer_stride_m: tl.constexpr,
@@ -93,8 +93,8 @@ def hc_post(
     Args:
         layer_output: [T, H]，连续的 attention / FFN 子层输出。
         residual: [T, S * H]，连续的、该子层 pre-mixing 前保存的原始残差。
-        residual_mix: [T, S, S]，fp32；来自 hc_pre_norm。
-        post_mix: [T, S]，fp32；来自同一次 pre 调用。
+        residual_mix: [T, S, S]，fp32 或激活 dtype；来自 hc_pre_norm。
+        post_mix: [T, S]，与 residual_mix 相同 dtype；来自同一次 pre 调用。
         streams: 残差 stream 数 S；当前 Triton 入口要求 S = 4。
 
     Returns:
