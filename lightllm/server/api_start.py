@@ -5,9 +5,15 @@ import subprocess
 import math
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
+from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_unique_server_name,
+    set_env_start_args,
+    set_unique_server_name,
+)
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
@@ -24,6 +30,7 @@ from lightllm.utils.config_utils import (
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
+    get_default_disable_chunked_mm_input,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -287,6 +294,16 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
+    args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
+        args.model_dir
+    )
+    if args.disable_chunked_mm_input and not args.disable_vision:
+        assert args.batch_max_tokens >= args.max_image_token_count, (
+            "--disable_chunked_mm_input requires batch_max_tokens >= max_image_token_count, "
+            f"but got {args.batch_max_tokens}, {args.max_image_token_count}. "
+            "Increase --batch_max_tokens or reduce --max_image_token_count."
+        )
+
     # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
         # 小页池大小只对 hybrid 模型生效。
@@ -439,6 +456,10 @@ def _launch_subprocesses(args: StartArgs):
         ],
         start_args=[(args,)],
     )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
 
     router_process, _ = process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
@@ -526,6 +547,10 @@ def pd_master_start(args: StartArgs):
         ],
         start_args=[(args,)],
     )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
 
     command = [
         "hypercorn",
@@ -552,6 +577,52 @@ def pd_master_start(args: StartArgs):
 
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
+
+
+def pd_master_multi_worker_start(args: StartArgs):
+    """Start multiple PD master workers on one host behind HAProxy."""
+    _validate_pd_features(args)
+    from .httpserver_for_pd_master.multiprocess import (
+        start_multiprocess_pd_master,
+        validate_multiprocess_pd_master_args,
+    )
+    from .httpserver_for_pd_master.pd_selector.pd_node_stats_server import start_pd_node_stats_server
+    from .httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import start_prompt_cache_tree_server
+
+    haproxy_binary = validate_multiprocess_pd_master_args(args)
+    _set_envs_and_config(args)
+    set_unique_server_name(args)
+
+    auto_set_max_req_total_len(args)
+    auto_set_response_parsers(args)
+    process_manager.setup_exit_controller()
+    set_env_start_args(args)
+    get_env_start_args.cache_clear()
+    ports = get_shm_port_args(create=True)
+    worker_ports = ports.pd_master_multi_ports
+    validate_ports([args.port, ports.metric_port, *worker_ports])
+    logger.info("PD master worker ports: %s", worker_ports)
+    process_manager.start_submodule_processes(
+        start_funcs=[start_metric_manager],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_pd_node_stats_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_prompt_cache_tree_server],
+        start_args=[(args,)],
+    )
+    return start_multiprocess_pd_master(
+        args,
+        ports=ports,
+        haproxy_binary=haproxy_binary,
+    )
 
 
 def visual_only_start(args):

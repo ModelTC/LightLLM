@@ -3,7 +3,7 @@ import time
 import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
 from lightllm.utils.log_utils import init_logger
@@ -229,6 +229,13 @@ class PDChunckedTransTask:
 
     def transfer_time(self):
         return time.time() - self.start_trans_time
+
+    def copy_for_notify(self) -> "PDChunckedTransTask":
+        task = copy.copy(self)
+        task.__dict__.pop("shared_time_out_mark", None)
+        task.mem_indexes = None
+        task.xfer_handle = None
+        return task
 
     def get_key(self) -> str:
         # page_kind 参与 P/D 任务匹配，发送端和接收端必须使用一致的协议取值。

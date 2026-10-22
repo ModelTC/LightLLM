@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import weakref
 
 import pytest
 import torch
@@ -8,6 +9,7 @@ flashinfer = pytest.importorskip("flashinfer")
 from lightllm.common.basemodel.attention.flashinfer.mla import (  # noqa: E402
     MlaFlashInferDecodeAttState,
 )
+from lightllm.common.basemodel.infer_struct import InferStateInfo  # noqa: E402
 
 
 def _make_wrapper(
@@ -123,9 +125,12 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
         init_short=True,
     )
     backend = SimpleNamespace(tp_q_head_num=num_heads, infer_page_size=page_size)
+    captured_owner = InferStateInfo()
+    captured_owner.batch_size = batch_size
+    captured_owner.b_seq_len = graph_wrapper._kv_len_arr_buf
     graph_state = MlaFlashInferDecodeAttState(
         backend=backend,
-        infer_state=SimpleNamespace(batch_size=batch_size, b_seq_len=graph_wrapper._kv_len_arr_buf),
+        _infer_state_weak_ref=weakref.ref(captured_owner),
         kv_starts=graph_wrapper._kv_indptr_buf,
         kv_indices=graph_wrapper._kv_indices_buf,
         decode_wrapper=graph_wrapper,
@@ -143,11 +148,13 @@ def test_mla_cuda_graph_triton_plan_matches_flashinfer_plan(lengths, num_heads, 
         replay_lens = torch.tensor(replay_lengths, dtype=torch.int32, device="cuda")
         replay_indptr = torch.zeros_like(kv_indptr)
         replay_indptr[1:] = torch.cumsum((replay_lens + page_size - 1) // page_size, dim=0)
+        runtime_owner = InferStateInfo()
+        runtime_owner.batch_size = batch_size
+        runtime_owner.b_seq_len = replay_lens
+        runtime_owner.max_kv_seq_len = max(replay_lengths)
         new_state = MlaFlashInferDecodeAttState(
             backend=backend,
-            infer_state=SimpleNamespace(
-                batch_size=batch_size, b_seq_len=replay_lens, max_kv_seq_len=max(replay_lengths)
-            ),
+            _infer_state_weak_ref=weakref.ref(runtime_owner),
             kv_starts=replay_indptr,
             kv_indices=kv_indices,
         )

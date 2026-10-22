@@ -74,11 +74,13 @@ def _init_env(
             mem_managers=mem_managers,
         )
         assert manager is not None
+        task_out_queue.put("module_ready")
 
         while True:
             time.sleep(100)
 
     except Exception as e:
+        task_out_queue.put("init_failed")
         logger.exception(str(e))
         logger.error(f"Fatal error happened in kv trans process: {e}")
         pass

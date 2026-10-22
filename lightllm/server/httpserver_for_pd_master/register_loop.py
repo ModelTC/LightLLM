@@ -2,7 +2,7 @@ import asyncio
 import pickle
 import websockets
 import socket
-from lightllm.utils.net_utils import get_hostname_ip
+from lightllm.utils.net_utils import get_hostname_ip, format_host_port
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -14,7 +14,7 @@ logger = init_logger(__name__)
 async def register_loop(manager: HttpServerManagerForPDMaster):
     assert manager.args.host not in ["127.0.0.1", "localhost"], "pd mode must specify host ip"
 
-    if manager.args.host in ["0.0.0.0"]:
+    if manager.args.host in ["0.0.0.0", "::"]:
         manager.host_ip = get_hostname_ip()
     else:
         manager.host_ip = manager.args.host
@@ -30,7 +30,7 @@ async def register_loop(manager: HttpServerManagerForPDMaster):
                 sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
 
                 pd_master_obj = PD_Master_Obj(
-                    node_id=manager.args.pd_node_id, host_ip_port=f"{manager.host_ip}:{ports.port}"
+                    node_id=manager.args.pd_node_id, host_ip_port=format_host_port(manager.host_ip, ports.port)
                 )
 
                 await websocket.send(pickle.dumps(pd_master_obj))

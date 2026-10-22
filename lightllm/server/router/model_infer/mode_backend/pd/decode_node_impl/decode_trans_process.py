@@ -100,11 +100,13 @@ def _init_env(
             up_status_in_queue=up_status_in_queue,
         )
         assert manager is not None
+        task_out_queue.put("module_ready")
 
         while True:
             time.sleep(100)
 
     except Exception as e:
+        task_out_queue.put("init_failed")
         logger.exception(str(e))
         logger.error(f"Fatal error happened in kv trans process: {e}")
         pass
@@ -210,7 +212,9 @@ class _DecodeTransModule:
             trans_task_group: PDChunckedTransTaskGroup = self.recv_task_group_queue.get()
 
             with self.waiting_dict_lock:
+                shared_time_out_mark = _SharedTimeOutMark()
                 for task in trans_task_group.task_list:
+                    task.shared_time_out_mark = shared_time_out_mark
                     if task.need_transfer_page():
                         self.waiting_dict[task.get_key()] = task
                     else:
@@ -290,6 +294,7 @@ class _DecodeTransModule:
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
+                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
@@ -320,6 +325,7 @@ class _DecodeTransModule:
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
+                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
@@ -348,7 +354,7 @@ class _DecodeTransModule:
         with self.waiting_dict_lock:
             timeout_tasks = []
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.time_out():
+                if trans_task.shared_time_out_mark.time_out(trans_task):
                     timeout_tasks.append(self.waiting_dict.pop(key))
 
         for trans_task in timeout_tasks:
@@ -458,3 +464,18 @@ class _DecodeTransModule:
                     error_info=trans_task.error_info,
                 )
                 self.transporter.send_error_info_to_prefill_node(trans_task=trans_task)
+
+
+class _SharedTimeOutMark:
+    """Pending pages share request progress; active pages keep their own deadline."""
+
+    def __init__(self):
+        self.update()
+
+    def update(self):
+        self.time_mark = time.time()
+
+    def time_out(self, task: PDChunckedTransTask) -> bool:
+        if task.start_trans_time is not None:
+            return task.time_out()
+        return time.time() - self.time_mark > task.time_out_secs

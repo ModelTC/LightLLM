@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import inspect
 import warnings
 
@@ -40,7 +41,7 @@ except ImportError as exc:
 
 class NeoFa3AttBackend(Fa3AttBackend):
     def create_att_prefill_state(self, infer_state) -> "NeoFa3PrefillAttState":
-        return NeoFa3PrefillAttState(backend=self, infer_state=infer_state)
+        return NeoFa3PrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

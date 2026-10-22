@@ -15,6 +15,7 @@ from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 
 logger = init_logger(__name__)
 
@@ -79,13 +80,22 @@ class MultiLevelKvCacheModule(object):
             page_len_start_list = [0] + page_len_list
             assert len(page_list) <= len(page_len_list)
 
-            if page_list:
-                match_tokens = page_len_list[len(page_list) - 1]
-            else:
-                match_tokens = 0
+            matched_page_num = len(page_list)
+            original_match_tokens = page_len_list[matched_page_num - 1] if matched_page_num else 0
+            # CPU 和 disk 命中统一在恢复前裁剪；图片内部的 KV 可以保留，但不能作为恢复终点。
+            while matched_page_num:
+                match_tokens = page_len_list[matched_page_num - 1]
+                cache_len = clamp_mm_cache_len(match_tokens, req.mm_input_spans)
+                if cache_len == match_tokens:
+                    break
+                matched_page_num = bisect.bisect_right(page_len_list, cache_len, hi=matched_page_num)
+            match_tokens = page_len_list[matched_page_num - 1] if matched_page_num else 0
 
             # 更新命中的 cpu kv cache 长度, 减去radix cache和disk cache的部分.
             if is_master_in_dp:
+                req.shm_req.disk_prompt_cache_len = max(
+                    0, req.shm_req.disk_prompt_cache_len - (original_match_tokens - match_tokens)
+                )
                 req.shm_req.cpu_prompt_cache_len = max(
                     0, match_tokens - req.cur_kv_len - req.shm_req.disk_prompt_cache_len
                 )
@@ -100,8 +110,8 @@ class MultiLevelKvCacheModule(object):
                 if need_token_num <= idle_token_num:
                     # 计算需要加载的页面（只加载未匹配的部分）
                     ready_page_num = bisect.bisect_right(page_len_list, req.cur_kv_len)
-                    assert ready_page_num <= len(page_list)
-                    need_pages = page_list[ready_page_num:]  # 只取需要的页面
+                    assert ready_page_num <= matched_page_num
+                    need_pages = page_list[ready_page_num:matched_page_num]
 
                     mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
                     assert mem_indexes is not None
@@ -128,9 +138,7 @@ class MultiLevelKvCacheModule(object):
                         [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
                     )
 
-                    assert (
-                        len(mem_indexes_cuda) == page_len_list[len(page_list) - 1] - page_len_start_list[ready_page_num]
-                    )
+                    assert len(mem_indexes_cuda) == match_tokens - page_len_start_list[ready_page_num]
 
                     # 更新 req 状态。
                     idle_token_num -= need_token_num

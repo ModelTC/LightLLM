@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
@@ -43,10 +44,10 @@ class FlashInferAttBackend(BaseAttBackend):
         )
 
     def create_att_prefill_state(self, infer_state) -> "FlashInferPrefillAttState":
-        return FlashInferPrefillAttState(backend=self, infer_state=infer_state)
+        return FlashInferPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "FlashInferDecodeAttState":
-        return FlashInferDecodeAttState(backend=self, infer_state=infer_state)
+        return FlashInferDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
@@ -151,7 +152,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
     decode_wrapper: object = None
 
     def _should_init_decode_wrapper(self) -> bool:
-        return should_init_decode_wrapper(self.backend.model, self.infer_state)
+        return should_init_decode_wrapper(self.infer_state)
 
     def init_state(self):
         import flashinfer

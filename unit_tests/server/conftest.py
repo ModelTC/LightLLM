@@ -1,4 +1,56 @@
+import json
+
 import pytest
+
+
+@pytest.fixture
+def cpu_cache_factory(monkeypatch):
+    from types import SimpleNamespace
+    import torch
+    from lightllm.common.cpu_cache import CpuCacheCreator
+    from lightllm.server.multi_level_kv_cache import cpu_cache_client, shm_objs
+
+    monkeypatch.setattr(
+        shm_objs, "_create_shm", lambda name, byte_size: SimpleNamespace(size=byte_size, buf=bytearray(byte_size))
+    )
+    monkeypatch.setattr(
+        cpu_cache_client,
+        "AtomicShmLock",
+        lambda **kwargs: SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
+    )
+    monkeypatch.setattr(cpu_cache_client, "get_disk_cache_prompt_limit_length", lambda: 0)
+    monkeypatch.setattr(
+        CpuCacheCreator,
+        "create_or_attach",
+        lambda self, **kwargs: torch.zeros(
+            self.tensor_spec.shape, dtype=self.tensor_spec.dtype, pin_memory=torch.cuda.is_available()
+        ),
+    )
+
+    def create(meta):
+        monkeypatch.setattr(
+            cpu_cache_client,
+            "get_env_start_args",
+            lambda: SimpleNamespace(cpu_kv_cache_shm_id=0),
+        )
+        monkeypatch.setattr(cpu_cache_client, "calcu_cpu_cache_meta", lambda: meta)
+        return cpu_cache_client.CpuKvCacheClient(only_create_meta_data=False, init_shm_data=True)
+
+    return create
+
+
+@pytest.fixture
+def single_http_worker_start_args(monkeypatch):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    monkeypatch.setenv(
+        "LIGHTLLM_START_ARGS",
+        json.dumps(vars(StartArgs(httpserver_workers=1))),
+    )
+    get_env_start_args.cache_clear()
+    yield
+    get_env_start_args.cache_clear()
 
 
 @pytest.fixture

@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from typing import TYPE_CHECKING, Tuple
 
@@ -19,10 +20,10 @@ class NsaFlashMlaFp8SparseAttBackend(BaseAttBackend):
         ]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaFp8SparsePrefillAttState":
-        return NsaFlashMlaFp8SparsePrefillAttState(backend=self, infer_state=infer_state)
+        return NsaFlashMlaFp8SparsePrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaFp8SparseDecodeAttState":
-        return NsaFlashMlaFp8SparseDecodeAttState(backend=self, infer_state=infer_state)
+        return NsaFlashMlaFp8SparseDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass
