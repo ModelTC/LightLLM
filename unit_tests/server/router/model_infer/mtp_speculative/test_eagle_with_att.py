@@ -23,6 +23,7 @@ def test_eagle3_reuses_attention_flow_and_maps_proposal_tokens():
 
     draft_model = SimpleNamespace(
         forward=forward,
+        should_project_draft_tail_logits=lambda: False,
         map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100,
     )
     proposer = Eagle3Proposer(
@@ -102,7 +103,9 @@ def test_eagle_with_att_prefill_builds_draft_kv_without_mutating_target():
         return ModelOutput(logits=torch.empty((0,), device=device))
 
     proposer = EagleWithAttProposer(
-        backend=SimpleNamespace(draft_models=[SimpleNamespace(forward=forward)]),
+        backend=SimpleNamespace(
+            draft_models=[SimpleNamespace(forward=forward, should_project_draft_tail_logits=lambda: False)]
+        ),
         enable_dynmaic_mtp=False,
     )
     proposer.fill_draft_model_kv_state(
@@ -158,7 +161,7 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
         )
 
     backend = SimpleNamespace(
-        draft_models=[SimpleNamespace(forward=forward)],
+        draft_models=[SimpleNamespace(forward=forward, should_project_draft_tail_logits=lambda: False)],
         _gen_argmax_token_ids=lambda output: output.logits[:, 0].long(),
         _gen_argmax_token_ids_and_prob=lambda output: (
             output.logits[:, 0].long(),
@@ -211,3 +214,44 @@ def test_eagle_with_att_commits_verify_kv_then_recurrently_decodes(monkeypatch):
     assert draft_calls[1]["total_token_num"] == 46
     assert target_input.input_ids is original_input_ids
     assert target_input.mtp_draft_input_hiddens is None
+
+
+@pytest.mark.parametrize("capacity", [2, 10, 264])
+def test_selected_tail_logits_keep_complete_draft_kv_input(capacity):
+    hidden = torch.arange(20).view(10, 2).float()
+    target_input = SimpleNamespace(
+        is_prefill=False,
+        batch_size=10,
+        input_ids=None,
+        b_position_delta=torch.zeros(10, dtype=torch.int32),
+        mtp_draft_input_hiddens=None,
+        b_logits_row_idx=None,
+    )
+
+    def forward(model_input):
+        assert model_input.batch_size == 10
+        assert model_input.mtp_draft_input_hiddens is hidden
+        assert model_input.input_ids.numel() == 10
+        torch.testing.assert_close(model_input.b_logits_row_idx, torch.tensor([1, 8]))
+        return ModelOutput(logits=torch.tensor([[7.0], [9.0]]), input_rows_per_logit=5)
+
+    draft_model = SimpleNamespace(
+        forward=forward,
+        should_project_draft_tail_logits=lambda: True,
+        args=SimpleNamespace(running_max_req_size=capacity),
+    )
+    proposer = EagleWithAttProposer(
+        backend=SimpleNamespace(draft_models=[draft_model], _gen_argmax_token_ids=lambda out: out.logits[:, 0].long()),
+        enable_dynmaic_mtp=False,
+    )
+    output = proposer.propose_next(
+        target_input,
+        ModelOutput(logits=torch.empty(10, 1), mtp_collector=ModelMtpOutputCollector(spec_hidden=hidden)),
+        torch.arange(10),
+        torch.tensor([0, 5]),
+        1,
+        torch.tensor([2, 4]),
+    )
+    torch.testing.assert_close(output.token_ids, torch.tensor([[7], [9]]))
+    assert target_input.b_logits_row_idx is None
+    assert target_input.input_ids is None
