@@ -54,8 +54,8 @@ def complete_chat(monkeypatch):
         monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value=prompt))
         captured_params = []
 
-        async def generate(*args, **kwargs):
-            captured_params.append(args[1])
+        async def generate(_prompt, sampling_params, *_args, **_kwargs):
+            captured_params.append(sampling_params)
             for index, (text, token_id) in enumerate(chunks):
                 finish = FinishStatus(finish_status) if index == len(chunks) - 1 else FinishStatus()
                 yield 0, text, {"id": token_id, "prompt_tokens": 1}, finish
@@ -266,7 +266,7 @@ def test_glm_grammar_activation_follows_rendered_prompt(monkeypatch, thinking):
     initial_reasoning_state = ReasoningParser.get_initial_reasoning_state("glm45", prompt, default)
     assert default is not thinking
     assert initial_reasoning_state is thinking
-    assert api_openai._get_guided_reasoning_end(request, tokenizer, initial_reasoning_state) == (
+    assert api_openai._get_guided_reasoning_end(tokenizer, "glm45", initial_reasoning_state) == (
         [99] if thinking else []
     )
 

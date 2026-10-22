@@ -49,7 +49,8 @@ def test_chat_grammar_activation_matches_template_thinking(monkeypatch, parser, 
         chat_template_kwargs=template_kwargs,
         reasoning_effort=effort,
     )
-    result = api_openai._get_guided_reasoning_end(request, SimpleNamespace(encode=encode))
+    thinking = api_openai._is_force_thinking_mode(request)
+    result = api_openai._get_guided_reasoning_end(SimpleNamespace(encode=encode), parser, thinking)
     assert encoded == ([marker] if marker else [])
     assert result == ([7, 8] if marker else [])
 
@@ -134,8 +135,11 @@ def test_fixed_reasoning_does_not_require_a_template_thinking_switch(monkeypatch
     monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: False)
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: list(text.encode()))
     request = ChatCompletionRequest(model="test", messages=[])
-    assert api_openai._is_force_thinking_mode(request) == (marker is not None)
-    assert api_openai._get_guided_reasoning_end(request, tokenizer) == (list(marker.encode()) if marker else [])
+    thinking = api_openai._is_force_thinking_mode(request)
+    assert thinking == (marker is not None)
+    assert api_openai._get_guided_reasoning_end(tokenizer, parser, thinking) == (
+        list(marker.encode()) if marker else []
+    )
 
 
 @pytest.mark.parametrize("stream", [False, True])

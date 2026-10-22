@@ -201,15 +201,10 @@ def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
     return True  # default
 
 
-def _get_guided_reasoning_end(
-    request: ChatCompletionRequest, tokenizer, initial_reasoning_state: Optional[bool] = None
-) -> List[int]:
+def _get_guided_reasoning_end(tokenizer, parser_name: Optional[str], initial_reasoning_state: bool) -> List[int]:
     """Delay answer constraints while generation starts inside reasoning."""
-    if initial_reasoning_state is None:
-        initial_reasoning_state = _is_force_thinking_mode(request)
-    if not initial_reasoning_state:
+    if not parser_name or not initial_reasoning_state:
         return []
-    parser_name = get_env_start_args().reasoning_parser
     detector = ReasoningParser.DetectorMap[parser_name.lower()]()
     token_ids = tokenizer.encode(detector.grammar_start_token, add_special_tokens=False)
     return token_ids
@@ -222,7 +217,7 @@ def _process_reasoning_stream(
     metadata: Dict[str, Any],
     request: ChatCompletionRequest,
     force_reasoning: bool,
-) -> tuple[Optional[str], str]:
+) -> tuple[str, str]:
     """Process reasoning content and update its token usage."""
     if index not in reasoning_parser_dict:
         reasoning_parser_dict[index] = ReasoningParser(
@@ -414,7 +409,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
         if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
             sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
-                request, g_objs.httpserver_manager.tokenizer, initial_reasoning_state
+                g_objs.httpserver_manager.tokenizer, reasoning_parser, initial_reasoning_state
             )
 
     sampling_params = SamplingParams()
@@ -604,14 +599,14 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     reasoning_parser_dict,
                     metadata,
                     request,
-                    initial_reasoning_state,
+                    force_reasoning=initial_reasoning_state,
                 )
                 if current_finish_reason is not None:
                     # Flush before tool parsing so buffered argument text follows
                     # the same path as every other chunk, including on truncation.
                     flush_reasoning, flush_text = reasoning_parser_dict[choice_index].flush()
-                    reasoning_text = (reasoning_text or "") + (flush_reasoning or "")
-                    delta = (delta or "") + (flush_text or "")
+                    reasoning_text += flush_reasoning
+                    delta += flush_text
                 if reasoning_text:
                     if request.separate_reasoning:
                         choice_data = ChatCompletionStreamResponseChoice(
@@ -627,7 +622,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                         )
                         yield f"data: {_serialize_sse_chunk(chunk, _choice_nulls)}\n\n"
                     else:
-                        delta = reasoning_text + (delta or "")
+                        delta = reasoning_text + delta
 
             if request.tool_choice != "none" and request.tools:
                 # parse_increment => returns (normal_text, calls)
