@@ -40,7 +40,7 @@ def test_grouped_o_projection_writes_contiguous_consumer_layout(monkeypatch, gro
         return input @ wb
 
     weight = SimpleNamespace(
-        o_proj_fp8=False,
+        o_proj_use_mm=False,
         wo_a_=SimpleNamespace(dim2=3, bmm=bmm),
         wo_b_=SimpleNamespace(mm=mm),
     )
@@ -50,7 +50,7 @@ def test_grouped_o_projection_writes_contiguous_consumer_layout(monkeypatch, gro
     assert len(allocations) == 1
 
 
-def test_fp8_o_projection_uses_selected_linear_weight(monkeypatch):
+def test_single_group_o_projection_uses_linear_weight(monkeypatch):
     layer = object.__new__(transformer_layer_infer.DeepseekV4TransformerLayerInfer)
     layer.qk_rope_head_dim = 2
     layer._select_rope = lambda _: (None, None)
@@ -59,7 +59,7 @@ def test_fp8_o_projection_uses_selected_linear_weight(monkeypatch):
     x = torch.randn(16, 2, 4)
     wa, wb = torch.randn(8, 3), torch.randn(3, 5)
     weight = SimpleNamespace(
-        o_proj_fp8=True,
+        o_proj_use_mm=True,
         wo_a_=SimpleNamespace(mm=lambda input: input @ wa),
         wo_b_=SimpleNamespace(mm=lambda input: input @ wb),
     )

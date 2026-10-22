@@ -91,20 +91,17 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         # grouped low-rank output projection (wo_a per-group [in, o_lora], wo_b row-parallel
         # [groups*o_lora -> hidden]).
         per_group_in = self.n_heads * self.head_dim // self.o_groups
-        # When o_groups == tp_world_size (e.g. tp8) each rank owns exactly one group, so the
-        # grouped O-proj can collapse to a single GEMM. SGLang only enables the fp8 wo_a GEMM
-        # on Blackwell; on Hopper it keeps BF16, and this checkpoint stores wo_a as BF16.
-        # For >1 group per rank (tp < o_groups) the per-group inputs differ (block-diagonal), so
-        # keep the BF16 grouped bmm.
+        # Keep the training BF16 weights. On Blackwell, one group per rank can
+        # use a plain GEMM; multiple groups use a grouped bmm.
         major, _ = torch.cuda.get_device_capability()
-        self.o_proj_fp8 = (self.o_groups // self.tp_world_size_) == 1 and major >= 10
-        if self.o_proj_fp8:
+        self.o_proj_use_mm = (self.o_groups // self.tp_world_size_) == 1 and major >= 10
+        if self.o_proj_use_mm:
             self.wo_a_ = ROWMMWeight(
                 in_dim=per_group_in,
                 out_dims=[self.o_groups * self.o_lora_rank],
                 weight_names=f"{p}.wo_a.weight",
                 data_type=self.data_type_,
-                quant_method=self.get_quant_method("wo_a"),
+                quant_method=None,
             )
         else:
             self.wo_a_ = ROWBMMWeight(
@@ -320,7 +317,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         # - routed expert `.scale` follows the fused_moe quant method's weight_scale_suffix:
         #   MXFP4 consumes `.scale` as-is, FP8 DeepGEMM expects `.weight_scale_inv` (rename only);
         # - FP8 matmul scales only need renaming for DeepGEMM, no weight required;
-        # - FP8 pairs on no-quant paths (wo_a's ROWBMMWeight) are expanded to bf16,
+        # - FP8 pairs on no-quant paths (including wo_a) are expanded to bf16,
         #   the only case that truly requires weight and scale in the same shard.
         expert_scale_suffix = self.experts_.quant_method.weight_scale_suffix
         for scale_k in [k for k in list(weights.keys()) if k.startswith(p) and k.endswith(".scale")]:
@@ -337,10 +334,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             else:
                 weights[k] = dequant_fp8_block_to_bf16(weights[k], weights[scale_k]).to(self.data_type_)
                 del weights[scale_k]
-        # grouped-O (bf16 path only): reshape [groups*o_lora, in] -> [groups, in, o_lora] for the
-        # batched matmul. The fp8 path keeps wo_a as a plain [groups*o_lora, in] fp8 GEMM weight
-        # (its `.scale` is renamed to `.weight_scale_inv` by the loop above, not dequantized).
-        if not self.o_proj_fp8:
+        # Grouped bmm needs [groups, in, o_lora]; the plain GEMM keeps [groups*o_lora, in].
+        if not self.o_proj_use_mm:
             woa = f"{self.prefix}.attn.wo_a.weight"
             if woa in weights and weights[woa].dim() == 2:
                 w = weights[woa]

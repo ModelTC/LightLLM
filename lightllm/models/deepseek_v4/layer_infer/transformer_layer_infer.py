@@ -379,8 +379,8 @@ class DeepseekV4TransformerLayerInfer(Deepseek3_2TransformerLayerInfer):
         position_cos, position_sin = self._select_rope(infer_state)
         rotary_emb_fwd(o[..., -self.qk_rope_head_dim :], None, position_cos, position_sin, inverse=True)
         T = o.shape[0]
-        if layer_weight.o_proj_fp8:
-            # one group per rank -> a single fp8 GEMM (deepgemm .mm quantizes o to fp8 internally)
+        if layer_weight.o_proj_use_mm:
+            # One group per rank uses a single BF16 GEMM.
             o = layer_weight.wo_a_.mm(o.reshape(T, -1))  # [T, o_lora]
         else:
             grouped_o = o.reshape(T, self.tp_groups, -1).transpose(0, 1)
