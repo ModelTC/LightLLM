@@ -1010,7 +1010,8 @@ def test_busy_before_first_token_logs_only_terminal_outcome(monkeypatch, mode):
 
 
 @pytest.mark.parametrize("retry_enabled", [False, True])
-def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypatch, retry_enabled):
+@pytest.mark.parametrize("failure_site", ["stream", "dispatch"])
+def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypatch, retry_enabled, failure_site):
     import time
     from unittest.mock import MagicMock
     from lightllm.utils.error_utils import ServerBusyError
@@ -1038,6 +1039,18 @@ def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypa
             raise ServerBusyError("segment busy before first token")
 
     manager.fetch_pd_stream = raw_stream
+    if failure_site == "dispatch":
+        original_dispatch = manager.pd_node_stats.add_dispatched_info
+        dispatch_count = 0
+
+        async def dispatch(**kwargs):
+            nonlocal dispatch_count
+            dispatch_count += 1
+            if dispatch_count == 2:
+                raise ServerBusyError("continuation dispatch failed")
+            await original_dispatch(**kwargs)
+
+        manager.pd_node_stats.add_dispatched_info = dispatch
 
     async def consume():
         return [item async for item in manager._generate_one("prompt", params, None, request, time.time(), 80, 10)]
@@ -1046,7 +1059,8 @@ def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypa
         with pytest.raises(ServerBusyError):
             await consume()
         assert [call.kwargs["status"] for call in summary.call_args_list] == ["continued", "busy"]
-        assert attempts == 2
+        assert [call.args[0] for call in summary.call_args_list] == [1, 80]
+        assert attempts == (2 if failure_site == "stream" else 1)
         assert not manager._summary_states
         assert not manager.active_req_ids
 

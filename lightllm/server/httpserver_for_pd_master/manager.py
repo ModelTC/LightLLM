@@ -415,6 +415,7 @@ class HttpServerManagerForPDMaster(HttpPdNormalManagerHelper, HttpPdPrefillFirst
 
                 # 分段请求始终复用循环外选定的 P 节点；这里只按每段实际发送的
                 # prompt 更新该节点的在途 prefill 负载，不会重新选点。
+                summary_state.clear()
                 block_prompt = prompt + "".join(history_gen_token_strs)
                 if segment_index > 0:
                     pending_prefill_load_chars = len(block_prompt)

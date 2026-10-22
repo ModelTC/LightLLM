@@ -153,12 +153,13 @@ def test_invalid_configuration_fails_explicitly(settings):
     env.update(settings)
     env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2]) + os.pathsep + env.get("PYTHONPATH", "")
     result = subprocess.run(
-        [sys.executable, "-c", "from lightllm.utils import log_utils"],
+        [sys.executable, "-c", "from lightllm.utils import log_utils; log_utils._setup_logger()"],
         env=env,
         text=True,
         capture_output=True,
         timeout=30,
     )
+    assert "using defaults until startup validation" in result.stdout
     assert result.returncode != 0
     assert "ValueError" in result.stderr
 
@@ -720,3 +721,34 @@ def test_all_logging_cli_options_survive_start_args_and_override_environment(sep
         LIGHTLLM_LOG_HTTP_ACCESS="0",
     )
     assert output.strip() == "configured"
+
+
+@pytest.mark.parametrize("setting", ["20", "Info,WARNING"])
+def test_invalid_legacy_level_import_keeps_warning_capture(setting):
+    output = _run_logging(
+        """
+        import warnings
+        from lightllm.utils import log_utils
+        warnings.warn("spawn-warning-regression", UserWarning)
+        """,
+        LIGHTLLM_LOG_LEVEL=setting,
+        LIGHTLLM_LOG_FORMAT="json",
+    )
+    events = [json.loads(line) for line in output.splitlines()]
+    assert any(event["logger"] == "py.warnings" and "spawn-warning-regression" in event["message"] for event in events)
+
+
+def test_log_time_ready_uses_process_local_monotonic_windows(monkeypatch):
+    clock = [0]
+    pid = [100]
+    monkeypatch.setattr(log_utils, "_log_time_mark_dict", {})
+    monkeypatch.setattr(log_utils.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(log_utils.os, "getpid", lambda: pid[0])
+    assert not log_utils.log_time_ready("window", 10)
+    clock[0] = 10
+    assert log_utils.log_time_ready("window", 10)
+    assert not log_utils.log_time_ready("window", 10)
+    pid[0] = 101
+    assert not log_utils.log_time_ready("window", 10)
+    clock[0] = 20
+    assert log_utils.log_time_ready("window", 10)

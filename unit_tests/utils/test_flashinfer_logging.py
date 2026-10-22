@@ -25,3 +25,4 @@ def test_nonleader_workspace_failure_remains_visible(monkeypatch):
     assert workspace.disabled is True
     logger.warning.assert_called_once()
     assert "local allocation failed" in logger.warning.call_args.args[1]
+    logger.debug.assert_called_once_with("FlashInfer workspace initialization diagnostics", exc_info=True)

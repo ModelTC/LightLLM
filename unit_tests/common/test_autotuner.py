@@ -502,3 +502,21 @@ def test_missing_configs_warn_once_and_keep_per_kernel_debug_details(tmp_path, m
     assert "event=kernel.defaults_used" in logger.warning.call_args.args[0]
     assert logger.debug.call_count == 2
     assert {call.args[1] for call in logger.debug.call_args_list} == {"missing_first", "missing_second"}
+
+
+@pytest.mark.parametrize("progress", [False, True])
+def test_autotune_progress_consumer(tmp_path, monkeypatch, progress):
+    original = autotuner_module.tqdm
+    flags = []
+
+    def bar(*args, **kwargs):
+        flags.append(kwargs["disable"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(autotuner_module, "tqdm", bar)
+    monkeypatch.setattr(autotuner_module, "progress_enabled", lambda: progress)
+    kernel, _, benchmarks, _ = make_kernel(tmp_path, monkeypatch, "progress_consumer")
+    with Autotuner.autotune_warmup():
+        kernel(8)
+    assert benchmarks
+    assert flags == [not progress]

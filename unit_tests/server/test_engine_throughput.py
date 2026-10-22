@@ -196,7 +196,8 @@ def test_resume_excludes_idle_time_without_discarding_short_burst(monkeypatch, c
 
 
 @pytest.mark.parametrize("node_rank,dp_size", [(0, 1), (1, 1), (1, 2)])
-def test_router_first_burst_excludes_initial_idle(monkeypatch, counters, node_rank, dp_size):
+@pytest.mark.parametrize("readiness", ["always", "never", "drop"])
+def test_router_first_burst_excludes_initial_idle(monkeypatch, counters, node_rank, dp_size, readiness):
     import asyncio
     from lightllm.server.router import manager
 
@@ -207,7 +208,9 @@ def test_router_first_burst_excludes_initial_idle(monkeypatch, counters, node_ra
     monkeypatch.setattr(manager, "init_logger", lambda name: logger)
     router = manager.RouterManager.__new__(manager.RouterManager)
     router.engine_counters = counters
-    router.service_ready = SimpleNamespace(get_value=lambda: 1)
+    router.service_ready = SimpleNamespace(
+        get_value=lambda: int(readiness != "never" and (readiness != "drop" or now[0] < 6))
+    )
     router.req_queue = Mock()
     router.req_queue.get_wait_req_num.return_value = 0
     router.running_batch = None
@@ -234,7 +237,7 @@ def test_router_first_burst_excludes_initial_idle(monkeypatch, counters, node_ra
     router._step = step
     with pytest.raises(StopLoop):
         asyncio.run(router.loop_for_fwd())
-    if dp_size == 1 and node_rank != 0:
+    if readiness == "never" or (dp_size == 1 and node_rank != 0):
         logger.info.assert_not_called()
     else:
         logger.info.assert_called_once()

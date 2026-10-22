@@ -344,16 +344,24 @@ def test_readiness_waits_for_bound_endpoint_and_pd_topology(monkeypatch):
     assert logger.info.call_count == 2
     flag.set_value.assert_called_once_with(1)
     assert logger.info.call_args.kwargs["extra"]["event"] == "service.ready"
+    assert logger.info.call_args.kwargs["extra"]["startup_s"] == 15
     state.observe(None)
     state.observe(None)
     logger.warning.assert_not_called()
     state.observe(None)
+    logger.warning.assert_not_called()
+    assert state.ready
+    state.observe(503)
+    state.observe(503)
+    state.observe(503)
     logger.warning.assert_called_once()
+    assert logger.warning.call_args.kwargs["extra"]["reason"] == "readiness_probe_failed"
     assert flag.set_value.call_args.args == (0,)
     state.observe(200)
     assert not state.ready
     state.observe(200)
     assert logger.info.call_args.kwargs["extra"]["event"] == "service.recovered"
+    assert logger.info.call_args.kwargs["extra"]["uptime_s"] == 15
 
 
 @pytest.mark.parametrize(
@@ -424,6 +432,11 @@ def test_readiness_tolerates_isolated_failures_and_confirms_recovery(monkeypatch
     flag.set_value.assert_called_once_with(1)
     for _ in range(3):
         state.observe(failure)
+    if failure is None:
+        assert state.ready
+        flag.set_value.assert_called_once_with(1)
+        logger.warning.assert_not_called()
+        return
     assert not state.ready
     assert flag.set_value.call_args.args == (0,)
     logger.warning.assert_called_once()
@@ -438,7 +451,7 @@ def test_readiness_tolerates_isolated_failures_and_confirms_recovery(monkeypatch
 
 
 @pytest.mark.parametrize("failure,reason", [("timeout", "probe_timeout"), ("connection", "probe_connection_failed")])
-def test_readiness_monitor_reports_transport_reason_and_stops_after_http_exit(monkeypatch, failure, reason):
+def test_readiness_monitor_transport_failures_preserve_ready_and_stop_after_http_exit(monkeypatch, failure, reason):
     import requests
     from unittest.mock import Mock, MagicMock
     from lightllm.server.router.dynamic_prompt import shared_arr
@@ -462,9 +475,8 @@ def test_readiness_monitor_reports_transport_reason_and_stops_after_http_exit(mo
     args = SimpleNamespace(run_mode="normal", host="127.0.0.1", model_name="test")
     manager.start_readiness_monitor(process, args)
     assert session.get.call_count == 4
-    logger.warning.assert_called_once()
-    assert logger.warning.call_args.kwargs["extra"]["reason"] == reason
-    assert [call.args for call in flag.set_value.call_args_list] == [(0,), (1,), (0,)]
+    logger.warning.assert_not_called()
+    assert [call.args for call in flag.set_value.call_args_list] == [(0,), (1,)]
     session.__exit__.assert_called_once()
 
 

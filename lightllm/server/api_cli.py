@@ -397,7 +397,11 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         help="Whether or not to allow for custom models defined on the Hub in their own modeling files.",
     )
-    parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
+    parser.add_argument(
+        "--detail_log",
+        action="store_true",
+        help="enable sampled request metadata at DEBUG; HTTP prompt text and token IDs are omitted.",
+    )
     parser.add_argument(
         "--pd_detail_log",
         action="store_true",

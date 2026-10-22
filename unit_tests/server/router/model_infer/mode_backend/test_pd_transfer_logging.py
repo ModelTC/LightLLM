@@ -129,3 +129,113 @@ def test_nixl_factory_forwards_transport_arguments(monkeypatch):
     result = kv_transporter.create_kv_transporter(SimpleNamespace(pd_trans_mode="nixl"), 7, 2, buffer)
     constructor.assert_called_once_with(node_id=7, tp_idx=2, kv_move_buffer=buffer)
     assert result is constructor.return_value
+
+
+@pytest.mark.parametrize("level", [20, 10])
+@pytest.mark.parametrize("kind,tokens", [("kv", 3), ("kv", 0), ("state", 0)])
+def test_decode_success_real_debug_window(monkeypatch, caplog, level, kind, tokens):
+    import logging
+    from lightllm.utils import log_utils
+
+    module = decode_trans_process
+    worker = module._DecodeTransModule.__new__(module._DecodeTransModule)
+    worker.device_id = 0
+    worker.page_index_queue = queue.Queue()
+    worker.task_out_queue = queue.Queue()
+    worker.transporter = Mock(kv_move_buffer=torch.empty((1, 4), dtype=torch.float16))
+    logger = logging.getLogger("decode-transfer-regression")
+    monkeypatch.setattr(module, "logger", logger)
+    monkeypatch.setattr(module.torch.cuda, "set_device", Mock())
+    clock = [0]
+    monkeypatch.setattr(log_utils.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(log_utils, "get_log_stats_interval", lambda: 10)
+    transfer = Mock(return_value=tokens)
+    task = SimpleNamespace(
+        request_id=123,
+        page_kind=kind,
+        transfer_kv_num=transfer,
+        dst_page_index=1,
+        xfer_handle=None,
+        create_time=0,
+        createRetObj=lambda: "done",
+    )
+    start, end = Mock(), Mock()
+    start.elapsed_time.return_value = 2.5
+    count = [0]
+
+    class StopLoop(BaseException):
+        pass
+
+    def get(timeout):
+        assert timeout == 10
+        count[0] += 1
+        if count[0] <= 3:
+            return end, start, task
+        if count[0] == 4:
+            clock[0] = 11
+            raise queue.Empty()
+        raise StopLoop()
+
+    worker.success_queue = SimpleNamespace(get=get)
+    with caplog.at_level(level, logger=logger.name), pytest.raises(StopLoop):
+        worker.success_loop()
+    assert worker.task_out_queue.qsize() == 3 and worker.page_index_queue.qsize() == 3
+    assert end.synchronize.call_count == 3
+    records = [r for r in caplog.records if r.name == logger.name]
+    assert len(records) == 2 * int(level == 10 and (kind != "kv" or tokens > 0))
+    if level == 20:
+        transfer.assert_not_called()
+        start.elapsed_time.assert_not_called()
+    if records:
+        record = records[1]
+        assert record.event == "kv.transfer.decode"
+        assert record.pages == 2 and record.kv_tokens_total == tokens * 2
+        assert record.state_pages == (2 if kind == "state" else 0)
+        assert record.read_page_gpu_ms_total == 5
+        assert record.bytes_total == 16
+        assert record.request_id_sample == {"count": 1, "sample": [123]}
+
+
+def test_prefill_idle_flushes_transfer_and_telemetry_separately(monkeypatch):
+    module = prefill_trans_process
+    worker = module._PrefillTransModule.__new__(module._PrefillTransModule)
+    worker.device_id = 0
+    worker._debug_telemetry = Mock()
+    transfer = Mock(interval=7)
+    monkeypatch.setattr(module, "DebugStatsLogger", Mock(return_value=transfer))
+    monkeypatch.setattr(module.torch.cuda, "set_device", Mock())
+
+    class StopLoop(BaseException):
+        pass
+
+    worker.success_queue = Mock()
+    worker.success_queue.get.side_effect = [queue.Empty(), StopLoop()]
+    with pytest.raises(StopLoop):
+        worker.success_loop()
+    assert worker.success_queue.get.call_args.kwargs == {"timeout": 7}
+    transfer.flush.assert_called_once()
+    worker._debug_telemetry.flush.assert_called_once()
+
+
+def test_prefill_info_does_not_collect_nixl_telemetry(monkeypatch):
+    import logging
+    import threading
+
+    worker = prefill_trans_process._PrefillTransModule.__new__(prefill_trans_process._PrefillTransModule)
+    task = Mock(xfer_handle="handle")
+    task.get_key.return_value = "key"
+    worker.waiting_dict = {"key": task}
+    worker.waiting_dict_lock = threading.Lock()
+    worker.transporter = Mock(capture_telemetry=True)
+    worker.transporter.check_task_status.return_value = "DONE"
+    worker.success_queue = queue.Queue()
+    logger = logging.getLogger("telemetry-info-regression")
+    monkeypatch.setattr(prefill_trans_process, "logger", logger)
+    old = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        worker._update_task_status_once()
+    finally:
+        logger.setLevel(old)
+    worker.transporter.nixl_agent.get_xfer_telemetry.assert_not_called()
+    assert worker.success_queue.get_nowait() is task

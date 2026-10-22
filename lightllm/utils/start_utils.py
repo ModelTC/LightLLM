@@ -59,7 +59,8 @@ class ServiceReadiness:
                 self.ready = self.ever_ready = True
         else:
             self.consecutive_successes = 0
-            self.consecutive_failures += 1
+            # A transport failure cannot establish that a live HTTP worker is unready.
+            self.consecutive_failures = 0 if status is None else self.consecutive_failures + 1
             if status not in (None, 503) and not self.ever_ready and not self.probe_failure_logged:
                 logger.warning(
                     "event=service.probe_failed address=%s status=%s",

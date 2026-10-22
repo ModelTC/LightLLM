@@ -706,6 +706,19 @@ def log_startup_config(logger, args):
     )
 
 
-_setup_logger()
+try:
+    _setup_logger()
+except (ValueError, TypeError) as error:
+    # Imports must remain usable before the launcher validates user configuration.
+    saved = {key: value for key, value in os.environ.items() if key.startswith("LIGHTLLM_LOG_")}
+    try:
+        for key in saved:
+            os.environ.pop(key)
+        if saved.get("LIGHTLLM_LOG_FORMAT", "").lower() in {"text", "json"}:
+            os.environ["LIGHTLLM_LOG_FORMAT"] = saved["LIGHTLLM_LOG_FORMAT"]
+        _setup_logger()
+    finally:
+        os.environ.update(saved)
+    _root_logger.warning("Invalid logging configuration; using defaults until startup validation: %s", error)
 logging.captureWarnings(True)
 init_logger("py.warnings")
