@@ -55,13 +55,8 @@ class ModelInput:
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
-    # Optional accepted-tail rows for the first EAGLE draft projection.
-    b_logits_row_idx: Optional[torch.Tensor] = None
-
     def to_cuda(self):
         self.check_input()
-        if self.b_logits_row_idx is not None:
-            self.b_logits_row_idx = self.b_logits_row_idx.cuda(non_blocking=True)
 
         # Prefill 和 decode 都必须提供的公共张量。
         self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
@@ -212,8 +207,6 @@ class ModelOutput:
 
     # Detached state-commit metadata for this forward/graph; preserved when unpadding.
     linear_state_commit: Optional["LinearStateCommit"] = None
-    # Number of physical decode rows represented by each selected logits row.
-    input_rows_per_logit: int = 1
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:
