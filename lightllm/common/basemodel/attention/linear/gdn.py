@@ -2,7 +2,7 @@ from lightllm.common.attention_state.bounded_att import GDNState
 import dataclasses
 import weakref
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -22,6 +22,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
 )
 
 if TYPE_CHECKING:
+    from lightllm.common.linear_state import LinearStateCommit, SSMRunConfig
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
@@ -201,11 +202,15 @@ class GDNLinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class GDNLinearAttDecodeAttState(BaseDecodeAttState):
+    run_config: Optional["SSMRunConfig"] = None
     backend: GDNLinearAttBackend = None
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
+
+    def get_linear_state_commit(self) -> Optional["LinearStateCommit"]:
+        return self.infer_state.req_manager.linear_state_manager.create_commit(self.run_config)
 
     def init_state(self):
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
@@ -336,7 +341,7 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
             linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(
                 layer_weight.layer_num_
             )
-            core_attn_out, self.infer_state.ssm_run_config = ssm_backend.forward(
+            core_attn_out, self.run_config = ssm_backend.forward(
                 linear_layer_idx,
                 query,
                 key,
@@ -346,7 +351,7 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
                 layer_weight.linear_A_log.weight,
                 layer_weight.linear_dt_bias.weight,
                 self.b_conv_buffer_idx,
-                run_config=self.infer_state.ssm_run_config,
+                run_config=self.run_config,
             )
             return core_attn_out, z
         core_attn_out, _ = fused_recurrent_gated_delta_rule(
@@ -399,7 +404,7 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
             linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(
                 layer_weight.layer_num_
             )
-            core_attn_out, self.infer_state.ssm_run_config = ssm_backend.forward(
+            core_attn_out, self.run_config = ssm_backend.forward(
                 linear_layer_idx,
                 query,
                 key,
@@ -410,7 +415,7 @@ class GDNLinearAttDecodeAttState(BaseDecodeAttState):
                 layer_weight.linear_dt_bias.weight,
                 self.b_conv_buffer_idx,
                 cu_seqlens_q,
-                run_config=self.infer_state.ssm_run_config,
+                run_config=self.run_config,
             )
             return core_attn_out
         assert self.b_ssm_buffer_idx.dim() == 2, "SSM buffer idx must be 2D [N, S+1]"

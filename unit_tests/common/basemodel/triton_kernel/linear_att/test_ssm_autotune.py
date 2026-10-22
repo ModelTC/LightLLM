@@ -319,6 +319,10 @@ def test_batch_configs_survive_other_warmups_and_preserve_padding(monkeypatch):
 @pytest.mark.parametrize("dynamic", [False, True])
 def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, projection, dtype, kda, dynamic):
     from types import SimpleNamespace
+    import weakref
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from lightllm.common.basemodel.attention.linear.gdn import GDNLinearAttDecodeAttState
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttDecodeAttState
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.batch_objs import PostLayerOutput, ModelMtpOutputCollector
     from lightllm.common.req_manager.linear_att import ReqManagerForMamba
@@ -366,17 +370,18 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             outputs, config = forward(ssm_backend)
-        state = SimpleNamespace(
-            hidden_collector=SimpleNamespace(finish_output=lambda **kw: ModelMtpOutputCollector()),
-            prompt_logics=None,
-            ssm_run_config=config,
-            input_rows_per_logit=1,
-        )
+        state = InferStateInfo()
+        state.req_manager = manager
+        state.hidden_collector = SimpleNamespace(finish_output=lambda **kw: ModelMtpOutputCollector())
+        att_class = KDALinearAttDecodeAttState if kda else GDNLinearAttDecodeAttState
+        state.decode_att_state1 = att_class(_infer_state_weak_ref=weakref.ref(state), run_config=config)
         output = TpPartBaseModel._create_model_output(
             None, PostLayerOutput(logits=outputs[0].view(count * 4, -1)), state
         )
+        commit = output.linear_state_commit
+        assert (commit is not None) == (mode == "compact")
         output = TpPartBaseModel._create_unpad_decode_model_output(None, output, len(ids) * 4)
-        assert output.ssm_run_config is config
+        assert output.linear_state_commit is commit
         buckets.append((graph, outputs, output, ref, args, reqs, cu, ids))
     # Published contexts and captured launches must survive later changes to
     # the tuner's dictionaries, including when two graphs replay alternately.
@@ -406,7 +411,7 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
             mtp,
             flags,
             4,
-            linear_state_batches=tuple((len(b[-1]), b[2].ssm_run_config) for b in buckets),
+            linear_state_batches=tuple((len(b[-1]), b[2].linear_state_commit) for b in buckets),
         )
         for _, _, _, ref, _, reqs, _, ids in buckets:
             ref.accept_updates(reqs[:-1], manager.linear_state_manager.accepted_state_index)

@@ -7,7 +7,7 @@ import torch
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 if TYPE_CHECKING:
-    from lightllm.common.linear_state import SSMRunConfig
+    from lightllm.common.linear_state import LinearStateCommit
 
 
 @dataclass
@@ -210,8 +210,8 @@ class ModelOutput:
     # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
     logits_token_ids: Optional[torch.Tensor] = None
 
-    # Immutable SSM configuration for this forward/graph; preserved when unpadding.
-    ssm_run_config: Optional["SSMRunConfig"] = None
+    # Detached state-commit metadata for this forward/graph; preserved when unpadding.
+    linear_state_commit: Optional["LinearStateCommit"] = None
     # Number of physical decode rows represented by each selected logits row.
     input_rows_per_logit: int = 1
 

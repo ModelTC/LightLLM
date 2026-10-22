@@ -618,12 +618,19 @@ class TpPartBaseModel:
         return new_model_input
 
     def _create_model_output(self, post_output: PostLayerOutput, infer_state: InferStateInfo) -> ModelOutput:
+        linear_state_commit = None
+        for state in (infer_state.decode_att_state, infer_state.decode_att_state1):
+            if state is not None:
+                commit = state.get_linear_state_commit()
+                if commit is not None:
+                    assert linear_state_commit is None, "multiple linear state commits in one forward"
+                    linear_state_commit = commit
         output = ModelOutput(
             logits=post_output.logits.contiguous(),
             mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
             prompt_logics=infer_state.prompt_logics,
             logits_token_ids=post_output.logits_token_ids,
-            ssm_run_config=infer_state.ssm_run_config,
+            linear_state_commit=linear_state_commit,
             input_rows_per_logit=infer_state.input_rows_per_logit,
         )
         return output

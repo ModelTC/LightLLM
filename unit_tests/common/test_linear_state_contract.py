@@ -118,3 +118,33 @@ def test_ssm_backend_publishes_detached_run_config(mode):
     assert config.num_stages == 3
     with pytest.raises(FrozenInstanceError):
         config.BV = 128
+
+
+def test_compact_commits_each_unpadded_partition_with_its_verify_config(monkeypatch):
+    from lightllm.common.basemodel.triton_kernel import mtp_utils
+    from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
+
+    owner = object.__new__(LinearStateManager)
+    owner.ssm_backend = object.__new__(CompactSSMBackend)
+    owner.accepted_state_index = torch.tensor([0, 1, 2, 0], dtype=torch.int32)
+    configs = [SSMRunConfig(8, 1), SSMRunConfig(32, 2)]
+    commits = [owner.create_commit(config) for config in configs]
+    owner.ssm_backend.run_config = {"BV": 128, "num_warps": 4}
+    calls = []
+    monkeypatch.setattr(mtp_utils, "linear_att_mtp_state_index_update", lambda **kwargs: None)
+    monkeypatch.setattr(
+        owner.ssm_backend,
+        "accept_updates",
+        lambda reqs, accepted, run_config: calls.append((reqs.tolist(), accepted, run_config)),
+    )
+    owner.commit_accepted_state(
+        torch.tensor([0, 4, 8]),
+        torch.tensor([2] * 4 + [0] * 4 + [1] * 4),
+        torch.arange(4).repeat(3),
+        torch.ones(12, dtype=torch.int32),
+        4,
+        linear_state_batches=((1, commits[0]), (0, None), (2, commits[1])),
+    )
+    assert [reqs for reqs, _, _ in calls] == [[2], [0, 1]]
+    assert all(accepted is owner.accepted_state_index for _, accepted, _ in calls)
+    assert [config for _, _, config in calls] == configs

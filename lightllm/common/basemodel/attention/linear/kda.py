@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import dataclasses
 import weakref
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Optional
 
 import torch
 
@@ -31,6 +31,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import 
 )
 
 if TYPE_CHECKING:
+    from lightllm.common.linear_state import LinearStateCommit, SSMRunConfig
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -132,10 +133,14 @@ class KDALinearAttPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class KDALinearAttDecodeAttState(BaseDecodeAttState):
+    run_config: Optional["SSMRunConfig"] = None
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
     b1_mtp_cu_q_seq_len: torch.Tensor = None
     b_num_accepted_tokens: torch.Tensor = None
+
+    def get_linear_state_commit(self) -> Optional["LinearStateCommit"]:
+        return self.infer_state.req_manager.linear_state_manager.create_commit(self.run_config)
 
     def init_state(self):
         mtp_step = self.backend.mtp_step
@@ -228,7 +233,7 @@ class KDALinearAttDecodeAttState(BaseDecodeAttState):
         ssm_backend = self.infer_state.req_manager.linear_state_manager.ssm_backend
         if ssm_backend is not None:
             linear_layer_idx = self.infer_state.req_manager.linear_config.get_linear_layer_index(layer_num)
-            output, self.infer_state.ssm_run_config = ssm_backend.forward(
+            output, self.run_config = ssm_backend.forward(
                 linear_layer_idx,
                 q,
                 k,
@@ -239,7 +244,7 @@ class KDALinearAttDecodeAttState(BaseDecodeAttState):
                 layer_weight.linear_dt_bias.weight,
                 self.b_conv_buffer_idx,
                 self.b1_mtp_cu_q_seq_len,
-                run_config=self.infer_state.ssm_run_config,
+                run_config=self.run_config,
             )
             return output
         output, _ = fused_recurrent_kda(

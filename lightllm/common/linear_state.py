@@ -29,6 +29,11 @@ class SSMRunConfig:
                 raise TypeError("SSM kernel configuration must be an integer")
 
 
+@dataclass(frozen=True, slots=True)
+class LinearStateCommit:
+    _run_config: SSMRunConfig
+
+
 class LinearStateTensors(NamedTuple):
     conv: torch.Tensor
     ssm: torch.Tensor
@@ -132,6 +137,13 @@ class LinearStateManager:
         self.prepare_decode(reqs, cu_seqlens)
         return reqs, ssm_indexes, accepted_token_counts
 
+    def create_commit(self, run_config: Optional[SSMRunConfig]) -> Optional[LinearStateCommit]:
+        from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
+
+        if run_config is not None and isinstance(self.ssm_backend, CompactSSMBackend):
+            return LinearStateCommit(run_config)
+        return None
+
     def commit_accepted_state(
         self,
         b_req_mtp_start_loc,
@@ -139,12 +151,12 @@ class LinearStateManager:
         b_mtp_index,
         accepted_index,
         verify_width,
-        linear_state_batches: Optional[Sequence[Tuple[int, Optional[SSMRunConfig]]]] = None,
+        linear_state_batches: Optional[Sequence[Tuple[int, Optional[LinearStateCommit]]]] = None,
     ):
         """Commit accepted prefixes without requiring full-state materialization.
 
         ``linear_state_batches`` partitions logical requests in the same order as the MTP
-        start locations. Each configuration belongs to the forward that wrote that
+        start locations. Each commit belongs to the forward that wrote that
         partition's scratch; padding rows do not participate in acceptance.
         """
         from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update
@@ -170,12 +182,12 @@ class LinearStateManager:
             return
         assert sum(size for size, _ in linear_state_batches) == reqs.numel()
         start = 0
-        for size, run_config in linear_state_batches:
+        for size, commit in linear_state_batches:
             if size:
                 self.ssm_backend.accept_updates(
                     reqs[start : start + size],
                     self.accepted_state_index,
-                    run_config=run_config,
+                    run_config=commit._run_config if commit is not None else None,
                 )
             start += size
 

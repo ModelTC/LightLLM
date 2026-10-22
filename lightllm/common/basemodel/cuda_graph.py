@@ -2,6 +2,7 @@ import os
 import copy
 import bisect
 import math
+import weakref
 from typing import Optional
 
 import torch
@@ -21,6 +22,17 @@ from .infer_struct import InferStateInfo
 
 
 logger = init_logger(__name__)
+
+
+def _copy_warmup_state(infer_state: InferStateInfo) -> InferStateInfo:
+    warmup_state = copy.copy(infer_state)
+    for name in ("decode_att_state", "decode_att_state1"):
+        state = getattr(infer_state, name, None)
+        if state is not None:
+            state = copy.copy(state)
+            state._infer_state_weak_ref = weakref.ref(warmup_state)
+            setattr(warmup_state, name, state)
+    return warmup_state
 
 
 class CudaGraph:
@@ -125,7 +137,7 @@ class CudaGraph:
             torch.cuda.synchronize()
             # 在正式捕获前调优 decode attention，退出作用域后再捕获选定的配置。
             with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
-                decode_func(copy.copy(infer_state))
+                decode_func(_copy_warmup_state(infer_state))
             torch.cuda.synchronize()
             for param_name in set(vars(infer_state).keys()):
                 if param_name not in pure_para_set:
@@ -158,7 +170,7 @@ class CudaGraph:
             pure_para_set1 = set(vars(infer_state1).keys())
             torch.cuda.synchronize()
             with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
-                decode_func(copy.copy(infer_state), copy.copy(infer_state1))
+                decode_func(_copy_warmup_state(infer_state), _copy_warmup_state(infer_state1))
             torch.cuda.synchronize()
             for para_name in set(vars(infer_state).keys()):
                 if para_name not in pure_para_set:

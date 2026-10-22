@@ -1,5 +1,6 @@
 from contextlib import contextmanager
 from types import SimpleNamespace
+import weakref
 
 import pytest
 import torch
@@ -128,3 +129,59 @@ def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
     assert not Autotuner.is_autotune_warmup()
     assert capture_env.capture_count == 0
     assert graph.graph == {}
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("kda", [False, True])
+def test_linear_config_is_local_to_capture_state(capture_env, overlap, kda):
+    from lightllm.common.basemodel.attention.linear.gdn import GDNLinearAttDecodeAttState
+    from lightllm.common.basemodel.attention.linear.kda import KDALinearAttDecodeAttState
+    from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+    from lightllm.common.basemodel.batch_objs import PostLayerOutput
+    from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
+    from lightllm.common.linear_state import LinearStateManager, SSMRunConfig
+
+    capture_env.args.enable_decode_microbatch_overlap = overlap
+    graph = CudaGraph(1, 2, 1, max_batch_size=2)
+    manager = object.__new__(LinearStateManager)
+    manager.ssm_backend = object.__new__(CompactSSMBackend)
+    att_class = KDALinearAttDecodeAttState if kda else GDNLinearAttDecodeAttState
+    states = []
+    configs = [SSMRunConfig(8, 1), SSMRunConfig(32, 2)]
+    for _ in range(2 if overlap else 1):
+        state = InferStateInfo()
+        state.input_ids = torch.ones(2, dtype=torch.int64)
+        state.req_manager = SimpleNamespace(linear_state_manager=manager)
+        state.hidden_collector = NoopHiddenCollector()
+        state.decode_att_state = TritonDecodeAttState(_infer_state_weak_ref=weakref.ref(state))
+        state.decode_att_state1 = att_class(_infer_state_weak_ref=weakref.ref(state))
+        states.append(state)
+
+    def decode_func(*infer_states):
+        outputs = []
+        for index, state in enumerate(infer_states):
+            att = state.decode_att_state1
+            assert att.infer_state is state
+            assert att.run_config is None
+            assert (att is states[index].decode_att_state1) == capture_env.capturing
+            att.run_config = configs[index] if capture_env.capturing else SSMRunConfig(128, 4)
+            outputs.append(TpPartBaseModel._create_model_output(None, PostLayerOutput(torch.ones(2, 1)), state))
+        return tuple(outputs) if overlap else outputs[0]
+
+    result = graph.capture_decode(decode_func, *states)
+    outputs = result if overlap else (result,)
+    runtime_states = [cuda_graph_module._copy_warmup_state(state) for state in states]
+    for state in runtime_states:
+        state.decode_att_state1.run_config = None
+    replay = graph.replay(*runtime_states)
+    assert replay == result
+    for index, (state, output) in enumerate(zip(states, outputs)):
+        assert state.decode_att_state1.run_config is configs[index]
+        state.decode_att_state1.run_config = SSMRunConfig(64, 4)
+        assert output.linear_state_commit == manager.create_commit(configs[index])
+        unpadded = TpPartBaseModel._create_unpad_decode_model_output(None, output, 1)
+        assert unpadded.logits.shape[0] == 1
+        assert unpadded.linear_state_commit is output.linear_state_commit

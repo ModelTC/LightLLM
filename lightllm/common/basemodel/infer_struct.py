@@ -1,5 +1,5 @@
 import collections
-from typing import TYPE_CHECKING, Tuple, Any, Optional, List
+from typing import Tuple, Any, Optional, List
 
 import torch
 import triton
@@ -14,9 +14,6 @@ from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_dp_rank, get_dp_world_size
 from .attention import BasePrefillAttState, BaseDecodeAttState
-
-if TYPE_CHECKING:
-    from lightllm.common.linear_state import SSMRunConfig
 
 
 class InferStateInfo:
@@ -71,7 +68,6 @@ class InferStateInfo:
         # 在microbatch overlap的运行模式下，用于标记当前 microbatch 的 index 序号
         # 在一些细节场景下需要有该信息区分一些资源的申请和管理。
         self.microbatch_index: int = 0
-        self.ssm_run_config: Optional["SSMRunConfig"] = None
         self.b_logits_row_idx: Optional[torch.Tensor] = None
         self.input_rows_per_logit: int = 1
 
