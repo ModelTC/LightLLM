@@ -355,7 +355,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     created_time = int(time.time())
     multimodal_params = _build_multimodal_params(request)
 
-    prompt, sampling_params = _get_text_generator_input(request)
+    prompt, sampling_params = await _get_text_generator_input(request)
 
     results_generator = g_objs.httpserver_manager.generate(
         prompt, sampling_params, multimodal_params, request=raw_request
@@ -1029,7 +1029,8 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                 if delta == image_start_tag:
                     need_call_x2i = True
                     continue
-                output_chunk += delta
+                if not need_call_x2i:
+                    output_chunk += delta
 
             full_text += output_chunk
 
@@ -1053,7 +1054,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
         text_out = full_text
         reasoning_parser = get_env_start_args().reasoning_parser
         if reasoning_parser and request.separate_reasoning:
-            request_enable_reasoning = _get_reasoning_from_request(request)
+            request_enable_reasoning = _is_force_thinking_mode(request) if reasoning_parser else False
             try:
                 parser = ReasoningParser(
                     model_type=reasoning_parser,
@@ -1102,6 +1103,8 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
         group_request_id = None
         max_image_gen_num = 15 if not image_only else 1  # TODO: make this configurable
 
+        reasoning_parser_dict = {}
+
         while max_image_gen_num > 0:
             max_image_gen_num -= 1
             need_call_x2i = False
@@ -1109,32 +1112,31 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                 prompt, sampling_params, multimodal_params.clone(), request=raw_request
             )
 
-            reasoning_parser_dict = {}
             output_chunk = ""
-
+            choice_index = 0
             async for sub_req_id, request_output, metadata, finish_status in text_generator:
                 prompt_tokens = metadata["prompt_tokens"]
                 completion_tokens += 1
                 if group_request_id is None:
                     group_request_id = convert_sub_id_to_group_id(sub_req_id)
 
-                index = sub_req_id
                 delta = request_output
                 finish_reason = finish_status.get_finish_reason()
                 if delta == image_start_tag:
                     need_call_x2i = True
                     continue
 
-                output_chunk += delta
+                if not need_call_x2i:
+                    output_chunk += delta
 
                 # Handle reasoning content
                 if get_env_start_args().reasoning_parser and request.separate_reasoning:
                     reasoning_text, delta = _process_reasoning_stream(
-                        index, delta, reasoning_parser_dict, request_output, request
+                        choice_index, delta, reasoning_parser_dict, metadata, request
                     )
                     if reasoning_text:
                         choice_data = ChatCompletionStreamResponseChoice(
-                            index=0,
+                            index=choice_index,
                             delta=DeltaMessage(reasoning_content=reasoning_text),
                             finish_reason=None,
                         )
@@ -1150,7 +1152,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                 if finish_status.is_finished():
                     finish_reason = finish_status.get_finish_reason()
                 stream_choice = ChatCompletionStreamResponseChoice(
-                    index=0, delta=delta_message, finish_reason=finish_reason
+                    index=choice_index, delta=delta_message, finish_reason=finish_reason
                 )
                 stream_resp = ChatCompletionStreamResponse(
                     id=group_request_id,
@@ -1177,7 +1179,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                     model=request.model,
                     choices=[
                         ChatCompletionStreamResponseChoice(
-                            index=0,
+                            index=choice_index,
                             delta=DeltaMessage(role="assistant", content=image_tag),
                             finish_reason=None,
                         )
@@ -1192,7 +1194,7 @@ async def chat_completions_impl_v2(request: ChatCompletionRequestV2, raw_request
                     model=request.model,
                     choices=[
                         ChatCompletionStreamResponseChoice(
-                            index=0,
+                            index=choice_index,
                             delta=DeltaMessage(role="assistant", images=img_items),
                             finish_reason=None,
                         )

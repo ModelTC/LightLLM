@@ -127,6 +127,8 @@ class ServiceShmCleanup:
                 system_v_shm_keys.append(int(self.start_args["cpu_kv_cache_shm_id"]))
             if self.start_args.get("enable_multimodal") and self.start_args.get("multi_modal_cache_shm_id") is not None:
                 system_v_shm_keys.append(int(self.start_args["multi_modal_cache_shm_id"]))
+            if self.start_args.get("enable_multimodal_x2i") and self.start_args.get("multi_modal_x2i_cache_shm_id") is not None:
+                system_v_shm_keys.append(int(self.start_args["multi_modal_x2i_cache_shm_id"]))
         removed_system_v = self.cleanup_system_v_shm(system_v_shm_keys) if system_v_shm_keys else 0
         removed_ipc = self.cleanup_ipc_files(self.service_name)
         if removed_posix or removed_system_v or removed_ipc:
