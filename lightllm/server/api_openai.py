@@ -180,17 +180,13 @@ def _get_history_tool_calls_cnt(request: ChatCompletionRequest) -> int:
     return idx
 
 
-def _is_force_thinking_mode(request: ChatCompletionRequest, prompt: Optional[str] = None) -> bool:
-    """Whether this request uses forced thinking / reasoning (parser + template)."""
+def _is_force_thinking_mode(request: ChatCompletionRequest) -> bool:
+    """Resolve the request's thinking switch for rendering the chat template."""
     from .build_prompt import tokenizer_supports_force_thinking
 
     reasoning_parser = get_env_start_args().reasoning_parser
     if not reasoning_parser:
         return False
-    if reasoning_parser == "glm45" and prompt is not None:
-        state = ReasoningParser.DetectorMap["glm45"].initial_reasoning_state(prompt)
-        if state is not None:
-            return state
     # Always-thinking models may have no thinking switch in their chat template.
     # Their answer grammar must wait for the reasoning delimiter nonetheless.
     if reasoning_parser in ["deepseek-r1", "qwen3-thinking", "gpt-oss", "minimax"]:
@@ -206,12 +202,12 @@ def _is_force_thinking_mode(request: ChatCompletionRequest, prompt: Optional[str
 
 
 def _get_guided_reasoning_end(
-    request: ChatCompletionRequest, tokenizer, force_reasoning: Optional[bool] = None
+    request: ChatCompletionRequest, tokenizer, initial_reasoning_state: Optional[bool] = None
 ) -> List[int]:
-    """Use the same thinking mode as the chat template for grammar activation."""
-    if force_reasoning is None:
-        force_reasoning = _is_force_thinking_mode(request)
-    if not force_reasoning:
+    """Delay answer constraints while generation starts inside reasoning."""
+    if initial_reasoning_state is None:
+        initial_reasoning_state = _is_force_thinking_mode(request)
+    if not initial_reasoning_state:
         return []
     parser_name = get_env_start_args().reasoning_parser
     detector = ReasoningParser.DetectorMap[parser_name.lower()]()
@@ -362,7 +358,10 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
     multimodal_params = _build_multimodal_params(request)
     tools = _select_chat_template_tools(request)
     prompt = await build_prompt(request, tools)
-    request_enable_reasoning = _is_force_thinking_mode(request, prompt)
+    reasoning_parser = get_env_start_args().reasoning_parser
+    initial_reasoning_state = ReasoningParser.get_initial_reasoning_state(
+        reasoning_parser, prompt, default=_is_force_thinking_mode(request)
+    )
     sampling_params_dict = {
         "do_sample": request.do_sample,
         "presence_penalty": request.presence_penalty,
@@ -395,9 +394,9 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
         sampling_params_dict["max_new_tokens"] = request.max_tokens
     if request.stop is not None:
         sampling_params_dict["stop_sequences"] = request.stop
-        if get_env_start_args().reasoning_parser:
+        if reasoning_parser:
             # The prompt may already open reasoning; generated tokens may omit the opening marker.
-            sampling_params_dict["_initial_reasoning_state"] = int(request_enable_reasoning)
+            sampling_params_dict["_initial_reasoning_state"] = int(initial_reasoning_state)
             # Chat 接口提取 reasoning，按请求设置 stop 范围；通用 generate 接口不区分阶段。
             sampling_params_dict["stop_str_match_mode"] = (
                 StopStrMatchMode.ALL_TEXT if is_stop_matching_in_reasoning_enabled() else StopStrMatchMode.CONTENT_ONLY
@@ -415,7 +414,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
         if sampling_params_dict.get("guided_json") or sampling_params_dict.get("guided_grammar"):
             sampling_params_dict["guided_reasoning_end"] = _get_guided_reasoning_end(
-                request, g_objs.httpserver_manager.tokenizer, request_enable_reasoning
+                request, g_objs.httpserver_manager.tokenizer, initial_reasoning_state
             )
 
     sampling_params = SamplingParams()
@@ -428,7 +427,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
 
     # Non-streaming case
     if not request.stream:
-        reasoning_parser = get_env_start_args().reasoning_parser
         final_output_dict = collections.defaultdict(list)
         count_output_tokens_dict = collections.defaultdict(lambda: 0)
         finish_reason_dict = {}
@@ -449,7 +447,7 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                     parser = ReasoningParser(
                         reasoning_parser,
                         stream_reasoning=False,
-                        force_reasoning=request_enable_reasoning,
+                        force_reasoning=initial_reasoning_state,
                     )
                     reasoning_parser_dict[sub_req_id] = parser
                 token_id = metadata.get("id")
@@ -599,15 +597,21 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 yield f"data: {_serialize_sse_chunk(first_chunk, _first_choice_nulls, _first_resp_nulls)}\n\n"
 
             # Handle reasoning content
-            if get_env_start_args().reasoning_parser:
+            if reasoning_parser:
                 reasoning_text, delta = _process_reasoning_stream(
                     choice_index,
                     delta,
                     reasoning_parser_dict,
                     metadata,
                     request,
-                    request_enable_reasoning,
+                    initial_reasoning_state,
                 )
+                if current_finish_reason is not None:
+                    # Flush before tool parsing so buffered argument text follows
+                    # the same path as every other chunk, including on truncation.
+                    flush_reasoning, flush_text = reasoning_parser_dict[choice_index].flush()
+                    reasoning_text = (reasoning_text or "") + (flush_reasoning or "")
+                    delta = (delta or "") + (flush_text or "")
                 if reasoning_text:
                     if request.separate_reasoning:
                         choice_data = ChatCompletionStreamResponseChoice(
@@ -787,46 +791,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
             # Emit a per-choice final chunk with finish_reason (for tool_calls path
             # or when no delta was emitted alongside finish_reason).
             if current_finish_reason is not None:
-                # Flush any buffered reasoning content that was never released
-                # (e.g., max_completion_tokens hit before </think/> was seen).
-                if get_env_start_args().reasoning_parser:
-                    parser = reasoning_parser_dict.get(choice_index)
-                    if parser is not None:
-                        flush_reasoning, flush_text = parser.flush()
-                        if flush_reasoning:
-                            if request.separate_reasoning:
-                                flush_choice = ChatCompletionStreamResponseChoice(
-                                    index=choice_index,
-                                    delta=DeltaMessage(reasoning=flush_reasoning),
-                                    finish_reason=None,
-                                )
-                            else:
-                                # vLLM compat: emit buffered thinking as content
-                                flush_choice = ChatCompletionStreamResponseChoice(
-                                    index=choice_index,
-                                    delta=DeltaMessage(content=flush_reasoning),
-                                    finish_reason=None,
-                                )
-                            flush_chunk = ChatCompletionStreamResponse(
-                                id=chat_completion_id,
-                                created=created_time,
-                                model=request.model,
-                                choices=[flush_choice],
-                            )
-                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls)}\n\n"
-                        if flush_text:
-                            flush_choice = ChatCompletionStreamResponseChoice(
-                                index=choice_index,
-                                delta=DeltaMessage(content=flush_text),
-                                finish_reason=None,
-                            )
-                            flush_chunk = ChatCompletionStreamResponse(
-                                id=chat_completion_id,
-                                created=created_time,
-                                model=request.model,
-                                choices=[flush_choice],
-                            )
-                            yield f"data: {_serialize_sse_chunk(flush_chunk, _choice_nulls)}\n\n"
                 if has_emitted_tool_calls[sub_req_id] and current_finish_reason == "stop":
                     current_finish_reason = "tool_calls"
                 final_choice = ChatCompletionStreamResponseChoice(
@@ -842,7 +806,6 @@ async def chat_completions_impl(request: ChatCompletionRequest, raw_request: Req
                 )
                 yield f"data: {_serialize_sse_chunk(final_chunk, _final_choice_nulls)}\n\n"
 
-        reasoning_parser = get_env_start_args().reasoning_parser
         completion_tokens_details = None
         if reasoning_parser:
             reasoning_tokens = sum(parser.reasoning_tokens for parser in reasoning_parser_dict.values())

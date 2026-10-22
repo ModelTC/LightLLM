@@ -41,21 +41,33 @@ def complete_chat(monkeypatch):
     args = StartArgs(reasoning_parser="glm45", tool_call_parser="glm47")
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
     monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
-    monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value="<|assistant|><think>"))
 
-    def complete(chunks, finish_status=FinishStatus.FINISHED_STOP, **request_kwargs):
+    def complete(
+        chunks,
+        finish_status=FinishStatus.FINISHED_STOP,
+        prompt="<|assistant|><think>",
+        parser_name="glm45",
+        compiler=None,
+        **request_kwargs,
+    ):
+        args.reasoning_parser = parser_name
+        monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value=prompt))
+        captured_params = []
+
         async def generate(*args, **kwargs):
+            captured_params.append(args[1])
             for index, (text, token_id) in enumerate(chunks):
                 finish = FinishStatus(finish_status) if index == len(chunks) - 1 else FinishStatus()
                 yield 0, text, {"id": token_id, "prompt_tokens": 1}, finish
 
-        manager = SimpleNamespace(tokenizer=SimpleNamespace(), generate=generate, output_grammar_compiler=None)
+        tokenizer = SimpleNamespace(encode=lambda text, **kwargs: {"</think>": [99]}[text])
+        manager = SimpleNamespace(tokenizer=tokenizer, generate=generate, output_grammar_compiler=compiler)
         monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(args=args, httpserver_manager=manager))
         request = ChatCompletionRequest(model="glm", messages=[], tools=TOOLS, **request_kwargs)
 
         async def run():
             response = await api_openai.chat_completions_impl(request, None)
-            result = SimpleNamespace(reasoning="", content="", calls=[], finish_reason=None)
+            result = SimpleNamespace(reasoning="", content="", calls=[], finish_reason=None, sampling_params=None)
             if not request.stream:
                 choice = response.choices[0]
                 result.reasoning = choice.message.reasoning or ""
@@ -65,6 +77,7 @@ def complete_chat(monkeypatch):
                     for call in choice.message.tool_calls or []
                 ]
                 result.finish_reason = choice.finish_reason
+                result.sampling_params = captured_params[0]
                 return result
 
             calls = {}
@@ -93,6 +106,7 @@ def complete_chat(monkeypatch):
             assert done
             assert list(calls) == list(range(len(calls)))
             result.calls = list(calls.values())
+            result.sampling_params = captured_params[0]
             return result
 
         return asyncio.run(run())
@@ -214,7 +228,9 @@ def test_chat_completion_exposes_glm_tool_calls(complete_chat, stream, separate_
     [
         ("<|assistant|><think>", True),
         ("<|assistant|><think>reasoning directive", True),
+        ("<|assistant|></think>", False),
         ("<|assistant|><think></think>", False),
+        ("<|assistant|><think>first</think><think>second", True),
         ("<|assistant|><think>old</think><|user|>question<|assistant|><think>", True),
         ("<|assistant|><think>old<|user|>question<|assistant|>", None),
         ("<|assistant|><think>old<|observation|>tool result", None),
@@ -229,18 +245,71 @@ def test_glm_prompt_override_does_not_change_other_models(monkeypatch):
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser="qwen3"))
     monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
     request = ChatCompletionRequest(model="qwen", messages=[], chat_template_kwargs={"enable_thinking": False})
-    assert api_openai._is_force_thinking_mode(request, "<|assistant|><think>") is False
+    default = api_openai._is_force_thinking_mode(request)
+    assert ReasoningParser.get_initial_reasoning_state("qwen3", "<|assistant|><think>", default) is False
+
+
+@pytest.mark.parametrize("default", [False, True])
+@pytest.mark.parametrize("prompt", ["custom prompt", "<|assistant|>", "<|assistant|><think>old<|user|>question"])
+def test_glm_unrecognized_prompt_preserves_request_mode(prompt, default):
+    assert ReasoningParser.get_initial_reasoning_state("glm45", prompt, default) is default
 
 
 @pytest.mark.parametrize("thinking", [False, True])
 def test_glm_grammar_activation_follows_rendered_prompt(monkeypatch, thinking):
     monkeypatch.setattr(api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser="glm45"))
+    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
     request = ChatCompletionRequest(model="glm", messages=[], chat_template_kwargs={"enable_thinking": not thinking})
     prompt = "<|assistant|><think>" + ("" if thinking else "</think>")
     tokenizer = SimpleNamespace(encode=lambda text, **kwargs: {"</think>": [99]}[text])
-    force_reasoning = api_openai._is_force_thinking_mode(request, prompt)
-    assert force_reasoning is thinking
-    assert api_openai._get_guided_reasoning_end(request, tokenizer, force_reasoning) == ([99] if thinking else [])
+    default = api_openai._is_force_thinking_mode(request)
+    initial_reasoning_state = ReasoningParser.get_initial_reasoning_state("glm45", prompt, default)
+    assert default is not thinking
+    assert initial_reasoning_state is thinking
+    assert api_openai._get_guided_reasoning_end(request, tokenizer, initial_reasoning_state) == (
+        [99] if thinking else []
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("thinking", [False, True])
+def test_glm_prompt_phase_is_shared_by_output_stop_and_grammar(complete_chat, compiler, stream, thinking):
+    chunks = [("Need a file.", 1), ("</think>", 99)] if thinking else []
+    chunks.append(('{"ok": true}', 2))
+    result = complete_chat(
+        chunks,
+        prompt="<|assistant|>" + ("<think>" if thinking else "</think>"),
+        compiler=compiler,
+        stream=stream,
+        separate_reasoning=True,
+        tool_choice="none",
+        stop=["STOP"],
+        response_format={"type": "json_object"},
+        chat_template_kwargs={"enable_thinking": not thinking},
+    )
+    assert result.reasoning == ("Need a file." if thinking else "")
+    assert result.content == '{"ok": true}'
+    assert result.sampling_params._initial_reasoning_state == int(thinking)
+    assert result.sampling_params.constraint_out_params.guided_reasoning_end.to_list() == ([99] if thinking else [])
+
+
+@pytest.mark.parametrize("parser_name", ["glm45", "qwen3"])
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("separate_reasoning", [False, True])
+def test_stream_flush_preserves_truncated_text_in_each_phase(complete_chat, parser_name, thinking, separate_reasoning):
+    result = complete_chat(
+        [("Body", 1), ("<", 2)],
+        finish_status=FinishStatus.FINISHED_LENGTH,
+        parser_name=parser_name,
+        prompt="<|assistant|>" + ("<think>" if thinking else "</think>"),
+        stream=True,
+        separate_reasoning=separate_reasoning,
+        tool_choice="none",
+        chat_template_kwargs={"enable_thinking": thinking},
+    )
+    assert result.reasoning == ("Body<" if thinking and separate_reasoning else "")
+    assert result.content == ("" if thinking and separate_reasoning else "Body<")
+    assert result.finish_reason == "length"
 
 
 @pytest.mark.parametrize("suffix", ["<", "</arg_va"])

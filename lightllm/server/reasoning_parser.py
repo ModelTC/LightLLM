@@ -586,6 +586,11 @@ class StreamingParseResult:
 class BaseReasoningFormatDetector:
     """Base class providing two sets of interfaces: one-time and streaming incremental."""
 
+    @classmethod
+    def initial_reasoning_state(cls, prompt: str) -> Optional[bool]:
+        """Infer the generation phase from the prompt, or defer to the request."""
+        return None
+
     def __init__(
         self,
         think_start_token: str,
@@ -757,13 +762,13 @@ class Qwen3Detector(BaseReasoningFormatDetector):
         )
 
 
-class Glm45Detector(Qwen3Detector):
-    """GLM tool calls implicitly end thinking, even without ``</think>``."""
+class Glm45Detector(BaseReasoningFormatDetector):
+    """Route GLM tool envelopes to content, even before an explicit ``</think>``."""
 
     tool_start_token = "<tool_call>"
 
     def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = False):
-        super().__init__(stream_reasoning=stream_reasoning, force_reasoning=force_reasoning)
+        super().__init__("<think>", "</think>", stream_reasoning=stream_reasoning, force_reasoning=force_reasoning)
         self._in_tool_call = False
         self._tool_scanner = GlmToolCallScanner()
 
@@ -771,14 +776,16 @@ class Glm45Detector(Qwen3Detector):
     def initial_reasoning_state(cls, prompt: str) -> Optional[bool]:
         # GLM-5.3 always opens thinking, even if enable_thinking=False was
         # requested. Inspect only the final assistant turn, never past turns.
-        turns = prompt.rsplit("<|assistant|>", 1)
-        if len(turns) != 2:
+        _, assistant_marker, assistant_prompt = prompt.rpartition("<|assistant|>")
+        if not assistant_marker:
             return None
-        tail = turns[-1]
-        if any(marker in tail for marker in ("<|system|>", "<|user|>", "<|observation|>")):
+        if any(marker in assistant_prompt for marker in ("<|system|>", "<|user|>", "<|observation|>")):
             return None
-        start, end = tail.rfind("<think>"), tail.rfind("</think>")
-        return start > end if start != -1 or end != -1 else None
+        think_start = assistant_prompt.rfind("<think>")
+        think_end = assistant_prompt.rfind("</think>")
+        if think_start == think_end == -1:
+            return None
+        return think_start > think_end
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         detector = type(self)(stream_reasoning=self.stream_reasoning, force_reasoning=self._in_reasoning)
@@ -797,6 +804,7 @@ class Glm45Detector(Qwen3Detector):
 
         while self._buffer:
             if self._in_tool_call:
+                # Tool arguments are literal, including any reasoning markers.
                 consumed, complete = self._tool_scanner.scan(self._buffer)
                 normal_parts.append(self._buffer[:consumed])
                 self._buffer = self._buffer[consumed:]
@@ -807,15 +815,15 @@ class Glm45Detector(Qwen3Detector):
 
             positions = [(self._buffer.find(marker), marker) for marker in markers]
             positions = [(position, marker) for position, marker in positions if position != -1]
-            parts = reasoning_parts if self._in_reasoning else normal_parts
+            output_parts = reasoning_parts if self._in_reasoning else normal_parts
             if not positions:
                 # A delimiter may share a chunk with reasoning or span chunks.
                 text, self._buffer = prefix_hold(self._buffer, markers)
-                parts.append(text)
+                output_parts.append(text)
                 break
 
             position, marker = min(positions)
-            parts.append(self._buffer[:position])
+            output_parts.append(self._buffer[:position])
             if marker == self.tool_start_token:
                 self._in_reasoning = False
                 self._in_tool_call = True
@@ -1008,6 +1016,17 @@ class ReasoningParser:
         "interns1": Qwen3Detector,
         "gemma4": Gemma4Detector,
     }
+
+    @classmethod
+    def get_initial_reasoning_state(cls, model_type: Optional[str], prompt: str, default: bool) -> bool:
+        """Resolve the starting phase once for parsing, stops and answer constraints."""
+        if not model_type:
+            return False
+        detector_class = cls.DetectorMap.get(model_type.lower())
+        if detector_class is None:
+            raise ValueError(f"Unsupported model type: {model_type}")
+        state = detector_class.initial_reasoning_state(prompt)
+        return default if state is None else state
 
     def __init__(
         self,
