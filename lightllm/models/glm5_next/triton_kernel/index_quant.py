@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import _butterfly_stage
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -42,7 +43,7 @@ def _hadamard_transform_quant_fp8_kernel(
 def hadamard_transform_quant_fp8(x: torch.Tensor, scale: float = 1.0) -> tuple[torch.Tensor, torch.Tensor]:
     """Fuse Hadamard-128 with the following ue8m0 FP8 quantization."""
 
-    assert x.is_cuda, "hadamard_transform_quant_fp8 only supports CUDA tensors"
+    assert x.device.type == get_device_type(), "hadamard_transform_quant_fp8 only supports CUDA tensors"
     assert x.dtype == torch.bfloat16, "Hadamard transform expects bfloat16 input"
     assert x.size(-1) == 128, "Hadamard transform expects hidden size 128"
     if not x.is_contiguous():

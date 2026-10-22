@@ -25,6 +25,10 @@ def local_pd_master_clients(monkeypatch):
     )
 
 
+# These tests check the cuda start-up validation, the xpu start policy would reject their modes first.
+pytestmark = pytest.mark.usefixtures("cuda_platform")
+
+
 def test_pd_node_self_request_limit_cli_defaults_to_enabled_and_can_be_disabled():
     parser = make_argument_parser()
 

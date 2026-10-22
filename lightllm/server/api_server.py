@@ -10,6 +10,11 @@ def launch_server(args: StartArgs):
     if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
         raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
     set_log_node_role(args.run_mode)
+    from lightllm.platform import resolve_platform_name
+
+    if args.hardware_platform == "auto":
+        args.hardware_platform = resolve_platform_name(args.hardware_platform)
+        logger.info(f"--hardware_platform auto resolved to {args.hardware_platform}")
     from .api_start import (
         pd_master_start,
         pd_master_multi_worker_start,

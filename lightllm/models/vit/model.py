@@ -20,6 +20,7 @@ from rpyc.utils.classic import obtain
 from lightllm.common.quantization import Quantcfg
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+from lightllm.platform import get_device_type
 
 
 logger = init_logger(__name__)
@@ -162,7 +163,7 @@ class VisionTransformer:
             return None
 
         imgs = torch.cat(img_tensors, dim=0)
-        pixel_values = imgs.cuda().to(dtype=self.data_type)
+        pixel_values = imgs.to(get_device_type()).to(dtype=self.data_type)
         # [total_patches, tokens_per_patch, hidden]
         all_img_embeds = self.forward(pixel_values)
         tokens_per_patch = all_img_embeds.shape[1]

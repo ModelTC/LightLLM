@@ -2,6 +2,7 @@ import math
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -60,7 +61,11 @@ def rotary_kernel(
 def apply_rotary_pos_emb_triton(
     tensor: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, BLOCK_D: int = 128
 ) -> torch.Tensor:
-    assert tensor.is_cuda and cos.is_cuda and sin.is_cuda
+    assert (
+        (tensor.device.type == get_device_type())
+        and (cos.device.type == get_device_type())
+        and (sin.device.type == get_device_type())
+    )
     assert cos.is_contiguous() and sin.is_contiguous()
     if tensor.ndim != 3:
         raise RuntimeError("tensor shape should be [L, H, D]")

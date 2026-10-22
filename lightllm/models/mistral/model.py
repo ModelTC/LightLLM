@@ -9,6 +9,7 @@ from lightllm.models.mistral.layer_infer.transformer_layer_infer import MistralT
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.platform import get_device_type
 
 
 class MistralTpPartModel(TpPartBaseModel):
@@ -73,6 +74,6 @@ class MistralTpPartModel(TpPartBaseModel):
         t = torch.arange(max_seq_len + 1024 * 64, device="cpu", dtype=torch.float32) / rope_scaling_factor
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = torch.cos(freqs).to(self.data_type).to(get_device_type())
+        self._sin_cached = torch.sin(freqs).to(self.data_type).to(get_device_type())
         return

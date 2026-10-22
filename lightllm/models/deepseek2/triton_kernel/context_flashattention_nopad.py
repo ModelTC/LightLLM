@@ -5,6 +5,7 @@ import triton.language as tl
 import math
 import torch.nn.functional as F
 from lightllm.utils.device_utils import is_tesla
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -172,7 +173,7 @@ def context_attention_fwd(
     assert q_rope_dim in {16, 32, 64, 128, 256}
 
     if q_nope_dim >= 512:
-        BLOCK = 32 if is_tesla() or torch.cuda.get_device_capability()[0] >= 9 else 64
+        BLOCK = 32 if is_tesla() or (get_device_type() == "cuda" and torch.cuda.get_device_capability()[0] >= 9) else 64
     else:
         BLOCK = 128 if not is_tesla() else 64
 
@@ -368,7 +369,7 @@ def context_attention_fwd_no_prompt_cache(
     assert q_rope_dim in {16, 32, 64, 128, 256}
 
     if q_nope_dim >= 512:
-        BLOCK = 32 if is_tesla() or torch.cuda.get_device_capability()[0] >= 9 else 64
+        BLOCK = 32 if is_tesla() or (get_device_type() == "cuda" and torch.cuda.get_device_capability()[0] >= 9) else 64
     else:
         BLOCK = 128 if not is_tesla() else 64
 
@@ -423,7 +424,7 @@ def torch_att(q, q_rope, kv, kv_rope, bs, seqlen, num_head, q_head_dim, rope_hea
     xk = torch.cat([kv, kv_rope], dim=2).view(bs, seqlen, 1, -1)
     xv = kv.view(bs, seqlen, 1, -1)
 
-    mask = torch.tril(torch.ones(seqlen, seqlen), diagonal=0).unsqueeze(0).unsqueeze(0).cuda()
+    mask = torch.tril(torch.ones(seqlen, seqlen), diagonal=0).unsqueeze(0).unsqueeze(0).to(get_device_type())
     mask[mask == 0.0] = -100000000.0
     mask = mask.repeat(bs, num_head, 1, 1)
     keys = xk

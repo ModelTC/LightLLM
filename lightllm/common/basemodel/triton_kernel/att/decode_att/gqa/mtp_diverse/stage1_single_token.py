@@ -19,6 +19,7 @@ from typing import Optional
 from lightllm.common.triton_utils.autotuner import autotune, Autotuner, AutotuneKernelType, AutotuneLevel
 from lightllm.utils.device_utils import is_hopper
 from lightllm.utils.envs_utils import get_decode_attn_autotune_seq_len, get_triton_autotune_level
+from lightllm.platform import get_device_type
 
 
 def get_test_configs():
@@ -302,9 +303,18 @@ def mtp_diverse_stage1_single_token(
     BLOCK_BATCH = triton.next_power_of_2(block_batch)
 
     assert q.dim() == 3 and k.dim() == 3 and v.dim() == 3
-    assert q.is_cuda and k.is_cuda and v.is_cuda
-    assert Req_to_tokens.is_cuda and B_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_shared_group.is_cuda
-    assert mid_out.is_cuda and mid_out_logsumexp.is_cuda
+    assert (
+        (q.device.type == get_device_type())
+        and (k.device.type == get_device_type())
+        and (v.device.type == get_device_type())
+    )
+    assert (
+        (Req_to_tokens.device.type == get_device_type())
+        and (B_req_idx.device.type == get_device_type())
+        and (b_seq_len.device.type == get_device_type())
+        and (b_mark_shared_group.device.type == get_device_type())
+    )
+    assert (mid_out.device.type == get_device_type()) and (mid_out_logsumexp.device.type == get_device_type())
 
     Lq, Lk = int(q.shape[2]), int(k.shape[2])
     assert Lq == Lk

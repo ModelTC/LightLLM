@@ -20,6 +20,7 @@ from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.req_manager import ReqManagerForMamba
 from lightllm.common.state_cache_manager import LinearAttCacheConfig
+from lightllm.platform import get_device_type
 
 logger = init_logger(__name__)
 
@@ -42,7 +43,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def _init_triton(self):
         def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
-            return torch.empty(size, device="cuda", dtype=torch.int8)
+            return torch.empty(size, device=get_device_type(), dtype=torch.int8)
 
         # Set Triton allocator for TMA descriptors
         # This is required for kernels in common/.../linear_att/fla/ops/solve_tril.py

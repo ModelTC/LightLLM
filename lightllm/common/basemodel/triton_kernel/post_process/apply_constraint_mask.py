@@ -3,6 +3,7 @@ from typing import Optional
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -57,8 +58,10 @@ def apply_constraint_mask(
     CPU-filled masks are copied to CUDA on this stream before the call.
     The existing post_handle completion event protects pinned source reuse next step.
     """
-    assert logits.is_cuda and logits.stride(1) == 1
-    assert req_to_bitmask.is_cuda and req_to_bitmask_enabled.is_cuda
+    assert (logits.device.type == get_device_type()) and logits.stride(1) == 1
+    assert (req_to_bitmask.device.type == get_device_type()) and (
+        req_to_bitmask_enabled.device.type == get_device_type()
+    )
     if logits.shape[0] == 0:
         return
     block_size = 4096

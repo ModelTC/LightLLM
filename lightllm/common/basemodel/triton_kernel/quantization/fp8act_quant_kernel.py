@@ -7,6 +7,7 @@ from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
 from frozendict import frozendict
 from functools import lru_cache
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from lightllm.platform import get_device_type
 
 try:
     from deep_gemm import ceil_div
@@ -289,8 +290,8 @@ def tma_align_input_scale(input_scale: torch.Tensor):
 
 def torch_quant(x, group_size, dtype=torch.float8_e4m3fn):
     M, N = x.shape
-    x_q = torch.randn((M, N)).cuda().to(torch.float8_e4m3fn)
-    x_s = torch.randn((M, N // group_size), dtype=torch.float32).cuda()
+    x_q = torch.randn((M, N)).to(get_device_type()).to(torch.float8_e4m3fn)
+    x_s = torch.randn((M, N // group_size), dtype=torch.float32).to(get_device_type())
     x = x.reshape(-1, group_size)
     finfo = torch.finfo(dtype)
     fp8_max = finfo.max

@@ -17,6 +17,7 @@ from lightllm.models.qwen2_vl.qwen2_visual import Qwen2VisionTransformerPretrain
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.models.qwen2_vl.vision_process import Qwen2VLImageProcessor, resize_image
+from lightllm.platform import get_device_type
 
 
 def add_split_tokens(image_features, image_newline_embed, image_new_embed):
@@ -273,8 +274,8 @@ class TarsierVisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_thw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.cuda()
-        image_grid_thw = grid_thw.cuda()
+        pixel_values = imgs.to(get_device_type())
+        image_grid_thw = grid_thw.to(get_device_type())
 
         all_img_embeds = self.forward(pixel_values=pixel_values, image_grid_thw=image_grid_thw)
 

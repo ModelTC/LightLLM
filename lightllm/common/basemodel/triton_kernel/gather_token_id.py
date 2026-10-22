@@ -2,6 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -122,7 +123,7 @@ def gather_token(req_to_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b
         output: (batch_size,)
     """
     batch_size = b_req_idx.shape[0]
-    output = torch.empty(batch_size, dtype=req_to_next_token_ids.dtype, device="cuda")
+    output = torch.empty(batch_size, dtype=req_to_next_token_ids.dtype, device=get_device_type())
     BLOCK = 256
     grid = (triton.cdiv(batch_size, BLOCK),)
     num_warps = 1
@@ -270,12 +271,12 @@ def _run_gather_token_prefill_decode_mixed_case(
     b_is_decode_req: torch.Tensor,
     b_prefill_start_loc: torch.Tensor,
 ):
-    input_cuda = input_ids.clone().cuda()
-    req_table = req_to_next_token_ids.cuda()
-    b_req_idx_cuda = b_req_idx.cuda()
-    b_mtp_index_cuda = b_mtp_index.cuda()
-    b_is_decode_cuda = b_is_decode_req.cuda()
-    b_start_loc_cuda = b_prefill_start_loc.cuda()
+    input_cuda = input_ids.clone().to(get_device_type())
+    req_table = req_to_next_token_ids.to(get_device_type())
+    b_req_idx_cuda = b_req_idx.to(get_device_type())
+    b_mtp_index_cuda = b_mtp_index.to(get_device_type())
+    b_is_decode_cuda = b_is_decode_req.to(get_device_type())
+    b_start_loc_cuda = b_prefill_start_loc.to(get_device_type())
 
     expected = _ref_gather_token_prefill_decode_mixed(
         input_cuda,

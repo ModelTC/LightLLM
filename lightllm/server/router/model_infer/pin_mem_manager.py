@@ -3,6 +3,7 @@ import threading
 import collections
 from dataclasses import dataclass
 from typing import List, Dict, Union, Sequence
+from lightllm.platform import get_device_module, get_device_type
 
 
 @dataclass
@@ -65,7 +66,7 @@ class PinMemTensorManager:
         gpu_tensor: torch.Tensor,
     ) -> AsyncPinnedCpuTensor:
         cpu_tensor = self.async_copy_from_gpu_tensor(key=key, gpu_tensor=gpu_tensor)
-        ready_event = torch.cuda.Event()
+        ready_event = get_device_module().Event()
         ready_event.record()
         return AsyncPinnedCpuTensor(tensor=cpu_tensor, ready_event=ready_event)
 
@@ -115,7 +116,7 @@ class PinMemTensorManager:
             buf = self.key_to_const_gpu_tensor.get(key)
             if buf is None or buf.numel() < size:
                 n = max(size, 2048)
-                buf = torch.full((n,), fill_value, dtype=dtype, device="cuda")
+                buf = torch.full((n,), fill_value, dtype=dtype, device=get_device_type())
                 self.key_to_const_gpu_tensor[key] = buf
             else:
                 assert buf.dtype == dtype, f"const gpu tensor key={key!r} dtype mismatch: {buf.dtype} vs {dtype}"

@@ -3,6 +3,7 @@
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -80,7 +81,7 @@ def local_vocab_topk(
         token_num >= 16
         and local_vocab_size > 0
         and top_k > 0
-        and local_logits.is_cuda
+        and (local_logits.device.type == get_device_type())
         and local_logits.dtype == torch.bfloat16
         and local_logits.is_contiguous()
     )

@@ -93,7 +93,7 @@ def input_guard(fn: Callable[..., torch.Tensor]) -> Callable[..., torch.Tensor]:
                     break
 
         if tensor is not None:
-            ctx = torch.cuda.device(tensor.device.index)
+            ctx = device_torch_lib.device(tensor.device.index)
         else:
             ctx = contextlib.nullcontext()
 
@@ -126,9 +126,9 @@ def _check_platform() -> Literal["nvidia", "amd", "intel", "musa"]:
 # For AMD GPUs, the triton backend is 'hip', while for Nvidia GPUs, the triton backend is 'cuda'.
 # However, the torch backend is 'cuda' for both Nvidia and AMD GPUs.
 # Therefore, we need to check the triton backend to determine the actual GPU vendor.
-device = "cuda"
-device_torch_lib = getattr(torch, device, None)
 device_platform = _check_platform()
+device = "xpu" if device_platform == "intel" else "cuda"
+device_torch_lib = getattr(torch, device, None)
 
 is_amd = device_platform == "amd"
 is_intel = device_platform == "intel"

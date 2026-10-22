@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -85,7 +86,11 @@ def build_dynamic_mtp_linear_att_state_params(
     per-request query lengths.
     """
 
-    assert b_req_idx.is_cuda and b_mtp_index.is_cuda and req_to_mtp_state_index.is_cuda
+    assert (
+        (b_req_idx.device.type == get_device_type())
+        and (b_mtp_index.device.type == get_device_type())
+        and (req_to_mtp_state_index.device.type == get_device_type())
+    )
     assert b_req_idx.ndim == 1 and b_req_idx.shape == b_mtp_index.shape
     assert b_req_idx.dtype == torch.int32 and b_mtp_index.dtype == torch.int32
     batch_size = b_req_idx.shape[0]

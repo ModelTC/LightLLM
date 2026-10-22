@@ -83,8 +83,32 @@ Lightllm 是一个纯python开发的推理框架，其中的算子使用triton�
     $ ./generate_requirements_musa.sh
     $ pip install -r requirements-musa.txt
     $
+    $ # 安装lightllm的依赖 (Intel XPU)
+    $ pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+    $ ./generate_requirements_xpu.sh
+    $ pip install -r requirements-xpu.txt
+    $ pip install --no-deps xgrammar==0.2.8
+    $
     $ # 安装lightllm
     $ python setup.py install
+
+Intel XPU
+^^^^^^^^^
+
+在 Intel GPU 上使用 ``pip install --no-deps -e .`` 安装 Lightllm（``setup.py`` 依赖 CUDA 版的 ``triton``，
+XPU 版 torch 自带 ``pytorch-triton-xpu``）。硬件平台根据安装的 torch 自动识别（默认 ``--hardware_platform auto``），
+也可以用 ``--hardware_platform xpu`` 显式指定：
+
+.. code-block:: console
+
+    $ ZE_AFFINITY_MASK=0 python -m lightllm.server.api_server --model_dir /path/to/Qwen3-8B \
+    $     --tp 1 --max_req_total_len 24576
+
+* 使用 Triton 注意力后端和算子，分布式后端为 ``xccl``。
+* 默认关闭图捕获，可设置 ``LIGHTLLM_XPU_ENABLE_GRAPH=1`` 尝试开启。
+* 使用 ``ZE_AFFINITY_MASK`` 选择显卡。
+* 暂不支持：量化模型、``--enable_ep_moe``、``--mtp_mode``、PD 分离、``--enable_cpu_cache``、
+  ``--enable_dp_prompt_cache_fetch``、``--enable_torch_memory_saver``。
 
 使用 uv 安装
 ----------------

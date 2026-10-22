@@ -57,7 +57,7 @@ def test_dp_backend_reuses_common_engine_outside_overlap():
     assert not issubclass(DPOverlapSpecEngine, SpecEngine)
 
 
-def test_lightspec_planner_reduces_draft_step_with_max(monkeypatch):
+def test_lightspec_planner_reduces_draft_step_with_max(monkeypatch, cuda_platform):
     group = object()
     planner = LightSpecPlanner.__new__(LightSpecPlanner)
     planner._draft_step_group = group
@@ -83,7 +83,7 @@ def test_lightspec_planner_reduces_draft_step_with_max(monkeypatch):
     assert planner.pre_draft_step == 3
 
 
-def test_dp_backend_builds_dedicated_global_nccl_group(monkeypatch):
+def test_dp_backend_builds_dedicated_global_nccl_group(monkeypatch, cuda_platform):
     created_group = object()
     created_stream = object()
     new_group_args = {}
@@ -161,7 +161,7 @@ def test_dp_backend_does_not_build_group_for_fixed_planner(monkeypatch):
     assert not hasattr(backend.spec_engine.planner, "_draft_step_group")
 
 
-def test_dp_backend_overlap_decode_reuses_common_lightspec_group(monkeypatch):
+def test_dp_backend_overlap_decode_reuses_common_lightspec_group(monkeypatch, cuda_platform):
     created_group = object()
     created_stream = object()
     real_torch_zeros = torch.zeros

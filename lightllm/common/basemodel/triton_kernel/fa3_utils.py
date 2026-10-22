@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 _DYNAMIC_SPEC_FA3_FAST_PATH_MAX_BATCH_SIZE = 1024
@@ -212,7 +213,11 @@ def build_dynamic_spec_fa3_decode_params(
     multiple attention groups. Fixed output shapes let one CUDA Graph replay
     different speculative verify layouts.
     """
-    assert b_req_idx.is_cuda and b_seq_len.is_cuda and b_mark_mtp_shared_group.is_cuda
+    assert (
+        (b_req_idx.device.type == get_device_type())
+        and (b_seq_len.device.type == get_device_type())
+        and (b_mark_mtp_shared_group.device.type == get_device_type())
+    )
     assert b_req_idx.shape == b_seq_len.shape == b_mark_mtp_shared_group.shape
     assert b_req_idx.shape[0] == att_batch_size
     assert att_batch_size > 0

@@ -9,6 +9,7 @@ from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_module, get_device_type
 
 logger = init_logger(__name__)
 
@@ -198,9 +199,9 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         import math
 
         # Check if blocks and scales are on CPU, and move to GPU if so
-        if not blocks.is_cuda and torch.cuda.is_available():
-            blocks = blocks.cuda()
-            scales = scales.cuda()
+        if not (blocks.device.type == get_device_type()) and get_device_module().is_available():
+            blocks = blocks.to(get_device_type())
+            scales = scales.to(get_device_type())
 
         scales = scales.to(torch.int32) - 127  # that's because 128=2**7
 
@@ -238,4 +239,4 @@ class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
         return out.transpose(1, 2).contiguous()
 
     def _cuda(self, cpu_tensor):
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(get_current_device_id())
+        return cpu_tensor.contiguous().to(self.data_type_).to(torch.device(get_device_type(), get_current_device_id()))

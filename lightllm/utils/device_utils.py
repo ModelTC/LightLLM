@@ -11,24 +11,38 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
+def _get_device_module():
+    from lightllm.platform import get_device_module
+
+    return get_device_module()
+
+
+def _get_device_type() -> str:
+    from lightllm.platform import get_device_type
+
+    return get_device_type()
+
+
 @lru_cache(maxsize=None)
 def is_tesla():
-    return "Tesla" in torch.cuda.get_device_name(0)
+    return "Tesla" in _get_device_module().get_device_name(0)
 
 
 @lru_cache(maxsize=None)
 def is_hopper():
+    device_module = _get_device_module()
     return (
-        "H100" in torch.cuda.get_device_name(0)
-        or "H200" in torch.cuda.get_device_name(0)
-        or "H800" in torch.cuda.get_device_name(0)
-        or "Hopper" in torch.cuda.get_device_name(0)
+        "H100" in device_module.get_device_name(0)
+        or "H200" in device_module.get_device_name(0)
+        or "H800" in device_module.get_device_name(0)
+        or "Hopper" in device_module.get_device_name(0)
     )
 
 
 @lru_cache(maxsize=None)
 def is_4090():
-    return "4090" in torch.cuda.get_device_name(0) or "RTX 4090" in torch.cuda.get_device_name(0)
+    device_module = _get_device_module()
+    return "4090" in device_module.get_device_name(0) or "RTX 4090" in device_module.get_device_name(0)
 
 
 @lru_cache(maxsize=None)
@@ -42,6 +56,8 @@ def get_device_sm_count():
 
 @lru_cache(maxsize=None)
 def is_sm100_gpu():
+    if _get_device_type() != "cuda":
+        return False
     return torch.cuda.get_device_capability()[0] == 10
 
 
@@ -51,7 +67,8 @@ def get_device_sm_regs_num():
     from triton.runtime import driver
 
     properties = driver.active.utils.get_device_properties(0)
-    return properties["max_num_regs"]
+    # Intel Triton does not report max_num_regs.
+    return properties.get("max_num_regs", None)
 
 
 @lru_cache(maxsize=None)
@@ -69,7 +86,8 @@ def get_device_warp_size():
     from triton.runtime import driver
 
     properties = driver.active.utils.get_device_properties(0)
-    return properties["warpSize"]
+    # Intel Triton does not report warpSize.
+    return properties.get("warpSize", None)
 
 
 def calcu_kernel_best_vsm_count(kernel, num_warps):
@@ -80,6 +98,9 @@ def calcu_kernel_best_vsm_count(kernel, num_warps):
     max_regs = get_device_sm_regs_num()
     shared_mem_max = get_device_sm_shared_mem_num()
     warp_size = get_device_warp_size()
+    if max_regs is None or warp_size is None:
+        # The register file is not reported (Intel XPU), assume one program per SM.
+        return sm_count
 
     occupancy = max_regs // (n_regs * warp_size * num_warps)
     if size_smem > 0:
@@ -91,6 +112,11 @@ def calcu_kernel_best_vsm_count(kernel, num_warps):
 @lru_cache(maxsize=1)
 def is_musa():
     return hasattr(torch.version, "musa") and torch.version.musa is not None
+
+
+@lru_cache(maxsize=1)
+def is_xpu():
+    return hasattr(torch, "xpu") and torch.xpu.is_available()
 
 
 @lru_cache(maxsize=1)
@@ -116,6 +142,11 @@ def get_current_device_name():
 
         gpu_name = gpu_name.replace(" ", "_")
         return gpu_name
+    elif is_xpu():
+        device = torch.xpu.current_device()
+        gpu_name = torch.xpu.get_device_name(device)
+        gpu_name = gpu_name.replace(" ", "_")
+        return gpu_name
     else:
         return None
 
@@ -125,13 +156,15 @@ def init_p2p(device_index):
     """
     torch 调用跨卡的to操作后，triton编译的算子便能自动操作跨卡tensor。
     """
-    num_gpus = torch.cuda.device_count()
+    device_type = _get_device_type()
+    device_module = _get_device_module()
+    num_gpus = device_module.device_count()
     tensor = torch.zeros((1,))
-    tensor = tensor.to(f"cuda:{device_index}")
+    tensor = tensor.to(f"{device_type}:{device_index}")
     for j in range(num_gpus):
-        tensor.to(f"cuda:{j}")
+        tensor.to(f"{device_type}:{j}")
 
-    torch.cuda.empty_cache()
+    device_module.empty_cache()
     return
 
 
@@ -326,21 +359,22 @@ class Platform(Enum):
     CAMBRICON = "cambricon"  # cambricon
     MUSA = "musa"  # musa
     ROCM = "rocm"  # rocm
+    XPU = "xpu"  # intel xpu
     CPU = "cpu"  # cpu
 
 
-# 目前仅支持cuda 和 musa
+# 目前仅支持cuda, musa 和 xpu
 def get_platform(platform_name: Optional[str] = None) -> Platform:
     """
     get hardware platform.
 
     Args:
-        platform_name: platform name (cuda, ascend, cambricon, musa, rocm, cpu)
+        platform_name: platform name (cuda, ascend, cambricon, musa, rocm, xpu, cpu)
 
     Returns:
         Platform: platform enum value
     """
-    assert platform_name in ["cuda", "musa"], f"Only support cuda and musa now, but got {platform_name}"
+    assert platform_name in ["cuda", "musa", "xpu"], f"Only support cuda, musa and xpu now, but got {platform_name}"
     platform_name = platform_name.lower()
     platform_map = {
         "cuda": Platform.CUDA,
@@ -348,6 +382,7 @@ def get_platform(platform_name: Optional[str] = None) -> Platform:
         "cambricon": Platform.CAMBRICON,
         "musa": Platform.MUSA,
         "rocm": Platform.ROCM,
+        "xpu": Platform.XPU,
         "cpu": Platform.CPU,
     }
 

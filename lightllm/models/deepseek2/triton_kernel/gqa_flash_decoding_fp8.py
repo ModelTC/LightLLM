@@ -6,6 +6,7 @@ import triton.language as tl
 from typing import List
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.platform import get_device_type, get_hardware_backend
 
 logger = init_logger(__name__)
 
@@ -32,7 +33,7 @@ def gqa_token_decode_attention_flash_decoding_fp8(
     calcu_shape2 = (batch_size, q_head_num, q_rope_dim)
 
     if not run_config:
-        if torch.cuda.is_current_stream_capturing():
+        if get_hardware_backend().graph.is_capturing():
             avg_seq_len_in_batch = max_kv_seq_len
         else:
             avg_seq_len_in_batch = infer_state.total_token_num // batch_size
@@ -55,9 +56,9 @@ def gqa_token_decode_attention_flash_decoding_fp8(
 
     o_tensor = alloc_tensor_func(q_nope.shape, q_nope.dtype, q_nope.device) if out is None else out
 
-    fake_decode_att_block_seq = torch.empty([0], dtype=torch.int64, device="cuda")
-    mid_o = torch.empty([q_head_num, 0, kv_lora_rank], dtype=torch.float32, device="cuda")
-    mid_o_logexpsum = torch.empty([q_head_num, 0], dtype=torch.float32, device="cuda")
+    fake_decode_att_block_seq = torch.empty([0], dtype=torch.int64, device=get_device_type())
+    mid_o = torch.empty([q_head_num, 0, kv_lora_rank], dtype=torch.float32, device=get_device_type())
+    mid_o_logexpsum = torch.empty([q_head_num, 0], dtype=torch.float32, device=get_device_type())
 
     vsm_count = flash_decode_stage1_fp8(
         fake_decode_att_block_seq,
@@ -83,14 +84,14 @@ def gqa_token_decode_attention_flash_decoding_fp8(
                 1,
             ],
             dtype=torch.int64,
-            device="cuda",
+            device=get_device_type(),
         )
         mid_o_batch_start_index = torch.empty(
             [
                 batch_size,
             ],
             dtype=torch.int64,
-            device="cuda",
+            device=get_device_type(),
         )
         _fwd_kernel_calcu_index_and_block_seq[(1,)](
             infer_state.b_seq_len,
@@ -105,8 +106,12 @@ def gqa_token_decode_attention_flash_decoding_fp8(
         infer_state.decode_att_block_seq = decode_att_block_seq
         infer_state.mid_o_batch_start_index = mid_o_batch_start_index
 
-    mid_o = torch.empty([q_head_num, vsm_count * 4 + batch_size, kv_lora_rank], dtype=torch.float32, device="cuda")
-    mid_o_logexpsum = torch.empty([q_head_num, vsm_count * 4 + batch_size], dtype=torch.float32, device="cuda")
+    mid_o = torch.empty(
+        [q_head_num, vsm_count * 4 + batch_size, kv_lora_rank], dtype=torch.float32, device=get_device_type()
+    )
+    mid_o_logexpsum = torch.empty(
+        [q_head_num, vsm_count * 4 + batch_size], dtype=torch.float32, device=get_device_type()
+    )
 
     flash_decode_stage1_fp8(
         infer_state.decode_att_block_seq,

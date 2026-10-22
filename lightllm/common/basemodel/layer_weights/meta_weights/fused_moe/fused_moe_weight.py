@@ -14,6 +14,7 @@ from lightllm.common.quantization.quantize_method import QuantizationMethod
 from lightllm.utils.envs_utils import get_redundancy_expert_ids, get_redundancy_expert_num, get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 logger = init_logger(__name__)
 
@@ -84,8 +85,12 @@ class FusedMoeWeight(BaseWeightTpl):
         self.redundancy_expert_num = get_redundancy_expert_num()
         self.redundancy_expert_ids = get_redundancy_expert_ids(self.layer_num_)
         self.auto_update_redundancy_expert: bool = get_env_start_args().auto_update_redundancy_expert
-        self.redundancy_expert_ids_tensor = torch.tensor(self.redundancy_expert_ids, dtype=torch.int64, device="cuda")
-        self.routed_expert_counter_tensor = torch.zeros((self.n_routed_experts,), dtype=torch.int64, device="cuda")
+        self.redundancy_expert_ids_tensor = torch.tensor(
+            self.redundancy_expert_ids, dtype=torch.int64, device=get_device_type()
+        )
+        self.routed_expert_counter_tensor = torch.zeros(
+            (self.n_routed_experts,), dtype=torch.int64, device=get_device_type()
+        )
         # TODO: find out the reason of failure of deepep when redundancy_expert_num is 1.
         assert self.redundancy_expert_num != 1, "redundancy_expert_num can not be 1 for some unknown hang of deepep."
 
@@ -309,7 +314,7 @@ class FusedMoeWeight(BaseWeightTpl):
             self.e_score_correction_bias = torch.empty(
                 (self.n_routed_experts,),
                 dtype=self.data_type_,
-                device=f"cuda:{self.device_id_}",
+                device=f"{get_device_type()}:{self.device_id_}",
             )
             self.e_score_correction_bias.load_ok = False
 
@@ -317,7 +322,7 @@ class FusedMoeWeight(BaseWeightTpl):
             self.per_expert_scale = torch.empty(
                 (self.n_routed_experts,),
                 dtype=torch.float32,
-                device=f"cuda:{self.device_id_}",
+                device=f"{get_device_type()}:{self.device_id_}",
             )
             self.per_expert_scale.load_ok = False
 

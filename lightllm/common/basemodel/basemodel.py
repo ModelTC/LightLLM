@@ -50,6 +50,7 @@ from lightllm.utils.torch_memory_saver_utils import (
 )
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
+from lightllm.platform import get_device_module, get_device_type
 
 logger = init_logger(__name__)
 
@@ -141,7 +142,7 @@ class TpPartBaseModel:
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
         self._check_max_len_infer()
-        torch.cuda.empty_cache()
+        get_device_module().empty_cache()
         set_model_init_status(True)
         return
 
@@ -559,7 +560,7 @@ class TpPartBaseModel:
         )
 
         infer_state = self._create_inferstate(model_input)
-        prefill_mem_indexes_ready_event = torch.cuda.Event()
+        prefill_mem_indexes_ready_event = get_device_module().Event()
         prefill_mem_indexes_ready_event.record()
 
         infer_state.init_some_extra_state(self)
@@ -770,7 +771,7 @@ class TpPartBaseModel:
         infer_state1.init_some_extra_state(self)
         infer_state1.init_att_state()
 
-        prefill_mem_indexes_ready_event = torch.cuda.Event()
+        prefill_mem_indexes_ready_event = get_device_module().Event()
         prefill_mem_indexes_ready_event.record()
 
         model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
@@ -986,19 +987,19 @@ class TpPartBaseModel:
         # 模拟最大长度进行 prefill，观察是否出现 OOM
         try:
             logger.info("begin check max_len infer")
-            dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
-            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+            dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device=get_device_type())
+            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device=get_device_type())
             page_size = self.mem_manager.page_size
             alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-            mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
+            mem_indexes = self.mem_manager.alloc(alloc_token_num).to(get_device_type())
             self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-            b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+            b_seq_len = torch.ones(1, dtype=torch.int32, device=get_device_type())
             b_seq_len[:] = self.batch_max_tokens
-            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
+            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device=get_device_type())
+            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device=get_device_type())
             total_token_num = self.batch_max_tokens
-            b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
+            b_mtp_index = torch.zeros(1, dtype=torch.int32, device=get_device_type())
+            b_is_decode_req = torch.zeros(1, dtype=torch.bool, device=get_device_type())
             model_input = ModelInput(
                 batch_size=1,
                 total_token_num=total_token_num,
@@ -1036,7 +1037,7 @@ class TpPartBaseModel:
             )
             logger.error(exception_str)
             raise Exception(exception_str)
-        torch.cuda.empty_cache()
+        get_device_module().empty_cache()
         return
 
     def autotune_layers(self):
@@ -1063,23 +1064,23 @@ class TpPartBaseModel:
         self.layers_num = self.autotune_layers()
         for input_len in tqdm(warmup_lengths, desc="warming up"):
             try:
-                rand_gen = torch.Generator(device="cuda")
+                rand_gen = torch.Generator(device=get_device_type())
                 rand_gen.manual_seed(input_len)
                 dummy_input_ids = torch.randint(
-                    0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
+                    0, 10000, (input_len,), dtype=torch.int64, device=get_device_type(), generator=rand_gen
                 )
-                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device=get_device_type())
                 page_size = self.mem_manager.page_size
                 alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-                mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
+                mem_indexes = self.mem_manager.alloc(alloc_token_num).to(get_device_type())
                 self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-                b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+                b_seq_len = torch.ones(1, dtype=torch.int32, device=get_device_type())
                 b_seq_len[:] = input_len
-                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
+                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device=get_device_type())
+                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device=get_device_type())
                 total_token_num = input_len
-                b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-                b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
+                b_mtp_index = torch.zeros(1, dtype=torch.int32, device=get_device_type())
+                b_is_decode_req = torch.zeros(1, dtype=torch.bool, device=get_device_type())
                 model_input = ModelInput(
                     batch_size=1,
                     total_token_num=total_token_num,
@@ -1107,14 +1108,14 @@ class TpPartBaseModel:
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
                 gc.collect()
-                torch.cuda.empty_cache()
+                get_device_module().empty_cache()
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 logger.exception(str(e))
                 self.req_manager.free_all()
                 self.mem_manager.free_all()
                 gc.collect()
-                torch.cuda.empty_cache()
+                get_device_module().empty_cache()
         self.layers_num = layer_num_bak
         torch.distributed.barrier()
         Autotuner.end_autotune_warmup()
@@ -1131,17 +1132,17 @@ class TpPartBaseModel:
         # prefill init padding req.
         prefill_input_len = 1
         batch_size = 1
-        dummy_input_ids = torch.ones((batch_size,), dtype=torch.int64, device="cuda")
+        dummy_input_ids = torch.ones((batch_size,), dtype=torch.int64, device=get_device_type())
         b_req_idx = torch.tensor(
-            [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+            [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device=get_device_type()
         )
-        b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
-        b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+        b_seq_len = torch.ones(batch_size, dtype=torch.int32, device=get_device_type())
+        b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device=get_device_type())
         b_q_seq_len = b_seq_len - b_ready_cache_len
         b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
         total_token_num = prefill_input_len * batch_size
-        b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        b_is_decode_req = torch.zeros(batch_size, dtype=torch.bool, device="cuda")
+        b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device=get_device_type())
+        b_is_decode_req = torch.zeros(batch_size, dtype=torch.bool, device=get_device_type())
         model_input = ModelInput(
             batch_size=batch_size,
             total_token_num=total_token_num,
@@ -1173,7 +1174,7 @@ class TpPartBaseModel:
         del b_mtp_index
         del b_prefill_start_loc
         del b_q_seq_len
-        torch.cuda.empty_cache()
+        get_device_module().empty_cache()
         return
 
     def _gen_special_model_input(self, token_num: int):
@@ -1181,7 +1182,7 @@ class TpPartBaseModel:
 
         if self.is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
-                token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
+                token_num, self.config["hidden_size"], dtype=self.data_type, device=get_device_type()
             )
         else:
             special_model_input["mtp_draft_input_hiddens"] = None

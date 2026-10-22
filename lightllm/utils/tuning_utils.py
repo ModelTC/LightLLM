@@ -7,6 +7,7 @@ from multiprocessing.pool import util, worker
 from typing import Callable, Any, Dict, List
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.watchdog_utils import Watchdog
+from lightllm.platform import get_device_module
 
 logger = init_logger(__name__)
 
@@ -33,7 +34,7 @@ def run_func(func, args):
 def mp_tuning(func, args: Dict[str, Any]):
     # 修复 pool 中的进程无法启动子进程进行 kernel tuning 的问题
     Pool._repopulate_pool_static = fix_repopulate_pool_static
-    device_count = torch.cuda.device_count()
+    device_count = get_device_module().device_count()
 
     with mp.Pool(processes=device_count) as pool:
         tasks = []
@@ -59,7 +60,6 @@ def mp_tuning(func, args: Dict[str, Any]):
 
 
 def set_seed():
-    import torch
     import random
     import numpy as np
 
@@ -67,9 +67,9 @@ def set_seed():
     torch.manual_seed(seed)
     random.seed(seed)
     np.random.seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
+    if get_device_module().is_available():
+        get_device_module().manual_seed(seed)
+        get_device_module().manual_seed_all(seed)
     return
 
 

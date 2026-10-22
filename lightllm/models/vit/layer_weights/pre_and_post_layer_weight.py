@@ -6,6 +6,7 @@ from lightllm.common.basemodel import PreAndPostLayerWeight
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.basemodel.layer_weights.meta_weights import LayerNormWeight, COLMMWeight, ROWMMWeight
 from lightllm.common.quantization import Quantcfg
+from lightllm.platform import get_device_type
 
 
 class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
@@ -29,12 +30,14 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
         split_embed_dim = split_end - split_start
 
         # Pre-allocate memory for vision model weights
-        self.class_embedding = torch.empty((1, 1, split_embed_dim), dtype=self.data_type_).cuda()
-        self.position_embedding = torch.empty((1, self.num_positions, split_embed_dim), dtype=self.data_type_).cuda()
+        self.class_embedding = torch.empty((1, 1, split_embed_dim), dtype=self.data_type_).to(get_device_type())
+        self.position_embedding = torch.empty((1, self.num_positions, split_embed_dim), dtype=self.data_type_).to(
+            get_device_type()
+        )
         self.patch_embedding_weight_ = torch.empty(
             (split_embed_dim, 3, self.patch_size, self.patch_size), dtype=self.data_type_
-        ).cuda()
-        self.patch_embedding_bias_ = torch.empty(split_embed_dim, dtype=self.data_type_).cuda()
+        ).to(get_device_type())
+        self.patch_embedding_bias_ = torch.empty(split_embed_dim, dtype=self.data_type_).to(get_device_type())
 
         self.layernorm_weight_ = LayerNormWeight(
             dim=self.embed_dim * int(1 / self.downsample_ratio) ** 2,
@@ -62,7 +65,7 @@ class ViTPreAndPostLayerWeight(PreAndPostLayerWeight):
 
     def _cuda(self, cpu_tensor):
         device_id = get_current_device_id()
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(device_id)
+        return cpu_tensor.contiguous().to(self.data_type_).to(torch.device(get_device_type(), device_id))
 
     def _get_pos_embed(self, H, W):
         pos_embed = self.position_embedding[:, 1:, :]

@@ -5,6 +5,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.req_manager import ReqManager
 from lightllm.models.neo_chat_moe.triton_kernel.get_neo_position import get_neo_position_triton
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.platform import get_device_type
 
 
 class NeoChatInferStateInfo(LlamaInferStateInfo):
@@ -22,8 +23,8 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
     def init_some_extra_state(self, model: LlamaTpPartModel):
         LlamaInferStateInfo.init_some_extra_state(self, model)
         if self.is_prefill:
-            self.b_image_token_end = torch.zeros([self.position_ids.size(0)], dtype=torch.int32, device="cpu").cuda(
-                non_blocking=True
+            self.b_image_token_end = torch.zeros([self.position_ids.size(0)], dtype=torch.int32, device="cpu").to(
+                get_device_type(), non_blocking=True
             )
             self.position_ids = self.get_neo_position(self.multimodal_params)
         else:
@@ -79,11 +80,13 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             position_ids = self.position_ids.new_zeros((3, self.position_ids.size(0)))
             position_ids[0].copy_(self.position_ids)
             return position_ids.contiguous()
-        b_image_start_idx = torch.tensor(b_image_start_idx, device="cpu").cuda(non_blocking=True)
-        b_image_thwd = torch.tensor(b_image_thwd, device="cpu").cuda(non_blocking=True)  # image_num x 4
-        b_image_nums = torch.tensor(b_image_nums, device="cpu").cuda(non_blocking=True)
-        b_image_start_num = torch.tensor(b_image_start_num, device="cpu").cuda(non_blocking=True)
-        b_image_len = torch.tensor(b_image_len, device="cpu").cuda(non_blocking=True)
+        b_image_start_idx = torch.tensor(b_image_start_idx, device="cpu").to(get_device_type(), non_blocking=True)
+        b_image_thwd = torch.tensor(b_image_thwd, device="cpu").to(
+            get_device_type(), non_blocking=True
+        )  # image_num x 4
+        b_image_nums = torch.tensor(b_image_nums, device="cpu").to(get_device_type(), non_blocking=True)
+        b_image_start_num = torch.tensor(b_image_start_num, device="cpu").to(get_device_type(), non_blocking=True)
+        b_image_len = torch.tensor(b_image_len, device="cpu").to(get_device_type(), non_blocking=True)
 
         position_ids = self.position_ids.new_zeros((3, self.position_ids.size(0)))
         position_ids[0].copy_(self.position_ids)

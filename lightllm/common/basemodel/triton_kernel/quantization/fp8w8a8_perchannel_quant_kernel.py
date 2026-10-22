@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -37,7 +38,7 @@ def mm_weight_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
 
 def weight_quant(x: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
     assert x.is_contiguous(), "Input tensor must be contiguous"
-    x = x.cuda(get_current_device_id())
+    x = x.to(torch.device(get_device_type(), get_current_device_id()))
     if x.dim() == 3:
         y_quant = torch.empty((x.shape[0], x.shape[1], x.shape[2]), dtype=torch.float8_e4m3fn, device=x.device)
         s_scales = torch.empty((x.shape[0], x.shape[1], 1), dtype=torch.float32, device=x.device)

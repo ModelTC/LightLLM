@@ -104,7 +104,7 @@ def prepare_sampling_tensors(reqs, manager, has_output=None):
     # CUDA integration tests use the real pinned-memory manager and transfers.
     def cpu_tensor(key, data, dtype):
         tensor = torch.tensor(data, dtype=dtype)
-        return SimpleNamespace(cuda=lambda non_blocking: tensor)
+        return SimpleNamespace(cuda=lambda non_blocking: tensor, to=lambda device, non_blocking=False: tensor)
 
     with patch.object(g_pin_mem_manager, "gen_from_list", side_effect=cpu_tensor):
         return _get_post_sample_tensors(reqs, manager, has_output)

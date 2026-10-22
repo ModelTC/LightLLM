@@ -29,6 +29,7 @@ from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.common.state_cache_manager import get_hybrid_cache_config
+from lightllm.platform import get_device_module
 
 logger = init_logger(__name__)
 
@@ -258,12 +259,12 @@ def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
     cudaHostRegisterFlag = 3
 
     device_id = get_current_device_id()
-    torch.cuda.set_device(device_id)
+    get_device_module().set_device(device_id)
     desc = f"pid {os.getpid()} Registering pinned host memory"
 
     def _register_one_segment(task: Tuple[int, int]):
         offset, seg_len = task
-        torch.cuda.set_device(device_id)
+        get_device_module().set_device(device_id)
         ptr = ctypes.c_void_p(shm_ptr + offset)
         r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
         if r != 0:

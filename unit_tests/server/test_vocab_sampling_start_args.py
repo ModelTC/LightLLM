@@ -3,6 +3,9 @@ import pytest
 from lightllm.server.api_start import _launch_subprocesses, pd_master_start
 from lightllm.server.core.objs.start_args_type import StartArgs
 
+# These tests check the cuda start-up validation, the xpu start policy would reject their modes first.
+pytestmark = pytest.mark.usefixtures("cuda_platform")
+
 
 @pytest.mark.parametrize("run_mode", ["normal", "prefill", "decode"])
 @pytest.mark.parametrize(

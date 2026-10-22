@@ -17,6 +17,7 @@ from typing import Callable, List, Optional
 from lightllm.utils.envs_utils import get_triton_autotune_level
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
+from lightllm.platform import get_device_module, get_hardware_backend
 
 logger = init_logger(__name__)
 
@@ -276,8 +277,8 @@ class Autotuner:
             device_name = get_current_device_name()
             if device_name is None:
                 raise RuntimeError(
-                    f"Autotuner for kernel {self.kernel_name} requires a visible CUDA/MUSA device "
-                    f"to resolve its cache directory, but torch.cuda.is_available() is False."
+                    f"Autotuner for kernel {self.kernel_name} requires a visible CUDA/MUSA/XPU device "
+                    f"to resolve its cache directory, but no device is available."
                 )
             self._cache_dir = os.path.join(
                 Path(__file__).parent,
@@ -333,17 +334,19 @@ class Autotuner:
             # warmup
             kernel_call()
 
-            torch.cuda.current_stream().synchronize()
-            g = torch.cuda.CUDAGraph()
-            with torch.cuda.graph(g, stream=torch.cuda.Stream()):
+            device_module = get_device_module()
+            graph_backend = get_hardware_backend().graph
+            device_module.current_stream().synchronize()
+            g = graph_backend.create_graph()
+            with graph_backend.graph(g, stream=device_module.Stream()):
                 for _ in range(n_repeat):
                     kernel_call()
-            torch.cuda.current_stream().synchronize()
+            device_module.current_stream().synchronize()
 
             state = _BenchmarkState()
             for i in range(n_retries):
-                start_event = torch.cuda.Event(enable_timing=True)
-                end_event = torch.cuda.Event(enable_timing=True)
+                start_event = device_module.Event(enable_timing=True)
+                end_event = device_module.Event(enable_timing=True)
                 start_event.record()
                 g.replay()
                 end_event.record()

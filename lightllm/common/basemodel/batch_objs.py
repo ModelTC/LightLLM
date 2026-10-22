@@ -5,6 +5,7 @@ from typing import List, Optional
 import torch
 
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+from lightllm.platform import get_device_type
 
 
 @dataclass
@@ -56,25 +57,25 @@ class ModelInput:
         self.check_input()
 
         # Prefill 和 decode 都必须提供的公共张量。
-        self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
-        self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
-        self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
+        self.b_req_idx = self.b_req_idx.to(get_device_type(), non_blocking=True)
+        self.b_seq_len = self.b_seq_len.to(get_device_type(), non_blocking=True)
+        self.b_mtp_index = self.b_mtp_index.to(get_device_type(), non_blocking=True)
 
         if self.is_prefill:
             # Prefill 必须提供的张量。
-            self.input_ids = self.input_ids.cuda(non_blocking=True)
-            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
-            self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
-            self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
+            self.input_ids = self.input_ids.to(get_device_type(), non_blocking=True)
+            self.b_ready_cache_len = self.b_ready_cache_len.to(get_device_type(), non_blocking=True)
+            self.b_prefill_start_loc = self.b_prefill_start_loc.to(get_device_type(), non_blocking=True)
+            self.b_is_decode_req = self.b_is_decode_req.to(get_device_type(), non_blocking=True)
         else:
             # Decode 必须提供的张量。
-            self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
-            self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
-            self.b_shared_radix_node_id = self.b_shared_radix_node_id.cuda(non_blocking=True)
+            self.b_position_delta = self.b_position_delta.to(get_device_type(), non_blocking=True)
+            self.b_shared_seq_len = self.b_shared_seq_len.to(get_device_type(), non_blocking=True)
+            self.b_shared_radix_node_id = self.b_shared_radix_node_id.to(get_device_type(), non_blocking=True)
 
             # Decode 可以显式提供 input_ids；未提供时会在模型内部按请求索引收集。
             if self.input_ids is not None:
-                self.input_ids = self.input_ids.cuda(non_blocking=True)
+                self.input_ids = self.input_ids.to(get_device_type(), non_blocking=True)
 
     def __post_init__(self):
         self.check_input()

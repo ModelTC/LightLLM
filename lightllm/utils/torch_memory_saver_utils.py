@@ -2,6 +2,7 @@ import torch
 from contextlib import contextmanager
 from enum import Enum
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_hardware_backend
 
 try:
     from torch_memory_saver import (
@@ -90,7 +91,7 @@ class _TorchMemorySaverFake:
         yield
 
     def cuda_graph(self, graph_obj: torch.cuda.CUDAGraph, **kwargs):
-        return torch.cuda.graph(graph_obj, **kwargs)
+        return get_hardware_backend().graph.graph(graph_obj, **kwargs)
 
     @contextmanager
     def disable(self):

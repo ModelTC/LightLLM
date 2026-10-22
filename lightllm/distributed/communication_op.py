@@ -40,6 +40,7 @@ from lightllm.utils.dist_utils import (
 )
 from lightllm.utils.device_utils import get_device_sm_count, is_sm100_gpu
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
+from lightllm.platform import get_device_module, get_device_type, get_dist_backend
 
 logger = init_logger(__name__)
 
@@ -58,16 +59,17 @@ class CustomProcessGroup:
         self.symm_mem_reduce = None
         self.flashinfer_reduce = None
         self.dp_world_size = get_dp_world_size()
-        self.device_group = create_new_group_for_current_dp("nccl")
+        self.device_group = create_new_group_for_current_dp(get_dist_backend())
         if get_env_start_args().enable_dp_prefill_balance:
-            self.dp_prefill_balance_group = create_dp_special_inter_group("nccl")
+            self.dp_prefill_balance_group = create_dp_special_inter_group(get_dist_backend())
         else:
             self.dp_prefill_balance_group = None
 
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def _support_custom_allreduce(self) -> bool:
-        return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
+        # SymmMem / FlashInfer all-reduce are cuda only.
+        return get_device_type() == "cuda" and has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
 
     def init_symm_mem_reduce(self) -> None:
         if not self._support_custom_allreduce():
@@ -75,7 +77,7 @@ class CustomProcessGroup:
         from .symm_mem_all_reduce import SymmMemAllreduce
 
         data_type = get_torch_dtype(get_env_start_args().data_type)
-        symm = SymmMemAllreduce(self.device_group, torch.cuda.current_device(), dtype=data_type)
+        symm = SymmMemAllreduce(self.device_group, get_device_module().current_device(), dtype=data_type)
         if not symm.disabled:
             self.symm_mem_reduce = symm
             logger.info("Enable SymmMem ALLReduce.")
@@ -86,7 +88,7 @@ class CustomProcessGroup:
         from .flashinfer_all_reduce import FlashInferAllReduce
 
         fi_cpu_group = create_new_group_for_current_dp("gloo")
-        fi = FlashInferAllReduce(fi_cpu_group, torch.cuda.current_device())
+        fi = FlashInferAllReduce(fi_cpu_group, get_device_module().current_device())
         if not fi.disabled:
             self.flashinfer_reduce = fi
             logger.info("Enable FlashInfer ALLReduce.")
@@ -188,7 +190,7 @@ class DistributeGroupManager:
         # communicator. The default process group's warmup does not cover this group.
         dist.barrier(
             group=deepep_group,
-            device_ids=[torch.cuda.current_device()],
+            device_ids=[get_device_module().current_device()],
         )
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank

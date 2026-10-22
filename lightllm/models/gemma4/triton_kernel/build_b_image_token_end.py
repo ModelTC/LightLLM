@@ -12,6 +12,7 @@ position_ids — gemma-4 uses 1D position ids).
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -110,7 +111,7 @@ def _reference(
 
 
 def _check():
-    device = "cuda"
+    device = get_device_type()
     # Two batches. b0 has 1 image overlapping new tokens; b1 has 2 images, one
     # fully cached and one in the new-token range.
     multimodal = [

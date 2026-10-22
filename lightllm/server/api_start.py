@@ -14,6 +14,7 @@ from lightllm.utils.envs_utils import (
     set_env_start_args,
     set_unique_server_name,
 )
+from lightllm.platform import resolve_platform_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
@@ -42,6 +43,10 @@ def _set_envs_and_config(args: StartArgs):
 
 
 def _launch_subprocesses(args: StartArgs):
+    if resolve_platform_name(args.hardware_platform) == "xpu":
+        from lightllm.platform.backends.xpu.start_args import check_and_set_xpu_args
+
+        check_and_set_xpu_args(args)
     _validate_pd_features(args)
     _set_envs_and_config(args)
 

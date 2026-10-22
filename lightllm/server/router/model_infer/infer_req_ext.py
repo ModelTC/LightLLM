@@ -18,6 +18,7 @@ import torch
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
+from lightllm.platform import get_device_module
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -77,8 +78,8 @@ class PromptSelectedLogprobsExt:
         ranks_cpu = torch.empty(ranks.shape, dtype=ranks.dtype, device="cpu", pin_memory=True)
         logprobs_cpu.copy_(logprobs, non_blocking=True)
         ranks_cpu.copy_(ranks, non_blocking=True)
-        event = torch.cuda.Event()
-        event.record(torch.cuda.current_stream())
+        event = get_device_module().Event()
+        event.record(get_device_module().current_stream())
         self._chunks.append((target_start, target_end, logprobs_cpu, ranks_cpu, event))
 
     def flush(self) -> None:

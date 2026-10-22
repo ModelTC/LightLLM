@@ -6,6 +6,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
+from lightllm.platform import get_device_type
 
 
 """
@@ -60,15 +61,15 @@ class LlamaMultimodalPreLayerInfer(LlamaPreLayerInfer):
             f"but image embed dimension is {cpu_embed_cache_tensor.shape[2]}"
         )
         # each tp will fill the img embeds, should divide by world_size
-        img_start_token_ids = torch.tensor(img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
+        img_start_token_ids = torch.tensor(img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True).to(
+            get_device_type(), non_blocking=True
         )
-        img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
+        img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).to(
+            get_device_type(), non_blocking=True
         )
         img_start_locs_in_cache = torch.tensor(
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
-        ).cuda(non_blocking=True)
+        ).to(get_device_type(), non_blocking=True)
 
         self._multimodal_emb(
             out=out,

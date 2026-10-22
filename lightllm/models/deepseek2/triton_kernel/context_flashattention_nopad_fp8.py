@@ -5,6 +5,7 @@ import triton.language as tl
 import math
 import torch.nn.functional as F
 from lightllm.utils.device_utils import is_tesla
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -183,7 +184,7 @@ def context_attention_fwd_fp8(
     assert q_rope_dim in {16, 32, 64, 128, 256}
 
     if q_nope_dim >= 512:
-        BLOCK = 32 if is_tesla() or torch.cuda.get_device_capability()[0] >= 9 else 64
+        BLOCK = 32 if is_tesla() or (get_device_type() == "cuda" and torch.cuda.get_device_capability()[0] >= 9) else 64
     else:
         BLOCK = 128 if not is_tesla() else 64
 

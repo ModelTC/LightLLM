@@ -1,5 +1,6 @@
 import torch
 from typing import Optional
+from lightllm.platform import get_device_type
 
 
 def token_decode_attention_flash_decoding(
@@ -31,8 +32,8 @@ def token_decode_attention_flash_decoding(
     else:
         block_num = 32
 
-    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device="cuda")
-    mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=q.dtype, device="cuda")
+    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device=get_device_type())
+    mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=q.dtype, device=get_device_type())
 
     from .int4kv_flash_decoding_stage1 import int4kv_flash_decode_stage1
 
