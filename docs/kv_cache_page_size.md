@@ -52,8 +52,8 @@ Helper 保存该流，后续不随调用点的当前流切换：
 | `pure_gpu` | `PureGpuReqTokenIndex` 直接维护 GPU 请求表，无常驻 CPU 索引缓存 | CPU 读取需要 D2H 并等待结果，频繁的 CPU 索引操作可能更慢 |
 
 两种模式均保留相同的 GPU 请求表，显存占用基本相同。追加后的所需长度为 `end = token_index_len + mem_indexes.numel()`。
-CPU 缓存首次按 `max(input_len, end)`
-向上对齐到 1K token 申请；后续容量不足时，在本次所需长度 `end` 上多预留 2K token，再向上对齐到 1K，
+CPU 缓存首次按 `max(input_len + 2K, end)`
+向上对齐到 1K token 申请，为输出预留空间；后续容量不足时，在本次所需长度 `end` 上多预留 2K token，再向上对齐到 1K，
 容量上限为 GPU 请求表行长度。缓冲区在首次非空写入时按需申请，重置时保留输入长度，丢弃已申请的缓冲区引用；
 由新建的 `torch.empty(..., pin_memory=True, requires_grad=False)`
 独立持有，不借用 KV allocator 的返回缓冲区。索引缓存按 token 保存，不再按页压缩或展开。

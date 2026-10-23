@@ -294,11 +294,11 @@ def test_reset_rebuild_keeps_cpu_appends_and_gpu_submission_separate(mode):
 @pytest.mark.parametrize(
     ("input_len", "max_length", "initial_capacity", "next_end", "grown_capacity"),
     [
-        (1023, 16384, 1024, 1025, 4096),
-        (1024, 16384, 1024, 1025, 4096),
-        (1025, 16384, 2048, 2049, 5120),
-        (2048, 16384, 2048, 5000, 7168),
-        (1025, 3500, 2048, 3000, 3500),
+        (1023, 16384, 3072, 3073, 6144),
+        (1024, 16384, 3072, 3073, 6144),
+        (1025, 16384, 4096, 4097, 7168),
+        (2048, 16384, 4096, 5000, 7168),
+        (1025, 5500, 4096, 5000, 5500),
     ],
 )
 def test_pin_buffer_reserves_input_length_and_grows_with_headroom(
@@ -310,7 +310,7 @@ def test_pin_buffer_reserves_input_length_and_grows_with_headroom(
     assert helper._cpu_buffer is None
     helper.append_token_indexes(torch.empty(0, dtype=torch.int32))
     assert helper._cpu_buffer is None
-    # 首次只追加一个索引，仍按完整输入长度预留。
+    # 首次只追加一个索引，仍按完整输入长度额外预留 2K 输出 token。
     first_index = torch.zeros(1, dtype=torch.int32, pin_memory=True)
     helper.append_token_indexes(first_index)
     assert helper._cpu_buffer.numel() == initial_capacity

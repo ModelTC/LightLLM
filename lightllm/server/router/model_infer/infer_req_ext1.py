@@ -140,8 +140,8 @@ class PinMemCacheReqTokenIndex(ReqTokenIndex):
         if old_capacity >= end:
             return
         if old_capacity == 0:
-            # 首次按完整输入长度预留，同时覆盖本次写入需要的 token 区间。
-            reserve_len = max(self.input_len, end)
+            # 首次按完整输入长度额外预留 2K 输出 token，同时覆盖本次写入区间。
+            reserve_len = max(self.input_len + 2 * 1024, end)
         else:
             # 容量不足时在所需长度上额外预留 2K token，减少后续 decode 扩容。
             reserve_len = end + 2 * 1024
