@@ -95,7 +95,6 @@ def test_case3():
 
 
 def test_case4():
-
     tree = RadixCache(100, 2)
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64, device="cpu"))
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 7, 8, 9], dtype=torch.int64, device="cpu"))
@@ -258,6 +257,8 @@ def test_case10():
     )
     assert tree_node is not None
     assert size == 3
+    tree.dec_node_ref_counter(tree_node)
+    tree.mem_manager = SimpleNamespace(allocator=SimpleNamespace(can_use_mem_size=95), free=lambda indexes: None)
     tree.flush_cache()
     tree_node, size, values = tree.match_prefix(
         torch.tensor([1, 2, 3], dtype=torch.int64, device="cpu"), update_refs=True
@@ -632,11 +633,16 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
 
     tree, freed = hybrid_tree
     context = InferenceContext()
+    context.is_hybrid_att_model = True
     context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: context.args)
     context.radix_cache = tree
-    context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(100, 132).view(1, -1))
+    table = torch.arange(100, 132).view(1, -1)
+    context.req_manager = SimpleNamespace(
+        get_cpu_token_indexes=lambda row, start, end: table[row, start:end].clone(),
+        get_cpu_token_index_blocks=lambda row, start, end: table[row, start:end].numpy(),
+    )
     req = InferReq.__new__(InferReq)
     req.req_idx = req.cur_output_len = 0
     req.cur_kv_len, req.hold_kv_len, req.hybrid_cache_len = computed, max(24, computed), cache_len
@@ -653,7 +659,9 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
     )
     released = []
     context._hybrid_att_free_req(released, req)
-    assert torch.cat(released).tolist() == list(range(100 + retained, 100 + max(24, computed)))
+    assert [index for block in released for index in block.tolist()] == list(
+        range(100 + retained, 100 + max(24, computed))
+    )
     assert not req.hybrid_len_to_big_page_id
     assert req.tail_small_page_buffer_id is None
     assert tree.get_tree_total_tokens_num() == retained

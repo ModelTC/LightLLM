@@ -1,4 +1,3 @@
-import os
 import torch
 import torch.distributed as dist
 import copy
@@ -8,13 +7,10 @@ import triton
 from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.distributed import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import build_kv_indexes_and_input_ids
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.utils.torch_memory_saver_utils import (
-    TorchMemorySaverWrapper,
-    MemoryTag,
-)
+from lightllm.utils.torch_memory_saver_utils import TorchMemorySaverWrapper
 from .infer_struct import InferStateInfo
 
 
@@ -286,6 +282,12 @@ class CudaGraph:
                 multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                 **model._gen_special_model_input(batch_size),
             )
+            # Warm the ordinary decode gather path as well as the explicit-ID path below.
+            _, model_input.input_ids = build_kv_indexes_and_input_ids(
+                model_input,
+                model.req_manager.req_to_token_indexs,
+                model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
+            )
             model_output: ModelOutput = model.forward(model_input)
             del model_output
             del input_ids
@@ -343,6 +345,11 @@ class CudaGraph:
                     b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
                     multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
                     **model._gen_special_model_input(batch_size),
+                )
+                _, micro_batch.input_ids = build_kv_indexes_and_input_ids(
+                    micro_batch,
+                    model.req_manager.req_to_token_indexs,
+                    model.req_manager.req_sampling_params_manager.req_to_next_token_ids,
                 )
                 decode_batches.append(micro_batch)
                 del micro_batch

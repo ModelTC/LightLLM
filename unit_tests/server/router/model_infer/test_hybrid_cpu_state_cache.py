@@ -67,6 +67,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         SimpleNamespace(
             get_big_page_ids_by_node=lambda node: [],
             free_one_small_page_buffer=lambda: None,
+            free_radix_cache_to_get_enough_token=lambda need: None,
             small_page_buffers=requests.small_page_buffers,
         ),
     )
@@ -144,16 +145,9 @@ def test_cpu_roundtrip_keeps_kv_continuous_and_restores_only_saved_states(
     big.conv_state_cache.buffer.zero_()
     big.ssm_state_cache.buffer.zero_()
 
-    def allocate(req, count):
-        allocated = mem.alloc(count)
-        requests.req_to_token_indexs[req.req_idx, :count] = allocated.cuda()
-        req.hold_kv_len = count
-        return allocated
-
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(mem_manager=mem, req_manager=requests),
     )
     module.init_sync_group = None

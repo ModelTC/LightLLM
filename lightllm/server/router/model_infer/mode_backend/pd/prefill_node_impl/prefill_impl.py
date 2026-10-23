@@ -1,6 +1,5 @@
 import torch.multiprocessing as mp
-import random
-from typing import List, Tuple
+from typing import List
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger
@@ -122,12 +121,9 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
 
         pd_decode_node_info = req_obj.sampling_param.pd_decode_node
         if page_kind == "kv":
-            mem_indexes = (
-                self.model.req_manager.req_to_token_indexs[req_obj.req_idx, kv_start_index:kv_end_index]
-                .detach()
-                .cpu()
-                .tolist()
-            )
+            mem_indexes = self.model.req_manager.get_cpu_token_indexes(
+                req_obj.req_idx, kv_start_index, kv_end_index
+            ).tolist()
             req_idx = None
         elif page_kind == "att_state":
             mem_indexes = []

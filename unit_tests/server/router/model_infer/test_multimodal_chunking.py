@@ -105,6 +105,7 @@ def test_full_attention_gpu_restore_stays_outside_image(
     from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManager
     from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
     from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+    from lightllm.common.req_manager import ReqManager
     from lightllm.utils import shm_utils
     from lightllm.utils.kv_cache_utils import CpuKVCacheMeta, compute_token_list_hash
 
@@ -119,11 +120,12 @@ def test_full_attention_gpu_restore_stays_outside_image(
 
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(g_infer_context, "radix_cache", radix_cache)
-    monkeypatch.setattr(
-        g_infer_context,
-        "req_manager",
-        SimpleNamespace(req_to_token_indexs=torch.empty((1, len(query)), dtype=torch.int64)),
-    )
+    req_manager = ReqManager.__new__(ReqManager)
+    req_manager.mem_manager = SimpleNamespace(page_size=page_size)
+    req_manager._cpu_token_index_blocks = torch.full(
+        (1, (len(query) + page_size - 1) // page_size), -1, dtype=torch.int32
+    ).numpy()
+    monkeypatch.setattr(g_infer_context, "req_manager", req_manager)
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(page_size=page_size)
     req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
@@ -131,8 +133,11 @@ def test_full_attention_gpu_restore_stays_outside_image(
     req.shared_kv_node = None
     req.mm_input_spans = [(700, 1200)]
     req.shm_req = SimpleNamespace(input_len=len(query), shm_prompt_ids=SimpleNamespace(arr=query))
-    req._match_radix_cache()
+    req_prefix_lens = {}
+    req._match_radix_cache(req_prefix_lens=req_prefix_lens)
     assert req.cur_kv_len == req.hold_kv_len == gpu_end
+    assert req_prefix_lens == ({0: gpu_end} if gpu_end else {})
+    assert req_manager.get_cpu_token_index_blocks(0, 0, gpu_end).tolist() == query[:gpu_end:page_size]
     assert not any(start < gpu_end < end for start, end in req.mm_input_spans)
     assert radix_cache.get_refed_tokens_num() == gpu_end
 
@@ -255,15 +260,14 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     )
     table = torch.arange(8192, dtype=torch.int32).view(1, -1)
 
-    def allocate(req, count):
-        req.hold_kv_len += count
-        return torch.arange(req.cur_kv_len, req.cur_kv_len + count, dtype=torch.int32)
+    def allocate(req, end, radix_cache):
+        req.hold_kv_len = end
+        return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
 
     module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
     module.args = SimpleNamespace(page_size=256)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=table),
             mem_manager=SimpleNamespace(
@@ -276,6 +280,11 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
+    monkeypatch.setattr(
+        common.g_infer_context,
+        "req_manager",
+        SimpleNamespace(alloc_token_indexes=allocate),
+    )
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
     monkeypatch.setattr(common.g_infer_context, "is_hybrid_att_model", hybrid)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
