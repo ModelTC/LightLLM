@@ -2,12 +2,17 @@ import copy
 import errno
 import queue
 import pickle
+import socket
 import threading
+import time
+import zlib
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import rpyc
 import torch
+from rpyc.core.channel import Channel as RPyCChannel
+from rpyc.core.stream import SocketStream
 from torch import Tensor
 from rpyc.utils.classic import obtain
 from rpyc.utils.server import ThreadedServer
@@ -19,6 +24,25 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.net_utils import get_hostname_ip
 
 logger = init_logger(__name__)
+
+_MAX_CONTROL_STORE_KEY_BYTES = 1024
+_MAX_CONTROL_STORE_VALUE_BYTES = 1 << 20
+_MAX_CONTROL_STORE_ENTRIES = 1024
+_MAX_CONTROL_STORE_BYTES = 16 << 20
+_MAX_CONTROL_RPC_FRAME_BYTES = 2 << 20
+_CONTROL_STORE_VALUE_TTL_SECONDS = 60 * 60
+_CONTROL_STORE_CLEANUP_INTERVAL_SECONDS = 60
+
+
+def _validate_control_store_key(key: str) -> None:
+    if not isinstance(key, str):
+        raise TypeError("NCCL control store keys must be strings")
+    if len(key.encode("utf-8")) > _MAX_CONTROL_STORE_KEY_BYTES:
+        raise ValueError(f"NCCL control store key exceeds {_MAX_CONTROL_STORE_KEY_BYTES} bytes")
+
+
+def _control_store_now() -> float:
+    return time.monotonic()
 
 
 @dataclass
@@ -410,11 +434,58 @@ class _NcclControlService(rpyc.Service):
         self.channel.notif_queue.put(payload)
         return
 
-    def exposed_set_value(self, key: str, value: bytes):
+    def exposed_set_value(self, key: str, value: bytes) -> None:
         key = obtain(key)
         value = obtain(value)
         self.channel.add_store_value(key, value)
         return
+
+    def exposed_delete_value(self, key: str) -> None:
+        key = obtain(key)
+        self.channel.delete_store_value(key)
+        return
+
+
+class _BoundedControlRPCChannel(RPyCChannel):
+    def recv(self) -> bytes:
+        header = self.stream.read(self.FRAME_HEADER.size)
+        length, compressed = self.FRAME_HEADER.unpack(header)
+        if length > _MAX_CONTROL_RPC_FRAME_BYTES:
+            raise _OversizedControlRPCFrame(f"frame exceeds {_MAX_CONTROL_RPC_FRAME_BYTES} bytes")
+
+        data = self.stream.read(length + len(self.FLUSHER))[: -len(self.FLUSHER)]
+        if compressed:
+            decompressor = zlib.decompressobj()
+            data = decompressor.decompress(data, _MAX_CONTROL_RPC_FRAME_BYTES + 1)
+            if len(data) > _MAX_CONTROL_RPC_FRAME_BYTES or decompressor.unconsumed_tail or not decompressor.eof:
+                raise _OversizedControlRPCFrame(f"frame exceeds {_MAX_CONTROL_RPC_FRAME_BYTES} bytes")
+        return data
+
+
+class _OversizedControlRPCFrame(ValueError):
+    pass
+
+
+class _NcclControlServer(ThreadedServer):
+    def _serve_client(self, sock: socket.socket, credentials: Optional[object]) -> None:
+        addrinfo = sock.getpeername()
+        if credentials:
+            self.logger.info(f"welcome {addrinfo} ({credentials!r})")
+        else:
+            self.logger.info(f"welcome {addrinfo}")
+        try:
+            config = dict(
+                self.protocol_config,
+                credentials=credentials,
+                endpoints=(sock.getsockname(), addrinfo),
+                logger=self.logger,
+            )
+            conn = self.service._connect(_BoundedControlRPCChannel(SocketStream(sock)), config)
+            self._handle_connection(conn)
+        except _OversizedControlRPCFrame as e:
+            self.logger.warning(f"Rejected NCCL control RPC: {e}")
+        finally:
+            self.logger.info(f"goodbye {addrinfo}")
 
 
 class _NcclControlChannel:
@@ -426,16 +497,21 @@ class _NcclControlChannel:
     ):
         self.notif_queue: "queue.Queue[bytes]" = queue.Queue()
         self._store_values: Dict[str, bytes] = {}
+        self._store_value_expirations: Dict[str, float] = {}
+        self._store_value_bytes = 0
         self._store_cond = threading.Condition()
+        self._store_cleanup_stop = threading.Event()
         self._conn_lock = threading.Lock()
         self._conns: Dict[tuple[str, str, int], rpyc.Connection] = {}
         self._server, self.port = self._start_server(host_ip, port_min, port_max)
+        self._store_cleanup_thread = threading.Thread(target=self._expire_store_values_loop, daemon=True)
+        self._store_cleanup_thread.start()
 
-    def _start_server(self, host_ip: str, port_min: int, port_max: int) -> tuple[ThreadedServer, int]:
+    def _start_server(self, host_ip: str, port_min: int, port_max: int) -> tuple[_NcclControlServer, int]:
         last_error = None
         for cur_port in range(port_min, port_max + 1):
             try:
-                server = ThreadedServer(
+                server = _NcclControlServer(
                     _NcclControlService(self),
                     hostname=host_ip,
                     port=cur_port,
@@ -457,7 +533,9 @@ class _NcclControlChannel:
                     logger.warning(f"Create NCCL RPyC control channel on {host_ip}:{cur_port} failed: {e}")
         raise RuntimeError(f"can not allocate NCCL control port in [{port_min}, {port_max}]") from last_error
 
-    def close(self):
+    def close(self) -> None:
+        self._store_cleanup_stop.set()
+        self._store_cleanup_thread.join(timeout=1)
         with self._conn_lock:
             for conn in self._conns.values():
                 try:
@@ -465,21 +543,75 @@ class _NcclControlChannel:
                 except Exception:
                     pass
             self._conns.clear()
+        with self._store_cond:
+            self._store_values.clear()
+            self._store_value_expirations.clear()
+            self._store_value_bytes = 0
+            self._store_cond.notify_all()
         self._server.close()
         return
 
-    def add_store_value(self, key: str, value: bytes):
+    def add_store_value(self, key: str, value: bytes) -> None:
+        _validate_control_store_key(key)
+        if not isinstance(value, bytes):
+            raise TypeError("NCCL control store values must be bytes")
+        if len(value) > _MAX_CONTROL_STORE_VALUE_BYTES:
+            raise ValueError(f"NCCL control store value exceeds {_MAX_CONTROL_STORE_VALUE_BYTES} bytes")
+
         with self._store_cond:
+            now = _control_store_now()
+            self._expire_store_values(now)
+            previous_value = self._store_values.get(key)
+            previous_size = len(previous_value) if previous_value is not None else 0
+            new_size = self._store_value_bytes - previous_size + len(value)
+            if previous_value is None and len(self._store_values) >= _MAX_CONTROL_STORE_ENTRIES:
+                raise ValueError(f"NCCL control store exceeds {_MAX_CONTROL_STORE_ENTRIES} entries")
+            if new_size > _MAX_CONTROL_STORE_BYTES:
+                raise ValueError(f"NCCL control store exceeds {_MAX_CONTROL_STORE_BYTES} bytes")
+
             self._store_values[key] = value
+            self._store_value_expirations[key] = now + _CONTROL_STORE_VALUE_TTL_SECONDS
+            self._store_value_bytes = new_size
             self._store_cond.notify_all()
         return
 
-    def wait_store_value(self, key: str, timeout: float = 30.0) -> bytes:
+    def delete_store_value(self, key: str) -> None:
+        _validate_control_store_key(key)
         with self._store_cond:
+            self._expire_store_values(_control_store_now())
+            self._remove_store_value(key)
+            self._store_cond.notify_all()
+        return
+
+    def _remove_store_value(self, key: str) -> Optional[bytes]:
+        value = self._store_values.pop(key, None)
+        self._store_value_expirations.pop(key, None)
+        if value is not None:
+            self._store_value_bytes -= len(value)
+        return value
+
+    def _expire_store_values(self, now: float) -> bool:
+        expired_keys = [key for key, expires_at in self._store_value_expirations.items() if expires_at <= now]
+        for key in expired_keys:
+            self._remove_store_value(key)
+        return bool(expired_keys)
+
+    def _expire_store_values_loop(self) -> None:
+        while not self._store_cleanup_stop.wait(_CONTROL_STORE_CLEANUP_INTERVAL_SECONDS):
+            with self._store_cond:
+                if self._expire_store_values(_control_store_now()):
+                    self._store_cond.notify_all()
+
+    def wait_store_value(self, key: str, timeout: float = 30.0) -> bytes:
+        _validate_control_store_key(key)
+        with self._store_cond:
+            self._expire_store_values(_control_store_now())
             ok = self._store_cond.wait_for(lambda: key in self._store_values, timeout=timeout)
             if not ok:
                 raise TimeoutError(f"wait timeout after {int(timeout * 1000)}ms, key: {key}")
-            return self._store_values.pop(key)
+            value = self._remove_store_value(key)
+            assert value is not None
+            return value
 
     def get_notifs(self) -> List[bytes]:
         notifs = []
@@ -496,6 +628,10 @@ class _NcclControlChannel:
 
     def send_store_value(self, peer_name: str, host_ip: str, port: int, key: str, value: bytes):
         self._call(peer_name, host_ip, port, "set_value", key, value)
+        return
+
+    def send_delete_value(self, peer_name: str, host_ip: str, port: int, key: str) -> None:
+        self._call(peer_name, host_ip, port, "delete_value", key)
         return
 
     def _call(self, peer_name: str, host_ip: str, port: int, method: str, *args):
@@ -544,6 +680,16 @@ class _NcclControlStore:
 
     def get(self, key: str) -> bytes:
         return self.transporter.control_channel.wait_store_value(self._recv_key(key))
+
+    def delete_key(self, key: str) -> None:
+        remote_metadata = self.transporter._get_remote_metadata(self.remote_agent_name)
+        self.transporter.control_channel.send_delete_value(
+            self.remote_agent_name,
+            remote_metadata.host_ip,
+            remote_metadata.control_port,
+            self._send_key(key),
+        )
+        return
 
     def _send_key(self, key: str) -> str:
         return f"{self.transporter.agent_name}->{self.remote_agent_name}:{key}"

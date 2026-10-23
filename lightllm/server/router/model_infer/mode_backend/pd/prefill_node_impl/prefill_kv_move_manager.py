@@ -9,7 +9,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
-from ..trans_process_obj import KVTransProcess
 from ..base_kv_move_manager import BaseKVMoveManager
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -81,8 +80,7 @@ class PrefillKVMoveManager(BaseKVMoveManager):
                 raise TypeError(f"unsupported prefill kv move task type: {type(task)}")
 
             try:
-                trans_process: KVTransProcess = self.kv_trans_processes[device_id]
-                trans_process.task_in_queue.put(task)
+                self.dispatch_trans_task(device_id, task)
                 if (
                     isinstance(task, PDChunckedTransTask)
                     and self.args.pd_detail_log

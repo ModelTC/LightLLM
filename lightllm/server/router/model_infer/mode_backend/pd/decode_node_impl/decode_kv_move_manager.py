@@ -10,7 +10,6 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.server.pd_io_struct import PDChunckedTransTaskGroup, PDAbortReq
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.graceful_utils import graceful_registry
-from ..trans_process_obj import KVTransProcess
 from ..base_kv_move_manager import BaseKVMoveManager
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -99,8 +98,7 @@ class DecodeKVMoveManager(BaseKVMoveManager):
                 assert False, f"error obj {task_group}"
 
             try:
-                trans_process: KVTransProcess = self.kv_trans_processes[device_id]
-                trans_process.task_in_queue.put(task_group)
+                self.dispatch_trans_task(device_id, task_group)
                 # A task group covers the whole request, so this log does not require pd_detail_log.
                 if isinstance(task_group, PDChunckedTransTaskGroup) and logger.isEnabledFor(logging.DEBUG):
                     logger.debug(
