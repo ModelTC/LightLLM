@@ -1,6 +1,6 @@
 """Exercise request release with real radix trees, KV allocation and checkpoint slot pools."""
 
-from types import MethodType, SimpleNamespace
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -98,7 +98,8 @@ def make_release_case(monkeypatch):
         context.req_manager = SimpleNamespace(
             page_size=page_size, req_to_token_indexs=torch.full((1, 32), -1, dtype=torch.int32, device="cuda")
         )
-        req = SimpleNamespace(
+        req = infer_batch.InferReq.__new__(infer_batch.InferReq)
+        req.__dict__.update(
             req_idx=0,
             req_manager=context.req_manager,
             args=SimpleNamespace(req_token_index_mode=mode),
@@ -335,6 +336,110 @@ def test_hybrid_release_before_first_forward_handles_reserved_capacity(
 
 
 @pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
+@pytest.mark.parametrize("shared_prefix_len", [0, 8])
+@pytest.mark.parametrize("available_tokens", [3, 4, 5])
+def test_hybrid_small_page_match_preserves_tail_capacity_and_checkpoint_order(
+    make_release_case, monkeypatch, mode, shared_prefix_len, available_tokens
+):
+    context, req, allocator, small_slots, big_slots, _ = make_release_case("hybrid_small", mode, 4, "uncached")
+    matched_len = shared_prefix_len + 4
+    if shared_prefix_len == 0:
+        big_slots.free_state_cache(list(req.hybrid_len_to_big_page_id.values()))
+        req.hybrid_len_to_big_page_id.clear()
+    req.cur_kv_len = req.hybrid_cache_len = matched_len
+    small_checkpoint = req.tail_small_page_buffer_id
+    cached_indexes = req.token_index.get_cpu_token_indexes(0, matched_len)
+    released = []
+    context.free_a_req_mem(released, req)
+    allocator.free(torch.cat(released))
+    free_tokens_before_match = allocator.can_use_mem_size
+
+    req.args = SimpleNamespace(
+        page_size=4,
+        linear_att_hash_page_size=4,
+        linear_att_page_block_num=2,
+        max_req_total_len=32,
+    )
+    req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
+    req.get_cur_total_len = lambda: matched_len + 1
+    req.shm_req.shm_prompt_ids = SimpleNamespace(arr=np.arange(matched_len + 1))
+    block_hashs = list(range(1, matched_len // 4 + 1))
+    req.shm_req.hybrid_token_hash_list = SimpleNamespace(size=len(block_hashs), get_all=lambda: block_hashs)
+    req.shm_req.prompt_cache_len = 0
+    monkeypatch.setattr(context, "get_can_alloc_token_num", lambda: available_tokens)
+
+    operations = []
+    copy_kv = Mock(side_effect=lambda *args: operations.append("copy_kv"))
+    context.radix_cache.mem_manager.operator = SimpleNamespace(copy_mem_to_mem=copy_kv)
+    copy_logprobs = Mock(side_effect=lambda **kwargs: operations.append("copy_logprobs"))
+    req.prompt_selected_logprobs = SimpleNamespace(copy_capture_slots_if_needed=copy_logprobs)
+
+    def restore_small_page(req):
+        assert req.shared_kv_node.small_page_buffer_idx == small_checkpoint
+        assert req.shared_kv_node.ref_counter > 0
+        operations.append("restore_small")
+
+    context.req_manager.restore_small_page_state = restore_small_page
+    context.req_manager.restore_big_page_state = Mock()
+    context.req_manager.init_hybrid_attention_state = Mock()
+    deref = context.radix_cache.deref_to_first_big_page_node
+
+    def release_small_page_reference(node):
+        operations.append("deref")
+        return deref(node)
+
+    monkeypatch.setattr(context.radix_cache, "deref_to_first_big_page_node", release_small_page_reference)
+    req._hybrid_match_radix_cache()
+
+    rebuild_tail = available_tokens > 4
+    expected_len = matched_len if rebuild_tail else shared_prefix_len
+    expected_indexes = cached_indexes[:shared_prefix_len]
+    if rebuild_tail:
+        source_indexes, private_indexes = copy_kv.call_args.args
+        torch.testing.assert_close(source_indexes, cached_indexes[shared_prefix_len:])
+        assert private_indexes.numel() == 4
+        assert not torch.isin(private_indexes, cached_indexes).any()
+        copy_logprobs.assert_called_once()
+        torch.testing.assert_close(copy_logprobs.call_args.kwargs["source_indexes"], source_indexes)
+        torch.testing.assert_close(copy_logprobs.call_args.kwargs["destination_indexes"], private_indexes)
+        expected_indexes = torch.cat([expected_indexes, private_indexes])
+        assert operations == ["copy_kv", "copy_logprobs", "restore_small", "deref"]
+    else:
+        copy_kv.assert_not_called()
+        copy_logprobs.assert_not_called()
+        assert operations == ["deref"]
+
+    assert req.cur_kv_len == req.hold_kv_len == req.shm_req.shm_cur_kv_len == expected_len
+    assert req.shm_req.prompt_cache_len == req.token_index.token_index_len == expected_len
+    torch.testing.assert_close(req.token_index.get_cpu_token_indexes(0, expected_len), expected_indexes)
+    assert allocator.can_use_mem_size == free_tokens_before_match - (4 if rebuild_tail else 0)
+    assert context.radix_cache.get_refed_tokens_num() == shared_prefix_len
+    if shared_prefix_len:
+        assert req.shared_kv_node.is_big_page_node()
+        assert req.shared_kv_node.node_prefix_total_len == shared_prefix_len
+    else:
+        assert req.shared_kv_node is None
+    if not rebuild_tail and shared_prefix_len:
+        context.req_manager.restore_big_page_state.assert_called_once_with(
+            big_page_buffer_idx=req.shared_kv_node.big_page_buffer_idx, req=req
+        )
+    else:
+        context.req_manager.restore_big_page_state.assert_not_called()
+    if expected_len == 0:
+        context.req_manager.init_hybrid_attention_state.assert_called_once_with(req=req)
+    else:
+        context.req_manager.init_hybrid_attention_state.assert_not_called()
+
+    released = []
+    context.free_a_req_mem(released, req)
+    if released:
+        allocator.free(torch.cat(released))
+    context.radix_cache.clear_tree_nodes()
+    assert allocator.can_use_mem_size == allocator.size
+    assert small_slots.get_used_cache_num() == big_slots.get_used_cache_num() == 0
+
+
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 @pytest.mark.parametrize("new_tokens", [0, 1])
 @pytest.mark.parametrize("evict_checkpoint", [False, True])
 def test_hybrid_release_skips_insert_for_shared_small_prefix(
@@ -374,8 +479,7 @@ def test_hybrid_release_skips_insert_for_shared_small_prefix(
     context.free_a_req_mem(released, req)
     allocator.free(torch.cat(released))
     cache = context.radix_cache
-    req._set_cache_prefix = MethodType(infer_batch.InferReq._set_cache_prefix, req)
-    infer_batch.InferReq._hybrid_match_radix_cache(req)
+    req._hybrid_match_radix_cache()
     node = req.shared_kv_node
     shared_len = req.cur_kv_len
     checkpoint = node.small_page_buffer_idx

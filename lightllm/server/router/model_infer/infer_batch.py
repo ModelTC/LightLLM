@@ -629,6 +629,7 @@ class InferReq:
         return
 
     def _hybrid_match_radix_cache(self):
+        """匹配完整 hash 页，恢复命中的 KV 和 checkpoint，再发布请求长度。"""
         assert (
             g_infer_context.is_hybrid_att_model is True
         ), "current _hybrid_match_radix_cache only supports hybrid attention models, to do..."
@@ -641,84 +642,15 @@ class InferReq:
         match_block_num = match_tokens // hash_page_size
         block_hashs = block_hashs[:match_block_num]
         assert len(block_hashs) == self.shm_req.hybrid_token_hash_list.size
-        big_page_token_num = hash_page_size * self.args.linear_att_page_block_num
-        big_page_is_disable = big_page_token_num > self.args.max_req_total_len
         if enable_prompt_cache and match_tokens > 1 and len(block_hashs) > 0 and self.cur_kv_len == 0:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
             assert len(key) == len(block_hashs) * hash_page_size
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
+            shared_node, _, token_indexes = g_infer_context.radix_cache.match_prefix(
                 key, block_hashs=block_hashs, update_refs=True
             )
-            if share_node is not None:
-                # 与普通前缀匹配一致：新请求或已完成暂停释放的请求，其索引状态为空。
-                assert self.tail_small_page_buffer_id is None
-                if share_node.is_big_page_node():
-                    # 大页匹配
-                    self._set_cache_prefix(share_node, value_tensor)
-                    assert self.tail_small_page_buffer_id is None
-                    # 恢复 hybrid checkpoint
-                    g_infer_context.req_manager.restore_big_page_state(
-                        big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
-                    )
-                else:
-                    # 小页匹配
-                    if big_page_is_disable:
-                        # 如果 大页本质是被禁用的，可以直接使用小页的匹配结果
-                        self._set_cache_prefix(share_node, value_tensor)
-                        assert self.tail_small_page_buffer_id is None
-                        # 恢复 hybrid checkpoint
-                        g_infer_context.req_manager.restore_small_page_state(
-                            req=self,
-                        )
-                    else:
-                        # 如果 大页本质是被启用的，则需要使用小页的匹配结果, 将小页的kv 复制到的新申请的kv位置，同时释放
-                        # 对应的小页对应的节点，递归找到对应最近的大叶节点进行返回,然后赋值到req.shared_node 对象上
-                        shared_kv_len = share_node.node_prefix_total_len
-                        cur_big_page_tokens = (shared_kv_len // big_page_token_num) * big_page_token_num
-                        need_tokens = shared_kv_len - cur_big_page_tokens
-                        radix_cache = g_infer_context.radix_cache
-                        if g_infer_context.get_can_alloc_token_num() > need_tokens:
-                            # 有充足的token 容量时
-                            assert need_tokens % self.args.page_size == 0
-                            radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
-                            tail_mems = radix_cache.mem_manager.alloc(need_size=need_tokens)
-
-                            # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
-                            radix_cache.mem_manager.operator.copy_mem_to_mem(
-                                value_tensor[cur_big_page_tokens:shared_kv_len], tail_mems
-                            )
-                            # 尾部 KV 换到新 mem 后，同步拷贝已捕获的 top-k prompt logprobs。
-                            self.prompt_selected_logprobs.copy_capture_slots_if_needed(
-                                source_indexes=value_tensor[cur_big_page_tokens:shared_kv_len],
-                                destination_indexes=tail_mems,
-                            )
-
-                            self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
-                            g_infer_context.req_manager.restore_small_page_state(
-                                req=self,
-                            )
-                            self.shared_kv_node = None
-
-                            big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
-                            self._set_cache_prefix(
-                                shared_node=big_page_shared_node,
-                                shared_prefix_indexes=value_tensor[:cur_big_page_tokens],
-                                private_tail_indexes=tail_mems,
-                            )
-                        else:
-                            # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
-                            share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
-                            if share_node is not None:
-                                assert share_node.is_big_page_node()
-                                # 大页匹配
-                                ready_cache_len = share_node.node_prefix_total_len
-                                self._set_cache_prefix(share_node, value_tensor[:ready_cache_len])
-                                assert self.tail_small_page_buffer_id is None
-                                # 恢复 hybrid checkpoint
-                                g_infer_context.req_manager.restore_big_page_state(
-                                    big_page_buffer_idx=share_node.big_page_buffer_idx, req=self
-                                )
+            if shared_node is not None:
+                self._restore_hybrid_cache_match(shared_node, token_indexes)
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
 
@@ -729,9 +661,62 @@ class InferReq:
         assert self.hold_kv_len % self.args.page_size == 0
 
         if self.cur_kv_len == 0:
-            # 说明没有任何命中
             g_infer_context.req_manager.init_hybrid_attention_state(req=self)
         return
+
+    def _restore_hybrid_cache_match(self, shared_node: HybridAttPagedTreeNode, token_indexes: torch.Tensor):
+        """直接复用共享前缀，或将小页尾部转为私有 KV；容量不足时回退到大页。"""
+        # 新请求或已完成暂停释放的请求，其索引和私有 checkpoint 状态为空。
+        assert self.tail_small_page_buffer_id is None
+        big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
+        big_pages_disabled = big_page_token_num > self.args.max_req_total_len
+        if shared_node.is_big_page_node() or big_pages_disabled:
+            self._restore_hybrid_shared_prefix(shared_node, token_indexes)
+            return
+
+        radix_cache = g_infer_context.radix_cache
+        shared_kv_len = shared_node.node_prefix_total_len
+        big_page_prefix_len = shared_kv_len // big_page_token_num * big_page_token_num
+        private_tail_len = shared_kv_len - big_page_prefix_len
+
+        # 保持原有容量条件：只有可用量严格大于尾部需求时才重建小页尾部。
+        if g_infer_context.get_can_alloc_token_num() <= private_tail_len:
+            big_page_node = radix_cache.deref_to_first_big_page_node(node=shared_node)
+            if big_page_node is not None:
+                assert big_page_node.is_big_page_node()
+                self._restore_hybrid_shared_prefix(big_page_node, token_indexes[: big_page_node.node_prefix_total_len])
+            return
+
+        assert private_tail_len % self.args.page_size == 0
+        radix_cache.free_radix_cache_to_get_enough_token(need_token_num=private_tail_len)
+        private_tail_indexes = radix_cache.mem_manager.alloc(need_size=private_tail_len)
+        cached_tail_indexes = token_indexes[big_page_prefix_len:shared_kv_len]
+        radix_cache.mem_manager.operator.copy_mem_to_mem(cached_tail_indexes, private_tail_indexes)
+        self.prompt_selected_logprobs.copy_capture_slots_if_needed(
+            source_indexes=cached_tail_indexes, destination_indexes=private_tail_indexes
+        )
+
+        # 小页恢复接口从请求读取节点；必须先恢复 checkpoint，再解除小页引用。
+        self.shared_kv_node = shared_node
+        g_infer_context.req_manager.restore_small_page_state(req=self)
+        self.shared_kv_node = None
+        big_page_node = radix_cache.deref_to_first_big_page_node(node=shared_node)
+        self._set_cache_prefix(
+            shared_node=big_page_node,
+            shared_prefix_indexes=token_indexes[:big_page_prefix_len],
+            private_tail_indexes=private_tail_indexes,
+        )
+
+    def _restore_hybrid_shared_prefix(self, shared_node: HybridAttPagedTreeNode, token_indexes: torch.Tensor):
+        """登记直接共享的 KV 前缀，并恢复同一节点的 checkpoint。"""
+        self._set_cache_prefix(shared_node, token_indexes)
+        assert self.tail_small_page_buffer_id is None
+        if shared_node.is_big_page_node():
+            g_infer_context.req_manager.restore_big_page_state(
+                big_page_buffer_idx=shared_node.big_page_buffer_idx, req=self
+            )
+        else:
+            g_infer_context.req_manager.restore_small_page_state(req=self)
 
     def _set_cache_prefix(
         self,
