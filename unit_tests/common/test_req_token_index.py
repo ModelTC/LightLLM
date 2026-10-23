@@ -7,7 +7,9 @@ import torch
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process  # noqa: F401
 from lightllm.common.req_manager import base
 from lightllm.server.router.model_infer.infer_req_ext1 import (
+    ReqTokenIndex,
     PinMemCacheReqTokenIndex,
+    PinMemPageCacheReqTokenIndex,
     PureGpuReqTokenIndex,
     create_req_token_index,
 )
@@ -16,15 +18,23 @@ from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
-MODES = ["pin_mem_cache", "pure_gpu"]
+MODES = ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"]
 requires_cuda = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA and pinned CPU memory")
 
 
-def make_req(token_table, mode="pin_mem_cache", req_idx=0, input_len=0):
+@pytest.fixture(autouse=True)
+def reset_page_offsets(monkeypatch):
+    # 各用例模拟不同启动配置；隔离进程级页偏移，同一用例内的请求仍共享。
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_page_offsets", None)
+
+
+def make_req(token_table, mode="pin_mem_cache", req_idx=0, input_len=0, page_size=1):
     req = InferReq.__new__(InferReq)
     req.req_idx = req_idx
-    req.req_manager = SimpleNamespace(req_to_token_indexs=token_table)
-    req.args = StartArgs() if mode is None else StartArgs(req_token_index_mode=mode)
+    req.req_manager = SimpleNamespace(req_to_token_indexs=token_table, page_size=page_size)
+    req.args = (
+        StartArgs(page_size=page_size) if mode is None else StartArgs(req_token_index_mode=mode, page_size=page_size)
+    )
     req.shm_req = SimpleNamespace(input_len=input_len)
     return req
 
@@ -34,6 +44,7 @@ def make_req(token_table, mode="pin_mem_cache", req_idx=0, input_len=0):
     [
         (None, PinMemCacheReqTokenIndex),
         ("pin_mem_cache", PinMemCacheReqTokenIndex),
+        ("pin_mem_page_cache", PinMemPageCacheReqTokenIndex),
         ("pure_gpu", PureGpuReqTokenIndex),
     ],
 )
@@ -46,6 +57,9 @@ def test_factory_uses_request_mode_and_row_view_without_retaining_request(mode, 
 
     assert not hasattr(InferReq, "move_to_gpu_index_len")
     assert isinstance(helper, expected_type)
+    assert hasattr(helper, "_alloc_pinned_tensor") == (expected_type is PinMemPageCacheReqTokenIndex)
+    assert not hasattr(ReqTokenIndex, "_pinned_buffer")
+    assert not hasattr(ReqTokenIndex, "_pinned_offset")
     assert helper._index_stream is index_stream
     assert helper.req_idx == req.req_idx
     assert helper.gpu_indexes.data_ptr() == table[req.req_idx].data_ptr()
@@ -76,29 +90,85 @@ def test_start_args_and_cli_select_mode(mode):
 @requires_cuda
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("pinned", [False, True])
-def test_append_accepts_cpu_input_and_only_pins_when_gpu_upload_requires_it(monkeypatch, mode, pinned):
+def test_append_accepts_cpu_input_and_allocates_pinned_storage_when_needed(monkeypatch, mode, pinned):
     table = torch.full((1, 8), -1, dtype=torch.int32, device="cuda")
     helper = create_req_token_index(make_req(table, mode), index_stream=torch.cuda.current_stream())
     indexes = torch.arange(4, dtype=torch.int32, pin_memory=pinned)
-    pin_memory = torch.Tensor.pin_memory
-    pinned_inputs = []
+    alloc_pinned = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor
+    pinned_sizes = []
 
-    def record_pin_memory(tensor, *args, **kwargs):
-        pinned_inputs.append(tensor)
-        return pin_memory(tensor, *args, **kwargs)
+    def record_alloc_pinned(need_size):
+        pinned_sizes.append(need_size)
+        return alloc_pinned(need_size)
 
-    monkeypatch.setattr(torch.Tensor, "pin_memory", record_pin_memory)
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_alloc_pinned_tensor", staticmethod(record_alloc_pinned))
     helper.append_token_indexes(indexes)
     # 普通 CPU 输入已经复制到自有 storage，可在 append 返回后立即改写。
     if not pinned:
         indexes.fill_(-99)
 
-    assert len(pinned_inputs) == (1 if mode == "pure_gpu" and not pinned else 0)
+    assert pinned_sizes == []
     assert helper.token_index_len == 4
     assert helper.get_cpu_token_indexes(0, 4).tolist() == [0, 1, 2, 3]
     assert helper.get_gpu_token_indexes(0, 4).cpu().tolist() == [0, 1, 2, 3]
-    if mode == "pin_mem_cache":
+    if mode != "pure_gpu":
         assert helper._cpu_buffer.is_pinned()
+        assert helper._cpu_buffer.untyped_storage().nbytes() == helper._cpu_buffer.nbytes
+
+
+@requires_cuda
+def test_shared_pinned_allocator_preserves_slices_across_slab_replacement(monkeypatch):
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_pinned_buffer", None)
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_pinned_offset", 0)
+    buffer_token_num = 1024 * 1024
+    first = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor(5)
+    second = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor(3)
+    first.fill_(11)
+    second.fill_(22)
+    assert second.data_ptr() == first.data_ptr() + first.nbytes
+    assert first.is_pinned() and second.is_pinned()
+    assert first.dtype == second.dtype == torch.int32
+    assert not first.requires_grad and not second.requires_grad
+
+    buffer = PinMemPageCacheReqTokenIndex._pinned_buffer
+    empty = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor(0)
+    oversized = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor(buffer_token_num + 1)
+    assert empty.numel() == 0 and oversized.numel() == buffer_token_num + 1 and oversized.is_pinned()
+    assert PinMemPageCacheReqTokenIndex._pinned_buffer is buffer
+    assert PinMemPageCacheReqTokenIndex._pinned_offset == 8
+    assert oversized.untyped_storage().data_ptr() != first.untyped_storage().data_ptr()
+
+    replacement = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor(buffer_token_num - 7)
+    replacement.fill_(33)
+    assert replacement.untyped_storage().data_ptr() != first.untyped_storage().data_ptr()
+    assert first.tolist() == [11] * 5 and second.tolist() == [22] * 3
+    assert PinMemPageCacheReqTokenIndex._pinned_buffer.numel() == buffer_token_num
+    assert PinMemPageCacheReqTokenIndex._pinned_offset == buffer_token_num - 7
+
+
+@requires_cuda
+def test_shared_pinned_allocator_rollover_keeps_released_h2d_source_valid(monkeypatch):
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_pinned_buffer", None)
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_pinned_offset", 0)
+    buffer_token_num = 1024 * 1024
+    source = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor(buffer_token_num)
+    source.fill_(11)
+    source_ref = weakref.ref(source)
+    target = torch.empty(buffer_token_num, dtype=torch.int32, device="cuda")
+    stream = torch.cuda.Stream()
+    with torch.cuda.stream(stream):
+        torch.cuda._sleep(200_000_000)
+        target.copy_(source, non_blocking=True)
+    del source
+    assert source_ref() is None and not stream.query()
+
+    # 连续换掉多个 slab，旧 storage 释放后仍须等在途 H2D 结束才能被重新使用。
+    for value in range(22, 26):
+        replacement = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor(buffer_token_num)
+        replacement.fill_(value)
+        del replacement
+    stream.synchronize()
+    assert target.eq(11).all().item()
 
 
 @requires_cuda
@@ -171,27 +241,33 @@ def test_backend_rejects_requests_with_different_index_streams(monkeypatch, mode
     backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
     with pytest.raises(AssertionError, match="All requests in a batch must use the same index stream"):
         backend._copy_req_token_indexes_to_gpu(reqs)
-    assert [req.token_index.gpu_index_submitted_len for req in reqs] == [0 if mode == "pin_mem_cache" else 4] * 2
+    assert [req.token_index.gpu_index_submitted_len for req in reqs] == [4 if mode == "pure_gpu" else 0] * 2
 
 
 @requires_cuda
 @pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("page_size", [1, 3, 4, 64])
-def test_token_units_allow_partial_page_appends_and_snapshot_ownership(mode, page_size):
-    row = torch.full((3 * page_size + 5,), -1, dtype=torch.int32, device="cuda")
-    req = make_req(row.unsqueeze(0), mode)
+def test_token_units_and_snapshot_ownership(mode, page_size):
+    row = torch.full((4 * page_size,), -1, dtype=torch.int32, device="cuda")
+    req = make_req(row.unsqueeze(0), mode, page_size=page_size)
     helper = create_req_token_index(req, index_stream=torch.cuda.default_stream())
     req.token_index = helper
     count = row.numel()
-    original = (torch.arange(count, dtype=torch.int32) * 3).pin_memory()
-    split = page_size + 1
+    positions = torch.arange(count, dtype=torch.int32)
+    expected = positions.div(page_size, rounding_mode="floor") * (3 * page_size) + positions.remainder(page_size)
+    original = expected.pin_memory()
+    split = page_size if mode == "pin_mem_page_cache" else page_size + 1
     req.token_index.append_token_indexes(original[:split])
     req.token_index.append_token_indexes(torch.empty(0, dtype=torch.int32))
     assert helper.token_index_len == split
     req.token_index.append_token_indexes(original[split:])
     assert helper.token_index_len == count
-    expected = torch.arange(count, dtype=torch.int32) * 3
-    for start, end in [(0, count), (1, count - 1), (page_size, page_size + 2), (count, count)]:
+    ranges = (
+        [(0, count), (page_size, 3 * page_size), (count, count)]
+        if mode == "pin_mem_page_cache"
+        else [(0, count), (1, count - 1), (page_size, page_size + 2), (count, count)]
+    )
+    for start, end in ranges:
         assert torch.equal(req.token_index.get_cpu_token_indexes(start, end), expected[start:end])
     snapshot = req.token_index.get_cpu_token_indexes(0, count)
     # pure_gpu 的阻塞 CPU getter 已等待 H2D 完成，此后才可主动改写上传源。
@@ -202,19 +278,70 @@ def test_token_units_allow_partial_page_appends_and_snapshot_ownership(mode, pag
     gpu = req.token_index.get_gpu_token_indexes(0, count)
     assert gpu.data_ptr() == row.data_ptr()
     assert torch.equal(gpu.cpu(), expected)
-    if mode == "pin_mem_cache":
+    if mode != "pure_gpu":
         cpu_buffer = helper._cpu_buffer
     helper.reset()
     assert helper.token_index_len == helper.gpu_index_submitted_len == 0
-    if mode == "pin_mem_cache":
+    if mode != "pure_gpu":
         assert helper._cpu_buffer is None
     else:
         assert not hasattr(helper, "_cpu_buffer")
-    helper.append_token_indexes(torch.zeros(count, dtype=torch.int32, pin_memory=True))
-    if mode == "pin_mem_cache":
+    replacement = torch.arange(count, dtype=torch.int32, pin_memory=True)
+    helper.append_token_indexes(replacement)
+    if mode != "pure_gpu":
         assert helper._cpu_buffer is not cpu_buffer
-    assert helper.get_gpu_token_indexes(0, count).cpu().eq(0).all()
-    assert torch.equal(snapshot, torch.arange(count, dtype=torch.int32) * 3)
+    assert torch.equal(helper.get_gpu_token_indexes(0, count).cpu(), replacement)
+    assert torch.equal(snapshot, expected)
+
+
+@requires_cuda
+@pytest.mark.parametrize("page_size", [1, 3, 4, 64])
+def test_page_cache_compresses_page_starts_and_uploads_aligned_token_ranges(page_size):
+    table = torch.full((1, 8 * page_size), -1, dtype=torch.int32, device="cuda")
+    req = make_req(table, "pin_mem_page_cache", input_len=4 * page_size, page_size=page_size)
+    helper = create_req_token_index(req, index_stream=torch.cuda.default_stream())
+    page_starts = torch.tensor([9, 2, 15, 4], dtype=torch.int32) * page_size
+    expected = (page_starts[:, None] + torch.arange(page_size, dtype=torch.int32)).reshape(-1)
+    source = expected.clone()
+    start = 0
+    for end in (page_size, 2 * page_size, 3 * page_size, expected.numel()):
+        helper.append_token_indexes(source[start:end])
+        start = end
+    source.fill_(-99)
+
+    assert helper._cpu_buffer.is_pinned() and helper._cpu_buffer.numel() == 8
+    assert helper._cpu_buffer.nbytes * page_size == table.nbytes
+    assert torch.equal(helper._cpu_buffer[:4], page_starts)
+    for start, end in ((0, expected.numel()), (page_size, 3 * page_size), (page_size, page_size)):
+        assert torch.equal(helper.get_cpu_token_indexes(start, end), expected[start:end])
+        assert torch.equal(helper.get_free_token_indexes(start, end), expected[start:end])
+
+    snapshot = helper.get_cpu_token_indexes(0, expected.numel())
+    upload = helper.get_upload_indexes()
+    assert upload.is_pinned() and torch.equal(upload, expected)
+    assert helper.gpu_index_submitted_len == 0
+    if page_size > 1:
+        with pytest.raises(AssertionError, match="start must be page-aligned"):
+            helper.get_cpu_token_indexes(1, page_size)
+        with pytest.raises(AssertionError, match="end must be page-aligned"):
+            helper.get_free_token_indexes(0, page_size - 1)
+        with pytest.raises(AssertionError, match="start must be page-aligned"):
+            helper.get_cpu_token_indexes(1, 1)
+
+    # 模拟完整前缀页已经提交，待上传接口从下一个页边界开始展开。
+    submitted = page_size
+    table[0, :submitted].copy_(upload[:submitted], non_blocking=True)
+    helper.gpu_index_submitted_len = submitted
+    pending = helper.get_upload_indexes()
+    assert pending.is_pinned() and torch.equal(pending, expected[submitted:])
+    assert helper.gpu_index_submitted_len == submitted
+    assert torch.equal(helper.get_gpu_token_indexes(0, expected.numel()).cpu(), expected)
+    assert helper.get_upload_indexes().numel() == 0
+    assert table[0, expected.numel() :].eq(-1).all()
+
+    helper.reset()
+    helper.append_token_indexes(torch.arange(expected.numel(), dtype=torch.int32))
+    assert torch.equal(snapshot, expected) and torch.equal(upload, expected)
 
 
 @requires_cuda
@@ -268,7 +395,7 @@ def test_reset_rebuild_keeps_cpu_appends_and_gpu_submission_separate(mode):
         assert pending is None
     else:
         assert pending.tolist() == [0, 1, 2, 3]
-    assert helper.gpu_index_submitted_len == (0 if mode == "pin_mem_cache" else 4)
+    assert helper.gpu_index_submitted_len == (4 if mode == "pure_gpu" else 0)
     before = helper.get_cpu_token_indexes(0, 4)
     helper.get_gpu_token_indexes(0, 4)
     pending = helper.get_upload_indexes()
@@ -279,18 +406,20 @@ def test_reset_rebuild_keeps_cpu_appends_and_gpu_submission_separate(mode):
     helper.reset()
     helper.append_token_indexes(torch.tensor([0, 31], dtype=torch.int32, pin_memory=True))
     assert helper.token_index_len == 2
-    assert helper.gpu_index_submitted_len == (0 if mode == "pin_mem_cache" else 2)
-    if mode == "pin_mem_cache":
+    assert helper.gpu_index_submitted_len == (2 if mode == "pure_gpu" else 0)
+    if mode != "pure_gpu":
         assert helper.gpu_indexes[:4].cpu().tolist() == [0, 1, 2, 3]
     helper.append_token_indexes(torch.tensor([32, 3], dtype=torch.int32, pin_memory=True))
     assert helper.token_index_len == 4
-    assert helper.gpu_index_submitted_len == (0 if mode == "pin_mem_cache" else 4)
+    assert helper.gpu_index_submitted_len == (4 if mode == "pure_gpu" else 0)
     assert helper.get_gpu_token_indexes(0, 4).cpu().tolist() == [0, 31, 32, 3]
     assert helper.gpu_index_submitted_len == 4
     assert before.tolist() == [0, 1, 2, 3]
 
 
 @requires_cuda
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache"])
+@pytest.mark.parametrize("page_size", [1, 64])
 @pytest.mark.parametrize(
     ("input_len", "max_length", "initial_capacity", "next_end", "grown_capacity"),
     [
@@ -301,49 +430,66 @@ def test_reset_rebuild_keeps_cpu_appends_and_gpu_submission_separate(mode):
         (1025, 5500, 4096, 5000, 5500),
     ],
 )
-def test_pin_buffer_reserves_input_length_and_grows_with_headroom(
-    input_len, max_length, initial_capacity, next_end, grown_capacity
+def test_pin_buffer_capacity_and_lifecycle(
+    mode, page_size, input_len, max_length, initial_capacity, next_end, grown_capacity
 ):
-    req = make_req(torch.empty((1, max_length), dtype=torch.int32, device="cuda"), input_len=input_len)
-    helper = PinMemCacheReqTokenIndex(req, index_stream=torch.cuda.default_stream())
+    req = make_req(
+        torch.empty((1, max_length), dtype=torch.int32, device="cuda"), mode, input_len=input_len, page_size=page_size
+    )
+    helper = create_req_token_index(req, index_stream=torch.cuda.default_stream())
+    storage_page_size = page_size if mode == "pin_mem_page_cache" else 1
+    if mode == "pin_mem_page_cache":
+        next_end = (next_end + page_size - 1) // page_size * page_size
+        initial_elements = grown_elements = (max_length + page_size - 1) // page_size
+    else:
+        initial_elements = initial_capacity
+        grown_elements = grown_capacity
     assert helper.input_len == input_len
     assert helper._cpu_buffer is None
     helper.append_token_indexes(torch.empty(0, dtype=torch.int32))
     assert helper._cpu_buffer is None
-    # 首次只追加一个索引，仍按完整输入长度额外预留 2K 输出 token。
-    first_index = torch.zeros(1, dtype=torch.int32, pin_memory=True)
+    # 首次追加最小存储单位；完整模式预留 2K 输出，页模式一次申请到最大长度。
+    first_index = torch.arange(storage_page_size, dtype=torch.int32, pin_memory=True)
     helper.append_token_indexes(first_index)
-    assert helper._cpu_buffer.numel() == initial_capacity
+    assert helper._cpu_buffer.numel() == initial_elements
     assert helper._cpu_buffer.is_pinned() and helper._cpu_buffer.data_ptr() != first_index.data_ptr()
-    helper.append_token_indexes(torch.arange(1, initial_capacity, dtype=torch.int32, pin_memory=True))
+    helper.append_token_indexes(torch.arange(storage_page_size, initial_capacity, dtype=torch.int32, pin_memory=True))
     old_buffer = helper._cpu_buffer
     helper.append_token_indexes(torch.arange(initial_capacity, next_end, dtype=torch.int32, pin_memory=True))
-    assert helper._cpu_buffer.numel() == grown_capacity and helper._cpu_buffer.is_pinned()
-    assert helper._cpu_buffer.data_ptr() != old_buffer.data_ptr()
+    assert helper._cpu_buffer.numel() == grown_elements and helper._cpu_buffer.is_pinned()
+    if mode == "pin_mem_page_cache":
+        assert helper._cpu_buffer is old_buffer
+    else:
+        assert helper._cpu_buffer.data_ptr() != old_buffer.data_ptr()
     snapshot = helper.get_cpu_token_indexes(0, next_end)
     assert snapshot.tolist() == list(range(next_end))
     grown_buffer = helper._cpu_buffer
     helper.reset()
     assert helper.input_len == input_len and helper._cpu_buffer is None
     assert helper.token_index_len == helper.gpu_index_submitted_len == 0
-    helper.append_token_indexes(torch.tensor([99], dtype=torch.int32, pin_memory=True))
+    replacement = torch.arange(99, 99 + storage_page_size, dtype=torch.int32, pin_memory=True)
+    helper.append_token_indexes(replacement)
     assert helper._cpu_buffer is not grown_buffer
-    assert helper._cpu_buffer.numel() == initial_capacity
-    assert helper.token_index_len == 1
-    assert helper.get_cpu_token_indexes(0, helper.token_index_len).tolist() == [99]
+    assert helper._cpu_buffer.numel() == initial_elements
+    assert helper.token_index_len == storage_page_size
+    assert torch.equal(helper.get_cpu_token_indexes(0, helper.token_index_len), replacement)
     assert snapshot.tolist() == list(range(next_end))
 
 
 @requires_cuda
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache"])
+@pytest.mark.parametrize("page_size", [1, 64])
 @pytest.mark.parametrize("use_default_stream", [False, True])
-def test_pin_buffer_reset_during_upload_keeps_old_data_until_h2d_completes(use_default_stream):
+def test_pin_buffer_reset_during_upload_keeps_old_data_until_h2d_completes(mode, page_size, use_default_stream):
     count = 8192
     row = torch.full((count,), -1, dtype=torch.int32, device="cuda")
     index_stream = torch.cuda.default_stream() if use_default_stream else torch.cuda.Stream()
     index_stream.wait_stream(torch.cuda.current_stream())
-    helper = PinMemCacheReqTokenIndex(make_req(row.unsqueeze(0), input_len=count), index_stream=index_stream)
+    helper = create_req_token_index(
+        make_req(row.unsqueeze(0), mode, input_len=count, page_size=page_size), index_stream=index_stream
+    )
     original = torch.arange(count, dtype=torch.int32, pin_memory=True)
-    replacement = torch.full((count,), -99, dtype=torch.int32, pin_memory=True)
+    replacement = (torch.arange(count, dtype=torch.int32).remainder(page_size) + count * 2).pin_memory()
     helper.append_token_indexes(original)
     source_ref = weakref.ref(helper._cpu_buffer)
 
@@ -448,15 +594,17 @@ def test_manager_owns_only_gpu_table_and_initializes_hold_page(monkeypatch, page
 @requires_cuda
 @pytest.mark.parametrize("batch_available", [False, True])
 @pytest.mark.parametrize("mode", MODES)
+@pytest.mark.parametrize("page_size", [1, 64])
 @pytest.mark.parametrize("index_stream_kind", ["default", "shared"])
 def test_backend_uploads_pinned_views_without_request_events_or_keepalive_list(
-    monkeypatch, mode, batch_available, index_stream_kind
+    monkeypatch, mode, page_size, batch_available, index_stream_kind
 ):
     from lightllm.common import cuda_wrapper
     from lightllm.server.router.model_infer.mode_backend import base_backend
 
-    table = torch.full((2, 16), -1, dtype=torch.int32, device="cuda")
-    expected = (torch.arange(16, dtype=torch.int32).view(2, 8) + 32).pin_memory()
+    count = max(8, page_size)
+    table = torch.full((2, 2 * count), -1, dtype=torch.int32, device="cuda")
+    expected = (torch.arange(2 * count, dtype=torch.int32).view(2, count) + 32).pin_memory()
     index_streams = [torch.cuda.default_stream()] * 2
     if index_stream_kind == "shared":
         index_streams = [torch.cuda.Stream()] * 2
@@ -464,14 +612,14 @@ def test_backend_uploads_pinned_views_without_request_events_or_keepalive_list(
         index_stream.wait_stream(torch.cuda.default_stream())
     reqs = []
     for row, index_stream in enumerate(index_streams):
-        req = make_req(table, mode, req_idx=row)
+        req = make_req(table, mode, req_idx=row, page_size=page_size)
         req.token_index = create_req_token_index(req, index_stream=index_stream)
         with torch.cuda.stream(index_stream):
             # 批量上传须先等待旧写入；pure_gpu 在本流追加，调用流尚未承接依赖。
             torch.cuda._sleep(60_000_000)
-            table[row, :8].fill_(-2)
+            table[row, :count].fill_(-2)
             req.token_index.append_token_indexes(expected[row])
-        req.hold_kv_len = 8
+        req.hold_kv_len = count
         reqs.append(req)
     monkeypatch.setattr(base_backend, "g_infer_context", SimpleNamespace(req_manager=reqs[0].req_manager))
     monkeypatch.setattr(cuda_wrapper.PinnedH2DBatchCopier, "_native_batch_available", batch_available)
@@ -486,10 +634,13 @@ def test_backend_uploads_pinned_views_without_request_events_or_keepalive_list(
     event_type = torch.cuda.Event
 
     def record_batch(dst_tensors, src_tensors):
-        # 直接借用各请求缓存的待上传区间，不能再创建聚合快照或改成逐请求上传。
-        assert [tensor.data_ptr() for tensor in src_tensors] == [
-            req.token_index.get_upload_indexes().data_ptr() for req in reqs
-        ]
+        # 完整缓存直接借用视图，页缓存先展开；两者都应一次批量提交正确的 token 索引。
+        assert all(tensor.is_pinned() for tensor in src_tensors)
+        assert all(torch.equal(tensor, expected[row]) for row, tensor in enumerate(src_tensors))
+        if mode == "pin_mem_cache":
+            assert [tensor.data_ptr() for tensor in src_tensors] == [
+                req.token_index.get_upload_indexes().data_ptr() for req in reqs
+            ]
         batch_calls.append(len(src_tensors))
         return copy_batch(dst_tensors, src_tensors)
 
@@ -506,22 +657,22 @@ def test_backend_uploads_pinned_views_without_request_events_or_keepalive_list(
         for req, index_stream in zip(reqs, index_streams):
             with torch.cuda.stream(index_stream):
                 # 不等待后台线程：已标记提交的索引必须能在请求自己的索引流立即使用。
-                observed.append(req.token_index.get_gpu_token_indexes(0, 8).clone())
-        if mode == "pin_mem_cache":
+                observed.append(req.token_index.get_gpu_token_indexes(0, count).clone())
+        if mode != "pure_gpu":
             for req in reqs:
                 req.token_index.reset()
-                req.token_index.append_token_indexes(torch.zeros(8, dtype=torch.int32, pin_memory=True))
+                req.token_index.append_token_indexes(torch.arange(count, dtype=torch.int32, pin_memory=True))
         # 两个请求只建立一个 batch 保活事件；pure_gpu 与 PyTorch 回退无需该事件。
-        assert len(events) == (1 if mode == "pin_mem_cache" and batch_available else 0)
-        assert batch_calls == ([2] if mode == "pin_mem_cache" else [])
+        assert len(events) == (1 if mode != "pure_gpu" and batch_available else 0)
+        assert batch_calls == ([] if mode == "pure_gpu" else [2])
         pool = cuda_wrapper.PinnedH2DBatchCopier._release_pool
         if pool is not None:
             pool.submit(lambda: None).result(timeout=10)
-    assert [req.token_index.gpu_index_submitted_len for req in reqs] == [0 if mode == "pin_mem_cache" else 8] * 2
+    assert [req.token_index.gpu_index_submitted_len for req in reqs] == [count if mode == "pure_gpu" else 0] * 2
     assert not hasattr(backend, "_pending_cpu_index_uploads")
     assert not hasattr(backend, "_index_upload_stream")
     assert all(not hasattr(req.token_index, "_gpu_write_event") for req in reqs)
-    assert torch.equal(table[:, :8].cpu(), expected)
+    assert torch.equal(table[:, :count].cpu(), expected)
     for actual, expected_row, index_stream in zip(observed, expected, index_streams):
         with torch.cuda.stream(index_stream):
             assert torch.equal(actual.cpu(), expected_row)

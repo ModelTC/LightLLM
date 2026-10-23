@@ -11,7 +11,7 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.req_manager.base import ReqManager, _ReqLinkedList
 from lightllm.common.cuda_wrapper import cuda_memcpy_pinned_h2d_batch_async
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
-from lightllm.server.router.model_infer.infer_req_ext1 import create_req_token_index
+from lightllm.server.router.model_infer.infer_req_ext1 import PinMemPageCacheReqTokenIndex, create_req_token_index
 from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from unit_tests.common.cpu_index_helpers import bind_cpu_indexes, make_cpu_index_manager
@@ -23,6 +23,7 @@ def reset_batch_copy_availability(monkeypatch):
 
     monkeypatch.setattr(cuda_wrapper.PinnedH2DBatchCopier, "_native_batch_available", True)
     monkeypatch.setattr(infer_batch.g_infer_context, "req_manager", None)
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_page_offsets", None)
 
 
 def _make_manager(device="cpu"):
@@ -143,11 +144,12 @@ def test_shared_export_keeps_cpu_mirror_local_and_pinned(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
-@pytest.mark.parametrize("mode", ["pin_mem_cache", "pure_gpu"])
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 @pytest.mark.parametrize("hybrid", [False, True])
 @pytest.mark.parametrize("resuming", [False, True])
 def test_prefix_match_appends_to_initialized_or_released_index_state(monkeypatch, mode, hybrid, resuming):
     manager = _make_manager("cuda")
+    manager.page_size = 4
     req = InferReq.__new__(InferReq)
     req.req_idx = 0
     req.req_manager = manager
@@ -199,7 +201,7 @@ def test_prefix_match_appends_to_initialized_or_released_index_state(monkeypatch
         req._match_radix_cache()
 
     assert req.token_index.token_index_len == 4
-    assert req.token_index.gpu_index_submitted_len == (0 if mode == "pin_mem_cache" else 4)
+    assert req.token_index.gpu_index_submitted_len == (4 if mode == "pure_gpu" else 0)
     assert req.cur_kv_len == req.hold_kv_len == 4
     assert req.shared_kv_node is node
     assert req.shm_req.prompt_cache_len == req.shm_req.shm_cur_kv_len == 4

@@ -51,10 +51,10 @@ class ReqTokenIndex(ABC):
 
     @abstractmethod
     def get_upload_indexes(self) -> Optional[torch.Tensor]:
-        """借用 [gpu_index_submitted_len, token_index_len) 的 CPU 视图，不更新提交进度。
+        """返回 [gpu_index_submitted_len, token_index_len) 的 pinned CPU token 索引，不更新提交进度。
 
-        调用方可直接批量上传；缓存只追加，reset/扩容换用新存储，上传期间已有区间不变。
-        GPU 模式返回 None。
+        完整 CPU 缓存借用内部视图，页缓存按需展开到独立暂存区，调用方均可直接批量上传。
+        缓存只追加，reset/扩容换用新存储，上传期间已有区间不变；GPU 模式返回 None。
         """
         pass
 
@@ -62,7 +62,7 @@ class ReqTokenIndex(ABC):
     def get_free_token_indexes(self, start: int, end: int) -> torch.Tensor:
         """返回仅用于释放的 token 索引，可能是 CPU 或 GPU Tensor。
 
-        pin_mem_cache 返回 CPU 快照；pure_gpu 返回借用的 GPU 请求表视图。
+        两种 CPU 缓存模式返回 CPU 快照；pure_gpu 返回借用的 GPU 请求表视图。
 
         GPU 视图借用请求表，返回前让调用流等待索引流。重写请求槽位前，须在同一流
         按序消费，或让索引流等待消费流。此接口不提供跨槽位复用的快照语义，
@@ -155,6 +155,95 @@ class PinMemCacheReqTokenIndex(ReqTokenIndex):
         self._cpu_buffer = new_buffer
 
 
+class PinMemPageCacheReqTokenIndex(PinMemCacheReqTokenIndex):
+    """每个逻辑页仅保存首 token 的 pinned CPU 索引，对外仍使用 token 单位。"""
+
+    # 同一进程使用统一的 page_size，所有请求共享首次初始化的页内偏移。
+    _page_offsets: Optional[torch.Tensor] = None
+    # 同一推理进程的页缓存实例共享 slab 和空闲 offset，由推理线程串行申请。
+    _pinned_buffer: Optional[torch.Tensor] = None
+    _pinned_offset = 0
+
+    def __init__(self, infer_req: "InferReq", index_stream: torch.cuda.Stream):
+        super().__init__(infer_req, index_stream)
+        self.page_size = infer_req.req_manager.page_size
+        if PinMemPageCacheReqTokenIndex._page_offsets is None:
+            PinMemPageCacheReqTokenIndex._page_offsets = torch.arange(
+                self.page_size, dtype=self.gpu_indexes.dtype, device="cpu", requires_grad=False
+            )
+
+    def append_token_indexes(self, mem_indexes: torch.Tensor):
+        """从页边界追加 token 索引；调用方保证同一逻辑页内索引连续。"""
+        append_len = mem_indexes.numel()
+        if append_len == 0:
+            return
+        assert mem_indexes.device.type == "cpu", "mem_indexes must be a CPU Tensor"
+        start = self.token_index_len
+        end = start + append_len
+        self._reserve(end)
+        # 输入从页首开始，每隔 page_size 个 token 保存一个页首索引。
+        first_page = start // self.page_size
+        last_page = (end + self.page_size - 1) // self.page_size
+        self._cpu_buffer[first_page:last_page].copy_(mem_indexes[:: self.page_size])
+        self.token_index_len = end
+
+    def get_cpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
+        return self._expand_token_indexes(start, end, pin_memory=False)
+
+    def get_upload_indexes(self) -> torch.Tensor:
+        return self._expand_token_indexes(self.gpu_index_submitted_len, self.token_index_len, pin_memory=True)
+
+    def _reserve(self, end: int):
+        """首次按 GPU 请求表的最大长度申请全部页索引，后续追加直接复用。"""
+        if self._cpu_buffer is not None:
+            return
+        page_capacity = (self.gpu_indexes.numel() + self.page_size - 1) // self.page_size
+        self._cpu_buffer = torch.empty(
+            page_capacity, dtype=self.gpu_indexes.dtype, device="cpu", pin_memory=True, requires_grad=False
+        )
+
+    def _expand_token_indexes(self, start: int, end: int, pin_memory: bool) -> torch.Tensor:
+        """展开页对齐区间内的 token 索引，返回值不借用压缩缓存。"""
+        assert start % self.page_size == 0, "start must be page-aligned"
+        assert end % self.page_size == 0, "end must be page-aligned"
+        if start == end:
+            return torch.empty(
+                0, dtype=self.gpu_indexes.dtype, device="cpu", pin_memory=pin_memory, requires_grad=False
+            )
+        first_page = start // self.page_size
+        last_page = end // self.page_size
+        token_num = end - start
+        if pin_memory:
+            # 上传使用一次性的 slab 区间，后续追加、扩容或 reset 均不会覆写在途 H2D 的源。
+            token_indexes = self._alloc_pinned_tensor(token_num)
+        else:
+            token_indexes = torch.empty(token_num, dtype=self.gpu_indexes.dtype, device="cpu", requires_grad=False)
+        page_starts = self._cpu_buffer[first_page:last_page]
+        # 将每个 page 的首索引加上页内偏移，直接展开到 token 级别的目标缓冲区。
+        torch.add(page_starts[:, None], self._page_offsets, out=token_indexes.view(-1, self.page_size))
+        return token_indexes
+
+    @staticmethod
+    def _alloc_pinned_tensor(need_size: int) -> torch.Tensor:
+        """申请 int32 token 索引的 pinned 区间，slab 容量为 1M token（4 MiB）。"""
+        buffer_token_num = 1024 * 1024
+        if need_size == 0 or need_size > buffer_token_num:
+            return torch.empty(need_size, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True)
+        buffer = PinMemPageCacheReqTokenIndex._pinned_buffer
+        start = PinMemPageCacheReqTokenIndex._pinned_offset
+        end = start + need_size
+        if buffer is None or end > buffer_token_num:
+            buffer = torch.empty(
+                buffer_token_num, dtype=torch.int32, device="cpu", requires_grad=False, pin_memory=True
+            )
+            PinMemPageCacheReqTokenIndex._pinned_buffer = buffer
+            start = 0
+            end = need_size
+        # 每次只创建返回值这一个视图；offset 只前进，换新 slab 时才归零，不覆写在途 H2D 的源。
+        PinMemPageCacheReqTokenIndex._pinned_offset = end
+        return buffer[start:end]
+
+
 class PureGpuReqTokenIndex(ReqTokenIndex):
     """直接维护 GPU 请求表，不持有 CPU 索引缓存；CPU 读取会等待 D2H 完成。"""
 
@@ -210,6 +299,10 @@ def create_req_token_index(infer_req: "InferReq", index_stream: torch.cuda.Strea
     mode = infer_req.args.req_token_index_mode
     if mode == "pin_mem_cache":
         return PinMemCacheReqTokenIndex(infer_req, index_stream)
+    if mode == "pin_mem_page_cache":
+        return PinMemPageCacheReqTokenIndex(infer_req, index_stream)
     if mode == "pure_gpu":
         return PureGpuReqTokenIndex(infer_req, index_stream)
-    raise ValueError(f"Unknown request token index mode: {mode}; expected pin_mem_cache or pure_gpu")
+    raise ValueError(
+        f"Unknown request token index mode: {mode}; expected pin_mem_cache, pin_mem_page_cache or pure_gpu"
+    )

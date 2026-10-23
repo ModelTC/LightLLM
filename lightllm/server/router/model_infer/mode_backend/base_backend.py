@@ -671,7 +671,7 @@ class ModeBackend:
         assert len(index_streams) == 1, "All requests in a batch must use the same index stream"
         index_stream = index_streams.pop()
         current_stream = torch.cuda.current_stream(index_stream.device)
-        # 第二阶段：切出尚未提交的 CPU 源视图和 GPU 目标视图，记录本次提交终点。
+        # 第二阶段：准备尚未提交的 CPU token 索引和 GPU 目标视图，记录本次提交终点。
         cpu_index_slices, gpu_index_slices = [], []
         pending_index_uploads = []
         for req in run_reqs:
@@ -694,7 +694,7 @@ class ModeBackend:
             for token_index, end in pending_index_uploads:
                 token_index.gpu_index_submitted_len = end
         # 第五阶段：调用流与索引流不同时建立等待依赖，保证后续 GPU 访问能读到更新。
-        # 两种模式在没有新上传时，已提交的索引写入也可能尚未完成，仍需承接依赖。
+        # 各模式在没有新上传时，已提交的索引写入也可能尚未完成，仍需承接依赖。
         if current_stream != index_stream:
             current_stream.wait_stream(index_stream)
 

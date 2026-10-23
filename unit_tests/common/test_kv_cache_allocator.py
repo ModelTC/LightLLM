@@ -245,7 +245,7 @@ def test_memory_manager_passes_page_size_and_resizes_token_capacity(make_allocat
     assert_capacity(manager.allocator, manager.size)
 
 
-@pytest.mark.parametrize("mode", ["pin_mem_cache", "pure_gpu"])
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 @pytest.mark.parametrize("page_size", [1, 64])
 def test_request_free_indexes_recycle_pages_after_reset_batch_and_slot_reuse(
     make_allocator, monkeypatch, mode, page_size
@@ -253,15 +253,16 @@ def test_request_free_indexes_recycle_pages_after_reset_batch_and_slot_reuse(
     # 延迟导入，沿用在线推理初始化顺序，不增加另一套请求/allocator 夹具。
     from lightllm.server.router.model_infer.mode_backend import generic_pre_process  # noqa: F401
     from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
-    from lightllm.server.router.model_infer.infer_req_ext1 import create_req_token_index
+    from lightllm.server.router.model_infer.infer_req_ext1 import PinMemPageCacheReqTokenIndex, create_req_token_index
 
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_page_offsets", None)
     allocator = make_allocator(6 * page_size, page_size)
     allocated = allocator.alloc(allocator.size)
     first = torch.cat([allocated[4 * page_size : 5 * page_size], allocated[page_size : 2 * page_size]]).pin_memory()
     second = allocated[3 * page_size : 4 * page_size]
     expected = torch.cat([first, second])
     table = torch.full((2, 2 * page_size), -1, dtype=torch.int32, device="cuda")
-    manager = SimpleNamespace(req_to_token_indexs=table)
+    manager = SimpleNamespace(req_to_token_indexs=table, page_size=page_size)
     context = InferenceContext.__new__(InferenceContext)
     context.req_manager = manager
     context.radix_cache = None

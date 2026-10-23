@@ -38,7 +38,8 @@ KV 存储和请求表，但资源的申请、缓存和释放以完整物理页�
 `ReqManager` 只持有 GPU `req_to_token_indexs`，不再分配全局 CPU 页表。
 每个 `InferReq` 通过成员 `token_index` 持有一个 `ReqTokenIndex`，实现位于 `server/router/model_infer/infer_req_ext1.py`。
 索引操作直接使用 `req.token_index.append_token_indexes(...)` 等接口，`InferReq` 不再提供同名转发方法。
-基类仅在构造函数中初始化公共对象和状态，其余方法只定义抽象接口；两种子类各自实现读写、上传和重置逻辑。
+基类仅在构造函数中初始化公共对象和状态，其余方法只定义抽象接口；
+各子类实现或复用读写、上传和重置逻辑。
 扩展构造函数接收 `infer_req` 和必填的 `index_stream`，仅提取并保存固定的 `req_idx`、GPU 请求表行视图及索引流，
 避免反向持有请求对象形成循环引用；索引流由外部选择，Helper 内部不查询默认流或捕获构造时的当前流。
 CPU 缓存实现同时记录输入长度 `input_len`，helper 在共享请求初始化后、前缀匹配前构造。
@@ -49,20 +50,34 @@ Helper 保存该流，后续不随调用点的当前流切换：
 | `--req_token_index_mode` | 存储与优点 | 代价 |
 | --- | --- | --- |
 | `pin_mem_cache`（默认） | `PinMemCacheReqTokenIndex` 按请求直接申请 pinned CPU token 缓存；CPU 读取无需 D2H，GPU 更新可批量提交 | 占用 pinned CPU 内存，需要维护上传进度 |
+| `pin_mem_page_cache` | `PinMemPageCacheReqTokenIndex` 每个 KV 页仅保存一个 pinned CPU 首 token 索引，常驻索引项数约缩小为原来的 `1 / page_size` | CPU 读取和 GPU 上传时需要展开 token 索引，适用于 `page_size > 1` |
 | `pure_gpu` | `PureGpuReqTokenIndex` 直接维护 GPU 请求表，无常驻 CPU 索引缓存 | CPU 读取需要 D2H 并等待结果，频繁的 CPU 索引操作可能更慢 |
 
-两种模式均保留相同的 GPU 请求表，显存占用基本相同。追加后的所需长度为 `end = token_index_len + mem_indexes.numel()`。
-CPU 缓存首次按 `max(input_len + 2K, end)`
+三种模式均保留相同的 GPU 请求表，显存占用基本相同。追加后的所需长度为 `end = token_index_len + mem_indexes.numel()`。
+完整 token 模式的 CPU 缓存首次按 `max(input_len + 2K, end)`
 向上对齐到 1K token 申请，为输出预留空间；后续容量不足时，在本次所需长度 `end` 上多预留 2K token，再向上对齐到 1K，
-容量上限为 GPU 请求表行长度。缓冲区在首次非空写入时按需申请，重置时保留输入长度，丢弃已申请的缓冲区引用；
-由新建的 `torch.empty(..., pin_memory=True, requires_grad=False)`
-独立持有，不借用 KV allocator 的返回缓冲区。索引缓存按 token 保存，不再按页压缩或展开。
+容量上限为 GPU 请求表行长度。两种 CPU 缓存模式均直接使用 `torch.empty(..., pin_memory=True, requires_grad=False)`
+为每个请求独立申请常驻存储；完整模式保存每个 token，页模式在首次追加时按 GPU 请求表的最大长度
+一次性申请 `ceil(max_sequence_length / page_size)` 个页首索引，后续追加无需扩容或复制旧缓存。
+页模式继承完整模式的 GPU 上传、释放快照和 reset 流程，覆盖 CPU 索引的存储和展开。
+压缩依赖已有的页内连续索引约束；追加完整页，输入从下标 0 按 page_size 取页首。
+页模式展开 CPU 快照、释放索引或待上传索引时，断言 start 和 end 均为页边界，直接返回完整展开结果。
+缓冲区在首次非空写入时按需申请，重置时保留输入长度，
+丢弃已申请的缓冲区引用，由 PyTorch 在引用和异步传输依赖结束后回收。
+页模式上传时先将待提交区间展开到临时 pinned token 索引，使用 `PinMemPageCacheReqTokenIndex._alloc_pinned_tensor`
+按 1M token（4 MiB）申请 int32 slab。该接口及共享状态仅属于页缓存类，保存完整 buffer 和下一个空闲位置 `_pinned_offset`，
+每次只创建返回值这一个切片。
+offset 只前进，不回绕；空间不足时换用新 slab 并从零开始，请求 reset 不重置共享 offset。
+超出 slab 容量的申请独立分配，空申请不改变 slab 或 offset。旧 slab 的 storage 在所有切片引用和异步传输依赖结束后
+由 PyTorch 回收。
+纯 GPU 模式对普通 CPU 输入使用 `mem_indexes.pin_memory()` 转为独立 pinned 存储，已有 pinned 输入继续复用。
+三种模式均不借用 KV allocator 的返回缓冲区作为请求常驻缓存。
 
 统一接口为 `append_token_indexes(mem_indexes)`、`get_cpu_token_indexes(start, end)`、
 `get_free_token_indexes(start, end)` 和 `get_gpu_token_indexes(start, end)`，均使用 token 单位，
-追加接口将完整输入接到已记录索引的尾部，非空输入在两种模式下均断言为 CPU Tensor；空输入直接返回。
+追加接口将完整输入接到已记录索引的尾部，非空输入在三种模式下均断言为 CPU Tensor；空输入直接返回。
 CPU 缓存模式直接复制到自身的 pinned 缓冲区，无需先 pin 输入；GPU 模式仅在输入未 pinned 时内部转换，已有 pinned 输入直接复用。
-前缀匹配和索引重建路径直接传入 CPU 索引，不再自行 pin。读取接口支持页内任意区间；提交给 allocator 的释放区间仍须覆盖完整页。
+前缀匹配和索引重建路径直接传入 CPU 索引，不再自行 pin。GPU 视图读取支持页内任意区间；页模式 CPU 展开和 allocator 释放使用完整页区间。
 CPU getter 返回独立快照，缓存、PD 元数据和异步任务可跨请求释放持有；GPU getter 返回当前请求的
 GPU 表视图，不应跨请求槽位复用持有。Helper 保存外部传入的索引流，GPU 索引读写固定在该流，
 调用方保证 token 区间有效；GPU getter 返回前让调用流等待索引流，没有新增上传时也需承接已有写入的依赖。
@@ -80,8 +95,8 @@ allocator 仍维护 CPU 空闲页表，因此最终按 `page_size` 取页首并�
 
 `token_index_len` 是当前连续记录的 token 索引长度，包含页内预留槽位；每次追加从该位置开始，
 并按输入元素个数增长。CPU 缓存扩容时保留
-`[0, token_index_len)` 的已有映射。它与 CPU 缓存容量 `_cpu_buffer.numel()`、已算好 KV 的长度
-`cur_kv_len` 不同。
+`[0, token_index_len)` 的已有映射。它与 CPU 缓存容量、已算好 KV 的长度 `cur_kv_len` 不同；
+完整模式的 CPU token 容量为 `_cpu_buffer.numel()`，页模式为 `_cpu_buffer.numel() * page_size`。
 `gpu_index_submitted_len` 是最新 GPU 索引写入已提交的前缀右端点，后续索引流操作可按序使用
 `[0, gpu_index_submitted_len)`。它表示提交进度，不表示 GPU 传输已完成，也不是累计上传量；
 CPU 缓存模式的追加接口只更新 CPU 索引和 `token_index_len`，不修改 GPU 提交进度。
@@ -89,12 +104,13 @@ CPU 缓存模式的追加接口只更新 CPU 索引和 `token_index_len`，不�
 首次前缀匹配时索引为空；暂停恢复前已由统一释放流程重置，两处匹配入口直接追加命中前缀，不重复 `reset()`。
 释放或暂停请求时也由索引扩展的 `reset()` 统一清零两个长度。
 CPU 模式重置时将 `_cpu_buffer` 设为 `None`，下一次追加重新申请，随后从零开始提交 GPU 更新。
-单独的 GPU getter 直接上传 CPU 缓存视图：普通追加不会改写已有区间，扩容和重置使用新存储，
+单独的 GPU getter 上传完整缓存视图或页缓存展开得到的暂存区：普通追加不会改写已有区间，扩容和重置使用新存储，
 PyTorch `copy_(non_blocking=True)` 会登记 pinned 源的流使用，旧存储在 H2D 完成前不会被回收复用。
 因此不再为单个请求上传额外申请 pinned 快照或执行一次 CPU 拷贝，也不需要在 reset 中同步 CUDA。
 
 `get_upload_indexes()` 不接受区间参数，CPU 模式返回内部计算的
-`[gpu_index_submitted_len, token_index_len)` 视图，不改变提交进度；无待上传内容时返回空 tensor，
+`[gpu_index_submitted_len, token_index_len)` 的 pinned token 索引，完整模式返回缓存视图，页模式按需展开，
+不改变提交进度；无待上传内容时返回空 tensor，
 纯 GPU 模式返回 `None`。CPU 缓存模式的 GPU getter 校验 `end <= token_index_len` 后按需提交完整待上传区间，
 纯 GPU 模式校验 `end <= gpu_index_submitted_len`；读取均不允许推进超出已有索引的提交进度。
 批量入口遇到存在未提交区间、但没有 CPU 上传源的情况会直接断言，不再替 GPU 模式补写提交进度。

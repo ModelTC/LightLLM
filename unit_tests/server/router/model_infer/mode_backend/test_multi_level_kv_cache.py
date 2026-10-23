@@ -13,7 +13,7 @@ from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import
 from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as multi_level_kv_cache_impl
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
 from unit_tests.common.cpu_index_helpers import make_cpu_index_manager, bind_cpu_indexes
-from lightllm.server.router.model_infer.infer_req_ext1 import create_req_token_index
+from lightllm.server.router.model_infer.infer_req_ext1 import PinMemPageCacheReqTokenIndex, create_req_token_index
 
 
 def test_cache_tiers_reassignment_is_rejected():
@@ -168,9 +168,10 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     assert req.hybrid_len_to_big_page_id == {}
 
 
-@pytest.mark.parametrize("mode", ["pin_mem_cache", "pure_gpu"])
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires pinned CPU buffers")
 def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, mode):
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_page_offsets", None)
     table = torch.full((1, 136), -1, dtype=torch.int32)
     gpu_table = torch.full_like(table, -2)
     table[0, :4] = torch.arange(4, dtype=torch.int32)
@@ -262,10 +263,11 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, mode):
     assert gpu_table[0, 132:].eq(-2).all()
 
 
-@pytest.mark.parametrize("mode", ["pin_mem_cache", "pure_gpu"])
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
 @pytest.mark.parametrize("use_default_index_stream", [False, True])
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_cpu_cache_offload_getter_orders_transfer_stream(monkeypatch, mode, use_default_index_stream):
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_page_offsets", None)
     default_stream = torch.cuda.default_stream()
     index_stream = default_stream if use_default_index_stream else torch.cuda.Stream()
     index_stream.wait_stream(default_stream)
@@ -273,7 +275,7 @@ def test_cpu_cache_offload_getter_orders_transfer_stream(monkeypatch, mode, use_
     gpu_indexes = torch.full((64,), -1, dtype=torch.int32, device="cuda")
     req = SimpleNamespace(
         req_idx=0,
-        req_manager=SimpleNamespace(req_to_token_indexs=gpu_indexes.unsqueeze(0)),
+        req_manager=SimpleNamespace(req_to_token_indexs=gpu_indexes.unsqueeze(0), page_size=64),
         args=SimpleNamespace(req_token_index_mode=mode),
         cache_tiers=(CacheTier.CPU,),
         cur_kv_len=64,
