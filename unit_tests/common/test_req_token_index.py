@@ -186,18 +186,38 @@ def test_append_rejects_gpu_input_without_changing_index_state(mode):
 
 @requires_cuda
 @pytest.mark.parametrize("mode", MODES)
-def test_gpu_getter_rejects_unrecorded_indexes_without_advancing_progress(mode):
-    table = torch.full((1, 8), -7, dtype=torch.int32, device="cuda")
-    helper = create_req_token_index(make_req(table, mode), index_stream=torch.cuda.current_stream())
-    helper.append_token_indexes(torch.tensor([10, 11], dtype=torch.int32, pin_memory=True))
+@pytest.mark.parametrize("getter_name", ["get_cpu_token_indexes", "get_gpu_token_indexes", "get_free_token_indexes"])
+@pytest.mark.parametrize("start,end", [(0, 65), (65, 65)])
+def test_read_getters_reject_unrecorded_indexes_without_advancing_progress(mode, getter_name, start, end):
+    table = torch.full((1, 128), -7, dtype=torch.int32, device="cuda")
+    helper = create_req_token_index(make_req(table, mode, page_size=64), index_stream=torch.cuda.current_stream())
+    helper.append_token_indexes(torch.arange(64, dtype=torch.int32, pin_memory=True))
     submitted_len = helper.gpu_index_submitted_len
+    getter = getattr(helper, getter_name)
 
     with pytest.raises(AssertionError, match="Read range exceeds"):
-        helper.get_gpu_token_indexes(0, 4)
+        getter(start, end)
 
-    assert helper.token_index_len == 2
+    assert helper.token_index_len == 64
     assert helper.gpu_index_submitted_len == submitted_len
-    assert helper.get_gpu_token_indexes(0, 2).cpu().tolist() == [10, 11]
+    assert getter(1, 3).cpu().tolist() == [1, 2]
+    assert getter(64, 64).numel() == 0
+
+
+@pytest.mark.parametrize("start,append_len,boundary", [(0, 63, "end"), (1, 63, "start")])
+def test_page_cache_rejects_partial_page_appends_before_mutating_state(start, append_len, boundary):
+    table = torch.full((1, 128), -7, dtype=torch.int32)
+    helper = create_req_token_index(make_req(table, "pin_mem_page_cache", page_size=64), index_stream=object())
+    # 模拟不对齐的已有长度，验证从页内追加也会在分配或写入之前失败。
+    helper.token_index_len = start
+
+    with pytest.raises(AssertionError, match=f"Append {boundary} must be page-aligned"):
+        helper.append_token_indexes(torch.arange(append_len, dtype=torch.int32))
+
+    assert helper.token_index_len == start
+    assert helper.gpu_index_submitted_len == 0
+    assert helper._cpu_buffer is None
+    assert table.eq(-7).all()
 
 
 @requires_cuda

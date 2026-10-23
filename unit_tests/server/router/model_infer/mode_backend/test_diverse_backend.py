@@ -46,6 +46,7 @@ def test_copy_master_kv_updates_slave_hold_kv_len():
     master_req = SimpleNamespace(
         req_idx=0,
         cur_kv_len=4,
+        hold_kv_len=4,
         cur_output_len=1,
         shared_kv_node=new_shared_node,
     )

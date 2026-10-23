@@ -35,13 +35,14 @@ class ReqTokenIndex(ABC):
 
         非空输入必须是 CPU Tensor；CPU 缓存模式直接复制到自己的 pinned 缓存。
         pure_gpu 按需 pin 后异步上传；已 pinned 的输入在 H2D 完成前不得改写，但可释放引用。
+        pin_mem_page_cache 仅接受从页边界追加完整页，调用方保证每页内物理 token 索引连续。
         前缀替换先 reset，再按顺序追加重建。
         """
         pass
 
     @abstractmethod
     def get_cpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
-        """返回独立 CPU 快照，允许缓存或传输任务跨请求生命周期持有。"""
+        """读取有效长度内任意 token 区间，返回可跨请求生命周期持有的独立 CPU 快照。"""
         pass
 
     @abstractmethod
@@ -97,6 +98,7 @@ class PinMemCacheReqTokenIndex(ReqTokenIndex):
         self.token_index_len = end
 
     def get_cpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
+        assert end <= self.token_index_len, "Read range exceeds recorded token indexes"
         if start == end:
             return torch.empty(0, dtype=self.gpu_indexes.dtype, device="cpu", requires_grad=False)
         return self._cpu_buffer[start:end].clone()
@@ -173,13 +175,15 @@ class PinMemPageCacheReqTokenIndex(PinMemCacheReqTokenIndex):
             )
 
     def append_token_indexes(self, mem_indexes: torch.Tensor):
-        """从页边界追加 token 索引；调用方保证同一逻辑页内索引连续。"""
+        """从页边界追加完整页；调用方保证同一逻辑页内物理 token 索引连续。"""
         append_len = mem_indexes.numel()
         if append_len == 0:
             return
         assert mem_indexes.device.type == "cpu", "mem_indexes must be a CPU Tensor"
         start = self.token_index_len
         end = start + append_len
+        assert start % self.page_size == 0, "Append start must be page-aligned"
+        assert end % self.page_size == 0, "Append end must be page-aligned"
         self._reserve(end)
         # 输入从页首开始，每隔 page_size 个 token 保存一个页首索引。
         first_page = start // self.page_size
@@ -188,6 +192,7 @@ class PinMemPageCacheReqTokenIndex(PinMemCacheReqTokenIndex):
         self.token_index_len = end
 
     def get_cpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
+        assert end <= self.token_index_len, "Read range exceeds recorded token indexes"
         return self._expand_token_indexes(start, end, pin_memory=False)
 
     def get_upload_indexes(self) -> torch.Tensor:
@@ -268,6 +273,7 @@ class PureGpuReqTokenIndex(ReqTokenIndex):
         self.gpu_index_submitted_len = end
 
     def get_cpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
+        assert end <= self.token_index_len, "Read range exceeds recorded token indexes"
         # 阻塞到 D2H 完成，GPU 索引拷回后得到独立 CPU 快照。
         with torch.cuda.stream(self._index_stream):
             return self.gpu_indexes[start:end].detach().cpu()
