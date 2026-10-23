@@ -195,3 +195,36 @@ diverse mode 仍只支持 `page_size=1`，启动阶段会对其他取值明确�
   `[HOLD, HOLD+1, ..., HOLD+page_size-1]` 循环填充，而不是重复同一个 token 索引。
 - Radix 子节点用“首个完整 token 页”作为键，避免不同序列仅首 token 相同造成页级分支冲突。
 - 非法的 `page_size < 1` 以及尚未支持的功能组合在模型加载前失败。
+
+## 附录：选择批量异步 H2D 的原因
+
+当前实现采用“CPU 写入 pinned 索引 → CUDA 异步 H2D → GPU kernel 读取 device 请求表”的流程。
+选择显式拷贝的一项工程依据是：根据以往的使用经验，CPU 写入 pinned 内存后，直接让 GPU kernel
+读取这块 host 内存的方案，曾在极端时序下观察到读取值异常。因此，本实现通过 CUDA 内存传输接口
+建立明确的数据交接过程，模型 kernel 统一读取 GPU 上的 `req_to_token_indexs`。
+
+排查上述现象时，需要考虑 CPU 存储缓冲、写合并、cache 一致性以及 CPU/GPU 访问顺序对数据可见性的影响。
+“CPU 写入仍滞留于写缓冲，尚未对设备可见”是历史排查中考虑的可能原因，本文没有将其确认为所有平台上的根因。
+具体的 cache 维护与可见性实现取决于硬件和驱动，正确性应依赖 CUDA API 的访问顺序与完成语义，
+不假定每次异步拷贝都会执行固定的 CPU cache flush，或必须先把数据写回 DRAM 才能被设备正确读取。
+CUDA 也支持正确同步的 mapped pinned memory；其文档明确要求应用协调 host/device 访问，避免读写竞争。
+参见 [CUDA 13.0：Mapped Memory](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-c-programming-guide/index.html#mapped-memory)。
+
+本实现的正确性由以下约束共同保证：
+
+1. CPU 完成源索引写入后才提交 H2D；上传完成前不再改写已提交的源区间。
+2. `cudaMemcpyBatchAsync` 使用 `cudaMemcpySrcAccessOrderStream`，源读取遵循上传流顺序；
+   API 返回只表示已经提交，源内存须保持有效到实际传输结束。
+3. GPU 消费流通过已有的流等待承接上传依赖，随后读取 device 请求表。
+4. 原生 batch 路径由完成事件和后台任务持有 pinned 源引用；PyTorch `copy_` 回退路径
+   由其 host allocator 跟踪异步使用，避免传输完成前回收复用源内存。
+
+源访问顺序的定义参见 [CUDA 13.0 Runtime API：Memory Management](https://docs.nvidia.com/cuda/archive/13.0.0/cuda-runtime-api/group__CUDART__MEMORY.html)。
+批量接口用于将多个请求的索引上传合并为一次 API 提交，并直接使用各请求的 pinned 视图，避免额外的 CPU 聚合拷贝；
+这些正确性约束同样适用于普通的异步 H2D，batch 接口本身不能替代源保活、访问排序和禁止在途改写。
+
+PyTorch 文档介绍了使用 pinned CPU Tensor 配合 `to(..., non_blocking=True)` / `cuda(non_blocking=True)` 进行异步传输的方式，
+并说明 pinned 源在传输完成前被 CPU 改写可能导致 GPU 数据错误。本实现遵循这一显式传输范式，
+`cudaMemcpyBatchAsync` 则是多个索引区间的批量提交选择。
+参见 [PyTorch 2.11：Use pinned memory buffers](https://docs.pytorch.org/docs/2.11/notes/cuda.html#use-pinned-memory-buffers)
+和 [PyTorch：non_blocking 与 pin_memory 使用指南](https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html#other-copy-directions-gpu-cpu-cpu-mps)。
