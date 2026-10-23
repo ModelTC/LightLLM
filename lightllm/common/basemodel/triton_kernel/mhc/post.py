@@ -74,16 +74,16 @@ def _hc_post_4stream_kernel(
     accumulator_3 += residual_3 * tl.load(mix_base + 15)
 
     if GLM5_NUMERICS:
-        # Megatron's compiled native post rounds the residual bmm to BF16,
-        # then fuses the post expansion and addition into the final BF16 output.
+        # With TORCH_COMPILE_DISABLE=1, Megatron materializes both the
+        # residual bmm and the post product in the activation dtype.
         accumulator_0 = accumulator_0.to(residual.dtype.element_ty).to(tl.float32)
         accumulator_1 = accumulator_1.to(residual.dtype.element_ty).to(tl.float32)
         accumulator_2 = accumulator_2.to(residual.dtype.element_ty).to(tl.float32)
         accumulator_3 = accumulator_3.to(residual.dtype.element_ty).to(tl.float32)
-        accumulator_0 += layer_value * tl.load(post_base)
-        accumulator_1 += layer_value * tl.load(post_base + 1)
-        accumulator_2 += layer_value * tl.load(post_base + 2)
-        accumulator_3 += layer_value * tl.load(post_base + 3)
+        accumulator_0 += (layer_value * tl.load(post_base)).to(layer_output.dtype.element_ty).to(tl.float32)
+        accumulator_1 += (layer_value * tl.load(post_base + 1)).to(layer_output.dtype.element_ty).to(tl.float32)
+        accumulator_2 += (layer_value * tl.load(post_base + 2)).to(layer_output.dtype.element_ty).to(tl.float32)
+        accumulator_3 += (layer_value * tl.load(post_base + 3)).to(layer_output.dtype.element_ty).to(tl.float32)
 
     output_base = output + token * out_stride_m + hidden_offsets
     tl.store(output_base, accumulator_0, mask=hidden_mask)
@@ -111,7 +111,7 @@ def hc_post(
         residual_mix: [T, S, S]，fp32 或激活 dtype；来自 hc_pre_norm。
         post_mix: [T, S]，与 residual_mix 相同 dtype；来自同一次 pre 调用。
         streams: 残差 stream 数 S；当前 Triton 入口要求 S = 4。
-        glm5_numerics: 匹配 GLM 训练默认 native post，在加子层输出前将残差混合结果舍入到激活 dtype。
+        glm5_numerics: 匹配 GLM 训练默认 native post，在加子层输出前将残差混合结果和 post 乘积分别舍入到激活 dtype。
 
     Returns:
         新残差 [T, S * H]，dtype 与 layer_output 相同；输入张量保持不变。
@@ -144,6 +144,7 @@ def hc_post(
         out_stride_m=output.stride(0),
         BLOCK_H=block_h,
         GLM5_NUMERICS=glm5_numerics,
+        enable_fp_fusion=not glm5_numerics,
         num_warps=8,
     )
     return output

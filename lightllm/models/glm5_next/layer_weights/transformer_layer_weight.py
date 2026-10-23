@@ -212,6 +212,7 @@ class Glm5NextTransformerLayerWeight(TransformerLayerWeight):
             num_fused_shared_experts=self.num_fused_shared_experts,
             layer_num=self.layer_num_,
             network_config=self.network_config_,
+            glm5_numerics=True,
         )
 
     def _init_kda(self):

@@ -22,7 +22,9 @@ class FuseMoeBaseImpl:
         redundancy_expert_ids_tensor: torch.Tensor,
         routed_expert_counter_tensor: torch.Tensor,
         auto_update_redundancy_expert: bool,
+        glm5_numerics: bool = False,
     ):
+        self.glm5_numerics = glm5_numerics
         self.n_routed_experts = n_routed_experts
         self.num_fused_shared_experts = num_fused_shared_experts
         self.routed_scaling_factor = routed_scaling_factor

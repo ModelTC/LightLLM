@@ -87,6 +87,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            glm5_numerics=self.glm5_numerics,
         )
         return input_tensor
 

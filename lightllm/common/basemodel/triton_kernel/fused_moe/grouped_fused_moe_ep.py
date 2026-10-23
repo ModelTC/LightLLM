@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from lightllm.distributed import dist_group_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from .moe_route_weight import multiply_routing_weights, gather_low_latency_routing_weights
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
     silu_and_mul_masked_post_quant_fwd,
 )
@@ -79,6 +80,8 @@ def masked_group_gemm(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    glm5_numerics: bool = False,
+    routing_weights: Optional[torch.Tensor] = None,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
@@ -99,6 +102,8 @@ def masked_group_gemm(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        glm5_numerics=glm5_numerics,
+        routing_weights=routing_weights,
     )
     del gemm_out_a
     gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
@@ -221,6 +226,7 @@ def fused_experts(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    glm5_numerics: bool = False,
 ):
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
     check_ep_expert_dtype(quant_method)
@@ -249,6 +255,7 @@ def fused_experts(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        glm5_numerics=glm5_numerics,
     )
 
 
@@ -271,6 +278,7 @@ def fused_experts_impl(
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
     block_size_k: int = 128,
+    glm5_numerics: bool = False,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -340,6 +348,7 @@ def fused_experts_impl(
                 alpha=alpha,
                 limit=limit,
                 clamp_up_add_one=clamp_up_add_one,
+                glm5_numerics=glm5_numerics,
             )
         else:
             gather_out = torch.empty(
@@ -361,6 +370,7 @@ def fused_experts_impl(
                     alpha=alpha,
                     limit=limit,
                     clamp_up_add_one=clamp_up_add_one,
+                    glm5_numerics=glm5_numerics,
                 )
                 _gemm_out_a, _silu_out = None, None
         del recv_x
@@ -387,6 +397,9 @@ def fused_experts_impl(
             async_finish=False,
             return_recv_hook=False,
         )
+        routing_weights = None
+        if glm5_numerics:
+            routing_weights = gather_low_latency_routing_weights(buffer, topk_idx, topk_weights, handle)
         # deepgemm
         gemm_out_b = masked_group_gemm(
             recv_x,
@@ -397,13 +410,20 @@ def fused_experts_impl(
             w2,
             w2_scale,
             expected_m,
+            routing_weights=routing_weights,
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            glm5_numerics=glm5_numerics,
         )
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
-            gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
+            gemm_out_b,
+            topk_idx,
+            torch.ones_like(topk_weights) if glm5_numerics else topk_weights,
+            handle,
+            async_finish=False,
+            return_recv_hook=False,
         )
     return combined_x
 
@@ -521,6 +541,7 @@ def chunked_expanded_moe_forward(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    glm5_numerics: bool = False,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     alignment = 128
@@ -588,7 +609,16 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
-            silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
+            silu_and_mul_fwd(
+                gemm_out_a,
+                silu_out,
+                alpha=alpha,
+                limit=limit,
+                clamp_up_add_one=clamp_up_add_one,
+                glm5_numerics=glm5_numerics,
+            )
+            if glm5_numerics:
+                multiply_routing_weights(silu_out, recv_topk_weights[chunk_start:chunk_end])
             workspace_manager.free(gemm_out_a)
             del gemm_out_a
 
@@ -624,7 +654,14 @@ def chunked_expanded_moe_forward(
             for quant_buffer in quant_buffers:
                 workspace_manager.free(quant_buffer)
 
-            ep_gather_chunk(gemm_out_b, chunk_start, recv_topk_weights, recv_src_metadata, gather_out)
+            ep_gather_chunk(
+                gemm_out_b,
+                chunk_start,
+                recv_topk_weights,
+                recv_src_metadata,
+                gather_out,
+                apply_routed_weight=not glm5_numerics,
+            )
             workspace_manager.free(gemm_out_b)
     finally:
         if is_autotune_warmup:

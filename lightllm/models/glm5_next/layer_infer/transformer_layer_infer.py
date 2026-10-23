@@ -58,7 +58,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             self.q_lora_rank = network_config["q_lora_rank"]
             self.kv_lora_rank = network_config["kv_lora_rank"]
             self.v_head_dim = network_config["v_head_dim"]
-            self.softmax_scale = self.qk_nope_head_dim ** -0.5
+            self.softmax_scale = self.qk_nope_head_dim**-0.5
             self.indexer = Glm5NextNsaInfer(
                 layer_idx=self.layer_num_,
                 network_config=self.network_config_,
@@ -94,6 +94,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             limit=self.swiglu_limit,
             alpha=1.0,
             clamp_up_add_one=False,
+            glm5_numerics=True,
         )
         return layer_weight.down_proj.mm(ffn1_out)
 
@@ -434,7 +435,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _forward_mhc(self, input_embeddings, infer_state, layer_weight, *, prefill):
         streams = input_embeddings
 
-        layer_input, residual_mix, post_mix = self._hc_pre(streams, layer_weight, "attn", layer_weight.att_norm_weight_)
+        layer_input, residual_mix, post_mix = self._hc_pre(
+            streams, layer_weight, "attn", layer_weight.att_norm_weight_
+        )
         if prefill:
             layer_output = self.context_attention_forward(layer_input, infer_state, layer_weight)
         else:

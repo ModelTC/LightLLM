@@ -26,6 +26,7 @@ def _silu_and_mul_kernel_fast(
     USE_LIMIT_AND_ALPHA: tl.constexpr = False,
     CLAMP_UP_ADD_ONE: tl.constexpr = True,
     USE_TANH_APPROXIMATE_GELU: tl.constexpr = False,
+    GLM5_NUMERICS: tl.constexpr = False,
 ):
     stride_input_m = tl.cast(stride_input_m, dtype=tl.int64)
     stride_output_m = tl.cast(stride_output_m, dtype=tl.int64)
@@ -66,11 +67,14 @@ def _silu_and_mul_kernel_fast(
             other=other,
         ).to(tl.float32)
 
+        if GLM5_NUMERICS:
+            up = up.to(tl.float32)
         if USE_LIMIT_AND_ALPHA:
             gate = tl.minimum(gate, limit)
             up = tl.minimum(tl.maximum(up, -limit), limit)
             gate = 1 / (1 + tl.exp(-gate * alpha)) * gate
-            gate = gate.to(input_ptr.dtype.element_ty)
+            if not GLM5_NUMERICS:
+                gate = gate.to(input_ptr.dtype.element_ty)
             if CLAMP_UP_ADD_ONE:
                 up += 1
             tl.store(output_ptr + out_offsets, up * gate, mask=mask)
@@ -83,7 +87,8 @@ def _silu_and_mul_kernel_fast(
                 gate = 0.5 * gate * (1.0 + tanh_val)
             else:
                 gate = gate / (1 + tl.exp(-gate))
-            gate = gate.to(input_ptr.dtype.element_ty)
+            if not GLM5_NUMERICS:
+                gate = gate.to(input_ptr.dtype.element_ty)
 
             tl.store(
                 output_ptr + out_offsets,
@@ -121,6 +126,7 @@ def silu_and_mul_fwd(
     alpha=None,
     run_config=None,
     clamp_up_add_one=True,
+    glm5_numerics=False,
 ):
     assert input.stride(-1) == 1
     assert output.is_contiguous()
@@ -173,5 +179,6 @@ def silu_and_mul_fwd(
         USE_LIMIT_AND_ALPHA=USE_LIMIT_AND_ALPHA,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,
         USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
+        GLM5_NUMERICS=glm5_numerics,
     )
     return

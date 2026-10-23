@@ -67,7 +67,10 @@ def _hc_post_reference(layer_output, residual, residual_mix, post_mix, streams, 
     mixed_residual = (residual_mix.unsqueeze(-1) * residual_3d.float().unsqueeze(2)).sum(dim=1)
     if round_residual:
         mixed_residual = mixed_residual.to(layer_output.dtype).float()
-    out = post_mix.unsqueeze(-1) * layer_output.float().unsqueeze(1) + mixed_residual
+    expanded = post_mix.unsqueeze(-1) * layer_output.float().unsqueeze(1)
+    if round_residual:
+        expanded = expanded.to(layer_output.dtype).float()
+    out = expanded + mixed_residual
     return out.to(layer_output.dtype).reshape(tokens, streams * hidden)
 
 
@@ -244,10 +247,20 @@ def test_glm_mhc_keeps_pre_coefficients_in_fp32():
     base[:2] = torch.logit(pre_values)
     norm = torch.ones(17, device="cuda", dtype=x.dtype)
     actual, _, _ = hc_pre_norm(x, fn, scale, base, norm, 4, 1e-5, 1e-5, 1e-6, 20, glm5_numerics=True)
-    merged, _, _ = _hc_pre_reference(
-        x, fn, scale, base, 4, 1e-5, 1e-6, 20, normalize_before_projection=True
-    )
+    merged, _, _ = _hc_pre_reference(x, fn, scale, base, 4, 1e-5, 1e-6, 20, normalize_before_projection=True)
     merged = merged.float()
     expected = (merged * torch.rsqrt(merged.square().mean(-1, keepdim=True) + 1e-5)).to(x.dtype)
     assert (expected > 0.1).all()
     torch.testing.assert_close(actual, expected, atol=0.001, rtol=0.008)
+
+
+def test_glm_mhc_rounds_post_product_before_residual_add():
+    x = torch.full((1, 4 * 17), -1.015625, device="cuda", dtype=torch.bfloat16)
+    layer = torch.full((1, 17), 1.0078125, device="cuda", dtype=x.dtype)
+    mix = torch.eye(4, device="cuda", dtype=x.dtype).unsqueeze(0)
+    post = torch.full((1, 4), 1.0078125, device="cuda", dtype=x.dtype)
+    expected = _hc_post_reference(layer, x, mix, post, 4, round_residual=True)
+    actual = hc_post(layer, x, mix, post, 4, glm5_numerics=True)
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    assert torch.count_nonzero(actual) == 0
+    assert torch.count_nonzero(hc_post(layer, x, mix, post, 4)) > 0
