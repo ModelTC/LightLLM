@@ -57,7 +57,7 @@ def test_empty_batch_and_fallback_do_not_create_release_pool(monkeypatch):
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(cuda_stream=0))
 
     def unexpected_pool(*args, **kwargs):
-        pytest.fail("空批次和 copy_ 回退不能创建保活线程池")
+        pytest.fail("Empty batches and copy_ fallback must not create the source release pool")
 
     monkeypatch.setattr(cuda_wrapper, "ThreadPoolExecutor", unexpected_pool)
     cuda_wrapper.cuda_memcpy_pinned_h2d_batch_async([], [])
@@ -155,10 +155,10 @@ def test_raw_batch_records_one_completion_event_without_small_copy(monkeypatch, 
         return event_record(event, on_stream)
 
     def unexpected_copy(*args, **kwargs):
-        pytest.fail("raw batch 保活不应额外提交小片段 copy_ 或进入逐项回退")
+        pytest.fail("Raw batch source protection must not submit a small copy_ or enter per-tensor fallback")
 
     def unexpected_sync(*args, **kwargs):
-        pytest.fail("正常 raw batch 不应在提交线程同步 CUDA 流")
+        pytest.fail("Normal raw batches must not synchronize a CUDA stream on the submitting thread")
 
     monkeypatch.setattr(runtime, "cudaMemcpyBatchAsync", record_native)
     monkeypatch.setattr(torch.cuda.Event, "record", record_event)
@@ -191,9 +191,9 @@ def test_background_wait_holds_tensor_references_without_blocking_submitter(monk
     event_synchronize = torch.cuda.Event.synchronize
 
     def controlled_wait(event):
-        assert threading.get_ident() != main_thread, "CUDA 完成事件只能由后台等待线程同步"
+        assert threading.get_ident() != main_thread, "Only the background worker may synchronize completion events"
         worker_wait_started.set()
-        assert allow_worker_finish.wait(timeout=10), "测试未允许后台等待结束"
+        assert allow_worker_finish.wait(timeout=10), "The test did not allow the background wait to finish"
         event_synchronize(event)
 
     monkeypatch.setattr(torch.cuda.Event, "synchronize", controlled_wait)
@@ -250,7 +250,7 @@ def test_async_copy_keeps_freed_source_storage_out_of_reuse(monkeypatch, native_
         replacement.fill_(-1)
         del replacement
     stream.synchronize()
-    assert pending_checks > 0, "延时传输应覆盖源释放和 pinned 内存复用检查"
+    assert pending_checks > 0, "Delayed transfers must cover source release and pinned memory reuse checks"
     assert torch.equal(target.cpu(), expected)
 
 
@@ -268,10 +268,10 @@ def test_event_setup_failure_propagates_without_sync_or_fallback(monkeypatch, fa
         raise RuntimeError(f"test {failure} failure")
 
     def unexpected_sync(*args, **kwargs):
-        pytest.fail("保活接管异常应直接传播，不应同步收尾")
+        pytest.fail("Source protection setup errors must propagate without synchronous cleanup")
 
     def unexpected_copy(*args, **kwargs):
-        pytest.fail("raw batch 已提交后的保护失败不能被 copy_ 回退掩盖")
+        pytest.fail("copy_ fallback must not hide source protection failure after raw batch submission")
 
     if failure == "record":
         monkeypatch.setattr(torch.cuda.Event, "record", fail_setup)
@@ -305,7 +305,7 @@ def test_pytorch_fallback_needs_no_completion_event_or_pool_task(monkeypatch, re
     copy = torch.Tensor.copy_
 
     def unexpected_event(*args, **kwargs):
-        pytest.fail("普通 PyTorch copy_ 已保护源 storage，不应建立额外完成事件")
+        pytest.fail("PyTorch copy_ already protects source storage and must not create an extra completion event")
 
     def record_copy(dst, src, *args, **kwargs):
         copy_sizes.append(src.numel() * src.element_size())

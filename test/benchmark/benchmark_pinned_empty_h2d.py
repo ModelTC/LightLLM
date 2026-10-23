@@ -172,9 +172,9 @@ def main():
     # 显式限制到一张卡，防止实验误用用户禁止的 GPU 3 或其他运行中的服务。
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not visible or "," in visible or visible == "3":
-        parser.error("请通过 CUDA_VISIBLE_DEVICES 显式选择一张空闲 GPU，不能使用 3 号卡")
+        parser.error("Set CUDA_VISIBLE_DEVICES to one idle GPU; GPU 3 must not be used")
     if args.repeats < 1 or min(args.sizes) < 1 or args.delay_cycles < 1 or args.attempts < 1:
-        parser.error("重复数、规模、延时和分配尝试次数必须大于 0")
+        parser.error("Repeats, sizes, delay cycles and allocation attempts must be positive")
     if args.worker:
         run_worker(args)
         return
@@ -241,7 +241,7 @@ def main():
         writer = csv.DictWriter(output, fieldnames=list(summaries[0]))
         writer.writeheader()
         writer.writerows(summaries)
-    print(f"实验结果：{root}", flush=True)
+    print(f"Experiment results: {root}", flush=True)
 
 
 if __name__ == "__main__":

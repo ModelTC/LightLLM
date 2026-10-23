@@ -190,7 +190,7 @@ def test_prefix_match_appends_to_initialized_or_released_index_state(monkeypatch
     monkeypatch.setattr(infer_batch, "g_infer_context", context)
 
     def unexpected_reset():
-        pytest.fail("前缀匹配入口的索引状态已为空，不应再次 reset")
+        pytest.fail("Prefix matching starts with empty indexes and must not reset them again")
 
     monkeypatch.setattr(req.token_index, "reset", unexpected_reset)
     if hybrid:

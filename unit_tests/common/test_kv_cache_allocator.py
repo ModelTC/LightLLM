@@ -268,7 +268,7 @@ def test_request_free_indexes_recycle_pages_after_reset_batch_and_slot_reuse(
     reqs = []
 
     def unexpected_snapshot(*args):
-        pytest.fail("pure_gpu 的实际释放路径不能先拷回完整 CPU token 快照")
+        pytest.fail("The pure_gpu release path must not copy a full token index snapshot to CPU first")
 
     with torch.cuda.stream(torch.cuda.default_stream()):
         for row, indexes in enumerate((first, second)):

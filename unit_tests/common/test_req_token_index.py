@@ -40,9 +40,6 @@ def make_req(token_table, mode="pin_mem_cache", req_idx=0, input_len=0):
 def test_factory_uses_request_mode_and_row_view_without_retaining_request(mode, expected_type):
     table = torch.arange(24, dtype=torch.int32).view(3, 8)
     req = make_req(table, mode, req_idx=1)
-    # 模式来自请求参数；manager 的相反配置不能影响该请求的选择。
-    req.req_manager.req_token_index_mode = "pin_mem_cache" if mode == "pure_gpu" else "pure_gpu"
-
     # 构造只保存传入的流，不执行 CUDA 操作；用占位对象验证透传即可。
     index_stream = object()
     helper = create_req_token_index(req, index_stream=index_stream)
@@ -72,7 +69,7 @@ def test_start_args_and_cli_select_mode(mode):
     assert StartArgs(req_token_index_mode=mode).req_token_index_mode == mode
     with pytest.raises(SystemExit):
         parser.parse_args(["--req_token_index_mode", "unknown"])
-    with pytest.raises(ValueError, match="未知请求 token 索引模式"):
+    with pytest.raises(ValueError, match="Unknown request token index mode"):
         create_req_token_index(make_req(torch.empty((1, 8), dtype=torch.int32), "unknown"), index_stream=object())
 
 
@@ -110,7 +107,7 @@ def test_append_rejects_gpu_input_without_changing_index_state(mode):
     table = torch.full((1, 8), -1, dtype=torch.int32, device="cuda")
     helper = create_req_token_index(make_req(table, mode), index_stream=torch.cuda.current_stream())
 
-    with pytest.raises(AssertionError, match="mem_indexes 必须是 CPU Tensor"):
+    with pytest.raises(AssertionError, match="mem_indexes must be a CPU Tensor"):
         helper.append_token_indexes(torch.arange(4, dtype=torch.int32, device="cuda"))
 
     assert helper.token_index_len == helper.gpu_index_submitted_len == 0
@@ -125,7 +122,7 @@ def test_gpu_getter_rejects_unrecorded_indexes_without_advancing_progress(mode):
     helper.append_token_indexes(torch.tensor([10, 11], dtype=torch.int32, pin_memory=True))
     submitted_len = helper.gpu_index_submitted_len
 
-    with pytest.raises(AssertionError, match="读取范围超出"):
+    with pytest.raises(AssertionError, match="Read range exceeds"):
         helper.get_gpu_token_indexes(0, 4)
 
     assert helper.token_index_len == 2
@@ -145,7 +142,7 @@ def test_batch_upload_rejects_missing_gpu_submission_without_advancing_progress(
     monkeypatch.setattr(base_backend, "g_infer_context", SimpleNamespace(req_manager=req.req_manager))
     backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
 
-    with pytest.raises(AssertionError, match="GPU 索引提交进度与记录长度不一致"):
+    with pytest.raises(AssertionError, match="GPU index submission progress does not match recorded length"):
         backend._copy_req_token_indexes_to_gpu([req])
 
     assert req.token_index.gpu_index_submitted_len == 0
@@ -168,11 +165,11 @@ def test_backend_rejects_requests_with_different_index_streams(monkeypatch, mode
         reqs.append(req)
 
     def unexpected_upload(*args):
-        pytest.fail("索引流不一致时应在提交上传前拒绝该批请求")
+        pytest.fail("A batch with mismatched index streams must be rejected before upload")
 
     monkeypatch.setattr(base_backend, "cuda_memcpy_pinned_h2d_batch_async", unexpected_upload)
     backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
-    with pytest.raises(AssertionError, match="同一批请求必须使用同一个索引流"):
+    with pytest.raises(AssertionError, match="All requests in a batch must use the same index stream"):
         backend._copy_req_token_indexes_to_gpu(reqs)
     assert [req.token_index.gpu_index_submitted_len for req in reqs] == [0 if mode == "pin_mem_cache" else 4] * 2
 
@@ -230,7 +227,7 @@ def test_free_getter_borrows_gpu_indexes_but_metadata_getter_keeps_cpu_snapshot(
     snapshot = req.token_index.get_cpu_token_indexes(1, 5)
 
     def unexpected_snapshot(*args):
-        pytest.fail("pure_gpu 的释放接口不能调用普通 CPU 快照 getter")
+        pytest.fail("The pure_gpu free getter must not call the CPU snapshot getter")
 
     with monkeypatch.context() as no_snapshot:
         if mode == "pure_gpu":
@@ -353,7 +350,7 @@ def test_pin_buffer_reset_during_upload_keeps_old_data_until_h2d_completes(use_d
     with torch.cuda.stream(index_stream):
         torch.cuda._sleep(200_000_000)
     helper.get_gpu_token_indexes(0, count)
-    assert not index_stream.query(), "延迟 H2D 应覆盖 reset 和重新追加的过程"
+    assert not index_stream.query(), "Delayed H2D must remain pending through reset and append"
     helper.reset()
     assert helper._cpu_buffer is None and source_ref() is None
     helper.append_token_indexes(replacement)
@@ -430,17 +427,15 @@ def test_pure_gpu_slot_reuse_keeps_old_and_new_helper_writes_in_order():
 
 
 @requires_cuda
-@pytest.mark.parametrize("mode", MODES)
 @pytest.mark.parametrize("page_size", [1, 4, 64])
-def test_manager_owns_only_gpu_table_and_initializes_hold_page(monkeypatch, mode, page_size):
+def test_manager_owns_only_gpu_table_and_initializes_hold_page(monkeypatch, page_size):
     from lightllm.common.req_manager import req_sampling_params
 
-    monkeypatch.setattr(
-        base, "get_env_start_args", lambda: SimpleNamespace(page_size=page_size, req_token_index_mode=mode)
-    )
+    monkeypatch.setattr(base, "get_env_start_args", lambda: SimpleNamespace(page_size=page_size))
     monkeypatch.setattr(req_sampling_params, "ReqSamplingParamsManager", lambda count: None)
     mem_manager = SimpleNamespace(page_size=page_size, HOLD_TOKEN_MEMINDEXES=tuple(range(page_size * 8, page_size * 9)))
     manager = base.ReqManager(2, page_size * 2 + 1, mem_manager)
+    assert not hasattr(manager, "req_token_index_mode")
     assert not hasattr(manager, "req_to_page_indexs_cpu")
     assert not hasattr(manager, "get_cpu_token_indexes")
     assert manager.req_to_token_indexs.shape == (3, 3 * page_size)
@@ -549,10 +544,10 @@ def test_backend_waits_for_submitted_indexes_without_pending_cpu_uploads(monkeyp
         req.token_index.append_token_indexes(torch.arange(8, dtype=torch.int32, pin_memory=True))
         req.token_index.get_gpu_token_indexes(0, 8)
     assert req.token_index.gpu_index_submitted_len == req.token_index.token_index_len == 8
-    assert not index_stream.query(), "索引应已提交但尚未完成，且没有新的 CPU 上传区间"
+    assert not index_stream.query(), "Submitted indexes must still be pending with no new CPU upload range"
 
     def unexpected_upload(*args):
-        pytest.fail("没有待上传区间时不应再次提交拷贝")
+        pytest.fail("No copy should be submitted when there are no pending upload ranges")
 
     monkeypatch.setattr(base_backend, "cuda_memcpy_pinned_h2d_batch_async", unexpected_upload)
     backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)

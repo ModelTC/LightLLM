@@ -89,7 +89,7 @@ class PinMemCacheReqTokenIndex(ReqTokenIndex):
         append_len = mem_indexes.numel()
         if append_len == 0:
             return
-        assert mem_indexes.device.type == "cpu", "mem_indexes 必须是 CPU Tensor"
+        assert mem_indexes.device.type == "cpu", "mem_indexes must be a CPU Tensor"
         start = self.token_index_len
         end = start + append_len
         self._reserve(end)
@@ -103,7 +103,7 @@ class PinMemCacheReqTokenIndex(ReqTokenIndex):
 
     def get_gpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
         """在索引流提交全部待上传索引，让调用流承接依赖后返回 GPU 视图。"""
-        assert end <= self.token_index_len, "读取范围超出已记录的 token 索引"
+        assert end <= self.token_index_len, "Read range exceeds recorded token indexes"
         current_stream = torch.cuda.current_stream(self._index_stream.device)
         with torch.cuda.stream(self._index_stream):
             if self.gpu_index_submitted_len < end:
@@ -162,7 +162,7 @@ class PureGpuReqTokenIndex(ReqTokenIndex):
         append_len = mem_indexes.numel()
         if append_len == 0:
             return
-        assert mem_indexes.device.type == "cpu", "mem_indexes 必须是 CPU Tensor"
+        assert mem_indexes.device.type == "cpu", "mem_indexes must be a CPU Tensor"
         # 普通 CPU 输入在这里转为独立 pinned storage；已有 pinned 输入直接复用。
         if not mem_indexes.is_pinned():
             mem_indexes = mem_indexes.pin_memory()
@@ -185,7 +185,7 @@ class PureGpuReqTokenIndex(ReqTokenIndex):
 
     def get_gpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
         # append 已在索引流提交写入，读取只校验范围，不推进提交进度。
-        assert end <= self.gpu_index_submitted_len, "读取范围超出已提交的 GPU 索引"
+        assert end <= self.gpu_index_submitted_len, "Read range exceeds submitted GPU indexes"
         current_stream = torch.cuda.current_stream(self._index_stream.device)
         if current_stream != self._index_stream:
             current_stream.wait_stream(self._index_stream)
@@ -212,4 +212,4 @@ def create_req_token_index(infer_req: "InferReq", index_stream: torch.cuda.Strea
         return PinMemCacheReqTokenIndex(infer_req, index_stream)
     if mode == "pure_gpu":
         return PureGpuReqTokenIndex(infer_req, index_stream)
-    raise ValueError(f"未知请求 token 索引模式：{mode}，可选 pin_mem_cache / pure_gpu")
+    raise ValueError(f"Unknown request token index mode: {mode}; expected pin_mem_cache or pure_gpu")

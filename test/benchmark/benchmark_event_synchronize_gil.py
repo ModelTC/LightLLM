@@ -150,9 +150,11 @@ def main():
     args = parser.parse_args()
     visible = os.environ.get("CUDA_VISIBLE_DEVICES", "")
     if not visible or "," in visible or visible == "3":
-        parser.error("请通过 CUDA_VISIBLE_DEVICES 显式选择一张空闲 GPU，不能使用 3 号卡")
+        parser.error("Set CUDA_VISIBLE_DEVICES to one idle GPU; GPU 3 must not be used")
     if args.repeats < 1 or args.wait_ms < 400 or not 0 < args.margin_ms < args.wait_ms / 4:
-        parser.error("重复数须大于 0，等待至少 400ms，边缘排除区间须介于 0 和等待时间的四分之一之间")
+        parser.error(
+            "Repeats must be positive, wait must be at least 400 ms, and margin must be between 0 and wait / 4"
+        )
 
     import torch
     from lightllm.common import cuda_wrapper
@@ -174,7 +176,7 @@ def main():
         "event_synchronize_gil_" + datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     )
     root.mkdir(parents=True, exist_ok=False)
-    print(f"结果目录：{root}", flush=True)
+    print(f"Results directory: {root}", flush=True)
     rows = []
     try:
         for repeat in range(args.repeats):
@@ -184,7 +186,7 @@ def main():
                         torch, cuda_wrapper, stream, host_waits, cycles, method, repeat, args.wait_ms, args.margin_ms
                     )
                 )
-            print(f"已完成第 {repeat + 1}/{args.repeats} 轮", flush=True)
+            print(f"Completed round {repeat + 1}/{args.repeats}", flush=True)
     finally:
         stream.synchronize()
         cuda_wrapper.PinnedH2DBatchCopier._get_release_pool().submit(lambda: None).result(timeout=10)
@@ -226,7 +228,9 @@ def main():
     }
     (root / "result.json").write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n")
     if not evidence["passed"]:
-        raise SystemExit("实验判据未全部满足，请查看 result.json 中的有效等待时长与内部窗口进度")
+        raise SystemExit(
+            "Experiment criteria were not fully met; check wait durations and window progress in result.json"
+        )
 
 
 if __name__ == "__main__":

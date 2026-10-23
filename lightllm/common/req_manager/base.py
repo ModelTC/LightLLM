@@ -49,20 +49,12 @@ class ReqManager:
         # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
         # 这样让 DP 的实现更为简化一些。
         self.req_list = _ReqLinkedList(max_request_num)
-        args = get_env_start_args()
-        page_size = args.page_size
+        page_size = get_env_start_args().page_size
         self.page_size = page_size
         aligned_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
         self.req_to_token_indexs = torch.zeros(
             (max_request_num + 1, aligned_sequence_length), dtype=torch.int32, device="cuda"
         )
-        self.req_token_index_mode = args.req_token_index_mode
-        if self.req_token_index_mode == "pin_mem_cache":
-            logger.info("请求 token 索引模式 pin_mem_cache：按请求申请 pinned CPU 缓存，索引更新批量上传 GPU")
-        elif self.req_token_index_mode == "pure_gpu":
-            logger.info("请求 token 索引模式 pure_gpu：直接维护 GPU 表，CPU 读取索引时执行 D2H 同步")
-        else:
-            raise ValueError(f"未知请求 token 索引模式：{self.req_token_index_mode}")
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num

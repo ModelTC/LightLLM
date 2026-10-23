@@ -668,7 +668,7 @@ class ModeBackend:
         if not run_reqs:
             return
         index_streams = {req.token_index._index_stream for req in run_reqs}
-        assert len(index_streams) == 1, "同一批请求必须使用同一个索引流"
+        assert len(index_streams) == 1, "All requests in a batch must use the same index stream"
         index_stream = index_streams.pop()
         current_stream = torch.cuda.current_stream(index_stream.device)
         # 第二阶段：切出尚未提交的 CPU 源视图和 GPU 目标视图，记录本次提交终点。
@@ -679,7 +679,10 @@ class ModeBackend:
             start, end = token_index.gpu_index_submitted_len, token_index.token_index_len
             if start < end:
                 source_indexes = token_index.get_upload_indexes()
-                assert source_indexes is not None, "GPU 索引提交进度与记录长度不一致，GPU 模式应在追加时完成提交"
+                assert source_indexes is not None, (
+                    "GPU index submission progress does not match recorded length; "
+                    "pure_gpu must submit indexes when appending"
+                )
                 cpu_index_slices.append(source_indexes)
                 gpu_index_slices.append(token_index.gpu_indexes[start:end])
                 pending_index_uploads.append((token_index, end))

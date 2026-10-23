@@ -48,7 +48,6 @@ def make_cpu_index_manager(token_table, page_size=1, **attributes):
 
     manager = TestReqManager.__new__(TestReqManager)
     manager.page_size = page_size
-    manager.req_token_index_mode = "pin_mem_cache"
     manager.token_indexes_cpu = token_table
     manager.req_to_token_indexs = torch.full_like(token_table, -1)
     manager._req_token_indexes = {}
@@ -60,7 +59,7 @@ def make_cpu_index_manager(token_table, page_size=1, **attributes):
 def bind_cpu_indexes(req, manager, gpu_index_submitted_len=0, token_index_len=None):
     req.req_manager = manager
     if not hasattr(req, "args"):
-        req.args = SimpleNamespace(req_token_index_mode=manager.req_token_index_mode)
+        req.args = SimpleNamespace(req_token_index_mode="pin_mem_cache")
     req.token_index = manager.get_req_token_index(req.req_idx)
     # 矩阵只提供容量和预置数据；追加位置取请求实际持有的长度，不能使用整行容量。
     if token_index_len is None:
