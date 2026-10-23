@@ -25,7 +25,7 @@ class _Tokenizer:
 
 @pytest.mark.parametrize("prefix_len", range(8))
 def test_tokenizer_uses_position_dependent_canonical_suffix(prefix_len):
-    from lightllm.models.deepseek_v4.model import DeepSeekV4Tokenizer
+    from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
 
     tokenizer = DeepSeekV4Tokenizer(_Tokenizer(), "/unused", VISION_CONFIG)
     image = SimpleNamespace(
@@ -52,7 +52,7 @@ def test_tokenizer_uses_position_dependent_canonical_suffix(prefix_len):
 
 
 def test_tokenizer_keeps_dsv4_on_one_dimensional_positions():
-    from lightllm.models.deepseek_v4.model import DeepSeekV4Tokenizer
+    from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
 
     tokenizer = DeepSeekV4Tokenizer(_Tokenizer(), "/unused", VISION_CONFIG)
     image = SimpleNamespace(image_h=64, image_w=64, grid_thwd=None)
