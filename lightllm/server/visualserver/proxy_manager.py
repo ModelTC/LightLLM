@@ -27,7 +27,8 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 from rpyc.utils.classic import obtain
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from .manager import VisualManager
-from .objs import VIT_Obj
+from .objs import VIT_Obj, visual_only_rpyc_config
+from .rpc_payload import RemoteEvent, pack_image_items
 
 logger = init_logger(__name__)
 
@@ -129,7 +130,7 @@ class ProxyVisualManager(VisualManager):
         if self.args.detail_log:
             start = time.time()
             logger.info(f"Start to remote infer images {[image.md5 for image in images]}")
-        conn.root.remote_infer_images(images, event)
+        conn.root.remote_infer_images(pack_image_items(images), RemoteEvent(event))
         event.wait(timeout=600)
         if self.args.detail_log:
             logger.info(
@@ -166,9 +167,7 @@ class ProxyVisualManager(VisualManager):
                             if node_id not in self.id_to_rpyc_conn:
 
                                 def _connect():
-                                    from .objs import rpyc_config
-
-                                    conn = rpyc.connect(vit_obj.host_ip, vit_obj.port, config=rpyc_config)
+                                    conn = rpyc.connect(vit_obj.host_ip, vit_obj.port, config=visual_only_rpyc_config)
                                     conn._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                                     conn._bg_thread = rpyc.BgServingThread(conn, sleep_interval=0.001)
                                     logger.info(

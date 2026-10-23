@@ -10,6 +10,16 @@ rpyc_config = {
     "allow_setattr": True,
 }
 
+visual_only_rpyc_config = {
+    "allow_pickle": False,
+    "allow_all_attrs": False,
+    "allow_getattr": True,
+    "allow_setattr": False,
+    "allow_delattr": False,
+    "allow_public_attrs": False,
+    "allow_exposed_attrs": True,
+}
+
 
 @dataclass
 class VIT_Obj:
