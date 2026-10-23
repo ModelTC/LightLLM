@@ -26,9 +26,10 @@ from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
-from rpyc.utils.classic import obtain
 from lightllm.server.embed_cache.utils import create_shm, get_shm_name_data, free_shm
 from .manager import VisualManager
+from .objs import visual_only_rpyc_config
+from .rpc_payload import unpack_image_items
 
 
 logger = init_logger(__name__)
@@ -40,6 +41,7 @@ class VisualOnlyManager(rpyc.Service):
         args: StartArgs,
     ):
         self.args = args
+        self.rpc_host = get_hostname_ip() if args.host == "0.0.0.0" else args.host
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
         assert self.vit_dp == 1
@@ -64,10 +66,7 @@ class VisualOnlyManager(rpyc.Service):
             os.kill(os.getppid(), signal.SIGTERM)
             sys.exit(-1)
 
-        if args.host in ["0.0.0.0"]:
-            host_ip = get_hostname_ip()
-        else:
-            host_ip = args.host
+        host_ip = self.rpc_host
 
         ports = get_shm_port_args()
         while True:
@@ -135,9 +134,25 @@ class VisualOnlyManager(rpyc.Service):
     def clean_up(self):
         return
 
-    def exposed_remote_infer_images(self, images: List[ImageItem], ref_event: threading.Event):
+    def exposed_remote_infer_images(self, payload: tuple, ref_event):
+        images = unpack_image_items(
+            payload,
+            ImageItem,
+            max_count=self.infer_batch_size,
+            require_image_data=True,
+        )
+        created_shm_names = []
+
+        def _cleanup_shared_memory():
+            for shm_name in created_shm_names:
+                try:
+                    free_shm(shm_name)
+                except FileNotFoundError:
+                    pass
+                except Exception:
+                    logger.exception(f"Failed to clean up visual inference shared memory {shm_name}")
+
         try:
-            images = obtain(images)
             logger.info(f"Received infer_images request with {len(images)} images md5s: {[img.md5 for img in images]}")
             start = time.time()
             # 将 images 的内容写入到 shm 中，这里修改了原始的uuid，主要是在远端的vit
@@ -145,7 +160,9 @@ class VisualOnlyManager(rpyc.Service):
             # 目标的 md5 一致即可，这样调用端一样可以拿到准确的数据。
             for image in images:
                 image.uuid = str(uuid.uuid4())
-                create_shm(get_shm_name_data(image.uuid), image.data_bytes)
+                shm_name = get_shm_name_data(image.uuid)
+                create_shm(shm_name, image.data_bytes)
+                created_shm_names.append(shm_name)
                 del image.data_bytes
 
             handle = asyncio.run_coroutine_threadsafe(self.handle_images(images_need_infer=images), loop=self.new_loop)
@@ -156,10 +173,10 @@ class VisualOnlyManager(rpyc.Service):
                         f"Finished infer_images for images {[image.md5 for image in images]}"
                         f" with latency {time.time() - start} seconds"
                     )
-                ref_event.set()
-                # 清理资源
-                for image in images:
-                    free_shm(get_shm_name_data(image.uuid))
+                try:
+                    ref_event.set()
+                finally:
+                    _cleanup_shared_memory()
                 logger.info(
                     f"Finished infer_images request for images {[image.md5 for image in images]}"
                     f" and cleaned up shm resources"
@@ -168,9 +185,7 @@ class VisualOnlyManager(rpyc.Service):
             handle.add_done_callback(_callback)
         except BaseException as e:
             logger.exception(str(e))
-            # 清理资源
-            for image in images:
-                free_shm(get_shm_name_data(image.uuid))
+            _cleanup_shared_memory()
             raise e
         return
 
@@ -198,9 +213,12 @@ def start_visual_process(args: StartArgs, pipe_writer):
             visualserver.register_to_config_server_loop(args=args), loop=visualserver.new_loop
         )
 
-        from .objs import rpyc_config
-
-        t = rpyc.ThreadedServer(visualserver, port=get_shm_port_args().visual_rpyc_port, protocol_config=rpyc_config)
+        t = rpyc.ThreadedServer(
+            visualserver,
+            hostname=visualserver.rpc_host,
+            port=get_shm_port_args().visual_rpyc_port,
+            protocol_config=visual_only_rpyc_config,
+        )
     except Exception as e:
         logger.exception(str(e))
         visualserver.clean_up()
