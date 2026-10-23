@@ -266,10 +266,56 @@ def test_weight_scale_loading_preserves_fused_views(
     assert len(packed_weight_layout) == (2 * (experts or 1) if packed else 0)
 
 
+@pytest.mark.parametrize("use_ue8m0", [False, True])
+@pytest.mark.parametrize("shared_expert", [False, True])
+def test_tp_moe_activation_scale_rule(monkeypatch, use_ue8m0, shared_expert):
+    from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe as moe
+    from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import append_fused_shared_experts
+
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0")
+    Quantcfg(
+        {
+            "n_layer": 1,
+            "quantization_config": {
+                "quant_method": "fp8",
+                "weight_block_size": [128, 128],
+                "scale_fmt": "ue8m0" if use_ue8m0 else "float32",
+            },
+        }
+    )
+    torch.manual_seed(20261023)
+    x = torch.randn((17, 512), device="cuda", dtype=torch.bfloat16)
+    w1, s1 = weight.weight_quant(torch.randn((3, 512, 512), device="cuda", dtype=torch.bfloat16) * 0.02)
+    w2, s2 = weight.weight_quant(torch.randn((3, 512, 256), device="cuda", dtype=torch.bfloat16) * 0.02)
+    ids = torch.tensor([0, 1], device="cuda", dtype=torch.int32).repeat(17, 1)
+    scores = torch.tensor([0.3, 0.7], device="cuda").repeat(17, 1)
+    if shared_expert:
+        scores, ids = append_fused_shared_experts(scores, ids, shared_expert_start_id=2, num_fused_shared_experts=1)
+    calls = []
+    quantize = moe.per_token_group_quant_fp8
+
+    def check_activation(values, group_size, **kwargs):
+        q, scales = quantize(values, group_size, **kwargs)
+        assert group_size == 128
+        assert scales.dtype == torch.float32
+        expected = values.float().reshape(values.shape[0], -1, 128).abs().amax(-1).clamp_min(1e-10) / 448.0
+        if use_ue8m0:
+            expected = torch.exp2(torch.ceil(torch.log2(expected.double()))).float()
+        torch.testing.assert_close(scales, expected, rtol=1e-6, atol=0)
+        calls.append(values.shape[1])
+        return q, scales
+
+    monkeypatch.setattr(moe, "per_token_group_quant_fp8", check_activation)
+    out = moe.fused_experts_impl(x, w1, w2, scores, ids, use_fp8_w8a8=True, w1_scale=s1, w2_scale=s2)
+    assert calls == [512, 256]  # W13 and W2, including the optional shared-expert slot.
+    assert torch.isfinite(out).all()
+
+
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
+@pytest.mark.parametrize("packed_env", [False, True])
 @pytest.mark.parametrize("need_trans", [False, True])
 @pytest.mark.parametrize("k", [512, 640])
-def test_tp_moe_consumes_packed_weight_scales(monkeypatch, packed_weight_layout, need_trans, k):
+def test_tp_moe_consumes_packed_weight_scales(monkeypatch, packed_weight_layout, need_trans, k, packed_env):
     from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import grouped_matmul
 
     monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1")
@@ -287,6 +333,7 @@ def test_tp_moe_consumes_packed_weight_scales(monkeypatch, packed_weight_layout,
     indices[1, :8] = torch.arange(9, 17, device="cuda")
     outputs = []
     for sf in (scales, full.weight_scale):
+        monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1" if sf.dtype != torch.int32 or packed_env else "0")
         out = torch.empty((17, 256), device="cuda", dtype=torch.bfloat16)
         grouped_matmul(
             17,

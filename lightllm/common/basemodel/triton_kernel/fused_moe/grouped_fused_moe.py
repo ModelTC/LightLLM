@@ -25,6 +25,7 @@ from typing import Any, Callable, Dict, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.device_utils import triton_support_tensor_descriptor
+from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
 from .moe_silu_and_mul import silu_and_mul_fwd
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
@@ -878,8 +879,12 @@ def grouped_matmul(
             # input 使用 per group quant 量化
             _m, _k = token_inputs.shape
             assert _k % block_size_k == 0
+            # Triton consumes FP32 activation scales even when weight scales are packed UE8M0.
             token_inputs, token_input_scale = per_token_group_quant_fp8(
-                token_inputs, block_size_k, dtype=expert_weights.dtype
+                token_inputs,
+                block_size_k,
+                dtype=expert_weights.dtype,
+                use_ue8m0_scales=get_env_use_ue8m0_scales() or use_packed_ue8m0,
             )
 
     if reused_mblock_infos is None:
