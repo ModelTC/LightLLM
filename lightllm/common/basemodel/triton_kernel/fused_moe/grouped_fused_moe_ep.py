@@ -22,7 +22,7 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_ke
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_env_use_ue8m0_scales,
+    get_env_use_ue8m0_activation_scales,
 )
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.device_utils import is_sm100_gpu
@@ -158,7 +158,7 @@ def mega_moe_impl(
 
     qinput_tensor = per_token_cast_to_fp8(
         hidden_states,
-        use_ue8m0=True,
+        use_ue8m0=get_env_use_ue8m0_activation_scales(default=True, require_ue8m0=True),
         gran_k=quant_method.block_size,
         use_packed_ue8m0=True,
     )
@@ -192,7 +192,7 @@ def quantize_fused_experts_input(
 
         return per_token_cast_to_fp8(
             hidden_states,
-            use_ue8m0=True,
+            use_ue8m0=get_env_use_ue8m0_activation_scales(default=True, require_ue8m0=True),
             gran_k=quant_method.block_size,
             use_packed_ue8m0=True,
         )
@@ -204,7 +204,7 @@ def quantize_fused_experts_input(
         hidden_states,
         block_size_k,
         dtype=w13.weight.dtype,
-        use_ue8m0_scales=get_env_use_ue8m0_scales(),
+        use_ue8m0_scales=get_env_use_ue8m0_activation_scales(),
     )
 
 
@@ -288,7 +288,7 @@ def fused_experts_impl(
     combined_x = None
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(
-            hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=get_env_use_ue8m0_scales()
+            hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=get_env_use_ue8m0_activation_scales()
         )
         allocate_on_comm_stream = previous_event is not None
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
@@ -383,7 +383,7 @@ def fused_experts_impl(
             num_max_dispatch_tokens_per_rank,
             num_experts,
             use_fp8=use_fp8_w8a8,
-            round_scale=get_env_use_ue8m0_scales(),
+            round_scale=get_env_use_ue8m0_activation_scales(),
             async_finish=False,
             return_recv_hook=False,
         )
@@ -608,7 +608,7 @@ def chunked_expanded_moe_forward(
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=workspace_quant_alloc,
-                use_ue8m0_scales=get_env_use_ue8m0_scales(),
+                use_ue8m0_scales=get_env_use_ue8m0_activation_scales(),
             )
             workspace_manager.free(silu_out)
             del silu_out

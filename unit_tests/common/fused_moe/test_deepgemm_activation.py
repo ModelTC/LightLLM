@@ -14,7 +14,12 @@ pytestmark = pytest.mark.skipif(
 @pytest.mark.parametrize("is_prefill", [False, True])
 @pytest.mark.parametrize("use_ue8m0_scales", [False, True])
 @pytest.mark.parametrize("alpha,limit,add_one", [(None, None, True), (1.0, 10.0, False), (1.702, 7.0, True)])
-def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_ue8m0_scales, alpha, limit, add_one):
+@pytest.mark.parametrize("activation_format", ["auto", "fp32", "ue8m0"])
+def test_grouped_gemm_activation_matches_reference(
+    monkeypatch, is_prefill, use_ue8m0_scales, alpha, limit, add_one, activation_format
+):
+    monkeypatch.setenv("LIGHTLLM_ACTIVATION_SCALE_FORMAT", activation_format)
+    activation_ue8m0 = use_ue8m0_scales if activation_format == "auto" else activation_format == "ue8m0"
     monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0")
     monkeypatch.delenv("LIGHTLLM_USE_UE8M0_SCALES")
     config = {"quant_method": "fp8", "weight_block_size": [128, 128]}
@@ -31,6 +36,24 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
     w2_scale = torch.ones(2, 1, 1, device="cuda")
     counts = torch.tensor([3, 2], device="cuda", dtype=torch.int32)
     activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one)
+    captured_scales = []
+    quantize = ep.per_token_group_quant_fp8
+    masked_quantize = ep.silu_and_mul_masked_post_quant_fwd
+
+    def capture_contiguous(*args, **kwargs):
+        assert kwargs["use_ue8m0_scales"] == activation_ue8m0
+        result = quantize(*args, **kwargs)
+        count = (3, 2)[len(captured_scales)]
+        captured_scales.append(result[1][:count].clone())
+        return result
+
+    def capture_masked(*args, **kwargs):
+        result = masked_quantize(*args, **kwargs)
+        captured_scales.append(torch.cat([args[2][0, :3], args[2][1, :2]]).clone())
+        return result
+
+    monkeypatch.setattr(ep, "per_token_group_quant_fp8", capture_contiguous)
+    monkeypatch.setattr(ep, "silu_and_mul_masked_post_quant_fwd", capture_masked)
     recv = torch.zeros(2, padded, dim, device="cuda", dtype=torch.float8_e4m3fn)
     recv[0, :3] = x[:3]
     recv[1, :2] = x[3:]
@@ -77,7 +100,8 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
     gate = (gate * torch.sigmoid(gate * (alpha or 1.0))).bfloat16().float()
     activation = (gate * up).bfloat16().float()
     scales = activation.abs().amax(-1, keepdim=True).clamp(min=1e-10) / 448
-    if use_ue8m0_scales:
+    if activation_ue8m0:
         scales = torch.exp2(torch.ceil(torch.log2(scales)))
+    torch.testing.assert_close(torch.cat(captured_scales), scales, atol=1e-6, rtol=1e-5)
     expected = ((activation / scales).to(torch.float8_e4m3fn).float() * scales).bfloat16()
     torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.02)
