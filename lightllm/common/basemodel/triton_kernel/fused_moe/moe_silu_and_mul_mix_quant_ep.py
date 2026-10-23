@@ -22,8 +22,6 @@ def _silu_and_mul_post_quant_kernel(
     stride_output_scale_1,
     stride_output_scale_2,
     masked_m_ptr,
-    routing_weights,
-    ROUTING_STRIDE: tl.constexpr,
     size_n,
     fp8_max,
     fp8_min,
@@ -35,8 +33,6 @@ def _silu_and_mul_post_quant_kernel(
     limit: tl.constexpr = None,
     CLAMP_UP_ADD_ONE: tl.constexpr = True,
     USE_UE8M0_SCALE: tl.constexpr = False,
-    GLM5_NUMERICS: tl.constexpr = False,
-    WEIGHTED_INPUT: tl.constexpr = False,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -59,12 +55,8 @@ def _silu_and_mul_post_quant_kernel(
     )
 
     for token_index in tl.range(token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE):
-        gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(
-            tl.float32
-        )
+        gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(tl.float32)
         up = tl.load(input_ptr_offs + token_index * stride_input_1 + size_n, mask=offs_in_d < size_n, other=0.0)
-        if GLM5_NUMERICS:
-            up = up.to(tl.float32)
         if USE_LIMIT_AND_ALPHA:
             gate = tl.minimum(gate, limit)
             up = tl.minimum(tl.maximum(up, -limit), limit)
@@ -78,15 +70,11 @@ def _silu_and_mul_post_quant_kernel(
             gate = 0.5 * gate * (1.0 + tanh_val)
         else:
             gate = gate / (1 + tl.exp(-gate))
-        if not GLM5_NUMERICS:
-            gate = gate.to(input_ptr.dtype.element_ty)
+        gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
-        if USE_LIMIT_AND_ALPHA or GLM5_NUMERICS:
+        if USE_LIMIT_AND_ALPHA:
             # Match the BF16/FP16 activation stored before prefill's FP8 quantization.
             gate_up = gate_up.to(input_ptr.dtype.element_ty).to(tl.float32)
-        if WEIGHTED_INPUT:
-            p = tl.load(routing_weights + expert_id * ROUTING_STRIDE + token_index)
-            gate_up = (gate_up * p).to(input_ptr.dtype.element_ty).to(tl.float32)
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
         output_s = _absmax / fp8_max
         if USE_UE8M0_SCALE:
@@ -112,8 +100,6 @@ def silu_and_mul_masked_post_quant_fwd(
     alpha=None,
     limit=None,
     clamp_up_add_one=True,
-    glm5_numerics=False,
-    routing_weights=None,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -130,10 +116,6 @@ def silu_and_mul_masked_post_quant_fwd(
     assert len(input.shape) == 3
     assert input.shape[0] == masked_m.shape[0]
     assert input.shape[-1] % 2 == 0
-
-    if routing_weights is not None:
-        assert routing_weights.shape == input.shape[:2] and routing_weights.is_contiguous()
-        assert routing_weights.dtype == torch.float32
 
     size_n = input.shape[-1] // 2
     assert size_n % quant_group_size == 0
@@ -169,8 +151,6 @@ def silu_and_mul_masked_post_quant_fwd(
         output_scale,
         *output_scale.stride(),
         masked_m,
-        routing_weights,
-        routing_weights.stride(0) if routing_weights is not None else 0,
         size_n,
         fp8_max,
         fp8_min,
@@ -182,9 +162,6 @@ def silu_and_mul_masked_post_quant_fwd(
         limit=limit,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,
         USE_UE8M0_SCALE=get_env_use_ue8m0_scales(),
-        GLM5_NUMERICS=glm5_numerics,
-        enable_fp_fusion=not glm5_numerics,
-        WEIGHTED_INPUT=routing_weights is not None,
         num_warps=num_warps,
     )
     return

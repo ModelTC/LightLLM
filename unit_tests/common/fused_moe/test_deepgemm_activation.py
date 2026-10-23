@@ -11,13 +11,10 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-@pytest.mark.parametrize("glm5_numerics", [False, True])
 @pytest.mark.parametrize("is_prefill", [False, True])
 @pytest.mark.parametrize("use_ue8m0_scales", [False, True])
 @pytest.mark.parametrize("alpha,limit,add_one", [(None, None, True), (1.0, 10.0, False), (1.702, 7.0, True)])
-def test_grouped_gemm_activation_matches_reference(
-    monkeypatch, is_prefill, use_ue8m0_scales, alpha, limit, add_one, glm5_numerics
-):
+def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_ue8m0_scales, alpha, limit, add_one):
     monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0")
     monkeypatch.delenv("LIGHTLLM_USE_UE8M0_SCALES")
     config = {"quant_method": "fp8", "weight_block_size": [128, 128]}
@@ -33,10 +30,7 @@ def test_grouped_gemm_activation_matches_reference(
     w1_scale = torch.ones(2, 2, 1, device="cuda")
     w2_scale = torch.ones(2, 1, 1, device="cuda")
     counts = torch.tensor([3, 2], device="cuda", dtype=torch.int32)
-    activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one, glm5_numerics=glm5_numerics)
-    p = torch.tensor([0.13, 0.71, 0.88, 1.0, 1.3], device="cuda") if glm5_numerics else torch.ones(5, device="cuda")
-    recv_p = torch.zeros(2, padded, device="cuda")
-    recv_p[0, :3], recv_p[1, :2] = p[:3], p[3:]
+    activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one)
     recv = torch.zeros(2, padded, dim, device="cuda", dtype=torch.float8_e4m3fn)
     recv[0, :3] = x[:3]
     recv[1, :2] = x[3:]
@@ -50,7 +44,7 @@ def test_grouped_gemm_activation_matches_reference(
             num_recv_tokens_per_expert_list=[padded, padded],
             num_unaligned_recv_tokens_per_expert=counts,
             recv_x=(recv.view(2 * padded, dim), torch.ones(1, 2 * padded, device="cuda").T),
-            recv_topk_weights=recv_p.view(-1),
+            recv_topk_weights=torch.ones(2 * padded, device="cuda"),
             recv_src_metadata=metadata,
             w1=w1,
             w1_scale=w1_scale,
@@ -71,7 +65,6 @@ def test_grouped_gemm_activation_matches_reference(
             w2,
             w2_scale,
             expected_m=3,
-            routing_weights=recv_p if glm5_numerics else None,
             **activation_args,
         )
         actual = torch.cat([output[0, :3], output[1, :2]])
@@ -81,11 +74,8 @@ def test_grouped_gemm_activation_matches_reference(
     if limit is not None:
         gate = gate.clamp(max=limit)
         up = up.clamp(-limit, limit) + int(add_one)
-    gate = gate * torch.sigmoid(gate * (alpha or 1.0))
-    if not glm5_numerics:
-        gate = gate.bfloat16().float()
+    gate = (gate * torch.sigmoid(gate * (alpha or 1.0))).bfloat16().float()
     activation = (gate * up).bfloat16().float()
-    activation = (activation * p[:, None]).bfloat16().float()
     scales = activation.abs().amax(-1, keepdim=True).clamp(min=1e-10) / 448
     if use_ue8m0_scales:
         scales = torch.exp2(torch.ceil(torch.log2(scales)))

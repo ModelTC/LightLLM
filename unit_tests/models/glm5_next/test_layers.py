@@ -95,16 +95,7 @@ def test_kda_projections_need_no_sparse_attention_config(config):
     weight = Glm5NextTransformerLayerWeight(0, torch.bfloat16, config, Quantcfg(config))
     projections = {
         name: random_weight(size, 128)
-        for name, size in {
-            "q": 512,
-            "k": 512,
-            "v": 512,
-            "b": 4,
-            "f_a": 128,
-            "g_a": 128,
-            "f_b": 512,
-            "g_b": 512,
-        }.items()
+        for name, size in {"q": 512, "k": 512, "v": 512, "b": 4, "f_a": 128, "g_a": 128, "f_b": 512, "g_b": 512}.items()
     }
     weight.load_hf_weights(
         {f"model.language_model.layers.0.self_attn.{name}_proj.weight": value for name, value in projections.items()}
@@ -235,11 +226,10 @@ def test_ffn_dispatch_preserves_clamp_and_shared_expert(config, monkeypatch, mod
     def reference_mlp(gate_scale, up_scale):
         gate = (x * gate_scale).float().clamp(max=10)
         up = (x * up_scale).float().clamp(-10, 10)
-        return (F.silu(gate) * up).bfloat16()
+        return (F.silu(gate).bfloat16().float() * up).bfloat16()
 
     expected = reference_mlp(1.5, 0.75)
     if mode != "dense":
-        assert weight.experts.fuse_moe_impl.glm5_numerics
         scores = F.linear(x.float(), router).sigmoid()
         probabilities, ids = scores.topk(2, dim=-1)
         probabilities /= probabilities.sum(-1, keepdim=True)
@@ -280,7 +270,7 @@ def test_ep_ffn_uses_combined_output_and_replicated_shared_expert(config, monkey
 
     monkeypatch.setattr(weight.experts, "experts", combined_output)
     actual = layer._ffn(x, SimpleNamespace(is_prefill=is_prefill), weight)
-    shared = (F.silu(x.float().clamp(max=10)) * x.float().clamp(-10, 10)).bfloat16()
+    shared = (F.silu(x.float().clamp(max=10)).bfloat16().float() * x.float().clamp(-10, 10)).bfloat16()
     torch.testing.assert_close(actual, shared + 17, atol=0.25, rtol=0.01)
     torch.testing.assert_close(x, original, atol=0, rtol=0)
 

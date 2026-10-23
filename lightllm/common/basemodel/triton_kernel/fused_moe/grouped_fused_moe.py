@@ -27,7 +27,6 @@ from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.device_utils import triton_support_tensor_descriptor
 from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
 from .moe_silu_and_mul import silu_and_mul_fwd
-from .moe_route_weight import multiply_routing_weights, sorted_tp_routing_weights
 from .moe_sum_reduce import moe_sum_reduce
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.torch_ops_utils import direct_register_custom_op
@@ -393,9 +392,7 @@ def moe_align_fused(expert_to_token_index, expert_to_weight, expert_token_num, t
     else:
         # Expert rows may be unordered, but grouped matmul reuses this same
         # mapping for up/down projections and writes back to original topk slots.
-        _moe_align_fused_atomic_token(
-            expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights
-        )
+        _moe_align_fused_atomic_token(expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights)
     return expert_to_token_index, expert_to_weight, expert_token_num
 
 
@@ -584,7 +581,7 @@ def grouped_matmul_kernel(
             assert BLOCK_SIZE_K <= block_size_k
             token_scale_stride0 = token_stride_0 // block_size_k
             if TOKEN_INPUT_USE_TMA:
-                assert topk_num == 1
+                assert MUL_ROUTED_WEIGHT is True
                 a_scale_ptrs = token_scale_ptr + (token_start_index + tl.arange(0, BLOCK_SIZE_M)) * token_scale_stride0
             else:
                 a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num) * token_scale_stride0
@@ -599,7 +596,7 @@ def grouped_matmul_kernel(
         else:
             # per token scale quant
             if TOKEN_INPUT_USE_TMA:
-                assert topk_num == 1
+                assert MUL_ROUTED_WEIGHT is True
                 a_scale_ptrs = token_scale_ptr + (token_start_index + tl.arange(0, BLOCK_SIZE_M))[:, None]
             else:
                 a_scale_ptrs = token_scale_ptr + (a_m_index // topk_num)[:, None]
@@ -800,7 +797,6 @@ def grouped_matmul(
     reused_mblock_infos=None,
     run_config: Optional[dict] = None,
     bias: Optional[torch.Tensor] = None,  # per-expert bias [expert_num, N]
-    apply_routed_weight: bool = True,
 ):
     """
     token_num_mul_topk_num is int equal token_num * topk_num,
@@ -909,8 +905,7 @@ def grouped_matmul(
 
         triton.set_allocator(alloc_fn)
 
-    # mul_routed_weight selects the W2 layout. GLM can separately disable
-    # its output weighting after applying p to the BF16 input before quantization.
+    # moe 分为 up 和 down 两次计算，当 mul_routed_weight 为 False 的时候为 up
     is_up_moe = not mul_routed_weight
 
     if is_up_moe:
@@ -994,7 +989,7 @@ def grouped_matmul(
         BLOCK_SIZE_N=BLOCK_SIZE_N,
         BLOCK_SIZE_K=BLOCK_SIZE_K,
         GROUP_SIZE_M=GROUP_SIZE_M,
-        MUL_ROUTED_WEIGHT=mul_routed_weight and apply_routed_weight,
+        MUL_ROUTED_WEIGHT=mul_routed_weight,
         NEED_K_MASK=NEED_K_MASK,
         NEED_TRANS=NEED_TRANS,
         num_warps=num_warps,
@@ -1029,7 +1024,6 @@ def fused_experts_impl(
     limit=None,
     alpha=None,
     clamp_up_add_one=True,
-    glm5_numerics=False,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -1109,17 +1103,8 @@ def fused_experts_impl(
             limit=limit,
             alpha=alpha,
             clamp_up_add_one=clamp_up_add_one,
-            glm5_numerics=glm5_numerics,
             layout=layout,
         )
-
-        if glm5_numerics:
-            p = curr_topk_weights.reshape(-1)
-            if triton_support_tensor_descriptor():
-                p = sorted_tp_routing_weights(
-                    curr_topk_weights, expert_to_weights, expert_to_token_num, reused_mblock_infos
-                )
-            multiply_routing_weights(intermediate_cache2.view(-1, N // 2), p)
 
         grouped_matmul(
             curr_topk_ids.numel(),
@@ -1138,7 +1123,6 @@ def fused_experts_impl(
             reused_mblock_infos=reused_mblock_infos,
             run_config=run_config,
             bias=w2_bias,
-            apply_routed_weight=not glm5_numerics,
         )
 
         moe_sum_reduce(
@@ -1166,7 +1150,6 @@ def inplace_fused_experts_impl(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    glm5_numerics: bool = False,
 ) -> None:
     fused_experts_impl(
         hidden_states,
@@ -1187,7 +1170,6 @@ def inplace_fused_experts_impl(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
-        glm5_numerics=glm5_numerics,
     )
 
 
@@ -1210,7 +1192,6 @@ def inplace_fused_experts_impl_fake(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    glm5_numerics: bool = False,
 ) -> None:
     pass
 
@@ -1242,8 +1223,7 @@ def outplace_fused_experts_impl(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    glm5_numerics: bool = False,
-) -> torch.Tensor:
+) -> None:
     return fused_experts_impl(
         hidden_states,
         w1,
@@ -1263,7 +1243,6 @@ def outplace_fused_experts_impl(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
-        glm5_numerics=glm5_numerics,
     )
 
 
@@ -1286,8 +1265,7 @@ def outplace_fused_experts_impl_fake(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    glm5_numerics: bool = False,
-) -> torch.Tensor:
+) -> None:
     return torch.empty_like(hidden_states)
 
 
@@ -1319,7 +1297,6 @@ def fused_experts(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
-    glm5_numerics: bool = False,
 ):
     if inplace:
         torch.ops.lightllm.inplace_fused_experts_impl(
@@ -1340,7 +1317,6 @@ def fused_experts(
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-            glm5_numerics=glm5_numerics,
         )
         return hidden_states
     else:
@@ -1362,5 +1338,4 @@ def fused_experts(
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-            glm5_numerics=glm5_numerics,
         )

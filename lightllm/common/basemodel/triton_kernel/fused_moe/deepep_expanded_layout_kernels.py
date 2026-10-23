@@ -104,9 +104,7 @@ def _ep_zero_padding_kernel(
         scale_offsets = tl.arange(0, BLOCK_SCALE_K)
         scale_mask = scale_offsets < scale_hidden_size
         scale_ptrs = (
-            recv_x_scale
-            + row_offsets[:, None] * recv_x_scale_stride_m
-            + scale_offsets[None, :] * recv_x_scale_stride_k
+            recv_x_scale + row_offsets[:, None] * recv_x_scale_stride_m + scale_offsets[None, :] * recv_x_scale_stride_k
         )
         tl.store(scale_ptrs, 0.0, mask=row_mask[:, None] & scale_mask[None, :])
         tl.store(recv_topk_weights + row_offsets, 0.0, mask=row_mask)
@@ -175,7 +173,6 @@ def _ep_gather_chunk_kernel(
     TOPK: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NEED_HIDDEN_MASK: tl.constexpr,
-    APPLY_ROUTED_WEIGHT: tl.constexpr,
 ):
     hidden_block_id = tl.program_id(0)
     start_recv_token_id = tl.program_id(1)
@@ -199,7 +196,7 @@ def _ep_gather_chunk_kernel(
                     value = tl.load(chunk_ptrs, mask=hidden_mask, other=0.0)
                 else:
                     value = tl.load(chunk_ptrs)
-                weight = tl.load(weights + slot) if APPLY_ROUTED_WEIGHT else 1.0
+                weight = tl.load(weights + slot)
                 accumulator += value.to(tl.float32) * weight
         if NEED_HIDDEN_MASK:
             tl.store(output_ptrs, accumulator, mask=hidden_mask)
@@ -214,7 +211,6 @@ def ep_gather_chunk(
     weights: torch.Tensor,  # [num_expanded_tokens]
     recv_src_metadata: torch.Tensor,  # [num_recv_tokens, topk + 2]
     output: torch.Tensor,  # [num_recv_tokens, hidden_size]
-    apply_routed_weight: bool = True,
 ):
     """Accumulate one expanded W2-output chunk into dense receive-token rows.
 
@@ -244,7 +240,6 @@ def ep_gather_chunk(
         output_stride_k=output.stride(1),
         hidden_size=hidden_size,
         TOPK=topk,
-        APPLY_ROUTED_WEIGHT=apply_routed_weight,
         BLOCK_D=block_d,
         # 常见整块 hidden size 保持原来的无 mask kernel；仅尾块不完整时启用边界保护。
         NEED_HIDDEN_MASK=hidden_size % block_d != 0,
