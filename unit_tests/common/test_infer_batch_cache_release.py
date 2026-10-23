@@ -1,6 +1,6 @@
 """Exercise request release with real radix trees, KV allocation and checkpoint slot pools."""
 
-from types import SimpleNamespace
+from types import MethodType, SimpleNamespace
 from unittest.mock import Mock
 
 import numpy as np
@@ -374,6 +374,7 @@ def test_hybrid_release_skips_insert_for_shared_small_prefix(
     context.free_a_req_mem(released, req)
     allocator.free(torch.cat(released))
     cache = context.radix_cache
+    req._set_cache_prefix = MethodType(infer_batch.InferReq._set_cache_prefix, req)
     infer_batch.InferReq._hybrid_match_radix_cache(req)
     node = req.shared_kv_node
     shared_len = req.cur_kv_len

@@ -623,14 +623,7 @@ class InferReq:
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
             if share_node is not None:
-                self.shared_kv_node = share_node
-                ready_cache_len = share_node.node_prefix_total_len
-                # 新请求索引为空，暂停恢复前也已统一释放并 reset，可直接追加命中前缀。
-                self.token_index.append_token_indexes(value_tensor)
-                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                self.hold_kv_len = self.cur_kv_len
-                assert self.hold_kv_len % self.args.page_size == 0
-                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                self._set_cache_prefix(share_node, value_tensor)
 
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
@@ -662,11 +655,7 @@ class InferReq:
                 assert self.tail_small_page_buffer_id is None
                 if share_node.is_big_page_node():
                     # 大页匹配
-                    self.shared_kv_node = share_node
-                    ready_cache_len = share_node.node_prefix_total_len
-                    self.token_index.append_token_indexes(value_tensor)
-                    self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                    self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                    self._set_cache_prefix(share_node, value_tensor)
                     assert self.tail_small_page_buffer_id is None
                     # 恢复 hybrid checkpoint
                     g_infer_context.req_manager.restore_big_page_state(
@@ -676,11 +665,7 @@ class InferReq:
                     # 小页匹配
                     if big_page_is_disable:
                         # 如果 大页本质是被禁用的，可以直接使用小页的匹配结果
-                        self.shared_kv_node = share_node
-                        ready_cache_len = share_node.node_prefix_total_len
-                        self.token_index.append_token_indexes(value_tensor)
-                        self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                        self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                        self._set_cache_prefix(share_node, value_tensor)
                         assert self.tail_small_page_buffer_id is None
                         # 恢复 hybrid checkpoint
                         g_infer_context.req_manager.restore_small_page_state(
@@ -698,8 +683,6 @@ class InferReq:
                             assert need_tokens % self.args.page_size == 0
                             radix_cache.free_radix_cache_to_get_enough_token(need_token_num=need_tokens)
                             tail_mems = radix_cache.mem_manager.alloc(need_size=need_tokens)
-                            self.token_index.append_token_indexes(value_tensor[:cur_big_page_tokens])
-                            self.token_index.append_token_indexes(tail_mems)
 
                             # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
                             radix_cache.mem_manager.operator.copy_mem_to_mem(
@@ -718,20 +701,19 @@ class InferReq:
                             self.shared_kv_node = None
 
                             big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
-                            self.shared_kv_node = big_page_shared_node
-                            self.cur_kv_len = int(shared_kv_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                            self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                            self._set_cache_prefix(
+                                shared_node=big_page_shared_node,
+                                shared_prefix_indexes=value_tensor[:cur_big_page_tokens],
+                                private_tail_indexes=tail_mems,
+                            )
                         else:
                             # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
                             share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
                             if share_node is not None:
                                 assert share_node.is_big_page_node()
                                 # 大页匹配
-                                self.shared_kv_node = share_node
                                 ready_cache_len = share_node.node_prefix_total_len
-                                self.token_index.append_token_indexes(value_tensor[:ready_cache_len])
-                                self.cur_kv_len = int(ready_cache_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
-                                self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
+                                self._set_cache_prefix(share_node, value_tensor[:ready_cache_len])
                                 assert self.tail_small_page_buffer_id is None
                                 # 恢复 hybrid checkpoint
                                 g_infer_context.req_manager.restore_big_page_state(
@@ -750,6 +732,48 @@ class InferReq:
             # 说明没有任何命中
             g_infer_context.req_manager.init_hybrid_attention_state(req=self)
         return
+
+    def _set_cache_prefix(
+        self,
+        shared_node: Optional[Union[TreeNode, HybridAttPagedTreeNode]],
+        shared_prefix_indexes: torch.Tensor,
+        private_tail_indexes: Optional[torch.Tensor] = None,
+    ):
+        """登记已命中的 KV 前缀，统一更新请求索引、持有长度和缓存命中信息。
+
+        Args:
+            shared_node: 请求最终保留引用的 radix cache 节点。普通匹配时为命中节点；
+                hybrid 小页尾部复制到私有 KV 后，为回退到的最近大页节点。
+                若没有可保留的共享大页，则为 None。节点引用计数由调用方的匹配、回退流程维护。
+            shared_prefix_indexes: 共享前缀对应的物理 KV 槽位索引，为按逻辑 token 顺序排列的
+                一维 CPU Tensor，每个元素代表一个 token 槽位，覆盖请求从位置 0 开始的前缀。
+                长度对应 shared_node 的完整前缀长度；没有共享节点时传空 Tensor。
+            private_tail_indexes: 紧接共享前缀的请求私有 KV 槽位索引，同样是一维 CPU Tensor。
+                用于 hybrid 小页命中后，将尾部 KV 复制到新分配槽位的场景；这里传入复制目标
+                的索引。其 KV 由当前请求独占，不计入 shared_node 的共享长度。无需私有尾部时
+                使用 None。两段索引均使用 token 单位，多 token 页模式下须覆盖完整物理页。
+
+        使用场景：
+            普通前缀命中、hybrid 大页命中，以及大页禁用时直接复用小页，都只传共享前缀。
+            hybrid 小页命中且允许重建尾部时，调用方先提交尾部 KV 拷贝、恢复小页 checkpoint，
+            再回退共享节点，最后分别传入保留的共享前缀和私有尾部索引，无需先拼接 Tensor。
+            容量不足、只能回退到大页时，只传该大页覆盖的共享前缀。
+
+        调用时请求索引必须为空，适用于新请求或已完成暂停释放的请求。
+        cur_kv_len、hold_kv_len 和 prompt_cache_len 均设为两段索引的总长度，因为私有尾部
+        也来自已计算的缓存 KV。例如共享前缀为 8、私有尾部为 4 时，命中长度为 12，
+        共享节点仍只保护前 8 个 token。shm_cur_kv_len 由外层匹配方法统一发布。
+        """
+        # 新请求或已完成暂停释放的请求，其索引状态为空，无需再次 reset。
+        self.shared_kv_node = shared_node
+        self.token_index.append_token_indexes(shared_prefix_indexes)
+        cache_len = shared_prefix_indexes.numel()
+        if private_tail_indexes is not None:
+            self.token_index.append_token_indexes(private_tail_indexes)
+            cache_len += private_tail_indexes.numel()
+        self.cur_kv_len = self.hold_kv_len = int(cache_len)
+        assert self.hold_kv_len % self.args.page_size == 0
+        self.shm_req.prompt_cache_len = self.cur_kv_len
 
     def is_master_req(self):
         """
