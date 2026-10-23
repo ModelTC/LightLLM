@@ -9,6 +9,7 @@ from lightllm.server.router.model_infer.mode_backend import generic_pre_process 
 from lightllm.server.core.objs.sampling_params import SamplingParams
 from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferSamplingParams
+from lightllm.server.router.model_infer.infer_req_ext1 import PinMemPageCacheReqTokenIndex, create_req_token_index
 from lightllm.server.router.model_infer.mode_backend import base_backend
 from unit_tests.common.cpu_index_helpers import make_cpu_index_manager, bind_cpu_indexes
 
@@ -127,3 +128,45 @@ def test_final_metadata_extracts_owned_token_indexes_through_req_helper(monkeypa
     req.token_index.reset()
     req.token_index.append_token_indexes(torch.arange(6, dtype=torch.int32))
     assert indexes.tolist() == [8, 9, 2, 3, 14]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA and pinned CPU memory")
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
+@pytest.mark.parametrize("input_len", [128, 130])
+@pytest.mark.parametrize("kind", ["prompt_logprobs", "routed_experts"])
+def test_final_metadata_reads_partial_pages_with_real_index_helper(monkeypatch, mode, input_len, kind):
+    from lightllm.server.router.model_infer import infer_req_ext
+
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_page_offsets", None)
+    page_size = 64
+    token_num = (input_len + page_size - 1) // page_size * page_size
+    req = SimpleNamespace(
+        req_idx=0,
+        req_manager=SimpleNamespace(
+            page_size=page_size, req_to_token_indexs=torch.empty((1, token_num), dtype=torch.int32, device="cuda")
+        ),
+        args=SimpleNamespace(req_token_index_mode=mode),
+        shm_req=SimpleNamespace(input_len=input_len),
+        sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=3)),
+        cur_kv_len=input_len,
+        cur_output_len=0,
+    )
+    req.token_index = create_req_token_index(req, index_stream=torch.cuda.default_stream())
+    page_starts = torch.tensor([9, 2, 15], dtype=torch.int32)[: token_num // page_size] * page_size
+    expected = (page_starts[:, None] + torch.arange(page_size, dtype=torch.int32)).reshape(-1)
+    req.token_index.append_token_indexes(expected)
+    manager = SimpleNamespace(extract=Mock(return_value="metadata"))
+    metadata = infer_req_ext.FinalTokenMetadataExt(req)
+    if kind == "prompt_logprobs":
+        monkeypatch.setattr(infer_req_ext.PromptLogprobsCaptureManager, "get_instance", lambda: manager)
+        result = metadata.collect_prompt_logprobs()
+    else:
+        monkeypatch.setattr(infer_req_ext.MoeRouteInfoManager, "get_instance", lambda: manager)
+        result = metadata.collect_routed_experts()
+
+    assert result == "metadata"
+    indexes = manager.extract.call_args.args[0]
+    assert torch.equal(indexes, expected[: input_len - 1])
+    req.token_index.reset()
+    req.token_index.append_token_indexes(torch.arange(token_num, dtype=torch.int32))
+    assert torch.equal(indexes, expected[: input_len - 1])

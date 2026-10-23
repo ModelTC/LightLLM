@@ -8,6 +8,7 @@ import torch
 # 在独立运行本测试文件时形成模块级循环导入。
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process  # noqa: F401
 from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.router.model_infer.infer_req_ext1 import PinMemPageCacheReqTokenIndex, create_req_token_index
 from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.dp_backend import dp_shared_kv_trans
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
@@ -83,6 +84,55 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
         expected_tasks.append((10, 10, [], "att_state"))
     assert tasks == expected_tasks
     assert table[0, :12].tolist() == list(range(12))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA and pinned CPU memory")
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"])
+@pytest.mark.parametrize("input_len", [128, 130])
+def test_pd_prefill_transfers_exact_logical_tail_with_real_index_helper(monkeypatch, mode, input_len):
+    monkeypatch.setattr(PinMemPageCacheReqTokenIndex, "_page_offsets", None)
+    monkeypatch.setattr(prefill_impl.g_infer_context, "is_hybrid_att_model", False)
+    page_size = 64
+    token_num = (input_len + page_size - 1) // page_size * page_size
+    req = SimpleNamespace(
+        req_idx=0,
+        req_id=1,
+        req_manager=SimpleNamespace(
+            page_size=page_size, req_to_token_indexs=torch.empty((1, token_num), dtype=torch.int32, device="cuda")
+        ),
+        args=SimpleNamespace(req_token_index_mode=mode),
+        shm_req=SimpleNamespace(input_len=input_len),
+        sampling_param=SimpleNamespace(
+            pd_master_node_id=1,
+            pd_decode_node=SimpleNamespace(agent_name="decode", agent_metadata=None, num_pages=1, page_reg_desc=None),
+        ),
+        cur_kv_len=input_len,
+        hold_kv_len=token_num,
+        pd_trans_kv_start_index=0,
+        pd_trans_device_id=0,
+        pd_task_num=0,
+    )
+    req.token_index = create_req_token_index(req, index_stream=torch.cuda.default_stream())
+    page_starts = torch.tensor([9, 2, 15], dtype=torch.int32)[: token_num // page_size] * page_size
+    expected = (page_starts[:, None] + torch.arange(page_size, dtype=torch.int32)).reshape(-1)
+    req.token_index.append_token_indexes(expected)
+    backend = prefill_impl.PDChunkedPrefillForPrefillNode.__new__(prefill_impl.PDChunkedPrefillForPrefillNode)
+    backend.args = SimpleNamespace(page_size=page_size, pd_kv_page_size=128)
+    backend.is_master_in_dp = True
+    backend.dp_rank_in_node = 0
+    tasks = []
+    backend.info_queue = SimpleNamespace(put=tasks.append)
+
+    backend._prefill_chuncked_handle_func(req, next_token_id=7, next_token_prob=-0.5, output_len=1)
+
+    assert req.pd_task_num == len(tasks)
+    assert req.pd_trans_kv_start_index == input_len
+    assert [(task.start_kv_index, task.end_kv_index) for task in tasks] == (
+        [(0, 128)] if input_len == 128 else [(0, 128), (128, 130)]
+    )
+    assert [index for task in tasks for index in task.mem_indexes] == expected[:input_len].tolist()
+    assert tasks[-1].first_gen_token_id == 7
+    assert tasks[-1].first_gen_token_logprob == -0.5
 
 
 def test_pd_decode_rejects_unaligned_transfer_page_size():

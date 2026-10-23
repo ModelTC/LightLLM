@@ -262,11 +262,7 @@ def test_token_units_and_snapshot_ownership(mode, page_size):
     assert helper.token_index_len == split
     req.token_index.append_token_indexes(original[split:])
     assert helper.token_index_len == count
-    ranges = (
-        [(0, count), (page_size, 3 * page_size), (count, count)]
-        if mode == "pin_mem_page_cache"
-        else [(0, count), (1, count - 1), (page_size, page_size + 2), (count, count)]
-    )
+    ranges = [(0, count), (1, count - 1), (page_size, page_size + 2), (count, count)]
     for start, end in ranges:
         assert torch.equal(req.token_index.get_cpu_token_indexes(start, end), expected[start:end])
     snapshot = req.token_index.get_cpu_token_indexes(0, count)
@@ -296,7 +292,7 @@ def test_token_units_and_snapshot_ownership(mode, page_size):
 
 @requires_cuda
 @pytest.mark.parametrize("page_size", [1, 3, 4, 64])
-def test_page_cache_compresses_page_starts_and_uploads_aligned_token_ranges(page_size):
+def test_page_cache_compresses_page_starts_and_reads_partial_token_ranges(page_size):
     table = torch.full((1, 8 * page_size), -1, dtype=torch.int32, device="cuda")
     req = make_req(table, "pin_mem_page_cache", input_len=4 * page_size, page_size=page_size)
     helper = create_req_token_index(req, index_stream=torch.cuda.default_stream())
@@ -312,7 +308,14 @@ def test_page_cache_compresses_page_starts_and_uploads_aligned_token_ranges(page
     assert helper._cpu_buffer.is_pinned() and helper._cpu_buffer.numel() == 8
     assert helper._cpu_buffer.nbytes * page_size == table.nbytes
     assert torch.equal(helper._cpu_buffer[:4], page_starts)
-    for start, end in ((0, expected.numel()), (page_size, 3 * page_size), (page_size, page_size)):
+    for start, end in (
+        (0, expected.numel()),
+        (1, expected.numel() - 1),
+        (page_size - 1, 2 * page_size + 1),
+        (1, 2),
+        (1, 1),
+        (page_size, page_size),
+    ):
         assert torch.equal(helper.get_cpu_token_indexes(start, end), expected[start:end])
         assert torch.equal(helper.get_free_token_indexes(start, end), expected[start:end])
 
@@ -320,16 +323,8 @@ def test_page_cache_compresses_page_starts_and_uploads_aligned_token_ranges(page
     upload = helper.get_upload_indexes()
     assert upload.is_pinned() and torch.equal(upload, expected)
     assert helper.gpu_index_submitted_len == 0
-    if page_size > 1:
-        with pytest.raises(AssertionError, match="start must be page-aligned"):
-            helper.get_cpu_token_indexes(1, page_size)
-        with pytest.raises(AssertionError, match="end must be page-aligned"):
-            helper.get_free_token_indexes(0, page_size - 1)
-        with pytest.raises(AssertionError, match="start must be page-aligned"):
-            helper.get_cpu_token_indexes(1, 1)
-
-    # 模拟完整前缀页已经提交，待上传接口从下一个页边界开始展开。
-    submitted = page_size
+    # 模拟已提交前缀结束于页内，待上传接口仍返回精确的剩余 token 区间。
+    submitted = page_size + 1
     table[0, :submitted].copy_(upload[:submitted], non_blocking=True)
     helper.gpu_index_submitted_len = submitted
     pending = helper.get_upload_indexes()

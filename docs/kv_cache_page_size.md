@@ -61,7 +61,8 @@ Helper 保存该流，后续不随调用点的当前流切换：
 一次性申请 `ceil(max_sequence_length / page_size)` 个页首索引，后续追加无需扩容或复制旧缓存。
 页模式继承完整模式的 GPU 上传、释放快照和 reset 流程，覆盖 CPU 索引的存储和展开。
 压缩依赖已有的页内连续索引约束；追加完整页，输入从下标 0 按 page_size 取页首。
-页模式展开 CPU 快照、释放索引或待上传索引时，断言 start 和 end 均为页边界，直接返回完整展开结果。
+页模式读取支持页内任意 token 区间：内部展开覆盖区间的完整页，再按页内偏移截取精确范围。
+CPU 快照独立于压缩缓存，PD 尾段传输和最终 metadata 无需自行处理页对齐。
 缓冲区在首次非空写入时按需申请，重置时保留输入长度，
 丢弃已申请的缓冲区引用，由 PyTorch 在引用和异步传输依赖结束后回收。
 页模式上传时先将待提交区间展开到临时 pinned token 索引，使用 `PinMemPageCacheReqTokenIndex._alloc_pinned_tensor`
@@ -77,7 +78,7 @@ offset 只前进，不回绕；空间不足时换用新 slab 并从零开始，�
 `get_free_token_indexes(start, end)` 和 `get_gpu_token_indexes(start, end)`，均使用 token 单位，
 追加接口将完整输入接到已记录索引的尾部，非空输入在三种模式下均断言为 CPU Tensor；空输入直接返回。
 CPU 缓存模式直接复制到自身的 pinned 缓冲区，无需先 pin 输入；GPU 模式仅在输入未 pinned 时内部转换，已有 pinned 输入直接复用。
-前缀匹配和索引重建路径直接传入 CPU 索引，不再自行 pin。GPU 视图读取支持页内任意区间；页模式 CPU 展开和 allocator 释放使用完整页区间。
+前缀匹配和索引重建路径直接传入 CPU 索引，不再自行 pin。读取接口均支持页内任意区间；提交给 allocator 的释放区间仍须覆盖完整页。
 CPU getter 返回独立快照，缓存、PD 元数据和异步任务可跨请求释放持有；GPU getter 返回当前请求的
 GPU 表视图，不应跨请求槽位复用持有。Helper 保存外部传入的索引流，GPU 索引读写固定在该流，
 调用方保证 token 区间有效；GPU getter 返回前让调用流等待索引流，没有新增上传时也需承接已有写入的依赖。

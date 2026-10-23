@@ -203,16 +203,14 @@ class PinMemPageCacheReqTokenIndex(PinMemCacheReqTokenIndex):
         )
 
     def _expand_token_indexes(self, start: int, end: int, pin_memory: bool) -> torch.Tensor:
-        """展开页对齐区间内的 token 索引，返回值不借用压缩缓存。"""
-        assert start % self.page_size == 0, "start must be page-aligned"
-        assert end % self.page_size == 0, "end must be page-aligned"
+        """展开覆盖读取区间的完整页，再截取精确 token 范围，返回值不借用压缩缓存。"""
         if start == end:
             return torch.empty(
                 0, dtype=self.gpu_indexes.dtype, device="cpu", pin_memory=pin_memory, requires_grad=False
             )
         first_page = start // self.page_size
-        last_page = end // self.page_size
-        token_num = end - start
+        last_page = (end + self.page_size - 1) // self.page_size
+        token_num = (last_page - first_page) * self.page_size
         if pin_memory:
             # 上传使用一次性的 slab 区间，后续追加、扩容或 reset 均不会覆写在途 H2D 的源。
             token_indexes = self._alloc_pinned_tensor(token_num)
@@ -221,7 +219,9 @@ class PinMemPageCacheReqTokenIndex(PinMemCacheReqTokenIndex):
         page_starts = self._cpu_buffer[first_page:last_page]
         # 将每个 page 的首索引加上页内偏移，直接展开到 token 级别的目标缓冲区。
         torch.add(page_starts[:, None], self._page_offsets, out=token_indexes.view(-1, self.page_size))
-        return token_indexes
+        # 读取可从页内任意位置开始或结束，页内偏移只影响返回范围，不改变压缩页缓存。
+        offset = start % self.page_size
+        return token_indexes[offset : offset + end - start]
 
     @staticmethod
     def _alloc_pinned_tensor(need_size: int) -> torch.Tensor:
