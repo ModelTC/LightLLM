@@ -13,6 +13,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
+from lightllm.utils.envs_utils import get_env_use_ue8m0_activation_scales
 
 _HAS_SGL_FP8 = HAS_SGL_KERNEL and sgl_ops is not None and hasattr(sgl_ops, "fp8_scaled_mm")
 
@@ -447,7 +448,11 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         if input_scale is None:
             qinput_tensor, input_scale = per_token_group_quant_fp8(
-                input_tensor, self.block_size, dtype=qweight.dtype, alloc_func=alloc_func
+                input_tensor,
+                self.block_size,
+                dtype=qweight.dtype,
+                alloc_func=alloc_func,
+                use_ue8m0_scales=get_env_use_ue8m0_activation_scales(default=False),
             )
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)

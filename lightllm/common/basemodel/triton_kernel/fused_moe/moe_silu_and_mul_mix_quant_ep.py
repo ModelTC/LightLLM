@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 
 from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
-from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
+from lightllm.utils.envs_utils import get_env_use_ue8m0_activation_scales
 
 
 @triton.jit
@@ -55,7 +55,9 @@ def _silu_and_mul_post_quant_kernel(
     )
 
     for token_index in tl.range(token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE):
-        gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(tl.float32)
+        gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(
+            tl.float32
+        )
         up = tl.load(input_ptr_offs + token_index * stride_input_1 + size_n, mask=offs_in_d < size_n, other=0.0)
         if USE_LIMIT_AND_ALPHA:
             gate = tl.minimum(gate, limit)
@@ -161,7 +163,7 @@ def silu_and_mul_masked_post_quant_fwd(
         alpha=alpha,
         limit=limit,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,
-        USE_UE8M0_SCALE=get_env_use_ue8m0_scales(),
+        USE_UE8M0_SCALE=get_env_use_ue8m0_activation_scales(),
         num_warps=num_warps,
     )
     return

@@ -306,9 +306,10 @@ class FusedMoeWeight(BaseWeightTpl):
         self.per_expert_scale = None
         # Create e_score_correction_bias
         if self.e_score_correction_bias_name:
+            # Preserve FP32 correction scores at expert-selection boundaries.
             self.e_score_correction_bias = torch.empty(
                 (self.n_routed_experts,),
-                dtype=self.data_type_,
+                dtype=torch.float32,
                 device=f"cuda:{self.device_id_}",
             )
             self.e_score_correction_bias.load_ok = False

@@ -39,6 +39,10 @@ class Glm5NextMemManager(Qwen3NextMemManager):
         return self._layer_buffer(layer_index)[:, :, : self.mla_head_dim]
 
     def get_indexer_k_buffer(self, layer_index):
+        if self.linear_config.indexer_bf16:
+            return self._layer_buffer(layer_index)[
+                :, :, self.mla_head_dim : self.mla_head_dim + self.linear_config.index_head_dim
+            ]
         return self._layer_buffer(layer_index).view(torch.uint8)[:, :, -132:]
 
     def write_to_shm(self, req_manager):

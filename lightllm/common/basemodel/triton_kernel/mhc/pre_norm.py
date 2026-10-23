@@ -15,14 +15,71 @@ LIGHTLLM_DISABLE_DEEPGEMM_MHC = os.getenv("LIGHTLLM_DISABLE_DEEPGEMM_MHC", "Fals
 
 
 @triton.jit
+def _hc_input_inv_rms_kernel(
+    x,
+    inv_rms,
+    FLATTENED_HIDDEN: tl.constexpr,
+    RMS_EPS: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    token = tl.program_id(0)
+    offsets = tl.arange(0, BLOCK_K)
+    values = tl.load(x + token * FLATTENED_HIDDEN + offsets, offsets < FLATTENED_HIDDEN, 0).to(tl.float32)
+    variance = tl.sum(values * values, axis=0) / FLATTENED_HIDDEN
+    tl.store(inv_rms + token, tl.rsqrt(variance + RMS_EPS))
+
+
+@triton.jit
+def _hc_normalized_projection_kernel(
+    x,
+    fn,
+    inv_rms,
+    gemm_partial,
+    tokens,
+    FLATTENED_HIDDEN: tl.constexpr,
+    MIX_SIZE: tl.constexpr,
+    SPLIT_K_BLOCKS: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+    BLOCK_K: tl.constexpr,
+):
+    token_offsets = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    split = tl.program_id(1)
+    mix_offsets = tl.arange(0, BLOCK_M)
+    k_offsets = split * SPLIT_K_BLOCKS * BLOCK_K + tl.arange(0, BLOCK_K)
+    rms = tl.load(inv_rms + token_offsets, token_offsets < tokens, 0)
+    accumulator = tl.zeros((BLOCK_T, BLOCK_M), dtype=tl.float32)
+    for _ in range(SPLIT_K_BLOCKS):
+        values = tl.load(
+            x + token_offsets[:, None] * FLATTENED_HIDDEN + k_offsets[None, :],
+            (token_offsets[:, None] < tokens) & (k_offsets[None, :] < FLATTENED_HIDDEN),
+            0,
+        ).to(tl.float32)
+        weights = tl.load(
+            fn + mix_offsets[None, :] * FLATTENED_HIDDEN + k_offsets[:, None],
+            (mix_offsets[None, :] < MIX_SIZE) & (k_offsets[:, None] < FLATTENED_HIDDEN),
+            0,
+        )
+        # Normalize in FP32 before the IEEE projection, independent of TF32 settings.
+        normalized = values * rms[:, None]
+        accumulator = tl.dot(normalized, weights, accumulator, input_precision="ieee")
+        k_offsets += BLOCK_K
+    tl.store(
+        gemm_partial + (split * tokens + token_offsets[:, None]) * MIX_SIZE + mix_offsets[None, :],
+        accumulator,
+        (token_offsets[:, None] < tokens) & (mix_offsets[None, :] < MIX_SIZE),
+    )
+
+
+@triton.jit
 def _hc_prepare_prenorm_kernel(
     gemm_partial,  # 输入 [P, T, M]，fp32；投影的 split-K 部分和。
     sqrsum_partial,  # 输入 [P, T]，fp32；残差平方和的 split-K 部分和。
     scale,  # 输入 [3]，fp32；pre、post、residual 三组缩放系数。
     base,  # 输入 [M]，fp32；M = 2 * S + S * S。
     pre,  # 输出 [T, S]，fp32。
-    post,  # 输出 [T, S]，fp32。
-    residual_mix,  # 输出 [T, S, S]，fp32；最后两维为输入、输出 stream。
+    post,  # 输出 [T, S]，fp32 或激活 dtype。
+    residual_mix,  # 输出 [T, S, S]，fp32 或激活 dtype；最后两维为输入、输出 stream。
     gemm_stride_s,
     gemm_stride_m: tl.constexpr,
     sqrsum_stride_s,
@@ -36,6 +93,7 @@ def _hc_prepare_prenorm_kernel(
     POST_MULTIPLIER: tl.constexpr,
     SINKHORN_ITERS: tl.constexpr,
     N_SPLITS: tl.constexpr,
+    PROJECTION_IS_NORMALIZED: tl.constexpr,
 ):
     """归并分片并准备混合权重：[P, T, M] / [P, T] -> [T, S] / [T, S, S]。
 
@@ -55,11 +113,13 @@ def _hc_prepare_prenorm_kernel(
         pre_raw += tl.load(partial_base + stream_offsets)
         post_raw += tl.load(partial_base + STREAMS + stream_offsets)
         matrix_raw += tl.load(partial_base + 2 * STREAMS + matrix_offsets)
-        sqrsum += tl.load(sqrsum_partial + split * sqrsum_stride_s + token * sqrsum_stride_m)
-    inv_rms = tl.rsqrt(sqrsum / FLATTENED_HIDDEN + RMS_EPS)
-    pre_raw *= inv_rms
-    post_raw *= inv_rms
-    matrix_raw *= inv_rms
+        if not PROJECTION_IS_NORMALIZED:
+            sqrsum += tl.load(sqrsum_partial + split * sqrsum_stride_s + token * sqrsum_stride_m)
+    if not PROJECTION_IS_NORMALIZED:
+        inv_rms = tl.rsqrt(sqrsum / FLATTENED_HIDDEN + RMS_EPS)
+        pre_raw *= inv_rms
+        post_raw *= inv_rms
+        matrix_raw *= inv_rms
 
     pre_values = tl.sigmoid(pre_raw * tl.load(scale) + tl.load(base + stream_offsets)) + HC_EPS
     post_values = POST_MULTIPLIER * tl.sigmoid(post_raw * tl.load(scale + 1) + tl.load(base + STREAMS + stream_offsets))
@@ -141,6 +201,38 @@ def _compute_prenorm_splits(tokens: int, flattened_hidden: int, device: torch.de
     return max(1, min(sms // max(grid_size, 1), k_blocks // 4))
 
 
+def _hc_normalized_projection(x: torch.Tensor, fn: torch.Tensor, rms_eps: float) -> torch.Tensor:
+    """FP32 normalize-before-project, without materializing a [T, S * H] FP32 copy."""
+    tokens, flattened_hidden = x.shape
+    mix_size = fn.shape[0]
+    n_splits = _compute_prenorm_splits(tokens, flattened_hidden, x.device)
+    inv_rms = torch.empty((tokens,), dtype=torch.float32, device=x.device)
+    gemm_partial = torch.empty((n_splits, tokens, mix_size), dtype=torch.float32, device=x.device)
+    _hc_input_inv_rms_kernel[(tokens,)](
+        x,
+        inv_rms,
+        FLATTENED_HIDDEN=flattened_hidden,
+        RMS_EPS=rms_eps,
+        BLOCK_K=triton.next_power_of_2(flattened_hidden),
+        num_warps=8,
+    )
+    _hc_normalized_projection_kernel[(triton.cdiv(tokens, 16), n_splits)](
+        x,
+        fn,
+        inv_rms,
+        gemm_partial,
+        tokens,
+        FLATTENED_HIDDEN=flattened_hidden,
+        MIX_SIZE=mix_size,
+        SPLIT_K_BLOCKS=triton.cdiv(triton.cdiv(flattened_hidden, 64), n_splits),
+        BLOCK_T=16,
+        BLOCK_M=triton.next_power_of_2(mix_size),
+        BLOCK_K=64,
+        num_warps=4,
+    )
+    return gemm_partial
+
+
 def hc_pre_norm(
     x: torch.Tensor,
     fn: torch.Tensor,
@@ -153,6 +245,8 @@ def hc_pre_norm(
     hc_eps: float,
     sinkhorn_iters: int,
     post_multiplier: float = 2.0,
+    *,
+    glm5_numerics: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """将 mHC pre-mixing 与紧随其后的子层 RMSNorm 融合。
 
@@ -170,15 +264,18 @@ def hc_pre_norm(
         hc_eps: pre sigmoid 后的偏移量及 Sinkhorn 的稳定项。
         sinkhorn_iters: Sinkhorn 迭代次数。
         post_multiplier: post sigmoid 的乘数，默认 2.0。
+        glm5_numerics: FP32 先归一化后投影；pre 系数保持 fp32，post/residual 舍入到激活 dtype。
 
     Returns:
-        (layer_input, residual_mix, post_mix)：分别为 bf16 [T, H]、fp32 [T, S, S]、fp32 [T, S]。
+        (layer_input, residual_mix, post_mix)：形状为 [T, H]、[T, S, S]、[T, S]。
+        layer_input 为 bf16；两个混合系数默认 fp32，glm5_numerics=True 时为激活 dtype。
         layer_input 已完成子层 RMSNorm；residual_mix[t, i, j] 对应输入 i 到输出 j。
         x 保持不变，留给对应 hc_post 使用。
 
     默认用 DeepGEMM 融合投影与平方和计算，Triton 完成 Sinkhorn、stream 合并和 RMSNorm。
     合并结果先舍入到 bf16，再做 RMSNorm。
     LIGHTLLM_DISABLE_DEEPGEMM_MHC=1 禁用 DeepGEMM，改用 PyTorch 计算投影与平方和。
+    glm5_numerics=True 则使用独立的 IEEE FP32 Triton 投影，不依赖 DeepGEMM 或全局 TF32 设置。
     """
 
     assert x.ndim == 2 and x.shape[-1] % streams == 0
@@ -187,8 +284,13 @@ def hc_pre_norm(
     assert x.is_contiguous() and fn.is_contiguous() and norm_weight.is_contiguous()
     tokens, flattened_hidden = x.shape
     hidden = flattened_hidden // streams
+    assert fn.shape == ((2 + streams) * streams, flattened_hidden)
 
-    if LIGHTLLM_DISABLE_DEEPGEMM_MHC:
+    if glm5_numerics:
+        gemm_partial = _hc_normalized_projection(x, fn, rms_eps)
+        sqrsum_partial = None
+        n_splits = gemm_partial.shape[0]
+    elif LIGHTLLM_DISABLE_DEEPGEMM_MHC:
         # PyTorch produces one complete partition: [1, T, M] and [1, T].
         x_fp32 = x.float()
         gemm_partial = (x_fp32 @ fn.T).unsqueeze(0)
@@ -204,8 +306,9 @@ def hc_pre_norm(
         tf32_hc_prenorm_gemm(x, fn, gemm_partial, sqrsum_partial, n_splits)
 
     pre = torch.empty((tokens, streams), dtype=torch.float32, device=x.device)
-    post = torch.empty_like(pre)
-    residual_mix = torch.empty((tokens, streams, streams), dtype=torch.float32, device=x.device)
+    mix_dtype = x.dtype if glm5_numerics else torch.float32
+    post = torch.empty((tokens, streams), dtype=mix_dtype, device=x.device)
+    residual_mix = torch.empty((tokens, streams, streams), dtype=mix_dtype, device=x.device)
     _hc_prepare_prenorm_kernel[(tokens,)](
         gemm_partial,
         sqrsum_partial,
@@ -216,8 +319,8 @@ def hc_pre_norm(
         residual_mix,
         gemm_partial.stride(0),
         gemm_partial.stride(1),
-        sqrsum_partial.stride(0),
-        sqrsum_partial.stride(1),
+        sqrsum_partial.stride(0) if sqrsum_partial is not None else 0,
+        sqrsum_partial.stride(1) if sqrsum_partial is not None else 0,
         pre.stride(0),
         residual_mix.stride(0),
         FLATTENED_HIDDEN=flattened_hidden,
@@ -227,6 +330,7 @@ def hc_pre_norm(
         POST_MULTIPLIER=post_multiplier,
         SINKHORN_ITERS=sinkhorn_iters,
         N_SPLITS=n_splits,
+        PROJECTION_IS_NORMALIZED=glm5_numerics,
         num_warps=1,
     )
 

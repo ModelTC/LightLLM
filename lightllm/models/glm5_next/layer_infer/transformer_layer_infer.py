@@ -428,6 +428,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             norm_eps=self.eps_,
             hc_eps=self.hc_eps,
             sinkhorn_iters=self.hc_sinkhorn_iters,
+            glm5_numerics=True,
         )
 
     def _forward_mhc(self, input_embeddings, infer_state, layer_weight, *, prefill):
@@ -438,11 +439,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             layer_output = self.context_attention_forward(layer_input, infer_state, layer_weight)
         else:
             layer_output = self.token_attention_forward(layer_input, infer_state, layer_weight)
-        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams)
+        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams, glm5_numerics=True)
 
         layer_input, residual_mix, post_mix = self._hc_pre(streams, layer_weight, "ffn", layer_weight.ffn_norm_weight_)
         layer_output = self._ffn(layer_input, infer_state, layer_weight)
-        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams)
+        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams, glm5_numerics=True)
         # Only prefill autotuning truncates the model. Decode autotuning still
         # executes every layer and must keep all residual streams until the end.
         is_autotune_last_layer = (
