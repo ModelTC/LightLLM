@@ -33,7 +33,7 @@ from lightllm.common.state_cache_manager import get_hybrid_cache_config
 logger = init_logger(__name__)
 
 
-def compute_token_list_hash(tokens: List[int], cpu_cache_token_page_size: int) -> List[int]:
+def compute_token_list_hash(tokens: List[int] | np.ndarray, cpu_cache_token_page_size: int) -> List[int]:
     if len(tokens) == 0:
         return []
 
