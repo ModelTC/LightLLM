@@ -802,15 +802,24 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""Whether to enable ep moe for deepseekv3 model.""",
     )
     parser.add_argument(
-        "--ep_redundancy_expert_config_path",
-        type=str,
-        default=None,
-        help="""Path of the redundant expert config. It can be used for deepseekv3 model.""",
+        "--disable_ep_balance_monitor",
+        action="store_true",
+        help="""Disable the prefill expert balance monitor enabled by default for EP-MoE.""",
     )
     parser.add_argument(
-        "--auto_update_redundancy_expert",
+        "--enable_prefill_eplb",
         action="store_true",
-        help="""Whether to update the redundant expert for deepseekv3 model by online expert used counter.""",
+        help="""Balance experts from prefill samples. PD decode automatically disables EPLB.
+        Single-node normal mode shares the published layout between prefill and decode;
+        decode does not sample loads, plan, or commit migrations.""",
+    )
+    parser.add_argument(
+        "--eplb_num_redundant_experts_per_rank",
+        type=int,
+        default=2,
+        help="""Number of redundant physical experts per EP rank for each MoE layer used by EPLB.
+            Shared by both phases in normal mode; ignored on PD decode nodes.
+            The value must be nonnegative; zero enables rearrangement without extra replicas.""",
     )
     parser.add_argument(
         "--enable_fused_shared_experts",

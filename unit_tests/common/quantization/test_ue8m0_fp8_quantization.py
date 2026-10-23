@@ -384,27 +384,15 @@ def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequa
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
 @pytest.mark.parametrize("prepacked", [False, True])
 @pytest.mark.parametrize("sm100", [False, True])
-def test_redundancy_expert_update_packs_scales(monkeypatch, packed_weight_layout, prepacked, sm100):
-    from types import SimpleNamespace
-    from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.ep_redundancy import (
-        FusedMoeWeightEPAutoRedundancy,
-    )
-
+def test_moe_expert_row_load_packs_scales(monkeypatch, packed_weight_layout, prepacked, sm100):
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1")
     monkeypatch.setattr(deepgemm, "is_sm100_gpu", lambda: sm100)
     method = Quantcfg({"n_layer": 1}, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
     w13, _ = method.create_moe_weight([128, 128], 512, torch.bfloat16, 0, 4)
     w2, _ = method.create_moe_weight([512], 128, torch.bfloat16, 0, 4)
-    update = object.__new__(FusedMoeWeightEPAutoRedundancy)
-    update.redundancy_expert_num = 2
-    update.redundancy_expert_ids = [6, 7]
-    update._ep_w = SimpleNamespace(
-        w13=w13,
-        w2=w2,
-        quant_method=method,
-        redundancy_expert_ids_tensor=torch.zeros(2, device="cuda", dtype=torch.int64),
-    )
     expected = []
+    before = len(packed_weight_layout)
     for dest in (w13, w2):
         dest.weight.zero_()
         dest.weight_scale.zero_()
@@ -415,11 +403,13 @@ def test_redundancy_expert_update_packs_scales(monkeypatch, packed_weight_layout
             source, _ = method.create_moe_weight([shape[-2]], shape[-1], torch.bfloat16, 0, 2)
             method.load_weight(raw, source)
             sf = source.weight_scale
+        for row in range(2):
+            expert = dest.get_expert(row + 2)
+            method.load_weight(q[row], expert)
+            method.load_weight_scale(sf[row], expert)
+            assert all(expert.load_ok)
         expected.append([q, sf])
-    update.w13, update.w2 = expected
-    before = len(packed_weight_layout)
-    update.commit()
-    assert len(packed_weight_layout) == before + (2 if sm100 and not prepacked else 0)
+    assert len(packed_weight_layout) == before + (2 if sm100 and prepacked else 4 if sm100 else 0)
     for dest, (q, sf) in zip((w13, w2), expected):
         assert torch.count_nonzero(dest.weight[:2].float()) == 0
         assert torch.count_nonzero(dest.weight_scale[:2]) == 0
@@ -435,7 +425,6 @@ def test_redundancy_expert_update_packs_scales(monkeypatch, packed_weight_layout
         else:
             actual, expected_sf = dest.weight_scale[2:], sf
         torch.testing.assert_close(actual, expected_sf, rtol=0, atol=0)
-    assert update._ep_w.redundancy_expert_ids_tensor.tolist() == [6, 7]
 
 
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")

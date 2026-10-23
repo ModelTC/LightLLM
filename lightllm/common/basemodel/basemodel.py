@@ -28,7 +28,7 @@ from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
+from lightllm.utils.profile_max_tokens import profile_model_memory
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_llm_data_type,
@@ -109,7 +109,7 @@ class TpPartBaseModel:
         self._init_quant()
 
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
-        with profile_mtp_weight_memory(self):
+        with profile_model_memory(self):
             with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
                 self._init_weights()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
@@ -148,6 +148,7 @@ class TpPartBaseModel:
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
             self.config = json.load(json_file)
+        self.config["is_mtp_draft_model"] = self.is_mtp_draft_model
         # rename keys
         repair_config(self.config, same_names=["num_attention_heads", "n_head"])
         repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
@@ -631,7 +632,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"

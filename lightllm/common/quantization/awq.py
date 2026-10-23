@@ -109,11 +109,11 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         return out
 
     def _create_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: Optional[int] = None
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims)
         group_size = self.hf_quantization_config["group_size"]
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(expert_prefix + (in_dim, out_dim // self.pack_factor), dtype=torch.int32).cuda(device_id)
         weight_scale = torch.empty(expert_prefix + (in_dim // group_size, out_dim), dtype=dtype).cuda(device_id)
         weight_zero_point = torch.empty(
@@ -206,13 +206,13 @@ class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         return out
 
     def _create_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: Optional[int] = None
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims)
         self.n = out_dim
         self.k = in_dim
         group_size = self.hf_quantization_config["group_size"]
-        expert_prefix = (num_experts,) if num_experts > 1 else ()
+        expert_prefix = () if num_experts is None else (num_experts,)
         weight = torch.empty(
             expert_prefix + (in_dim // self.tile_size, out_dim * self.tile_size // self.pack_factor), dtype=torch.int32
         ).cuda(device_id)
