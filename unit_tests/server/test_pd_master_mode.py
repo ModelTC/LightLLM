@@ -43,10 +43,113 @@ def test_pd_cache_high_priority_cli_defaults_to_enabled_and_can_be_disabled():
     assert StartArgs().disable_pd_cache_high_priority is False
 
 
-def test_pd_master_request_slot_is_reserved_noop():
+@pytest.mark.parametrize("running_request_count", [0, 127, 128, 129])
+def test_pd_master_request_slot_enforces_configured_limit(running_request_count):
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = StartArgs(running_max_req_size=128)
+    manager.running_request_count = running_request_count
 
-    asyncio.run(manager._wait_for_pd_master_request_slot())
+    if running_request_count < 128:
+        asyncio.run(manager._wait_for_pd_master_request_slot())
+    else:
+        with pytest.raises(ServerBusyError) as exc_info:
+            asyncio.run(manager._wait_for_pd_master_request_slot())
+        assert exc_info.value.status_code == 429
+    assert manager.running_request_count == running_request_count
+
+
+def test_pd_master_admission_limits_concurrency_and_releases_cancelled_requests():
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = StartArgs(running_max_req_size=128)
+        manager.running_request_count = 0
+        entered = 0
+        blocked = asyncio.Event()
+
+        async def generate(*args):
+            nonlocal entered
+            entered += 1
+            await asyncio.sleep(0)
+            yield b"result"
+            await blocked.wait()
+
+        manager._generate_choices = generate
+        generators = [manager._generate(None, None, None, None) for _ in range(129)]
+        try:
+            results = await asyncio.gather(*(g.__anext__() for g in generators), return_exceptions=True)
+            assert results.count(b"result") == 128
+            rejected = [result for result in results if isinstance(result, ServerBusyError)]
+            assert len(rejected) == 1
+            assert rejected[0].status_code == 429
+            assert entered == manager.running_request_count == 128
+
+            pending = asyncio.create_task(generators[0].__anext__())
+            await asyncio.sleep(0)
+            pending.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await pending
+            assert manager.running_request_count == 127
+
+            replacement = manager._generate(None, None, None, None)
+            generators.append(replacement)
+            assert await replacement.__anext__() == b"result"
+            assert manager.running_request_count == 128
+        finally:
+            await asyncio.gather(*(g.aclose() for g in generators))
+        assert manager.running_request_count == 0
+
+    asyncio.run(run())
+
+
+def test_pd_master_admission_returns_http_429_before_generation(monkeypatch):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from lightllm.server import api_stream_obj
+    from lightllm.server.api_http import g_objs, server_busy_exception_handler
+    from lightllm.server.api_openai import _safe_stream_wrapper
+
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.args = StartArgs(running_max_req_size=128)
+    manager.running_request_count = 128
+    manager._generate_choices = Mock()
+    monkeypatch.setattr(api_stream_obj, "get_env_start_args", lambda: manager.args)
+    monkeypatch.setattr(g_objs, "metric_client", Mock())
+    app = FastAPI()
+    app.add_exception_handler(ServerBusyError, server_busy_exception_handler)
+
+    @app.get("/")
+    async def stream():
+        return api_stream_obj.CustomStreamingResponse(
+            _safe_stream_wrapper(manager._generate(None, None, None, None)), media_type="text/event-stream"
+        )
+
+    response = TestClient(app).get("/")
+    assert response.status_code == 429
+    assert response.json()["error"]["type"] == "RateLimitError"
+    manager._generate_choices.assert_not_called()
+    assert manager.running_request_count == 128
+
+
+def test_pd_master_zero_busy_retry_timeout_attempts_generation_once():
+    manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+    manager.enable_pd_node_self_request_limit = True
+    manager.pd_node_busy_retry_timeout_seconds = 0
+    attempts = 0
+
+    async def generate(*args):
+        nonlocal attempts
+        attempts += 1
+        raise ServerBusyError("decode node is full")
+        yield
+
+    manager._generate_one_attempt = generate
+
+    async def consume():
+        return [result async for result in manager._generate_one("prompt", None, None, None, 0, 1, 1)]
+
+    with pytest.raises(ServerBusyError, match="decode node is full"):
+        asyncio.run(consume())
+    assert attempts == 1
 
 
 def test_auto_set_response_parsers_from_qwen35_model_config(tmp_path):
@@ -384,7 +487,9 @@ def test_pd_master_restores_request_count_when_preload_fails():
             raise RuntimeError("preload failed")
 
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
+    manager.args = SimpleNamespace(
+        running_max_req_size=128, reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False
+    )
     manager.running_request_count = 0
 
     params = SamplingParams()
@@ -405,7 +510,9 @@ def test_pd_master_restores_request_count_when_preload_fails():
 def test_pd_master_request_count_covers_async_generator_lifecycle(monkeypatch, parser, enabled):
     monkeypatch.setenv("LIGHTLLM_STOP_IN_REASONING", "1" if enabled else "0")
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
+    manager.args = SimpleNamespace(
+        running_max_req_size=128, reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False
+    )
     manager.running_request_count = 0
     manager.args.reasoning_parser = parser
     inner_generator_closed = False
@@ -436,7 +543,9 @@ def test_pd_master_request_count_covers_async_generator_lifecycle(monkeypatch, p
 @pytest.mark.parametrize("include", [False, True])
 def test_pd_master_forwards_filtered_choices(include):
     manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
-    manager.args = SimpleNamespace(reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False)
+    manager.args = SimpleNamespace(
+        running_max_req_size=128, reasoning_parser=None, enable_rl=False, enable_return_routed_experts=False
+    )
     manager.running_request_count = 0
     manager.tokenizer = SimpleNamespace(encode=lambda text, **kwargs: [ord(c) for c in text])
     params = SamplingParams()

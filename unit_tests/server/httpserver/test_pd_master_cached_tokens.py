@@ -68,6 +68,7 @@ def _make_manager(monkeypatch):
     mgr.active_req_ids = set()
     mgr.req_id_to_out_inf = {}
     mgr.args = SimpleNamespace(
+        running_max_req_size=128,
         disable_pd_master_decode_capacity_limit=True,
         reasoning_parser=None,
         enable_rl=False,

@@ -158,8 +158,11 @@ class HttpServerManagerForPDMaster:
         return await self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
 
     async def _wait_for_pd_master_request_slot(self) -> None:
-        """PD Master 请求准入的预留接口，当前不执行限流。"""
-        return
+        """达到当前 master worker 的并发上限时直接拒绝新请求。"""
+        if self.running_request_count >= self.args.running_max_req_size:
+            raise ServerBusyError(
+                f"PD master is busy: concurrent request limit {self.args.running_max_req_size} reached"
+            )
 
     def generate(
         self,
