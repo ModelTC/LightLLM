@@ -747,6 +747,7 @@ class ModeBackend:
         finished_reqs = []
         prefill_reqs = []
         decode_reqs = []
+        decode_allocations = []
 
         # 单轮最多处理少量因 token 容量不足而无法继续的请求，避免一次性影响大量请求。
         # 普通 Decode 请求进入暂停队列等待恢复；PD Decode 请求则强制提前结束并进入清理流程。
@@ -789,12 +790,10 @@ class ModeBackend:
             if is_decode:
                 # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
                 _, alloc_token_num = req_obj.decode_need_token_num()
-                # page_size 较小时，decode 会频繁触发 KV 内存分配。此处额外预申请不超过 8 个 token，
-                # 并将数量向下对齐到 page_size 的整数倍，以减少 alloc 调用次数并保持分页分配约束。
-                if alloc_token_num > 0 and self.args.page_size < 8:
-                    alloc_token_num += 8 // self.args.page_size * self.args.page_size
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num)
+                    # 只扣除必需容量；等本轮分类结束后，再从剩余预算中分配可选预留。
+                    if alloc_token_num > 0:
+                        decode_allocations.append((req_obj, alloc_token_num))
                     decode_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
                 else:
@@ -839,6 +838,17 @@ class ModeBackend:
                     if wait_pause_count < pause_max_req_num:
                         req_obj.wait_pause = True
                         wait_pause_count += 1
+
+        # 所有接纳请求的必需容量均已计入预算，额外预留不能挤占后续 decode 或 prefill。
+        # page_size 较小时，decode 频繁分配 mem index 会增加 CPU overhead；因此在剩余预算允许时，
+        # 为 decode 请求额外预留一些 token，供后续步骤复用，减少分配次数并降低 CPU overhead。
+        for req_obj, alloc_token_num in decode_allocations:
+            if self.args.page_size < 8:
+                extra_token_num = min(8, can_alloc_token_num) // self.args.page_size * self.args.page_size
+                alloc_token_num += extra_token_num
+                can_alloc_token_num -= extra_token_num
+            # 将必需容量和可选预留合并申请，保留每个请求一次 alloc 的行为。
+            self._alloc_req_kv_mem(req_obj, alloc_token_num)
 
         # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller

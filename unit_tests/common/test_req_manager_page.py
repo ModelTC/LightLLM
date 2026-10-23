@@ -259,6 +259,103 @@ def test_decode_scheduler_reserves_cpu_request_table(monkeypatch):
     assert context.req_manager.mem_manager.alloc_sizes == [12]
 
 
+def _make_capacity_scheduler(monkeypatch, page_size, available, run_mode, support_overlap=False):
+    context, backend = _make_context(monkeypatch)
+    context.args.page_size = context.req_manager.page_size = page_size
+    context.req_manager.token_indexes_cpu = torch.full((2, 256), -1, dtype=torch.int32)
+    context.req_manager.req_to_token_indexs = torch.full((2, 256), -1, dtype=torch.int32)
+    backend.args.enable_cpu_cache = False
+    backend.args.enable_prefill_decode_mixed = False
+    backend.args.run_mode = run_mode
+    backend.support_overlap = support_overlap
+    backend.disable_chunked_prefill = True
+    backend.batch_max_tokens = 256
+    backend.is_master_in_dp = True
+    backend.logger = SimpleNamespace(info=lambda message: None)
+    backend._timer_merge_radix_tree = lambda: None
+    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
+    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    context.get_can_alloc_token_num = lambda: available
+    context.cache_placement_controller = SimpleNamespace(set_req_cache_way=lambda reqs: None)
+    context.finished_reqs = []
+    context.filter_reqs = lambda finished_reqs: context.finished_reqs.extend(finished_reqs)
+    context.pause_reqs = lambda reqs, is_master_in_dp: None
+    return context, backend
+
+
+def _make_capacity_req(req_idx, context, is_decode=True):
+    req = _make_req(req_idx)
+    req.req_id = req_idx
+    req.args = context.args
+    req.cur_kv_len = req.hold_kv_len = context.args.page_size
+    req.mtp_step = 0
+    req.filter_mark = req.wait_pause = req.paused = req.infer_aborted = False
+    req.finish_status = infer_batch.FinishStatus()
+    req.cpu_cache_task_status = SimpleNamespace(is_not_started=lambda: True)
+    req.is_slave_req = lambda: False
+    req.get_cur_total_len = lambda: req.cur_kv_len + (1 if is_decode else 2 * context.args.page_size)
+    req.decode_need_token_num = MethodType(InferReq.decode_need_token_num, req)
+    req.prefill_need_token_num = MethodType(InferReq.prefill_need_token_num, req)
+    context.req_manager.append_token_indexes(req_idx, torch.arange(req.hold_kv_len, dtype=torch.int32))
+    return req
+
+
+@pytest.mark.parametrize("page_size", [1, 3, 4, 7, 8, 64])
+@pytest.mark.parametrize("run_mode", ["normal", "decode"])
+@pytest.mark.parametrize("extra_budget", [0, 1, 8])
+@pytest.mark.parametrize("request_types", [(True,), (True, True), (True, False), (False, True)])
+def test_decode_headroom_only_uses_budget_after_all_required_allocations(
+    monkeypatch, page_size, run_mode, extra_budget, request_types
+):
+    required = sum(page_size if is_decode else 2 * page_size for is_decode in request_types)
+    context, backend = _make_capacity_scheduler(monkeypatch, page_size, required + extra_budget, run_mode)
+    reqs = [_make_capacity_req(index, context, is_decode) for index, is_decode in enumerate(request_types)]
+    context.req_manager.mem_manager.next_index = len(reqs) * page_size
+    backend._filter_not_ready_reqs = lambda req_ids: reqs
+
+    prefill, decode = backend._get_classed_reqs(req_ids=list(range(len(reqs))))
+
+    assert prefill == [req for req, is_decode in zip(reqs, request_types) if not is_decode]
+    assert decode == [req for req, is_decode in zip(reqs, request_types) if is_decode]
+    assert context.finished_reqs == []
+    remaining = extra_budget
+    for req, is_decode in zip(reqs, request_types):
+        extra = min(8, remaining) // page_size * page_size if is_decode and page_size < 8 else 0
+        remaining -= extra
+        assert req.hold_kv_len == page_size + (page_size if is_decode else 2 * page_size) + extra
+        assert req.token_index.token_index_len == req.hold_kv_len
+        assert req.token_index.gpu_index_submitted_len == req.hold_kv_len
+        assert not req.wait_pause and not req.filter_mark
+        assert not hasattr(req, "finished_by_pd_decode_capacity")
+    # 必需量和可选预留合并申请，不额外增加分配次数，且不会超出总预算。
+    allocations = context.req_manager.mem_manager.alloc_sizes
+    assert len(allocations) == len(reqs)
+    assert sum(allocations) == required + extra_budget - remaining
+
+
+@pytest.mark.parametrize("page_size", [1, 4, 64])
+@pytest.mark.parametrize("run_mode", ["normal", "decode"])
+@pytest.mark.parametrize("support_overlap", [False, True])
+def test_decode_still_rejects_requests_when_required_capacity_is_insufficient(
+    monkeypatch, page_size, run_mode, support_overlap
+):
+    context, backend = _make_capacity_scheduler(monkeypatch, page_size, page_size - 1, run_mode, support_overlap)
+    req = _make_capacity_req(0, context)
+    backend._filter_not_ready_reqs = lambda req_ids: [req]
+
+    assert backend._get_classed_reqs(req_ids=[0]) == ([], [])
+
+    assert context.req_manager.mem_manager.alloc_sizes == []
+    assert req.hold_kv_len == page_size
+    if run_mode == "normal":
+        assert req.wait_pause
+        assert context.finished_reqs == []
+    else:
+        assert req.finished_by_pd_decode_capacity
+        assert req.filter_mark is support_overlap
+        assert context.finished_reqs == ([] if support_overlap else [req])
+
+
 @pytest.mark.parametrize(
     "page_size, expected_alloc_token_num",
     [(1, 9), (3, 9), (4, 12), (7, 14), (8, 8)],
