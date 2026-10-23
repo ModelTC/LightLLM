@@ -76,7 +76,7 @@ def get_tokenizer(
     # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
     # a Python-based apply_chat_template that uses encoding_dsv32.py.
     if model_type == "deepseek_v32":
-        from ..models.deepseek3_2.model import DeepSeekV32Tokenizer
+        from ..models.deepseek3_2.tokenizer import DeepSeekV32Tokenizer
 
         hf_tokenizer = AutoTokenizer.from_pretrained(
             tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs
