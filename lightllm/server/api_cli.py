@@ -923,7 +923,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="""enable RL control plane (HTTP APIs, router rl_rpyc, model RlBackendOps).
-        When disabled (default), RL routes/services are not started.""",
+        When disabled (default), RL routes/services are not started.
+        When enabled, set LIGHTLLM_RL_API_KEY and send it as an Authorization: Bearer token
+        to the RL control-plane routes.""",
     )
     parser.add_argument(
         "--enable_torch_memory_saver",

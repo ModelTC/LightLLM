@@ -33,6 +33,7 @@ from lightllm.utils.config_utils import (
     get_default_disable_chunked_mm_input,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
+from .rl_auth import validate_rl_auth
 
 logger = init_logger(__name__)
 
@@ -43,6 +44,7 @@ def _set_envs_and_config(args: StartArgs):
 
 def _launch_subprocesses(args: StartArgs):
     _validate_pd_features(args)
+    validate_rl_auth(args)
     _set_envs_and_config(args)
 
     if args.target_vocab_topk_sampling is not None:
