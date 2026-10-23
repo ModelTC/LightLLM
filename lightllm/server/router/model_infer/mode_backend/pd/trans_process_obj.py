@@ -56,7 +56,7 @@ class KVTransProcess:
                 return False
             else:
                 return True
-        except:
+        except Exception:
             return False
 
     def wait_until_ready(self):
