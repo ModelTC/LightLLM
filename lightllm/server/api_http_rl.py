@@ -12,7 +12,7 @@
 
 from http import HTTPStatus
 
-from fastapi import APIRouter, Request
+from fastapi import APIRouter, Depends, Request
 from fastapi.responses import JSONResponse, Response
 
 from lightllm.server.io_struct import (
@@ -30,10 +30,11 @@ from lightllm.server.io_struct import (
 from lightllm.utils.log_utils import init_logger
 
 from .api_errors import create_error_response
+from .rl_auth import require_rl_auth
 
 logger = init_logger(__name__)
 
-router = APIRouter()
+router = APIRouter(dependencies=[Depends(require_rl_auth)])
 
 
 async def handle_request_common(request_obj, handler):
