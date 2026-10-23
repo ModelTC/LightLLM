@@ -2,9 +2,18 @@ import torch
 import triton
 
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
+from lightllm.utils.envs_utils import get_env_glm5_indexer_bf16
 
+from .triton_kernel.index_bf16 import bf16_mqa_logits
 from .triton_kernel.index_quant import hadamard_transform_quant_fp8
-from .triton_kernel.kpool import compress_pools, gather_pools, gather_paged_pools, get_pool_ranges, expand_topk
+from .triton_kernel.kpool import (
+    compress_pools,
+    gather_pools,
+    gather_bf16_pools,
+    gather_paged_pools,
+    get_pool_ranges,
+    expand_topk,
+)
 
 
 class Glm5NextNsaInfer:
@@ -17,6 +26,7 @@ class Glm5NextNsaInfer:
         self.dim = network_config["index_head_dim"]
         # The indexer LayerNorm has a separate epsilon from the model RMSNorm.
         self.eps = 1e-6
+        self.indexer_bf16 = get_env_glm5_indexer_bf16()
 
     def select_topk_indices(self, logits, lengths, indices):
         """Select row-relative indices, with valid entries before -1 padding."""
@@ -39,6 +49,7 @@ class Glm5NextNsaInfer:
         raw = torch.cat((k, gate), -1)
         tail = infer_state.req_manager.get_indexer_tail_buffer(self.layer_idx)
         packed_buffer = infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx)
+        assert (packed_buffer.dtype == torch.bfloat16) == self.indexer_bf16, "Indexer/cache precision mismatch"
         compress_pools(
             raw=raw,
             tail=tail,
@@ -55,15 +66,24 @@ class Glm5NextNsaInfer:
         )
 
         if infer_state.max_kv_seq_len <= self.topk:
-            return expand_topk(None, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk, dense=True)
+            return expand_topk(
+                None, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk, dense=True
+            )
 
         # The small indexer is replicated: no all-gather of query heads and
         # identical pool selection on every TP rank.
         q = layer_weight.wq_b_proj_.mm(q_lora).view(-1, self.heads, self.dim)
-        q_fp8, q_scale = hadamard_transform_quant_fp8(q, scale=self.dim ** -0.5)
-        weights = layer_weight.weights_proj_.mm(hidden_states.float())
-        weights = weights * (self.heads ** -0.5 * self.dim ** -0.5) * q_scale.squeeze(-1)
         max_pools = triton.cdiv(infer_state.max_kv_seq_len, 4 * 128) * 128
+        if self.indexer_bf16:
+            # Keep the existing projections and pooling arithmetic: only remove
+            # the rotated FP8 Q/K representation and FP8 scoring from this A/B.
+            weights = layer_weight.weights_proj_.mm(hidden_states.float()) * self.heads**-0.5
+            groups = self._get_bf16_indices(q, weights, packed_buffer, infer_state, att_state, max_pools)
+            return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)
+
+        q_fp8, q_scale = hadamard_transform_quant_fp8(q, scale=self.dim**-0.5)
+        weights = layer_weight.weights_proj_.mm(hidden_states.float())
+        weights = weights * (self.heads**-0.5 * self.dim**-0.5) * q_scale.squeeze(-1)
         # Prefill usually has many queries: parallelize over Q and reuse K within each query tile.
         # Decode has few queries, so paged MQA also splits K across SMs for parallelism.
         if infer_state.is_prefill:
@@ -71,6 +91,26 @@ class Glm5NextNsaInfer:
         else:
             groups = self._get_decode_indices(q_fp8, weights, packed_buffer, infer_state, att_state, max_pools)
         return expand_topk(groups, att_state.lengths, att_state.ks, att_state.ragged_mem_index, self.topk)
+
+    def _get_bf16_indices(self, q, weights, packed_buffer, infer_state, att_state, max_pools):
+        # Decode uses one request entry per MTP position; its visible length is
+        # per row, so future verify pools and HOLD rows remain masked.
+        seq_lens = infer_state.b_seq_len if infer_state.is_prefill else att_state.lengths
+        keys = gather_bf16_pools(
+            packed_buffer, infer_state.req_manager.req_to_token_indexs, infer_state.b_req_idx, seq_lens, max_pools
+        )
+        starts, ends, lengths = get_pool_ranges(
+            att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
+        )
+        groups = torch.empty((q.shape[0], self.topk // 4), dtype=torch.int32, device=q.device)
+        chunk_size = max(1, min(q.shape[0], 16 * 1024 * 1024 // max_pools))
+        for start in range(0, q.shape[0], chunk_size):
+            end = min(start + chunk_size, q.shape[0])
+            logits = bf16_mqa_logits(
+                q[start:end], keys, weights[start:end], starts[start:end], ends[start:end], max_pools
+            )
+            self.select_topk_indices(logits, lengths[start:end], groups[start:end])
+        return groups
 
     def _get_prefill_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):
         keys = gather_pools(

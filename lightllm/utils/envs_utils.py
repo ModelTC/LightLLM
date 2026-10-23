@@ -77,6 +77,11 @@ def get_env_use_ue8m0_scales() -> bool:
     return os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
 
 
+def get_env_glm5_indexer_bf16() -> bool:
+    """Precision ablation; set identically on all GLM5 prefill/decode workers."""
+    return os.getenv("LIGHTLLM_GLM5_INDEXER_BF16", "0").upper() in ["ON", "TRUE", "1"]
+
+
 @lru_cache(maxsize=None)
 def is_stop_matching_in_reasoning_enabled() -> bool:
     """是否允许用户配置的 stop 在 reasoning 阶段参与匹配。"""
