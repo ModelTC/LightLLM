@@ -186,7 +186,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, mode):
         next_index += need_size
         return mem_indexes
 
-    def alloc_req_kv_mem(req, alloc_token_num):
+    def alloc_kv_mem(alloc_token_num):
         mem_indexes = alloc(alloc_token_num)
         new_hold_kv_len = req.hold_kv_len + alloc_token_num
         req.token_index.append_token_indexes(mem_indexes)
@@ -206,7 +206,6 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, mode):
             mem_manager=SimpleNamespace(operator=operator),
             req_manager=make_cpu_index_manager(token_table=table, req_to_token_indexs=gpu_table, page_size=4),
         ),
-        _alloc_req_kv_mem=alloc_req_kv_mem,
     )
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = SimpleNamespace(page_size=4, cpu_cache_token_page_size=132)
@@ -229,6 +228,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, mode):
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [132]),
         ),
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
+        alloc_kv_mem=alloc_kv_mem,
     )
     bind_cpu_indexes(req, backend.model.req_manager)
     req.args.req_token_index_mode = mode

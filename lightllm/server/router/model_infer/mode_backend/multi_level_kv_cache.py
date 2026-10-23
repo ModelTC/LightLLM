@@ -103,7 +103,7 @@ class MultiLevelKvCacheModule(object):
                     assert ready_page_num <= len(page_list)
                     need_pages = page_list[ready_page_num:]  # 只取需要的页面
 
-                    allocated_mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
+                    allocated_mem_indexes = req.alloc_kv_mem(need_token_num)
                     assert allocated_mem_indexes is not None
 
                     if self.need_sync_compute_stream():

@@ -83,6 +83,7 @@ def _make_context(monkeypatch):
 def _make_req(req_idx):
     req = InferReq.__new__(InferReq)
     req.req_idx = req_idx
+    req.args = infer_batch.g_infer_context.args
     bind_cpu_indexes(req, infer_batch.g_infer_context.req_manager)
     req.cur_kv_len = req.hold_kv_len = 0
     req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
@@ -90,45 +91,45 @@ def _make_req(req_idx):
 
 
 def test_request_reuses_reserved_page_tail_before_allocating_next_page(monkeypatch):
-    context, backend = _make_context(monkeypatch)
+    context, _ = _make_context(monkeypatch)
     req = _make_req(0)
 
-    mem_indexes = backend._alloc_req_kv_mem(req, alloc_token_num=4)
+    mem_indexes = req.alloc_kv_mem(alloc_token_num=4)
     assert mem_indexes.tolist() == [0, 1, 2, 3]
     assert req.hold_kv_len == 4
     assert context.req_manager.mem_manager.alloc_sizes == [4]
     assert context.req_manager.get_cpu_token_indexes(0, 0, 4).tolist() == [0, 1, 2, 3]
 
     req.cur_kv_len = 3
-    assert backend._alloc_req_kv_mem(req, alloc_token_num=0) is None
+    assert req.alloc_kv_mem(alloc_token_num=0) is None
     assert context.req_manager.mem_manager.alloc_sizes == [4]
 
     req.cur_kv_len = 4
-    backend._alloc_req_kv_mem(req, alloc_token_num=4)
+    req.alloc_kv_mem(alloc_token_num=4)
     assert req.hold_kv_len == 8
     assert context.req_manager.mem_manager.alloc_sizes == [4, 4]
     assert context.req_manager.get_cpu_token_indexes(0, 0, 8).tolist() == list(range(8))
 
 
 def test_reservation_fills_each_request_table_row(monkeypatch):
-    _, backend = _make_context(monkeypatch)
+    _make_context(monkeypatch)
     req0 = _make_req(0)
     req1 = _make_req(1)
 
-    backend._alloc_req_kv_mem(req0, alloc_token_num=4)
-    backend._alloc_req_kv_mem(req1, alloc_token_num=4)
+    req0.alloc_kv_mem(alloc_token_num=4)
+    req1.alloc_kv_mem(alloc_token_num=4)
 
     assert generic_pre_process.g_infer_context.req_manager.get_cpu_token_indexes(0, 0, 4).tolist() == [0, 1, 2, 3]
     assert generic_pre_process.g_infer_context.req_manager.get_cpu_token_indexes(1, 0, 4).tolist() == [4, 5, 6, 7]
     assert req0.hold_kv_len == req1.hold_kv_len == 4
 
 
-def test_alloc_req_kv_mem_defers_gpu_table_update(monkeypatch):
-    context, backend = _make_context(monkeypatch)
+def test_alloc_kv_mem_defers_gpu_table_update(monkeypatch):
+    context, _ = _make_context(monkeypatch)
     req = _make_req(0)
 
-    backend._alloc_req_kv_mem(req, alloc_token_num=4)
-    backend._alloc_req_kv_mem(req, alloc_token_num=4)
+    req.alloc_kv_mem(alloc_token_num=4)
+    req.alloc_kv_mem(alloc_token_num=4)
 
     assert context.req_manager.get_cpu_token_indexes(0, 0, 8).tolist() == list(range(8))
     assert context.req_manager.req_to_token_indexs.eq(-1).all()
@@ -409,7 +410,7 @@ def test_decode_small_page_preallocation_reuses_one_allocation_for_multiple_step
 
 
 def test_decode_reserves_mtp_headroom(monkeypatch):
-    context, backend = _make_context(monkeypatch)
+    context, _ = _make_context(monkeypatch)
     req = _make_req(0)
     req.cur_kv_len = 3
     req.hold_kv_len = 4
@@ -425,7 +426,7 @@ def test_decode_reserves_mtp_headroom(monkeypatch):
     token_num, alloc_token_num = InferReq.decode_need_token_num(req)
     assert token_num == 6
     assert alloc_token_num == 8
-    backend._alloc_req_kv_mem(req, alloc_token_num)
+    req.alloc_kv_mem(alloc_token_num)
 
     model_input, run_reqs = generic_pre_process.prepare_decode_inputs([req])
 
@@ -437,7 +438,7 @@ def test_decode_reserves_mtp_headroom(monkeypatch):
 
 
 def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
-    context, backend = _make_context(monkeypatch)
+    context, _ = _make_context(monkeypatch)
     context.args.page_size = 1
     context.req_manager.page_size = 1
     context.req_manager.token_indexes_cpu = torch.full((2, 16), -1, dtype=torch.int32)
@@ -454,7 +455,7 @@ def test_page_size_one_uses_the_same_scheduler_preallocation(monkeypatch):
     context.req_manager.mem_manager.next_index = 3
     token_num, alloc_token_num = InferReq.decode_need_token_num(req)
     assert token_num == alloc_token_num == 6
-    backend._alloc_req_kv_mem(req, alloc_token_num)
+    req.alloc_kv_mem(alloc_token_num)
 
     model_input, _ = generic_pre_process.prepare_decode_inputs([req])
 

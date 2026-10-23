@@ -646,23 +646,6 @@ class ModeBackend:
         return ready_reqs
 
     # 一些可以复用的通用功能函数
-    def _alloc_req_kv_mem(
-        self,
-        req_obj: InferReq,
-        alloc_token_num: int,
-    ) -> Optional[torch.Tensor]:
-        if alloc_token_num == 0:
-            return None
-
-        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
-        if g_infer_context.radix_cache is not None:
-            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
-
-        mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
-        req_obj.token_index.append_token_indexes(mem_indexes)
-        req_obj.hold_kv_len += alloc_token_num
-        return mem_indexes
-
     def _copy_req_token_indexes_to_gpu(self, run_reqs: List[InferReq]):
         """选择本批请求；索引对象统一管理上传区间、提交进度和流依赖。"""
         ReqTokenIndex.submit_pending_uploads(
@@ -801,7 +784,7 @@ class ModeBackend:
                 if prefill_tokens + token_num > self.batch_max_tokens:
                     continue
                 if alloc_token_num <= can_alloc_token_num:
-                    self._alloc_req_kv_mem(req_obj, alloc_token_num)
+                    req_obj.alloc_kv_mem(alloc_token_num)
                     prefill_tokens += token_num
                     prefill_reqs.append(req_obj)
                     can_alloc_token_num -= alloc_token_num
@@ -819,7 +802,7 @@ class ModeBackend:
                 alloc_token_num += extra_token_num
                 can_alloc_token_num -= extra_token_num
             # 将必需容量和可选预留合并申请，保留每个请求一次 alloc 的行为。
-            self._alloc_req_kv_mem(req_obj, alloc_token_num)
+            req_obj.alloc_kv_mem(alloc_token_num)
 
         # 先由控制器确定请求需要写入的缓存层级，再按是否包含 CPU cache 决定是否发起 offload。
         cache_controller = g_infer_context.cache_placement_controller

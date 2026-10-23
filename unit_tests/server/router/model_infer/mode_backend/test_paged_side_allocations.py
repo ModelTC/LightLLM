@@ -45,7 +45,6 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
     backend.model = SimpleNamespace(req_manager=make_cpu_index_manager(token_table=table, page_size=1))
     backend.is_master_in_dp = False
-    backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(table, req, alloc_sizes, next_index, size)
 
     def create_task(**kwargs):
         tasks.append(
@@ -70,6 +69,8 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
         ),
         page_size=4,
     )
+
+    req.alloc_kv_mem = lambda size: _reserve_into_table(table, req, alloc_sizes, next_index, size)
 
     backend._decode_node_gen_trans_tasks(req)
 
@@ -250,7 +251,7 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
         node_nccl_group=None,
         mem_managers=[SimpleNamespace(req_to_token_indexs=source_table)] * 2,
     )
-    backend._alloc_req_kv_mem = lambda cur_req, size: _reserve_into_table(table, cur_req, alloc_sizes, next_index, size)
+    req.alloc_kv_mem = lambda size: _reserve_into_table(table, req, alloc_sizes, next_index, size)
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = backend
     module.dp_rank_in_node = 0

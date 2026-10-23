@@ -11,7 +11,7 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger("lightllm.common.req_manager")
 
 
-class _ReqLinkedList:
+class _ReqIndexPool:
     def __init__(self, max_request_num):
         self._free_indexes = deque(range(max_request_num))
         self.marks = [0 for _ in range(max_request_num)]
@@ -48,7 +48,7 @@ class ReqManager:
         # 的这个请求管理 id， 主要是为了兼容 DP 运行模式下，让各个 DP 能 padding 到 DP 中最大
         # 的那个batch size 进行运行，所有 padding 的请求都会使用预留的这个请求管理 id 进行处理
         # 这样让 DP 的实现更为简化一些。
-        self.req_list = _ReqLinkedList(max_request_num)
+        self.req_list = _ReqIndexPool(max_request_num)
         page_size = get_env_start_args().page_size
         self.page_size = page_size
         aligned_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
@@ -107,5 +107,5 @@ class ReqManager:
         return
 
     def free_all(self):
-        self.req_list = _ReqLinkedList(self.max_request_num)
+        self.req_list = _ReqIndexPool(self.max_request_num)
         return

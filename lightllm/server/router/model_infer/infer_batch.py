@@ -960,6 +960,20 @@ class InferReq:
         assert alloc_token_num % page_size == 0
         return alloc_token_num
 
+    def alloc_kv_mem(self, alloc_token_num: int) -> Optional[torch.Tensor]:
+        """按完整页追加 KV 容量，更新请求索引和持有长度；零申请返回 None。"""
+        if alloc_token_num == 0:
+            return None
+
+        assert alloc_token_num > 0 and alloc_token_num % self.args.page_size == 0
+        if g_infer_context.radix_cache is not None:
+            g_infer_context.radix_cache.free_radix_cache_to_get_enough_token(alloc_token_num)
+
+        mem_indexes = self.req_manager.mem_manager.alloc(alloc_token_num)
+        self.token_index.append_token_indexes(mem_indexes)
+        self.hold_kv_len += alloc_token_num
+        return mem_indexes
+
 
 class InferReqUpdatePack:
     """

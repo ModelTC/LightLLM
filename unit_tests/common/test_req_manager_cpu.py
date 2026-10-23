@@ -8,7 +8,7 @@ import torch
 # Use the production import order to avoid the existing package initialization cycle.
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process  # noqa: F401
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.req_manager.base import ReqManager, _ReqLinkedList
+from lightllm.common.req_manager.base import ReqManager, _ReqIndexPool
 from lightllm.common.cuda_wrapper import cuda_memcpy_pinned_h2d_batch_async
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
 from lightllm.server.router.model_infer.infer_req_ext1 import PinMemPageCacheReqTokenIndex, create_req_token_index
@@ -33,12 +33,12 @@ def _make_manager(device="cpu"):
     )
     infer_batch.g_infer_context.req_manager = manager
     manager.max_request_num = 2
-    manager.req_list = _ReqLinkedList(2)
+    manager.req_list = _ReqIndexPool(2)
     return manager
 
 
 def test_req_index_allocation_preserves_order_capacity_and_reuse():
-    indexes = _ReqLinkedList(3)
+    indexes = _ReqIndexPool(3)
     assert indexes.is_all_free() and indexes.can_alloc_size == 3
     assert [indexes.alloc() for _ in range(3)] == [0, 1, 2]
     assert indexes.can_alloc_size == 0 and not indexes.is_all_free()
@@ -55,7 +55,7 @@ def test_req_index_allocation_preserves_order_capacity_and_reuse():
 
 
 def test_req_index_free_rejects_unallocated_and_duplicate_indexes():
-    indexes = _ReqLinkedList(2)
+    indexes = _ReqIndexPool(2)
     with pytest.raises(AssertionError):
         indexes.free(0)
     assert indexes.alloc() == 0
