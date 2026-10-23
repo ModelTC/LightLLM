@@ -17,12 +17,13 @@ def get_hardware_backend() -> HardwareBackend:
     if _backend is not None:
         return _backend
 
-    configure_plugins()
-
     platform_name = get_env_start_args().hardware_platform
     spec = get_platform_spec(platform_name)
 
     backend_cls = spec.load_backend_cls()
+
+    configure_plugins()
+
     backend = backend_cls()
 
     if not backend.runtime.is_available():

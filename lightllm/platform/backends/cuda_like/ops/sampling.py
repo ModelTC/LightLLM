@@ -6,12 +6,16 @@ from lightllm.common.basemodel.triton_kernel.post_process.apply_invalid_token im
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty import apply_penalty
 from lightllm.common.basemodel.triton_kernel.post_process.apply_penalty_gpu_cache import apply_penalty_gpu_cache
 from lightllm.platform.ops.sampling import SamplingOps
+from lightllm.platform.plugin.ops import register_ops
+from lightllm.server.router.model_infer.mode_backend.generic_post_process import _top_p_top_k_sample
 
-
-CUDA_LIKE_SAMPLING_OPS = SamplingOps(
+register_ops(
+    SamplingOps,
+    platforms=("cuda", "musa"),
     apply_penalty=apply_penalty,
     apply_penalty_gpu_cache=apply_penalty_gpu_cache,
     apply_invalid_token_ids=apply_invalid_token_ids,
     token_id_counter=token_id_counter,
     update_req_to_token_id_counter=update_req_to_token_id_counter,
+    top_p_top_k_sample=_top_p_top_k_sample,
 )

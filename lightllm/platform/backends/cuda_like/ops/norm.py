@@ -3,9 +3,11 @@ from lightllm.common.basemodel.triton_kernel.norm.layernorm import layernorm_for
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward, qk_rmsnorm_fused_forward
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.platform.ops.norm import NormOps
+from lightllm.platform.plugin.ops import register_ops
 
-
-CUDA_LIKE_NORM_OPS = NormOps(
+register_ops(
+    NormOps,
+    platforms=("cuda", "musa"),
     rms_norm=rmsnorm_forward,
     gated_rms_norm=gated_rmsnorm_forward,
     layer_norm=layernorm_forward,

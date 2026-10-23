@@ -1,20 +1,20 @@
 from dataclasses import dataclass
 
-ATT_TABLE: dict[tuple[str, str, str], list["AttBackendEntry"]] = {}
+from lightllm.platform.plugin.common import is_plugin_registering
+from lightllm.utils.log_utils import init_logger
+
+logger = init_logger(__name__)
+
+AttKey = tuple[str, str, str, str]
 
 
 @dataclass(frozen=True)
-class AttBackendEntry:
-    # The name of the att backend. e.g., "triton", "flashinfer", "fa3".
-    name: str
-    # The category of the att backend. e.g., "standard", "mla", "nsa".
-    category: str
-    # The type of the kv. e.g., "int8kv", "int4kv", "fp8kv_sph".
-    kv_type: str
-    # The class of the att backend.
+class _AttImpl:
     backend_cls: type
-    # The platforms of the att backend. e.g., "cuda", "ascend".
-    platforms: tuple[str, ...]
+    plugin: bool
+
+
+ATT_IMPLS: dict[AttKey, _AttImpl] = {}
 
 
 def register_att_backend(
@@ -25,24 +25,26 @@ def register_att_backend(
     platforms: tuple[str, ...] = ("cuda",),
 ):
     def decorator(backend_cls):
-        if not platforms:
-            raise ValueError("The value of platforms must be specified for att backend registration.")
-
-        key = (name, category, kv_type)
-        # Check if the att backend is already registered.
-        for existing in ATT_TABLE.get(key, []):
-            if set(existing.platforms) & set(platforms):
-                raise ValueError(f"The att backend {name} is already registered for platforms {existing.platforms}.")
-
-        ATT_TABLE.setdefault(key, []).append(
-            AttBackendEntry(
-                name=name,
-                category=category,
-                kv_type=kv_type,
-                backend_cls=backend_cls,
-                platforms=platforms,
-            )
-        )
+        plugin = is_plugin_registering()
+        staged: dict[AttKey, _AttImpl] = {}
+        for platform in platforms:
+            key = (platform, name, category, kv_type)
+            current = staged.get(key, ATT_IMPLS.get(key))
+            if current is None:
+                staged[key] = _AttImpl(backend_cls, plugin)
+                continue
+            if plugin and not current.plugin:
+                logger.info(
+                    "Att backend %s category %s kv type %s on platform %s: plugin replaced builtin implementation.",
+                    name,
+                    category,
+                    kv_type,
+                    platform,
+                )
+                staged[key] = _AttImpl(backend_cls, plugin=True)
+                continue
+            raise ValueError(f"The att backend {name} is already registered for platform {platform!r}.")
+        ATT_IMPLS.update(staged)
         return backend_cls
 
     return decorator
@@ -54,10 +56,11 @@ def get_att_backend_class(
     kv_type: str,
     platform: str,
 ) -> type:
-    key = (name, category, kv_type)
-    for entry in ATT_TABLE.get(key, []):
-        if platform in entry.platforms:
-            return entry.backend_cls
-    raise ValueError(
-        f"The att backend {name} is not registered for category {category}, kv type {kv_type}, and platform {platform}."
-    )
+    key = (platform, name, category, kv_type)
+    entry = ATT_IMPLS.get(key)
+    if entry is None:
+        raise ValueError(
+            f"The att backend {name} is not registered for category {category}, "
+            f"kv type {kv_type}, and platform {platform}."
+        )
+    return entry.backend_cls

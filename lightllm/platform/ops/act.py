@@ -1,10 +1,18 @@
 from dataclasses import dataclass
-from typing import Any, Callable
+from typing import Protocol
 
-ActOp = Callable[..., Any]
+import torch
+
+
+class SiluAndMul(Protocol):
+    def __call__(self, input: torch.Tensor, output: torch.Tensor) -> None: ...
+
+
+class GeluAndMul(Protocol):
+    def __call__(self, input: torch.Tensor, output: torch.Tensor) -> torch.Tensor: ...
 
 
 @dataclass(frozen=True)
 class ActOps:
-    silu_and_mul: ActOp
-    gelu_and_mul: ActOp
+    silu_and_mul: SiluAndMul
+    gelu_and_mul: GeluAndMul
