@@ -38,8 +38,8 @@ KV 存储和请求表，但资源的申请、缓存和释放以完整物理页�
 `ReqManager` 只持有 GPU `req_to_token_indexs`，不再分配全局 CPU 页表。
 每个 `InferReq` 通过成员 `token_index` 持有一个 `ReqTokenIndex`，实现位于 `server/router/model_infer/infer_req_ext1.py`。
 索引操作直接使用 `req.token_index.append_token_indexes(...)` 等接口，`InferReq` 不再提供同名转发方法。
-基类仅在构造函数中初始化公共对象和状态，其余方法只定义抽象接口；
-各子类实现或复用读写、上传和重置逻辑。
+基类初始化公共对象和状态，并统一维护上传提交协议及索引流等待；
+各子类实现或复用存储、读写和重置逻辑。
 扩展构造函数接收 `infer_req` 和必填的 `index_stream`，仅提取并保存固定的 `req_idx`、GPU 请求表行视图及索引流，
 避免反向持有请求对象形成循环引用；索引流由外部选择，Helper 内部不查询默认流或捕获构造时的当前流。
 CPU 缓存实现同时记录输入长度 `input_len`，helper 在共享请求初始化后、前缀匹配前构造。
@@ -114,17 +114,19 @@ PyTorch `copy_(non_blocking=True)` 会登记 pinned 源的流使用，旧存储�
 不改变提交进度；无待上传内容时返回空 tensor，
 纯 GPU 模式返回 `None`。CPU 缓存模式的 GPU getter 校验 `end <= token_index_len` 后按需提交完整待上传区间，
 纯 GPU 模式校验 `end <= gpu_index_submitted_len`；读取均不允许推进超出已有索引的提交进度。
-批量入口遇到存在未提交区间、但没有 CPU 上传源的情况会直接断言，不再替 GPU 模式补写提交进度。
+批量入口不会替 GPU 模式补写提交进度；若缺少待上传数据，由后续拷贝操作报错，提交进度保持不变。
 
 例如 CPU 缓存模式追加 64 个索引后，两个字段分别为 `64/0`；提交到 GPU 后为 `64/64`；
 再追加 32 个索引后为 `96/64`，下次仅需提交 `[64,96)`。需要替换映射时，`reset()` 将两者清为 `0/0`，
 重新追加 96 个完整索引后为 `96/0`，再从头提交 GPU 更新。纯 GPU 模式在追加接口中
 直接提交写表，所以追加后两者相同。
-`_get_classed_reqs` 返回前，backend 收集各请求待上传的 pinned 视图，直接使用
-`cudaMemcpyBatchAsync` 提交，不再申请聚合缓冲区或额外复制 CPU 索引。
-同一批请求必须共用一个索引流，backend 对此进行断言；随后只准备源、目标视图列表，
-在索引流上下文调用批量拷贝并更新提交进度。返回前仅在调用流不同于索引流时排入等待，
-没有新上传时也承接已有写入的依赖。backend 不再持有上传流，也不逐条交接多条索引流。
+`_get_classed_reqs` 返回前，backend 将本批索引对象交给 `ReqTokenIndex.submit_pending_uploads`，
+并传入批量拷贝函数；backend 不再读写索引流、GPU 行和提交进度。
+统一入口检查所有请求共用一个索引流，准备源、目标视图列表，在索引流提交拷贝，
+仅在整批提交成功后更新提交进度。单请求 GPU getter 复用该协议，默认通过 PyTorch `copy_` 提交；
+backend 路径使用 `cudaMemcpyBatchAsync`，不申请聚合缓冲区或额外复制 CPU 索引。
+返回前仅在调用流不同于索引流时排入等待，没有新上传时也承接已有写入的依赖。
+backend 不再持有上传流，也不逐条交接多条索引流。
 原生 API 不接受 legacy 默认流，适配由 `PinnedH2DBatchCopier` 内部处理：按设备延迟创建并复用非默认上传流，
 先让上传流等待默认流，提交后再让默认流等待上传流；非默认索引流直接提交，PyTorch 回退直接使用当前流。
 这些操作只排入 GPU 依赖，不阻塞 CPU。
@@ -179,6 +181,8 @@ HOLD 请求直接在 GPU 表初始化为预留物理页的循环索引。
 - Decode：请求通过调度后，若尾页仍有预留槽位则不再访问 allocator；容量不足时先补齐完整页再执行。
 - Prefix Cache 命中：命中长度天然是整页，`cur_kv_len` 与 `hold_kv_len` 同时初始化为命中长度。
 - 完成/暂停：完整逻辑页可进入 Radix Cache；重复页和未完成尾页按物理页展开后释放。
+  混合注意力在 Prefill 尚未完成时，也可插入已保存大页 checkpoint 且 KV 已计算完成的最长前缀；
+  缓存长度不超过目标缓存边界，其余 KV 统一释放；大页 checkpoint 随前缀移交缓存，重复 checkpoint 在插入时回收。
 - Attention：FA3/FlashInfer 页表每项由物理 token 页首索引除以 `page_size` 得到，KV buffer 视为
   `[page_count, page_size, ...]`。
 

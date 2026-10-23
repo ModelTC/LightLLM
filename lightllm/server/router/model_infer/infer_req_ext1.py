@@ -1,7 +1,7 @@
 """InferReq 的 token 索引扩展，仅保存请求槽位和索引状态。"""
 
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, List, Optional, Sequence
 
 import torch
 
@@ -76,6 +76,52 @@ class ReqTokenIndex(ABC):
         """重置有效索引长度和 GPU 提交进度，释放 CPU 缓存引用。"""
         pass
 
+    @staticmethod
+    def submit_pending_uploads(
+        token_indexes: Sequence["ReqTokenIndex"],
+        copy_batch: Optional[Callable[[List[torch.Tensor], List[torch.Tensor]], None]] = None,
+    ) -> None:
+        """统一准备待上传区间、提交拷贝并确认进度，随后让调用流承接依赖。
+
+        copy_batch 接收 GPU 目标和 pinned CPU 源列表，必须在当前索引流提交拷贝，
+        并保护异步源的生命周期；未提供时使用 PyTorch copy_。
+        只有整批提交成功才推进进度；提交不表示传输完成，无新上传也需等待已有写入。
+        """
+        if not token_indexes:
+            return
+        index_stream = token_indexes[0]._index_stream
+        assert all(
+            token_index._index_stream == index_stream for token_index in token_indexes
+        ), "All requests in a batch must use the same index stream"
+        cpu_slices, gpu_slices, pending_uploads = [], [], []
+        for token_index in token_indexes:
+            start, end = token_index.gpu_index_submitted_len, token_index.token_index_len
+            if start < end:
+                source = token_index.get_upload_indexes()
+                cpu_slices.append(source)
+                gpu_slices.append(token_index.gpu_indexes[start:end])
+                pending_uploads.append((token_index, end))
+        if pending_uploads:
+            with torch.cuda.stream(index_stream):
+                if copy_batch is None:
+                    for destination, source in zip(gpu_slices, cpu_slices):
+                        destination.copy_(source, non_blocking=True)
+                else:
+                    copy_batch(gpu_slices, cpu_slices)
+            for token_index, end in pending_uploads:
+                token_index._mark_gpu_indexes_submitted(end)
+        token_indexes[0]._wait_for_index_stream()
+
+    def _mark_gpu_indexes_submitted(self, end: int) -> None:
+        """只确认已成功提交的连续前缀，不把 GPU 完成状态混入长度计数。"""
+        assert self.gpu_index_submitted_len <= end <= self.token_index_len
+        self.gpu_index_submitted_len = end
+
+    def _wait_for_index_stream(self) -> None:
+        current_stream = torch.cuda.current_stream(self._index_stream.device)
+        if current_stream != self._index_stream:
+            current_stream.wait_stream(self._index_stream)
+
 
 class PinMemCacheReqTokenIndex(ReqTokenIndex):
     """按请求按需申请完整 token 级 pinned CPU 缓存，GPU 更新可批量提交。"""
@@ -106,19 +152,10 @@ class PinMemCacheReqTokenIndex(ReqTokenIndex):
     def get_gpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
         """在索引流提交全部待上传索引，让调用流承接依赖后返回 GPU 视图。"""
         assert end <= self.token_index_len, "Read range exceeds recorded token indexes"
-        current_stream = torch.cuda.current_stream(self._index_stream.device)
-        with torch.cuda.stream(self._index_stream):
-            if self.gpu_index_submitted_len < end:
-                source_indexes = self.get_upload_indexes()
-                upload_end = self.token_index_len
-                # 缓存只追加，reset 会丢弃旧 buffer，已有上传区间不会被 CPU 重写。
-                # copy_ 向 PyTorch pinned allocator 登记流使用，即使 reset 释放引用，
-                # 旧内存也会等 H2D 完成后才允许回收复用，因此可以直接上传缓存视图。
-                self.gpu_indexes[self.gpu_index_submitted_len : upload_end].copy_(source_indexes, non_blocking=True)
-                self.gpu_index_submitted_len = upload_end
-        # 没有新上传时，已有写入也可能尚未完成；调用流仍需等待索引流。
-        if current_stream != self._index_stream:
-            current_stream.wait_stream(self._index_stream)
+        if self.gpu_index_submitted_len < end:
+            self.submit_pending_uploads([self])
+        else:
+            self._wait_for_index_stream()
         return self.gpu_indexes[start:end]
 
     def get_upload_indexes(self) -> torch.Tensor:
@@ -264,13 +301,11 @@ class PureGpuReqTokenIndex(ReqTokenIndex):
         end = start + append_len
         # copy_ 会向 PyTorch pinned allocator 登记流使用，H2D 完成前不会回收源内存。
         # 普通 CPU 输入已形成独立 pinned 副本；直接复用的 pinned 输入在传输完成前不能改写。
-        current_stream = torch.cuda.current_stream(self._index_stream.device)
         with torch.cuda.stream(self._index_stream):
             self.gpu_indexes[start:end].copy_(mem_indexes, non_blocking=True)
-        if current_stream != self._index_stream:
-            current_stream.wait_stream(self._index_stream)
         self.token_index_len = end
-        self.gpu_index_submitted_len = end
+        self._mark_gpu_indexes_submitted(end)
+        self._wait_for_index_stream()
 
     def get_cpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
         assert end <= self.token_index_len, "Read range exceeds recorded token indexes"
@@ -281,9 +316,7 @@ class PureGpuReqTokenIndex(ReqTokenIndex):
     def get_gpu_token_indexes(self, start: int, end: int) -> torch.Tensor:
         # append 已在索引流提交写入，读取只校验范围，不推进提交进度。
         assert end <= self.gpu_index_submitted_len, "Read range exceeds submitted GPU indexes"
-        current_stream = torch.cuda.current_stream(self._index_stream.device)
-        if current_stream != self._index_stream:
-            current_stream.wait_stream(self._index_stream)
+        self._wait_for_index_stream()
         return self.gpu_indexes[start:end]
 
     def get_upload_indexes(self) -> None:

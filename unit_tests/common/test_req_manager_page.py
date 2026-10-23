@@ -8,6 +8,7 @@ from lightllm.common.req_manager import ReqManager
 from lightllm.server.router.model_infer import infer_batch
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
 from lightllm.server.router.model_infer.mode_backend import base_backend
+from lightllm.server.multi_level_kv_cache import CacheTier
 from unit_tests.common.cpu_index_helpers import make_cpu_index_manager, bind_cpu_indexes
 
 
@@ -485,10 +486,110 @@ def test_page_size_one_frees_all_preallocated_indexes():
     assert req.token_index.token_index_len == req.token_index.gpu_index_submitted_len == 0
 
 
+@pytest.mark.parametrize("attention", ["full", "hybrid_small", "hybrid_big"])
+def test_cache_release_preserves_snapshots_and_reclaims_tail_duplicates_and_reference(monkeypatch, attention):
+    hybrid = attention != "full"
+    context = InferenceContext()
+    context.args = SimpleNamespace(page_size=4, linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    context.is_hybrid_att_model = hybrid
+    context.req_manager = make_cpu_index_manager(torch.arange(16, dtype=torch.int32)[None, :], page_size=4)
+    cached = []
+    released_refs = []
+
+    def insert(key, indexes, *, block_hashs=None, block_state_idxs=None, len_to_big_page_id=None):
+        cached.append((key, indexes, block_hashs, block_state_idxs))
+        # 模拟 radix cache 接管请求已生成的大页 checkpoint。
+        if hybrid:
+            len_to_big_page_id.clear()
+        return 8, None
+
+    context.radix_cache = SimpleNamespace(insert=insert, dec_node_ref_counter=released_refs.append)
+    shared_node = SimpleNamespace(node_prefix_total_len=4)
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=13 if hybrid else 11,
+        hold_kv_len=16,
+        cache_tiers=(CacheTier.GPU,),
+        shared_kv_node=shared_node,
+        hybrid_cache_len=12,
+        tail_small_page_buffer_id=7 if attention == "hybrid_small" else None,
+        hybrid_len_to_big_page_id={8: 9} if hybrid else {},
+        get_input_token_ids=lambda: list(range(13)),
+        shm_req=SimpleNamespace(
+            shm_cur_kv_len=13,
+            hybrid_token_hash_list=SimpleNamespace(get_all=lambda: [100, 200, 300]),
+        ),
+    )
+    bind_cpu_indexes(req, context.req_manager)
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
+    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: context.args)
+    released = []
+
+    context.free_a_req_mem(released, req)
+
+    cache_len = 12 if attention == "hybrid_small" else 8
+    assert [indexes.tolist() for indexes in released] == [list(range(cache_len, 16)), list(range(4, 8))]
+    assert released_refs == [shared_node]
+    assert req.shared_kv_node is None
+    assert req.cur_kv_len == req.hold_kv_len == req.shm_req.shm_cur_kv_len == 0
+    assert req.token_index.token_index_len == req.token_index.gpu_index_submitted_len == 0
+    assert req.tail_small_page_buffer_id is None and req.hybrid_len_to_big_page_id == {}
+    context.req_manager.token_indexes_cpu.fill_(-99)
+    key, indexes, block_hashs, block_state_idxs = cached[0]
+    assert key.tolist() == indexes.tolist() == list(range(cache_len))
+    if hybrid:
+        assert block_hashs == [100, 200, 300][: cache_len // 4]
+        assert block_state_idxs == ([None, None, 7] if attention == "hybrid_small" else [None, None])
+    else:
+        assert block_hashs is None and block_state_idxs is None
+
+
+def _insert_empty_hybrid_prefix(key, indexes, *, block_hashs, block_state_idxs, len_to_big_page_id):
+    assert key.numel() == indexes.numel() == 0
+    assert block_hashs == block_state_idxs == []
+    assert not len_to_big_page_id
+    return 0, None
+
+
+def test_hybrid_release_without_new_big_page_rejects_pending_checkpoints(monkeypatch):
+    context = InferenceContext()
+    context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
+    context.is_hybrid_att_model = True
+    context.req_manager = make_cpu_index_manager(torch.arange(8, dtype=torch.int32)[None, :])
+    freed_states = []
+    context.radix_cache = SimpleNamespace(
+        insert=_insert_empty_hybrid_prefix,
+        big_page_buffers=SimpleNamespace(free_state_cache=freed_states.extend),
+    )
+    req = SimpleNamespace(
+        req_idx=0,
+        cur_kv_len=5,
+        hold_kv_len=8,
+        hybrid_cache_len=0,
+        tail_small_page_buffer_id=None,
+        hybrid_len_to_big_page_id={8: 9},
+        shared_kv_node=None,
+        get_input_token_ids=lambda: list(range(8)),
+        shm_req=SimpleNamespace(hybrid_token_hash_list=SimpleNamespace(get_all=lambda: [])),
+    )
+    bind_cpu_indexes(req, context.req_manager)
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
+    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: context.args)
+    released = []
+
+    with pytest.raises(AssertionError):
+        context._hybrid_att_free_req(released, req)
+
+    assert released == []
+    assert freed_states == []
+    assert req.hybrid_len_to_big_page_id == {8: 9}
+    assert req.cur_kv_len == 5 and req.hold_kv_len == 8
+
+
 def test_linear_attention_frees_reserved_page_tail(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
     infer_context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
-    infer_context.radix_cache = SimpleNamespace()
+    infer_context.radix_cache = SimpleNamespace(insert=_insert_empty_hybrid_prefix)
     infer_context.req_manager = make_cpu_index_manager(
         token_table=torch.arange(16, dtype=torch.int32)[None, :], page_size=1
     )
@@ -500,6 +601,8 @@ def test_linear_attention_frees_reserved_page_tail(monkeypatch):
         tail_small_page_buffer_id=None,
         hybrid_len_to_big_page_id={},
         shared_kv_node=None,
+        get_input_token_ids=lambda: list(range(8)),
+        shm_req=SimpleNamespace(hybrid_token_hash_list=SimpleNamespace(get_all=lambda: [])),
     )
     bind_cpu_indexes(req, infer_context.req_manager)
     free_token_indexes = []
@@ -514,7 +617,7 @@ def test_linear_attention_frees_reserved_page_tail(monkeypatch):
 def test_linear_attention_frees_preallocated_pages_before_first_forward(monkeypatch):
     infer_context = InferenceContext.__new__(InferenceContext)
     infer_context.args = SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2)
-    infer_context.radix_cache = SimpleNamespace()
+    infer_context.radix_cache = SimpleNamespace(insert=_insert_empty_hybrid_prefix)
     infer_context.req_manager = make_cpu_index_manager(
         token_table=torch.arange(8, dtype=torch.int32)[None, :], page_size=1
     )
@@ -526,6 +629,8 @@ def test_linear_attention_frees_preallocated_pages_before_first_forward(monkeypa
         tail_small_page_buffer_id=None,
         hybrid_len_to_big_page_id={},
         shared_kv_node=None,
+        get_input_token_ids=lambda: list(range(8)),
+        shm_req=SimpleNamespace(hybrid_token_hash_list=SimpleNamespace(get_all=lambda: [])),
     )
     bind_cpu_indexes(req, infer_context.req_manager)
     free_token_indexes = []

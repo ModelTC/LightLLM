@@ -168,32 +168,23 @@ class InferenceContext:
     def _full_att_free_req(self, free_token_index: List, req: "InferReq"):
         page_size = self.args.page_size
         cache_kv_len = req.cur_kv_len // page_size * page_size
-        # radix cache 只保存完整页，因此不足一页的有效 KV 和页内预留空间都不会参与插入。
-        # 先收集 [cache_kv_len, hold_kv_len) 待释放区间，再处理可缓存前缀的插入和去重。
+        # 只缓存完整页，不足一页的有效 KV 和预留尾部均归还 allocator。
+        # 待释放索引可以借用 GPU 行；缓存值须独立于请求槽位及其后续复用。
         free_token_index.append(req.token_index.get_free_token_indexes(cache_kv_len, req.hold_kv_len))
-        input_token_ids = req.get_input_token_ids()
-        key = torch.tensor(input_token_ids[0:cache_kv_len], dtype=torch.int64, device="cpu")
-        # radix cache 跨请求槽位复用持有索引，因此使用独立 CPU 快照。
+        key = torch.tensor(req.get_input_token_ids()[:cache_kv_len], dtype=torch.int64, device="cpu")
         value = req.token_index.get_cpu_token_indexes(0, cache_kv_len)
-
         prefix_len, _ = self.radix_cache.insert(key, value)
-        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        free_token_index.append(req.token_index.get_free_token_indexes(old_prefix_len, prefix_len))
-        if req.shared_kv_node is not None:
-            assert req.shared_kv_node.node_prefix_total_len <= prefix_len
-            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-            req.shared_kv_node = None
-        return
+        self._release_duplicate_prefix(free_token_index, req, prefix_len)
 
     def _hybrid_att_free_req(self, free_token_index: List, req: "InferReq"):
         assert g_infer_context.is_hybrid_att_model is True
         args = get_env_start_args()
         hash_page_size = args.linear_att_hash_page_size
         big_page_num = args.linear_att_page_block_num
+        big_page_token_num = hash_page_size * big_page_num
         shared_kv_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-        tail_big_page_token_num = (
-            req.hybrid_cache_len // (hash_page_size * big_page_num) * (hash_page_size * big_page_num)
-        )
+        completed_kv_len = min(req.cur_kv_len, req.hybrid_cache_len)
+        completed_big_page_token_num = completed_kv_len // big_page_token_num * big_page_token_num
         page_num = req.hybrid_cache_len // hash_page_size
         assert req.hybrid_cache_len >= shared_kv_len
         if req.tail_small_page_buffer_id is not None:
@@ -205,79 +196,58 @@ class InferenceContext:
         if req.hybrid_cache_len <= req.cur_kv_len and req.tail_small_page_buffer_id is not None:
             # 只有小页可以有 tail_small_page_buffer_id，然后进行小页插入。
             assert page_num % big_page_num != 0
-            free_token_index.append(req.token_index.get_free_token_indexes(req.hybrid_cache_len, req.hold_kv_len))
-            req.cur_kv_len = req.hybrid_cache_len
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = req.token_index.get_cpu_token_indexes(0, req.cur_kv_len)
-            block_hashs = req.shm_req.hybrid_token_hash_list.get_all()[:page_num]
-            state_idxs = [None for _ in range(page_num)]
+            cache_kv_len = req.hybrid_cache_len
+        elif completed_big_page_token_num > shared_kv_len:
+            # Prefill 在大页边界保存 checkpoint，因此按已完成长度对齐即可。
+            assert req.tail_small_page_buffer_id is None
+            assert len(req.hybrid_len_to_big_page_id) > 0
+            cache_kv_len = completed_big_page_token_num
+        elif shared_kv_len <= req.cur_kv_len:
+            # 没有新 checkpoint，区分共享小页、共享大页和空前缀。
+            assert req.tail_small_page_buffer_id is None
+            assert len(req.hybrid_len_to_big_page_id) == 0
+            if req.shared_kv_node is not None and not req.shared_kv_node.is_big_page_node():
+                # 大页关闭时，前缀匹配会直接保留共享小页。请求只持有节点引用，
+                # 没有可移交给 insert 的新小页 checkpoint；节点引用只保护 KV，
+                # 其 CPU page buffer 仍可能被独立淘汰，因此不能依赖它仍然存在。
+                # 即使 buffer 仍在，也不能借用其 id 重新插入，否则重复插入会将
+                # 缓存自身持有的槽位当作重复 checkpoint 释放。
+                # 这里只回收请求私有的尾部 KV 并解除引用，共享 KV 和 checkpoint
+                # 继续由 radix cache 管理，避免改变原有的小页插入协议。
+                self._free_req_mem_without_radix_insert(free_token_index, req)
+                return
+            # 共享大页可在没有新 checkpoint 时重复插入；空前缀也可直接插入。
+            cache_kv_len = shared_kv_len
+        else:
+            assert False, f"error state: cur_kv_len: {req.cur_kv_len}"
+
+        free_token_index.append(req.token_index.get_free_token_indexes(cache_kv_len, req.hold_kv_len))
+        req.cur_kv_len = cache_kv_len
+        key = torch.tensor(req.get_input_token_ids()[:cache_kv_len], dtype=torch.int64, device="cpu")
+        value = req.token_index.get_cpu_token_indexes(0, cache_kv_len)
+        page_num = cache_kv_len // hash_page_size
+        state_idxs = [None] * page_num
+        if req.tail_small_page_buffer_id is not None:
             state_idxs[-1] = req.tail_small_page_buffer_id
             req.tail_small_page_buffer_id = None
-            prefix_len, _ = self.radix_cache.insert(
-                key,
-                value,
-                block_hashs=block_hashs,
-                block_state_idxs=state_idxs,
-                len_to_big_page_id=req.hybrid_len_to_big_page_id,
-            )
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            free_token_index.append(req.token_index.get_free_token_indexes(old_prefix_len, prefix_len))
-            if req.shared_kv_node is not None:
-                assert req.shared_kv_node.node_prefix_total_len <= prefix_len
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
-            return
+        prefix_len, _ = self.radix_cache.insert(
+            key,
+            value,
+            block_hashs=req.shm_req.hybrid_token_hash_list.get_all()[:page_num],
+            block_state_idxs=state_idxs,
+            len_to_big_page_id=req.hybrid_len_to_big_page_id,
+        )
+        assert len(req.hybrid_len_to_big_page_id) == 0
+        self._release_duplicate_prefix(free_token_index, req, prefix_len)
 
-        if shared_kv_len < tail_big_page_token_num <= req.cur_kv_len:
-            free_token_index.append(req.token_index.get_free_token_indexes(tail_big_page_token_num, req.hold_kv_len))
-            req.cur_kv_len = tail_big_page_token_num
-
-            assert req.tail_small_page_buffer_id is None
-            input_token_ids = req.get_input_token_ids()
-            key = torch.tensor(input_token_ids[0 : req.cur_kv_len], dtype=torch.int64, device="cpu")
-            value = req.token_index.get_cpu_token_indexes(0, req.cur_kv_len)
-            cur_page_num = tail_big_page_token_num // hash_page_size
-            assert tail_big_page_token_num % hash_page_size == 0
-            block_hashs = req.shm_req.hybrid_token_hash_list.get_all()[:cur_page_num]
-            state_idxs = [None for _ in range(cur_page_num)]
-            prefix_len, _ = self.radix_cache.insert(
-                key,
-                value,
-                block_hashs=block_hashs,
-                block_state_idxs=state_idxs,
-                len_to_big_page_id=req.hybrid_len_to_big_page_id,
-            )
-            old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
-            free_token_index.append(req.token_index.get_free_token_indexes(old_prefix_len, prefix_len))
-            if req.shared_kv_node is not None:
-                assert req.shared_kv_node.node_prefix_total_len <= prefix_len
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
-            return
-
-        if shared_kv_len <= req.cur_kv_len:
-            free_token_index.append(req.token_index.get_free_token_indexes(shared_kv_len, req.hold_kv_len))
-            # 该分支不会把 prefill 阶段累积的 big page id 插入 radix cache（典型为 pause/abort
-            # 在 prefill 跨过 big page 边界后、到达末尾前触发），需在此显式释放，避免泄漏。
-
-            # 释放本请求 prefill 阶段在 big page 边界上申请、但尚未插入 radix cache 的 big page
-            # state buffer。仅当请求未走 insert 分支(小页/大页插入)就被释放时才会有残留，典型场景：
-            # big page 模式下请求在 prefill 跨过 big page 边界后、到达末尾前被 pause / abort。
-            # 若不释放，会泄漏 big page state slot，并触发 free_a_req_mem 中 dict 为空的断言。
-            if req.hybrid_len_to_big_page_id:
-                self.radix_cache.big_page_buffers.free_state_cache(list(req.hybrid_len_to_big_page_id.values()))
-                req.hybrid_len_to_big_page_id.clear()
-
-            req.cur_kv_len = shared_kv_len
-            assert req.tail_small_page_buffer_id is None
-            if req.shared_kv_node is not None:
-                assert req.shared_kv_node.node_prefix_total_len == req.cur_kv_len
-                self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
-                req.shared_kv_node = None
-            return
-
-        assert False, f"error state: cur_kv_len: {req.cur_kv_len}"
+    def _release_duplicate_prefix(self, free_token_index: List, req: "InferReq", prefix_len: int):
+        """回收插入时发现的重复 KV 页，并解除请求对共享节点的引用。"""
+        old_prefix_len = 0 if req.shared_kv_node is None else req.shared_kv_node.node_prefix_total_len
+        free_token_index.append(req.token_index.get_free_token_indexes(old_prefix_len, prefix_len))
+        if req.shared_kv_node is not None:
+            assert req.shared_kv_node.node_prefix_total_len <= prefix_len
+            self.radix_cache.dec_node_ref_counter(req.shared_kv_node)
+            req.shared_kv_node = None
 
     def _save_promptcache_kvbuffer(self):
         """

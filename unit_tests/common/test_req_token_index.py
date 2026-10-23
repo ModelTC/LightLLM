@@ -232,7 +232,7 @@ def test_batch_upload_rejects_missing_gpu_submission_without_advancing_progress(
     monkeypatch.setattr(base_backend, "g_infer_context", SimpleNamespace(req_manager=req.req_manager))
     backend = base_backend.ModeBackend.__new__(base_backend.ModeBackend)
 
-    with pytest.raises(AssertionError, match="GPU index submission progress does not match recorded length"):
+    with pytest.raises(TypeError):
         backend._copy_req_token_indexes_to_gpu([req])
 
     assert req.token_index.gpu_index_submitted_len == 0
@@ -262,6 +262,39 @@ def test_backend_rejects_requests_with_different_index_streams(monkeypatch, mode
     with pytest.raises(AssertionError, match="All requests in a batch must use the same index stream"):
         backend._copy_req_token_indexes_to_gpu(reqs)
     assert [req.token_index.gpu_index_submitted_len for req in reqs] == [4 if mode == "pure_gpu" else 0] * 2
+
+
+@requires_cuda
+@pytest.mark.parametrize("mode", ["pin_mem_cache", "pin_mem_page_cache"])
+def test_partial_batch_submission_can_retry_and_share_progress_with_gpu_getter(mode):
+    table = torch.full((2, 16), -1, dtype=torch.int32, device="cuda")
+    helpers = [
+        create_req_token_index(make_req(table, mode, req_idx=row, page_size=4), torch.cuda.current_stream())
+        for row in range(2)
+    ]
+    for row, helper in enumerate(helpers):
+        helper.append_token_indexes(torch.arange(row * 8, row * 8 + 4, dtype=torch.int32))
+
+    def partial_copy(destinations, sources):
+        destinations[0].copy_(sources[0], non_blocking=True)
+        raise RuntimeError("partial submission failed")
+
+    with pytest.raises(RuntimeError, match="partial submission failed"):
+        ReqTokenIndex.submit_pending_uploads(helpers, copy_batch=partial_copy)
+    assert [helper.gpu_index_submitted_len for helper in helpers] == [0, 0]
+
+    # 重试须覆盖完整待提交区间；单请求 getter 随后只提交新追加部分。
+    ReqTokenIndex.submit_pending_uploads(helpers)
+    helpers[0].append_token_indexes(torch.arange(4, 8, dtype=torch.int32))
+    assert helpers[0].get_gpu_token_indexes(0, 8).cpu().tolist() == list(range(8))
+    assert helpers[1].get_gpu_token_indexes(0, 4).cpu().tolist() == list(range(8, 12))
+    assert [helper.gpu_index_submitted_len for helper in helpers] == [8, 4]
+
+    def unexpected_copy(*args):
+        pytest.fail("Getter and batch submission must share the same upload progress")
+
+    ReqTokenIndex.submit_pending_uploads(helpers, copy_batch=unexpected_copy)
+    assert table[0, 8:].eq(-1).all() and table[1, 4:].eq(-1).all()
 
 
 @requires_cuda

@@ -134,7 +134,7 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 
         graph_flags_at_att_init = []
 
-        def create_infer_state(model_input):
+        def create_infer_state(model_input, microbatch_index=0):
             infer_state = SimpleNamespace(
                 b_req_idx=model_input.b_req_idx,
                 b_seq_len=model_input.b_seq_len,
@@ -234,3 +234,59 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
     assert seen_sizes == [expected_size] * (2 if overlap else 1)
     torch.testing.assert_close(output.logits, expected)
     torch.testing.assert_close(torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1), expected)
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_prefill_preparation_preserves_index_event_and_initialization_order(monkeypatch, overlap):
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.args = SimpleNamespace(enable_prefill_decode_mixed=False, enable_tpsp_mix_mode=True)
+    model.tp_world_size_ = 2
+    model.prefill_graph = None
+    calls = []
+
+    class ReadyEvent:
+        def record(self):
+            calls.append("ready")
+
+    monkeypatch.setattr(basemodel.torch.cuda, "Event", ReadyEvent)
+    monkeypatch.setattr(basemodel.dist_group_manager, "clear_deepep_buffer", lambda: None)
+
+    def pad_input(model_input, handle_token_num):
+        assert handle_token_num == 4
+        return model_input
+
+    def create_state(model_input, microbatch_index=0):
+        calls.append(("select_indexes", microbatch_index))
+        return SimpleNamespace(
+            init_some_extra_state=lambda _: calls.append(("extra", microbatch_index)),
+            init_att_state=lambda: calls.append(("attention", microbatch_index)),
+        )
+
+    def forward(*args, **kwargs):
+        calls.append("forward")
+        return ModelOutput(logits=torch.ones(1, 4))
+
+    model._create_padded_prefill_model_input = pad_input
+    model._create_inferstate = create_state
+    model._context_forward = forward
+    model._overlap_tpsp_context_forward = lambda *args, **kwargs: (forward(), forward())
+    model_input = SimpleNamespace(is_prefill=True, input_ids=torch.arange(3), batch_size=1)
+    if overlap:
+        outputs = model._microbatch_overlap_prefill_cuda(model_input, model_input)
+        expected = [
+            ("select_indexes", 0),
+            ("extra", 0),
+            ("attention", 0),
+            ("select_indexes", 1),
+            ("extra", 1),
+            ("attention", 1),
+            "ready",
+            "forward",
+            "forward",
+        ]
+        assert outputs[0].prefill_mem_indexes_ready_event is outputs[1].prefill_mem_indexes_ready_event
+    else:
+        outputs = (model._prefill(model_input),)
+        expected = [("select_indexes", 0), "ready", ("extra", 0), ("attention", 0), "forward"]
+    assert calls == expected
+    assert all(isinstance(output.prefill_mem_indexes_ready_event, ReadyEvent) for output in outputs)

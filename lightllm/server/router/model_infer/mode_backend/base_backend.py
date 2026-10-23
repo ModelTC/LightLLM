@@ -11,6 +11,7 @@ from lightllm.utils.infer_utils import set_random_seed
 from lightllm.utils.log_utils import init_logger
 from lightllm.models import get_draft_model_class, get_model
 from lightllm.server.router.model_infer.infer_batch import InferReq, InferReqUpdatePack
+from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.cuda_wrapper import cuda_memcpy_pinned_h2d_batch_async
@@ -663,40 +664,10 @@ class ModeBackend:
         return mem_indexes
 
     def _copy_req_token_indexes_to_gpu(self, run_reqs: List[InferReq]):
-        """在本批请求共用的索引流上批量上传，调用流按需等待索引流。"""
-        # 第一阶段：空批直接返回，确认请求共用一个索引流，并记录当前调用流。
-        if not run_reqs:
-            return
-        index_streams = {req.token_index._index_stream for req in run_reqs}
-        assert len(index_streams) == 1, "All requests in a batch must use the same index stream"
-        index_stream = index_streams.pop()
-        current_stream = torch.cuda.current_stream(index_stream.device)
-        # 第二阶段：准备尚未提交的 CPU token 索引和 GPU 目标视图，记录本次提交终点。
-        cpu_index_slices, gpu_index_slices = [], []
-        pending_index_uploads = []
-        for req in run_reqs:
-            token_index = req.token_index
-            start, end = token_index.gpu_index_submitted_len, token_index.token_index_len
-            if start < end:
-                source_indexes = token_index.get_upload_indexes()
-                assert source_indexes is not None, (
-                    "GPU index submission progress does not match recorded length; "
-                    "pure_gpu must submit indexes when appending"
-                )
-                cpu_index_slices.append(source_indexes)
-                gpu_index_slices.append(token_index.gpu_indexes[start:end])
-                pending_index_uploads.append((token_index, end))
-        # 第三阶段：在索引流上批量提交 H2D，默认流适配和 pinned 源保活由拷贝封装处理。
-        if cpu_index_slices:
-            with torch.cuda.stream(index_stream):
-                cuda_memcpy_pinned_h2d_batch_async(gpu_index_slices, cpu_index_slices)
-            # 第四阶段：成功提交后再更新进度；提交完成不代表 GPU 传输已经完成。
-            for token_index, end in pending_index_uploads:
-                token_index.gpu_index_submitted_len = end
-        # 第五阶段：调用流与索引流不同时建立等待依赖，保证后续 GPU 访问能读到更新。
-        # 各模式在没有新上传时，已提交的索引写入也可能尚未完成，仍需承接依赖。
-        if current_stream != index_stream:
-            current_stream.wait_stream(index_stream)
+        """选择本批请求；索引对象统一管理上传区间、提交进度和流依赖。"""
+        ReqTokenIndex.submit_pending_uploads(
+            [req.token_index for req in run_reqs], copy_batch=cuda_memcpy_pinned_h2d_batch_async
+        )
 
     def _get_classed_reqs(
         self,
