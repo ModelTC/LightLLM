@@ -1,4 +1,4 @@
-"""Measure page-cache token index pinned allocation, excluding data writes and H2D.
+"""Measure shared token index pinned allocation, excluding data writes and H2D.
 
 Example:
     CUDA_VISIBLE_DEVICES=4 PYTHONPATH=. python test/benchmark/benchmark_req_token_index_alloc.py \
@@ -19,7 +19,7 @@ import time
 
 import torch
 
-from lightllm.server.router.model_infer.infer_req_ext1 import PinMemPageCacheReqTokenIndex
+from lightllm.server.router.model_infer.infer_req_ext1 import ReqTokenIndex
 
 
 SLAB_TOKENS = 1024 * 1024
@@ -43,18 +43,15 @@ def summarize(samples):
 
 
 def measure_cached(mode, token_num, repeats, backing):
-    allocate = allocate_direct if mode == "direct_cached" else PinMemPageCacheReqTokenIndex._alloc_pinned_tensor
+    allocate = allocate_direct if mode == "direct_cached" else ReqTokenIndex._alloc_return_pinned_tensor
     samples = []
     for _ in range(repeats):
         if mode == "slab_slice" and 0 < token_num <= SLAB_TOKENS:
             # 仅测切片路径：当前没有存活的返回值或异步传输，允许在计时外重置测试 backing。
             # 生产接口始终向后切分；slab_cached 模式保留其真实换块行为。
-            if (
-                PinMemPageCacheReqTokenIndex._pinned_buffer is None
-                or PinMemPageCacheReqTokenIndex._pinned_offset + token_num > SLAB_TOKENS
-            ):
-                PinMemPageCacheReqTokenIndex._pinned_buffer = backing
-                PinMemPageCacheReqTokenIndex._pinned_offset = 0
+            buffer, offset = getattr(allocate, "return_buffer_state", (None, 0))
+            if buffer is None or offset + token_num > SLAB_TOKENS:
+                allocate.return_buffer_state = (backing, 0)
         start = CLOCK()
         tensor = allocate(token_num)
         samples.append((CLOCK() - start) / 1000)
@@ -64,13 +61,12 @@ def measure_cached(mode, token_num, repeats, backing):
 
 def measure_growth(mode, token_num, live_count):
     # 仅清理 HOST 空闲缓存；用于构造缓存未命中，不用于生产服务。
-    PinMemPageCacheReqTokenIndex._pinned_buffer = None
-    PinMemPageCacheReqTokenIndex._pinned_offset = 0
+    ReqTokenIndex._alloc_return_pinned_tensor.return_buffer_state = (None, 0)
     gc.collect()
     torch.cuda.synchronize()
     torch._C._host_emptyCache()
     before = torch.cuda.memory.host_memory_stats()
-    allocate = allocate_direct if mode == "direct" else PinMemPageCacheReqTokenIndex._alloc_pinned_tensor
+    allocate = allocate_direct if mode == "direct" else ReqTokenIndex._alloc_return_pinned_tensor
     samples, held = [], []
     for _ in range(live_count):
         start = CLOCK()
@@ -109,7 +105,7 @@ def main():
     del seed
     torch._C._host_emptyCache()
     start = CLOCK()
-    seed = PinMemPageCacheReqTokenIndex._alloc_pinned_tensor(1)
+    seed = ReqTokenIndex._alloc_return_pinned_tensor(1)
     initial_slab_us = (CLOCK() - start) / 1000
     backing = seed._base
     assert backing.numel() == SLAB_TOKENS and backing.is_pinned()
@@ -130,7 +126,7 @@ def main():
             "torch_threads": torch.get_num_threads(),
             "allocator_env": {name: os.environ.get(name) for name in ("PYTORCH_ALLOC_CONF", "PYTORCH_CUDA_ALLOC_CONF")},
             "source_sha256": hashlib.sha256(
-                Path(PinMemPageCacheReqTokenIndex._alloc_pinned_tensor.__code__.co_filename).read_bytes()
+                Path(ReqTokenIndex._alloc_return_pinned_tensor.__code__.co_filename).read_bytes()
             ).hexdigest(),
             "slab_tokens": SLAB_TOKENS,
             "slab_bytes": SLAB_TOKENS * 4,
@@ -182,8 +178,7 @@ def main():
         result["growth"][str(token_num)] = data
         print(f"Uncached growth for {token_num} tokens x {live_count} complete", flush=True)
 
-    PinMemPageCacheReqTokenIndex._pinned_buffer = None
-    PinMemPageCacheReqTokenIndex._pinned_offset = 0
+    ReqTokenIndex._alloc_return_pinned_tensor.return_buffer_state = (None, 0)
     gc.enable()
     (args.output_dir / "result.json").write_text(json.dumps(result, indent=2) + "\n")
     with (args.output_dir / "timings.csv").open("w", newline="") as output:

@@ -502,9 +502,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         type=str,
         choices=["pin_mem_cache", "pin_mem_page_cache", "pure_gpu"],
         default="pin_mem_cache",
-        help="""Storage mode for request token indexes. pin_mem_cache (default): allocates a pinned CPU cache
-        per request, allowing CPU reads without D2H transfers and batched GPU uploads, at the cost of pinned
-        memory usage and upload progress tracking. pin_mem_page_cache: stores one pinned CPU index per KV page,
+        help="""Storage mode for request token indexes. pin_mem_cache (default): allocates a pageable CPU cache
+        per request and copies pending indexes to a fresh pinned slab slice for each upload, allowing CPU reads without
+        D2H transfers and batched GPU uploads. pin_mem_page_cache: stores one pinned CPU index per KV page,
         reducing persistent index memory but expanding indexes for token reads and GPU uploads; page_size=1
         provides no compression. pure_gpu: maintains the GPU request table directly without
         a persistent CPU index cache; CPU reads require D2H transfers and may incur synchronization waits.

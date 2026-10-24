@@ -49,25 +49,25 @@ Helper 保存该流，后续不随调用点的当前流切换：
 
 | `--req_token_index_mode` | 存储与优点 | 代价 |
 | --- | --- | --- |
-| `pin_mem_cache`（默认） | `PinMemCacheReqTokenIndex` 按请求直接申请 pinned CPU token 缓存；CPU 读取无需 D2H，GPU 更新可批量提交 | 占用 pinned CPU 内存，需要维护上传进度 |
+| `pin_mem_cache`（默认） | `PinMemCacheReqTokenIndex` 按请求申请普通 CPU token 缓存，上传时仅为待提交区间创建 pinned 快照；CPU 读取无需 D2H，GPU 更新可批量提交 | 每次上传增加一次 CPU 拷贝和临时 pinned 区间申请，需要维护上传进度 |
 | `pin_mem_page_cache` | `PinMemPageCacheReqTokenIndex` 每个 KV 页仅保存一个 pinned CPU 首 token 索引，常驻索引项数约缩小为原来的 `1 / page_size` | CPU 读取和 GPU 上传时需要展开 token 索引，适用于 `page_size > 1` |
 | `pure_gpu` | `PureGpuReqTokenIndex` 直接维护 GPU 请求表，无常驻 CPU 索引缓存 | CPU 读取需要 D2H 并等待结果，频繁的 CPU 索引操作可能更慢 |
 
 三种模式均保留相同的 GPU 请求表，显存占用基本相同。追加后的所需长度为 `end = token_index_len + mem_indexes.numel()`。
 完整 token 模式的 CPU 缓存首次按 `max(input_len + 2K, end)`
 向上对齐到 1K token 申请，为输出预留空间；后续容量不足时，在本次所需长度 `end` 上多预留 2K token，再向上对齐到 1K，
-容量上限为 GPU 请求表行长度。两种 CPU 缓存模式均直接使用 `torch.empty(..., pin_memory=True, requires_grad=False)`
-为每个请求独立申请常驻存储；完整模式保存每个 token，页模式在首次追加时按 GPU 请求表的最大长度
+容量上限为 GPU 请求表行长度。完整模式使用普通 CPU Tensor 保存每个 token，首次分配及扩容均不申请 pinned 内存。
+页模式的常驻存储仍使用 `torch.empty(..., pin_memory=True, requires_grad=False)`，在首次追加时按 GPU 请求表的最大长度
 一次性申请 `ceil(max_sequence_length / page_size)` 个页首索引，后续追加无需扩容或复制旧缓存。
 页模式继承完整模式的 GPU 上传、释放快照和 reset 流程，覆盖 CPU 索引的存储和展开。
 压缩依赖已有的页内连续索引约束；追加完整页，输入从下标 0 按 page_size 取页首。
 页模式读取支持页内任意 token 区间：内部展开覆盖区间的完整页，再按页内偏移截取精确范围。
 CPU 快照独立于压缩缓存，PD 尾段传输和最终 metadata 无需自行处理页对齐。
 缓冲区在首次非空写入时按需申请，重置时保留输入长度，
-丢弃已申请的缓冲区引用，由 PyTorch 在引用和异步传输依赖结束后回收。
-页模式上传时先将待提交区间展开到临时 pinned token 索引，使用 `PinMemPageCacheReqTokenIndex._alloc_pinned_tensor`
-按 1M token（4 MiB）申请 int32 slab。该接口及共享状态仅属于页缓存类，保存完整 buffer 和下一个空闲位置 `_pinned_offset`，
-每次只创建返回值这一个切片。
+丢弃已申请的常驻缓冲区引用。上传使用独立暂存区，其引用和异步传输依赖由上传路径管理。
+完整模式的上传快照和页模式的展开暂存区统一使用基类 `ReqTokenIndex._alloc_return_pinned_tensor()`，
+按 1M token（4 MiB）申请 int32 slab。函数内部通过函数属性 `return_buffer_state` 惰性保存完整 slab 和下一个空闲 offset，
+两种模式共享同一分配进度，每次只创建返回值这一个切片。返回区间互不重叠，但可持有同一块底层 storage。
 offset 只前进，不回绕；空间不足时换用新 slab 并从零开始，请求 reset 不重置共享 offset。
 超出 slab 容量的申请独立分配，空申请不改变 slab 或 offset。旧 slab 的 storage 在所有切片引用和异步传输依赖结束后
 由 PyTorch 回收。
@@ -77,7 +77,8 @@ offset 只前进，不回绕；空间不足时换用新 slab 并从零开始，�
 统一接口为 `append_token_indexes(mem_indexes)`、`get_cpu_token_indexes(start, end)`、
 `get_free_token_indexes(start, end)` 和 `get_gpu_token_indexes(start, end)`，均使用 token 单位，
 追加接口将完整输入接到已记录索引的尾部，非空输入在三种模式下均断言为 CPU Tensor；空输入直接返回。
-CPU 缓存模式直接复制到自身的 pinned 缓冲区，无需先 pin 输入；GPU 模式仅在输入未 pinned 时内部转换，已有 pinned 输入直接复用。
+CPU 缓存模式直接复制到自身的常驻缓冲区，无需先 pin 输入；完整模式为普通 CPU 内存，页模式为 pinned 内存。
+GPU 模式仅在输入未 pinned 时内部转换，已有 pinned 输入直接复用。
 前缀匹配和索引重建路径直接传入 CPU 索引，不再自行 pin。读取接口均支持页内任意区间；提交给 allocator 的释放区间仍须覆盖完整页。
 CPU getter 返回独立快照，缓存、PD 元数据和异步任务可跨请求释放持有；GPU getter 返回当前请求的
 GPU 表视图，不应跨请求槽位复用持有。Helper 保存外部传入的索引流，GPU 索引读写固定在该流，
@@ -105,13 +106,15 @@ CPU 缓存模式的追加接口只更新 CPU 索引和 `token_index_len`，不�
 首次前缀匹配时索引为空；暂停恢复前已由统一释放流程重置，两处匹配入口直接追加命中前缀，不重复 `reset()`。
 释放或暂停请求时也由索引扩展的 `reset()` 统一清零两个长度。
 CPU 模式重置时将 `_cpu_buffer` 设为 `None`，下一次追加重新申请，随后从零开始提交 GPU 更新。
-单独的 GPU getter 上传完整缓存视图或页缓存展开得到的暂存区：普通追加不会改写已有区间，扩容和重置使用新存储，
-PyTorch `copy_(non_blocking=True)` 会登记 pinned 源的流使用，旧存储在 H2D 完成前不会被回收复用。
-因此不再为单个请求上传额外申请 pinned 快照或执行一次 CPU 拷贝，也不需要在 reset 中同步 CUDA。
+单独的 GPU getter 通过 `get_upload_indexes()` 准备独立 pinned 暂存区：完整模式复制待提交区间，页模式展开压缩索引。
+上传源不借用常驻缓存，常驻缓存的扩容和重置不影响在途 H2D，也不需要在 reset 中同步 CUDA。
+PyTorch `copy_(non_blocking=True)` 会登记 pinned 源的流使用，暂存区在 H2D 完成前不会被回收复用。
 
 `get_upload_indexes()` 不接受区间参数，CPU 模式返回内部计算的
-`[gpu_index_submitted_len, token_index_len)` 的 pinned token 索引，完整模式返回缓存视图，页模式按需展开，
-不改变提交进度；无待上传内容时返回空 tensor，
+`[gpu_index_submitted_len, token_index_len)` 的 pinned token 索引。完整模式每次通过基类接口申请恰好覆盖该区间的切片，
+同步复制普通 CPU 缓存中的索引后返回；连续调用返回互不重叠的快照，不覆写上次结果，不包含容量预留区间。
+切片的逻辑长度只覆盖待上传索引，其底层 storage 通常为共享的 4 MiB slab。
+页模式按需展开。两种模式均不改变提交进度；无待上传内容时返回空 tensor，
 纯 GPU 模式返回 `None`。CPU 缓存模式的 GPU getter 校验 `end <= token_index_len` 后按需提交完整待上传区间，
 纯 GPU 模式校验 `end <= gpu_index_submitted_len`；读取均不允许推进超出已有索引的提交进度。
 批量入口不会替 GPU 模式补写提交进度；若缺少待上传数据，由后续拷贝操作报错，提交进度保持不变。
@@ -124,7 +127,7 @@ PyTorch `copy_(non_blocking=True)` 会登记 pinned 源的流使用，旧存储�
 并传入批量拷贝函数；backend 不再读写索引流、GPU 行和提交进度。
 统一入口检查所有请求共用一个索引流，准备源、目标视图列表，在索引流提交拷贝，
 仅在整批提交成功后更新提交进度。单请求 GPU getter 复用该协议，默认通过 PyTorch `copy_` 提交；
-backend 路径使用 `cudaMemcpyBatchAsync`，不申请聚合缓冲区或额外复制 CPU 索引。
+backend 路径使用 `cudaMemcpyBatchAsync`，直接提交索引对象准备的 pinned 快照，不再额外聚合或复制。
 返回前仅在调用流不同于索引流时排入等待，没有新上传时也承接已有写入的依赖。
 backend 不再持有上传流，也不逐条交接多条索引流。
 原生 API 不接受 legacy 默认流，适配由 `PinnedH2DBatchCopier` 内部处理：按设备延迟创建并复用非默认上传流，
@@ -144,8 +147,8 @@ backend 不再持有上传流，也不逐条交接多条索引流。
 后台 `event.synchronize()` 休眠等待并释放 GIL，完成后清空源列表，不向 Future 返回 Tensor；
 主推理线程不等待后台任务，默认索引流由封装承接内部上传流的依赖，调用流按需等待索引流。
 索引扩展不维护逐请求事件，backend 不维护保活列表，也不需要额外的小片段 H2D 或 C++ 扩展。
-该方式只保护引用生命周期，不阻止 CPU 主动改写数据。请求缓存只追加，reset 和扩容换用新存储，
-因此可直接保活缓存视图；上传期间不能改写已提交的区间，无需独立聚合快照。
+该方式只保护引用生命周期，不阻止 CPU 主动改写上传源。完整模式的 pinned 快照和页模式的展开暂存区
+均独立于常驻缓存，reset 和扩容不会改写它们；调用方在传输完成前不能主动修改返回的 pinned Tensor。
 单线程按提交顺序处理；多上传流共用线程池时可能延后回收，不改变 GPU 工作顺序。
 正常进程退出时由线程池等待未完成任务，不取消保活任务。
 
@@ -232,3 +235,109 @@ PyTorch 文档介绍了使用 pinned CPU Tensor 配合 `to(..., non_blocking=Tru
 `cudaMemcpyBatchAsync` 则是多个索引区间的批量提交选择。
 参见 [PyTorch 2.11：Use pinned memory buffers](https://docs.pytorch.org/docs/2.11/notes/cuda.html#use-pinned-memory-buffers)
 和 [PyTorch：non_blocking 与 pin_memory 使用指南](https://docs.pytorch.org/tutorials/intermediate/pinmem_nonblock.html#other-copy-directions-gpu-cpu-cpu-mps)。
+
+## 附录：分离常驻索引与 pinned 上传缓冲区
+
+### 设计动机与容量估算
+
+请求索引有两种不同的生命周期：完整映射需要保存到请求结束或重建，用于前缀匹配、缓存管理和资源释放；
+H2D 源只需保存到本次上传完成。将完整映射长期保存在 pinned 内存中，会让短期传输需要的锁页资源
+随全部存活请求的索引容量增长。在当前离散 GPU 部署中，大量长期锁页会增加主机内存压力；
+NVIDIA 也明确指出，过量分配 page-locked memory 会影响系统整体性能。
+参见 [NVIDIA CUDA FAQ：Host/Device transfer](https://developer.nvidia.com/cuda/faq)。
+
+面向 V4.1 这类模型的后续部署，需要提前考虑上下文长度、并发请求数和推理进程数同时增长的情况。
+这里按部署容量分析，不假定 V4.1 的具体上下文上限、并发量或实测内存占用。
+对每个推理进程，设已分配缓存的请求数为 `R`，请求 `i` 的完整 token 缓存容量为 `C_i`，
+每个索引为 `int32`，则完整索引的逻辑字节数为 `4 × Σ C_i`。
+如果每个请求各自申请 pinned 缓存，还需要计算底层分配块的容量取整。
+本次核对的 PyTorch 2.11 host caching allocator 将申请字节数向上取整到 2 的幂，
+因此这部分常驻 pinned 块约占 `Σ round_pow2(4 × C_i)`，扩容期间的新旧块和空闲缓存另计。
+这是该版本 pinned allocator 的行为，不是所有 CPU Tensor 的通用分配规则。
+参见 [PyTorch 2.11：host_memory_stats](https://docs.pytorch.org/docs/2.11/generated/torch.cuda.memory.host_memory_stats.html)。
+
+例如，假设输入长 `128 × 1024` token，GPU 请求表行长度允许再预留 2K token，
+当前完整缓存策略会申请 `130 × 1024` 个索引，逻辑大小为 520 KiB；若直接申请 pinned tensor，
+对应块会取整为 1 MiB。每进程 128 个这样的存活请求、同机 8 个进程分别保存这些映射时，
+仅常驻索引就会占用约 1 GiB pinned 块，尚未计入上传、旧块和其他模块。
+多进程占用应按各进程的实际请求集合求和；TP 进程可能保存相同映射，DP 进程则应按各自请求数计算。
+
+默认 `pin_mem_cache` 现将这部分长期存储改为普通 CPU Tensor，上述算例的常驻缓存逻辑大小合计为 520 MiB，
+另加临时 pinned 上传区间。Linux 默认 CPU allocator 按请求大小进行对齐分配，
+没有上述 host caching allocator 的统一 2 的幂取整步骤；系统 malloc 仍可能存在对齐、缓存和碎片开销。
+当前代码自己的 1K 对齐、2K 预留以及扩容复制也仍然存在，普通 CPU 缓存不能当作零成本。
+参见 [PyTorch 2.11：alloc_cpu 实现](https://github.com/pytorch/pytorch/blob/v2.11.0/c10/core/impl/alloc_cpu.cpp)。
+
+### 为什么采用普通 CPU 常驻缓存和共享 pinned slab
+
+完整模式的 `get_upload_indexes()` 只复制 `[gpu_index_submitted_len, token_index_len)`，
+已经提交的历史索引和 CPU 缓存预留空间都不会重复进入上传快照。
+这样保留了 CPU 读取无需 D2H 的能力，同时将 pinned 源的生命周期缩短到本次传输。
+代价是每次上传增加一次同步 CPU 拷贝；前缀重建后需要重新上传完整映射，不能总按少量 decode 增量估算。
+
+如果每次快照都单独调用 `torch.empty(..., pin_memory=True)`，小额上传仍会频繁进入 host allocator，
+且不同大小的快照分别受容量取整影响。`_alloc_return_pinned_tensor()` 为常规申请维护一个
+`1024 × 1024` 个 int32 元素的 slab，让多个请求取得互不重叠的区间，摊薄底层分配和取整开销。
+4 MiB 是当前的小额分配与保留粒度取舍，并非所有模型、并发量和上传大小下的最优值。
+空申请不创建 slab，单次超过 slab 容量时独立申请，避免把长期保留的工作块扩成一个大块。
+
+完整模式将索引复制进这个区间，页模式将压缩页索引直接展开进这个区间；
+两者共享相同的分配与生命周期约定。返回值是一次上传使用的快照，调用方不应把它保存为长期索引缓存。
+多个快照可以共享 storage，但不得共享可写区间。offset 只前进，空间不足时换新 slab，
+请求 reset 不回绕 offset，避免后续 CPU 写入覆盖尚未完成的 H2D 源。
+PyTorch `copy_` 的 allocator 跟踪和原生 batch 路径的事件保活，继续负责传输结束前不回收源存储。
+
+### 职责划分与状态归属
+
+| 组件 | 负责的内容 |
+| --- | --- |
+| `PinMemCacheReqTokenIndex` | 普通 CPU 完整映射的追加、容量管理、快照生成和重置 |
+| `PinMemPageCacheReqTokenIndex` | 页首映射的存储及 token 索引展开，复用公共上传协议 |
+| `ReqTokenIndex` | 上传区间与提交进度、索引流依赖、临时 pinned 返回区间分配 |
+| backend | 选择本批请求并调用统一提交入口 |
+| `PinnedH2DBatchCopier` | CUDA 拷贝提交、原生接口适配及异步源保活 |
+
+这种划分让常驻存储策略可以变化，而 backend 无需了解 CPU 缓存布局或维护上传进度。
+`get_upload_indexes()` 只准备数据，`submit_pending_uploads()` 在整批提交成功后推进进度，
+流完成与引用保活由传输层处理；缓存扩容和 reset 无需等待上传完成。
+页模式继承完整模式时覆盖所有依赖压缩布局的追加、读取和分配操作，复用 GPU getter、释放入口及 reset。
+保留 `PinMemCacheReqTokenIndex` 和 `pin_mem_cache` 名称以兼容现有调用和配置；名称中的 PinMem
+现在对应上传缓冲区，常驻完整缓存的实际类型以实现、类说明和 CLI 帮助为准。
+
+`return_buffer_state = (buffer, offset)` 放在分配函数对象上，由函数内部惰性建立和更新，
+使两个字段的使用范围集中在唯一分配入口。它仍是进程内共享的持久状态，函数返回后不会消失，
+移动字段本身不减少内存；主要收益来自常驻缓存改用普通 CPU 内存及上传区间共享 slab。
+该入口依赖同一推理线程串行申请，未提供多线程分配保护；未来若增加并行申请线程，需重新设计同步或状态归属。
+
+### 内存边界与后续评估
+
+4 MiB 仅表示此分配函数当前持有的一块 slab，不能解释为整个进程的 pinned 内存上限。
+上传缓冲区的实际占用还包括旧 slab 的存活切片、在途传输、超过 slab 的独立申请，以及 PyTorch 缓存的空闲块。
+一个小切片也会保留整块 slab；GPU 上传积压、后台回收延迟或调用方长期持有返回值，都会延长整块存储的存活时间。
+当前没有对同时存活的 slab 数量设置硬上限，也没有上传积压的内存背压。
+KV allocator 的返回缓冲区和其他模块的 pinned 申请应独立计入整机预算，不能只统计这个函数。
+
+`pin_mem_page_cache` 的常驻缓存目前仍使用 pinned 内存，并在首次追加时按 GPU 行长度 `S`
+申请 `ceil(S / page_size)` 个页首索引，而不是按本次实际长度增长。
+其常驻 pinned 块约为 `R × round_pow2(4 × ceil(S / page_size))`，上传暂存区另计。
+`page_size=1` 时没有压缩收益；即使页较大，配置很大的最大序列长度且并发很多时，也仍需评估这部分预分配。
+默认完整模式的改进不能代表页模式已经消除了长期锁页。若该项成为瓶颈，后续可评估普通 CPU 页缓存或按需增长，
+并测量对页索引展开耗时的影响。
+
+本次设计主要降低完整索引的长期 pinned 占用。首次长 prefill 或大规模重建时，普通 CPU 缓存与 pinned 快照会同时存在，
+因此不保证主机总内存峰值下降，也不保证推理吞吐提升。
+GPU `req_to_token_indexs` 仍为 token 级表，约占 `4 × (max_request_num + 1) × S` 字节；
+模型权重、KV Cache 和该 GPU 表的显存都不因这项改动缩小。
+
+评估 V4.1 等模型的实际部署时，应同时观察长 prefill、稳态 decode、前缀重建和上传积压场景，
+按主机汇总各推理进程的 CPU RSS、pinned 块占用及峰值，并测量索引准备、上传和端到端延迟。
+PyTorch 2.11 的 `host_memory_stats()` 中，`allocated_bytes.current` 包含活跃块和缓存块，
+`active_bytes.current` 表示尚未变成可复用空闲块的容量，`num_host_alloc` 用于观察底层分配次数；
+这些是进程级 host allocator 指标，不能直接归因到单个索引类，也不能用 GPU 的 `memory_allocated()` 替代。
+各 bucket 的峰值是汇总近似值，取整与指标定义参见上述 PyTorch 文档。
+
+仓库中的 [CPU/pinned 保活分配基准](../test/benchmark/benchmark_cpu_pinned_alloc_keepalive.py)
+保留所有申请结果，可观察不同大小的直接分配耗时和 pinned 块取整；
+[索引分配基准](../test/benchmark/benchmark_req_token_index_alloc.py) 比较直接申请与 slab 切片路径。
+两者都不测量完整上传流程，前者也不写入普通 CPU Tensor 的全部页面，不能据此直接判断真实工作负载的 RSS 或推理性能。
+现有 [索引测试](../unit_tests/common/test_req_token_index.py) 覆盖快照独立性、跨模式共享、换块及在途 H2D 源的生命周期。
