@@ -95,6 +95,8 @@ class AdaptiveLoadSelector(PDSelector):
         return p_node, d_node, PDSelectionExtraInfo()
 
     def _importance_sampling(self, nodes: List[PD_Client_Obj]):
+        if not nodes:
+            raise ServerBusyError("No PD nodes are available for selection")
         return random.choices(nodes, weights=[max(1.0 - e.run_status.total_token_usage_rate, 0.02) for e in nodes])[0]
 
 

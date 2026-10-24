@@ -30,18 +30,17 @@ class IntList(object):
     def size(self):
         return self.arr[-1]
 
-    def add_item(self, value: int):
-        write_index = self.arr[-1]
-        self.arr[write_index] = value
-        self.arr[-1] += 1
-        return
+    def add_item(self, value: int) -> bool:
+        return self.add_items([value])
 
-    def add_items(self, values: List[int]):
-        write_index = self.arr[-1]
+    def add_items(self, values: List[int]) -> bool:
+        write_index = int(self.arr[-1])
         n = len(values)
+        if write_index + n > self.capacity:
+            return False
         self.arr[write_index : write_index + n] = values
-        self.arr[-1] += n
-        return
+        self.arr[-1] = write_index + n
+        return True
 
     def pop_all_item(self) -> Optional[List[int]]:
         if self.size() == 0:

@@ -1,3 +1,4 @@
+from lightllm.common.cache_coordinator import HybridCacheCoordinator, CacheCoordinator
 from types import SimpleNamespace
 from collections import deque
 
@@ -12,6 +13,34 @@ from lightllm.server.multi_level_kv_cache import (
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as multi_level_kv_cache_impl
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
+
+
+def test_cpu_cache_completion_releases_lock_after_error(monkeypatch):
+    calls = []
+
+    def fail_update(**kwargs):
+        raise ValueError("invalid page")
+
+    task = SimpleNamespace(
+        sync_event=SimpleNamespace(query=lambda: True),
+        page_indexes=torch.tensor([0], dtype=torch.int32),
+        move_token_num=64,
+        req_obj=SimpleNamespace(cache_tiers=(CacheTier.CPU, CacheTier.DISK)),
+    )
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(is_master_in_dp=True)
+    module.filter_group = None
+    module.cpu_cache_handle_queue = deque([task])
+    module.cpu_cache_client = SimpleNamespace(
+        lock=SimpleNamespace(acquire_sleep1ms=lambda: calls.append("acquire"), release=lambda: calls.append("release")),
+        update_pages_status_to_ready=fail_update,
+    )
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "broadcast_object_list", lambda *args, **kwargs: None)
+
+    with pytest.raises(ValueError, match="invalid page"):
+        module.update_cpu_cache_task_states()
+
+    assert calls == ["acquire", "release"]
 
 
 def test_cache_tiers_reassignment_is_rejected():
@@ -48,7 +77,9 @@ def test_non_gpu_cache_tiers_release_owned_tokens_without_radix_insert():
     req = SimpleNamespace(req_idx=0, cur_kv_len=5, hold_kv_len=7, shared_kv_node=shared_node)
     free_token_indexes = []
 
-    context._free_req_mem_without_radix_insert(free_token_indexes, req)
+    free_token_indexes.extend(
+        CacheCoordinator().release_request_cache(req, context.req_manager, context.radix_cache, None, False)
+    )
 
     assert free_token_indexes[0].tolist() == [12, 13, 14, 15, 16]
     assert released_refs == [shared_node]
@@ -60,7 +91,11 @@ def test_legacy_cache_tiers_still_insert_gpu_radix_cache():
     context.radix_cache = object()
     context.is_hybrid_att_model = False
     inserted_reqs = []
-    context._full_att_free_req = lambda free_token_index, req: inserted_reqs.append(req)
+    context.req_manager = None
+    context.args = None
+    context.cache_coordinator = SimpleNamespace(
+        release_request_cache=lambda req, *args, **kwargs: inserted_reqs.append(req) or []
+    )
     req = SimpleNamespace(
         cache_tiers=(CacheTier.GPU, CacheTier.CPU, CacheTier.DISK),
         cur_kv_len=3,
@@ -131,7 +166,8 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
     assert len(module.cpu_cache_handle_queue) == 2
 
 
-def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
+@pytest.mark.parametrize("with_radix", [False, True])
+def test_non_gpu_linear_cache_tiers_release_pending_state_pages(with_radix):
     freed_small_pages = []
     freed_big_pages = []
     context = InferenceContext()
@@ -148,19 +184,31 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
         shared_kv_node=None,
         tail_small_page_buffer_id=7,
         hybrid_len_to_big_page_id={128: 8, 256: 9},
+        cache_tiers=(CacheTier.CPU,),
+        shm_req=SimpleNamespace(shm_cur_kv_len=3),
     )
     free_token_indexes = []
 
-    context._free_req_mem_without_radix_insert(free_token_indexes, req)
+    coordinator = HybridCacheCoordinator()
+    coordinator.bind_mem_manager(context.radix_cache)
+    coordinator.small_page_buffers = context.radix_cache.small_page_buffers
+    coordinator.big_page_buffers = context.radix_cache.big_page_buffers
+    context.cache_coordinator = coordinator
+    context.args = None
+    if not with_radix:
+        context.radix_cache = None
+    context.free_a_req_mem(free_token_indexes, req)
 
     assert free_token_indexes[0].tolist() == [10, 11, 12]
     assert freed_small_pages == [7]
     assert freed_big_pages == [8, 9]
     assert req.tail_small_page_buffer_id is None
     assert req.hybrid_len_to_big_page_id == {}
+    assert req.cur_kv_len == req.hold_kv_len == req.shm_req.shm_cur_kv_len == 0
 
 
-def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
+@pytest.mark.parametrize("checkpoint_len", ["full", None, 128, 132])
+def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch, checkpoint_len):
     table = torch.full((1, 136), -1, dtype=torch.int32)
     table[0, :4] = torch.arange(4, dtype=torch.int32)
     next_index = 4
@@ -182,13 +230,17 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         return mem_indexes
 
     operator = SimpleNamespace(
-        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist())
+        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist()),
     )
+    coordinator = CacheCoordinator() if checkpoint_len == "full" else HybridCacheCoordinator()
+    coordinator.cpu_cache_transfer = SimpleNamespace(get_checkpoint_lens=lambda *args: [checkpoint_len])
+    coordinator.load_cpu_cache_to_gpu = operator.load_cpu_cache_to_gpu
     backend = SimpleNamespace(
         is_master_in_dp=False,
         radix_cache=None,
         model=SimpleNamespace(
             mem_manager=SimpleNamespace(operator=operator),
+            cache_coordinator=coordinator,
             req_manager=SimpleNamespace(req_to_token_indexs=table),
         ),
         _alloc_req_kv_mem=alloc_req_kv_mem,
@@ -219,9 +271,14 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))
 
     module.load_cpu_cache_to_reqs([req])
 
+    if checkpoint_len not in ("full", 132):
+        assert not alloc_sizes and not loaded_indexes
+        assert req.cur_kv_len == req.hold_kv_len == 4
+        return
     assert alloc_sizes == [128]
     assert req.cur_kv_len == 132
     assert req.hold_kv_len == 132

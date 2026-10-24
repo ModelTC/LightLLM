@@ -152,6 +152,11 @@ class CpuKvCacheClient(object):
         limit_length = get_disk_cache_prompt_limit_length()
 
         if disk_offload_enable and offload_candidates and token_num_in_page_list >= limit_length:
+            # 写入到 offload_page_indexes 中的数据是分组的，其中
+            # 开头的元素标记后续多少个元素是一组，便于读取时进行分组处理
+            # 写入数据为 group_page_size, page_index1, page_index2, ...
+            if not self.offload_page_indexes.add_items([len(offload_candidates), *offload_candidates]):
+                return
             # 加引用计数，落盘成功后再减掉
             for offload_page_index in offload_candidates:
                 offload_page_item: _CpuPageStatus = page_items[offload_page_index]
@@ -159,11 +164,6 @@ class CpuKvCacheClient(object):
                 if offload_page_item.ref_count == 1:
                     # 从 LRU 列表中移除
                     offload_page_item.del_self_from_list()
-            # 写入到 offload_page_indexes 中的数据是分组的，其中
-            # 开头的元素标记后续多少个元素是一组，便于读取时进行分组处理
-            # 写入数据为 group_page_size, page_index1, page_index2, ...
-            self.offload_page_indexes.add_item(len(offload_candidates))
-            self.offload_page_indexes.add_items(offload_candidates)
         return
 
     def query_one_page(self, hash_key: int) -> Tuple[Optional[int], bool]:

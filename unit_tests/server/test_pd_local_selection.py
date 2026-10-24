@@ -563,6 +563,53 @@ async def _consume(manager, params):
     return [item async for item in manager._generate_one_attempt("prompt", params, None, None, 0, 80, 2)]
 
 
+@pytest.mark.parametrize("strategy", ["random", "round_robin", "adaptive_load", "cache_aware"])
+@pytest.mark.parametrize("missing", ["prefill", "decode", "both"])
+def test_generate_rejects_missing_pd_nodes_with_429(monkeypatch, strategy, missing):
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from lightllm.server import api_http
+
+    manager, _ = _generator_manager("local", strategy)
+    _set_nodes(
+        manager,
+        [] if missing in ("prefill", "both") else manager.pd_manager.prefill_nodes,
+        [] if missing in ("decode", "both") else manager.pd_manager.decode_nodes,
+    )
+
+    async def generate(_request, current_manager):
+        return await _consume(current_manager, _params())
+
+    monkeypatch.setattr(api_http, "get_env_start_args", lambda: SimpleNamespace(run_mode="pd_master"))
+    monkeypatch.setattr(api_http.g_objs, "httpserver_manager", manager)
+    monkeypatch.setattr(api_http.g_objs, "g_generate_func", generate)
+    monkeypatch.setattr(api_http.g_objs, "metric_client", Mock())
+    app = FastAPI()
+    app.post("/generate")(api_http.generate)
+
+    response = TestClient(app).post("/generate", json={"inputs": "prompt"})
+
+    assert response.status_code == 429
+    assert response.json()["error"]["type"] == "RateLimitError"
+    assert "IndexError" not in response.text
+    assert not manager.active_req_ids
+    manager.pd_node_stats.add_dispatched_info.assert_not_awaited()
+    manager.abort.assert_awaited_once()
+
+
+def test_cache_lookup_rejects_decode_removal():
+    manager = _manager()
+    prefill = manager.pd_manager.prefill_nodes
+
+    async def query(*_args):
+        _set_nodes(manager, prefill, [])
+        return _match(prefill[0])
+
+    manager.pd_manager.selector.policy.prompt_cache_tree.prefix_match_sampled.side_effect = query
+    with pytest.raises(ServerBusyError, match="No PD nodes"):
+        asyncio.run(manager.select_p_d_node(PROMPT, None, None))
+
+
 def test_cache_aware_selection_and_initial_reservation_are_serialized_per_worker(backend):
     async def run():
         manager, state = _generator_manager(backend, "cache_aware")

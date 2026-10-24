@@ -201,7 +201,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     is_prefill=True,
                     b_prefill_has_output_cpu=model_input.b_prefill_has_output_cpu,
                 )
-                g_infer_context.save_hybrid_state_to_cache(
+                g_infer_context.save_cache_state(
                     b_req_idx=model_input.b_req_idx,
                     reqs=run_reqs,
                 )
@@ -324,7 +324,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 )
 
                 if g_infer_context.is_hybrid_att_model:
-                    g_infer_context.save_hybrid_state_to_cache(b_req_idx=b_req_idx, reqs=run_reqs)
+                    g_infer_context.save_cache_state(b_req_idx=b_req_idx, reqs=run_reqs)
 
                 sync_event = torch.cuda.Event()
                 sync_event.record()
@@ -448,7 +448,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                 target_next_token_ids=next_token_ids,
             )
             if req_num > 0:
-                g_infer_context.save_hybrid_state_to_cache(b_req_idx=b_req_idx, reqs=run_reqs)
+                g_infer_context.save_cache_state(b_req_idx=b_req_idx, reqs=run_reqs)
 
             sync_event = torch.cuda.Event()
             sync_event.record()
@@ -691,7 +691,7 @@ class DPChunkedPrefillBackend(ModeBackend):
             )
 
             if req_num > 0 and g_infer_context.is_hybrid_att_model:
-                g_infer_context.save_hybrid_state_to_cache(b_req_idx=b_req_idx, reqs=run_reqs)
+                g_infer_context.save_cache_state(b_req_idx=b_req_idx, reqs=run_reqs)
 
             sync_event = torch.cuda.Event()
             sync_event.record()

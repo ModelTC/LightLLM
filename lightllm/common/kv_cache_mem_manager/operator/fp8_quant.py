@@ -10,7 +10,8 @@ logger = init_logger(__name__)
 
 class FP8StaticPerHeadQuantMemOperator(BaseMemManagerOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.common.kv_cache_mem_manager.fp8_static_per_head_quant_mem_manager import (
+        layer_index = self.mem_manager.get_kv_layer_index(layer_index)
+        from lightllm.common.kv_cache_mem_manager.static_fp8_mem_manager import (
             FP8StaticPerHeadQuantMemManager,
         )
 
@@ -31,6 +32,7 @@ class FP8StaticPerHeadQuantMemOperator(BaseMemManagerOperator):
 
 class FP8StaticPerTensorQuantMemOperator(BaseMemManagerOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        layer_index = self.mem_manager.get_kv_layer_index(layer_index)
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager

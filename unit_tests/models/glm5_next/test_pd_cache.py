@@ -1,10 +1,14 @@
+from lightllm.common.kv_page_transfer import KVPageTransfer
+from lightllm.common.kv_transfer_resources import KVTransferView
 import dataclasses
 
 import pytest
 import torch
 
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager, MemoryManager
-from lightllm.common.req_manager import Glm5NextReqManager
+from lightllm.common.cache_coordinator import HybridCacheCoordinator
+from lightllm.common.linear_state import LinearStateManager
+from lightllm.common.indexer_state import IndexerStateManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -31,14 +35,6 @@ def make_mems(monkeypatch, request):
     get_env_start_args.cache_clear()
     set_env_start_args(dataclasses.asdict(args))
 
-    def check_shm_refs(mem, req):
-        assert mem.req_to_indexer_tail is req.req_to_indexer_tail
-        assert mem.req_to_conv_state is req.req_to_conv_state
-        assert mem.req_to_ssm_state is req.req_to_ssm_state
-        assert mem.big_page_buffers is None
-
-    monkeypatch.setattr(MemoryManager, "write_to_shm", check_shm_refs)
-
     def create(tp):
         config = Glm5NextCacheConfig(
             tp_world_size=tp,
@@ -61,14 +57,24 @@ def make_mems(monkeypatch, request):
             draft_full_att_kv_layer_num=int(mtp_step > 0),
         )
         mems = []
+        states = []
         for _ in range(tp):
-            mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(mtp_step > 0), config)
-            req = Glm5NextReqManager(3, 32, mem, config)
-            mem.write_to_shm(req)
-            assert mem.big_page_buffers is not None
+            mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(mtp_step > 0))
+            mem.set_kv_layer_mapping(config.get_full_att_kv_layer_mapping())
+            coordinator = HybridCacheCoordinator(
+                LinearStateManager(3, config, args), IndexerStateManager(3, config, mtp_step)
+            )
+            coordinator.bind_mem_manager(mem)
+            assert not hasattr(mem, "req_to_conv_state")
+            assert not hasattr(mem, "req_to_ssm_state")
+            assert not hasattr(mem, "req_to_indexer_tail")
+            assert not hasattr(mem, "big_page_buffers")
+            states.append(coordinator.create_state_transfer())
             mems.append(mem)
-        mems[0].alloc_paged_kv_move_buffer(1, 2048)
-        return mems
+        transfer = KVPageTransfer(KVTransferView.from_mem_manager(mems[0], include_page_layout=True))
+        transfer.alloc_paged_kv_move_buffer(1, 2048)
+        states[0].bind_page_buffer(transfer.kv_move_buffer)
+        return mems, states, transfer
 
     return create
 
@@ -76,7 +82,9 @@ def make_mems(monkeypatch, request):
 @pytest.mark.parametrize("prefill_tp,decode_tp", [(1, 1), (4, 4), (1, 4), (4, 1)])
 @pytest.mark.parametrize("remainder", range(4))
 def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, remainder):
-    source, dest = make_mems(prefill_tp), make_mems(decode_tp)
+    (source, source_states, source_transfer), (dest, dest_states, dest_transfer) = make_mems(prefill_tp), make_mems(
+        decode_tp
+    )
     mtp_size = get_env_start_args().mtp_step + 1
     layers = source[0].layer_num
     src_req, dst_req = 0, 2
@@ -89,47 +97,47 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     # Non-live slots deliberately contain stale data. The sequence length, not
     # the bytes in these slots, controls subsequent K-pool completion.
     tail = torch.randn(layers, 3 + mtp_size, 256, dtype=torch.bfloat16, device="cuda")
-    for rank, mem in enumerate(source):
+    for rank, (mem, state) in enumerate(zip(source, source_states)):
         heads = slice(rank * 8 // prefill_tp, (rank + 1) * 8 // prefill_tp)
         mem.kv_buffer.view(torch.uint8)[:, src_indexes] = packed
-        mem.req_to_conv_state.buffer[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
-        mem.req_to_ssm_state.buffer[:, src_req * mtp_size].copy_(ssm[:, heads])
-        mem.req_to_indexer_tail.buffer[:, src_req].copy_(tail)
+        state.req_to_conv_state.buffer[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
+        state.req_to_ssm_state.buffer[:, src_req * mtp_size].copy_(ssm[:, heads])
+        state.req_to_indexer_tail.buffer[:, src_req].copy_(tail)
 
     untouched = []
-    for mem in dest:
+    for mem, state in zip(dest, dest_states):
         mem.kv_buffer.zero_()
-        mem.req_to_conv_state.buffer.normal_()
-        mem.req_to_ssm_state.buffer.normal_()
-        mem.req_to_indexer_tail.buffer.normal_()
+        state.req_to_conv_state.buffer.normal_()
+        state.req_to_ssm_state.buffer.normal_()
+        state.req_to_indexer_tail.buffer.normal_()
         untouched.append(
             [
                 x.buffer[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
                 for x, stride in (
-                    (mem.req_to_conv_state, 1),
-                    (mem.req_to_ssm_state, mtp_size),
-                    (mem.req_to_indexer_tail, 1),
+                    (state.req_to_conv_state, 1),
+                    (state.req_to_ssm_state, mtp_size),
+                    (state.req_to_indexer_tail, 1),
                 )
             ]
         )
 
-    source[0].write_mem_to_page_kv_move_buffer(src_indexes, 0, 0, source, prefill_tp)
+    source_transfer.write_mem_to_page_kv_move_buffer(src_indexes, 0, 0, source, prefill_tp)
     # Model a byte-preserving transport between separate P/D page buffers.
-    dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
-    dest[0].read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp)
-    source[0].write_mem_to_page_kv_move_buffer([], 0, 0, source, prefill_tp, "att_state", src_req)
-    dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
-    dest[0].read_page_kv_move_buffer_to_mem([], 0, 0, dest, decode_tp, "att_state", dst_req)
+    dest_transfer.kv_move_buffer.view(torch.uint8).copy_(source_transfer.kv_move_buffer.view(torch.uint8))
+    dest_transfer.read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp)
+    source_states[0].write_req_to_page(0, src_req, source_states[0].get_dp_states(source_states, 0, prefill_tp))
+    dest_transfer.kv_move_buffer.view(torch.uint8).copy_(source_transfer.kv_move_buffer.view(torch.uint8))
+    dest_states[0].read_page_to_req(0, dst_req, dest_states[0].get_dp_states(dest_states, 0, decode_tp))
     torch.cuda.synchronize()
 
-    for rank, mem in enumerate(dest):
+    for rank, (mem, state) in enumerate(zip(dest, dest_states)):
         heads = slice(rank * 8 // decode_tp, (rank + 1) * 8 // decode_tp)
         assert torch.equal(mem.kv_buffer.view(torch.uint8)[:, dst_indexes], packed)
-        assert torch.equal(mem.req_to_conv_state.buffer[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3))
-        assert torch.equal(mem.req_to_ssm_state.buffer[:, dst_req * mtp_size], ssm[:, heads])
-        assert torch.equal(mem.req_to_indexer_tail.buffer[:, dst_req], tail)
+        assert torch.equal(state.req_to_conv_state.buffer[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3))
+        assert torch.equal(state.req_to_ssm_state.buffer[:, dst_req * mtp_size], ssm[:, heads])
+        assert torch.equal(state.req_to_indexer_tail.buffer[:, dst_req], tail)
         for (state, stride), expected in zip(
-            ((mem.req_to_conv_state, 1), (mem.req_to_ssm_state, mtp_size), (mem.req_to_indexer_tail, 1)),
+            ((state.req_to_conv_state, 1), (state.req_to_ssm_state, mtp_size), (state.req_to_indexer_tail, 1)),
             untouched[rank],
         ):
             indexes = torch.tensor([0, 1, 3], device="cuda") * stride
@@ -142,12 +150,15 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     ape = torch.randn(4, 128, device="cuda")
     tensor = lambda values: torch.tensor(values, dtype=torch.int32, device="cuda")
     outputs = []
-    for mem, req_idx, indexes in ((source[0], src_req, src_indexes), (dest[0], dst_req, dst_indexes)):
+    for mem, state, req_idx, indexes in (
+        (source[0], source_states[0], src_req, src_indexes),
+        (dest[0], dest_states[0], dst_req, dst_indexes),
+    ):
         new_indexes = [i for i in range(32) if i not in indexes][:count]
         all_indexes = indexes + new_indexes
         compress_pools(
             raw=raw,
-            tail=mem.req_to_indexer_tail.buffer[0],
+            tail=state.req_to_indexer_tail.buffer[0],
             packed_buffer=mem.get_indexer_k_buffer(3),
             ape=ape,
             lengths=tensor(range(length + 1, length + count + 1)),
@@ -163,10 +174,10 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
 
 
 def test_pd_page_capacity_includes_tail_without_resizing(make_mems):
-    mem = make_mems(1)[0]
-    helper = mem.att_state_page_helper
+    mems, states, transfer = make_mems(1)
+    mem, helper = mems[0], states[0]
     # A page that fits Conv+SSM but not the appended tail must be rejected.
-    mem.kv_move_buffer = torch.empty((1, helper.tail_offset), dtype=torch.uint8, device="cuda")
+    helper.kv_move_buffer = torch.empty((1, helper.tail_offset), dtype=torch.uint8, device="cuda")
     with pytest.raises(AssertionError, match="smaller than global linear att state"):
         helper.assert_page_size()
     shape = mem.get_paged_kv_move_buffer_shape(2, 2048)

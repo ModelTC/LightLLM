@@ -49,7 +49,8 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
     ):
         context.register(
             backend=SimpleNamespace(dp_rank_in_node=0),
-            req_manager=SimpleNamespace(req_sampling_params_manager=None),
+            req_manager=SimpleNamespace(req_sampling_params_manager=None, mem_manager=None),
+            cache_coordinator=infer_batch.HybridCacheCoordinator(),
             radix_cache=None,
             shm_req_manager=None,
             vocab_size=257,

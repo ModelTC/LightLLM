@@ -1,3 +1,4 @@
+from lightllm.common.cache_coordinator import CacheCoordinator
 from types import SimpleNamespace
 
 import pytest
@@ -13,6 +14,7 @@ def test_chunk_ids_and_lengths_use_the_same_complete_boundaries(hybrid, spans):
     req.args = SimpleNamespace(
         chunked_prefill_size=256,
         batch_max_tokens=1024,
+        disable_chunked_prefill=False,
         linear_att_hash_page_size=64,
         linear_att_page_block_num=8,
     )
@@ -75,17 +77,26 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     context.args = req.args
     context.is_hybrid_att_model = True
     context.radix_cache = SimpleNamespace(
-        big_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: next(slots)),
-        small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7),
+        big_page_buffers=SimpleNamespace(
+            alloc_one_state_cache=lambda: next(slots), checkpoint_lens=[None] * len(page_ends)
+        ),
+        small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7, checkpoint_lens=[None] * 8),
         free_one_small_page_buffer=lambda: None,
     )
-    context.req_manager = SimpleNamespace(
-        save_big_page_states=lambda **kwargs: big_snapshots.append(req.get_chuncked_input_token_len()),
-        save_state=lambda **kwargs: small_snapshots.append(req.get_chuncked_input_token_len()),
+    from lightllm.common.cache_coordinator import HybridCacheCoordinator
+
+    context.cache_coordinator = HybridCacheCoordinator(
+        state_manager=SimpleNamespace(
+            capture_intermediate_checkpoints=False,
+            save_checkpoints=lambda req_idx, reqs, slots, pool, lengths: big_snapshots.extend(lengths),
+            save_state=lambda req_idx, slot, pool, length: small_snapshots.append(length),
+        )
     )
+    context.cache_coordinator.big_page_buffers = context.radix_cache.big_page_buffers
+    context.cache_coordinator.small_page_buffers = context.radix_cache.small_page_buffers
 
     while req.cur_kv_len < req.get_cur_total_len():
-        context.save_hybrid_state_to_cache(torch.tensor([0]), [req])
+        context.save_cache_state(torch.tensor([0]), [req])
         req.cur_kv_len = req.get_chuncked_input_token_len()
 
     assert big_snapshots == expected_big
@@ -93,6 +104,10 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     assert sorted(req.hybrid_len_to_big_page_id) == page_ends
     assert len(set(req.hybrid_len_to_big_page_id.values())) == len(page_ends)
     assert big_snapshots == [end for end in page_ends if not any(start < end < stop for start, stop in spans)]
+    assert context.radix_cache.big_page_buffers.checkpoint_lens == [
+        end if end in expected_big else None for end in page_ends
+    ]
+    assert context.radix_cache.small_page_buffers.checkpoint_lens[7] == (expected_small[0] if expected_small else None)
 
 
 @pytest.mark.parametrize(
@@ -131,6 +146,7 @@ def test_full_attention_gpu_restore_stays_outside_image(
     req.shared_kv_node = None
     req.mm_input_spans = [(700, 1200)]
     req.shm_req = SimpleNamespace(input_len=len(query), shm_prompt_ids=SimpleNamespace(arr=query))
+    monkeypatch.setattr(g_infer_context, "cache_coordinator", CacheCoordinator())
     req._match_radix_cache()
     assert req.cur_kv_len == req.hold_kv_len == gpu_end
     assert not any(start < gpu_end < end for start, end in req.mm_input_spans)
@@ -188,6 +204,7 @@ def test_mm_chunking_keeps_the_original_state_cache_position(monkeypatch, disabl
         linear_att_page_block_num=8,
         disable_chunked_mm_input=disable_chunked_mm_input,
         batch_max_tokens=1024,
+        disable_chunked_prefill=False,
     )
     req.shm_index, req.vocab_size = 0, 100
     req.multimodal_params = SimpleNamespace(
@@ -269,10 +286,12 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
             mem_manager=SimpleNamespace(
                 operator=SimpleNamespace(
                     load_cpu_cache_to_gpu=lambda **kwargs: loaded.append(req.cur_kv_len),
+                    get_cpu_cache_match_page_num=lambda pages, *args: len(pages),
                 )
             ),
         ),
     )
+    module.backend.model.cache_coordinator = module.backend.model.mem_manager.operator
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False

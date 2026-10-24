@@ -596,7 +596,8 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         # A large capacity also exercises query chunking and uninitialized
         # logits beyond each query's actual pool range.
         max_kv_seq_len=max_kv_seq_len,
-        req_manager=SimpleNamespace(req_to_token_indexs=ragged[None], get_indexer_tail_buffer=lambda _: tail),
+        req_manager=SimpleNamespace(req_to_token_indexs=ragged[None]),
+        indexer_state_manager=SimpleNamespace(get_layer_buffer=lambda _: tail),
         b_req_idx=torch.zeros(1, device="cuda", dtype=torch.int32),
         b_seq_len=torch.tensor([tokens], device="cuda", dtype=torch.int32),
         b1_cu_q_seq_len=torch.tensor([0, tokens], device="cuda", dtype=torch.int32),

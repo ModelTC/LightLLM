@@ -139,7 +139,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         layer_num = linear_att_dict["layer_num"]
         backend: LinearAttBackend = self.backend
 
-        conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
+        conv_states, ssm_states = self.infer_state.linear_state_manager.get_layer_buffers(layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
         if backend.mtp_step > 0:
@@ -227,7 +227,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         ) = build_dynamic_mtp_linear_att_state_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=self.infer_state.req_manager.req_to_mtp_state_index,
+            req_to_mtp_state_index=self.infer_state.linear_state_manager.mtp_state_index,
             hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
         self._init_mtp_ssm_buffer_idx(mtp_size)
@@ -249,7 +249,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             device=self.infer_state.b_req_idx.device,
         )
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = self.infer_state.req_manager.req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
+        self.b_num_accepted_tokens = self.infer_state.linear_state_manager.mtp_state_index[self.b_conv_buffer_idx] + 1
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
@@ -281,7 +281,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         backend: LinearAttBackend = self.backend
 
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        conv_states, ssm_states = self.infer_state.req_manager.get_mamba_cache(layer_num)
+        conv_states, ssm_states = self.infer_state.linear_state_manager.get_layer_buffers(layer_num)
 
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:

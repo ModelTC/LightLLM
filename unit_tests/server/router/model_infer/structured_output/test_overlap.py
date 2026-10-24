@@ -67,7 +67,7 @@ def test_overlap_handoff_completes_postprocessing_before_sampling(
         impl.torch.cuda, "Event", lambda: SimpleNamespace(record=lambda: None, synchronize=lambda: None)
     )
     monkeypatch.setattr(impl.g_infer_context, "get_overlap_stream", lambda: None)
-    monkeypatch.setattr(impl.g_infer_context, "save_hybrid_state_to_cache", lambda **kwargs: None)
+    monkeypatch.setattr(impl.g_infer_context, "save_cache_state", lambda **kwargs: None)
     monkeypatch.setattr(impl.g_infer_context, "is_hybrid_att_model", False)
     second_forward = Event()
     order, errors = [], []

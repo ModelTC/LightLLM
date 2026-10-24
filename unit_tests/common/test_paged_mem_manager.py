@@ -4,9 +4,9 @@ import pytest
 import torch
 
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
-from lightllm.common.kv_cache_mem_manager.deepseek2_mem_manager import Deepseek2MemoryManager
-from lightllm.common.kv_cache_mem_manager.ppl_int4kv_mem_manager import PPLINT4KVMemoryManager
-from lightllm.common.kv_cache_mem_manager.ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
+from lightllm.common.kv_cache_mem_manager.mla_mem_manager import MlaMemoryManager
+from lightllm.common.kv_cache_mem_manager.group_quantized_mem_manager import PPLINT4KVMemoryManager
+from lightllm.common.kv_cache_mem_manager.group_quantized_mem_manager import PPLINT8KVMemoryManager
 
 
 def test_kv_cache_allocation_requires_complete_pages():
@@ -22,7 +22,7 @@ def test_kv_cache_allocation_requires_complete_pages():
 
 @pytest.mark.parametrize(
     "manager_class",
-    [MemoryManager, Deepseek2MemoryManager, PPLINT4KVMemoryManager, PPLINT8KVMemoryManager],
+    [MemoryManager, MlaMemoryManager, PPLINT4KVMemoryManager, PPLINT8KVMemoryManager],
 )
 def test_kv_cache_buffer_size_requires_complete_pages(manager_class):
     manager = manager_class.__new__(manager_class)

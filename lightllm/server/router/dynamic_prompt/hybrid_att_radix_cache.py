@@ -119,6 +119,7 @@ class HybridAttPagedRadixCache:
         big_page_num: int,
         kv_cache_mem_manager=None,
         small_page_buffers=None,
+        big_page_buffers=None,
     ):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
@@ -132,7 +133,7 @@ class HybridAttPagedRadixCache:
 
         self.mem_manager: MemoryManager = kv_cache_mem_manager
 
-        self.big_page_buffers: StateCacheManager = self.mem_manager.big_page_buffers
+        self.big_page_buffers: StateCacheManager = big_page_buffers
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -247,6 +248,13 @@ class HybridAttPagedRadixCache:
                     # 提前释放 len_to_big_page_id 对应的buffer资源
                     new_big_page_buffer_id = len_to_big_page_id.pop(child.node_prefix_total_len, None)
                     if new_big_page_buffer_id is not None:
+                        if not self.big_page_buffers.has_checkpoint(
+                            child.big_page_buffer_idx, child.node_prefix_total_len
+                        ) and self.big_page_buffers.has_checkpoint(new_big_page_buffer_id, child.node_prefix_total_len):
+                            child.big_page_buffer_idx, new_big_page_buffer_id = (
+                                new_big_page_buffer_id,
+                                child.big_page_buffer_idx,
+                            )
                         # 因为节点已经存在，所以无法插入，但是要释放对应的buffer_id 节点
                         self.big_page_buffers.free_state_cache([new_big_page_buffer_id])
 
@@ -364,12 +372,10 @@ class HybridAttPagedRadixCache:
             ans_node_list=ans_node_list,
             update_refs=update_refs,
         )
-        if len(ans_node_list) == 0:
-            return None, 0, None
-
         # 判定真正可以用的匹配节点。
         ans_node_list = self._trim_unusable_match_tail(ans_node_list, mm_input_spans=mm_input_spans)
         if len(ans_node_list) == 0:
+            self.dec_node_ref_counter(self.root_node)
             return None, 0, None
 
         ans_node = ans_node_list[-1]
@@ -442,7 +448,12 @@ class HybridAttPagedRadixCache:
         """
         removed_list = []
         for node in reversed(nodes):
-            has_state = node.is_big_page_node() or node.small_page_buffer_idx is not None
+            if node.is_big_page_node():
+                has_state = self.big_page_buffers.has_checkpoint(node.big_page_buffer_idx, node.node_prefix_total_len)
+            else:
+                has_state = self.small_page_buffers.has_checkpoint(
+                    node.small_page_buffer_idx, node.node_prefix_total_len
+                )
             outside_mm = clamp_mm_cache_len(node.node_prefix_total_len, mm_input_spans) == node.node_prefix_total_len
             if has_state and outside_mm:
                 break
@@ -478,7 +489,7 @@ class HybridAttPagedRadixCache:
         return
 
     def deref_to_first_big_page_node(
-        self, node: HybridAttPagedTreeNode, mm_input_spans: Sequence[Tuple[int, int]] = ()
+        self, node: HybridAttPagedTreeNode, mm_input_spans: Sequence[Tuple[int, int]] = (), require_state=True
     ) -> Optional[HybridAttPagedTreeNode]:
         """回退到最近的大页；用于恢复 state 时，传入图片区间以跳过图内边界。"""
         assert not node.is_big_page_node()
@@ -486,7 +497,11 @@ class HybridAttPagedRadixCache:
         while iter_node is not self.root_node:
             node_end = iter_node.node_prefix_total_len
             outside_mm = clamp_mm_cache_len(node_end, mm_input_spans) == node_end
-            if iter_node.is_big_page_node() and outside_mm:
+            if (
+                iter_node.is_big_page_node()
+                and outside_mm
+                and (not require_state or self.big_page_buffers.has_checkpoint(iter_node.big_page_buffer_idx, node_end))
+            ):
                 break
 
             self._discard_node(iter_node)
@@ -500,6 +515,7 @@ class HybridAttPagedRadixCache:
             iter_node = iter_node.parent
 
         if iter_node is self.root_node:
+            self.dec_node_ref_counter(self.root_node)
             return None
         else:
             return iter_node

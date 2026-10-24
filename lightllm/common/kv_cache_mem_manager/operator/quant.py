@@ -93,7 +93,8 @@ class QuantScaleMemOperator(BaseMemManagerOperator):
 
 class PPLInt4KVMemOperator(QuantScaleMemOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.common.kv_cache_mem_manager.ppl_int4kv_mem_manager import PPLINT4KVMemoryManager
+        layer_index = self.mem_manager.get_kv_layer_index(layer_index)
+        from lightllm.common.kv_cache_mem_manager.group_quantized_mem_manager import PPLINT4KVMemoryManager
 
         mem_manager: PPLINT4KVMemoryManager = self.mem_manager
         from ...basemodel.triton_kernel.kv_copy.ppl_int4kv_copy_kv import (
@@ -112,7 +113,8 @@ class PPLInt4KVMemOperator(QuantScaleMemOperator):
 
 class PPLInt8KVMemOperator(QuantScaleMemOperator):
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
-        from lightllm.common.kv_cache_mem_manager.ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
+        layer_index = self.mem_manager.get_kv_layer_index(layer_index)
+        from lightllm.common.kv_cache_mem_manager.group_quantized_mem_manager import PPLINT8KVMemoryManager
 
         mem_manager: PPLINT8KVMemoryManager = self.mem_manager
         from ...basemodel.triton_kernel.kv_copy.ppl_int8kv_copy_kv import (

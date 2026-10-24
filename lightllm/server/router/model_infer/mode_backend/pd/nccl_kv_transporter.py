@@ -434,6 +434,7 @@ class _NcclControlChannel:
     def _start_server(self, host_ip: str, port_min: int, port_max: int) -> tuple[ThreadedServer, int]:
         last_error = None
         for cur_port in range(port_min, port_max + 1):
+            server = None
             try:
                 server = ThreadedServer(
                     _NcclControlService(self),
@@ -446,10 +447,13 @@ class _NcclControlChannel:
                         "allow_setattr": True,
                     },
                 )
+                server._listen()
                 threading.Thread(target=server.start, daemon=True).start()
                 logger.info(f"NCCL RPyC control channel listen on {host_ip}:{cur_port}")
                 return server, cur_port
             except OSError as e:
+                if server is not None:
+                    server.close()
                 last_error = e
                 if e.errno == errno.EADDRINUSE:
                     logger.info(f"NCCL RPyC control port {host_ip}:{cur_port} is in use, try next port")

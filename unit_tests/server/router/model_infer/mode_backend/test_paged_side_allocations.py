@@ -121,7 +121,7 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
         dp_world_size=1,
         rank_in_dp=0,
         node_nccl_group=None,
-        mem_managers=[SimpleNamespace(req_to_token_indexs=source_table)] * 2,
+        req_to_token_indexes_by_rank=[source_table] * 2,
     )
     backend._alloc_req_kv_mem = lambda cur_req, size: _reserve_into_table(table, cur_req, alloc_sizes, next_index, size)
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)

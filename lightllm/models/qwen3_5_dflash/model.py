@@ -32,7 +32,7 @@ class Qwen3_5DFlashModel(Qwen3DFlashModel):
         target_mem_manager = self.main_model.mem_manager
         draft_kv_shape = (self.config["num_key_value_heads"], self.config["head_dim"])
         target_kv_shape = (
-            target_mem_manager.linear_config.full_att_all_num_kv_heads,
+            self.main_model.linear_config.full_att_all_num_kv_heads,
             target_mem_manager.head_dim,
         )
         assert draft_kv_shape == target_kv_shape, (
