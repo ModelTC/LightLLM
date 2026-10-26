@@ -96,6 +96,7 @@ class _WriteRecovery:
     original: PDChunckedTransTask
     fence: PDChunckedTransTask
     next_check_time: float = 0.0
+    deadline: float = 0.0
     post_confirmed: bool = False
     attempts: int = 0
     retired_handles: List[object] = field(default_factory=list)
@@ -220,12 +221,14 @@ class _PrefillTransModule:
             if not fence.write_quiesced:
                 if recovery.post_confirmed:
                     status = self.transporter.check_task_status(fence)
-                    if status in ("PROC", "UNKNOWN"):
-                        return
                     if status == "DONE":
                         fence.write_quiesced = True
+                    elif status in ("PROC", "UNKNOWN") and time.monotonic() < recovery.deadline:
+                        return
                     else:
                         recovery.post_confirmed = False
+                        if status in ("PROC", "UNKNOWN"):
+                            logger.warning(f"WRITE recovery fence timed out; retaining handle: {task.get_key()}")
                 if not fence.write_quiesced:
                     # An unposted, prepared handle can also report DONE. Only a
                     # fence whose native post returned PROC/DONE provides proof.
@@ -491,6 +494,7 @@ class _PrefillTransModule:
                 recovery = trans_task
                 try:
                     recovery.attempts += 1
+                    recovery.deadline = time.monotonic() + recovery.original.transfer_time_out_secs
                     status = self.transporter.start_write_fence(recovery.original, recovery.fence)
                     recovery.post_confirmed = status in ("PROC", "DONE")
                 except Exception:

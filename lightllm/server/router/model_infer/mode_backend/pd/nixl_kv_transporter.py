@@ -18,10 +18,27 @@ try:
     from nixl._api import nixl_agent_config
     from nixl._api import nixl_thread_sync_t
 
+    # getXferStatus raises these binding exceptions for negative native status
+    # codes; the Python wrapper's string ERR branch is not reached in that case.
+    _NIXL_XFER_ERRORS = (
+        nixlBind.nixlNotPostedError,
+        nixlBind.nixlInvalidParamError,
+        nixlBind.nixlBackendError,
+        nixlBind.nixlNotFoundError,
+        nixlBind.nixlMismatchError,
+        nixlBind.nixlNotAllowedError,
+        nixlBind.nixlRepostActiveError,
+        nixlBind.nixlUnknownError,
+        nixlBind.nixlNotSupportedError,
+        nixlBind.nixlRemoteDisconnectError,
+        nixlBind.nixlCancelledError,
+    )
+
     logger.info("Nixl is available")
 except ImportError:
     logger.warning("nixl is not installed, which is required for pd disagreggation!!!")
     NixlWrapper = None
+    _NIXL_XFER_ERRORS = ()
 
 
 class NixlKVTransporter:
@@ -351,6 +368,10 @@ class NixlKVTransporter:
         handle = trans_task.xfer_handle
         try:
             xfer_state = self.nixl_agent.check_xfer_state(handle)
+        except _NIXL_XFER_ERRORS as e:
+            logger.error(f"Native NIXL transfer failed with trans task {trans_task.to_str()} for handle {handle}")
+            logger.exception(str(e))
+            return "ERR"
         except Exception as e:
             logger.error(f"Check transfer state failed with trans task {trans_task.to_str()} for handle {handle}")
             logger.exception(str(e))

@@ -273,6 +273,73 @@ def test_heartbeat_cache_follows_serialized_send_completion():
     asyncio.run(run())
 
 
+def test_cancelled_immediate_heartbeat_invalidates_cache_and_reports_recovery(managers):
+    async def run():
+        master = managers()
+        node = master.prefill_nodes[0]
+        status = _status()
+        messages = []
+        frame_written = asyncio.Event()
+
+        async def send(data):
+            message = pickle.loads(data)
+            if message[0] == ObjType.HEARTBEAT:
+                master.update_transfer_availability(node, message[1])
+                messages.append(message[1])
+                if message[1] is False:
+                    frame_written.set()
+                    # The frame reached master; the send is still draining.
+                    await asyncio.Event().wait()
+
+        async def generate(**kwargs):
+            raise PDTransportUnavailableError()
+            yield
+
+        socket = SimpleNamespace(send=send)
+        reporter = pd_loop._PDHeartbeatReporter(socket, status)
+        await reporter.report()
+        last_sent = reporter.last_sent
+        status.set_quarantined_pages(0, 2)
+        manager = SimpleNamespace(generate=generate, cancel_pd_request_registration=lambda _: None)
+        request_task = asyncio.create_task(
+            pd_loop._pd_process_generate(
+                manager, "prompt", SimpleNamespace(group_request_id=123), {}, None, socket, None, reporter
+            )
+        )
+        await frame_written.wait()
+        assert node not in master.selector.prefill_nodes
+        request_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await request_task
+        assert reporter.last_available is None
+        assert reporter.last_sent == last_sent
+        status.set_quarantined_pages(0, 0)
+        await reporter.report()
+        assert messages == [True, False, True]
+        assert node in master.selector.prefill_nodes
+
+    asyncio.run(run())
+
+
+def test_heartbeat_send_exception_invalidates_cache_and_preserves_exception():
+    async def run():
+        socket = SimpleNamespace(send=AsyncMock())
+        reporter = pd_loop._PDHeartbeatReporter(socket, None)
+        await reporter.report()
+        error = ConnectionError("delivery unknown")
+        socket.send.side_effect = error
+        with pytest.raises(ConnectionError) as caught:
+            await reporter.report(False)
+        assert caught.value is error
+        assert reporter.last_available is None
+        socket.send.reset_mock(side_effect=True)
+        await reporter.report()
+        socket.send.assert_awaited_once()
+        assert pickle.loads(socket.send.await_args.args[0]) == (ObjType.HEARTBEAT, True)
+
+    asyncio.run(run())
+
+
 def test_each_master_applies_heartbeat_to_its_own_registered_connection(monkeypatch, managers):
     for manager in (managers(), managers()):
         node = manager.prefill_nodes[0]

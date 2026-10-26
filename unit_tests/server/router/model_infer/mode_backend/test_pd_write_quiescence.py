@@ -9,6 +9,7 @@ import pytest
 
 from lightllm.server.pd_io_struct import PDChunckedTransTask
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import _DecodeTransModule
+from lightllm.server.router.model_infer.mode_backend.pd import nixl_kv_transporter
 from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_trans_process
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_trans_process import (
@@ -755,3 +756,131 @@ def test_nixl_query_exception_is_unknown_rather_than_native_err():
     transporter.nixl_agent.check_xfer_state.side_effect = None
     transporter.nixl_agent.check_xfer_state.return_value = "ERR"
     assert transporter.check_task_status(task) == "ERR"
+
+
+@pytest.mark.skipif(nixl_kv_transporter.NixlWrapper is None, reason="NIXL bindings are not installed")
+@pytest.mark.parametrize(
+    "exception_name",
+    [
+        "nixlBackendError",
+        "nixlRemoteDisconnectError",
+        "nixlCancelledError",
+        "nixlNotFoundError",
+        "nixlUnknownError",
+    ],
+)
+def test_native_binding_errors_traverse_real_python_wrapper_and_trigger_bounded_fence_retries(exception_name):
+    # Keep the actual NIXL check_xfer_state body and actual native exception type;
+    # replace only getXferStatus's native call, which needs no GPU for this test.
+    native_error = getattr(nixl_kv_transporter.nixlBind, exception_name)
+    agent = nixl_kv_transporter.NixlWrapper.__new__(nixl_kv_transporter.NixlWrapper)
+    agent.agent = SimpleNamespace(getXferStatus=MagicMock(side_effect=native_error("injected native failure")))
+    transporter = NixlKVTransporter.__new__(NixlKVTransporter)
+    transporter.nixl_agent = agent
+    module = _module(_PrefillTransModule)
+    task = _uncertain_source(module)
+    module.transporter.check_task_status = transporter.check_task_status
+    handles = []
+
+    def submit(original, fence):
+        handle = SimpleNamespace(_handle=len(handles) + 8)
+        handles.append(handle)
+        fence.xfer_handle = handle
+        fence.write_submitted = True
+        return "PROC"
+
+    module.transporter.start_write_fence = submit
+    for attempt in range(1, 4):
+        recovery = _start_recovery(module)
+        assert recovery.attempts == attempt
+        recovery.next_check_time = 0
+        module._update_task_status_once()
+    assert recovery.fence.write_uncertain
+    assert recovery.retired_handles == handles[:2]
+    assert recovery.fence.xfer_handle is handles[2]
+    assert agent.agent.getXferStatus.call_count == 3
+    assert module.write_peer_kv_queue.empty()
+    assert module.page_index_queue.empty() and not task.write_quiesced
+    module.transporter.release_xfer_handle.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["PROC", "UNKNOWN"])
+def test_recovery_wait_has_deadline_and_retains_all_timed_out_handles(monkeypatch, status):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(prefill_trans_process.time, "monotonic", lambda: clock.now)
+    module = _module(_PrefillTransModule)
+    task = _uncertain_source(module)
+    task.transfer_time_out_secs = 4
+    handles = []
+
+    def submit(original, fence):
+        handle = len(handles) + 8
+        handles.append(handle)
+        fence.xfer_handle = handle
+        fence.write_submitted = True
+        return "PROC"
+
+    module.transporter.start_write_fence = submit
+    module.transporter.check_task_status.return_value = status
+    for attempt in range(1, 4):
+        recovery = _start_recovery(module)
+        assert recovery.attempts == attempt
+        assert recovery.deadline == clock.now + task.transfer_time_out_secs
+        clock.now = recovery.deadline - 0.1
+        recovery.next_check_time = 0
+        module._update_task_status_once()
+        assert recovery.post_confirmed
+        assert module.write_peer_kv_queue.empty()
+        clock.now = recovery.deadline
+        recovery.next_check_time = 0
+        module._update_task_status_once()
+        assert not recovery.post_confirmed
+    assert recovery.fence.write_uncertain
+    assert recovery.retired_handles == [8, 9]
+    assert recovery.fence.xfer_handle == 10
+    assert module.write_peer_kv_queue.empty() and module.page_index_queue.empty()
+    module.transporter.release_xfer_handle.assert_not_called()
+
+
+def test_recovery_after_wait_timeout_drains_and_releases_previous_handle(monkeypatch):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(prefill_trans_process.time, "monotonic", lambda: clock.now)
+    module = _module(_PrefillTransModule)
+    task = _uncertain_source(module)
+    module.transporter.start_write_fence = _submit_fence
+    recovery = _start_recovery(module)
+    clock.now = recovery.deadline
+    recovery.next_check_time = 0
+    module._update_task_status_once()
+    assert recovery.retired_handles == [8]
+    assert not task.write_quiesced
+
+    def submit(original, fence):
+        fence.xfer_handle = 9
+        fence.write_submitted = True
+        return "PROC"
+
+    module.transporter.start_write_fence = submit
+    _start_recovery(module)
+    module.transporter.check_task_status.return_value = "DONE"
+    recovery.next_check_time = 0
+    module._update_task_status_once()
+    assert task.write_quiesced
+    assert module.page_index_queue.get_nowait() == 0
+    assert [call.args for call in module.transporter.release_xfer_handle.call_args_list] == [(9,), (8,), (7,)]
+
+
+def test_completed_fence_proof_is_accepted_even_if_periodic_check_runs_after_deadline(monkeypatch):
+    clock = SimpleNamespace(now=100.0)
+    monkeypatch.setattr(prefill_trans_process.time, "monotonic", lambda: clock.now)
+    module = _module(_PrefillTransModule)
+    task = _uncertain_source(module)
+    module.transporter.start_write_fence = _submit_fence
+    recovery = _start_recovery(module)
+    clock.now = recovery.deadline + 1
+    module.transporter.check_task_status.return_value = "DONE"
+    module._update_task_status_once()
+    assert task.write_quiesced
+    assert module.page_index_queue.get_nowait() == 0
+    assert module.write_peer_kv_queue.empty()
+    assert recovery.attempts == 1

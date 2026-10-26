@@ -418,7 +418,14 @@ class _PDHeartbeatReporter:
                 available = self.transfer_status is None or self.transfer_status.is_available()
             now = asyncio.get_running_loop().time()
             if available != self.last_available or now - self.last_sent >= 15:
-                await self.websocket.send(pickle.dumps((ObjType.HEARTBEAT, available)))
+                try:
+                    await self.websocket.send(pickle.dumps((ObjType.HEARTBEAT, available)))
+                except BaseException:
+                    # The frame may be written before send() finishes draining.
+                    # Cancellation/failure leaves delivery unknown, so re-report
+                    # current state at the next periodic check.
+                    self.last_available = None
+                    raise
                 self.last_available = available
                 self.last_sent = now
 
