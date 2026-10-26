@@ -338,13 +338,13 @@ class FullAttentionState:
     # layout 描述该 State 在外部页中的位置及本地轴到页内轴的映射。
     def write_to_cpu(
         self, token_indices, cpu_buffer, cpu_page_indices,
-        *, layout: BufferTransferLayout, page_token_offset: int = 0,
+        *, layout: BufferTransferLayout,
     ) -> None:
         raise NotImplementedError
 
     def read_from_cpu(
         self, cpu_buffer, cpu_page_indices, token_indices,
-        *, layout: BufferTransferLayout, page_token_offset: int = 0,
+        *, layout: BufferTransferLayout,
     ) -> None:
         raise NotImplementedError
 
@@ -358,13 +358,13 @@ class FullAttentionState:
     # pd_buffer 为已选中的一页，区域偏移相对该页起点。
     def write_to_pd_buffer(
         self, token_indices, pd_buffer,
-        *, layout: BufferTransferLayout, page_token_offset: int = 0,
+        *, layout: BufferTransferLayout,
     ) -> None:
         raise NotImplementedError
 
     def read_from_pd_buffer(
         self, pd_buffer, token_indices,
-        *, layout: BufferTransferLayout, page_token_offset: int = 0,
+        *, layout: BufferTransferLayout,
     ) -> None:
         raise NotImplementedError
 ```
@@ -444,11 +444,11 @@ GLM 当前 attention 读取的只是 packed buffer 的一部分；indexer 还使
 
 | 接口 | 数据方向与位置参数 |
 | --- | --- |
-| `write_to_cpu(..., layout, page_token_offset=0)` | 当前 State → CPU 缓存；layout 描述外部页区域、层/轴映射和写入副本选择 |
-| `read_from_cpu(..., layout, page_token_offset=0)` | CPU 缓存 → 当前 State；layout 描述该目标 State 从页中读取的对应范围 |
+| `write_to_cpu(..., layout)` | 当前 State → CPU 缓存；layout 描述外部页区域、层/轴映射和写入副本选择 |
+| `read_from_cpu(..., layout)` | CPU 缓存 → 当前 State；layout 描述该目标 State 从页中读取的对应范围 |
 | `copy_from_dp(src_state, src_token_indices, dst_token_indices, mapping=...)` | 一个明确源 State → 当前 State；mapping 描述两侧字段、物理层及分片范围的对应 |
-| `write_to_pd_buffer(..., layout, page_token_offset=0)` | 当前 State → 已选中的 PD 页；按 layout 写入指定区域 |
-| `read_from_pd_buffer(..., layout, page_token_offset=0)` | 已选中的 PD 页 → 当前 State；按 layout 恢复对应区域 |
+| `write_to_pd_buffer(..., layout)` | 当前 State → 已选中的 PD 页；按 layout 写入指定区域 |
+| `read_from_pd_buffer(..., layout)` | 已选中的 PD 页 → 当前 State；按 layout 恢复对应区域 |
 
 `write_to_*` 表示将本 State 的数据写到外部区域，`read_from_*` 表示从外部区域读入本 State。DP 的源明确到具体 State，组合层按源 DP/TP/资源及对应 token 分组；一个目标分片需要多个来源时，以多次直接调用覆盖，不假定源 rank 与目标 rank 一一对应。
 
@@ -523,7 +523,7 @@ model.bind_attention_resources(attention_resources)
 | 本地存储布局与分片事实 | 具体 State，在初始化时确定并通过 `StorageDescriptor` 描述 | 物理层映射、Tensor stride、packed 字段偏移、字段的全局 head 范围、TP 副本关系 |
 | 组合页布局及资源间分区 | 模型专属 `AttResourceManager` 根据参与资源和 CPU/PD 格式组织，结合传输端确认的格式生成 | main/full、draft/full、Conv、SSM、tail 各区域的起点、大小、对齐和总页跨度 |
 | 某个 State 到外部页、或两个 State 之间的位置映射 | 管理器在传输初始化时生成并缓存；具体 State 校验是否支持 | `BufferTransferLayout`、`StateCopyMapping`；按资源、路径、对端配置分别保存 |
-| 本次实际位置和长度 | 请求流程/传输调度显式传入 | 已分配的 token 索引、CPU 页 ID、所选 PD 页、页内 token 起点、有效 token 数 |
+| 本次实际位置和长度 | 请求流程/传输调度显式传入 | 已分配的 token 索引、CPU 页 ID、所选 PD 页、有效 token 数 |
 
 资源的全局身份须包括模型角色及资源标识，不能只用层号识别 main/draft。一个模型可以有多个同类 State；管理器组织内部组合，不增加固定的六个成员变量。共享 allocator 只保证索引域，不能推导层、head、字段或传输字节位置。
 
@@ -579,7 +579,7 @@ class BufferTransferLayout:
 
 `field` 在初始化时与 State 自身描述匹配；本地 Tensor、dtype、stride 和字段起点继续由 State 持有。`axes`、`shape`、`strides_bytes` 均描述外部页区域，长度必须相同且轴名唯一。例如 `axes=("token", "layer", "head", "dim")` 明确 stride 元组各项的含义，避免把 CPU 和 PD 不同的维度顺序混用。
 
-`layer_pairs` 定义层选择；存在 layer 轴时必须明确列出对应，不默认源目标层号相同。token 轴由本次索引向量及 `page_token_offset` 驱动，不放进 `axis_slices`。其余实际搬运轴在 `axis_slices` 中明确范围，各轴映射与层对按笛卡尔积组成当前 region 的拷贝范围；某些层需要不同 head 映射时拆分 region，避免产生错误的交叉组合。首版用多个连续片段表达非连续范围，不引入额外的通用索引解释器。
+`layer_pairs` 定义层选择；存在 layer 轴时必须明确列出对应，不默认源目标层号相同。token 轴由本次索引向量驱动，外部页内从槽位 0 开始，不放进 `axis_slices`。其余实际搬运轴在 `axis_slices` 中明确范围，各轴映射与层对按笛卡尔积组成当前 region 的拷贝范围；某些层需要不同 head 映射时拆分 region，避免产生错误的交叉组合。首版用多个连续片段表达非连续范围，不引入额外的通用索引解释器。
 
 `shape` 表达该外部字段区域的完整范围，而 `axis_slices` 表达当前 State 实际访问的子范围；两者不能混淆。`byte_offset` 已包含组合资源的起点，不再重复加一个资源 base offset。CPU 按页 ID 使用 `page_stride_bytes`；PD 传入已选中的一页，方法验证该页容纳完整布局。
 
@@ -633,15 +633,28 @@ buffer.data_ptr()
 
 `data_ptr()` 已指向传入 Tensor 的起点，不重复加 Tensor 的 storage offset。State 内部源/目标地址使用该 State 自身 Tensor 的基址及 stride；PyTorch 元素 stride 进入字节描述前乘以对应 dtype 大小。非连续区域必须保留真实 stride，不能通过会产生拷贝的 reshape/contiguous 假装仍指向原写入目标。
 
-`page_token_offset` 只表示本次页内 token 起点，不是 token 的全局序列长度或 State 的物理槽位。令 `i` 为当前索引向量位置，CPU 页池中：
+当前实际 CPU/PD 调用链均从外部页内 token 槽位 0 开始，因此公共接口不增加页内 token 起点参数。令 `i` 为本次索引向量位置：
 
 ```text
-position = page_token_offset + i
-page_id = cpu_page_indices[position // tokens_per_page]
-token_in_page = position % tokens_per_page
+# CPU：按给定页 ID 顺序，从每页槽位 0 开始
+page_id = cpu_page_indices[i // tokens_per_page]
+token_in_page = i % tokens_per_page
+
+# PD：传入的 buffer 已选到一页
+page_id = 0
+token_in_page = i
 ```
 
-约定 `0 <= page_token_offset < tokens_per_page`，非空 CPU 操作的页 ID 数量与覆盖页数一致；PD 单页要求 `page_token_offset + len(token_indices) <= tokens_per_page`。有效 token 数由索引长度给出，未参与的页内位置不写入。只支持整页的实现仍需检查对齐并拒绝部分页，不能忽略新参数。checkpoint 对应的前缀长度继续由 `state_token_lens` 表达。
+当前代码的依据如下：
+
+- PD 的 `KVPageTransfer` 选取完整 `kv_move_buffer[page_index]`，普通和 MLA kernel 都用从 0 开始的 `tid` 定位页内 token。分段任务的请求逻辑起止位置用于选取 State 物理索引；每个任务独立从暂存页头打包/还原，尾页也相同。
+- 普通和量化 CPU 搬运入口要求 token 数是 CPU 页容量的整数倍；offload 按每页 `arange(0, TOKEN_BLOCK)` 写入。上层 CPU load 在已命中 GPU 前缀落于页内时，将该页前半段的已有 KV 索引补回，整页从头恢复，见 [`multi_level_kv_cache.py`](../lightllm/server/router/model_infer/mode_backend/multi_level_kv_cache.py)。
+- 混合 CPU 尾页将有效 token 索引放在前面，尾部补 `-1`，kernel 掩码跳过填充位置；没有从非零页内槽位开始的逻辑，见 [`HybridCpuCacheTransfer`](../lightllm/common/hybrid_cache_transfer.py)。
+- 底层 [`load_cpu_kv_to_gpu`](../lightllm/common/basemodel/triton_kernel/kv_cache_offload.py) 本身使用 `[-move_token_num:]` 截取所列页的末尾 token，单独调用时可以表达非整页后缀。但当前仅由普通/量化入口调用，入口保证整页长度，因此即使跳过前面的完整页，也仍从所选页的槽位 0 开始。不能把底层可表达的能力误认为当前请求流程正在使用的行为。
+
+有效 token 数由索引长度给出。普通 CPU 路径保留整页约束；支持尾页的路径允许最后一页只有前部有效，CPU 页 ID 数量须与覆盖页数一致，PD 单页要求 `len(token_indices) <= tokens_per_page`。checkpoint 对应前缀长度继续由 `state_token_lens` 表达。
+
+上述固定的是 token 维度起点。组合资源的 `byte_offset`、TP head/channel 范围以及 State 的实际物理 token 索引仍可非零，应继续保留在各自的位置映射中。
 
 #### StateCopyMapping：DP 源目标位置对应
 
@@ -671,7 +684,7 @@ CPU 组合页可以继续包含 full-attention、checkpoint 和元数据；PD �
 
 初始化时校验模型/资源身份、格式版本、字段覆盖、dtype 与固定参数、字节对齐、页内地址边界、层/轴映射范围，以及 TP 写入覆盖和副本唯一写入者。各资源的实际写入区域不得相互覆盖；packed 别名按实际物理范围去重。涉及多个布局的描述以实际访问地址为准，不能仅比较 shape。
 
-每次提交校验 token/page 索引和页内起点；源数据须已就绪且保持有效。所有参与 State、TP 分片、checkpoint 元数据写入完成后，组合层才能发布页或请求为 ready。布局格式或参与资源改变时，重新生成映射并重新校验，不能复用旧版本的偏移。
+每次提交校验 token/page 索引、有效长度和对应页数；源数据须已就绪且保持有效。所有参与 State、TP 分片、checkpoint 元数据写入完成后，组合层才能发布页或请求为 ready。布局格式或参与资源改变时，重新生成映射并重新校验，不能复用旧版本的偏移。
 
 ### 6.6 子类实现与直接调用示例
 
@@ -680,25 +693,23 @@ CPU 组合页可以继续包含 full-attention、checkpoint 和元数据；PD �
 ```python
 class DenseFullAttentionState(FullAttentionState):
     def write_to_pd_buffer(
-        self, token_indices, pd_buffer, *, layout, page_token_offset=0,
+        self, token_indices, pd_buffer, *, layout,
     ) -> None:
         dense_kv_to_pd_buffer(
             kv_buffer=self.kv_buffer,
             token_indices=token_indices,
             pd_buffer=pd_buffer,
             layout=layout,
-            page_token_offset=page_token_offset,
         )
 
     def read_from_pd_buffer(
-        self, pd_buffer, token_indices, *, layout, page_token_offset=0,
+        self, pd_buffer, token_indices, *, layout,
     ) -> None:
         dense_pd_buffer_to_kv(
             pd_buffer=pd_buffer,
             kv_buffer=self.kv_buffer,
             token_indices=token_indices,
             layout=layout,
-            page_token_offset=page_token_offset,
         )
 ```
 
@@ -707,13 +718,13 @@ CPU 操作按路径选取该 State 的位置映射：
 ```python
 state.write_to_cpu(
     src_token_indices, cpu_buffer, cpu_page_indices,
-    layout=cpu_write_layout, page_token_offset=0,
+    layout=cpu_write_layout,
 )
 # 当前 stream 上记录 event；所有资源写入完成后发布 CPU 页 ready。
 
 state.read_from_cpu(
     cpu_buffer, cpu_page_indices, dst_token_indices,
-    layout=cpu_read_layout, page_token_offset=0,
+    layout=cpu_read_layout,
 )
 # 后续计算与写入建立 stream/event 依赖。
 ```
@@ -732,14 +743,14 @@ PD 两端分别调用；buffer 已选到实际发送/接收页，区域与 TP �
 ```python
 p_state.write_to_pd_buffer(
     src_token_indices, send_page,
-    layout=p_layout, page_token_offset=0,
+    layout=p_layout,
 )
 # 全部参与资源/分片的打包完成后，调度层发送。
 
 # D 端接收完成并建立 stream 依赖后执行。
 d_state.read_from_pd_buffer(
     recv_page, dst_token_indices,
-    layout=d_layout, page_token_offset=0,
+    layout=d_layout,
 )
 # 所有目标资源/分片恢复完成后允许 decode。
 ```
