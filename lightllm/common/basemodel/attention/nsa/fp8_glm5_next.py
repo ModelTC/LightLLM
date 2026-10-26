@@ -8,6 +8,75 @@ from .glm5_next import Glm5NextSparsePrefillState
 
 
 class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
+    def __init__(self, model):
+        super().__init__(model=model)
+        # Match the backend's existing microbatch-separated ragged buffers.
+        self._prefill_workspaces = [{"smallq": None, "generic": None} for _ in self.ragged_mem_buffers]
+
+    def get_smallq_workspace(self, infer_state, q):
+        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
+            _allocate_direct_smallq_workspace,
+            _allocate_selected_prefill_workspace,
+        )
+
+        slot = self._prefill_workspaces[infer_state.microbatch_index]
+        if slot["smallq"] is None:
+            slot["smallq"] = {
+                "direct": _allocate_direct_smallq_workspace(q[:1]),
+                "selected": _allocate_selected_prefill_workspace(q, batch_capacity=8),
+            }
+        if q.shape[0] == 1:
+            return slot["smallq"]["direct"]
+        batch = q.shape[0]
+        selected = slot["smallq"]["selected"]
+        slots = selected["compact"].shape[1]
+        return {
+            "compact": selected["compact"][:batch],
+            "lengths": selected["lengths"][:batch],
+            "page_table": selected["page_table"][:batch],
+            "cu_q": selected["cu_q"][: batch + 1],
+            "cu_k": selected["cu_k"][: batch + 1],
+            "selected_kv": selected["selected_kv"][: batch * slots],
+        }
+
+    def get_generic_prefill_workspace(self, infer_state, q, packed_kv, topk_indices):
+        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
+            _allocate_generic_prefill_workspace,
+        )
+
+        slot = self._prefill_workspaces[infer_state.microbatch_index]
+        entry = slot["generic"]
+        rows, columns = topk_indices.shape
+        if (
+            entry is None
+            or entry["buffers"]["chunk_indices"].shape[0] < rows
+            or entry["buffers"]["chunk_indices"].shape[1] != columns
+            or entry["buffers"]["chunk_indices"].dtype != topk_indices.dtype
+            or entry["buffers"]["prefill_row_table"].numel() < packed_kv.shape[0]
+        ):
+            capacity = max(self.model.batch_max_tokens or 0, rows)
+            entry = {
+                "buffers": _allocate_generic_prefill_workspace(q, packed_kv, topk_indices, query_capacity=capacity),
+                "owner": None,
+            }
+            slot["generic"] = entry
+        mem_index = infer_state.mem_index
+        binding = (id(mem_index), mem_index.data_ptr(), tuple(topk_indices.shape), packed_kv.shape[0])
+        if entry["owner"] is None or entry["owner"]() is not infer_state or entry["binding"] != binding:
+            buffers = entry["buffers"]
+            # Capacity is persistent; the current batch's mapping is not.
+            buffers["prefill_row_table"].fill_(-1)
+            entry["workspace"] = {
+                "prefill_row_table": buffers["prefill_row_table"][: packed_kv.shape[0]],
+                "chunk_indices": buffers["chunk_indices"][:rows],
+                "chunk_lengths": buffers["chunk_lengths"][:rows],
+                "cu_seqlens_q": buffers["cu_seqlens_q"][: rows + 1],
+                "row_table_built": False,
+            }
+            entry["owner"] = weakref.ref(infer_state)
+            entry["binding"] = binding
+        return entry["workspace"]
+
     def create_att_prefill_state(self, infer_state):
         return Fp8Glm5NextSparsePrefillState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -27,54 +96,14 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
 @dataclasses.dataclass
 class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
     def _smallq_workspace(self, q):
-        key = (q.shape[0], q.shape[1], q.device, q.dtype)
-        cache = getattr(self.infer_state, "_glm5_fp8_smallq_workspace_cache", None)
-        if cache is None:
-            cache = {}
-            self.infer_state._glm5_fp8_smallq_workspace_cache = cache
-        workspace = cache.get(key)
-        if workspace is None:
-            if q.shape[0] == 1:
-                from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-                    _allocate_direct_smallq_workspace,
-                )
-
-                workspace = _allocate_direct_smallq_workspace(q)
-            else:
-                from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-                    _allocate_selected_prefill_workspace,
-                )
-
-                workspace = _allocate_selected_prefill_workspace(q)
-            cache[key] = workspace
-        return workspace
+        if self.backend is None:
+            return None
+        return self.backend.get_smallq_workspace(self.infer_state, q)
 
     def _generic_prefill_workspace(self, q, packed_kv, topk_indices):
-        mem_index = self.infer_state.mem_index
-        key = (
-            "generic_prefill",
-            q.shape[0],
-            packed_kv.shape[0],
-            q.device,
-            q.dtype,
-            mem_index.data_ptr(),
-            id(mem_index),
-            topk_indices.shape,
-            topk_indices.dtype,
-        )
-        cache = getattr(self.infer_state, "_fp8_sparse_generic_prefill_workspace_cache", None)
-        if cache is None:
-            cache = {}
-            self.infer_state._fp8_sparse_generic_prefill_workspace_cache = cache
-        workspace = cache.get(key)
-        if workspace is None:
-            from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-                _allocate_generic_prefill_workspace,
-            )
-
-            workspace = _allocate_generic_prefill_workspace(q, packed_kv, topk_indices)
-            cache[key] = workspace
-        return workspace
+        if self.backend is None:
+            return None
+        return self.backend.get_generic_prefill_workspace(self.infer_state, q, packed_kv, topk_indices)
 
     def _nsa_prefill_att(self, q, kv, att_control):
         from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (

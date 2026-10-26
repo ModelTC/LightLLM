@@ -38,6 +38,13 @@ def _make_infer_state(**attributes):
     return state
 
 
+def _make_workspace_backend(batch_max_tokens):
+    backend = object.__new__(Fp8Glm5NextSparseAttBackend)
+    backend.model = SimpleNamespace(batch_max_tokens=batch_max_tokens)
+    backend._prefill_workspaces = [{"smallq": None, "generic": None} for _ in range(2)]
+    return backend
+
+
 @pytest.mark.parametrize("draft", [False, True])
 @pytest.mark.parametrize("kv_type", ["None", "fp8kv_dsa"])
 def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
@@ -512,7 +519,7 @@ def test_fp8_direct_smallq_prefill_dispatch_strided_holes_and_current(num_q, num
 
 
 def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
-    """Q1 H64 direct workspace is shared by DSA layers and isolated by infer state."""
+    """Q1 H64 direct workspace is owned by the backend and reused across infer states."""
     torch.manual_seed(53150)
     capacity = 65536
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
@@ -538,8 +545,9 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
         },
     )
     infer_state = _make_infer_state(mem_index=prefill_mem)
+    backend = _make_workspace_backend(q.shape[0])
     state = Fp8Glm5NextSparsePrefillState(
-        _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
+        backend=backend, _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
     )
 
     def expected():
@@ -551,36 +559,36 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
         return active_state.prefill_att(q, packed[..., :584], None, control)
 
     torch.testing.assert_close(run().float(), expected(), atol=0.012, rtol=0.015)
-    cache = infer_state._glm5_fp8_smallq_workspace_cache
-    assert len(cache) == 1
-    workspace = next(iter(cache.values()))
+    cache = backend._prefill_workspaces[0]["smallq"]
+    assert not hasattr(infer_state, "_glm5_fp8_smallq_workspace_cache")
+    workspace = cache["direct"]
     pointers = {name: tensor.data_ptr() for name, tensor in workspace.items()}
     for _ in range(10):
         layer_state = Fp8Glm5NextSparsePrefillState(
-            _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
+            backend=backend, _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
         )
         torch.testing.assert_close(run(layer_state).float(), expected(), atol=0.012, rtol=0.015)
-    assert {name: tensor.data_ptr() for name, tensor in next(iter(cache.values())).items()} == pointers
+    assert {name: tensor.data_ptr() for name, tensor in cache["direct"].items()} == pointers
 
     fresh_infer_state = _make_infer_state(mem_index=prefill_mem.clone())
     fresh_state = Fp8Glm5NextSparsePrefillState(
-        _infer_state_weak_ref=weakref.ref(fresh_infer_state), ks=starts, ragged_mem_index=ragged
+        backend=backend, _infer_state_weak_ref=weakref.ref(fresh_infer_state), ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(fresh_state).float(), expected(), atol=0.012, rtol=0.015)
-    fresh_workspace = next(iter(fresh_infer_state._glm5_fp8_smallq_workspace_cache.values()))
-    assert fresh_workspace["partial_o"].data_ptr() != workspace["partial_o"].data_ptr()
+    fresh_workspace = backend._prefill_workspaces[0]["smallq"]["direct"]
+    assert fresh_workspace["partial_o"].data_ptr() == workspace["partial_o"].data_ptr()
 
     q.normal_()
     source.normal_()
     prefill_kv.normal_()
     destindex_copy_kv_flashmla_fp8(source, mem, packed)
     torch.testing.assert_close(run().float(), expected(), atol=0.012, rtol=0.015)
-    assert {name: tensor.data_ptr() for name, tensor in next(iter(cache.values())).items()} == pointers
+    assert {name: tensor.data_ptr() for name, tensor in cache["direct"].items()} == pointers
 
 
 @pytest.mark.parametrize("num_q", [2, 3, 5, 8])
 def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
-    """H64 selected prefill rewrites infer-state workspace across DSA layers."""
+    """H64 selected prefill rewrites backend workspace across DSA layers."""
     torch.manual_seed(53200 + num_q)
     capacity = 65536
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
@@ -606,8 +614,9 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
         },
     )
     infer_state = _make_infer_state(mem_index=prefill_mem)
+    backend = _make_workspace_backend(q.shape[0])
     state = Fp8Glm5NextSparsePrefillState(
-        _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
+        backend=backend, _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
     )
 
     def expected():
@@ -621,33 +630,32 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
 
     eager = run()
     torch.testing.assert_close(eager.float(), expected(), atol=0.012, rtol=0.015)
-    cache = infer_state._glm5_fp8_smallq_workspace_cache
-    assert len(cache) == 1
-    workspace = next(iter(cache.values()))
+    cache = backend._prefill_workspaces[0]["smallq"]
+    assert not hasattr(infer_state, "_glm5_fp8_smallq_workspace_cache")
+    workspace = cache["selected"]
     pointers = {name: tensor.data_ptr() for name, tensor in workspace.items()}
-    # All 11 DSA layers share the infer-state allocation and rewrite its contents.
+    # All 11 DSA layers share the backend allocation and rewrite its contents.
     for _ in range(10):
         layer_state = Fp8Glm5NextSparsePrefillState(
-            _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
+            backend=backend, _infer_state_weak_ref=weakref.ref(infer_state), ks=starts, ragged_mem_index=ragged
         )
         torch.testing.assert_close(run(layer_state).float(), expected(), atol=0.012, rtol=0.015)
-    assert len(cache) == 1
-    assert {name: tensor.data_ptr() for name, tensor in next(iter(cache.values())).items()} == pointers
+    assert {name: tensor.data_ptr() for name, tensor in cache["selected"].items()} == pointers
 
     fresh_infer_state = _make_infer_state(mem_index=prefill_mem.clone())
     fresh_state = Fp8Glm5NextSparsePrefillState(
-        _infer_state_weak_ref=weakref.ref(fresh_infer_state), ks=starts, ragged_mem_index=ragged
+        backend=backend, _infer_state_weak_ref=weakref.ref(fresh_infer_state), ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(fresh_state).float(), expected(), atol=0.012, rtol=0.015)
-    fresh_workspace = next(iter(fresh_infer_state._glm5_fp8_smallq_workspace_cache.values()))
-    assert fresh_workspace["compact"].data_ptr() != workspace["compact"].data_ptr()
+    fresh_workspace = backend._prefill_workspaces[0]["smallq"]["selected"]
+    assert fresh_workspace["compact"].data_ptr() == workspace["compact"].data_ptr()
 
     source.normal_()
     destindex_copy_kv_flashmla_fp8(source, mem, packed)
     prefill_kv.normal_()
     q.normal_()
     eager = run()
-    assert {name: tensor.data_ptr() for name, tensor in next(iter(cache.values())).items()} == pointers
+    assert {name: tensor.data_ptr() for name, tensor in cache["selected"].items()} == pointers
     torch.testing.assert_close(eager.float(), expected(), atol=0.012, rtol=0.015)
     graph, output = _capture_cuda_graph(run)
     q.normal_()
@@ -704,8 +712,10 @@ def test_fp8_decode_qpad_kernel_strides_and_zero_padding(num_heads):
     # This has BMM-style B/H strides and a non-unit final dimension stride.
     q = torch.randn(num_heads, batch, 1024, device="cuda", dtype=torch.bfloat16)[..., ::2].transpose(0, 1)
     padded_heads = ((num_heads + 63) // 64) * 64
-    padded = torch.empty((batch, 1, padded_heads, 512), device="cuda", dtype=torch.bfloat16)
-    _fused_strided_qpad_kernel[(batch, triton.cdiv(padded_heads * 512, 1024))](
+    head_dim = q.shape[-1]
+    block_size = triton.next_power_of_2(2 * head_dim)
+    padded = torch.empty((batch, 1, padded_heads, head_dim), device="cuda", dtype=torch.bfloat16)
+    _fused_strided_qpad_kernel[(batch, triton.cdiv(padded_heads * head_dim, block_size))](
         q,
         padded,
         q.stride(0),
@@ -713,7 +723,8 @@ def test_fp8_decode_qpad_kernel_strides_and_zero_padding(num_heads):
         q.stride(2),
         num_heads,
         padded_heads,
-        BLOCK1024=1024,
+        head_dim=head_dim,
+        BLOCK_SIZE=block_size,
         num_warps=4,
     )
     expected = torch.zeros_like(padded)
@@ -1134,7 +1145,7 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
 
 
 def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallback():
-    """Generic H64 eager metadata is state-local, mutable inputs remain correct, graph falls back."""
+    """Generic H64 backend buffers are reused, batch metadata resets, and graph falls back."""
     torch.manual_seed(53450)
     capacity, num_q = 65536, 13
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
@@ -1161,6 +1172,7 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
         },
     )
     infer = _make_infer_state(mem_index=prefill_mem)
+    backend = _make_workspace_backend(2 * num_q)
 
     def expected(active_ragged=ragged):
         values = _dequantize_kv_cache(packed)[active_ragged.long()]
@@ -1171,19 +1183,23 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
     def run(active):
         return active.prefill_att(q, packed[..., :584], None, control)
 
-    state = Fp8Glm5NextSparsePrefillState(_infer_state_weak_ref=weakref.ref(infer), ks=starts, ragged_mem_index=ragged)
+    state = Fp8Glm5NextSparsePrefillState(
+        backend=backend, _infer_state_weak_ref=weakref.ref(infer), ks=starts, ragged_mem_index=ragged
+    )
     torch.testing.assert_close(run(state).float(), expected(), atol=0.012, rtol=0.015)
-    cache = infer._fp8_sparse_generic_prefill_workspace_cache
-    assert len(cache) == 1
-    workspace = next(iter(cache.values()))
+    cache = backend._prefill_workspaces[0]
+    assert not hasattr(infer, "_fp8_sparse_generic_prefill_workspace_cache")
+    workspace = cache["generic"]["workspace"]
     pointers = {k: v.data_ptr() for k, v in workspace.items() if isinstance(v, torch.Tensor)}
     for _ in range(10):
         layer = Fp8Glm5NextSparsePrefillState(
-            _infer_state_weak_ref=weakref.ref(infer), ks=starts, ragged_mem_index=ragged
+            backend=backend, _infer_state_weak_ref=weakref.ref(infer), ks=starts, ragged_mem_index=ragged
         )
         torch.testing.assert_close(run(layer).float(), expected(), atol=0.012, rtol=0.015)
     assert workspace["row_table_built"]
-    assert {k: v.data_ptr() for k, v in next(iter(cache.values())).items() if isinstance(v, torch.Tensor)} == pointers
+    assert {
+        k: v.data_ptr() for k, v in cache["generic"]["workspace"].items() if isinstance(v, torch.Tensor)
+    } == pointers
 
     # Change raw KV/top-k in place: reusable metadata must not cache either.
     q.normal_()
@@ -1196,24 +1212,21 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
     fresh_mem = fresh_ragged[(starts + current_local).long()].clone()
     fresh = _make_infer_state(mem_index=fresh_mem)
     fresh_state = Fp8Glm5NextSparsePrefillState(
-        _infer_state_weak_ref=weakref.ref(fresh), ks=starts, ragged_mem_index=fresh_ragged
+        backend=backend, _infer_state_weak_ref=weakref.ref(fresh), ks=starts, ragged_mem_index=fresh_ragged
     )
     torch.testing.assert_close(run(fresh_state).float(), expected(fresh_ragged), atol=0.012, rtol=0.015)
-    assert (
-        next(iter(fresh._fp8_sparse_generic_prefill_workspace_cache.values()))["prefill_row_table"].data_ptr()
-        != workspace["prefill_row_table"].data_ptr()
-    )
+    assert cache["generic"]["workspace"]["prefill_row_table"].data_ptr() == workspace["prefill_row_table"].data_ptr()
 
     graph_infer = _make_infer_state(mem_index=prefill_mem, prefill_cuda_graph_exe_list=[])
     graph_state = Fp8Glm5NextSparsePrefillState(
-        _infer_state_weak_ref=weakref.ref(graph_infer), ks=starts, ragged_mem_index=ragged
+        backend=backend, _infer_state_weak_ref=weakref.ref(graph_infer), ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(graph_state).float(), expected(), atol=0.012, rtol=0.015)
     assert not hasattr(graph_infer, "_fp8_sparse_generic_prefill_workspace_cache")
 
     explicit_graph_infer = _make_infer_state(mem_index=prefill_mem, is_cuda_graph_capture=True)
     explicit_graph_state = Fp8Glm5NextSparsePrefillState(
-        _infer_state_weak_ref=weakref.ref(explicit_graph_infer), ks=starts, ragged_mem_index=ragged
+        backend=backend, _infer_state_weak_ref=weakref.ref(explicit_graph_infer), ks=starts, ragged_mem_index=ragged
     )
     torch.testing.assert_close(run(explicit_graph_state).float(), expected(), atol=0.012, rtol=0.015)
     assert not hasattr(explicit_graph_infer, "_fp8_sparse_generic_prefill_workspace_cache")
