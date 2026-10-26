@@ -5,6 +5,7 @@ from typing import TYPE_CHECKING, Tuple
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.flashmla_utils import get_flash_mla
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -71,7 +72,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         packed_kv: torch.Tensor,
         att_control: AttControl,
     ) -> torch.Tensor:
-        import flash_mla
+        flash_mla = get_flash_mla()
 
         nsa_dict = att_control.nsa_prefill_dict
         topk_indices = nsa_dict["topk_indices"]
@@ -142,7 +143,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
-        import flash_mla
+        flash_mla = get_flash_mla()
 
         self.flashmla_sched_meta, _ = flash_mla.get_mla_metadata()
         return
@@ -165,7 +166,7 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
         packed_kv: torch.Tensor,
         att_control: AttControl,
     ) -> torch.Tensor:
-        import flash_mla
+        flash_mla = get_flash_mla()
 
         nsa_dict = att_control.nsa_decode_dict
         topk_mem_indices = nsa_dict["topk_mem_indices"]

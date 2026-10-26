@@ -2,6 +2,7 @@ import dataclasses
 import weakref
 
 import torch
+from lightllm.utils.flashmla_utils import get_flash_mla
 
 from .fp8_flashmla_sparse import NsaFlashMlaFp8SparseAttBackend, NsaFlashMlaFp8SparseDecodeAttState
 from .glm5_next import Glm5NextSparsePrefillState
@@ -180,7 +181,7 @@ class Fp8Glm5NextSparseDecodeState(NsaFlashMlaFp8SparseDecodeAttState):
     decode_topk_bound: int = None
 
     def _nsa_decode_att(self, q, packed_kv, att_control):
-        import flash_mla
+        flash_mla = get_flash_mla()
 
         from lightllm.models.glm5_next.triton_kernel import fp8_sparse_decode
         from lightllm.models.glm5_next.triton_kernel.pad_query_heads import pad_query_heads

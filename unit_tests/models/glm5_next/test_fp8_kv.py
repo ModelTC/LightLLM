@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 import triton
+from lightllm.utils.flashmla_utils import get_flash_mla
 
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -166,7 +167,7 @@ def test_fp8_scatter_quantization_and_gather_prefill(index_dtype, source_d_strid
 def test_fp8_nope_decode_and_cuda_graph(num_heads):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse decode target is Hopper")
-    import flash_mla
+    flash_mla = get_flash_mla()
 
     torch.manual_seed(53)
     packed_kv = torch.zeros(4096, 1, 720, device="cuda", dtype=torch.uint8)
@@ -238,7 +239,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
         nsa_prefill_dict={
             "topk_indices": topk_indices,
             "prefill_cache_kv": prefill_kv,
-            "softmax_scale": 512 ** -0.5,
+            "softmax_scale": 512**-0.5,
             "kv_lora_rank": 512,
         },
     )
@@ -275,7 +276,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
 
 
 @pytest.mark.parametrize("num_heads", [8, 16, 64, 128])
-@pytest.mark.parametrize("softmax_scale", [0.0625, 512 ** -0.5])
+@pytest.mark.parametrize("softmax_scale", [0.0625, 512**-0.5])
 def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softmax_scale):
     monkeypatch.setattr(fp8_prefill, "KV_GATHER_CHUNK_SIZE", 129)
     torch.manual_seed(53)
@@ -670,7 +671,7 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
 def test_fp8_h64_b1_decode_uses_native_eager_and_direct_graph():
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse decode target is Hopper")
-    import flash_mla
+    flash_mla = get_flash_mla()
 
     torch.manual_seed(53300)
     capacity = 4096
@@ -738,7 +739,7 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
     """Exercise the actual backend's eager and graph flags with strided BMM Q."""
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse decode target is Hopper")
-    import flash_mla
+    flash_mla = get_flash_mla()
 
     torch.manual_seed(53100 + num_heads)
     batch, capacity = 2, 4096
@@ -795,7 +796,7 @@ def test_fp8_sparse_direct_decode_factory_bound_guard():
 def test_fp8_sparse_direct_decode_actual_entry_edges_and_graph(monkeypatch, batch):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse decode target is Hopper")
-    import flash_mla
+    flash_mla = get_flash_mla()
 
     torch.manual_seed(53200 + batch)
     capacity = 4096
@@ -883,7 +884,7 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
     """General head/token shapes use the direct path selected by the central predicate."""
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse decode target is Hopper")
-    import flash_mla
+    flash_mla = get_flash_mla()
 
     torch.manual_seed(53300 + batch)
     capacity = 4096
@@ -966,7 +967,7 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
 def test_fp8_sparse_direct_decode_unknown_bound_fallback_and_strided_q(monkeypatch):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse decode target is Hopper")
-    import flash_mla
+    flash_mla = get_flash_mla()
 
     torch.manual_seed(53250)
     capacity = 4096
@@ -1037,7 +1038,7 @@ def test_fp8_sparse_direct_decode_strided_inputs_and_packed_row_padding(monkeypa
         def native_must_not_run(*args, **kwargs):
             raise AssertionError("supported strided decode took native fallback")
 
-        monkeypatch.setattr("flash_mla.flash_mla_with_kvcache", native_must_not_run)
+        monkeypatch.setattr(get_flash_mla(), "flash_mla_with_kvcache", native_must_not_run)
         torch.testing.assert_close(
             state.decode_att(
                 (q, q[..., :0]),
@@ -1087,7 +1088,7 @@ def test_fp8_sparse_direct_decode_offsets_beyond_int32(strided_input):
     storage_size = (batch - 1) * stride + shape[-1]
     required_bytes = storage_size * torch.empty((), dtype=dtype).element_size()
     torch.cuda.empty_cache()
-    if torch.cuda.mem_get_info()[0] < required_bytes + 512 * 1024 ** 2:
+    if torch.cuda.mem_get_info()[0] < required_bytes + 512 * 1024**2:
         pytest.skip("Large-stride regression requires sufficient free GPU memory")
     # Allocate address space without initializing the gaps between logical rows.
     storage = torch.empty(storage_size, device="cuda", dtype=dtype)
@@ -1110,7 +1111,7 @@ def test_fp8_sparse_direct_decode_offsets_beyond_int32(strided_input):
 def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatch, num_heads, batch):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("Validated FlashMLA sparse decode target is Hopper")
-    import flash_mla
+    flash_mla = get_flash_mla()
 
     torch.manual_seed(53700 + num_heads + batch)
     packed = torch.empty(4096, 1, 720, device="cuda", dtype=torch.uint8)
