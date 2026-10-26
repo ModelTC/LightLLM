@@ -15,10 +15,12 @@ from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
     Fp8Glm5NextSparseAttBackend,
     Fp8Glm5NextSparsePrefillState,
     Fp8Glm5NextSparseDecodeState,
+)
+from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
     _can_use_fp8_sparse_direct_decode,
     _fp8_sparse_direct_decode,
-    _fused_strided_qpad_kernel,
 )
+from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
 from lightllm.models.glm5_next.triton_kernel.destindex_copy_kv_flashmla_fp8 import destindex_copy_kv_flashmla_fp8
 from lightllm.models.glm5_next.triton_kernel import context_flashattention_nopad_fp8 as fp8_prefill
 from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
@@ -1112,7 +1114,7 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
         raise AssertionError("larger workload took the slower direct path")
 
     monkeypatch.setattr(
-        "lightllm.common.basemodel.attention.nsa.fp8_glm5_next._fp8_sparse_direct_decode", direct_must_not_run
+        "lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode._fp8_sparse_direct_decode", direct_must_not_run
     )
     infer = _make_infer_state(is_cuda_graph_capture=True)
     state = Fp8Glm5NextSparseDecodeState(
