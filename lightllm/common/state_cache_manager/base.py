@@ -20,6 +20,7 @@ class StateCacheManager(ABC):
         self.keep_num = keep_num
         assert 0 <= keep_num <= size, f"invalid keep_num {keep_num} for size {size}"
         self.free_list = collections.deque(range(size - keep_num))
+        self.checkpoint_lens = [None] * size
 
     @abstractmethod
     def get_state_cache(self, buffer_idx: int):
@@ -40,6 +41,7 @@ class StateCacheManager(ABC):
             assert 0 <= idx < alloc_upper_bound, (
                 f"free index {idx} out of alloc range [0, {alloc_upper_bound}), " f"reserved tail num {self.keep_num}"
             )
+            self.checkpoint_lens[idx] = None
         self.free_list.extend(free_indexes)
         assert (
             len(self.free_list) <= alloc_upper_bound
@@ -48,6 +50,9 @@ class StateCacheManager(ABC):
     def get_free_cache_num(self):
         return len(self.free_list)
 
+    def has_checkpoint(self, buffer_idx, length):
+        return buffer_idx is not None and length is not None and self.checkpoint_lens[buffer_idx] == length
+
     def get_used_cache_num(self):
         # Preserve the existing accounting: reserved slots count as used.
         return self.size - len(self.free_list)
@@ -55,3 +60,4 @@ class StateCacheManager(ABC):
     def clear_to_init_state(self):
         """重置空闲槽位；子类同时清零自身的 checkpoint buffer。"""
         self.free_list = collections.deque(range(self.size - self.keep_num))
+        self.checkpoint_lens = [None] * self.size

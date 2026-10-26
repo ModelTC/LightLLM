@@ -1,3 +1,4 @@
+from lightllm.common.kv_page_transfer import KVPageTransfer
 import torch
 import time
 import inspect
@@ -7,8 +8,9 @@ import torch.multiprocessing as mp
 import queue
 import pickle
 from typing import List, Dict, Union, Optional
+from lightllm.common.kv_transfer_resources import KVTransferResources
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.kv_transfer_resources import KVTransferView
 from lightllm.server.pd_io_struct import (
     PDChunckedTransTask,
     PDChunckedTransTaskGroup,
@@ -85,9 +87,10 @@ def _init_env(
 
         # 从共享内存读取所有rank的mem_manager
         node_world_size = args.tp // args.nnodes
-        mem_managers: List[MemoryManager] = [
-            MemoryManager.loads_from_shm(rank_in_node=rank) for rank in range(node_world_size)
-        ]
+        resources = [KVTransferResources.loads_from_shm(rank_in_node=rank) for rank in range(node_world_size)]
+
+        kv_views = [resource.kv for resource in resources]
+        state_transfers = [resource.state_transfer for resource in resources]
 
         task_out_queue.put("get_mem_managers_ok")
 
@@ -96,7 +99,8 @@ def _init_env(
             device_id=device_id,
             task_in_queue=task_in_queue,
             task_out_queue=task_out_queue,
-            mem_managers=mem_managers,
+            kv_views=kv_views,
+            state_transfers=state_transfers,
             up_status_in_queue=up_status_in_queue,
         )
         assert manager is not None
@@ -119,7 +123,8 @@ class _DecodeTransModule:
         device_id: int,
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
-        mem_managers: List[MemoryManager],
+        kv_views: List[KVTransferView],
+        state_transfers,
         up_status_in_queue: Optional[mp.SimpleQueue],
     ):
         self.args = args
@@ -127,12 +132,15 @@ class _DecodeTransModule:
         self.device_id = device_id
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
-        self.mem_managers = mem_managers
+        self.kv_views = kv_views
+        self.state_transfers = state_transfers
         self.up_status_in_queue = up_status_in_queue
-        cur_mem_manager: MemoryManager = self.mem_managers[device_id]
-        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
+        self.kv_page_transfer = KVPageTransfer(self.kv_views[device_id])
+        kv_move_buffer = self.kv_page_transfer.alloc_paged_kv_move_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
+        if self.state_transfers[device_id] is not None:
+            self.state_transfers[device_id].bind_page_buffer(kv_move_buffer)
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -170,12 +178,12 @@ class _DecodeTransModule:
     def _warmup(self):
         for dp_index in range(self.args.dp // self.args.nnodes):
             with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.mem_managers[self.device_id]
+                cur_mem = self.kv_page_transfer
                 cur_mem.read_page_kv_move_buffer_to_mem(
                     mem_indexes=[0],
                     page_index=0,
                     dp_index=dp_index,
-                    mem_managers=self.mem_managers,
+                    kv_views=self.kv_views,
                     dp_world_size=self.dp_world_size,
                 )
                 torch.cuda.current_stream().synchronize()
@@ -396,16 +404,21 @@ class _DecodeTransModule:
             copy_end_event = torch.cuda.Event(enable_timing=True)
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 copy_start_event.record(self.copy_cuda_stream)
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    trans_task.mem_indexes,
-                    page_index=trans_task.dst_page_index,
-                    dp_index=trans_task.decode_dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
-                    page_kind=trans_task.page_kind,
-                    req_idx=trans_task.req_idx,
-                )
+                cur_mem = self.kv_page_transfer
+                if trans_task.page_kind == "att_state":
+                    helper = self.state_transfers[self.device_id]
+                    assert helper is not None
+                    states = helper.get_dp_states(self.state_transfers, trans_task.decode_dp_index, self.dp_world_size)
+                    helper.read_page_to_req(trans_task.dst_page_index, trans_task.req_idx, states)
+                else:
+                    assert trans_task.page_kind == "kv"
+                    cur_mem.read_page_kv_move_buffer_to_mem(
+                        trans_task.mem_indexes,
+                        page_index=trans_task.dst_page_index,
+                        dp_index=trans_task.decode_dp_index,
+                        kv_views=self.kv_views,
+                        dp_world_size=self.dp_world_size,
+                    )
                 copy_end_event.record(self.copy_cuda_stream)
             self.success_queue.put((copy_end_event, copy_start_event, trans_task))
 

@@ -4,7 +4,7 @@ from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepse
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.common.kv_cache_mem_manager import MlaMemoryManager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_added_mtp_kv_layer_num
 from lightllm.distributed.communication_op import dist_group_manager
@@ -57,8 +57,12 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     def _verify_params(self):
         return super()._verify_params()
 
+    @classmethod
+    def get_mem_manager_class(cls):
+        return MlaMemoryManager
+
     def _init_mem_manager(self):
-        manager_class = select_mem_manager_class()
+        manager_class = self.get_mem_manager_class()
 
         self.mem_manager = manager_class(
             self.max_total_token_num,

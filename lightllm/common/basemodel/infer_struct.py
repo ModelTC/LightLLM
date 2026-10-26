@@ -49,6 +49,8 @@ class InferStateInfo:
 
         self.mem_manager: MemoryManager = None
         self.req_manager: ReqManager = None
+        self.linear_state_manager = None
+        self.indexer_state_manager = None
 
         self.mem_index: torch.Tensor = None
 

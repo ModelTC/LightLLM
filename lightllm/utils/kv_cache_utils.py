@@ -17,12 +17,12 @@ from lightllm.utils.envs_utils import (
 )
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_hybrid_att_model
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+from lightllm.utils.llm_utils import get_llm_model_class
 from lightllm.common.kv_cache_mem_manager import (
     MemoryManager,
     PPLINT8KVMemoryManager,
     PPLINT4KVMemoryManager,
-    Deepseek2MemoryManager,
+    MlaMemoryManager,
 )
 
 from typing import List, Tuple, Optional
@@ -63,7 +63,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     assert args.enable_cpu_cache
 
     is_hybrid_model = is_hybrid_att_model(args.model_dir)
-    mem_manager_class = None if is_hybrid_model else select_mem_manager_class()
+    mem_manager_class = None if is_hybrid_model else get_llm_model_class().get_mem_manager_class()
     if is_hybrid_model:
         hybrid_config = get_hybrid_cache_config()
         cpu_cache_meta = CpuKVCacheMeta(
@@ -76,7 +76,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
             scale_head_dim=0,
             scale_data_type=get_llm_data_type(),
         )
-    elif mem_manager_class is Deepseek2MemoryManager:
+    elif mem_manager_class is MlaMemoryManager:
         cpu_cache_meta = CpuKVCacheMeta(
             page_num=0,
             token_page_size=args.cpu_cache_token_page_size,

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.cache_coordinator import CacheCoordinator
 from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManager
 from lightllm.utils.kv_cache_utils import CpuKVCacheMeta
 
@@ -85,6 +86,8 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
             ),
         ),
     )
+    module.backend.model.cache_coordinator = CacheCoordinator()
+    module.backend.model.cache_coordinator.bind_mem_manager(module.backend.model.mem_manager)
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 1024)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)

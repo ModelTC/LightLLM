@@ -5,11 +5,14 @@ import torch
 import triton
 
 from lightllm.common.build_utils import repair_config
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
 from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager
-from lightllm.common.req_manager import Glm5NextReqManager
+from lightllm.common.cache_coordinator import HybridCacheCoordinator
+from lightllm.common.linear_state import LinearStateManager
+from lightllm.common.indexer_state import IndexerStateManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
@@ -58,25 +61,35 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
-    def _init_req_manager(self):
+    def _init_cache_coordinator(self):
         self.linear_config = Glm5NextCacheConfig.from_model_config(self.config, self.args)
-        self.req_manager = Glm5NextReqManager(
-            self.max_req_num,
-            max(self.batch_max_tokens or 0, self.max_seq_length or 0),
-            None,
-            linear_config=self.linear_config,
+        assert (
+            self.args.linear_att_hash_page_size % self.linear_config.index_kpool == 0
+        ), "GLM K-pool requires cache pages aligned to index_kpool"
+        if self.args.mtp_step > 0:
+            assert self.args.enable_prefill_decode_mixed is False
+        self.cache_coordinator = HybridCacheCoordinator(
+            linear_state_manager=LinearStateManager(self.max_req_num, self.linear_config, self.args),
+            indexer_state_manager=IndexerStateManager(self.max_req_num, self.linear_config, self.args.mtp_step),
         )
 
+    @classmethod
+    def get_mem_manager_class(cls):
+        kv_type = get_env_start_args().llm_kv_type
+        if kv_type != "None":
+            raise ValueError(f"GLM5Next does not support llm_kv_type={kv_type}")
+        return Glm5NextMemManager
+
     def _init_mem_manager(self):
-        self.mem_manager = Glm5NextMemManager(
+        self.mem_manager = self.get_mem_manager_class()(
             size=self.max_total_token_num,
             dtype=self.data_type,
-            num_kv_heads=1,
+            head_num=1,
             head_dim=self.linear_config.full_att_head_dim,
-            full_att_layer_num=self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
-            linear_config=self.linear_config,
+            layer_num=self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
             mem_fraction=self.mem_fraction,
         )
+        self.mem_manager.set_kv_layer_mapping(self.linear_config.get_full_att_kv_layer_mapping())
 
     def _init_att_backend(self):
         self.prefill_att_backend = Glm5NextSparseAttBackend(model=self)

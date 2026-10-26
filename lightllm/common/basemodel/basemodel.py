@@ -16,6 +16,7 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
+from lightllm.common.cache_coordinator import CacheCoordinator
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
@@ -114,12 +115,14 @@ class TpPartBaseModel:
                 self._init_weights()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()
+            if getattr(self, "is_mtp_draft_model", False):
+                self.cache_coordinator = self.main_model.cache_coordinator
+            else:
+                self._init_cache_coordinator()
             self._init_mem_manager()
 
-        # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
-        # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
-        # 因此 req_manager 创建时暂不传入 mem_manager，需要在两者初始化完成后再进行绑定。
         self.req_manager.bind_mem_manager(self.mem_manager)
+        self.cache_coordinator.bind_mem_manager(self.mem_manager)
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
@@ -196,9 +199,13 @@ class TpPartBaseModel:
         [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
+    @classmethod
+    def get_mem_manager_class(cls):
+        return select_mem_manager_class()
+
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        self.mem_manager: MemoryManager = select_mem_manager_class()(
+        self.mem_manager: MemoryManager = self.get_mem_manager_class()(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=self.config["num_attention_heads"] // self.tp_world_size_,
@@ -228,6 +235,9 @@ class TpPartBaseModel:
             )
 
         return
+
+    def _init_cache_coordinator(self):
+        self.cache_coordinator = CacheCoordinator()
 
     def _init_req_manager(self):
         create_max_seq_len = 0
@@ -376,6 +386,9 @@ class TpPartBaseModel:
 
         infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
+        infer_state.state_manager = self.cache_coordinator.state_manager
+        infer_state.linear_state_manager = self.cache_coordinator.linear_state_manager
+        infer_state.indexer_state_manager = self.cache_coordinator.indexer_state_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
@@ -631,7 +644,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"

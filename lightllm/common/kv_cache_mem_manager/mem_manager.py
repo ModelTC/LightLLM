@@ -1,35 +1,23 @@
 import math
-import os
-import re
 import torch
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from typing import List, Tuple, Any, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .allocator import KvCacheAllocator
 from lightllm.utils.profile_max_tokens import get_available_gpu_memory, get_total_gpu_memory
-from lightllm.utils.dist_utils import (
-    get_current_device_id,
-    get_current_rank_in_node,
-    get_node_world_size,
-)
+from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.shm_utils import get_service_shm_name
 from lightllm.utils.config_utils import get_num_key_value_heads
-from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
-from lightllm.utils.device_utils import kv_trans_use_p2p
-from lightllm.utils.shm_utils import create_or_link_shm
-from multiprocessing.reduction import ForkingPickler
-from filelock import FileLock
 from .operator import BaseMemManagerOperator, NormalMemOperator
 
 logger = init_logger(__name__)
 
 
 class MemoryManager:
-
     operator_class = NormalMemOperator
+    kv_layer_mapping = None
+    kv_is_replicated = False
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
         self.size = size
@@ -61,13 +49,31 @@ class MemoryManager:
         # 构建对外的操作类接口
         self.operator: BaseMemManagerOperator = self.operator_class(self)
 
+    def set_kv_layer_mapping(self, layer_mapping):
+        layer_mapping = tuple(layer_mapping)
+        if not layer_mapping or any(index is not None and not 0 <= index < self.layer_num for index in layer_mapping):
+            raise ValueError("KV layer mapping must refer to allocated layers")
+        self.kv_layer_mapping = layer_mapping
+
+    def get_kv_layer_index(self, layer_index):
+        kv_layer_index = layer_index if self.kv_layer_mapping is None else self.kv_layer_mapping[layer_index]
+        if kv_layer_index is None:
+            raise ValueError(f"layer {layer_index} has no KV storage")
+        return kv_layer_index
+
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
+        layer_index = self.get_kv_layer_index(layer_index)
         k = self.kv_buffer[layer_index][:, : self.head_num, :]
         v = self.kv_buffer[layer_index][:, self.head_num :, :]
         return k, v
 
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
+
+    def get_transfer_view(self, *, include_page_layout=False):
+        from lightllm.common.kv_transfer_resources import KVTransferView
+
+        return KVTransferView.from_mem_manager(self, include_page_layout=include_page_layout)
 
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
@@ -98,7 +104,7 @@ class MemoryManager:
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
         pd_kv_move_buffer_size = self.get_pd_kv_move_buffer_size()
-        available_memory_bytes = available_memory * 1024 ** 3 - pd_kv_move_buffer_size
+        available_memory_bytes = available_memory * 1024**3 - pd_kv_move_buffer_size
         self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
             tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
@@ -120,79 +126,6 @@ class MemoryManager:
         self.kv_buffer = torch.empty(
             (layer_num, size + self.page_size, 2 * head_num, head_dim), dtype=dtype, device="cuda"
         )
-
-    def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
-        self.kv_move_buffer = torch.empty(
-            self.get_paged_kv_move_buffer_shape(page_num, page_size), dtype=self.dtype, device="cuda"
-        )
-        self._buffer_mem_indexes_tensors = [
-            torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
-        ]
-        return self.kv_move_buffer
-
-    def write_mem_to_page_kv_move_buffer(
-        self,
-        mem_indexes: List[int],
-        page_index: int,
-        dp_index: int,
-        mem_managers: List["MemoryManager"],
-        dp_world_size: int,
-        page_kind: str = "kv",
-        req_idx: int = None,
-    ):
-        assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
-        cur_page = self.kv_move_buffer[page_index]
-        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
-        pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
-        repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
-        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        for tp_index in range(dp_world_size):
-            if tp_index % repeat_count == 0:
-                page_io(
-                    mem_indexes=mem_indexes_gpu,
-                    page_tensor=cur_page,
-                    kv_buffer=dp_mems[tp_index].kv_buffer,
-                    tp_index=tp_index,
-                    tp_world_size=dp_world_size,
-                    mode="write",
-                )
-        # keep for debug
-        # logger.info(f"src token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
-        # logger.info(f"src page token tensor {cur_page[0, :, 0, 0]}")
-        return
-
-    def read_page_kv_move_buffer_to_mem(
-        self,
-        mem_indexes: List[int],
-        page_index: int,
-        dp_index: int,
-        mem_managers: List["MemoryManager"],
-        dp_world_size: int,
-        page_kind: str = "kv",
-        req_idx: int = None,
-    ):
-        assert page_kind == "kv", f"{type(self).__name__} does not support page_kind={page_kind}"
-        cur_page = self.kv_move_buffer[page_index]
-        pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
-        pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
-        dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
-        )
-        for tp_index in range(dp_world_size):
-            page_io(
-                mem_indexes=mem_indexes_gpu,
-                page_tensor=cur_page,
-                kv_buffer=dp_mems[tp_index].kv_buffer,
-                tp_index=tp_index,
-                tp_world_size=dp_world_size,
-                mode="read",
-            )
-        # keep for debug
-        # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
-        # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
 
     def _free_buffers(self):
         self.kv_buffer = None
@@ -231,57 +164,6 @@ class MemoryManager:
 
     def load_index_kv_buffer(self, index, load_tensor_dict):
         self.kv_buffer[:, index].copy_(load_tensor_dict["kv_buffer"])
-
-    def write_to_shm(self, req_manager):
-        """
-        将 mem manager 写入到 shm中，方便pd分离等特性直接从中读取，不依赖进程间队列。
-        """
-        if kv_trans_use_p2p():
-            from lightllm.server.router.model_infer.mode_backend.pd.p2p_fix import reduce_tensor
-
-            mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
-
-        from lightllm.common.req_manager import ReqManager
-
-        req_manager: ReqManager = req_manager
-
-        # 这个地方是一个不太优雅的设计，但是暂时这么做，可以让dp shared kv swap模块直接访问 req_manager 中的 req_to_token_indexs
-        # 避免过多无用的数据复制和传输开销。
-        self.req_to_token_indexs: torch.Tensor = req_manager.req_to_token_indexs
-
-        lock = FileLock(f"/tmp/{get_service_shm_name('mem_manager_lock')}")
-        with lock:
-            node_world_size = get_node_world_size()
-            shm_name = f"mem_manager_{get_current_rank_in_node()}"
-            obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
-            obj_size = len(obj_bytes_array[0])
-            shm = create_or_link_shm(
-                name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"
-            )
-            logger.info(f"create shm {shm.name} size {shm.size} for mem manger shared buffer")
-            shm.buf[0:4] = (node_world_size * 2).to_bytes(4, "little")
-            shm.buf[4:8] = obj_size.to_bytes(4, "little")
-            start_index = 8
-            for obj_bytes in obj_bytes_array:
-                shm.buf[start_index : start_index + obj_size] = obj_bytes
-                start_index += obj_size
-
-    @staticmethod
-    def loads_from_shm(rank_in_node: int) -> "MemoryManager":
-        shm_name = f"mem_manager_{rank_in_node}"
-        lock = FileLock(f"/tmp/{get_service_shm_name('mem_manager_lock')}")
-        logger.info(f"get memmanager from shm {shm_name}")
-        with lock:
-            shm = create_or_link_shm(name=shm_name, expected_size=-1, force_mode="link")
-            left_num = int.from_bytes(shm.buf[0:4], "little")
-            obj_size = int.from_bytes(shm.buf[4:8], "little")
-            assert left_num > 0
-            end_index = 8 + left_num * obj_size
-            start_index = 8 + (left_num - 1) * obj_size
-            obj_bytes = shm.buf[start_index:end_index].tobytes()
-            shm.buf[0:4] = (left_num - 1).to_bytes(4, byteorder="little")
-            shm.close()
-            return ForkingPickler.loads(obj_bytes)
 
 
 class ReadOnlyStaticsMemoryManager:

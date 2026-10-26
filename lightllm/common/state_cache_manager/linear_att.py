@@ -59,6 +59,8 @@ class LinearAttCacheConfig:
         """Map a global target/draft layer index to the packed full-attention cache."""
 
         layer_index = int(layer_index)
+        if 0 <= layer_index < self.all_layer_num and (layer_index + 1) % self.full_attention_interval != 0:
+            raise ValueError(f"layer {layer_index} has no full-attention KV storage")
         if layer_index >= self.all_layer_num:
             kv_layer_index = layer_index - self.linear_layer_num
         else:
@@ -68,6 +70,14 @@ class LinearAttCacheConfig:
             f"slot={kv_layer_index}, slots={self.get_full_att_kv_layer_num_with_draft_model()}"
         )
         return kv_layer_index
+
+    def get_full_att_kv_layer_mapping(self):
+        return tuple(
+            self.get_full_att_kv_layer_index(index)
+            if index >= self.all_layer_num or (index + 1) % self.full_attention_interval == 0
+            else None
+            for index in range(self.all_layer_num + self.draft_full_att_kv_layer_num)
+        )
 
     def get_conv_state_shape(self):
         # Base committed sliding-window state, without speculative MTP tail.
@@ -91,7 +101,7 @@ class LinearAttCacheConfig:
         b = self.get_cpu_cache_conv_bytes()
         c = self.get_cpu_cache_ssm_bytes()
 
-        return triton.cdiv(a + b + c, 16) * 16
+        return triton.cdiv(a + b + c, 16) * 16 + 16
 
     def get_cpu_cache_full_att_bytes(self):
         big_page_token_num = (
@@ -125,9 +135,13 @@ class LinearAttCacheConfig:
         except:
             pass
 
-        n_layer = llm_config["num_hidden_layers"]
+        return LinearAttCacheConfig.from_model_config(llm_config, args)
 
-        tp_world_size = get_env_start_args().tp // get_env_start_args().dp
+    @staticmethod
+    def from_model_config(llm_config, args) -> "LinearAttCacheConfig":
+        n_layer = llm_config["n_layer"] if "n_layer" in llm_config else llm_config["num_hidden_layers"]
+
+        tp_world_size = args.tp // args.dp
         full_att_dtype = (
             torch.uint8 if args.llm_kv_type in {"fp8kv_sph", "fp8kv_spt"} else get_torch_dtype(args.data_type)
         )

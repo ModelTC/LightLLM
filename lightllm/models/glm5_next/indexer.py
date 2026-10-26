@@ -36,7 +36,7 @@ class Glm5NextNsaInfer:
         k = layer_weight.k_norm_(layer_weight.wk_proj_.mm(hidden_states), eps=self.eps)
         gate = layer_weight.index_kpool_compress_gate.mm(hidden_states)
         raw = torch.cat((k, gate), -1)
-        tail = infer_state.req_manager.get_indexer_tail_buffer(self.layer_idx)
+        tail = infer_state.indexer_state_manager.get_layer_buffer(self.layer_idx)
         packed_buffer = infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx)
         compress_pools(
             raw=raw,

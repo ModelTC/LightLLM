@@ -13,7 +13,10 @@ logger = init_logger(__name__)
 
 
 class NormalMemOperator(BaseMemManagerOperator):
+    supports_dp_cache_fetch = True
+
     def copy_kv_to_mem_manager(self, layer_index: int, mem_index: torch.Tensor, kv: torch.Tensor):
+        layer_index = self.mem_manager.get_kv_layer_index(layer_index)
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 
         mem_manager: MemoryManager = self.mem_manager
@@ -86,7 +89,7 @@ class NormalMemOperator(BaseMemManagerOperator):
 
     def copy_kv_from_other_dp_ranks(
         self,
-        mem_managers: List,
+        kv_views: List,
         move_token_indexes: torch.Tensor,
         token_dp_indexes: torch.Tensor,
         mem_indexes: torch.Tensor,
@@ -96,8 +99,8 @@ class NormalMemOperator(BaseMemManagerOperator):
         if not hasattr(self, "mem_ptrs_tensor"):
             # 构建一个2D tensor，shape为(layer_num, mem_num)
             mems_ptr_list = []
-            for i in range(0, len(mem_managers)):
-                mems_ptr_list.append(mem_managers[i].kv_buffer.data_ptr())
+            for i in range(0, len(kv_views)):
+                mems_ptr_list.append(kv_views[i].kv_buffer.data_ptr())
             self.mem_ptrs_tensor = torch.tensor(mems_ptr_list, dtype=torch.uint64, device="cpu", pin_memory=True)
 
         from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_for_dp

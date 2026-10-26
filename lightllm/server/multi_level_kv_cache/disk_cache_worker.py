@@ -6,7 +6,8 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import torch
-from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.envs_utils import get_unique_server_name, get_env_start_args
+from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.log_utils import init_logger
 from .cpu_cache_client import CpuKvCacheClient
 
@@ -43,7 +44,7 @@ class DiskCacheWorker:
         self._pages_all_idle = False
 
         assert disk_cache_storage_size > 0
-        storage_size = int(disk_cache_storage_size * (1024 ** 3))
+        storage_size = int(disk_cache_storage_size * (1024**3))
         # 为了发挥afs性能，2TiB以内使用8个shard；容量超过2TiB后，每增加1TiB增加4个shard。
         num_shard = max(8, math.ceil(disk_cache_storage_size / 1024) * 4)
         num_worker = 24
@@ -54,7 +55,8 @@ class DiskCacheWorker:
         if not cache_dir:
             cache_dir = os.path.join(tempfile.gettempdir(), f"lightllm_disk_cache_{get_unique_server_name()}")
         os.makedirs(cache_dir, exist_ok=True)
-        cache_file = os.path.join(cache_dir, "cache_file")
+        filename = "cache_file_hybrid_state_v1" if is_hybrid_att_model(get_env_start_args().model_dir) else "cache_file"
+        cache_file = os.path.join(cache_dir, filename)
 
         self.max_concurrent_write_tasks = max_concurrent_write_tasks
         self._page_major_tensor = self._prepare_tensor(cpu_cache_client.cpu_kv_cache_tensor)

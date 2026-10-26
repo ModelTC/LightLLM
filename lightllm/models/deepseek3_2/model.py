@@ -13,6 +13,15 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
     # infer class
     transformer_layer_infer_class = Deepseek3_2TransformerLayerInfer
 
+    @classmethod
+    def get_mem_manager_class(cls):
+        from lightllm.common.kv_cache_mem_manager import IndexedMlaMemoryManager, FP8IndexedMlaMemoryManager
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        return (
+            FP8IndexedMlaMemoryManager if get_env_start_args().llm_kv_type == "fp8kv_dsa" else IndexedMlaMemoryManager
+        )
+
     def _init_att_backend(self):
         self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)
         self.decode_att_backend = get_nsa_decode_att_backend_class(index=0)(model=self)

@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import torch
 
-from lightllm.common.kv_cache_mem_manager.ppl_int4kv_mem_manager import PPLINT4KVMemoryManager
-from lightllm.common.kv_cache_mem_manager.ppl_int8kv_mem_manager import PPLINT8KVMemoryManager
+from lightllm.common.kv_cache_mem_manager.group_quantized_mem_manager import PPLINT4KVMemoryManager
+from lightllm.common.kv_cache_mem_manager.group_quantized_mem_manager import PPLINT8KVMemoryManager
 
 
 def test_quantized_kv_buffers_include_the_full_hold_page(monkeypatch):
