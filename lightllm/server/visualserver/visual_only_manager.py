@@ -39,6 +39,7 @@ class VisualOnlyManager(rpyc.Service):
     ):
         """Initialize the visual inference service and its worker event loop."""
         self.args = args
+        # Proxies for this service must run on the same host because its RPC endpoint is loopback-only.
         self.rpc_host = VISUAL_ONLY_RPC_HOST
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
