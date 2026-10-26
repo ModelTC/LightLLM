@@ -451,11 +451,11 @@ class _PrefillTransModule:
         while True:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
 
-            # 回收页面
-            if trans_task.src_page_index is not None:
-                self.page_index_queue.put(trans_task.src_page_index)
+            # 失败任务可能仍有在途传输，handle 释放成功后才能复用源页面。
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            if trans_task.src_page_index is not None:
+                self.page_index_queue.put(trans_task.src_page_index)
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)

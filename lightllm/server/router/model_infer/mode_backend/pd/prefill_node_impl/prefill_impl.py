@@ -51,7 +51,8 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
                 if req_obj.pd_task_num == (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                     ans_list.append(req_obj)
             else:
-                if req_obj.infer_aborted:
+                # 暂停会释放请求的 KV/SWA 页面，必须先等待在途传输任务结束。
+                if req_obj.infer_aborted or req_obj.wait_pause:
                     if req_obj.pd_task_num == (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                         ans_list.append(req_obj)
                     else:

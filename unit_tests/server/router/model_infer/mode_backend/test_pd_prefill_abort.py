@@ -87,6 +87,81 @@ def test_prefill_infer_sends_abort_at_most_six_times(monkeypatch):
     assert req.pd_abort_req_send_count == 6
 
 
+@pytest.mark.parametrize("success_num,failed_num", [(2, 0), (1, 1), (0, 2)])
+def test_prefill_capacity_pause_waits_for_pending_pd_tasks(monkeypatch, success_num, failed_num):
+    req = SimpleNamespace(
+        req_id=123,
+        infer_aborted=False,
+        pd_task_num=2,
+        pd_task_failed_num=0,
+        pd_task_success_num=0,
+        cur_kv_len=8192,
+        shm_req=SimpleNamespace(input_len=8193),
+        filter_mark=False,
+        wait_pause=False,
+        paused=False,
+        finish_status=SimpleNamespace(is_finished=lambda: False),
+        is_slave_req=lambda: False,
+        prefill_need_token_num=lambda **kwargs: (1, 1),
+    )
+    backend = PDChunkedPrefillForPrefillNode.__new__(PDChunkedPrefillForPrefillNode)
+    backend.args = SimpleNamespace(enable_cpu_cache=False, enable_prefill_decode_mixed=False)
+    backend.is_master_in_dp = True
+    backend.is_deepseek_v4 = True
+    backend.support_overlap = False
+    backend.disable_chunked_prefill = False
+    backend.batch_max_tokens = 8192
+    backend.info_queue = queue.Queue()
+    backend._timer_merge_radix_tree = MagicMock()
+    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
+    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+
+    context = prefill_impl.g_infer_context
+    monkeypatch.setattr(context, "requests_mapping", {req.req_id: req})
+    monkeypatch.setattr(context, "get_can_alloc_token_num", lambda: 0)
+    monkeypatch.setattr(context, "get_can_alloc_dsv4_swa_page_num", lambda: 0)
+    monkeypatch.setattr(context, "cache_placement_controller", SimpleNamespace(set_req_cache_way=MagicMock()))
+    monkeypatch.setattr(context, "filter_reqs", MagicMock())
+    pause_reqs = MagicMock()
+    monkeypatch.setattr(context, "pause_reqs", pause_reqs)
+
+    # Capacity pressure marks the unfinished request for pausing on the next iteration.
+    assert backend._get_classed_reqs(req_ids=[req.req_id], no_decode=True) == ([], [])
+    assert req.wait_pause
+    pause_reqs.assert_called_once_with([], is_master_in_dp=True)
+
+    pause_reqs.reset_mock()
+    assert backend._get_classed_reqs(req_ids=[req.req_id], no_decode=True) == ([], [])
+    pause_reqs.assert_called_once_with([], is_master_in_dp=True)
+
+    req.pd_task_success_num = success_num
+    req.pd_task_failed_num = failed_num
+    pause_reqs.reset_mock()
+    backend._get_classed_reqs(req_ids=[req.req_id], no_decode=True)
+    pause_reqs.assert_called_once_with([req], is_master_in_dp=True)
+    assert backend.info_queue.empty()
+
+
+def test_prefill_keeps_chunk_overlap_while_pd_tasks_are_pending(monkeypatch):
+    req = SimpleNamespace(
+        req_id=123,
+        infer_aborted=False,
+        wait_pause=False,
+        pd_task_num=2,
+        pd_task_failed_num=0,
+        pd_task_success_num=0,
+        cur_kv_len=8192,
+        shm_req=SimpleNamespace(input_len=8193),
+    )
+    monkeypatch.setattr(prefill_impl.g_infer_context, "requests_mapping", {req.req_id: req})
+    backend = PDChunkedPrefillForPrefillNode.__new__(PDChunkedPrefillForPrefillNode)
+    backend.is_master_in_dp = True
+    backend.info_queue = queue.Queue()
+
+    assert backend._filter_not_ready_reqs([req.req_id]) == [req]
+    assert backend.info_queue.empty()
+
+
 def test_decode_infer_sends_abort_at_most_six_times(monkeypatch):
     request_id = 123
     req = SimpleNamespace(
@@ -166,3 +241,40 @@ def test_prefill_abort_only_fails_tasks_not_submitted_to_transporter():
         "active": active_task,
         "unrelated": unrelated_task,
     }
+
+
+@pytest.mark.parametrize("release_fails", [False, True])
+def test_prefill_failed_transfer_releases_handle_before_reusing_page(monkeypatch, release_fails):
+    task = SimpleNamespace(
+        src_page_index=2,
+        xfer_handle=object(),
+        error_info=None,
+        createRetObj=MagicMock(return_value=object()),
+    )
+    module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.device_id = 0
+    module.failed_queue = _SequenceQueue(task)
+    module.page_index_queue = queue.Queue()
+    module.task_out_queue = queue.Queue()
+    monkeypatch.setattr(prefill_trans_process.torch.cuda, "set_device", lambda _device_id: None)
+
+    def release(handle):
+        assert handle is task.xfer_handle
+        assert module.page_index_queue.empty()
+        assert module.task_out_queue.empty()
+        if release_fails:
+            raise RuntimeError("transfer cancellation failed")
+
+    module.transporter = SimpleNamespace(release_xfer_handle=MagicMock(side_effect=release))
+    if release_fails:
+        with pytest.raises(RuntimeError, match="transfer cancellation failed"):
+            module.fail_loop()
+        assert module.page_index_queue.empty()
+        assert module.task_out_queue.empty()
+        task.createRetObj.assert_not_called()
+    else:
+        with pytest.raises(_StopLoop):
+            module.fail_loop()
+        assert module.page_index_queue.get_nowait() == task.src_page_index
+        assert module.task_out_queue.get_nowait() is task.createRetObj.return_value
+    module.transporter.release_xfer_handle.assert_called_once_with(task.xfer_handle)
