@@ -7,7 +7,7 @@ from typing import Union, List, Tuple, Optional
 from lightllm.server.pd_io_struct import PD_Client_Obj
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
-from lightllm.utils.error_utils import ServerBusyError
+from lightllm.utils.error_utils import PDTransportUnavailableError, ServerBusyError
 from lightllm.utils.log_utils import init_logger
 
 
@@ -35,8 +35,15 @@ class PDSelector:
         self.selection_lock = nullcontext()
 
     def update_nodes(self, prefill_nodes, decode_nodes):
-        self.prefill_nodes = prefill_nodes
-        self.decode_nodes = decode_nodes
+        self.prefill_nodes = [node for node in prefill_nodes if node.run_status.transfer_available]
+        self.decode_nodes = [node for node in decode_nodes if node.run_status.transfer_available]
+
+    def _check_available_nodes(self):
+        if not self.prefill_nodes or not self.decode_nodes:
+            raise PDTransportUnavailableError(
+                "PD transport unavailable: "
+                f"available_prefill={len(self.prefill_nodes)}, available_decode={len(self.decode_nodes)}"
+            )
 
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
@@ -61,6 +68,7 @@ class RandomSelector(PDSelector):
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
+        self._check_available_nodes()
         p_node = random.choice(self.prefill_nodes)
         d_node = random.choice(self.decode_nodes)
         return p_node, d_node, PDSelectionExtraInfo()
@@ -77,6 +85,7 @@ class RoundRobinSelector(PDSelector):
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
+        self._check_available_nodes()
         self.prefill_node_index = self.prefill_node_index % len(self.prefill_nodes)
         self.decode_node_index = self.decode_node_index % len(self.decode_nodes)
         p_node = self.prefill_nodes[self.prefill_node_index]
@@ -92,6 +101,7 @@ class AdaptiveLoadSelector(PDSelector):
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
+        self._check_available_nodes()
         p_node = self._importance_sampling(self.prefill_nodes)
         d_node = self._importance_sampling(self.decode_nodes)
 
@@ -124,6 +134,7 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
     async def select_p_d_node(
         self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
+        self._check_available_nodes()
         assert isinstance(prompt, str), "prompt must be a string for cache-aware selection"
         if self.shared_cache is None:
             await self.pd_node_stats.update_dispatched_info(p_nodes=self.prefill_nodes)
@@ -137,6 +148,7 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
                 selection_extra_info = PDSelectionExtraInfo()
             else:
                 p_node, selection_extra_info = await self.policy.select_worker(self.prefill_nodes, prompt, loads)
+        self._check_available_nodes()
         # 前缀查询期间 P 节点可能已经重连；即使 connection_key 相同，旧对象持有的 WebSocket 也已失效。
         # 必须按对象身份确认选中节点仍是当前连接，让上层通过 ServerBusyError 重新选点。
         if not any(node is p_node for node in self.prefill_nodes):

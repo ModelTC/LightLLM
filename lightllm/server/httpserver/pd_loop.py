@@ -26,7 +26,7 @@ from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
 from lightllm.server.core.objs import StartArgs
 from lightllm.server.core.objs import SamplingParams
-from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, ServerBusyError
+from lightllm.utils.error_utils import PDPrefillNodeStopGenToken, PDTransportUnavailableError, ServerBusyError
 from lightllm.utils.shm_port_args import get_shm_port_args
 
 logger = init_logger(__name__)
@@ -125,7 +125,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 forwarding_tokens_task = asyncio.create_task(
                     _up_tokens_to_pd_master(forwarding_queue, websocket, dp_index)
                 )
-                heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket))
+                heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket, manager.transfer_status))
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
@@ -315,6 +315,8 @@ async def _pd_process_generate(
         group_request_id = sampling_params.group_request_id
         logger.warning(f"pd node rejected request {group_request_id}: {e.message}")
         try:
+            if isinstance(e, PDTransportUnavailableError):
+                await pd_upload_websocket.send(pickle.dumps((ObjType.HEARTBEAT, False)))
             await pd_upload_websocket.send(pickle.dumps((ObjType.PD_UPLOAD_SERVER_BUSY, group_request_id, e.message)))
         except Exception:
             logger.exception(f"report pd node request rejection failed, group_request_id: {group_request_id}")
@@ -397,11 +399,19 @@ async def _up_tokens_to_pd_master(
                 pending_handle_lists.extend((token_list[split_index:], token_list[:split_index]))
 
 
-async def _send_heartbeat_to_pd_master(websocket: ClientConnection):
+async def _send_heartbeat_to_pd_master(websocket: ClientConnection, transfer_status):
     heartbeat_interval_seconds = 15
+    last_available = None
+    last_sent = 0.0
+    loop = asyncio.get_running_loop()
     while True:
-        await websocket.send(pickle.dumps((ObjType.HEARTBEAT,)))
-        await asyncio.sleep(heartbeat_interval_seconds)
+        available = transfer_status is None or transfer_status.is_available()
+        now = loop.time()
+        if available != last_available or now - last_sent >= heartbeat_interval_seconds:
+            await websocket.send(pickle.dumps((ObjType.HEARTBEAT, available)))
+            last_available = available
+            last_sent = now
+        await asyncio.sleep(1)
 
 
 # 获取节点负载信息

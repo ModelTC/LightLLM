@@ -34,6 +34,10 @@ class ServerBusyError(Exception):
         return f"{self.message} (Status code: {self.status_code})"
 
 
+class PDTransportUnavailableError(ServerBusyError):
+    """No safe PD transfer capacity remains; reject without busy retry."""
+
+
 class ClientDisconnected(Exception):
     """Raised when the client closed the HTTP connection mid-request, as
     detected by ``request.is_disconnected()``. This is an expected control-flow

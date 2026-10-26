@@ -10,7 +10,7 @@ import copy
 from typing import List, Dict, Optional, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
+from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask, PDTransferStatus
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
@@ -121,6 +121,9 @@ class _PrefillTransModule:
         self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
         self.use_write_quiescence = args.pd_trans_mode == "nixl"
         self.quarantined_tasks: Dict[str, PDChunckedTransTask] = {}
+        if self.use_write_quiescence:
+            self.transfer_status = PDTransferStatus(args)
+            self.transfer_status.set_quarantined_pages(device_id, 0)
 
         self.local_copy_kv_queue = queue.Queue()
         self.ready_transfer_queue = queue.Queue()
@@ -174,6 +177,7 @@ class _PrefillTransModule:
         task.write_uncertain |= uncertain
         if task.write_submitted and not task.write_quiesced:
             self.quarantined_tasks[task.get_key()] = task
+            self.transfer_status.set_quarantined_pages(self.device_id, len(self.quarantined_tasks))
         else:
             task.write_quiesced = True
         self.failed_queue.put(task)
@@ -485,6 +489,7 @@ class _PrefillTransModule:
                             trans_task.write_quiesced = True
                             self.quarantined_tasks.pop(trans_task.get_key())
                             self._release_source_page(trans_task)
+                            self.transfer_status.set_quarantined_pages(self.device_id, len(self.quarantined_tasks))
                             self.transporter.send_error_info_to_decode_node(trans_task=trans_task)
                         elif ret == "ERR":
                             # ERR/query failure does not prove quiescence; never reinterpret it as DONE later.

@@ -19,7 +19,7 @@ from typing import Literal, Union, List, Tuple, Dict, Optional, AsyncGenerator, 
 from websockets import ClientConnection
 from fastapi import Request
 from ..tokenizer import get_tokenizer
-from ..pd_io_struct import NodeRole, ObjType, PDDecodeNodeInfo
+from ..pd_io_struct import NodeRole, ObjType, PDDecodeNodeInfo, PDTransferStatus
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
 from .req_id_generator_client import ReqIDGenerator
@@ -44,6 +44,7 @@ from lightllm.utils.error_utils import (
     ClientDisconnected,
     InvalidRequestError,
     PDPrefillNodeStopGenToken,
+    PDTransportUnavailableError,
     ServerBusyError,
 )
 from rpyc.utils.classic import obtain
@@ -127,6 +128,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         self.pd_mode: NodeRole = NodeRole(self.args.run_mode)
         assert self.pd_mode in [NodeRole.NORMAL, NodeRole.P, NodeRole.D]
+        self.transfer_status = (
+            PDTransferStatus(args) if self.pd_mode.is_P_or_D() and args.pd_trans_mode == "nixl" else None
+        )
         self.id_gen = ReqIDGenerator()
         self.first_time_costs = MovingAverage()
         self.per_token_costs = MovingAverage()
@@ -364,6 +368,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
 
         start_time = time.time()
+        if self.transfer_status is not None and not self.transfer_status.is_available():
+            raise PDTransportUnavailableError("PD transfer pages quarantined; transport recovery required")
         # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
         compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
         request_headers = request.headers if request is not None else {}

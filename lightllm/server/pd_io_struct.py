@@ -145,9 +145,31 @@ def unpack_pd_compact_token_info(token_info: PDCompactTokenInfo):
     return sub_req_id, text, metadata, finish_status
 
 
+class PDTransferStatus:
+    """Node-local transfer capacity, one writer per local CUDA device.
+
+    Only quarantined pages count here. Ordinary in-flight transfers retain the
+    existing queueing behavior. HTTP workers read this without touching CUDA.
+    """
+
+    def __init__(self, args):
+        import numpy as np
+        from lightllm.server.router.dynamic_prompt.shared_arr import SharedArray
+
+        self.page_capacity = args.pd_kv_page_num
+        self.quarantined_pages = SharedArray("pd_transfer_quarantined_pages", (args.tp // args.nnodes,), dtype=np.int64)
+
+    def set_quarantined_pages(self, device_id, count):
+        self.quarantined_pages.arr[device_id] = count
+
+    def is_available(self):
+        return bool((self.quarantined_pages.arr < self.page_capacity).all())
+
+
 @dataclass
 class _PD_Client_RunStatus:
     total_token_usage_rate: float = 0.0  # pd 节点上的 token 使用率
+    transfer_available: bool = True
 
 
 @dataclass

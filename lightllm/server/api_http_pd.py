@@ -44,6 +44,8 @@ async def register_and_keep_alive(websocket: WebSocket):
                 data = await websocket.receive_bytes()
             obj = pickle.loads(data)
             if isinstance(obj, tuple) and obj and obj[0] == ObjType.HEARTBEAT:
+                if len(obj) == 2:
+                    g_objs.httpserver_manager.pd_manager.update_transfer_availability(pd_client, obj[1])
                 continue
             await g_objs.httpserver_manager.put_to_handle_queue(obj)
 

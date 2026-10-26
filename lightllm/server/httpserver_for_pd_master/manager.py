@@ -32,7 +32,12 @@ from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 from lightllm.server.httpserver.grammar import create_output_grammar_compiler
-from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    InvalidRequestError,
+    PDTransportUnavailableError,
+    ServerBusyError,
+)
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
@@ -285,6 +290,8 @@ class HttpServerManagerForPDMaster:
                         has_yielded_result = True
                         yield result
                 return
+            except PDTransportUnavailableError:
+                raise
             except ServerBusyError:
                 # 关闭节点自限流时，不启用与该策略配套的 busy 重试，直接透传异常。
                 if not self.enable_pd_node_self_request_limit:
@@ -1150,6 +1157,16 @@ class PDManager:
 
         logger.info(f"mode: {pd_client.mode} url: {pd_client.client_ip_port} dp_index: {pd_client.dp_index} removed")
         return
+
+    def update_transfer_availability(self, pd_client: PD_Client_Obj, available: bool):
+        # A delayed heartbeat from an old connection must not change its replacement.
+        if self.url_to_pd_nodes.get(pd_client.connection_key) is not pd_client:
+            return
+        if pd_client.run_status.transfer_available == available:
+            return
+        pd_client.run_status.transfer_available = available
+        self.selector.update_nodes(self.prefill_nodes, self.decode_nodes)
+        logger.warning(f"PD {pd_client.connection_key} transfer availability changed: {available}")
 
     def update_node_load_info(self, load_info: Optional[dict]):
         """更新节点负载信息

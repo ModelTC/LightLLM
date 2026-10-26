@@ -15,6 +15,7 @@ from lightllm.server.pd_io_struct import (
     PDChunckedTransTaskGroup,
     PDUpKVStatus,
     PDAbortReq,
+    PDTransferStatus,
 )
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.utils.graceful_utils import graceful_registry
@@ -149,6 +150,9 @@ class _DecodeTransModule:
         self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
         self.use_write_quiescence = args.pd_trans_mode == "nixl"
         self.quarantined_tasks: Dict[str, PDChunckedTransTask] = {}
+        if self.use_write_quiescence:
+            self.transfer_status = PDTransferStatus(args)
+            self.transfer_status.set_quarantined_pages(device_id, 0)
         self.last_stop_retry_time = 0.0
         self.request_last_progress_time: Dict[int, float] = {}
         self.request_page_task_queue = queue.Queue()
@@ -213,6 +217,7 @@ class _DecodeTransModule:
             assert task.write_id is not None
             # 与移出 waiting_dict 原子交接，DONE/STOPPED 不能落在两张表之间。
             self.quarantined_tasks[task.write_id] = task
+            self.transfer_status.set_quarantined_pages(self.device_id, len(self.quarantined_tasks))
         self.failed_queue.put(task)
 
     def _confirm_write_quiesced(self, notify: PDChunckedTransTask):
@@ -232,6 +237,7 @@ class _DecodeTransModule:
             page = task.dst_page_index
             task.dst_page_index = None
             self.page_index_queue.put(page)
+            self.transfer_status.set_quarantined_pages(self.device_id, len(self.quarantined_tasks))
         return True
 
     def _abort(self, request_id: int, error_info: str = "aborted req"):

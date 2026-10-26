@@ -157,6 +157,7 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
         manager = SimpleNamespace(
             args=args,
             host_ip="p",
+            transfer_status=None,
             pd_mode=SimpleNamespace(value="prefill"),
             metric_client=MagicMock(),
             begin_pd_request_registration=MagicMock(),

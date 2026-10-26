@@ -33,6 +33,7 @@ def _make_manager(mode: NodeRole):
         enable_return_routed_experts=False,
     )
     manager.pd_mode = mode
+    manager.transfer_status = None
     manager.is_multinode_tp_slave = False
     manager.alloc_req_id = MagicMock(return_value=123)
     manager.is_multinode_tp_master = False

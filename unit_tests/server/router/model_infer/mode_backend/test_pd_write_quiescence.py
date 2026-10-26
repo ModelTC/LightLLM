@@ -72,6 +72,7 @@ def _module(cls):
     module.waiting_dict_lock = threading.Lock()
     module.waiting_dict = {}
     module.quarantined_tasks = {}
+    module.transfer_status = MagicMock()
     module.request_last_progress_time = {}
     module.last_stop_retry_time = 0.0
     module.failed_queue = queue.Queue()
@@ -496,3 +497,34 @@ def test_prefill_preparation_failure_before_submission_can_reclaim_source():
     assert task.write_quiesced and not task.write_submitted
     assert module.page_index_queue.get_nowait() == 0
     assert not module.quarantined_tasks
+
+
+@pytest.mark.parametrize("cls", [_PrefillTransModule, _DecodeTransModule])
+def test_quarantine_capacity_is_published_and_recovers_only_after_safe_page_return(cls):
+    module = _module(cls)
+    tasks = [
+        _task(request_id=i, src_page_index=i, dst_page_index=i, write_id=f"allocation-{i}", start_trans_time=0)
+        for i in range(2)
+    ]
+    for task in tasks:
+        task.write_submitted = True
+        task.xfer_handle = task.request_id
+        module.waiting_dict[task.get_key()] = task
+    if cls is _PrefillTransModule:
+        module._update_task_status_once()
+    else:
+        module._check_tasks_time_out()
+    assert [call.args for call in module.transfer_status.set_quarantined_pages.call_args_list] == [(0, 1), (0, 2)]
+    assert module.page_index_queue.empty()
+
+    def publish_after_page_return(device_id, count):
+        assert (device_id, count) == (0, 1)
+        assert module.page_index_queue.qsize() == 1
+
+    module.transfer_status.set_quarantined_pages.side_effect = publish_after_page_return
+    if cls is _PrefillTransModule:
+        module.transporter.check_task_status.side_effect = ["DONE", "PROC"]
+        module._update_task_status_once()
+    else:
+        assert module._confirm_write_quiesced(replace(tasks[0], write_quiesced=True))
+    assert len(module.quarantined_tasks) == 1
