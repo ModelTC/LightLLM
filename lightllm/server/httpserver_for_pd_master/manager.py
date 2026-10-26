@@ -25,7 +25,11 @@ from lightllm.utils.statics_utils import MovingAverage
 from lightllm.server.httpserver.manager import AsyncQueue
 from lightllm.server.httpserver.stop_seq_match import wrap_stop_match_stream
 from lightllm.server.httpserver.grammar import create_output_grammar_compiler
-from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, ServerBusyError
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    InvalidRequestError,
+    ServerBusyError,
+)
 from lightllm.utils.envs_utils import (
     get_pd_cache_high_priority_max_age_seconds,
     get_pd_cache_high_priority_min_prompt_tokens,
@@ -34,6 +38,7 @@ from lightllm.utils.envs_utils import (
     get_pd_node_resource_wait_timeout_seconds,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
+from lightllm.utils.pd_timeout_utils import get_pd_handshake_timeout_seconds
 from .pd_selector import PDSelectionExtraInfo, create_selector
 
 logger = init_logger(__name__)
@@ -72,7 +77,11 @@ class HttpServerManagerForPDMaster:
         self.pd_cache_high_priority_min_prompt_tokens = get_pd_cache_high_priority_min_prompt_tokens()
         self.disable_pd_cache_high_priority = args.disable_pd_cache_high_priority
 
-        self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.tokenizer = get_tokenizer(
+            args.model_dir,
+            args.tokenizer_mode,
+            trust_remote_code=args.trust_remote_code,
+        )
         self.output_grammar_compiler = create_output_grammar_compiler(args, self.tokenizer)
 
         self.first_time_costs = MovingAverage()
@@ -116,7 +125,10 @@ class HttpServerManagerForPDMaster:
         return
 
     def tokens(self, prompt, multimodal_params, sampling_params: SamplingParams, kwargs=None):
-        kwargs = {"add_special_tokens": sampling_params.add_special_tokens, **(kwargs or {})}
+        kwargs = {
+            "add_special_tokens": sampling_params.add_special_tokens,
+            **(kwargs or {}),
+        }
         prompt_ids = self.tokenizer.encode(prompt, None, **kwargs)
         image_tokens = 0
         audio_tokens = 0
@@ -141,7 +153,10 @@ class HttpServerManagerForPDMaster:
         return len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
     async def select_p_d_node(
-        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         return await self.pd_manager.select_p_d_node(prompt, sampling_params, multimodal_params)
 
@@ -365,7 +380,10 @@ class HttpServerManagerForPDMaster:
                 sampling_params = SamplingParams.from_buffer_copy(origin_sampling_params)
                 block_group_request_id = self.id_gen.generate_id()
                 sampling_params.group_request_id = block_group_request_id
-                logger.debug(f"pd log gen sub req id {block_group_request_id} for main req id {origin_request_id}")
+                logger.info(
+                    f"pd_dispatch origin_req_id:{origin_request_id} block_req_id:{block_group_request_id} "
+                    f"p_node:{p_node.connection_key} d_node:{d_node.connection_key} segment:{segment_index}"
+                )
                 sampling_params.max_new_tokens = remaining_max_new_tokens
                 # high_priority_request 只影响 HTTP 资源申请和 Router 等待队列：首段仅在
                 # 输入达到长度门槛、预计 cache 命中率高于 0.8 且命中记录仍有效时提升；
@@ -417,7 +435,12 @@ class HttpServerManagerForPDMaster:
                     request,
                 )
                 raw_finish_status = FinishStatus()
-                async for sub_req_id, request_output, metadata, raw_finish_status in results_generator:
+                async for (
+                    sub_req_id,
+                    request_output,
+                    metadata,
+                    raw_finish_status,
+                ) in results_generator:
                     # 应用侧匹配到 stop 后，stop_request 会移除该子请求 ID。
                     # 恢复生成时丢弃后续输出，abort 当前 P/D 分段并结束该子请求，避免容量不足时继续续跑；
                     # 外层 finally 负责清理请求记录和节点负载，不影响其他子请求。
@@ -610,7 +633,7 @@ class HttpServerManagerForPDMaster:
             await self._wait_for_event_or_disconnect(
                 up_status_event,
                 request,
-                timeout=180,
+                timeout=get_pd_handshake_timeout_seconds(sampling_params.pd_node_resource_wait_timeout_seconds),
                 group_request_id=group_request_id,
                 stage="decode",
             )
@@ -726,12 +749,16 @@ class HttpServerManagerForPDMaster:
         sub_req_id_to_mtp_verify_step_num: Dict[int, int] = {}
 
         try:
-            async for sub_req_id, out_str, metadata, finish_status in self.fetch_pd_stream(
-                p_node, d_node, prompt, sampling_params, multimodal_params, request
-            ):
+            async for (
+                sub_req_id,
+                out_str,
+                metadata,
+                finish_status,
+            ) in self.fetch_pd_stream(p_node, d_node, prompt, sampling_params, multimodal_params, request):
                 if await request.is_disconnected():
                     raise ClientDisconnected(
-                        group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                        group_request_id=group_request_id,
+                        reason="_wait_to_token_package check network disconnected",
                     )
 
                 prompt_tokens = metadata["prompt_tokens"]
@@ -779,10 +806,12 @@ class HttpServerManagerForPDMaster:
                 )
                 self.metric_client.histogram_observe("lightllm_request_inference_duration", total_cost_time_ms / 1000.0)
                 self.metric_client.histogram_observe(
-                    "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
+                    "lightllm_request_mean_time_per_token_duration",
+                    mean_per_token_cost_time_ms / 1000.0,
                 )
                 self.metric_client.histogram_observe(
-                    "lightllm_request_first_token_duration", first_token_cost_ms / 1000.0
+                    "lightllm_request_first_token_duration",
+                    first_token_cost_ms / 1000.0,
                 )
                 self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
                 self.metric_client.histogram_observe("lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step)
@@ -793,7 +822,10 @@ class HttpServerManagerForPDMaster:
         self.active_req_ids.discard(request_id)
 
     async def abort(
-        self, group_request_id, p_node: Optional[PD_Client_Obj] = None, d_node: Optional[PD_Client_Obj] = None
+        self,
+        group_request_id,
+        p_node: Optional[PD_Client_Obj] = None,
+        d_node: Optional[PD_Client_Obj] = None,
     ):
         logger.warning(f"aborted group_request_id {group_request_id}")
 
@@ -839,7 +871,9 @@ class HttpServerManagerForPDMaster:
         use_config_server = self.args.config_server_host and self.args.config_server_port
 
         if use_config_server:
-            from lightllm.server.httpserver_for_pd_master.register_loop import register_loop
+            from lightllm.server.httpserver_for_pd_master.register_loop import (
+                register_loop,
+            )
 
             asyncio.create_task(register_loop(self))
 
@@ -916,6 +950,8 @@ class ReqStatus:
         self.is_server_busy = False
 
     async def wait_to_ready(self):
+        if self.event.is_set():
+            return
         try:
             await asyncio.wait_for(self.event.wait(), timeout=5)
         except asyncio.TimeoutError:
@@ -1108,6 +1144,9 @@ class PDManager:
         return
 
     async def select_p_d_node(
-        self, prompt: Union[str, List[int]], sampling_params: SamplingParams, multimodal_params: MultimodalParams
+        self,
+        prompt: Union[str, List[int]],
+        sampling_params: SamplingParams,
+        multimodal_params: MultimodalParams,
     ) -> Tuple[PD_Client_Obj, PD_Client_Obj, PDSelectionExtraInfo]:
         return await self.selector.select_p_d_node(prompt, sampling_params, multimodal_params)

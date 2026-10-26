@@ -27,10 +27,16 @@ from .stop_seq_match import wrap_stop_match_stream
 from .grammar import create_output_grammar_compiler
 from lightllm.server.core.objs import Req, FinishStatus, StartArgs
 from lightllm.server.core.objs import SamplingParams
-from lightllm.server.core.objs.out_token_circlequeue import LIGHTLLM_OUT_TOKEN_QUEUE_SIZE
+from lightllm.server.core.objs.out_token_circlequeue import (
+    LIGHTLLM_OUT_TOKEN_QUEUE_SIZE,
+)
 from lightllm.server.core.objs.io_objs import GroupReqObjs
 from lightllm.server.core.objs.shm_req_manager import ShmReqManager
-from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AsyncLock, AtomicLockItem
+from lightllm.server.core.objs.atomic_array_lock import (
+    AtomicShmArrayLock,
+    AsyncLock,
+    AtomicLockItem,
+)
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient
@@ -46,6 +52,7 @@ from lightllm.utils.error_utils import (
     ServerBusyError,
 )
 from rpyc.utils.classic import obtain
+from lightllm.utils.pd_timeout_utils import get_pd_handshake_timeout_seconds
 
 logger = init_logger(__name__)
 
@@ -113,7 +120,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self.zmq_recv_socket.connect(f"{args.zmq_mode}127.0.0.1:{ports.http_server_port}")
         self.zmq_recv_socket.setsockopt(zmq.SUBSCRIBE, b"")
 
-        self.tokenizer = get_tokenizer(args.model_dir, args.tokenizer_mode, trust_remote_code=args.trust_remote_code)
+        self.tokenizer = get_tokenizer(
+            args.model_dir,
+            args.tokenizer_mode,
+            trust_remote_code=args.trust_remote_code,
+        )
         self.output_grammar_compiler = create_output_grammar_compiler(args, self.tokenizer)
 
         self.req_id_to_out_inf: Dict[int, ReqStatus] = {}  # value type (out_str, metadata, finished, event)
@@ -328,7 +339,14 @@ class HttpServerManager(HttpRlManagerHelper, object):
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
         """客户端输出统一包裹 stop；P/D 节点和 TP slave 转发原始流。"""
-        generator = self._generate(prompt, sampling_params, multimodal_params, request, pd_upload_websocket, pd_event)
+        generator = self._generate(
+            prompt,
+            sampling_params,
+            multimodal_params,
+            request,
+            pd_upload_websocket,
+            pd_event,
+        )
         if self.pd_mode.is_normal() and not self.is_multinode_tp_slave:
             return wrap_stop_match_stream(self, generator, sampling_params, prompt)
         return generator
@@ -416,19 +434,34 @@ class HttpServerManager(HttpRlManagerHelper, object):
             if pd_upload_websocket is not None and self.pd_mode.is_P():
                 # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
                 # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
-                logger.debug(
+                logger.info(
                     f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
                 await pd_upload_websocket.send(
-                    pickle.dumps((ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS, group_request_id, array("q", prompt_ids)))
+                    pickle.dumps(
+                        (
+                            ObjType.PD_UPLOAD_PREFILL_PROMPT_IDS,
+                            group_request_id,
+                            array("q", prompt_ids),
+                        )
+                    )
+                )
+                handshake_timeout = get_pd_handshake_timeout_seconds(
+                    sampling_params.pd_node_resource_wait_timeout_seconds, prefill=True
                 )
                 try:
-                    await asyncio.wait_for(pd_event.wait(), timeout=180)
+                    await asyncio.wait_for(pd_event.wait(), timeout=handshake_timeout)
                 except asyncio.TimeoutError:
-                    logger.error(f"pd prefill node wait pd_event 180s time out, group_req_id {group_request_id}")
+                    logger.error(
+                        f"pd prefill node wait pd_event {handshake_timeout}s time out, group_req_id {group_request_id}"
+                    )
                     raise Exception(f"group_req_id {group_request_id} wait pd_event time out")
 
                 decode_node_info: PDDecodeNodeInfo = pd_event.decode_node_info
+                logger.info(
+                    f"pd_handshake_ready lightllm_req_id:{group_request_id} "
+                    f"elapsed_ms:{(time.time() - start_time) * 1000:.3f}"
+                )
                 sampling_params.pd_kv_trans_params.set(pickle.dumps(decode_node_info))
 
                 if decode_node_info.ready_kv_len == len(prompt_ids) - 1:
@@ -490,7 +523,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self.rl_controller.unregister_generation_admission(group_request_id)
 
             await self.transfer_to_next_module_or_node(
-                prompt, sampling_params, original_multimodal_params, req_status.group_req_objs
+                prompt,
+                sampling_params,
+                original_multimodal_params,
+                req_status.group_req_objs,
             )
             self._log_stage_timing(
                 group_request_id,
@@ -517,7 +553,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
             }
 
             is_first_gen_token = True
-            async for sub_req_id, request_output, metadata, finish_status in results_generator:
+            async for (
+                sub_req_id,
+                request_output,
+                metadata,
+                finish_status,
+            ) in results_generator:
                 # 只有第一个生成的 token 的 metadata 中包含 input_usage
                 if is_first_gen_token:
                     metadata["input_usage"] = input_usage
@@ -619,7 +660,10 @@ class HttpServerManager(HttpRlManagerHelper, object):
         return
 
     async def _encode(
-        self, prompt: Union[str, List[int]], multimodal_params: MultimodalParams, sampling_params: SamplingParams
+        self,
+        prompt: Union[str, List[int]],
+        multimodal_params: MultimodalParams,
+        sampling_params: SamplingParams,
     ):
         if isinstance(prompt, str):
             # pre-verify prompt length
@@ -759,11 +803,17 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
-                self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
+                self.send_to_visual.send_pyobj(
+                    group_req_objs.to_group_req_index(),
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
                 return
 
             if not self.args.disable_audio:
-                self.send_to_audio.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
+                self.send_to_audio.send_pyobj(
+                    group_req_objs.to_group_req_index(),
+                    protocol=pickle.HIGHEST_PROTOCOL,
+                )
                 return
 
             if self.args.enable_cpu_cache:
@@ -827,7 +877,8 @@ class HttpServerManager(HttpRlManagerHelper, object):
             if request is not None and await request.is_disconnected():
                 await self.abort(group_request_id)
                 raise ClientDisconnected(
-                    group_request_id=group_request_id, reason="_wait_to_token_package check network disconnected"
+                    group_request_id=group_request_id,
+                    reason="_wait_to_token_package check network disconnected",
                 )
 
             async with req_status.lock:
@@ -835,7 +886,12 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 if len(req_status.out_token_info_list) == 0:
                     continue
 
-                for sub_req_id, out_str, metadata, finish_status in req_status.out_token_info_list:
+                for (
+                    sub_req_id,
+                    out_str,
+                    metadata,
+                    finish_status,
+                ) in req_status.out_token_info_list:
                     # pd master 节点需要这个做统计信息， 所以放在元数据中返回给 pd master 节点
                     metadata["prompt_tokens"] = prompt_tokens
 
@@ -886,7 +942,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_verify_steps, 1)
                         mtp_avg_accepted_tokens_per_step = mtp_accepted_token_num / max(mtp_total_verify_steps, 1)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.debug(
+                        logger.info(
                             f"X-Request-Id:{x_request_id} "
                             f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
                             f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
@@ -917,18 +973,22 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         self.metric_client.gauge_set("lightllm_cache_hit_rate", prompt_cache_ratio)
                         self.metric_client.gauge_set("lightllm_gen_throughput", generation_throughput)
                         self.metric_client.histogram_observe(
-                            "lightllm_request_inference_duration", total_cost_time_ms / 1000.0
+                            "lightllm_request_inference_duration",
+                            total_cost_time_ms / 1000.0,
                         )
                         self.metric_client.histogram_observe(
-                            "lightllm_request_mean_time_per_token_duration", mean_per_token_cost_time_ms / 1000.0
+                            "lightllm_request_mean_time_per_token_duration",
+                            mean_per_token_cost_time_ms / 1000.0,
                         )
                         self.metric_client.histogram_observe(
-                            "lightllm_request_first_token_duration", first_token_cost_ms / 1000.0
+                            "lightllm_request_first_token_duration",
+                            first_token_cost_ms / 1000.0,
                         )
                         self.metric_client.histogram_observe("lightllm_request_generated_tokens", out_token_counter)
                         self.metric_client.counter_inc("lightllm_request_success")
                         self.metric_client.histogram_observe(
-                            "lightllm_request_mtp_avg_token_per_step", mtp_avg_token_per_step
+                            "lightllm_request_mtp_avg_token_per_step",
+                            mtp_avg_token_per_step,
                         )
 
                         return
