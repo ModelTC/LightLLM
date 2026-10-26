@@ -2,13 +2,14 @@ import asyncio
 from itertools import count
 from types import MethodType, SimpleNamespace
 from weakref import ref
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import torch
 import xgrammar as xgr
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams
+from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.httpserver.grammar import OutputGrammarCompiler
 from unit_tests.server.grammar_helpers import (
     make_req,
@@ -296,19 +297,23 @@ def test_pd_first_token_updates_constraint_before_sampling(
     for request in (req, good):
         init_request(compiler, request)
     req.pd_task_success_num = 0
+    req.pd_task_finished_keys = set()
     req.shm_req.shm_prompt_ids.arr.append(0)
     req.shm_req.shm_logprobs = SimpleNamespace(arr=[None] * (req.shm_req.input_len + 1))
     req.set_next_gen_token_id = MethodType(infer_batch.InferReq.set_next_gen_token_id, req)
     req.update_finish_status = lambda **kwargs: None
     sampling_params = make_mask_buffers([req, good])
-    transfer = SimpleNamespace(
+    transfer = PDChunckedTransTaskRet(
         request_id=req.req_idx,
+        start_kv_index=0,
+        end_kv_index=req.shm_req.input_len,
         has_error=False,
         first_gen_token_id=first_token,
         first_gen_token_logprob=0.0,
     )
     backend = SimpleNamespace(
-        shm_pd_trans_io_buffer=SimpleNamespace(read_obj=lambda: [transfer], sub_state=lambda: None),
+        shm_pd_trans_io_buffer=SimpleNamespace(read_obj=lambda: [transfer, transfer], sub_state=lambda: None),
+        logger=MagicMock(),
         is_pd_decode_mode=True,
         model=SimpleNamespace(req_manager=SimpleNamespace(req_sampling_params_manager=sampling_params)),
         eos_id=[256],
@@ -319,6 +324,7 @@ def test_pd_first_token_updates_constraint_before_sampling(
 
     # Exercise the real PD receive handler and InferReqUpdatePack.handle()
     # before any sampling preparation can update the constraint.
+    ModeBackend._read_pd_trans_io_buffer_and_update_req_status(backend)
     ModeBackend._read_pd_trans_io_buffer_and_update_req_status(backend)
 
     assert req.cur_output_len == 1 and req.pd_task_success_num == 1

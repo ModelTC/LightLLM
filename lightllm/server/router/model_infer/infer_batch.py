@@ -616,6 +616,7 @@ class InferReq:
         self.pd_task_num: int = 0
         self.pd_task_success_num: int = 0
         self.pd_task_failed_num: int = 0
+        self.pd_task_finished_keys: set[str] = set()
         self.pd_trans_device_id: int = -1
 
         # hybrid checkpoint 槽位：prefill 到达边界后保存运行态，供请求释放时插入 radix cache。

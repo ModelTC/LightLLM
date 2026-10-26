@@ -409,6 +409,7 @@ class PDChunckedTransTask:
             error_info=self.error_info,
             first_gen_token_id=self.first_gen_token_id,
             first_gen_token_logprob=self.first_gen_token_logprob,
+            page_kind=self.page_kind,
         )
         return ret
 
@@ -438,9 +439,10 @@ class PDChunckedTransTaskRet:
     error_info: str = None
     first_gen_token_id: Optional[int] = None
     first_gen_token_logprob: Optional[float] = None
+    page_kind: str = "kv"
 
     def get_key(self) -> str:
-        return f"{self.request_id}_{self.start_kv_index}_{self.end_kv_index}"
+        return f"{self.request_id}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"
 
 
 @dataclass

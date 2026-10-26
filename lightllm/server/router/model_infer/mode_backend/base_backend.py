@@ -549,6 +549,11 @@ class ModeBackend:
             for obj in cmds:
                 if obj.request_id in g_infer_context.requests_mapping:
                     req: InferReq = g_infer_context.requests_mapping[obj.request_id]
+                    key = obj.get_key()
+                    if key in req.pd_task_finished_keys:
+                        self.logger.warning(f"ignore duplicate PD transfer receipt: {key}")
+                        continue
+                    req.pd_task_finished_keys.add(key)
                     if obj.has_error:
                         req.pd_task_failed_num += 1
                     else:
@@ -743,14 +748,7 @@ class ModeBackend:
                 finished_reqs.append(req_obj)
                 continue
 
-            if req_obj.wait_pause:
-                wait_pause_reqs.append(req_obj)
-                continue
-
-            if req_obj.paused:
-                paused_reqs.append(req_obj)
-                continue
-
+            # ready_reqs 已经过后端的传输安全检查；终态请求不应再等待暂停恢复。
             if req_obj.infer_aborted or req_obj.finish_status.is_finished():
                 if support_overlap:
                     # 延迟处理
@@ -759,6 +757,14 @@ class ModeBackend:
                 else:
                     finished_reqs.append(req_obj)
                     continue
+
+            if req_obj.wait_pause:
+                wait_pause_reqs.append(req_obj)
+                continue
+
+            if req_obj.paused:
+                paused_reqs.append(req_obj)
+                continue
 
             if no_decode:
                 is_decode = False

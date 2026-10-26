@@ -407,10 +407,13 @@ class _DecodeTransModule:
                     self.waiting_dict[key] = trans_task
                 self.transporter.send_write_ready_task_to_prefill_node(trans_task=trans_task)
             except BaseException as e:
-                with self.waiting_dict_lock:
-                    self.waiting_dict.pop(key, None)
                 logger.error(f"send write ready task to prefill node failed: {trans_task.to_str()}")
                 logger.exception(str(e))
+                with self.waiting_dict_lock:
+                    # 超时或 done 通知已取走的任务由对应线程处理，不能重复失败。
+                    if self.waiting_dict.get(key) is not trans_task:
+                        continue
+                    self.waiting_dict.pop(key)
                 self.transporter.remove_remote_agent(peer_name=trans_task.prefill_agent_name)
                 trans_task.error_info = f"send write ready task to prefill node failed: {str(e)}"
                 self.failed_queue.put(trans_task)

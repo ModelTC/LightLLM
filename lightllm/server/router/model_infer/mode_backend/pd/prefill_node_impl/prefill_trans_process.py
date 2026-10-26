@@ -242,10 +242,13 @@ class _PrefillTransModule:
                 self.transporter.send_write_request_task_to_decode_node(trans_task)
                 logger.debug(f"send WRITE request to decode: {key}")
             except BaseException as e:
-                with self.waiting_dict_lock:
-                    self.waiting_dict.pop(key, None)
                 logger.error(f"send WRITE request to decode failed: {trans_task.to_str()}")
                 logger.exception(str(e))
+                with self.waiting_dict_lock:
+                    # 超时/abort 可能已接管任务，或 ready 通知已推动任务进入 WRITE 阶段。
+                    if self.waiting_dict.get(key) is not trans_task or trans_task.xfer_handle is not None:
+                        continue
+                    self.waiting_dict.pop(key)
                 trans_task.error_info = f"send WRITE request to decode failed: {str(e)}"
                 self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
                 self.failed_queue.put(trans_task)

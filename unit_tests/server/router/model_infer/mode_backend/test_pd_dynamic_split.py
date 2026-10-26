@@ -230,3 +230,23 @@ def test_pd_decode_queue_uses_ema_for_prefill_stage_output_length(page_size, mon
         1,
     )
     req.get_tuple_tokens.assert_called_once_with(False, 128)
+
+
+@pytest.mark.parametrize("pause_state", ["wait_pause", "paused"])
+@pytest.mark.parametrize("aborted", [False, True])
+@pytest.mark.parametrize("support_overlap", [False, True])
+def test_terminal_requests_are_cleaned_before_pause_handling(monkeypatch, pause_state, aborted, support_overlap):
+    req = _make_infer_req(cur_output_len=5, shm_output_len=4)
+    setattr(req, pause_state, True)
+    if aborted:
+        req.infer_aborted = True
+    else:
+        req.finish_status.set_status(FinishStatus.FINISHED_STOP)
+
+    filter_reqs, _ = _classify_without_token_capacity(monkeypatch, req, support_overlap=support_overlap)
+    if support_overlap:
+        assert req.filter_mark
+        filter_reqs.assert_called_once_with(finished_reqs=[])
+        filter_reqs, _ = _classify_without_token_capacity(monkeypatch, req, support_overlap=support_overlap)
+    filter_reqs.assert_called_once_with(finished_reqs=[req])
+    base_backend.g_infer_context.pause_reqs.assert_called_once_with([], is_master_in_dp=True)
