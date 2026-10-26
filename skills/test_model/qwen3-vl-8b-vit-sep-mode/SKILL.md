@@ -48,7 +48,7 @@ description: >-
 3. **`MODEL_DIR`**：指向 **Qwen3-VL-8B-Instruct**；默认试跑 **`/mtc/models/Qwen3-VL-8B-Instruct`**；不存在或加载失败时 **向用户询问** 本机路径。
 4. **`AFS_IMAGE_EMBED_DIR`**：**`--afs_image_embed_dir`** 指向的目录须存在或可创建；默认试跑 **`/mtc/afs/vit_embed_dir`**；不可用时 **向用户询问**。
 5. **显卡**：**`visual_only`** 与 **`normal`** 的 **`CUDA_VISIBLE_DEVICES`** **不得重叠**；先 **`nvidia-smi`** 再 **`export`**（**不要写死**示例卡号）。
-6. **`CONFIG_SERVER_HOST`**：各进程 **`--config_server_host`** 须能访问 **`config_server` 的 HTTP 服务**。**三进程同机**时常见为 **`0.0.0.0`**（与历史脚本一致）；`config_server` 可单独部署并通过可达 IP 提供服务，但 `visual_only` 与其 `normal` proxy 必须同机。跨主机时只开放所需的 **`config_server` 端口（8090）** 和 **Redis 暴露端口（6000）**；**8091 始终仅供本机 proxy 使用，不要对网络开放**。
+6. **`CONFIG_SERVER_HOST`**：各进程 **`--config_server_host`** 须能访问 **`config_server` 的 HTTP 服务**。**三进程同机**时常见为 **`0.0.0.0`**（与历史脚本一致）；`config_server` 可单独部署并通过可达 IP 提供服务，但 `visual_only` 与其 `normal` proxy 必须同机。跨主机时只开放所需的 **`config_server` HTTP 端口（8090）**；**Redis 暴露端口（6000）只能向受控可信私有网络中的 allowlist 服务主机开放，且仅允许 `visual_only` 和 `normal` 主机访问**。当前 Redis 未配置认证或 TLS，**不得将其暴露到不受信任的网络**；**`8091` 始终仅供本机 proxy 使用，不要对网络开放**。
 7. **代理**：每条 **`python`（LightLLM）** 前 **`export http_proxy=`**、**`export https_proxy=`**（与仓库其它 acc 测试一致）。**`lmms_eval` 拉取 `lmms-lab/MMMU` 时**若需经企业代理访问 Hugging Face，应在 **`no_proxy` 已包含 `127.0.0.1`** 的前提下**恢复 `https_proxy`（或等价镜像）**；否则易出现 Hub **`ConnectionError`**。仅当本机已有完整离线缓存且确认 **`datasets` 可纯离线命中**时，才可全程无代理。
 8. **`lmms-eval`**：**`python3 -m lmms_eval --help`** 可执行；否则无法完成必跑 **`mmmu_val`**。
 
