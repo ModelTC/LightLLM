@@ -1,12 +1,11 @@
-from typing import TYPE_CHECKING, List
+from typing import List
 
 import torch
 
+from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-if TYPE_CHECKING:
-    from lightllm.common.kv_cache_mem_manager import MemoryManager
 
 logger = init_logger("lightllm.common.req_manager")
 
@@ -53,7 +52,7 @@ class _ReqLinkedList:
 
 
 class ReqManager:
-    def __init__(self, max_request_num, max_sequence_length, mem_manager: "MemoryManager"):
+    def __init__(self, max_request_num, max_sequence_length, mem_manager: MemoryManager):
         from .req_sampling_params import ReqSamplingParamsManager
 
         # 这里对最大请求数量的管理在默认上多申请了一个，主要是 index 为 max_request_num 代表
@@ -73,7 +72,7 @@ class ReqManager:
         if mem_manager is not None:
             self.bind_mem_manager(mem_manager)
 
-    def bind_mem_manager(self, mem_manager: "MemoryManager"):
+    def bind_mem_manager(self, mem_manager: MemoryManager):
         self.mem_manager = mem_manager
 
         self.init_hold_request_indexs()

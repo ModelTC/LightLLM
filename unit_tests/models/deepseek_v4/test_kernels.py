@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.models.deepseek_v4.triton_kernel import norm_rope, topk_softplus_sqrt, topk_transform
+from lightllm.models.deepseek_v4.triton_kernel import norm_rope, topk_softplus_sqrt, indexer_topk
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -50,7 +50,7 @@ def test_k_norm_rope_cache_layout_and_unwritten_bytes(batch, position_dtype):
     weight = torch.randn(512, device="cuda", dtype=torch.bfloat16)
     slots = torch.randperm(384, device="cuda")[:batch].int()
     cache = torch.full((3, 74880), 165, device="cuda", dtype=torch.uint8)
-    norm_rope.fused_k_norm_rope_flashmla(kv, weight, 1e-6, freqs, pos, slots, cache, 128)
+    norm_rope.fused_kv_norm_rope_to_swa(kv, weight, 1e-6, freqs, pos, slots, cache, 128)
     values = kv.float() * torch.rsqrt(kv.float().square().mean(-1, keepdim=True) + 1e-6) * weight.float()
     grouped = values[:, :448].reshape(batch, 7, 64)
     scale_raw = grouped.abs().amax(-1).clamp_min(1e-4) / 448
@@ -178,10 +178,10 @@ def test_topk_valid_prefix_raw_indices_and_padding(width, page_size):
     pages = torch.randint(0, 4096, (8, (width + page_size - 1) // page_size), device="cuda", dtype=torch.int32)
     out = torch.empty(8, 512, device="cuda", dtype=torch.int32)
     raw = torch.empty_like(out)
-    topk_transform.topk_transform(scores, lengths, pages, out, page_size, raw)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, page_size, raw)
     assert_topk(scores, lengths, pages, out, raw, page_size)
     # The allocation-free in-place translation must select the same values too.
-    topk_transform.topk_transform(scores, lengths, pages, out, page_size)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, page_size)
     valid = out >= 0
     assert valid.sum(-1).tolist() == lengths.clamp_max(512).tolist()
 
@@ -203,10 +203,10 @@ def test_short_topk_rank_selection_and_optional_raw(width, rows, distribution, p
     pages = torch.randint(0, 4096, (rows, (width + page_size - 1) // page_size), device="cuda", dtype=torch.int32)
     out = torch.empty(rows, 512, device="cuda", dtype=torch.int32)
     raw = torch.empty_like(out)
-    topk_transform.topk_transform(scores, lengths, pages, out, page_size, raw)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, page_size, raw)
     assert_topk(scores, lengths, pages, out, raw, page_size)
     expected = out.clone()
-    topk_transform.topk_transform(scores, lengths, pages, out, page_size)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, page_size)
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
@@ -217,7 +217,7 @@ def test_topk_cuda_graph_replay_changing_lengths(rows, width):
     pages = torch.randint(0, 4096, (rows, width // 64), device="cuda", dtype=torch.int32)
     out = torch.empty(rows, 512, device="cuda", dtype=torch.int32)
     raw = torch.empty_like(out)
-    fn = lambda: topk_transform.topk_transform(scores, lengths, pages, out, 64, raw)
+    fn = lambda: indexer_topk.indexer_topk(scores, lengths, pages, out, 64, raw)
     fn()
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
@@ -271,5 +271,5 @@ def test_topk_uses_configured_output_capacity(topk, width):
     pages = torch.randint(0, 1000, (2, (width + 63) // 64), dtype=torch.int32, device="cuda")
     out = torch.empty((2, topk), dtype=torch.int32, device="cuda")
     raw = torch.empty_like(out)
-    topk_transform.topk_transform(scores, lengths, pages, out, 64, raw)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, 64, raw)
     assert_topk(scores, lengths, pages, out, raw, 64)

@@ -5,16 +5,15 @@ import pytest
 import torch
 
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-from lightllm.common.state_cache_manager.deepseek4 import (
-    DeepseekV4CacheConfig,
-)
+from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 from lightllm.common.req_manager import DeepseekV4ReqManager
-from lightllm.models.deepseek_v4.triton_kernel.build_compress_index_dsv4 import build_compress_index
+from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer, get_indexer_k_buffer
+from lightllm.models.deepseek_v4.triton_kernel.swa_cache import get_swa_token_indices as _get_swa_token_indices
 
 
-def _history_pools(manager):
+def _compressed_kv_pools(manager):
     c4 = next(iter(manager.cache_config.layer_to_c4_idx))
     c128 = next(iter(manager.cache_config.layer_to_c128_idx))
     return (
@@ -24,7 +23,7 @@ def _history_pools(manager):
     )
 
 
-def _randomize_history(manager):
+def _randomize_compressed_kv(manager):
     for buffer in manager.kv_buffer:
         buffer.random_(0, 256)
 
@@ -38,6 +37,7 @@ def cache(monkeypatch, tmp_path, request):
     (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 100}))
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
     monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", "test_dsv4_paged_cache")
     monkeypatch.setenv(
         "LIGHTLLM_START_ARGS",
@@ -47,6 +47,7 @@ def cache(monkeypatch, tmp_path, request):
                 "run_mode": "normal",
                 "linear_att_hash_page_size": page_size,
                 "linear_att_page_block_num": 8,
+                "cpu_cache_token_page_size": page_size * 8,
                 "chunked_prefill_size": 2048,
                 "max_req_total_len": 4096,
                 "disable_chunked_prefill": False,
@@ -66,14 +67,20 @@ def cache(monkeypatch, tmp_path, request):
         1,
         512,
         3,
-        DeepseekV4CacheConfig([4, 128, 0], (2048 + page_size - 1) // page_size * page_size),
+        DeepseekV4CacheConfig.from_model_config(
+            dict(
+                num_hidden_layers=3,
+                compress_ratios=[4, 128, 0],
+                head_dim=512,
+                qk_rope_head_dim=64,
+                index_head_dim=128,
+                sliding_window=128,
+            ),
+            SimpleNamespace(mtp_mode=None),
+        ),
     )
-    requests = DeepseekV4ReqManager(
-        2, 4096, None, manager.cache_config, max_forward_tokens=8192, mtp_step=mtp_step, prefill_regions=2
-    )
+    requests = DeepseekV4ReqManager(2, 4096, None, manager.cache_config, mtp_step=mtp_step)
     requests.bind_mem_manager(manager)
-    requests.prefill_c4_checkpoints.zero_()
-    requests.prefill_indexer_checkpoints.zero_()
     yield manager, requests
     torch.cuda.synchronize()
     get_env_start_args.cache_clear()
@@ -82,15 +89,15 @@ def cache(monkeypatch, tmp_path, request):
 def test_attention_input_params_select_token_buffers(cache):
     manager, requests = cache
     for layer_index, slot in ((0, 0), (1, 1), (2, None)):
-        swa, history = requests.get_att_input_params(layer_index)
-        assert swa.data_ptr() == requests.swa_buffer[layer_index].data_ptr()
+        swa, compressed_kv = requests.get_att_input_params(layer_index)
+        assert swa.data_ptr() == requests.req_to_swa.flatten(1, 2)[layer_index].data_ptr()
         if slot is None:
-            assert history is None
+            assert compressed_kv is None
         else:
             token_buffer = manager.get_att_input_params(layer_index)
             assert token_buffer is manager.kv_buffer[slot]
             assert token_buffer.shape[:2] == (manager.size + manager.page_size, 1)
-            assert history.untyped_storage().data_ptr() == token_buffer.data_ptr()
+            assert compressed_kv.untyped_storage().data_ptr() == token_buffer.data_ptr()
 
 
 def test_big_page_pool_reserves_cpu_cache_staging_slots(cache):
@@ -122,7 +129,7 @@ def test_copy_mem_to_mem_preserves_token_slot_indices(cache):
 
 
 def test_cache_io_copies_individual_token_slots(cache):
-    from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages
+    from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_compressed_kv_pages
 
     manager, _ = cache
     source = torch.tensor([3, 17, 257, 509], device="cuda")
@@ -132,8 +139,8 @@ def test_cache_io_copies_individual_token_slots(cache):
         buffer[source] = torch.arange(1, 5, device="cuda", dtype=torch.uint8)[:, None, None]
     pages = torch.empty((1, 4 * manager.get_cell_size()), dtype=torch.uint8, pin_memory=True)
     page_ids = torch.zeros(1, dtype=torch.int32, device="cuda")
-    copy_history_pages(manager, source, page_ids, pages, to_pages=True, page_tokens=4)
-    copy_history_pages(manager, destination, page_ids, pages, to_pages=False, page_tokens=4)
+    copy_compressed_kv_pages(manager, source, page_ids, pages, to_pages=True, page_size=4)
+    copy_compressed_kv_pages(manager, destination, page_ids, pages, to_pages=False, page_size=4)
     torch.cuda.synchronize()
     for buffer in manager.kv_buffer:
         torch.testing.assert_close(buffer[destination], buffer[source], rtol=0, atol=0)
@@ -152,25 +159,25 @@ def test_cache_io_copies_individual_token_slots(cache):
         assert buffer[destination[2:]].eq(0).all()
 
 
-def test_request_runtime_is_independent_of_history_capacity(cache, monkeypatch):
+def test_request_runtime_is_independent_of_compressed_kv_capacity(cache, monkeypatch):
     from lightllm.common.kv_cache_mem_manager import MemoryManager
 
     original, requests = cache
     observed = []
 
     def profile(manager, mem_fraction):
-        observed.append(requests.swa_buffer.nbytes)
+        observed.append(requests.req_to_swa.flatten(1, 2).nbytes)
         assert _state_buffer(requests, "c4").is_cuda and _state_buffer(requests, "c128").is_cuda
         assert not hasattr(manager, "swa_buffer")
         manager.size = 8192
 
     monkeypatch.setattr(MemoryManager, "profile_size", profile)
     manager = DeepseekV4MemoryManager(None, torch.bfloat16, 1, 512, 3, original.cache_config)
-    assert observed == [requests.swa_buffer.nbytes]
-    assert manager.size == 8192 - manager.page_size
+    assert observed == [requests.req_to_swa.flatten(1, 2).nbytes]
+    assert manager.size == 8192
     for buffer in manager.kv_buffer:
         assert buffer.shape[0] == manager.size + manager.page_size
-    assert sum(buffer.nbytes for buffer in manager.kv_buffer) == original.get_cell_size() * 8192
+    assert sum(buffer.nbytes for buffer in manager.kv_buffer) == original.get_cell_size() * (8192 + manager.page_size)
 
 
 @pytest.mark.parametrize("page_size", [256, 1024, 4096])
@@ -195,7 +202,7 @@ def _state_buffer(requests, kind):
 
 
 def _swa_blocks(requests, req_idx, blocks):
-    return requests.get_swa_token_indices(req_idx, blocks * 128) // 128
+    return _swa_slots(requests, req_idx, blocks * 128) // 128
 
 
 def _packed_geometry(buffer):
@@ -229,20 +236,35 @@ def _write_packed_rows(buffer, layer_index, slots, packed):
     layer[pages, scale_offsets[:, None] + torch.arange(scale_bytes, device=slots.device)] = packed[:, data_bytes:]
 
 
+def _test_backend(requests, token_capacity=8192):
+    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
+
+    model = type("TestModel", (), {})()
+    model.req_manager = requests
+    model.config = {"num_attention_heads": 64, "compress_ratios": requests.cache_config.compress_rates}
+    model.tp_world_size_ = 1
+    model.max_req_num = requests.max_request_num
+    model.batch_max_tokens = token_capacity
+    model.args = SimpleNamespace(run_mode="normal", enable_prefill_microbatch_overlap=True)
+    return DeepseekV4FlashMlaFp8SparseAttBackend(model)
+
+
 def _prepare_prefill(requests, req_ids, starts, ends, microbatch_index=0):
     req_ids, starts, ends = (value.to(device="cuda", dtype=torch.int32) for value in (req_ids, starts, ends))
-    q_lens = ends - starts
-    requests.init_forward_state(
+    if not hasattr(requests, "_test_backend"):
+        requests._test_backend = _test_backend(requests)
+        requests._test_prefill_states = {}
+    state = requests._test_backend.create_att_prefill_state(None)
+    state.prepare_swa_workspace(
         SimpleNamespace(
-            is_draft_model=False,
-            is_prefill=True,
-            microbatch_index=microbatch_index,
+            req_manager=requests,
             b_req_idx=req_ids,
             b_ready_cache_len=starts,
             b_seq_len=ends,
-            b_q_start_loc=q_lens.cumsum(0, dtype=torch.int32) - q_lens,
+            microbatch_index=microbatch_index,
         )
     )
+    requests._test_prefill_states.update((req, state) for req in req_ids.tolist())
     if not hasattr(requests, "_test_prefill_ends"):
         requests._test_prefill_ends = {}
     requests._test_prefill_ends.update(zip(req_ids.tolist(), ends.tolist()))
@@ -252,23 +274,54 @@ def _prepare_swa(requests, req_idx, start, end, microbatch_index=0):
     _prepare_prefill(requests, torch.tensor([req_idx]), torch.tensor([start]), torch.tensor([end]), microbatch_index)
 
 
+def _checkpoint_req(req_idx, length):
+    return SimpleNamespace(req_idx=req_idx, get_chuncked_input_token_len=lambda: length)
+
+
 def _finish_prefill(requests, req_ids):
     for req in req_ids:
-        requests.clear_runtime_state(req)
+        requests._test_prefill_states.pop(req, None)
+
+
+def _prefill_state(requests, req_idx, prefill=True):
+    if not prefill or not hasattr(requests, "_test_prefill_states") or not isinstance(req_idx, int):
+        return None
+    return requests._test_prefill_states.get(req_idx)
+
+
+def _swa_slots(requests, req_idx, positions, *, prefill=True):
+    return _get_swa_token_indices(
+        requests, req_idx, positions, prefill_state=_prefill_state(requests, req_idx, prefill)
+    )
+
+
+def _swa_buffer(requests, req_idx, *, prefill=True):
+    state = _prefill_state(requests, req_idx, prefill)
+    return state.swa_buffer if state is not None else requests.req_to_swa.flatten(1, 2)
+
+
+def _read_swa(requests, layer, req_idx, positions, *, prefill=True):
+    return _read_packed_rows(
+        _swa_buffer(requests, req_idx, prefill=prefill),
+        layer,
+        _swa_slots(requests, req_idx, positions, prefill=prefill),
+    )
+
+
+def _write_swa_rows(requests, layer, req_idx, positions, packed, *, prefill=True):
+    _write_packed_rows(
+        _swa_buffer(requests, req_idx, prefill=prefill),
+        layer,
+        _swa_slots(requests, req_idx, positions, prefill=prefill),
+        packed,
+    )
 
 
 def _write_swa(requests, layer, req_idx, positions, packed):
-    slots = requests.get_swa_token_indices(req_idx, positions)
-    _write_packed_rows(requests.swa_buffer, layer, slots, packed)
+    _write_swa_rows(requests, layer, req_idx, positions, packed)
     end = requests._test_prefill_ends.get(req_idx, int(positions.max()) + 1)
-    retain = requests.swa_capacity_tokens
-    keep = positions >= end - retain
-    _write_packed_rows(
-        requests.swa_buffer,
-        layer,
-        requests.get_swa_token_indices(req_idx, positions[keep], prefill=False),
-        packed[keep],
-    )
+    keep = positions >= end - requests.swa_capacity_tokens
+    _write_swa_rows(requests, layer, req_idx, positions[keep], packed[keep], prefill=False)
 
 
 def _request_pages(requests, req):
@@ -297,7 +350,7 @@ def test_noncontiguous_pages_obey_logical_compression_boundaries(cache, ratio):
     )
     indexes = torch.empty((len(positions), slots.numel() // ratio), dtype=torch.int32, device="cuda")
     lengths = torch.empty_like(positions, dtype=torch.int32)
-    build_compress_index(
+    build_compressed_kv_indices(
         torch.full_like(positions, req_idx), positions, requests.req_to_token_indexs, ratio, indexes, lengths
     )
     group_slots = slots[ratio - 1 :: ratio] // ratio
@@ -316,12 +369,12 @@ def test_indexer_writer_only_writes_closed_groups(cache):
     slots = slots.view(2, 256).flip(0).reshape(-1)
     keys = torch.randn((259, 128), dtype=torch.bfloat16, device="cuda")
     positions = torch.arange(259, dtype=torch.int32, device="cuda")
-    _history_pools(manager)[1].zero_()
-    from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k_dsv4 import destindex_copy_indexer_k_dsv4
+    _compressed_kv_pools(manager)[1].zero_()
+    from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k import destindex_copy_indexer_k
 
-    destindex_copy_indexer_k_dsv4(keys, slots[:259], positions, get_indexer_k_buffer(manager, 0), 64)
+    destindex_copy_indexer_k(keys, slots[:259], positions, get_indexer_k_buffer(manager, 0), 64)
     closed = torch.arange(3, 259, 4, device="cuda")
-    actual = _read_packed_rows(_history_pools(manager)[1], 0, slots[closed] // 4)
+    actual = _read_packed_rows(_compressed_kv_pools(manager)[1], 0, slots[closed] // 4)
     # Reference quantization is independent of the cache writer and stays in the test.
     selected_keys = keys[closed].float()
     scale = selected_keys.abs().amax(dim=-1, keepdim=True).clamp_min(1e-4) / 448.0
@@ -329,7 +382,7 @@ def test_indexer_writer_only_writes_closed_groups(cache):
     expected = torch.cat((quantized.view(torch.uint8), scale.view(torch.uint8)), dim=-1)
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     # Positions 256..258 cannot publish their reserved next compressed slot.
-    assert _read_packed_rows(_history_pools(manager)[1], 0, slots[256:257] // 4).eq(0).all()
+    assert _read_packed_rows(_compressed_kv_pools(manager)[1], 0, slots[256:257] // 4).eq(0).all()
 
 
 def test_speculative_retry_reuses_swa_without_freeing_token_pages(cache):
@@ -341,7 +394,7 @@ def test_speculative_retry_reuses_swa_without_freeing_token_pages(cache):
 
     _prepare_prefill(requests, cpu([req_idx]), cpu([0]), cpu([254]))
     for sequences in ([255, 256, 257, 258], [255, 256, 257, 258], [256, 257, 258, 259]):
-        swa_slots = requests.get_swa_token_indices(req_idx, torch.tensor(sequences, device="cuda") - 1)
+        swa_slots = _swa_slots(requests, req_idx, torch.tensor(sequences, device="cuda") - 1)
         assert swa_slots.unique().numel() == len(sequences)
         assert manager.allocator.can_use_mem_size == manager.size - 512
     requests.free([req_idx], slots)
@@ -389,22 +442,20 @@ def test_prefill_chunk_keeps_all_new_swa_rows(cache):
     req_idx, slots = _reserve(manager, requests, 2048)
     _prepare_prefill(requests, torch.tensor([req_idx]), torch.tensor([0]), torch.tensor([2048]))
     positions = torch.arange(2048, device="cuda")
-    swa_slots = requests.get_swa_token_indices(req_idx, positions)
+    swa_slots = _swa_slots(requests, req_idx, positions)
     assert swa_slots.unique().numel() == 2048
     packed = torch.randint(0, 256, (2048, 584), dtype=torch.uint8, device="cuda")
     _write_swa(requests, 0, req_idx, positions, packed)
     # Checkpoints can still read any boundary of the complete chunk here.
-    torch.testing.assert_close(_read_packed_rows(requests.swa_buffer, 0, swa_slots), packed)
+    torch.testing.assert_close(_read_packed_rows(_swa_buffer(requests, req_idx), 0, swa_slots), packed)
     _finish_prefill(requests, [req_idx])
     tail = positions[-requests.sliding_window :]
-    torch.testing.assert_close(
-        _read_packed_rows(requests.swa_buffer, 0, requests.get_swa_token_indices(req_idx, tail)), packed[tail]
-    )
+    torch.testing.assert_close(_read_swa(requests, 0, req_idx, tail), packed[tail])
     requests.free([req_idx], slots)
 
 
 def test_prefill_checkpoint_reads_precede_window_retention(cache):
-    """Intermediate checkpoints and late draft KV must survive a long prefill."""
+    """The chunk-end checkpoint and late draft KV must survive a long prefill."""
     manager, requests = cache
     req, slots = _reserve(manager, requests, 2048)
     _prepare_swa(requests, req, 0, 2048)
@@ -416,18 +467,12 @@ def test_prefill_checkpoint_reads_precede_window_retention(cache):
     live_tail = requests.req_to_c4_state.clone()
     states = requests.create_small_page_cache_manager(1)
     index = states.alloc_one_state_cache()
+    requests.save_state(_checkpoint_req(req, 2048), index, states)
+    window, _, _ = states.get_state_cache(index)
+    torch.testing.assert_close(window[0].cuda(), packed[-requests.sliding_window :], rtol=0, atol=0)
     for boundary in range(256, 2049, 256):
-        requests.save_state(req, index, states, boundary)
-        window, _, _ = states.get_state_cache(index)
         torch.testing.assert_close(
-            window[0].cuda(), packed[boundary - requests.sliding_window : boundary], rtol=0, atol=0
-        )
-        torch.testing.assert_close(
-            _read_packed_rows(
-                requests.swa_buffer,
-                0,
-                requests.get_swa_token_indices(req, positions[boundary - requests.sliding_window : boundary]),
-            ),
+            _read_swa(requests, 0, req, positions[boundary - requests.sliding_window : boundary]),
             packed[boundary - requests.sliding_window : boundary],
             rtol=0,
             atol=0,
@@ -437,11 +482,14 @@ def test_prefill_checkpoint_reads_precede_window_retention(cache):
     _write_swa(requests, 2, req, positions, packed.flip(0))
     _finish_prefill(requests, [req])
     # Reuse the scratch: only fixed request windows and CPU snapshots remain.
-    requests.swa_buffer[:, requests.swa_runtime_tokens :].zero_()
+    requests._test_backend.get_swa_prefill_workspace(requests._test_backend.model)[0].zero_()
+    requests.save_state(_checkpoint_req(req, 2048), index, states)
+    saved_swa = states.get_state_cache(index)[0]
+    torch.testing.assert_close(saved_swa[0].cuda(), packed[-requests.sliding_window :], rtol=0, atol=0)
     tail = positions[-requests.sliding_window :]
     for layer, expected in ((0, packed), (2, packed.flip(0))):
         torch.testing.assert_close(
-            _read_packed_rows(requests.swa_buffer, layer, requests.get_swa_token_indices(req, tail)),
+            _read_swa(requests, layer, req, tail),
             expected[tail],
             rtol=0,
             atol=0,
@@ -466,7 +514,7 @@ def test_non_aligned_chunks_preserve_window_and_checkpoint_history(cache):
         for left, right in reads:
             logical = torch.arange(left, right, device="cuda")
             torch.testing.assert_close(
-                _read_packed_rows(requests.swa_buffer, 0, requests.get_swa_token_indices(req, logical)),
+                _read_swa(requests, 0, req, logical),
                 packed[left:right],
                 rtol=0,
                 atol=0,
@@ -476,18 +524,19 @@ def test_non_aligned_chunks_preserve_window_and_checkpoint_history(cache):
 
 
 @pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
-def test_history_copy_preserves_packed_data_and_scale_regions(cache):
+def test_compressed_kv_copy_preserves_packed_data_and_scale_regions(cache):
     manager, requests = cache
     source, src = _reserve(manager, requests, 2 * manager.page_size)
     destination, dst = _reserve(manager, requests, 2 * manager.page_size)
-    swa_mapping = requests.prefill_token_ranges.clone()
+    requests.req_to_swa.random_(0, 256)
+    swa_state = requests.req_to_swa.clone()
     src = src.view(2, manager.page_size).flip(0).reshape(-1)
-    for pool in _history_pools(manager):
+    for pool in _compressed_kv_pools(manager):
         pool.random_(0, 256)
     manager.operator.copy_mem_to_mem(src_mem_index=src, dst_mem_index=dst)
-    for pool in _history_pools(manager):
+    for pool in _compressed_kv_pools(manager):
         torch.testing.assert_close(pool[:, src[::256].long() // 256], pool[:, dst[::256].long() // 256], rtol=0, atol=0)
-    torch.testing.assert_close(requests.prefill_token_ranges, swa_mapping)
+    torch.testing.assert_close(requests.req_to_swa, swa_state)
     requests.free([source, destination], torch.cat([src, dst]))
 
 
@@ -504,8 +553,8 @@ def test_hold_page_is_separate_from_request_rings(cache):
         .eq(requests.HOLD_SWA_SLOT // 128)
         .all()
     )
-    assert (hold // 4).lt(_history_pools(manager)[0].shape[1] * 64).all()
-    assert (hold // 128).lt(_history_pools(manager)[2].shape[1] * 2).all()
+    assert (hold // 4).lt(_compressed_kv_pools(manager)[0].shape[1] * 64).all()
+    assert (hold // 128).lt(_compressed_kv_pools(manager)[2].shape[1] * 2).all()
     free_tokens = manager.allocator.can_use_mem_size
     reqs = [requests.alloc(), requests.alloc()]
     assert set(_request_pages(requests, reqs[0])).isdisjoint(_request_pages(requests, reqs[1]))
@@ -520,30 +569,26 @@ def test_hold_page_is_separate_from_request_rings(cache):
 
 
 @pytest.mark.parametrize("length", [256, 512, 2048])
-def test_shared_history_restores_private_continuation(cache, length):
+def test_shared_compressed_kv_restores_private_continuation(cache, length):
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, length)
     _prepare_swa(requests, req_idx, 0, length)
-    requests.swa_buffer.random_(0, 256)
+    requests.req_to_swa.flatten(1, 2).random_(0, 256)
     _state_buffer(requests, "c4").uniform_()
     _state_buffer(requests, "c4_indexer").uniform_()
     states = requests.create_small_page_cache_manager(1)
     state_idx = states.alloc_one_state_cache()
-    requests.save_state(req_idx, state_idx, states, checkpoint_len=length)
+    requests.save_state(_checkpoint_req(req_idx, length), state_idx, states)
     torch.cuda.synchronize()
     expected_swa, expected_c4, expected_indexer = [value.cuda() for value in states.get_state_cache(state_idx)]
+    _finish_prefill(requests, [req_idx])
     requests.free_req(req_idx)
     reqs = [requests.alloc(), requests.alloc()]
     for req in reqs:
         requests.req_to_token_indexs[req, :length] = slots
         requests.restore_state(SimpleNamespace(req_idx=req, cur_kv_len=length), states, state_idx)
         positions = torch.arange(length - requests.sliding_window, length, device="cuda")
-        actual = torch.stack(
-            [
-                _read_packed_rows(requests.swa_buffer, layer, requests.get_swa_token_indices(req, positions))
-                for layer in range(3)
-            ]
-        )
+        actual = torch.stack([_read_swa(requests, layer, req, positions) for layer in range(3)])
         torch.testing.assert_close(actual, expected_swa)
         state_slots = torch.arange(length - 4, length, device="cuda") % requests.c4_state_tokens
         torch.testing.assert_close(requests.req_to_c4_state[:, req, state_slots], expected_c4)
@@ -552,12 +597,7 @@ def test_shared_history_restores_private_continuation(cache, length):
     # Advancing one fork releases only its own window; the shared token page survives.
     _prepare_swa(requests, reqs[0], length + 512, length + 768)
     positions = torch.arange(length - requests.sliding_window, length, device="cuda")
-    actual = torch.stack(
-        [
-            _read_packed_rows(requests.swa_buffer, layer, requests.get_swa_token_indices(reqs[1], positions))
-            for layer in range(3)
-        ]
-    )
+    actual = torch.stack([_read_swa(requests, layer, reqs[1], positions) for layer in range(3)])
     torch.testing.assert_close(actual, expected_swa)
     requests.free(reqs, slots)
     states.free_state_cache([state_idx])
@@ -565,50 +605,36 @@ def test_shared_history_restores_private_continuation(cache, length):
     assert states.get_free_cache_num() == 1
 
 
-@pytest.mark.parametrize("cache", [256, 512, 768, 1024], indirect=True)
+@pytest.mark.parametrize("cache", [(page, step) for page in (256, 512, 768, 1024) for step in (0, 3)], indirect=True)
 @pytest.mark.parametrize("length", [3, 127, 128, 255, 256, 257, 511, 512, 513, 2051])
-@pytest.mark.parametrize("prefill_mtp", [0, 3])
-def test_pd_kv_and_att_state_roundtrip_with_different_rings(cache, length, prefill_mtp):
+def test_pd_kv_and_att_state_roundtrip(cache, length):
     import copy
-    from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import create_cache_page_io
 
     manager, requests = cache
-    prefill = DeepseekV4ReqManager(2, 4096, None, manager.cache_config, max_forward_tokens=8192, mtp_step=prefill_mtp)
+    prefill = DeepseekV4ReqManager(2, 4096, None, manager.cache_config, mtp_step=get_env_start_args().mtp_step)
     prefill.bind_mem_manager(manager)
     source, src = _reserve(manager, prefill, length)
     destination, dst = _reserve(manager, requests, length)
-    _randomize_history(manager)
-    prefill.swa_buffer.random_(0, 256)
+    _randomize_compressed_kv(manager)
+    prefill.req_to_swa.flatten(1, 2).random_(0, 256)
     for buffer in (_state_buffer(prefill, "c4"), _state_buffer(prefill, "c4_indexer"), _state_buffer(prefill, "c128")):
         buffer.uniform_()
     source_memory = copy.copy(manager)
     for memory, runtime in ((source_memory, prefill), (manager, requests)):
         for name in (
-            "swa_buffer",
-            "swa_capacity_tokens",
-            "HOLD_REQUEST_ID",
-            "HOLD_SWA_SLOT",
+            "req_to_swa",
             "req_to_c4_state",
             "req_to_c4_indexer_state",
             "req_to_c128_state",
-            "req_to_token_indexs",
         ):
             setattr(memory, name, getattr(runtime, name))
         memory.alloc_paged_kv_move_buffer(1, manager.page_size)
-    source_io, destination_io = create_cache_page_io([source_memory], 0, 1), create_cache_page_io([manager], 0, 1)
-    task = SimpleNamespace(
-        src_page_index=0, dst_page_index=0, prefill_dp_index=0, decode_dp_index=0, req_idx=source, page_kind="kv"
-    )
     for start in range(0, length, manager.page_size):
         end = min(length, start + manager.page_size)
-        task.mem_indexes = src[start:end].tolist()
-        task.start_kv_index = start
-        moved = source_io.pack(task)
-        assert 0 < moved <= source_memory.kv_move_buffer[0].numel()
+        source_memory.write_mem_to_page_kv_move_buffer(src[start:end].tolist(), 0, 0, [source_memory], 1)
         manager.kv_move_buffer.copy_(source_memory.kv_move_buffer)
-        task.mem_indexes = dst[start:end].tolist()
-        destination_io.unpack(task)
-    for buffer, ratio in zip(_history_pools(manager), (4, 4, 128)):
+        manager.read_page_kv_move_buffer_to_mem(dst[start:end].tolist(), 0, 0, [manager], 1)
+    for buffer, ratio in zip(_compressed_kv_pools(manager), (4, 4, 128)):
         torch.testing.assert_close(
             _read_packed_rows(buffer, 0, src[ratio - 1 : length : ratio].long() // ratio),
             _read_packed_rows(buffer, 0, dst[ratio - 1 : length : ratio].long() // ratio),
@@ -616,50 +642,26 @@ def test_pd_kv_and_att_state_roundtrip_with_different_rings(cache, length, prefi
             atol=0,
         )
 
-    # The final att_state task carries the window and only the unfinished compressor tails.
-    task.mem_indexes, task.page_kind, task.start_kv_index = [], "att_state", length
-    assert 0 < source_io.pack(task) <= source_memory.kv_move_buffer[0].numel()
+    # Copy all ring slots, including the SWA-only layer and partially filled compressor pools.
+    source_memory.write_mem_to_page_kv_move_buffer([], 0, 0, [source_memory], 1, "att_state", source)
     manager.kv_move_buffer.copy_(source_memory.kv_move_buffer)
-    task.req_idx = destination
-    destination_io.unpack(task)
-    positions = torch.arange(max(0, length - requests.sliding_window), length, device="cuda")
-    for layer in range(manager.layer_num):
-        torch.testing.assert_close(
-            _read_packed_rows(prefill.swa_buffer, layer, prefill.get_swa_token_indices(source, positions)),
-            _read_packed_rows(requests.swa_buffer, layer, requests.get_swa_token_indices(destination, positions)),
-            rtol=0,
-            atol=0,
-        )
-    for source_buffer, target_buffer, source_ring, target_ring, first in (
-        (
-            _state_buffer(prefill, "c4"),
-            _state_buffer(requests, "c4"),
-            prefill.c4_state_tokens,
-            requests.c4_state_tokens,
-            max(0, length - 4 - length % 4),
-        ),
-        (
-            _state_buffer(prefill, "c4_indexer"),
-            _state_buffer(requests, "c4_indexer"),
-            prefill.c4_state_tokens,
-            requests.c4_state_tokens,
-            max(0, length - 4 - length % 4),
-        ),
-        (
-            _state_buffer(prefill, "c128"),
-            _state_buffer(requests, "c128"),
-            prefill.c128_state_tokens,
-            requests.c128_state_tokens,
-            length - length % 128,
-        ),
+    manager.read_page_kv_move_buffer_to_mem([], 0, 0, [manager], 1, "att_state", destination)
+    ring_size = requests.swa_capacity_tokens
+    torch.testing.assert_close(
+        requests.req_to_swa[:, destination],
+        prefill.req_to_swa[:, source],
+        rtol=0,
+        atol=0,
+    )
+    # Neither another request's ring nor the prefill workspace belongs to this transfer.
+    assert requests.req_to_swa.flatten(1, 2)[:, : destination * ring_size].eq(0).all()
+    assert requests.req_to_swa.flatten(1, 2)[:, (destination + 1) * ring_size :].eq(0).all()
+    for source_buffer, target_buffer in (
+        (prefill.req_to_c4_state, requests.req_to_c4_state),
+        (prefill.req_to_c4_indexer_state, requests.req_to_c4_indexer_state),
+        (prefill.req_to_c128_state, requests.req_to_c128_state),
     ):
-        positions = torch.arange(first, length, device="cuda")
-        torch.testing.assert_close(
-            source_buffer[:, source * source_ring + positions % source_ring],
-            target_buffer[:, destination * target_ring + positions % target_ring],
-            rtol=0,
-            atol=0,
-        )
+        torch.testing.assert_close(source_buffer[:, source], target_buffer[:, destination], rtol=0, atol=0)
     prefill.free([source], src)
     requests.free([destination], dst)
     assert manager.allocator.can_use_mem_size == manager.size
@@ -669,17 +671,16 @@ def test_pd_kv_and_att_state_roundtrip_with_different_rings(cache, length, prefi
 @pytest.mark.parametrize("length", [257, 2051])
 def test_pd_transport_completion_covers_peer_gpu_state(cache, length):
     import ctypes
-    from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import create_cache_page_io
 
     transport, _ = cache
     with torch.cuda.device(1):
         peer = DeepseekV4MemoryManager(8192, torch.bfloat16, 1, 512, 3, transport.cache_config)
-        requests = DeepseekV4ReqManager(2, 4096, None, peer.cache_config, max_forward_tokens=4096, mtp_step=0)
+        requests = DeepseekV4ReqManager(2, 4096, None, peer.cache_config, mtp_step=get_env_start_args().mtp_step)
         requests.bind_mem_manager(peer)
         source, src = _reserve(peer, requests, length)
         destination, dst = _reserve(peer, requests, length)
-        _randomize_history(peer)
-        requests.swa_buffer.random_(0, 256)
+        _randomize_compressed_kv(peer)
+        requests.req_to_swa.flatten(1, 2).random_(0, 256)
         for buffer in (
             _state_buffer(requests, "c4"),
             _state_buffer(requests, "c4_indexer"),
@@ -687,82 +688,70 @@ def test_pd_transport_completion_covers_peer_gpu_state(cache, length):
         ):
             buffer.uniform_()
         for name in (
-            "swa_buffer",
-            "swa_capacity_tokens",
-            "HOLD_REQUEST_ID",
-            "HOLD_SWA_SLOT",
+            "req_to_swa",
             "req_to_c4_state",
             "req_to_c4_indexer_state",
             "req_to_c128_state",
-            "req_to_token_indexs",
         ):
             setattr(peer, name, getattr(requests, name))
         torch.cuda.synchronize()
         peer_stream = torch.cuda.Stream()
+        consumer_stream = torch.cuda.Stream()
+    copy_stream = torch.cuda.Stream()
     # CUDA IPC enables peer access in production. A same-process test needs
     # to establish that access before Triton dereferences the peer pointer.
     cudart = ctypes.CDLL(f"libcudart.so.{torch.version.cuda.split('.')[0]}")
     assert cudart.cudaDeviceEnablePeerAccess(1, 0) in (0, 704)
     cudart.cudaGetLastError()
     transport.alloc_paged_kv_move_buffer(1, transport.page_size)
-    page_io = create_cache_page_io([transport, peer], 0, 1)
-    task = SimpleNamespace(
-        src_page_index=0, dst_page_index=0, prefill_dp_index=1, decode_dp_index=1, req_idx=source, page_kind="kv"
-    )
+    mem_managers = [transport, peer]
     for start in range(0, length, transport.page_size):
-        task.mem_indexes = src[start : start + transport.page_size].tolist()
-        page_io.pack(task)
+        transport.write_mem_to_page_kv_move_buffer(
+            src[start : start + transport.page_size].tolist(), 0, 1, mem_managers, 1
+        )
         torch.cuda.current_stream().synchronize()  # The network consumes the completed packed page.
-        task.mem_indexes = dst[start : start + transport.page_size].tolist()
-        page_io.unpack(task)
+        transport.read_page_kv_move_buffer_to_mem(
+            dst[start : start + transport.page_size].tolist(), 0, 1, mem_managers, 1
+        )
         torch.cuda.current_stream().synchronize()  # Return the page to the pool only after completion.
-    task.mem_indexes, task.page_kind, task.start_kv_index = [], "att_state", length
-    with torch.cuda.stream(peer_stream), torch.cuda.device(0):
-        page_io.pack(task)
+    with torch.cuda.stream(peer_stream), torch.cuda.stream(copy_stream):
+        transport.write_mem_to_page_kv_move_buffer([], 0, 1, mem_managers, 1, "att_state", source)
         with torch.cuda.device(1):
             torch.cuda._sleep(20_000_000)
-        task.req_idx = destination
-        page_io.unpack(task)
+        transport.read_page_kv_move_buffer_to_mem([], 0, 1, mem_managers, 1, "att_state", destination)
         completed = torch.cuda.Event()
-        completed.record()
+        completed.record(copy_stream)
         completed.synchronize()
-        assert peer_stream.query(), "transport completion must include the peer's index_copy kernels"
-    with torch.cuda.device(1):
-        for buffer in peer.kv_buffer:
-            torch.testing.assert_close(buffer[src.long()], buffer[dst.long()], rtol=0, atol=0)
-        positions = torch.arange(max(0, length - requests.sliding_window), length, device="cuda")
+    # 完成事件只需保证数据可读，无需目标 stream 已空闲；用独立 stream 校验整块 state。
+    with torch.cuda.stream(consumer_stream):
         torch.testing.assert_close(
-            _read_packed_rows(requests.swa_buffer, 0, requests.get_swa_token_indices(source, positions)),
-            _read_packed_rows(requests.swa_buffer, 0, requests.get_swa_token_indices(destination, positions)),
+            requests.req_to_swa[:, destination],
+            requests.req_to_swa[:, source],
             rtol=0,
             atol=0,
         )
-        for buffer, ring, first in (
-            (_state_buffer(requests, "c4"), requests.c4_state_tokens, length - 4 - length % 4),
-            (_state_buffer(requests, "c4_indexer"), requests.c4_state_tokens, length - 4 - length % 4),
-            (_state_buffer(requests, "c128"), requests.c128_state_tokens, length - length % 128),
-        ):
-            positions = torch.arange(first, length, device="cuda") % ring
-            torch.testing.assert_close(
-                buffer[:, source * ring + positions], buffer[:, destination * ring + positions], rtol=0, atol=0
-            )
+        for buffer in (requests.req_to_c4_state, requests.req_to_c4_indexer_state, requests.req_to_c128_state):
+            torch.testing.assert_close(buffer[:, destination], buffer[:, source], rtol=0, atol=0)
+        for buffer in peer.kv_buffer:
+            torch.testing.assert_close(buffer[src.long()], buffer[dst.long()], rtol=0, atol=0)
         requests.free([source, destination], torch.cat([src, dst]))
 
 
-@pytest.mark.parametrize("ratio,layer", [(4, 0), (128, 1)])
+@pytest.mark.parametrize("ratio,layer,is_indexer", [(4, 0, False), (128, 1, False), (4, 0, True)])
 @pytest.mark.parametrize("length", [512, 2048])
 @pytest.mark.parametrize("cache", [(256, 0), (256, 1), (256, 5)], indirect=True)
-def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, layer, length):
+def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, layer, is_indexer, length):
     from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
 
     manager, requests = cache
     source, src = _reserve(manager, requests, length)
     destination, dst = _reserve(manager, requests, length)
     _prepare_swa(requests, source, 0, length)
-    scores = torch.randn((length, 512 * (4 if ratio == 4 else 2)), dtype=torch.float32, device="cuda")
+    head_dim = requests.cache_config.indexer_head_dim if is_indexer else requests.cache_config.head_dim
+    scores = torch.randn((length, head_dim * (4 if ratio == 4 else 2)), dtype=torch.float32, device="cuda")
     cos = torch.ones((length, 32), dtype=torch.float32, device="cuda")
     sin = torch.zeros_like(cos)
-    weight = torch.ones(512, dtype=torch.float32, device="cuda")
+    weight = torch.ones(head_dim, dtype=torch.float32, device="cuda")
 
     def compress(req_idx, slots, start, end, decode=False):
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
@@ -781,35 +770,45 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
             b_seq_len=positions + 1 if decode else torch.tensor([end], dtype=torch.int32, device="cuda"),
             b_ready_cache_len=None if decode else torch.tensor([start], dtype=torch.int32, device="cuda"),
             b_q_start_loc=None if decode else torch.zeros(1, dtype=torch.int32, device="cuda"),
-            dsv4_swa_write_slots=requests.get_swa_token_indices(req_idx, positions),
+            dsv4_swa_write_slots=_swa_slots(requests, req_idx, positions),
             dsv4_swa_runtime_write_slots=torch.where(
                 positions >= end - requests.swa_capacity_tokens,
-                requests.get_swa_token_indices(req_idx, positions, prefill=False),
+                _swa_slots(requests, req_idx, positions, prefill=False),
                 -1,
             )
             if not decode
             else None,
         )
-        fused_compress(
+        output = fused_compress(
             kv_score=scores[start:end],
             infer_state=state,
             layer_idx=layer,
             norm_weight=weight,
             eps=1e-6,
-            head_dim=512,
+            head_dim=head_dim,
             qk_rope_head_dim=64,
             compress_ratio=ratio,
             cos_table=cos,
             sin_table=sin,
+            is_in_indexer=is_indexer,
         )
+        if is_indexer and req_idx == destination:
+            closed_groups = (positions + 1) % ratio == 0
+            torch.testing.assert_close(output[closed_groups], reference[start:end][closed_groups], rtol=0, atol=0)
+        return output
 
-    compress(source, src, 0, length)
+    reference = compress(source, src, 0, length)
     states = requests.create_small_page_cache_manager(1)
     index = states.alloc_one_state_cache()
-    requests.save_state(source, index, states, checkpoint_len=256)
-    requests.restore_state(SimpleNamespace(req_idx=destination, cur_kv_len=256), states, index)
+    # A short final chunk must preserve the previous rows needed by the checkpoint tail.
+    checkpoint_len = length // 2
+    for start, end in ((0, checkpoint_len - 2), (checkpoint_len - 2, checkpoint_len)):
+        _prepare_swa(requests, source, start, end)
+        compress(source, src, start, end)
+    requests.save_state(_checkpoint_req(source, checkpoint_len), index, states)
+    requests.restore_state(SimpleNamespace(req_idx=destination, cur_kv_len=checkpoint_len), states, index)
     verify_width = requests.c4_state_tokens - 8 + 1
-    for start in range(256, length - verify_width, 256):
+    for start in range(checkpoint_len, length - verify_width, 256):
         end = min(start + 256, length - verify_width)
         _prepare_swa(requests, destination, start, end)
         compress(destination, dst, start, end)
@@ -817,25 +816,25 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
     # Rejected speculative rows are written again in the same held token page.
     compress(destination, dst, length - verify_width, length, decode=True)
     compress(destination, dst, length - verify_width, length, decode=True)
-    pool = _history_pools(manager)[0] if ratio == 4 else _history_pools(manager)[2]
-    torch.testing.assert_close(
-        _read_packed_rows(pool, 0, src[256 + ratio - 1 : length : ratio].long() // ratio),
-        _read_packed_rows(pool, 0, dst[256 + ratio - 1 : length : ratio].long() // ratio),
-        rtol=0,
-        atol=0,
-    )
+    if not is_indexer:
+        pool = _compressed_kv_pools(manager)[0] if ratio == 4 else _compressed_kv_pools(manager)[2]
+        torch.testing.assert_close(
+            _read_packed_rows(pool, 0, src[checkpoint_len + ratio - 1 : length : ratio].long() // ratio),
+            _read_packed_rows(pool, 0, dst[checkpoint_len + ratio - 1 : length : ratio].long() // ratio),
+            rtol=0,
+            atol=0,
+        )
     requests.free([source, destination], torch.cat([src, dst]))
     states.free_state_cache([index])
 
 
 def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
-    from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import build_swa_index
+    from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
 
     manager, requests = cache
     source, src = _reserve(manager, requests, 512)
     destination, dst = _reserve(manager, requests, 512)
-    _prepare_swa(requests, source, 0, 512)
-    _prepare_swa(requests, destination, 0, 512)
+    _prepare_prefill(requests, torch.tensor([source, destination]), torch.zeros(2), torch.full((2,), 512))
     req_ids = torch.tensor([source, requests.HOLD_REQUEST_ID], dtype=torch.int32, device="cuda")
     positions = torch.tensor([255, 1], dtype=torch.int32, device="cuda")
     indexes = torch.empty((2, 128), dtype=torch.int32, device="cuda")
@@ -843,7 +842,15 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
     write_slots = torch.empty_like(lengths)
 
     def build():
-        build_swa_index(req_ids, positions, requests, indexes, lengths, write_slots, is_prefill=True)
+        build_swa_indices(
+            req_ids,
+            positions,
+            requests,
+            indexes,
+            lengths,
+            write_slots,
+            prefill_state=requests._test_prefill_states[source],
+        )
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -856,10 +863,10 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
     req_ids[0] = destination
     positions[0] = 256
     graph.replay()
-    expected = requests.get_swa_token_indices(destination, torch.arange(256, 128, -1, dtype=torch.int32, device="cuda"))
+    expected = _swa_slots(requests, destination, torch.arange(256, 128, -1, dtype=torch.int32, device="cuda"))
     torch.testing.assert_close(indexes[0], expected)
     assert write_slots[0].item() == expected[0].item()
-    assert write_slots[1].item() == requests.HOLD_SWA_SLOT + 1
+    assert write_slots[1].item() == requests._test_prefill_states[source].HOLD_SWA_SLOT + 1
     requests.free([source, destination], torch.cat([src, dst]))
 
 
@@ -870,8 +877,8 @@ def test_swa_index_cuda_graph_reads_updated_private_pages(cache):
 )
 def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, dspark):
     from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
-    from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import build_swa_index
-    from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_index import build_dspark_swa_index
+    from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
+    from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_indices import build_dspark_swa_indices
 
     torch.manual_seed(1593)
     manager, requests = cache
@@ -886,7 +893,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     packed[:, 448:576] = values[:, 448:].contiguous().view(torch.uint8)
     packed[:, 576:583] = 127
     positions = torch.arange(4096, device="cuda")
-    _write_packed_rows(requests.swa_buffer, 2, requests.get_swa_token_indices(source, positions), packed)
+    _write_swa_rows(requests, 2, source, positions, packed)
     _write_swa(requests, 2, destination, positions[:512], packed[:512])
     _finish_prefill(requests, [destination])
 
@@ -901,20 +908,20 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
 
     def build():
         if dspark:
-            build_dspark_swa_index(
+            build_dspark_swa_indices(
                 req_idx,
                 query_positions,
                 requests,
                 indices,
                 lengths,
                 write_slots,
-                window=128,
+                sliding_window=128,
                 block_size=token_num,
                 hold_req_id=requests.HOLD_REQUEST_ID,
                 hold_swa_slot=requests.HOLD_SWA_SLOT,
             )
         else:
-            build_swa_index(req_idx, query_positions, requests, indices, lengths, write_slots)
+            build_swa_indices(req_idx, query_positions, requests, indices, lengths, write_slots)
 
     backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(
         type(
@@ -957,6 +964,14 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
 
     reference_state = backend.create_att_decode_state(state_info)
     reference_state.init_state()
+    reference_kv = backend.get_att_input_params(
+        SimpleNamespace(
+            req_manager=requests,
+            is_prefill=True,
+            prefill_att_state=requests._test_prefill_states[source],
+        ),
+        2,
+    )
     committed_end = 512
     # Both sides of page boundaries, repeated retries, and several complete ring wraps.
     for start in (512, 513, 638, 639, 640, 640, 641, 767, 768, 1023, 1279, 1280, 1919, 1920, 2047):
@@ -964,27 +979,25 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         # prefill would instead borrow pages before writing the whole chunk.
         for gap_start in range(committed_end, start, 128):
             gap = positions[gap_start : min(start, gap_start + 128)]
-            _write_packed_rows(requests.swa_buffer, 2, requests.get_swa_token_indices(source, gap), packed[gap])
-            _write_packed_rows(requests.swa_buffer, 2, requests.get_swa_token_indices(destination, gap), packed[gap])
+            _write_swa_rows(requests, 2, source, gap, packed[gap])
+            _write_swa_rows(requests, 2, destination, gap, packed[gap])
         query_positions.copy_(torch.arange(start, start + token_num, dtype=torch.int32))
         current = packed[start : start + token_num].clone()
         current[:, :448] = (
             (values[start : start + token_num, :448] * (1 + start % 7)).to(torch.float8_e4m3fn).view(torch.uint8)
         )
         logical_positions = query_positions.long()
-        _write_packed_rows(requests.swa_buffer, 2, requests.get_swa_token_indices(source, logical_positions), current)
-        _write_packed_rows(
-            requests.swa_buffer, 2, requests.get_swa_token_indices(destination, logical_positions), current
-        )
+        _write_swa_rows(requests, 2, source, logical_positions, current)
+        _write_swa_rows(requests, 2, destination, logical_positions, current)
         history = torch.arange(max(0, start - 128), start, device="cuda")
         graph.replay()
         if dspark:
             visible = torch.cat((history.flip(0), logical_positions))
-            reference_indices = requests.get_swa_token_indices(source, visible).expand(token_num, -1).contiguous()
+            reference_indices = _swa_slots(requests, source, visible).expand(token_num, -1).contiguous()
             reference_lengths = torch.full_like(lengths, visible.numel())
         else:
             visible = logical_positions[:, None] - torch.arange(128, device="cuda")
-            reference_indices = requests.get_swa_token_indices(source, visible)
+            reference_indices = _swa_slots(requests, source, visible)
             reference_lengths = torch.full_like(lengths, 128)
         reference_indices = torch.nn.functional.pad(
             reference_indices, (0, width - reference_indices.shape[1]), value=-1
@@ -992,12 +1005,10 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
         reference_indices = reference_indices.to(torch.int32)
         reference_params = dict(params, swa_indices=reference_indices.unsqueeze(1), swa_lengths=reference_lengths)
         expected = reference_state.decode_att(
-            q, packed_kv, None, att_control=attention.AttControl(nsa_decode=True, nsa_decode_dict=reference_params)
+            q, reference_kv, None, att_control=attention.AttControl(nsa_decode=True, nsa_decode_dict=reference_params)
         )
         torch.testing.assert_close(actual, expected, rtol=0, atol=0, msg=f"SWA mismatch at position {start}")
-        torch.testing.assert_close(
-            write_slots, requests.get_swa_token_indices(destination, logical_positions).to(torch.int32)
-        )
+        torch.testing.assert_close(write_slots, _swa_slots(requests, destination, logical_positions).to(torch.int32))
         # Accept one position; speculative future rows stay dirty until the next write.
         committed_end = start + 1
     requests.free([source, destination], torch.cat([src, dst]))
@@ -1007,8 +1018,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     "cache,hash_page_size", [(256, 256), (256, 512), (512, 512), (768, 768), (1024, 1024)], indirect=["cache"]
 )
 @pytest.mark.parametrize("hit_extra_page", [False, True])
-@pytest.mark.parametrize("chunked", [True, False])
-def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash_page_size, hit_extra_page, chunked):
+def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash_page_size, hit_extra_page):
     from sortedcontainers import SortedDict
     from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context, CacheTier
     from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
@@ -1022,11 +1032,8 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     args = get_env_start_args()
     args.linear_att_hash_page_size = hash_page_size
     args.linear_att_page_block_num = block_num
-    args.disable_chunked_prefill = not chunked
     tail_len = big_page_tokens + hash_page_size
     hit_len = tail_len if hit_extra_page else big_page_tokens
-    if not chunked:
-        args.chunked_prefill_size = args.max_req_total_len
     for name, value in {
         "req_manager": requests,
         "radix_cache": radix,
@@ -1062,10 +1069,10 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     source, held = _reserve(manager, requests, tail_len + 1)
     req = request(source, tail_len + 1)
     req.hold_kv_len = held.numel()
-    for end in (big_page_tokens, tail_len) if chunked else (tail_len + 1,):
+    for end in (big_page_tokens, tail_len):
         assert req.get_chuncked_input_token_len() == end
         _prepare_swa(requests, source, req.cur_kv_len, end)
-        for pool in (requests.swa_buffer, *_history_pools(manager)):
+        for pool in (requests.req_to_swa.flatten(1, 2), *_compressed_kv_pools(manager)):
             pool.random_(0, 256)
         _state_buffer(requests, "c4").uniform_()
         _state_buffer(requests, "c4_indexer").uniform_()
@@ -1088,7 +1095,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
         if hit_extra_page:
             assert requests.req_to_token_indexs[fork.req_idx, big_page_tokens].item() != held[big_page_tokens].item()
         restored = requests.req_to_token_indexs[fork.req_idx, :hit_len]
-        for pool, ratio in zip(_history_pools(manager), (4, 4, 128)):
+        for pool, ratio in zip(_compressed_kv_pools(manager), (4, 4, 128)):
             torch.testing.assert_close(
                 _read_packed_rows(pool, 0, held[ratio - 1 : hit_len : ratio].long() // ratio),
                 _read_packed_rows(pool, 0, restored[ratio - 1 : hit_len : ratio].long() // ratio),
@@ -1108,6 +1115,49 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
         == manager.big_page_buffers.size - manager.big_page_buffers.keep_num
     )
     assert small.get_free_cache_num() == small.size
+
+
+@pytest.mark.parametrize("page_cap", [3, 130])
+def test_c4_indexer_page_table_uses_each_query_request_and_causal_length(cache, page_cap):
+    from lightllm.models.deepseek_v4.triton_kernel.build_c4_indexer_page_table import build_c4_indexer_page_table
+
+    manager, requests = cache
+    first, first_slots = _reserve(manager, requests, 512)
+    second, second_slots = _reserve(manager, requests, 768)
+    req_ids = [second, first, second, requests.HOLD_REQUEST_ID, first]
+    lengths = [1, 0, 129, 64, 65]
+    token_req_idx = torch.tensor(req_ids, dtype=torch.int32, device="cuda")
+    c4_lengths = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    storage = torch.full((len(req_ids) * page_cap + 7,), -17, dtype=torch.int32, device="cuda")
+    out = storage[:-7].view(len(req_ids), page_cap)
+    actual = build_c4_indexer_page_table(
+        token_req_idx,
+        c4_lengths,
+        page_cap * 64,
+        requests.req_to_token_indexs,
+        requests.HOLD_REQUEST_ID,
+        out=out,
+    )
+    expected = torch.zeros_like(out)
+    request_slots = {first: first_slots, second: second_slots}
+    for row, (req_idx, length) in enumerate(zip(req_ids, lengths)):
+        if req_idx == requests.HOLD_REQUEST_ID:
+            continue
+        compressed_slots = request_slots[req_idx][3 : length * 4 : 4].long() // 4
+        pages = compressed_slots[::64] // 64
+        expected[row, : pages.numel()] = pages.to(torch.int32)
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+    assert actual.data_ptr() == out.data_ptr()
+    assert storage[-7:].eq(-17).all()
+    empty = build_c4_indexer_page_table(
+        token_req_idx[:0],
+        c4_lengths[:0],
+        page_cap * 64,
+        requests.req_to_token_indexs,
+        requests.HOLD_REQUEST_ID,
+    )
+    assert empty.shape == (0, page_cap)
+    requests.free([first, second], torch.cat((first_slots, second_slots)))
 
 
 @pytest.mark.parametrize("mode", ["decode", "prefill", "prefill_aux"])
@@ -1146,13 +1196,12 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     state.b_req_idx = torch.tensor([req_idx] if state.is_prefill else [req_idx] * tokens, device="cuda")
     state.b_seq_len = torch.full_like(state.b_req_idx, 4096)
     state.position_ids = torch.arange(3068, 3068 + tokens, device="cuda")
+    state.dsv4_sparse_req_idx = torch.full_like(state.position_ids, req_idx)
     state._dsv4_token_to_batch_idx = torch.zeros(tokens, dtype=torch.int64, device="cuda")
     # Exercise chunk scheduling without requiring a long prompt or large logits allocation.
     monkeypatch.setattr(indexer_module, "C4_PREFILL_LOGITS_BUDGET_BYTES", 2 * 1024 * 4)
     aux = (
-        DeepseekV4C4PrefillWorkspace(tokens, 4096, 1, heads, 128, requests.cache_config)
-        if mode == "prefill_aux"
-        else None
+        DeepseekV4C4PrefillWorkspace(tokens, 4096, heads, 128, requests.cache_config) if mode == "prefill_aux" else None
     )
     if aux is not None:
         monkeypatch.setattr(aux, "rows_per_logits_chunk", lambda capacity: 2)
@@ -1160,7 +1209,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     scales = torch.ones((1024, 1), dtype=torch.float32, device="cuda")
     packed = torch.cat((keys.view(torch.uint8), scales.view(torch.uint8)), dim=1)
     c4_slots = slots[3::4].long() // 4
-    _write_packed_rows(_history_pools(manager)[1], 0, c4_slots, packed)
+    _write_packed_rows(_compressed_kv_pools(manager)[1], 0, c4_slots, packed)
     q = (torch.randn((tokens, heads, 128), device="cuda") * 0.125).to(torch.float8_e4m3fn)
     weights = torch.rand((tokens, heads), device="cuda")
 
@@ -1188,7 +1237,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     torch.testing.assert_close(actual.sort(dim=-1).values, eager.sort(dim=-1).values, rtol=0, atol=0)
     torch.testing.assert_close(actual_lengths, eager_lengths, rtol=0, atol=0)
     torch.testing.assert_close(actual_lengths, torch.full_like(actual_lengths, 512))
-    inverse_slots = torch.full((_history_pools(manager)[1].shape[1] * 64,), -1, device="cuda", dtype=torch.long)
+    inverse_slots = torch.full((_compressed_kv_pools(manager)[1].shape[1] * 64,), -1, device="cuda", dtype=torch.long)
     inverse_slots[c4_slots] = torch.arange(1024, device="cuda")
     logical_indices = inverse_slots[actual[:, 0].long()]
     scores = ((q.float() @ keys.float().T).relu() * weights[:, :, None]).sum(1)
@@ -1199,6 +1248,48 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
         selected_scores = scores[row, selected].sort(descending=True).values
         reference_scores = scores[row, : valid_lengths[row]].topk(512).values
         torch.testing.assert_close(selected_scores, reference_scores, rtol=2e-3, atol=2e-3)
+    requests.free([req_idx], slots)
+
+
+@pytest.mark.parametrize("microbatch_index", [0, 1])
+def test_dspark_proposal_reuses_forward_write_slots(cache, monkeypatch, microbatch_index):
+    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
+    from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
+
+    manager, requests = cache
+    req_idx, slots = _reserve(manager, requests, 512)
+    args = get_env_start_args()
+    monkeypatch.setitem(args, "mtp_mode", "dspark")
+    monkeypatch.setitem(args, "enable_decode_microbatch_overlap", True)
+    monkeypatch.setitem(args, "enable_prefill_microbatch_overlap", False)
+    config = dict(sliding_window=128, index_topk=512)
+    model = SimpleNamespace(config=config, batch_max_tokens=3, max_seq_length=4096, graph=None, has_vision=False)
+    model.block_size = 3
+    model.dsv4_workspace = DeepseekV4Workspace(model)
+    rope = torch.zeros((512, 32), device="cuda")
+    model._cos_cached_sliding = model._sin_cached_sliding = rope
+    model._cos_cached_compress = model._sin_cached_compress = rope
+    state = DeepseekV4DSparkInferStateInfo()
+    state.is_prefill, state.microbatch_index = False, microbatch_index
+    state.req_manager, state.mem_manager = requests, manager
+    state.b_req_idx = torch.full((3,), req_idx, dtype=torch.int32, device="cuda")
+    state.b_seq_len = torch.arange(258, 261, dtype=torch.int32, device="cuda")
+    state.max_kv_seq_len = 260
+    parent_init = DeepseekV4InferStateInfo.init_some_extra_state
+    parent_write_slots = []
+
+    def init_and_remember_write_slots(self, model):
+        parent_init(self, model)
+        parent_write_slots.append(self.dsv4_swa_write_slots)
+
+    monkeypatch.setattr(DeepseekV4InferStateInfo, "init_some_extra_state", init_and_remember_write_slots)
+    state.init_some_extra_state(model)
+    assert state.dsv4_swa_write_slots is parent_write_slots[0]
+    assert state.dsv4_swa_indices.shape == (3, model.dsv4_workspace.swa_capacity)
+    torch.testing.assert_close(state.dsv4_swa_lengths, torch.full_like(state.dsv4_swa_lengths, 131))
+    expected_slots = _swa_slots(requests, req_idx, state.position_ids, prefill=False).to(torch.int32)
+    torch.testing.assert_close(state.dsv4_swa_write_slots, expected_slots)
     requests.free([req_idx], slots)
 
 
@@ -1238,7 +1329,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     manager, requests = cache
     source, src = _reserve(manager, requests, length)
     requests.create_small_page_cache_manager(4)
-    page_tokens = manager.cache_config.cpu_cache_token_page_size
+    page_tokens = get_env_start_args().cpu_cache_token_page_size
     ends = list(range(page_tokens, length + 1, page_tokens))
     if length % page_tokens:
         ends.append(length)
@@ -1246,13 +1337,15 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     tail = None
     expected_checkpoints = []
     for end in ends:
+        # Populate a runtime state at this endpoint without generating new tokens.
+        _prepare_swa(requests, source, end, end)
         value = 11 + end // 256
-        requests.swa_buffer.fill_(value)
+        requests.req_to_swa.flatten(1, 2).fill_(value)
         _state_buffer(requests, "c4").fill_(value)
         _state_buffer(requests, "c4_indexer").fill_(value)
         state_pool = requests.small_page_buffers if end % page_tokens else manager.big_page_buffers
         slot = state_pool.alloc_one_state_cache()
-        requests.save_state(source, slot, state_pool, end)
+        requests.save_state(_checkpoint_req(source, end), slot, state_pool)
         torch.cuda.synchronize()
         expected_checkpoints.append(state_pool.buffer[slot].clone())
         if end % page_tokens:
@@ -1260,10 +1353,10 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         else:
             source_checkpoints[end] = slot
     # The live ring no longer contains the prompt's continuation checkpoints.
-    requests.swa_buffer.fill_(99)
+    requests.req_to_swa.flatten(1, 2).fill_(99)
     _state_buffer(requests, "c4").fill_(88)
     _state_buffer(requests, "c4_indexer").fill_(77)
-    _randomize_history(manager)
+    _randomize_compressed_kv(manager)
     pages = torch.full(
         (len(ends) + 2, 1, 1, 1, manager.cache_config.get_cpu_cache_big_page_bytes()),
         221,
@@ -1297,13 +1390,17 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: ends),
         ),
     )
+    # 已命中的大页来自 radix，其余完整大页来自当前请求。
+    shared_page_ids = [source_checkpoints.pop(end) for end in range(page_tokens, prefix + 1, page_tokens)]
     producer = torch.cuda.current_stream()
     context = common.g_infer_context
     monkeypatch.setattr(context, "req_manager", requests)
     monkeypatch.setattr(
         context,
         "radix_cache",
-        SimpleNamespace(get_big_page_ids_by_node=lambda node: [], free_one_small_page_buffer=lambda: None),
+        SimpleNamespace(
+            get_big_page_ids_by_node=lambda node: shared_page_ids.copy(), free_one_small_page_buffer=lambda: None
+        ),
     )
     monkeypatch.setattr(context, "is_hybrid_att_model", True)
     monkeypatch.setattr(context, "get_overlap_stream", lambda: producer)
@@ -1415,17 +1512,18 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
                 atol=0,
             )
     dst = requests.req_to_token_indexs[destination, :length]
-    for pool in _history_pools(manager):
+    for pool in _compressed_kv_pools(manager):
         torch.testing.assert_close(
             pool[:, (src[::256] // 256).long()], pool[:, (dst[::256] // 256).long()], rtol=0, atol=0
         )
     check = DeepseekV4StateCacheManager(1, manager.cache_config)
-    requests.save_state(destination, 0, check, length)
+    _prepare_swa(requests, destination, length, length)
+    requests.save_state(_checkpoint_req(destination, length), 0, check)
     torch.cuda.synchronize()
     torch.testing.assert_close(check.buffer[0], expected_checkpoints[-1], rtol=0, atol=0)
     requests.free([source, destination], torch.cat((src, dst)))
     manager.big_page_buffers.free_state_cache(
-        list(source_checkpoints.values()) + list(restored.hybrid_len_to_big_page_id.values())
+        shared_page_ids + list(source_checkpoints.values()) + list(restored.hybrid_len_to_big_page_id.values())
     )
     requests.small_page_buffers.free_state_cache(
         [x for x in (tail, restored.tail_small_page_buffer_id) if x is not None] + busy_small_slots
@@ -1438,8 +1536,9 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
 
 
 def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
-    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_k_norm_rope_flashmla
-    from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import build_swa_index
+    from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
+    from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
 
     manager, requests = cache
     req, held = _reserve(manager, requests, 2048)
@@ -1448,6 +1547,9 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
     weight = torch.randn(512, dtype=torch.bfloat16, device="cuda")
     angles = torch.randn((2048, 32), device="cuda")
     freqs = torch.complex(angles.cos(), angles.sin())
+    layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
+    layer.layer_num_, layer.eps_, layer.freqs_cis = 2, 1e-6, freqs
+    layer_weight = SimpleNamespace(kv_norm_=SimpleNamespace(weight=weight))
     for start, end in ((0, 255), (255, 641), (641, 1100), (1100, 2048)):
         _prepare_swa(requests, req, start, end)
         positions = torch.arange(start, end, device="cuda", dtype=torch.int32)
@@ -1455,37 +1557,46 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
         lengths = torch.empty(positions.numel(), dtype=torch.int32, device="cuda")
         writes = torch.empty_like(lengths)
         runtime = torch.empty_like(lengths)
-        build_swa_index(
+        build_swa_indices(
             torch.full_like(positions, req),
             positions,
             requests,
             indices,
             lengths,
             writes,
-            is_prefill=True,
-            runtime_write_slots=runtime,
-            token_to_batch=torch.zeros_like(positions),
-            seq_lens=torch.tensor([end], device="cuda"),
+            prefill_state=requests._test_prefill_states[req],
+            swa_runtime_write_slots=runtime,
+            token_to_batch_idx=torch.zeros_like(positions),
+            b_seq_len=torch.tensor([end], device="cuda"),
         )
-        slots = requests.get_swa_token_indices(req, positions)
-        requests.pack_mla_kv_to_cache_fused_norm_rope(2, slots, kv[start:end], weight, 1e-6, freqs, positions, runtime)
-        fused_k_norm_rope_flashmla(kv[start:end], weight, 1e-6, freqs, positions, positions, reference[0], 128)
+        slots = _swa_slots(requests, req, positions)
+        state = SimpleNamespace(
+            req_manager=requests,
+            is_prefill=True,
+            prefill_att_state=requests._test_prefill_states[req],
+            dsv4_swa_write_slots=slots,
+            dsv4_swa_runtime_write_slots=runtime,
+            position_ids=positions,
+        )
+        layer._norm_rope_and_cache_kv(kv[start:end], state, layer_weight)
+        fused_kv_norm_rope_to_swa(kv[start:end], weight, 1e-6, freqs, positions, positions, reference[0], 128)
         visible = torch.arange(max(0, start - 127), end, device="cuda")
+        # 第八个 scale 字节仅用于对齐；workspace 复用时无需保持其初始值。
         torch.testing.assert_close(
-            _read_packed_rows(requests.swa_buffer, 2, requests.get_swa_token_indices(req, visible)),
-            _read_packed_rows(reference, 0, visible),
+            _read_swa(requests, 2, req, visible)[:, :-1],
+            _read_packed_rows(reference, 0, visible)[:, :-1],
             rtol=0,
             atol=0,
         )
         logical = positions[:, None] - torch.arange(128, device="cuda")[None, :]
         valid = logical >= 0
-        expected_slots = requests.get_swa_token_indices(req, logical.clamp_min(0))
+        expected_slots = _swa_slots(requests, req, logical.clamp_min(0))
         torch.testing.assert_close(indices[valid], expected_slots[valid].to(torch.int32))
         _finish_prefill(requests, [req])
         tail = torch.arange(max(0, end - requests.sliding_window), end, device="cuda")
         torch.testing.assert_close(
-            _read_packed_rows(requests.swa_buffer, 2, requests.get_swa_token_indices(req, tail)),
-            _read_packed_rows(reference, 0, tail),
+            _read_swa(requests, 2, req, tail)[:, :-1],
+            _read_packed_rows(reference, 0, tail)[:, :-1],
             rtol=0,
             atol=0,
         )
@@ -1493,11 +1604,11 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
 
 
 def test_cpu_cache_preserves_already_published_pages(cache):
-    from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages, copy_checkpoint_pages
+    from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_kv_buffer_to_cpu_cache
 
     manager, requests = cache
     req, slots = _reserve(manager, requests, 2048)
-    _randomize_history(manager)
+    _randomize_compressed_kv(manager)
     layout = manager.cache_config
     pages = torch.full((3, layout.get_cpu_cache_big_page_bytes()), 221, dtype=torch.uint8, pin_memory=True)
     page_ids = torch.tensor([1], dtype=torch.int32, device="cuda")
@@ -1505,13 +1616,11 @@ def test_cpu_cache_preserves_already_published_pages(cache):
     state_id = manager.big_page_buffers.alloc_one_state_cache()
     manager.big_page_buffers.buffer[state_id].fill_(7)
     checkpoint_ids = torch.tensor([state_id], dtype=torch.int64, device="cuda")
-    copy_history_pages(manager, slots, page_ids, pages, to_pages=True, readies=readies)
-    copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, to_pages=True, readies=readies)
+    copy_kv_buffer_to_cpu_cache(manager, slots, page_ids, readies, checkpoint_ids, pages)
     torch.cuda.synchronize()
     assert pages.eq(221).all()
     readies.zero_()
-    copy_history_pages(manager, slots, page_ids, pages, to_pages=True, readies=readies)
-    copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, to_pages=True, readies=readies)
+    copy_kv_buffer_to_cpu_cache(manager, slots, page_ids, readies, checkpoint_ids, pages)
     torch.cuda.synchronize()
     offset = 0
     for pool in manager.kv_buffer:
@@ -1524,6 +1633,54 @@ def test_cpu_cache_preserves_already_published_pages(cache):
     requests.free([req], slots)
 
 
+@pytest.mark.parametrize("padding_tokens", [0, 3, 5])
+def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
+    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+
+    manager, requests = cache
+    backend = _test_backend(requests)
+    model = backend.model
+    model.has_vision = False
+    rope = torch.zeros((8, 32), device="cuda")
+    model._cos_cached_sliding = model._sin_cached_sliding = rope
+    model._cos_cached_compress = model._sin_cached_compress = rope
+
+    def allocate_indices(microbatch_index, token_num, width):
+        return (
+            torch.empty((token_num, width), dtype=torch.int32, device="cuda"),
+            torch.empty((token_num,), dtype=torch.int32, device="cuda"),
+        )
+
+    model.dsv4_workspace = SimpleNamespace(
+        sliding_window=128, vision_swa_width=128, swa=allocate_indices, c128=allocate_indices
+    )
+    real_tokens = 5 - padding_tokens
+    req_ids, lengths = ([0], [real_tokens]) if real_tokens else ([], [])
+    if padding_tokens:
+        req_ids.append(requests.HOLD_REQUEST_ID)
+        lengths.append(padding_tokens)
+    infer_state = DeepseekV4InferStateInfo()
+    infer_state.is_prefill = True
+    infer_state.req_manager = requests
+    infer_state.mem_manager = manager
+    infer_state.input_ids = torch.ones(5, dtype=torch.int64, device="cuda")
+    infer_state.b_req_idx = torch.tensor(req_ids, dtype=torch.int32, device="cuda")
+    infer_state.b_seq_len = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+    infer_state.b_ready_cache_len = torch.zeros_like(infer_state.b_seq_len)
+    infer_state.max_kv_seq_len = max(lengths)
+    infer_state.prefill_padding_token_num = padding_tokens
+    infer_state.prefill_att_state = backend.create_att_prefill_state(infer_state)
+    infer_state.init_some_extra_state(model)
+
+    previous_debug_mode = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        infer_state.init_some_extra_state(model)
+    finally:
+        torch.cuda.set_sync_debug_mode(previous_debug_mode)
+    assert infer_state.dsv4_sparse_req_idx.shape == (5,)
+
+
 @pytest.mark.parametrize("window", [64, 128, 256, 512])
 @pytest.mark.parametrize("mtp_step", [0, 5])
 def test_configured_window_survives_chunks_and_checkpoint_restore(cache, window, mtp_step):
@@ -1531,26 +1688,24 @@ def test_configured_window_survives_chunks_and_checkpoint_restore(cache, window,
 
     manager, _ = cache
     config = replace(manager.cache_config, sliding_window=window)
-    requests = DeepseekV4ReqManager(2, 4096, manager, config, max_forward_tokens=2048, mtp_step=mtp_step)
-    requests.prefill_c4_checkpoints.zero_()
-    requests.prefill_indexer_checkpoints.zero_()
+    requests = DeepseekV4ReqManager(2, 4096, manager, config, mtp_step=mtp_step)
     source, destination = requests.alloc(), requests.alloc()
     packed = torch.randint(0, 256, (2048, config.kv_bytes), dtype=torch.uint8, device="cuda")
     states = requests.create_small_page_cache_manager(1)
     index = states.alloc_one_state_cache()
-    for start, end in ((0, 257), (257, 513), (513, 2048)):
+    for start, end in ((0, 257), (257, 512), (512, 513), (513, 2048)):
         _prepare_swa(requests, source, start, end)
         positions = torch.arange(start, end, device="cuda")
         _write_swa(requests, 0, source, positions, packed[start:end])
-        for boundary in range((start // 256 + 1) * 256, end + 1, 256):
-            requests.save_state(source, index, states, boundary)
-            requests.restore_state(SimpleNamespace(req_idx=destination, cur_kv_len=boundary), states, index)
-            positions = torch.arange(max(0, boundary - window), boundary, device="cuda")
-            actual = _read_packed_rows(requests.swa_buffer, 0, requests.get_swa_token_indices(destination, positions))
+        if end % 256 == 0:
+            requests.save_state(_checkpoint_req(source, end), index, states)
+            requests.restore_state(SimpleNamespace(req_idx=destination, cur_kv_len=end), states, index)
+            positions = torch.arange(max(0, end - window), end, device="cuda")
+            actual = _read_swa(requests, 0, destination, positions)
             torch.testing.assert_close(actual, packed[positions], rtol=0, atol=0)
         _finish_prefill(requests, [source])
         positions = torch.arange(max(0, end - window), end, device="cuda")
-        actual = _read_packed_rows(requests.swa_buffer, 0, requests.get_swa_token_indices(source, positions))
+        actual = _read_swa(requests, 0, source, positions)
         torch.testing.assert_close(actual, packed[positions], rtol=0, atol=0)
     requests.free_req(source)
     requests.free_req(destination)
@@ -1561,31 +1716,28 @@ def test_configured_window_survives_chunks_and_checkpoint_restore(cache, window,
 def test_full_batch_unaligned_prefill_workspace_is_bounded_and_private(cache, mtp_step):
     manager, _ = cache
     request_count, chunk_tokens, ready = 8, 64, 382
-    requests = DeepseekV4ReqManager(
-        request_count,
-        4096,
-        manager,
-        manager.cache_config,
-        max_forward_tokens=request_count * chunk_tokens,
-        mtp_step=mtp_step,
-        prefill_regions=2,
-    )
+    requests = DeepseekV4ReqManager(request_count, 4096, manager, manager.cache_config, mtp_step=mtp_step)
     reqs = [requests.alloc() for _ in range(request_count)]
-    alignment = manager.cache_config.swa_token_alignment
-    first = (ready - requests.sliding_window + 1) // alignment * alignment
+    page_token_num = manager.cache_config.swa_page_token_num
+    first = (ready - requests.sliding_window + 1) // page_token_num * page_token_num
     end = ready + chunk_tokens
-    required = request_count * ((end + alignment - 1) // alignment * alignment - first)
-    assert requests.prefill_capacity_tokens >= required
-    next_region = requests.swa_runtime_tokens + requests.prefill_capacity_tokens
-    requests.swa_buffer[:, next_region:].fill_(173)
+    required = request_count * ((end + page_token_num - 1) // page_token_num * page_token_num - first)
+    requests._test_backend = _test_backend(requests, request_count * chunk_tokens)
+    requests._test_prefill_states = {}
+    workspace, capacity = requests._test_backend.get_swa_prefill_workspace(requests._test_backend.model)
+    assert capacity >= required
+    assert workspace.untyped_storage().data_ptr() != requests.req_to_swa.untyped_storage().data_ptr()
+    workspace[:, capacity : 2 * capacity].fill_(173)
     old_positions = torch.arange(ready - requests.sliding_window + 1, ready, device="cuda")
     new_positions = torch.arange(ready, end, device="cuda")
     for req in reqs:
-        _write_packed_rows(
-            requests.swa_buffer,
+        _write_swa_rows(
+            requests,
             0,
-            requests.get_swa_token_indices(req, old_positions, prefill=False),
+            req,
+            old_positions,
             torch.full((old_positions.numel(), 584), req + 1, dtype=torch.uint8, device="cuda"),
+            prefill=False,
         )
     _prepare_prefill(
         requests, torch.tensor(reqs), torch.full((request_count,), ready), torch.full((request_count,), end)
@@ -1600,16 +1752,16 @@ def test_full_batch_unaligned_prefill_workspace_is_bounded_and_private(cache, mt
         )
     for req in reqs:
         positions = torch.arange(ready - requests.sliding_window + 1, end, device="cuda")
-        slots = requests.get_swa_token_indices(req, positions)
+        slots = _swa_slots(requests, req, positions)
         assert slots.unique().numel() == positions.numel()
-        actual = _read_packed_rows(requests.swa_buffer, 0, slots)
+        actual = _read_packed_rows(workspace, 0, slots)
         expected = torch.where(positions[:, None] < ready, req + 1, req + 17).expand_as(actual).to(torch.uint8)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
-    assert requests.swa_buffer[:, next_region:].eq(173).all()
+    assert workspace[:, capacity : 2 * capacity].eq(173).all()
     _finish_prefill(requests, reqs)
     for req in reqs:
         positions = torch.arange(end - requests.sliding_window, end, device="cuda")
-        actual = _read_packed_rows(requests.swa_buffer, 0, requests.get_swa_token_indices(req, positions))
+        actual = _read_swa(requests, 0, req, positions)
         expected = torch.where(positions[:, None] < ready, req + 1, req + 17).expand_as(actual).to(torch.uint8)
         torch.testing.assert_close(actual, expected, rtol=0, atol=0)
         requests.free_req(req)

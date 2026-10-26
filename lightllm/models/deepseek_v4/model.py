@@ -21,7 +21,10 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
-from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DSV4_NSA_BACKENDS
+from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
+    DSV4_NSA_BACKENDS,
+    DeepseekV4FlashMlaFp8SparseAttBackend,
+)
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
@@ -30,11 +33,8 @@ from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
 )
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args, get_redundancy_expert_num
-from lightllm.utils.config_utils import (
-    get_deepseek_v4_compress_rates,
-    normalize_deepseek_v4_config,
-)
+from lightllm.utils.envs_utils import get_env_start_args, get_redundancy_expert_num
+from lightllm.utils.config_utils import normalize_deepseek_v4_config
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -103,28 +103,17 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
-        cache_config = DeepseekV4CacheConfig(
-            get_deepseek_v4_compress_rates(self.config, layer_num),
-            self.args.cpu_cache_token_page_size or 2048,
-            self.config["head_dim"],
-            self.config["index_head_dim"],
-            sliding_window=self.config["sliding_window"],
-            rope_head_dim=self.config["qk_rope_head_dim"],
-        )
+        cache_config = DeepseekV4CacheConfig.from_model_config(self.config, self.args)
         self.req_manager = DeepseekV4ReqManager(
             self.max_req_num,
             create_max_seq_len,
             None,
             cache_config,
-            max_forward_tokens=max(self.batch_max_tokens, self.max_req_num) + 2 * self.tp_world_size_,
-            mtp_step=0 if self.args.run_mode == "prefill" else self.args.mtp_step,
-            prefill_regions=0
-            if self.args.run_mode == "decode"
-            else 1 + int(self.args.enable_prefill_microbatch_overlap),
+            mtp_step=self.args.mtp_step,
         )
 
     def _init_mem_manager(self):
+        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
         cache_config = self.req_manager.cache_config
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,

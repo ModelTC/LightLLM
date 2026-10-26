@@ -1,7 +1,15 @@
 import torch
 import triton
 import triton.language as tl
+from functools import lru_cache
 from typing import List
+
+
+@lru_cache(maxsize=None)
+def get_pdl_launch_kwargs(device):
+    """按设备能力同时启用 Triton kernel 的 PDL 分支和依赖启动。"""
+    enabled = torch.version.hip is None and torch.cuda.get_device_capability(device)[0] >= 9
+    return {"USE_PDL": True, "launch_pdl": True} if enabled else {"USE_PDL": False}
 
 
 def custom_cat(tensors):

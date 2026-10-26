@@ -9,7 +9,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     ROWMMWeight,
 )
 from lightllm.common.quantization import Quantcfg
-from lightllm.models.deepseek_v4.triton_kernel.quant_convert import prepare_fp8_weights
+from lightllm.models.deepseek_v4.layer_weights.quant_utils import prepare_fp8_weights
 
 
 class DeepseekV4DSparkPreAndPostLayerWeight(PreAndPostLayerWeight):

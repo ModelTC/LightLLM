@@ -21,7 +21,11 @@ class C4IndexerMetadata:
 
 
 class DeepseekV4InferStateInfo(InferStateInfo):
-    """Per-forward RoPE views, SWA slots and sparse attention metadata."""
+    """Per-forward inputs, derived indices and attention metadata.
+
+    Views may borrow workspace storage. Request-owned SWA and compressor rings
+    remain in the request manager and are never copied into this forward state.
+    """
 
     req_manager: DeepseekV4ReqManager
     mem_manager: DeepseekV4MemoryManager
@@ -46,7 +50,6 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_workspace = None
         # token -> batch-position map for the compressor; built per prefill forward in init_some_extra_state.
         self._dsv4_token_to_batch_idx = None
-        self._dsv4_prefill_pad_q_len = 0
         # The first C4 layer builds metadata and later layers reuse it within this forward.
         # During CUDA Graph capture its tensor producers become graph nodes. Replay updates
         # those captured buffers from staged inputs; copy_for_cuda_graph skips this container.
@@ -64,7 +67,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
     def init_some_extra_state(self, model):
         self.c4_indexer_metadata = None  # Rebuild for each eager forward or graph capture.
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
-        self.req_manager.init_forward_state(self)
+        if self.is_prefill:
+            self.prefill_att_state.prepare_swa_workspace(self)
         pos = self.position_ids
         self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
         self.position_sin_sliding = torch.index_select(model._sin_cached_sliding, 0, pos)
@@ -85,9 +89,9 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             self.dsv4_sparse_req_idx = self.b_req_idx
             self._dsv4_token_to_batch_idx = None
         # Sliding-window indices are layer-independent, so build them once into the model workspace.
-        from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import (
+        from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import (
             build_image_visibility,
-            build_swa_index,
+            build_swa_indices,
         )
 
         workspace = model.dsv4_workspace
@@ -116,27 +120,27 @@ class DeepseekV4InferStateInfo(InferStateInfo):
                 )
         self.dsv4_swa_write_slots = torch.empty_like(pos, dtype=torch.int32)
         self.dsv4_swa_runtime_write_slots = torch.empty_like(pos, dtype=torch.int32) if self.is_prefill else None
-        self.dsv4_swa_indices, self.dsv4_swa_lengths = build_swa_index(
-            req_idx=self.dsv4_sparse_req_idx,
-            positions=self.position_ids,
+        self.dsv4_swa_indices, self.dsv4_swa_lengths = build_swa_indices(
+            token_req_idx=self.dsv4_sparse_req_idx,
+            position_ids=self.position_ids,
             req_manager=self.req_manager,
-            swa_index=self.dsv4_swa_indices,
-            swa_length=self.dsv4_swa_lengths,
+            swa_indices=self.dsv4_swa_indices,
+            swa_lengths=self.dsv4_swa_lengths,
             swa_write_slots=self.dsv4_swa_write_slots,
-            window=workspace.sliding_window,
+            sliding_window=workspace.sliding_window,
             image_left=self.dsv4_image_left,
             image_right=self.dsv4_image_right,
-            is_prefill=self.is_prefill,
-            runtime_write_slots=self.dsv4_swa_runtime_write_slots,
-            token_to_batch=self._dsv4_token_to_batch_idx,
-            seq_lens=self.b_seq_len,
+            prefill_state=self.prefill_att_state if self.is_prefill else None,
+            swa_runtime_write_slots=self.dsv4_swa_runtime_write_slots,
+            token_to_batch_idx=self._dsv4_token_to_batch_idx,
+            b_seq_len=self.b_seq_len,
         )
-        from lightllm.models.deepseek_v4.triton_kernel.build_compress_index_dsv4 import build_compress_index
+        from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 
         long_ratio = self.req_manager.cache_config.long_compress_ratio
         cap = compressed_kv_capacity(self._dsv4_index_max_kv_seq_len(model), long_ratio)
         self.dsv4_c128_indices, self.dsv4_c128_lengths = workspace.c128(self.microbatch_index, pos.numel(), cap)
-        build_compress_index(
+        build_compressed_kv_indices(
             self.dsv4_sparse_req_idx,
             self.position_ids,
             self.req_manager.req_to_token_indexs,
@@ -144,10 +148,3 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             self.dsv4_c128_indices,
             self.dsv4_c128_lengths,
         )
-        # prefill-cudagraph 桶填充的 HOLD 尾请求的 q 行数。其注意力读 HOLD 槽位(内容被并发写
-        # 竞争,每轮不同),输出必须清零,否则 pad 行 hidden 不确定 -> MoE 路由抖动 -> 共享 expert
-        # 批次组成变化 -> 真实行 GEMM 归约顺序变化(ulp 级),44 层放大后翻转低置信 token。
-        self._dsv4_prefill_pad_q_len = 0
-        if self.is_prefill and self.b_req_idx.numel() > 0:
-            if int(self.b_req_idx[-1].item()) == self.req_manager.HOLD_REQUEST_ID:
-                self._dsv4_prefill_pad_q_len = int((self.b_seq_len[-1] - self.b_ready_cache_len[-1]).item())

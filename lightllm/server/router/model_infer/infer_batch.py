@@ -426,45 +426,44 @@ class InferenceContext:
 
     def save_hybrid_state_to_cache(self, b_req_idx: torch.Tensor, reqs: List["InferReq"]):
         """Snapshot request-level attention state at big/small-page boundaries."""
-        if not self.is_hybrid_att_model or self.radix_cache is None:
+        if not self.is_hybrid_att_model:
             return
 
         # Request-state snapshot at a big-page boundary.
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         big_page_buffer_ids = []
-        checkpoint_lens = []
-        req_rows = []
-        for row, req in enumerate(reqs):
-            chunk_end = req.get_chuncked_input_token_len()
-            first_boundary = (req.cur_kv_len // big_page_token_num + 1) * big_page_token_num
-            for length in range(first_boundary, min(chunk_end, req.hybrid_cache_len) + 1, big_page_token_num):
+        for req in reqs:
+            # 保存时尚未更新 req.cur_kv_len；它是本轮 chunk 起点，cur_input_len 是终点。
+            cur_input_len = req.get_chuncked_input_token_len()
+            first_page_end = (req.cur_kv_len // big_page_token_num + 1) * big_page_token_num
+            state_buffer_id = -1
+            last_page_end = min(cur_input_len, req.hybrid_cache_len)
+            # 完整图片可能跨过多个大页结束点，例如页长 256、chunk [128, 768) 覆盖 256/512/768。
+            # 这些页的 KV 都有效，仍需为 radix 插入和 CPU offload 分配对应槽位。
+            for page_end in range(first_page_end, last_page_end + 1, big_page_token_num):
                 big_page_id = self.radix_cache.big_page_buffers.alloc_one_state_cache()
                 assert big_page_id is not None
-                assert length not in req.hybrid_len_to_big_page_id
-                req.hybrid_len_to_big_page_id[length] = big_page_id
-                # 完整图片可能跨过多个大页：保留所有槽位，正常分块只保存 chunk 尾状态。
-                # V4 关闭分块时仍使用原有的中间状态快照。
-                if length == chunk_end or self.args.disable_chunked_prefill:
-                    big_page_buffer_ids.append(big_page_id)
-                    checkpoint_lens.append(length)
-                    req_rows.append(row)
+                assert page_end not in req.hybrid_len_to_big_page_id
+                req.hybrid_len_to_big_page_id[page_end] = big_page_id
+                # 当前运行态只对应 chunk 终点；图片内部页尾不保存 state，匹配时也不能在此恢复。
+                if page_end == cur_input_len:
+                    state_buffer_id = big_page_id
+            big_page_buffer_ids.append(state_buffer_id)
 
-        if big_page_buffer_ids:
-            selected_rows = torch.tensor(req_rows, dtype=torch.int64, device=b_req_idx.device)
+        assert len(b_req_idx) == len(big_page_buffer_ids)
+        if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
             self.req_manager.save_big_page_states(
-                b_req_idx=b_req_idx[selected_rows],
-                req_indexes=[reqs[row].req_idx for row in req_rows],
+                b_req_idx=b_req_idx,
+                reqs=reqs,
                 buffer_indexes=big_page_buffer_ids,
-                checkpoint_lens=checkpoint_lens,
             )
+
+        assert not self.args.disable_chunked_prefill, "chunked prefill must be enabled for hybrid attention models"
 
         # Request-state snapshot at the final small-page boundary.
         for req in reqs:
             # 判断本次prefill 完以后 kv 的长度是否到达 hybrid checkpoint 的存储边界。
-            chunk_end = req.get_chuncked_input_token_len()
-            if chunk_end == req.hybrid_cache_len or (
-                self.args.disable_chunked_prefill and req.cur_kv_len < req.hybrid_cache_len < chunk_end
-            ):
+            if req.get_chuncked_input_token_len() == req.hybrid_cache_len:
                 assert req.tail_small_page_buffer_id is None
                 if req.hybrid_cache_len % big_page_token_num != 0:
                     self.radix_cache.free_one_small_page_buffer()
@@ -472,10 +471,9 @@ class InferenceContext:
                     if req.tail_small_page_buffer_id is not None:
                         dst_buffer_idx = req.tail_small_page_buffer_id
                         self.req_manager.save_state(
-                            req_idx=req.req_idx,
+                            req=req,
                             buffer_idx=dst_buffer_idx,
                             state_cache_manager=self.radix_cache.small_page_buffers,
-                            checkpoint_len=req.hybrid_cache_len,
                         )
         return
 
@@ -758,7 +756,6 @@ class InferReq:
                                 destination_indexes=tail_mems,
                             )
 
-                            self.cur_kv_len = int(shared_kv_len)  # Restore state at the matched token position.
                             self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
                             g_infer_context.req_manager.restore_small_page_state(
                                 req=self,
@@ -854,8 +851,6 @@ class InferReq:
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_ids_for_hybrid_att(self):
-        if self.args.disable_chunked_prefill:
-            return InferReq.get_chuncked_input_token_ids(self)
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
 
         chunked_start = self.cur_kv_len
@@ -877,8 +872,6 @@ class InferReq:
         return adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
 
     def get_chuncked_input_token_len_for_hybrid_att(self):
-        if self.args.disable_chunked_prefill:
-            return InferReq.get_chuncked_input_token_len(self)
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         chunked_start = self.cur_kv_len
         chunked_end = chunked_start + self.args.chunked_prefill_size

@@ -75,12 +75,14 @@ def _launch_subprocesses(args: StartArgs):
 
     model_type = get_model_type(args.model_dir)
     if model_type == "deepseek_v4":
-        from lightllm.common.state_cache_manager.deepseek4 import DSV4_HISTORY_TOKEN_ALIGNMENT
+        from lightllm.common.state_cache_manager.deepseek4 import DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
 
         if args.page_size == 1:
-            args.page_size = DSV4_HISTORY_TOKEN_ALIGNMENT
-        if args.page_size <= 0 or args.page_size % DSV4_HISTORY_TOKEN_ALIGNMENT:
-            raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_HISTORY_TOKEN_ALIGNMENT}")
+            args.page_size = DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
+        if args.page_size <= 0 or args.page_size % DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT:
+            raise ValueError(
+                f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT}"
+            )
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
@@ -159,8 +161,7 @@ def _launch_subprocesses(args: StartArgs):
     if is_hybrid_model:
         # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
         assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
-        if model_type != "deepseek_v4":
-            assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
+        assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
     if args.diverse_mode:
         # diverse 按普通 KV 前缀插入缓存，尚不支持混合注意力模型的状态页和哈希边界。
         assert not is_hybrid_model, "--diverse_mode does not support hybrid attention models"

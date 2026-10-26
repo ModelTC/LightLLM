@@ -3,63 +3,6 @@ from types import SimpleNamespace
 import torch
 import pytest
 
-from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import create_cache_page_io
-
-
-@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16])
-def test_nccl_page_prefix_preserves_byte_count_and_legacy_full_pages(dtype):
-    from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import _page_prefix
-
-    page = torch.arange(32).to(dtype).view(2, 16)
-    assert _page_prefix(page, page.nbytes) is page
-    prefix = _page_prefix(page, 8 * page.element_size())
-    assert prefix.nbytes == 8 * page.element_size()
-    torch.testing.assert_close(prefix, page.reshape(-1)[:8])
-    assert prefix.data_ptr() == page.data_ptr()
-
-
-def test_nixl_partial_transfer_keeps_the_allocation_page_stride():
-    from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
-
-    transporter = NixlKVTransporter.__new__(NixlKVTransporter)
-    transporter.page_len = 256
-    transporter.nixl_agent = SimpleNamespace(
-        get_xfer_descs=lambda pages, memory_type: pages,
-        prep_xfer_dlist=lambda agent, descs, memory_type: (agent, descs),
-    )
-    peer, descriptors = transporter._create_paged_xfer_handles([(4096, 512, 0, 0)], 2, 64, agent_name="peer")
-    assert peer == "peer"
-    assert descriptors == [(4096, 64, 0), (4352, 64, 0)]
-
-
-def test_existing_memory_manager_interface_needs_no_position_metadata():
-    calls = []
-
-    class LegacyMemoryManager:
-        kv_move_buffer = torch.empty((1, 2, 3), dtype=torch.bfloat16)
-
-        def write_mem_to_page_kv_move_buffer(self, indexes, page, dp, managers, world_size, *, page_kind, req_idx):
-            calls.append(("pack", indexes, page_kind, req_idx))
-
-        def read_page_kv_move_buffer_to_mem(self, indexes, page, dp, managers, world_size, *, page_kind, req_idx):
-            calls.append(("unpack", indexes, page_kind, req_idx))
-
-    memory = LegacyMemoryManager()
-    page_io = create_cache_page_io([memory], 0, 1)
-    # Existing models do not receive start_kv_index or request_kv_len.
-    task = SimpleNamespace(
-        mem_indexes=[3, 4],
-        src_page_index=0,
-        dst_page_index=0,
-        prefill_dp_index=0,
-        decode_dp_index=0,
-        page_kind="kv",
-        req_idx=7,
-    )
-    assert page_io.pack(task) == 12
-    page_io.unpack(task)
-    assert calls == [("pack", [3, 4], "kv", 7), ("unpack", [3, 4], "kv", 7)]
-
 
 @pytest.mark.parametrize("role", ["prefill", "decode"])
 def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatch, role):

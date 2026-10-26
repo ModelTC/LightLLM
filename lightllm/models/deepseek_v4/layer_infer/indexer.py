@@ -3,16 +3,16 @@ import deep_gemm
 
 from lightllm.common.basemodel import BaseLayerInfer
 from ..infer_struct import C4IndexerMetadata, DeepseekV4InferStateInfo
-from ..triton_kernel.topk_transform import topk_transform
+from ..triton_kernel.indexer_topk import indexer_topk
 from ..workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES, compressed_kv_capacity
 from .compressor import CompressorInfer
 
 
 class DeepseekV4IndexInfer(BaseLayerInfer):
-    """Build sparse metadata and score C4 history with the replicated FP8 indexer.
+    """Build sparse metadata and score C4 compressed KV with the replicated FP8 indexer.
 
     SWA and C128 indices are prepared once per forward. C4 layers write
-    compressed indexer keys, score paged history, then select up to 512 entries.
+    compressed indexer keys, score paged indexer keys, then select up to 512 entries.
     Per-forward page tables and scheduler metadata live on infer_state and are
     reused across C4 layers; this object holds only per-layer configuration.
     """
@@ -70,16 +70,16 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             hadamard_out = self.alloc_tensor(scratch.shape, scratch.dtype, device=scratch.device)
         scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5, out=hadamard_out)
         from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
-        from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k_dsv4 import (
-            destindex_copy_indexer_k_dsv4,
+        from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k import (
+            destindex_copy_indexer_k,
         )
 
-        destindex_copy_indexer_k_dsv4(
+        destindex_copy_indexer_k(
             scratch,
             infer_state.mem_index.reshape(-1),
             infer_state.position_ids,
             get_indexer_k_buffer(infer_state.mem_manager, self.layer_idx_),
-            infer_state.req_manager.cache_config.history_token_alignment // self.compress_ratio,
+            infer_state.mem_manager.cache_config.compressed_kv_token_alignment // self.compress_ratio,
         )
 
     def build_metadata(
@@ -177,10 +177,10 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         c4_cap = compressed_kv_capacity(infer_state.max_kv_seq_len, 4)
 
         if max_entries <= index_topk:
-            from ..triton_kernel.build_compress_index_dsv4 import build_compress_index
+            from ..triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 
             slots, lengths = workspace.c4(infer_state.microbatch_index, positions.shape[0], c4_cap)
-            slots, lengths = build_compress_index(
+            slots, lengths = build_compressed_kv_indices(
                 infer_state.dsv4_sparse_req_idx,
                 positions,
                 infer_state.req_manager.req_to_token_indexs,
@@ -198,49 +198,34 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         if infer_state.c4_indexer_metadata is not None:
             return infer_state.c4_indexer_metadata
         mem_manager = infer_state.mem_manager
-        page_size = mem_manager.cache_config.history_token_alignment // self.compress_ratio
+        page_size = mem_manager.cache_config.compressed_kv_token_alignment // self.compress_ratio
         positions = infer_state.position_ids
-        from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
+        from ..triton_kernel.build_c4_indexer_page_table import build_c4_indexer_page_table
 
-        b_req_idx = infer_state.b_req_idx
-        batch = b_req_idx.shape[0]
         token_num = positions.numel()
-        if c4_aux_workspace is None:
-            c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)
-            page_table_out = row_page_table = None
-        else:
-            page_cap = c4_cap // page_size
-            page_table_out, row_page_table = c4_aux_workspace.page_tables(batch, token_num, page_cap)
-            c4_len, _, _, _ = c4_aux_workspace.metadata(batch, token_num)
-            c4_len.copy_(torch.div(infer_state.b_seq_len, 4, rounding_mode="floor"))
-        page_table = build_c4_indexer_page_table(
-            mem_manager,
-            b_req_idx,
-            c4_len,
-            c4_cap,
-            infer_state.req_manager.req_to_token_indexs,
-            infer_state.req_manager.HOLD_REQUEST_ID,
-            out=page_table_out,
-        )
-
-        if infer_state.is_prefill:
-            token_batch_pos = infer_state._dsv4_token_to_batch_idx
-            if row_page_table is None:
-                row_page_table = page_table[token_batch_pos]
-            else:
-                torch.index_select(page_table, 0, token_batch_pos, out=row_page_table)
-        else:
-            row_page_table = page_table
-
+        # Both C4 paths use the workspace's output lengths. They stay valid
+        # across the C4 layers of this forward along with the cached metadata.
+        _, topk_lengths = infer_state.dsv4_workspace.c4(infer_state.microbatch_index, token_num, self.index_topk)
+        row_page_table_out = None
         if c4_aux_workspace is None:
             valid_len = ((positions + 1) // 4).to(torch.int32)
             ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1)
-            topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, self.index_topk)), min=1)
         else:
-            _, valid_len, ctx_lens, topk_lengths = c4_aux_workspace.metadata(batch, token_num)
+            row_page_table_out = c4_aux_workspace.page_table(token_num, c4_cap // page_size)
+            valid_len, ctx_lens = c4_aux_workspace.metadata(token_num)
             valid_len.copy_((positions + 1) // 4)
             torch.clamp(valid_len, min=1, out=ctx_lens[:, 0])
-            torch.clamp(valid_len, min=1, max=self.index_topk, out=topk_lengths)
+        torch.clamp(valid_len, min=1, max=self.index_topk, out=topk_lengths)
+        # Derive the scorer's query rows directly from the authoritative request
+        # mapping. A batch page table and a separate gather would duplicate it.
+        row_page_table = build_c4_indexer_page_table(
+            infer_state.dsv4_sparse_req_idx,
+            valid_len,
+            c4_cap,
+            infer_state.req_manager.req_to_token_indexs,
+            infer_state.req_manager.HOLD_REQUEST_ID,
+            out=row_page_table_out,
+        )
         rows_per_chunk = None
         chunk_metadata = None
         if infer_state.is_prefill:
@@ -282,7 +267,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
     def _score_c4_indices(self, infer_state, idx_q_fp8, weights, c4_cap, paged_meta: C4IndexerMetadata):
         mem_manager = infer_state.mem_manager
         workspace = infer_state.dsv4_workspace
-        page_size = mem_manager.cache_config.history_token_alignment // self.compress_ratio
+        page_size = mem_manager.cache_config.compressed_kv_token_alignment // self.compress_ratio
         index_topk = self.index_topk
         from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
 
@@ -348,7 +333,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             c4_cap,
             False,
         )
-        topk_transform(
+        indexer_topk(
             logits,
             valid_len,
             row_page_table,

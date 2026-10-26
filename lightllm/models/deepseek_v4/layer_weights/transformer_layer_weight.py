@@ -12,7 +12,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     FusedMoeWeight,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import BMMWeightTpl
-from ..triton_kernel.quant_convert import prepare_fp8_weights
+from .quant_utils import prepare_fp8_weights
 
 
 class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):

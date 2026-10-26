@@ -331,6 +331,26 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             return infer_state.position_cos_compress, infer_state.position_sin_compress
         return infer_state.position_cos_sliding, infer_state.position_sin_sliding
 
+    def _norm_rope_and_cache_kv(self, kv, infer_state, layer_weight):
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
+
+        req_manager = infer_state.req_manager
+        att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
+        swa, _ = att_state.backend.get_att_input_params(infer_state, self.layer_num_)
+        # 一次完成 RMSNorm、RoPE、FP8 打包和 SWA 写入。
+        fused_kv_norm_rope_to_swa(
+            kv=kv,
+            kv_norm_weight=layer_weight.kv_norm_.weight,
+            eps=self.eps_,
+            freqs_cis=self.freqs_cis,
+            position_ids=infer_state.position_ids,
+            swa_write_slots=infer_state.dsv4_swa_write_slots,
+            swa_runtime_write_slots=infer_state.dsv4_swa_runtime_write_slots,
+            swa_kv_buffer=swa,
+            swa_page_token_num=req_manager.cache_config.swa_page_token_num,
+            req_to_swa=req_manager.req_to_swa[self.layer_num_],
+        )
+
     def _get_qkv(
         self,
         input: torch.Tensor,
@@ -352,17 +372,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
             q[:, self.tp_q_head_num_ :, :].zero_()
         fused_q_norm_rope(q_in, q[:, : self.tp_q_head_num_, :], self.eps_, self.freqs_cis, infer_state.position_ids)
-        # kv: RMSNorm + RoPE + FP8 pack + scatter into SWA in one Triton kernel.
-        infer_state.req_manager.pack_mla_kv_to_cache_fused_norm_rope(
-            layer_index=self.layer_num_,
-            swa_slots=infer_state.dsv4_swa_write_slots,
-            runtime_slots=infer_state.dsv4_swa_runtime_write_slots,
-            kv=qkv[:, -self.head_dim_ :],
-            kv_weight=layer_weight.kv_norm_.weight,
-            eps=self.eps_,
-            freqs_cis=self.freqs_cis,
-            positions=infer_state.position_ids,
-        )
+        self._norm_rope_and_cache_kv(qkv[:, -self.head_dim_ :], infer_state, layer_weight)
         return q, qa, input
 
     def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
@@ -484,15 +494,15 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
         attn_out = infer_state.prefill_att_state.prefill_att(
             q=q,
-            k=infer_state.req_manager.get_att_input_params(layer_index=self.layer_num_),
+            k=infer_state.prefill_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
             v=None,
             att_control=att_control,
             alloc_func=self.alloc_tensor,
             out=out,
         )
-        pad_q_len = infer_state._dsv4_prefill_pad_q_len
+        pad_q_len = infer_state.prefill_padding_token_num
         if pad_q_len:
-            # pad 行读 HOLD 槽位(参见 infer_struct._dsv4_prefill_pad_q_len),清零以保持确定性
+            # HOLD KV 可被并发写入；清零 padding 行，避免其影响后续 MoE 路由。
             attn_out[-pad_q_len:] = 0
         return attn_out
 
@@ -520,7 +530,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
         return infer_state.decode_att_state.decode_att(
             q=q,
-            k=infer_state.req_manager.get_att_input_params(layer_index=self.layer_num_),
+            k=infer_state.decode_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
             v=None,
             att_control=att_control,
         )

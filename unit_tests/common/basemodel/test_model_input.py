@@ -135,6 +135,8 @@ def test_padded_prefill_adds_non_decode_request_marker():
 
     assert padded_input.b_is_decode_req.dtype == torch.bool
     assert padded_input.b_is_decode_req.tolist() == [True, False]
+    assert model_input.prefill_padding_token_num == 0
+    assert padded_input.prefill_padding_token_num == 2
 
 
 def test_padded_prefill_builds_internal_request_for_empty_input():
@@ -173,6 +175,7 @@ def test_padded_prefill_builds_internal_request_for_empty_input():
     assert padded_input.b_req_idx.tolist() == [88]
     assert padded_input.b_seq_len.tolist() == [1]
     assert padded_input.b_prefill_has_output_cpu == [False]
+    assert padded_input.prefill_padding_token_num == 1
     assert torch.equal(padded_input.mtp_draft_input_hiddens, torch.zeros((1, 4)))
 
 

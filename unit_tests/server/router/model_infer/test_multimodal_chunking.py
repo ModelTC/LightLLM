@@ -15,7 +15,6 @@ def test_chunk_ids_and_lengths_use_the_same_complete_boundaries(hybrid, spans):
         batch_max_tokens=1024,
         linear_att_hash_page_size=64,
         linear_att_page_block_num=8,
-        disable_chunked_prefill=False,
     )
     req.cur_kv_len = req.cur_output_len = 0
     req.mm_input_spans = spans
@@ -80,10 +79,17 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
         small_page_buffers=SimpleNamespace(alloc_one_state_cache=lambda: 7),
         free_one_small_page_buffer=lambda: None,
     )
-    context.req_manager = SimpleNamespace(
-        save_big_page_states=lambda **kwargs: big_snapshots.append(req.get_chuncked_input_token_len()),
-        save_state=lambda **kwargs: small_snapshots.append(req.get_chuncked_input_token_len()),
-    )
+
+    def save_big_page_states(b_req_idx, reqs, buffer_indexes):
+        assert b_req_idx.tolist() == [req.req_idx for req in reqs]
+        for req, buffer_idx in zip(reqs, buffer_indexes):
+            if buffer_idx != -1:
+                big_snapshots.append(req.get_chuncked_input_token_len())
+
+    def save_state(req, buffer_idx, state_cache_manager):
+        small_snapshots.append(req.get_chuncked_input_token_len())
+
+    context.req_manager = SimpleNamespace(save_big_page_states=save_big_page_states, save_state=save_state)
 
     while req.cur_kv_len < req.get_cur_total_len():
         context.save_hybrid_state_to_cache(torch.tensor([0]), [req])

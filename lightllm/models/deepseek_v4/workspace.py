@@ -1,3 +1,9 @@
+"""Reusable GPU scratch; request mappings and persistent rings live in the request manager.
+
+Infer states hold the views and metadata for one forward. Workspace contents may
+be overwritten after their consumers finish; they are never request checkpoints.
+"""
+
 import math
 import os
 
@@ -24,18 +30,16 @@ class DeepseekV4C4PrefillWorkspace:
         self,
         token_capacity: int,
         max_seq_length: int,
-        max_request_num: int,
         index_n_heads: int,
         index_head_dim: int,
         cache_config: DeepseekV4CacheConfig,
     ):
         self.token_capacity = int(token_capacity)
-        self.max_request_num = int(max_request_num)
         self.index_n_heads = int(index_n_heads)
         self.index_head_dim = int(index_head_dim)
         ratio = cache_config.short_compress_ratio
         self.max_page_cap = compressed_kv_capacity(max_seq_length, ratio) // (
-            cache_config.history_token_alignment // ratio
+            cache_config.compressed_kv_token_alignment // ratio
         )
 
         max_indexer_k_phase = self.token_capacity * self.index_head_dim * (4 * 4 + 2 + 2)
@@ -51,12 +55,9 @@ class DeepseekV4C4PrefillWorkspace:
             device="cuda",
         )
         self.weights = torch.empty((self.token_capacity, self.index_n_heads, 1), dtype=torch.float32, device="cuda")
-        self.page_table = torch.empty((self.max_request_num * self.max_page_cap,), dtype=torch.int32, device="cuda")
         self.row_page_table = torch.empty((self.token_capacity * self.max_page_cap,), dtype=torch.int32, device="cuda")
-        self.c4_len = torch.empty((self.max_request_num,), dtype=torch.int32, device="cuda")
         self.valid_len = torch.empty((self.token_capacity,), dtype=torch.int32, device="cuda")
         self.ctx_lens = torch.empty((self.token_capacity, 1), dtype=torch.int32, device="cuda")
-        self.topk_lengths = torch.empty((self.token_capacity,), dtype=torch.int32, device="cuda")
 
     @staticmethod
     def _flat_view(buffer: torch.Tensor, shape) -> torch.Tensor:
@@ -88,18 +89,14 @@ class DeepseekV4C4PrefillWorkspace:
     def indexer_q_outputs(self, token_num: int):
         return self.idx_q_fp8[:token_num], self.weights[:token_num]
 
-    def page_tables(self, batch_size: int, token_num: int, page_cap: int):
+    def page_table(self, token_num: int, page_cap: int):
         assert page_cap <= self.max_page_cap
-        page_table = self._flat_view(self.page_table, (batch_size, page_cap))
-        row_page_table = self._flat_view(self.row_page_table, (token_num, page_cap))
-        return page_table, row_page_table
+        return self._flat_view(self.row_page_table, (token_num, page_cap))
 
-    def metadata(self, batch_size: int, token_num: int):
+    def metadata(self, token_num: int):
         return (
-            self.c4_len[:batch_size],
             self.valid_len[:token_num],
             self.ctx_lens[:token_num],
-            self.topk_lengths[:token_num],
         )
 
     def rows_per_logits_chunk(self, c4_cap: int) -> int:
@@ -108,6 +105,12 @@ class DeepseekV4C4PrefillWorkspace:
 
 
 class DeepseekV4Workspace:
+    """Model-owned buffer capacity, partitioned for overlapping microbatches.
+
+    Request mappings and persistent attention state belong to the request
+    manager; the current forward's views and validity belong to its infer state.
+    """
+
     def __init__(self, model):
         self.token_capacity = int(model.batch_max_tokens)
         self.sliding_window = int(model.config["sliding_window"])
@@ -130,11 +133,6 @@ class DeepseekV4Workspace:
 
         self.swa_indices = self._alloc(self.swa_capacity)
         self.swa_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
-        self.dspark_swa_write_slots = torch.empty(
-            (self.microbatch_count, self.token_capacity),
-            dtype=torch.int32,
-            device="cuda",
-        )
         self.c4_indices = self._alloc(self.index_topk)
         self.c4_lengths = torch.empty((self.microbatch_count, self.token_capacity), dtype=torch.int32, device="cuda")
         self.c128_indices = self._alloc(self.c128_cap)
@@ -146,7 +144,6 @@ class DeepseekV4Workspace:
         self.c4_prefill_aux = DeepseekV4C4PrefillWorkspace(
             token_capacity=self.token_capacity,
             max_seq_length=model.max_seq_length,
-            max_request_num=model.max_req_num,
             index_n_heads=model.config["index_n_heads"],
             index_head_dim=model.config["index_head_dim"],
             cache_config=model.req_manager.cache_config,
@@ -180,18 +177,6 @@ class DeepseekV4Workspace:
         return (
             self._view(self.swa_indices[microbatch_index], token_num, width),
             self.swa_lengths[microbatch_index, :token_num],
-        )
-
-    def dspark_swa(self, microbatch_index: int, token_num: int):
-        indices, lengths = self.swa(
-            microbatch_index,
-            token_num,
-            width=self.swa_capacity,
-        )
-        return (
-            indices,
-            lengths,
-            self.dspark_swa_write_slots[microbatch_index, :token_num],
         )
 
     def c4(self, microbatch_index: int, token_num: int, width: int):

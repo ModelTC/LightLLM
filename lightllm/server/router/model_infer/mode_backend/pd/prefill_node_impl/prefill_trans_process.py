@@ -13,7 +13,6 @@ from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
-from ..cache_page_io import create_cache_page_io
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
@@ -105,7 +104,6 @@ class _PrefillTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
-        self.page_io = create_cache_page_io(mem_managers, device_id, self.dp_world_size)
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -143,9 +141,17 @@ class _PrefillTransModule:
         return
 
     def _warmup(self):
-        with torch.cuda.stream(self.copy_cuda_stream):
-            self.page_io.warmup(write=True)
-            torch.cuda.current_stream().synchronize()
+        for dp_index in range(self.args.dp // self.args.nnodes):
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.write_mem_to_page_kv_move_buffer(
+                    mem_indexes=[0],
+                    page_index=0,
+                    dp_index=dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                )
+                torch.cuda.current_stream().synchronize()
         return
 
     def _abort(self, request_id: int, error_info: str = "aborted req"):
@@ -195,7 +201,16 @@ class _PrefillTransModule:
 
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
-                trans_task.transfer_nbytes = self.page_io.pack(trans_task)
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.write_mem_to_page_kv_move_buffer(
+                    trans_task.mem_indexes,
+                    page_index=trans_task.src_page_index,
+                    dp_index=trans_task.prefill_dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                    page_kind=trans_task.page_kind,
+                    req_idx=trans_task.req_idx,
+                )
                 sync_event = torch.cuda.Event()
                 sync_event.record()
 

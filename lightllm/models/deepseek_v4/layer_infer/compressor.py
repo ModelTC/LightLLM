@@ -4,11 +4,11 @@ import triton
 from lightllm.common.basemodel import BaseLayerInfer
 from ..infer_struct import DeepseekV4InferStateInfo
 from ..layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
-from ..triton_kernel.compressor import apply_ape, _fused_compress_norm_rope_insert_kernel, _save_partial_states_kernel
+from ..triton_kernel.compressor import apply_ape, _fused_compress_norm_rope_kernel, _save_compressor_state_kernel
 
 
 class CompressorInfer(BaseLayerInfer):
-    """Compress latent KV into packed history, or emit BF16 C4 indexer keys.
+    """Compress latent KV into packed KV, or emit BF16 C4 indexer keys.
 
     Both paths share the compression kernel and keep unfinished groups in request state.
     """
@@ -97,8 +97,8 @@ def fused_compress(
     out_buffer: torch.Tensor = None,
 ):
     mem_manager = infer_state.mem_manager
-    requests = infer_state.req_manager
-    out_slots = torch.where(
+    req_manager = infer_state.req_manager
+    compressed_kv_slots = torch.where(
         (infer_state.position_ids + 1) % compress_ratio == 0,
         infer_state.mem_index.reshape(-1) // compress_ratio,
         -1,
@@ -106,32 +106,25 @@ def fused_compress(
     if is_in_indexer:
         assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
 
-        state_buffer = requests.req_to_c4_indexer_state[requests.cache_config.layer_to_c4_idx[layer_idx]]
-        checkpoint_buffer = (
-            requests.prefill_indexer_checkpoints[requests.cache_config.layer_to_c4_idx[layer_idx]]
-            if requests.prefill_indexer_checkpoints is not None
-            else None
-        )
+        req_to_compressor_state = req_manager.req_to_c4_indexer_state[
+            req_manager.cache_config.layer_to_c4_idx[layer_idx]
+        ]
         if out_buffer is None:
             out_buffer = torch.empty(
-                (infer_state.mem_index.numel(), requests.cache_config.indexer_head_dim),
+                (infer_state.mem_index.numel(), req_manager.cache_config.indexer_head_dim),
                 dtype=torch.bfloat16,
                 device=infer_state.mem_index.device,
             )
         out_page_size = 1
     else:
         if compress_ratio == 4:
-            state_buffer = requests.req_to_c4_state[requests.cache_config.layer_to_c4_idx[layer_idx]]
-            checkpoint_buffer = (
-                requests.prefill_c4_checkpoints[requests.cache_config.layer_to_c4_idx[layer_idx]]
-                if requests.prefill_c4_checkpoints is not None
-                else None
-            )
-            out_page_size = requests.cache_config.history_token_alignment // compress_ratio
+            req_to_compressor_state = req_manager.req_to_c4_state[req_manager.cache_config.layer_to_c4_idx[layer_idx]]
+            out_page_size = req_manager.cache_config.compressed_kv_token_alignment // compress_ratio
         elif compress_ratio == 128:
-            state_buffer = requests.req_to_c128_state[requests.cache_config.layer_to_c128_idx[layer_idx]]
-            checkpoint_buffer = None
-            out_page_size = requests.cache_config.history_token_alignment // compress_ratio
+            req_to_compressor_state = req_manager.req_to_c128_state[
+                req_manager.cache_config.layer_to_c128_idx[layer_idx]
+            ]
+            out_page_size = req_manager.cache_config.compressed_kv_token_alignment // compress_ratio
         from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer
 
         out_buffer = get_compressed_kv_buffer(mem_manager, layer_idx)
@@ -139,11 +132,11 @@ def fused_compress(
     if kv_score.shape[0] == 0:
         return out_buffer
 
-    state_tokens = state_buffer.shape[1]
-    state_buffer = state_buffer.flatten(0, 1)
-    checkpoint_buffer = state_buffer if checkpoint_buffer is None else checkpoint_buffer.flatten(0, 1)
+    # 三种 compressor 共用算子，分别对应 req_to_c4_state / req_to_c4_indexer_state / req_to_c128_state。
+    state_capacity_tokens = req_to_compressor_state.shape[1]
+    req_to_compressor_state = req_to_compressor_state.flatten(0, 1)
     candidate_dim = kv_score.shape[-1] // 2
-    state_dim = state_buffer.shape[-1]
+    state_dim = req_to_compressor_state.shape[-1]
     is_c4 = compress_ratio == 4
     block_state = triton.next_power_of_2(candidate_dim)
     block_head = triton.next_power_of_2(head_dim)
@@ -153,11 +146,11 @@ def fused_compress(
     )
     q_start_loc = infer_state.b_q_start_loc if infer_state.b_q_start_loc is not None else infer_state.b_seq_len
 
-    _fused_compress_norm_rope_insert_kernel[(kv_score.shape[0],)](
+    _fused_compress_norm_rope_kernel[(kv_score.shape[0],)](
         kv_score,
         kv_score.stride(0),
         kv_score.stride(1),
-        state_buffer,
+        req_to_compressor_state,
         infer_state.position_ids,
         token_to_batch_idx,
         infer_state.b_req_idx,
@@ -165,9 +158,7 @@ def fused_compress(
         infer_state.b_seq_len,
         ready_cache_len,
         q_start_loc,
-        checkpoint_buffer,
-        requests.prefill_checkpoint_offsets,
-        out_slots,
+        compressed_kv_slots,
         norm_weight,
         eps,
         cos_table,
@@ -184,9 +175,7 @@ def fused_compress(
         WINDOW_SIZE=compress_ratio * (2 if is_c4 else 1),
         IS_C4=is_c4,
         IS_PREFILL=infer_state.is_prefill,
-        STATE_TOKENS=state_tokens,
-        CHECKPOINT_TOKENS=requests.cache_config.history_token_alignment,
-        HOLD_REQ=requests.HOLD_REQUEST_ID,
+        STATE_CAPACITY_TOKENS=state_capacity_tokens,
         ROPE_HEAD_DIM=qk_rope_head_dim,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
         AMAX_MIN=1e-4,
@@ -200,7 +189,7 @@ def fused_compress(
         num_warps=4,
     )
 
-    _save_partial_states_kernel[(kv_score.shape[0],)](
+    _save_compressor_state_kernel[(kv_score.shape[0],)](
         kv_score,
         kv_score.stride(0),
         kv_score.stride(1),
@@ -208,11 +197,11 @@ def fused_compress(
         token_to_batch_idx,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
-        state_buffer,
+        req_to_compressor_state,
         CANDIDATE_DIM=candidate_dim,
         STATE_DIM=state_dim,
         IS_PREFILL=infer_state.is_prefill,
-        STATE_TOKENS=state_tokens,
+        STATE_CAPACITY_TOKENS=state_capacity_tokens,
         BLOCK=block_state,
         num_warps=4,
     )

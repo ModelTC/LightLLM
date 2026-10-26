@@ -176,7 +176,7 @@ def test_router_uses_bias_vl_only_for_image_tokens(is_hash):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_build_image_visibility_scatter():
-    from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import build_image_visibility
+    from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_image_visibility
 
     image_spans = torch.tensor([[0, 1, 4], [0, 7, 3], [1, 6, 3]], dtype=torch.int32, device="cuda")
     b_q_start_loc = torch.tensor([0, 6], dtype=torch.int32, device="cuda")
@@ -200,18 +200,20 @@ def test_build_image_visibility_scatter():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
 def test_swa_index_adds_bidirectional_image_visibility():
-    from lightllm.models.deepseek_v4.triton_kernel.build_swa_index_dsv4 import build_swa_index
+    from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import build_swa_indices
 
     positions = torch.tensor([5, 8, 10], dtype=torch.int32, device="cuda")
     req_idx = torch.zeros(3, dtype=torch.int32, device="cuda")
-    requests = SimpleNamespace(
+    prefill_state = SimpleNamespace(
         prefill_token_ranges=torch.tensor([[0, 128]], dtype=torch.int32, device="cuda"),
-        prefill_workspace_offsets=torch.tensor([128], dtype=torch.int32, device="cuda"),
-        cache_config=SimpleNamespace(swa_token_alignment=128),
-        swa_capacity_tokens=128,
+        swa_prefill_workspace_offsets=torch.tensor([128], dtype=torch.int32, device="cuda"),
         HOLD_SWA_SLOT=256,
+    )
+    requests = SimpleNamespace(
+        cache_config=SimpleNamespace(swa_page_token_num=128),
+        swa_capacity_tokens=128,
+        HOLD_SWA_SLOT=128,
         HOLD_REQUEST_ID=1,
-        swa_buffer=torch.empty((1, 3, 74880), dtype=torch.uint8, device="cuda"),
     )
     write_slots = torch.empty_like(positions)
     output = torch.empty((3, 8), dtype=torch.int32, device="cuda")
@@ -219,17 +221,17 @@ def test_swa_index_adds_bidirectional_image_visibility():
     image_left = torch.tensor([0, 2, 4], dtype=torch.int32, device="cuda")
     image_right = torch.tensor([0, 2, 0], dtype=torch.int32, device="cuda")
 
-    build_swa_index(
+    build_swa_indices(
         req_idx,
         positions,
         requests,
         output,
         lengths,
         write_slots,
-        window=4,
+        sliding_window=4,
         image_left=image_left,
         image_right=image_right,
-        is_prefill=True,
+        prefill_state=prefill_state,
     )
 
     assert output.cpu().tolist() == [
