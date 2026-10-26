@@ -12,14 +12,30 @@ class WeightPack:
     weight_zero_point: Optional[torch.Tensor] = None
 
     def __post_init__(self):
-        self.load_ok = [False, self.weight_scale is None, self.weight_zero_point is None]
+        self.load_ok = [
+            False,
+            self.weight_scale is None,
+            self.weight_zero_point is None,
+        ]
 
     def get_expert(self, expert_idx: int):
-        assert self.weight.ndim == 3, f"weight must be a 3D tensor, but got {self.weight.ndim}"
+        assert (
+            self.weight.ndim == 3
+        ), f"weight must be a 3D tensor, but got {self.weight.ndim}"
         weight = self.weight[expert_idx]
-        weight_scale = self.weight_scale[expert_idx] if self.weight_scale is not None else None
-        weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
-        return WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+        weight_scale = (
+            self.weight_scale[expert_idx] if self.weight_scale is not None else None
+        )
+        weight_zero_point = (
+            self.weight_zero_point[expert_idx]
+            if self.weight_zero_point is not None
+            else None
+        )
+        return WeightPack(
+            weight=weight,
+            weight_scale=weight_scale,
+            weight_zero_point=weight_zero_point,
+        )
 
 
 class QuantizationMethod(ABC):
@@ -63,6 +79,47 @@ class QuantizationMethod(ABC):
     def method_name(self):
         pass
 
+    def apply_swiglu(
+        self,
+        input_tensor,
+        weight_pack,
+        limit=None,
+        alpha=None,
+        clamp_up_add_one=True,
+        out=None,
+        use_custom_tensor_mananger=True,
+        bias=None,
+    ):
+        from lightllm.common.basemodel.layer_infer.cache_tensor_manager import (
+            g_cache_manager,
+        )
+        from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
+            silu_and_mul_fwd,
+        )
+
+        alloc_func = (
+            g_cache_manager.empty if use_custom_tensor_mananger else torch.empty
+        )
+        activation = alloc_func(
+            (input_tensor.shape[0], input_tensor.shape[1] // 2),
+            dtype=input_tensor.dtype,
+            device=input_tensor.device,
+        )
+        silu_and_mul_fwd(
+            input_tensor,
+            activation,
+            limit=limit,
+            alpha=alpha,
+            clamp_up_add_one=clamp_up_add_one,
+        )
+        return self.apply(
+            activation,
+            weight_pack,
+            out,
+            use_custom_tensor_mananger=use_custom_tensor_mananger,
+            bias=bias,
+        )
+
     def create_weight(
         self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int
     ) -> Tuple[WeightPack, List[WeightPack]]:
@@ -74,7 +131,12 @@ class QuantizationMethod(ABC):
         )
 
     def create_moe_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int
+        self,
+        out_dims: List[int],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         return self._create_weight(
             out_dims=out_dims,
@@ -93,14 +155,18 @@ class QuantizationMethod(ABC):
         weight_pack.load_ok[0] = True
         return
 
-    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
+    def load_weight_scale(
+        self, weight_scale: torch.Tensor, weight_pack: WeightPack
+    ) -> None:
         if weight_scale is None:
             return
         weight_pack.weight_scale.copy_(weight_scale)
         weight_pack.load_ok[1] = True
         return
 
-    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack) -> None:
+    def load_weight_zero_point(
+        self, weight_zero_point: torch.Tensor, weight_pack: WeightPack
+    ) -> None:
         if weight_zero_point is None:
             return
         weight_pack.weight_zero_point.copy_(weight_zero_point)
@@ -109,10 +175,20 @@ class QuantizationMethod(ABC):
 
     def _check_weight_need_quanted(self, weight: torch.Tensor) -> bool:
         # 判断一个 weight 是否需要进行量化操作。
-        return weight.dtype in [torch.bfloat16, torch.float16, torch.float32, torch.float64]
+        return weight.dtype in [
+            torch.bfloat16,
+            torch.float16,
+            torch.float32,
+            torch.float64,
+        ]
 
     def _create_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self,
+        out_dims: List[int],
+        in_dim: int,
+        dtype: torch.dtype,
+        device_id: int,
+        num_experts: int = 1,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         pass
 
@@ -132,18 +208,34 @@ class QuantizationMethod(ABC):
         weight_scale = (
             [None] * len(weight_out_dims)
             if weight_pack.weight_scale is None
-            else (torch.split(weight_pack.weight_scale, weight_scale_out_dims, dim=weight_scale_split_dim))
+            else (
+                torch.split(
+                    weight_pack.weight_scale,
+                    weight_scale_out_dims,
+                    dim=weight_scale_split_dim,
+                )
+            )
         )
         # the ndim of weight_zero_point is the same as weight_scale.
         weight_zero_point = (
             [None] * len(weight_out_dims)
             if weight_pack.weight_zero_point is None
             else (
-                torch.split(weight_pack.weight_zero_point, weight_zero_point_out_dims, dim=weight_zero_point_split_dim)
+                torch.split(
+                    weight_pack.weight_zero_point,
+                    weight_zero_point_out_dims,
+                    dim=weight_zero_point_split_dim,
+                )
             )
         )
-        for weight, weight_scale, weight_zero_point in zip(weight, weight_scale, weight_zero_point):
+        for weight, weight_scale, weight_zero_point in zip(
+            weight, weight_scale, weight_zero_point
+        ):
             mm_param_list.append(
-                WeightPack(weight=weight, weight_scale=weight_scale, weight_zero_point=weight_zero_point)
+                WeightPack(
+                    weight=weight,
+                    weight_scale=weight_scale,
+                    weight_zero_point=weight_zero_point,
+                )
             )
         return mm_param_list

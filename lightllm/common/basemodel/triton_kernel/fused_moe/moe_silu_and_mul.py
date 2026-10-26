@@ -6,6 +6,109 @@ from lightllm.common.triton_utils.autotuner import autotune
 from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
+@triton.jit(do_not_specialize=["groups", "scale_stride_n"])
+def _silu_and_mul_quant_fp8_kernel(
+    input_ptr,
+    quant_ptr,
+    scale_ptr,
+    input_stride: tl.constexpr,
+    size_n: tl.constexpr,
+    groups,
+    scale_stride_n,
+    limit: tl.constexpr,
+    alpha: tl.constexpr,
+    fp8_max: tl.constexpr,
+    GROUP_SIZE: tl.constexpr,
+    GROUPS_PER_CTA: tl.constexpr,
+    USE_LIMIT_AND_ALPHA: tl.constexpr,
+    CLAMP_UP_ADD_ONE: tl.constexpr,
+    USE_GELU: tl.constexpr,
+    USE_UE8M0_SCALE: tl.constexpr,
+):
+    ids = tl.program_id(0) * GROUPS_PER_CTA + tl.arange(0, GROUPS_PER_CTA)
+    rows = ids // (size_n // GROUP_SIZE)
+    group_cols = ids % (size_n // GROUP_SIZE)
+    cols = tl.arange(0, GROUP_SIZE)[None, :]
+    offsets = rows[:, None] * input_stride + group_cols[:, None] * GROUP_SIZE + cols
+    mask = ids[:, None] < groups
+    gate = tl.load(input_ptr + offsets, mask, 0).to(tl.float32)
+    up = tl.load(input_ptr + offsets + size_n, mask, 0)
+    if USE_LIMIT_AND_ALPHA:
+        gate = tl.minimum(gate, limit)
+        up = tl.minimum(tl.maximum(up, -limit), limit)
+        gate = 1 / (1 + tl.exp(-gate * alpha)) * gate
+        gate = gate.to(input_ptr.dtype.element_ty)
+        if CLAMP_UP_ADD_ONE:
+            up += 1
+    else:
+        if USE_GELU:
+            cubed = gate * gate * gate
+            arg = 0.7978845608028654 * (gate + 0.044715 * cubed)
+            gate = 0.5 * gate * (1.0 + (2.0 / (1.0 + tl.exp(-2.0 * arg)) - 1.0))
+        else:
+            gate = gate / (1 + tl.exp(-gate))
+        gate = gate.to(input_ptr.dtype.element_ty)
+    # Keep activation -> BF16/FP16 -> FP8 rounding identical to the two-kernel path.
+    value = (up * gate).to(input_ptr.dtype.element_ty).to(tl.float32)
+    scale = tl.maximum(tl.max(tl.abs(value), axis=1), 1e-10) / fp8_max
+    if USE_UE8M0_SCALE:
+        scale = tl.exp2(tl.ceil(tl.log2(scale)))
+    quant = tl.clamp(value / scale[:, None], -fp8_max, fp8_max).to(
+        quant_ptr.dtype.element_ty
+    )
+    tl.store(quant_ptr + ids[:, None] * GROUP_SIZE + cols, quant, mask)
+    tl.store(scale_ptr + rows + group_cols * scale_stride_n, scale, ids < groups)
+
+
+def silu_and_mul_quant_fp8(
+    input,
+    group_size,
+    dtype,
+    limit=None,
+    alpha=None,
+    clamp_up_add_one=True,
+    alloc_func=torch.empty,
+    use_ue8m0_scales=True,
+):
+    """Port support_ds4's fused activation/quantization, retaining GLM clamp semantics."""
+    assert input.ndim == 2 and input.stride(1) == 1
+    assert input.shape[1] % (2 * group_size) == 0
+    assert group_size == triton.next_power_of_2(group_size)
+    assert (limit is None and alpha is None) or (
+        limit is not None and alpha is not None
+    )
+    m, n = input.shape[0], input.shape[1] // 2
+    quant = alloc_func((m, n), device=input.device, dtype=dtype)
+    aligned_m = triton.cdiv(m, 4) * 4
+    scale = alloc_func(
+        (n // group_size, aligned_m), device=input.device, dtype=torch.float32
+    ).T[:m, :]
+    groups = m * n // group_size
+    if groups == 0:
+        return quant, scale
+    groups_per_cta, warps = (1, 1) if groups <= 64 else (4, 4)
+    _silu_and_mul_quant_fp8_kernel[(triton.cdiv(groups, groups_per_cta),)](
+        input,
+        quant,
+        scale,
+        input.stride(0),
+        n,
+        groups,
+        scale.stride(1),
+        limit,
+        alpha,
+        torch.finfo(dtype).max,
+        group_size,
+        groups_per_cta,
+        USE_LIMIT_AND_ALPHA=limit is not None and alpha is not None,
+        CLAMP_UP_ADD_ONE=clamp_up_add_one,
+        USE_GELU=ffn_use_tanh_approximate_gelu(),
+        USE_UE8M0_SCALE=use_ue8m0_scales,
+        num_warps=warps,
+    )
+    return quant, scale
+
+
 @triton.jit
 def _silu_and_mul_kernel_fast(
     input_ptr,
@@ -124,7 +227,9 @@ def silu_and_mul_fwd(
 ):
     assert input.stride(-1) == 1
     assert output.is_contiguous()
-    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
+    assert (limit is None and alpha is None) or (
+        limit is not None and alpha is not None
+    )
 
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)
@@ -137,7 +242,12 @@ def silu_and_mul_fwd(
         if size_m < 256:
             run_config = {"BLOCK_M": 1, "BLOCK_N": 128, "num_warps": 1, "NUM_STAGES": 1}
         else:
-            run_config = {"BLOCK_M": 16, "BLOCK_N": 128, "num_warps": 4, "NUM_STAGES": 5}
+            run_config = {
+                "BLOCK_M": 16,
+                "BLOCK_N": 128,
+                "num_warps": 4,
+                "NUM_STAGES": 5,
+            }
 
     BLOCK_M = run_config["BLOCK_M"]
     BLOCK_N = run_config["BLOCK_N"]

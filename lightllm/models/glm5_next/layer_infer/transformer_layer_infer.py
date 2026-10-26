@@ -7,9 +7,6 @@ import torch
 from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
-    silu_and_mul_fwd,
-)
 from lightllm.common.basemodel.triton_kernel.mhc import (
     hc_contract,
     hc_post,
@@ -27,9 +24,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         self.eps_ = network_config["rms_norm_eps"]
         self.embed_dim_ = network_config["hidden_size"]
         self.num_hidden_layers = network_config["num_hidden_layers"]
-        self.autotune_layer_num = network_config.get("autotune_layer_num", self.num_hidden_layers)
+        self.autotune_layer_num = network_config.get(
+            "autotune_layer_num", self.num_hidden_layers
+        )
         self.is_linear_attention_layer = (
-            layer_num < self.num_hidden_layers and network_config["layer_types"][layer_num] == "linear_attention"
+            layer_num < self.num_hidden_layers
+            and network_config["layer_types"][layer_num] == "linear_attention"
         )
         self.use_mhc = network_config.get("mhc", True)
         self.mhc_streams = network_config.get("hc_mult", 4)
@@ -53,12 +53,14 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         self.tp_linear_num_heads = self.linear_num_heads // self.tp_world_size_
         self.tp_linear_projection_size = self.tp_linear_num_heads * self.linear_head_dim
         if not self.is_linear_attention_layer:
-            self.tp_q_head_num_ = network_config["num_attention_heads"] // self.tp_world_size_
+            self.tp_q_head_num_ = (
+                network_config["num_attention_heads"] // self.tp_world_size_
+            )
             self.qk_nope_head_dim = network_config["qk_nope_head_dim"]
             self.q_lora_rank = network_config["q_lora_rank"]
             self.kv_lora_rank = network_config["kv_lora_rank"]
             self.v_head_dim = network_config["v_head_dim"]
-            self.softmax_scale = self.qk_nope_head_dim ** -0.5
+            self.softmax_scale = self.qk_nope_head_dim**-0.5
             self.indexer = Glm5NextNsaInfer(
                 layer_idx=self.layer_num_,
                 network_config=self.network_config_,
@@ -66,13 +68,19 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             )
 
     def _att_norm(self, input, infer_state, layer_weight):
-        return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
+        return layer_weight.att_norm_weight_(
+            input=input, eps=self.eps_, alloc_func=self.alloc_tensor
+        )
 
     def _ffn_norm(self, input, infer_state, layer_weight):
-        return layer_weight.ffn_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
+        return layer_weight.ffn_norm_weight_(
+            input=input, eps=self.eps_, alloc_func=self.alloc_tensor
+        )
 
     def _ffn(self, input, infer_state, layer_weight):
-        input = self._tpsp_allgather(input=input.view(-1, self.embed_dim_), infer_state=infer_state)
+        input = self._tpsp_allgather(
+            input=input.view(-1, self.embed_dim_), infer_state=infer_state
+        )
         if self.is_moe:
             output = self._moe_ffn(input, infer_state, layer_weight)
             if self.enable_ep_moe:
@@ -87,22 +95,22 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.gate_up_proj.mm(input)
-        ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(
+        return layer_weight.down_proj.mm_swiglu(
             up_gate_out,
-            ffn1_out,
             limit=self.swiglu_limit,
             alpha=1.0,
             clamp_up_add_one=False,
         )
-        return layer_weight.down_proj.mm(ffn1_out)
 
     def _moe_ffn(self, input, infer_state, layer_weight) -> torch.Tensor:
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
         # if fused_shared_experts is not enabled, compute shared_output
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+        if (
+            self.n_shared_experts is not None
+            and layer_weight.num_fused_shared_experts == 0
+        ):
             shared_output = self._ffn_tp(hidden_states, infer_state, layer_weight)
 
         moe_gate_dtype = layer_weight.moe_gate.data_type_
@@ -122,7 +130,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             clamp_up_add_one=False,
         )
 
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+        if (
+            self.n_shared_experts is not None
+            and layer_weight.num_fused_shared_experts == 0
+        ):
             output.add_(shared_output)
 
         return output.view(num_tokens, hidden_dim)
@@ -136,10 +147,14 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         if infer_state.need_dp_prefill_balance:
             input = infer_state._all_to_all_unbalance_get(data=input)
 
-        q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split([self.q_lora_rank, self.kv_lora_rank], dim=-1)
+        q, cache_kv = layer_weight.qkv_a_proj_with_mqa_.mm(input).split(
+            [self.q_lora_rank, self.kv_lora_rank], dim=-1
+        )
         q = rmsnorm_forward(q, weight=layer_weight.q_a_layernorm_.weight, eps=self.eps_)
         infer_state.get_topk_indices_params = {"hidden_states": input, "q_lora": q}
-        q = layer_weight.q_b_proj_.mm(q).view(-1, self.tp_q_head_num_, self.qk_nope_head_dim)
+        q = layer_weight.q_b_proj_.mm(q).view(
+            -1, self.tp_q_head_num_, self.qk_nope_head_dim
+        )
         cache_kv = cache_kv.view(-1, 1, self.kv_lora_rank)
         rmsnorm_forward(
             cache_kv[:, :, : self.kv_lora_rank],
@@ -185,7 +200,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         preserve those tensors explicitly and restore them for every replay.
         """
         if not torch.cuda.is_current_stream_capturing():
-            return self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+            return self._context_attention_kernel(
+                q, cache_kv, infer_state, layer_weight
+            )
 
         q = q.contiguous()
         cache_kv = cache_kv.contiguous()
@@ -200,13 +217,22 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         pre_capture_graph.__exit__(None, None, None)
 
         def restore_indexer_inputs(state):
-            state.get_topk_indices_params = {"hidden_states": _hidden_states, "q_lora": _q_lora}
+            state.get_topk_indices_params = {
+                "hidden_states": _hidden_states,
+                "q_lora": _q_lora,
+            }
 
         def get_o_shape_dtype_device():
             restore_indexer_inputs(infer_state)
             with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
-                output = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
-                output_shape, output_dtype, output_device = output.shape, output.dtype, output.device
+                output = self._context_attention_kernel(
+                    _q, _cache_kv, infer_state, layer_weight
+                )
+                output_shape, output_dtype, output_device = (
+                    output.shape,
+                    output.dtype,
+                    output.device,
+                )
             return output_shape, output_dtype, output_device
 
         output_shape, output_dtype, output_device = get_o_shape_dtype_device()
@@ -217,7 +243,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
         def sparse_att_func(new_infer_state):
             restore_indexer_inputs(new_infer_state)
-            tmp_output = self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight)
+            tmp_output = self._context_attention_kernel(
+                _q, _cache_kv, new_infer_state, layer_weight
+            )
             assert tmp_output.shape == _output.shape
             _output.copy_(tmp_output)
 
@@ -261,14 +289,18 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             input = infer_state._all_to_all_balance_get(data=input)
         # Both sparse prefill and decode return attention in MLA latent space.
         input = layer_weight.v_b_proj_.bmm(input.transpose(0, 1)).transpose(0, 1)
-        output = layer_weight.o_weight_.mm(input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim))
+        output = layer_weight.o_weight_.mm(
+            input.reshape(-1, self.tp_q_head_num_ * self.v_head_dim)
+        )
         return self._tpsp_reduce(input=output, infer_state=infer_state)
 
     def _kda_projections(self, hidden_states, infer_state, layer_weight):
         # Gather sequence-sharded tokens for each rank's KDA heads;
         # _kda_post reduces the output back to the sequence shard.
         hidden_states = hidden_states.view(-1, self.embed_dim_)
-        hidden_states = self._tpsp_allgather(input=hidden_states, infer_state=infer_state)
+        hidden_states = self._tpsp_allgather(
+            input=hidden_states, infer_state=infer_state
+        )
         qkv_gate_proj = layer_weight.linear_qkvbfg_a_proj.mm(hidden_states)
         qkv_dim = 3 * self.tp_linear_projection_size
         qkv, beta_logits, decay_gate_hidden, output_gate_hidden = qkv_gate_proj.split(
@@ -280,13 +312,17 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             ],
             dim=-1,
         )
-        raw_decay_gate, raw_output_gate = layer_weight.project_kda_fg_b(decay_gate_hidden, output_gate_hidden)
+        raw_decay_gate, raw_output_gate = layer_weight.project_kda_fg_b(
+            decay_gate_hidden, output_gate_hidden
+        )
         return qkv, raw_decay_gate, beta_logits, raw_output_gate
 
     def _kda_post(self, core_output, raw_output_gate, infer_state, layer_weight):
         tokens = raw_output_gate.shape[0]
         core_output = core_output.view(-1, self.linear_head_dim)
-        raw_output_gate = raw_output_gate.view(tokens, self.tp_linear_num_heads, self.linear_head_dim)
+        raw_output_gate = raw_output_gate.view(
+            tokens, self.tp_linear_num_heads, self.linear_head_dim
+        )
         output = layer_weight.linear_o_norm(
             input=core_output,
             gate_value=raw_output_gate,
@@ -330,7 +366,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         output_shape = (1, mixed_qkv.shape[0], backend.tp_num_heads, backend.head_dim)
         infer_state.prefill_cuda_graph_create_graph_obj()
         infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-        output = torch.empty(output_shape, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
+        output = torch.empty(
+            output_shape, dtype=mixed_qkv.dtype, device=mixed_qkv.device
+        )
         _output = tensor_to_no_ref_tensor(output)
 
         def kda_prefill_func(new_infer_state):
@@ -361,7 +399,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
     def context_attention_forward(self, input_embeddings, infer_state, layer_weight):
         if not self.is_linear_attention_layer:
-            return super().context_attention_forward(input_embeddings, infer_state, layer_weight)
+            return super().context_attention_forward(
+                input_embeddings, infer_state, layer_weight
+            )
         qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
             input_embeddings, infer_state, layer_weight
         )
@@ -394,7 +434,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
     def token_attention_forward(self, input_embeddings, infer_state, layer_weight):
         if not self.is_linear_attention_layer:
-            return super().token_attention_forward(input_embeddings, infer_state, layer_weight)
+            return super().token_attention_forward(
+                input_embeddings, infer_state, layer_weight
+            )
         qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
             input_embeddings, infer_state, layer_weight
         )
@@ -433,20 +475,34 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _forward_mhc(self, input_embeddings, infer_state, layer_weight, *, prefill):
         streams = input_embeddings
 
-        layer_input, residual_mix, post_mix = self._hc_pre(streams, layer_weight, "attn", layer_weight.att_norm_weight_)
+        layer_input, residual_mix, post_mix = self._hc_pre(
+            streams, layer_weight, "attn", layer_weight.att_norm_weight_
+        )
         if prefill:
-            layer_output = self.context_attention_forward(layer_input, infer_state, layer_weight)
+            layer_output = self.context_attention_forward(
+                layer_input, infer_state, layer_weight
+            )
         else:
-            layer_output = self.token_attention_forward(layer_input, infer_state, layer_weight)
-        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams)
+            layer_output = self.token_attention_forward(
+                layer_input, infer_state, layer_weight
+            )
+        streams = hc_post(
+            layer_output, streams, residual_mix, post_mix, self.mhc_streams
+        )
 
-        layer_input, residual_mix, post_mix = self._hc_pre(streams, layer_weight, "ffn", layer_weight.ffn_norm_weight_)
+        layer_input, residual_mix, post_mix = self._hc_pre(
+            streams, layer_weight, "ffn", layer_weight.ffn_norm_weight_
+        )
         layer_output = self._ffn(layer_input, infer_state, layer_weight)
-        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams)
+        streams = hc_post(
+            layer_output, streams, residual_mix, post_mix, self.mhc_streams
+        )
         # Only prefill autotuning truncates the model. Decode autotuning still
         # executes every layer and must keep all residual streams until the end.
         is_autotune_last_layer = (
-            prefill and Autotuner.is_autotune_warmup() and self.layer_num_ == self.autotune_layer_num - 1
+            prefill
+            and Autotuner.is_autotune_warmup()
+            and self.layer_num_ == self.autotune_layer_num - 1
         )
         if self.layer_num_ == self.num_hidden_layers - 1 or is_autotune_last_layer:
             return hc_contract(streams, self.mhc_streams)
@@ -455,9 +511,13 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def context_forward(self, input_embeddings, infer_state, layer_weight):
         if not self.use_mhc:
             return super().context_forward(input_embeddings, infer_state, layer_weight)
-        return self._forward_mhc(input_embeddings, infer_state, layer_weight, prefill=True)
+        return self._forward_mhc(
+            input_embeddings, infer_state, layer_weight, prefill=True
+        )
 
     def token_forward(self, input_embeddings, infer_state, layer_weight):
         if not self.use_mhc:
             return super().token_forward(input_embeddings, infer_state, layer_weight)
-        return self._forward_mhc(input_embeddings, infer_state, layer_weight, prefill=False)
+        return self._forward_mhc(
+            input_embeddings, infer_state, layer_weight, prefill=False
+        )
