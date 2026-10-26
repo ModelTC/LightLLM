@@ -61,15 +61,6 @@ class Qwen3NextMemManager(MemoryManager):
         self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
         return
 
-    def _free_buffers(self):
-        super()._free_buffers()
-        self._free_linear_att_buffers()
-        return
-
-    def _free_linear_att_buffers(self):
-        self.big_page_buffers = None
-        return
-
     def write_to_shm(self, req_manager):
         self.req_to_conv_state = req_manager.req_to_conv_state
         self.req_to_ssm_state = req_manager.req_to_ssm_state

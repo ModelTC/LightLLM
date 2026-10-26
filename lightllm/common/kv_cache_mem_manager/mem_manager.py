@@ -1,6 +1,4 @@
 import math
-import os
-import re
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
@@ -47,7 +45,7 @@ class MemoryManager:
         self.page_size = get_env_start_args().page_size
         self.size = self.size // self.page_size * self.page_size
 
-        self.allocator = KvCacheAllocator(self.size)
+        self.allocator = KvCacheAllocator(self.size, self.page_size)
 
         self._init_buffers(
             self.size,
@@ -60,6 +58,14 @@ class MemoryManager:
 
         # 构建对外的操作类接口
         self.operator: BaseMemManagerOperator = self.operator_class(self)
+
+    def __getstate__(self):
+        # IPC consumers access KV buffers and request indexes, while allocation
+        # remains owned by the inference process. NumPy pools would otherwise
+        # be embedded in every descriptor written by write_to_shm.
+        state = self.__dict__.copy()
+        state["allocator"] = None
+        return state
 
     def get_att_input_params(self, layer_index: int) -> Tuple[Any, Any]:
         k = self.kv_buffer[layer_index][:, : self.head_num, :]
@@ -194,9 +200,6 @@ class MemoryManager:
         # logger.info(f"dst token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"dst page token tensor {cur_page[0, :, 0, 0]}")
 
-    def _free_buffers(self):
-        self.kv_buffer = None
-
     def alloc(self, need_size) -> torch.Tensor:
         assert (
             need_size % self.page_size == 0
@@ -208,23 +211,6 @@ class MemoryManager:
 
     def free_all(self):
         self.allocator.free_all()
-
-    def resize_mem(self, new_size):
-        """
-        just for test code
-        """
-        size = new_size // self.page_size * self.page_size
-        dtype = self.dtype
-        head_num = self.head_num
-        head_dim = self.head_dim
-        layer_num = self.layer_num
-
-        self.size = size
-        self.allocator.resize(size)
-        self._free_buffers()
-        self._init_buffers(size, dtype, head_num, head_dim, layer_num)
-        self.HOLD_TOKEN_MEMINDEXES = tuple(range(self.size, self.size + self.page_size))
-        return
 
     def get_index_kv_buffer(self, index):
         return {"kv_buffer": self.kv_buffer[:, index]}

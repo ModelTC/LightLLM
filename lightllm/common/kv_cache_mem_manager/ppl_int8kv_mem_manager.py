@@ -37,10 +37,6 @@ class PPLINT8KVMemoryManager(MemoryManager):
             device="cuda",
         )
 
-    def _free_buffers(self):
-        self.kv_buffer = None
-        self.scale_buffer = None
-
     def get_index_kv_buffer(self, index):
         return {"kv_buffer": self.kv_buffer[:, index], "scale_buffer": self.scale_buffer[:, index]}
 
