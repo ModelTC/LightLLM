@@ -622,6 +622,11 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
     params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4, group_request_id=80)
     request = SimpleNamespace(headers={"X-Request-Id": "summary-test"}, is_disconnected=lambda: asyncio.sleep(0, False))
     caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
+    # LightLLM intentionally disables propagation; capture this logger directly.
+    from lightllm.server.httpserver_for_pd_master.manager import logger
+
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(logger, "propagate", False)
 
     async def raw_stream(*_args):
         if exit_mode == "empty":
@@ -684,6 +689,11 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
     params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
     request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
     caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
+    # LightLLM intentionally disables propagation; capture this logger directly.
+    from lightllm.server.httpserver_for_pd_master.manager import logger
+
+    monkeypatch.setattr(logger, "handlers", [caplog.handler])
+    monkeypatch.setattr(logger, "propagate", False)
 
     async def raw_stream(_p_node, _d_node, _prompt, sampling_params, *_args):
         metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
