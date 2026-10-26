@@ -249,7 +249,7 @@ class NixlKVTransporter:
         except BaseException as e:
             logger.error(f"send error info to prefill node failed: {trans_task.to_str()}")
             logger.exception(str(e))
-            self.remove_remote_agent(peer_name=prefill_agent_name)
+            # 控制消息失败不能撤销仍被在途 WRITE 使用的远端描述符；由隔离任务重试。
         return
 
     def send_error_info_to_decode_node(self, trans_task: PDChunckedTransTask):
@@ -261,7 +261,7 @@ class NixlKVTransporter:
                 self.connect_add_remote_agent(_remote_agent)
             assert trans_task.error_info is not None
             new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
-            new_trans_task.write_stage = "error"
+            new_trans_task.write_stage = "stopped" if trans_task.write_quiesced else "error"
             new_trans_task.mem_indexes = None
             new_trans_task.xfer_handle = None
             new_trans_task.prefill_agent_name = self.agent_name
@@ -275,7 +275,7 @@ class NixlKVTransporter:
         except BaseException as e:
             logger.error(f"send error info to decode node failed: {trans_task.to_str()}")
             logger.exception(str(e))
-            self.remove_remote_agent(peer_name=decode_agent_name)
+            # 控制消息失败不能撤销仍被在途 WRITE 使用的远端描述符；由隔离任务重试。
         return
 
     def write_blocks_paged(
@@ -307,6 +307,9 @@ class NixlKVTransporter:
         if not handle:
             raise RuntimeError(f"make_prepped_xfer failed for task: {trans_task.to_str()}")
 
+        # transfer() 抛异常也可能已经提交部分操作，先保留 handle 和提交状态。
+        trans_task.xfer_handle = handle
+        trans_task.write_submitted = True
         self.nixl_agent.transfer(handle)
 
         return handle

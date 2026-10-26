@@ -6,6 +6,7 @@ import setproctitle
 import torch.multiprocessing as mp
 import queue
 import pickle
+import uuid
 from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
@@ -146,6 +147,9 @@ class _DecodeTransModule:
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
+        self.use_write_quiescence = args.pd_trans_mode == "nixl"
+        self.quarantined_tasks: Dict[str, PDChunckedTransTask] = {}
+        self.last_stop_retry_time = 0.0
         self.request_last_progress_time: Dict[int, float] = {}
         self.request_page_task_queue = queue.Queue()
         self.ready_page_task_queue = queue.Queue()
@@ -199,6 +203,36 @@ class _DecodeTransModule:
                 self.recv_task_group_queue.put(obj)
             else:
                 assert False, f"recv error obj {obj}"
+
+    def _fail_waiting_task_locked(self, task: PDChunckedTransTask, error_info: str):
+        if self.waiting_dict.get(task.get_key()) is not task:
+            return
+        self.waiting_dict.pop(task.get_key())
+        task.error_info = error_info
+        if task.dst_page_index is not None:
+            assert task.write_id is not None
+            # 与移出 waiting_dict 原子交接，DONE/STOPPED 不能落在两张表之间。
+            self.quarantined_tasks[task.write_id] = task
+        self.failed_queue.put(task)
+
+    def _confirm_write_quiesced(self, notify: PDChunckedTransTask):
+        if not notify.write_quiesced:
+            return False
+        with self.waiting_dict_lock:
+            task = self.quarantined_tasks.get(notify.write_id)
+            if (
+                task is None
+                or task.get_key() != notify.get_key()
+                or task.dst_page_index != notify.dst_page_index
+                or task.prefill_agent_name != notify.prefill_agent_name
+            ):
+                return False
+            self.quarantined_tasks.pop(notify.write_id)
+            task.write_quiesced = True
+            page = task.dst_page_index
+            task.dst_page_index = None
+            self.page_index_queue.put(page)
+        return True
 
     def _abort(self, request_id: int, error_info: str = "aborted req"):
         aborted_tasks = []
@@ -254,9 +288,19 @@ class _DecodeTransModule:
 
     def _pop_waiting_task_for_notify(self, notify_task: PDChunckedTransTask):
         with self.waiting_dict_lock:
-            local_trans_task = self.waiting_dict.pop(notify_task.get_key(), None)
+            local_trans_task = self.waiting_dict.get(notify_task.get_key())
             if local_trans_task is None:
                 return None
+            if self.use_write_quiescence:
+                if notify_task.write_stage == "request" and local_trans_task.dst_page_index is not None:
+                    return None
+                if notify_task.write_stage == "done" and (
+                    local_trans_task.write_id is None
+                    or notify_task.write_id != local_trans_task.write_id
+                    or notify_task.dst_page_index != local_trans_task.dst_page_index
+                ):
+                    return None
+            self.waiting_dict.pop(notify_task.get_key())
 
             # Decode creates every page task before prefill starts producing pages.
             # A matched notify is forward progress for the request, so future pages
@@ -290,12 +334,26 @@ class _DecodeTransModule:
                         if not isinstance(notify_obj, PDChunckedTransTask):
                             continue
 
+                        if self.use_write_quiescence:
+                            if self._confirm_write_quiesced(notify_obj):
+                                continue
+                            # 旧确认只能作用于旧分配，不能终结同一 task key 下的新分配。
+                            if notify_obj.write_stage in ("done", "stopped") and notify_obj.write_id is not None:
+                                with self.waiting_dict_lock:
+                                    current = self.waiting_dict.get(notify_obj.get_key())
+                                    if current is None or current.write_id != notify_obj.write_id:
+                                        continue
+
                         # 请求有错误
                         if notify_obj.error_info is not None:
-                            # 直接清理掉所有的相关请求。
                             with self.waiting_dict_lock:
-                                local_trans_task = self.waiting_dict.pop(notify_obj.get_key(), None)
-                                if local_trans_task is not None:
+                                if self.use_write_quiescence:
+                                    local_trans_task = self.waiting_dict.get(notify_obj.get_key())
+                                    if local_trans_task is not None:
+                                        self._fail_waiting_task_locked(local_trans_task, notify_obj.error_info)
+                                else:
+                                    local_trans_task = self.waiting_dict.pop(notify_obj.get_key(), None)
+                                if local_trans_task is not None and not self.use_write_quiescence:
                                     local_trans_task.error_info = notify_obj.error_info
                                     # TODO: 这里设置 12 秒超时后会立即将任务放入 failed_queue，
                                     # fail_loop 会直接归还任务占用的 page，因此该超时时间实际不会再被检查。
@@ -304,6 +362,8 @@ class _DecodeTransModule:
                                     local_trans_task.transfer_time_out_secs = 12
                                     self.failed_queue.put(local_trans_task)
 
+                            if self.use_write_quiescence:
+                                self._confirm_write_quiesced(notify_obj)
                             self._abort(
                                 request_id=notify_obj.request_id,
                                 error_info=notify_obj.error_info,
@@ -381,7 +441,10 @@ class _DecodeTransModule:
                 else:
                     is_timeout = trans_task.time_out()
                 if is_timeout:
-                    timeout_tasks.append(self.waiting_dict.pop(key))
+                    if self.use_write_quiescence:
+                        self._fail_waiting_task_locked(trans_task, "time out in accept_peer_task_loop")
+                    else:
+                        timeout_tasks.append(self.waiting_dict.pop(key))
                 elif trans_task.start_trans_time is None:
                     pending_request_ids.add(trans_task.request_id)
             for request_id in list(self.request_last_progress_time):
@@ -391,15 +454,36 @@ class _DecodeTransModule:
         for trans_task in timeout_tasks:
             trans_task.error_info = "time out in accept_peer_task_loop"
             self.failed_queue.put(trans_task)
+        if self.use_write_quiescence and self.quarantined_tasks and now - self.last_stop_retry_time >= 1.0:
+            self.last_stop_retry_time = now
+            with self.waiting_dict_lock:
+                stopped_tasks = list(self.quarantined_tasks.values())
+            for task in stopped_tasks:
+                self.transporter.send_error_info_to_prefill_node(trans_task=task)
         return
 
     @log_exception
     def request_page_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            dst_page_index = self.page_index_queue.get()
             trans_task: PDChunckedTransTask = self.request_page_task_queue.get()
+            if self.use_write_quiescence:
+                dst_page_index = None
+                while len(self.quarantined_tasks) < self.args.pd_kv_page_num:
+                    try:
+                        dst_page_index = self.page_index_queue.get(timeout=1.0)
+                        break
+                    except queue.Empty:
+                        pass
+                if dst_page_index is None:
+                    trans_task.error_info = "all destination transfer pages quarantined; transport recovery required"
+                    self.failed_queue.put(trans_task)
+                    continue
+            else:
+                dst_page_index = self.page_index_queue.get()
             trans_task.dst_page_index = dst_page_index
+            if self.use_write_quiescence:
+                trans_task.write_id = uuid.uuid4().hex
             trans_task.start_trans_time = time.time()
             key = trans_task.get_key()
             try:
@@ -412,6 +496,9 @@ class _DecodeTransModule:
                 with self.waiting_dict_lock:
                     # 超时或 done 通知已取走的任务由对应线程处理，不能重复失败。
                     if self.waiting_dict.get(key) is not trans_task:
+                        continue
+                    if self.use_write_quiescence:
+                        self._fail_waiting_task_locked(trans_task, f"send write ready failed: {e}")
                         continue
                     self.waiting_dict.pop(key)
                 self.transporter.remove_remote_agent(peer_name=trans_task.prefill_agent_name)
@@ -481,9 +568,12 @@ class _DecodeTransModule:
         while True:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
 
-            # 回收页面
+            # NIXL WRITE 的 handle 在 P；本地失败不能证明目的页已无人写入。
             if trans_task.dst_page_index is not None:
-                self.page_index_queue.put(trans_task.dst_page_index)
+                if not self.use_write_quiescence:
+                    self.page_index_queue.put(trans_task.dst_page_index)
+                else:
+                    logger.error(f"quarantine destination page; waiting for P confirmation: {trans_task.to_str()}")
 
             if trans_task.xfer_handle is not None:
                 self.transporter.release_xfer_handle(trans_task.xfer_handle)

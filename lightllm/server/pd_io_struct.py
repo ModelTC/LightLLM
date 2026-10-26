@@ -320,6 +320,13 @@ class PDChunckedTransTask:
     first_gen_token_logprob: Optional[float]
 
     write_stage: Optional[str] = None
+    # D 分配 staging page 时生成，停止确认必须匹配这次分配。
+    write_id: Optional[str] = None
+    # P 本地提交状态；submitting 覆盖 native transfer 调用尚未返回的窗口。
+    write_submitting: bool = False
+    write_submitted: bool = False
+    write_quiesced: bool = False
+    write_uncertain: bool = False
 
     # transfer params
     src_page_index: Optional[int] = None

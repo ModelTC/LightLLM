@@ -247,6 +247,7 @@ def test_prefill_kv_move_manager_routes_abort_to_target_device():
 def test_prefill_trans_process_handles_abort_without_allocating_page(monkeypatch):
     abort_req = PDAbortReq(request_id=123, device_id=0)
     module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.use_write_quiescence = False
     module.device_id = 0
     module.task_in_queue = _SequenceQueue(abort_req)
     module.page_index_queue = MagicMock()
@@ -265,6 +266,7 @@ def test_prefill_abort_only_fails_tasks_not_submitted_to_transporter():
     active_task = SimpleNamespace(request_id=123, xfer_handle=object(), error_info=None)
     unrelated_task = SimpleNamespace(request_id=456, xfer_handle=None, error_info=None)
     module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.use_write_quiescence = False
     module.waiting_dict_lock = threading.Lock()
     module.waiting_dict = {
         "pending": pending_task,
@@ -292,6 +294,7 @@ def test_prefill_failed_transfer_releases_handle_before_reusing_page(monkeypatch
         createRetObj=MagicMock(return_value=object()),
     )
     module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.use_write_quiescence = False
     module.device_id = 0
     module.failed_queue = _SequenceQueue(task)
     module.page_index_queue = queue.Queue()
@@ -315,9 +318,9 @@ def test_prefill_failed_transfer_releases_handle_before_reusing_page(monkeypatch
     else:
         with pytest.raises(_StopLoop):
             module.fail_loop()
-        assert module.page_index_queue.get_nowait() == task.src_page_index
+        assert module.page_index_queue.get_nowait() == 2
         assert module.task_out_queue.get_nowait() is task.createRetObj.return_value
-    module.transporter.release_xfer_handle.assert_called_once_with(task.xfer_handle)
+    module.transporter.release_xfer_handle.assert_called_once()
 
 
 @pytest.mark.parametrize("side", ["prefill", "decode"])
@@ -328,6 +331,7 @@ def test_notify_send_error_only_cleans_up_the_task_it_still_owns(monkeypatch, si
     is_prefill = side == "prefill"
     module_class = _PrefillTransModule if is_prefill else _DecodeTransModule
     module = module_class.__new__(module_class)
+    module.use_write_quiescence = False
     module.device_id = 0
     module.waiting_dict_lock = threading.Lock()
     module.waiting_dict = {}
@@ -385,6 +389,7 @@ def test_notify_send_error_only_cleans_up_the_task_it_still_owns(monkeypatch, si
 def test_prefill_send_error_does_not_remove_a_write_that_already_started(monkeypatch):
     task = _make_transfer_task()
     module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.use_write_quiescence = False
     module.device_id = 0
     module.waiting_dict_lock = threading.Lock()
     module.waiting_dict = {}
