@@ -869,7 +869,7 @@ async def _get_text_generator_input(request: ChatCompletionRequest):
     sampling_params.init(tokenizer=g_objs.httpserver_manager.tokenizer, **sampling_params_dict)
     await sampling_params.verify_cpu_async(g_objs.httpserver_manager.output_grammar_compiler)
 
-    logger.info(f"call text generator with prompt: {prompt} and {sampling_params_dict}")
+    # logger.info(f"call text generator with prompt: {prompt} and {sampling_params_dict}")
 
     return prompt, sampling_params
 

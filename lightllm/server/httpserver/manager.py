@@ -590,15 +590,18 @@ class HttpServerManager(HttpRlManagerHelper, object):
         generate_req_ids = []
 
         async def generation_wrapper(prompt, sample, multimodal, request):
+            ret = None
             async for sub_req_id, _, metadata, finish_status in self.generate(prompt, sample, multimodal, request):
-                kv_cache_item: PastKVCacheItem = self.past_kv_cache_client.get_pages_by_req_id(sub_req_id)
-                if kv_cache_item is None:
-                    raise Exception(f"kv_cache_pages is None for sub_req_id {sub_req_id}")
-                metadata["kv_cache_item"] = kv_cache_item
-                metadata["request_id"] = sub_req_id
-                metadata["finish_status"] = finish_status
-                generate_req_ids.append(sub_req_id)
-                return metadata
+                if not ret:
+                    kv_cache_item: PastKVCacheItem = self.past_kv_cache_client.get_pages_by_req_id(sub_req_id)
+                    if kv_cache_item is None:
+                        raise Exception(f"kv_cache_pages is None for sub_req_id {sub_req_id}")
+                    metadata["kv_cache_item"] = kv_cache_item
+                    metadata["request_id"] = sub_req_id
+                    metadata["finish_status"] = finish_status
+                    generate_req_ids.append(sub_req_id)
+                    ret = metadata
+            return ret
 
         try:
             from lightllm.server.x2i_server.manager import get_input_min_max_pixels

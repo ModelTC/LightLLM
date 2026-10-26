@@ -255,12 +255,100 @@ class LightX2VServer:
         return [image]
 
 
+def filter_logs():
+    import sys
+    import re
+    from loguru import logger
+
+    step_times = dict()
+    in_step = False
+    STEP_PATTERN = re.compile(r"step_index:\s*(\d+)\s*/\s*(\d+)")
+    COST_PATTERN = re.compile(r"(\S+?)\s+cost\s+([\d.]+)\s+seconds")
+    console_format = (
+        "<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | <level>{level}</level> | <cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - <level>{message}</level>"
+    )
+
+    def progress_sink(message):
+        record = message.record
+        extra = record["extra"]
+
+        if "step_progress" in extra:
+            a, b = extra["step_progress"]
+            sys.stderr.write(f"\rInference progress: {a}/{b}")
+            sys.stderr.flush()
+
+            if "step_stats" in extra:
+                sys.stderr.write("\n" + extra["step_stats"] + "\n")
+                sys.stderr.flush()
+            return
+
+        # 其他正常日志照常输出
+        sys.stderr.write(str(message))
+        sys.stderr.flush()
+
+    def log_filter(record):
+        nonlocal in_step
+        message = record["message"]
+        name = record["name"]
+        function = record["function"]
+
+        if in_step and name.endswith("profiler") and function == "__exit__":
+            match = COST_PATTERN.search(message)
+            if match:
+                key = match.group(1).strip()
+                cost = float(match.group(2))
+                step_times.setdefault(key, []).append(cost)
+
+            # 不输出单条 profiler 日志
+            return False
+
+        if name.endswith("neopp_runner") and function == "_run_infer_step":
+            match = STEP_PATTERN.search(message)
+            if match:
+                a, b = map(int, match.groups())
+                if a == 1:
+                    step_times.clear()
+                    in_step = True
+
+                record["extra"]["step_progress"] = (a, b)
+
+                if a == b:
+                    stats = []
+                    for key, values in step_times.items():
+                        if values:
+                            stats.append(
+                                f"{key}: avg={sum(values) / len(values):.6f}, "
+                                f"min={min(values):.6f}, "
+                                f"max={max(values):.6f}, "
+                                f"n={len(values)}"
+                            )
+
+                    record["extra"]["step_stats"] = "Step timing statistics (seconds): " + "; ".join(stats)
+                    step_times.clear()
+                    in_step = False
+
+            return True
+
+        return not in_step
+
+    # 清理子进程继承的 Loguru sinks，并添加过滤后的 stderr sink
+    logger.remove()
+    logger.add(
+        progress_sink,
+        filter=log_filter,
+        format=console_format,
+        colorize=True,
+        enqueue=False,
+    )
+
+
 def start_x2v_process(args: StartArgs, rank: int, world_size: int, nccl_port: int, pipe_writer):
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::x2v_server_{rank}")
     start_parent_check_thread()
+    filter_logs()
 
     try:
         x2v_server = LightX2VServer(args=args, rank=rank, world_size=world_size, nccl_port=nccl_port)
