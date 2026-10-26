@@ -1,0 +1,328 @@
+import asyncio
+import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
+
+from lightllm.server import api_http, api_openai, build_prompt, reasoning_parser
+from lightllm.server.api_models import ChatCompletionRequest, Tool
+from lightllm.server.core.objs import FinishStatus
+from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.server.function_call_parser import FunctionCallParser
+from lightllm.server.httpserver.stop_seq_match import ReasoningStateMachine
+from lightllm.server.reasoning_parser import ReasoningParser
+
+
+TOOLS = [
+    Tool.model_validate(
+        {
+            "type": "function",
+            "function": {
+                "name": "Write",
+                "parameters": {"type": "object", "properties": {"content": {"type": "string"}}},
+            },
+        }
+    )
+]
+VALUE = '  中文 "quoted" \\path\n</tool_call><think>literal</think><tool_call>Read\n  '
+TOOL_CALL = f"<tool_call>Write<arg_key>content</arg_key><arg_value>{VALUE}</arg_value></tool_call>"
+
+
+@pytest.fixture(autouse=True)
+def mock_token_ids(monkeypatch):
+    monkeypatch.setattr(
+        reasoning_parser, "get_token_id", {"<think>": 98, "</think>": 99, "<tool_call>": 77}.__getitem__
+    )
+
+
+@pytest.fixture
+def complete_chat(monkeypatch):
+    args = StartArgs(reasoning_parser="glm45", tool_call_parser="glm47")
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: args)
+    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
+
+    def complete(
+        chunks,
+        finish_status=FinishStatus.FINISHED_STOP,
+        prompt="<|assistant|><think>",
+        parser_name="glm45",
+        compiler=None,
+        **request_kwargs,
+    ):
+        args.reasoning_parser = parser_name
+        monkeypatch.setattr(api_openai, "build_prompt", AsyncMock(return_value=prompt))
+        captured_params = []
+
+        async def generate(_prompt, sampling_params, *_args, **_kwargs):
+            captured_params.append(sampling_params)
+            for index, (text, token_id) in enumerate(chunks):
+                finish = FinishStatus(finish_status) if index == len(chunks) - 1 else FinishStatus()
+                yield 0, text, {"id": token_id, "prompt_tokens": 1}, finish
+
+        tokenizer = SimpleNamespace(encode=lambda text, **kwargs: {"</think>": [99]}[text])
+        manager = SimpleNamespace(tokenizer=tokenizer, generate=generate, output_grammar_compiler=compiler)
+        monkeypatch.setattr(api_http, "g_objs", SimpleNamespace(args=args, httpserver_manager=manager))
+        request = ChatCompletionRequest(model="glm", messages=[], tools=TOOLS, **request_kwargs)
+
+        async def run():
+            response = await api_openai.chat_completions_impl(request, None)
+            result = SimpleNamespace(reasoning="", content="", calls=[], finish_reason=None, sampling_params=None)
+            if not request.stream:
+                choice = response.choices[0]
+                result.reasoning = choice.message.reasoning or ""
+                result.content = choice.message.content or ""
+                result.calls = [
+                    {"id": call.id, "name": call.function.name, "arguments": call.function.arguments}
+                    for call in choice.message.tool_calls or []
+                ]
+                result.finish_reason = choice.finish_reason
+                result.sampling_params = captured_params[0]
+                return result
+
+            calls = {}
+            done = False
+            async for chunk in response.body_iterator:
+                chunk = chunk.decode() if isinstance(chunk, bytes) else chunk
+                if chunk.strip() == "data: [DONE]":
+                    done = True
+                    continue
+                for choice in json.loads(chunk.removeprefix("data: "))["choices"]:
+                    delta = choice["delta"]
+                    result.reasoning += delta.get("reasoning") or ""
+                    result.content += delta.get("content") or ""
+                    for call in delta.get("tool_calls") or []:
+                        index = call["index"]
+                        name = call["function"].get("name")
+                        if name is not None:
+                            assert index not in calls  # Send each name and ID once.
+                            assert call["id"]
+                            calls[index] = {"id": call["id"], "name": name, "arguments": ""}
+                        assert index in calls
+                        if call.get("id") is not None:
+                            assert call["id"] == calls[index]["id"]
+                        calls[index]["arguments"] += call["function"].get("arguments") or ""
+                    result.finish_reason = choice.get("finish_reason") or result.finish_reason
+            assert done
+            assert list(calls) == list(range(len(calls)))
+            result.calls = list(calls.values())
+            result.sampling_params = captured_params[0]
+            return result
+
+        return asyncio.run(run())
+
+    return complete
+
+
+@pytest.mark.parametrize(
+    "prefix,force_reasoning",
+    [
+        ("<think>Need a file.", False),
+        ("Need a file.", True),
+        ("<think>Need a file.</think>", False),
+        ("Need a file.</think>", True),
+    ],
+)
+@pytest.mark.parametrize("chunk_size", [1, 7, 4096])
+def test_glm_reasoning_and_tools_agree_across_stream_boundaries(prefix, force_reasoning, chunk_size):
+    text = prefix + TOOL_CALL + TOOL_CALL
+    parser = ReasoningParser("glm45", force_reasoning=force_reasoning)
+    reasoning, content = parser.parse_non_stream(text)
+    assert reasoning == "Need a file."
+    assert content == TOOL_CALL + TOOL_CALL
+
+    parser = ReasoningParser("glm45", force_reasoning=force_reasoning)
+    tool_parser = FunctionCallParser(TOOLS, "glm47")
+    reasoning_parts, content_parts, calls = [], [], {}
+    for start in range(0, len(text), chunk_size):
+        reasoning, content = parser.parse_stream_chunk(text[start : start + chunk_size])
+        reasoning_parts.append(reasoning)
+        content, deltas = tool_parser.parse_stream_chunk(content)
+        content_parts.append(content)
+        for delta in deltas:
+            if delta.name is not None:
+                assert delta.tool_index not in calls
+                calls[delta.tool_index] = {"name": delta.name, "arguments": ""}
+            calls[delta.tool_index]["arguments"] += delta.parameters
+
+    assert parser.flush() == ("", "")
+    assert "".join(reasoning_parts) == "Need a file."
+    assert "".join(content_parts) == ""
+    assert list(calls) == [0, 1]
+    assert all(call["name"] == "Write" for call in calls.values())
+    assert all(json.loads(call["arguments"]) == {"content": VALUE} for call in calls.values())
+
+
+@pytest.mark.parametrize("suffix", ["<tool_ca", "</thi", "<tool_calling>"])
+def test_truncated_or_similar_markers_remain_reasoning(suffix):
+    parser = ReasoningParser("glm45", force_reasoning=True)
+    reasoning, content = parser.parse_stream_chunk("Keep thinking." + suffix)
+    tail_reasoning, tail_content = parser.flush()
+    assert reasoning + tail_reasoning == "Keep thinking." + suffix
+    assert content + tail_content == ""
+
+
+def test_non_thinking_glm_preserves_tool_payload():
+    parser = ReasoningParser("glm45", force_reasoning=False)
+    assert parser.parse_non_stream(TOOL_CALL) == ("", TOOL_CALL)
+    assert parser.parse_stream_chunk(TOOL_CALL) == ("", TOOL_CALL)
+
+
+def test_other_reasoning_parsers_keep_their_existing_boundary():
+    parser = ReasoningParser("qwen3", force_reasoning=True)
+    reasoning, content = parser.parse_non_stream("Still thinking." + TOOL_CALL.replace(VALUE, "literal"))
+    assert reasoning.startswith("Still thinking.<tool_call>")
+    assert content == ""
+
+
+def test_glm_tool_parsing_keeps_existing_reasoning_token_accounting():
+    parser = ReasoningParser("glm45", force_reasoning=True)
+    for token_id in [1, 2, 77, 3, 99, 4]:
+        parser.update_reasoning_token_count(token_id)
+    assert parser.reasoning_tokens == 4
+
+
+def test_glm_tools_inside_reasoning_do_not_enable_string_stops():
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: {"<think>": [98], "</think>": [99]}[text])
+    state = ReasoningStateMachine("glm45", tokenizer, 1, [])
+    assert not any(state.handle(token_id) for token_id in [1, 77, 2, 3])
+    assert state.in_reasoning
+    assert state.handle(99) is False
+    assert not state.in_reasoning
+    assert state.handle(4) is True
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("separate_reasoning", [False, True])
+@pytest.mark.parametrize("reasoning_end", ["missing", "before_tool", "after_tool"])
+@pytest.mark.parametrize("chunk_size", [1, 4096])
+def test_chat_completion_exposes_glm_tool_calls(complete_chat, stream, separate_reasoning, reasoning_end, chunk_size):
+    segments = [("Need a file.", 1)]
+    if reasoning_end == "before_tool":
+        segments.append(("</think>", 99))
+    segments.extend([("<tool_call>", 77), (TOOL_CALL[len("<tool_call>") :], 2)] * 2)
+    if reasoning_end == "after_tool":
+        segments.append(("</think>", 99))
+    chunks = [
+        (text[start : start + chunk_size], token_id if start + chunk_size >= len(text) else 1)
+        for text, token_id in segments
+        for start in range(0, len(text), chunk_size)
+    ]
+    result = complete_chat(
+        chunks,
+        stream=stream,
+        separate_reasoning=separate_reasoning,
+        # GLM-5.3's template opens thinking even with this toggle disabled.
+        chat_template_kwargs={"enable_thinking": False},
+    )
+    assert result.reasoning == ("Need a file." if separate_reasoning else "")
+    assert result.content == ("" if separate_reasoning else "Need a file.")
+    assert [call["name"] for call in result.calls] == ["Write", "Write"]
+    assert len({call["id"] for call in result.calls}) == 2
+    assert [json.loads(call["arguments"]) for call in result.calls] == [{"content": VALUE}] * 2
+    assert result.finish_reason == "tool_calls"
+
+
+@pytest.mark.parametrize(
+    "prompt,state",
+    [
+        ("<|assistant|><think>", True),
+        ("<|assistant|><think>reasoning directive", True),
+        ("<|assistant|></think>", False),
+        ("<|assistant|><think></think>", False),
+        ("<|assistant|><think>first</think><think>second", True),
+        ("<|assistant|><think>old</think><|user|>question<|assistant|><think>", True),
+        ("<|assistant|><think>old<|user|>question<|assistant|>", None),
+        ("<|assistant|><think>old<|observation|>tool result", None),
+        ("<|user|><think>quoted", None),
+    ],
+)
+def test_glm_initial_reasoning_state_comes_from_current_prompt_turn(prompt, state):
+    assert ReasoningParser.DetectorMap["glm45"].initial_reasoning_state(prompt) is state
+
+
+def test_glm_prompt_override_does_not_change_other_models(monkeypatch):
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser="qwen3"))
+    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
+    request = ChatCompletionRequest(model="qwen", messages=[], chat_template_kwargs={"enable_thinking": False})
+    default = api_openai._is_force_thinking_mode(request)
+    assert ReasoningParser.get_initial_reasoning_state("qwen3", "<|assistant|><think>", default) is False
+
+
+@pytest.mark.parametrize("default", [False, True])
+@pytest.mark.parametrize("prompt", ["custom prompt", "<|assistant|>", "<|assistant|><think>old<|user|>question"])
+def test_glm_unrecognized_prompt_preserves_request_mode(prompt, default):
+    assert ReasoningParser.get_initial_reasoning_state("glm45", prompt, default) is default
+
+
+@pytest.mark.parametrize("thinking", [False, True])
+def test_glm_grammar_activation_follows_rendered_prompt(monkeypatch, thinking):
+    monkeypatch.setattr(api_openai, "get_env_start_args", lambda: StartArgs(reasoning_parser="glm45"))
+    monkeypatch.setattr(build_prompt, "tokenizer_supports_force_thinking", lambda: True)
+    request = ChatCompletionRequest(model="glm", messages=[], chat_template_kwargs={"enable_thinking": not thinking})
+    prompt = "<|assistant|><think>" + ("" if thinking else "</think>")
+    tokenizer = SimpleNamespace(encode=lambda text, **kwargs: {"</think>": [99]}[text])
+    default = api_openai._is_force_thinking_mode(request)
+    initial_reasoning_state = ReasoningParser.get_initial_reasoning_state("glm45", prompt, default)
+    assert default is not thinking
+    assert initial_reasoning_state is thinking
+    assert api_openai._get_guided_reasoning_end(tokenizer, "glm45", initial_reasoning_state) == (
+        [99] if thinking else []
+    )
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("thinking", [False, True])
+def test_glm_prompt_phase_is_shared_by_output_stop_and_grammar(complete_chat, compiler, stream, thinking):
+    chunks = [("Need a file.", 1), ("</think>", 99)] if thinking else []
+    chunks.append(('{"ok": true}', 2))
+    result = complete_chat(
+        chunks,
+        prompt="<|assistant|>" + ("<think>" if thinking else "</think>"),
+        compiler=compiler,
+        stream=stream,
+        separate_reasoning=True,
+        tool_choice="none",
+        stop=["STOP"],
+        response_format={"type": "json_object"},
+        chat_template_kwargs={"enable_thinking": not thinking},
+    )
+    assert result.reasoning == ("Need a file." if thinking else "")
+    assert result.content == '{"ok": true}'
+    assert result.sampling_params._initial_reasoning_state == int(thinking)
+    assert result.sampling_params.constraint_out_params.guided_reasoning_end.to_list() == ([99] if thinking else [])
+
+
+@pytest.mark.parametrize("parser_name", ["glm45", "qwen3"])
+@pytest.mark.parametrize("thinking", [False, True])
+@pytest.mark.parametrize("separate_reasoning", [False, True])
+def test_stream_flush_preserves_truncated_text_in_each_phase(complete_chat, parser_name, thinking, separate_reasoning):
+    result = complete_chat(
+        [("Body", 1), ("<", 2)],
+        finish_status=FinishStatus.FINISHED_LENGTH,
+        parser_name=parser_name,
+        prompt="<|assistant|>" + ("<think>" if thinking else "</think>"),
+        stream=True,
+        separate_reasoning=separate_reasoning,
+        tool_choice="none",
+        chat_template_kwargs={"enable_thinking": thinking},
+    )
+    assert result.reasoning == ("Body<" if thinking and separate_reasoning else "")
+    assert result.content == ("" if thinking and separate_reasoning else "Body<")
+    assert result.finish_reason == "length"
+
+
+@pytest.mark.parametrize("suffix", ["<", "</arg_va"])
+@pytest.mark.parametrize("separate_reasoning", [False, True])
+def test_truncated_tool_argument_suffix_does_not_leak_as_content(complete_chat, suffix, separate_reasoning):
+    result = complete_chat(
+        [("Need a file.", 1), ("<tool_call>Write<arg_key>content</arg_key><arg_value>body", 2), (suffix, 3)],
+        finish_status=FinishStatus.FINISHED_LENGTH,
+        stream=True,
+        separate_reasoning=separate_reasoning,
+    )
+    assert result.reasoning == ("Need a file." if separate_reasoning else "")
+    assert result.content == ("" if separate_reasoning else "Need a file.")
+    assert [call["name"] for call in result.calls] == ["Write"]
+    assert result.calls[0]["arguments"] == ""
+    assert result.finish_reason == "length"

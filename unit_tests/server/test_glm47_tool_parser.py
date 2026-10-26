@@ -84,6 +84,9 @@ def test_text_around_tool_calls_survives_chunk_boundaries(chunk_size):
     content, calls = collect_stream(text, chunk_size)
     assert content == "Before  between  after"
     assert list(calls) == [0, 1]
+    normal, nonstream = FunctionCallParser(TOOLS, "glm47").parse_non_stream(text)
+    assert normal == content
+    assert [call.parameters for call in nonstream] == [call["arguments"] for call in calls.values()]
 
 
 def test_buffered_arguments_keep_the_stream_alive_without_repeating_the_name():
@@ -95,7 +98,7 @@ def test_buffered_arguments_keep_the_stream_alive_without_repeating_the_name():
     assert calls[0].name == "Write"
     assert calls[0].parameters == ""
 
-    value = '    line 1\n{"literal": true}\n' + "x" * 100_000
+    value = '    line 1\n{"literal": true}\n</tool_call><tool_call>Read\n' + "x" * 100_000
     for chunk in (value[:13], value[13:27], value[27:]):
         normal, calls = parser.parse_stream_chunk(chunk)
         assert normal == ""
@@ -125,3 +128,79 @@ def test_undefined_buffered_tool_does_not_consume_a_call_index():
     assert len(calls) == 1
     assert calls[0].name == "Read"
     assert calls[0].tool_index == 0
+
+
+@pytest.mark.parametrize("chunk_size", [1, 7, 4096])
+def test_tool_delimiters_inside_values_do_not_close_or_create_calls(chunk_size):
+    value = "</tool_call><tool_call>Read\n<think>literal</think><arg_value><arg_key>literal</arg_key>"
+    text = (
+        f"<tool_call>Write<arg_key>content</arg_key><arg_value>{value}</arg_value></tool_call>"
+        "<tool_call>Read<arg_key>file_path</arg_key><arg_value>/tmp/a</arg_value></tool_call>"
+    )
+    normal, calls = collect_stream(text, chunk_size)
+    assert normal == ""
+    assert list(calls) == [0, 1]
+    assert [call["name"] for call in calls.values()] == ["Write", "Read"]
+    assert [json.loads(call["arguments"]) for call in calls.values()] == [{"content": value}, {"file_path": "/tmp/a"}]
+    normal, nonstream = FunctionCallParser(TOOLS, "glm47").parse_non_stream(text)
+    assert normal == ""
+    assert [call.parameters for call in nonstream] == [call["arguments"] for call in calls.values()]
+
+
+@pytest.mark.parametrize(
+    "schema,value,expected",
+    [
+        ({"type": ["string"]}, "123", "123"),
+        ({"anyOf": [{"type": "string"}]}, "false", "false"),
+        ({"oneOf": [{"type": "string"}]}, "null", "null"),
+        ({"allOf": [{"type": "string"}]}, "123", "123"),
+        ({"enum": ["123", "false"]}, "123", "123"),
+        ({"type": ["string", "null"]}, "null", None),
+        ({"anyOf": [{"type": "integer"}, {"type": "string"}]}, "0012", 12),
+        ({"type": "boolean"}, "False", False),
+        ({"type": "boolean"}, "1", True),
+        ({"type": "boolean"}, " 0 ", False),
+        ({"type": "integer"}, "0012", 12),
+        ({"type": "number"}, ".5", 0.5),
+        ({"type": "number"}, "1.0", 1),
+        ({"type": "array"}, '[1, "中", false]', [1, "中", False]),
+        ({"type": "object"}, '{"nested": {"ok": true}}', {"nested": {"ok": True}}),
+        ({}, "123", "123"),
+        (None, "false", "false"),
+        ({"type": "number"}, "NaN", "NaN"),
+        ({"type": "number"}, "Infinity", "Infinity"),
+        ({"type": "number"}, "1e999", "1e999"),
+        ({"type": "array"}, "[1e999]", "[1e999]"),
+        ({"type": "object"}, '{"x": NaN}', '{"x": NaN}'),
+    ],
+)
+def test_schema_coercion_preserves_declared_types_and_finite_json(schema, value, expected):
+    tools = [
+        Tool.model_validate(
+            {
+                "type": "function",
+                "function": {
+                    "name": "Probe",
+                    "parameters": {
+                        "type": "object",
+                        "properties": {"value": schema} if schema is not None else {},
+                    },
+                },
+            }
+        )
+    ]
+    text = f"<tool_call>Probe<arg_key>value</arg_key><arg_value>{value}</arg_value></tool_call>"
+    parser = FunctionCallParser(tools, "glm47")
+    normal, calls = parser.parse_non_stream(text)
+    assert normal == ""
+    assert len(calls) == 1
+    parsed = json.loads(calls[0].parameters)["value"]
+    assert parsed == expected
+    assert type(parsed) is type(expected)
+    json.dumps(parsed, allow_nan=False)
+    parameters = ""
+    for char in text:
+        normal, deltas = parser.parse_stream_chunk(char)
+        assert normal == ""
+        parameters += "".join(delta.parameters for delta in deltas)
+    assert parameters == calls[0].parameters
