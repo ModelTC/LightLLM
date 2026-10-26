@@ -4,11 +4,18 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager, FP8Glm5NextMemManager
+from lightllm.common.kv_cache_mem_manager import (
+    Glm5NextMemManager,
+    FP8Glm5NextMemManager,
+)
 from lightllm.common.req_manager import Glm5NextReqManager
 from lightllm.common.state_cache_manager import Glm5NextCacheConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, set_unique_server_name
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    set_env_start_args,
+    set_unique_server_name,
+)
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -36,18 +43,26 @@ def model_config():
 def test_nope_cache_layout_and_hold_page(monkeypatch, model_config, kv_type, page_size):
     args = StartArgs(tp=4, data_type="bfloat16", llm_kv_type=kv_type)
     config = Glm5NextCacheConfig.from_model_config(model_config, args)
-    nested_config = Glm5NextCacheConfig.from_model_config({"text_config": model_config}, args)
+    nested_config = Glm5NextCacheConfig.from_model_config(
+        {"text_config": model_config}, args
+    )
     assert nested_config == config
     # The allocator reserves an entire HOLD page, including when KV is quantized.
-    monkeypatch.setattr(Glm5NextMemManager, "_init_linear_att_buffers", lambda self: None)
-    mem_manager_class = FP8Glm5NextMemManager if kv_type == "fp8kv_dsa" else Glm5NextMemManager
+    monkeypatch.setattr(
+        Glm5NextMemManager, "_init_linear_att_buffers", lambda self: None
+    )
+    mem_manager_class = (
+        FP8Glm5NextMemManager if kv_type == "fp8kv_dsa" else Glm5NextMemManager
+    )
     mem = object.__new__(mem_manager_class)
     mem.page_size = page_size
     mem._init_buffers(32, config.full_att_dtype, 1, config.full_att_head_dim, 1)
     assert mem.kv_buffer.shape[1] == 32 + page_size
 
     assert config.full_att_head_dim == (720 if kv_type == "fp8kv_dsa" else 584)
-    assert config.full_att_dtype == (torch.uint8 if kv_type == "fp8kv_dsa" else torch.bfloat16)
+    assert config.full_att_dtype == (
+        torch.uint8 if kv_type == "fp8kv_dsa" else torch.bfloat16
+    )
     assert config.conv_state_dtype == torch.bfloat16
 
 
@@ -55,15 +70,21 @@ def test_nope_cache_layout_and_hold_page(monkeypatch, model_config, kv_type, pag
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 @pytest.mark.parametrize("mtp_step", [0, 2])
 @pytest.mark.parametrize("kv_type", ["None", "fp8kv_dsa"])
-def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step, kv_type):
+@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
+def test_hybrid_checkpoint_restore_and_packed_kv_copy(
+    monkeypatch, small_page, tp_world_size, mtp_step, kv_type, mode
+):
     from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
-    monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
+    monkeypatch.setattr(
+        "lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128
+    )
     args = StartArgs(
         tp=tp_world_size,
         llm_kv_type=kv_type,
+        ssm_state_mode=mode,
         data_type="bfloat16",
         linear_att_hash_page_size=4,
         linear_att_page_block_num=2,
@@ -118,7 +139,9 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         values = att_kv[..., :448].view(torch.float8_e4m3fn).float().view(17, 1, 7, 64)
         scales = att_kv[..., 576:583].view(torch.float8_e8m0fnu).float().unsqueeze(-1)
         tail = att_kv[..., 448:576].view(torch.bfloat16).float()
-        actual = torch.cat(((values * scales).view(17, 1, 448), tail), dim=-1)[destinations]
+        actual = torch.cat(((values * scales).view(17, 1, 448), tail), dim=-1)[
+            destinations
+        ]
         torch.testing.assert_close(actual, new_kv.float(), atol=0.13, rtol=0.065)
         assert torch.equal(tail[destinations], new_kv[..., 448:].float())
     else:
@@ -128,39 +151,82 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     if mtp_step:
         assert req.get_indexer_tail_buffer(4).shape == (4, 4 + mtp_step, 256)
         assert mem.get_att_input_params(4).shape == att_kv.shape
-    cache = req.create_small_page_cache_manager(2) if small_page else mem.big_page_buffers
+    cache = (
+        req.create_small_page_cache_manager(2) if small_page else mem.big_page_buffers
+    )
     slot = cache.alloc_one_state_cache()
     source_req = SimpleNamespace(req_idx=0)
     req.init_hybrid_attention_state(source_req)
-    req.req_to_conv_state.buffer[:, 0].normal_()
-    req.req_to_ssm_state.buffer[:, 0].normal_()
-    conv = req.req_to_conv_state.buffer[:, 0, ..., :3].clone()
-    ssm = req.req_to_ssm_state.buffer[:, 0].clone()
-    if small_page:
-        req.save_state(0, slot, cache)
+    req.linear_state_manager.conv_state.buffer[:, 0].normal_()
+    req.linear_state_manager.ssm_state.buffer[:, 0].normal_()
+    conv = req.linear_state_manager.conv_state.buffer[:, 0, ..., :3].clone()
+    ssm_backend = req.linear_state_manager.ssm_backend
+    if ssm_backend is not None:
+        # Save an accepted suffix, not merely an already folded checkpoint.
+        heads, dim = config.num_linear_v_heads, config.head_linear_k_dim
+        width = mtp_step + 1
+        q = torch.randn(1, width, heads, dim, dtype=torch.bfloat16, device="cuda")
+        gate = torch.randn(width, heads * dim, dtype=torch.bfloat16, device="cuda")
+        beta = torch.randn(width, heads, dtype=torch.bfloat16, device="cuda")
+        alog = torch.zeros(heads, device="cuda")
+        bias = torch.zeros(heads * dim, device="cuda")
+        ids = torch.tensor([0], dtype=torch.int32, device="cuda")
+        cu = torch.tensor([0, width], dtype=torch.int32, device="cuda")
+        ssm_backend.prepare_decode(ids, cu)
+        for layer in range(config.linear_layer_num):
+            ssm_backend.forward(layer, q, q, q, gate, beta, alog, bias, ids, cu)
+        accepted = torch.zeros(4, dtype=torch.int32, device="cuda")
+        ssm_backend.accept_updates(ids, accepted)
+        ssm = ssm_backend.get_accepted_state(0).clone()
+        if mtp_step:
+            req.linear_state_manager.accepted_state_index[2] = mtp_step
     else:
-        req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot])
+        ssm = req.linear_state_manager.ssm_state.buffer[:, 0].clone()
+    if small_page:
+        req.save_small_page_state(0, slot)
+    else:
+        req.save_big_page_states(
+            torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot]
+        )
     torch.cuda.synchronize()
-    req.req_to_conv_state.buffer[:, 0].zero_()
-    req.req_to_ssm_state.buffer[:, 0].zero_()
+    req.linear_state_manager.conv_state.buffer[:, 0].zero_()
+    req.linear_state_manager.ssm_state.buffer[:, 0].zero_()
     req.req_to_indexer_tail.buffer.normal_()
     unchanged = req.req_to_indexer_tail.buffer[:, [0, 1, 3]].clone()
-    dest_req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot))
+    dest_req = SimpleNamespace(
+        req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot)
+    )
     if small_page:
         req.restore_small_page_state(dest_req)
     else:
         req.restore_big_page_state(slot, dest_req)
     torch.cuda.synchronize()
-    assert torch.equal(req.req_to_conv_state.buffer[:, 2, ..., :3], conv)
-    assert torch.equal(req.req_to_ssm_state.buffer[:, 2 * (mtp_step + 1)], ssm)
+    if ssm_backend is not None:
+        assert ssm_backend.kda
+        if mode == "replay":
+            assert ssm_backend.cursors[2] == 0
+        if mtp_step:
+            assert req.linear_state_manager.accepted_state_index[2] == 0
+    assert torch.equal(req.linear_state_manager.conv_state.buffer[:, 2, ..., :3], conv)
+    assert torch.equal(
+        req.linear_state_manager.ssm_state.buffer[
+            :, 2 * req.linear_state_manager.ssm_slots_per_req
+        ],
+        ssm,
+    )
     # Both page sizes are aligned to complete pools. Restoring a prefix must
     # discard stale tail values from a previously allocated request slot.
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
     req.req_to_indexer_tail.buffer[:, 2].normal_()
     req.init_hybrid_attention_state(dest_req)
-    assert not req.req_to_conv_state.buffer[:, 2].any()
-    assert not req.req_to_ssm_state.buffer[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
+    assert not req.linear_state_manager.conv_state.buffer[:, 2].any()
+    assert not req.linear_state_manager.ssm_state.buffer[
+        :,
+        2
+        * req.linear_state_manager.ssm_slots_per_req : 3
+        * req.linear_state_manager.ssm_slots_per_req,
+    ].any()
     assert not req.req_to_indexer_tail.buffer[:, 2].any()
     assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
     # KV moves carry MLA latents and pooled FP8 bytes; raw keys/gates only
@@ -177,7 +243,9 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         copy_cpu_cache_to_kv_buffer,
     )
 
-    cpu_pages = torch.zeros((1, config.get_cpu_cache_big_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    cpu_pages = torch.zeros(
+        (1, config.get_cpu_cache_big_page_bytes()), dtype=torch.uint8, pin_memory=True
+    )
     indexes = torch.arange(8, dtype=torch.int32, device="cuda")
     zero = torch.zeros(1, dtype=torch.int64, device="cuda")
     ready = torch.zeros(1, dtype=torch.int32, pin_memory=True)
@@ -205,14 +273,26 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     for rank in range(tp_world_size):
         big.conv_state_cache.buffer[0].copy_(expected_conv + rank)
         big.ssm_state_cache.buffer[0].copy_(expected_ssm + rank)
-        expected_states.append((big.conv_state_cache.buffer[0].clone(), big.ssm_state_cache.buffer[0].clone()))
-        copy_kv_buffer_to_cpu_cache(page_readies=ready, gpu_kv_full_att_state=mem.kv_buffer, tp_rank=rank, **common)
+        expected_states.append(
+            (
+                big.conv_state_cache.buffer[0].clone(),
+                big.ssm_state_cache.buffer[0].clone(),
+            )
+        )
+        copy_kv_buffer_to_cpu_cache(
+            page_readies=ready,
+            gpu_kv_full_att_state=mem.kv_buffer,
+            tp_rank=rank,
+            **common
+        )
         torch.cuda.synchronize()
     for rank, (conv, ssm) in enumerate(expected_states):
         packed_bytes[:, :8].zero_()
         big.conv_state_cache.buffer[0].zero_()
         big.ssm_state_cache.buffer[0].zero_()
-        copy_cpu_cache_to_kv_buffer(gpu_full_att_kv_state=mem.kv_buffer, tp_rank=rank, **common)
+        copy_cpu_cache_to_kv_buffer(
+            gpu_full_att_kv_state=mem.kv_buffer, tp_rank=rank, **common
+        )
         torch.cuda.synchronize()
         assert torch.equal(packed_bytes[:, :8], expected_kv)
         assert torch.equal(big.conv_state_cache.buffer[0], conv)
@@ -221,13 +301,19 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
 
 @pytest.mark.parametrize("gate_type", ["silu", "sigmoid"])
 def test_gated_norm_gate_type_and_strided_gate(gate_type):
-    from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
+    from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import (
+        gated_rmsnorm_forward,
+    )
 
     x = torch.randn(12, 128, device="cuda", dtype=torch.bfloat16)
     gate = torch.randn(3, 8, 128, device="cuda", dtype=torch.bfloat16)[:, :4]
     weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
     actual = gated_rmsnorm_forward(x, weight, None, 1e-5, gate, gate_type=gate_type)
-    expected = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-5) * weight.float()
+    expected = (
+        x.float()
+        * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-5)
+        * weight.float()
+    )
     z = gate.reshape(12, 128).float()
     expected *= z.sigmoid() if gate_type == "sigmoid" else torch.nn.functional.silu(z)
     torch.testing.assert_close(actual, expected.bfloat16(), atol=0.008, rtol=0.008)
@@ -235,7 +321,9 @@ def test_gated_norm_gate_type_and_strided_gate(gate_type):
 
 @pytest.mark.parametrize("add_one", [False, True])
 def test_clamped_swiglu_preserves_gpt_oss_default(add_one):
-    from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+    from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
+        silu_and_mul_fwd,
+    )
 
     x = torch.linspace(-25, 25, 2048, device="cuda", dtype=torch.bfloat16).view(4, 512)
     out = torch.empty(4, 256, device="cuda", dtype=torch.bfloat16)

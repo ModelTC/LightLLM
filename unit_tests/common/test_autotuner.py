@@ -425,3 +425,61 @@ def test_default_api_and_nested_phase_restore_after_exception():
     assert not Autotuner.is_autotune_warmup()
     assert not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
     assert not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
+
+
+@pytest.mark.parametrize("world_size,failed_rank", [(1, 0), (2, 0), (2, 1)])
+@pytest.mark.parametrize("cached", [False, True])
+def test_rebuild_oom_skips_search_on_all_ranks_without_saving_fallback(
+    tmp_path, monkeypatch, world_size, failed_rank, cached
+):
+    kernel, calls, benchmarks, cache_file = make_kernel(
+        tmp_path, monkeypatch, "scratch_oom", AutotuneKernelType.DECODE_ATTENTION, warmup_all_exist_config=False
+    )
+    if cached:
+        cache_file.write_text(json.dumps({"8": {"block": 1}}))
+    before = cache_file.read_bytes() if cached else None
+    rebuilds = []
+
+    def rebuild(size, run_config=None):
+        rebuilds.append(size)
+        if failed_rank == 0:
+            raise torch.cuda.OutOfMemoryError("scratch allocation")
+        return (size,), {}
+
+    monkeypatch.setattr(kernel, "rebuild_input_func", rebuild)
+    monkeypatch.setattr(autotuner_module.dist, "is_initialized", lambda: world_size > 1)
+    monkeypatch.setattr(autotuner_module, "get_global_rank", lambda: 0)
+    monkeypatch.setattr(autotuner_module, "get_global_world_size", lambda: world_size)
+    monkeypatch.setattr(kernel, "_get_autotune_group", lambda: None)
+    collectives = []
+
+    def all_gather_object(outputs, obj, group):
+        collectives.append(obj)
+        if len(collectives) == 3 and isinstance(obj, bool):
+            outputs[:] = [rank != failed_rank for rank in range(world_size)]
+        else:
+            outputs[:] = [obj] * world_size
+
+    monkeypatch.setattr(autotuner_module.dist, "all_gather_object", all_gather_object)
+    fallback = {"block": 1} if cached else None
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+        assert kernel(16) == fallback
+        assert kernel(16) == fallback
+    assert rebuilds == [16]
+    assert calls == [(16, fallback), (16, fallback)]
+    assert not benchmarks
+    assert (cache_file.read_bytes() if cache_file.exists() else None) == before
+    assert "16" not in kernel.cached_configs.get(frozendict({"dtype": "test"}), {})
+    if world_size > 1:
+        assert len(collectives) == 4  # need, key, allocation status, repeated need
+
+
+def test_rebuild_programming_error_is_not_treated_as_oom(tmp_path, monkeypatch):
+    kernel, _, _, _ = make_kernel(tmp_path, monkeypatch, "rebuild_error")
+
+    def rebuild(size, run_config=None):
+        raise ValueError("invalid scratch layout")
+
+    monkeypatch.setattr(kernel, "rebuild_input_func", rebuild)
+    with Autotuner.autotune_warmup(), pytest.raises(ValueError, match="invalid scratch layout"):
+        kernel(16)

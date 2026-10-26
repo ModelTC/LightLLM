@@ -1,6 +1,8 @@
-import torch
 import time
 from typing import List
+
+import torch
+
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack
@@ -300,6 +302,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_mtp_index=model_input.b_mtp_index,
+                linear_state_batches=((req_num, model_output.linear_state_commit),),
             )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",

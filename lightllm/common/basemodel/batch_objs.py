@@ -1,10 +1,13 @@
 import copy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import TYPE_CHECKING, List, Optional
 
 import torch
 
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
+
+if TYPE_CHECKING:
+    from lightllm.common.linear_state import LinearStateCommit
 
 
 @dataclass
@@ -224,6 +227,9 @@ class ModelOutput:
     # 仅在 draft 模型直接返回紧凑候选词表时提供。
     # target 模型会将候选值回填到完整词表 logits，因此不需要该映射。
     logits_token_ids: Optional[torch.Tensor] = None
+
+    # Detached state-commit metadata for this forward/graph; preserved when unpadding.
+    linear_state_commit: Optional["LinearStateCommit"] = None
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:

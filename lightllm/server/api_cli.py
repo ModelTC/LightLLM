@@ -1,4 +1,5 @@
 import argparse
+import json
 
 
 def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
@@ -970,6 +971,20 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""The size of linear attn cache.
         If radix cache hit rate is low under high load due to limited small-page capacity and LRU
         eviction, increasing linear_att_cache_size can improve hit rate at the cost of more memory.""",
+    )
+    parser.add_argument(
+        "--ssm_state_mode",
+        choices=["native", "compact", "replay"],
+        default="native",
+        help="SSM state storage: native snapshots, compact MTP records, or deferred GDN/KDA replay (FP32/BF16).",
+    )
+    parser.add_argument(
+        "--ssm_replay_config",
+        type=json.loads,
+        default={},
+        help='Replay-only JSON object: {"cache_len":16,"compute_mode":"inline","fold_method":"raw"}. '
+        "cache_len: 4/8/16/32/64, at least the verify width; compute_mode: inline/precompute/parallel; "
+        "fold_method: raw/derived. Parallel requires BF16 GDN MTP with 128x128 heads; derived requires parallel.",
     )
     parser.add_argument(
         "--linear_att_ssm_data_type",

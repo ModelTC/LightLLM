@@ -144,6 +144,15 @@ class InferStateInfo:
                 self.decode_att_state1.init_state()
         self.check_att_states()
 
+    @property
+    def is_cuda_graph(self) -> bool:
+        """Compatibility name used by support_ds4 attention backends during capture."""
+        return self.is_cuda_graph_capture
+
+    @is_cuda_graph.setter
+    def is_cuda_graph(self, value: bool) -> None:
+        self.is_cuda_graph_capture = value
+
     def check_att_states(self) -> None:
         """检查 attention state，防止其强引用 InferStateInfo 而形成循环引用。
 

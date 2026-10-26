@@ -1,3 +1,6 @@
+from typing import Tuple
+from functools import partial
+
 import torch
 
 import torch.distributed as dist
@@ -10,12 +13,10 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from lightllm.common.basemodel.attention.base_att import AttControl
-from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
 from lightllm.distributed import all_reduce
 from lightllm.models.llama.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.utils.envs_utils import get_env_start_args
-from functools import partial
 
 logger = init_logger(__name__)
 
@@ -319,7 +320,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         num_tokens = z.shape[0]
         core_attn_out = core_attn_out.view(-1, core_attn_out.shape[-1])
-        z = z.contiguous().view(-1, z.shape[-1])
+        # Gated RMSNorm accepts the strided [tokens, heads, dim] projection slice.
         norm_out = layer_weight.linear_norm(core_attn_out, z, self.eps_)
         core_attn_out = norm_out.view(num_tokens, -1)
         output = layer_weight.linear_out_proj.mm(core_attn_out)

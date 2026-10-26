@@ -1,6 +1,8 @@
 import dataclasses
 from typing import TYPE_CHECKING
 
+import weakref
+
 import torch
 from vllm.v1.attention.ops import flashmla
 
@@ -129,10 +131,10 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         return full_out[:, 0, : self.real_q_head_num, :]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":
-        return _PrefillAttState(backend=self, infer_state=infer_state)
+        return _PrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "_DecodeAttState":
-        return _DecodeAttState(backend=self, infer_state=infer_state)
+        return _DecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

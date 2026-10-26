@@ -42,6 +42,65 @@ def _set_envs_and_config(args: StartArgs):
     mp.set_start_method("spawn", force=True)
 
 
+def _validate_and_normalize_ssm_config(args: StartArgs):
+    assert args.ssm_state_mode in ("native", "compact", "replay"), "Invalid ssm_state_mode"
+    config = args.ssm_replay_config
+    assert isinstance(config, dict), "ssm_replay_config must be a JSON object"
+    assert args.ssm_state_mode == "replay" or not config, "ssm_replay_config requires ssm_state_mode=replay"
+    if args.ssm_state_mode == "replay":
+        defaults = {"cache_len": 16, "compute_mode": "inline", "fold_method": "raw"}
+        unknown = config.keys() - defaults.keys()
+        assert not unknown, f"Unknown ssm_replay_config fields: {unknown}"
+        config = {**defaults, **config}
+        assert type(config["cache_len"]) is int and config["cache_len"] in (
+            4,
+            8,
+            16,
+            32,
+            64,
+        ), "ReplaySSM capacity must be a power of two and at least 4, up to 64"
+        assert config["compute_mode"] in ("inline", "precompute", "parallel"), "Invalid replay compute_mode"
+        assert config["fold_method"] in ("raw", "derived"), "Invalid replay fold_method"
+        assert (
+            config["fold_method"] == "raw" or config["compute_mode"] == "parallel"
+        ), "derived fold requires parallel ReplaySSM compute_mode"
+        if config["compute_mode"] == "parallel":
+            assert args.mtp_step > 0, "Parallel ReplaySSM requires MTP"
+            assert args.linear_att_ssm_data_type == "bfloat16", "Parallel ReplaySSM requires BF16 state"
+        args.ssm_replay_config = config
+        logger.info(f"SSM mode: replay, config: {config}")
+    else:
+        logger.info(f"SSM mode: {args.ssm_state_mode}")
+    from lightllm.utils.config_utils import get_model_type
+
+    is_gdn_or_kda = get_model_type(args.model_dir) in (
+        "glm5_next",
+        "glm5_next_text",
+        "qwen3_next",
+        "qwen3_5",
+        "qwen3_5_moe",
+        "qwen3_5_text",
+        "qwen3_5_moe_text",
+    )
+    if is_gdn_or_kda:
+        assert args.mtp_step <= 15, (
+            "GDN/KDA requires mtp_step <= 15: " "linear attention MTP state acceptance supports verify width <= 16"
+        )
+    if args.ssm_state_mode == "native":
+        return
+    assert args.linear_att_ssm_data_type in (
+        "float32",
+        "bfloat16",
+    ), "Non-native SSM state modes require FP32 or BF16 state"
+    assert is_gdn_or_kda, "Non-native SSM state modes currently require a GDN or KDA model"
+    if args.ssm_state_mode == "compact":
+        assert args.mtp_step > 0, "ssm_state_mode=compact requires MTP (mtp_step > 0)"
+    else:
+        assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
+        capacity = config["cache_len"]
+        assert capacity >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"
+
+
 def _launch_subprocesses(args: StartArgs):
     _validate_pd_features(args)
     _set_envs_and_config(args)
@@ -58,6 +117,12 @@ def _launch_subprocesses(args: StartArgs):
         assert (
             not args.disable_cudagraph or args.run_mode == "prefill"
         ), "--disable_cudagraph is only supported on Prefill nodes when --mtp_mode is enabled"
+
+    # Prepare remote configuration before any model-dependent defaults or validation.
+    if args.model_dir and "s3://" in args.model_dir:
+        from lightllm.utils.petrel_helper import s3_model_prepare
+
+        s3_model_prepare(args.model_dir)
 
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
@@ -340,6 +405,8 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
+    _validate_and_normalize_ssm_config(args)
+
     # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
         # 小页池大小只对 hybrid 模型生效。
@@ -376,12 +443,6 @@ def _launch_subprocesses(args: StartArgs):
         assert (
             args.cpu_cache_token_page_size % args.page_size == 0
         ), "--cpu_cache_token_page_size must be divisible by --page_size"
-
-    # help to manage data stored on Ceph
-    if "s3://" in args.model_dir:
-        from lightllm.utils.petrel_helper import s3_model_prepare
-
-        s3_model_prepare(args.model_dir)
 
     # 如果args.eos_id 是 None, 从 config.json 中读取 eos_token_id 相关的信息，赋值给 args
     if args.eos_id is None:

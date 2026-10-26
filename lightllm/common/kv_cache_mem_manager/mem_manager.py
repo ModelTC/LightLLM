@@ -1,10 +1,14 @@
 import math
 import os
 import re
+from typing import List, Tuple, Any, Union
+from multiprocessing.reduction import ForkingPickler
+
 import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from typing import List, Tuple, Any, Union
+from filelock import FileLock
+
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
 from .allocator import KvCacheAllocator
@@ -20,8 +24,6 @@ from lightllm.utils.config_utils import get_num_key_value_heads
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import page_io
 from lightllm.utils.device_utils import kv_trans_use_p2p
 from lightllm.utils.shm_utils import create_or_link_shm
-from multiprocessing.reduction import ForkingPickler
-from filelock import FileLock
 from .operator import BaseMemManagerOperator, NormalMemOperator
 
 logger = init_logger(__name__)
@@ -216,9 +218,6 @@ class MemoryManager:
         pin_mem_indexes.numpy()[:] = mem_indexes
         mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
-        )
         for tp_index in range(dp_world_size):
             page_io(
                 mem_indexes=mem_indexes_gpu,
