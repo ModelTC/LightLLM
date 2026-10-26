@@ -20,7 +20,7 @@ class AttResourceManager:
 - 基类不声明固定的 `main_full_att`、`draft_full_att`、`main_linear_att`、`draft_linear_att`、`main_indexer_tail`、`draft_indexer_tail` 成员。具体模型自行组织内部资源，数量、组合、字段名和实现类型由模型决定。
 - `full_att`、`linear_att`、`indexer_tail` 保留为可复用实现的目录分类。full attention 保存历史 KV；linear attention 由 `LinearAttentionState` 抽象基类约定操作，按算法直接实现 `KDAState`、`GDNState` 等状态对象，包含各自的运行态与可选 checkpoint；indexer tail 保存增量索引所需尾部状态。
 - main/draft 可以采用不同方案；同一共享分配域的参与方使用同一个 allocator 实例，遵守统一的索引和回收约定。资源对象持有 buffer 和数据有效性信息；管理器创建或绑定共享 allocator，调用方直接使用对应 allocator 分配与归还索引。
-- 模型专属 `AttResourceManager` 提供运行态清零、token 复制、状态页的聚合保存、校验、恢复、失效和数据传输操作；缓存功能流程决定匹配、引用、发布与淘汰时机，推理流程决定请求执行阶段。
+- 模型专属 `AttResourceManager` 提供运行态清零、按前缀长度重置 tail、token 复制、状态页的聚合保存、校验、恢复、失效和数据传输操作；缓存功能流程决定匹配、引用、发布与淘汰时机，推理流程决定请求执行阶段。
 - `req_to_token_indexs` 和请求槽位仍由 `ReqManager` 持有。资源管理器接收显式传入的物理索引、请求槽位及恢复长度，提供资源操作接口。
 - 内部 attention 资源的暴露方式作为接口设计问题单独讨论。当前建议按调用方区分统一资源操作、模型推理视图和 State 直接传输操作，详见第 6 节。
 
@@ -289,7 +289,7 @@ CPU load/offload 尾页的两个暂存槽位 ID 由管理器统一保留，排�
 
 上层的 `length → slot` 映射表达某个前缀关联哪个槽位；pool 中的 `slot → state_token_len` 记录槽位内快照对应的位置。恢复时两者必须一致。只预留槽位但尚未捕获状态的中间页边界保持 `None`。
 
-`LinearCheckpointPool` 通过保存、载入和失效接口维护这份记录；`AttResourceManager` 组织操作并校验恢复条件，allocator 只维护槽位的分配状态。CPU offload/load 同步携带并恢复长度元数据。长度记录本身不表示异步复制已完成，也不标识具体 token 前缀；同步由 stream/event 保证，前缀身份由请求与缓存关联关系保证。
+`LinearCheckpointPool` 通过保存、载入和失效接口维护这份记录；`AttResourceManager` 组织操作并校验恢复条件，allocator 只维护槽位的分配状态。CPU offload/load 同步携带并恢复长度元数据。对于包含 linear attention 的模型，每个已发布 CPU 缓存页必须包含全部参与 linear State 在该页前缀终点的有效状态；内部 pool 中尚未捕获的 None 记录不能发布为 CPU 缓存页。长度记录本身不表示异步复制已完成，也不标识具体 token 前缀；同步由 stream/event 保证，前缀身份由请求与缓存关联关系保证。
 
 ## 6. 对外接口与 attention 资源暴露方式
 
@@ -475,6 +475,7 @@ class FullAttentionState:
 | --- | --- | --- |
 | full-attention token 复制 | `copy_tokens(src_indices, dst_indices)` | 聚合复制所有参与 FullAttentionState 的对应物理 token 数据，覆盖各自完整存储字段 |
 | 空前缀运行态清零 | `reset_state(req_indices)` | 将指定槽位的全部参与运行态恢复到长度 0 的初始状态，覆盖递推状态、控制信息与 indexer tail |
+| 无 tail 快照的前缀恢复 | `reset_tail_state(req_indices, state_token_lens)` | 先聚合校验所有 tail 的恢复条件，再按对应长度重置 tail，保留其他已恢复状态 |
 | 状态页保存 | `save_pages(...)` | 将指定运行态保存到全部参与 State 的同类 pool、同一组槽位 |
 | 状态页校验 | `has_page(page_kind, slot_id, state_token_len)` | 全部参与 State 在该槽位都有匹配长度的有效页时返回 True |
 | 状态页恢复 | `restore_pages(...)` | 先整体校验，再将各 State 保存的页恢复到对应运行态位置 |
@@ -507,6 +508,10 @@ class AttResourceManager(ABC):
     @abstractmethod
     def reset_state(self, req_indices) -> None: ...
 
+    # 无 tail 快照的前缀恢复；只校验并重置 tail。
+    @abstractmethod
+    def reset_tail_state(self, req_indices, state_token_lens) -> None: ...
+
     @abstractmethod
     def save_pages(
         self, req_indices, state_token_lens, *, page_kind: PageKind, slot_ids,
@@ -532,12 +537,13 @@ class AttResourceManager(ABC):
         state_token_lens=None, req_indices=None,
     ) -> None: ...
 
+    # 一次读取同一前缀的有序页面；tail 只恢复最后一页到 req_idx。
     @abstractmethod
     def read_from_cpu(
         self, cpu_buffer, cpu_page_indices, token_indices,
         *, layouts: Mapping[str, BufferTransferLayout],
         page_kind: PageKind | None = None, slot_ids=None,
-        expected_token_lens=None, req_indices=None,
+        expected_token_lens=None, req_idx: int | None = None,
     ) -> None: ...
 
     # 一个明确来源管理器到当前管理器，按来源与 TP 分片分批调用。
@@ -567,7 +573,7 @@ class AttResourceManager(ABC):
     ) -> None: ...
 ```
 
-以上方法均为基类的抽象契约，由具体管理器实现或继承兼容的聚合实现。未支持的 CPU/DP/PD 路径须明确报错，启用相应功能时检查参与 State 的完整支持能力。未启用某种页分配域时，`has_page` 返回 False，保存、恢复和失效该域则明确报错；纯 full-attention 模型无需创建大小页 pool，其 `reset_state` 可以为空操作。
+以上方法均为基类的抽象契约，由具体管理器实现或继承兼容的聚合实现。未支持的 CPU/DP/PD 路径须明确报错，启用相应功能时检查参与 State 的完整支持能力。未启用某种页分配域时，`has_page` 返回 False，保存、恢复和失效该域则明确报错；纯 full-attention 模型无需创建大小页 pool，其 `reset_state` 可以为空操作；没有 indexer tail 的组合，其 `reset_tail_state` 也可以为空操作。
 
 `page_kind="big"` 对应 `bounded_att_big_page_allocator` 和参与 State 的 `big_pages_pool`；`"small"` 对应小页 allocator 与 `small_pages_pool`。两者是独立分配域，即使槽位数字相同，也不是同一份资源。
 
@@ -584,7 +590,17 @@ class AttResourceManager(ABC):
 - full-attention 没有需要清零的空前缀递推状态；该操作不遍历或清空历史 KV，不更改请求映射，也不失效大小页快照或归还索引。纯 full-attention 管理器合法地不做数据操作。
 - 目标请求槽位须唯一且在有效范围内，main/draft 所需运行态全部初始化后才可使用。重复执行在没有并发访问时具有相同结果；方法返回仍遵守 stream 完成约定。
 
-这是长度 0 的数据初始化接口，不接收非零前缀长度。命中非零前缀时使用 `restore_pages` 或 CPU/DP/PD 读回，再按 tail 恢复规则处理；不能在部分资源恢复后调用此方法，否则会清除已经恢复的运行态。
+这是长度 0 的数据初始化接口，不接收非零前缀长度。命中非零前缀时使用 `restore_pages` 或 CPU/DP/PD 读回；没有 tail 快照时通过 `reset_tail_state` 按长度校验并初始化 tail；不能在部分资源恢复后调用此方法，否则会清除已经恢复的运行态。
+
+#### 无 tail 快照时按前缀长度重置
+
+`reset_tail_state(req_indices, state_token_lens)` 用于已选定恢复前缀、但没有 tail 快照的情况，支持长度 0 和满足各实现恢复条件的非零长度。请求槽位与长度逐项对应，目标槽位唯一且已分配；该接口仅定位数据，不读取请求映射或缓存节点。
+
+具体管理器先对全部参与的 IndexerTailState 和全部目标长度调用 `can_restore_without_tail(L)` 校验，全部通过后才逐个调用底层 `reset_requests(req_indices, state_token_lens)`。例如 K-pool 要求 `L % P == 0`；main/draft 各按自己的 P 检查。任意条件不满足时在修改任何 tail 前报错，调用方须使用真实 tail 快照或其他合法恢复点，不能强制清零后继续。
+
+该操作只重置 tail 及其必要控制信息，保留已恢复的 Conv/SSM、MTP 游标、KV 和大小页快照。没有 tail 的管理器合法地不做数据操作。调用方保证此前使用已结束，并在相关数据操作完成后继续计算；这不是运行中 MTP 回退的替代操作。
+
+前缀页命中时，调用方恢复 KV 和 linear 页后，调用本接口处理未保存的 tail。CPU 最后一页已有 tail 快照，或 DP/PD 已传入完整 tail 时，直接使用该快照，不再调用本接口重置它。恢复条件检查内聚在此方法中，无需调用方访问内部 State。
 
 #### full-attention 的聚合 token 复制
 
@@ -638,10 +654,14 @@ CPU/PD 的映射集合必须覆盖所选页格式的全部参与资源；不能�
 
 **CPU 联合页**
 
-- `token_indices` 是 full-attention 的物理 token 索引，`cpu_page_indices` 是 CPU 页池的页 ID。索引按页 ID 顺序排列，从各页槽位 0 开始；长度与页数遵守 6.5 节的整页/尾页约定。只传状态的格式使用空 token 索引序列。
-- 格式包含 linear 页时，`page_kind` 与 `slot_ids` 必须同时提供，选择已分配 pool 槽位；`slot_ids` 和写出的 `state_token_lens` 或读回的 `expected_token_lens` 均与 CPU 页 ID 逐项对应。写出前聚合校验全部 pool 的长度，读回前核对页内元数据和预期长度。纯 KV 格式的这些参数为 None。
-- `req_indices` 只用于格式中的 tail 段，必须与写出的 `state_token_lens` 或读回的 `expected_token_lens` 一起提供，均与 CPU 页 ID 逐项对应；写出读取当前实际可捕获的 tail，读回写入指定运行态槽位。只有 tail 而没有 linear 页时，`page_kind/slot_ids` 仍为 None。没有 tail 段时传 None；历史 linear 页的存在不能证明当前 tail 仍对应那个历史长度，不能用当前 tail 补写旧页。
-- `read_from_cpu` 将 KV 写到给定物理位置，将 linear 快照写入 pool，将可选 tail 写到运行态。linear 运行态随后由调用方显式调用 `restore_pages` 恢复。没有 tail 段的格式按无 tail 恢复条件处理，不能把缺失数据当作零快照。
+包含 linear attention 的模型，每个已发布 CPU 缓存页都必须包含全部参与 linear State 对应页终点的有效快照，且长度一致。写出前检查这一条件，读回时校验格式和预期长度；不完整状态不能发布。纯 full-attention 模型仍使用自身的 KV 页格式。接口不增加缺失 linear 快照的 CPU 页语义，也无需为选择有效快照终点新增元数据查询方法。
+
+- `token_indices` 是 full-attention 的物理 token 索引，`cpu_page_indices` 是 CPU 页池的页 ID。索引按列表顺序排列，从各页槽位 0 开始；长度与页数遵守 6.5 节的整页/尾页约定。页列表按逻辑前缀顺序排列，不要求物理页 ID 连续或递增。只传状态的格式使用空 token 索引序列。
+- 格式包含 linear 页时，`page_kind` 与 `slot_ids` 必须同时提供，选择已分配 pool 槽位；`slot_ids` 和写出的 `state_token_lens` 或读回的 `expected_token_lens` 均与 CPU 页 ID 逐项对应，每项长度有效且不得为 None。没有 linear 页时，`page_kind/slot_ids` 为 None；纯 KV 传输且无需 tail 恢复时，长度参数也可为 None。
+- 写出带 tail 的格式时，`req_indices` 和 `state_token_lens` 与 CPU 页 ID 逐项对应，各页的 tail 必须在其实际恢复位置仍可捕获时保存。没有 tail 段时，写出方法的 `req_indices=None`；不能用当前 tail 补写历史页。只有 tail 而没有 linear 页时，`page_kind/slot_ids` 为 None。
+- `read_from_cpu` 一次处理同一前缀的有序页面，将全部 KV 写到给定物理位置，将各页 linear 快照写入对应 pool 槽位。linear 运行态随后由调用方使用最后一个槽位及 `expected_token_lens[-1]` 显式调用 `restore_pages` 恢复。
+- 需要 tail 恢复时，调用方传入单个目标 `req_idx`，并提供非空的页列表和逐页 `expected_token_lens`。管理器只使用 `cpu_page_indices[-1]` 和 `expected_token_lens[-1]`，将最后一页的 tail 恢复一次；中间页的 tail 不写入运行态。底层 IndexerTailState 的批量接口使用长度为 1 的请求、页 ID 和长度序列调用，无需改动其签名。
+- CPU 格式没有 tail 段时，管理器针对最后一页的长度调用 `reset_tail_state([req_idx], [expected_token_lens[-1]])`；恢复条件须在任何目标写入前检查。模型没有 tail 时，`req_idx=None`。多个目标前缀按前缀分别调用，不将不同请求的页混成一个列表。
 - 读入 pool 前统一失效本次目标页；任一参与资源读入失败时，所有本次目标 pool 页保持无效，已写入的 KV 或 tail 不得作为就绪数据使用。CPU 写出失败时同样不得发布不完整联合页。
 
 **DP 直接复制**
@@ -1079,7 +1099,7 @@ prefill 的最终状态、普通 decode 的结果和已提交验证状态都可�
 
 | 路径 | 传输单位与接口职责 |
 | --- | --- |
-| CPU 写出 | `write_to_cpu` 将指定 pool 的有效快照写到 CPU 组合页，并按布局写入/关联本资源的长度元数据；CPU pool 到 CPU 页同样是独立的格式搬运 |
+| CPU 写出 | `write_to_cpu` 将指定 pool 的有效快照写到 CPU 组合页，并按布局写入/关联本资源的长度元数据；每个待发布页的参与状态必须完整，长度不得为 None；CPU pool 到 CPU 页同样是独立的格式搬运 |
 | CPU 读回 | `read_from_cpu` 核对实际页元数据与预期长度，将快照恢复到已分配 pool 槽位并更新其长度记录；随后需要显式 `restore_pages` 才能恢复请求运行态 |
 | DP 复制 | `copy_from_dp` 将源请求已接受状态按 mapping 写入目标请求；传入的长度描述该源状态对应位置。不同 TP 的字段/轴分别映射，目标规范化游标，源保持有效 |
 | PD 写出 | `write_to_pd_buffer` 将一个请求的已接受状态写入已选中的状态页区域，按协议关联其前缀长度 |
@@ -1196,7 +1216,7 @@ class IndexerTailState(ABC):
     ) -> None: ...
 ```
 
-除单请求 PD 和单长度能力查询外，接口均按批量处理，请求、长度和外部页索引逐项对应。`state_token_len=L` 表示已经接受且执行过 forward 的前缀 `[0, L)`，不是本轮输入数，也不是 sampled token 数。请求槽位由 ReqManager 分配；长度由执行流程显式传入，不要求 State 再维护一份请求长度表。
+除单请求 PD 和单长度能力查询外，本 State 的接口均按批量处理，请求、长度和外部页索引逐项对应。管理器的 CPU 读回方法只选择该前缀最后一页，以长度为 1 的批次调用此 State，不要求为中间页提供目标请求槽位。`state_token_len=L` 表示已经接受且执行过 forward 的前缀 `[0, L)`，不是本轮输入数，也不是 sampled token 数。请求槽位由 ReqManager 分配；长度由执行流程显式传入，不要求 State 再维护一份请求长度表。
 
 #### 容量、访问与恢复
 
@@ -1221,7 +1241,7 @@ class IndexerTailState(ABC):
 | 接口 | 数据路径及约束 |
 | --- | --- |
 | `write_to_cpu(...)` | 当前请求 tail → 外部 CPU 页中的 tail 区域。与 linear 的 CPU 方法不同，此处源是请求运行态，没有 `page_kind/slot_ids`；只能捕获当前实际可恢复位置 |
-| `read_from_cpu(...)` | CPU 页的 tail 区域 → 目标请求运行态，恢复 ring 和必要控制信息。具体管理器核对保存长度与 `expected_token_lens`，不能把缺失 tail 当成全零快照 |
+| `read_from_cpu(...)` | CPU 页的 tail 区域 → 目标请求运行态，恢复 ring 和必要控制信息。管理器只将本次前缀最后一页传给此接口，核对保存长度与 `expected_token_lens`；不能把缺失 tail 当成全零快照 |
 | `copy_from_dp(...)` | 一个显式来源 State → 目标请求；`mapping` 指定字段、层和分片对应关系。GLM K-pool 在 TP 间为副本，选一个有效来源并恢复每个需要的目标副本；多来源由上层组织 |
 | `write_to_pd_buffer(...)` | 指定请求 tail → 已选中的 PD 状态页区域，使用 layout 的资源偏移、字段布局与 TP 写入规则 |
 | `read_from_pd_buffer(...)` | 已接收的 PD 状态页区域 → 目标请求 tail；具体管理器先核对资源身份、格式及预期长度，并建立接收完成依赖 |
@@ -1257,11 +1277,11 @@ class IndexerTailState(ABC):
 
 调用方直接使用指定大小页域的 allocator 取得槽位，在状态仍可捕获时调用管理器的 `save_pages`。具体管理器将同一组槽位传给全部参与 State 保存，并记录长度；调用方确认数据就绪后，可以把 `(page_kind, slot_id, state_token_len)` 关联到 radix 节点，也可以用于其他缓存操作。
 
-radix 匹配得到节点引用后，调用方使用 `has_page` 检查状态页记录，并调用 `restore_pages` 恢复全部参与 State。KV 索引由调用方交给 ReqManager 绑定；tail 按具体 State 的规则恢复。状态页校验只覆盖对应 pool，调用方还需确认历史 KV、tail 和数据就绪性。
+radix 匹配得到节点引用后，调用方使用 `has_page` 检查状态页记录，并调用 `restore_pages` 恢复全部参与 State。KV 索引由调用方交给 ReqManager 绑定；没有 tail 快照时，调用方使用管理器的 `reset_tail_state(req_indices, expected_token_lens)` 校验并初始化 tail，保留已恢复的 linear 状态。状态页校验只覆盖对应 pool，调用方还需确认历史 KV、tail 和数据就绪性。
 
-使用 K-pool 的 tail 在完整池化边界上可以按其 State 契约重置；非对齐恢复需要原始 tail 数据。DP/PD 运行态复制按第 6.8 节保留完整兼容的 ring，不能把前缀恢复的清零规则用于 MTP 回退。
+使用 K-pool 的 tail 在完整池化边界上通过 `reset_tail_state` 重置；非对齐恢复需要原始 tail 数据。CPU 读回只从该前缀最后一页恢复 tail；格式没有 tail 段时，由管理器按最后一页长度调用 `reset_tail_state`。DP/PD 运行态复制按第 6.8 节保留完整兼容的 ring，不能把前缀恢复的清零规则用于 MTP 回退。
 
-MTP 接受位置由模型执行流程选择，再保存或传输已接受状态。KDA/GDN 只保存实际捕获的状态；跨越但未保存的中间位置不可作为有效页。管理器的数据操作不承担一次 forward 的提交或请求长度更新。
+MTP 接受位置由模型执行流程选择，再保存或传输已接受状态。KDA/GDN 只保存实际捕获的状态；跨越但未保存的中间位置不可作为有效页，也不能发布为 CPU 缓存页；执行流程需在待缓存页边界安排真实状态捕获。管理器的数据操作不承担一次 forward 的提交或请求长度更新。
 
 ### 7.3 同步、引用与回收
 
@@ -1299,7 +1319,7 @@ P 端在 prefill 完成时发送状态页。linear state 按全局 head 布局�
 
 ### 8.3 CPU/Disk 与 DP fetch
 
-模型专属 `AttResourceManager` 实现 CPU 联合页的布局与读写组织，调用所需 main/draft State 的 CPU 方法，组合 full-attention KV、linear 页及各参与 pool 的 `state_token_lens`。CPU 缓存调度提供外部页和任务生命周期。对齐前缀恢复中的 indexer tail 按边界规则重置；非对齐恢复需要联合页包含 tail 快照，并由其具体 State 实现相应读写。
+模型专属 `AttResourceManager` 实现 CPU 联合页的布局与读写组织，调用所需 main/draft State 的 CPU 方法，组合 full-attention KV、linear 页及各参与 pool 的 `state_token_lens`。CPU 缓存调度提供外部页和任务生命周期；每个已发布 CPU 页都具备该模型组合所需的有效 linear 状态。一次读回处理同一前缀的页面，仅从最后一页恢复 indexer tail；没有 tail 段时通过 `reset_tail_state` 按最终长度重置。非对齐恢复需要最后一页包含真实 tail 快照，并由其具体 State 实现读回。
 
 CPU load/offload 的尾页暂存槽位由管理器保留和协调，参与的大页 pool 分别提供存储。各参与方的暂存数据消费完成后，后续请求才能复用该槽位。磁盘存储使用 CPU 页格式；main/draft 异构组合需定义各自资源段的布局、格式版本和兼容规则。
 
@@ -1310,7 +1330,7 @@ DP fetch 同时恢复需要的历史 KV 和请求运行态。只有当前运行�
 | 问题 | 设计约定 | 待确定内容 |
 | --- | --- | --- |
 | main/draft 管理器装配 | 模型实现自己的管理器；同一分配域共享唯一 allocator 实例 | 使用组合管理器还是多个模型管理器实例，allocator 的唯一创建/销毁者；调用方覆盖全部参与 pool 的失效顺序及单次归还责任 |
-| AttResourceManager 聚合接口 | 按 6.2 节提供 full-attention token 复制、空前缀清零、大小页聚合操作及完整 CPU/DP/PD 接口；radix 是调用方 | 各模型参与集合、跨实例共享域装配、分阶段捕获及索引/元数据的具体承载类型 |
+| AttResourceManager 聚合接口 | 按 6.2 节提供 full-attention token 复制、空前缀清零、按长度重置 tail、大小页聚合操作及完整 CPU/DP/PD 接口；radix 是调用方 | 各模型参与集合、跨实例共享域装配、分阶段捕获及索引/元数据的具体承载类型 |
 | 内部 attention 资源的暴露 | 具体模型在初始化阶段绑定 State 或层视图，不要求统一模型视图获取接口 | 各模型/backend 的具体绑定方式与按层访问结构 |
 | FullAttentionState 接口与继承 | 必需语义：容量计算、初始化、完整存储描述、层视图、KV 写入、完整 token 复制；CPU/DP/PD 由子类按支持路径直接实现读写方法 | StorageDescriptor 的最小字段、BufferTransferLayout / StateCopyMapping 的具体数据类型，以及各布局的复制/传输约束 |
 | LinearAttentionState 接口与继承 | KDAState、GDNState 实现统一抽象操作；已接受运行态、checkpoint 和传输分别定义，allocator 仍归管理器 | 按 6.7 节细化各子类的描述字段和 kernel，核对 MTP 状态选择、跨 TP/CPU 格式兼容性 |
@@ -1319,6 +1339,6 @@ DP fetch 同时恢复需要的历史 KV 和请求运行态。只有当前运行�
 | checkpoint 引用形式 | 明确大小页类别、共享槽位 ID、预期恢复长度及参与模型资源；各侧 pool 保留 `state_token_lens` | 引用对象或参数组合的具体类型，以及参与资源集合的表达 |
 | 配置类型拆分 | main/draft 分别产生实现和布局参数，共享 allocator 接收统一容量与索引配置 | 各类 State 的配置字段、跨资源共享字段与校验责任 |
 | PD tail 的协议布局 | 完整复制兼容原生 ring，组件描述字段，具体管理器安排位置与 TP 副本读写 | 不同 MTP 配置下的可恢复历史范围、位置元数据和格式转换规则 |
-| CPU 缓存页的组合方式 | 模型专属管理器实现布局与组合调用，各具体 State 实现自身区域读写 | 不同 main/draft 实现的资源段布局、非对齐 tail 快照及版本兼容 |
+| CPU 缓存页的组合方式 | 每页包含全部有效 linear 状态；管理器组织读写，并只从最后一页恢复 tail | 不同 main/draft 实现的资源段布局、非对齐 tail 快照及版本兼容 |
 
 以上待细化事项须遵守本文的资源归属、共享分配域和恢复语义约定。
