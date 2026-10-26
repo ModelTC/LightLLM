@@ -176,7 +176,7 @@ def _allocate_direct_smallq_workspace(q):
     qn, heads, _ = q.shape
     splits = 34 if qn == 1 else 17
     return {
-        "partial_o": torch.empty((qn, splits, heads, 512), dtype=torch.float32, device=q.device),
+        "partial_o": torch.empty((qn, splits, heads, q.shape[-1]), dtype=torch.float32, device=q.device),
         "partial_lse": torch.empty((qn, splits, heads), dtype=torch.float32, device=q.device),
         # The reducer requires a contiguous [Q, H, 512] destination.
         "output": torch.empty(q.shape, dtype=q.dtype, device=q.device),
@@ -496,29 +496,26 @@ def _can_use_selected_prefill(q, packed_kv, ragged_mem_index, prefill_mem_index,
     )
 
 
-def _allocate_selected_prefill_workspace(q):
-    batch = q.shape[0]
+def _allocate_selected_prefill_workspace(q, batch_capacity=None):
+    batch = q.shape[0] if batch_capacity is None else batch_capacity
     return {
         "compact": torch.empty((batch, 2176), dtype=torch.int64, device=q.device),
         "lengths": torch.empty(batch, dtype=torch.int32, device=q.device),
         "page_table": torch.empty((batch, 2176), dtype=torch.int32, device=q.device),
         "cu_q": torch.empty(batch + 1, dtype=torch.int32, device=q.device),
         "cu_k": torch.empty(batch + 1, dtype=torch.int32, device=q.device),
-        "selected_kv": torch.empty((batch * 2176, 1, 512), dtype=q.dtype, device=q.device),
+        "selected_kv": torch.empty((batch * 2176, 1, q.shape[-1]), dtype=q.dtype, device=q.device),
     }
 
 
-def _allocate_generic_prefill_workspace(q, packed_kv, topk_indices):
-    """State-local metadata for the generic H64 eager prefill path.
-
-    The gathered BF16 KV remains a per-call allocation because its bounded size can
-    reach 2 GiB; only invariant map/page metadata is retained across DSA layers.
-    """
+def _allocate_generic_prefill_workspace(q, packed_kv, topk_indices, query_capacity=None):
+    """Allocate generic prefill metadata up to the backend's planned query capacity."""
+    capacity = q.shape[0] if query_capacity is None else query_capacity
     return {
         "prefill_row_table": torch.full((packed_kv.shape[0],), -1, dtype=torch.int32, device=q.device),
-        "chunk_indices": torch.empty_like(topk_indices),
-        "chunk_lengths": torch.empty(q.shape[0], dtype=torch.int32, device=q.device),
-        "cu_seqlens_q": torch.arange(q.shape[0] + 1, dtype=torch.int32, device=q.device),
+        "chunk_indices": torch.empty((capacity, topk_indices.shape[1]), dtype=topk_indices.dtype, device=q.device),
+        "chunk_lengths": torch.empty(capacity, dtype=torch.int32, device=q.device),
+        "cu_seqlens_q": torch.arange(capacity + 1, dtype=torch.int32, device=q.device),
         "row_table_built": False,
     }
 
