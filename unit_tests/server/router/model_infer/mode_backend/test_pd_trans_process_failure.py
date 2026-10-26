@@ -3,6 +3,7 @@ import threading
 
 import pytest
 
+from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask, PDChunckedTransTaskGroup
 from lightllm.server.router.model_infer.mode_backend.pd import base_kv_move_manager as manager_module
 
 
@@ -82,6 +83,65 @@ def test_unhealthy_transfer_worker_restarts_and_reopens_return_handler(monkeypat
     assert new_process.init_args["manager"] is manager
     assert old_process.task_out_queue.get_nowait() is None
     assert manager._trans_process_last_restart_at[0] is not None
+
+
+def _make_trans_task(request_id: int) -> PDChunckedTransTask:
+    return PDChunckedTransTask(
+        request_id=request_id,
+        start_kv_index=0,
+        end_kv_index=1,
+        time_out_secs=10,
+        pd_master_node_id=0,
+        prefill_dp_index=0,
+        decode_dp_index=0,
+        src_device_id=0,
+        dst_device_id=0,
+        mem_indexes=[0],
+        prefill_agent_name=None,
+        prefill_agent_metadata=None,
+        prefill_num_pages=None,
+        prefill_page_reg_desc=None,
+        decode_agent_name=None,
+        decode_agent_metadata=None,
+        decode_num_pages=None,
+        decode_page_reg_desc=None,
+        first_gen_token_id=None,
+        first_gen_token_logprob=None,
+    )
+
+
+def test_restarting_worker_returns_errors_for_queued_tasks(monkeypatch):
+    manager = manager_module.BaseKVMoveManager.__new__(manager_module.BaseKVMoveManager)
+    old_process = FakeTransProcess(False)
+    old_process.task_in_queue = manager_module.mp.Queue()
+    new_process = FakeTransProcess(True)
+    new_process.task_out_queue.put(None)
+    tasks = [_make_trans_task(request_id) for request_id in (1, 2, 3)]
+    old_process.task_in_queue.put(tasks[0])
+    old_process.task_in_queue.put(PDChunckedTransTaskGroup(task_list=tasks[1:]))
+    old_process.task_in_queue.put(PDAbortReq(request_id=4, device_id=0))
+    manager.node_world_size = 1
+    manager.kv_trans_processes = [old_process]
+    manager._trans_process_locks = [threading.Lock()]
+    manager._trans_process_restart_counts = [0]
+    manager._trans_process_last_restart_at = [None]
+    manager.ret_obj_queue = queue.Queue()
+    manager.args = object()
+    manager.start_trans_process_func = object()
+    manager.up_status_in_queue = None
+    monkeypatch.setattr(manager_module, "KVTransProcess", lambda: new_process)
+
+    try:
+        manager._restart_trans_process(0)
+
+        returns = [manager.ret_obj_queue.get_nowait() for _ in tasks]
+        assert {ret.request_id for ret in returns} == {1, 2, 3}
+        assert all(ret.has_error for ret in returns)
+        assert all("restarted before processing task" in ret.error_info for ret in returns)
+        assert old_process.task_out_queue.get_nowait() is None
+    finally:
+        old_process.task_in_queue.close()
+        old_process.task_in_queue.join_thread()
 
 
 def test_dispatch_waits_for_a_healthy_replacement():

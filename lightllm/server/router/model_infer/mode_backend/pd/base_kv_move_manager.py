@@ -133,6 +133,28 @@ class BaseKVMoveManager:
                 return
             self.ret_obj_queue.put(ret_obj)
 
+    def _fail_queued_trans_tasks(self, trans_process: KVTransProcess, device_id: int) -> None:
+        trans_process.task_in_queue.put(None)
+        while True:
+            task: Union[
+                PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq, None
+            ] = trans_process.task_in_queue.get()
+            if task is None:
+                return
+            if isinstance(task, PDAbortReq):
+                continue
+            tasks: List[PDChunckedTransTask]
+            if isinstance(task, PDChunckedTransTaskGroup):
+                tasks = task.task_list
+            elif isinstance(task, PDChunckedTransTask):
+                tasks = [task]
+            else:
+                raise TypeError(f"Unexpected queued KV transfer task: {type(task).__name__}")
+
+            for trans_task in tasks:
+                trans_task.error_info = f"KV transfer worker for device {device_id} restarted before processing task"
+                self.ret_obj_queue.put(trans_task.createRetObj())
+
     def _restart_trans_process(self, device_id: int) -> None:
         with self._trans_process_locks[device_id]:
             old_trans_process = self.kv_trans_processes[device_id]
@@ -142,6 +164,7 @@ class BaseKVMoveManager:
                 old_trans_process.process.join(timeout=5)
                 if old_trans_process.process.is_alive():
                     raise RuntimeError(f"KV transfer worker for device {device_id} did not stop before restart")
+            self._fail_queued_trans_tasks(old_trans_process, device_id)
             try:
                 old_trans_process.task_out_queue.put(None)
             except (EOFError, OSError, ValueError):
