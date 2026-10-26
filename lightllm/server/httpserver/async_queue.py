@@ -8,6 +8,8 @@ class AsyncQueue:
         self.lock = asyncio.Lock()
 
     async def wait_to_ready(self):
+        if self.event.is_set():
+            return
         try:
             await asyncio.wait_for(self.event.wait(), timeout=3)
         except asyncio.TimeoutError:

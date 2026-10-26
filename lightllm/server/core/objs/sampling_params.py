@@ -5,11 +5,20 @@ from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
 from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.error_utils import InvalidRequestError
 from .pd_kv_trans_params import PDKVTransParamObj
 
 _SAMPLING_EPS = 1e-5
-DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in ["ON", "TRUE", "1"]
-SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "False").upper() in ["ON", "TRUE", "1"]
+DEFAULT_INPUT_PENALTY = os.getenv("INPUT_PENALTY", "False").upper() in [
+    "ON",
+    "TRUE",
+    "1",
+]
+SKIP_SPECIAL_TOKENS = os.getenv("SKIP_SPECIAL_TOKENS", "False").upper() in [
+    "ON",
+    "TRUE",
+    "1",
+]
 
 # 从环境变量获取最大长度限制
 STOP_SEQUENCE_MAX_LENGTH = int(os.getenv("LIGHTLLM_STOP_SEQUENCE_MAX_LENGTH", 256))
@@ -181,7 +190,11 @@ class GuidedJsonSchema(ctypes.Structure):
         if isinstance(constraint, dict):
             constraint = json.dumps(constraint, ensure_ascii=False, separators=(",", ":"))
         constraint_bytes = constraint.encode("utf-8")
-        assert len(constraint_bytes) < JSON_SCHEMA_MAX_LENGTH, "Guided json schema is too long."
+        if len(constraint_bytes) >= JSON_SCHEMA_MAX_LENGTH:
+            raise InvalidRequestError(
+                f"Guided JSON schema is too long: {len(constraint_bytes)} UTF-8 bytes; "
+                f"the configured limit is {JSON_SCHEMA_MAX_LENGTH - 1} bytes."
+            )
 
         ctypes.memmove(self.constraint, constraint_bytes, len(constraint_bytes))
         self.length = len(constraint_bytes)
@@ -222,7 +235,7 @@ class ConstraintOutParams(ctypes.Structure):
         guided_reasoning_end: List[int],
         pd_previous_output_len: int = 0,
     ):
-        if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2 ** 31 - 1:
+        if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2**31 - 1:
             raise ValueError("pd_previous_output_len must be an integer in [0, 2147483647]")
         self.regular_constraint.initialize(regular_constraint)
         self.guided_grammar.initialize(guided_grammar, tokenizer)
@@ -327,18 +340,30 @@ class SamplingParams(ctypes.Structure):
         # P/D 节点的资源等待超时，由 PD Master 下发。非负值用于控制 shm_req 申请和
         # Router 等待进入推理系统的时限；负数表示永久等待。
         ("pd_node_resource_wait_timeout_seconds", ctypes.c_int),
-        ("suggested_dp_index", ctypes.c_int),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
+        (
+            "suggested_dp_index",
+            ctypes.c_int,
+        ),  # suggest dp index, deepseekv2 dp mode, use to suggest used dp_index
         # in pd split mode, use to keep the id of pd master
         ("pd_master_node_id", NodeUUId),
         # pd params object, only used in pd mode, used to build kv transport connection in prefill and decode
         ("pd_kv_trans_params", PDKVTransParamObj),
-        ("skip_special_tokens", ctypes.c_bool),  # whether to skip special tokens when decoding
-        ("add_special_tokens", ctypes.c_bool),  # whether to add special tokens when encoding
+        (
+            "skip_special_tokens",
+            ctypes.c_bool,
+        ),  # whether to skip special tokens when decoding
+        (
+            "add_special_tokens",
+            ctypes.c_bool,
+        ),  # whether to add special tokens when encoding
         (
             "add_spaces_between_special_tokens",
             ctypes.c_bool,
         ),  # whether to add spaces between special tokens when decoding
-        ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
+        (
+            "print_eos_token",
+            ctypes.c_bool,
+        ),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
         ("seed", ctypes.c_int64),  # random seed
         # -1 disables prompt logprobs; K >= 0 returns only the top-K prompt tokens.
@@ -597,6 +622,6 @@ def _check_and_store_int_token_ids(dst, ids: List[int], max_length: int, name: s
     size = len(ids)
     assert size <= max_length, f"Too many {name}: {size} > {max_length}."
     assert all(isinstance(e, int) for e in ids), f"all {name} must be int."
-    assert all(0 <= e < 2 ** 31 for e in ids), f"all {name} must be int in [0, 2**31)."
+    assert all(0 <= e < 2**31 for e in ids), f"all {name} must be int in [0, 2**31)."
     dst[:size] = ids[:]
     return size

@@ -5,8 +5,11 @@ from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.pd_timeout_utils import get_pd_kv_transfer_timeout_seconds
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
-from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
+from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import (
+    ChunkedPrefillBackend,
+)
 
 logger = init_logger(__name__)
 
@@ -61,7 +64,11 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
         return ans_list
 
     def _prefill_chuncked_handle_func(
-        self, req_obj: InferReq, next_token_id: int, next_token_prob: float, output_len: int
+        self,
+        req_obj: InferReq,
+        next_token_id: int,
+        next_token_prob: float,
+        output_len: int,
     ):
         """
         在每一步chuncked prefill 后，尝试生成chuncked 传输任务，发个 kv_move_manager 进行处理。
@@ -138,7 +145,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
-            time_out_secs=182,
+            time_out_secs=get_pd_kv_transfer_timeout_seconds() + 2,
             pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
             prefill_dp_index=self.dp_rank_in_node,
             decode_dp_index=None,

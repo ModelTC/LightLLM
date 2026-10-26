@@ -50,9 +50,7 @@ class MMWeightTpl(BaseWeightTpl):
         # 同时存在 weight_names 和 quanted_weight_names 是为了兼容在线和离线两种加载方案
         self.weight_names = weight_names
         self.bias_names = bias_names
-        self.quant_method: QuantizationMethod = (
-            NoQuantization() if quant_method is None else quant_method
-        )
+        self.quant_method: QuantizationMethod = NoQuantization() if quant_method is None else quant_method
         self.param_slicer: SliceMixinTpl = None
         self._create_weight()
         self.gen_weight_quant_param_names()
@@ -98,36 +96,24 @@ class MMWeightTpl(BaseWeightTpl):
 
         for sub_child_index, weight_name in enumerate(self.weight_names):
             if self.quant_method.weight_scale_suffix is not None:
-                weight_scale_name = weight_name.replace(
-                    "weight", self.quant_method.weight_scale_suffix
-                )
+                weight_scale_name = weight_name.replace("weight", self.quant_method.weight_scale_suffix)
                 self.weight_scale_names[sub_child_index] = weight_scale_name
             if self.quant_method.weight_zero_point_suffix is not None:
-                weight_zero_point_name = weight_name.replace(
-                    "weight", self.quant_method.weight_zero_point_suffix
-                )
+                weight_zero_point_name = weight_name.replace("weight", self.quant_method.weight_zero_point_suffix)
                 self.weight_zero_point_names[sub_child_index] = weight_zero_point_name
             if self.quant_method.weight_suffix is not None:
-                weight_name = weight_name.replace(
-                    "weight", self.quant_method.weight_suffix
-                )
+                weight_name = weight_name.replace("weight", self.quant_method.weight_suffix)
                 self.quanted_weight_names[sub_child_index] = weight_name
         return
 
     def load_hf_weights(self, weights):
 
         for sub_child_index, param_name in enumerate(self.weight_names):
-            self._load_weight(
-                param_name=param_name, weights=weights, sub_child_index=sub_child_index
-            )
+            self._load_weight(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
         for sub_child_index, param_name in enumerate(self.weight_scale_names):
-            self._load_weight_scale(
-                param_name=param_name, weights=weights, sub_child_index=sub_child_index
-            )
+            self._load_weight_scale(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
         for sub_child_index, param_name in enumerate(self.weight_zero_point_names):
-            self._load_weight_zero_point(
-                param_name=param_name, weights=weights, sub_child_index=sub_child_index
-            )
+            self._load_weight_zero_point(param_name=param_name, weights=weights, sub_child_index=sub_child_index)
         if self.bias_names is not None:
             for sub_child_index, param_name in enumerate(self.bias_names):
                 self._load_bias(
@@ -139,9 +125,7 @@ class MMWeightTpl(BaseWeightTpl):
     def _create_weight(self):
         self.bias = None
         if self.bias_names is not None:
-            self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(
-                get_current_device_id()
-            )
+            self.bias = torch.empty(sum(self.out_dims), dtype=self.data_type_).cuda(get_current_device_id())
             # bias_list shares storage with bias for each output shard
             self.bias_list = torch.split(self.bias, self.out_dims, dim=0)
             for sub_bias in self.bias_list:
@@ -205,9 +189,7 @@ class MMWeightTpl(BaseWeightTpl):
         if param_name in weights:
             slicer = self._get_param_slicer(sub_child_index)
             weight_scale = slicer._slice_weight_scale(weights[param_name])
-            self.quant_method.load_weight_scale(
-                weight_scale, self.mm_param_list[sub_child_index]
-            )
+            self.quant_method.load_weight_scale(weight_scale, self.mm_param_list[sub_child_index])
         return
 
     def _load_weight_zero_point(
@@ -219,20 +201,12 @@ class MMWeightTpl(BaseWeightTpl):
         if param_name in weights:
             slicer = self._get_param_slicer(sub_child_index)
             weight_zero_point = slicer._slice_weight_zero_point(weights[param_name])
-            self.quant_method.load_weight_zero_point(
-                weight_zero_point, self.mm_param_list[sub_child_index]
-            )
+            self.quant_method.load_weight_zero_point(weight_zero_point, self.mm_param_list[sub_child_index])
         return
 
     def verify_load(self):
-        mm_param_load_ok = all(
-            all(_mm_param.load_ok) for _mm_param in self.mm_param_list
-        )
-        bias_load_ok = (
-            True
-            if self.bias is None
-            else all(sub_bias.load_ok for sub_bias in self.bias_list)
-        )
+        mm_param_load_ok = all(all(_mm_param.load_ok) for _mm_param in self.mm_param_list)
+        bias_load_ok = True if self.bias is None else all(sub_bias.load_ok for sub_bias in self.bias_list)
         if not (mm_param_load_ok and bias_load_ok):
             logger.warning(f"mm_param_load_ok: {self.mm_param_list[0].load_ok}")
         return mm_param_load_ok and bias_load_ok
@@ -264,9 +238,7 @@ class BMMWeightTpl(BaseWeightTpl):
         self.bias_names = bias_names
         assert bias_names is None, "bmm not support bias"
         if isinstance(bias_names, list):
-            assert all(
-                bias_name is None for bias_name in bias_names
-            ), "bmm not support bias"
+            assert all(bias_name is None for bias_name in bias_names), "bmm not support bias"
         assert quant_method is None, "bmm not support quantized weight"
         self.quant_method = quant_method
         self.dim0 = dim0
@@ -276,9 +248,7 @@ class BMMWeightTpl(BaseWeightTpl):
         return
 
     def _create_weight(self):
-        self.weight = torch.empty(
-            self.dim0, self.dim1, self.dim2, dtype=self.data_type_
-        ).cuda(get_current_device_id())
+        self.weight = torch.empty(self.dim0, self.dim1, self.dim2, dtype=self.data_type_).cuda(get_current_device_id())
         self.weight.load_ok = False
         return
 

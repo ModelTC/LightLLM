@@ -21,12 +21,8 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 
 
 def unfused(input, limit, alpha, add_one):
-    out = torch.empty(
-        (input.shape[0], input.shape[1] // 2), device=input.device, dtype=input.dtype
-    )
-    activation.silu_and_mul_fwd(
-        input, out, limit=limit, alpha=alpha, clamp_up_add_one=add_one
-    )
+    out = torch.empty((input.shape[0], input.shape[1] // 2), device=input.device, dtype=input.dtype)
+    activation.silu_and_mul_fwd(input, out, limit=limit, alpha=alpha, clamp_up_add_one=add_one)
     return per_token_group_quant_fp8(
         out,
         128,
@@ -36,15 +32,9 @@ def unfused(input, limit, alpha, add_one):
     )
 
 
-@pytest.mark.parametrize(
-    "m,n", [(1, 128), (7, 256), (33, 2048), (128, 2048), (256, 2048)]
-)
-@pytest.mark.parametrize(
-    "limit,alpha,add_one", [(None, None, True), (7.0, 1.0, False), (7.0, 1.7, True)]
-)
-def test_fused_preserves_activation_rounding_and_ue8m0_bytes(
-    m, n, limit, alpha, add_one
-):
+@pytest.mark.parametrize("m,n", [(1, 128), (7, 256), (33, 2048), (128, 2048), (256, 2048)])
+@pytest.mark.parametrize("limit,alpha,add_one", [(None, None, True), (7.0, 1.0, False), (7.0, 1.7, True)])
+def test_fused_preserves_activation_rounding_and_ue8m0_bytes(m, n, limit, alpha, add_one):
     torch.manual_seed(1013)
     input = torch.randn(m, 2 * n, dtype=torch.bfloat16, device="cuda") * 10
     input[:, :128] = 1e-7
@@ -58,9 +48,7 @@ def test_fused_preserves_activation_rounding_and_ue8m0_bytes(
         alpha=alpha,
         clamp_up_add_one=add_one,
     )
-    torch.testing.assert_close(
-        q.view(torch.uint8), expected_q.view(torch.uint8), rtol=0, atol=0
-    )
+    torch.testing.assert_close(q.view(torch.uint8), expected_q.view(torch.uint8), rtol=0, atol=0)
     torch.testing.assert_close(s, expected_s, rtol=0, atol=0)
     assert q.is_contiguous() and s.stride() == (1, ((m + 3) // 4) * 4)
 
@@ -71,16 +59,12 @@ def test_glm_fused_graph_replay():
     activation.silu_and_mul_quant_fp8(input, 128, torch.float8_e4m3fn, **kwargs)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        q, s = activation.silu_and_mul_quant_fp8(
-            input, 128, torch.float8_e4m3fn, **kwargs
-        )
+        q, s = activation.silu_and_mul_quant_fp8(input, 128, torch.float8_e4m3fn, **kwargs)
     for factor in [1.0, 10.0]:
         input.normal_().mul_(factor)
         graph.replay()
         expected_q, expected_s = unfused(input, 7.0, 1.0, False)
-        torch.testing.assert_close(
-            q.view(torch.uint8), expected_q.view(torch.uint8), rtol=0, atol=0
-        )
+        torch.testing.assert_close(q.view(torch.uint8), expected_q.view(torch.uint8), rtol=0, atol=0)
         torch.testing.assert_close(s, expected_s, rtol=0, atol=0)
 
 
@@ -106,9 +90,7 @@ def test_glm_fused_reuses_kernel_with_varying_scale_strides(monkeypatch):
             clamp_up_add_one=False,
         )
         expected = unfused(input, 7.0, 1.0, False)
-        torch.testing.assert_close(
-            actual[0].view(torch.uint8), expected[0].view(torch.uint8), rtol=0, atol=0
-        )
+        torch.testing.assert_close(actual[0].view(torch.uint8), expected[0].view(torch.uint8), rtol=0, atol=0)
         torch.testing.assert_close(actual[1], expected[1], rtol=0, atol=0)
     assert len(hashes) == 4 and len(set(hashes)) == 1
 
@@ -126,9 +108,7 @@ def test_glm_fused_deepgemm_w2_output(m):
     owner.mm_param = WeightPack(weight=qw, weight_scale=sw)
     owner.bias = None
     activated = torch.empty((m, 2048), dtype=input.dtype, device=input.device)
-    activation.silu_and_mul_fwd(
-        input, activated, limit=7.0, alpha=1.0, clamp_up_add_one=False
-    )
+    activation.silu_and_mul_fwd(input, activated, limit=7.0, alpha=1.0, clamp_up_add_one=False)
     expected = owner.mm(activated, use_custom_tensor_mananger=False)
     actual = owner.mm_swiglu(
         input,
@@ -144,14 +124,10 @@ def test_glm_fallback_preserves_no_quant_bias_and_output_buffer():
     input = torch.randn(7, 512, dtype=torch.bfloat16, device="cuda") * 10
     owner = MMWeightTpl.__new__(MMWeightTpl)
     owner.quant_method = NoQuantization()
-    owner.mm_param = WeightPack(
-        weight=torch.randn(128, 256, dtype=input.dtype, device=input.device)
-    )
+    owner.mm_param = WeightPack(weight=torch.randn(128, 256, dtype=input.dtype, device=input.device))
     owner.bias = torch.randn(128, dtype=input.dtype, device=input.device)
     activated = torch.empty((7, 256), dtype=input.dtype, device=input.device)
-    activation.silu_and_mul_fwd(
-        input, activated, limit=7.0, alpha=1.0, clamp_up_add_one=False
-    )
+    activation.silu_and_mul_fwd(input, activated, limit=7.0, alpha=1.0, clamp_up_add_one=False)
     expected = owner.mm(activated, use_custom_tensor_mananger=False)
     output = torch.empty_like(expected)
     actual = owner.mm_swiglu(

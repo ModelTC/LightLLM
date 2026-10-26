@@ -70,16 +70,12 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         )
 
         device = output.weight.device
-        weight, scale = weight_quant(
-            weight.cuda(device), self.block_size, use_ue8m0_scales=self.use_ue8m0_scales
-        )
+        weight, scale = weight_quant(weight.cuda(device), self.block_size, use_ue8m0_scales=self.use_ue8m0_scales)
         output.weight.copy_(weight)
         self.load_weight_scale(scale, output)
         return
 
-    def load_weight_scale(
-        self, weight_scale: torch.Tensor, weight_pack: WeightPack
-    ) -> None:
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
         if weight_scale is None:
             return
         repack_weight_scale = weight_scale
@@ -108,9 +104,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         input_scale = None
-        alloc_func = (
-            torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
-        )
+        alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         m, k = input_tensor.shape
         n = qweight.shape[0]
         if input_scale is None:
@@ -126,9 +120,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             )
 
         if out is None:
-            out = alloc_func(
-                (m, n), dtype=input_tensor.dtype, device=input_tensor.device
-            )
+            out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out)
         return out
 
@@ -158,9 +150,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 use_custom_tensor_mananger=use_custom_tensor_mananger,
                 bias=bias,
             )
-        alloc_func = (
-            self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
-        )
+        alloc_func = self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
         quant, scale = silu_and_mul_quant_fp8(
             input_tensor,
             self.block_size,
@@ -177,9 +167,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 dtype=input_tensor.dtype,
                 device=input_tensor.device,
             )
-        _deepgemm_fp8_nt(
-            (quant, scale), (weight_pack.weight, weight_pack.weight_scale), out
-        )
+        _deepgemm_fp8_nt((quant, scale), (weight_pack.weight, weight_pack.weight_scale), out)
         return out
 
     def _create_weight(
@@ -191,17 +179,12 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         num_experts: int = 1,
     ) -> Tuple[WeightPack, List[WeightPack]]:
         self.use_ue8m0_scales = (
-            self.hf_quantization_config is not None
-            and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
+            self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
         ) or os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
         self.use_packed_ue8m0 = self.use_ue8m0_scales and is_sm100_gpu()
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
-        weight_scale_out_dims = [
-            (_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims
-        ]
-        divisible_by_block_size = [
-            _out_dim % self.block_size != 0 for _out_dim in out_dims
-        ]
+        weight_scale_out_dims = [(_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims]
+        divisible_by_block_size = [_out_dim % self.block_size != 0 for _out_dim in out_dims]
         if sum(divisible_by_block_size) > 1:
             raise ValueError(
                 f"out_dims only contains one dim can not be divisible \
@@ -210,9 +193,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         weight_scale_out_dim = sum(weight_scale_out_dims)
         weight_scale_in_dim = (in_dim + self.block_size - 1) // self.block_size
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(
-            expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn
-        ).cuda(device_id)
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
         if self.use_packed_ue8m0:
             aligned_out_dim = (out_dim + 3) // 4 * 4
             weight_scale = torch.empty(
@@ -259,17 +240,11 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         weight = weight.cuda(output.weight.device)
         if weight.dim() == 2:
             n, k = weight.shape
-            packed_weight, weight_scale = per_token_cast_to_fp4(
-                weight, use_ue8m0=True, gran_k=self.block_size
-            )
-            weight_scale = deep_gemm.transform_sf_into_required_layout(
-                weight_scale, n, k, (1, self.block_size), None
-            )
+            packed_weight, weight_scale = per_token_cast_to_fp4(weight, use_ue8m0=True, gran_k=self.block_size)
+            weight_scale = deep_gemm.transform_sf_into_required_layout(weight_scale, n, k, (1, self.block_size), None)
         else:
             num_groups, n, k = weight.shape
-            packed_weight = torch.empty(
-                (num_groups, n, k // 2), device=weight.device, dtype=torch.int8
-            )
+            packed_weight = torch.empty((num_groups, n, k // 2), device=weight.device, dtype=torch.int8)
             weight_scale = torch.empty(
                 (num_groups, n, k // self.block_size),
                 device=weight.device,
@@ -295,9 +270,7 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         use_custom_tensor_mananger: bool = True,
         bias: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        raise NotImplementedError(
-            "fp4fp8-b32-deepgemm is only implemented for fused MoE expert weights"
-        )
+        raise NotImplementedError("fp4fp8-b32-deepgemm is only implemented for fused MoE expert weights")
 
     def _create_weight(
         self,
@@ -309,16 +282,12 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         assert in_dim % 2 == 0, "FP4 packed weight requires even input dimension"
-        assert (
-            in_dim % self.block_size == 0
-        ), "FP4 scale dimension must be divisible by block_size"
+        assert in_dim % self.block_size == 0, "FP4 scale dimension must be divisible by block_size"
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(
-            expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8
-        ).cuda(device_id)
-        weight_scale = torch.empty(
-            expert_prefix + (out_dim, in_dim // self.block_size), dtype=torch.int32
-        ).cuda(device_id)
+        weight = torch.empty(expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8).cuda(device_id)
+        weight_scale = torch.empty(expert_prefix + (out_dim, in_dim // self.block_size), dtype=torch.int32).cuda(
+            device_id
+        )
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         mm_param_list = self._split_weight_pack(
             mm_param,
@@ -333,11 +302,7 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
 def _deepgemm_fp8_nt(a_tuple, b_tuple, out):
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "gemm_fp8_fp8_bf16_nt"):
-            return deep_gemm.gemm_fp8_fp8_bf16_nt(
-                [a_tuple[0], a_tuple[1]], [b_tuple[0], b_tuple[1]], out
-            )
+            return deep_gemm.gemm_fp8_fp8_bf16_nt([a_tuple[0], a_tuple[1]], [b_tuple[0], b_tuple[1]], out)
         if hasattr(deep_gemm, "fp8_gemm_nt"):
-            return deep_gemm.fp8_gemm_nt(
-                (a_tuple[0], a_tuple[1]), (b_tuple[0], b_tuple[1]), out
-            )
+            return deep_gemm.fp8_gemm_nt((a_tuple[0], a_tuple[1]), (b_tuple[0], b_tuple[1]), out)
     raise RuntimeError("deep_gemm does not provide fp8 NT GEMM kernel in this version")

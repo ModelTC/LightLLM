@@ -19,18 +19,10 @@ class WeightPack:
         ]
 
     def get_expert(self, expert_idx: int):
-        assert (
-            self.weight.ndim == 3
-        ), f"weight must be a 3D tensor, but got {self.weight.ndim}"
+        assert self.weight.ndim == 3, f"weight must be a 3D tensor, but got {self.weight.ndim}"
         weight = self.weight[expert_idx]
-        weight_scale = (
-            self.weight_scale[expert_idx] if self.weight_scale is not None else None
-        )
-        weight_zero_point = (
-            self.weight_zero_point[expert_idx]
-            if self.weight_zero_point is not None
-            else None
-        )
+        weight_scale = self.weight_scale[expert_idx] if self.weight_scale is not None else None
+        weight_zero_point = self.weight_zero_point[expert_idx] if self.weight_zero_point is not None else None
         return WeightPack(
             weight=weight,
             weight_scale=weight_scale,
@@ -97,9 +89,7 @@ class QuantizationMethod(ABC):
             silu_and_mul_fwd,
         )
 
-        alloc_func = (
-            g_cache_manager.empty if use_custom_tensor_mananger else torch.empty
-        )
+        alloc_func = g_cache_manager.empty if use_custom_tensor_mananger else torch.empty
         activation = alloc_func(
             (input_tensor.shape[0], input_tensor.shape[1] // 2),
             dtype=input_tensor.dtype,
@@ -155,18 +145,14 @@ class QuantizationMethod(ABC):
         weight_pack.load_ok[0] = True
         return
 
-    def load_weight_scale(
-        self, weight_scale: torch.Tensor, weight_pack: WeightPack
-    ) -> None:
+    def load_weight_scale(self, weight_scale: torch.Tensor, weight_pack: WeightPack) -> None:
         if weight_scale is None:
             return
         weight_pack.weight_scale.copy_(weight_scale)
         weight_pack.load_ok[1] = True
         return
 
-    def load_weight_zero_point(
-        self, weight_zero_point: torch.Tensor, weight_pack: WeightPack
-    ) -> None:
+    def load_weight_zero_point(self, weight_zero_point: torch.Tensor, weight_pack: WeightPack) -> None:
         if weight_zero_point is None:
             return
         weight_pack.weight_zero_point.copy_(weight_zero_point)
@@ -228,9 +214,7 @@ class QuantizationMethod(ABC):
                 )
             )
         )
-        for weight, weight_scale, weight_zero_point in zip(
-            weight, weight_scale, weight_zero_point
-        ):
+        for weight, weight_scale, weight_zero_point in zip(weight, weight_scale, weight_zero_point):
             mm_param_list.append(
                 WeightPack(
                     weight=weight,

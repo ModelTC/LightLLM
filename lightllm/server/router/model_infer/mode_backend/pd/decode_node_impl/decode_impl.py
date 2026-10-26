@@ -1,12 +1,19 @@
 import random
 import torch.multiprocessing as mp
-from lightllm.server.pd_io_struct import PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq
-from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import ChunkedPrefillBackend
+from lightllm.server.pd_io_struct import (
+    PDChunckedTransTask,
+    PDChunckedTransTaskGroup,
+    PDAbortReq,
+)
+from lightllm.server.router.model_infer.mode_backend.chunked_prefill.impl import (
+    ChunkedPrefillBackend,
+)
 from typing import List, Tuple
 from lightllm.server.router.model_infer.infer_batch import g_infer_context, InferReq
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.pd_timeout_utils import get_pd_kv_transfer_timeout_seconds
 
 logger = init_logger(__name__)
 
@@ -216,7 +223,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
-            time_out_secs=180,
+            time_out_secs=get_pd_kv_transfer_timeout_seconds(),
             pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
             prefill_dp_index=None,
             decode_dp_index=self.dp_rank_in_node,

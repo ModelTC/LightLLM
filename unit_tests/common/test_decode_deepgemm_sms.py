@@ -14,9 +14,7 @@ from lightllm.distributed import communication_op as comm
         ("decode", False, 118),
     ],
 )
-def test_decode_compute_pool_preserves_communication_budget(
-    monkeypatch, mode, low_latency, expected
-):
+def test_decode_compute_pool_preserves_communication_budget(monkeypatch, mode, low_latency, expected):
     import deep_gemm
 
     compute, communication = [], []
@@ -29,9 +27,7 @@ def test_decode_compute_pool_preserves_communication_budget(
     else:
         monkeypatch.setattr(old_utils, "set_num_sms", compute.append)
     monkeypatch.setattr(comm, "get_device_sm_count", lambda: 132)
-    monkeypatch.setattr(
-        comm, "get_env_start_args", lambda: SimpleNamespace(run_mode=mode)
-    )
+    monkeypatch.setattr(comm, "get_env_start_args", lambda: SimpleNamespace(run_mode=mode))
     monkeypatch.setattr(
         comm,
         "deep_ep",

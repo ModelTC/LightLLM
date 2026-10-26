@@ -53,9 +53,7 @@ def _silu_and_mul_quant_fp8_kernel(
     scale = tl.maximum(tl.max(tl.abs(value), axis=1), 1e-10) / fp8_max
     if USE_UE8M0_SCALE:
         scale = tl.exp2(tl.ceil(tl.log2(scale)))
-    quant = tl.clamp(value / scale[:, None], -fp8_max, fp8_max).to(
-        quant_ptr.dtype.element_ty
-    )
+    quant = tl.clamp(value / scale[:, None], -fp8_max, fp8_max).to(quant_ptr.dtype.element_ty)
     tl.store(quant_ptr + ids[:, None] * GROUP_SIZE + cols, quant, mask)
     tl.store(scale_ptr + rows + group_cols * scale_stride_n, scale, ids < groups)
 
@@ -74,15 +72,11 @@ def silu_and_mul_quant_fp8(
     assert input.ndim == 2 and input.stride(1) == 1
     assert input.shape[1] % (2 * group_size) == 0
     assert group_size == triton.next_power_of_2(group_size)
-    assert (limit is None and alpha is None) or (
-        limit is not None and alpha is not None
-    )
+    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
     m, n = input.shape[0], input.shape[1] // 2
     quant = alloc_func((m, n), device=input.device, dtype=dtype)
     aligned_m = triton.cdiv(m, 4) * 4
-    scale = alloc_func(
-        (n // group_size, aligned_m), device=input.device, dtype=torch.float32
-    ).T[:m, :]
+    scale = alloc_func((n // group_size, aligned_m), device=input.device, dtype=torch.float32).T[:m, :]
     groups = m * n // group_size
     if groups == 0:
         return quant, scale
@@ -227,9 +221,7 @@ def silu_and_mul_fwd(
 ):
     assert input.stride(-1) == 1
     assert output.is_contiguous()
-    assert (limit is None and alpha is None) or (
-        limit is not None and alpha is not None
-    )
+    assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
 
     stride_input_m = input.stride(0)
     stride_input_n = input.stride(1)

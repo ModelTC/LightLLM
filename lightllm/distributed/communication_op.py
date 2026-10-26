@@ -64,9 +64,7 @@ class CustomProcessGroup:
         else:
             self.dp_prefill_balance_group = None
 
-        self.autotune_group = dist.new_group(
-            [i for i in range(get_global_world_size())], backend="gloo"
-        )
+        self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def _support_custom_allreduce(self) -> bool:
         return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
@@ -77,9 +75,7 @@ class CustomProcessGroup:
         from .symm_mem_all_reduce import SymmMemAllreduce
 
         data_type = get_torch_dtype(get_env_start_args().data_type)
-        symm = SymmMemAllreduce(
-            self.device_group, torch.cuda.current_device(), dtype=data_type
-        )
+        symm = SymmMemAllreduce(self.device_group, torch.cuda.current_device(), dtype=data_type)
         if not symm.disabled:
             self.symm_mem_reduce = symm
             logger.info("Enable SymmMem ALLReduce.")
@@ -97,9 +93,7 @@ class CustomProcessGroup:
 
     def all_reduce(self, input_: torch.Tensor) -> None:
         # Dispatch chain: FlashInfer -> SymmMem -> NCCL.
-        if self.flashinfer_reduce is not None and self.flashinfer_reduce.should_use(
-            input_
-        ):
+        if self.flashinfer_reduce is not None and self.flashinfer_reduce.should_use(input_):
             input_.data = self.flashinfer_reduce.all_reduce(input_)
             return
         if self.symm_mem_reduce is not None and self.symm_mem_reduce.should_use(input_):
@@ -107,12 +101,8 @@ class CustomProcessGroup:
             return
         return dist.all_reduce(input_, group=self.device_group)
 
-    def all_gather_into_tensor(
-        self, output_: torch.Tensor, input_: torch.Tensor, async_op: bool = False
-    ) -> None:
-        return dist.all_gather_into_tensor(
-            output_, input_, group=self.device_group, async_op=async_op
-        )
+    def all_gather_into_tensor(self, output_: torch.Tensor, input_: torch.Tensor, async_op: bool = False) -> None:
+        return dist.all_gather_into_tensor(output_, input_, group=self.device_group, async_op=async_op)
 
 
 class DistributeGroupManager:
@@ -137,9 +127,7 @@ class DistributeGroupManager:
                 group.init_flashinfer_reduce()
             self.groups.append(group)
         if args.dp > 1:
-            self.dp_control_group = dist.new_group(
-                ranks=list(range(get_global_world_size())), backend="gloo"
-            )
+            self.dp_control_group = dist.new_group(ranks=list(range(get_global_world_size())), backend="gloo")
         return
 
     def get_default_group(self) -> CustomProcessGroup:
@@ -186,12 +174,8 @@ class DistributeGroupManager:
         避免为未使用的路径长期占用显存。
         """
         enable_ep_moe = get_env_start_args().enable_ep_moe
-        prefill_num_max_dispatch_tokens_per_rank = (
-            get_deepep_num_max_dispatch_tokens_per_rank_prefill()
-        )
-        decode_num_max_dispatch_tokens_per_rank = (
-            get_deepep_num_max_dispatch_tokens_per_rank_decode()
-        )
+        prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+        decode_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if not enable_ep_moe:
             self.ep_buffer = None
             self.ep_low_latency_buffer = None
@@ -212,9 +196,7 @@ class DistributeGroupManager:
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        self.ll_num_experts = (
-            n_routed_experts + get_redundancy_expert_num() * global_world_size
-        )
+        self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
@@ -227,9 +209,7 @@ class DistributeGroupManager:
         self.ep_low_latency_buffer = None
 
         if not expert_quant_method_names:
-            raise ValueError(
-                "No valid MoE quant method was found while initializing DeepEP buffers"
-            )
+            raise ValueError("No valid MoE quant method was found while initializing DeepEP buffers")
 
         mega_moe_quant_method = "fp4fp8-b32-deepgemm"
         is_sm100 = is_sm100_gpu()
@@ -244,8 +224,7 @@ class DistributeGroupManager:
             # MoE 层，就需要 legacy low-latency buffer。FP4/FP8 逐层混用时两者都会初始化。
             has_mega_moe_layer = mega_moe_quant_method in expert_quant_method_names
             has_legacy_moe_layer = any(
-                method_name != mega_moe_quant_method
-                for method_name in expert_quant_method_names
+                method_name != mega_moe_quant_method for method_name in expert_quant_method_names
             )
             enable_mega_moe_buffer = has_mega_moe_layer
             enable_low_latency_buffer = has_legacy_moe_layer
@@ -263,24 +242,20 @@ class DistributeGroupManager:
                 self.ll_num_experts,
             )
             microbatch_count = len(self.groups)
-            min_prefill_reuse_buffer_bytes = (
-                _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
-                    global_world_size=global_world_size,
-                    prefill_tokens_per_rank=prefill_num_max_dispatch_tokens_per_rank,
-                    hidden_size=hidden_size,
-                    moe_intermediate_size=moe_intermediate_size,
-                    hidden_dtype=get_torch_dtype(get_env_start_args().data_type),
-                    microbatch_count=microbatch_count,
-                )
+            min_prefill_reuse_buffer_bytes = _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
+                global_world_size=global_world_size,
+                prefill_tokens_per_rank=prefill_num_max_dispatch_tokens_per_rank,
+                hidden_size=hidden_size,
+                moe_intermediate_size=moe_intermediate_size,
+                hidden_dtype=get_torch_dtype(get_env_start_args().data_type),
+                microbatch_count=microbatch_count,
             )
             # Decode 和 prefill 不会同时使用 local RDMA storage，容量取两条路径的较大值。
             num_rdma_bytes = max(decode_size_hint, min_prefill_reuse_buffer_bytes)
             # DeepEP 返回的 decode hint 不保证能被 microbatch 均分；最终再对齐一次，
             # 确保每个 workspace slice 的容量及起始位置仍保持 256-byte 对齐。
             rdma_alignment = microbatch_count * 256
-            num_rdma_bytes = (
-                triton.cdiv(num_rdma_bytes, rdma_alignment) * rdma_alignment
-            )
+            num_rdma_bytes = triton.cdiv(num_rdma_bytes, rdma_alignment) * rdma_alignment
             self.ep_low_latency_buffer = deep_ep.Buffer(
                 deepep_group,
                 num_rdma_bytes=num_rdma_bytes,
@@ -292,9 +267,7 @@ class DistributeGroupManager:
             # SM100 FP4 层通过 DeepGEMM Mega MoE 完成通信和计算，不使用 legacy
             # low-latency buffer，因此纯 FP4 模型无需承担后者的大块 RDMA 显存。
             if moe_intermediate_size is None:
-                raise ValueError(
-                    "SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config"
-                )
+                raise ValueError("SM100 Mega MoE requires moe_intermediate_size or intermediate_size in model config")
 
             import deep_gemm
 
@@ -312,9 +285,7 @@ class DistributeGroupManager:
             enable_mega_moe_buffer,
             sorted(expert_quant_method_names),
         )
-        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(
-            self.ll_num_experts, num_experts_per_tok
-        )
+        theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
         self._set_num_sms_for_deep_gemm(theoretical_sms)
 
     def _set_num_sms_for_deep_gemm(self, deepep_sms: int):
@@ -330,10 +301,7 @@ class DistributeGroupManager:
             if self.ep_low_latency_buffer is not None:
                 deep_ep.Buffer.set_num_sms(deepep_sms - deepep_sms % 2)
             compute_sms = max(device_sms - deepep_sms, 2)
-            if (
-                self.ep_low_latency_buffer is not None
-                and get_env_start_args().run_mode == "decode"
-            ):
+            if self.ep_low_latency_buffer is not None and get_env_start_args().run_mode == "decode":
                 # Pure decode uses DeepEP's separate low-latency communication
                 # pool; the persistent prefill SM partition does not apply.
                 compute_sms = device_sms
@@ -341,9 +309,7 @@ class DistributeGroupManager:
         except BaseException as e:
             logger.warning(f"set num sms for deep_gemm failed: {e}")
 
-    def get_deep_ep_prefill_moe_workspace(
-        self, microbatch_index: int = 0
-    ) -> torch.Tensor:
+    def get_deep_ep_prefill_moe_workspace(self, microbatch_index: int = 0) -> torch.Tensor:
         """Return a slice of the workspace reused by DeepEP prefill MoE kernels.
 
         DeepEP's low-latency RDMA buffer is idle during prefill, so its local
@@ -366,12 +332,8 @@ class DistributeGroupManager:
         initialized. The same returned slice must not be used concurrently by
         overlapping calls.
         """
-        assert (
-            self.ep_low_latency_buffer is not None
-        ), "DeepEP low-latency buffer is not initialized"
-        workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(
-            torch.uint8, use_rdma_buffer=True
-        )
+        assert self.ep_low_latency_buffer is not None, "DeepEP low-latency buffer is not initialized"
+        workspace = self.ep_low_latency_buffer.get_local_buffer_tensor(torch.uint8, use_rdma_buffer=True)
         microbatch_count = len(self.groups)
         assert 0 <= microbatch_index < microbatch_count
         workspace_size = workspace.numel() // microbatch_count
@@ -447,13 +409,9 @@ def reduce_scatter_tensor(
         return
     # 目前还没有定制算子实现。
     if isinstance(group, CustomProcessGroup):
-        return dist.reduce_scatter_tensor(
-            output, input, op=op, group=group.device_group, async_op=async_op
-        )
+        return dist.reduce_scatter_tensor(output, input, op=op, group=group.device_group, async_op=async_op)
     else:
-        return dist.reduce_scatter_tensor(
-            output, input, op=op, group=group, async_op=async_op
-        )
+        return dist.reduce_scatter_tensor(output, input, op=op, group=group, async_op=async_op)
 
 
 def broadcast(
@@ -465,9 +423,7 @@ def broadcast(
     if _is_single_group(group=group):
         return
     if isinstance(group, CustomProcessGroup):
-        return dist.broadcast(
-            tensor, src=src, group=group.device_group, async_op=async_op
-        )
+        return dist.broadcast(tensor, src=src, group=group.device_group, async_op=async_op)
     else:
         return dist.broadcast(tensor, src=src, group=group, async_op=async_op)
 
@@ -517,9 +473,7 @@ def _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
     scale_cols = moe_intermediate_size // 128
 
     silu_bytes = tensor_bytes(chunk_rows, moe_intermediate_size, hidden_itemsize)
-    gemm_out_a_bytes = tensor_bytes(
-        chunk_rows, 2 * moe_intermediate_size, hidden_itemsize
-    )
+    gemm_out_a_bytes = tensor_bytes(chunk_rows, 2 * moe_intermediate_size, hidden_itemsize)
     quant_bytes = tensor_bytes(chunk_rows, moe_intermediate_size, 1)
     scale_bytes = tensor_bytes(chunk_rows, scale_cols, torch.float32.itemsize)
     gemm_out_b_bytes = tensor_bytes(chunk_rows, hidden_size, hidden_itemsize)
@@ -528,10 +482,7 @@ def _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
 
     # silu 释放后，B 较小时可复用其 first-fit 空洞；B 更大则需另行预留完整空间。
     quant_w2_peak_bytes = (
-        silu_bytes
-        + quant_bytes
-        + scale_bytes
-        + (gemm_out_b_bytes if gemm_out_b_bytes > silu_bytes else 0)
+        silu_bytes + quant_bytes + scale_bytes + (gemm_out_b_bytes if gemm_out_b_bytes > silu_bytes else 0)
     )
     temporary_peak_bytes = max(w1_peak_bytes, quant_w2_peak_bytes)
 

@@ -49,12 +49,8 @@ def test_selected_prefill_compaction_reuses_kernel_across_context_lengths(monkey
             num_warps=8,
         )
         torch.testing.assert_close(lengths, torch.full_like(lengths, 32))
-        torch.testing.assert_close(
-            compact[:, :32], mapping[(starts[:, None] + topk[:, :32]).long()].long()
-        )
-        torch.testing.assert_close(
-            cuq, torch.arange(3, dtype=torch.int32, device="cuda")
-        )
+        torch.testing.assert_close(compact[:, :32], mapping[(starts[:, None] + topk[:, :32]).long()].long())
+        torch.testing.assert_close(cuq, torch.arange(3, dtype=torch.int32, device="cuda"))
     assert len(hashes) == 4 and len(set(hashes)) == 1
 
 
@@ -66,9 +62,9 @@ def test_online_attention_merge_reuses_kernel_across_query_counts(monkeypatch):
         chunk = torch.randn_like(output)
         chunk_lse = torch.randn_like(lse)
         expected_lse = torch.logaddexp(lse, chunk_lse)
-        expected = output * torch.exp(lse - expected_lse).T.unsqueeze(
-            -1
-        ) + chunk * torch.exp(chunk_lse - expected_lse).T.unsqueeze(-1)
+        expected = output * torch.exp(lse - expected_lse).T.unsqueeze(-1) + chunk * torch.exp(
+            chunk_lse - expected_lse
+        ).T.unsqueeze(-1)
         fp8._merge_att_output_kernel[(nq, 1)](
             output,
             lse,
