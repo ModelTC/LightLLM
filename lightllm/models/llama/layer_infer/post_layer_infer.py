@@ -1,9 +1,10 @@
 import os
 import torch
-from lightllm.common.basemodel.batch_objs import PostLayerOutput
 import torch.functional as F
 import torch.distributed as dist
 import numpy as np
+
+from lightllm.common.basemodel.batch_objs import PostLayerOutput
 from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
@@ -101,6 +102,17 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
         infer_state: LlamaInferStateInfo,
     ) -> PostLayerOutput:
         """执行原始 lm-head，并收集完整词表 logits。"""
+
+        if self.tp_world_size_ == 1 and hidden.is_cuda and hidden.dtype == torch.bfloat16:
+            # Produce token-major logits directly so the FP32 conversion reads
+            # contiguous rows instead of transposing the full vocabulary matrix.
+            normed = self._norm(hidden, infer_state, layer_weight)
+            vocab_size = layer_weight.lm_head_weight_.vocab_size
+            local_logits = self.alloc_tensor((token_num, vocab_size), dtype=hidden.dtype)
+            torch.mm(normed, layer_weight.lm_head_weight_.weight.t(), out=local_logits)
+            logits = self.alloc_tensor((token_num, vocab_size), dtype=torch.float32)
+            logits.copy_(local_logits)
+            return PostLayerOutput(logits=logits)
 
         local_logits = self._project_local_logits(hidden, token_num, layer_weight, infer_state)
 

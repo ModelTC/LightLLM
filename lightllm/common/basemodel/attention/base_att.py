@@ -10,6 +10,7 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
+    from lightllm.common.linear_state import LinearStateCommit
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -169,6 +170,9 @@ class BasePrefillAttState(BaseAttState):
 
 @dataclass
 class BaseDecodeAttState(BaseAttState):
+    def get_linear_state_commit(self) -> Optional["LinearStateCommit"]:
+        return None
+
     def copy_for_decode_cuda_graph(self, new_state: "BaseDecodeAttState"):
         """Copy tensor metadata into the buffers owned by the captured graph."""
         for attr_name, attr_value in vars(new_state).items():

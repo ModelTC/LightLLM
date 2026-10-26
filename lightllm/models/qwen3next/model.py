@@ -118,7 +118,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def _init_att_backend1(self):
         # MTP draft models only keep full-attention layers and reuse the main
-        # model's managers, so they do not need LinearAttBackend.
+        # model's managers, so they do not need GDNLinearAttBackend.
         if getattr(self, "is_mtp_draft_model", False):
             self.prefill_att_backend1 = None
             self.decode_att_backend1 = None
