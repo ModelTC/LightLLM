@@ -181,6 +181,7 @@ class VisualModelRpcServer(rpyc.Service):
             )
 
     def exposed_run_task(self, images: List["ImageItem"], ref_event_list: List[threading.Event]):
+        """Validate image items received from the visual proxy and enqueue them."""
         try:
             images = unpack_image_items(images, ImageItem)
             for i in range(len(images)):

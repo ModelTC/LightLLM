@@ -120,6 +120,7 @@ class ProxyVisualManager(VisualManager):
             return self.id_to_rpyc_conn[id]
 
     def run_task(self, conn: rpyc.Connection, images: List[ImageItem]):
+        """Copy image data into the visual RPC payload and await inference completion."""
         event = threading.Event()
         # 避免修改原始的 image 对象，主要是为了避免在后续的流程中出现问题，因为后续的流程可能会对 image 对象进行访问，
         # 尤其是一些 cache 的逻辑，如果直接修改了原始的 image 对象，可能会导致一些不可预期的问题。
@@ -140,6 +141,7 @@ class ProxyVisualManager(VisualManager):
         return
 
     async def loop_to_connect_remote_visual_server(self):
+        """Refresh registered visual servers and maintain their RPC connections."""
         counter = 0
         error_counter = 0
         while True:

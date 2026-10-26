@@ -8,13 +8,9 @@ import uuid
 import pickle
 import websockets
 import socket
-import sys
-import os
-import signal
 import time
-from lightllm.utils.net_utils import get_hostname_ip
 from .objs import VIT_Obj
-from typing import List
+from typing import Any, List, Tuple
 from lightllm.server.core.objs import StartArgs
 
 asyncio.set_event_loop_policy(uvloop.EventLoopPolicy())
@@ -28,8 +24,9 @@ from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.server.embed_cache.utils import create_shm, get_shm_name_data, free_shm
 from .manager import VisualManager
-from .objs import visual_only_rpyc_config
-from .rpc_payload import unpack_image_items
+from .objs import VISUAL_ONLY_RPC_HOST, visual_only_rpyc_config
+from .rpc_payload import notify_remote_event_async, unpack_image_items
+from .rpyc_server import VisualOnlyThreadedServer
 
 
 logger = init_logger(__name__)
@@ -40,8 +37,9 @@ class VisualOnlyManager(rpyc.Service):
         self,
         args: StartArgs,
     ):
+        """Initialize the visual inference service and its worker event loop."""
         self.args = args
-        self.rpc_host = get_hostname_ip() if args.host == "0.0.0.0" else args.host
+        self.rpc_host = VISUAL_ONLY_RPC_HOST
         self.model_weightdir = args.model_dir
         self.vit_dp = args.visual_dp
         assert self.vit_dp == 1
@@ -52,7 +50,7 @@ class VisualOnlyManager(rpyc.Service):
 
         self.new_loop = asyncio.new_event_loop()
 
-        def _event_loop():
+        def _event_loop() -> None:
             asyncio.set_event_loop(self.new_loop)
             self.new_loop.run_forever()
 
@@ -60,12 +58,7 @@ class VisualOnlyManager(rpyc.Service):
         t.start()
 
     async def register_to_config_server_loop(self, args: StartArgs):
-        if args.host in ["127.0.0.1", "localhost"]:
-            logger.error("remote visual server must specify host ip, can not be localhost or 127.0.0.1")
-            # kill father process to trigger graceful exit, avoid orphan process
-            os.kill(os.getppid(), signal.SIGTERM)
-            sys.exit(-1)
-
+        """Register this loopback-only endpoint with the local config service."""
         host_ip = self.rpc_host
 
         ports = get_shm_port_args()
@@ -134,7 +127,8 @@ class VisualOnlyManager(rpyc.Service):
     def clean_up(self):
         return
 
-    def exposed_remote_infer_images(self, payload: tuple, ref_event):
+    def exposed_remote_infer_images(self, payload: Tuple[Any, ...], ref_event: Any) -> None:
+        """Validate remote image data, stage it in shared memory, and queue inference."""
         images = unpack_image_items(
             payload,
             ImageItem,
@@ -143,7 +137,8 @@ class VisualOnlyManager(rpyc.Service):
         )
         created_shm_names = []
 
-        def _cleanup_shared_memory():
+        def _cleanup_shared_memory() -> None:
+            """Release shared-memory segments created for this request."""
             for shm_name in created_shm_names:
                 try:
                     free_shm(shm_name)
@@ -167,16 +162,17 @@ class VisualOnlyManager(rpyc.Service):
 
             handle = asyncio.run_coroutine_threadsafe(self.handle_images(images_need_infer=images), loop=self.new_loop)
 
-            def _callback(fut):
+            def _callback(fut: Any) -> None:
+                """Release request storage before notifying the client asynchronously."""
                 if time.time() - start > 0.05:
                     logger.info(
                         f"Finished infer_images for images {[image.md5 for image in images]}"
                         f" with latency {time.time() - start} seconds"
                     )
                 try:
-                    ref_event.set()
-                finally:
                     _cleanup_shared_memory()
+                finally:
+                    notify_remote_event_async(ref_event)
                 logger.info(
                     f"Finished infer_images request for images {[image.md5 for image in images]}"
                     f" and cleaned up shm resources"
@@ -191,6 +187,7 @@ class VisualOnlyManager(rpyc.Service):
 
 
 def start_visual_process(args: StartArgs, pipe_writer):
+    """Initialize the visual inference process and start its loopback RPC server."""
     import lightllm.utils.rpyc_fix_utils as _
 
     # 注册graceful 退出的处理
@@ -201,7 +198,8 @@ def start_visual_process(args: StartArgs, pipe_writer):
     try:
         visualserver = VisualOnlyManager(args=args)
 
-        def handle_exception(loop, context):
+        def handle_exception(loop: asyncio.AbstractEventLoop, context: Any) -> None:
+            """Log unhandled errors raised by the visual inference event loop."""
             logger.exception(f"VisualServer Caught exception: {str(context)}")
 
         visualserver.new_loop.set_exception_handler(handle_exception)
@@ -213,7 +211,7 @@ def start_visual_process(args: StartArgs, pipe_writer):
             visualserver.register_to_config_server_loop(args=args), loop=visualserver.new_loop
         )
 
-        t = rpyc.ThreadedServer(
+        t = VisualOnlyThreadedServer(
             visualserver,
             hostname=visualserver.rpc_host,
             port=get_shm_port_args().visual_rpyc_port,

@@ -33,5 +33,6 @@ class VisualModelRpcClient:
         return
 
     async def run_task(self, images: List[ImageItem], ref_event_list: List[threading.Event]):
+        """Serialize images before dispatching them to the model RPC worker."""
         ans = self._run_task(pack_image_items(images), ref_event_list)
         return await ans

@@ -1,5 +1,6 @@
+import logging
 from math import isfinite
-from threading import Event
+from threading import Event, Thread
 from typing import Any, Callable, List, Optional, Sequence, Tuple
 
 
@@ -22,9 +23,28 @@ _PAYLOAD_VERSION = 1
 _MAX_IMAGE_COUNT = 4096
 _MAX_CONTAINER_ITEMS = 4096
 _MAX_NESTING = 16
+MAX_IMAGE_BYTES = 32 * 1024 * 1024
+MAX_BATCH_IMAGE_BYTES = 64 * 1024 * 1024
+MAX_RPC_FRAME_BYTES = MAX_BATCH_IMAGE_BYTES + 1024 * 1024
+logger = logging.getLogger(__name__)
+
+
+def _validate_image_data_size(data_bytes: Any, total_bytes: int) -> int:
+    """Validate one image payload and update the batch byte total."""
+    if data_bytes is None:
+        return total_bytes
+    if type(data_bytes) is not bytes:
+        raise ValueError("visual RPC image data must be bytes")
+    if len(data_bytes) > MAX_IMAGE_BYTES:
+        raise ValueError("visual RPC image exceeds the per-image byte limit")
+    total_bytes += len(data_bytes)
+    if total_bytes > MAX_BATCH_IMAGE_BYTES:
+        raise ValueError("visual RPC image batch exceeds the aggregate byte limit")
+    return total_bytes
 
 
 def _pack_value(value: Any, depth: int = 0) -> Tuple[Any, ...]:
+    """Encode a supported value as a tagged tuple of built-in values."""
     if depth > _MAX_NESTING:
         raise ValueError("visual RPC value is nested too deeply")
     if value is None:
@@ -61,6 +81,7 @@ def _pack_value(value: Any, depth: int = 0) -> Tuple[Any, ...]:
 
 
 def _unpack_value(value: Any, depth: int = 0) -> Any:
+    """Decode one tagged value while validating its type and nesting."""
     if depth > _MAX_NESTING or type(value) is not tuple or not value:
         raise ValueError("invalid visual RPC value")
 
@@ -105,11 +126,14 @@ def _unpack_value(value: Any, depth: int = 0) -> Any:
 
 
 def pack_image_items(images: Sequence[Any]) -> Tuple[Any, ...]:
+    """Serialize image items and enforce their per-image and batch byte budgets."""
     if type(images) not in (list, tuple) or len(images) > _MAX_IMAGE_COUNT:
         raise ValueError("invalid visual RPC image batch")
 
     records = []
+    total_bytes = 0
     for image in images:
+        total_bytes = _validate_image_data_size(getattr(image, "data_bytes", None), total_bytes)
         records.append(tuple(_pack_value(getattr(image, field, None)) for field in _IMAGE_FIELDS))
     return (_PAYLOAD_VERSION, tuple(records))
 
@@ -120,6 +144,7 @@ def unpack_image_items(
     max_count: Optional[int] = None,
     require_image_data: bool = False,
 ) -> List[Any]:
+    """Validate a versioned image payload and reconstruct its image items."""
     if type(payload) is not tuple or len(payload) != 2:
         raise ValueError("visual RPC payload must be a versioned tuple")
     if type(payload[0]) is not int or payload[0] != _PAYLOAD_VERSION:
@@ -131,10 +156,12 @@ def unpack_image_items(
         raise ValueError("visual RPC image batch exceeds the configured limit")
 
     images = []
+    total_bytes = 0
     for record in records:
         if type(record) is not tuple or len(record) != len(_IMAGE_FIELDS):
             raise ValueError("invalid visual RPC image record")
         values = [_unpack_value(value) for value in record]
+        total_bytes = _validate_image_data_size(values[-1], total_bytes)
         image = image_item_factory(type=values[0], data=values[1])
         for field, value in zip(_IMAGE_FIELDS[2:], values[2:]):
             if field == "data_bytes" and value is None:
@@ -168,8 +195,28 @@ def unpack_image_items(
 
 
 class RemoteEvent:
+    """Expose a narrow callback for signaling an event owned by the client."""
+
     def __init__(self, event: Event):
+        """Store the event that the remote peer may signal."""
         self._event = event
 
     def exposed_set(self) -> None:
+        """Signal the stored event."""
         self._event.set()
+
+
+def notify_remote_event_async(remote_event: Any) -> None:
+    """Signal a client-owned event on a daemon thread without blocking inference."""
+
+    def _notify() -> None:
+        try:
+            remote_event.set()
+        except Exception:
+            logger.exception("Failed to notify the visual inference client")
+
+    worker = Thread(target=_notify, name="visual-rpc-callback", daemon=True)
+    try:
+        worker.start()
+    except RuntimeError:
+        logger.exception("Failed to start visual RPC callback thread")
