@@ -45,6 +45,9 @@ class BaseKVMoveManager:
 
         self.kv_trans_processes: List[KVTransProcess] = [None] * self.node_world_size
         self._trans_process_locks = [threading.Lock() for _ in range(self.node_world_size)]
+        self._pending_trans_tasks_by_device: List[Dict[str, List[PDChunckedTransTask]]] = [
+            {} for _ in range(self.node_world_size)
+        ]
         self._trans_process_restart_counts = [0] * self.node_world_size
         self._trans_process_last_restart_at: List[Optional[float]] = [None] * self.node_world_size
         for device_id in range(self.node_world_size):
@@ -88,8 +91,26 @@ class BaseKVMoveManager:
                 trans_process = self.kv_trans_processes[device_id]
                 if trans_process.is_trans_process_health():
                     trans_process.task_in_queue.put(task)
+                    self._register_pending_trans_tasks(device_id, task)
                     return
             time.sleep(0.01)
+
+    def _register_pending_trans_tasks(
+        self,
+        device_id: int,
+        task: Union[PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq],
+    ) -> None:
+        if isinstance(task, PDChunckedTransTaskGroup):
+            tasks = task.task_list
+        elif isinstance(task, PDChunckedTransTask):
+            tasks = [task]
+        else:
+            return
+
+        pending_tasks = self._pending_trans_tasks_by_device[device_id]
+        for trans_task in tasks:
+            key = trans_task.createRetObj().get_key()
+            pending_tasks.setdefault(key, []).append(trans_task)
 
     # ==================================================================================
     #  将收集到的传输返回信息，批量写回给推理进程，触发其进行相关管理信息的更新。
@@ -131,29 +152,29 @@ class BaseKVMoveManager:
             ret_obj: Optional[PDChunckedTransTaskRet] = trans_process.task_out_queue.get()
             if ret_obj is None:
                 return
-            self.ret_obj_queue.put(ret_obj)
+            device_id = trans_process.device_id
+            with self._trans_process_locks[device_id]:
+                if self.kv_trans_processes[device_id] is not trans_process:
+                    continue
 
-    def _fail_queued_trans_tasks(self, trans_process: KVTransProcess, device_id: int) -> None:
-        trans_process.task_in_queue.put(None)
-        while True:
-            task: Union[
-                PDChunckedTransTask, PDChunckedTransTaskGroup, PDAbortReq, None
-            ] = trans_process.task_in_queue.get()
-            if task is None:
-                return
-            if isinstance(task, PDAbortReq):
-                continue
-            tasks: List[PDChunckedTransTask]
-            if isinstance(task, PDChunckedTransTaskGroup):
-                tasks = task.task_list
-            elif isinstance(task, PDChunckedTransTask):
-                tasks = [task]
-            else:
-                raise TypeError(f"Unexpected queued KV transfer task: {type(task).__name__}")
+                pending_tasks = self._pending_trans_tasks_by_device[device_id]
+                ret_key = ret_obj.get_key()
+                tasks_for_key = pending_tasks.get(ret_key)
+                if not tasks_for_key:
+                    continue
+                tasks_for_key.pop()
+                if not tasks_for_key:
+                    del pending_tasks[ret_key]
+                self.ret_obj_queue.put(ret_obj)
 
-            for trans_task in tasks:
-                trans_task.error_info = f"KV transfer worker for device {device_id} restarted before processing task"
-                self.ret_obj_queue.put(trans_task.createRetObj())
+    def _fail_pending_trans_tasks(self, device_id: int) -> None:
+        pending_tasks = self._pending_trans_tasks_by_device[device_id]
+        tasks_to_fail = [task for tasks in pending_tasks.values() for task in tasks]
+        pending_tasks.clear()
+
+        for trans_task in tasks_to_fail:
+            trans_task.error_info = f"KV transfer worker for device {device_id} restarted before reporting task result"
+            self.ret_obj_queue.put(trans_task.createRetObj())
 
     def _restart_trans_process(self, device_id: int) -> None:
         with self._trans_process_locks[device_id]:
@@ -164,7 +185,7 @@ class BaseKVMoveManager:
                 old_trans_process.process.join(timeout=5)
                 if old_trans_process.process.is_alive():
                     raise RuntimeError(f"KV transfer worker for device {device_id} did not stop before restart")
-            self._fail_queued_trans_tasks(old_trans_process, device_id)
+            self._fail_pending_trans_tasks(device_id)
             try:
                 old_trans_process.task_out_queue.put(None)
             except (EOFError, OSError, ValueError):
