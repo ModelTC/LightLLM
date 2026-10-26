@@ -1,3 +1,4 @@
+import os
 import time
 from typing import List, Tuple
 
@@ -170,7 +171,9 @@ class DPChunkedPrefillBackend(ModeBackend):
 
         except BaseException as e:
             self.logger.exception(str(e))
-            raise e
+            # A dead inference thread cannot serve requests or join DP collectives.
+            # Exit the worker so the existing process supervisor detects failure.
+            os._exit(1)
 
     def prefill_normal(
         self,
