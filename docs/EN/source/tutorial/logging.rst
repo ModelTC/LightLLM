@@ -196,3 +196,9 @@ INFO reports one throughput, queue and KV usage snapshot per node. Active KV and
 cache occupancy are separate. JSON retains raw window counts omitted from compact text.
 Successful request summaries default to 1% sampling; P/D stage summaries are DEBUG only.
 Failures bypass sampling; cancellations are DEBUG. Terminal reasons are preserved.
+
+For HTTPS with required client certificates, set ``LIGHTLLM_READINESS_CLIENT_CERT``
+to a PEM client certificate trusted by Hypercorn and ``LIGHTLLM_READINESS_CLIENT_KEY``
+to its unencrypted PEM private key. The key setting can be omitted when the key is
+in the certificate file. The probe continues to verify the server certificate;
+use a dedicated client identity with client-authentication permission.

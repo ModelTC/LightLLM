@@ -133,6 +133,9 @@ class SubmoduleManager:
                     context = ssl.create_default_context(cafile=tls_config.certfile)
                     context.check_hostname = False
                     context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+                    client_cert = os.getenv("LIGHTLLM_READINESS_CLIENT_CERT")
+                    if client_cert:
+                        context.load_cert_chain(client_cert, os.getenv("LIGHTLLM_READINESS_CLIENT_KEY"))
                     adapter = HTTPAdapter()
                     adapter.init_poolmanager(1, 1, ssl_context=context, assert_hostname=False)
                     session.mount("https://", adapter)

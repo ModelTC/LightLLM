@@ -207,3 +207,8 @@ INFO 启动日志以 HTTP /readiness 成功后的 service.ready 为准，包含�
 运行时每个节点仅打印一份吞吐与队列摘要；KV 活跃占用与可复用缓存分开显示。
 文本省略原始窗口计数，JSON 保留全部计数与时间窗口。P/D 内部请求摘要只在 DEBUG 输出。
 失败摘要不采样，取消请求只在 DEBUG 输出；终止原因包含 stop、length、abort 或 error。
+
+HTTPS 启用客户端证书认证时，将 ``LIGHTLLM_READINESS_CLIENT_CERT`` 设置为 Hypercorn
+信任的 PEM 客户端证书路径，将 ``LIGHTLLM_READINESS_CLIENT_KEY`` 设置为对应的未加密
+PEM 私钥路径。证书文件已包含私钥时可省略后者。探针仍验证服务端证书；请使用具有
+客户端认证权限的独立身份。

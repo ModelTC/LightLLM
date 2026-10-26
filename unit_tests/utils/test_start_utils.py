@@ -570,3 +570,91 @@ def test_readiness_monitor_tls(monkeypatch, tmp_path):
         server.shutdown()
         server.server_close()
         worker.join()
+
+
+@pytest.mark.parametrize("identity", [None, "separate", "combined"])
+def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
+    import ssl
+    import subprocess
+    import requests
+    from unittest.mock import MagicMock, Mock
+    from lightllm.server.router.dynamic_prompt import shared_arr
+    from lightllm.utils import shm_port_args
+
+    for name in ("server", "client"):
+        subprocess.run(
+            [
+                "openssl",
+                "req",
+                "-x509",
+                "-newkey",
+                "rsa:2048",
+                "-nodes",
+                "-days",
+                "1",
+                "-subj",
+                f"/CN={name}",
+                "-keyout",
+                str(tmp_path / f"{name}.key"),
+                "-out",
+                str(tmp_path / f"{name}.pem"),
+            ],
+            check=True,
+            capture_output=True,
+        )
+    config = tmp_path / "hypercorn.toml"
+    config.write_text(f'certfile = "{tmp_path / "server.pem"}"\nkeyfile = "{tmp_path / "server.key"}"\n')
+    monkeypatch.delenv("LIGHTLLM_READINESS_CLIENT_CERT", raising=False)
+    monkeypatch.delenv("LIGHTLLM_READINESS_CLIENT_KEY", raising=False)
+    if identity == "separate":
+        monkeypatch.setenv("LIGHTLLM_READINESS_CLIENT_CERT", str(tmp_path / "client.pem"))
+        monkeypatch.setenv("LIGHTLLM_READINESS_CLIENT_KEY", str(tmp_path / "client.key"))
+    elif identity == "combined":
+        combined = tmp_path / "identity.pem"
+        combined.write_bytes((tmp_path / "client.pem").read_bytes() + (tmp_path / "client.key").read_bytes())
+        monkeypatch.setenv("LIGHTLLM_READINESS_CLIENT_CERT", str(combined))
+
+    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    server_context.load_cert_chain(tmp_path / "server.pem", tmp_path / "server.key")
+    server_context.load_verify_locations(tmp_path / "client.pem")
+    server_context.verify_mode = ssl.CERT_REQUIRED
+    session = MagicMock()
+    session.__enter__.return_value = session
+
+    def probe(url, timeout):
+        assert url == "https://127.0.0.1:8000/readiness"
+        context = session.mount.call_args.args[1].poolmanager.connection_pool_kw["ssl_context"]
+        server_in, server_out, client_in, client_out = [ssl.MemoryBIO() for _ in range(4)]
+        server = server_context.wrap_bio(server_in, server_out, server_side=True)
+        client = context.wrap_bio(client_in, client_out, server_side=False, server_hostname="server")
+        finished = set()
+        try:
+            for _ in range(20):
+                for peer, outgoing, incoming in ((client, client_out, server_in), (server, server_out, client_in)):
+                    try:
+                        peer.do_handshake()
+                        finished.add(peer)
+                    except ssl.SSLWantReadError:
+                        pass
+                    incoming.write(outgoing.read())
+                if len(finished) == 2:
+                    assert server.getpeercert()
+                    return SimpleNamespace(status_code=200)
+        except ssl.SSLError as error:
+            assert identity is None
+            assert error.reason == "PEER_DID_NOT_RETURN_A_CERTIFICATE"
+            raise requests.exceptions.SSLError(str(error)) from error
+        pytest.fail("TLS handshake did not finish")
+
+    manager = start_utils.SubmoduleManager()
+    flag = Mock()
+    monkeypatch.setattr(shared_arr, "SharedInt", lambda name: flag)
+    monkeypatch.setattr(shm_port_args, "get_shm_port_args", lambda: SimpleNamespace(port=8000))
+    monkeypatch.setattr(requests, "Session", lambda: session)
+    monkeypatch.setattr(start_utils.threading, "Thread", lambda target, **kw: SimpleNamespace(start=target))
+    monkeypatch.setattr(manager.readiness_stop, "wait", lambda timeout: manager.readiness_stop.set())
+    session.get.side_effect = probe
+    args = SimpleNamespace(run_mode="normal", host="0.0.0.0", model_name="test", hypercorn_config=str(config))
+    manager.start_readiness_monitor(FakeHttpServerProcess(), args)
+    session.get.assert_called_once()
+    assert [call.args for call in flag.set_value.call_args_list] == ([(0,)] if identity is None else [(0,), (1,)])

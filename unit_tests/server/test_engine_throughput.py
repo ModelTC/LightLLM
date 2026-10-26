@@ -230,6 +230,7 @@ def test_router_first_burst_excludes_initial_idle(monkeypatch, counters, node_ra
     router.req_queue = Mock()
     router.req_queue.get_wait_req_num.return_value = 0
     router.running_batch = None
+    router.schedule_new_batch = None
     router.dp_size, router.node_rank, router.dp_size_in_node = dp_size, node_rank, 2
     router.radix_cache_client = None
     router.max_total_token_num = 100
@@ -340,7 +341,10 @@ def test_init_model_attaches_only_the_dp_leaders_counter_row(monkeypatch, counte
 
 
 @pytest.mark.parametrize("node_rank,dp_size", [(0, 1), (1, 1), (0, 2), (1, 2)])
-def test_router_statistics_wait_for_readiness_and_emit_once_per_node(monkeypatch, counters, node_rank, dp_size):
+@pytest.mark.parametrize("queued,staged", [(2, 0), (0, 5)])
+def test_router_statistics_wait_for_readiness_and_emit_once_per_node(
+    monkeypatch, counters, node_rank, dp_size, queued, staged
+):
     import asyncio
     from lightllm.server.router import manager as router
 
@@ -354,8 +358,9 @@ def test_router_statistics_wait_for_readiness_and_emit_once_per_node(monkeypatch
     manager = router.RouterManager.__new__(router.RouterManager)
     manager.engine_counters = counters
     manager.running_batch = None
+    manager.schedule_new_batch = SimpleNamespace(reqs=[Mock() for _ in range(staged)]) if staged else None
     manager.req_queue = Mock()
-    manager.req_queue.get_wait_req_num.return_value = 2
+    manager.req_queue.get_wait_req_num.return_value = queued
     manager.node_rank, manager.dp_size, manager.dp_size_in_node = node_rank, dp_size, dp_size
     manager.max_total_token_num = 100
     manager.get_used_tokens = lambda index: 10 * (index + 1)
@@ -385,9 +390,9 @@ def test_router_statistics_wait_for_readiness_and_emit_once_per_node(monkeypatch
     assert logger.info.call_count == 2
     first, second = [call.kwargs["extra"] for call in logger.info.call_args_list]
     assert first["prefill_tokens"] == 200 and second["prefill_tokens"] == 100
-    assert first["window_s"] == second["window_s"] == 10
-    assert first["output_tok_s"] == 2 and second["output_tok_s"] == 1
-    assert first["running"] == 0 and first["waiting"] == 2 and first["paused"] == 1
+    assert first["window_s"] == 20 and second["window_s"] == 10
+    assert first["output_tok_s"] == second["output_tok_s"] == 1
+    assert first["running"] == 0 and first["waiting"] == queued + staged and first["paused"] == 1
     assert first["kv_active_pct_by_local_dp"] == [10.0 * (i + 1) for i in range(dp_size)]
     assert first["kv_cached_pct_by_local_dp"] == [5.0 * (i + 1) for i in range(dp_size)]
     assert first["kv_capacity_tokens_per_dp"] == 100
