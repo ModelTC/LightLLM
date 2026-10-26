@@ -60,6 +60,7 @@ def test_pd_transport_without_logprobs_keeps_token_id_in_compact_packet():
             forwarding_queue=forwarding_queue,
             pd_upload_websocket=AsyncMock(),
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
         return forwarding_queue.put.await_args.args[0]
 

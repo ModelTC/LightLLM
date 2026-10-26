@@ -23,6 +23,7 @@ class _StopLoop(Exception):
 class _SequenceQueue:
     def __init__(self, *items):
         self.items = iter(items)
+        self.put = MagicMock()
 
     def get(self):
         try:
@@ -72,6 +73,8 @@ def _module(cls):
     module.waiting_dict_lock = threading.Lock()
     module.waiting_dict = {}
     module.quarantined_tasks = {}
+    module.write_recoveries = {}
+    module.write_peer_kv_queue = queue.Queue()
     module.transfer_status = MagicMock()
     module.request_last_progress_time = {}
     module.last_stop_retry_time = 0.0
@@ -245,6 +248,7 @@ def test_nixl_retains_handle_when_transfer_submission_raises():
     task = _task(src_page_index=0, dst_page_index=1, transfer_nbytes=16)
     transporter = NixlKVTransporter.__new__(NixlKVTransporter)
     transporter.remote_agents = {"D": object()}
+    transporter._write_contexts = {}
     transporter._get_local_page_xfer_handles = MagicMock(return_value="src")
     transporter._get_remote_page_xfer_handles = MagicMock(return_value="dst")
     transporter.nixl_agent = SimpleNamespace(make_prepped_xfer=MagicMock(return_value=7))
@@ -427,6 +431,7 @@ def test_nixl_error_notification_carries_stop_proof_and_allocation_identity(quie
     transporter.node_id, transporter.tp_idx, transporter.num_pages = 1, 0, 2
     transporter.page_reg_desc = "registered"
     transporter.remote_agents = {"D": object()}
+    transporter._write_contexts = {}
     transporter.nixl_agent = SimpleNamespace(
         get_agent_metadata=lambda: b"P", get_serialized_descs=lambda _: b"pages", send_notif=MagicMock()
     )
@@ -443,6 +448,7 @@ def test_lost_stop_notification_does_not_remove_active_peer_descriptors():
     transporter.node_id, transporter.tp_idx, transporter.num_pages = 1, 0, 2
     transporter.page_reg_desc = "registered"
     transporter.remote_agents = {"D": object()}
+    transporter._write_contexts = {}
     transporter.remove_remote_agent = MagicMock()
     transporter.nixl_agent = SimpleNamespace(
         get_agent_metadata=lambda: b"P",
@@ -528,3 +534,224 @@ def test_quarantine_capacity_is_published_and_recovers_only_after_safe_page_retu
     else:
         assert module._confirm_write_quiesced(replace(tasks[0], write_quiesced=True))
     assert len(module.quarantined_tasks) == 1
+
+
+def _start_recovery(module):
+    recovery = module.write_peer_kv_queue.get_nowait()
+    module.write_peer_kv_queue = _SequenceQueue(recovery)
+    with pytest.raises(_StopLoop):
+        module.write_peer_kv_loop()
+    module.write_peer_kv_queue = queue.Queue()
+    return recovery
+
+
+def _uncertain_source(module):
+    task = _task(src_page_index=0, dst_page_index=1, write_id="allocation-1", transfer_nbytes=16)
+    task.write_submitted = True
+    task.xfer_handle = 7
+    module.waiting_dict[task.get_key()] = task
+    module.transporter.check_task_status.return_value = "ERR"
+    module._update_task_status_once()
+    _fail_one(module)
+    return task
+
+
+def _submit_fence(original, fence):
+    assert original.src_page_index == fence.src_page_index == 0
+    assert original.dst_page_index == fence.dst_page_index == 1
+    assert original.write_id == fence.write_id == "allocation-1"
+    fence.xfer_handle = 8
+    fence.write_submitted = True
+    return "PROC"
+
+
+@pytest.mark.parametrize("incomplete_status", ["PROC", "UNKNOWN"])
+def test_recovery_fence_requires_done_before_reclaim_and_matching_decode_stop(incomplete_status):
+    module, decode = _module(_PrefillTransModule), _module(_DecodeTransModule)
+    task = _uncertain_source(module)
+    dst = replace(task, src_page_index=None, xfer_handle=None, write_submitted=False)
+    decode.waiting_dict[dst.get_key()] = dst
+    decode._fail_waiting_task_locked(dst, "failed source WRITE")
+    module.transporter.start_write_fence = _submit_fence
+    recovery = _start_recovery(module)
+    module.transporter.check_task_status.return_value = incomplete_status
+    module._update_task_status_once()
+    assert module.page_index_queue.empty() and decode.page_index_queue.empty()
+    assert not task.write_quiesced
+    module.transporter.release_xfer_handle.assert_not_called()
+    module.transporter.send_error_info_to_decode_node.reset_mock()
+
+    recovery.next_check_time = 0
+    module.transporter.check_task_status.return_value = "DONE"
+    module._update_task_status_once()
+    assert module.page_index_queue.get_nowait() == 0
+    assert module.task_out_queue.qsize() == 1
+    assert [call.args for call in module.transporter.release_xfer_handle.call_args_list] == [(8,), (7,)]
+    assert task.write_quiesced
+    assert not module.quarantined_tasks and not module.write_recoveries
+    stopped = module.transporter.send_error_info_to_decode_node.call_args.kwargs["trans_task"]
+    assert decode._confirm_write_quiesced(stopped)
+    assert decode.page_index_queue.get_nowait() == 1
+    assert not decode._confirm_write_quiesced(stopped)
+    module._update_task_status_once()
+    assert module.transporter.release_xfer_handle.call_count == 2
+    assert module.task_out_queue.qsize() == 1
+
+
+def test_failed_fences_remain_quarantined_and_retries_are_bounded():
+    module = _module(_PrefillTransModule)
+    task = _uncertain_source(module)
+    handles = iter([8, 9, 10])
+
+    def submit(original, fence):
+        fence.xfer_handle = next(handles)
+        fence.write_submitted = True
+        return "PROC"
+
+    module.transporter.start_write_fence = submit
+    for _ in range(3):
+        recovery = _start_recovery(module)
+        recovery.next_check_time = 0
+        module._update_task_status_once()
+    assert recovery.fence.write_uncertain
+    assert recovery.retired_handles == [8, 9]
+    assert recovery.fence.xfer_handle == 10
+    assert module.page_index_queue.empty()
+    assert module.write_peer_kv_queue.empty()
+    assert not task.write_quiesced
+    module.transporter.release_xfer_handle.assert_not_called()
+    module.transporter.check_task_status.reset_mock()
+    recovery.next_check_time = 0
+    module._update_task_status_once()
+    module.transporter.check_task_status.assert_not_called()
+
+
+def test_recovery_does_not_accept_done_after_unconfirmed_post_and_retries_with_fresh_handle():
+    module = _module(_PrefillTransModule)
+    task = _uncertain_source(module)
+
+    def partial_submission(original, fence):
+        _submit_fence(original, fence)
+        raise RuntimeError("fence submission result lost")
+
+    module.transporter.start_write_fence = partial_submission
+    recovery = _start_recovery(module)
+    module.transporter.check_task_status.return_value = "DONE"
+    module._update_task_status_once()
+    assert not task.write_quiesced
+    assert module.page_index_queue.empty()
+    module.transporter.release_xfer_handle.assert_not_called()
+    assert recovery.retired_handles == [8]
+
+    def confirmed_submission(original, fence):
+        fence.xfer_handle = 9
+        fence.write_submitted = True
+        return "PROC"
+
+    module.transporter.start_write_fence = confirmed_submission
+    _start_recovery(module)
+    recovery.next_check_time = 0
+    module._update_task_status_once()
+    assert task.write_quiesced
+    assert module.page_index_queue.get_nowait() == 0
+    assert [call.args for call in module.transporter.release_xfer_handle.call_args_list] == [(9,), (8,), (7,)]
+
+
+def test_recovery_preparation_failure_retries_once_without_losing_ownership():
+    module = _module(_PrefillTransModule)
+    task = _uncertain_source(module)
+    module.transporter.start_write_fence = MagicMock(side_effect=RuntimeError("preparation failed"))
+    recovery = _start_recovery(module)
+    module._update_task_status_once()
+    assert module.write_peer_kv_queue.qsize() == 1
+    module._queue_write_recovery_locked(task)
+    module._update_task_status_once()
+    assert module.write_peer_kv_queue.qsize() == 1
+    assert recovery.fence.write_submitting
+    assert not task.write_quiesced
+    module.transporter.release_xfer_handle.assert_not_called()
+
+
+def test_recovery_cleanup_failure_keeps_done_proof_and_does_not_resubmit():
+    module = _module(_PrefillTransModule)
+    task = _uncertain_source(module)
+    module.transporter.start_write_fence = _submit_fence
+    recovery = _start_recovery(module)
+    module.transporter.check_task_status.return_value = "DONE"
+    module.transporter.release_xfer_handle.side_effect = [None, RuntimeError("cleanup failed"), None]
+    module._update_task_status_once()
+    assert recovery.fence.write_quiesced and recovery.fence.xfer_handle is None
+    assert module.page_index_queue.empty()
+    recovery.next_check_time = 0
+    module._update_task_status_once()
+    assert module.page_index_queue.get_nowait() == 0
+    assert module.write_peer_kv_queue.empty()
+    assert task.write_quiesced
+
+
+def test_retired_status_query_exception_also_schedules_independent_recovery():
+    module = _module(_PrefillTransModule)
+    task = _task(src_page_index=0, dst_page_index=1, write_id="allocation-1", start_trans_time=0)
+    task.write_submitted = True
+    task.xfer_handle = 7
+    module.waiting_dict[task.get_key()] = task
+    module._update_task_status_once()
+    module.transporter.check_task_status.side_effect = RuntimeError("query unavailable")
+    module._update_task_status_once()
+    assert task.write_uncertain
+    assert module.write_peer_kv_queue.qsize() == 1
+    assert module.write_recoveries[task.get_key()].original is task
+
+
+def test_nixl_fence_uses_original_thread_and_prepared_connection_without_reconnect():
+    transporter = NixlKVTransporter.__new__(NixlKVTransporter)
+    transporter._write_contexts = {7: (threading.get_ident(), "old-src", "old-dst")}
+    transporter.connect_add_remote_agent = MagicMock()
+    transporter.nixl_agent = SimpleNamespace(
+        query_xfer_backend=MagicMock(return_value="UCX"),
+        make_prepped_xfer=MagicMock(return_value=8),
+        transfer=MagicMock(),
+    )
+    task = _task(src_page_index=0, dst_page_index=1, xfer_handle=7)
+    fence = replace(task, xfer_handle=None, write_submitted=False)
+    transporter.start_write_fence(task, fence)
+    transporter.nixl_agent.make_prepped_xfer.assert_called_once_with(
+        "WRITE", "old-src", [0], "old-dst", [1], b"", backends=["UCX"]
+    )
+    assert fence.xfer_handle == 8 and fence.write_submitted
+    transporter.connect_add_remote_agent.assert_not_called()
+    transporter._write_contexts[7] = (-1, "old-src", "old-dst")
+    with pytest.raises(AssertionError, match="original issuing thread"):
+        transporter.start_write_fence(task, replace(fence, xfer_handle=None))
+    assert transporter.nixl_agent.transfer.call_count == 1
+
+
+def test_nixl_post_error_is_not_mistaken_for_an_unposted_handles_done_state():
+    transporter = NixlKVTransporter.__new__(NixlKVTransporter)
+    transporter.remote_agents = {"D": object()}
+    transporter._write_contexts = {}
+    transporter._get_local_page_xfer_handles = MagicMock(return_value="src")
+    transporter._get_remote_page_xfer_handles = MagicMock(return_value="dst")
+    transporter.nixl_agent = SimpleNamespace(
+        make_prepped_xfer=MagicMock(return_value=7),
+        transfer=MagicMock(return_value="ERR"),
+        check_xfer_state=MagicMock(return_value="DONE"),
+    )
+    task = _task(src_page_index=0, dst_page_index=1, transfer_nbytes=16)
+    with pytest.raises(RuntimeError, match="submission returned ERR"):
+        transporter.write_blocks_paged(task)
+    assert task.write_submitted and task.xfer_handle == 7
+    assert 7 in transporter._write_contexts
+    transporter.nixl_agent.check_xfer_state.assert_not_called()
+
+
+def test_nixl_query_exception_is_unknown_rather_than_native_err():
+    transporter = NixlKVTransporter.__new__(NixlKVTransporter)
+    transporter.nixl_agent = SimpleNamespace(
+        check_xfer_state=MagicMock(side_effect=RuntimeError("query result unavailable"))
+    )
+    task = _task(xfer_handle=7)
+    assert transporter.check_task_status(task) == "UNKNOWN"
+    transporter.nixl_agent.check_xfer_state.side_effect = None
+    transporter.nixl_agent.check_xfer_state.return_value = "ERR"
+    assert transporter.check_task_status(task) == "ERR"

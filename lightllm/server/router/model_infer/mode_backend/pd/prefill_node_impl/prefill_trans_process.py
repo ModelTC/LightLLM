@@ -7,6 +7,7 @@ import torch.multiprocessing as mp
 import queue
 import pickle
 import copy
+from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
@@ -90,6 +91,16 @@ def _init_env(
         pass
 
 
+@dataclass
+class _WriteRecovery:
+    original: PDChunckedTransTask
+    fence: PDChunckedTransTask
+    next_check_time: float = 0.0
+    post_confirmed: bool = False
+    attempts: int = 0
+    retired_handles: List[object] = field(default_factory=list)
+
+
 class _PrefillTransModule:
     def __init__(
         self,
@@ -121,6 +132,7 @@ class _PrefillTransModule:
         self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
         self.use_write_quiescence = args.pd_trans_mode == "nixl"
         self.quarantined_tasks: Dict[str, PDChunckedTransTask] = {}
+        self.write_recoveries: Dict[str, _WriteRecovery] = {}
         if self.use_write_quiescence:
             self.transfer_status = PDTransferStatus(args)
             self.transfer_status.set_quarantined_pages(device_id, 0)
@@ -178,9 +190,73 @@ class _PrefillTransModule:
         if task.write_submitted and not task.write_quiesced:
             self.quarantined_tasks[task.get_key()] = task
             self.transfer_status.set_quarantined_pages(self.device_id, len(self.quarantined_tasks))
+            if task.write_uncertain:
+                self._queue_write_recovery_locked(task)
         else:
             task.write_quiesced = True
         self.failed_queue.put(task)
+
+    def _queue_write_recovery_locked(self, task: PDChunckedTransTask):
+        if task.get_key() in self.write_recoveries:
+            return
+        fence = copy.copy(task)
+        fence.xfer_handle = None
+        fence.write_submitted = False
+        fence.write_submitting = True
+        fence.write_uncertain = False
+        recovery = _WriteRecovery(task, fence)
+        self.write_recoveries[task.get_key()] = recovery
+        # Creating a NIXL handle on a different thread can select a different UCX
+        # worker/endpoint. The original WRITE thread must issue this fence.
+        self.write_peer_kv_queue.put(recovery)
+
+    def _update_write_recovery_locked(self, task: PDChunckedTransTask):
+        recovery = self.write_recoveries[task.get_key()]
+        fence = recovery.fence
+        if fence.write_submitting or fence.write_uncertain or time.monotonic() < recovery.next_check_time:
+            return
+        recovery.next_check_time = time.monotonic() + 1.0
+        try:
+            if not fence.write_quiesced:
+                if recovery.post_confirmed:
+                    status = self.transporter.check_task_status(fence)
+                    if status in ("PROC", "UNKNOWN"):
+                        return
+                    if status == "DONE":
+                        fence.write_quiesced = True
+                    else:
+                        recovery.post_confirmed = False
+                if not fence.write_quiesced:
+                    # An unposted, prepared handle can also report DONE. Only a
+                    # fence whose native post returned PROC/DONE provides proof.
+                    # Keep every possibly submitted handle until a later fence
+                    # drains the endpoint; cap retries to bound retained handles.
+                    if recovery.attempts >= 3:
+                        fence.write_uncertain = True
+                        logger.error(f"WRITE recovery exhausted; pages remain quarantined: {task.get_key()}")
+                        return
+                    if fence.xfer_handle is not None:
+                        recovery.retired_handles.append(fence.xfer_handle)
+                        fence.xfer_handle = None
+                    fence.write_submitted = False
+                    fence.write_submitting = True
+                    self.write_peer_kv_queue.put(recovery)
+                    return
+            if fence.xfer_handle is not None:
+                self.transporter.release_xfer_handle(fence.xfer_handle)
+                fence.xfer_handle = None
+            while recovery.retired_handles:
+                self.transporter.release_xfer_handle(recovery.retired_handles[-1])
+                recovery.retired_handles.pop()
+            self._release_source_page(task)
+            task.write_quiesced = True
+            self.quarantined_tasks.pop(task.get_key())
+            self.write_recoveries.pop(task.get_key())
+            self.transfer_status.set_quarantined_pages(self.device_id, len(self.quarantined_tasks))
+            self.transporter.send_error_info_to_decode_node(trans_task=task)
+            logger.warning(f"WRITE recovery fence completed; staging page reclaimed: {task.get_key()}")
+        except Exception:
+            logger.exception(f"WRITE recovery check failed; pages remain quarantined: {task.get_key()}")
 
     def _handle_stop_request(self, notify: PDChunckedTransTask):
         key = notify.get_key()
@@ -411,6 +487,18 @@ class _PrefillTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task = self.write_peer_kv_queue.get()
+            if isinstance(trans_task, _WriteRecovery):
+                recovery = trans_task
+                try:
+                    recovery.attempts += 1
+                    status = self.transporter.start_write_fence(recovery.original, recovery.fence)
+                    recovery.post_confirmed = status in ("PROC", "DONE")
+                except Exception:
+                    logger.exception(f"WRITE recovery submission failed: {recovery.original.get_key()}")
+                finally:
+                    with self.waiting_dict_lock:
+                        recovery.fence.write_submitting = False
+                continue
             trans_task: PDChunckedTransTask = trans_task
 
             if self.use_write_quiescence:
@@ -461,8 +549,12 @@ class _PrefillTransModule:
             if self.use_write_quiescence:
                 tasks.extend(self.quarantined_tasks.values())
             for trans_task in tasks:
-                if self.use_write_quiescence and (trans_task.write_submitting or trans_task.write_uncertain):
-                    continue
+                if self.use_write_quiescence:
+                    if trans_task.write_submitting:
+                        continue
+                    if trans_task.write_uncertain:
+                        self._update_write_recovery_locked(trans_task)
+                        continue
                 if trans_task.xfer_handle is None:
                     continue
 
@@ -474,6 +566,7 @@ class _PrefillTransModule:
                     if self.use_write_quiescence:
                         trans_task.write_uncertain = True
                         self._fail_waiting_task_locked(trans_task, f"check transfer status failed: {e}", uncertain=True)
+                        self._queue_write_recovery_locked(trans_task)
                         continue
                     failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
                     if failed_task is not None:
@@ -491,18 +584,22 @@ class _PrefillTransModule:
                             self._release_source_page(trans_task)
                             self.transfer_status.set_quarantined_pages(self.device_id, len(self.quarantined_tasks))
                             self.transporter.send_error_info_to_decode_node(trans_task=trans_task)
-                        elif ret == "ERR":
-                            # ERR/query failure does not prove quiescence; never reinterpret it as DONE later.
+                        elif ret in ("ERR", "UNKNOWN"):
+                            # Preserve the failed handle; only a fresh fence can
+                            # provide a new, independent quiescence proof.
                             trans_task.write_uncertain = True
+                            self._queue_write_recovery_locked(trans_task)
                         continue
                     if ret == "DONE":
                         trans_task.write_quiesced = True
                         if trans_task.error_info is not None:
                             self._fail_waiting_task_locked(trans_task, trans_task.error_info)
                             continue
-                    elif ret == "ERR" or trans_task.time_out():
+                    elif ret in ("ERR", "UNKNOWN") or trans_task.time_out():
                         self._fail_waiting_task_locked(
-                            trans_task, "xfer error" if ret == "ERR" else "time out in WRITE", uncertain=ret == "ERR"
+                            trans_task,
+                            {"ERR": "xfer error", "UNKNOWN": "xfer state query failed"}.get(ret, "time out in WRITE"),
+                            uncertain=ret in ("ERR", "UNKNOWN"),
                         )
                         continue
 

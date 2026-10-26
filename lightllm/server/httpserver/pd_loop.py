@@ -125,7 +125,8 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 forwarding_tokens_task = asyncio.create_task(
                     _up_tokens_to_pd_master(forwarding_queue, websocket, dp_index)
                 )
-                heartbeat_task = asyncio.create_task(_send_heartbeat_to_pd_master(websocket, manager.transfer_status))
+                heartbeat_reporter = _PDHeartbeatReporter(websocket, manager.transfer_status)
+                heartbeat_task = asyncio.create_task(heartbeat_reporter.run())
 
                 group_req_id_to_event: Dict[int, asyncio.Event] = weakref.WeakValueDictionary()
                 # 接收 pd master 发来的请求，并推理后，将生成的token转发回pd master。
@@ -156,6 +157,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                                 forwarding_queue=forwarding_queue,
                                 pd_upload_websocket=websocket,
                                 pd_event=pd_event,
+                                heartbeat_reporter=heartbeat_reporter,
                             )
                         )
                         generation_tasks[group_req_id] = generation_task
@@ -286,6 +288,7 @@ async def _pd_process_generate(
     forwarding_queue: AsyncQueue,
     pd_upload_websocket: ClientConnection,
     pd_event: asyncio.Event,
+    heartbeat_reporter: "_PDHeartbeatReporter",
 ):
     return_output_logprobs = getattr(sampling_params, "return_output_logprobs", True)
     try:
@@ -316,7 +319,7 @@ async def _pd_process_generate(
         logger.warning(f"pd node rejected request {group_request_id}: {e.message}")
         try:
             if isinstance(e, PDTransportUnavailableError):
-                await pd_upload_websocket.send(pickle.dumps((ObjType.HEARTBEAT, False)))
+                await heartbeat_reporter.report(False)
             await pd_upload_websocket.send(pickle.dumps((ObjType.PD_UPLOAD_SERVER_BUSY, group_request_id, e.message)))
         except Exception:
             logger.exception(f"report pd node request rejection failed, group_request_id: {group_request_id}")
@@ -399,19 +402,30 @@ async def _up_tokens_to_pd_master(
                 pending_handle_lists.extend((token_list[split_index:], token_list[:split_index]))
 
 
-async def _send_heartbeat_to_pd_master(websocket: ClientConnection, transfer_status):
-    heartbeat_interval_seconds = 15
-    last_available = None
-    last_sent = 0.0
-    loop = asyncio.get_running_loop()
-    while True:
-        available = transfer_status is None or transfer_status.is_available()
-        now = loop.time()
-        if available != last_available or now - last_sent >= heartbeat_interval_seconds:
-            await websocket.send(pickle.dumps((ObjType.HEARTBEAT, available)))
-            last_available = available
-            last_sent = now
-        await asyncio.sleep(1)
+class _PDHeartbeatReporter:
+    """One connection owns both immediate and periodic availability reports."""
+
+    def __init__(self, websocket: ClientConnection, transfer_status):
+        self.websocket = websocket
+        self.transfer_status = transfer_status
+        self.last_available = None
+        self.last_sent = 0.0
+        self.send_lock = asyncio.Lock()
+
+    async def report(self, available=None):
+        async with self.send_lock:
+            if available is None:
+                available = self.transfer_status is None or self.transfer_status.is_available()
+            now = asyncio.get_running_loop().time()
+            if available != self.last_available or now - self.last_sent >= 15:
+                await self.websocket.send(pickle.dumps((ObjType.HEARTBEAT, available)))
+                self.last_available = available
+                self.last_sent = now
+
+    async def run(self):
+        while True:
+            await self.report()
+            await asyncio.sleep(1)
 
 
 # 获取节点负载信息

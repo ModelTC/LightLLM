@@ -157,7 +157,7 @@ def test_heartbeat_reports_fault_and_recovery_without_waiting_15_seconds(monkeyp
 
     monkeypatch.setattr(pd_loop.asyncio, "sleep", sleep)
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(pd_loop._send_heartbeat_to_pd_master(SimpleNamespace(send=send), status))
+        asyncio.run(pd_loop._PDHeartbeatReporter(SimpleNamespace(send=send), status).run())
     assert messages == [(ObjType.HEARTBEAT, True), (ObjType.HEARTBEAT, False), (ObjType.HEARTBEAT, True)]
     assert polls == [1, 1, 1, 1]
 
@@ -180,7 +180,7 @@ def test_healthy_heartbeat_keeps_existing_15_second_network_interval(monkeypatch
 
         monkeypatch.setattr(pd_loop.asyncio, "sleep", sleep)
         with pytest.raises(asyncio.CancelledError):
-            await pd_loop._send_heartbeat_to_pd_master(SimpleNamespace(send=send), None)
+            await pd_loop._PDHeartbeatReporter(SimpleNamespace(send=send), None).run()
 
     asyncio.run(run())
     assert messages == [(t, (ObjType.HEARTBEAT, True)) for t in (0, 15, 30)]
@@ -194,10 +194,83 @@ def test_local_admission_reports_unavailable_before_busy_reply():
     manager = SimpleNamespace(generate=generate, cancel_pd_request_registration=lambda _: None)
     socket = SimpleNamespace(send=AsyncMock())
     params = SimpleNamespace(group_request_id=123)
-    asyncio.run(pd_loop._pd_process_generate(manager, "prompt", params, {}, None, socket, None))
+    reporter = pd_loop._PDHeartbeatReporter(socket, None)
+    asyncio.run(pd_loop._pd_process_generate(manager, "prompt", params, {}, None, socket, None, reporter))
     messages = [pickle.loads(call.args[0]) for call in socket.send.await_args_list]
     assert messages[0] == (ObjType.HEARTBEAT, False)
     assert messages[1][0:2] == (ObjType.PD_UPLOAD_SERVER_BUSY, 123)
+
+
+def test_immediate_rejection_and_recovery_between_heartbeat_checks(monkeypatch, managers):
+    master = managers()
+    node = master.prefill_nodes[0]
+    status = _status()
+    clock = SimpleNamespace(now=0.0, polls=0)
+    messages = []
+
+    async def generate(**kwargs):
+        raise PDTransportUnavailableError()
+        yield
+
+    manager = SimpleNamespace(generate=generate, cancel_pd_request_registration=lambda _: None)
+
+    async def send(data):
+        message = pickle.loads(data)
+        if message[0] == ObjType.HEARTBEAT:
+            master.update_transfer_availability(node, message[1])
+            messages.append((clock.now, message[1]))
+
+    socket = SimpleNamespace(send=send)
+    reporter = pd_loop._PDHeartbeatReporter(socket, status)
+
+    async def sleep(seconds):
+        clock.polls += 1
+        if clock.polls == 2:
+            raise asyncio.CancelledError()
+        clock.now = 0.1
+        status.set_quarantined_pages(0, 2)
+        await pd_loop._pd_process_generate(
+            manager, "prompt", SimpleNamespace(group_request_id=123), {}, None, socket, None, reporter
+        )
+        assert node not in master.selector.prefill_nodes
+        clock.now = 0.2
+        status.set_quarantined_pages(0, 0)
+        clock.now = 1.0
+
+    async def run():
+        monkeypatch.setattr(asyncio.get_running_loop(), "time", lambda: clock.now)
+        monkeypatch.setattr(pd_loop.asyncio, "sleep", sleep)
+        with pytest.raises(asyncio.CancelledError):
+            await reporter.run()
+
+    asyncio.run(run())
+    assert messages == [(0.0, True), (0.1, False), (1.0, True)]
+    assert node in master.selector.prefill_nodes
+
+
+def test_heartbeat_cache_follows_serialized_send_completion():
+    async def run():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        messages = []
+
+        async def send(data):
+            if not messages:
+                entered.set()
+                await release.wait()
+            messages.append(pickle.loads(data))
+
+        reporter = pd_loop._PDHeartbeatReporter(SimpleNamespace(send=send), None)
+        periodic = asyncio.create_task(reporter.report())
+        await entered.wait()
+        immediate = asyncio.create_task(reporter.report(False))
+        release.set()
+        await asyncio.gather(periodic, immediate)
+        assert reporter.last_available is False
+        await reporter.report()
+        assert messages == [(ObjType.HEARTBEAT, True), (ObjType.HEARTBEAT, False), (ObjType.HEARTBEAT, True)]
+
+    asyncio.run(run())
 
 
 def test_each_master_applies_heartbeat_to_its_own_registered_connection(monkeypatch, managers):

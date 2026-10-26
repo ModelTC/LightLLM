@@ -42,6 +42,7 @@ class NixlKVTransporter:
         self._register_kv_move_buffer(kv_move_buffer=kv_move_buffer)
         self._remote_agents_lock = threading.Lock()
         self.remote_agents: Dict[str, PDAgentMetadata] = {}
+        self._write_contexts = {}
         # Serialize complete peer add/remove operations, including native NIXL
         # calls and descriptor cleanup, across worker threads (see GH-1470).
         self._remote_agents_lock = threading.Lock()
@@ -310,9 +311,40 @@ class NixlKVTransporter:
         # transfer() 抛异常也可能已经提交部分操作，先保留 handle 和提交状态。
         trans_task.xfer_handle = handle
         trans_task.write_submitted = True
-        self.nixl_agent.transfer(handle)
+        self._write_contexts[handle] = (threading.get_ident(), src_handle, dst_handle)
+        status = self.nixl_agent.transfer(handle)
+        if status not in ("PROC", "DONE"):
+            raise RuntimeError(f"NIXL WRITE submission returned {status}")
 
         return handle
+
+    def start_write_fence(self, original: PDChunckedTransTask, fence: PDChunckedTransTask):
+        """Drain earlier UCX WRITEs using their exact connection and issuing thread.
+
+        The source and destination staging pages remain quarantined throughout.
+        A fresh WRITE includes UCX endpoint flush, so its DONE can prove older
+        operations on that endpoint quiescent even when their handles report ERR.
+        Never reconnect here: flushing a replacement endpoint proves nothing
+        about the old endpoint. Reuse the original prepared descriptors instead.
+        """
+        thread_id, src_handle, dst_handle = self._write_contexts[original.xfer_handle]
+        assert thread_id == threading.get_ident(), "WRITE fence must run on the original issuing thread"
+        if self.nixl_agent.query_xfer_backend(original.xfer_handle) != "UCX":
+            raise RuntimeError("WRITE recovery requires UCX endpoint flush semantics")
+        handle = self.nixl_agent.make_prepped_xfer(
+            "WRITE",
+            src_handle,
+            [original.src_page_index],
+            dst_handle,
+            [original.dst_page_index],
+            b"",
+            backends=["UCX"],
+        )
+        if not handle:
+            raise RuntimeError("make_prepped_xfer failed for WRITE recovery fence")
+        fence.xfer_handle = handle
+        fence.write_submitted = True
+        return self.nixl_agent.transfer(handle)
 
     def check_task_status(self, trans_task: PDChunckedTransTask) -> str:
         assert trans_task.xfer_handle is not None
@@ -322,13 +354,14 @@ class NixlKVTransporter:
         except Exception as e:
             logger.error(f"Check transfer state failed with trans task {trans_task.to_str()} for handle {handle}")
             logger.exception(str(e))
-            return "ERR"
+            return "UNKNOWN"
         if xfer_state == "ERR":
             logger.warning(f"Transfer failed with trans task {trans_task.to_str()} for handle {handle}")
         return xfer_state
 
     def release_xfer_handle(self, handle):
         self.nixl_agent.release_xfer_handle(handle=handle)
+        self._write_contexts.pop(handle, None)
         return
 
     def shutdown(self):

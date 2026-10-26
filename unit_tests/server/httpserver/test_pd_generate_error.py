@@ -86,6 +86,7 @@ def test_pd_node_reports_generate_error_to_master():
             forwarding_queue=MagicMock(),
             pd_upload_websocket=websocket,
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
 
         websocket.send.assert_awaited_once()
@@ -113,6 +114,7 @@ def test_pd_node_reports_local_request_rejection_to_master():
             forwarding_queue=MagicMock(),
             pd_upload_websocket=websocket,
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
 
         websocket.send.assert_awaited_once()
@@ -140,6 +142,7 @@ def test_pd_node_cancellation_finishes_without_reporting_generate_error():
             forwarding_queue=MagicMock(),
             pd_upload_websocket=websocket,
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
 
         websocket.send.assert_not_awaited()
@@ -162,6 +165,7 @@ def test_pd_node_success_forwards_token_without_error_report():
             forwarding_queue=forwarding_queue,
             pd_upload_websocket=websocket,
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
 
         forwarding_queue.put.assert_awaited_once()
@@ -189,6 +193,7 @@ def test_pd_prefill_full_cache_stop_is_not_reported_as_error():
             forwarding_queue=AsyncMock(),
             pd_upload_websocket=websocket,
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
 
         websocket.send.assert_not_awaited()
@@ -210,6 +215,7 @@ def test_pd_node_reports_non_exception_base_exception():
             forwarding_queue=AsyncMock(),
             pd_upload_websocket=websocket,
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
 
         obj = pickle.loads(websocket.send.await_args.args[0])
@@ -237,6 +243,7 @@ def test_pd_node_error_report_send_failure_is_contained():
             forwarding_queue=AsyncMock(),
             pd_upload_websocket=websocket,
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
 
         websocket.send.assert_awaited_once()
@@ -428,6 +435,7 @@ def test_pd_invalid_request_error_round_trip():
             forwarding_queue=AsyncMock(),
             pd_upload_websocket=websocket,
             pd_event=asyncio.Event(),
+            heartbeat_reporter=None,
         )
         kind, req_id, error_info = pickle.loads(websocket.send.await_args.args[0])
         assert kind == ObjType.PD_UPLOAD_GENERATE_ERROR
