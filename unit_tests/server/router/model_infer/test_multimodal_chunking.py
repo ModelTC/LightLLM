@@ -81,7 +81,7 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     )
     context.req_manager = SimpleNamespace(
         save_big_page_states=lambda **kwargs: big_snapshots.append(req.get_chuncked_input_token_len()),
-        save_state=lambda **kwargs: small_snapshots.append(req.get_chuncked_input_token_len()),
+        save_small_page_state=lambda req_idx, buffer_idx: small_snapshots.append(req.get_chuncked_input_token_len()),
     )
 
     while req.cur_kv_len < req.get_cur_total_len():

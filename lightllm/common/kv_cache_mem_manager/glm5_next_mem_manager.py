@@ -1,10 +1,7 @@
 import torch
 
 from lightllm.common.kv_cache_mem_manager.operator import LinearAttMemOperator
-from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
-    Qwen3NextMemManager,
-    Qwen3NextLinearAttPageHelper,
-)
+from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
 
@@ -40,13 +37,6 @@ class Glm5NextMemManager(Qwen3NextMemManager):
 
     def get_indexer_k_buffer(self, layer_index):
         return self._layer_buffer(layer_index).view(torch.uint8)[:, :, -132:]
-
-    def write_to_shm(self, req_manager):
-        self.req_to_indexer_tail = req_manager.req_to_indexer_tail
-        return super().write_to_shm(req_manager)
-
-    def _create_att_state_page_helper(self):
-        return Glm5NextAttStatePageHelper(self)
 
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
         # Packed MLA/index KV is replicated across TP ranks.
@@ -85,38 +75,3 @@ class Glm5NextMemManager(Qwen3NextMemManager):
                 kv_buffer=mem.kv_buffer,
                 mode="read",
             )
-
-
-class Glm5NextAttStatePageHelper(Qwen3NextLinearAttPageHelper):
-    """Append the replicated K-pool tail to the global Conv/SSM state page."""
-
-    def __init__(self, mem_manager):
-        super().__init__(mem_manager)
-        self.tail_dtype = mem_manager.req_to_indexer_tail.buffer.dtype
-        self.tail_shape = (
-            self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
-            *mem_manager.req_to_indexer_tail.buffer.shape[2:],
-        )
-        self.tail_offset = ((self.state_nbytes + 15) // 16) * 16
-        self.tail_nbytes = self.tail_shape[0] * self.tail_shape[1] * self.tail_shape[2] * self.tail_dtype.itemsize
-        self.state_nbytes = self.tail_offset + self.tail_nbytes
-
-    def _view_page_to_tail(self, page_index):
-        page_bytes = self.mem_manager.kv_move_buffer[page_index].view(torch.uint8).reshape(-1)
-        return (
-            page_bytes[self.tail_offset : self.tail_offset + self.tail_nbytes]
-            .view(self.tail_dtype)
-            .view(self.tail_shape)
-        )
-
-    def write_req_to_page(self, page_index, req_idx, dp_mems):
-        super().write_req_to_page(page_index, req_idx, dp_mems)
-        # The ring uses absolute token positions; sequence length already travels
-        # with the request, so restoring it needs no additional PD metadata.
-        self._view_page_to_tail(page_index).copy_(dp_mems[0].req_to_indexer_tail.buffer[:, req_idx], non_blocking=True)
-
-    def read_page_to_req(self, page_index, req_idx, dp_mems):
-        super().read_page_to_req(page_index, req_idx, dp_mems)
-        tail = self._view_page_to_tail(page_index)
-        for mem in dp_mems:
-            mem.req_to_indexer_tail.buffer[:, req_idx].copy_(tail, non_blocking=True)
