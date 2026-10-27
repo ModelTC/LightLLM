@@ -126,19 +126,42 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out)
         return out
 
-    def apply_swiglu(self, input_tensor, weight_pack, limit=None, out=None, use_custom_tensor_mananger=True, bias=None):
-        from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_quant_fp8
+    def apply_swiglu(
+        self,
+        input_tensor,
+        weight_pack,
+        limit=None,
+        alpha=None,
+        clamp_up_add_one=True,
+        out=None,
+        use_custom_tensor_mananger=True,
+        bias=None,
+    ):
+        from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
+            silu_and_mul_quant_fp8,
+        )
 
-        if self.use_packed_ue8m0:
-            return super().apply_swiglu(input_tensor, weight_pack, limit, out, use_custom_tensor_mananger, bias)
+        if self.use_packed_ue8m0 or not self.use_ue8m0_scales:
+            return super().apply_swiglu(
+                input_tensor,
+                weight_pack,
+                limit=limit,
+                alpha=alpha,
+                clamp_up_add_one=clamp_up_add_one,
+                out=out,
+                use_custom_tensor_mananger=use_custom_tensor_mananger,
+                bias=bias,
+            )
         alloc_func = self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
         quant, scale = silu_and_mul_quant_fp8(
             input_tensor,
             self.block_size,
             weight_pack.weight.dtype,
             limit=limit,
+            alpha=alpha,
+            clamp_up_add_one=clamp_up_add_one,
             alloc_func=alloc_func,
-            use_ue8m0_scales=self.use_ue8m0_scales,
+            use_ue8m0_scales=True,
         )
         if out is None:
             out = alloc_func(

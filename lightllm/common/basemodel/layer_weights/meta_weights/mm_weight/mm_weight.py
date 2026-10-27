@@ -75,11 +75,21 @@ class MMWeightTpl(BaseWeightTpl):
             input_tensor, self.mm_param, out, use_custom_tensor_mananger=use_custom_tensor_mananger, bias=self.bias
         )
 
-    def mm_swiglu(self, input_tensor, limit=None, out=None, use_custom_tensor_mananger=True):
+    def mm_swiglu(
+        self,
+        input_tensor,
+        limit=None,
+        alpha=None,
+        clamp_up_add_one=True,
+        out=None,
+        use_custom_tensor_mananger=True,
+    ):
         return self.quant_method.apply_swiglu(
             input_tensor,
             self.mm_param,
             limit=limit,
+            alpha=alpha,
+            clamp_up_add_one=clamp_up_add_one,
             out=out,
             use_custom_tensor_mananger=use_custom_tensor_mananger,
             bias=self.bias,

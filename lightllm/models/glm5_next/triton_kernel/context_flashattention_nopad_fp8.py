@@ -71,7 +71,11 @@ def _direct_smallq_packed_kernel(
         mem = tl.load(RaggedMemIndex + ragged_pos, valid, 0).to(tl.int64)
         current_row = tl.full((64,), -1, tl.int32)
         for j in tl.static_range(PREFILL_N):
-            current_row = tl.where(valid & (mem == tl.load(PrefillMemIndex + j).to(tl.int64)), j, current_row)
+            current_row = tl.where(
+                valid & (mem == tl.load(PrefillMemIndex + j).to(tl.int64)),
+                j,
+                current_row,
+            )
         cached = valid & (current_row < 0)
         current = valid & (current_row >= 0)
         packed_row = PackedKV + mem[:, None] * packed_stride_s
@@ -252,14 +256,14 @@ def _context_attention_fwd_fp8_direct_smallq(
     return output
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _build_prefill_row_table_kernel(PrefillMemIndex, RowTable, num_tokens, BLOCK: tl.constexpr):
     row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     mem_index = tl.load(PrefillMemIndex + row, row < num_tokens, 0)
     tl.store(RowTable + mem_index, row, row < num_tokens)
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_tokens"])
 def _gather_prefill_kv_kernel(
     PackedKV,
     MemIndex,
@@ -285,7 +289,11 @@ def _gather_prefill_kv_kernel(
         cached[:, None] & (dim[None, :] < 448),
         0.0,
     ).to(tl.float32)
-    scales = tl.load(packed_row + 576 + dim[None, :] // 64, cached[:, None] & (dim[None, :] < 448), 127)
+    scales = tl.load(
+        packed_row + 576 + dim[None, :] // 64,
+        cached[:, None] & (dim[None, :] < 448),
+        127,
+    )
     values = quantized * (scales.to(tl.uint32) << 23).to(tl.float32, bitcast=True)
     tail = tl.load(
         (packed_row + 448).to(tl.pointer_type(tl.bfloat16)) + dim[None, :] - 448,
@@ -305,7 +313,7 @@ def _gather_prefill_kv_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["chunk_start", "chunk_end"])
 def _compact_topk_indices_kernel(
     TopkIndices,
     KVStarts,
@@ -334,16 +342,16 @@ def _compact_topk_indices_kernel(
         )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["NUM_Q_TOKENS", "chunk_lse_stride_s", "chunk_lse_stride_h"])
 def _merge_att_output_kernel(
     Output,
     Lse,
     ChunkOutput,
     ChunkLse,
-    chunk_lse_stride_s: tl.constexpr,
-    chunk_lse_stride_h: tl.constexpr,
+    chunk_lse_stride_s,
+    chunk_lse_stride_h,
     NUM_HEADS: tl.constexpr,
-    NUM_Q_TOKENS: tl.constexpr,
+    NUM_Q_TOKENS,
     BLOCK_HEADS: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -351,7 +359,9 @@ def _merge_att_output_kernel(
     dim = tl.arange(0, 512)
     previous_lse = tl.load(Lse + head * NUM_Q_TOKENS + row, head < NUM_HEADS, -float("inf"))
     chunk_lse = tl.load(
-        ChunkLse + row * chunk_lse_stride_s + head * chunk_lse_stride_h, head < NUM_HEADS, -float("inf")
+        ChunkLse + row * chunk_lse_stride_s + head * chunk_lse_stride_h,
+        head < NUM_HEADS,
+        -float("inf"),
     )
     # FA3 uses natural-log LSE and returns +inf for an empty row.
     previous_lse = tl.where(previous_lse == float("inf"), -float("inf"), previous_lse)
@@ -363,7 +373,11 @@ def _merge_att_output_kernel(
     denominator = previous_weight + chunk_weight
     offset = (row * NUM_HEADS + head[:, None]) * 512 + dim[None, :]
     previous = tl.load(Output + offset, (head[:, None] < NUM_HEADS) & (previous_weight[:, None] > 0), 0)
-    current = tl.load(ChunkOutput + offset, (head[:, None] < NUM_HEADS) & (chunk_weight[:, None] > 0), 0).to(tl.float32)
+    current = tl.load(
+        ChunkOutput + offset,
+        (head[:, None] < NUM_HEADS) & (chunk_weight[:, None] > 0),
+        0,
+    ).to(tl.float32)
     result = (previous * previous_weight[:, None] + current * chunk_weight[:, None]) / tl.where(
         denominator > 0, denominator, 1
     )[:, None]
@@ -375,7 +389,7 @@ def _merge_att_output_kernel(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["ragged_n"])
 def _selected_prefill_compact_kernel(
     Topk,
     KVStarts,
@@ -384,7 +398,7 @@ def _selected_prefill_compact_kernel(
     Lengths,
     PageTable,
     CuQ,
-    ragged_n: tl.constexpr,
+    ragged_n,
     packed_rows: tl.constexpr,
     topk_stride_s: tl.constexpr,
     topk_stride_d: tl.constexpr,
@@ -461,7 +475,11 @@ def _selected_prefill_gather_kernel(
         0.0,
     ).to(tl.float32)
     value = tl.where(current[:, None], current_value, cached_value).to(tl.bfloat16)
-    tl.store(SelectedKV + (qid * 2176 + row[:, None]) * 512 + dim[None, :], value, row[:, None] < 2176)
+    tl.store(
+        SelectedKV + (qid * 2176 + row[:, None]) * 512 + dim[None, :],
+        value,
+        row[:, None] < 2176,
+    )
     if (qid == 0) & (tl.program_id(1) == 0):
         x = tl.arange(0, BATCH_PAD)
         lengths = tl.load(Lengths + x, x < BATCH, 0)
@@ -647,7 +665,10 @@ def context_attention_fwd_fp8(
         cu_seqlens_q = generic_workspace["cu_seqlens_q"]
         if not generic_workspace["row_table_built"]:
             _build_prefill_row_table_kernel[(triton.cdiv(prefill_mem_index.numel(), 256),)](
-                prefill_mem_index, prefill_row_table, prefill_mem_index.numel(), BLOCK=256
+                prefill_mem_index,
+                prefill_row_table,
+                prefill_mem_index.numel(),
+                BLOCK=256,
             )
             generic_workspace["row_table_built"] = True
         # Keep this potentially 2 GiB buffer local to a DSA layer.

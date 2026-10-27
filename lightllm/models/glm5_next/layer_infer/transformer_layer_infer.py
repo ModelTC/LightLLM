@@ -87,15 +87,12 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.gate_up_proj.mm(input)
-        ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(
+        return layer_weight.down_proj.mm_swiglu(
             up_gate_out,
-            ffn1_out,
             limit=self.swiglu_limit,
             alpha=1.0,
             clamp_up_add_one=False,
         )
-        return layer_weight.down_proj.mm(ffn1_out)
 
     def _moe_ffn(self, input, infer_state, layer_weight) -> torch.Tensor:
         hidden_states = input.view(-1, self.embed_dim_)
