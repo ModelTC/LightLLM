@@ -91,16 +91,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         return
 
     def _init_req_manager(self):
-        create_max_seq_len = 0
-        if self.batch_max_tokens is not None:
-            create_max_seq_len = max(create_max_seq_len, self.batch_max_tokens)
-        if self.max_seq_length is not None:
-            create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
-
         cache_config = DeepseekV4CacheConfig.from_model_config(self.config, self.args)
         self.req_manager = DeepseekV4ReqManager(
             self.max_req_num,
-            create_max_seq_len,
+            self.max_seq_length,
             None,
             cache_config,
             mtp_step=self.args.mtp_step,
