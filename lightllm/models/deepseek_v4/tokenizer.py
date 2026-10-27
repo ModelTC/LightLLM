@@ -122,10 +122,16 @@ class DeepSeekV4Tokenizer:
         # JSON strings to encode each named argument separately.
         for msg in msgs:
             content = msg.get("content")
-            if isinstance(content, list) and all(
-                isinstance(part, dict) and part.get("type") == "text" for part in content
-            ):
-                msg["content"] = "".join(part.get("text") or "" for part in content)
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if part["type"] == "text":
+                        parts.append(part.get("text") or "")
+                    elif part["type"] in ("image_url", "image"):
+                        parts.append("<｜deepseek_image｜>")
+                    else:
+                        raise ValueError(f"Unsupported DeepSeek-V4 content type: {part['type']}")
+                msg["content"] = "".join(parts)
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function")
                 if isinstance(fn, dict) and isinstance(fn.get("arguments"), dict):
@@ -150,10 +156,12 @@ class DeepSeekV4Tokenizer:
             if not injected:
                 msgs.insert(0, {"role": "system", "content": "", "tools": wrapped_tools})
 
-        if thinking is None:
-            thinking = bool(enable_thinking) if enable_thinking is not None else True
-        thinking_mode = "thinking" if thinking else "chat"
         effort = kwargs.get("reasoning_effort")
+        if thinking is None:
+            thinking = bool(enable_thinking) if enable_thinking is not None else effort != "none"
+        thinking_mode = "thinking" if thinking else "chat"
+        if effort == "none":
+            effort = None
         if thinking and effort is None:
             effort = os.getenv("LIGHTLLM_DSV4_THINKING_EFFORT", "high")
         encoding = self._get_encoding_module()

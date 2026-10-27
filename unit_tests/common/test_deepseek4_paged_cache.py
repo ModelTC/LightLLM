@@ -1317,8 +1317,12 @@ def test_forward_indices_are_isolated_and_graph_inputs_refresh(cache, is_prefill
 
 
 @pytest.mark.parametrize("microbatch_index", [0, 1])
-def test_dspark_proposal_reuses_forward_write_slots(cache, monkeypatch, microbatch_index):
-    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+@pytest.mark.parametrize("mode", ["proposal", "commit", "prefill"])
+def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index, mode):
+    from unittest.mock import Mock
+
+    import lightllm.models.deepseek_v4.triton_kernel.build_swa_indices as swa_kernel
+    import lightllm.models.deepseek_v4_dspark.infer_struct as dspark_state
     from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
     from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
     from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
@@ -1334,6 +1338,7 @@ def test_dspark_proposal_reuses_forward_write_slots(cache, monkeypatch, microbat
     vars(model).update(
         config=config,
         batch_max_tokens=3,
+        max_req_num=requests.max_request_num,
         max_seq_length=4096,
         graph=None,
         has_vision=False,
@@ -1348,26 +1353,38 @@ def test_dspark_proposal_reuses_forward_write_slots(cache, monkeypatch, microbat
     model._cos_cached_sliding = model._sin_cached_sliding = rope
     model._cos_cached_compress = model._sin_cached_compress = rope
     state = DeepseekV4DSparkInferStateInfo()
-    state.is_prefill, state.microbatch_index = False, microbatch_index
+    state.is_prefill, state.microbatch_index = mode == "prefill", microbatch_index
     state.is_draft_model = True
     state.req_manager, state.mem_manager = requests, manager
-    state.decode_att_state = backend.create_att_decode_state(state)
-    state.b_req_idx = torch.full((3,), req_idx, dtype=torch.int32, device="cuda")
-    state.b_seq_len = torch.arange(258, 261, dtype=torch.int32, device="cuda")
+    if state.is_prefill:
+        state.batch_size = 1
+        state.input_ids = torch.ones(3, dtype=torch.int64, device="cuda")
+        state.b_req_idx = torch.tensor([req_idx], dtype=torch.int32, device="cuda")
+        state.b_seq_len = torch.tensor([260], dtype=torch.int32, device="cuda")
+        state.b_ready_cache_len = torch.tensor([257], dtype=torch.int32, device="cuda")
+        state.prefill_att_state = backend.create_att_prefill_state(state)
+    else:
+        state.decode_att_state = backend.create_att_decode_state(state)
+        state.b_req_idx = torch.full((3,), req_idx, dtype=torch.int32, device="cuda")
+        state.b_seq_len = torch.arange(258, 261, dtype=torch.int32, device="cuda")
+        if mode == "commit":
+            state.mtp_draft_input_hiddens = torch.zeros((3, 1), device="cuda")
     state.max_kv_seq_len = 260
-    parent_init = DeepseekV4InferStateInfo.init_some_extra_state
-    parent_write_slots = []
-
-    def init_and_remember_write_slots(self, model):
-        parent_init(self, model)
-        parent_write_slots.append(self.dsv4_swa_write_slots)
-
-    monkeypatch.setattr(DeepseekV4InferStateInfo, "init_some_extra_state", init_and_remember_write_slots)
+    causal_builder = Mock(wraps=swa_kernel.build_swa_indices)
+    draft_builder = Mock(wraps=dspark_state.build_dspark_swa_indices)
+    monkeypatch.setattr(swa_kernel, "build_swa_indices", causal_builder)
+    monkeypatch.setattr(dspark_state, "build_dspark_swa_indices", draft_builder)
     state.init_some_extra_state(model)
-    assert state.dsv4_swa_write_slots is parent_write_slots[0]
-    assert state.dsv4_swa_indices.shape == (3, 256)
-    torch.testing.assert_close(state.dsv4_swa_lengths, torch.full_like(state.dsv4_swa_lengths, 131))
-    expected_slots = _swa_slots(requests, req_idx, state.position_ids, prefill=False).to(torch.int32)
+    proposal = mode == "proposal"
+    assert causal_builder.call_count == int(not proposal)
+    assert draft_builder.call_count == int(proposal)
+    assert state.dsv4_swa_indices.shape == (3, 256 if proposal else 128)
+    torch.testing.assert_close(
+        state.dsv4_swa_lengths, torch.full_like(state.dsv4_swa_lengths, 131 if proposal else 128)
+    )
+    expected_slots = _get_swa_token_indices(
+        requests, req_idx, state.position_ids, prefill_state=state.prefill_att_state if state.is_prefill else None
+    ).to(torch.int32)
     torch.testing.assert_close(state.dsv4_swa_write_slots, expected_slots)
     requests.free([req_idx], slots)
 

@@ -81,25 +81,41 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         else:
             self.dsv4_sparse_req_idx = self.b_req_idx
             self._dsv4_token_to_batch_idx = None
-        # Sliding-window indices are layer-independent; build once for this forward.
+        self.dsv4_workspace = model.dsv4_workspace
+        self._init_swa_metadata(model)
+
+        from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
+
+        long_ratio = self.req_manager.cache_config.long_compress_ratio
+        max_kv_seq_len = self.max_kv_seq_len
+        # Replay copies C128 indices into the captured state, so their widths must match.
+        if not self.is_prefill and model.graph is not None and model.graph.can_run(self.batch_size, max_kv_seq_len):
+            max_kv_seq_len = model.graph.graph_max_len_in_batch
+        c128_entries = max(1, max_kv_seq_len // long_ratio)
+        c128_cap = ((c128_entries + 63) // 64) * 64
+        self.dsv4_c128_indices = torch.empty((pos.numel(), c128_cap), dtype=torch.int32, device=pos.device)
+        self.dsv4_c128_lengths = torch.empty_like(pos, dtype=torch.int32)
+        build_compressed_kv_indices(
+            self.dsv4_sparse_req_idx,
+            self.position_ids,
+            self.req_manager.req_to_token_indexs,
+            long_ratio,
+            self.dsv4_c128_indices,
+            self.dsv4_c128_lengths,
+        )
+
+    def _init_swa_metadata(self, model):
+        """Build the sliding-window metadata once for this forward."""
         from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import (
             build_image_visibility,
             build_swa_indices,
         )
 
-        self.dsv4_workspace = model.dsv4_workspace
+        pos = self.position_ids
         has_vision = model.has_vision
         swa_width = self.req_manager.cache_config.sliding_window
         if has_vision and self.is_prefill:
             swa_width += model.config["vision_max_n_token"]
-        if (
-            self.is_draft_model
-            and model.args.mtp_mode == "dspark"
-            and not self.is_prefill
-            and self.mtp_draft_input_hiddens is None
-        ):
-            # DSpark proposals include the complete draft block, with FlashMLA padding.
-            swa_width = ((swa_width + int(model.args.mtp_step) + 127) // 128) * 128
         self.dsv4_swa_indices = torch.empty((pos.numel(), swa_width), dtype=torch.int32, device=pos.device)
         self.dsv4_swa_lengths = torch.empty_like(pos, dtype=torch.int32)
         if has_vision and self.is_prefill:
@@ -136,25 +152,6 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             swa_runtime_write_slots=self.dsv4_swa_runtime_write_slots,
             token_to_batch_idx=self._dsv4_token_to_batch_idx,
             b_seq_len=self.b_seq_len,
-        )
-        from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
-
-        long_ratio = self.req_manager.cache_config.long_compress_ratio
-        max_kv_seq_len = self.max_kv_seq_len
-        # Replay copies C128 indices into the captured state, so their widths must match.
-        if not self.is_prefill and model.graph is not None and model.graph.can_run(self.batch_size, max_kv_seq_len):
-            max_kv_seq_len = model.graph.graph_max_len_in_batch
-        c128_entries = max(1, max_kv_seq_len // long_ratio)
-        c128_cap = ((c128_entries + 63) // 64) * 64
-        self.dsv4_c128_indices = torch.empty((pos.numel(), c128_cap), dtype=torch.int32, device=pos.device)
-        self.dsv4_c128_lengths = torch.empty_like(pos, dtype=torch.int32)
-        build_compressed_kv_indices(
-            self.dsv4_sparse_req_idx,
-            self.position_ids,
-            self.req_manager.req_to_token_indexs,
-            long_ratio,
-            self.dsv4_c128_indices,
-            self.dsv4_c128_lengths,
         )
 
     def init_c4_indices(self, width):

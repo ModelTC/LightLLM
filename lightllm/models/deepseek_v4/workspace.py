@@ -60,7 +60,9 @@ class DeepseekV4Workspace:
     """Reusable model computation buffers; forward metadata lives in infer states."""
 
     def __init__(self, model):
-        self.token_capacity = int(model.batch_max_tokens)
+        # Eager prefill and CUDA graph buckets may pad tokens to a full TP group.
+        tp = model.tp_world_size_
+        self.token_capacity = ((int(model.batch_max_tokens) + tp - 1) // tp) * tp
         self.flashmla_prefill_q = None
         self.c4_prefill_aux = None
 
@@ -76,3 +78,10 @@ class DeepseekV4Workspace:
             (self.token_capacity, padded_q_head_num, head_dim), dtype=dtype, device="cuda"
         )
         self.flashmla_prefill_q[:, tp_q_head_num:, :].zero_()
+
+    def get_flashmla_prefill_q(self, token_num: int):
+        if token_num > self.token_capacity:
+            raise ValueError(
+                f"DeepSeek-V4 Q workspace capacity {self.token_capacity} is smaller than {token_num} tokens"
+            )
+        return self.flashmla_prefill_q[:token_num]

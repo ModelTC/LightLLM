@@ -115,6 +115,24 @@ def test_activation_scales_and_quantized_values(monkeypatch, layout, group_size,
         assert scales.stride() == (groups, 1)
 
 
+@pytest.mark.parametrize("shape", [(2, 3, 256), (2, 3, 4, 256)])
+@pytest.mark.parametrize("group_size", [64, 128])
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
+def test_nd_activation_scales_preserve_row_major_output(monkeypatch, shape, group_size, use_ue8m0_scales):
+    monkeypatch.setattr(activation, "HAS_SGL_KERNEL", False)
+    x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    x[0, 0].zero_()
+    q, scales = activation.per_token_group_quant_fp8(x, group_size, use_ue8m0_scales=use_ue8m0_scales)
+    groups = shape[-1] // group_size
+    reference_scales = x.float().view(*shape[:-1], groups, group_size).abs().amax(-1).clamp_min(1e-10) / 448
+    if use_ue8m0_scales:
+        reference_scales = reference_scales.log2().ceil().exp2()
+    reference_q = (x.float().view(*shape[:-1], groups, group_size) / reference_scales[..., None]).to(q.dtype)
+    assert scales.shape == (*shape[:-1], groups)
+    torch.testing.assert_close(scales, reference_scales, rtol=0, atol=0)
+    torch.testing.assert_close(q.float(), reference_q.view_as(x).float(), rtol=0, atol=0)
+
+
 @pytest.mark.parametrize("use_sgl", [False, True])
 @pytest.mark.parametrize("rows", [1, 17])
 @pytest.mark.parametrize("groups", [1, 2, 3, 4, 5, 8])

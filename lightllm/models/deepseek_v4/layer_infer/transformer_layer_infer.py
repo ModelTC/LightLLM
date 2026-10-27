@@ -367,7 +367,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
 
         if infer_state.is_prefill:
-            q = infer_state.dsv4_workspace.flashmla_prefill_q[:T]
+            q = infer_state.dsv4_workspace.get_flashmla_prefill_q(T)
         else:
             q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
             q[:, self.tp_q_head_num_ :, :].zero_()

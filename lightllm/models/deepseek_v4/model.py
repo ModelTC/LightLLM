@@ -133,12 +133,14 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
         tp_q_head_num = self.prefill_att_backend.tp_q_head_num
         padded_q_head_num = self.prefill_att_backend.padded_q_head_num
-        self.dsv4_workspace.init_flashmla_prefill_q(
-            tp_q_head_num=tp_q_head_num,
-            padded_q_head_num=padded_q_head_num,
-            head_dim=self.config["head_dim"],
-            dtype=self.data_type,
-        )
+        if not self.is_mtp_draft_model:
+            # Drafts share this buffer after the main model has captured its CUDA graphs.
+            self.dsv4_workspace.init_flashmla_prefill_q(
+                tp_q_head_num=tp_q_head_num,
+                padded_q_head_num=padded_q_head_num,
+                head_dim=self.config["head_dim"],
+                dtype=self.data_type,
+            )
         for layer_infer in self.layers_infer:
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
         return
