@@ -7,6 +7,7 @@ model or claim to validate multi-node communication or numerical kernel results.
 import argparse
 import importlib
 import importlib.metadata
+import hashlib
 import json
 from pathlib import Path
 import subprocess
@@ -55,6 +56,11 @@ def validate(gpu=False):
     for name in ("get_num_sms", "set_num_sms", "fp8_gemm_nt", "m_grouped_fp8_gemm_nt_masked"):
         assert callable(getattr(deep_gemm, name)), name
     assert callable(deep_ep.Buffer)
+    receipt = json.loads(Path("/opt/lightllm-build/deepep_rcqp.json").read_text())
+    native = Path(deep_ep.__file__).parent / Path(receipt["native_path"]).name
+    assert hashlib.sha256(native.read_bytes()).hexdigest() == receipt["native_sha256"]
+    for name, field in (("nvidia-nvshmem-cu13", "nvshmem"), ("nvidia-nccl-cu13", "nccl")):
+        assert importlib.metadata.version(name) == receipt[field]
     assert callable(light_mem.PyLocalCacheService)
     assert hasattr(light_mem.PyState, "Finished")
     assert callable(torch_memory_saver.region) and callable(configure_subprocess)
@@ -133,6 +139,7 @@ def validate(gpu=False):
         "tilelang": tilelang.__version__,
         "flashinfer": flashinfer.__version__,
         "native_gpu_imports": native_gpu_imports,
+        "deepep_rcqp": receipt,
     }
 
 

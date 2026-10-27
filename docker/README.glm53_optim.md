@@ -1,95 +1,104 @@
-# GLM53 optimized overlay image
+# GLM53 optimized image
 
-This Dockerfile updates the `support_ds4` release image with `glm53_optim` source,
-ReplaySSM/FP8 KV, cache-aware routing and its actual-cache measurements. The
-control plane uses a ConfigServer, four independent PD masters (one worker each)
-and HAProxy. GPU roles are `p0`, `p1`, `d0`, `d1`; their group ranks are filled by
-the launcher.
+The image contains `glm53_optim` on `support_ds4`: Replay8, FP8 KV, cache-aware
+routing and actual cache measurements, ConfigServer TCPStore startup and GLM
+packed-KV transfer fixes. DeepEP is rebuilt for SM90 / CUDA 13 / PyTorch 2.11 /
+NVSHMEM 3.6.5 with the RC-QP layout fix from upstream PR 696. No package
+installation, source patching, external dependency directory or HAProxy is
+needed at startup.
 
-## Build
+## Start
 
-Use a clean checkout of `glm53_optim` from the public repository, with no registry
-credentials, local dependency directories or model files in the build context.
-The Dockerfile retains `.git` so the source can be inspected and updated later.
-The base image is pinned by digest, and the source commit is checked during
-build and recorded in an OCI label and `/opt/lightllm-build/source_revision`.
+Mount the same complete model (including MTP and tokenizer files) at `/model`.
+Set `CONFIG_SERVER_HOST` to a reachable ConfigServer service DNS name; no P/D
+machine IP list is needed. There must be exactly one ConfigServer for this
+cluster. Run each command in its own container/process:
+
+| Component | Count | Command | Port |
+|---|---:|---|---:|
+| ConfigServer | 1 | `glm53-pd config` | 60088 |
+| PD Master | 4, one per GPU host/pod | `glm53-pd master` | 60011 each |
+| Prefill | 2 hosts, 8 H100 each | `glm53-pd p0` / `glm53-pd p1` | 8019 each |
+| Decode | 2 hosts, 8 H100 each | `glm53-pd d0` / `glm53-pd d1` | 8121 each |
+
+For the ConfigServer container, leave `CONFIG_SERVER_HOST` unset so it binds
+`0.0.0.0`. For every Master/P/D container, set it to the service DNS name,
+for example `lightllm-config`. Expose 60088 and NCCL TCPStore ports 29501/29502
+on that service. P/D pods must reach each other and all Masters over the cluster
+network, with RDMA device access configured by the cluster runtime. Each Master
+uses one HTTP worker; clients can use any Master or an existing Kubernetes
+Service covering the four Masters.
 
 ```bash
-git clone --depth 1 -b glm53_optim https://github.com/ModelTC/LightLLM.git
+# Common environment in each Master/P/D container:
+export CONFIG_SERVER_HOST=lightllm-config
+export CONFIG_SERVER_PORT=60088
+export MODEL_DIR=/model
+export RUN_DIR=/var/log/lightllm
+
+# Execute ONE role, as appropriate for that container:
+glm53-pd master
+glm53-pd p0
+glm53-pd p1
+glm53-pd d0
+glm53-pd d1
+```
+
+Start ConfigServer first, then the four Masters and the P/D groups. P0/P1 form
+one TP16/DP16 group; D0/D1 form a second. Role names fill `node_rank=0/1` within
+each group. Node discovery does not assign distributed ranks.
+
+Logs go to stdout and `$RUN_DIR/logs/ROLE.log`. Mount `$RUN_DIR` to persistent
+writable **local storage** on each GPU host; its disk cache defaults to
+`$RUN_DIR/disk_cache/ROLE`. CPU cache needs 1024 GiB per P host and disk cache
+needs up to 10240 GiB. RDMA, sufficient host RAM/shared memory and model/log/cache
+mounts are deployment resources supplied by the operator; they are not image
+contents. `MODEL_DIR` must use the same path on all roles so routing namespaces
+match. Masters can mount just model/tokenizer metadata at that same path.
+
+Inspect the exact command without starting or writing anything:
+
+```bash
+CONFIG_SERVER_HOST=lightllm-config glm53-pd p0 --dry-run
+CONFIG_SERVER_HOST=lightllm-config glm53-pd master --dry-run
+```
+
+The measured configuration stays 1M context, P128/D256, MTP3, BF16 SSM,
+Replay8/precompute/raw, `fp8kv_dsa`, P batch4096/chunk2048, D batch1024,
+P memory .75 / D .85, D KV cap 2,800,000 per GPU, graph batch16
+(P graphs disabled, D graphs enabled). Master resource waits are 200 seconds;
+GPU KV transfer timeout is 600 seconds; Schema limit is 65536 for every role.
+
+## Build and verify
+
+Build from a clean public checkout, with no credentials, model files or local
+runtime directories in the context:
+
+```bash
+git clone --single-branch -b glm53_optim https://github.com/ModelTC/LightLLM.git
 cd LightLLM
 revision=$(git rev-parse HEAD)
 docker build --network host -f docker/Dockerfile.glm53_optim \
   --build-arg VCS_REF="$revision" -t "lightllm:glm53_optim-${revision:0:8}" .
 ```
 
-`requirements.glm53_optim.txt` is an explicit overlay, installed with `--no-deps`.
-It includes the required transitive DSL libraries. This preserves the base
-CUDA 13/Torch 2.11/Triton 3.6 and compiled DeepEP, DeepGEMM, FlashMLA and LightMem.
-`requirements.glm53_optim_extra.txt` adds the required CUTLASS cu12 companion and
-the base NVSHMEM's missing CCCL headers, while keeping the CUDA 13.0 SDK version.
-These extra wheels have official PyPI SHA256 pins for Linux x86_64 / Python 3.10.
-If PyPI downloads are slow, pass
-`--build-arg POST_UPGRADE_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`;
-the hashes still verify that the downloaded wheels match the official artifacts.
-The NIXL distributions are removed together and reinstalled after the overlay
-upgrade. The old release wheels have overlapping file ownership, so an ordinary in-place
-upgrade can delete files just installed by another wheel while reporting the
-new versions as successfully installed.
-Do not run a blanket dependency upgrade. The base image contains unrelated
-vLLM/MCP packages with pre-existing metadata conflicts; `pip check` should be
-compared with the base result, not treated as proof of LightLLM GPU correctness.
-
-## Validate
+The base image is pinned by digest. Runtime overlays use explicit versions and
+`--no-deps`; NIXL's overlapping distributions are removed and reinstalled as a
+family with SHA256 pins. Do not blanket-upgrade Torch/CUDA/NCCL/NVSHMEM. DeepEP's
+pinned source, patch hashes, linked dependency versions and native binary hash
+are recorded in `/opt/lightllm-build/deepep_rcqp.json`; the built wheel is kept
+under `/opt/lightllm-build/wheels/`. The application revision is in the OCI label
+and `/opt/lightllm-build/source_revision`.
 
 ```bash
-# No GPU or model requests: versions, real native-library imports, XGrammar
-# compile/match, GLM/Replay/cache-aware imports and API CLI options.
+# CPU validation: dependency/API checks, binary receipt and source revision.
 docker run --rm --entrypoint /opt/conda/bin/python IMAGE \
   /lightllm/docker/validate_glm53_optim.py
-
-# On a Hopper machine with a CUDA 13 compatible driver: additionally import
-# SGL's native FlashMLA/FlashAttention bindings. This is an API check, not a
-# numerical kernel test or multi-node communication test.
+# Adds Hopper native import checks; does not run model requests.
 docker run --rm --gpus all --entrypoint /opt/conda/bin/python IMAGE \
   /lightllm/docker/validate_glm53_optim.py --gpu
 ```
 
-The build host does not need a GPU. Do not disable the NVIDIA entrypoint's CUDA
-driver requirements to make a validation appear successful. Production use
-still requires Hopper kernel and distributed P/D validation on the target hosts.
-
-## Start the 2P2D deployment
-
-The image provides `glm53-pd`, which invokes the existing launcher with
-image-local source/dependencies and `/model` as the model mount. Logs default
-to `/var/log/lightllm/logs/ROLE.log`; mount `/var/log/lightllm` to persistent host
-storage. The proxy uses the base image's bundled `ray-haproxy` 2.8.25 binary,
-the same binary exercised by the independent-master integration test. Review
-all IP/port/model/cache mounts before starting.
-
-```bash
-# Inspect every control-plane command without starting anything.
-docker run --rm -e PD_MASTER_IP=CPU_IP IMAGE glm53-pd cpu --dry-run
-
-# CPU host: mount the model/tokenizer metadata needed by all four masters.
-docker run --name glm53-control --network host --ipc host \
-  -v /host/model_meta:/model:ro -v /host/logs/cpu:/var/log/lightllm \
-  -e PD_MASTER_IP=CPU_IP IMAGE glm53-pd cpu
-
-# One command on EACH GPU host; set ROLE to p0/p1/d0/d1 as appropriate.
-# Configure RDMA device access/mounts for the host's container runtime as well.
-docker run --name "glm53-$ROLE" --gpus all --network host --ipc host \
-  --ulimit memlock=-1 --ulimit stack=67108864 \
-  -v /host/model:/model:ro -v /host/logs:/var/log/lightllm \
-  -v /host/disk_cache:/mnt/vqa/lightllm_disk_cache \
-  -e PD_MASTER_IP=CPU_IP -e P0_IP=P0_IP -e P1_IP=P1_IP \
-  -e D0_IP=D0_IP -e D1_IP=D1_IP IMAGE glm53-pd "$ROLE"
-```
-
-The default topology remains 1M context, P128/D256, MTP3, BF16 SSM, Replay8 with
-precompute/raw, FP8 KV and D KV cap 2,800,000 per card. `cpu` starts ports 60011
-(HAProxy), 60088 (ConfigServer) and 60111–60114 (masters). Use a separate log
-mount for each host. Persistent disk cache paths and RDMA access are host-specific
-and must be supplied by the operator. See
-[`README_glm53_optim_2p2d.md`](../test/start_scripts/glm53/README_glm53_optim_2p2d.md)
-for the full topology and available overrides.
+Import checks do not substitute for a two-node DeepEP numerical check or a
+complete four-node P/D inference check. Startup or HTTP 200 alone does not prove
+that an entire streamed response completed.

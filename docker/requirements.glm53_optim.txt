@@ -1,5 +1,6 @@
 # Overlay for lightllm:v1.4.0-dsv4-1e5097. Installed with --no-deps so that
-# the base image's Torch/CUDA/DeepEP/DeepGEMM/FlashMLA binaries stay together.
+# Torch/CUDA/NCCL/NVSHMEM/DeepGEMM/FlashMLA stay pinned. DeepEP alone is
+# rebuilt by build_deepep_glm53_optim.py with its NVSHMEM RC-QP layout fix.
 # Include the transitive DSL libraries explicitly because automatic resolution
 # can replace the base image's deliberately selected NCCL/NVSHMEM versions.
 --extra-index-url https://flashinfer.ai/whl

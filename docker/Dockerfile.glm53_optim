@@ -23,6 +23,7 @@ RUN --mount=type=cache,target=/root/.cache/pip \
     && rm /tmp/glm53_optim-extra.txt
 
 COPY . /lightllm
+RUN /opt/conda/bin/python /lightllm/docker/build_deepep_glm53_optim.py
 ARG VCS_REF
 LABEL org.opencontainers.image.source="https://github.com/ModelTC/LightLLM" \
       org.opencontainers.image.revision="${VCS_REF}" \
@@ -31,7 +32,6 @@ RUN test -n "${VCS_REF}" \
     && test "$(git rev-parse HEAD)" = "${VCS_REF}" \
     && /opt/conda/bin/python -m pip install --no-cache-dir --no-deps --no-build-isolation -e /lightllm \
     && ln -s /lightllm/test/start_scripts/glm53/glm53_pd_2p2d.sh /usr/local/bin/glm53-pd \
-    && ln -s "$(/opt/conda/bin/python -c 'from ray_haproxy import get_haproxy_binary; print(get_haproxy_binary())')" /usr/local/bin/glm53-haproxy \
     && mkdir -p /opt/lightllm-build \
     && printf '%s\n' "${VCS_REF}" > /opt/lightllm-build/source_revision
 
@@ -45,7 +45,7 @@ ENV CPU_SOURCE=/lightllm \
     GPU_EXTRA_PYTHONPATH=/lightllm \
     RUN_DIR=/var/log/lightllm \
     PYTHON_BIN=/opt/conda/bin/python \
-    HAPROXY_BIN=/usr/local/bin/glm53-haproxy \
+    PATH=/opt/conda/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
     LIGHTLLM_JSON_SCHEMA_MAX_LENGTH=65536
 
 RUN /opt/conda/bin/python /lightllm/docker/validate_glm53_optim.py

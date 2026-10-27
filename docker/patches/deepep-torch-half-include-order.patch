@@ -1,0 +1,14 @@
+diff --git a/csrc/kernels/backend/nvshmem.cu b/csrc/kernels/backend/nvshmem.cu
+--- a/csrc/kernels/backend/nvshmem.cu
++++ b/csrc/kernels/backend/nvshmem.cu
+@@ -1,7 +1,9 @@
++// PyTorch defines __CUDA_NO_HALF_* for extensions. Enable the CUDA operators
++// before NVSHMEM 3.6.5 instantiates its half reduction templates.
++#include <deep_ep/common/compiled.cuh>
+ #include <nvshmem.h>
+ 
+ #include <cstring>
+-#include <deep_ep/common/compiled.cuh>
+ #include <deep_ep/common/exception.cuh>
+ #include <optional>
+ #include <sstream>
