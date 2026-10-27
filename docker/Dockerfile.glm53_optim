@@ -22,6 +22,9 @@ RUN --mount=type=cache,target=/root/.cache/pip \
         -r /tmp/glm53_optim-extra.txt \
     && rm /tmp/glm53_optim-extra.txt
 
+# Remove the release checkout first so files deleted by this branch cannot
+# remain as stale modules underneath the new source tree.
+RUN rm -rf /lightllm
 COPY . /lightllm
 RUN /opt/conda/bin/python /lightllm/docker/build_deepep_glm53_optim.py
 ARG VCS_REF
@@ -30,6 +33,7 @@ LABEL org.opencontainers.image.source="https://github.com/ModelTC/LightLLM" \
       org.opencontainers.image.description="glm53_optim: ReplaySSM, FP8 KV, cache-aware routing, four independent PD masters"
 RUN test -n "${VCS_REF}" \
     && test "$(git rev-parse HEAD)" = "${VCS_REF}" \
+    && test -z "$(git status --porcelain)" \
     && /opt/conda/bin/python -m pip install --no-cache-dir --no-deps --no-build-isolation -e /lightllm \
     && ln -s /lightllm/test/start_scripts/glm53/glm53_pd_2p2d.sh /usr/local/bin/glm53-pd \
     && mkdir -p /opt/lightllm-build \
