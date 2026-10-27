@@ -1,0 +1,10 @@
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+**/*.egg-info
+outputs
+work
+.git/hooks
+.git/logs
+# Build only from a clean public checkout; .git is retained for source updates
+# and the build's exact commit assertion. Never add credentials to the context.

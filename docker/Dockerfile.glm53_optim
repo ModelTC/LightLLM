@@ -1,0 +1,52 @@
+# Build from a clean glm53_optim checkout:
+# docker build -f docker/Dockerfile.glm53_optim --build-arg VCS_REF=$(git rev-parse HEAD) -t lightllm:glm53_optim .
+ARG BASE_IMAGE=registry.cn-sh-02.sensecore.cn/ccr-ams-public/crafted/lightllm:v1.4.0-dsv4-1e5097@sha256:a6b2e96175ee228309e30fd9fdcb660648259af1443784c9cad68327c09647d6
+FROM ${BASE_IMAGE}
+
+WORKDIR /lightllm
+COPY docker/requirements.glm53_optim.txt /tmp/glm53_optim-requirements.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /opt/conda/bin/python -m pip install --no-deps \
+        -r /tmp/glm53_optim-requirements.txt \
+    && rm /tmp/glm53_optim-requirements.txt
+
+# Old NIXL distributions have overlapping RECORD ownership. Uninstalling one
+# during an in-place upgrade can remove the newly installed CUDA 13 backend.
+# Reinstall the complete family after upgrading, and validate actual files/APIs.
+COPY docker/requirements.glm53_optim_extra.txt /tmp/glm53_optim-extra.txt
+RUN --mount=type=cache,target=/root/.cache/pip \
+    /opt/conda/bin/python -m pip uninstall -y nixl nixl-cu12 nixl-cu13 \
+    && /opt/conda/bin/python -m pip install --no-deps \
+        -r /tmp/glm53_optim-extra.txt \
+    && rm /tmp/glm53_optim-extra.txt
+
+COPY . /lightllm
+ARG VCS_REF
+LABEL org.opencontainers.image.source="https://github.com/ModelTC/LightLLM" \
+      org.opencontainers.image.revision="${VCS_REF}" \
+      org.opencontainers.image.description="glm53_optim: ReplaySSM, FP8 KV, cache-aware routing, four independent PD masters"
+RUN test -n "${VCS_REF}" \
+    && test "$(git rev-parse HEAD)" = "${VCS_REF}" \
+    && /opt/conda/bin/python -m pip install --no-cache-dir --no-deps --no-build-isolation -e /lightllm \
+    && ln -s /lightllm/test/start_scripts/glm53/glm53_pd_2p2d.sh /usr/local/bin/glm53-pd \
+    && ln -s "$(/opt/conda/bin/python -c 'from ray_haproxy import get_haproxy_binary; print(get_haproxy_binary())')" /usr/local/bin/glm53-haproxy \
+    && mkdir -p /opt/lightllm-build \
+    && printf '%s\n' "${VCS_REF}" > /opt/lightllm-build/source_revision
+
+# Use the packages shipped in this image instead of host-specific dependency
+# directories from the original bare-metal deployment.
+ENV CPU_SOURCE=/lightllm \
+    GPU_SOURCE=/lightllm \
+    CPU_MODEL_DIR=/model \
+    MODEL_DIR=/model \
+    CPU_EXTRA_PYTHONPATH=/lightllm \
+    GPU_EXTRA_PYTHONPATH=/lightllm \
+    RUN_DIR=/var/log/lightllm \
+    PYTHON_BIN=/opt/conda/bin/python \
+    HAPROXY_BIN=/usr/local/bin/glm53-haproxy \
+    LIGHTLLM_JSON_SCHEMA_MAX_LENGTH=65536
+
+RUN /opt/conda/bin/python /lightllm/docker/validate_glm53_optim.py
+
+# Keep the base NVIDIA entrypoint (including its driver checks).
+CMD ["/bin/bash"]

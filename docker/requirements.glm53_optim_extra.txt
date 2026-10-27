@@ -1,0 +1,8 @@
+# Reinstall the complete NIXL family together after the main overlay upgrade.
+nixl==1.2.0
+nixl-cu12==1.2.0
+nixl-cu13==1.2.0
+# Required companion library declared by CUTLASS DSL 4.6.2 (both CUDA variants).
+nvidia-cutlass-dsl-libs-cu12==4.6.2
+# Header-only dependency declared by the base image's NVSHMEM; match CUDA 13.0.
+nvidia-cuda-cccl==13.0.85
