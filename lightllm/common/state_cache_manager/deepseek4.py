@@ -53,16 +53,25 @@ class DeepseekV4CacheConfig:
 
     @classmethod
     def from_model_config(cls, config, args):
-        from lightllm.utils.config_utils import get_deepseek_v4_compress_rates, normalize_deepseek_v4_config
         from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 
-        config = normalize_deepseek_v4_config(config)
-        layer_num = config.get("n_layer", config.get("num_hidden_layers"))
+        target_layer_num = config.get("n_layer", config.get("num_hidden_layers"))
+        if target_layer_num is None:
+            raise ValueError("DeepSeek-V4 config is missing num_hidden_layers")
+        target_layer_num = int(target_layer_num)
+        layer_num = target_layer_num
         if args.mtp_mode is not None:
             layer_num += get_added_mtp_kv_layer_num()
-        compress_rates = get_deepseek_v4_compress_rates(config, layer_num)
+        compress_rates = list(config["compress_ratios"])
+        if len(compress_rates) < target_layer_num:
+            raise ValueError(
+                f"DeepSeek-V4 compress_ratios has {len(compress_rates)} entries, "
+                f"but the target model has {target_layer_num} layers"
+            )
+        # Missing runtime-added draft layers use sliding-window attention.
+        compress_rates.extend([0] * (layer_num - len(compress_rates)))
         return cls(
-            compress_rates=tuple(compress_rates),
+            compress_rates=tuple(compress_rates[:layer_num]),
             head_dim=config["head_dim"],
             rope_head_dim=config["qk_rope_head_dim"],
             indexer_head_dim=config["index_head_dim"],

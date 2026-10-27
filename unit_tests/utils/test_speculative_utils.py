@@ -361,9 +361,25 @@ def test_qwen35_dflash_added_kv_layers_come_from_nested_draft_config(tmp_path):
     assert envs_utils.get_added_mtp_kv_layer_num() == 5
 
 
-def test_dspark_added_kv_layers_come_from_draft_config(tmp_path):
+@pytest.mark.parametrize(
+    "draft_config,expected_layer_num",
+    [
+        ({"num_hidden_layers": 6}, 6),
+        (
+            {
+                "model_type": "deepseek_v4",
+                "num_hidden_layers": 61,
+                "compress_ratios": [4] * 61 + [0] * 3,
+                "dspark_target_layer_ids": [15, 31, 47],
+                "dspark_block_size": 8,
+            },
+            3,
+        ),
+    ],
+)
+def test_dspark_added_kv_layers_come_from_draft_config(tmp_path, draft_config, expected_layer_num):
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"num_hidden_layers": 6}))
+    config_path.write_text(json.dumps(draft_config))
 
     envs_utils.get_env_start_args.cache_clear()
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
@@ -376,7 +392,7 @@ def test_dspark_added_kv_layers_come_from_draft_config(tmp_path):
         }
     )
 
-    assert envs_utils.get_added_mtp_kv_layer_num() == 6
+    assert envs_utils.get_added_mtp_kv_layer_num() == expected_layer_num
 
 
 def test_eagle3_added_kv_layers_come_from_draft_config(tmp_path):
