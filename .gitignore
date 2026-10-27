@@ -11,3 +11,6 @@ logs/
 
 /benchmark/
 artifacts/
+
+# Local inference logs, caches, traces and isolated runtime packages.
+/outputs/
