@@ -1,8 +1,9 @@
 # Reinstall the complete NIXL family together after the main overlay upgrade.
-nixl==1.2.0
-nixl-cu12==1.2.0
-nixl-cu13==1.2.0
+# Hashes are for the official PyPI Linux x86_64 / CPython 3.10 wheels.
+nixl==1.2.0 --hash=sha256:eb666a3691e3d98be35164128175d7763eea3217125b5ead9fc54cd9754e0f16
+nixl-cu12==1.2.0 --hash=sha256:a3429cdb2e01114c8cde805e0551f3e65a3bd14337926a19f3f207a3202dcf78
+nixl-cu13==1.2.0 --hash=sha256:071952e71852ea17b4b83425fe086baa0c17a5074dec31106875cc3107f086f8
 # Required companion library declared by CUTLASS DSL 4.6.2 (both CUDA variants).
-nvidia-cutlass-dsl-libs-cu12==4.6.2
+nvidia-cutlass-dsl-libs-cu12==4.6.2 --hash=sha256:32bfc7caa5341076c7000adbb58da2a86b6ecfd8c480a264b36326a8359a7a50
 # Header-only dependency declared by the base image's NVSHMEM; match CUDA 13.0.
-nvidia-cuda-cccl==13.0.85
+nvidia-cuda-cccl==13.0.85 --hash=sha256:e0da7ad981f3a8aff08241b5bfc1af868742a63e2762f53a5171c492ef242649

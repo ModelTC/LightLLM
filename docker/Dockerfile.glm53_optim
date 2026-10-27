@@ -14,9 +14,11 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 # during an in-place upgrade can remove the newly installed CUDA 13 backend.
 # Reinstall the complete family after upgrading, and validate actual files/APIs.
 COPY docker/requirements.glm53_optim_extra.txt /tmp/glm53_optim-extra.txt
+ARG POST_UPGRADE_INDEX_URL=https://pypi.org/simple
 RUN --mount=type=cache,target=/root/.cache/pip \
     /opt/conda/bin/python -m pip uninstall -y nixl nixl-cu12 nixl-cu13 \
-    && /opt/conda/bin/python -m pip install --no-deps \
+    && /opt/conda/bin/python -m pip install --no-deps --require-hashes \
+        --index-url "${POST_UPGRADE_INDEX_URL}" \
         -r /tmp/glm53_optim-extra.txt \
     && rm /tmp/glm53_optim-extra.txt
 

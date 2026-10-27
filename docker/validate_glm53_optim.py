@@ -21,7 +21,7 @@ def validate(gpu=False):
         for line in (root / "docker" / filename).read_text().splitlines():
             if not line or line.startswith(("#", "--")):
                 continue
-            name, expected = line.split("==")
+            name, expected = line.split(" --hash=", 1)[0].split("==")
             assert name not in pins or pins[name] == expected, f"Conflicting pin: {name}"
             pins[name] = expected
     for name, expected in pins.items():

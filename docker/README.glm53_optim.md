@@ -27,6 +27,10 @@ It includes the required transitive DSL libraries. This preserves the base
 CUDA 13/Torch 2.11/Triton 3.6 and compiled DeepEP, DeepGEMM, FlashMLA and LightMem.
 `requirements.glm53_optim_extra.txt` adds the required CUTLASS cu12 companion and
 the base NVSHMEM's missing CCCL headers, while keeping the CUDA 13.0 SDK version.
+These extra wheels have official PyPI SHA256 pins for Linux x86_64 / Python 3.10.
+If PyPI downloads are slow, pass
+`--build-arg POST_UPGRADE_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple`;
+the hashes still verify that the downloaded wheels match the official artifacts.
 The NIXL distributions are removed together and reinstalled after the overlay
 upgrade. The old release wheels have overlapping file ownership, so an ordinary in-place
 upgrade can delete files just installed by another wheel while reporting the
