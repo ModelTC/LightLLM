@@ -163,6 +163,7 @@ class InferenceContext:
                 assert len(req.hybrid_len_to_big_page_id) == 0
         req.cur_kv_len = 0
         req.hold_kv_len = 0
+        req.token_history_ready = False
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         return
 
@@ -624,6 +625,7 @@ class InferReq:
 
         self.cur_kv_len = 0
         self.cur_output_len = 0
+        self.token_history_ready = False
         self.prompt_selected_logprobs = PromptSelectedLogprobsExt(self)
         self.final_token_metadata = FinalTokenMetadataExt(self)
 
@@ -860,6 +862,16 @@ class InferReq:
 
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
+
+    def get_token_lookback(self, depth):
+        if self.token_history_ready:
+            return None
+        self.token_history_ready = True
+        start = self.cur_kv_len
+        if start == 0:
+            return None
+        ids = self.get_input_token_ids()[max(0, start - depth) : start].tolist()
+        return self.req_idx, start, ids
 
     def _get_chunked_input_end(self):
         chunked_start = self.cur_kv_len

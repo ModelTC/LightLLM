@@ -1,6 +1,6 @@
 import copy
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 import torch
 
@@ -51,6 +51,10 @@ class ModelInput:
     # mtp_draft_input_hiddens 用于模型 mtp 模式下
     # 的 draft 模型的输入
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
+
+    # One-time CPU lookback at request admission/resume: (req_idx, chunk_start, token_ids).
+    # Request-aligned metadata is independent of MTP verify-row compaction and graph padding.
+    token_lookback: Optional[List[Tuple[int, int, List[int]]]] = None
 
     def to_cuda(self):
         self.check_input()

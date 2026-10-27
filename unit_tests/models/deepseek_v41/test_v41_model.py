@@ -961,6 +961,16 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             unsupported.setattr(model.args, "enable_prefill_cudagraph", True)
             with pytest.raises(ValueError, match="prefill CUDA Graph"):
                 model._verify_params()
+        with monkeypatch.context() as cpu_cache:
+            cpu_cache.setattr(model.args, "enable_cpu_cache", True)
+            for role in ("normal", "prefill"):
+                cpu_cache.setattr(model.args, "run_mode", role)
+                for disk in (False, True):
+                    cpu_cache.setattr(model.args, "enable_disk_cache", disk)
+                    model._verify_params()
+            cpu_cache.setattr(model.args, "run_mode", "decode")
+            with pytest.raises(ValueError, match="CPU cache on Decode nodes"):
+                model._verify_params()
         tokens = torch.arange(1, 301, dtype=torch.int64) % 64
         images = []
         if vision:
@@ -992,6 +1002,9 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 b_prefill_has_output_cpu=[True],
                 is_prefill=True,
                 multimodal_params=[{"images": images, "audios": []}],
+                token_lookback=[(req_idx, start, tokens[max(0, start - model.token_lookback_depth) : start].tolist())]
+                if start and model.token_lookback_depth
+                else None,
             )
 
         def prefill(start, end, req_idx=0):
@@ -1159,8 +1172,65 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 b_shared_radix_node_id=tensor(0),
                 is_prefill=False,
                 multimodal_params=[{"images": [], "audios": []}],
+                token_lookback=[
+                    (req_idx, position, tokens[max(0, position - model.token_lookback_depth) : position].tolist())
+                ]
+                if req_idx and model.token_lookback_depth
+                else None,
             )
             return model.forward(inp).logits.clone()
+
+        # P/D restores C2 state; Engram predecessors are rebuilt from the
+        # receiving request's tokens at its new physical KV pages.
+        from lightllm.models.deepseek_v4.pd_cache import _copy_request_state, get_pd_page_nbytes
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages
+
+        with monkeypatch.context() as pd:
+            for role in ("prefill", "decode"):
+                pd.setattr(model.args, "run_mode", role)
+                model._verify_params()
+            pd.setattr(model.args, "run_mode", "normal")
+            pd.setattr(model, "return_all_prompt_logics", False)
+            model.req_manager.clear_runtime_state(0)
+            prefill(0, 257)
+            model.req_manager.req_to_token_indexs[1, :512] = torch.arange(512, 1024, dtype=torch.int32, device="cuda")
+            manager = SimpleNamespace(
+                cache_config=model.req_manager.cache_config,
+                req_to_token_indexs=model.req_manager.req_to_token_indexs,
+                **{
+                    name: getattr(model.req_manager, name)
+                    for name in (
+                        "swa_buffer",
+                        "swa_capacity_tokens",
+                        "HOLD_REQUEST_ID",
+                        "HOLD_SWA_SLOT",
+                        "req_to_c4_state",
+                        "req_to_c4_indexer_state",
+                        "req_to_c128_state",
+                    )
+                },
+            )
+            state_page = torch.empty(get_pd_page_nbytes(manager.cache_config, 256), dtype=torch.uint8, device="cuda")
+            _copy_request_state(manager, state_page, 0, 257, write=True)
+            history_page = torch.empty_like(state_page).view(1, -1)
+            page_id = torch.zeros(1, dtype=torch.int32, device="cuda")
+            for start, end in ((0, 256), (256, 257)):
+                for req, write in ((0, True), (1, False)):
+                    copy_history_pages(
+                        model.mem_manager,
+                        manager.req_to_token_indexs[req, start:end].long(),
+                        page_id,
+                        history_page,
+                        to_pages=write,
+                        page_tokens=256,
+                        round_tail=True,
+                    )
+            expected = [decode(pos) for pos in (257, 258)]
+            model.req_manager.clear_runtime_state(1)
+            model.engram_hasher.history[512:769].fill_(-1)
+            _copy_request_state(manager, state_page, 1, 257, write=False)
+            for pos, reference in zip((257, 258), expected):
+                torch.testing.assert_close(decode(pos, req_idx=1), reference, atol=0, rtol=0)
 
         model.req_manager.clear_runtime_state(0)
         prefill(0, 33)
@@ -1196,6 +1266,35 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         torch.testing.assert_close(prefill(256, 257, req_idx=1), expected_prefill, atol=0, rtol=0)
         for position, expected in zip((257, 258), expected_decode):
             torch.testing.assert_close(decode(position, req_idx=1), expected, atol=0, rtol=0)
+
+        # CPU pages must resume at new physical slots after all source Engram
+        # history is lost, rather than relying on a still-resident GPU prefix.
+        from dataclasses import replace
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_checkpoint_pages
+
+        with monkeypatch.context() as cpu_cache:
+            manager, requests = model.mem_manager, model.req_manager
+            layout = replace(manager.cache_config, cpu_cache_token_page_size=256)
+            cpu_cache.setattr(manager, "cache_config", layout)
+            torch.cuda.synchronize()
+            manager.big_page_buffers.buffer[0].copy_(checkpoints.buffer[0])
+            pages = torch.empty((1, layout.get_cpu_cache_big_page_bytes()), dtype=torch.uint8, pin_memory=True)
+            page_ids = torch.zeros(1, dtype=torch.int32, device="cuda")
+            checkpoint_ids = torch.zeros(1, dtype=torch.int64, device="cuda")
+            copy_history_pages(manager, requests.req_to_token_indexs[0, :256].long(), page_ids, pages, to_pages=True)
+            copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, to_pages=True)
+            torch.cuda.synchronize()
+            manager.big_page_buffers.buffer[0].zero_()
+            model.engram_hasher.history.fill_(-99)
+            requests.req_to_token_indexs[1, :512] = torch.arange(512, 1024, dtype=torch.int32, device="cuda")
+            copy_history_pages(manager, requests.req_to_token_indexs[1, :256].long(), page_ids, pages, to_pages=False)
+            copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, to_pages=False)
+            requests.restore_big_page_state(0, SimpleNamespace(req_idx=1, cur_kv_len=256))
+            torch.testing.assert_close(prefill(256, 257, req_idx=1), expected_prefill, atol=0, rtol=0)
+            for position, expected in zip((257, 258), expected_decode):
+                torch.testing.assert_close(decode(position, req_idx=1), expected, atol=0, rtol=0)
+            requests.req_to_token_indexs[1, :256] = requests.req_to_token_indexs[0, :256]
+            requests.req_to_token_indexs[1, 256:259] = torch.arange(512, 515, dtype=torch.int32, device="cuda")
         assert len(model.mem_manager.kv_buffer) == 2
         assert (
             get_compressed_kv_buffer(model.mem_manager, 1).data_ptr()
@@ -1417,13 +1516,13 @@ def test_engram_hashes_survive_chunk_and_swa_page_boundaries(monkeypatch, vision
     pages = torch.tensor([[2, 0], [1, 3]], dtype=torch.int32, device="cuda")
     table = (pages[:, :, None] * 128 + torch.arange(128, device="cuda")).flatten(1)
 
-    def state(start, end):
+    def state(start, end, req_idx=0):
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
         return SimpleNamespace(
             position_ids=positions,
             input_ids=ids[start:end],
-            dsv4_sparse_req_idx=torch.zeros_like(positions),
-            mem_index=table[0, positions.long()],
+            dsv4_sparse_req_idx=torch.full_like(positions, req_idx),
+            mem_index=table[req_idx, positions.long()],
             req_manager=SimpleNamespace(req_to_token_indexs=table),
         )
 
@@ -1446,3 +1545,21 @@ def test_engram_hashes_survive_chunk_and_swa_page_boundaries(monkeypatch, vision
                         col = (shift - 1) * 2 + head
                         expected = rolling % int(hasher.primes[layer, col]) + int(hasher.offsets[layer, col])
                         assert int(full[pos, layer, col]) == expected
+
+    # Simulate GPU/CPU cache restoration or P/D transfer into unrelated physical slots.
+    manager = SimpleNamespace(req_to_token_indexs=table)
+    for start in (1, 2, 3, 127, 129, 130):
+        hasher.history.fill_(-99)
+        tail = ids[max(0, start - 3) : start].tolist()
+        hasher.restore_history([(1, start, tail)], manager)
+        restored = hasher(state(start, 135, req_idx=1))
+        torch.testing.assert_close(restored, full[start:], atol=0, rtol=0)
+
+    graph = torch.cuda.CUDAGraph()
+    replay_state = state(130, 135, req_idx=1)
+    with torch.cuda.graph(graph):
+        replayed = hasher(replay_state)
+    hasher.history.fill_(-99)
+    hasher.restore_history([(1, 130, ids[127:130].tolist())], manager)
+    graph.replay()
+    torch.testing.assert_close(replayed, full[130:], atol=0, rtol=0)

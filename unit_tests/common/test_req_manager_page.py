@@ -53,6 +53,7 @@ def _make_context(monkeypatch):
         req_to_token_indexs=torch.full((2, 16), -1, dtype=torch.int32),
     )
     context = SimpleNamespace(
+        backend=SimpleNamespace(model=SimpleNamespace(token_lookback_depth=0)),
         args=SimpleNamespace(page_size=4),
         req_manager=req_manager,
         radix_cache=None,

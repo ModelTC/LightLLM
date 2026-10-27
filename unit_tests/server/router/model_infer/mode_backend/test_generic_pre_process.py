@@ -1,6 +1,9 @@
 from types import SimpleNamespace
 
+import numpy as np
+import pytest
 import torch
+from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
 
 
@@ -10,6 +13,7 @@ def _patch_empty_input_context(monkeypatch):
         alloc=lambda size: torch.empty((size,), dtype=torch.int32),
     )
     infer_context = SimpleNamespace(
+        backend=SimpleNamespace(model=SimpleNamespace(token_lookback_depth=0)),
         args=SimpleNamespace(page_size=1),
         req_manager=SimpleNamespace(
             HOLD_REQUEST_ID=-1,
@@ -174,3 +178,60 @@ def test_overlap_decode_preserves_empty_microbatch(monkeypatch):
     assert run_reqs1 == []
     assert model_input1.batch_size == 0
     assert model_input1.b_req_idx.shape == (0,)
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize("start", [0, 1, 2, 3, 7])
+def test_token_lookback_is_captured_once_before_current_token(monkeypatch, is_prefill, start):
+    context = _patch_empty_input_context(monkeypatch)
+    context.backend.model.token_lookback_depth = 3
+    ids = np.arange(20, 20 + start + 2, dtype=np.int64)
+    if start > 2:
+        ids[start - 2] = 1 << 61  # Image cache IDs must retain their int64 range.
+    req = InferReq.__new__(InferReq)
+    req.req_idx = 5
+    req.cur_kv_len = start
+    req.cur_output_len = 4  # A resumed generation may already extend beyond the prompt.
+    req.token_history_ready = False
+    req.mtp_step = 2
+    req.multimodal_params = {"images": [], "audios": []}
+    req.shared_kv_node = None
+    req.get_input_token_ids = lambda: ids
+    req.get_chuncked_input_token_ids = lambda: ids[: start + 1]
+    req.get_cur_total_len = lambda: start + 1
+
+    def prepare():
+        if is_prefill:
+            return generic_pre_process.prepare_prefill_inputs([req], is_chuncked_mode=True)[0]
+        return generic_pre_process.prepare_decode_inputs([req])[0]
+
+    model_input = prepare()
+    expected = [(5, start, ids[max(0, start - 3) : start].tolist())] if start else None
+    assert model_input.token_lookback == expected
+    assert req.token_history_ready
+    if not is_prefill:
+        assert model_input.b_req_idx.tolist() == [5, 5, 5]
+        assert model_input.batch_size == 3  # Lookback remains request-aligned, not draft-row-aligned.
+    if start:
+        ids[:start] = -999
+        assert model_input.token_lookback == expected  # Own the snapshot while CPU tokens advance.
+    if not is_prefill:
+        req.get_input_token_ids = lambda: pytest.fail("ordinary decode must not fetch CPU token history")
+    assert prepare().token_lookback is None
+
+
+def test_freeing_request_kv_requires_local_lookback_again(monkeypatch):
+    from lightllm.server.router.model_infer.infer_batch import InferenceContext
+
+    context = _patch_empty_input_context(monkeypatch)
+    context.backend.model.token_lookback_depth = 3
+    request = InferReq.__new__(InferReq)
+    request.req_idx = 0
+    request.cur_kv_len = request.hold_kv_len = 4
+    request.token_history_ready = True
+    request.shm_req = SimpleNamespace(shm_cur_kv_len=4)
+    InferenceContext.free_a_req_mem(context, [], request)
+    assert not request.token_history_ready
+    request.cur_kv_len = 3
+    request.get_input_token_ids = lambda: np.array([11, 12, 13, 14], dtype=np.int64)
+    assert request.get_token_lookback(3) == (0, 3, [11, 12, 13])

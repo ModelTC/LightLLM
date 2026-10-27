@@ -34,7 +34,10 @@ def cache(monkeypatch, tmp_path, request):
     if not torch.cuda.is_available():
         pytest.skip("CUDA is required for the packed cache kernels")
     param = getattr(request, "param", 256)
-    page_size, mtp_step = param if isinstance(param, tuple) else (param, 3)
+    if param == "v41":
+        page_size, mtp_step = 256, 3
+    else:
+        page_size, mtp_step = param if isinstance(param, tuple) else (param, 3)
     (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 100}))
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
@@ -60,20 +63,24 @@ def cache(monkeypatch, tmp_path, request):
         ),
     )
     get_env_start_args.cache_clear()
+    config = DeepseekV4CacheConfig([4, 128, 0], (2048 + page_size - 1) // page_size * page_size)
+    if param == "v41":
+        config = DeepseekV4CacheConfig([2, 1, 0], 2048, short_compress_ratio=2, long_compress_ratio=1)
     manager = DeepseekV4MemoryManager(
         8192,
         torch.bfloat16,
         1,
         512,
         3,
-        DeepseekV4CacheConfig([4, 128, 0], (2048 + page_size - 1) // page_size * page_size),
+        config,
     )
     requests = DeepseekV4ReqManager(
         2, 4096, None, manager.cache_config, max_forward_tokens=8192, mtp_step=mtp_step, prefill_regions=2
     )
     requests.bind_mem_manager(manager)
-    requests.prefill_c4_checkpoints.zero_()
-    requests.prefill_indexer_checkpoints.zero_()
+    if requests.prefill_c4_checkpoints is not None:
+        requests.prefill_c4_checkpoints.zero_()
+        requests.prefill_indexer_checkpoints.zero_()
     yield manager, requests
     torch.cuda.synchronize()
     get_env_start_args.cache_clear()
@@ -1256,9 +1263,19 @@ def test_empty_dspark_commit_is_local_but_proposal_keeps_common_padding_path(mon
     "length,prefix", [(768, 0), (768, 256), (2816, 0), (2816, 2304), (4096, 0), (4096, 256), (4096, 2304)]
 )
 @pytest.mark.parametrize("exhaust_small_pool", [False, True])
+@pytest.mark.parametrize("cache", [256, "v41"], indirect=True)
 def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
-    cache, monkeypatch, length, prefix, exhaust_small_pool
+    cache, monkeypatch, tmp_path, length, prefix, exhaust_small_pool
 ):
+    _cpu_cache_roundtrip(cache, monkeypatch, tmp_path, length, prefix, exhaust_small_pool, disk_roundtrip=False)
+
+
+@pytest.mark.parametrize("cache", ["v41"], indirect=True)
+def test_v41_disk_cache_offload_and_load_use_saved_checkpoints(cache, monkeypatch, tmp_path):
+    _cpu_cache_roundtrip(cache, monkeypatch, tmp_path, 2816, 2304, False, disk_roundtrip=True)
+
+
+def _cpu_cache_roundtrip(cache, monkeypatch, tmp_path, length, prefix, exhaust_small_pool, disk_roundtrip):
     """Offload after the runtime ring is overwritten, then resume through the common loader."""
     from collections import deque
     from lightllm.server.multi_level_kv_cache import CacheTier
@@ -1383,6 +1400,28 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
             rtol=0,
             atol=0,
         )
+
+    if disk_roundtrip:
+        import time
+
+        pytest.importorskip("light_mem")
+        from lightllm.server.multi_level_kv_cache.disk_cache_worker import DiskCacheWorker, _PagePayload
+
+        worker = DiskCacheWorker(2, client, str(tmp_path / "disk_cache"))
+        payloads = [_PagePayload(i, i * 12345) for i in range(1, len(ends) + 1)]
+        expected_pages = pages.clone()
+        worker._persist_pages_to_disk(payloads)
+        # data_safe permits releasing CPU pages before the asynchronous write finishes.
+        for _ in range(3000):
+            if all(worker.service.query([item.hash_key for item in payloads])):
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("LightMem did not publish the disk block")
+        pages[1 : len(ends) + 1].zero_()
+        assert worker.load_pages([item.hash_key for item in payloads], [item.index for item in payloads])
+        torch.testing.assert_close(pages, expected_pages, atol=0, rtol=0)
+        released.clear()
 
     destination = requests.alloc()
     dst = torch.empty(0, dtype=torch.int32, device="cuda")

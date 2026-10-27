@@ -321,7 +321,7 @@ def _launch_subprocesses(args: StartArgs):
         args.linear_att_page_block_num = 10000000
 
     if args.enable_cpu_cache and is_hybrid_model:
-        if model_type == "deepseek_v4" and args.run_mode != "decode":
+        if model_type in ("deepseek_v4", "deepseek_v41") and args.run_mode != "decode":
             big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
             if big_page_tokens > args.max_req_total_len:
                 # CPU pages need the same boundary snapshots as GPU prefix caching.

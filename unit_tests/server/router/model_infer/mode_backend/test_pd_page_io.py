@@ -102,3 +102,46 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
         backend._decode_node_gen_trans_tasks(req)
         assert len(groups) == 1
     assert [task.page_kind for task in tasks] == ["kv", "kv", "att_state"]
+
+
+@pytest.mark.parametrize("seq_len", [1, 2, 3, 129, 256, 257])
+def test_pd_request_state_rebuilds_engram_locally(monkeypatch, seq_len):
+    from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
+    from lightllm.models.deepseek_v4 import pd_cache
+    from lightllm.models.deepseek_v41.engram import EngramHasher
+
+    config = DeepseekV4CacheConfig((0,), sliding_window=4)
+    slots = seq_len + 5
+    source_ids = torch.arange(seq_len, dtype=torch.int32).flip(0)
+    decode_ids = torch.arange(seq_len, dtype=torch.int32) + slots
+
+    def manager():
+        return SimpleNamespace(
+            cache_config=config,
+            swa_buffer=torch.zeros((1, 4, config.kv_bytes), dtype=torch.uint8),
+            req_to_c4_state=None,
+            req_to_c4_indexer_state=None,
+            req_to_c128_state=None,
+            req_to_token_indexs=torch.stack((source_ids, decode_ids)),
+        )
+
+    source, destination = manager(), manager()
+    source.swa_buffer.random_(256)
+    monkeypatch.setattr(pd_cache, "gather_swa_tokens", lambda mgr, req, pos, **_: mgr.swa_buffer)
+    monkeypatch.setattr(pd_cache, "scatter_swa_tokens", lambda mgr, req, pos, values: mgr.swa_buffer.copy_(values))
+    page = torch.empty(pd_cache.get_pd_page_nbytes(config, 256), dtype=torch.uint8)
+    written = pd_cache._copy_request_state(source, page, 0, seq_len, write=True)
+    read = pd_cache._copy_request_state(destination, page, 1, seq_len, write=False)
+    assert written == read == page.numel()
+    torch.testing.assert_close(destination.swa_buffer, source.swa_buffer, atol=0, rtol=0)
+
+    hasher = EngramHasher.__new__(EngramHasher)
+    hasher.has_vision = False
+    hasher.token_map = torch.arange(64).flip(0)
+    hasher.history = torch.full((2 * slots,), -99, dtype=torch.int64)
+    tokens = (torch.arange(seq_len) % 64).tolist()
+    tail = tokens[-3:]
+    hasher.restore_history([(1, seq_len, tail)], destination)
+    expected = torch.full_like(hasher.history, -99)
+    expected[decode_ids[-len(tail) :].long()] = hasher.token_map[tail]
+    torch.testing.assert_close(hasher.history, expected, atol=0, rtol=0)

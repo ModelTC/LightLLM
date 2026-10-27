@@ -36,6 +36,11 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     post_layer_infer_class = DeepseekV41PostLayerInfer
     infer_state_class = DeepseekV41InferStateInfo
 
+    def forward(self, model_input):
+        if not self.is_mtp_draft_model and model_input.token_lookback is not None:
+            self.engram_hasher.restore_history(model_input.token_lookback, self.req_manager)
+        return super().forward(model_input)
+
     def _init_config(self):
         config = get_config_json(self.weight_dir_)
         self.config = {**config["text_config"], **config}
@@ -52,9 +57,9 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
         super()._verify_params()
         args = self.args
         if (
-            args.run_mode != "normal"
+            args.run_mode not in ("normal", "prefill", "decode")
             or args.mtp_mode not in (None, "dspark")
-            or args.enable_cpu_cache
+            or (args.enable_cpu_cache and args.run_mode == "decode")
             or args.enable_dp_prompt_cache_fetch
             or args.enable_prefill_cudagraph
             or args.enable_prefill_microbatch_overlap
@@ -62,8 +67,9 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             or self.enable_tpsp_mix_mode
         ):
             raise ValueError(
-                "DeepSeek-V4.1 currently supports normal serving with TP or DP/EP; "
-                "only DSpark MTP is supported; CPU cache, prefill CUDA Graph and overlap are unsupported"
+                "DeepSeek-V4.1 supports normal and P/D serving with TP or DP/EP; "
+                "only DSpark MTP is supported; CPU cache on Decode nodes, "
+                "prefill CUDA Graph and overlap are unsupported"
             )
         cfg = self.config
         if cfg["candidate_block_size"] != 8:
@@ -91,6 +97,7 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             self.engram_hasher = EngramHasher(
                 self.config, tokenizer, self.mem_manager.size + self.mem_manager.page_size
             )
+            self.token_lookback_depth = self.engram_hasher.order - 1
 
 
 class DeepseekV41VisionTpPartModel(DeepseekV41TpPartModel):

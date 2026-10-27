@@ -74,18 +74,33 @@ class EngramHasher:
         self.multipliers = torch.tensor(np.asarray(multipliers), device="cuda")
         self.heads = config["engram_n_heads"]
 
+    def _map_token_ids(self, ids):
+        if self.has_vision:
+            # Image cache IDs are out of vocabulary and break the n-gram history.
+            return torch.where(
+                ids < self.token_map.numel(), self.token_map[ids.clamp_max(self.token_map.numel() - 1)], -1
+            )
+        return self.token_map[ids]
+
+    def restore_history(self, lookback, req_manager):
+        rows = torch.tensor(
+            [
+                (req, start - len(ids) + offset, token)
+                for req, start, ids in lookback
+                for offset, token in enumerate(ids)
+            ],
+            dtype=torch.int64,
+            device=self.history.device,
+        )
+        slots = req_manager.req_to_token_indexs[rows[:, 0], rows[:, 1]].long()
+        self.history[slots] = self._map_token_ids(rows[:, 2])
+
     def __call__(self, state):
         positions = state.position_ids.long()
         reqs = state.dsv4_sparse_req_idx.long()
         slots = state.mem_index.long()
         ids = state.input_ids.long()
-        if self.has_vision:
-            # Image cache IDs are out of vocabulary and break the n-gram history.
-            self.history[slots] = torch.where(
-                ids < self.token_map.numel(), self.token_map[ids.clamp_max(self.token_map.numel() - 1)], -1
-            )
-        else:
-            self.history[slots] = self.token_map[ids]
+        self.history[slots] = self._map_token_ids(ids)
         tokens = []
         blocked = torch.zeros_like(positions, dtype=torch.bool)
         for shift in range(self.order):
