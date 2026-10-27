@@ -170,7 +170,8 @@ class DistributeGroupManager:
         DeepEP legacy low-latency 路径。这里只为实际存在的执行路径分配 buffer，
         避免为未使用的路径长期占用显存。
         """
-        enable_ep_moe = get_env_start_args().enable_ep_moe
+        args = get_env_start_args()
+        enable_ep_moe = args.enable_ep_moe
         prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         decode_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         if not enable_ep_moe:
@@ -201,6 +202,7 @@ class DistributeGroupManager:
             num_topk=num_experts_per_tok,
             use_fp8_dispatch=True,
             allow_multiple_reduction=True,
+            prefer_overlap_with_compute=args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap,
         )
         self.ep_mega_moe_buffer = None
         self.ep_low_latency_buffer = None
@@ -294,7 +296,8 @@ class DistributeGroupManager:
             self.ep_num_sms = deepep_sms
             if self.ep_low_latency_buffer is not None:
                 deep_ep.Buffer.set_num_sms(deepep_sms - deepep_sms % 2)
-            set_num_sms(max(device_sms - deepep_sms, 2))
+            gemm_sms = device_sms - deepep_sms if self.ep_buffer.prefer_overlap_with_compute else device_sms
+            set_num_sms(max(gemm_sms, 2))
         except BaseException as e:
             logger.warning(f"set num sms for deep_gemm failed: {e}")
 
