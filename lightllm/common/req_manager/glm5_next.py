@@ -37,8 +37,8 @@ class Glm5NextReqManager(ReqManagerForMamba):
 
     ##### 检查点恢复：CPU 缓存 → 请求 GPU 运行态 #####
 
-    def restore_state(self, req, state_cache_manager, buffer_idx):
-        super().restore_state(req, state_cache_manager, buffer_idx)
+    def restore_state(self, req, state_cache_manager, buffer_idx, checkpoint_len=None):
+        super().restore_state(req, state_cache_manager, buffer_idx, checkpoint_len)
         self.req_to_indexer_tail.buffer[:, req.req_idx].zero_()
 
     ##### Indexer 尾部运行态访问 #####

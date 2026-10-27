@@ -8,12 +8,35 @@ import torch
 from lightllm.common.kv_cache_mem_manager.glm5_next_mem_manager import Glm5NextMemManager
 from lightllm.common.kv_cache_mem_manager.fp8_glm5_next_mem_manager import FP8Glm5NextMemManager
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import Qwen3NextMemManager
+from lightllm.common.req_manager.glm5_next import Glm5NextReqManager
+from lightllm.common.req_manager.linear_att import ReqManagerForMamba
+
+
+def test_checkpoint_restore_accepts_range_from_hybrid_cache_entrypoints():
+    manager = Glm5NextReqManager.__new__(Glm5NextReqManager)
+    manager.mem_manager = SimpleNamespace(big_page_buffers=object())
+    manager.small_page_buffers = object()
+    tail = torch.ones((2, 4, 7, 256))
+    manager.req_to_indexer_tail = SimpleNamespace(buffer=tail)
+    req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=3))
+    with patch.object(ReqManagerForMamba, 'restore_state') as restore:
+        manager.restore_big_page_state(1, req, checkpoint_len=16384)
+        restore.assert_called_once_with(req, manager.big_page_buffers, 1, 16384)
+    assert torch.all(tail[:, req.req_idx] == 0)
+    assert torch.all(tail[:, [0, 1, 3]] == 1)
+    tail[:, req.req_idx].fill_(1)
+    with patch.object(ReqManagerForMamba, 'restore_state') as restore:
+        manager.restore_small_page_state(req, checkpoint_len=18432)
+        restore.assert_called_once_with(req, manager.small_page_buffers, 3, 18432)
+    assert torch.all(tail[:, req.req_idx] == 0)
+    assert torch.all(tail[:, [0, 1, 3]] == 1)
 
 
 def test_packed_fp8_transfer_roundtrip_and_replication():
     if not torch.cuda.is_available():
         raise SkipTest('requires CUDA')
-    layers, rows, width, page_size = 2, 67, 716, 8
+    # Runtime rows include four padding bytes between MLA and index storage.
+    layers, rows, width, page_size = 2, 67, 720, 8
     source = torch.arange(layers*rows*width, device='cuda').remainder(251).to(torch.uint8)
     source = source.reshape(layers, rows, 1, width)
     manager = FP8Glm5NextMemManager.__new__(FP8Glm5NextMemManager)

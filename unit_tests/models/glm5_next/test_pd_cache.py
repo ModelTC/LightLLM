@@ -30,6 +30,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
             (2, "native"),
             (0, "replay"),
             (2, "replay"),
+            (3, "replay"),
             (2, "compact"),
         ]
         for fp8 in [False, True]
@@ -88,7 +89,7 @@ def make_mems(monkeypatch, request):
             conv_kernel_size=4,
             linear_layer_num=6,
             conv_state_dtype=torch.bfloat16,
-            ssm_state_dtype=torch.float32,
+            ssm_state_dtype=torch.bfloat16 if mtp_step == 3 else torch.float32,
             full_attention_interval=4,
             all_layer_num=8,
             draft_full_att_kv_layer_num=int(mtp_step > 0),
@@ -124,7 +125,7 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     token_bytes = source[0].head_dim * source[0].dtype.itemsize
     packed = torch.randint(0, 256, (layers, length, 1, token_bytes), dtype=torch.uint8, device="cuda")
     conv = torch.randn(6, 3, 8, 128, 3, dtype=torch.bfloat16, device="cuda")
-    ssm = torch.randn(6, 8, 128, 128, dtype=torch.float32, device="cuda")
+    ssm = torch.randn(6, 8, 128, 128, dtype=source[0].linear_config.ssm_state_dtype, device="cuda")
     # Non-live slots deliberately contain stale data. The sequence length, not
     # the bytes in these slots, controls subsequent K-pool completion.
     tail = torch.randn(layers, 3 + mtp_size, 256, dtype=torch.bfloat16, device="cuda")
@@ -190,21 +191,21 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
             ]
         )
 
-    source[0].write_mem_to_page_kv_move_buffer(src_indexes, 0, 0, source, prefill_tp)
+    source[0].write_mem_to_page_kv_move_buffer(src_indexes, 0, 0, source, prefill_tp, 0, length)
     # Model a byte-preserving transport between separate P/D page buffers.
     dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
-    dest[0].read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp)
+    dest[0].read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp, 0, length)
     state_nbytes = source[0].req_manager.get_pd_state_size()
     source_state_bytes = source[0].kv_move_buffer[0].view(torch.uint8).reshape(-1)[:state_nbytes]
     source_state_bytes.zero_()
-    source[0].write_mem_to_page_kv_move_buffer([], 0, 0, source, prefill_tp, "att_state", src_req)
+    source[0].write_mem_to_page_kv_move_buffer([], 0, 0, source, prefill_tp, 0, length, "att_state", src_req)
     # The public request interface packs the same complete block as the PD helper.
     request_state_block = torch.zeros(state_nbytes, dtype=torch.uint8, device="cuda")
     for rank, mem in enumerate(source):
         mem.req_manager.get_pd_state(src_req, request_state_block, rank)
     assert torch.equal(source_state_bytes, request_state_block)
     dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
-    dest[0].read_page_kv_move_buffer_to_mem([], 0, 0, dest, decode_tp, "att_state", dst_req)
+    dest[0].read_page_kv_move_buffer_to_mem([], 0, 0, dest, decode_tp, 0, length, "att_state", dst_req)
     torch.cuda.synchronize()
 
     for rank, mem in enumerate(dest):
