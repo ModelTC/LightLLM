@@ -44,7 +44,6 @@ class InferStateInfo:
         self.b_seq_len: torch.Tensor = None
         # max_cache_len 用于 prefill 阶段标识请求中最大 cache的kv 的长度
         self.max_cache_len: int = None
-        self.prefill_padding_token_num: int = 0
         self.is_prefill: bool = None
         self.is_draft_model: bool = False
 
@@ -421,7 +420,6 @@ class InferStateInfo:
         return
 
     def copy_for_prefill_cuda_graph(self, new_infer_state: "InferStateInfo"):
-        self.prefill_padding_token_num = new_infer_state.prefill_padding_token_num
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)

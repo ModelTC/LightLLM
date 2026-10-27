@@ -44,8 +44,6 @@ class ModelInput:
     # 的一些变量
     # 标记 prefill 请求是否会在本轮产生输出。Prefill 必填（空 batch 使用空 list），decode 不使用。
     b_prefill_has_output_cpu: List[bool] = None
-    # CPU 端记录尾部 HOLD 请求占用的 token 数，避免推理时读取 GPU 标量。
-    prefill_padding_token_num: int = 0
 
     # 专有变量，用于一些特殊的模型，特殊的模式下, 传递一些特殊
     # 的输入变量。只在特殊的模型模式下才会具体使用和生效。

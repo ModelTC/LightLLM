@@ -26,33 +26,27 @@ class _Tokenizer:
 @pytest.mark.parametrize("prefix_len", range(8))
 def test_tokenizer_uses_position_dependent_canonical_suffix(prefix_len):
     from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
+    from lightllm.server.multimodal_params import MultimodalParams
 
     tokenizer = DeepSeekV4Tokenizer(_Tokenizer(), "/unused", VISION_CONFIG)
-    image = SimpleNamespace(
-        token_id=100_000,
-        token_num=13,
-        start_idx=None,
-        block_start_idx=None,
-        block_end_idx=None,
-    )
-    params = SimpleNamespace(images=[image])
+    params = MultimodalParams(images=[{"type": "url", "data": "unused"}])
+    image = params.images[0]
+    image.token_id, image.token_num = 100_000, 13
     prompt = [7] * prefix_len + [99, 8]
 
     result = tokenizer.encode(prompt, params)
 
     cache_skip = prefix_len % 4
     assert result == [7] * prefix_len + list(range(image.token_id + cache_skip, image.token_id + 13)) + [8]
-    assert image.block_start_idx == prefix_len
-    assert image.block_end_idx == prefix_len + image.token_num - cache_skip
-    assert image.start_idx == prefix_len + 3 - cache_skip
-    assert image.start_idx % 4 == 3
-    assert result[image.block_start_idx : image.block_end_idx] == list(
+    assert image.start_idx == prefix_len
+    image_end = prefix_len + image.token_num - cache_skip
+    assert result[image.start_idx : image_end] == list(
         range(image.token_id + cache_skip, image.token_id + image.token_num)
     )
 
     from lightllm.utils.multimodal_chunk_utils import get_mm_input_spans
 
-    assert get_mm_input_spans({"images": [vars(image)], "audios": []}) == [(image.block_start_idx, image.block_end_idx)]
+    assert get_mm_input_spans(result, params.to_dict()) == [(image.start_idx, image_end)]
 
 
 def test_tokenizer_keeps_dsv4_on_one_dimensional_positions():

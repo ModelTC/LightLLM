@@ -71,12 +71,9 @@ class DeepSeekV4Tokenizer:
                 continue
 
             image = images[image_index]
-            cache_skip = len(input_ids) % 4
-            compress_pad = 3 - cache_skip
-            image.block_start_idx = len(input_ids)
-            image.start_idx = len(input_ids) + compress_pad
+            image.start_idx = len(input_ids)
+            cache_skip = image.start_idx % 4
             input_ids.extend(range(image.token_id + cache_skip, image.token_id + image.token_num))
-            image.block_end_idx = len(input_ids)
             image_index += 1
 
         return input_ids

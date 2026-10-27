@@ -358,7 +358,6 @@ class TpPartBaseModel:
         infer_state.max_q_seq_len = model_input.max_q_seq_len
         infer_state.max_kv_seq_len = model_input.max_kv_seq_len
         infer_state.max_cache_len = model_input.max_cache_len
-        infer_state.prefill_padding_token_num = model_input.prefill_padding_token_num
         assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
         infer_state.b_req_idx = model_input.b_req_idx
         infer_state.b_seq_len = model_input.b_seq_len
@@ -455,7 +454,6 @@ class TpPartBaseModel:
         assert padded_token_num > 0
         new_model_input = copy.copy(model_input)
         new_model_input.batch_size = model_input.batch_size + 1
-        new_model_input.prefill_padding_token_num += padded_token_num
         new_model_input.total_token_num += padded_token_num
         new_model_input.max_q_seq_len = max(padded_token_num, model_input.max_q_seq_len)
         new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
@@ -1149,7 +1147,6 @@ class TpPartBaseModel:
             total_token_num=total_token_num,
             max_q_seq_len=prefill_input_len,
             max_kv_seq_len=prefill_input_len,
-            prefill_padding_token_num=total_token_num,
             max_cache_len=0,
             input_ids=dummy_input_ids,
             b_req_idx=b_req_idx,

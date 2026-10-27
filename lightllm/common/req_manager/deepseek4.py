@@ -7,7 +7,8 @@ from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4StateCacheMa
 class DeepseekV4ReqManager(HybridAttentionReqManager):
     """持有跨 forward 的请求映射、SWA ring 和 compressor ring，并负责状态保存和恢复。
 
-    当前 forward 的派生索引和元数据由 infer_state 持有，复用的算子缓冲区由 workspace 提供。
+    当前 forward 的派生索引、页表和元数据由 infer_state 构建并持有，
+    模型 workspace 提供投影与量化的计算 scratch。
     """
 
     def __init__(

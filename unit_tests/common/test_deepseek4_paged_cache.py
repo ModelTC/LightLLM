@@ -241,11 +241,23 @@ def _test_backend(requests, token_capacity=8192):
 
     model = type("TestModel", (), {})()
     model.req_manager = requests
-    model.config = {"num_attention_heads": 64, "compress_ratios": requests.cache_config.compress_rates}
+    model.config = {
+        "num_attention_heads": 64,
+        "compress_ratios": requests.cache_config.compress_rates,
+        "index_topk": 512,
+    }
     model.tp_world_size_ = 1
     model.max_req_num = requests.max_request_num
     model.batch_max_tokens = token_capacity
-    model.args = SimpleNamespace(run_mode="normal", enable_prefill_microbatch_overlap=True)
+    model.max_seq_length = requests.req_to_token_indexs.shape[1]
+    model.has_vision = False
+    model.args = SimpleNamespace(
+        run_mode="normal",
+        enable_prefill_microbatch_overlap=True,
+        enable_decode_microbatch_overlap=False,
+        mtp_mode=None,
+        mtp_step=0,
+    )
     return DeepseekV4FlashMlaFp8SparseAttBackend(model)
 
 
@@ -762,7 +774,7 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
             mem_index=slots[start:end],
             position_ids=positions,
             is_prefill=not decode,
-            _dsv4_token_to_batch_idx=torch.zeros(width, dtype=torch.int32, device="cuda"),
+            _dsv4_token_to_batch_idx=None if decode else torch.zeros(width, dtype=torch.int32, device="cuda"),
             b_req_idx=torch.full((width if decode else 1,), req_idx, dtype=torch.int32, device="cuda"),
             b_mtp_index=torch.arange(width, dtype=torch.int32, device="cuda")
             if decode
@@ -1160,24 +1172,20 @@ def test_c4_indexer_page_table_uses_each_query_request_and_causal_length(cache, 
     requests.free([first, second], torch.cat((first_slots, second_slots)))
 
 
-@pytest.mark.parametrize("mode", ["decode", "prefill", "prefill_aux"])
+@pytest.mark.parametrize("mode", ["decode", "prefill"])
 def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
-    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+    from lightllm.models.deepseek_v4 import infer_struct as infer_struct_module
     from lightllm.models.deepseek_v4.layer_infer import indexer as indexer_module
-    from lightllm.models.deepseek_v4.workspace import DeepseekV4C4PrefillWorkspace, DeepseekV4Workspace
 
     torch.manual_seed(1593)
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
     monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "1")
-    args = get_env_start_args()
-    monkeypatch.setitem(args, "mtp_mode", "none")
-    monkeypatch.setitem(args, "enable_decode_microbatch_overlap", False)
-    monkeypatch.setitem(args, "enable_prefill_microbatch_overlap", False)
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, 4096)
     heads, tokens = 64, 5
     config = dict(
         compress_ratios=[4, 128, 0],
+        num_attention_heads=heads,
         index_topk=512,
         index_head_dim=128,
         qk_rope_head_dim=64,
@@ -1187,10 +1195,8 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
         rms_norm_eps=1e-6,
     )
     indexer = indexer_module.DeepseekV4IndexInfer(0, config, 1)
-    model = SimpleNamespace(batch_max_tokens=tokens, config=config, max_seq_length=4096)
-    state = DeepseekV4InferStateInfo()
+    state = infer_struct_module.DeepseekV4InferStateInfo()
     state.mem_manager, state.req_manager = manager, requests
-    state.dsv4_workspace = DeepseekV4Workspace(model)
     state.is_prefill = mode != "decode"
     state.microbatch_index, state.max_kv_seq_len = 0, 4096
     state.b_req_idx = torch.tensor([req_idx] if state.is_prefill else [req_idx] * tokens, device="cuda")
@@ -1199,12 +1205,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     state.dsv4_sparse_req_idx = torch.full_like(state.position_ids, req_idx)
     state._dsv4_token_to_batch_idx = torch.zeros(tokens, dtype=torch.int64, device="cuda")
     # Exercise chunk scheduling without requiring a long prompt or large logits allocation.
-    monkeypatch.setattr(indexer_module, "C4_PREFILL_LOGITS_BUDGET_BYTES", 2 * 1024 * 4)
-    aux = (
-        DeepseekV4C4PrefillWorkspace(tokens, 4096, heads, 128, requests.cache_config) if mode == "prefill_aux" else None
-    )
-    if aux is not None:
-        monkeypatch.setattr(aux, "rows_per_logits_chunk", lambda capacity: 2)
+    monkeypatch.setattr(infer_struct_module, "C4_PREFILL_LOGITS_BUDGET_BYTES", 2 * 1024 * 4)
     keys = (torch.randn((1024, 128), device="cuda") * 0.1).to(torch.float8_e4m3fn)
     scales = torch.ones((1024, 1), dtype=torch.float32, device="cuda")
     packed = torch.cat((keys.view(torch.uint8), scales.view(torch.uint8)), dim=1)
@@ -1214,7 +1215,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     weights = torch.rand((tokens, heads), device="cuda")
 
     def select():
-        return indexer._c4_indices(state, q, weights, state.position_ids, c4_aux_workspace=aux)
+        return indexer._c4_indices(state, q, weights)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
@@ -1251,11 +1252,76 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     requests.free([req_idx], slots)
 
 
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_forward_indices_are_isolated_and_graph_inputs_refresh(cache, is_prefill):
+    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
+
+    manager, requests = cache
+    first, first_slots = _reserve(manager, requests, 512)
+    second, second_slots = _reserve(manager, requests, 512)
+    backend = _test_backend(requests)
+    model = backend.model
+    model.graph = SimpleNamespace(can_run=lambda *args: True, graph_max_len_in_batch=16384)
+    model.dsv4_workspace = DeepseekV4Workspace(model)
+    rope = torch.zeros((1024, 32), device="cuda")
+    model._cos_cached_sliding = model._sin_cached_sliding = rope
+    model._cos_cached_compress = model._sin_cached_compress = rope
+
+    def make_state(lengths, microbatch_index):
+        state = DeepseekV4InferStateInfo()
+        state.is_prefill, state.microbatch_index = is_prefill, microbatch_index
+        state.req_manager, state.mem_manager = requests, manager
+        state.batch_size = 2
+        state.max_kv_seq_len = max(lengths)
+        state.input_ids = torch.zeros(2, dtype=torch.int64, device="cuda")
+        state.b_req_idx = torch.tensor([first, second], dtype=torch.int32, device="cuda")
+        state.b_seq_len = torch.tensor(lengths, dtype=torch.int32, device="cuda")
+        if is_prefill:
+            state.b_ready_cache_len = state.b_seq_len - 1
+            state.prefill_att_state = backend.create_att_prefill_state(state)
+        else:
+            state.decode_att_state = backend.create_att_decode_state(state)
+        state.init_some_extra_state(model)
+        return state
+
+    captured_state = make_state([130, 258], 0)
+    other_state = make_state([130, 258], 1)
+    swa_before = captured_state.dsv4_swa_indices.clone()
+    other_state.dsv4_swa_indices.fill_(-7)
+    torch.testing.assert_close(captured_state.dsv4_swa_indices, swa_before)
+    assert captured_state.dsv4_c128_indices.shape == (2, 64 if is_prefill else 128)
+    captured_state.init_c4_indices(512)
+    other_state.init_c4_indices(512)
+    captured_state.dsv4_c4_indices.fill_(11)
+    other_state.dsv4_c4_indices.fill_(22)
+    assert captured_state.dsv4_c4_indices.eq(11).all()
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        swa_output = captured_state.dsv4_swa_indices.clone()
+        c128_output = captured_state.dsv4_c128_indices.clone()
+    updated = make_state([258, 386], 0)
+    assert updated.dsv4_c4_indices is None
+    if is_prefill:
+        captured_state.copy_for_prefill_cuda_graph(updated)
+    else:
+        captured_state.copy_for_cuda_graph(updated)
+    graph.replay()
+    torch.testing.assert_close(swa_output, updated.dsv4_swa_indices)
+    torch.testing.assert_close(c128_output, updated.dsv4_c128_indices)
+    assert captured_state.dsv4_c4_indices.eq(11).all()
+    requests.free([first, second], torch.cat((first_slots, second_slots)))
+
+
 @pytest.mark.parametrize("microbatch_index", [0, 1])
 def test_dspark_proposal_reuses_forward_write_slots(cache, monkeypatch, microbatch_index):
     from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
     from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
     from lightllm.models.deepseek_v4_dspark.infer_struct import DeepseekV4DSparkInferStateInfo
+    from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DeepseekV4FlashMlaFp8SparseAttBackend
 
     manager, requests = cache
     req_idx, slots = _reserve(manager, requests, 512)
@@ -1263,8 +1329,19 @@ def test_dspark_proposal_reuses_forward_write_slots(cache, monkeypatch, microbat
     monkeypatch.setitem(args, "mtp_mode", "dspark")
     monkeypatch.setitem(args, "enable_decode_microbatch_overlap", True)
     monkeypatch.setitem(args, "enable_prefill_microbatch_overlap", False)
-    config = dict(sliding_window=128, index_topk=512)
-    model = SimpleNamespace(config=config, batch_max_tokens=3, max_seq_length=4096, graph=None, has_vision=False)
+    config = dict(sliding_window=128, index_topk=512, num_attention_heads=64, compress_ratios=[4, 128, 0])
+    model = type("TestModel", (), {})()
+    vars(model).update(
+        config=config,
+        batch_max_tokens=3,
+        max_seq_length=4096,
+        graph=None,
+        has_vision=False,
+        args=args,
+        req_manager=requests,
+        tp_world_size_=1,
+    )
+    backend = DeepseekV4FlashMlaFp8SparseAttBackend(model)
     model.block_size = 3
     model.dsv4_workspace = DeepseekV4Workspace(model)
     rope = torch.zeros((512, 32), device="cuda")
@@ -1272,7 +1349,9 @@ def test_dspark_proposal_reuses_forward_write_slots(cache, monkeypatch, microbat
     model._cos_cached_compress = model._sin_cached_compress = rope
     state = DeepseekV4DSparkInferStateInfo()
     state.is_prefill, state.microbatch_index = False, microbatch_index
+    state.is_draft_model = True
     state.req_manager, state.mem_manager = requests, manager
+    state.decode_att_state = backend.create_att_decode_state(state)
     state.b_req_idx = torch.full((3,), req_idx, dtype=torch.int32, device="cuda")
     state.b_seq_len = torch.arange(258, 261, dtype=torch.int32, device="cuda")
     state.max_kv_seq_len = 260
@@ -1286,7 +1365,7 @@ def test_dspark_proposal_reuses_forward_write_slots(cache, monkeypatch, microbat
     monkeypatch.setattr(DeepseekV4InferStateInfo, "init_some_extra_state", init_and_remember_write_slots)
     state.init_some_extra_state(model)
     assert state.dsv4_swa_write_slots is parent_write_slots[0]
-    assert state.dsv4_swa_indices.shape == (3, model.dsv4_workspace.swa_capacity)
+    assert state.dsv4_swa_indices.shape == (3, 256)
     torch.testing.assert_close(state.dsv4_swa_lengths, torch.full_like(state.dsv4_swa_lengths, 131))
     expected_slots = _swa_slots(requests, req_idx, state.position_ids, prefill=False).to(torch.int32)
     torch.testing.assert_close(state.dsv4_swa_write_slots, expected_slots)
@@ -1633,9 +1712,84 @@ def test_cpu_cache_preserves_already_published_pages(cache):
     requests.free([req], slots)
 
 
+@pytest.mark.parametrize("prefix_len", range(4))
+@pytest.mark.parametrize("cached_first_image", [False, True])
+def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_len, cached_first_image):
+    from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
+    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+    from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
+    from lightllm.server.multimodal_params import MultimodalParams
+    from lightllm.utils.multimodal_chunk_utils import get_mm_input_spans
+
+    tokenizer = DeepSeekV4Tokenizer(
+        SimpleNamespace(convert_tokens_to_ids=lambda token: 99), "/unused", {"vision_n_layers": 1}
+    )
+    params = MultimodalParams(images=[{"type": "url", "data": "unused"} for _ in range(3)])
+    token_base, canonical_length = 2 ** 62, 13
+    for image in params.images:
+        image.token_id, image.token_num, image.start_index_in_embed_cache = token_base, canonical_length, 0
+    input_ids = tokenizer.encode([7] * prefix_len + [99, 99, 8, 99, 8], params)
+    spans = get_mm_input_spans(input_ids, params.to_dict())
+    expected_left, expected_right = [0] * len(input_ids), [0] * len(input_ids)
+    for start, end in spans:
+        image_start = input_ids.index(token_base + 3, start, end)
+        expected_left[image_start:end] = range(end - image_start)
+        expected_right[image_start:end] = range(end - image_start - 1, -1, -1)
+
+    ready = spans[0][1] if cached_first_image else 0
+    manager, requests = cache
+    req_idx, slots = _reserve(manager, requests, len(input_ids))
+    backend = _test_backend(requests, token_capacity=128)
+    model = backend.model
+    model.has_vision = True
+    model.config["vision_max_n_token"] = 384
+    model.dsv4_workspace = None
+    rope = torch.zeros((len(input_ids), 32), device="cuda")
+    model._cos_cached_sliding = model._sin_cached_sliding = rope
+    model._cos_cached_compress = model._sin_cached_compress = rope
+    state = DeepseekV4InferStateInfo()
+    state.is_prefill = True
+    state.req_manager, state.mem_manager = requests, manager
+    state.input_ids = torch.tensor(input_ids[ready:], dtype=torch.int64, device="cuda")
+    state.b_req_idx = torch.tensor([req_idx], dtype=torch.int32, device="cuda")
+    state.b_seq_len = torch.tensor([len(input_ids)], dtype=torch.int32, device="cuda")
+    state.b_ready_cache_len = torch.tensor([ready], dtype=torch.int32, device="cuda")
+    state.max_kv_seq_len = len(input_ids)
+    state.multimodal_params = [params.to_dict()]
+    state.prefill_att_state = backend.create_att_prefill_state(state)
+    state.init_some_extra_state(model)
+    assert state.dsv4_image_left.cpu().tolist() == expected_left[ready:]
+    assert state.dsv4_image_right.cpu().tolist() == expected_right[ready:]
+
+    text_embeddings = torch.randn((100, 16), dtype=torch.bfloat16, device="cuda")
+    image_embeddings = torch.randn((canonical_length, 1, 16), dtype=torch.bfloat16, device="cuda")
+    out = torch.zeros((len(input_ids) - ready, 16), dtype=torch.bfloat16, device="cuda")
+    multimodal_emb(
+        out,
+        state.input_ids,
+        text_embeddings,
+        image_embeddings,
+        torch.tensor([canonical_length], dtype=torch.int64, device="cuda"),
+        torch.tensor([token_base], dtype=torch.int64, device="cuda"),
+        torch.tensor([0], dtype=torch.int64, device="cuda"),
+        0,
+        100,
+        1,
+    )
+    expected = torch.stack(
+        [
+            text_embeddings[token] if token < 100 else image_embeddings[token - token_base, 0]
+            for token in input_ids[ready:]
+        ]
+    )
+    torch.testing.assert_close(out, expected, rtol=0, atol=0)
+    requests.free([req_idx], slots)
+
+
 @pytest.mark.parametrize("padding_tokens", [0, 3, 5])
 def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 
     manager, requests = cache
     backend = _test_backend(requests)
@@ -1645,15 +1799,7 @@ def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     model._cos_cached_sliding = model._sin_cached_sliding = rope
     model._cos_cached_compress = model._sin_cached_compress = rope
 
-    def allocate_indices(microbatch_index, token_num, width):
-        return (
-            torch.empty((token_num, width), dtype=torch.int32, device="cuda"),
-            torch.empty((token_num,), dtype=torch.int32, device="cuda"),
-        )
-
-    model.dsv4_workspace = SimpleNamespace(
-        sliding_window=128, vision_swa_width=128, swa=allocate_indices, c128=allocate_indices
-    )
+    model.dsv4_workspace = DeepseekV4Workspace(model)
     real_tokens = 5 - padding_tokens
     req_ids, lengths = ([0], [real_tokens]) if real_tokens else ([], [])
     if padding_tokens:
@@ -1668,7 +1814,6 @@ def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     infer_state.b_seq_len = torch.tensor(lengths, dtype=torch.int32, device="cuda")
     infer_state.b_ready_cache_len = torch.zeros_like(infer_state.b_seq_len)
     infer_state.max_kv_seq_len = max(lengths)
-    infer_state.prefill_padding_token_num = padding_tokens
     infer_state.prefill_att_state = backend.create_att_prefill_state(infer_state)
     infer_state.init_some_extra_state(model)
 

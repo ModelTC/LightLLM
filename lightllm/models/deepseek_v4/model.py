@@ -155,12 +155,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
             prefill_aux_stream = torch.cuda.Stream()
         self.dsv4_workspace = DeepseekV4Workspace(self)
-        if self.dsv4_workspace.needs_c4_prefill_aux(self):
+        if prefill_aux_stream is not None and self.run_mode == "prefill" and 4 in self.config["compress_ratios"]:
             with torch.cuda.stream(prefill_aux_stream):
                 self.dsv4_workspace.init_c4_prefill_aux(self)
-        if prefill_aux_stream is not None:
-            for layer in self.layers_infer:
-                layer.dsv4_prefill_aux_stream = prefill_aux_stream
+        for layer in self.layers_infer:
+            layer.dsv4_prefill_aux_stream = prefill_aux_stream
         dist_group_manager.new_deepep_group(
             n_routed_experts=self.config["n_routed_experts"],
             hidden_size=self.config["hidden_size"],
@@ -202,9 +201,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the
         # gemma4 two-variant convention; the fused CUDA Q/K kernels consume them directly, while
         # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the inverse
-        # rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
-        # Sliding-window and compressed layers both use DeepSeek YaRN correction; only the
-        # RoPE base differs (rope_theta vs compress_rope_theta), matching SGLang/vLLM.
+        # rope and compressor paths.
+        # Pure sliding-window layers use unscaled rope_theta. Compressed layers use
+        # compress_rope_theta with YaRN for both local SWA and compressed attention.
         # Kept fp32 for accuracy (the apply upcasts anyway).
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
@@ -233,7 +232,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 freqs = freqs / factor * (1 - smooth) + freqs * smooth
             return freqs
 
-        sliding_freqs = build_inv_freq(cfg["rope_theta"])
+        sliding_freqs = 1.0 / (cfg["rope_theta"] ** freq_exponents)
         f = torch.outer(positions, sliding_freqs)  # [max_seq, dim//2]
         self._freqs_cis_sliding = torch.complex(f.cos(), f.sin())
 

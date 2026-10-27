@@ -117,9 +117,6 @@ def _fused_compress_norm_rope_kernel(
         return
 
     position = tl.load(position_ids + token_idx)
-    if (position + 1) % COMPRESS_RATIO != 0:
-        return
-
     batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
     req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
     seq_len = tl.load(b_seq_len + batch_idx)
@@ -132,22 +129,13 @@ def _fused_compress_norm_rope_kernel(
         q_start = token_idx - mtp_index
 
     token_offsets = tl.arange(0, WINDOW_SIZE)
-    # position 11, start 4
     start = position - WINDOW_SIZE + 1
-    # 最近的window个索引 [4, 5, 6, 7, 8, 9, 10, 11]
     gather_pos = start + token_offsets
-    # 都在[0, 12)之间，valid [1, 1, 1, 1, 1, 1, 1, 1]
     valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
-    # 新计算的mask ready_len=8 [0, 0, 0, 0, 1, 1, 1, 1]
     use_current = (gather_pos >= ready_len) & valid_pos
-    # 现在的kvscore的索引 [-4, -3, -2, -1, 0, 1, 2, 3]
     current_idx = q_start + (gather_pos - ready_len)
-    # cache的mask [1, 1, 1, 1, 0, 0, 0, 0]
-    valid_pos = valid_pos & (~use_current)
-    cache_pos = valid_pos
-
+    state_valid = valid_pos & ~use_current
     state_slot = req_idx * STATE_CAPACITY_TOKENS + gather_pos % STATE_CAPACITY_TOKENS
-    state_valid = cache_pos
     if IS_C4:
         head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
     else:
@@ -188,8 +176,6 @@ def _fused_compress_norm_rope_kernel(
     score = tl.where(current_mask, cur_score, state_score)
     score = tl.softmax(score, dim=0)
     compressed_kv = tl.sum(kv * score, axis=0)
-    # 以上得到compressed_kv
-
     # rms_norm
     rms_w = tl.load(norm_weight + offs, mask=dim_mask, other=0.0)
     variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_DIM
@@ -225,7 +211,7 @@ def _fused_compress_norm_rope_kernel(
 
     n_quant_blocks: tl.constexpr = BLOCK // QUANT_BLOCK
     n_nope_blocks: tl.constexpr = NOPE_DIM // QUANT_BLOCK
-    # 有待检验是否有必要
+    # Preserve BF16 rounding before FP8 packing.
     quant_input = normed.to(tl.bfloat16).to(tl.float32)
     quant_2d = tl.reshape(quant_input, (n_quant_blocks, QUANT_BLOCK))
     abs_2d = tl.abs(quant_2d)

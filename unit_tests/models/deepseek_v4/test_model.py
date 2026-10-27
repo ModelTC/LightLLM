@@ -7,6 +7,34 @@ from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_rotary_cache_keeps_unscaled_swa_and_yarn_compression():
+    model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
+    model.config = dict(
+        qk_rope_head_dim=64,
+        rope_theta=10000,
+        compress_rope_theta=160000,
+        max_position_embeddings=8193,
+        rope_scaling=dict(type="yarn", factor=16, original_max_position_embeddings=65536, beta_fast=32, beta_slow=1),
+    )
+    model.max_seq_length = 8193
+    model.layers_infer = [SimpleNamespace(compress_ratio=ratio, index_infer=SimpleNamespace()) for ratio in (0, 4, 128)]
+    model._init_to_get_rotary()
+
+    positions = torch.tensor([0, 1, 127, 1023, 8192], device="cuda")
+    exponents = torch.arange(0, 64, 2, device="cuda", dtype=torch.float32) / 64
+    angles = torch.outer(positions.float(), 1.0 / (10000 ** exponents))
+    expected = torch.complex(angles.cos(), angles.sin())
+    torch.testing.assert_close(model._freqs_cis_sliding[positions], expected, rtol=1e-6, atol=1e-6)
+    unscaled_compress = torch.outer(positions.float(), 1.0 / (160000 ** exponents))
+    assert not torch.allclose(
+        model._freqs_cis_compress[positions], torch.complex(unscaled_compress.cos(), unscaled_compress.sin())
+    )
+    assert model.layers_infer[0].freqs_cis is model._freqs_cis_sliding
+    for layer in model.layers_infer[1:]:
+        assert layer.freqs_cis is model._freqs_cis_compress
+
+
 @pytest.mark.parametrize(
     "balance,ep,tpsp,tp,redundancy,error",
     [
@@ -195,43 +223,55 @@ def test_mhc_layers_and_head_cuda_graph_replay(monkeypatch, tokens, prefill, tru
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("heads,groups,fp8", [(16, 1, False), (32, 2, False), (128, 8, False), (16, 1, True)])
-def test_output_projection_accepts_attention_view(heads, groups, fp8):
-    torch.manual_seed(6102)
-    tokens = 5
-    padded_heads = (heads + 63) // 64 * 64
-    padded = torch.randn((tokens, padded_heads, 512), dtype=torch.bfloat16, device="cuda") * 0.1
-    attention_view = padded[:, :heads]
-    compact = attention_view.contiguous().clone()
-    angles = torch.randn((tokens, 32), device="cuda")
-    cos, sin = angles.cos().bfloat16(), angles.sin().bfloat16()
-    weight_a = torch.randn((groups, heads * 512 // groups, 8), dtype=padded.dtype, device=padded.device) * 0.1
-    weight_b = torch.randn((groups * 8, 16), dtype=padded.dtype, device=padded.device) * 0.1
-    bmm_inputs = []
+@pytest.mark.parametrize("tp_size,rank", [(1, 0), (2, 0), (2, 1)])
+def test_output_projection_matches_bf16_reference(monkeypatch, tp_size, rank):
+    from lightllm.common.basemodel.layer_weights.base_layer_weight import BaseLayerWeight
+    from lightllm.common.basemodel.layer_weights.meta_weights import platform_op
+    from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 
-    def bmm(input):
-        bmm_inputs.append(input)
-        return torch.bmm(input, weight_a)
-
-    def mm(input):
-        # The FP8 activation quantizer requires a contiguous input.
-        assert input.is_contiguous()
-        return input @ weight_a[0]
-
-    layer_weight = SimpleNamespace(
-        o_proj_fp8=fp8,
-        wo_a_=SimpleNamespace(bmm=bmm, mm=mm),
-        wo_b_=SimpleNamespace(mm=lambda input: input @ weight_b),
+    monkeypatch.setattr(
+        platform_op,
+        "get_env_start_args",
+        lambda: SimpleNamespace(hardware_platform="cuda", enable_torch_fallback=False, enable_triton_fallback=False),
     )
-    layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
-    layer.qk_rope_head_dim = 64
-    layer.tp_groups = groups
-    layer._select_rope = lambda infer_state: (cos, sin)
-    layer._tpsp_reduce = lambda input, infer_state: input
+    monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", str(tp_size))
+    monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", str(rank))
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    torch.manual_seed(6102)
+    layer = DeepseekV4TransformerLayerWeight.__new__(DeepseekV4TransformerLayerWeight)
+    BaseLayerWeight.__init__(layer)
+    layer.prefix, layer.data_type_ = "layers.0", torch.bfloat16
+    layer.hidden, layer.n_heads, layer.head_dim = 128, 8, 64
+    layer.q_lora_rank, layer.o_lora_rank, layer.o_groups = 128, 128, 2
+    layer.get_quant_method = lambda name: None
+    layer._init_qkvo()
+    layer.experts = SimpleNamespace(quant_method=SimpleNamespace(weight_scale_suffix=None))
 
-    expected = layer._get_o(compact, None, layer_weight)
-    actual = layer._get_o(attention_view, None, layer_weight)
+    weight_name = "layers.0.attn.wo_a.weight"
+    scale_name = "layers.0.attn.wo_a.scale"
+    packed = torch.randn(256, 256, device="cuda").to(torch.float8_e4m3fn)
+    scales = torch.tensor([[0.125, 0.25], [0.5, 1]], device="cuda").to(torch.float8_e8m0fnu)
+    expected_weight = packed.float().unflatten(0, (-1, 128)).unflatten(-1, (-1, 128)) * scales[:, None, :, None].float()
+    expected_weight = expected_weight.flatten(2, 3).flatten(0, 1).bfloat16()
+    weight_b = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16) * 0.1
+    layer.load_hf_weights({weight_name: packed, scale_name: scales, "layers.0.attn.wo_b.weight": weight_b})
+    assert layer.wo_a_.verify_load()
+    local_groups = layer.o_groups // tp_size
+    grouped_weight = expected_weight.view(2, 128, 256)[rank * local_groups : (rank + 1) * local_groups]
+    heads = layer.n_heads // tp_size
+    padded = torch.full((5, 64, 64), 9, device="cuda", dtype=torch.bfloat16)
+    attention = padded[:, :heads]
+    attention.normal_(std=0.1)
+    angles = torch.randn(5, 32, device="cuda")
+    cos, sin = angles.cos(), angles.sin()
+    pairs = torch.view_as_complex(attention.float().reshape(5, heads, 32, 2).contiguous())
+    rotated = torch.view_as_real(pairs * torch.complex(cos, sin).conj()[:, None]).flatten(-2).bfloat16()
+    expected = torch.einsum("tgd,grd->tgr", rotated.reshape(5, local_groups, 256), grouped_weight).flatten(1)
+    expected = expected @ weight_b[:, rank * local_groups * 128 : (rank + 1) * local_groups * 128].T
 
-    torch.testing.assert_close(actual, expected)
-    if not fp8:
-        assert bmm_inputs[-1].untyped_storage().data_ptr() == padded.untyped_storage().data_ptr()
+    infer_layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
+    infer_layer.qk_rope_head_dim, infer_layer.tp_groups, infer_layer.compress_ratio = 64, local_groups, 0
+    infer_layer._tpsp_reduce = lambda input, infer_state: input
+    state = SimpleNamespace(position_cos_sliding=cos, position_sin_sliding=sin)
+    torch.testing.assert_close(infer_layer._get_o(attention, state, layer), expected, rtol=0.01, atol=0.01)
+    assert padded[:, heads:].eq(9).all()

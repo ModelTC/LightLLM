@@ -16,12 +16,10 @@ class CompressorInfer(BaseLayerInfer):
     def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int, is_in_indexer: bool = False):
         super().__init__()
         self.layer_idx_ = layer_idx
-        self.network_config_ = network_config
         self.tp_world_size_ = tp_world_size
         self.is_in_indexer = is_in_indexer
         self.compress_ratio = network_config["compress_ratios"][layer_idx]
-        self.head_dim = network_config["head_dim"]
-        self.index_head_dim = network_config["index_head_dim"]
+        self.head_dim = network_config["index_head_dim" if is_in_indexer else "head_dim"]
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.eps = network_config["rms_norm_eps"]
 
@@ -42,14 +40,12 @@ class CompressorInfer(BaseLayerInfer):
             projection = layer_weight.idx_cmp_wkv_gate_
             norm_weight = layer_weight.idx_cmp_norm_.weight
             ape = layer_weight.idx_cmp_ape_.weight
-            head_dim = self.index_head_dim
         else:
             projection = layer_weight.compressor_wkv_gate_
             norm_weight = layer_weight.compressor_norm_.weight
             ape = layer_weight.compressor_ape_.weight
-            head_dim = self.head_dim
         if kv_score_out is None:
-            shape = (x.shape[0], head_dim * (4 if self.compress_ratio == 4 else 2))
+            shape = (x.shape[0], self.head_dim * (4 if self.compress_ratio == 4 else 2))
             allocate = self.alloc_tensor if use_custom_tensor_manager else torch.empty
             kv_score_out = allocate(shape, dtype=torch.float32, device=x.device)
         kv_score = projection.mm(x, out=kv_score_out, use_custom_tensor_mananger=use_custom_tensor_manager)
@@ -61,7 +57,7 @@ class CompressorInfer(BaseLayerInfer):
         )
         if self.is_in_indexer and use_custom_tensor_manager and out_buffer is None:
             out_buffer = self.alloc_tensor(
-                (infer_state.mem_index.numel(), self.index_head_dim),
+                (infer_state.mem_index.numel(), self.head_dim),
                 torch.bfloat16,
                 device=infer_state.mem_index.device,
             )
@@ -71,7 +67,7 @@ class CompressorInfer(BaseLayerInfer):
             layer_idx=self.layer_idx_,
             norm_weight=norm_weight,
             eps=self.eps,
-            head_dim=head_dim,
+            head_dim=self.head_dim,
             qk_rope_head_dim=self.qk_rope_head_dim,
             compress_ratio=self.compress_ratio,
             cos_table=cos_table,
@@ -104,8 +100,6 @@ def fused_compress(
         -1,
     )
     if is_in_indexer:
-        assert compress_ratio == 4, "只有 c4(CSA) 层有 indexer-K"
-
         req_to_compressor_state = req_manager.req_to_c4_indexer_state[
             req_manager.cache_config.layer_to_c4_idx[layer_idx]
         ]
@@ -119,12 +113,11 @@ def fused_compress(
     else:
         if compress_ratio == 4:
             req_to_compressor_state = req_manager.req_to_c4_state[req_manager.cache_config.layer_to_c4_idx[layer_idx]]
-            out_page_size = req_manager.cache_config.compressed_kv_token_alignment // compress_ratio
-        elif compress_ratio == 128:
+        else:
             req_to_compressor_state = req_manager.req_to_c128_state[
                 req_manager.cache_config.layer_to_c128_idx[layer_idx]
             ]
-            out_page_size = req_manager.cache_config.compressed_kv_token_alignment // compress_ratio
+        out_page_size = req_manager.cache_config.compressed_kv_token_alignment // compress_ratio
         from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer
 
         out_buffer = get_compressed_kv_buffer(mem_manager, layer_idx)
@@ -140,11 +133,6 @@ def fused_compress(
     is_c4 = compress_ratio == 4
     block_state = triton.next_power_of_2(candidate_dim)
     block_head = triton.next_power_of_2(head_dim)
-    token_to_batch_idx = infer_state._dsv4_token_to_batch_idx if infer_state.is_prefill else infer_state.b_req_idx
-    ready_cache_len = (
-        infer_state.b_ready_cache_len if infer_state.b_ready_cache_len is not None else infer_state.b_seq_len
-    )
-    q_start_loc = infer_state.b_q_start_loc if infer_state.b_q_start_loc is not None else infer_state.b_seq_len
 
     _fused_compress_norm_rope_kernel[(kv_score.shape[0],)](
         kv_score,
@@ -152,12 +140,12 @@ def fused_compress(
         kv_score.stride(1),
         req_to_compressor_state,
         infer_state.position_ids,
-        token_to_batch_idx,
+        infer_state._dsv4_token_to_batch_idx,
         infer_state.b_req_idx,
         infer_state.b_mtp_index,
         infer_state.b_seq_len,
-        ready_cache_len,
-        q_start_loc,
+        infer_state.b_ready_cache_len,
+        infer_state.b_q_start_loc,
         compressed_kv_slots,
         norm_weight,
         eps,
@@ -194,7 +182,7 @@ def fused_compress(
         kv_score.stride(0),
         kv_score.stride(1),
         infer_state.position_ids,
-        token_to_batch_idx,
+        infer_state._dsv4_token_to_batch_idx,
         infer_state.b_req_idx,
         infer_state.b_seq_len,
         req_to_compressor_state,

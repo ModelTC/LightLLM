@@ -17,12 +17,6 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
             # history plus the complete block in the ring's future slots.
             return
 
-        workspace = self.dsv4_workspace
-        self.dsv4_swa_indices, self.dsv4_swa_lengths = workspace.swa(
-            self.microbatch_index,
-            self.position_ids.numel(),
-            width=workspace.swa_capacity,
-        )
         # The parent forward already owns the write-slot buffer. Rebuild it for
         # draft visibility instead of replacing it with a second workspace copy.
         build_dspark_swa_indices(

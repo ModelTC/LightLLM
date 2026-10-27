@@ -14,6 +14,8 @@ if TYPE_CHECKING:
 
 
 class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
+    """FlashMLA layouts and operator workspace; forward states own sparse metadata."""
+
     def __init__(self, model):
         super().__init__(model=model)
         self.cache_config = model.req_manager.cache_config

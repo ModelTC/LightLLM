@@ -11,7 +11,7 @@ from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from .compressor import CompressorInfer
 from .indexer import DeepseekV4IndexInfer
-from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+from ..triton_kernel.rotary_emb import inverse_rotary_emb
 from ..infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 
@@ -378,12 +378,10 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
     def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         # o: [T, tp_q_head_num_, head_dim_] after inverse rope -> grouped low-rank O -> [T, embed_dim_]
         position_cos, position_sin = self._select_rope(infer_state)
-        rotary_emb_fwd(o[..., -self.qk_rope_head_dim :], None, position_cos, position_sin, inverse=True)
+        inverse_rotary_emb(o[..., -self.qk_rope_head_dim :], position_cos, position_sin)
         T = o.shape[0]
-        if layer_weight.o_proj_fp8:
-            # one group per rank -> a single fp8 GEMM (deepgemm .mm quantizes o to fp8 internally)
-            # FP8 activation quantization requires contiguous rows.
-            o = layer_weight.wo_a_.mm(o.reshape(T, -1).contiguous())  # [T, o_lora]
+        if layer_weight.o_proj_use_mm:
+            o = layer_weight.wo_a_.mm(o.reshape(T, -1))  # [T, o_lora]
         else:
             o = o.reshape(T, self.tp_groups, -1).transpose(0, 1)  # [groups, T, per_group_in]
             o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
@@ -492,7 +490,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 **meta,
             },
         )
-        attn_out = infer_state.prefill_att_state.prefill_att(
+        return infer_state.prefill_att_state.prefill_att(
             q=q,
             k=infer_state.prefill_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
             v=None,
@@ -500,11 +498,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             alloc_func=self.alloc_tensor,
             out=out,
         )
-        pad_q_len = infer_state.prefill_padding_token_num
-        if pad_q_len:
-            # HOLD KV 可被并发写入；清零 padding 行，避免其影响后续 MoE 路由。
-            attn_out[-pad_q_len:] = 0
-        return attn_out
 
     # ------------------------------------------------------------------ attention (decode)
     def token_attention_forward(
@@ -547,21 +540,15 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
-        input = None
-        gate_up = None
-        out = layer_weight.down_proj.mm(shared)
-        shared = None
-        return out
+        del gate_up
+        return layer_weight.down_proj.mm(shared)
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)
         x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
         topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
-        # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
-        # 是 inplace 的，routed 计算结束后 x 已被覆盖为输出。
-        # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
-        # DeepseekV2MLP(..., swiglu_limit=config.swiglu_limit) path.
+        # Routed experts can overwrite x in place, so compute the shared expert first.
         shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = layer_weight.experts.experts_with_topk(
             input_tensor=x,

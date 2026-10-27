@@ -278,9 +278,8 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         packed_kv = (packed_kv[0], extra)
         params["extra_indices"].copy_(indices)
 
-    def new_request(length, padding_tokens):
+    def new_request(length):
         infer_state = DeepseekV4InferStateInfo()
-        infer_state.prefill_padding_token_num = padding_tokens
         infer_state.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         infer_state.hidden_collector = NoopHiddenCollector()
         infer_state.req_manager = SimpleNamespace(get_att_input_params=lambda layer_index: packed_kv)
@@ -326,33 +325,28 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         # A graph segment after attention must read the output filled by the CPU callback.
         return [att_out + 0.125]
 
-    # 与实际 warmup 一致：先用全 HOLD 输入 capture，再改变真实请求与 padding 的比例。
-    infer_state = new_request(1, q.shape[0])
+    infer_state = new_request(1)
     layer._context_attention_wrapper_run(q, q_lora, x, infer_state, layer_weight)
     outputs = runner.capture_prefill(prefill_func, [q, q_lora, x], infer_state)
     torch.testing.assert_close(
         outputs[0],
-        torch.full_like(outputs[0], 0.125),
-        rtol=0,
-        atol=0,
+        _reference(q, decoded, extra_decoded, infer_state.attn_params, heads) + 0.125,
+        rtol=0.02,
+        atol=5e-4,
     )
     assert len(infer_state.prefill_cuda_graph_exe_list) == 3
     previous_meta = infer_state.prefill_att_state.sched_meta_by_ratio[ratio]
-    for length, padding_tokens in ((128, 0), (64, 2), (1, q.shape[0]), (64, 0)):
+    for length in (128, 64, 1, 64):
         q.mul_(1.25)
-        infer_state = new_request(length, padding_tokens)
+        infer_state = new_request(length)
         current_meta = infer_state.prefill_att_state.sched_meta_by_ratio[ratio]
         assert current_meta.tile_scheduler_metadata is None
         actual = runner.replay([q, q_lora, x], infer_state)[0]
         assert callback_states[-1] is infer_state
         assert current_meta.tile_scheduler_metadata.data_ptr() != previous_meta.tile_scheduler_metadata.data_ptr()
-        assert runner.graph[q.shape[0]][0].prefill_padding_token_num == padding_tokens
-        expected = _reference(q, decoded, extra_decoded, infer_state.attn_params, heads)
-        if padding_tokens:
-            expected[-padding_tokens:] = 0
         torch.testing.assert_close(
             actual,
-            expected + 0.125,
+            _reference(q, decoded, extra_decoded, infer_state.attn_params, heads) + 0.125,
             rtol=0.02,
             atol=5e-4,
         )

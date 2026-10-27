@@ -637,7 +637,11 @@ class InferReq:
         # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
-        self.mm_input_spans = get_mm_input_spans(self.multimodal_params) if self.args.disable_chunked_mm_input else []
+        self.mm_input_spans = (
+            get_mm_input_spans(self.get_input_token_ids(), self.multimodal_params)
+            if self.args.disable_chunked_mm_input
+            else []
+        )
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()

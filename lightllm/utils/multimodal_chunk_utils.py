@@ -3,16 +3,20 @@
 from typing import List, Mapping, Sequence, Tuple
 
 
-def get_mm_input_spans(multimodal_params: Mapping) -> List[Tuple[int, int]]:
-    """Read image/audio ranges recorded by the tokenizer."""
+def get_mm_input_spans(input_ids: Sequence[int], multimodal_params: Mapping) -> List[Tuple[int, int]]:
+    """Locate image/audio blocks, including requests using a suffix of cached embeddings."""
     spans = []
     for modality in ("images", "audios"):
         for item in multimodal_params[modality]:
-            if item.get("block_start_idx") is not None:
-                spans.append((item["block_start_idx"], item["block_end_idx"]))
-            else:
-                start = item["start_idx"]
-                spans.append((start, start + item["token_num"]))
+            start = item["start_idx"]
+            # 缓存中的完整块使用连续虚拟 ID：[token_id, token_id + token_num)。
+            # start_idx 指向当前输入中该块的首个虚拟 token；请求可能只引用缓存后缀，
+            # 如 DeepSeek-V4 按位置对齐时会跳过开头的 padding token。
+            # 首个实际 ID 与缓存起始 ID 的差就是跳过的槽数，完整引用时为 0。
+            cache_offset = int(input_ids[start]) - item["token_id"]
+            # 当前块长度为 token_num - cache_offset，返回左闭右开的输入区间。
+            # 例如缓存 ID 为 [100, 108)，实际从 102 开始，则块长为 6。
+            spans.append((start, start + item["token_num"] - cache_offset))
     return spans
 
 

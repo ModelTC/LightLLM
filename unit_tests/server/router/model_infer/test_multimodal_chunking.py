@@ -200,8 +200,8 @@ def test_mm_chunking_keeps_the_original_state_cache_position(monkeypatch, disabl
     req.multimodal_params = SimpleNamespace(
         to_dict=lambda: {
             "images": [
-                {"start_idx": 450, "token_num": 150},
-                {"start_idx": 700, "token_num": 200},
+                {"start_idx": 450, "token_id": 450, "token_num": 150},
+                {"start_idx": 700, "token_id": 700, "token_num": 200},
             ],
             "audios": [],
         }
