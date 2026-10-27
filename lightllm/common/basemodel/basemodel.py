@@ -295,6 +295,14 @@ class TpPartBaseModel:
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
                 capture_infer_cost=self.args.mtp_dynamic_verify,
+                # DSpark consumes target logits and commits target hidden before replaying its graph.
+                mempool=(
+                    self.main_model.graph.mempool
+                    if self.is_mtp_draft_model
+                    and self.args.mtp_mode == "dspark"
+                    and not self.args.enable_decode_microbatch_overlap
+                    else None
+                ),
             )
         )
         if self.graph is not None:

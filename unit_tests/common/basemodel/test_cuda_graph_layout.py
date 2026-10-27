@@ -2,6 +2,7 @@ import math
 from types import SimpleNamespace
 
 import pytest
+import torch
 
 import lightllm.common.basemodel.basemodel as basemodel_module
 import lightllm.common.basemodel.cuda_graph as cuda_graph_module
@@ -81,6 +82,40 @@ def test_batch_step_size_after_split_controls_capture_range(_graph_args):
         42,
         56,
     ]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA graph replay needs a GPU")
+def test_shared_target_draft_pool_preserves_live_outputs(_graph_args):
+    target = CudaGraph(1, 2, 1, max_batch_size=4)
+    draft = CudaGraph(1, 2, 1, max_batch_size=4, mempool=target.mempool)
+    x = torch.randn((384, 512), device="cuda")
+    bias = torch.randn((4, 512), device="cuda")
+    torch.tanh(torch.sin(x)[:, None, :] + bias).sum(1)
+    torch.cuda.synchronize()
+    graphs = {}
+    outputs = {}
+    for rows in (384, 48):
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=target.mempool):
+            hidden = torch.sin(x[:rows])
+            output = hidden.square().sum(1)
+        graphs["target", rows] = graph
+        outputs[rows] = hidden, output
+    for rows in (384, 48):
+        hidden, _ = outputs[rows]
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, pool=draft.mempool):
+            output = torch.tanh(hidden[:, None, :] + bias).sum(1)
+        graphs["draft", rows] = graph
+        outputs["draft", rows] = output
+    for rows in (384, 48, 48, 384):
+        x.normal_()
+        graphs["target", rows].replay()
+        graphs["draft", rows].replay()
+        hidden, output = outputs[rows]
+        torch.testing.assert_close(hidden, torch.sin(x[:rows]), rtol=0, atol=0)
+        torch.testing.assert_close(output, torch.sin(x[:rows]).square().sum(1))
+        torch.testing.assert_close(outputs["draft", rows], torch.tanh(hidden[:, None, :] + bias).sum(1))
 
 
 @pytest.mark.parametrize("tp_size", [1, 2, 4, 8])

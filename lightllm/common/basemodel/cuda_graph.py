@@ -63,10 +63,13 @@ class CudaGraph:
         max_len_in_batch=8192,
         tp_world_size: int = 1,
         capture_infer_cost: bool = False,
+        mempool=None,
     ):
         self.graph = {}
         self.tp_world_size = tp_world_size
-        self.mempool = torch.cuda.graph_pool_handle() if torch.cuda.is_available() else None
+        self.mempool = mempool
+        if self.mempool is None:
+            self.mempool = torch.cuda.graph_pool_handle()
         self.args = get_env_start_args()
         self.max_batch_size = max_batch_size
         self.graph_max_len_in_batch = max_len_in_batch
