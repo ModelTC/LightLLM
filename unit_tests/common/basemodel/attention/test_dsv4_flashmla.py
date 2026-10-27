@@ -130,9 +130,13 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
 
     kernel = attention.flashmla.flash_mla_with_kvcache
 
+    kernel_outputs = []
+
     def flashmla_with_out(**kwargs):
         assert ("out" in kwargs) == backend.flashmla_supports_out
-        return kernel(**kwargs)
+        result = kernel(**kwargs)
+        kernel_outputs.append(result[0])
+        return result
 
     monkeypatch.setattr(attention.flashmla, "flash_mla_with_kvcache", flashmla_with_out)
     out = torch.full_like(q, float("nan")) if provide_out else None
@@ -146,8 +150,8 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
     )
     assert params["attn_sink"].shape == (backend.padded_q_head_num,)
     assert torch.count_nonzero(params["attn_sink"][heads:]) == 0
-    assert len(allocations) == (0 if provide_out else 1)
-    output_buffer = out if provide_out else allocations[0]
+    assert len(allocations) == int(not provide_out and backend.flashmla_supports_out)
+    output_buffer = out if provide_out else (allocations[0] if allocations else kernel_outputs[0][:, 0])
     assert actual.data_ptr() == output_buffer.data_ptr()
     assert actual.stride() == output_buffer.stride()
     assert actual.shape == (q.shape[0], heads, 512)

@@ -28,7 +28,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         packed_kv: Tuple[torch.Tensor, Optional[torch.Tensor]],
         nsa_dict: dict,
         sched_meta: "FlashMLASchedMeta",
-        out: torch.Tensor,
+        out: Optional[torch.Tensor],
     ) -> torch.Tensor:
         """Attend to SWA plus optional compressed KV and return all padded Q heads."""
         swa_packed, compressed_packed = packed_kv
@@ -66,7 +66,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             extra_topk_length=nsa_dict.get("extra_lengths"),
             **({"out": out.unsqueeze(1)} if self.flashmla_supports_out else {}),
         )
-        if not self.flashmla_supports_out:
+        if out is not None and not self.flashmla_supports_out:
             out.copy_(padded_out[:, 0])
             return out
         return padded_out[:, 0]
@@ -96,7 +96,7 @@ class _PrefillAttState(BasePrefillAttState):
         out: torch.Tensor = None,
     ) -> torch.Tensor:
         nsa_dict = att_control.nsa_prefill_dict
-        if out is None:
+        if out is None and self.backend.flashmla_supports_out:
             out = alloc_func((q.shape[0], q.shape[1], nsa_dict["head_dim_v"]), dtype=q.dtype, device=q.device)
 
         padded_out = self.backend._flashmla_att(
@@ -133,7 +133,11 @@ class _DecodeAttState(BaseDecodeAttState):
         sched_meta_by_ratio = (
             self.capture_sched_meta_by_ratio if torch.cuda.is_current_stream_capturing() else self.sched_meta_by_ratio
         )
-        out = alloc_func((q.shape[0], q.shape[1], nsa_dict["head_dim_v"]), dtype=q.dtype, device=q.device)
+        out = (
+            alloc_func((q.shape[0], q.shape[1], nsa_dict["head_dim_v"]), dtype=q.dtype, device=q.device)
+            if self.backend.flashmla_supports_out
+            else None
+        )
         padded_out = self.backend._flashmla_att(
             q,
             k,
