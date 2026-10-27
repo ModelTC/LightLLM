@@ -727,7 +727,11 @@ class TpPartBaseModel:
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
-        infer_state.mtp_draft_input_hiddens = None
+        # Captured MTP graphs keep this fixed-address input alive and update it
+        # through copy_for_cuda_graph on every replay. Dropping the reference
+        # skips those updates and lets the allocator reuse a captured address.
+        if not infer_state.is_cuda_graph_capture:
+            infer_state.mtp_draft_input_hiddens = None
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
         for i in range(self.layers_num):
