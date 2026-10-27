@@ -65,7 +65,7 @@ def _make_dp_queue(monkeypatch, balancer):
 def _req(request_id, dp=-1):
     return SimpleNamespace(
         request_id=request_id,
-        sample_params=SimpleNamespace(suggested_dp_index=dp, pd_high_priority_request=False),
+        sample_params=SimpleNamespace(suggested_dp_index=dp, high_priority_request=False),
         is_aborted=False,
         get_tuple_tokens=lambda busy, ema: (64, 16),
         get_first_router_need_tokens=lambda: 64,

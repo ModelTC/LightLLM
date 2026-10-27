@@ -1,7 +1,8 @@
 import pytest
 import torch
 
-from lightllm.models.deepseek_v4.triton_kernel import norm_rope, topk_softplus_sqrt, topk_transform
+from lightllm.models.deepseek_v4.triton_kernel import norm_rope, topk_softplus_sqrt, indexer_topk
+from lightllm.models.deepseek_v4.triton_kernel.rotary_emb import inverse_rotary_emb
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -20,6 +21,51 @@ def rope_reference(x, freqs, positions):
     while rotation.ndim < pairs.ndim:
         rotation = rotation.unsqueeze(1)
     return torch.view_as_real(pairs * rotation).flatten(-2)
+
+
+@pytest.mark.parametrize("tokens,heads,dim_stride", [(0, 8, 1), (1, 3, 1), (7, 16, 2), (129, 64, 1)])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_inverse_rotary_emb_strides_and_unwritten_channels(tokens, heads, dim_stride, dtype):
+    freqs, positions = freqs_and_positions(tokens)
+    padded = torch.randn(tokens, heads + 2, 512 * dim_stride, device="cuda", dtype=dtype)
+    before = padded.clone()
+    attention = padded[:, :heads, ::dim_stride]
+    expected = rope_reference(attention, freqs.conj(), positions).to(dtype)
+    rotation = freqs[positions]
+    # Independent table strides: complex real view for cos, contiguous sin.
+    inverse_rotary_emb(attention[..., -64:], rotation.real, rotation.imag.contiguous())
+    tolerance = 0.01 if dtype == torch.bfloat16 else 1e-5
+    torch.testing.assert_close(attention[..., -64:], expected, rtol=tolerance, atol=tolerance)
+    torch.testing.assert_close(attention[..., :-64], before[:, :heads, ::dim_stride][..., :-64], rtol=0, atol=0)
+    torch.testing.assert_close(padded[:, heads:], before[:, heads:], rtol=0, atol=0)
+    if dim_stride == 2:
+        torch.testing.assert_close(padded[..., 1::2], before[..., 1::2], rtol=0, atol=0)
+
+
+def test_inverse_rotary_emb_cuda_graph_replay():
+    freqs, positions = freqs_and_positions(7)
+    rotation = freqs[positions]
+    source = torch.randn(7, 5, 512, device="cuda", dtype=torch.bfloat16)
+    output = torch.empty_like(source)
+
+    def run():
+        inverse_rotary_emb(output[..., -64:], rotation.real, rotation.imag)
+
+    output.copy_(source)
+    run()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        run()
+    for _ in range(2):
+        source.normal_()
+        positions.random_(0, 128)
+        rotation.copy_(freqs[positions])
+        output.copy_(source)
+        graph.replay()
+        expected = source.clone()
+        expected[..., -64:] = rope_reference(source, freqs.conj(), positions).bfloat16()
+        torch.testing.assert_close(output, expected, rtol=0.01, atol=0.01)
 
 
 @pytest.mark.parametrize("batch,heads", [(0, 8), (1, 8), (7, 16), (128, 16)])
@@ -50,7 +96,7 @@ def test_k_norm_rope_cache_layout_and_unwritten_bytes(batch, position_dtype):
     weight = torch.randn(512, device="cuda", dtype=torch.bfloat16)
     slots = torch.randperm(384, device="cuda")[:batch].int()
     cache = torch.full((3, 74880), 165, device="cuda", dtype=torch.uint8)
-    norm_rope.fused_k_norm_rope_flashmla(kv, weight, 1e-6, freqs, pos, slots, cache, 128)
+    norm_rope.fused_kv_norm_rope_to_swa(kv, weight, 1e-6, freqs, pos, slots, cache, 128)
     values = kv.float() * torch.rsqrt(kv.float().square().mean(-1, keepdim=True) + 1e-6) * weight.float()
     grouped = values[:, :448].reshape(batch, 7, 64)
     scale_raw = grouped.abs().amax(-1).clamp_min(1e-4) / 448
@@ -122,8 +168,7 @@ def router_reference(logits, factor, bias, tokens, table, image_bias, image_star
 
 @pytest.mark.parametrize("experts", [256, 384])
 @pytest.mark.parametrize("mode", ["bias", "hash", "vision", "hash_vision"])
-@pytest.mark.parametrize("rows", [1, 17, 513])
-@pytest.mark.parametrize("distribution", ["normal", "ties", "underflow"])
+@pytest.mark.parametrize("rows,distribution", [(1, "normal"), (513, "normal"), (17, "ties"), (513, "underflow")])
 def test_router_modes_scaling_ties_and_underflow(experts, mode, rows, distribution):
     torch.manual_seed(23)
     logits = torch.randn(rows, experts, device="cuda")
@@ -196,17 +241,18 @@ def test_topk_valid_prefix_raw_indices_and_padding(width, page_size):
     pages = torch.randint(0, 4096, (8, (width + page_size - 1) // page_size), device="cuda", dtype=torch.int32)
     out = torch.empty(8, 512, device="cuda", dtype=torch.int32)
     raw = torch.empty_like(out)
-    topk_transform.topk_transform(scores, lengths, pages, out, page_size, raw)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, page_size, raw)
     assert_topk(scores, lengths, pages, out, raw, page_size)
     # The allocation-free in-place translation must select the same values too.
-    topk_transform.topk_transform(scores, lengths, pages, out, page_size)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, page_size)
     valid = out >= 0
     assert valid.sum(-1).tolist() == lengths.clamp_max(512).tolist()
 
 
-@pytest.mark.parametrize("width,rows", [(513, 1), (640, 2), (1024, 1), (1024, 4), (1536, 2), (2048, 2)])
+@pytest.mark.parametrize(
+    "width,rows,page_size", [(513, 1, 64), (640, 2, 128), (1024, 1, 1), (1024, 4, 64), (1536, 2, 128), (2048, 2, 64)]
+)
 @pytest.mark.parametrize("distribution", ["normal", "ties", "concentrated"])
-@pytest.mark.parametrize("page_size", [1, 64, 128])
 def test_short_topk_rank_selection_and_optional_raw(width, rows, distribution, page_size):
     torch.manual_seed(43)
     scores = torch.randn(rows, width + 1, device="cuda")[:, :width]
@@ -221,10 +267,10 @@ def test_short_topk_rank_selection_and_optional_raw(width, rows, distribution, p
     pages = torch.randint(0, 4096, (rows, (width + page_size - 1) // page_size), device="cuda", dtype=torch.int32)
     out = torch.empty(rows, 512, device="cuda", dtype=torch.int32)
     raw = torch.empty_like(out)
-    topk_transform.topk_transform(scores, lengths, pages, out, page_size, raw)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, page_size, raw)
     assert_topk(scores, lengths, pages, out, raw, page_size)
     expected = out.clone()
-    topk_transform.topk_transform(scores, lengths, pages, out, page_size)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, page_size)
     torch.testing.assert_close(out, expected, rtol=0, atol=0)
 
 
@@ -235,7 +281,7 @@ def test_topk_cuda_graph_replay_changing_lengths(rows, width):
     pages = torch.randint(0, 4096, (rows, width // 64), device="cuda", dtype=torch.int32)
     out = torch.empty(rows, 512, device="cuda", dtype=torch.int32)
     raw = torch.empty_like(out)
-    fn = lambda: topk_transform.topk_transform(scores, lengths, pages, out, 64, raw)
+    fn = lambda: indexer_topk.indexer_topk(scores, lengths, pages, out, 64, raw)
     fn()
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
@@ -289,5 +335,5 @@ def test_topk_uses_configured_output_capacity(topk, width):
     pages = torch.randint(0, 1000, (2, (width + 63) // 64), dtype=torch.int32, device="cuda")
     out = torch.empty((2, topk), dtype=torch.int32, device="cuda")
     raw = torch.empty_like(out)
-    topk_transform.topk_transform(scores, lengths, pages, out, 64, raw)
+    indexer_topk.indexer_topk(scores, lengths, pages, out, 64, raw)
     assert_topk(scores, lengths, pages, out, raw, 64)

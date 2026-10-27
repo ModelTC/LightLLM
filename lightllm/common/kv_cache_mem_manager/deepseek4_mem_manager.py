@@ -5,21 +5,12 @@ import triton
 
 from .mem_manager import MemoryManager
 from .operator import DeepseekV4MemOperator
-from lightllm.common.state_cache_manager.deepseek4 import (
-    DeepseekV4CacheConfig,
-    DeepseekV4StateCacheManager,
-)
+from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig, DeepseekV4StateCacheManager
+from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_compressed_kv_pages
 from lightllm.utils.envs_utils import get_env_start_args
 
 
 class DeepseekV4MemoryManager(MemoryManager):
-    """One token-slot capacity, with one byte buffer per history layer.
-
-    SWA and compressor working state belong to ReqManager, like linear state.
-    Layer widths include packed KV, indexer K where present, and alignment.
-    Model operators expose the physical views needed by their kernels.
-    """
-
     operator_class = DeepseekV4MemOperator
 
     def __init__(
@@ -39,14 +30,14 @@ class DeepseekV4MemoryManager(MemoryManager):
             size,
             torch.uint8,
             head_num,
-            max(cache_config.history_widths, default=0),
-            len(cache_config.history_widths),
+            max(cache_config.compressed_kv_slot_bytes),
+            len(cache_config.compressed_kv_slot_bytes),
             always_copy,
             mem_fraction,
         )
 
     def get_cell_size(self):
-        return sum(self.cache_config.history_widths)
+        return sum(self.cache_config.compressed_kv_slot_bytes)
 
     def profile_size(self, mem_fraction):
         automatic = self.size is None
@@ -58,8 +49,8 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.kv_buffer = [
-            torch.zeros((size + self.page_size, head_num, width), dtype=dtype, device="cuda")
-            for width in self.cache_config.history_widths
+            torch.zeros((size + self.page_size, head_num, slot_bytes), dtype=dtype, device="cuda")
+            for slot_bytes in self.cache_config.compressed_kv_slot_bytes
         ]
         args = get_env_start_args()
         big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
@@ -78,7 +69,7 @@ class DeepseekV4MemoryManager(MemoryManager):
         self.big_page_buffers.clear_to_init_state()
 
     def get_att_input_params(self, layer_index):
-        index = self.cache_config.layer_to_history_idx.get(layer_index)
+        index = self.cache_config.layer_to_compressed_kv_idx.get(layer_index)
         return self.kv_buffer[index] if index is not None else None
 
     def get_index_kv_buffer(self, index):
@@ -96,10 +87,7 @@ class DeepseekV4MemoryManager(MemoryManager):
     def write_to_shm(self, req_manager):
         # Transport receives GPU views, just as Qwen's mem manager exports linear state.
         for name in (
-            "swa_buffer",
-            "swa_capacity_tokens",
-            "HOLD_SWA_SLOT",
-            "HOLD_REQUEST_ID",
+            "req_to_swa",
             "req_to_c4_state",
             "req_to_c4_indexer_state",
             "req_to_c128_state",
@@ -108,22 +96,89 @@ class DeepseekV4MemoryManager(MemoryManager):
         return super().write_to_shm(req_manager)
 
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
-        from lightllm.models.deepseek_v4.pd_cache import get_pd_page_nbytes
-
-        return (page_num, 1, 1, 1, get_pd_page_nbytes(self.cache_config, page_size))
-
-    def get_pd_kv_move_buffer_size(self):
-        args = get_env_start_args()
-        if args.run_mode not in ("prefill", "decode"):
-            return 0
-        return math.prod(self.get_paged_kv_move_buffer_shape(args.pd_kv_page_num, args.pd_kv_page_size))
+        compressed_kv_bytes = page_size * self.get_cell_size()
+        swa_shape, *compressor_shapes = self.cache_config.get_runtime_state_shapes(get_env_start_args().mtp_step)
+        state_bytes = (
+            math.prod(swa_shape) + sum(math.prod(shape) for shape in compressor_shapes) * torch.float32.itemsize
+        )
+        return (page_num, 1, 1, 1, max(compressed_kv_bytes, state_bytes))
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size):
         self.pd_kv_page_size = page_size
-        self.kv_move_buffer = torch.empty(
-            self.get_paged_kv_move_buffer_shape(page_num, page_size), dtype=torch.uint8, device="cuda"
+        kv_move_buffer = super().alloc_paged_kv_move_buffer(page_num, page_size)
+        self.att_state_page_helper = DeepseekV4AttStatePageHelper(self)
+        return kv_move_buffer
+
+    def write_mem_to_page_kv_move_buffer(
+        self, mem_indexes, page_index, dp_index, mem_managers, dp_world_size, page_kind="kv", req_idx=None
+    ):
+        if page_kind != "kv":
+            assert page_kind == "att_state", f"unknown page_kind={page_kind}"
+            dp_mems = mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]
+            return self.att_state_page_helper.write_req_to_page(page_index, req_idx, dp_mems)
+        pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
+        pin_indexes.numpy()[:] = mem_indexes
+        page = self.kv_move_buffer[page_index]
+        copy_compressed_kv_pages(
+            mem_manager=mem_managers[dp_index * dp_world_size],
+            mem_indexes=pin_indexes.cuda(non_blocking=True),
+            page_indexes=torch.zeros(1, dtype=torch.int32, device=page.device),
+            kv_move_buffer=page.view(1, -1),
+            to_pages=True,
+            page_size=self.pd_kv_page_size,
+            round_tail=True,
         )
-        self._buffer_mem_indexes_tensors = [
-            torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
-        ]
-        return self.kv_move_buffer
+
+    def read_page_kv_move_buffer_to_mem(
+        self, mem_indexes, page_index, dp_index, mem_managers, dp_world_size, page_kind="kv", req_idx=None
+    ):
+        if page_kind != "kv":
+            assert page_kind == "att_state", f"unknown page_kind={page_kind}"
+            dp_mems = mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]
+            return self.att_state_page_helper.read_page_to_req(page_index, req_idx, dp_mems)
+        pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
+        pin_indexes.numpy()[:] = mem_indexes
+        indexes = pin_indexes.cuda(non_blocking=True)
+        page = self.kv_move_buffer[page_index]
+        page_ids = torch.zeros(1, dtype=torch.int32, device=page.device)
+        for mem in mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]:
+            copy_compressed_kv_pages(
+                mem_manager=mem,
+                mem_indexes=indexes,
+                page_indexes=page_ids,
+                kv_move_buffer=page.view(1, -1),
+                to_pages=False,
+                page_size=self.pd_kv_page_size,
+                round_tail=True,
+            )
+
+
+class DeepseekV4AttStatePageHelper:
+    """整块迁移请求的 SWA 和 compressor ring，保持物理槽位顺序。"""
+
+    def __init__(self, mem_manager):
+        self.mem_manager = mem_manager
+
+    def write_req_to_page(self, page_index, req_idx, dp_mems):
+        page = self.mem_manager.kv_move_buffer[page_index]
+        self._copy_req_state(page, dp_mems[0], req_idx, write=True)
+
+    def read_page_to_req(self, page_index, req_idx, dp_mems):
+        page = self.mem_manager.kv_move_buffer[page_index]
+        for mem in dp_mems:
+            self._copy_req_state(page, mem, req_idx, write=False)
+
+    def _copy_req_state(self, page, mem, req_idx, *, write):
+        data = page.reshape(-1)
+        offset = 0
+        for buffer in (mem.req_to_swa, mem.req_to_c4_state, mem.req_to_c4_indexer_state, mem.req_to_c128_state):
+            if buffer is None:
+                continue
+            state = buffer[:, req_idx]
+            nbytes = state.numel() * state.element_size()
+            page_state = data[offset : offset + nbytes].view(state.dtype).view(state.shape)
+            if write:
+                page_state.copy_(state, non_blocking=True)
+            else:
+                state.copy_(page_state, non_blocking=True)
+            offset += nbytes

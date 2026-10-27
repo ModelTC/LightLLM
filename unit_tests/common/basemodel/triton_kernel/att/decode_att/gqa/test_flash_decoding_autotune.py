@@ -1,3 +1,4 @@
+import weakref
 import collections
 import inspect
 import math
@@ -9,6 +10,7 @@ import torch.nn.functional as F
 from frozendict import frozendict
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
 from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.flash_decoding import (
     gqa_flash_decoding as decode_module,
@@ -122,13 +124,15 @@ def test_rebuild_preserves_layout_and_bounds_indices(monkeypatch, num_tokens):
 
 
 def test_state_retains_actual_length_before_graph_capture(monkeypatch):
+    infer_state = InferStateInfo()
+    infer_state.max_kv_seq_len = 8193
     state = TritonDecodeAttState(
         backend=SimpleNamespace(
             model=SimpleNamespace(
                 is_mtp_draft_model=False, mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0)
             )
         ),
-        infer_state=SimpleNamespace(max_kv_seq_len=8193),
+        _infer_state_weak_ref=weakref.ref(infer_state),
     )
     state.init_state()
     state.infer_state.max_kv_seq_len = 32768

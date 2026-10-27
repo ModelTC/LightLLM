@@ -101,9 +101,9 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     conv = req.req_to_conv_state.buffer[:, 0, ..., :3].clone()
     ssm = req.req_to_ssm_state.buffer[:, 0].clone()
     if small_page:
-        req.save_state(0, slot, cache)
+        req.save_state(source_req, slot, cache)
     else:
-        req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [0], [slot])
+        req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [source_req], [slot])
     torch.cuda.synchronize()
     req.req_to_conv_state.buffer[:, 0].zero_()
     req.req_to_ssm_state.buffer[:, 0].zero_()

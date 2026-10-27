@@ -68,6 +68,7 @@ class LlavaTokenizer(BaseMultiModalTokenizer):
             token_num = multimodal_params.images[image_id].token_num
             assert token_num == self.image_length, "invalid token num: {} vs {}!".format(token_num, self.image_length)
 
+            multimodal_params.images[image_id].start_idx = len(input_ids)
             input_ids.extend(range(token_id, token_id + token_num))
             input_ids.extend(ids)
             image_id += 1

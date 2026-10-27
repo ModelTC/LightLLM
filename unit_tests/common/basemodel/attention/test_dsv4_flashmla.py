@@ -65,7 +65,19 @@ def _case(heads, ratio):
     model.config = {"num_attention_heads": heads, "compress_ratios": [0, 4, 128]}
     from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 
-    model.req_manager = SimpleNamespace(cache_config=DeepseekV4CacheConfig((0, 4, 128)))
+    model.req_manager = SimpleNamespace(
+        cache_config=DeepseekV4CacheConfig.from_model_config(
+            dict(
+                num_hidden_layers=3,
+                compress_ratios=[0, 4, 128],
+                head_dim=512,
+                qk_rope_head_dim=64,
+                index_head_dim=128,
+                sliding_window=128,
+            ),
+            SimpleNamespace(mtp_mode=None),
+        )
+    )
     model.tp_world_size_ = 1
     backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
     q = torch.randn((tokens, backend.padded_q_head_num, 512), dtype=torch.bfloat16, device="cuda") * 0.1
@@ -328,7 +340,7 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
     )
     assert len(infer_state.prefill_cuda_graph_exe_list) == 3
     previous_meta = infer_state.prefill_att_state.sched_meta_by_ratio[ratio]
-    for length in (128, 64, 1):
+    for length in (128, 64, 1, 64):
         q.mul_(1.25)
         infer_state = new_request(length)
         current_meta = infer_state.prefill_att_state.sched_meta_by_ratio[ratio]

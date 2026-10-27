@@ -23,6 +23,6 @@ class DeepseekV4PreLayerInfer(LlamaMultimodalPreLayerInfer):
 
     def token_forward(self, input_ids, infer_state: DeepseekV4InferStateInfo, layer_weight):
         input_embdings = super().token_forward(input_ids, infer_state, layer_weight)
-        if not infer_state.is_cuda_graph:
+        if not infer_state.is_cuda_graph_capture:
             infer_state.mtp_draft_input_hiddens = None
         return hc_expand(input_embdings, self.hc_mult)

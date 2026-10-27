@@ -103,10 +103,8 @@ class G_Objs:
             self.model_created = int(time.time())
 
         if args.run_mode == "pd_master":
-            self.metric_client = MetricClient(get_shm_port_args().metric_port)
-            self.httpserver_manager = HttpServerManagerForPDMaster(
-                args=args,
-            )
+            self.httpserver_manager = HttpServerManagerForPDMaster(args=args)
+            self.metric_client = self.httpserver_manager.metric_client
         else:
             self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManager(args=args)
@@ -213,7 +211,8 @@ def get_server_info():
     else:
         # HTTP workers restore StartArgs from the environment as an EasyDict.
         info = dict(g_objs.args)
-    if info["run_mode"] == "pd_master":
+    # P/D 节点通过此接口获取 PD master 的 worker 端口列表；单 worker 直接返回当前端口。
+    if info.get("run_mode") == "pd_master":
         if info["httpserver_workers"] == 1:
             info["pd_master_multi_ports"] = [info["port"]]
         else:
@@ -540,7 +539,7 @@ from .api_http_rl import router as rl_router
 
 app.include_router(rl_router)
 
-# PD 分离控制面接口（P/D 注册与 KV 状态上报），见 api_http_pd.py
+# PD 分离控制面接口（worker 发现、P/D 注册与 KV 状态上报），见 api_http_pd.py
 from .api_http_pd import router as pd_router
 
 app.include_router(pd_router)

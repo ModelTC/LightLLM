@@ -1,21 +1,28 @@
 # Copyright 2023-2024 SGLang Team
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
+
 import torch
 import triton
 import triton.language as tl
 
+from flashinfer import top_k_page_table_transform
+
 from lightllm.utils.vllm_utils import vllm_ops
-from .launch import pdl_kwargs
+from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
+
+
+_FLASHINFER_SUPPORTS_PAGE_SIZE = "page_size" in inspect.signature(top_k_page_table_transform).parameters
 
 
 @triton.jit
-def _short_topk_rank_kernel(
+def _indexer_topk_rank_kernel(
     scores,
-    seq_lens,
-    page_tables,
-    out_page_indices,
-    out_raw_indices,
+    valid_lengths,
+    page_table,
+    compressed_kv_indices,
+    out_logical_indices,
     score_stride,
     page_table_stride,
     SCORE_WIDTH: tl.constexpr,
@@ -31,20 +38,20 @@ def _short_topk_rank_kernel(
     row = tl.program_id(1)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
-    length = tl.load(seq_lens + row)
+    length = tl.load(valid_lengths + row)
     if length <= TOPK:
         if chunk == 0:
             col = tl.arange(0, TOPK_BLOCK)
-            page = tl.load(page_tables + row * page_table_stride + col // PAGE_SIZE, mask=col < length, other=0)
+            page = tl.load(page_table + row * page_table_stride + col // PAGE_SIZE, mask=col < length, other=0)
             if USE_PDL:
                 tl.extra.cuda.gdc_launch_dependents()
             tl.store(
-                out_page_indices + row * TOPK + col,
+                compressed_kv_indices + row * TOPK + col,
                 tl.where(col < length, page * PAGE_SIZE + col % PAGE_SIZE, -1),
                 col < TOPK,
             )
             if RAW_OUTPUT:
-                tl.store(out_raw_indices + row * TOPK + col, tl.where(col < length, col, -1), col < TOPK)
+                tl.store(out_logical_indices + row * TOPK + col, tl.where(col < length, col, -1), col < TOPK)
         elif USE_PDL:
             tl.extra.cuda.gdc_launch_dependents()
     else:
@@ -59,20 +66,20 @@ def _short_topk_rank_kernel(
         )
         rank = tl.sum(greater.to(tl.int32), axis=1)
         chosen = (target < length) & (rank < TOPK)
-        page = tl.load(page_tables + row * page_table_stride + target // PAGE_SIZE, mask=chosen, other=0)
+        page = tl.load(page_table + row * page_table_stride + target // PAGE_SIZE, mask=chosen, other=0)
         if USE_PDL:
             tl.extra.cuda.gdc_launch_dependents()
-        tl.store(out_page_indices + row * TOPK + rank, page * PAGE_SIZE + target % PAGE_SIZE, mask=chosen)
+        tl.store(compressed_kv_indices + row * TOPK + rank, page * PAGE_SIZE + target % PAGE_SIZE, mask=chosen)
         if RAW_OUTPUT:
-            tl.store(out_raw_indices + row * TOPK + rank, target, mask=chosen)
+            tl.store(out_logical_indices + row * TOPK + rank, target, mask=chosen)
 
 
 @triton.jit
-def _page_transform_kernel(
-    raw_indices,
-    page_tables,
-    out_page_indices,
-    seq_lens,
+def _indexer_topk_to_kv_indices_kernel(
+    logical_indices,
+    page_table,
+    compressed_kv_indices,
+    valid_lengths,
     page_table_stride,
     PAGE_SIZE: tl.constexpr,
     DENSE: tl.constexpr,
@@ -86,25 +93,25 @@ def _page_transform_kernel(
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
     if DENSE:
-        idx = tl.where(col < tl.load(seq_lens + row), col, -1)
+        idx = tl.where(col < tl.load(valid_lengths + row), col, -1)
     else:
-        idx = tl.load(raw_indices + row * TOPK + col, col < TOPK, -1)
-    page = tl.load(page_tables + row * page_table_stride + idx // PAGE_SIZE, mask=idx >= 0, other=0)
+        idx = tl.load(logical_indices + row * TOPK + col, col < TOPK, -1)
+    page = tl.load(page_table + row * page_table_stride + idx // PAGE_SIZE, mask=idx >= 0, other=0)
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
     tl.store(
-        out_page_indices + row * TOPK + col, tl.where(idx >= 0, page * PAGE_SIZE + idx % PAGE_SIZE, -1), col < TOPK
+        compressed_kv_indices + row * TOPK + col, tl.where(idx >= 0, page * PAGE_SIZE + idx % PAGE_SIZE, -1), col < TOPK
     )
     if DENSE and RAW_OUTPUT:
-        tl.store(raw_indices + row * TOPK + col, idx, col < TOPK)
+        tl.store(logical_indices + row * TOPK + col, idx, col < TOPK)
 
 
 @torch.no_grad()
-def topk_transform(scores, seq_lens, page_tables, out_page_indices, page_size, out_raw_indices=None):
+def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_size, out_logical_indices=None):
     """Select C4 entries and map row-relative indices to physical cache slots.
 
-    scores: FP32 [T, width] with contiguous columns; seq_lens: int32 [T].
-    page_tables and outputs use int32, with contiguous output entries per query.
+    scores: FP32 [T, width] with contiguous columns; valid_lengths: int32 [T].
+    page_table and outputs use int32, with contiguous output entries per query.
     Dense rows use a Triton page transform. Tiny short-row batches fuse
     pairwise rank selection and page mapping; larger short batches use
     FlashInfer. For long rows vLLM selects each valid prefix and Triton
@@ -112,83 +119,81 @@ def topk_transform(scores, seq_lens, page_tables, out_page_indices, page_size, o
     """
     if scores.shape[0] == 0:
         return
-    topk = out_page_indices.shape[1]
-    assert topk > 0 and out_page_indices.stride(0) == topk
-    raw = out_page_indices if out_raw_indices is None else out_raw_indices
-    assert raw.shape == out_page_indices.shape and raw.stride(0) == topk
+    topk = compressed_kv_indices.shape[1]
+    assert topk > 0 and compressed_kv_indices.stride(0) == topk
+    logical_indices = compressed_kv_indices if out_logical_indices is None else out_logical_indices
+    assert logical_indices.shape == compressed_kv_indices.shape and logical_indices.stride(0) == topk
     if scores.shape[1] <= topk:
-        _page_transform_kernel[(scores.shape[0],)](
-            raw,
-            page_tables,
-            out_page_indices,
-            seq_lens,
-            page_tables.stride(0),
+        _indexer_topk_to_kv_indices_kernel[(scores.shape[0],)](
+            logical_indices,
+            page_table,
+            compressed_kv_indices,
+            valid_lengths,
+            page_table.stride(0),
             PAGE_SIZE=page_size,
             DENSE=True,
             TOPK=topk,
             TOPK_BLOCK=triton.next_power_of_2(topk),
-            RAW_OUTPUT=out_raw_indices is not None,
+            RAW_OUTPUT=out_logical_indices is not None,
             num_warps=4,
-            **pdl_kwargs(scores.device),
+            **get_pdl_launch_kwargs(scores.device),
         )
     elif (scores.shape[1] <= 1024 and scores.shape[0] <= 4) or (scores.shape[1] <= 2048 and scores.shape[0] <= 2):
         # Bound the quadratic work; this launch is only for small decode batches.
         block_r = 4 if scores.shape[1] <= 1024 else 8
-        _short_topk_rank_kernel[(triton.cdiv(scores.shape[1], block_r), scores.shape[0])](
+        _indexer_topk_rank_kernel[(triton.cdiv(scores.shape[1], block_r), scores.shape[0])](
             scores,
-            seq_lens,
-            page_tables,
-            out_page_indices,
-            raw,
+            valid_lengths,
+            page_table,
+            compressed_kv_indices,
+            logical_indices,
             scores.stride(0),
-            page_tables.stride(0),
+            page_table.stride(0),
             SCORE_WIDTH=scores.shape[1],
             BLOCK_N=triton.next_power_of_2(scores.shape[1]),
             BLOCK_R=block_r,
             PAGE_SIZE=page_size,
             TOPK=topk,
             TOPK_BLOCK=triton.next_power_of_2(topk),
-            RAW_OUTPUT=out_raw_indices is not None,
+            RAW_OUTPUT=out_logical_indices is not None,
             num_warps=4,
             num_stages=1,
-            **pdl_kwargs(scores.device),
+            **get_pdl_launch_kwargs(scores.device),
         )
-    elif scores.shape[1] > 2048 or topk != 512:
+    elif scores.shape[1] > 2048 or topk != 512 or not _FLASHINFER_SUPPORTS_PAGE_SIZE:
         vllm_ops.top_k_per_row_decode(
             scores,
             1,
-            seq_lens,
-            raw,
+            valid_lengths,
+            logical_indices,
             scores.shape[0],
             scores.stride(0),
             scores.stride(1),
             topk,
         )
-        _page_transform_kernel[(scores.shape[0],)](
-            raw,
-            page_tables,
-            out_page_indices,
-            seq_lens,
-            page_tables.stride(0),
+        _indexer_topk_to_kv_indices_kernel[(scores.shape[0],)](
+            logical_indices,
+            page_table,
+            compressed_kv_indices,
+            valid_lengths,
+            page_table.stride(0),
             PAGE_SIZE=page_size,
             DENSE=False,
             TOPK=topk,
             TOPK_BLOCK=triton.next_power_of_2(topk),
             RAW_OUTPUT=False,
             num_warps=4,
-            **pdl_kwargs(scores.device),
+            **get_pdl_launch_kwargs(scores.device),
         )
     else:
         # FlashInfer's DSA-specialized path requires a 512-entry selection.
-        from flashinfer import top_k_page_table_transform
-
         top_k_page_table_transform(
             scores,
-            page_tables,
-            seq_lens,
+            page_table,
+            valid_lengths,
             topk,
             page_size=page_size,
-            out=out_page_indices,
-            out_raw_indices=out_raw_indices,
+            out=compressed_kv_indices,
+            out_raw_indices=out_logical_indices,
             dsa_graph_safe=True,
         )

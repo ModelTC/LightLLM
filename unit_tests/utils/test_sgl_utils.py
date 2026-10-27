@@ -1,3 +1,4 @@
+import weakref
 import collections
 import inspect
 import math
@@ -7,6 +8,7 @@ import pytest
 import torch
 from frozendict import frozendict
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.fa3 import fp as fa3_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner
@@ -104,25 +106,26 @@ def test_fa3_decode_preserves_actual_length_before_graph_capture(monkeypatch, pa
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
     )
+    infer_state = InferStateInfo()
+    infer_state.batch_size = 2
+    infer_state.max_kv_seq_len = actual_kv_len
+    infer_state.microbatch_index = 0
+    infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
+    infer_state.b_seq_len = torch.tensor([4096, actual_kv_len], dtype=torch.int32)
+    infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
+    infer_state.b1_cu_kv_seq_len = torch.tensor([0, 4096, 4096 + actual_kv_len], dtype=torch.int32)
     state = fa3_module.Fa3DecodeAttState(
         backend=SimpleNamespace(
             model=model,
             page_size=page_size,
+            infer_page_size=page_size,
             uses_causal_attention=lambda: True,
             uses_dynamic_spec_verify_layout=lambda: False,
             get_page_table_view=lambda att_batch_size, max_kv_len, microbatch_index: torch.zeros(
                 att_batch_size, math.ceil(max_kv_len / page_size), dtype=torch.int32
             ),
         ),
-        infer_state=SimpleNamespace(
-            batch_size=2,
-            max_kv_seq_len=actual_kv_len,
-            microbatch_index=0,
-            b_req_idx=torch.tensor([0, 1], dtype=torch.int32),
-            b_seq_len=torch.tensor([4096, actual_kv_len], dtype=torch.int32),
-            b1_cu_q_seq_len=torch.tensor([0, 1, 2], dtype=torch.int32),
-            b1_cu_kv_seq_len=torch.tensor([0, 4096, 4096 + actual_kv_len], dtype=torch.int32),
-        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
     )
     copy_calls = []
     monkeypatch.setattr(fa3_module, "page_table_copy", lambda **kwargs: copy_calls.append(kwargs))

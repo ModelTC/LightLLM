@@ -3,63 +3,6 @@ from types import SimpleNamespace
 import torch
 import pytest
 
-from lightllm.server.router.model_infer.mode_backend.pd.cache_page_io import create_cache_page_io
-
-
-@pytest.mark.parametrize("dtype", [torch.uint8, torch.bfloat16])
-def test_nccl_page_prefix_preserves_byte_count_and_legacy_full_pages(dtype):
-    from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import _page_prefix
-
-    page = torch.arange(32).to(dtype).view(2, 16)
-    assert _page_prefix(page, page.nbytes) is page
-    prefix = _page_prefix(page, 8 * page.element_size())
-    assert prefix.nbytes == 8 * page.element_size()
-    torch.testing.assert_close(prefix, page.reshape(-1)[:8])
-    assert prefix.data_ptr() == page.data_ptr()
-
-
-def test_nixl_partial_transfer_keeps_the_allocation_page_stride():
-    from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
-
-    transporter = NixlKVTransporter.__new__(NixlKVTransporter)
-    transporter.page_len = 256
-    transporter.nixl_agent = SimpleNamespace(
-        get_xfer_descs=lambda pages, memory_type: pages,
-        prep_xfer_dlist=lambda agent, descs, memory_type: (agent, descs),
-    )
-    peer, descriptors = transporter._create_paged_xfer_handles([(4096, 512, 0, 0)], 2, 64, agent_name="peer")
-    assert peer == "peer"
-    assert descriptors == [(4096, 64, 0), (4352, 64, 0)]
-
-
-def test_existing_memory_manager_interface_needs_no_position_metadata():
-    calls = []
-
-    class LegacyMemoryManager:
-        kv_move_buffer = torch.empty((1, 2, 3), dtype=torch.bfloat16)
-
-        def write_mem_to_page_kv_move_buffer(self, indexes, page, dp, managers, world_size, *, page_kind, req_idx):
-            calls.append(("pack", indexes, page_kind, req_idx))
-
-        def read_page_kv_move_buffer_to_mem(self, indexes, page, dp, managers, world_size, *, page_kind, req_idx):
-            calls.append(("unpack", indexes, page_kind, req_idx))
-
-    memory = LegacyMemoryManager()
-    page_io = create_cache_page_io([memory], 0, 1)
-    # Existing models do not receive start_kv_index or request_kv_len.
-    task = SimpleNamespace(
-        mem_indexes=[3, 4],
-        src_page_index=0,
-        dst_page_index=0,
-        prefill_dp_index=0,
-        decode_dp_index=0,
-        page_kind="kv",
-        req_idx=7,
-    )
-    assert page_io.pack(task) == 12
-    page_io.unpack(task)
-    assert calls == [("pack", [3, 4], "kv", 7), ("unpack", [3, 4], "kv", 7)]
-
 
 @pytest.mark.parametrize("role", ["prefill", "decode"])
 def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatch, role):
@@ -106,19 +49,16 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
 
 @pytest.mark.parametrize("seq_len", [1, 2, 3, 129, 256, 257])
 def test_pd_request_state_rebuilds_engram_locally(monkeypatch, seq_len):
-    from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
-    from lightllm.models.deepseek_v4 import pd_cache
+    from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4AttStatePageHelper
     from lightllm.models.deepseek_v41.engram import EngramHasher
 
-    config = DeepseekV4CacheConfig((0,), sliding_window=4)
     slots = seq_len + 5
     source_ids = torch.arange(seq_len, dtype=torch.int32).flip(0)
     decode_ids = torch.arange(seq_len, dtype=torch.int32) + slots
 
     def manager():
         return SimpleNamespace(
-            cache_config=config,
-            swa_buffer=torch.zeros((1, 4, config.kv_bytes), dtype=torch.uint8),
+            req_to_swa=torch.zeros((1, 2, 4, 585), dtype=torch.uint8),
             req_to_c4_state=None,
             req_to_c4_indexer_state=None,
             req_to_c128_state=None,
@@ -126,14 +66,12 @@ def test_pd_request_state_rebuilds_engram_locally(monkeypatch, seq_len):
         )
 
     source, destination = manager(), manager()
-    source.swa_buffer.random_(256)
-    monkeypatch.setattr(pd_cache, "gather_swa_tokens", lambda mgr, req, pos, **_: mgr.swa_buffer)
-    monkeypatch.setattr(pd_cache, "scatter_swa_tokens", lambda mgr, req, pos, values: mgr.swa_buffer.copy_(values))
-    page = torch.empty(pd_cache.get_pd_page_nbytes(config, 256), dtype=torch.uint8)
-    written = pd_cache._copy_request_state(source, page, 0, seq_len, write=True)
-    read = pd_cache._copy_request_state(destination, page, 1, seq_len, write=False)
-    assert written == read == page.numel()
-    torch.testing.assert_close(destination.swa_buffer, source.swa_buffer, atol=0, rtol=0)
+    source.req_to_swa[:, 0].random_(256)
+    page = torch.empty(source.req_to_swa[:, 0].numel(), dtype=torch.uint8)
+    helper = DeepseekV4AttStatePageHelper(source)
+    helper._copy_req_state(page, source, 0, write=True)
+    helper._copy_req_state(page, destination, 1, write=False)
+    torch.testing.assert_close(destination.req_to_swa[:, 1], source.req_to_swa[:, 0], atol=0, rtol=0)
 
     hasher = EngramHasher.__new__(EngramHasher)
     hasher.has_vision = False

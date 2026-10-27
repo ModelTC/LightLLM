@@ -1,4 +1,4 @@
-"""Token addressing and packed I/O for request windows and prefill scratch."""
+"""SWA 物理索引、prefill 临时区，以及大小页 SWA 状态的保存和恢复。"""
 
 import torch
 import triton
@@ -6,225 +6,220 @@ import triton.language as tl
 
 
 @triton.jit
-def swa_token_index(
-    req,
+def get_swa_token_index(
+    req_idx,
     position,
-    ranges,
-    workspace_offsets,
-    CAPACITY: tl.constexpr,
-    WINDOW: tl.constexpr,
-    ALIGNMENT: tl.constexpr,
-    HOLD_REQ: tl.constexpr,
-    HOLD_SLOT: tl.constexpr,
-    PREFILL: tl.constexpr,
+    prefill_token_ranges,
+    swa_prefill_workspace_offsets,
+    SWA_CAPACITY_TOKENS: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    SWA_PAGE_TOKEN_NUM: tl.constexpr,
+    HOLD_REQUEST_ID: tl.constexpr,
+    HOLD_SWA_SLOT: tl.constexpr,
+    IS_PREFILL: tl.constexpr,
 ):
-    slot = req * CAPACITY + position % CAPACITY
-    if PREFILL:
-        ready = tl.load(ranges + req * 2)
-        end = tl.load(ranges + req * 2 + 1)
-        first = tl.maximum(0, ready - WINDOW + 1) // ALIGNMENT * ALIGNMENT
-        workspace = tl.load(workspace_offsets + req)
-        slot = tl.where((workspace >= 0) & (position >= first) & (position < end), workspace + position - first, slot)
-    return tl.where(req == HOLD_REQ, HOLD_SLOT + position % ALIGNMENT, slot)
+    slot = req_idx * SWA_CAPACITY_TOKENS + position % SWA_CAPACITY_TOKENS
+    if IS_PREFILL:
+        ready = tl.load(prefill_token_ranges + req_idx * 2)
+        first = tl.maximum(0, ready - SLIDING_WINDOW + 1) // SWA_PAGE_TOKEN_NUM * SWA_PAGE_TOKEN_NUM
+        workspace = tl.load(swa_prefill_workspace_offsets + req_idx)
+        slot = workspace + position - first
+    return tl.where(req_idx == HOLD_REQUEST_ID, HOLD_SWA_SLOT + position % SWA_PAGE_TOKEN_NUM, slot)
 
 
-def get_swa_token_indices(requests, req_idx, positions, *, prefill=True):
-    config = requests.cache_config
-    slots = req_idx * requests.swa_capacity_tokens + positions % requests.swa_capacity_tokens
-    if prefill:
-        ready, end = requests.prefill_token_ranges[req_idx].unbind(-1)
+def get_swa_token_indices(req_manager, req_idx, position_ids, *, prefill_state=None):
+    config = req_manager.cache_config
+    swa_token_indices = req_idx * req_manager.swa_capacity_tokens + position_ids % req_manager.swa_capacity_tokens
+    hold_slot = req_manager.HOLD_SWA_SLOT
+    if prefill_state is not None:
+        ready = prefill_state.prefill_token_ranges[req_idx, 0]
         first = (
-            (ready - config.sliding_window + 1).clamp_min(0) // config.swa_token_alignment * config.swa_token_alignment
+            (ready - config.sliding_window + 1).clamp_min(0) // config.swa_page_token_num * config.swa_page_token_num
         )
-        workspace = requests.prefill_workspace_offsets[req_idx]
-        slots = torch.where(
-            (workspace >= 0) & (positions >= first) & (positions < end), workspace + positions - first, slots
-        )
+        workspace = prefill_state.swa_prefill_workspace_offsets[req_idx]
+        swa_token_indices = workspace + position_ids - first
+        hold_slot = prefill_state.HOLD_SWA_SLOT
     return torch.where(
-        torch.as_tensor(req_idx, device=positions.device) == requests.HOLD_REQUEST_ID,
-        requests.HOLD_SWA_SLOT + positions % config.swa_token_alignment,
-        slots,
+        torch.as_tensor(req_idx, device=position_ids.device) == req_manager.HOLD_REQUEST_ID,
+        hold_slot + position_ids % config.swa_page_token_num,
+        swa_token_indices,
     )
 
 
 @triton.jit
-def _prepare_prefill(
-    ranges,
-    workspace_offsets,
-    checkpoint_offsets,
-    req_ids,
-    ready_lens,
-    seq_lens,
+def _prepare_swa_prefill_workspace_kernel(
+    prefill_token_ranges,
+    swa_prefill_workspace_offsets,
+    b_req_idx,
+    b_ready_cache_len,
+    b_seq_len,
     BATCH: tl.constexpr,
-    WINDOW: tl.constexpr,
-    CAPACITY: tl.constexpr,
-    ALIGNMENT: tl.constexpr,
-    CHECKPOINT_TOKENS: tl.constexpr,
-    HOLD_REQ: tl.constexpr,
-    WORKSPACE_BASE: tl.constexpr,
-    CHECKPOINT_BASE: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    SWA_PAGE_TOKEN_NUM: tl.constexpr,
+    HOLD_REQUEST_ID: tl.constexpr,
+    SWA_WORKSPACE_BASE: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     batch = tl.arange(0, BLOCK)
     valid = batch < BATCH
-    req = tl.load(req_ids + batch, valid, HOLD_REQ)
-    ready = tl.load(ready_lens + batch, valid, 0)
-    end = tl.load(seq_lens + batch, valid, 0)
-    first = tl.maximum(0, ready - WINDOW + 1) // ALIGNMENT * ALIGNMENT
-    length = tl.cdiv(end - first, ALIGNMENT) * ALIGNMENT
-    overflow = (length > CAPACITY) & (req != HOLD_REQ) & valid
-    tokens = tl.where(overflow, length, 0)
-    workspace = WORKSPACE_BASE + tl.cumsum(tokens) - tokens
-    checkpoint_count = tl.where(valid & (req != HOLD_REQ), end // CHECKPOINT_TOKENS - ready // CHECKPOINT_TOKENS, 0)
-    checkpoint = CHECKPOINT_BASE + tl.cumsum(checkpoint_count) - checkpoint_count - ready // CHECKPOINT_TOKENS - 1
-    tl.store(ranges + req * 2, ready, valid)
-    tl.store(ranges + req * 2 + 1, end, valid)
-    tl.store(workspace_offsets + req, tl.where(overflow, workspace, -1), valid)
-    tl.store(checkpoint_offsets + req, checkpoint, valid)
+    req_idx = tl.load(b_req_idx + batch, valid, HOLD_REQUEST_ID)
+    ready = tl.load(b_ready_cache_len + batch, valid, 0)
+    end = tl.load(b_seq_len + batch, valid, 0)
+    first = tl.maximum(0, ready - SLIDING_WINDOW + 1) // SWA_PAGE_TOKEN_NUM * SWA_PAGE_TOKEN_NUM
+    length = tl.cdiv(end - first, SWA_PAGE_TOKEN_NUM) * SWA_PAGE_TOKEN_NUM
+    tokens = tl.where((req_idx != HOLD_REQUEST_ID) & valid, length, 0)
+    workspace = SWA_WORKSPACE_BASE + tl.cumsum(tokens) - tokens
+    tl.store(prefill_token_ranges + req_idx * 2, ready, valid)
+    tl.store(prefill_token_ranges + req_idx * 2 + 1, end, valid)
+    tl.store(swa_prefill_workspace_offsets + req_idx, workspace, valid)
 
 
 @triton.jit
-def _copy_prefix(
-    storage,
-    ranges,
-    workspace_offsets,
-    req_ids,
-    ready_lens,
-    CAPACITY: tl.constexpr,
-    WINDOW: tl.constexpr,
-    ALIGNMENT: tl.constexpr,
-    HOLD_REQ: tl.constexpr,
-    LAYER_STRIDE: tl.constexpr,
+def _copy_swa_prefix_to_workspace_kernel(
+    req_to_swa,
+    swa_buffer,
+    swa_prefill_workspace_offsets,
+    b_req_idx,
+    b_ready_cache_len,
+    SWA_CAPACITY_TOKENS: tl.constexpr,
+    SLIDING_WINDOW: tl.constexpr,
+    SWA_PAGE_TOKEN_NUM: tl.constexpr,
+    HOLD_REQUEST_ID: tl.constexpr,
+    REQ_LAYER_STRIDE: tl.constexpr,
+    WORKSPACE_LAYER_STRIDE: tl.constexpr,
     PACKED_BYTES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    batch, block, layer = tl.program_id(0), tl.program_id(1), tl.program_id(2).to(tl.int64)
-    req = tl.load(req_ids + batch)
-    target_slot = tl.load(workspace_offsets + req)
-    if req == HOLD_REQ or target_slot < 0:
+    batch, block, layer = tl.program_id(0), tl.program_id(1), tl.program_id(2)
+    req_idx = tl.load(b_req_idx + batch)
+    target_slot = tl.load(swa_prefill_workspace_offsets + req_idx)
+    if req_idx == HOLD_REQUEST_ID:
         return
-    ready = tl.load(ready_lens + batch)
-    first = tl.maximum(0, ready - WINDOW + 1) // ALIGNMENT * ALIGNMENT
-    position = first + block * ALIGNMENT
+    ready = tl.load(b_ready_cache_len + batch)
+    first = tl.maximum(0, ready - SLIDING_WINDOW + 1) // SWA_PAGE_TOKEN_NUM * SWA_PAGE_TOKEN_NUM
+    position = first + block * SWA_PAGE_TOKEN_NUM
     if position >= ready:
         return
-    source_slot = req * CAPACITY + position % CAPACITY
-    source = storage + layer * LAYER_STRIDE + source_slot // ALIGNMENT * PACKED_BYTES
-    target = storage + layer * LAYER_STRIDE + (target_slot // ALIGNMENT + block) * PACKED_BYTES
+    source_slot = req_idx * SWA_CAPACITY_TOKENS + position % SWA_CAPACITY_TOKENS
+    source = req_to_swa + layer * REQ_LAYER_STRIDE + source_slot // SWA_PAGE_TOKEN_NUM * PACKED_BYTES
+    target = swa_buffer + layer * WORKSPACE_LAYER_STRIDE + (target_slot // SWA_PAGE_TOKEN_NUM + block) * PACKED_BYTES
     lanes = tl.arange(0, BLOCK)
     for chunk in range(0, PACKED_BYTES, BLOCK):
         offset = chunk + lanes
         tl.store(target + offset, tl.load(source + offset, offset < PACKED_BYTES, 0), offset < PACKED_BYTES)
 
 
-def prepare_prefill_workspace(requests, req_ids, ready_lens, seq_lens, microbatch_index):
-    if not req_ids.numel():
+def prepare_swa_prefill_workspace(req_manager, prefill_state, b_req_idx, b_ready_cache_len, b_seq_len, workspace_base):
+    if not b_req_idx.numel():
         return
-    config = requests.cache_config
-    _prepare_prefill[(1,)](
-        requests.prefill_token_ranges,
-        requests.prefill_workspace_offsets,
-        requests.prefill_checkpoint_offsets,
-        req_ids,
-        ready_lens,
-        seq_lens,
-        BATCH=req_ids.numel(),
-        WINDOW=config.sliding_window,
-        CAPACITY=requests.swa_capacity_tokens,
-        ALIGNMENT=config.swa_token_alignment,
-        CHECKPOINT_TOKENS=config.history_token_alignment,
-        HOLD_REQ=requests.HOLD_REQUEST_ID,
-        WORKSPACE_BASE=requests.swa_runtime_tokens + microbatch_index * requests.prefill_capacity_tokens,
-        CHECKPOINT_BASE=microbatch_index * requests.prefill_checkpoint_capacity,
-        BLOCK=triton.next_power_of_2(req_ids.numel()),
+    config = req_manager.cache_config
+    _prepare_swa_prefill_workspace_kernel[(1,)](
+        prefill_state.prefill_token_ranges,
+        prefill_state.swa_prefill_workspace_offsets,
+        b_req_idx,
+        b_ready_cache_len,
+        b_seq_len,
+        BATCH=b_req_idx.numel(),
+        SLIDING_WINDOW=config.sliding_window,
+        SWA_PAGE_TOKEN_NUM=config.swa_page_token_num,
+        HOLD_REQUEST_ID=req_manager.HOLD_REQUEST_ID,
+        SWA_WORKSPACE_BASE=workspace_base,
+        BLOCK=triton.next_power_of_2(b_req_idx.numel()),
         num_warps=4,
     )
-    storage = requests.swa_buffer
-    _copy_prefix[
-        (req_ids.numel(), triton.cdiv(config.sliding_window - 1, config.swa_token_alignment) + 1, storage.shape[0])
+    swa_buffer = prefill_state.swa_buffer
+    _copy_swa_prefix_to_workspace_kernel[
+        (
+            b_req_idx.numel(),
+            triton.cdiv(config.sliding_window - 1, config.swa_page_token_num) + 1,
+            swa_buffer.shape[0],
+        )
     ](
-        storage,
-        requests.prefill_token_ranges,
-        requests.prefill_workspace_offsets,
-        req_ids,
-        ready_lens,
-        CAPACITY=requests.swa_capacity_tokens,
-        WINDOW=config.sliding_window,
-        ALIGNMENT=config.swa_token_alignment,
-        HOLD_REQ=requests.HOLD_REQUEST_ID,
-        LAYER_STRIDE=storage.stride(0),
-        PACKED_BYTES=config.packed_kv_bytes(config.swa_token_alignment),
+        req_manager.req_to_swa,
+        swa_buffer,
+        prefill_state.swa_prefill_workspace_offsets,
+        b_req_idx,
+        b_ready_cache_len,
+        SWA_CAPACITY_TOKENS=req_manager.swa_capacity_tokens,
+        SLIDING_WINDOW=config.sliding_window,
+        SWA_PAGE_TOKEN_NUM=config.swa_page_token_num,
+        HOLD_REQUEST_ID=req_manager.HOLD_REQUEST_ID,
+        REQ_LAYER_STRIDE=req_manager.req_to_swa.stride(0),
+        WORKSPACE_LAYER_STRIDE=swa_buffer.stride(0),
+        PACKED_BYTES=config.get_packed_kv_bytes(config.swa_page_token_num),
         BLOCK=4096,
         num_warps=4,
     )
 
 
 @triton.jit
-def _copy_swa_tokens(
-    storage,
-    canonical,
-    slots,
-    positions,
+def _copy_swa_state_kernel(
+    swa_buffer,
+    swa_state,
+    swa_token_indices,
+    position_ids,
     TOKEN_COUNT: tl.constexpr,
-    STORAGE_STRIDE: tl.constexpr,
-    TOKEN_BYTES: tl.constexpr,
-    PACK_TOKENS: tl.constexpr,
-    PACK_BYTES: tl.constexpr,
-    DATA_BYTES: tl.constexpr,
+    SWA_LAYER_STRIDE: tl.constexpr,
+    KV_BYTES: tl.constexpr,
+    SWA_PAGE_TOKEN_NUM: tl.constexpr,
+    SWA_PAGE_BYTES: tl.constexpr,
+    KV_DATA_BYTES: tl.constexpr,
     GATHER: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    token, layer = tl.program_id(0), tl.program_id(1).to(tl.int64)
-    slot = tl.load(slots + token).to(tl.int64)
-    position = tl.load(positions + token)
+    token, layer = tl.program_id(0), tl.program_id(1)
+    slot = tl.load(swa_token_indices + token).to(tl.int64)
+    position = tl.load(position_ids + token)
     byte = tl.arange(0, BLOCK)
-    offset = slot // PACK_TOKENS * PACK_BYTES
+    offset = slot // SWA_PAGE_TOKEN_NUM * SWA_PAGE_BYTES
     packed_offset = tl.where(
-        byte < DATA_BYTES,
-        slot % PACK_TOKENS * DATA_BYTES + byte,
-        PACK_TOKENS * DATA_BYTES + slot % PACK_TOKENS * (TOKEN_BYTES - DATA_BYTES) + byte - DATA_BYTES,
+        byte < KV_DATA_BYTES,
+        slot % SWA_PAGE_TOKEN_NUM * KV_DATA_BYTES + byte,
+        SWA_PAGE_TOKEN_NUM * KV_DATA_BYTES
+        + slot % SWA_PAGE_TOKEN_NUM * (KV_BYTES - KV_DATA_BYTES)
+        + byte
+        - KV_DATA_BYTES,
     )
-    packed = storage + layer * STORAGE_STRIDE + offset + packed_offset
-    dense = canonical + (layer * TOKEN_COUNT + token) * TOKEN_BYTES + byte
-    valid = (byte < TOKEN_BYTES) & (position >= 0)
+    packed = swa_buffer + layer * SWA_LAYER_STRIDE + offset + packed_offset
+    dense = swa_state + (layer * TOKEN_COUNT + token) * KV_BYTES + byte
+    valid = (byte < KV_BYTES) & (position >= 0)
     if GATHER:
-        tl.store(dense, tl.load(packed, valid, 0), byte < TOKEN_BYTES)
+        tl.store(dense, tl.load(packed, valid, 0), byte < KV_BYTES)
     else:
         tl.store(packed, tl.load(dense, valid, 0), valid)
 
 
-def _copy_window(requests, req_idx, positions, canonical, *, gather, prefill):
-    config = requests.cache_config
-    # Triton launches on the current device. PD may call from another GPU;
-    # address generation and packed I/O must share the owner's CUDA stream.
-    with torch.cuda.device(requests.swa_buffer.device):
-        slots = get_swa_token_indices(requests, req_idx, positions, prefill=prefill)
-        _copy_swa_tokens[(positions.numel(), config.layer_num)](
-            requests.swa_buffer,
-            canonical,
-            slots,
-            positions,
-            TOKEN_COUNT=positions.numel(),
-            STORAGE_STRIDE=requests.swa_buffer.stride(0),
-            TOKEN_BYTES=config.kv_bytes,
-            PACK_TOKENS=config.swa_token_alignment,
-            PACK_BYTES=config.packed_kv_bytes(config.swa_token_alignment),
-            DATA_BYTES=config.kv_data_bytes,
+def _copy_swa_state(req_manager, req_idx, position_ids, swa_state, *, gather):
+    config = req_manager.cache_config
+    with torch.cuda.device(req_manager.req_to_swa.device):
+        swa_token_indices = get_swa_token_indices(req_manager, req_idx, position_ids)
+        _copy_swa_state_kernel[(position_ids.numel(), config.layer_num)](
+            req_manager.req_to_swa,
+            swa_state,
+            swa_token_indices,
+            position_ids,
+            TOKEN_COUNT=position_ids.numel(),
+            SWA_LAYER_STRIDE=req_manager.req_to_swa.stride(0),
+            KV_BYTES=config.kv_bytes,
+            SWA_PAGE_TOKEN_NUM=config.swa_page_token_num,
+            SWA_PAGE_BYTES=config.get_packed_kv_bytes(config.swa_page_token_num),
+            KV_DATA_BYTES=config.kv_data_bytes,
             GATHER=gather,
             BLOCK=triton.next_power_of_2(config.kv_bytes),
             num_warps=4,
         )
 
 
-def gather_swa_tokens(requests, req_idx, positions, *, prefill=True):
-    canonical = torch.empty(
-        (requests.cache_config.layer_num, positions.numel(), requests.cache_config.kv_bytes),
+def gather_swa_state(req_manager, req_idx, position_ids):
+    """将 SWA packed 存储中的窗口读为 [层, token, kv_bytes]，供大小页保存。"""
+    swa_state = torch.empty(
+        (req_manager.cache_config.layer_num, position_ids.numel(), req_manager.cache_config.kv_bytes),
         dtype=torch.uint8,
-        device=requests.swa_buffer.device,
+        device=req_manager.req_to_swa.device,
     )
-    _copy_window(requests, req_idx, positions, canonical, gather=True, prefill=prefill)
-    return canonical
+    _copy_swa_state(req_manager, req_idx, position_ids, swa_state, gather=True)
+    return swa_state
 
 
-def scatter_swa_tokens(requests, req_idx, positions, canonical):
-    _copy_window(requests, req_idx, positions, canonical, gather=False, prefill=False)
+def scatter_swa_state(req_manager, req_idx, position_ids, swa_state):
+    _copy_swa_state(req_manager, req_idx, position_ids, swa_state, gather=False)

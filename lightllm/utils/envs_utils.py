@@ -55,11 +55,6 @@ def get_model_infer_recursion_limit() -> int:
 
 
 @lru_cache(maxsize=None)
-def get_pd_master_recursion_limit() -> int:
-    return int(os.getenv("LIGHTLLM_PD_MASTER_RECURSION_LIMIT", "4000"))
-
-
-@lru_cache(maxsize=None)
 def get_llm_data_type() -> torch.dtype:
     data_type: str = get_env_start_args().data_type
     if data_type in ["fp16", "float16"]:
@@ -360,8 +355,8 @@ def get_pd_node_continuation_resource_wait_timeout_seconds() -> int:
 
 @lru_cache(maxsize=None)
 def get_pd_node_busy_retry_timeout_seconds() -> int:
-    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒。"""
-    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 120)))
+    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒；0 表示不重试。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 0)))
 
 
 @lru_cache(maxsize=None)

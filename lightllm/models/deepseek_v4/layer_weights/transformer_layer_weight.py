@@ -12,7 +12,7 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     FusedMoeWeight,
 )
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import BMMWeightTpl
-from ..triton_kernel.quant_convert import prepare_fp8_weights
+from .quant_utils import prepare_fp8_weights
 
 
 class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
@@ -93,18 +93,16 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         # grouped low-rank output projection (wo_a per-group [in, o_lora], wo_b row-parallel
         # [groups*o_lora -> hidden]).
         per_group_in = self.n_heads * self.head_dim // self.o_groups
-        # When o_groups == tp_world_size (e.g. tp8) each rank owns exactly one group, so the
-        # grouped O-proj can collapse to a single FP8 GEMM on Blackwell.
-        # Otherwise use BF16 grouped bmm.
-        major, _ = torch.cuda.get_device_capability()
-        self.o_proj_fp8 = (self.o_groups // self.tp_world_size_) == 1 and major >= 10
-        if self.o_proj_fp8:
+        # Match the official BF16 wo_a computation; FP8 checkpoint weights are dequantized on load.
+        # A single local group uses GEMM; multiple groups use batched GEMM.
+        self.o_proj_use_mm = (self.o_groups // self.tp_world_size_) == 1
+        if self.o_proj_use_mm:
             self.wo_a_ = ROWMMWeight(
                 in_dim=per_group_in,
                 out_dims=[self.o_groups * self.o_lora_rank],
                 weight_names=f"{p}.wo_a.weight",
                 data_type=self.data_type_,
-                quant_method=self.get_quant_method("wo_a"),
+                quant_method=None,
             )
         else:
             self.wo_a_ = ROWBMMWeight(
@@ -312,10 +310,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
                     runtime_scale_name = scale_name.removesuffix("scale") + expert_scale_suffix
                     weights[runtime_scale_name] = weights[scale_name].to(torch.float32)
                     del weights[scale_name]
-        # grouped-O (bf16 path only): reshape [groups*o_lora, in] -> [groups, in, o_lora] for the
-        # batched matmul. The fp8 path keeps wo_a as a plain [groups*o_lora, in] fp8 GEMM weight
-        # (its `.scale` is renamed to `.weight_scale_inv` by the loop above, not dequantized).
-        if not self.o_proj_fp8:
+        # Batched GEMM loads [groups, in, o_lora]; single-group GEMM keeps [groups*o_lora, in].
+        if not self.o_proj_use_mm:
             woa = f"{self.prefix}.attn.wo_a.weight"
             if woa in weights and weights[woa].dim() == 2:
                 w = weights[woa]

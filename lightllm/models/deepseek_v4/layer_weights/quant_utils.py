@@ -1,7 +1,9 @@
+"""Checkpoint FP8 format conversion owned by the weight loaders."""
+
 import torch
 
 
-def dequant_fp8_block_to_bf16(weight_e4m3: torch.Tensor, scale_e8m0: torch.Tensor, block_size: int = 128):
+def _dequant_fp8_block_to_bf16(weight_e4m3: torch.Tensor, scale_e8m0: torch.Tensor, block_size: int = 128):
     """De-quantize an FP8 e4m3 weight [out, in] with block-[bs,bs] ue8m0 scale to bf16."""
     from lightllm.models.deepseek2.triton_kernel.weight_dequant import weight_dequant
 
@@ -26,7 +28,7 @@ def prepare_fp8_weights(weights: dict, matrix_weights, data_type: torch.dtype, b
                 continue
             scale = weights[checkpoint_scale_name]
             if scale_name is None:
-                weights[weight_name] = dequant_fp8_block_to_bf16(weights[weight_name], scale, block_size).to(data_type)
+                weights[weight_name] = _dequant_fp8_block_to_bf16(weights[weight_name], scale, block_size).to(data_type)
             else:
                 # Quantized paths can load scales before the weight's shard arrives.
                 weights[scale_name] = scale.to(torch.float32)

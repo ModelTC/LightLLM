@@ -255,7 +255,7 @@ class MemoryManager:
             shm_name = f"mem_manager_{get_current_rank_in_node()}"
             obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
             # Each consumer needs its own IPC ref-counter; its pickle size can vary.
-            obj_size = max(map(len, obj_bytes_array))
+            obj_size = max(len(obj_bytes) for obj_bytes in obj_bytes_array)
             shm = create_or_link_shm(
                 name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"
             )

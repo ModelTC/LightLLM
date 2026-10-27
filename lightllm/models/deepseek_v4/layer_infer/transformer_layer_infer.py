@@ -11,7 +11,7 @@ from lightllm.utils.dist_utils import get_global_world_size
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from .compressor import CompressorInfer
 from .indexer import DeepseekV4IndexInfer
-from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
+from ..triton_kernel.rotary_emb import inverse_rotary_emb
 from ..infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_softplus_sqrt
 
@@ -334,6 +334,27 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             return infer_state.position_cos_compress, infer_state.position_sin_compress
         return infer_state.position_cos_sliding, infer_state.position_sin_sliding
 
+    def _norm_rope_and_cache_kv(self, kv, infer_state, layer_weight):
+        from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
+
+        req_manager = infer_state.req_manager
+        att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
+        swa, _ = att_state.backend.get_att_input_params(infer_state, self.layer_num_)
+        # 一次完成 RMSNorm、RoPE、FP8 打包和 SWA 写入。
+        fused_kv_norm_rope_to_swa(
+            kv=kv,
+            kv_norm_weight=layer_weight.kv_norm_.weight,
+            eps=self.eps_,
+            freqs_cis=self.freqs_cis,
+            position_ids=infer_state.position_ids,
+            swa_write_slots=infer_state.dsv4_swa_write_slots,
+            swa_runtime_write_slots=infer_state.dsv4_swa_runtime_write_slots,
+            swa_kv_buffer=swa,
+            swa_page_token_num=req_manager.cache_config.swa_page_token_num,
+            req_to_swa=req_manager.req_to_swa[self.layer_num_],
+            bf16_rounding=self.kv_bf16_rounding,
+        )
+
     def _get_qkv(
         self,
         input: torch.Tensor,
@@ -362,32 +383,16 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             infer_state.position_ids,
             apply_norm=self.q_head_norm,
         )
-        # kv: RMSNorm + RoPE + FP8 pack + scatter into SWA in one Triton kernel.
-        infer_state.req_manager.pack_mla_kv_to_cache_fused_norm_rope(
-            layer_index=self.layer_num_,
-            swa_slots=infer_state.dsv4_swa_write_slots,
-            runtime_slots=infer_state.dsv4_swa_runtime_write_slots,
-            kv=qkv[:, -self.head_dim_ :],
-            kv_weight=layer_weight.kv_norm_.weight,
-            eps=self.eps_,
-            freqs_cis=self.freqs_cis,
-            positions=infer_state.position_ids,
-            bf16_rounding=self.kv_bf16_rounding,
-        )
+        self._norm_rope_and_cache_kv(qkv[:, -self.head_dim_ :], infer_state, layer_weight)
         return q, qa, input
 
     def _get_o(self, o, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         # o: [T, tp_q_head_num_, head_dim_] after inverse rope -> grouped low-rank O -> [T, embed_dim_]
         position_cos, position_sin = self._select_rope(infer_state)
-        rotary_emb_fwd(o[..., -self.qk_rope_head_dim :], None, position_cos, position_sin, inverse=True)
-        return self._project_o(o, infer_state, layer_weight)
-
-    def _project_o(self, o, infer_state, layer_weight):
+        inverse_rotary_emb(o[..., -self.qk_rope_head_dim :], position_cos, position_sin)
         T = o.shape[0]
-        if layer_weight.o_proj_fp8:
-            # one group per rank -> a single fp8 GEMM (deepgemm .mm quantizes o to fp8 internally)
-            # FP8 activation quantization requires contiguous rows.
-            o = layer_weight.wo_a_.mm(o.reshape(T, -1).contiguous())  # [T, o_lora]
+        if layer_weight.o_proj_use_mm:
+            o = layer_weight.wo_a_.mm(o.reshape(T, -1))  # [T, o_lora]
         else:
             o = o.reshape(T, self.tp_groups, -1).transpose(0, 1)  # [groups, T, per_group_in]
             o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
@@ -496,19 +501,14 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 **meta,
             },
         )
-        attn_out = infer_state.prefill_att_state.prefill_att(
+        return infer_state.prefill_att_state.prefill_att(
             q=q,
-            k=infer_state.req_manager.get_att_input_params(layer_index=self.layer_num_),
+            k=infer_state.prefill_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
             v=None,
             att_control=att_control,
             alloc_func=self.alloc_tensor,
             out=out,
         )
-        pad_q_len = infer_state._dsv4_prefill_pad_q_len
-        if pad_q_len:
-            # pad 行读 HOLD 槽位(参见 infer_struct._dsv4_prefill_pad_q_len),清零以保持确定性
-            attn_out[-pad_q_len:] = 0
-        return attn_out
 
     # ------------------------------------------------------------------ attention (decode)
     def token_attention_forward(
@@ -534,7 +534,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
         return infer_state.decode_att_state.decode_att(
             q=q,
-            k=infer_state.req_manager.get_att_input_params(layer_index=self.layer_num_),
+            k=infer_state.decode_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
             v=None,
             att_control=att_control,
         )
@@ -551,21 +551,15 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
-        input = None
-        gate_up = None
-        out = layer_weight.down_proj.mm(shared)
-        shared = None
-        return out
+        del gate_up
+        return layer_weight.down_proj.mm(shared)
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)
         x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
         topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
-        # shared expert 必须先于 routed 计算: fp8 路径 (FuseMoeTriton) 的 fused_experts
-        # 是 inplace 的，routed 计算结束后 x 已被覆盖为输出。
-        # DS4 shared experts also use the config swiglu_limit clamp, matching SGLang's
-        # DeepseekV2MLP(..., swiglu_limit=config.swiglu_limit) path.
+        # Routed experts can overwrite x in place, so compute the shared expert first.
         shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = layer_weight.experts.experts_with_topk(
             input_tensor=x,

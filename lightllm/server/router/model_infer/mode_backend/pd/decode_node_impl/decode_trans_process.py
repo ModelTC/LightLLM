@@ -19,7 +19,6 @@ from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
-from ..cache_page_io import create_cache_page_io
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
@@ -132,7 +131,6 @@ class _DecodeTransModule:
         kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
             page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
         )
-        self.page_io = create_cache_page_io(mem_managers, device_id, self.dp_world_size)
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -168,10 +166,17 @@ class _DecodeTransModule:
         return
 
     def _warmup(self):
-        with torch.cuda.stream(self.copy_cuda_stream):
-            self.mem_managers[self.device_id].kv_move_buffer[0].zero_()
-            self.page_io.warmup(write=False)
-            torch.cuda.current_stream().synchronize()
+        for dp_index in range(self.args.dp // self.args.nnodes):
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.read_page_kv_move_buffer_to_mem(
+                    mem_indexes=[0],
+                    page_index=0,
+                    dp_index=dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                )
+                torch.cuda.current_stream().synchronize()
         return
 
     @log_exception
@@ -205,7 +210,9 @@ class _DecodeTransModule:
             trans_task_group: PDChunckedTransTaskGroup = self.recv_task_group_queue.get()
 
             with self.waiting_dict_lock:
+                shared_time_out_mark = _SharedTimeOutMark()
                 for task in trans_task_group.task_list:
+                    task.shared_time_out_mark = shared_time_out_mark
                     if task.need_transfer_page():
                         self.waiting_dict[task.get_key()] = task
                     else:
@@ -285,13 +292,14 @@ class _DecodeTransModule:
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
+                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
-                                local_trans_task.transfer_nbytes = remote_trans_task.transfer_nbytes
                                 self.request_page_task_queue.put(local_trans_task)
-                                logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
+                                if self.args.pd_detail_log:
+                                    logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # This does not necessarily mean the WRITE protocol state is corrupted.
                                 # A common benign case is: decode has already received an abort for this
@@ -315,10 +323,12 @@ class _DecodeTransModule:
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
+                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
-                                logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
+                                if self.args.pd_detail_log:
+                                    logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -342,7 +352,7 @@ class _DecodeTransModule:
         with self.waiting_dict_lock:
             timeout_tasks = []
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.time_out():
+                if trans_task.shared_time_out_mark.time_out(trans_task):
                     timeout_tasks.append(self.waiting_dict.pop(key))
 
         for trans_task in timeout_tasks:
@@ -384,7 +394,16 @@ class _DecodeTransModule:
             copy_end_event = torch.cuda.Event(enable_timing=True)
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 copy_start_event.record(self.copy_cuda_stream)
-                self.page_io.unpack(trans_task)
+                cur_mem = self.mem_managers[self.device_id]
+                cur_mem.read_page_kv_move_buffer_to_mem(
+                    trans_task.mem_indexes,
+                    page_index=trans_task.dst_page_index,
+                    dp_index=trans_task.decode_dp_index,
+                    mem_managers=self.mem_managers,
+                    dp_world_size=self.dp_world_size,
+                    page_kind=trans_task.page_kind,
+                    req_idx=trans_task.req_idx,
+                )
                 copy_end_event.record(self.copy_cuda_stream)
             self.success_queue.put((copy_end_event, copy_start_event, trans_task))
 
@@ -410,13 +429,14 @@ class _DecodeTransModule:
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
 
-            if trans_task.start_trans_time is not None:
-                logger.debug(
-                    f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
-                    f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
-                )
-            else:
-                logger.debug(f"trans task ret success:{ret}")
+            if self.args.pd_detail_log:
+                if trans_task.start_trans_time is not None:
+                    logger.debug(
+                        f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
+                        f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
+                    )
+                else:
+                    logger.debug(f"trans task ret success:{ret}")
 
     @log_exception
     def fail_loop(self):
@@ -433,7 +453,7 @@ class _DecodeTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.info(f"trans task ret fail:{ret}")
+            logger.warning(f"trans task ret fail:{ret}")
 
             if trans_task.error_info is not None:
                 # 提前终结所有有问题的属于同一个请求的任务。
@@ -442,3 +462,18 @@ class _DecodeTransModule:
                     error_info=trans_task.error_info,
                 )
                 self.transporter.send_error_info_to_prefill_node(trans_task=trans_task)
+
+
+class _SharedTimeOutMark:
+    """Pending pages share request progress; active pages keep their own deadline."""
+
+    def __init__(self):
+        self.update()
+
+    def update(self):
+        self.time_mark = time.time()
+
+    def time_out(self, task: PDChunckedTransTask) -> bool:
+        if task.start_trans_time is not None:
+            return task.time_out()
+        return time.time() - self.time_mark > task.time_out_secs

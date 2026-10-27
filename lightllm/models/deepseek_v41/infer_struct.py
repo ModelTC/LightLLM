@@ -10,7 +10,6 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         super().init_some_extra_state(model)
         self.v41_sparse_selection = None
         self.candidate_block_mask = None
-        self.v41_index_capacity = self._dsv4_index_max_kv_seq_len(model)
         self.engram_hashes = model.engram_hasher(self) if model.engram_hasher is not None else None
         self.decoder_state = None
         self.decoder_token_indices = None
@@ -27,8 +26,9 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         batch = self._dsv4_token_to_batch_idx.long()
         rows = (self.position_ids >= ready[batch]).nonzero(as_tuple=True)[0]
         state = copy(self)
-        # FlashMLA schedulers cache the query row count; the replay has its own layout.
-        state.prefill_att_state = self.prefill_att_state.backend.create_att_prefill_state(state)
+        # CED changes query rows while retaining this forward's SWA workspace.
+        # FlashMLA schedulers cache the query row count and must be rebuilt.
+        state.prefill_att_state = copy(self.prefill_att_state)
         state.prefill_att_state.init_state()
         state.indexer_metadata = None
         for name in (
@@ -59,7 +59,6 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         state.candidate_block_mask = self.candidate_block_mask[rows]
         if self.engram_hashes is not None:
             state.engram_hashes = self.engram_hashes[rows]
-        state._dsv4_prefill_pad_q_len = min(self._dsv4_prefill_pad_q_len, window)
         self.decoder_state = state
         self.decoder_token_indices = rows
         return rows

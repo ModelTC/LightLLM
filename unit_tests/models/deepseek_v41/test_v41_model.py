@@ -10,7 +10,7 @@ from lightllm.models.deepseek_v41.triton_kernel.attention import (
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_indexer_rope_quant
 from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer
-from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k_dsv4 import destindex_copy_indexer_k_dsv4
+from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k import destindex_copy_indexer_k
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -87,13 +87,12 @@ def test_fp8_history_capacity_counts_shared_sources_and_indexer_scales():
             sliding_window=128,
             qk_rope_head_dim=64,
         ),
-        40,
-        2048,
+        SimpleNamespace(mtp_mode=None),
     )
     assert config.indexer_bytes == 132
-    assert config.history_widths == (360, 360, 360, 720)
-    assert sum(config.history_widths) == 1800
-    assert config.layer_to_history_idx[38] == config.layer_to_history_idx[20]
+    assert config.compressed_kv_slot_bytes == (360, 360, 360, 720)
+    assert sum(config.compressed_kv_slot_bytes) == 1800
+    assert config.layer_to_compressed_kv_idx[38] == config.layer_to_compressed_kv_idx[20]
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
@@ -169,7 +168,6 @@ def test_indexer_fp8_rope_matches_reference(tokens, heads, position_dtype):
 def test_swa_fused_norm_rope_fp8_scatter_matches_reference(tokens, position_dtype, runtime_tail, eps):
     from lightllm.common.req_manager.deepseek4 import DeepseekV4ReqManager
     from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
-    from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import view_swa_kv
 
     raw = torch.randn(tokens, 640, device="cuda", dtype=torch.bfloat16)
@@ -179,7 +177,7 @@ def test_swa_fused_norm_rope_fp8_scatter_matches_reference(tokens, position_dtyp
     angles = torch.randn(1024, 32, device="cuda")
     freqs = torch.polar(torch.ones_like(angles), angles)
     positions = torch.randint(0, 1024, (tokens,), device="cuda", dtype=position_dtype)
-    config = DeepseekV4CacheConfig((0,))
+    config = DeepseekV4CacheConfig((0,), head_dim=512, rope_head_dim=64, indexer_head_dim=128, sliding_window=128)
     pages = (tokens + 127) // 128
     slots = torch.randperm(pages * 128, device="cuda")[:tokens].int()
     runtime = None
@@ -188,17 +186,16 @@ def test_swa_fused_norm_rope_fp8_scatter_matches_reference(tokens, position_dtyp
         runtime[::3] = -1
     requests = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
     requests.cache_config = config
-    requests.swa_buffer = torch.full(
-        (1, pages * (2 if runtime_tail else 1) * 128, config.swa_storage_width),
+    requests.req_to_swa = torch.full(
+        (1, pages * (2 if runtime_tail else 1) * 128, config.swa_slot_bytes),
         165,
         dtype=torch.uint8,
         device="cuda",
     )
-    expected = torch.full_like(view_swa_kv(requests.swa_buffer[0], config), 165)
+    expected = torch.full_like(view_swa_kv(requests.req_to_swa[0], config), 165)
     # Reference the former separate RMSNorm/RoPE path and independently build its packed bytes.
     normalized = rmsnorm_forward(kv, weight, eps)
-    cos, sin = freqs.real[positions.long()].contiguous(), freqs.imag[positions.long()].contiguous()
-    rotary_emb_fwd(normalized[:, None, -64:], None, cos, sin)
+    normalized = _rope_reference(normalized, freqs, positions)
     groups = normalized[:, :448].float().reshape(tokens, 7, 64)
     raw_scale = groups.abs().amax(-1).clamp_min(1e-4) / 448
     bits = raw_scale.contiguous().view(torch.int32)
@@ -213,18 +210,22 @@ def test_swa_fused_norm_rope_fp8_scatter_matches_reference(tokens, position_dtyp
         expected[page[:, None], 128 * 576 + offset[:, None] * 8 + torch.arange(7, device="cuda")] = exponent[
             valid
         ].byte()
-    requests.pack_mla_kv_to_cache_fused_norm_rope(
-        0,
-        slots,
+    from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
+
+    fused_kv_norm_rope_to_swa(
         kv,
         weight,
         eps,
         freqs,
         positions,
-        runtime,
+        slots,
+        view_swa_kv(requests.req_to_swa[0], config),
+        128,
+        swa_runtime_write_slots=runtime,
+        req_to_swa=requests.req_to_swa[0],
         bf16_rounding=True,
     )
-    torch.testing.assert_close(view_swa_kv(requests.swa_buffer[0], config), expected, atol=0, rtol=0)
+    torch.testing.assert_close(view_swa_kv(requests.req_to_swa[0], config), expected, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("tokens", [1, 17, 513])
@@ -232,19 +233,12 @@ def test_swa_fused_norm_rope_fp8_scatter_matches_reference(tokens, position_dtyp
 @pytest.mark.parametrize("position_dtype", [torch.int32, torch.int64])
 def test_q_rope_writes_padded_buffer_without_per_head_norm(tokens, heads, position_dtype):
     from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_norm_rope
-    from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 
     q = (torch.randn(tokens, heads + 2, 512, device="cuda", dtype=torch.bfloat16) * 3)[:, :heads]
     angles = torch.randn(1024, 32, device="cuda")
     freqs = torch.polar(torch.ones_like(angles), angles)
     positions = torch.randint(0, 1024, (tokens,), device="cuda", dtype=position_dtype)
-    reference = q.clone()
-    rotary_emb_fwd(
-        reference[..., -64:],
-        None,
-        freqs.real[positions.long()].contiguous(),
-        freqs.imag[positions.long()].contiguous(),
-    )
+    reference = _rope_reference(q, freqs, positions)
     padded = torch.full((tokens, 64, 512), 42, device="cuda", dtype=torch.bfloat16)
     expected = padded.clone()
     expected[:, :heads] = reference
@@ -280,7 +274,7 @@ def test_pure_swa_uses_base_rope_while_compressed_attention_keeps_yarn():
     )
     torch.testing.assert_close(actual._freqs_cis_sliding, torch.complex(angles.cos(), angles.sin()))
     torch.testing.assert_close(actual._freqs_cis_compress, base._freqs_cis_compress)
-    assert (actual._freqs_cis_sliding - base._freqs_cis_sliding).abs().max() > 1e-4
+    torch.testing.assert_close(actual._freqs_cis_sliding, base._freqs_cis_sliding)
     assert actual.layers_infer[0].freqs_cis is actual._freqs_cis_sliding
 
 
@@ -353,9 +347,18 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
 
     keys, heads, capacity = 1031, 32, 262149
-    config = DeepseekV4CacheConfig((ratio,), short_compress_ratio=2, long_compress_ratio=1, indexer_layer_ids=(0,))
+    config = DeepseekV4CacheConfig(
+        (ratio,),
+        head_dim=512,
+        rope_head_dim=64,
+        indexer_head_dim=128,
+        sliding_window=128,
+        short_compress_ratio=2,
+        long_compress_ratio=1,
+        indexer_layer_ids=(0,),
+    )
     pages = (keys * ratio + 255) // 256
-    storage = torch.full((pages * 256, 1, config.history_widths[0]), 165, dtype=torch.uint8, device="cuda")
+    storage = torch.full((pages * 256, 1, config.compressed_kv_slot_bytes[0]), 165, dtype=torch.uint8, device="cuda")
     manager = SimpleNamespace(cache_config=config, get_att_input_params=lambda layer: storage)
     cache = get_indexer_k_buffer(manager, 0)
     physical = torch.randperm(pages, device="cuda").repeat_interleave(256) * 256
@@ -365,11 +368,11 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
     angles = torch.randn(keys * ratio + 8, 32, device="cuda")
     freqs = torch.polar(torch.ones_like(angles), angles)
     raw = torch.randn(keys * ratio, 128, device="cuda", dtype=torch.bfloat16)
-    destindex_copy_indexer_k_dsv4(raw, slots, positions, cache, 256 // ratio, ratio, freqs_cis=freqs)
+    destindex_copy_indexer_k(raw, slots, positions, cache, 256 // ratio, ratio, freqs_cis=freqs)
     closed = torch.arange(ratio - 1, keys * ratio, ratio, device="cuda")
     k = _indexer_fp8_reference(_rope_reference(raw[closed], freqs, positions[closed] - ratio + 1))
     # The indexer writer must leave every MLA byte untouched.
-    main_bytes = config.packed_kv_bytes(256 // ratio)
+    main_bytes = config.get_packed_kv_bytes(256 // ratio)
     assert (storage.view(pages, -1)[:, :main_bytes] == 165).all()
     table = torch.stack((physical.int(), torch.full_like(physical.int(), -1)))
     req = torch.tensor([0, 0, 0, 1], dtype=torch.int32, device="cuda")
@@ -377,10 +380,13 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
     query = torch.randn(4, heads, 128, dtype=torch.bfloat16, device="cuda")
     weights = torch.randn(4, heads, device="cuda")
     lengths = torch.tensor([keys * ratio, 1], device="cuda")
-    state = SimpleNamespace(
+    from lightllm.models.deepseek_v41.infer_struct import DeepseekV41InferStateInfo
+
+    state = DeepseekV41InferStateInfo()
+    state.__dict__.update(
         position_ids=query_pos,
         dsv4_sparse_req_idx=req,
-        v41_index_capacity=capacity,
+        max_kv_seq_len=capacity,
         indexer_metadata=None,
         is_prefill=mode != "decode",
         max_q_seq_len=3,
@@ -414,8 +420,12 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
         fused_q_indexer_rope_quant(query, weights, 1.0, freqs, query_pos, apply_hadamard=False)
     )
     # Force the same chunked metadata path used by long prefill.
+    from lightllm.models.deepseek_v4 import infer_struct
+
     monkeypatch.setattr(
-        indexer_module, "C4_PREFILL_LOGITS_BUDGET_BYTES", 64 * 1024 if mode == "prefill_paged" else 2 * 262400 * 4
+        infer_struct,
+        "C4_PREFILL_LOGITS_BUDGET_BYTES",
+        64 * 1024 if mode == "prefill_paged" else 2 * 262400 * 4,
     )
 
     def run():
@@ -477,8 +487,17 @@ def test_dense_prefill_gather_and_request_relative_logits(ratio):
     import deep_gemm
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer, gather_indexer_k
 
-    config = DeepseekV4CacheConfig((ratio,), short_compress_ratio=2, long_compress_ratio=1, indexer_layer_ids=(0,))
-    storage = torch.zeros(512, 1, config.history_widths[0], dtype=torch.uint8, device="cuda")
+    config = DeepseekV4CacheConfig(
+        (ratio,),
+        head_dim=512,
+        rope_head_dim=64,
+        indexer_head_dim=128,
+        sliding_window=128,
+        short_compress_ratio=2,
+        long_compress_ratio=1,
+        indexer_layer_ids=(0,),
+    )
+    storage = torch.zeros(512, 1, config.compressed_kv_slot_bytes[0], dtype=torch.uint8, device="cuda")
     manager = SimpleNamespace(cache_config=config, get_att_input_params=lambda layer: storage)
     positions = torch.cat((torch.arange(5 * ratio, device="cuda"), torch.arange(7 * ratio, device="cuda")))
     slots = torch.cat((torch.arange(5 * ratio, device="cuda") + 256, torch.arange(7 * ratio, device="cuda"))).int()
@@ -486,7 +505,7 @@ def test_dense_prefill_gather_and_request_relative_logits(ratio):
     table[0, : 5 * ratio] = slots[: 5 * ratio]
     table[1, : 7 * ratio] = slots[5 * ratio :]
     raw = torch.randn(12 * ratio, 128, dtype=torch.bfloat16, device="cuda")
-    destindex_copy_indexer_k_dsv4(
+    destindex_copy_indexer_k(
         raw,
         slots,
         positions,
@@ -538,7 +557,15 @@ def test_candidate_selection_2048_blocks_and_recent_block():
 def test_main_cache_writer_preserves_rope_and_layer_ownership(ratio):
     page_size = 256 // ratio
     cache = torch.zeros(
-        (2, 2, DeepseekV4CacheConfig((0, 0)).packed_kv_bytes(page_size)), dtype=torch.uint8, device="cuda"
+        (
+            2,
+            2,
+            DeepseekV4CacheConfig(
+                (0, 0), head_dim=512, rope_head_dim=64, indexer_head_dim=128, sliding_window=128
+            ).get_packed_kv_bytes(page_size),
+        ),
+        dtype=torch.uint8,
+        device="cuda",
     )
     kv = torch.randn(3, 512, dtype=torch.bfloat16, device="cuda")
     kv[0].zero_()
@@ -683,12 +710,23 @@ def test_c2_first_token_has_no_compressed_history():
         1,
     )
     indexer.freqs_cis = torch.ones((1, 32), dtype=torch.complex64, device="cuda")
-    config = DeepseekV4CacheConfig((2,), short_compress_ratio=2, long_compress_ratio=1)
-    cache = torch.zeros((256, 1, config.history_widths[0]), dtype=torch.uint8, device="cuda")
-    state = SimpleNamespace(
+    config = DeepseekV4CacheConfig(
+        (2,),
+        head_dim=512,
+        rope_head_dim=64,
+        indexer_head_dim=128,
+        sliding_window=128,
+        short_compress_ratio=2,
+        long_compress_ratio=1,
+    )
+    cache = torch.zeros((256, 1, config.compressed_kv_slot_bytes[0]), dtype=torch.uint8, device="cuda")
+    from lightllm.models.deepseek_v41.infer_struct import DeepseekV41InferStateInfo
+
+    state = DeepseekV41InferStateInfo()
+    state.__dict__.update(
         position_ids=torch.tensor([0], device="cuda"),
         dsv4_sparse_req_idx=torch.tensor([0], device="cuda"),
-        v41_index_capacity=1,
+        max_kv_seq_len=1,
         indexer_metadata=None,
         is_prefill=False,
         b_req_idx=torch.tensor([0], dtype=torch.int32, device="cuda"),
@@ -782,7 +820,7 @@ def test_o_projection_loads_bf16_groups_and_preserves_tp_slices(block_size, tp_s
     wb = torch.randn(hidden, groups * rank).bfloat16() * 0.02
     weights["layers.0.attn.wo_b.weight"] = wb
     layer = DeepseekV41TransformerLayerWeight.__new__(DeepseekV41TransformerLayerWeight)
-    layer.prefix, layer.o_proj_fp8, layer.data_type_ = "layers.0", False, torch.bfloat16
+    layer.prefix, layer.o_proj_use_mm, layer.data_type_ = "layers.0", False, torch.bfloat16
     layer.o_groups, layer.o_lora_rank, layer.n_heads, layer.head_dim = groups, rank, 8, 128
     layer.network_config_ = {"quantization_config": {"weight_block_size": [block_size, block_size]}}
     layer.experts = SimpleNamespace(quant_method=SimpleNamespace(weight_scale_suffix=None))
@@ -798,7 +836,7 @@ def test_o_projection_loads_bf16_groups_and_preserves_tp_slices(block_size, tp_s
     torch.testing.assert_close(layer.wo_a_.weight, wa.transpose(1, 2), atol=0, rtol=0)
     wb = wb[:, start * rank : (start + local_groups) * rank].cuda()
     infer = DeepseekV41TransformerLayerInfer.__new__(DeepseekV41TransformerLayerInfer)
-    infer.tp_groups = local_groups
+    infer.tp_groups, infer.qk_rope_head_dim, infer.compress_ratio = local_groups, 64, 0
     infer._tpsp_reduce = lambda input, infer_state: input
     for tokens in (1, 17):
         # FlashMLA's padded head dimension can leave a gap between token rows.
@@ -806,7 +844,11 @@ def test_o_projection_loads_bf16_groups_and_preserves_tp_slices(block_size, tp_s
         grouped = o.reshape(tokens, local_groups, width)
         projected = torch.cat([torch.nn.functional.linear(grouped[:, g], wa[g]) for g in range(local_groups)], -1)
         expected = torch.nn.functional.linear(projected, wb)
-        actual = infer._project_o(o, None, layer)
+        state = SimpleNamespace(
+            position_cos_sliding=torch.ones(tokens, 32, device="cuda"),
+            position_sin_sliding=torch.zeros(tokens, 32, device="cuda"),
+        )
+        actual = infer._get_o(o, state, layer)
         torch.testing.assert_close(actual, expected, atol=0.015625, rtol=0.01)
 
 
@@ -816,7 +858,8 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     state = DeepseekV41InferStateInfo()
     state.req_manager = SimpleNamespace(cache_config=SimpleNamespace(sliding_window=128))
     state.prefill_att_state = SimpleNamespace(
-        backend=SimpleNamespace(create_att_prefill_state=lambda _: SimpleNamespace(init_state=lambda: None))
+        init_state=lambda: None,
+        swa_buffer=object(),
     )
     state.b_q_seq_len = torch.tensor([200, 3, 129], dtype=torch.int32, device="cuda")
     state.b_seq_len = torch.tensor([220, 1003, 257], dtype=torch.int32, device="cuda")
@@ -841,13 +884,14 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     state.v41_sparse_selection = {"extra_indices": torch.arange(332, device="cuda")[:, None, None]}
     state.candidate_block_mask = torch.arange(332, device="cuda")[:, None]
     state.engram_hashes = torch.arange(332, device="cuda")[:, None, None]
-    state._dsv4_prefill_pad_q_len = 129
     state.indexer_metadata = object()
     original_swa = state.dsv4_swa_indices.clone()
     rows = state.init_decoder_state()
     expected_rows = torch.cat((torch.arange(72, 203, device="cuda"), torch.arange(204, 332, device="cuda")))
     torch.testing.assert_close(rows, expected_rows)
     decoder = state.decoder_state
+    assert decoder.prefill_att_state is not state.prefill_att_state
+    assert decoder.prefill_att_state.swa_buffer is state.prefill_att_state.swa_buffer
     assert decoder.req_manager is state.req_manager
     assert decoder.indexer_metadata is None
     assert state.indexer_metadata is not None
@@ -855,7 +899,6 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     assert decoder.b_q_seq_len.tolist() == [128, 3, 128]
     assert decoder.b_ready_cache_len.tolist() == [92, 1000, 129]
     assert decoder.b_q_start_loc.tolist() == [0, 128, 131]
-    assert decoder._dsv4_prefill_pad_q_len == 128
     torch.testing.assert_close(decoder.engram_hashes[:, 0, 0], expected_rows)
     torch.testing.assert_close(decoder.candidate_block_mask[:, 0], expected_rows)
     torch.testing.assert_close(decoder.v41_sparse_selection["extra_indices"][:, 0, 0], expected_rows)
@@ -1213,7 +1256,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 )
                 draft.forward(commit)
             # Every draft stage owns target-hidden KV, without modifying target history.
-            assert model.req_manager.swa_buffer[5:].count_nonzero() > 0
+            assert model.req_manager.req_to_swa[5:].count_nonzero() > 0
 
             def decode_input(ids, position):
                 count = len(ids)
@@ -1259,18 +1302,15 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 torch.testing.assert_close(actual, expected, atol=0, rtol=0)
 
             # Target verification must match autoregressive decode, including after rejected future rows.
-            model.req_manager.clear_runtime_state(0)
             model.forward(inp)
             sequential = torch.cat(
                 [model.forward(decode_input(tokens[pos : pos + 1], pos)).logits.clone() for pos in range(256, 260)]
             )
             torch.testing.assert_close(verify_logits, sequential, atol=0.0625, rtol=0.03)
             # Match the verify layout to isolate rejected-state leakage from FlashMLA batch rounding.
-            model.req_manager.clear_runtime_state(0)
             model.forward(inp)
             model.forward(verify)
             clean_resume = model.forward(decode_input(tokens[257:260], 257)).logits.clone()
-            model.req_manager.clear_runtime_state(0)
             model.forward(inp)
             rejected_ids = tokens[256:260].clone()
             rejected_ids[1:] = (rejected_ids[1:] + 7) % 64
@@ -1288,20 +1328,21 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 output = model.forward(model_input)
                 assert proposer.fill_draft_model_kv_state(model_input, output, output.logits.argmax(-1)) is None
 
-            model.req_manager.clear_runtime_state(0)
             prefill_and_commit(0, 256)
             checkpoints = model.req_manager.create_small_page_cache_manager(1)
-            model.req_manager.save_state(0, 0, checkpoints, checkpoint_len=256)
+            model.req_manager.save_state(
+                SimpleNamespace(req_idx=0, get_chuncked_input_token_len=lambda: 256), 0, checkpoints
+            )
             prefill_and_commit(256, 257)
-            from lightllm.models.deepseek_v4.triton_kernel.swa_cache import gather_swa_tokens
+            from lightllm.models.deepseek_v4.triton_kernel.swa_cache import gather_swa_state
 
             positions = torch.arange(129, 257, device="cuda")
-            expected = gather_swa_tokens(model.req_manager, 0, positions)[5:]
+            expected = gather_swa_state(model.req_manager, 0, positions)[5:]
             model.req_manager.req_to_token_indexs[1, :256] = model.req_manager.req_to_token_indexs[0, :256]
             model.req_manager.req_to_token_indexs[1, 256] = 512
             model.req_manager.restore_state(SimpleNamespace(req_idx=1, cur_kv_len=256), checkpoints, 0)
             prefill_and_commit(256, 257, req_idx=1)
-            actual = gather_swa_tokens(model.req_manager, 1, positions)[5:]
+            actual = gather_swa_state(model.req_manager, 1, positions)[5:]
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
             return
 
@@ -1310,14 +1351,12 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         model.return_all_prompt_logics = True
         full = prefill(0, 33)
         assert torch.isfinite(full).all()
-        model.req_manager.clear_runtime_state(0)
         prefill(0, 7)
         chunked = prefill(7, 33)
         # FlashMLA's batch-dependent BF16 rounding can cross a subsequent FP8 bin boundary.
         torch.testing.assert_close(full, chunked, atol=0.0625, rtol=0.03)
         references = []
         for end in (34, 35, 36):
-            model.req_manager.clear_runtime_state(0)
             references.append(prefill(0, end))
 
         def decode(position, req_idx=0):
@@ -1347,8 +1386,8 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
 
         # P/D restores C2 state; Engram predecessors are rebuilt from the
         # receiving request's tokens at its new physical KV pages.
-        from lightllm.models.deepseek_v4.pd_cache import _copy_request_state, get_pd_page_nbytes
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_history_pages
+        from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import DeepseekV4AttStatePageHelper
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_compressed_kv_pages
 
         with monkeypatch.context() as pd:
             for role in ("prefill", "decode"):
@@ -1356,7 +1395,6 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 model._verify_params()
             pd.setattr(model.args, "run_mode", "normal")
             pd.setattr(model, "return_all_prompt_logics", False)
-            model.req_manager.clear_runtime_state(0)
             prefill(0, 257)
             model.req_manager.req_to_token_indexs[1, :512] = torch.arange(512, 1024, dtype=torch.int32, device="cuda")
             manager = SimpleNamespace(
@@ -1365,7 +1403,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 **{
                     name: getattr(model.req_manager, name)
                     for name in (
-                        "swa_buffer",
+                        "req_to_swa",
                         "swa_capacity_tokens",
                         "HOLD_REQUEST_ID",
                         "HOLD_SWA_SLOT",
@@ -1375,29 +1413,30 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                     )
                 },
             )
-            state_page = torch.empty(get_pd_page_nbytes(manager.cache_config, 256), dtype=torch.uint8, device="cuda")
-            _copy_request_state(manager, state_page, 0, 257, write=True)
+            state_page = torch.empty(
+                model.mem_manager.get_paged_kv_move_buffer_shape(1, 256)[-1], dtype=torch.uint8, device="cuda"
+            )
+            helper = DeepseekV4AttStatePageHelper(model.mem_manager)
+            helper._copy_req_state(state_page, manager, 0, write=True)
             history_page = torch.empty_like(state_page).view(1, -1)
             page_id = torch.zeros(1, dtype=torch.int32, device="cuda")
             for start, end in ((0, 256), (256, 257)):
                 for req, write in ((0, True), (1, False)):
-                    copy_history_pages(
+                    copy_compressed_kv_pages(
                         model.mem_manager,
                         manager.req_to_token_indexs[req, start:end].long(),
                         page_id,
                         history_page,
                         to_pages=write,
-                        page_tokens=256,
+                        page_size=256,
                         round_tail=True,
                     )
             expected = [decode(pos) for pos in (257, 258)]
-            model.req_manager.clear_runtime_state(1)
             model.engram_hasher.history[512:769].fill_(-1)
-            _copy_request_state(manager, state_page, 1, 257, write=False)
+            helper._copy_req_state(state_page, manager, 1, write=False)
             for pos, reference in zip((257, 258), expected):
                 torch.testing.assert_close(decode(pos, req_idx=1), reference, atol=0, rtol=0)
 
-        model.req_manager.clear_runtime_state(0)
         prefill(0, 33)
         eager_decode = []
         for position, expected in zip((33, 34, 35), references):
@@ -1408,7 +1447,6 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         from lightllm.common.basemodel.cuda_graph import CudaGraph
 
         model.graph = CudaGraph(1, 1, 1, max_batch_size=1, max_len_in_batch=512)
-        model.req_manager.clear_runtime_state(0)
         prefill(0, 33)
         for position, expected in zip((33, 34, 35), eager_decode):
             torch.testing.assert_close(decode(position), expected, atol=0, rtol=0)
@@ -1417,10 +1455,11 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         # Reuse a 256-token prefix in another request slot, with different suffix slots.
         model.graph = None
         model.req_manager.req_to_token_indexs[0, :512] = torch.arange(512, dtype=torch.int32, device="cuda")
-        model.req_manager.clear_runtime_state(0)
         prefill(0, 256)
         checkpoints = model.req_manager.create_small_page_cache_manager(1)
-        model.req_manager.save_state(0, 0, checkpoints, checkpoint_len=256)
+        model.req_manager.save_state(
+            SimpleNamespace(req_idx=0, get_chuncked_input_token_len=lambda: 256), 0, checkpoints
+        )
         assert checkpoints.c4_shape[0] == 0
         assert checkpoints.indexer_shape[0] == 0
         expected_prefill = prefill(256, 257)
@@ -1434,26 +1473,32 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
 
         # CPU pages must resume at new physical slots after all source Engram
         # history is lost, rather than relying on a still-resident GPU prefix.
-        from dataclasses import replace
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_checkpoint_pages
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import (
+            copy_kv_buffer_to_cpu_cache,
+            copy_cpu_cache_to_kv_buffer,
+        )
 
         with monkeypatch.context() as cpu_cache:
             manager, requests = model.mem_manager, model.req_manager
-            layout = replace(manager.cache_config, cpu_cache_token_page_size=256)
-            cpu_cache.setattr(manager, "cache_config", layout)
+            layout = manager.cache_config
+            cpu_cache.setattr(model.args, "cpu_cache_token_page_size", 256)
+            cpu_cache.setattr(model.args, "linear_att_hash_page_size", 256)
+            cpu_cache.setattr(model.args, "linear_att_page_block_num", 1)
             torch.cuda.synchronize()
             manager.big_page_buffers.buffer[0].copy_(checkpoints.buffer[0])
             pages = torch.empty((1, layout.get_cpu_cache_big_page_bytes()), dtype=torch.uint8, pin_memory=True)
             page_ids = torch.zeros(1, dtype=torch.int32, device="cuda")
             checkpoint_ids = torch.zeros(1, dtype=torch.int64, device="cuda")
-            copy_history_pages(manager, requests.req_to_token_indexs[0, :256].long(), page_ids, pages, to_pages=True)
-            copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, to_pages=True)
+            copy_kv_buffer_to_cpu_cache(
+                manager, requests.req_to_token_indexs[0, :256].long(), page_ids, None, checkpoint_ids, pages
+            )
             torch.cuda.synchronize()
             manager.big_page_buffers.buffer[0].zero_()
             model.engram_hasher.history.fill_(-99)
             requests.req_to_token_indexs[1, :512] = torch.arange(512, 1024, dtype=torch.int32, device="cuda")
-            copy_history_pages(manager, requests.req_to_token_indexs[1, :256].long(), page_ids, pages, to_pages=False)
-            copy_checkpoint_pages(manager, checkpoint_ids, page_ids, pages, to_pages=False)
+            copy_cpu_cache_to_kv_buffer(
+                manager, requests.req_to_token_indexs[1, :256].long(), checkpoint_ids, page_ids, pages
+            )
             requests.restore_big_page_state(0, SimpleNamespace(req_idx=1, cur_kv_len=256))
             torch.testing.assert_close(prefill(256, 257, req_idx=1), expected_prefill, atol=0, rtol=0)
             for position, expected in zip((257, 258), expected_decode):
@@ -1470,7 +1515,6 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             == get_compressed_kv_buffer(model.mem_manager, 4).data_ptr()
         )
         model.req_manager.req_to_token_indexs[0, :512] = torch.arange(512, dtype=torch.int32, device="cuda")
-        model.req_manager.clear_runtime_state(0)
         prefill(0, 256)
         full_history = [buffer.clone() for buffer in model.mem_manager.kv_buffer]
         model.return_all_prompt_logics = False
@@ -1483,22 +1527,21 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             return original_ffn(x, state, weight)
 
         monkeypatch.setattr(decoder, "_ffn", record_decoder_ffn)
-        model.req_manager.clear_runtime_state(0)
         assert torch.isfinite(prefill(0, 256)).all()
         assert counts == [128]
         for actual, expected in zip(model.mem_manager.kv_buffer, full_history):
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
-        model.req_manager.save_state(0, 0, checkpoints, checkpoint_len=256)
+        model.req_manager.save_state(
+            SimpleNamespace(req_idx=0, get_chuncked_input_token_len=lambda: 256), 0, checkpoints
+        )
         expected = prefill(256, 257)
         assert counts[-1] == 1
         model.req_manager.restore_state(SimpleNamespace(req_idx=1, cur_kv_len=256), checkpoints, 0)
         # Decoder replay must not read saved SWA before the replay boundary.
-        model.req_manager.req_to_swa_state[4, 1].fill_(255)
+        model.req_manager.req_to_swa[4, 1].fill_(255)
         torch.testing.assert_close(prefill(256, 257, req_idx=1), expected, atol=0, rtol=0)
         assert torch.isfinite(decode(257, req_idx=1)).all()
         model.req_manager.req_to_token_indexs[1, :512] = torch.arange(512, 1024, dtype=torch.int32, device="cuda")
-        for request in (0, 1):
-            model.req_manager.clear_runtime_state(request)
         batch = ModelInput(
             batch_size=2,
             total_token_num=203,
@@ -1519,7 +1562,6 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         batched = model.forward(batch).logits.clone()
         assert counts[-1] == 131
         for request, length in ((0, 200), (1, 3)):
-            model.req_manager.clear_runtime_state(request)
             reference = prefill(0, length, req_idx=request)
             torch.testing.assert_close(batched[request], reference[0], atol=0.0625, rtol=0.03)
         prefill(200, 256)
@@ -1533,7 +1575,6 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         model.graph.warmup(model)
     finally:
         if model is not None:
-            model.req_manager.clear_runtime_state(0)
             for allocator in (model.mem_manager.allocator,):
                 allocator.shared_can_use_token_num.shm.close()
                 allocator.shared_can_use_token_num.shm.unlink()

@@ -9,10 +9,10 @@ from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_unique_server_name,
     set_env_start_args,
     set_unique_server_name,
-    get_unique_server_name,
-    get_env_start_args,
 )
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
@@ -31,6 +31,7 @@ from lightllm.utils.config_utils import (
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
+    get_default_disable_chunked_mm_input,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -70,14 +71,18 @@ def _launch_subprocesses(args: StartArgs):
     if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
+    _auto_set_prefill_queue_strategy(args)
+
     model_type = get_model_type(args.model_dir)
     if model_type in ("deepseek_v4", "deepseek_v41"):
-        from lightllm.common.state_cache_manager.deepseek4 import DSV4_HISTORY_TOKEN_ALIGNMENT
+        from lightllm.common.state_cache_manager.deepseek4 import DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
 
         if args.page_size == 1:
-            args.page_size = DSV4_HISTORY_TOKEN_ALIGNMENT
-        if args.page_size <= 0 or args.page_size % DSV4_HISTORY_TOKEN_ALIGNMENT:
-            raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_HISTORY_TOKEN_ALIGNMENT}")
+            args.page_size = DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
+        if args.page_size <= 0 or args.page_size % DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT:
+            raise ValueError(
+                f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT}"
+            )
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
@@ -100,10 +105,6 @@ def _launch_subprocesses(args: StartArgs):
         args.enable_multimodal = False
     else:
         args.enable_multimodal = True
-
-    if model_type == "deepseek_v4" and not args.disable_vision:
-        # V4 Vision opens bidirectional attention inside each complete image block.
-        args.disable_chunked_mm_input = True
 
     if args.enable_cpu_cache:
         # 生成一个用于创建cpu kv cache的共享内存id。
@@ -160,8 +161,7 @@ def _launch_subprocesses(args: StartArgs):
     if is_hybrid_model:
         # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
         assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
-        if model_type != "deepseek_v4":
-            assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
+        assert not args.disable_chunked_prefill, "hybrid attention models require chunked prefill"
     if args.diverse_mode:
         # diverse 按普通 KV 前缀插入缓存，尚不支持混合注意力模型的状态页和哈希边界。
         assert not is_hybrid_model, "--diverse_mode does not support hybrid attention models"
@@ -306,6 +306,16 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
+    args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
+        args.model_dir
+    )
+    if args.disable_chunked_mm_input and not args.disable_vision:
+        assert args.batch_max_tokens >= args.max_image_token_count, (
+            "--disable_chunked_mm_input requires batch_max_tokens >= max_image_token_count, "
+            f"but got {args.batch_max_tokens}, {args.max_image_token_count}. "
+            "Increase --batch_max_tokens or reduce --max_image_token_count."
+        )
+
     # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
         # 小页池大小只对 hybrid 模型生效。
@@ -321,7 +331,7 @@ def _launch_subprocesses(args: StartArgs):
         args.linear_att_page_block_num = 10000000
 
     if args.enable_cpu_cache and is_hybrid_model:
-        if model_type in ("deepseek_v4", "deepseek_v41") and args.run_mode != "decode":
+        if model_type == "deepseek_v4" and args.run_mode != "decode":
             big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
             if big_page_tokens > args.max_req_total_len:
                 # CPU pages need the same boundary snapshots as GPU prefix caching.
@@ -470,6 +480,10 @@ def _launch_subprocesses(args: StartArgs):
         ],
         start_args=[(args,)],
     )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
 
     router_process, _ = process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
@@ -557,7 +571,6 @@ def pd_master_start(args: StartArgs):
         ],
         start_args=[(args,)],
     )
-
     process_manager.start_submodule_processes(
         start_funcs=[start_req_id_generator_server],
         start_args=[(args,)],
@@ -597,6 +610,8 @@ def pd_master_multi_worker_start(args: StartArgs):
         start_multiprocess_pd_master,
         validate_multiprocess_pd_master_args,
     )
+    from .httpserver_for_pd_master.pd_selector.pd_node_stats_server import start_pd_node_stats_server
+    from .httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import start_prompt_cache_tree_server
 
     haproxy_binary = validate_multiprocess_pd_master_args(args)
     _set_envs_and_config(args)
@@ -617,6 +632,14 @@ def pd_master_multi_worker_start(args: StartArgs):
     )
     process_manager.start_submodule_processes(
         start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_pd_node_stats_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_prompt_cache_tree_server],
         start_args=[(args,)],
     )
     return start_multiprocess_pd_master(
@@ -715,3 +738,10 @@ def _validate_pd_features(args: StartArgs):
         args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
     ):
         raise ValueError("PD mode does not support RL, routed experts or prompt logprobs")
+
+
+def _auto_set_prefill_queue_strategy(args: StartArgs) -> None:
+    """自动选择 prefill 排队策略；显式指定策略时保留用户配置。"""
+    if args.prefill_queue_strategy == "auto":
+        args.prefill_queue_strategy = "hrrn" if args.run_mode == "prefill" else "default"
+        logger.info(f"run_mode={args.run_mode}, auto set prefill_queue_strategy to {args.prefill_queue_strategy}")

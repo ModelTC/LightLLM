@@ -9,7 +9,7 @@ import torch
 import triton
 import triton.language as tl
 
-from .launch import pdl_kwargs
+from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
 
 
 @triton.jit
@@ -31,7 +31,7 @@ def _hash_route(logits, input_ids, tid2eid, rows, valid, slots, NUM_EXPERTS: tl.
 
 
 @triton.jit
-def _router_kernel(
+def _topk_softplus_sqrt_kernel(
     logits,
     topk_weights,
     topk_indices,
@@ -124,7 +124,7 @@ def topk_softplus_sqrt(
         return
     hash_only = tid2eid is not None and bias_vl is None
     block_r, warps = (16, 8) if hash_only and rows >= 256 else (1, 1)
-    _router_kernel[(triton.cdiv(rows, block_r),)](
+    _topk_softplus_sqrt_kernel[(triton.cdiv(rows, block_r),)](
         logits,
         topk_weights,
         topk_indices,
@@ -144,5 +144,5 @@ def topk_softplus_sqrt(
         BLOCK_R=block_r,
         num_warps=warps,
         num_stages=1,
-        **pdl_kwargs(logits.device),
+        **get_pdl_launch_kwargs(logits.device),
     )

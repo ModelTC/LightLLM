@@ -1,8 +1,9 @@
 import torch
 import numpy as np
-from typing import Tuple, Dict, Set, List, Optional
+from typing import Tuple, Dict, Set, List, Optional, Sequence
 from sortedcontainers import SortedSet, SortedDict
 from lightllm.common.state_cache_manager import StateCacheManager
+from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 from .shared_arr import SharedArray
 from .radix_cache import time_gen
 
@@ -341,7 +342,9 @@ class HybridAttPagedRadixCache:
         key: torch.Tensor,
         block_hashs: Optional[List[int]] = None,
         update_refs: bool = False,
+        mm_input_spans: Sequence[Tuple[int, int]] = (),
     ):
+        assert update_refs is True, "update_refs must be True"
         assert key is not None, "key must not be None"
         if block_hashs is None:
             block_hashs = []
@@ -365,7 +368,7 @@ class HybridAttPagedRadixCache:
             return None, 0, None
 
         # 判定真正可以用的匹配节点。
-        ans_node_list = self._trim_unusable_match_tail(ans_node_list, update_refs=update_refs)
+        ans_node_list = self._trim_unusable_match_tail(ans_node_list, mm_input_spans=mm_input_spans)
         if len(ans_node_list) == 0:
             return None, 0, None
 
@@ -431,27 +434,28 @@ class HybridAttPagedRadixCache:
             self._add_node(node)
 
     def _trim_unusable_match_tail(
-        self, nodes: List[HybridAttPagedTreeNode], update_refs: bool
+        self, nodes: List[HybridAttPagedTreeNode], mm_input_spans: Sequence[Tuple[int, int]] = ()
     ) -> List[HybridAttPagedTreeNode]:
+        """沿已命中的路径回退到有 state 且位于图片外的节点，不再搜索旁支小页。
+
+        只撤销尾部节点的引用，保留此次匹配的访问时间。
+        """
         removed_list = []
         for node in reversed(nodes):
-            if node.is_big_page_node():
+            has_state = node.is_big_page_node() or node.small_page_buffer_idx is not None
+            outside_mm = clamp_mm_cache_len(node.node_prefix_total_len, mm_input_spans) == node.node_prefix_total_len
+            if has_state and outside_mm:
                 break
-            elif node.small_page_buffer_idx is not None:
-                assert not node.is_big_page_node()
-                break
-            else:
-                removed_list.append(node)
+            removed_list.append(node)
 
-        if update_refs:
-            for node in removed_list:
-                self._discard_node(node)
-                # dec ref
-                node.ref_counter -= 1
-                if node.ref_counter == 0:
-                    self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
+        for node in removed_list:
+            self._discard_node(node)
+            # dec ref
+            node.ref_counter -= 1
+            if node.ref_counter == 0:
+                self.refed_tokens_num.arr[0] -= len(node.token_mem_index_value)
 
-                self._add_node(node)
+            self._add_node(node)
 
         if len(removed_list) == 0:
             return nodes
@@ -473,10 +477,18 @@ class HybridAttPagedRadixCache:
         self.free_radix_cache_to_get_enough_token(need_token_num=self.total_token_num)
         return
 
-    def deref_to_first_big_page_node(self, node: HybridAttPagedTreeNode) -> Optional[HybridAttPagedTreeNode]:
+    def deref_to_first_big_page_node(
+        self, node: HybridAttPagedTreeNode, mm_input_spans: Sequence[Tuple[int, int]] = ()
+    ) -> Optional[HybridAttPagedTreeNode]:
+        """回退到最近的大页；用于恢复 state 时，传入图片区间以跳过图内边界。"""
         assert not node.is_big_page_node()
         iter_node = node
-        while not iter_node.is_big_page_node():
+        while iter_node is not self.root_node:
+            node_end = iter_node.node_prefix_total_len
+            outside_mm = clamp_mm_cache_len(node_end, mm_input_spans) == node_end
+            if iter_node.is_big_page_node() and outside_mm:
+                break
+
             self._discard_node(iter_node)
 
             if iter_node.ref_counter == 1:

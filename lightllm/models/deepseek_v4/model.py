@@ -21,7 +21,10 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
-from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DSV4_NSA_BACKENDS
+from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
+    DSV4_NSA_BACKENDS,
+    DeepseekV4FlashMlaFp8SparseAttBackend,
+)
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
@@ -30,7 +33,7 @@ from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
 )
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args, get_redundancy_expert_num
+from lightllm.utils.envs_utils import get_env_start_args, get_redundancy_expert_num
 from lightllm.utils.config_utils import normalize_deepseek_v4_config
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
@@ -101,25 +104,17 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
-        cache_config = DeepseekV4CacheConfig.from_model_config(
-            self.config,
-            layer_num,
-            self.args.cpu_cache_token_page_size or 2048,
-        )
+        cache_config = DeepseekV4CacheConfig.from_model_config(self.config, self.args)
         self.req_manager = DeepseekV4ReqManager(
             self.max_req_num,
             create_max_seq_len,
             None,
             cache_config,
-            max_forward_tokens=max(self.batch_max_tokens, self.max_req_num) + 2 * self.tp_world_size_,
-            mtp_step=0 if self.args.run_mode == "prefill" else self.args.mtp_step,
-            prefill_regions=0
-            if self.args.run_mode == "decode"
-            else 1 + int(self.args.enable_prefill_microbatch_overlap),
+            mtp_step=self.args.mtp_step,
         )
 
     def _init_mem_manager(self):
+        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
         cache_config = self.req_manager.cache_config
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
@@ -161,12 +156,11 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
             prefill_aux_stream = torch.cuda.Stream()
         self.dsv4_workspace = DeepseekV4Workspace(self)
-        if self.dsv4_workspace.needs_c4_prefill_aux(self):
+        if prefill_aux_stream is not None and self.run_mode == "prefill" and 4 in self.config["compress_ratios"]:
             with torch.cuda.stream(prefill_aux_stream):
                 self.dsv4_workspace.init_c4_prefill_aux(self)
-        if prefill_aux_stream is not None:
-            for layer in self.layers_infer:
-                layer.dsv4_prefill_aux_stream = prefill_aux_stream
+        for layer in self.layers_infer:
+            layer.dsv4_prefill_aux_stream = prefill_aux_stream
         dist_group_manager.new_deepep_group(
             n_routed_experts=self.config["n_routed_experts"],
             hidden_size=self.config["hidden_size"],
@@ -208,14 +202,14 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the
         # gemma4 two-variant convention; the fused CUDA Q/K kernels consume them directly, while
         # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the inverse
-        # rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
-        # V4 uses YaRN for both variants; V4.1 uses the base frequencies for pure SWA.
+        # rope and compressor paths.
+        # Pure sliding-window layers use unscaled rope_theta. Compressed layers use
+        # compress_rope_theta with YaRN for both local SWA and compressed attention.
         # Kept fp32 for accuracy (the apply upcasts anyway).
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
         dim = cfg["qk_rope_head_dim"]
-        # The served length already includes the MTP position margin. YaRN scaling
-        # still uses the checkpoint's original maximum, independent of table capacity.
+        # Served length includes the MTP position margin; YaRN uses the checkpoint's original maximum.
         max_seq = int(self.max_seq_length)
         freq_exponents = torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim
         positions = torch.arange(max_seq, dtype=torch.float32, device="cuda")
@@ -223,9 +217,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         rope_type = rs.get("rope_type", rs.get("type", "default"))
         orig_max = rs.get("original_max_position_embeddings", 0)
 
-        def build_inv_freq(base, apply_yarn=True):
+        def build_inv_freq(base):
             freqs = 1.0 / (base ** freq_exponents)
-            if apply_yarn and rope_type == "yarn" and orig_max > 0:
+            if rope_type == "yarn" and orig_max > 0:
                 beta_fast = rs.get("beta_fast", 32)
                 beta_slow = rs.get("beta_slow", 1)
                 factor = rs.get("factor", 1)
@@ -236,7 +230,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 freqs = freqs / factor * (1 - smooth) + freqs * smooth
             return freqs
 
-        sliding_freqs = build_inv_freq(cfg["rope_theta"], apply_yarn=cfg["model_type"] != "deepseek_v41")
+        sliding_freqs = 1.0 / (cfg["rope_theta"] ** freq_exponents)
         f = torch.outer(positions, sliding_freqs)  # [max_seq, dim//2]
         self._freqs_cis_sliding = torch.complex(f.cos(), f.sin())
 

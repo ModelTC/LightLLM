@@ -6,10 +6,10 @@ from .cache_io import INDEXER_PAGE_SIZE
 
 
 @triton.jit
-def _fwd_kernel_destindex_copy_indexer_k_dsv4(
+def _destindex_copy_indexer_k_kernel(
     indexer_k,
     mem_index,
-    positions,
+    position_ids,
     indexer_k_fp8,
     indexer_k_scale,
     indexer_k_stride0,
@@ -26,15 +26,15 @@ def _fwd_kernel_destindex_copy_indexer_k_dsv4(
     BYTES_PER_PAGE: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
-    position = tl.load(positions + cur_index)
+    position = tl.load(position_ids + cur_index)
     if (position + 1) % COMPRESS_RATIO != 0:
         return
 
-    full_slot = tl.load(mem_index + cur_index).to(tl.int64)
-    dest_index = full_slot // COMPRESS_RATIO
+    mem_slot = tl.load(mem_index + cur_index).to(tl.int64)
+    compressed_kv_slot = mem_slot // COMPRESS_RATIO
 
-    page = dest_index // PAGE_SIZE
-    token_in_page = dest_index % PAGE_SIZE
+    page = compressed_kv_slot // PAGE_SIZE
+    token_in_page = compressed_kv_slot % PAGE_SIZE
 
     offs_d = tl.arange(0, HEAD_DIM)
     vals = tl.load(indexer_k + cur_index * indexer_k_stride0 + offs_d * indexer_k_stride1).to(tl.float32)
@@ -63,38 +63,34 @@ def _fwd_kernel_destindex_copy_indexer_k_dsv4(
 
 
 @torch.no_grad()
-def destindex_copy_indexer_k_dsv4(
+def destindex_copy_indexer_k(
     indexer_k: torch.Tensor,
     mem_index: torch.Tensor,
-    positions: torch.Tensor,
-    indexer_k_cache: torch.Tensor,
+    position_ids: torch.Tensor,
+    indexer_k_buffer: torch.Tensor,
     page_size: int,
     compress_ratio: int = 4,
     freqs_cis: torch.Tensor = None,
 ):
-    """Packed indexer-indexer_k page-slab writer (DeepSeek-V4 c4/CSA layers).
+    """Write closed compression groups to packed FP8 indexer K pages.
 
-    indexer_k: [T, 128] BF16 keys. V4.1 passes freqs_cis to fuse RoPE before quantization.
-    mem_index: [T] int — full-token slots for the current rows.
-    positions: [T] int — logical positions; only compression group-end rows are written.
-    Compressed slots are group-end full-token slots divided by compress_ratio.
-    indexer_k_cache: [num_pages, bytes_per_page] uint8 — one layer's slab from the c4 indexer
-        Each history page contains 64-key slabs: FP8 data followed by FP32 scales.
-
+    indexer_k: [T, head_dim] BF16; indexer_k_buffer: [page, bytes] uint8.
+    Each page contains 64-key slabs, with FP8 data followed by FP32 scales.
+    V4.1 passes freqs_cis to apply RoPE before quantization.
     """
-    seq_len = mem_index.shape[0]
-    if seq_len == 0:
+    token_num = mem_index.shape[0]
+    if token_num == 0:
         return
     head_dim = indexer_k.shape[-1]
 
     indexer_k = indexer_k.reshape(-1, head_dim)
-    bytes_per_page = indexer_k_cache.stride(0)
-    _fwd_kernel_destindex_copy_indexer_k_dsv4[(seq_len,)](
+    bytes_per_page = indexer_k_buffer.stride(0)
+    _destindex_copy_indexer_k_kernel[(token_num,)](
         indexer_k,
         mem_index,
-        positions,
-        indexer_k_cache.view(torch.float8_e4m3fn),
-        indexer_k_cache.view(torch.float32),
+        position_ids,
+        indexer_k_buffer.view(torch.float8_e4m3fn),
+        indexer_k_buffer.view(torch.float32),
         indexer_k.stride(0),
         indexer_k.stride(1),
         None if freqs_cis is None else torch.view_as_real(freqs_cis).flatten(-2),

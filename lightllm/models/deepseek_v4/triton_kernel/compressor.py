@@ -11,7 +11,7 @@ def _add_ape_to_kv_score_kernel(
     kv_score_stride1,
     ape,
     ape_stride0,
-    positions,
+    position_ids,
     CANDIDATE_DIM: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -20,7 +20,7 @@ def _add_ape_to_kv_score_kernel(
     offs = tl.arange(0, BLOCK)
     mask = offs < CANDIDATE_DIM
 
-    position = tl.load(positions + token_idx)
+    position = tl.load(position_ids + token_idx)
     ape_row = position % COMPRESS_RATIO
     score = tl.load(kv_score + token_idx * kv_score_stride0 + (CANDIDATE_DIM + offs) * kv_score_stride1, mask=mask)
     ape_value = tl.load(ape + ape_row * ape_stride0 + offs, mask=mask)
@@ -33,107 +33,56 @@ def _add_ape_to_kv_score_kernel(
 
 
 @triton.jit
-def _save_partial_states_kernel(
+def _save_compressor_state_kernel(
     kv_score,
     kv_score_stride0,
     kv_score_stride1,
-    positions,
+    position_ids,
     token_to_batch_idx,
     b_req_idx,
     b_seq_len,
-    state_buffer,
+    req_to_compressor_state,
     CANDIDATE_DIM: tl.constexpr,
     STATE_DIM: tl.constexpr,
     IS_PREFILL: tl.constexpr,
-    STATE_TOKENS: tl.constexpr,
+    STATE_CAPACITY_TOKENS: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
     batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
-    position = tl.load(positions + token_idx)
+    position = tl.load(position_ids + token_idx)
     seq_len = tl.load(b_seq_len + batch_idx)
 
-    if position + STATE_TOKENS < seq_len:
+    # 只保留请求尾部，绝对位置对 ring 容量取模后写入对应 req_to_*_state。
+    if position + STATE_CAPACITY_TOKENS < seq_len:
         return
     req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
-    state_slot = req_idx * STATE_TOKENS + position % STATE_TOKENS
+    state_slot = req_idx * STATE_CAPACITY_TOKENS + position % STATE_CAPACITY_TOKENS
 
     offs = tl.arange(0, BLOCK)
     mask = offs < CANDIDATE_DIM
     kv = tl.load(kv_score + token_idx * kv_score_stride0 + offs * kv_score_stride1, mask=mask)
     score = tl.load(kv_score + token_idx * kv_score_stride0 + (CANDIDATE_DIM + offs) * kv_score_stride1, mask=mask)
-    state_base = state_buffer + state_slot * STATE_DIM
+    state_base = req_to_compressor_state + state_slot * STATE_DIM
     tl.store(state_base + offs, kv, mask=mask)
     tl.store(state_base + CANDIDATE_DIM + offs, score, mask=mask)
     return
 
 
 @triton.jit
-def _save_c4_checkpoint(
+def _fused_compress_norm_rope_kernel(
     kv_score,
     kv_score_stride0,
     kv_score_stride1,
-    state_buffer,
-    checkpoint_buffer,
-    checkpoint_offsets,
-    token_idx,
-    req_idx,
-    position,
-    ready_len,
-    q_start,
-    HEAD_DIM: tl.constexpr,
-    STATE_DIM: tl.constexpr,
-    STATE_TOKENS: tl.constexpr,
-    COMPRESS_RATIO: tl.constexpr,
-    CHECKPOINT_TOKENS: tl.constexpr,
-    BLOCK: tl.constexpr,
-):
-    # Capture each prefill boundary before replacing the previous request tail.
-    if (position + 1) % CHECKPOINT_TOKENS == 0:
-        token_offsets = tl.arange(0, COMPRESS_RATIO)
-        positions = position - COMPRESS_RATIO + 1 + token_offsets
-        from_chunk = positions >= ready_len
-        chunk_tokens = q_start + positions - ready_len
-        state_slots = req_idx * STATE_TOKENS + positions % STATE_TOKENS
-        checkpoint = tl.load(checkpoint_offsets + req_idx) + (position + 1) // CHECKPOINT_TOKENS
-        checkpoint_slots = checkpoint * COMPRESS_RATIO + token_offsets
-        features = tl.arange(0, BLOCK)
-        for part in tl.static_range(4):
-            offsets = part * HEAD_DIM + features
-            valid = features < HEAD_DIM
-            current = tl.load(
-                kv_score + chunk_tokens[:, None] * kv_score_stride0 + offsets[None, :] * kv_score_stride1,
-                mask=from_chunk[:, None] & valid[None, :],
-                other=0.0,
-            )
-            previous = tl.load(
-                state_buffer + state_slots[:, None] * STATE_DIM + offsets[None, :],
-                mask=(~from_chunk[:, None]) & valid[None, :],
-                other=0.0,
-            )
-            tl.store(
-                checkpoint_buffer + checkpoint_slots[:, None] * STATE_DIM + offsets[None, :],
-                tl.where(from_chunk[:, None], current, previous),
-                mask=valid[None, :],
-            )
-
-
-@triton.jit
-def _fused_compress_norm_rope_insert_kernel(
-    kv_score,
-    kv_score_stride0,
-    kv_score_stride1,
-    state_buffer,
-    positions,
+    req_to_compressor_state,
+    position_ids,
     token_to_batch_idx,
     b_req_idx,
     b_mtp_index,
     b_seq_len,
     b_ready_cache_len,
     b_q_start_loc,
-    checkpoint_buffer,
-    checkpoint_offsets,
-    out_slots,
+    compressed_kv_slots,
     norm_weight,
     rms_eps,
     cos_table,
@@ -150,9 +99,7 @@ def _fused_compress_norm_rope_insert_kernel(
     WINDOW_SIZE: tl.constexpr,
     IS_C4: tl.constexpr,
     IS_PREFILL: tl.constexpr,
-    STATE_TOKENS: tl.constexpr,
-    CHECKPOINT_TOKENS: tl.constexpr,
-    HOLD_REQ: tl.constexpr,
+    STATE_CAPACITY_TOKENS: tl.constexpr,
     ROPE_HEAD_DIM: tl.constexpr,
     FP8_MAX: tl.constexpr,
     AMAX_MIN: tl.constexpr,
@@ -165,14 +112,11 @@ def _fused_compress_norm_rope_insert_kernel(
     IS_IN_INDEXER: tl.constexpr,
 ):
     token_idx = tl.program_id(0)
-    out_slot = tl.load(out_slots + token_idx).to(tl.int64)
+    out_slot = tl.load(compressed_kv_slots + token_idx).to(tl.int64)
     if out_slot < 0:
         return
 
-    position = tl.load(positions + token_idx)
-    if (position + 1) % COMPRESS_RATIO != 0:
-        return
-
+    position = tl.load(position_ids + token_idx)
     batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
     req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
     seq_len = tl.load(b_seq_len + batch_idx)
@@ -185,22 +129,13 @@ def _fused_compress_norm_rope_insert_kernel(
         q_start = token_idx - mtp_index
 
     token_offsets = tl.arange(0, WINDOW_SIZE)
-    # position 11, start 4
     start = position - WINDOW_SIZE + 1
-    # 最近的window个索引 [4, 5, 6, 7, 8, 9, 10, 11]
     gather_pos = start + token_offsets
-    # 都在[0, 12)之间，valid [1, 1, 1, 1, 1, 1, 1, 1]
     valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
-    # 新计算的mask ready_len=8 [0, 0, 0, 0, 1, 1, 1, 1]
     use_current = (gather_pos >= ready_len) & valid_pos
-    # 现在的kvscore的索引 [-4, -3, -2, -1, 0, 1, 2, 3]
     current_idx = q_start + (gather_pos - ready_len)
-    # cache的mask [1, 1, 1, 1, 0, 0, 0, 0]
-    valid_pos = valid_pos & (~use_current)
-    cache_pos = valid_pos
-
-    state_slot = req_idx * STATE_TOKENS + gather_pos % STATE_TOKENS
-    state_valid = cache_pos
+    state_valid = valid_pos & ~use_current
+    state_slot = req_idx * STATE_CAPACITY_TOKENS + gather_pos % STATE_CAPACITY_TOKENS
     if IS_C4:
         head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
     else:
@@ -225,7 +160,7 @@ def _fused_compress_norm_rope_insert_kernel(
         other=float("-inf"),
     )
 
-    state_ptrs = state_buffer + state_slot[:, None] * STATE_DIM + head_offset[:, None] + offs[None, :]
+    state_ptrs = req_to_compressor_state + state_slot[:, None] * STATE_DIM + head_offset[:, None] + offs[None, :]
     state_kv = tl.load(
         state_ptrs,
         mask=state_mask,
@@ -241,8 +176,6 @@ def _fused_compress_norm_rope_insert_kernel(
     score = tl.where(current_mask, cur_score, state_score)
     score = tl.softmax(score, dim=0)
     compressed_kv = tl.sum(kv * score, axis=0)
-    # 以上得到compressed_kv
-
     # rms_norm
     rms_w = tl.load(norm_weight + offs, mask=dim_mask, other=0.0)
     variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_DIM
@@ -265,31 +198,9 @@ def _fused_compress_norm_rope_insert_kernel(
     new_odd = odd * cos_v + even * sin_v
     rotated = tl.interleave(new_even, new_odd)
 
-    if IS_C4 and IS_PREFILL and req_idx != HOLD_REQ:
-        _save_c4_checkpoint(
-            kv_score,
-            kv_score_stride0,
-            kv_score_stride1,
-            state_buffer,
-            checkpoint_buffer,
-            checkpoint_offsets,
-            token_idx,
-            req_idx,
-            position,
-            ready_len,
-            q_start,
-            HEAD_DIM,
-            STATE_DIM,
-            STATE_TOKENS,
-            COMPRESS_RATIO,
-            CHECKPOINT_TOKENS,
-            BLOCK,
-        )
-
     if IS_IN_INDEXER:
-        # indexer-K path: emit the post-rope full HEAD_DIM vector as dense bf16 (token-indexed),
-        # leaving the fp8 single-amax pack to destindex_copy_indexer_k_dsv4 (the c4_indexer_pool
-        # ABI differs from the latent slab: whole-vector fp8 + one fp32 scale, no bf16 rope tail).
+        # indexer K 输出 BF16，由 destindex_copy_indexer_k 写入 indexer_k_buffer。
+        # 它将整条向量量化为 FP8，并保存一个 FP32 scale。
         tl.store(out_buffer + token_idx * HEAD_DIM + offs, rotated.to(tl.bfloat16), mask=dim_mask)
         return
 
@@ -300,7 +211,7 @@ def _fused_compress_norm_rope_insert_kernel(
 
     n_quant_blocks: tl.constexpr = BLOCK // QUANT_BLOCK
     n_nope_blocks: tl.constexpr = NOPE_DIM // QUANT_BLOCK
-    # 有待检验是否有必要
+    # Preserve BF16 rounding before FP8 packing.
     quant_input = normed.to(tl.bfloat16).to(tl.float32)
     quant_2d = tl.reshape(quant_input, (n_quant_blocks, QUANT_BLOCK))
     abs_2d = tl.abs(quant_2d)

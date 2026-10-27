@@ -143,5 +143,5 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             infer_state.position_ids,
             get_compressed_kv_buffer(infer_state.mem_manager, self.layer_num_),
             ratio,
-            infer_state.req_manager.cache_config.history_token_alignment // ratio,
+            infer_state.req_manager.cache_config.compressed_kv_token_alignment // ratio,
         )

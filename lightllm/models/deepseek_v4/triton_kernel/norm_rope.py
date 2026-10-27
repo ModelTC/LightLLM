@@ -8,7 +8,7 @@ import triton
 import triton.language as tl
 
 from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import _butterfly_stage
-from .launch import pdl_kwargs
+from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
 
 
 @triton.jit
@@ -16,7 +16,7 @@ def _q_norm_rope_kernel(
     q_input,
     q_output,
     freqs_cis,
-    positions,
+    position_ids,
     q_input_stride,
     q_output_stride,
     num_rows,
@@ -37,10 +37,7 @@ def _q_norm_rope_kernel(
         mask=row[:, None] < num_rows,
         other=0,
     ).to(tl.float32)
-    if APPLY_NORM:
-        norm = tl.rsqrt(tl.sum(x * x, axis=1) / 512 + EPS)
-    else:
-        norm = tl.full((BLOCK_R,), 1.0, tl.float32)
+    norm = tl.rsqrt(tl.sum(x * x, axis=1) / 512 + EPS) if APPLY_NORM else tl.full((BLOCK_R,), 1.0, tl.float32)
     # Main Q rounds RMSNorm to BF16 before applying RoPE.
     x = (x * norm[:, None]).to(tl.bfloat16).to(tl.float32)
     out_base = q_output + batch[:, None] * q_output_stride + head[:, None] * 512
@@ -51,7 +48,7 @@ def _q_norm_rope_kernel(
     rope = tl.load(rope_base + rope_dim[None, :], mask=row[:, None] < num_rows, other=0).to(tl.float32)
     rope = (rope * norm[:, None]).to(tl.bfloat16).to(tl.float32)
     real, imag = tl.split(tl.reshape(rope, (BLOCK_R, 32, 2)))
-    pos = tl.load(positions + batch, mask=row < num_rows, other=0)
+    pos = tl.load(position_ids + batch, mask=row < num_rows, other=0)
     freq = freqs_cis + pos[:, None] * 64 + pair[None, :] * 2
     mask = row[:, None] < num_rows
     cos = tl.load(freq, mask=mask, other=1)
@@ -63,21 +60,20 @@ def _q_norm_rope_kernel(
 
 
 @triton.jit
-def _k_norm_rope_cache_kernel(
+def _kv_norm_rope_to_swa_kernel(
     kv,
-    kv_weight,
+    kv_norm_weight,
     freqs_cis,
-    positions,
-    out_loc,
-    out_loc2,
-    kvcache_fp8,
-    kvcache_bf16,
-    kvcache,
+    position_ids,
+    swa_write_slots,
+    swa_runtime_write_slots,
+    swa_kv_buffer,
+    req_to_swa,
     kv_stride,
     EPS: tl.constexpr,
-    PAGE_SIZE: tl.constexpr,
+    SWA_PAGE_TOKEN_NUM: tl.constexpr,
     PAGE_BYTES: tl.constexpr,
-    WRITE_TAIL: tl.constexpr,
+    WRITE_SWA_RUNTIME: tl.constexpr,
     BF16_ROUNDING: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
@@ -86,28 +82,16 @@ def _k_norm_rope_cache_kernel(
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
     x = tl.load(kv + row * kv_stride + dim).to(tl.float32)
-    w = tl.load(kv_weight + dim).to(tl.float32)
-    if BF16_ROUNDING:
-        norm = 1 / tl.sqrt(tl.sum(x * x, axis=0) / 512 + EPS)
-    else:
-        norm = tl.rsqrt(tl.sum(x * x, axis=0) / 512 + EPS)
+    w = tl.load(kv_norm_weight + dim).to(tl.float32)
+    norm = (
+        1 / tl.sqrt(tl.sum(x * x, axis=0) / 512 + EPS) if BF16_ROUNDING else tl.rsqrt(tl.sum(x * x, axis=0) / 512 + EPS)
+    )
     x = x * norm * w
     if BF16_ROUNDING:
-        # V4.1 rounds RMSNorm to BF16 before RoPE.
         x = x.to(tl.bfloat16).to(tl.float32)
     groups = tl.arange(0, 8)
     cols = tl.arange(0, 64)
     grouped = tl.reshape(x, (8, 64))
-    real, imag = tl.split(tl.reshape(x, (8, 32, 2)))
-    pair = tl.arange(0, 32)
-    pos = tl.load(positions + row)
-    cos = tl.load(freqs_cis + pos * 64 + pair * 2)
-    sin = tl.load(freqs_cis + pos * 64 + pair * 2 + 1)
-    rope = tl.reshape(
-        tl.join(real * cos[None, :] - imag * sin[None, :], real * sin[None, :] + imag * cos[None, :]), (8, 64)
-    )
-    if BF16_ROUNDING:
-        rope = rope.to(tl.bfloat16).to(tl.float32)
     scale = tl.maximum(tl.max(tl.abs(grouped), axis=1), 1e-4) / 448
     bits = scale.to(tl.uint32, bitcast=True)
     exponent = ((bits >> 23) & 255) + ((bits & 0x7FFFFF) != 0).to(tl.uint32)
@@ -115,32 +99,45 @@ def _k_norm_rope_cache_kernel(
     quantized = tl.clamp(grouped * inv_scale[:, None], -448, 448)
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
-    for destination in tl.static_range(2 if WRITE_TAIL else 1):
-        slot = tl.load(out_loc + row) if destination == 0 else tl.load(out_loc2 + row)
+    real, imag = tl.split(tl.reshape(x, (8, 32, 2)))
+    pair = tl.arange(0, 32)
+    pos = tl.load(position_ids + row)
+    cos = tl.load(freqs_cis + pos * 64 + pair * 2)
+    sin = tl.load(freqs_cis + pos * 64 + pair * 2 + 1)
+    rope = tl.reshape(
+        tl.join(real * cos[None, :] - imag * sin[None, :], real * sin[None, :] + imag * cos[None, :]), (8, 64)
+    )
+    if BF16_ROUNDING:
+        rope = rope.to(tl.bfloat16).to(tl.float32)
+    for destination in tl.static_range(2 if WRITE_SWA_RUNTIME else 1):
+        slot = tl.load(swa_write_slots + row) if destination == 0 else tl.load(swa_runtime_write_slots + row)
         slot = slot.to(tl.int64)
         valid_slot = True if destination == 0 else slot >= 0
-        page, offset = slot // PAGE_SIZE, slot % PAGE_SIZE
+        page, offset = slot // SWA_PAGE_TOKEN_NUM, slot % SWA_PAGE_TOKEN_NUM
         value_base = page * PAGE_BYTES + offset * 576
+        buffer = swa_kv_buffer if destination == 0 else req_to_swa
         tl.store(
-            kvcache_fp8 + value_base + groups[:, None] * 64 + cols[None, :],
+            buffer.to(tl.pointer_type(tl.float8e4nv)) + value_base + groups[:, None] * 64 + cols[None, :],
             quantized,
             mask=(groups[:, None] < 7) & valid_slot,
         )
         tl.store(
-            kvcache + page * PAGE_BYTES + PAGE_SIZE * 576 + offset * 8 + groups,
+            buffer + page * PAGE_BYTES + SWA_PAGE_TOKEN_NUM * 576 + offset * 8 + groups,
             exponent,
             mask=(groups < 7) & valid_slot,
         )
-        rope_ptr = tl.broadcast_to(kvcache_bf16 + (value_base + 448) // 2 + cols[None, :], (8, 64))
+        rope_ptr = tl.broadcast_to(
+            buffer.to(tl.pointer_type(tl.bfloat16)) + (value_base + 448) // 2 + cols[None, :], (8, 64)
+        )
         tl.store(rope_ptr, rope, mask=(groups[:, None] == 7) & valid_slot)
 
 
 @triton.jit
-def _indexer_rope_quant_kernel(
+def _indexer_rope_hadamard_quant_kernel(
     q_input,
     weight,
     freqs_cis,
-    positions,
+    position_ids,
     q_fp8,
     weights_out,
     num_rows,
@@ -157,7 +154,7 @@ def _indexer_rope_quant_kernel(
     x = tl.load(q_input + row[:, None] * 128 + dim[None, :], mask=row[:, None] < num_rows, other=0).to(tl.float32)
     real, imag = tl.split(tl.reshape(x, (BLOCK_R, 64, 2)))
     pair = tl.arange(0, 64)
-    pos = tl.load(positions + row // NUM_HEADS, mask=row < num_rows, other=0)
+    pos = tl.load(position_ids + row // NUM_HEADS, mask=row < num_rows, other=0)
     freq = freqs_cis + pos[:, None] * 64 + (pair[None, :] - 32) * 2
     mask = (row[:, None] < num_rows) & (pair[None, :] >= 32)
     cos = tl.load(freq, mask=mask, other=1)
@@ -180,12 +177,11 @@ def _indexer_rope_quant_kernel(
 
 
 @torch.no_grad()
-def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, positions, apply_norm=True):
+def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, position_ids, apply_norm=True):
     """RMSNorm/RoPE for BF16 Q [T, heads, 512], allowing padded head strides.
 
-    freqs_cis is contiguous complex64 [max_position, 32]; positions is int32/int64 [T].
+    freqs_cis is contiguous complex64 [max_position, 32]; position_ids is int32/int64 [T].
     RMSNorm rounds to BF16 before interleaved RoPE on the last 64 dimensions.
-    V4.1 skips per-head RMSNorm with apply_norm=False.
     """
     rows = q_input.shape[0] * q_input.shape[1]
     if rows:
@@ -194,7 +190,7 @@ def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, positions, apply_norm=T
             q_input,
             q_output,
             torch.view_as_real(freqs_cis).flatten(-2),
-            positions,
+            position_ids,
             q_input.stride(0),
             q_output.stride(0),
             rows,
@@ -204,19 +200,31 @@ def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, positions, apply_norm=T
             BLOCK_R=block_r,
             num_warps=warps,
             num_stages=1,
-            **pdl_kwargs(q_input.device),
+            **get_pdl_launch_kwargs(q_input.device),
         )
 
 
 @torch.no_grad()
-def fused_k_norm_rope_flashmla(
-    kv, kv_weight, eps, freqs_cis, positions, out_loc, kvcache, page_size, out_loc2=None, bf16_rounding=False
+def fused_kv_norm_rope_to_swa(
+    kv,
+    kv_norm_weight,
+    eps,
+    freqs_cis,
+    position_ids,
+    swa_write_slots,
+    swa_kv_buffer,
+    swa_page_token_num,
+    swa_runtime_write_slots=None,
+    req_to_swa=None,
+    bf16_rounding=False,
 ):
-    """Normalize BF16 KV [T, 512] and write at int32 out_loc [T] in packed pages.
+    """将 BF16 KV [T, 512] 归一化、旋转并写入 packed SWA。
+
+    swa_write_slots 对应当前 attention 使用的位置；swa_runtime_write_slots 将
+    长 prefill 的尾部同时保留到 req_to_swa，值为 -1 时跳过该 token。
 
     Each uint8 page stores 576 data bytes per slot followed by 8 scale bytes per
     slot. NoPE uses FP8 with UE8M0 scales; the last 64 dimensions use BF16 RoPE.
-    V4.1 rounds RMSNorm and RoPE to BF16 before the cache quantization.
     """
     if kv.shape[0]:
         if bf16_rounding:
@@ -225,26 +233,25 @@ def fused_k_norm_rope_flashmla(
             num_warps = rmsnorm_num_warps
         else:
             num_warps = 1 if kv.shape[0] >= 512 else 8
-        flat = kvcache.view(-1)
-        _k_norm_rope_cache_kernel[(kv.shape[0],)](
+        flat = swa_kv_buffer.view(-1)
+        _kv_norm_rope_to_swa_kernel[(kv.shape[0],)](
             kv,
-            kv_weight,
+            kv_norm_weight,
             torch.view_as_real(freqs_cis).flatten(-2),
-            positions,
-            out_loc,
-            out_loc2,
-            flat.view(torch.float8_e4m3fn),
-            flat.view(torch.bfloat16),
+            position_ids,
+            swa_write_slots,
+            swa_runtime_write_slots,
             flat,
+            req_to_swa,
             kv.stride(0),
             EPS=float(eps),
-            PAGE_SIZE=page_size,
-            PAGE_BYTES=kvcache.shape[-1],
-            WRITE_TAIL=out_loc2 is not None,
+            SWA_PAGE_TOKEN_NUM=swa_page_token_num,
+            PAGE_BYTES=swa_kv_buffer.shape[-1],
+            WRITE_SWA_RUNTIME=swa_runtime_write_slots is not None,
             BF16_ROUNDING=bf16_rounding,
             num_warps=num_warps,
             num_stages=1,
-            **pdl_kwargs(kv.device),
+            **get_pdl_launch_kwargs(kv.device),
         )
 
 
@@ -254,12 +261,12 @@ def fused_q_indexer_rope_quant(
     weight,
     weight_scale,
     freqs_cis,
-    positions,
+    position_ids,
     q_fp8=None,
     weights_out=None,
     apply_hadamard=True,
 ):
-    """RoPE, optional Hadamard-128 and FP8 quantization for contiguous BF16 indexer Q.
+    """RoPE/Hadamard-128 and FP8 quantization for contiguous BF16 indexer Q.
 
     q_input: [T, heads, 128], weight: [T, heads]. Return FP8 Q and FP32
     weights [T, heads, 1] folded with weight_scale and the quantization scale.
@@ -271,11 +278,11 @@ def fused_q_indexer_rope_quant(
     rows = q_input.shape[0] * q_input.shape[1]
     if rows:
         block_r = 1 if rows <= 256 else min(32, triton.next_power_of_2(max(1, rows // 1024)))
-        _indexer_rope_quant_kernel[(triton.cdiv(rows, block_r),)](
+        _indexer_rope_hadamard_quant_kernel[(triton.cdiv(rows, block_r),)](
             q_input,
             weight,
             torch.view_as_real(freqs_cis).flatten(-2),
-            positions,
+            position_ids,
             q_fp8,
             weights_out,
             rows,
@@ -285,6 +292,6 @@ def fused_q_indexer_rope_quant(
             BLOCK_R=block_r,
             num_warps=1,
             num_stages=1,
-            **pdl_kwargs(q_input.device),
+            **get_pdl_launch_kwargs(q_input.device),
         )
     return q_fp8, weights_out

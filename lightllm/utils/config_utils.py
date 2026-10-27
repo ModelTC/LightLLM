@@ -582,6 +582,10 @@ def get_model_type(model_path: str) -> Optional[str]:
         return None
 
 
+def get_default_disable_chunked_mm_input(model_path: str) -> bool:
+    return get_model_type(model_path) in ("neo_chat", "deepseek_v4", "gemma4")
+
+
 @lru_cache(maxsize=None)
 def get_model_type_v1() -> Optional[str]:
     start_args = get_env_start_args()

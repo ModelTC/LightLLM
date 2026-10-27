@@ -90,6 +90,58 @@ def test_image_block_and_permutation_match_reference(reference_processor, n_llm_
     assert torch.equal(perm, expected_perm)
 
 
+@pytest.mark.parametrize("prefix_len", [0, 1, 2, 3, 511, 512, 513, 514])
+@pytest.mark.parametrize("text_gap", range(4))
+@pytest.mark.parametrize("reuse_image", [False, True])
+def test_tokenizer_spans_match_reference_blocks(reference_processor, prefix_len, text_gap, reuse_image):
+    from lightllm.models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
+    from lightllm.server.multimodal_params import MultimodalParams
+    from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, clamp_mm_cache_len, get_mm_input_spans
+
+    tokenizer = DeepSeekV4Tokenizer(
+        SimpleNamespace(convert_tokens_to_ids=lambda token: 99), "/unused", {"vision_n_layers": 1}
+    )
+    grids = [(1, 1), (3, 2), (1, 1)]
+    params = MultimodalParams(images=[{"type": "url", "data": "unused"} for _ in grids])
+    prompt = [7] * prefix_len
+    expected_ids = prompt.copy()
+    expected_spans = []
+    expected_cache = []
+    for index, (image, (height, width)) in enumerate(zip(params.images, grids)):
+        canonical_types, _ = reference_processor.build_image_block(height, width, start_pos=0)
+        image.token_id = 2 ** 62 + (0 if reuse_image and index == 2 else index * 1024)
+        image.token_num = len(canonical_types)
+        image.start_index_in_embed_cache = 100 + (0 if reuse_image and index == 2 else index * 1024)
+        expected_cache.append((image.token_id, image.token_num, image.start_index_in_embed_cache))
+        start = len(expected_ids)
+        actual_types, _ = reference_processor.build_image_block(height, width, start_pos=start)
+        suffix_start = len(canonical_types) - len(actual_types)
+        assert torch.equal(canonical_types[suffix_start:], actual_types)
+        expected_ids.extend(range(image.token_id + suffix_start, image.token_id + image.token_num))
+        expected_spans.append((start, len(expected_ids)))
+        prompt.extend([99] + [8] * text_gap)
+        expected_ids.extend([8] * text_gap)
+
+    input_ids = tokenizer.encode(prompt, params)
+    assert input_ids == expected_ids
+    assert [
+        (image.token_id, image.token_num, image.start_index_in_embed_cache) for image in params.images
+    ] == expected_cache
+    spans = get_mm_input_spans(np.asarray(input_ids, dtype=np.int64), params.to_dict())
+    assert spans == expected_spans
+    for candidate in range(len(input_ids) + 1):
+        expected_end = next((start for start, end in expected_spans if start < candidate < end), candidate)
+        assert clamp_mm_cache_len(candidate, spans) == expected_end
+
+    for chunk_size in (1, 4, 16, 256, 512):
+        start = 0
+        while start < len(input_ids):
+            end = adjust_mm_chunk_end(start, min(start + chunk_size, len(input_ids)), spans)
+            assert start < end <= len(input_ids)
+            assert not any(left < end < right for left, right in expected_spans)
+            start = end
+
+
 @pytest.mark.parametrize(
     "width,height",
     [(800, 600), (100, 2000), (2000, 100), (50, 50), (13, 7), (384, 384)],

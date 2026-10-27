@@ -14,9 +14,8 @@ from typing import Dict, Optional, Union, List
 from websockets import ClientConnection
 from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
-from lightllm.utils.net_utils import get_hostname_ip
+from lightllm.utils.net_utils import get_hostname_ip, format_host_port
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.net_utils import format_host_port
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
@@ -105,7 +104,7 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
                 # 发送注册信息
                 regist_json = {
                     "node_id": manager.args.pd_node_id,
-                    "client_ip_port": f"{manager.host_ip}:{get_shm_port_args().port}",
+                    "client_ip_port": format_host_port(manager.host_ip, get_shm_port_args().port),
                     "mode": manager.pd_mode.value,
                     "start_args": args_dict,
                     "dp_index": dp_index,
@@ -281,7 +280,7 @@ async def _pd_process_generate(
             metadata["node_mode"] = manager.args.run_mode
             await forwarding_queue.put((sub_req_id, request_output, metadata, finish_status))
     except PDPrefillNodeStopGenToken as e:
-        logger.info(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
+        logger.debug(f"pd prefill node stop gen token for group_request_id {e.group_request_id}")
     except ServerBusyError as e:
         group_request_id = sampling_params.group_request_id
         logger.warning(f"pd node rejected request {group_request_id}: {e.message}")
@@ -343,7 +342,7 @@ def _get_load_info(dp_index: Optional[int] = None) -> dict:
     load_info = {
         "total_token_usage_rate": mean_node_load,
         "connection_key": PD_Client_Obj.make_connection_key(
-            f"{g_objs.httpserver_manager.host_ip}:{get_shm_port_args().port}", dp_index
+            format_host_port(g_objs.httpserver_manager.host_ip, get_shm_port_args().port), dp_index
         ),
     }
     return load_info

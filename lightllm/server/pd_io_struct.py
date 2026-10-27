@@ -3,7 +3,7 @@ import time
 import copy
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import WebSocket
 
 from lightllm.utils.log_utils import init_logger
@@ -145,7 +145,7 @@ class PDAgentMetadata:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: Optional[bytes] = None
-    page_xfer_handles: Optional[Dict[int, object]] = None
+    page_xfer_handles: Optional[int] = None
 
 
 @dataclass
@@ -181,7 +181,6 @@ class PDChunckedTransTask:
     # transfer params
     src_page_index: Optional[int] = None
     dst_page_index: Optional[int] = None
-    transfer_nbytes: Optional[int] = None
 
     # xfer_handle
     xfer_handle: Optional[int] = None

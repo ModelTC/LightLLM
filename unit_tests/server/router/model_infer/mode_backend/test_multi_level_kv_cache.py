@@ -207,6 +207,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         req_idx=0,
         cur_kv_len=4,
         hold_kv_len=4,
+        mm_input_spans=[],
         shm_req=SimpleNamespace(
             input_len=256,
             disk_prompt_cache_len=0,
@@ -243,6 +244,7 @@ def test_standard_load_releases_skipped_and_matched_pages_once_after_barrier(mon
     reqs = [
         SimpleNamespace(
             cur_kv_len=0,
+            mm_input_spans=[],
             sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=logprobs)),
             shm_req=SimpleNamespace(
                 input_len=64,
