@@ -16,7 +16,8 @@ from ..pd_io_struct import PD_Client_Obj, PDUpKVStatus, ObjType, PDDecodeNodeInf
 from lightllm.server.core.objs import SamplingParams, StartArgs
 from ..multimodal_params import MultimodalParams
 from ..tokenizer import get_tokenizer
-from ..req_id_generator import ReqIDGenerator, convert_sub_id_to_group_id
+from ..httpserver.req_id_generator_client import ReqIDGenerator
+from ..httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import Request
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.metrics.manager import MetricClient

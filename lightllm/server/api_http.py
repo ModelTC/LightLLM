@@ -209,10 +209,16 @@ def get_model_name():
 @app.post("/get_server_info")
 def get_server_info():
     if is_dataclass(g_objs.args):
-        return asdict(g_objs.args)
-
-    # HTTP workers restore StartArgs from the environment as an EasyDict.
-    return dict(g_objs.args)
+        info = asdict(g_objs.args)
+    else:
+        # HTTP workers restore StartArgs from the environment as an EasyDict.
+        info = dict(g_objs.args)
+    if info["run_mode"] == "pd_master":
+        if info["httpserver_workers"] == 1:
+            info["pd_master_multi_ports"] = [info["port"]]
+        else:
+            info["pd_master_multi_ports"] = get_shm_port_args().pd_master_multi_ports
+    return info
 
 
 @app.get("/get_weight_version")

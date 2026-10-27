@@ -16,6 +16,7 @@ from lightllm.server.pd_io_struct import NodeRole, ObjType
 from lightllm.server.httpserver.async_queue import AsyncQueue
 from lightllm.utils.net_utils import get_hostname_ip
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.net_utils import format_host_port
 from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
 from lightllm.server.httpserver.manager import HttpServerManager
 from ..pd_io_struct import PD_Client_Obj, PD_Master_Obj
@@ -206,32 +207,52 @@ async def _pd_handle_task(manager: HttpServerManager, pd_master_obj: PD_Master_O
 
 
 async def _get_pd_master_objs(args: StartArgs) -> Optional[Dict[int, PD_Master_Obj]]:
-    """
-    get_pd_master_objs 主要负责从 pd master 获取所有的pd master对象。
-    """
-    use_config_server = args.config_server_host and args.config_server_port
+    """通过 config server 发现节点，未配置时查询指定 master 的 worker 端口。"""
+    use_config_server = args.config_server_host is not None and args.config_server_port is not None
+    ports = get_shm_port_args()
 
-    # 如果不使用config_server服务来发现所有的 pd_master, 则需要使用启动参数中的
-    # --pd_master_ip 和--pd_master_port 设置的唯一pd_master来进行连接, 其默认
-    # node_id 为 0
-    if not use_config_server:
-        ans = dict()
-        ans[0] = PD_Master_Obj(node_id=0, host_ip_port=f"{args.pd_master_ip}:{get_shm_port_args().pd_master_port}")
-        return ans
+    async def get_from_config_server(client, endpoint):
+        response = await client.get(f"http://{endpoint}/registered_objects")
+        if response.status_code != 200:
+            logger.error(f"get pd_master_objs error {response.status_code}")
+            return None
+        base64data = response.json()["data"]
+        return pickle.loads(base64.b64decode(base64data))
 
-    # 使用 config_server 服务来发现所有的 pd_master 节点。
-    uri = f"ws://{args.config_server_host}:{get_shm_port_args().config_server_port}/registered_objects"
+    async def get_from_pd_master(client):
+        endpoint = format_host_port(args.pd_master_ip, ports.pd_master_port)
+        response = await client.get(f"http://{endpoint}/get_server_info")
+        response.raise_for_status()
+        info = response.json()
+        if info["run_mode"] != "pd_master":
+            raise ValueError(f"{endpoint} is not a PD master")
+
+        worker_count = info["httpserver_workers"]
+        if worker_count == 1:
+            # 单 worker 可能通过端口映射或代理对外暴露。保留已经成功访问的
+            # endpoint，只从响应中读取节点 ID，避免改连进程内部监听端口。
+            node_id = info["pd_node_id"]
+            return {node_id: PD_Master_Obj(node_id=node_id, host_ip_port=endpoint)}
+
+        if worker_count > 1:
+            # 本机多 worker 使用监听端口作为节点 ID，可由端口列表直接构建连接表。
+            return {
+                worker_port: PD_Master_Obj(
+                    node_id=worker_port,
+                    host_ip_port=format_host_port(args.pd_master_ip, worker_port),
+                )
+                for worker_port in info["pd_master_multi_ports"]
+            }
+
+        raise ValueError(f"{endpoint} returned invalid httpserver_workers={worker_count}")
 
     try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(uri)
-            if response.status_code == 200:
-                base64data = response.json()["data"]
-                id_to_pd_master_obj = pickle.loads(base64.b64decode(base64data))
-                return id_to_pd_master_obj
+        async with httpx.AsyncClient(trust_env=False) as client:
+            if use_config_server:
+                endpoint = format_host_port(args.config_server_host, ports.config_server_port)
+                return await get_from_config_server(client, endpoint)
             else:
-                logger.error(f"get pd_master_objs error {response.status_code}")
-                return None
+                return await get_from_pd_master(client)
     except Exception as e:
         logger.exception(str(e))
         await asyncio.sleep(10)

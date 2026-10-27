@@ -105,6 +105,11 @@ class ShmPortArgs:
     def pd_master_port(self) -> int:
         return self._get_user_set_port("pd_master_port")
 
+    @property
+    def pd_master_multi_ports(self) -> List[int]:
+        ports = self._get_or_alloc("pd_master_multi_ports", count=get_env_start_args().httpserver_workers)
+        return [ports] if isinstance(ports, int) else ports
+
     # [user_set] config server port
     @property
     def config_server_port(self) -> int:
