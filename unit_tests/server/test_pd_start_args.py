@@ -35,8 +35,8 @@ def startup_args(monkeypatch):
     [
         ("deepseek_v4", 8, None, 4096),
         ("deepseek_v4", 8, 4096, 4096),
-        ("deepseek_v4", 10000000, None, 2048),
-        ("deepseek_v4", 10000000, 4096, 4096),
+        ("deepseek_v4", 10000000, None, 512 * 10000000),
+        ("deepseek_v4", 10000000, 4096, 512 * 10000000),
         ("glm5_next", 8, None, 4096),
         ("glm5_next", 8, 256, 4096),
         ("llama", 8, None, 256),
@@ -57,6 +57,7 @@ def test_cpu_cache_page_defaults_preserve_model_contracts(
     with pytest.raises(RuntimeError, match="startup validation complete"):
         _launch_subprocesses(args)
     assert args.cpu_cache_token_page_size == expected
+    assert args.linear_att_page_block_num == block_num
 
 
 @pytest.mark.parametrize("model_type", ["deepseek_v4", "llama"])
@@ -132,6 +133,7 @@ def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_typ
     args = startup_args
     args.model_dir = str(tmp_path)
     args.enable_cpu_cache = True
+    args.linear_att_page_block_num = 8
     args.data_type = "bf16"
     with pytest.raises(RuntimeError, match="startup validation complete"):
         _launch_subprocesses(args)
@@ -149,6 +151,7 @@ def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_typ
     try:
         assert select_mem_manager_class() is DeepseekV4MemoryManager
         meta = calcu_cpu_cache_meta()
+        assert meta.page_num > 0
         assert meta.token_page_size == meta.layer_num == meta.num_heads == 1
         assert args.cpu_cache_token_page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         assert meta.calcu_one_page_size() == meta.head_dim

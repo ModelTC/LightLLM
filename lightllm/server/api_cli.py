@@ -904,8 +904,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--cpu_cache_token_page_size",
         type=int,
         default=None,
-        help="""The token page size of cpu cache. Hybrid models use their checkpoint interval.
-        DeepSeek-V4 defaults to 2048 when big-page checkpoints are disabled; non-hybrid models default to 256.""",
+        help="""The token page size of cpu cache. Non-hybrid models default to 256.
+        Hybrid models use linear_att_hash_page_size * linear_att_page_block_num;
+        configure --linear_att_page_block_num to set their checkpoint interval.""",
     )
     parser.add_argument(
         "--cache_placement_strategy",

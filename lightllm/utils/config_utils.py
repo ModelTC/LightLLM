@@ -1,5 +1,4 @@
 import json
-import math
 import os
 from typing import Any, Dict, Optional, List
 from functools import lru_cache
@@ -43,20 +42,9 @@ def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
         return
 
     if is_hybrid_model:
-        if get_model_type(args.model_dir) == "deepseek_v4" and args.run_mode != "decode":
-            big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
-            if big_page_tokens > args.max_req_total_len:
-                # CPU pages need the same boundary snapshots as GPU prefix caching.
-                page_tokens = (
-                    args.cpu_cache_token_page_size
-                    or math.ceil(2048 / args.linear_att_hash_page_size) * args.linear_att_hash_page_size
-                )
-                assert page_tokens % args.linear_att_hash_page_size == 0
-                args.linear_att_page_block_num = page_tokens // args.linear_att_hash_page_size
         args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
         logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
-
-    if args.cpu_cache_token_page_size is None:
+    elif args.cpu_cache_token_page_size is None:
         args.cpu_cache_token_page_size = 256
 
 
