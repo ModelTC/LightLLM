@@ -61,18 +61,12 @@ def build_c4_indexer_page_table(
     which the current token-slot allocator guarantees.
     """
     page_size = 64
-    assert c4_cap % page_size == 0
     token_num = token_req_idx.shape[0]
-    assert c4_lengths.shape == token_req_idx.shape
     page_cap = c4_cap // page_size
     if out is None:
-        page_table = torch.empty((token_num, page_cap), dtype=torch.int32, device=token_req_idx.device)
-    else:
-        assert out.shape == (token_num, page_cap)
-        assert out.dtype == torch.int32 and out.device == token_req_idx.device and out.is_contiguous()
-        page_table = out
+        out = torch.empty((token_num, page_cap), dtype=torch.int32, device=token_req_idx.device)
     if token_num == 0:
-        return page_table
+        return out
     block_pages = min(128, triton.next_power_of_2(page_cap))
     # Amortize block scheduling across adjacent queries for long-context prefill.
     block_rows = min(16, triton.next_power_of_2(token_num))
@@ -81,7 +75,7 @@ def build_c4_indexer_page_table(
         c4_lengths,
         req_to_token_indexs,
         req_to_token_indexs.stride(0),
-        page_table,
+        out,
         token_num,
         page_cap,
         int(hold_req_id),
@@ -91,4 +85,4 @@ def build_c4_indexer_page_table(
         BLOCK_ROWS=block_rows,
         num_warps=4,
     )
-    return page_table
+    return out

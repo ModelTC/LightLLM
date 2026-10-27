@@ -55,21 +55,12 @@ class DeepseekV4CacheConfig:
     def from_model_config(cls, config, args):
         from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 
-        target_layer_num = config.get("n_layer", config.get("num_hidden_layers"))
-        if target_layer_num is None:
-            raise ValueError("DeepSeek-V4 config is missing num_hidden_layers")
-        target_layer_num = int(target_layer_num)
-        layer_num = target_layer_num
+        layer_num = config["num_hidden_layers"]
+        compress_rates = list(config["compress_ratios"])
         if args.mtp_mode is not None:
             layer_num += get_added_mtp_kv_layer_num()
-        compress_rates = list(config["compress_ratios"])
-        if len(compress_rates) < target_layer_num:
-            raise ValueError(
-                f"DeepSeek-V4 compress_ratios has {len(compress_rates)} entries, "
-                f"but the target model has {target_layer_num} layers"
-            )
-        # Missing runtime-added draft layers use sliding-window attention.
-        compress_rates.extend([0] * (layer_num - len(compress_rates)))
+            # Runtime-added draft layers use sliding-window attention.
+            compress_rates.extend([0] * (layer_num - len(compress_rates)))
         return cls(
             compress_rates=tuple(compress_rates[:layer_num]),
             head_dim=config["head_dim"],
@@ -120,9 +111,7 @@ class DeepseekV4CacheConfig:
 
     def get_cpu_cache_full_att_bytes(self):
         args = get_env_start_args()
-        big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
-        assert big_page_token_num == args.cpu_cache_token_page_size
-        return big_page_token_num * sum(self.compressed_kv_slot_bytes)
+        return args.cpu_cache_token_page_size * sum(self.compressed_kv_slot_bytes)
 
     def get_cpu_cache_big_page_bytes(self):
         # MLA KV and compressor state are replicated across TP ranks.

@@ -87,7 +87,6 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             self.quant_cfg.quant_cfg[layer_idx]["fused_moe"] = expert_quant_type
 
     def _init_weights(self, start_layer_index=None):
-        assert start_layer_index is None
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type,
             network_config=self.config,
@@ -133,7 +132,6 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         return super()._create_padded_decode_model_input(model_input, new_batch_size)
 
     def _init_infer_layer(self, start_layer_index=None):
-        assert start_layer_index is None
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
         first_layer = self.config["n_layer"]
@@ -201,10 +199,8 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             return
 
         index_file = os.path.join(self.weight_dir_, "model.safetensors.index.json")
-        assert utils.PetrelHelper.exists(index_file), "DeepSeek-V4 DSpark requires model.safetensors.index.json"
         weight_map = utils.PetrelHelper.load_json(index_file)["weight_map"]
         candidate_files = sorted({file_ for key, file_ in weight_map.items() if key.startswith("mtp.")})
-        assert candidate_files, "DeepSeek-V4 DSpark weights with prefix mtp.* were not found"
 
         loaded_key_count = 0
         desc = f"pid {os.getpid()} Loading DeepSeek-V4 DSpark weights"

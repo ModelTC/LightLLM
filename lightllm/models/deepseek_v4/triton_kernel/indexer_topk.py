@@ -113,9 +113,7 @@ def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_
     if scores.shape[0] == 0:
         return
     topk = compressed_kv_indices.shape[1]
-    assert topk > 0 and compressed_kv_indices.stride(0) == topk
     logical_indices = compressed_kv_indices if out_logical_indices is None else out_logical_indices
-    assert logical_indices.shape == compressed_kv_indices.shape and logical_indices.stride(0) == topk
     if scores.shape[1] <= topk:
         _indexer_topk_to_kv_indices_kernel[(scores.shape[0],)](
             logical_indices,

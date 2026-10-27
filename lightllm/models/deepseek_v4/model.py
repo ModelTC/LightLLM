@@ -206,7 +206,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # max_req_total_len / max_position_embeddings, up to 1M). Capping them shorter makes
         # init_some_extra_state's index_select(cos/sin, position_ids) read OOB past the table at
         # contexts beyond the cap (device-side assert / crash). ~268MB total at 1M, fp32x32 x4 views.
-        max_seq = max(int(self.max_seq_length), int(cfg.get("max_position_embeddings", 8192)))
+        max_seq = max(self.max_seq_length, cfg["max_position_embeddings"])
         freq_exponents = torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim
         positions = torch.arange(max_seq, dtype=torch.float32, device="cuda")
 
@@ -220,7 +220,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 beta_slow = rs.get("beta_slow", 1)
                 factor = rs.get("factor", 1)
                 if factor is None:
-                    factor = cfg.get("max_position_embeddings", max_seq) / orig_max
+                    factor = cfg["max_position_embeddings"] / orig_max
                 low, high = find_correction_range(beta_fast, beta_slow, dim, base, orig_max)
                 smooth = 1 - linear_ramp_mask(low, high, dim // 2).cuda()
                 freqs = freqs / factor * (1 - smooth) + freqs * smooth

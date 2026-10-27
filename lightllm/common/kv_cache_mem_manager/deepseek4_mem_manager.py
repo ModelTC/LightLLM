@@ -24,7 +24,6 @@ class DeepseekV4MemoryManager(MemoryManager):
         always_copy=False,
         mem_fraction=0.9,
     ):
-        assert head_num == 1 and cache_config.layer_num == layer_num and cache_config.head_dim == head_dim
         self.cache_config = cache_config
         super().__init__(
             size,

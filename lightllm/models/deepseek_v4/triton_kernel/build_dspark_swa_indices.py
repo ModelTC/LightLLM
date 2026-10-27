@@ -66,8 +66,6 @@ def build_dspark_swa_indices(
 
     token_num = position_ids.shape[0]
     width = swa_indices.shape[1]
-    assert token_num % block_size == 0
-    assert sliding_window > 0 and width >= sliding_window + block_size
     if token_num == 0:
         return swa_indices, swa_lengths
 

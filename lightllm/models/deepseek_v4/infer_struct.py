@@ -91,7 +91,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         has_vision = model.has_vision
         swa_width = self.req_manager.cache_config.sliding_window
         if has_vision and self.is_prefill:
-            swa_width += int(model.config.get("vision_max_n_token", 0))
+            swa_width += model.config["vision_max_n_token"]
         if (
             self.is_draft_model
             and model.args.mtp_mode == "dspark"

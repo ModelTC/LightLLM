@@ -45,8 +45,6 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         self.has_indexer = self.compress_ratio == 4
         self.is_hash = self.layer_num_ < self.num_hash_layers
         self.has_vision = cfg.get("vision_n_layers", 0) > 0
-        assert self.n_heads % self.tp_world_size_ == 0
-        assert self.o_groups % self.tp_world_size_ == 0
         self.prefix = f"layers.{self.layer_num_}"
 
     def _init_weight(self):

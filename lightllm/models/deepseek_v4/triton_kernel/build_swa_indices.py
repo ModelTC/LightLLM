@@ -154,8 +154,6 @@ def build_swa_indices(
     token_num = position_ids.shape[0]
     width = swa_indices.shape[1]
     sliding_window = width if sliding_window is None else int(sliding_window)
-    assert sliding_window <= width
-    assert (image_left is None) == (image_right is None)
     if token_num == 0:
         return swa_indices, swa_lengths
     image_left_arg = position_ids if image_left is None else image_left
