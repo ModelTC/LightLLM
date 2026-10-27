@@ -44,8 +44,10 @@ class MultiLevelKVCacheManager:
         self.cpu_cache_time_out = 0.5
         self.recv_queue = Queue(maxsize=1024)
         self.send_to_router_queue = Queue(maxsize=args.running_max_req_size)
+        self.send_to_router_init = concurrent.futures.Future()
         self.send_to_router_thread = threading.Thread(target=self.send_loop, daemon=True)
         self.send_to_router_thread.start()
+        self.send_to_router_init.result()
         self.cpu_cache_thread = threading.Thread(target=self.cpu_cache_hanle_loop, daemon=True)
         self.cpu_cache_thread.start()
 
@@ -216,12 +218,18 @@ class MultiLevelKVCacheManager:
         return
 
     def send_loop(self):
-        with self.context.socket(zmq.PUSH) as send_to_router:
-            send_to_router.connect(self.router_addr)
-            logger.debug(f"send_to_router sendhwm {send_to_router.getsockopt(zmq.SNDHWM)}")
-            while True:
-                group_req_indexes = self.send_to_router_queue.get()
-                send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+        try:
+            with self.context.socket(zmq.PUSH) as send_to_router:
+                send_to_router.connect(self.router_addr)
+                logger.debug(f"send_to_router sendhwm {send_to_router.getsockopt(zmq.SNDHWM)}")
+                self.send_to_router_init.set_result(None)
+                while True:
+                    group_req_indexes = self.send_to_router_queue.get()
+                    send_to_router.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
+        except Exception as e:
+            if self.send_to_router_init.done():
+                raise
+            self.send_to_router_init.set_exception(e)
 
     def recv_loop(self):
         try:
