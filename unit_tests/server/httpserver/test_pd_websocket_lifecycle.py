@@ -39,7 +39,10 @@ def _manager(monkeypatch, **overrides):
 
 
 def test_rejected_registration_does_not_remove_an_existing_connection(monkeypatch):
-    manager = _manager(monkeypatch, register_pd=AsyncMock(side_effect=ValueError("wrong model parameters")))
+    manager = _manager(
+        monkeypatch,
+        register_pd=AsyncMock(side_effect=ValueError("wrong model parameters")),
+    )
     websocket = _websocket()
     with pytest.raises(ValueError, match="wrong model parameters"):
         asyncio.run(api_http_pd.register_and_keep_alive(websocket))
@@ -51,6 +54,7 @@ def test_heartbeat_wait_is_bounded(monkeypatch):
         original_wait_for = asyncio.wait_for
         original_fail_after = api_http_pd.fail_after
         timeouts = []
+        from anyio import fail_after
 
         async def wait_forever():
             await asyncio.Event().wait()

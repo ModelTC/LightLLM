@@ -16,7 +16,9 @@ from lightllm.server.core.objs.sampling_params import (
     JSON_SCHEMA_MAX_LENGTH,
     GRAMMAR_CONSTRAINT_MAX_LENGTH,
 )
-from lightllm.server.core.objs.py_sampling_params import SamplingParams as PySamplingParams
+from lightllm.server.core.objs.py_sampling_params import (
+    SamplingParams as PySamplingParams,
+)
 
 grammar_str = r"""root ::= (expr "=" term)+
 expr ::= term ([-+*/] term)*
@@ -90,7 +92,12 @@ def test_string_stops_are_not_encoded_and_round_trip_with_token_ids(mode):
     assert serialized["stop_sequences"] == stops
     restored = SamplingParams()
     restored.init(tokenizer, **serialized)
-    for candidate in (params, restored, SamplingParams.from_buffer_copy(params), pickle.loads(pickle.dumps(params))):
+    for candidate in (
+        params,
+        restored,
+        SamplingParams.from_buffer_copy(params),
+        pickle.loads(pickle.dumps(params)),
+    ):
         assert candidate.stop_sequences.to_token_ids_list() == [[10, 11]]
         assert candidate.stop_sequences.to_stop_str_list() == ["END", "结束"]
         assert candidate.stop_str_match_mode.get_mode() == mode
@@ -121,11 +128,13 @@ def test_guided_grammar_initialization():
 
 
 def test_guided_json_schema_initialization():
+    from lightllm.utils.error_utils import InvalidRequestError
+
     schema = GuidedJsonSchema()
     schema.initialize(schema_str, None)
     assert schema.to_str() == schema_str
 
-    with pytest.raises(ValueError, match="Guided json schema is too long"):
+    with pytest.raises(InvalidRequestError):
         schema.initialize("a" * (JSON_SCHEMA_MAX_LENGTH + 1), None)
 
 
@@ -192,7 +201,11 @@ def test_sampling_params_initialization():
 
 @pytest.mark.parametrize(
     "kwargs,expected",
-    [({}, False), ({"include_stop_str_in_output": False}, False), ({"include_stop_str_in_output": True}, True)],
+    [
+        ({}, False),
+        ({"include_stop_str_in_output": False}, False),
+        ({"include_stop_str_in_output": True}, True),
+    ],
 )
 def test_include_stop_str_in_output_round_trip(kwargs, expected):
     params = SamplingParams()
@@ -215,7 +228,10 @@ def test_include_stop_str_in_output_round_trip(kwargs, expected):
     [
         ({}, StopStrMatchMode.ALL_TEXT),
         ({"stop_str_match_mode": StopStrMatchMode.ALL_TEXT}, StopStrMatchMode.ALL_TEXT),
-        ({"stop_str_match_mode": StopStrMatchMode.CONTENT_ONLY}, StopStrMatchMode.CONTENT_ONLY),
+        (
+            {"stop_str_match_mode": StopStrMatchMode.CONTENT_ONLY},
+            StopStrMatchMode.CONTENT_ONLY,
+        ),
     ],
 )
 def test_stop_matching_policy_round_trip(kwargs, expected):
@@ -229,7 +245,12 @@ def test_stop_matching_policy_round_trip(kwargs, expected):
     restored = SamplingParams()
     restored.init(None, **serialized)
     py_params = PySamplingParams(**kwargs)
-    for candidate in (params, SamplingParams.from_buffer_copy(params), restored, py_params):
+    for candidate in (
+        params,
+        SamplingParams.from_buffer_copy(params),
+        restored,
+        py_params,
+    ):
         assert candidate.stop_str_match_mode.get_mode() == expected
         assert candidate.stop_str_match_mode.is_all_text() is (expected == StopStrMatchMode.ALL_TEXT)
         assert candidate.stop_str_match_mode.is_content_only() is (expected == StopStrMatchMode.CONTENT_ONLY)
@@ -238,7 +259,7 @@ def test_stop_matching_policy_round_trip(kwargs, expected):
     assert py_restored.stop_str_match_mode.get_mode() == expected
 
 
-@pytest.mark.parametrize("mode", [-1, 0, 3, 2 ** 32, "CONTENT_ONLY", None, 0.0])
+@pytest.mark.parametrize("mode", [-1, 0, 3, 2**32, "CONTENT_ONLY", None, 0.0])
 def test_invalid_stop_str_match_mode(mode):
     params = SamplingParams()
     with pytest.raises((ValueError, TypeError)):

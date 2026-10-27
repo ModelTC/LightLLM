@@ -9,6 +9,7 @@ from lightllm.server.router.model_infer.infer_batch import g_infer_context, Infe
 from lightllm.server.core.objs import FinishStatus
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import kv_trans_use_p2p
+from lightllm.utils.pd_timeout_utils import get_pd_kv_transfer_timeout_seconds
 
 logger = init_logger(__name__)
 
@@ -301,7 +302,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
             start_kv_index=kv_start_index,
             end_kv_index=kv_end_index,
             request_kv_len=req_obj.shm_req.input_len,
-            time_out_secs=180,
+            time_out_secs=get_pd_kv_transfer_timeout_seconds(),
             pd_master_node_id=req_obj.sampling_param.pd_master_node_id,
             prefill_dp_index=None,
             decode_dp_index=self.dp_rank_in_node,
