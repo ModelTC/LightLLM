@@ -503,7 +503,9 @@ def _launch_subprocesses(args: StartArgs):
     ports_to_check = [args.port]
     if args.dp == 1 and args.nnodes > 1:
         ports_to_check.extend([args.multinode_httpmanager_port, args.multinode_router_gloo_port])
-    if args.node_rank == 0 and args.nccl_port is not None:
+    # ConfigServer owns and replaces its rendezvous store on group restart.
+    # A collocated rank zero must not reject that existing listener as its own.
+    if args.node_rank == 0 and args.nccl_port is not None and not args.use_config_server_to_init_nccl:
         ports_to_check.append(args.nccl_port)
     validate_ports(ports_to_check)
 
