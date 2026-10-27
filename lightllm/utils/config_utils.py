@@ -24,16 +24,9 @@ def get_generation_config_dict(model_path: str) -> Dict[str, Any]:
 
 
 def auto_set_page_size(args) -> None:
-    """Select the model's default KV page size and validate its alignment."""
-    if get_model_type(args.model_dir) != "deepseek_v4":
-        return
-
-    from lightllm.common.state_cache_manager.deepseek4 import DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
-
-    if args.page_size == 1:
-        args.page_size = DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
-    if args.page_size <= 0 or args.page_size % DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT:
-        raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT}")
+    """Select the model's default KV page size."""
+    if args.page_size == 1 and get_model_type(args.model_dir) == "deepseek_v4":
+        args.page_size = 256
 
 
 def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:

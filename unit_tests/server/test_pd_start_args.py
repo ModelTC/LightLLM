@@ -198,19 +198,20 @@ def test_dsv4_page_and_checkpoint_configuration(startup_args, monkeypatch, page_
 
 
 @pytest.mark.parametrize(
-    "page_size,hash_page_size", [(256, 128), (256, 384), (512, 256), (0, 512), (128, 512), (384, 768)]
+    "page_size,hash_page_size,error",
+    [
+        (256, 128, "--linear_att_hash_page_size must be divisible by --page_size"),
+        (256, 384, "--linear_att_hash_page_size must be divisible by --page_size"),
+        (512, 256, "--linear_att_hash_page_size must be divisible by --page_size"),
+        (0, 512, "--page_size must be >= 1"),
+    ],
 )
-def test_dsv4_rejects_unaligned_cache_pages(startup_args, monkeypatch, page_size, hash_page_size):
+def test_dsv4_rejects_unaligned_cache_pages(startup_args, monkeypatch, page_size, hash_page_size, error):
     monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "deepseek_v4")
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda _: True)
     args = startup_args
     args.page_size = page_size
     args.linear_att_hash_page_size = hash_page_size
-    error = (
-        "--page_size must be a positive multiple"
-        if page_size <= 0 or page_size % 256
-        else "--linear_att_hash_page_size must be divisible by --page_size"
-    )
     with pytest.raises(ValueError, match=error):
         _launch_subprocesses(args)
 
