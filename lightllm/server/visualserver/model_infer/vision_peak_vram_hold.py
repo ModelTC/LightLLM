@@ -13,6 +13,7 @@ from PIL import Image
 from lightllm.server.embed_cache.utils import create_shm, free_shm, get_shm_name_data
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_module
 
 logger = init_logger(__name__)
 
@@ -43,9 +44,9 @@ class VisionPeakVramHolder:
         vit_tp: int = 1,
         dp_rank_id: int = 0,
     ) -> int:
-        torch.cuda.set_device(device_id)
-        baseline_reserved = torch.cuda.memory_reserved(device_id)
-        torch.cuda.reset_peak_memory_stats(device_id)
+        get_device_module().set_device(device_id)
+        baseline_reserved = get_device_module().memory_reserved(device_id)
+        get_device_module().reset_peak_memory_stats(device_id)
 
         gloo_group = dist.new_group(ranks=list(range(vit_tp)), backend="gloo")
 
@@ -71,7 +72,7 @@ class VisionPeakVramHolder:
             if tp_rank_id == 0:
                 self._free_image_items(image_items)
 
-        peak_reserved = torch.cuda.max_memory_reserved(device_id)
+        peak_reserved = get_device_module().max_memory_reserved(device_id)
         return int(max(0, peak_reserved - baseline_reserved))
 
     def _worst_case_image_size(self, max_image_pixels: int) -> Tuple[int, int]:

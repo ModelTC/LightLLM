@@ -23,6 +23,7 @@ from lightllm.utils.shm_utils import create_or_link_shm
 from multiprocessing.reduction import ForkingPickler
 from filelock import FileLock
 from .operator import BaseMemManagerOperator, NormalMemOperator
+from lightllm.platform import get_device_module, get_device_type
 
 logger = init_logger(__name__)
 
@@ -93,7 +94,7 @@ class MemoryManager:
         if self.size is not None:
             return
 
-        torch.cuda.empty_cache()
+        get_device_module().empty_cache()
         world_size = dist.get_world_size()
         available_memory = get_available_gpu_memory(world_size) - get_total_gpu_memory() * (1 - mem_fraction)
         cell_size = self.get_cell_size()
@@ -101,7 +102,7 @@ class MemoryManager:
         available_memory_bytes = available_memory * 1024 ** 3 - pd_kv_move_buffer_size
         self.size = int(available_memory_bytes / cell_size)
         if world_size > 1:
-            tensor = torch.tensor(self.size, dtype=torch.int64, device=f"cuda:{get_current_device_id()}")
+            tensor = torch.tensor(self.size, dtype=torch.int64, device=f"{get_device_type()}:{get_current_device_id()}")
             dist.all_reduce(tensor, op=dist.ReduceOp.MIN)
             self.size = tensor.item()
         logger.info(
@@ -118,12 +119,12 @@ class MemoryManager:
         # 这一页用于多 DP、overlap microbatch 等模式下的 padding 请求，
         # 页内索引存储在 HOLD_TOKEN_MEMINDEXES 中，与 req_manager 的 HOLD_REQUEST_ID 作用类似。
         self.kv_buffer = torch.empty(
-            (layer_num, size + self.page_size, 2 * head_num, head_dim), dtype=dtype, device="cuda"
+            (layer_num, size + self.page_size, 2 * head_num, head_dim), dtype=dtype, device=get_device_type()
         )
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size) -> torch.Tensor:
         self.kv_move_buffer = torch.empty(
-            self.get_paged_kv_move_buffer_shape(page_num, page_size), dtype=self.dtype, device="cuda"
+            self.get_paged_kv_move_buffer_shape(page_num, page_size), dtype=self.dtype, device=get_device_type()
         )
         self._buffer_mem_indexes_tensors = [
             torch.empty((page_size,), dtype=torch.int64, device="cpu", pin_memory=True) for _ in range(page_num)
@@ -144,7 +145,7 @@ class MemoryManager:
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        mem_indexes_gpu = pin_mem_indexes.to(get_device_type(), non_blocking=True)
         repeat_count = dp_world_size * self.kv_buffer.shape[2] // self.kv_move_buffer.shape[3]
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
         for tp_index in range(dp_world_size):
@@ -176,10 +177,10 @@ class MemoryManager:
         cur_page = self.kv_move_buffer[page_index]
         pin_mem_indexes = self._buffer_mem_indexes_tensors[page_index][0 : len(mem_indexes)]
         pin_mem_indexes.numpy()[:] = mem_indexes
-        mem_indexes_gpu = pin_mem_indexes.cuda(non_blocking=True)
+        mem_indexes_gpu = pin_mem_indexes.to(get_device_type(), non_blocking=True)
         dp_mems = mem_managers[(dp_index * dp_world_size) : ((dp_index + 1) * dp_world_size)]
-        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
+        mem_indexes_gpu = torch.tensor(mem_indexes, dtype=torch.int64, device="cpu", pin_memory=True).to(
+            get_device_type(), non_blocking=True
         )
         for tp_index in range(dp_world_size):
             page_io(

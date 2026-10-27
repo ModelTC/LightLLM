@@ -4,6 +4,7 @@ from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
@@ -31,7 +32,7 @@ class NormalMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
-        assert mem_indexes.is_cuda and page_indexes.is_cuda
+        assert (mem_indexes.device.type == get_device_type()) and (page_indexes.device.type == get_device_type())
         args = get_env_start_args()
         assert len(mem_indexes) % args.cpu_cache_token_page_size == 0
         from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
@@ -60,7 +61,7 @@ class NormalMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
-        assert mem_indexes.is_cuda and page_indexes.is_cuda
+        assert (mem_indexes.device.type == get_device_type()) and (page_indexes.device.type == get_device_type())
         args = get_env_start_args()
         assert len(mem_indexes) % args.cpu_cache_token_page_size == 0
         assert len(mem_indexes) // args.cpu_cache_token_page_size == len(page_indexes)
@@ -104,7 +105,7 @@ class NormalMemOperator(BaseMemManagerOperator):
 
         # 一次性传输所有层
         kv_trans_for_dp(
-            input_mems=self.mem_ptrs_tensor.cuda(non_blocking=True),
+            input_mems=self.mem_ptrs_tensor.to(get_device_type(), non_blocking=True),
             input_idx=move_token_indexes,
             input_dp_idx=token_dp_indexes,
             output=self.mem_manager.kv_buffer,

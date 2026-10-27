@@ -27,6 +27,7 @@ from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
 from lightllm.server.router.model_infer.infer_req_ext import FinalTokenMetadataExt, PromptSelectedLogprobsExt
 from lightllm.server.router.model_infer.structured_output.state import ConstraintState
+from lightllm.platform import get_device_module, get_device_type
 
 if TYPE_CHECKING:
     from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
@@ -102,12 +103,12 @@ class InferenceContext:
 
     def get_overlap_stream(self) -> torch.cuda.Stream:
         if self.overlap_stream is None:
-            self.overlap_stream = torch.cuda.Stream()
+            self.overlap_stream = get_device_module().Stream()
         return self.overlap_stream
 
     def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
         if self.cpu_kv_cache_stream is None:
-            self.cpu_kv_cache_stream = torch.cuda.Stream()
+            self.cpu_kv_cache_stream = get_device_module().Stream()
         return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
@@ -602,7 +603,7 @@ class InferReq:
 
         self.generator = None
         if self.sampling_param.shm_param.seed != -1:
-            self.generator = torch.Generator(device="cuda")
+            self.generator = torch.Generator(device=get_device_type())
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
         if init_prefix_cache:

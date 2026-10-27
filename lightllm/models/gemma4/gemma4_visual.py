@@ -12,6 +12,7 @@ from lightllm.server.embed_cache.utils import get_shm_name_data, read_shm
 from lightllm.server.multimodal_params import ImageItem
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
+from lightllm.platform import get_device_type
 
 
 logger = init_logger(__name__)
@@ -73,9 +74,9 @@ class Gemma4VisionModel:
         return self
 
     def cuda(self):
-        self.device = torch.device("cuda")
-        self.vision_tower = self.vision_tower.cuda()
-        self.embed_vision = self.embed_vision.cuda()
+        self.device = torch.device(get_device_type())
+        self.vision_tower = self.vision_tower.to(get_device_type())
+        self.embed_vision = self.embed_vision.to(get_device_type())
         return self
 
     def forward(self, pixel_values, image_position_ids):

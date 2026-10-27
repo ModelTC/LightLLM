@@ -9,6 +9,7 @@ from io import BytesIO
 from lightllm.server.multimodal_params import MultimodalParams, ImageItem
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 
 logger = init_logger(__name__)
@@ -94,14 +95,14 @@ class LlavaVisionModel:
                         self.projector_weights[k] = v.half()
 
     def cuda(self):
-        self.vision_tower = self.vision_tower.cuda()
+        self.vision_tower = self.vision_tower.to(get_device_type())
         for k, v in self.projector_weights.items():
-            self.projector_weights[k] = v.cuda()
+            self.projector_weights[k] = v.to(get_device_type())
         return self
 
     # batch images infer
     def forward(self, x):
-        x = x.half().cuda()
+        x = x.half().to(get_device_type())
         x = self.vision_tower(x, output_hidden_states=True)
         x = x.hidden_states[self.select_layer]
         if self.select_feature == "patch" or self.select_feature == "default":

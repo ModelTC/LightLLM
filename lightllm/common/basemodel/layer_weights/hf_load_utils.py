@@ -5,13 +5,14 @@ from safetensors import safe_open
 from tqdm import tqdm
 import lightllm.utils.petrel_helper as utils
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.platform import get_device_module
 
 
 def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_layer_list=None, weight_dir=None):
     # fix bug for 多线程加载的时候，每个线程内部的cuda device 会切回 0， 修改后来保证不会出现bug
     import torch.distributed as dist
 
-    torch.cuda.set_device(get_current_device_id())
+    get_device_module().set_device(get_current_device_id())
 
     if use_safetensors:
         weights = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")

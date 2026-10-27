@@ -5,6 +5,7 @@ from typing import NamedTuple
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 class SelectedMtpRows(NamedTuple):
@@ -105,7 +106,7 @@ def select_accepted_tail_rows(
     """Select one accepted-tail row per request in a single CUDA kernel."""
 
     req_num = b_req_mtp_start_loc.shape[0]
-    assert input_ids.is_cuda
+    assert input_ids.device.type == get_device_type()
     assert hidden.ndim == 2 and hidden.shape[0] == input_ids.shape[0]
     assert hidden.shape[1] > 0
     tensors = (
@@ -119,7 +120,7 @@ def select_accepted_tail_rows(
         b_shared_radix_node_id,
         b_position_delta,
     )
-    assert all(tensor.is_cuda and tensor.device == input_ids.device for tensor in tensors)
+    assert all((tensor.device.type == get_device_type()) and tensor.device == input_ids.device for tensor in tensors)
 
     selected = SelectedMtpRows(
         input_ids=input_ids.new_empty((req_num,)),

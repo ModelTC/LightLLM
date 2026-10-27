@@ -240,7 +240,7 @@ class StartArgs:
     enable_rl: bool = field(default=False)
     enable_torch_memory_saver: bool = field(default=False)
     enable_weight_cpu_backup: bool = field(default=False)
-    hardware_platform: str = field(default="cuda", metadata={"choices": ["cuda", "musa"]})
+    hardware_platform: str = field(default="auto", metadata={"choices": ["auto", "cuda", "musa", "xpu"]})
     enable_torch_fallback: bool = field(default=False)
     enable_triton_fallback: bool = field(default=False)
 
@@ -254,3 +254,6 @@ class StartArgs:
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)
     linear_att_cache_size: Optional[int] = field(default=None)
     linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
+
+    extra_ops: Optional[str] = field(default=None)
+    extra_att: Optional[str] = field(default=None)

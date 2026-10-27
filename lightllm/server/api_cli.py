@@ -987,9 +987,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--hardware_platform",
         type=str,
-        default="cuda",
-        choices=["cuda", "musa"],
-        help="""Hardware platform: cuda | musa""",
+        default="auto",
+        choices=["auto", "cuda", "musa", "xpu"],
+        help="""Hardware platform: auto | cuda | musa | xpu. auto detects it from the installed torch build:
+                CUDA, ROCm and MUSA builds run as cuda, XPU builds as xpu.""",
     )
     parser.add_argument(
         "--enable_torch_fallback",
@@ -1024,6 +1025,20 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 'nvtx': will add NVTX marks for external profiler like NVIDIA Nsight System
                 (you should set it up by yourself).
                 A NVTX range named 'LIGHTLLM_PROFILE' will be added within the profiling range.""",
+    )
+    parser.add_argument(
+        "--extra_ops",
+        type=str,
+        default=None,
+        help="""Extra ops plugin(s) to load at startup, comma-separated names.
+                Each name must match a pip-installed plugin.""",
+    )
+    parser.add_argument(
+        "--extra_att",
+        type=str,
+        default=None,
+        help="""Extra att plugin(s) to load at startup, comma-separated names.
+                Each name must match a pip-installed plugin.""",
     )
     return parser
 

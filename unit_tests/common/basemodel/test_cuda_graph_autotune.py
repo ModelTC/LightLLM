@@ -11,7 +11,7 @@ from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneL
 
 
 @pytest.fixture
-def capture_env(monkeypatch):
+def capture_env(monkeypatch, cuda_platform):
     env = SimpleNamespace(capturing=False, capture_count=0, graphs=[])
     env.args = SimpleNamespace(
         enable_decode_microbatch_overlap=False,

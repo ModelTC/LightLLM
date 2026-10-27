@@ -2,6 +2,7 @@ import torch
 from typing import Dict, Tuple
 from .base_weight import BaseWeightTpl
 from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.platform import get_device_type
 
 
 class TpAttSinkWeight(BaseWeightTpl):
@@ -15,7 +16,7 @@ class TpAttSinkWeight(BaseWeightTpl):
 
     def _create_weight(self):
         self.weight = torch.empty(
-            (self._end_head_index - self._start_head_index,), dtype=self.data_type_, device="cuda"
+            (self._end_head_index - self._start_head_index,), dtype=self.data_type_, device=get_device_type()
         )
         self.weight.load_ok = False
 
@@ -25,7 +26,9 @@ class TpAttSinkWeight(BaseWeightTpl):
 
         t_weight = weights[self.weight_name]
         self.weight = (
-            t_weight[self._start_head_index : self._end_head_index].to(self.data_type_).cuda(get_current_device_id())
+            t_weight[self._start_head_index : self._end_head_index]
+            .to(self.data_type_)
+            .to(torch.device(get_device_type(), get_current_device_id()))
         )
         self.weight.load_ok = True
 

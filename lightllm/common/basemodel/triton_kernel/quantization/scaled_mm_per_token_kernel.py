@@ -4,6 +4,7 @@ import triton.language as tl
 from typing import Optional
 from lightllm.common.triton_utils.autotuner import autotune
 from lightllm.utils.device_utils import triton_support_tensor_descriptor, is_5090_gpu
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -228,7 +229,7 @@ def scaled_mm_per_token(
     if support_tma:
         # TMA descriptors require a global memory allocation
         def alloc_fn(size: int, alignment: int, stream: Optional[int]):
-            return torch.empty(size, device="cuda", dtype=torch.int8)
+            return torch.empty(size, device=get_device_type(), dtype=torch.int8)
 
         triton.set_allocator(alloc_fn)
 

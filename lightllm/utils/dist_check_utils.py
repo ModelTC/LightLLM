@@ -10,6 +10,7 @@ import threading
 from typing import TYPE_CHECKING, Callable
 
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import resolve_platform_name
 
 if TYPE_CHECKING:
     from lightllm.server.core.objs.start_args_type import StartArgs
@@ -44,7 +45,7 @@ def _start_two_gpu_check_timeout_watchdog(backend_name: str) -> threading.Event:
 
 
 def _should_run_allreduce_capability_check(args: "StartArgs") -> bool:
-    if args.hardware_platform != "cuda":
+    if resolve_platform_name(args.hardware_platform) != "cuda":
         return False
 
     return (args.tp // args.dp) in _CUSTOM_ALLREDUCE_WORLD_SIZES

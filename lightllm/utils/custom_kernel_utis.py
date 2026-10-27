@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from typing import List
+from lightllm.platform import get_device_module, get_device_type
 
 
 def custom_cat(tensors):
@@ -12,7 +13,7 @@ def custom_cat(tensors):
     if not isinstance(tensors, (list, tuple)):
         raise ValueError("Input must be a list of tensors")
 
-    assert tensors[0].is_cuda and len(tensors[0].shape) == 1
+    assert (tensors[0].device.type == get_device_type()) and len(tensors[0].shape) == 1
     sizes = [t.shape[0] for t in tensors]
     dest_size = sum(sizes)
     out_tensor = torch.empty((dest_size,), dtype=tensors[0].dtype, device="cpu", pin_memory=True)
@@ -21,7 +22,7 @@ def custom_cat(tensors):
     for t, size in zip(tensors, sizes):
         out_tensor[start_loc : (start_loc + size)].copy_(t, non_blocking=True)
         start_loc += size
-    torch.cuda.current_stream().synchronize()
+    get_device_module().current_stream().synchronize()
 
     return out_tensor
 

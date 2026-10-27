@@ -5,6 +5,7 @@ import torch
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 
 logger = init_logger("lightllm.common.req_manager")
@@ -63,7 +64,7 @@ class ReqManager:
         page_size = get_env_start_args().page_size
         max_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
         self.req_to_token_indexs = torch.zeros(
-            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
+            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device=get_device_type()
         )
         self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
         self.max_request_num = max_request_num

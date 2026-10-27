@@ -1,4 +1,5 @@
 import torch
+from lightllm.platform import get_device_type
 
 
 def gqa_token_decode_attention_flash_decoding(
@@ -32,8 +33,10 @@ def gqa_token_decode_attention_flash_decoding(
     else:
         block_num = 32
 
-    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device="cuda")
-    mid_o_logexpsum = alloc_tensor_func([batch_size, q_head_num, block_num], dtype=torch.float32, device="cuda")
+    mid_o = alloc_tensor_func([batch_size, q_head_num, block_num, head_dim], dtype=q.dtype, device=get_device_type())
+    mid_o_logexpsum = alloc_tensor_func(
+        [batch_size, q_head_num, block_num], dtype=torch.float32, device=get_device_type()
+    )
 
     flash_decode_stage1(
         q=q.view(calcu_shape1),

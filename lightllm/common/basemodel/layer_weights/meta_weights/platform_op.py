@@ -2,6 +2,7 @@ import torch
 from abc import ABC, abstractmethod
 from typing import Optional, Callable, Any
 from lightllm.utils.device_utils import get_platform, Platform
+from lightllm.platform import get_platform_name
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
@@ -16,7 +17,7 @@ class PlatformAwareOp(ABC):
 
     def __init__(self):
         args = get_env_start_args()
-        self.platform = get_platform(args.hardware_platform)
+        self.platform = get_platform(get_platform_name())
         self.enable_torch_fallback = args.enable_torch_fallback
         self.enable_triton_fallback = args.enable_triton_fallback
         self._forward = self._route_forward()
@@ -29,6 +30,7 @@ class PlatformAwareOp(ABC):
             Platform.CAMBRICON: "_cambricon_forward",
             Platform.MUSA: "_musa_forward",
             Platform.ROCM: "_rocm_forward",
+            Platform.XPU: "_xpu_forward",
             Platform.CPU: "_cpu_forward",
         }
 

@@ -68,6 +68,7 @@ import numpy as np
 from typing import ClassVar, Dict, Optional, Tuple
 from lightllm.common.basemodel.triton_kernel.routing_capture import scatter_routing_topk_to_cpu
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 logger = init_logger(__name__)
 
@@ -209,7 +210,9 @@ class MoeRouteInfoManager:
             device="cpu",
             pin_memory=True,
         )
-        self.routing_buffer_ptr = torch.tensor([self.routing_buffer.data_ptr()], dtype=torch.uint64, device="cuda")
+        self.routing_buffer_ptr = torch.tensor(
+            [self.routing_buffer.data_ptr()], dtype=torch.uint64, device=get_device_type()
+        )
 
         logger.info(
             f"MoeRouteInfoManager capture buffer ready: kv_cache_size={kv_cache_size}, "
@@ -223,8 +226,8 @@ class MoeRouteInfoManager:
         moe_layer_index = self.layer_index_to_moe_index.get(layer_index)
         if moe_layer_index is None:
             return None
-        if not mem_indexes.is_cuda:
-            mem_indexes = mem_indexes.cuda(non_blocking=True)
+        if not (mem_indexes.device.type == get_device_type()):
+            mem_indexes = mem_indexes.to(get_device_type(), non_blocking=True)
 
         # Captures MoE topk ids for this layer and scatters them into the pinned CPU buffer.
         def moe_capture_callback(topk_ids: torch.Tensor) -> None:
@@ -252,7 +255,7 @@ class MoeRouteInfoManager:
     def extract(self, mem_indexes: torch.Tensor) -> np.ndarray:
         if not self.is_buffer_initialized():
             return
-        cpu_indexes = mem_indexes.cpu() if mem_indexes.is_cuda else mem_indexes
+        cpu_indexes = mem_indexes.cpu() if (mem_indexes.device.type == get_device_type()) else mem_indexes
         return self.routing_buffer[cpu_indexes, :, :].numpy()
 
 

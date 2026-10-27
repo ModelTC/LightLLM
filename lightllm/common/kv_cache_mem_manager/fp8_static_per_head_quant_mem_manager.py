@@ -9,6 +9,7 @@ from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from .mem_manager import MemoryManager
 from .operator import FP8StaticPerHeadQuantMemOperator
+from lightllm.platform import get_device_type
 
 logger = init_logger(__name__)
 
@@ -29,7 +30,7 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
 
         all_head_num = cfg["num_head"]
         # A joint target+draft config uses its leading target scale rows on a target-only server.
-        all_scales = all_scales[: self.layer_num].to(device="cuda")
+        all_scales = all_scales[: self.layer_num].to(device=get_device_type())
 
         factor = (get_dp_world_size() * head_num) // all_head_num
         all_scales = torch.repeat_interleave(input=all_scales, repeats=factor, dim=-1)
@@ -42,9 +43,9 @@ class FP8StaticPerHeadQuantMemManager(MemoryManager):
         v_scales = all_scales[:, v_offset + start_head : v_offset + end_head].contiguous()
         self.scales = torch.cat((k_scales, v_scales), dim=-1)
 
-        all_q_scales = torch.tensor(q_cfg["scales"], dtype=torch.float32, device="cuda").view(q_cfg["scales_shape"])[
-            : self.layer_num
-        ]
+        all_q_scales = torch.tensor(q_cfg["scales"], dtype=torch.float32, device=get_device_type()).view(
+            q_cfg["scales_shape"]
+        )[: self.layer_num]
         q_factor = (get_dp_world_size() * head_num) // q_cfg["num_head"]
         all_q_scales = torch.repeat_interleave(input=all_q_scales, repeats=q_factor, dim=-1)
         self.q_scales = all_q_scales[:, start_head:end_head].contiguous()

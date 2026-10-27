@@ -85,8 +85,32 @@ You can also install Lightllm from source:
     $ ./generate_requirements_musa.sh
     $ pip install -r requirements-musa.txt
     $
+    $ # Install Lightllm dependencies (Intel XPU)
+    $ pip install torch torchvision --index-url https://download.pytorch.org/whl/xpu
+    $ ./generate_requirements_xpu.sh
+    $ pip install -r requirements-xpu.txt
+    $ pip install --no-deps xgrammar==0.2.8
+    $
     $ # Install Lightllm
     $ python setup.py install
+
+Intel XPU
+^^^^^^^^^
+
+On Intel GPUs install Lightllm with ``pip install --no-deps -e .`` (``setup.py`` lists the CUDA ``triton`` wheel,
+the XPU build of torch ships ``pytorch-triton-xpu``). The platform is detected from the torch build
+(``--hardware_platform auto`` is the default), pass ``--hardware_platform xpu`` to set it explicitly:
+
+.. code-block:: console
+
+    $ ZE_AFFINITY_MASK=0 python -m lightllm.server.api_server --model_dir /path/to/Qwen3-8B \
+    $     --tp 1 --max_req_total_len 24576
+
+* The Triton attention backends and kernels are used, the distributed backend is ``xccl``.
+* Graph capture is off by default, set ``LIGHTLLM_XPU_ENABLE_GRAPH=1`` to try it.
+* Use ``ZE_AFFINITY_MASK`` to select the cards.
+* Not supported yet: quantized checkpoints, ``--enable_ep_moe``, ``--mtp_mode``, PD disaggregation,
+  ``--enable_cpu_cache``, ``--enable_dp_prompt_cache_fetch``, ``--enable_torch_memory_saver``.
 
 Installation with uv
 --------------------

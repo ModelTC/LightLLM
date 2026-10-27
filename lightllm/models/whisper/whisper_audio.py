@@ -7,6 +7,7 @@ from typing import List, Union
 from safetensors.torch import load_file
 from transformers.processing_utils import ProcessorMixin
 from lightllm.server.multimodal_params import AudioItem
+from lightllm.platform import get_device_type
 
 
 # tokenizer_class removed
@@ -91,10 +92,10 @@ class WhisperAudioModel:
             self.data_type = torch.float16
 
     def cuda(self):
-        self.audio = self.audio.cuda()
+        self.audio = self.audio.to(get_device_type())
         for k, v in self.projector_weights.items():
-            self.projector_weights[k] = v.cuda()
-        self.device = torch.device("cuda")
+            self.projector_weights[k] = v.to(get_device_type())
+        self.device = torch.device(get_device_type())
         return self
 
     def load_model(self, weight_dir, config):
@@ -136,7 +137,7 @@ class WhisperAudioModel:
         audio_values = audio_values.to(self.data_type).to(device=self.device)
         audio_values = audio_values.squeeze(1)
         # TODO: Avoid constructing CUDA tensors directly from Python or NumPy data.
-        audio_lens_after_cnn = torch.tensor(audio_lens_after_cnn).cuda()
+        audio_lens_after_cnn = torch.tensor(audio_lens_after_cnn).to(get_device_type())
         max_len_in_batch = torch.max(audio_lens_after_cnn).item()
 
         padding_mask = torch.ones([audio_values.size(0), max_len_in_batch]).to(

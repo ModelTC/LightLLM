@@ -7,6 +7,7 @@ from lightllm.common.basemodel.triton_kernel.post_process.apply_constraint_mask 
 from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.platform import get_device_type
 
 
 def sample(
@@ -33,7 +34,9 @@ def sample(
         exist_req_use_random_seed,
         has_output_constraints,
     ) = _get_post_sample_tensors(reqs, sampling_params_manager, has_output)
-    eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).cuda(non_blocking=True)
+    eos_ids = g_pin_mem_manager.gen_from_list(key="eos_ids", data=eos_id, dtype=torch.int32).to(
+        get_device_type(), non_blocking=True
+    )
 
     # 这里需要区分历史token的频率惩罚类的系数的生效模式，目前支持两种在线统计方式:
     # 一种是基于 cpu 的，每个 req 对象利用其上绑定的dict对象out_token_id_count，每生成一个token就进行相应
@@ -90,8 +93,10 @@ def sample(
         apply_constraint_mask(
             logits=logits,
             b_req_idx=b_req_idx,
-            req_to_bitmask=sampling_params_manager.req_to_bitmask.cuda(non_blocking=True),
-            req_to_bitmask_enabled=sampling_params_manager.req_to_bitmask_enabled.cuda(non_blocking=True),
+            req_to_bitmask=sampling_params_manager.req_to_bitmask.to(get_device_type(), non_blocking=True),
+            req_to_bitmask_enabled=sampling_params_manager.req_to_bitmask_enabled.to(
+                get_device_type(), non_blocking=True
+            ),
             vocab_size=sampling_params_manager.vocab_size,
             b_mtp_index=b_mtp_index,
         )
@@ -121,7 +126,7 @@ def _top_p_top_k(probs: torch.Tensor, top_ps: torch.Tensor, top_ks: torch.Tensor
     probs_sum = torch.cumsum(probs_sort, dim=-1)
     probs_sort[(probs_sum - probs_sort) > top_ps.view(-1, 1)] = 0.0
 
-    probs_sort[torch.arange(0, probs.shape[-1], device="cuda").view(1, -1) >= top_ks.view(-1, 1)] = 0.0
+    probs_sort[torch.arange(0, probs.shape[-1], device=get_device_type()).view(1, -1) >= top_ks.view(-1, 1)] = 0.0
 
     return probs_sort, probs_idx
 
@@ -246,14 +251,14 @@ def _get_post_sample_tensors(reqs: List[InferReq], sampling_params_manager, has_
         )
 
     return (
-        req_idxes_cpu.cuda(non_blocking=True),
-        temperatures_cpu.cuda(non_blocking=True),
-        top_ps_cpu.cuda(non_blocking=True),
-        top_ks_cpu.cuda(non_blocking=True),
-        length_penalty_param_cpu.cuda(non_blocking=True),
-        mask_eos_reqs_cpu.cuda(non_blocking=True),
-        invalid_token_ids_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
-        cu_invalid_token_num_cpu.cuda(non_blocking=True) if has_invalid_token_ids else None,
+        req_idxes_cpu.to(get_device_type(), non_blocking=True),
+        temperatures_cpu.to(get_device_type(), non_blocking=True),
+        top_ps_cpu.to(get_device_type(), non_blocking=True),
+        top_ks_cpu.to(get_device_type(), non_blocking=True),
+        length_penalty_param_cpu.to(get_device_type(), non_blocking=True),
+        mask_eos_reqs_cpu.to(get_device_type(), non_blocking=True),
+        invalid_token_ids_cpu.to(get_device_type(), non_blocking=True) if has_invalid_token_ids else None,
+        cu_invalid_token_num_cpu.to(get_device_type(), non_blocking=True) if has_invalid_token_ids else None,
         is_all_greedy,
         has_invalid_token_ids,
         skip_top_k,

@@ -1,13 +1,14 @@
 import torch
 from lightllm.models.qwen2_vl.triton_kernel.mrope import mrope_triton_fused
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
+from lightllm.platform import get_device_type
 
 
 class Qwen2VLTransformerLayerInfer(LlamaTransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         mrope_section = network_config["rope_scaling"]["mrope_section"]
-        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device="cuda")
+        self.mrope_section = torch.tensor(mrope_section, dtype=torch.int32, device=get_device_type())
 
     def _get_qkv(self, input, infer_state, layer_weight):
         input = self._tpsp_allgather(input, infer_state)

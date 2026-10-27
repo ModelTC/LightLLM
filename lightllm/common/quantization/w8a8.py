@@ -13,6 +13,7 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
 from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_gemm_kernel import w8a8_block_fp8_matmul
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops, cutlass_scaled_mm
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL, sgl_ops
+from lightllm.platform import get_device_type
 
 _HAS_SGL_FP8 = HAS_SGL_KERNEL and sgl_ops is not None and hasattr(sgl_ops, "fp8_scaled_mm")
 
@@ -66,7 +67,7 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         self.has_weight_zero_point = False
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
-        weight = weight.float().cuda(self.device_id_)
+        weight = weight.float().to(torch.device(get_device_type(), self.device_id_))
         scale = weight.abs().max(dim=-1)[0] / 127
         weight = weight / scale.reshape(-1, 1)
         weight = torch.round(weight.clamp(min=-127, max=127)).to(dtype=torch.int8)
@@ -107,8 +108,12 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.int8).to(
+            torch.device(get_device_type(), device_id)
+        )
+        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).to(
+            torch.device(get_device_type(), device_id)
+        )
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         mm_param_list = self._split_weight_pack(
             mm_param,
@@ -129,7 +134,7 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
 
     def quantize(self, weight: torch.Tensor, output: WeightPack) -> None:
         qweight, weight_scale = scaled_fp8_quant(
-            weight.cuda(self.device_id_), scale=None, use_per_token_if_dynamic=True
+            weight.to(torch.device(get_device_type(), self.device_id_)), scale=None, use_per_token_if_dynamic=True
         )
         output.weight.copy_(qweight)
         output.weight_scale.copy_(weight_scale.view(-1))
@@ -170,8 +175,12 @@ class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
-        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).cuda(device_id)
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).to(
+            torch.device(get_device_type(), device_id)
+        )
+        weight_scale = torch.empty(expert_prefix + (out_dim,), dtype=torch.float32).to(
+            torch.device(get_device_type(), device_id)
+        )
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
 
         mm_param_list = self._split_weight_pack(
@@ -201,7 +210,7 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
 
     def _fp8_ptq_quant(self, weight: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Quantize a complete weight tensor with one FP8 E4M3 scale."""
-        weight = weight.float().cuda(self.device_id_)
+        weight = weight.float().to(torch.device(get_device_type(), self.device_id_))
         fp8_e4m3_max = torch.finfo(torch.float8_e4m3fn).max
         # Map the largest absolute weight to the largest finite E4M3 value. The
         # lower bound keeps an all-zero tensor from producing a zero divisor.
@@ -292,7 +301,7 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         if isinstance(out_dims, int):
             out_dims = [out_dims]
         out_dim = sum(out_dims)
-        weight = torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn, device=f"cuda:{device_id}")
+        weight = torch.empty((out_dim, in_dim), dtype=torch.float8_e4m3fn, device=f"{get_device_type()}:{device_id}")
         weight_scale = self._create_weight_scale(out_dim, device_id)
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         weight_splits = torch.split(weight, out_dims, dim=-2)
@@ -317,7 +326,7 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
     def _create_weight_scale(self, out_dim: int, device_id: int) -> torch.Tensor:
         # Triton and Cutlass consume the logical per-tensor scale directly, so
         # their weight packs reserve only one element regardless of output size.
-        return torch.empty((1,), dtype=torch.float32, device=f"cuda:{device_id}")
+        return torch.empty((1,), dtype=torch.float32, device=f"{get_device_type()}:{device_id}")
 
 
 @QUANTMETHODS.register("fp8w8a8-pt-vllm", platform="cuda")
@@ -360,7 +369,7 @@ class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
         # SGL's scaled GEMM accepts only per-output-channel weight scales. Reserve
         # a contiguous [N] buffer; quantize() fills every entry with the same
         # scalar so this remains mathematically equivalent to per-tensor scaling.
-        return torch.empty((out_dim,), dtype=torch.float32, device=f"cuda:{device_id}")
+        return torch.empty((out_dim,), dtype=torch.float32, device=f"{get_device_type()}:{device_id}")
 
     def apply(
         self,
@@ -427,7 +436,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
-        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        weight, scale = weight_quant(weight.to(device), self.block_size)
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
@@ -458,10 +467,12 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     ) -> Tuple[WeightPack, List[WeightPack]]:
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         expert_prefix = (num_experts,) if num_experts > 1 else ()
-        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).cuda(device_id)
+        weight = torch.empty(expert_prefix + (out_dim, in_dim), dtype=torch.float8_e4m3fn).to(
+            torch.device(get_device_type(), device_id)
+        )
         weight_scale = torch.empty(
             expert_prefix + (out_dim // self.block_size, in_dim // self.block_size), dtype=torch.float32
-        ).cuda(device_id)
+        ).to(torch.device(get_device_type(), device_id))
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
         weight_scale_out_dims = [_out_dim // self.block_size for _out_dim in out_dims]
         mm_param_list = self._split_weight_pack(

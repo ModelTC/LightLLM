@@ -51,6 +51,7 @@ from lightllm.server.multi_level_kv_cache import (
 from .prefill_queue_strategy import create_prefill_queue_strategy
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
+from lightllm.platform import get_device_module, get_device_type, get_dist_backend
 
 
 class ModeBackend:
@@ -198,24 +199,32 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
-            self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+            self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device=get_device_type(), requires_grad=False)
+            self.dp_gather_item_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=get_device_type(), requires_grad=False
+            )
             self.dp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+                [0 for _ in range(self.global_world_size)],
+                dtype=torch.int32,
+                device=get_device_type(),
+                requires_grad=False,
             )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
-        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-        self.node_nccl_group = create_new_group_for_current_node("nccl")
+        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device=get_device_type(), requires_grad=False)
+        self.node_nccl_group = create_new_group_for_current_node(get_dist_backend())
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         if self.is_multinode_tp:
-            self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
+            self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device=get_device_type())
             self.multinode_tp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+                [0 for _ in range(self.global_world_size)],
+                dtype=torch.int32,
+                device=get_device_type(),
+                requires_grad=False,
             )
             self.multinode_tp_nccl_group = dist.new_group(
-                [rank for rank in range(self.global_world_size)], backend="nccl"
+                [rank for rank in range(self.global_world_size)], backend=get_dist_backend()
             )
 
         if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
@@ -276,7 +285,7 @@ class ModeBackend:
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
-        torch.cuda.set_device(get_current_device_id())
+        get_device_module().set_device(get_current_device_id())
 
         self.dp_kv_shared_module = DPKVSharedMoudle(
             max_req_num=self.args.running_max_req_size,
@@ -559,7 +568,7 @@ class ModeBackend:
                                 )
                                 # to do 这个地方是否需要加流同步
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                torch.cuda.current_stream().synchronize()
+                                get_device_module().current_stream().synchronize()
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
@@ -956,7 +965,7 @@ class ModeBackend:
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(
                 key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
-            ).cuda(non_blocking=True)
+            ).to(get_device_type(), non_blocking=True)
 
         scatter_token(
             next_token_ids=next_token_ids,

@@ -1,6 +1,7 @@
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -46,10 +47,10 @@ def scatter_routing_topk_to_cpu(
     topk: int,
     dtype_id: int,
 ):
-    assert topk_ids.is_cuda
-    assert mem_indexes.is_cuda
+    assert topk_ids.device.type == get_device_type()
+    assert mem_indexes.device.type == get_device_type()
     assert mem_indexes.is_contiguous()
-    assert routing_buffer_ptr.is_cuda
+    assert routing_buffer_ptr.device.type == get_device_type()
     assert routing_buffer_ptr.dtype == torch.uint64
     assert routing_buffer_ptr.numel() == 1
     assert topk_ids.dim() == 2

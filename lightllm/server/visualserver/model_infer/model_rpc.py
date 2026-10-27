@@ -32,6 +32,7 @@ from lightllm.server.visualserver import set_vit_att_backend
 from lightllm.server.embed_cache.afs_utils import SepEmbedHandler
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.visualserver.model_infer.vision_peak_vram_hold import VisionPeakVramHolder
+from lightllm.platform import get_device_module, get_device_type
 
 
 logger = init_logger(__name__)
@@ -120,7 +121,7 @@ class VisualModelRpcServer(rpyc.Service):
                 raise Exception(f"can not support {self.model_type} now")
 
             self.model.load_model(weight_dir)
-            self.model = self.model.cuda()
+            self.model = self.model.to(get_device_type())
             self._hold_vision_peak_vram()
             if not self.is_visual_only_mode:
                 self.cache_client = rpyc.connect("localhost", self.cache_port, config={"allow_pickle": True})
@@ -275,7 +276,7 @@ class VisualModelRpcServer(rpyc.Service):
         """
         任务处理循环: 从队列中取出任务, 执行完成后通知调用者
         """
-        torch.cuda.set_device(self.device_id)
+        get_device_module().set_device(self.device_id)
         while True:
             try:
                 # 从队列获取任务, 阻塞等待
@@ -292,7 +293,7 @@ class VisualModelRpcServer(rpyc.Service):
 
                 # 执行任务: 调用父类的forward方法处理图像
                 all_img_embeds, uuids, valid_ids = self._forward(images)
-                all_img_embeds = all_img_embeds.to(torch.device("cuda"))
+                all_img_embeds = all_img_embeds.to(torch.device(get_device_type()))
 
                 if self.is_visual_only_mode:
                     self._store_to_afs(all_img_embeds, valid_ids, images)
@@ -311,7 +312,7 @@ class VisualModelRpcServer(rpyc.Service):
                 self.cpu_embed_cache_client.copy_vision_to_cache(
                     embed_tensor=all_img_embeds[start:end], start_index_in_cache=image.start_index_in_embed_cache
                 )
-            cuda_event = torch.cuda.Event()
+            cuda_event = get_device_module().Event()
             cuda_event.record()
             image.cuda_event = cuda_event
             self.store_queue.put(image)

@@ -5,6 +5,7 @@ from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_em
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from ..layer_weights.pre_and_post_layer_weight import Qwen3VLPreAndPostLayerWeight
+from lightllm.platform import get_device_type
 
 
 class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
@@ -53,13 +54,13 @@ class Qwen3VLMultimodalPreLayerInfer(LlamaMultimodalPreLayerInfer):
         # each tp will fill the img embeds, should divide by world_size
         infer_state.img_start_token_ids = torch.tensor(
             img_start_token_ids, dtype=torch.long, device="cpu", pin_memory=True
-        ).cuda(non_blocking=True)
-        infer_state.img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).cuda(
-            non_blocking=True
+        ).to(get_device_type(), non_blocking=True)
+        infer_state.img_token_lens = torch.tensor(img_token_lens, dtype=torch.long, device="cpu", pin_memory=True).to(
+            get_device_type(), non_blocking=True
         )
         infer_state.img_start_locs_in_cache = torch.tensor(
             img_start_locs_in_cache, dtype=torch.long, device="cpu", pin_memory=True
-        ).cuda(non_blocking=True)
+        ).to(get_device_type(), non_blocking=True)
         infer_state.input_ids = input_ids
 
         multimodal_emb(

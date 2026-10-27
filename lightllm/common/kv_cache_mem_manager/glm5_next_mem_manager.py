@@ -7,6 +7,7 @@ from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
 )
 from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 from lightllm.common.kv_trans_kernel.nixl_kv_trans import mla_page_io
+from lightllm.platform import get_device_type
 
 
 class Glm5NextMemOperator(LinearAttMemOperator):
@@ -29,7 +30,7 @@ class Glm5NextMemManager(Qwen3NextMemManager):
 
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         assert head_num == 1
-        self.kv_buffer = torch.empty((layer_num, size + 1, 1, head_dim), dtype=dtype, device="cuda")
+        self.kv_buffer = torch.empty((layer_num, size + 1, 1, head_dim), dtype=dtype, device=get_device_type())
         self._init_linear_att_buffers()
 
     def _layer_buffer(self, layer_index):
@@ -62,7 +63,7 @@ class Glm5NextMemManager(Qwen3NextMemManager):
         pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
         pin_indexes.numpy()[:] = mem_indexes
         mla_page_io(
-            mem_indexes=pin_indexes.cuda(non_blocking=True),
+            mem_indexes=pin_indexes.to(get_device_type(), non_blocking=True),
             page_tensor=self.kv_move_buffer[page_index],
             kv_buffer=mem_managers[dp_index * dp_world_size].kv_buffer,
             mode="write",
@@ -77,7 +78,7 @@ class Glm5NextMemManager(Qwen3NextMemManager):
             )
         pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
         pin_indexes.numpy()[:] = mem_indexes
-        indexes = pin_indexes.cuda(non_blocking=True)
+        indexes = pin_indexes.to(get_device_type(), non_blocking=True)
         for mem in mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]:
             mla_page_io(
                 mem_indexes=indexes,

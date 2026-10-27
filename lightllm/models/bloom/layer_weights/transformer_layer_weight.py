@@ -3,6 +3,7 @@ import math
 import numpy as np
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.common.basemodel.layer_weights.meta_weights import ROWMMWeight, COLMMWeight
+from lightllm.platform import get_device_type
 
 
 def generate_alibi(n_head, dtype=torch.float16):
@@ -66,7 +67,11 @@ class BloomTransformerLayerWeight(LlamaTransformerLayerWeight):
         assert self.n_head % self.tp_world_size_ == 0
         tp_head_num = self.n_head // self.tp_world_size_
         tmp_alibi = generate_alibi(self.n_head, dtype=torch.float32)
-        self.tp_alibi = tmp_alibi[self.tp_rank_ * tp_head_num : (self.tp_rank_ + 1) * tp_head_num].contiguous().cuda()
+        self.tp_alibi = (
+            tmp_alibi[self.tp_rank_ * tp_head_num : (self.tp_rank_ + 1) * tp_head_num]
+            .contiguous()
+            .to(get_device_type())
+        )
 
     def _init_weight_names(self):
         self._q_weight_name = f"h.{self.layer_num_}.self_attention.q_proj.weight"

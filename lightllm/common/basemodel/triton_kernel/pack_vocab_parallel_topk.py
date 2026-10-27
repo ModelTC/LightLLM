@@ -17,6 +17,7 @@ FP32、token ID 加全局偏移以及两个 tensor 的拼接一次完成，生�
 import torch
 import triton
 import triton.language as tl
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -123,7 +124,11 @@ def pack_vocab_parallel_topk(
     全局 token ID 的 int32 位模式。
     """
 
-    assert values.is_cuda and token_ids.is_cuda and packed.is_cuda
+    assert (
+        (values.device.type == get_device_type())
+        and (token_ids.device.type == get_device_type())
+        and (packed.device.type == get_device_type())
+    )
     assert values.ndim == 2 and values.shape == token_ids.shape
     assert token_ids.dtype == torch.int64 and packed.dtype == torch.float32
     token_num, candidate_count = values.shape
@@ -169,7 +174,11 @@ def unpack_vocab_parallel_topk(
     输出的候选维按 rank 分段排列，且每个 rank 内保持本地 ``torch.topk`` 的原始顺序。
     """
 
-    assert packed.is_cuda and values.is_cuda and token_ids.is_cuda
+    assert (
+        (packed.device.type == get_device_type())
+        and (values.device.type == get_device_type())
+        and (token_ids.device.type == get_device_type())
+    )
     assert packed.ndim == 2 and values.ndim == 2 and token_ids.ndim == 2
     assert packed.dtype == torch.float32 and values.dtype == torch.float32 and token_ids.dtype == torch.int64
     token_num = values.shape[0]

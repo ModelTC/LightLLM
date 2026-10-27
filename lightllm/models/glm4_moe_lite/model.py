@@ -5,6 +5,7 @@ from lightllm.models.glm4_moe_lite.layer_weights.transformer_layer_weight import
 from lightllm.models.glm4_moe_lite.infer_struct import Glm4MoeLiteInferStateInfo
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.platform import get_device_type
 
 
 class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
@@ -52,5 +53,5 @@ class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
         t = torch.arange(max_seq_len, device="cpu", dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = torch.cos(freqs).to(self.data_type).to(get_device_type())
+        self._sin_cached = torch.sin(freqs).to(self.data_type).to(get_device_type())

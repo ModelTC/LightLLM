@@ -3,6 +3,7 @@ import torch
 import triton
 import triton.language as tl
 from triton.language.standard import _log2, sum, zeros_like
+from lightllm.platform import get_device_type
 
 
 @triton.jit
@@ -225,9 +226,9 @@ def triton_grouped_topk(
     else:
         dtype = torch.float32
 
-    scores_buffer = torch.empty((token_num, total_expert_num), dtype=dtype, device="cuda")
-    out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device="cuda")
-    out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device="cuda")
+    scores_buffer = torch.empty((token_num, total_expert_num), dtype=dtype, device=get_device_type())
+    out_topk_weights = torch.empty((token_num, topk), dtype=torch.float32, device=get_device_type())
+    out_topk_ids = torch.empty((token_num, topk), dtype=torch.long, device=get_device_type())
 
     assert total_expert_num % num_expert_group == 0
 

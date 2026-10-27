@@ -16,6 +16,7 @@ from lightllm.server.io_struct import (
     UpdateWeightsFromIPCReq,
     UpdateWeightsFromTensorReq,
 )
+from lightllm.platform import get_device_module, get_device_type
 
 
 class RlBackendOps:
@@ -58,11 +59,11 @@ class RlBackendOps:
         return self.MEMORY_TAG_ORDER if tags is None else tags
 
     def _clear_cuda_cache(self):
-        torch.cuda.empty_cache()
+        get_device_module().empty_cache()
         gc.collect()
 
     def _pause_memory_tags(self, tags: Optional[List[MemoryTag]]):
-        torch.cuda.synchronize()
+        get_device_module().synchronize()
         for tag in self._iter_memory_tags(tags):
             self.backend.model.torch_memory_saver.pause(tag=tag)
         self._clear_cuda_cache()
@@ -152,7 +153,7 @@ class RlBackendOps:
             handles = []
             for name, dtype, shape in zip(request.names, request.dtypes, request.shapes):
                 target_dtype = dtype if isinstance(dtype, torch.dtype) else getattr(torch, dtype)
-                weight = torch.empty(shape, dtype=target_dtype, device="cuda")
+                weight = torch.empty(shape, dtype=target_dtype, device=get_device_type())
                 handles.append(
                     torch.distributed.broadcast(
                         weight,
@@ -321,7 +322,7 @@ class RlBackendOps:
             if zmq_handle in (None, "", "auto"):
                 zmq_handle = get_zmq_handle()
             use_shm = request.use_shm
-            recv_device = torch.device("cuda", self.backend.current_device_id)
+            recv_device = torch.device(get_device_type(), self.backend.current_device_id)
             self.logger.debug(
                 "[LightLLM] RlBackendOps.update_weights_from_ipc: request.ipc_handle=%r, "
                 "resolved zmq_handle=%r, cuda_device_id=%s",

@@ -6,6 +6,7 @@ from .base import BaseMemManagerOperator
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_current_rank_in_dp, get_dp_world_size
 from lightllm.utils.log_utils import init_logger
+from lightllm.platform import get_device_type
 
 if TYPE_CHECKING:
     from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
@@ -30,7 +31,7 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
     ):
-        assert mem_indexes.is_cuda and page_indexes.is_cuda
+        assert (mem_indexes.device.type == get_device_type()) and (page_indexes.device.type == get_device_type())
         args = get_env_start_args()
         assert triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) == len(page_indexes)
         assert len(mem_indexes) % args.linear_att_hash_page_size == 0
@@ -65,8 +66,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
             # 将对应的小叶数据拷贝到临时的大页上，再从大页上拷贝到对应的运行态页面上
             big_page_buffer_ids_cpu.append(mem_manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID)
 
-        big_page_buffer_ids_gpu = torch.tensor(big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu").cuda(
-            non_blocking=True
+        big_page_buffer_ids_gpu = torch.tensor(big_page_buffer_ids_cpu, dtype=torch.int64, device="cpu").to(
+            get_device_type(), non_blocking=True
         )
 
         assert len(big_page_buffer_ids_gpu) == len(page_indexes)
@@ -108,14 +109,22 @@ class LinearAttMemOperator(BaseMemManagerOperator):
     ):
         args = get_env_start_args()
         if not hasattr(self, "big_page_ids_buffer_store"):
-            self.big_page_ids_buffer_store = torch.empty((1024 * 1024 * 4,), dtype=torch.int64, device="cuda")
+            self.big_page_ids_buffer_store = torch.empty(
+                (1024 * 1024 * 4,), dtype=torch.int64, device=get_device_type()
+            )
             # 多申请3个cpu cache token page size，用于处理碎页情况，碎页情况需要将对应的大页数据拷贝到临时的大页上，
             # 再从大页上拷贝到对应的运行态页面上
             self.mem_indexes_buffer = torch.empty(
-                (args.max_req_total_len + 3 * args.cpu_cache_token_page_size,), dtype=torch.int32, device="cuda"
+                (args.max_req_total_len + 3 * args.cpu_cache_token_page_size,),
+                dtype=torch.int32,
+                device=get_device_type(),
             )
 
-        assert mem_indexes.is_cuda and page_indexes.is_cuda and page_readies.is_cuda
+        assert (
+            (mem_indexes.device.type == get_device_type())
+            and (page_indexes.device.type == get_device_type())
+            and (page_readies.device.type == get_device_type())
+        )
 
         assert len(mem_indexes) % args.linear_att_hash_page_size == 0
         assert triton.cdiv(len(mem_indexes), args.cpu_cache_token_page_size) == len(page_indexes)
@@ -205,6 +214,8 @@ class LinearAttMemOperator(BaseMemManagerOperator):
         from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
 
         copy_kv_buffer_to_kv_buffer(
-            src_mem_index.cuda(non_blocking=True), dst_mem_index.cuda(non_blocking=True), self.mem_manager.kv_buffer
+            src_mem_index.to(get_device_type(), non_blocking=True),
+            dst_mem_index.to(get_device_type(), non_blocking=True),
+            self.mem_manager.kv_buffer,
         )
         return

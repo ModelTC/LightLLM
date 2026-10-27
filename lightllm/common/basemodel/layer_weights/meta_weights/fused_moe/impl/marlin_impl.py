@@ -8,6 +8,7 @@ from lightllm.common.quantization.awq import (
 )
 from typing import Optional
 from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
+from lightllm.platform import get_device_type
 
 
 class FuseMoeMarlin(FuseMoeTriton):
@@ -19,7 +20,7 @@ class FuseMoeMarlin(FuseMoeTriton):
             marlin_make_workspace_new,
         )
 
-        return marlin_make_workspace_new(torch.device("cuda"), 4)
+        return marlin_make_workspace_new(torch.device(get_device_type()), 4)
 
     def _fused_experts(
         self,

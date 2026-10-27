@@ -12,6 +12,7 @@ from transformers.modeling_outputs import BaseModelOutputWithPooling
 from transformers.modeling_utils import PreTrainedModel
 from lightllm.models.neo_chat_moe.vision_process import load_image_native
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
+from lightllm.platform import get_device_type
 
 
 def apply_rotary_emb_1d(
@@ -273,8 +274,8 @@ class NeoVisionTransformerPretrainedModel(nn.Module):
         imgs = torch.cat(img_tensors, dim=0)
         grid_hw = torch.cat(img_grids, dim=0)
 
-        pixel_values = imgs.to("cuda", dtype=self.data_type, non_blocking=True)
-        image_grid_hw = grid_hw.to("cuda", non_blocking=True)
+        pixel_values = imgs.to(get_device_type(), dtype=self.data_type, non_blocking=True)
+        image_grid_hw = grid_hw.to(get_device_type(), non_blocking=True)
 
         all_img_embeds = self.forward(pixel_values, grid_hw=image_grid_hw)
 

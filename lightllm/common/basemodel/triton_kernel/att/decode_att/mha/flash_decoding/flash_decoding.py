@@ -1,4 +1,5 @@
 import torch
+from lightllm.platform import get_device_type
 
 
 def token_decode_attention_flash_decoding(q, infer_state, cache_k, cache_v, out=None, alloc_tensor_func=torch.empty):
@@ -14,10 +15,12 @@ def token_decode_attention_flash_decoding(q, infer_state, cache_k, cache_v, out=
     o_tensor = alloc_tensor_func(q.shape, q.dtype, q.device) if out is None else out
 
     mid_o = alloc_tensor_func(
-        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 1, head_dim], dtype=torch.float32, device="cuda"
+        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 1, head_dim],
+        dtype=torch.float32,
+        device=get_device_type(),
     )
     mid_o_logexpsum = alloc_tensor_func(
-        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 1], dtype=torch.float32, device="cuda"
+        [batch_size, q_head_num, max_kv_seq_len // BLOCK_SEQ + 1], dtype=torch.float32, device=get_device_type()
     )
 
     flash_decode_stage1(
