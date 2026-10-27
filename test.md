@@ -382,3 +382,18 @@ Black 检查通过；Flake8 使用相同仓库规则在远端 Python 3.10 上通
 本轮为结构同步与回归，未启动完整模型服务、未重新运行 GSM8K/吞吐/显存压测。两台 18941 服务仍保持关闭；`mem_fraction=0.74` 仍是未通过完整模型负载验证的候选值，不将这些单测结果当作新的容量或性能结论。
 
 最终核对远端测试目录与提交前工作树的 **1838 个 Python/JSON 文件 SHA256 全部一致**，清单为 `final_manifest.json`；上述通过的日志已归档为同目录 `verified_logs.tar.gz`，本机与远端各保留一份。
+
+### 2026-10-27：继续同步 PR #1593 的 3a83d44fd
+
+合入 `3a83d44fd`（Remove DeepSeek V4 config normalization and simplify draft layer counts）。删除旧配置 normalization 与独立的压缩率补齐 helper；`get_config_json` 直接读取配置，压缩层数校验及 runtime-added SWA 层补齐由 `DeepseekV4CacheConfig` 持有。DSpark backbone 层数直接取 `dspark_target_layer_ids` 的长度，不再从 target 层数和压缩率列表反推。V4.1 保留嵌套 `text_config` 的读取及共享 C1/C2 KV 配置，沿用同一公共路径；未新增 wrapper 或兼容别名。
+
+本轮日志与冻结源码：
+`/mnt/vqa/wanzihao/dsv41_h100_dpep16_20261027_1527/pr1593_merge/followup_3a83d44_20261027_203107/`。
+
+- `model_cache.log`：**363 passed，2 skipped**，覆盖完整 V4.1 单测（包含 7 组小模型前向）、公共分页/CPU cache 和 V4 模型。新增嵌套/展开配置 × 启用/关闭 DSpark 的四种组合，确认共享 history 为 1800 bytes/token，target 40 层，DSpark 增加 3 个 SWA 层。两项跳过需要同时可见两张 GPU。
+- `config_spec_relevant.log`：**200 passed**，覆盖 speculative draft 层数、配置/启动参数；新增 V4.1 嵌套 DSpark 配置用例。
+- Black、Flake8 及 diff 空白检查通过。六个改动源码/测试文件与远端 SHA256 一致，清单为 `manifest.json`。
+
+扩展检查 `test_envs_utils.py` 有三条既有失败：测试期望缓存优先级 max age=36、最小 prompt=4096、资源等待=10，代码实际默认值分别为 180、2048、20。本轮未改这些默认值；合并前 `896553b89` 的冻结目录复测同样为 **3 failed，9 passed**（`baseline_env.log`），本轮扩展套件为 **3 failed，209 passed**（`config_spec.log`）。保留该事实，没有为此次合并修改不相关的 PD 默认值或旧断言。
+
+本轮未启动模型服务、未运行新的 GSM8K 或性能压测。

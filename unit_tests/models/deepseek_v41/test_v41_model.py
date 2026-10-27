@@ -75,20 +75,27 @@ def test_v41_mxfp4_uses_quant_selector_on_hopper(expert_dtype):
     assert quant.get_quant_method(0, "wq_a").method_name == "fp8w8a8-b32-triton"
 
 
-def test_fp8_history_capacity_counts_shared_sources_and_indexer_scales():
-    config = DeepseekV4CacheConfig.from_model_config(
-        dict(
-            model_type="deepseek_v41",
-            num_hidden_layers=40,
-            compress_ratios=[0, 0, *([2] * 18), *([1] * 19), 0],
-            kv_source_layer_ids=[2, 8, 14, 20],
-            head_dim=512,
-            index_head_dim=128,
-            sliding_window=128,
-            qk_rope_head_dim=64,
-        ),
-        SimpleNamespace(mtp_mode=None),
+@pytest.mark.parametrize("mtp_mode", [None, "dspark"])
+@pytest.mark.parametrize("nested", [False, True])
+def test_fp8_history_capacity_counts_shared_sources_and_indexer_scales(monkeypatch, mtp_mode, nested):
+    from lightllm.utils import envs_utils
+
+    monkeypatch.setattr(envs_utils, "get_added_mtp_kv_layer_num", lambda: 3)
+    model_config = dict(
+        model_type="deepseek_v41",
+        num_hidden_layers=40,
+        compress_ratios=[0, 0, *([2] * 18), *([1] * 19), 0],
+        kv_source_layer_ids=[2, 8, 14, 20],
+        head_dim=512,
+        index_head_dim=128,
+        sliding_window=128,
+        qk_rope_head_dim=64,
     )
+    if nested:
+        model_config = dict(model_type="deepseek_v41", text_config=model_config)
+    config = DeepseekV4CacheConfig.from_model_config(model_config, SimpleNamespace(mtp_mode=mtp_mode))
+    assert config.layer_num == (43 if mtp_mode == "dspark" else 40)
+    assert config.compress_rates[40:] == ((0, 0, 0) if mtp_mode == "dspark" else ())
     assert config.indexer_bytes == 132
     assert config.compressed_kv_slot_bytes == (360, 360, 360, 720)
     assert sum(config.compressed_kv_slot_bytes) == 1800
