@@ -17,8 +17,8 @@ from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
     Fp8Glm5NextSparseDecodeState,
 )
 from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
-    _can_use_fp8_sparse_direct_decode,
-    _fp8_sparse_direct_decode,
+    can_use_fp8_sparse_direct_decode,
+    fp8_sparse_direct_decode,
 )
 from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
 from lightllm.models.glm5_next.triton_kernel.destindex_copy_kv_flashmla_fp8 import destindex_copy_kv_flashmla_fp8
@@ -40,7 +40,7 @@ def _make_infer_state(**attributes):
 
 def _make_workspace_backend(batch_max_tokens):
     backend = object.__new__(Fp8Glm5NextSparseAttBackend)
-    backend.model = SimpleNamespace(batch_max_tokens=batch_max_tokens)
+    backend.model = SimpleNamespace(batch_max_tokens=batch_max_tokens, prefill_graph=None)
     backend._prefill_workspaces = [{"smallq": None, "generic": None} for _ in range(2)]
     return backend
 
@@ -54,6 +54,7 @@ def test_main_and_native_mtp_backend_selection(monkeypatch, draft, kv_type):
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     model = object.__new__(Glm5NextMTPModel if draft else Glm5NextTpPartModel)
     model.args = SimpleNamespace(llm_kv_type=kv_type)
+    model.config = {"index_topk": 2048, "index_kpool": 4}
     model.graph_max_batch_size = 4
     model.max_seq_length = 128
     model._init_att_backend()
@@ -182,7 +183,10 @@ def test_fp8_nope_decode_and_cuda_graph(num_heads):
     control = AttControl(
         nsa_decode=True, nsa_decode_dict={"topk_mem_indices": indices, "softmax_scale": 0.0625, "kv_lora_rank": 512}
     )
-    state = Fp8Glm5NextSparseDecodeState(flashmla_sched_meta=flash_mla.get_mla_metadata()[0])
+    infer_state = _make_infer_state()
+    state = Fp8Glm5NextSparseDecodeState(
+        _infer_state_weak_ref=weakref.ref(infer_state), flashmla_sched_meta=flash_mla.get_mla_metadata()[0]
+    )
 
     def run():
         return state.decode_att((q, q[..., :0]), packed_kv[..., :584], None, control)
@@ -244,6 +248,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
     )
     infer_state = _make_infer_state(max_cache_len=prefix_len, mem_index=prefill_mem_index)
     state = Fp8Glm5NextSparsePrefillState(
+        backend=_make_workspace_backend(q.shape[0]),
         _infer_state_weak_ref=weakref.ref(infer_state),
         ks=kv_start_offsets,
         ragged_mem_index=ragged_mem_index,
@@ -306,6 +311,7 @@ def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softm
     )
     infer_state = _make_infer_state(mem_index=prefill_mem_index)
     state = Fp8Glm5NextSparsePrefillState(
+        backend=_make_workspace_backend(q.shape[0]),
         _infer_state_weak_ref=weakref.ref(infer_state),
         ks=torch.zeros(9, device="cuda", dtype=torch.int32),
         ragged_mem_index=ragged_mem_index,
@@ -830,7 +836,7 @@ def test_fp8_sparse_direct_decode_actual_entry_edges_and_graph(monkeypatch, batc
     def run():
         return state.decode_att((q, q[..., :0]), packed[..., :584], None, control)
 
-    assert not _can_use_fp8_sparse_direct_decode(q, packed, indices.unsqueeze(1), 0.0625, 512, 2051)
+    assert not can_use_fp8_sparse_direct_decode(q, packed, indices.unsqueeze(1), 512, 2051)
     expected = _torch_sparse_attention(q, _dequantize_kv_cache(packed), indices)
     eager = run()
     torch.testing.assert_close(eager.float(), expected, atol=0.02, rtol=0.02)
@@ -996,17 +1002,17 @@ def test_fp8_sparse_direct_decode_unknown_bound_fallback_and_strided_q(monkeypat
     torch.testing.assert_close(
         actual.float(), _torch_sparse_attention(q, _dequantize_kv_cache(packed), late), atol=0.02, rtol=0.02
     )
-    assert calls and not _can_use_fp8_sparse_direct_decode(
-        q, packed[..., :584], late.unsqueeze(1), 0.0625, 512, None, is_cuda_graph_capture=True
+    assert calls and not can_use_fp8_sparse_direct_decode(
+        q, packed[..., :584], late.unsqueeze(1), 512, None, is_cuda_graph_capture=True
     )
     q_d2 = torch.randn(1, 8, 1024, device="cuda", dtype=torch.bfloat16)[..., ::2]
     good = torch.full((1, 2176), -1, device="cuda", dtype=torch.int32)
     good[:, :2051] = torch.randint(0, capacity, (1, 2051), device="cuda", dtype=torch.int32)
-    assert _can_use_fp8_sparse_direct_decode(
-        q_d2, packed[..., :584], good.unsqueeze(1), 0.0625, 512, 2051, is_cuda_graph_capture=True
+    assert can_use_fp8_sparse_direct_decode(
+        q_d2, packed[..., :584], good.unsqueeze(1), 512, 2051, is_cuda_graph_capture=True
     )
-    assert not _can_use_fp8_sparse_direct_decode(
-        q, packed[..., :584], good.unsqueeze(1), 0.0625, 256, 2051, is_cuda_graph_capture=True
+    assert not can_use_fp8_sparse_direct_decode(
+        q, packed[..., :584], good.unsqueeze(1), 256, 2051, is_cuda_graph_capture=True
     )
 
 
@@ -1025,7 +1031,7 @@ def test_fp8_sparse_direct_decode_strided_inputs_and_packed_row_padding(monkeypa
     indices[0].fill_(-1)
 
     def run():
-        return _fp8_sparse_direct_decode(q, packed, indices, 0.0625)
+        return fp8_sparse_direct_decode(q, packed, indices, 0.0625)
 
     def expected():
         return _torch_sparse_attention(q, _dequantize_kv_cache(packed), indices[:, 0])
@@ -1068,14 +1074,12 @@ def test_fp8_sparse_direct_decode_central_predicate_accepts_strides_and_rejects_
     q = torch.empty(1, 8, 1024, device="cuda", dtype=torch.bfloat16)[..., ::2]
     packed = torch.empty(8, 1, 720, device="cuda", dtype=torch.uint8)
     topk = torch.empty(1, 1, 4352, device="cuda", dtype=index_dtype)[..., ::2]
-    assert _can_use_fp8_sparse_direct_decode(q, packed, topk, 0.0625, 512, 2051, is_cuda_graph_capture=True)
+    assert can_use_fp8_sparse_direct_decode(q, packed, topk, 512, 2051, is_cuda_graph_capture=True)
     odd_rows = torch.empty(8, 1, 721, device="cuda", dtype=torch.uint8)[..., :584]
     odd_base = torch.empty(8, 1, 722, device="cuda", dtype=torch.uint8)[..., 1:585]
     strided_columns = torch.empty(8, 1, 1440, device="cuda", dtype=torch.uint8)[..., ::2]
     for invalid in (odd_rows, odd_base, strided_columns):
-        assert not _can_use_fp8_sparse_direct_decode(q, invalid, topk, 0.0625, 512, 2051, is_cuda_graph_capture=True)
-    for scale in (0.0, -1.0, float("inf"), float("nan")):
-        assert not _can_use_fp8_sparse_direct_decode(q, packed, topk, scale, 512, 2051, is_cuda_graph_capture=True)
+        assert not can_use_fp8_sparse_direct_decode(q, invalid, topk, 512, 2051, is_cuda_graph_capture=True)
 
 
 @pytest.mark.parametrize("strided_input", ["q", "topk"])
@@ -1100,8 +1104,8 @@ def test_fp8_sparse_direct_decode_offsets_beyond_int32(strided_input):
     packed = torch.empty(capacity, 1, 720, device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     destindex_copy_kv_flashmla_fp8(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
-    assert _can_use_fp8_sparse_direct_decode(q, packed, topk, 0.0625, 512, 2051, is_cuda_graph_capture=True)
-    actual = _fp8_sparse_direct_decode(q, packed, topk, 0.0625)
+    assert can_use_fp8_sparse_direct_decode(q, packed, topk, 512, 2051, is_cuda_graph_capture=True)
+    actual = fp8_sparse_direct_decode(q, packed, topk, 0.0625)
     expected = _torch_sparse_attention(q, _dequantize_kv_cache(packed), topk[:, 0])
     torch.testing.assert_close(actual.float(), expected, atol=0.02, rtol=0.02)
 
@@ -1119,13 +1123,13 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
     q = torch.randn(batch, num_heads, 512, device="cuda", dtype=torch.bfloat16)
     topk = torch.full((batch, 1, 2176), -1, device="cuda", dtype=torch.int32)
     topk[..., :2051] = torch.randint(0, 4096, (batch, 1, 2051), device="cuda", dtype=torch.int32)
-    assert not _can_use_fp8_sparse_direct_decode(q, packed, topk, 0.0625, 512, 2051, is_cuda_graph_capture=True)
+    assert not can_use_fp8_sparse_direct_decode(q, packed, topk, 512, 2051, is_cuda_graph_capture=True)
 
     def direct_must_not_run(*args, **kwargs):
         raise AssertionError("larger workload took the slower direct path")
 
     monkeypatch.setattr(
-        "lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode._fp8_sparse_direct_decode", direct_must_not_run
+        "lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode.fp8_sparse_direct_decode", direct_must_not_run
     )
     infer = _make_infer_state(is_cuda_graph_capture=True)
     state = Fp8Glm5NextSparseDecodeState(
@@ -1256,14 +1260,18 @@ def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypat
 
     monkeypatch.setattr(fp8_prefill, "context_attention_fwd_fp8", fake_context)
     for heads, direct, selected in ((8, False, False), (64, True, False), (64, False, True)):
-        monkeypatch.setattr(fp8_prefill, "_can_use_direct_smallq", lambda *args, d=direct: d)
-        monkeypatch.setattr(fp8_prefill, "_can_use_selected_prefill", lambda *args, s=selected: s)
+        monkeypatch.setattr(fp8_prefill, "can_use_direct_smallq", lambda *args, d=direct: d)
+        monkeypatch.setattr(fp8_prefill, "can_use_selected_prefill", lambda *args, s=selected: s)
         infer = _make_infer_state(mem_index=torch.empty(1, dtype=torch.int32))
+        backend = _make_workspace_backend(1)
+        backend.get_smallq_workspace = lambda active_infer, active_q, kind="direct" if direct else "selected": {
+            "kind": kind
+        }
         state = Fp8Glm5NextSparsePrefillState(
+            backend=backend,
             _infer_state_weak_ref=weakref.ref(infer),
             ks=torch.zeros(1, dtype=torch.int32),
             ragged_mem_index=torch.zeros(1, dtype=torch.int32),
         )
-        state._smallq_workspace = lambda active_q, kind="direct" if direct else "selected": {"kind": kind}
         assert state._nsa_prefill_att(torch.empty((1, heads, 512), dtype=torch.bfloat16), kv, control).shape[1] == heads
     assert not queries

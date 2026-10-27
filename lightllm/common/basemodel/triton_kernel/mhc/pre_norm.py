@@ -43,7 +43,7 @@ def _hc_mix_weights(
     HC_EPS: tl.constexpr,
     POST_MULTIPLIER: tl.constexpr,
     SINKHORN_ITERS: tl.constexpr,
-    N_SPLITS: tl.constexpr,
+    N_SPLITS,
     BLOCK_SPLITS: tl.constexpr,
     UNROLL_SINKHORN: tl.constexpr,
 ):
@@ -86,7 +86,7 @@ def _hc_mix_weights(
     return pre_values, post_values, matrix
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N_SPLITS"])
 def _hc_pre_norm_kernel(
     x,  # 输入 [T, S * H]，bf16；逻辑形状 [T, S, H]。
     gemm_partial,
@@ -110,7 +110,7 @@ def _hc_pre_norm_kernel(
     HC_EPS: tl.constexpr,
     POST_MULTIPLIER: tl.constexpr,
     SINKHORN_ITERS: tl.constexpr,
-    N_SPLITS: tl.constexpr,
+    N_SPLITS,
     BLOCK_SPLITS: tl.constexpr,
     BLOCK_H: tl.constexpr,
     UNROLL_SINKHORN: tl.constexpr = True,

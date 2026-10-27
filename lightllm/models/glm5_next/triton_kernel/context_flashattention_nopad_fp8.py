@@ -122,7 +122,7 @@ def _direct_smallq_packed_kernel(
 
 
 @triton.jit
-def _reduce_direct_smallq_kernel(
+def reduce_direct_smallq_kernel(
     PartialO,
     PartialLse,
     Out,
@@ -149,7 +149,7 @@ def _reduce_direct_smallq_kernel(
     tl.store(Out + (qid * HEADS_ + h) * 512 + d, value)
 
 
-def _can_use_direct_smallq(q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices):
+def can_use_direct_smallq(q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices):
     return (
         q.ndim == 3
         and 1 <= q.shape[0] <= 8
@@ -163,16 +163,13 @@ def _can_use_direct_smallq(q, packed_kv, ragged_mem_index, prefill_mem_index, pr
         and prefill_mem_index.dtype == torch.int32
         and prefill_mem_index.numel() == q.shape[0]
         and prefill_kv.dtype == torch.bfloat16
-        and prefill_kv.ndim == 3
-        and prefill_kv.shape[0] == q.shape[0]
-        and prefill_kv.shape[1:] == (1, 512)
+        and prefill_kv.shape == (q.shape[0], 1, 512)
         and topk_indices.dtype == torch.int32
-        and topk_indices.ndim == 2
         and topk_indices.shape == (q.shape[0], 2176)
     )
 
 
-def _allocate_direct_smallq_workspace(q):
+def allocate_direct_smallq_workspace(q):
     qn, heads, _ = q.shape
     splits = 34 if qn == 1 else 17
     return {
@@ -207,7 +204,7 @@ def _context_attention_fwd_fp8_direct_smallq(
         output = torch.empty(q.shape, dtype=q.dtype, device=q.device)
         launch_grid = (qn, splits)
     else:
-        workspace = direct_workspace or _allocate_direct_smallq_workspace(q)
+        workspace = direct_workspace or allocate_direct_smallq_workspace(q)
         partial_o = workspace["partial_o"]
         partial_lse = workspace["partial_lse"]
         output = workspace["output"]
@@ -240,7 +237,7 @@ def _context_attention_fwd_fp8_direct_smallq(
         softmax_scale=softmax_scale,
         num_warps=8,
     )
-    _reduce_direct_smallq_kernel[(qn, heads, 4)](
+    reduce_direct_smallq_kernel[(qn, heads, 4)](
         partial_o,
         partial_lse,
         output,
@@ -341,9 +338,9 @@ def _merge_att_output_kernel(
     ChunkOutput,
     ChunkLse,
     chunk_lse_stride_s: tl.constexpr,
-    chunk_lse_stride_h: tl.constexpr,
+    chunk_lse_stride_h,
     NUM_HEADS: tl.constexpr,
-    NUM_Q_TOKENS: tl.constexpr,
+    NUM_Q_TOKENS,
     BLOCK_HEADS: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -384,7 +381,7 @@ def _selected_prefill_compact_kernel(
     Lengths,
     PageTable,
     CuQ,
-    ragged_n: tl.constexpr,
+    ragged_n,
     packed_rows: tl.constexpr,
     topk_stride_s: tl.constexpr,
     topk_stride_d: tl.constexpr,
@@ -469,7 +466,7 @@ def _selected_prefill_gather_kernel(
         tl.store(CuK + 1 + x, tl.cumsum(lengths, axis=0), x < BATCH)
 
 
-def _can_use_selected_prefill(q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices):
+def can_use_selected_prefill(q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices):
     return (
         q.ndim == 3
         and 2 <= q.shape[0] <= 8
@@ -477,7 +474,6 @@ def _can_use_selected_prefill(q, packed_kv, ragged_mem_index, prefill_mem_index,
         and q.dtype == torch.bfloat16
         and q.is_cuda
         and q.stride(-1) == 1
-        and packed_kv.ndim == 3
         and packed_kv.shape[1:] == (1, 584)
         and packed_kv.dtype == torch.uint8
         and packed_kv.device == q.device
@@ -496,7 +492,7 @@ def _can_use_selected_prefill(q, packed_kv, ragged_mem_index, prefill_mem_index,
     )
 
 
-def _allocate_selected_prefill_workspace(q, batch_capacity=None):
+def allocate_selected_prefill_workspace(q, batch_capacity=None):
     batch = q.shape[0] if batch_capacity is None else batch_capacity
     return {
         "compact": torch.empty((batch, 2176), dtype=torch.int64, device=q.device),
@@ -508,7 +504,7 @@ def _allocate_selected_prefill_workspace(q, batch_capacity=None):
     }
 
 
-def _allocate_generic_prefill_workspace(q, packed_kv, topk_indices, query_capacity=None):
+def allocate_generic_prefill_workspace(q, packed_kv, topk_indices, query_capacity=None):
     """Allocate generic prefill metadata up to the backend's planned query capacity."""
     capacity = q.shape[0] if query_capacity is None else query_capacity
     return {
@@ -535,7 +531,7 @@ def _context_attention_fwd_fp8_selected_prefill(
     from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
     batch = q.shape[0]
-    workspace = selected_workspace or _allocate_selected_prefill_workspace(q)
+    workspace = selected_workspace or allocate_selected_prefill_workspace(q)
     batch_pad = triton.next_power_of_2(batch)
     _selected_prefill_compact_kernel[(batch,)](
         topk_indices,
@@ -601,7 +597,7 @@ def context_attention_fwd_fp8(
     """Run NoPE sparse prefill with a bounded gather buffer and BF16 current KV."""
     # Direct packed attention is intentionally restricted to the validated
     # small-Q GLM-5.3 shape; all other cases retain the bounded-gather path.
-    if _can_use_direct_smallq(q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices):
+    if can_use_direct_smallq(q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices):
         return _context_attention_fwd_fp8_direct_smallq(
             q,
             packed_kv,
@@ -613,7 +609,7 @@ def context_attention_fwd_fp8(
             softmax_scale,
             direct_workspace,
         )
-    if _can_use_selected_prefill(q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices):
+    if can_use_selected_prefill(q, packed_kv, ragged_mem_index, prefill_mem_index, prefill_kv, topk_indices):
         return _context_attention_fwd_fp8_selected_prefill(
             q,
             packed_kv,
@@ -675,7 +671,6 @@ def context_attention_fwd_fp8(
             and ragged_mem_index.numel() <= KV_GATHER_CHUNK_SIZE
             and q.dtype == torch.bfloat16
             and q.is_contiguous()
-            and q.stride(-1) == 1
             and packed_kv.dtype == torch.uint8
             and packed_kv.shape[1:] == (1, 584)
             and topk_indices.dtype == torch.int32

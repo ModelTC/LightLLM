@@ -7,17 +7,21 @@ from lightllm.utils.device_utils import get_device_sm_count
 
 
 @triton.jit
-def _get_query_block(CuQLens, BATCH: tl.constexpr, BLOCK: tl.constexpr):
+def _get_query_block(CuQLens, BATCH, BLOCK: tl.constexpr):
     block = tl.program_id(0)
     # Request b owns [cu[b] // BLOCK + b, cu[b + 1] // BLOCK + b + 1).
     # The extra block covers unaligned boundaries without padding to max_q_len.
     if BATCH == 1:
         batch = 0
     else:
-        batches = tl.arange(0, triton.next_power_of_2(BATCH))
-        q_ends = tl.load(CuQLens + batches + 1, batches < BATCH, 0)
-        block_ends = q_ends // BLOCK + batches + 1
-        batch = tl.sum(((block >= block_ends) & (batches < BATCH)).to(tl.int32), 0)
+        batch = tl.full((), 0, tl.int32)
+        # Keep the search tile independent of the scheduler's request count.
+        lanes = tl.arange(0, 128)
+        for first in range(0, BATCH, 128):
+            batches = first + lanes
+            q_ends = tl.load(CuQLens + batches + 1, batches < BATCH, 0)
+            block_ends = q_ends // BLOCK + batches + 1
+            batch += tl.sum(((block >= block_ends) & (batches < BATCH)).to(tl.int32), 0)
     q_start = tl.load(CuQLens + batch)
     q_end = tl.load(CuQLens + batch + 1)
     local_block = block - (q_start // BLOCK + batch)
@@ -41,7 +45,7 @@ def _compress_pools(
     TAIL_SLOT_STRIDE: tl.constexpr,
     PACKED_STRIDE: tl.constexpr,
     HOLD_REQ: tl.constexpr,
-    BATCH: tl.constexpr,
+    BATCH,
     SINGLE_QUERY: tl.constexpr,
     TAIL_SIZE: tl.constexpr,
     HAS_MTP_INDEX: tl.constexpr,
@@ -181,9 +185,9 @@ def _get_pool_ranges(
     Starts,
     Ends,
     PoolLengths,
-    BATCH: tl.constexpr,
-    TOKENS: tl.constexpr,
-    MAX_POOLS: tl.constexpr,
+    BATCH,
+    TOKENS,
+    MAX_POOLS,
     SINGLE_QUERY: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
@@ -225,7 +229,7 @@ def _gather_pools(
     Scale,
     PACKED_STRIDE: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
-    POOLS: tl.constexpr,
+    POOLS,
 ):
     pool, batch = tl.program_id(0), tl.program_id(1)
     length = tl.load(SeqLen + batch)

@@ -1,5 +1,3 @@
-import math
-
 import torch
 import triton
 import triton.language as tl
@@ -87,9 +85,7 @@ def _fp8_sparse_direct_decode_kernel(
     )
 
 
-def _can_use_fp8_sparse_direct_decode(
-    q_nope, packed_kv, topk, softmax_scale, kv_lora_rank, bound, is_cuda_graph_capture=False
-):
+def can_use_fp8_sparse_direct_decode(q_nope, packed_kv, topk, kv_lora_rank, bound, is_cuda_graph_capture=False):
     """Validate the GLM packed format and choose the direct decode implementation."""
     # The producer guarantees valid indices occupy at most the first 2051 slots.
     # The direct kernel scans 2112 slots; unknown bounds must retain the full native scan.
@@ -100,8 +96,6 @@ def _can_use_fp8_sparse_direct_decode(
         return False
     # Direct decode wins for small graph workloads; retain native eager/larger workloads.
     if not (is_cuda_graph_capture and batch * triton.cdiv(heads, 16) <= 8):
-        return False
-    if not isinstance(softmax_scale, (float, int)) or not math.isfinite(softmax_scale) or softmax_scale <= 0:
         return False
     return (
         q_nope.dtype == torch.bfloat16
@@ -121,9 +115,9 @@ def _can_use_fp8_sparse_direct_decode(
     )
 
 
-def _fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale):
+def fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale):
     from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-        _reduce_direct_smallq_kernel,
+        reduce_direct_smallq_kernel,
     )
 
     batch = q_nope.shape[0]
@@ -156,7 +150,7 @@ def _fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale):
         num_warps=4 if block_k == 16 else 8,
         num_stages=1,
     )
-    _reduce_direct_smallq_kernel[(batch, heads, 4)](
+    reduce_direct_smallq_kernel[(batch, heads, 4)](
         partial_o,
         partial_lse,
         out,

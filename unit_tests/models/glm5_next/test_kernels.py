@@ -145,7 +145,16 @@ def test_kda_gate_cumsum_packed_shape(seq_lens, safe_gate, strided):
 
 @pytest.mark.parametrize(
     "q_lens",
-    [(3, 2, 4), (0, 1, 0, 1, 0), (1,) * 64, (257, 1, 513, 0), (8129,) + (1,) * 63],
+    [
+        (3, 2, 4),
+        (0, 1, 0, 1, 0),
+        (1,) * 64,
+        (257, 1, 513, 0),
+        (8129,) + (1,) * 63,
+        (3, 0, 1, 2) * 31 + (3, 0, 1),
+        (3, 0, 1, 2) * 32,
+        (3, 0, 1, 2) * 32 + (3,),
+    ],
 )
 def test_kpool_ranges_cuda_graph_with_changing_query_boundaries(q_lens):
     # Move the longest query across the batch while replaying the same graph.
