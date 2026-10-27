@@ -13,6 +13,7 @@
 
 import ast
 import json
+import math
 import os
 import orjson
 import logging
@@ -20,7 +21,7 @@ import re
 from abc import ABC, abstractmethod
 from json import JSONDecodeError, JSONDecoder
 from json.decoder import WHITESPACE
-from typing import Any, Dict, List, Optional, Tuple, Type
+from typing import Any, Dict, Iterator, List, Optional, Tuple, Type
 
 import partial_json_parser
 from partial_json_parser.core.exceptions import MalformedJSON
@@ -28,6 +29,7 @@ from partial_json_parser.core.options import Allow
 from pydantic import BaseModel, Field
 
 from .api_models import Tool
+from .parser_utils import GlmToolCallScanner
 
 logger = logging.getLogger(__name__)
 ENABLE_TOOL_NAME_CHECK = os.getenv("LIGHTLLM_ENABLE_TOOL_NAME_CHECK", "False").upper() in ["ON", "TRUE", "1"]
@@ -1187,39 +1189,39 @@ class DeepSeekV3Detector(BaseFormatDetector):
 
 
 class Glm47Detector(BaseFormatDetector):
+    """Parse GLM's XML-style tool calls.
+
+    Format: <tool_call>name<arg_key>key</arg_key><arg_value>value</arg_value></tool_call>
+    Arguments stay literal until the call is complete, then convert according
+    to the function's parameter schema.
     """
-    Detector for GLM-4.7/GLM-4.7-Flash model function call format.
 
-    The GLM-4.7 format uses an XML-style envelope with arg_key/arg_value pairs
-    instead of JSON arguments.
-
-    Format Structure:
-    ```
-    <tool_call>function_name
-    <arg_key>param1</arg_key>
-    <arg_value>value1</arg_value>
-    <arg_key>param2</arg_key>
-    <arg_value>value2</arg_value>
-    </tool_call>
-    ```
-
-    Example:
-    ```
-    <tool_call>tool_brave_web_search_post
-    <arg_key>query</arg_key>
-    <arg_value>test search</arg_value>
-    <arg_key>count</arg_key>
-    <arg_value>5</arg_value>
-    </tool_call>
-    ```
-
-    Key Components:
-    - Tool Call Tags: `<tool_call>` and `</tool_call>` wrap each individual call
-    - Function Name: Appears on the first line after `<tool_call>`
-    - Arguments: Pairs of `<arg_key>name</arg_key>` and `<arg_value>value</arg_value>`
-
-    Reference: https://github.com/vllm-project/vllm/blob/main/vllm/tool_parsers/glm4_moe_tool_parser.py
-    """
+    _TYPE_ALIASES = {
+        "str": "string",
+        "text": "string",
+        "varchar": "string",
+        "char": "string",
+        "enum": "string",
+        "int": "integer",
+        "int32": "integer",
+        "int64": "integer",
+        "uint": "integer",
+        "uint32": "integer",
+        "uint64": "integer",
+        "long": "integer",
+        "short": "integer",
+        "unsigned": "integer",
+        "float": "number",
+        "float32": "number",
+        "float64": "number",
+        "double": "number",
+        "bool": "boolean",
+        "dict": "object",
+        "arr": "array",
+        "list": "array",
+        "sequence": "array",
+    }
+    _TYPE_PRIORITY = ("null", "integer", "number", "boolean", "object", "array", "string")
 
     def __init__(self):
         super().__init__()
@@ -1227,23 +1229,111 @@ class Glm47Detector(BaseFormatDetector):
         self.eot_token = "</tool_call>"
         self.tool_call_separator = "\n"
 
-        # Regex patterns for parsing GLM-4.7 tool calls
-        # Match complete tool call blocks
-        self.func_call_regex = re.compile(r"<tool_call>.*?</tool_call>", re.DOTALL)
-        # Extract function name and arguments from a tool call block
-        # Function name can be followed by newline OR directly by <arg_key>
-        # Pattern: <tool_call>function_name(\n|<arg_key>)...
-        self.func_detail_regex = re.compile(
-            r"<tool_call>([^<\n]+?)(?:\n|(?=<arg_key>)|(?=</tool_call>))(.*?)</tool_call>", re.DOTALL
-        )
+        # A function name ends at a newline, the first argument, or the closing tag.
         self.func_name_regex = re.compile(r"<tool_call>([^<\n]+?)(?:\n|(?=<arg_key>)|(?=</tool_call>))")
-        self._streaming_tool_name: Optional[str] = None
-        # Extract arg_key/arg_value pairs
         self.func_arg_regex = re.compile(r"<arg_key>(.*?)</arg_key>\s*<arg_value>(.*?)</arg_value>", re.DOTALL)
+        self._tool_scanner = GlmToolCallScanner()
+        self._tool_scan_offset = len(self.bot_token)
 
     def has_tool_call(self, text: str) -> bool:
         """Check if the text contains a GLM-4.7 format tool call."""
         return self.bot_token in text
+
+    @classmethod
+    def _schema_types(cls, schema: Any) -> set[str]:
+        if not isinstance(schema, dict):
+            return {"string"}
+        types = set()
+        declared = schema.get("type")
+        if isinstance(declared, str):
+            types.add(declared)
+        elif isinstance(declared, list):
+            types.update(item for item in declared if isinstance(item, str))
+        enum_values = schema.get("enum", [])
+        if not isinstance(enum_values, list):
+            enum_values = []
+        for value in enum_values:
+            if value is None:
+                types.add("null")
+            elif isinstance(value, bool):
+                types.add("boolean")
+            elif isinstance(value, int):
+                types.add("integer")
+            elif isinstance(value, float):
+                types.add("number")
+            elif isinstance(value, str):
+                types.add("string")
+            elif isinstance(value, list):
+                types.add("array")
+            elif isinstance(value, dict):
+                types.add("object")
+        for field in ("anyOf", "oneOf", "allOf"):
+            choices = schema.get(field)
+            if isinstance(choices, list):
+                for choice in choices:
+                    types.update(cls._schema_types(choice))
+        return types or {"string"}
+
+    @classmethod
+    def _is_finite_json(cls, value: Any) -> bool:
+        if isinstance(value, float):
+            return math.isfinite(value)
+        if isinstance(value, dict):
+            return all(cls._is_finite_json(item) for item in value.values())
+        if isinstance(value, list):
+            return all(cls._is_finite_json(item) for item in value)
+        return True
+
+    @staticmethod
+    def _parse_typed_value(value: str, value_type: str) -> Any:
+        match value_type:
+            case "string":
+                return value
+            case "null":
+                if value.lower() == "null":
+                    return None
+            case "integer":
+                return int(value)
+            case "number":
+                number = float(value)
+                return int(number) if number.is_integer() else number
+            case "boolean":
+                normalized = value.strip().lower()
+                if normalized in ("true", "1"):
+                    return True
+                if normalized in ("false", "0"):
+                    return False
+            case "object" | "array":
+                return json.loads(value)
+        raise ValueError(f"Cannot parse value as {value_type}")
+
+    @classmethod
+    def _convert_param_value(cls, value: str, schema: Any) -> Any:
+        """Match vLLM's schema-based coercion without changing literal strings.
+
+        Union types use null/integer/number/boolean/object/array/string priority.
+        Unspecified fields remain strings. Non-finite numbers remain raw text so
+        the resulting arguments are always valid JSON.
+        """
+        schema_types = set()
+        for type_name in cls._schema_types(schema):
+            type_name = type_name.strip().lower()
+            schema_types.add(cls._TYPE_ALIASES.get(type_name, type_name))
+
+        for value_type in cls._TYPE_PRIORITY:
+            if value_type not in schema_types:
+                continue
+            try:
+                parsed = cls._parse_typed_value(value, value_type)
+            except (ValueError, TypeError):
+                continue
+            if cls._is_finite_json(parsed):
+                return parsed
+        try:
+            parsed = json.loads(value)
+            return parsed if cls._is_finite_json(parsed) else value
+        except ValueError:
+            return value
 
     def _parse_xml_arguments(self, arg_text: str, tool: Tool) -> dict:
         """
@@ -1260,22 +1350,24 @@ class Glm47Detector(BaseFormatDetector):
 
         args = {}
         properties = (tool.function.parameters or {}).get("properties", {})
+        if not isinstance(properties, dict):
+            properties = {}
         matches = self.func_arg_regex.findall(arg_text)
         for key, value in matches:
             key = key.strip()
-            # XML string values are literal: file content and edit targets may
-            # contain meaningful whitespace or text that happens to be JSON.
-            if properties.get(key, {}).get("type") == "string":
-                args[key] = value
-                continue
-            # Try to parse value as JSON for complex types (arrays, objects, numbers, booleans)
-            try:
-                parsed_value = json.loads(value)
-                args[key] = parsed_value
-            except (json.JSONDecodeError, ValueError):
-                # Keep as string if not valid JSON
-                args[key] = value
+            args[key] = self._convert_param_value(value, properties.get(key))
         return args
+
+    def _iter_tool_call_spans(self, text: str) -> Iterator[Tuple[int, int]]:
+        start = text.find(self.bot_token)
+        while start != -1:
+            body_start = start + len(self.bot_token)
+            relative_end = GlmToolCallScanner().find_end(text[body_start:])
+            if relative_end is None:
+                return
+            end = body_start + relative_end
+            yield start, end
+            start = text.find(self.bot_token, end)
 
     def detect_and_parse(self, text: str, tools: List[Tool]) -> StreamingParseResult:
         """
@@ -1285,28 +1377,26 @@ class Glm47Detector(BaseFormatDetector):
         :param tools: List of available tools.
         :return: StreamingParseResult with normal_text and parsed calls.
         """
-        idx = text.find(self.bot_token)
-        normal_text = text[:idx].strip() if idx != -1 else text
-
         if self.bot_token not in text:
-            return StreamingParseResult(normal_text=normal_text, calls=[])
+            return StreamingParseResult(normal_text=text, calls=[])
 
         tool_indices = self._get_tool_indices(tools)
         calls = []
+        normal_parts = []
+        cursor = 0
 
-        # Find all <tool_call>...</tool_call> blocks
-        match_result_list = self.func_call_regex.findall(text)
-
-        for match_result in match_result_list:
+        for start, end in self._iter_tool_call_spans(text):
+            normal_parts.append(text[cursor:start])
+            cursor = end
+            tool_text = text[start:end]
             try:
-                # Extract function name and arguments
-                func_detail = self.func_detail_regex.search(match_result)
-                if not func_detail:
-                    logger.warning(f"Failed to parse GLM-4.7 tool call: {match_result}")
+                header = self.func_name_regex.match(tool_text)
+                if header is None:
+                    logger.warning(f"Failed to parse GLM-4.7 tool call: {tool_text}")
                     continue
 
-                func_name = func_detail.group(1).strip()
-                arg_text = func_detail.group(2) if func_detail.group(2) else ""
+                func_name = header.group(1).strip()
+                arg_text = tool_text[header.end() : -len(self.eot_token)]
 
                 # Validate function name
                 if func_name not in tool_indices:
@@ -1324,10 +1414,32 @@ class Glm47Detector(BaseFormatDetector):
                     )
                 )
             except Exception as e:
-                logger.warning(f"Failed to parse GLM-4.7 tool call: {match_result}, error: {str(e)}")
+                logger.warning(f"Failed to parse GLM-4.7 tool call: {tool_text}, error: {str(e)}")
                 continue
 
-        return StreamingParseResult(normal_text=normal_text, calls=calls)
+        # Keep ordinary text between and after calls. An unfinished envelope
+        # stays buffered in streaming mode and must not leak in non-streaming.
+        content_end = text.find(self.bot_token, cursor)
+        if content_end == -1:
+            content_end = len(text)
+        normal_parts.append(text[cursor:content_end])
+        return StreamingParseResult(normal_text="".join(normal_parts).strip(), calls=calls)
+
+    def _stream_incomplete_call(self, tools: List[Tool]) -> Optional[ToolCallItem]:
+        """Announce the name once, then emit empty argument deltas while buffering."""
+        if self.current_tool_name_sent:
+            return ToolCallItem(tool_index=self.current_tool_id, parameters="")
+
+        header = self.func_name_regex.match(self._buffer)
+        if header is None:
+            return None
+        name = header.group(1).strip()
+        if name not in self._get_tool_indices(tools):
+            return None
+
+        self.current_tool_id += 1
+        self.current_tool_name_sent = True
+        return ToolCallItem(tool_index=self.current_tool_id, name=name, parameters="")
 
     def parse_streaming_increment(self, new_text: str, tools: List[Tool]) -> StreamingParseResult:
         """Buffer XML arguments while emitting tool deltas to keep the stream alive."""
@@ -1345,35 +1457,29 @@ class Glm47Detector(BaseFormatDetector):
 
             normal_text += self._buffer[:start]
             self._buffer = self._buffer[start:]
-            end = self._buffer.find(self.eot_token)
-            if end == -1:
-                # Match the buffered Qwen3-Coder flow: announce the name once,
-                # then send empty argument deltas until the XML call is complete.
-                # Long Write/Bash arguments must not leave the HTTP stream idle.
-                name = None
-                if self._streaming_tool_name is None:
-                    match = self.func_name_regex.match(self._buffer)
-                    if match and match.group(1).strip() in self._get_tool_indices(tools):
-                        name = match.group(1).strip()
-                        self._streaming_tool_name = name
-                        self.current_tool_id += 1
-                if self._streaming_tool_name is not None:
-                    calls.append(ToolCallItem(tool_index=self.current_tool_id, name=name, parameters=""))
+            relative_end = self._tool_scanner.find_end(self._buffer[self._tool_scan_offset :])
+            if relative_end is None:
+                self._tool_scan_offset = len(self._buffer)
+                pending_call = self._stream_incomplete_call(tools)
+                if pending_call is not None:
+                    calls.append(pending_call)
                 break
 
-            end += len(self.eot_token)
+            end = self._tool_scan_offset + relative_end
             # Waiting for the closing tag avoids re-emitting partial JSON or
             # rewriting already sent arguments when another XML key arrives.
             result = self.detect_and_parse(self._buffer[:end], tools)
             for call in result.calls:
-                if self._streaming_tool_name is None:
-                    self.current_tool_id += 1
-                else:
+                if self.current_tool_name_sent:
                     call.name = None
+                else:
+                    self.current_tool_id += 1
                 call.tool_index = self.current_tool_id
                 calls.append(call)
-            self._streaming_tool_name = None
+            self.current_tool_name_sent = False
             self._buffer = self._buffer[end:]
+            self._tool_scanner = GlmToolCallScanner()
+            self._tool_scan_offset = len(self.bot_token)
 
         return StreamingParseResult(normal_text=normal_text, calls=calls)
 
