@@ -11,8 +11,9 @@ PD Master 的 cache-aware prefill 选点策略。
   - 树中的 prefill_node 对应 worker.connection_key，可区分同一服务的不同 DP 连接；
   - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
   - 根据推理侧返回的平均 prompt cache 命中率，动态调整 cache 亲和与负载均衡的权重；
-  - 优先使用 dispatched_req_num 为 0 的空闲节点，避免 GPU 闲置；
-  - 所有节点都忙时，用 worker.dispatched_prompt_chars 做负载均衡。
+  - 以预计未缓存字符数估算新增 Prefill 工作量，缓存节点与冷节点的新增成本不同；
+  - 长且高匹配的前缀保持原 P/DP 亲和，避免空闲优先和相对负载阈值反复搬移长请求；
+  - dispatched_prompt_chars 记录尚未完成 Prefill 的预计未缓存字符数，而非完整 prompt 长度。
 
 选点流程见 CacheAwarePolicy.select_worker。
 """
@@ -54,6 +55,9 @@ class CacheAwareConfig:
     evict_node_batch: int = 10_000
     # 每隔 sample_stride 个字符抽 1 个作为前缀树 key，降低匹配开销与内存。
     sample_stride: int = 512
+    # 保护已处理的长前缀；这是历史位置亲和，不代表 KV 一定仍驻留。
+    long_prefix_min_chars: int = 65536
+    long_prefix_min_hit_rate: float = 0.8
 
 
 class BalanceRelThresholdController:
@@ -123,15 +127,8 @@ class CacheAwarePolicy:
         Raises:
             ValueError: request_text 长度不大于 1 时抛出。
 
-        决策顺序：
-          1) workers 为空 -> 返回 None；
-          2) 对 request_text 做前缀匹配，计算
-             match_rate = matched_char_count / input_char_count；
-          3) match_rate > cache_threshold 且命中 prefill_node 仍在线 -> 得到 cache 命中节点；
-          4) 存在 dispatched_req_num 为 0 的空闲节点 -> 强制从空闲节点中选择；
-             多个节点空闲时优先选择 cache 命中节点；
-          5) cache 命中节点负载未严重高于最空闲节点 -> 选择 cache 命中节点；
-          6) 未命中或负载严重失衡 -> 选择最空闲节点；
+        长且高匹配的前缀保持在线缓存节点亲和；其余命中比较「已有预计工作量 +
+        本次未缓存工作量」。只有无有效命中时才优先使用空闲节点。
         """
         if not workers:
             return None, PDSelectionExtraInfo()
@@ -140,23 +137,37 @@ class CacheAwarePolicy:
 
         cache_worker, cache_match = await self._get_cache_worker(workers, request_text)
 
-        # ---- 1. 空闲优先：避免有可用 GPU 闲置 ----
-        if cache_worker is not None and cache_worker.dispatched_req_num == 0:
-            idle_worker = cache_worker
-        else:
+        request_chars = len(request_text)
+        matched_chars = min(request_chars, max(0, cache_match.matched_char_count))
+        if cache_worker is None:
             idle_worker = self._select_idle_worker(workers)
-        if idle_worker is not None:
-            selected_worker = idle_worker
-        else:
-            # ---- 2. 所有节点都忙时，在 cache 亲和与负载均衡之间权衡 ----
-            selected_worker = self._select_worker_by_cache_and_load(workers, cache_worker, len(request_text))
-
-        selection_extra_info = PDSelectionExtraInfo()
-        if cache_match.prefill_node == selected_worker.connection_key and cache_match.input_char_count != 0:
-            selection_extra_info = PDSelectionExtraInfo(
-                estimated_cache_hit_rate=cache_match.matched_char_count / cache_match.input_char_count,
-                cache_last_insert_time=cache_match.last_insert_time,
+            selected_worker = idle_worker or min(
+                workers, key=lambda worker: (worker.dispatched_prompt_chars, worker.dispatched_req_num)
             )
+            reason = "cold_idle" if idle_worker is not None else "cold_load"
+        elif (
+            matched_chars >= self.config.long_prefix_min_chars
+            and matched_chars / request_chars >= self.config.long_prefix_min_hit_rate
+        ):
+            selected_worker = cache_worker
+            reason = "long_prefix_affinity"
+        else:
+            selected_worker = self._select_worker_by_cache_and_load(
+                workers, cache_worker, request_chars, matched_chars
+            )
+            reason = "cache_work" if selected_worker is cache_worker else "cold_lower_work"
+
+        selected_cached_chars = matched_chars if selected_worker is cache_worker else 0
+        selection_extra_info = PDSelectionExtraInfo(
+            estimated_cache_hit_rate=selected_cached_chars / request_chars,
+            cache_last_insert_time=cache_match.last_insert_time if selected_worker is cache_worker else None,
+            estimated_prefill_chars=max(1, request_chars - selected_cached_chars),
+            selection_reason=reason,
+            cache_candidate=cache_match.prefill_node,
+            cache_candidate_online=cache_worker is not None,
+            matched_chars=matched_chars,
+            selected_pending_chars=selected_worker.dispatched_prompt_chars,
+        )
         return selected_worker, selection_extra_info
 
     def record_prompt_cache_hit_rate(self, cache_hit_rate: float) -> None:
@@ -209,14 +220,17 @@ class CacheAwarePolicy:
         workers: List[PD_Client_Obj],
         cache_worker: Optional[PD_Client_Obj],
         request_load: int,
+        cached_chars: int = 0,
     ) -> PD_Client_Obj:
         """所有节点都忙时，在 cache 亲和与 prompt 负载之间选择节点。"""
-        least_loaded_worker = min(workers, key=lambda worker: worker.dispatched_prompt_chars)
+        least_loaded_worker = min(
+            workers, key=lambda worker: (worker.dispatched_prompt_chars, worker.dispatched_req_num)
+        )
         least_projected_load = least_loaded_worker.dispatched_prompt_chars + request_load
         cache_projected_load = None
         cache_worker_is_overloaded = False
         if cache_worker is not None:
-            cache_projected_load = cache_worker.dispatched_prompt_chars + request_load
+            cache_projected_load = cache_worker.dispatched_prompt_chars + max(1, request_load - cached_chars)
             cache_worker_is_overloaded = cache_projected_load > least_projected_load * self.config.balance_rel_threshold
 
         if cache_worker is None or cache_worker_is_overloaded:

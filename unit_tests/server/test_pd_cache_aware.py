@@ -282,16 +282,18 @@ def test_cache_aware_keeps_cache_worker_when_both_workers_are_idle():
     assert selected_worker is cache_worker
 
 
-def test_cache_aware_forces_idle_worker_over_busy_cache_worker():
+def test_cache_aware_compares_uncached_work_even_when_other_worker_is_idle():
     policy = _local_policy(CacheAwareConfig())
     cache_worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=100, dispatched_req_num=1)
     idle_worker = _worker("10.0.0.2:8000")
     prompt = "shared prefix " * 100
     _insert_prompt(policy, prompt, cache_worker)
 
-    selected_worker, _ = asyncio.run(policy.select_worker([cache_worker, idle_worker], prompt))
+    selected_worker, extra = asyncio.run(policy.select_worker([cache_worker, idle_worker], prompt))
 
-    assert selected_worker is idle_worker
+    assert selected_worker is cache_worker
+    assert extra.selection_reason == "cache_work"
+    assert extra.estimated_prefill_chars == len(prompt) - 1025
 
 
 def test_cache_aware_randomly_selects_an_idle_worker_without_cache_match():
@@ -319,3 +321,62 @@ def test_cache_aware_matches_cache_only_within_idle_workers():
     selected_worker, _ = asyncio.run(policy.select_worker([other_idle_worker, busy_worker, cache_idle_worker], prompt))
 
     assert selected_worker is cache_idle_worker
+
+
+@pytest.mark.parametrize("other_idle", [True, False])
+def test_long_hot_prefix_does_not_move_to_a_different_physical_prefill(other_idle):
+    policy = _local_policy(CacheAwareConfig())
+    cached = _worker("10.0.0.1:8019/dp3", dispatched_prompt_chars=10_000_000, dispatched_req_num=90)
+    other = _worker("10.0.0.2:8019/dp1", dispatched_prompt_chars=0, dispatched_req_num=int(not other_idle))
+    previous = "x" * 510_000
+    prompt = previous + "y" * 5_000
+    _insert_prompt(policy, previous, cached)
+
+    selected, extra = asyncio.run(policy.select_worker([other, cached], prompt))
+
+    assert selected is cached
+    assert extra.selection_reason == "long_prefix_affinity"
+    assert extra.cache_candidate == cached.connection_key
+    assert extra.cache_candidate_online
+    assert extra.estimated_cache_hit_rate > 0.98
+    assert 5_000 <= extra.estimated_prefill_chars < 5_512
+
+
+def test_long_hot_prefix_falls_back_when_cached_connection_is_unavailable():
+    policy = _local_policy(CacheAwareConfig())
+    cached, other = _worker("10.0.0.1:8019/dp3"), _worker("10.0.0.2:8019/dp1")
+    prompt = "x" * 510_000
+    _insert_prompt(policy, prompt, cached)
+
+    selected, extra = asyncio.run(policy.select_worker([other], prompt))
+
+    assert selected is other
+    assert extra.cache_candidate == cached.connection_key
+    assert not extra.cache_candidate_online
+    assert extra.estimated_cache_hit_rate == 0
+    assert extra.estimated_prefill_chars == len(prompt)
+
+
+def test_long_cold_request_is_balanced_instead_of_pinned_to_a_short_shared_prefix():
+    policy = _local_policy(CacheAwareConfig())
+    cached = _worker("p1", dispatched_prompt_chars=1_000_000, dispatched_req_num=10)
+    other = _worker("p2", dispatched_req_num=1)
+    _insert_prompt(policy, "x" * 1_000, cached)
+    prompt = "x" * 1_000 + "y" * 500_000
+
+    selected, extra = asyncio.run(policy.select_worker([cached, other], prompt))
+
+    assert selected is other
+    assert extra.estimated_prefill_chars == len(prompt)
+    assert extra.selection_reason == "cold_load"
+
+
+def test_complete_prefix_hit_still_reserves_one_unit_until_first_token():
+    policy = _local_policy(CacheAwareConfig(sample_stride=1))
+    cached = _worker("p1")
+    _insert_prompt(policy, "prompt", cached)
+
+    _, extra = asyncio.run(policy.select_worker([cached], "prompt"))
+
+    assert extra.estimated_cache_hit_rate == 1
+    assert extra.estimated_prefill_chars == 1
