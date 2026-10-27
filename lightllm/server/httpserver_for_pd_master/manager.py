@@ -345,12 +345,27 @@ class HttpServerManagerForPDMaster:
                     logger.error(f"{origin_request_id}: No p_node or d_node found")
                     raise Exception(f"{origin_request_id}: No p_node or d_node found")
 
-                pending_prefill_load_chars = len(prompt)
+                # 共享计数和选点使用相同的预计未缓存工作量；首 token 或失败时释放同一预占值。
+                estimated_prefill_chars = selection_extra_info.estimated_prefill_chars
+                pending_prefill_load_chars = (
+                    len(prompt) if estimated_prefill_chars is None else max(1, min(len(prompt), estimated_prefill_chars))
+                )
                 await self.pd_node_stats.add_dispatched_info(p_node=p_node, chars=pending_prefill_load_chars, req_num=1)
 
             cache_age_seconds = None
             if selection_extra_info.cache_last_insert_time is not None:
                 cache_age_seconds = max(0.0, time.monotonic() - selection_extra_info.cache_last_insert_time)
+            # 仅记录数值与节点/请求 ID，不记录 prompt、抽样 key 或生成内容。
+            logger.info(
+                f"pd_cache_selection origin_req_id:{origin_request_id} p_node:{p_node.connection_key} "
+                f"candidate:{selection_extra_info.cache_candidate} "
+                f"candidate_online:{int(selection_extra_info.cache_candidate_online)} "
+                f"reason:{selection_extra_info.selection_reason} input_tokens:{input_token_num} "
+                f"prompt_chars:{len(prompt)} matched_chars:{selection_extra_info.matched_chars} "
+                f"estimated_hit_rate:{selection_extra_info.estimated_cache_hit_rate:.6f} "
+                f"reserved_prefill_chars:{pending_prefill_load_chars} "
+                f"pending_before_chars:{selection_extra_info.selected_pending_chars} cache_age_s:{cache_age_seconds}"
+            )
             # TODO: 后续应收集系统实际请求的 cache 命中信息及其随时间变化的规律，自动估算并动态调整
             # pd_cache_high_priority_max_age_seconds，而不是继续使用环境变量配置的固定时间窗。
             has_fresh_high_cache_hit = (
@@ -474,6 +489,15 @@ class HttpServerManagerForPDMaster:
                     if origin_prompt_cache_len is None:
                         origin_prompt_cache_len = metadata.get("prompt_cache_len", 0)
                         prompt_cache_hit_rate = origin_prompt_cache_len / max(prompt_tokens, 1)
+                        logger.info(
+                            f"pd_cache_result origin_req_id:{origin_request_id} block_req_id:{block_group_request_id} "
+                            f"p_node:{p_node.connection_key} reason:{selection_extra_info.selection_reason} "
+                            f"estimated_hit_rate:{selection_extra_info.estimated_cache_hit_rate:.6f} "
+                            f"prompt_tokens:{prompt_tokens} actual_cache_tokens:{origin_prompt_cache_len} "
+                            f"actual_hit_rate:{prompt_cache_hit_rate:.6f} "
+                            f"needs_prefill:{int(needs_prefill_first_token)} "
+                            f"ttft_ms:{(time.time() - start_time) * 1000:.3f}"
+                        )
                         self.pd_manager.selector.record_prompt_cache_hit_rate(prompt_cache_hit_rate)
                         if needs_prefill_first_token and not raw_finish_status.is_error_finished():
                             # 只有内层确认所需的 Prefill 输出且请求成功后才记录缓存，避免
