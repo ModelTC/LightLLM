@@ -349,3 +349,36 @@ OOM 后继续检查现有 attention backend，发现已安装 FlashMLA 不支持
 launcher 当前候选值为 mem_fraction=0.74，尚未启动和验证。`trial074/` 仅有未完成的源码准备，不能算作一次启动或测试。用户要求查看 diff 后暂停部署/压测，服务保持关闭。当前 HEAD 为 `7bdc227d8`，未提交的已跟踪 diff 保存于 `kv_capacity/current_worktree.patch`；未叠加或部署 communication_op.py 中待测的 SM 调度改动。
 
 提交前补充验证：在 H100 .201 的空闲 GPU 上覆盖加载最新 attention backend，原测试中的 GPU 数值、显式/隐式输出、strided output、decode graph replay 和 prefill graph-split 回归共 **38 项通过，1 项取消选择，7.97s**。取消选择的是未修改的独立导入子进程测试，因为本次以运行目录中的单模块覆盖方式测试，子进程不会继承该覆盖。没有启动模型服务或修改包；原始日志为 `kv_capacity/commit_validation/attention_gpu.log`。这补齐最新 attention 改动的局部 GPU 验证，不代表 mem_fraction=0.74 或完整模型已验证。
+
+### 2026-10-27：同步 PR #1593 的缓存与推理状态结构
+
+此前六笔显存相关提交已推送至 `support_dsv41_model`（截至 `21bf7747d`）。本轮先合入 PR #1593 的 `20e1f22e9`，合并提交为 `0ea31b320`；随后接入其新增的 `369f35461`（将页配置移入 `config_utils`）。保留上游提交历史，公共路径尽量使用 PR 的实现。
+
+主要对齐点：
+
+- ReqManager 只持有跨 forward 的 SWA/compressor ring 和请求映射；prefill SWA workspace 由 attention backend 管理，并在自动 KV profile 前分配。workspace 按 batch/request 上限计算，launcher 删除已失效的 `DSV4_SWA_FULL_TOKENS_RATIO`。
+- 当前 forward 的索引、页表和 DeepGEMM scheduler 归 infer state；V4.1 的 C1/C2 使用同一 metadata 入口，保留共享 KV source 映射与分层 candidate selection。CED 复用本轮 SWA workspace，仅重建缩短 query 后的 attention scheduler。
+- PD 状态搬运使用公共 memory manager 的 `DeepseekV4AttStatePageHelper`，移除旧 model-local PD 实现；量化格式适配使用 `layer_weights/quant_utils.py`。page size 和 CPU cache 页配置统一走 `config_utils`，覆盖 V4/V4.1。
+- 同步 attention state 弱引用生命周期、公共多模态 chunk/cache 边界、PD transfer progress、prefill queue 和 parser 等上游改动。保留 V4.1 的 causal LLM vision、shifted mHC、Engram continuation、原始 block32 FP8 / FP4 checkpoint 与转换后的 block128 FP8 checkpoint 支持。
+
+接入时修复 indexer K 初始化入口、局部导入遮蔽、旧 CUDA graph 标记和 V4.1 indexer RoPE 后的 BF16 舍入。当前 H100 已安装的 FlashInfer TopK 不接受 `page_size/out` 参数，因此仅在该 API 支持时使用对应优化，否则复用已有 vLLM TopK 路径。未安装或更换依赖。此前共享 graph pool、按服务长度分配 RoPE、MoE scratch 复用和 FlashMLA native output 优化均保留。
+
+验证在两台 H100 的空闲 GPU 上执行，源码与日志保存在：
+`/mnt/vqa/wanzihao/dsv41_h100_dpep16_20261027_1527/pr1593_merge/`。
+
+| 测试范围 | 结果 | 日志 |
+|---|---|---|
+| attention 生命周期/FlashMLA、分页与 CPU cache、graph layout、完整 V4.1 单测 | 446 passed，2 skipped | `r7/core_gpu.log` |
+| 公共 V4、vision、FlashInfer graph state/plan、多模态边界、PD/CPU state | 262 passed，124 skipped | `r5/upstream_gpu.log` |
+| PD progress/queue/cache、parser、detokenizer、HTTP lifecycle 与启动参数 | 433 passed，另 8 subtests passed | `r5/shared_server.log` |
+| 最终公共 kernel 与 V4 模型回归（属于上述公共范围的复测，不叠加计数） | 130 passed | `r7/v4_kernels.log` |
+| 最新页配置、V4.1 默认值/非法对齐及相关启动参数 | 137 passed | `r8/page_config.log` |
+| 双 GPU PD 状态与 KV 拷贝完成事件 | 2 passed | `r8/peer_gpu.log` |
+
+核心套件包含 7 组真实小模型构造与前向：FP4/block32、FP8/block128、单/多 O group、vision、DSpark 及二者组合；检查 chunked prefill、decode、prompt-cache/CPU-cache continuation 等数值一致性。124 项跳过是远端缺少单测硬编码路径下的 DeepSeek reference processor/vision 文件；核心的 2 项跳过需同时可见两张 GPU，随后已在双 GPU 上单独补测通过。上述结果不是模型精度评测分数。
+
+Black 检查通过；Flake8 使用相同仓库规则在远端 Python 3.10 上通过。本机 hook 的 Python 3.8 无法解析上游 `match` / `anext`，提交时只跳过该本地 Flake8 hook，未跳过等价的 Python 3.10 检查。
+
+本轮为结构同步与回归，未启动完整模型服务、未重新运行 GSM8K/吞吐/显存压测。两台 18941 服务仍保持关闭；`mem_fraction=0.74` 仍是未通过完整模型负载验证的候选值，不将这些单测结果当作新的容量或性能结论。
+
+最终核对远端测试目录与提交前工作树的 **1838 个 Python/JSON 文件 SHA256 全部一致**，清单为 `final_manifest.json`；上述通过的日志已归档为同目录 `verified_logs.tar.gz`，本机与远端各保留一份。
