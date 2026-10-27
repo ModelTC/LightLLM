@@ -214,11 +214,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
         dim = cfg["qk_rope_head_dim"]
-        # The rope tables MUST span every absolute position any request can produce (the served
-        # max_req_total_len / max_position_embeddings, up to 1M). Capping them shorter makes
-        # init_some_extra_state's index_select(cos/sin, position_ids) read OOB past the table at
-        # contexts beyond the cap (device-side assert / crash). ~268MB total at 1M, fp32x32 x4 views.
-        max_seq = max(int(self.max_seq_length), int(cfg.get("max_position_embeddings", 8192)))
+        # The served length already includes the MTP position margin. YaRN scaling
+        # still uses the checkpoint's original maximum, independent of table capacity.
+        max_seq = int(self.max_seq_length)
         freq_exponents = torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim
         positions = torch.arange(max_seq, dtype=torch.float32, device="cuda")
 

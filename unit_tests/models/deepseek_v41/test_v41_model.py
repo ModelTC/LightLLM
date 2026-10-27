@@ -96,6 +96,30 @@ def test_fp8_history_capacity_counts_shared_sources_and_indexer_scales():
     assert config.layer_to_history_idx[38] == config.layer_to_history_idx[20]
 
 
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
+@pytest.mark.parametrize("served_length", [262144 + 31, 1048576 + 31])
+def test_rope_served_capacity_preserves_yarn_and_mtp_boundary(model_type, served_length):
+    from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
+
+    config = dict(
+        model_type=model_type,
+        qk_rope_head_dim=64,
+        rope_theta=10000,
+        compress_rope_theta=160000,
+        max_position_embeddings=1048576,
+        rope_scaling=dict(rope_type="yarn", factor=None, original_max_position_embeddings=65536),
+    )
+    full = SimpleNamespace(config=config, max_seq_length=max(served_length, 1048576), layers_infer=[])
+    served = SimpleNamespace(config=config, max_seq_length=served_length, layers_infer=[])
+    DeepseekV4TpPartModel._init_to_get_rotary(full)
+    DeepseekV4TpPartModel._init_to_get_rotary(served)
+    positions = torch.tensor([0, 127, 65535, served_length - 1], device="cuda")
+    for name in ("_freqs_cis_sliding", "_freqs_cis_compress"):
+        actual, reference = getattr(served, name), getattr(full, name)
+        assert actual.shape[0] == served_length
+        torch.testing.assert_close(actual[positions], reference[positions], rtol=0, atol=0)
+
+
 def _rope_reference(x, freqs, positions):
     rotated = x.clone()
     tail = torch.view_as_complex(x[..., -64:].float().unflatten(-1, (-1, 2)))
