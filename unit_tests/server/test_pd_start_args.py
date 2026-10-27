@@ -46,7 +46,7 @@ def startup_args(monkeypatch):
 def test_cpu_cache_page_defaults_preserve_model_contracts(
     startup_args, monkeypatch, model_type, block_num, cpu_page_size, expected
 ):
-    monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda _: model_type)
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model_type)
     monkeypatch.setattr(
         "lightllm.server.api_start.is_hybrid_att_model", lambda _: model_type in ("deepseek_v4", "glm5_next")
     )
@@ -65,7 +65,7 @@ def test_cpu_cache_page_defaults_preserve_model_contracts(
 def test_model_kv_defaults_preserve_hash_pages_kv_selection_and_explicit_pd_tuning(
     startup_args, monkeypatch, model_type, enable_cpu_cache, disable_chunked_prefill
 ):
-    monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda _: model_type)
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model_type)
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda _: model_type == "deepseek_v4")
     args = startup_args
     args.enable_cpu_cache = enable_cpu_cache
@@ -172,7 +172,7 @@ def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_typ
     ],
 )
 def test_dsv4_page_and_checkpoint_configuration(startup_args, monkeypatch, page_size, hash_page_size, cpu_page_size):
-    monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda model_dir: "deepseek_v4")
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda model_dir: "deepseek_v4")
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda model_dir: True)
 
     def validation_finished(args):
@@ -198,7 +198,7 @@ def test_dsv4_page_and_checkpoint_configuration(startup_args, monkeypatch, page_
     "page_size,hash_page_size", [(256, 128), (256, 384), (512, 256), (0, 512), (128, 512), (384, 768)]
 )
 def test_dsv4_rejects_unaligned_cache_pages(startup_args, monkeypatch, page_size, hash_page_size):
-    monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda _: "deepseek_v4")
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "deepseek_v4")
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda _: True)
     args = startup_args
     args.page_size = page_size

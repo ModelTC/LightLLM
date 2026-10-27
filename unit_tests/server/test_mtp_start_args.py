@@ -42,7 +42,7 @@ def test_dsv4_cpu_cache_uses_common_adaptive_placement(monkeypatch):
     monkeypatch.setattr("lightllm.server.api_start.auto_set_max_req_total_len", lambda args: None)
     monkeypatch.setattr("lightllm.server.api_start.auto_set_fused_shared_experts", lambda args: None)
     monkeypatch.setattr("lightllm.server.api_start.set_unique_server_name", lambda args: None)
-    monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda model_dir: "deepseek_v4")
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda model_dir: "deepseek_v4")
     monkeypatch.setattr(
         "lightllm.server.api_start.has_vision_module",
         lambda model_dir: (_ for _ in ()).throw(_StartupStopped),

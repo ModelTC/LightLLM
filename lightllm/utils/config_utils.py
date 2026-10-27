@@ -1,4 +1,5 @@
 import json
+import math
 import os
 from typing import Any, Dict, Optional, List
 from functools import lru_cache
@@ -88,6 +89,42 @@ def get_generation_config_dict(model_path: str) -> Dict[str, Any]:
     if get_model_type(model_path) == "deepseek_v4":
         return {key: value for key, value in generation_cfg.to_diff_dict().items() if value is not None}
     return generation_cfg.to_dict()
+
+
+def auto_set_page_size(args) -> None:
+    """Select the model's default KV page size and validate its alignment."""
+    if get_model_type(args.model_dir) != "deepseek_v4":
+        return
+
+    from lightllm.common.state_cache_manager.deepseek4 import DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
+
+    if args.page_size == 1:
+        args.page_size = DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
+    if args.page_size <= 0 or args.page_size % DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT:
+        raise ValueError(f"DeepSeek-V4 --page_size must be a positive multiple of {DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT}")
+
+
+def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
+    """Align CPU cache pages with the model's checkpoint boundaries."""
+    if not args.enable_cpu_cache:
+        return
+
+    if is_hybrid_model:
+        if get_model_type(args.model_dir) == "deepseek_v4" and args.run_mode != "decode":
+            big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+            if big_page_tokens > args.max_req_total_len:
+                # CPU pages need the same boundary snapshots as GPU prefix caching.
+                page_tokens = (
+                    args.cpu_cache_token_page_size
+                    or math.ceil(2048 / args.linear_att_hash_page_size) * args.linear_att_hash_page_size
+                )
+                assert page_tokens % args.linear_att_hash_page_size == 0
+                args.linear_att_page_block_num = page_tokens // args.linear_att_hash_page_size
+        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+
+    if args.cpu_cache_token_page_size is None:
+        args.cpu_cache_token_page_size = 256
 
 
 def get_running_max_req_size_per_dp(args) -> int:
