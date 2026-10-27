@@ -212,4 +212,5 @@ def test_launch_dry_run_matches_current_branch_cli_and_creates_no_files(tmp_path
         assert args.config_server_host and args.config_server_port == 60088
     else:
         assert args.run_mode == "config_server"
+        assert args.config_server_host == "0.0.0.0"
     assert not (tmp_path / "run").exists()

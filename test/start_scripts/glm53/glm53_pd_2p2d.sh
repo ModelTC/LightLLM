@@ -8,10 +8,11 @@ Usage: glm53-pd <config|master|p0|p1|d0|d1> [--dry-run]
 Run master once on each host/pod (port 60011, one worker each).
 master0/master1/master2/master3 are aliases with distinct log names.
 Set CONFIG_SERVER_HOST to the ConfigServer DNS name or reachable address.
+ConfigServer binds to CONFIG_SERVER_BIND_HOST (default 0.0.0.0).
 P0/P1 and D0/D1 each form a TP16/DP16 group; the role supplies node_rank.
 Mount the same model at MODEL_DIR (default /model) on all GPU hosts.
 Logs: RUN_DIR/logs/ROLE.log and stdout (RUN_DIR defaults /var/log/lightllm).
-Overrides: CONFIG_SERVER_PORT, MODEL_DIR, CPU_MODEL_DIR, SOURCE_DIR,
+Overrides: CONFIG_SERVER_PORT, CONFIG_SERVER_BIND_HOST, MODEL_DIR, CPU_MODEL_DIR, SOURCE_DIR,
 CPU_SOURCE, GPU_SOURCE, PYTHON_BIN, RUN_DIR, MASTER_PORT, DISK_CACHE_DIR.
 --dry-run prints commands and paths without starting services or writing files.
 EOF
@@ -37,7 +38,9 @@ CPU_MODEL_DIR="${CPU_MODEL_DIR:-$MODEL_DIR}"
 RUN_DIR="${RUN_DIR:-/var/log/lightllm}"
 CONFIG_SERVER_PORT="${CONFIG_SERVER_PORT:-60088}"
 if [[ "$ROLE" == config ]]; then
-  CONFIG_SERVER_HOST="${CONFIG_SERVER_HOST:-0.0.0.0}"
+  # A Kubernetes Service address belongs to the virtual service, not this pod.
+  # Peers use CONFIG_SERVER_HOST; the server binds on its own interfaces.
+  CONFIG_SERVER_HOST="${CONFIG_SERVER_BIND_HOST:-0.0.0.0}"
 else
   : "${CONFIG_SERVER_HOST:?Set CONFIG_SERVER_HOST to the ConfigServer service DNS name or address}"
 fi

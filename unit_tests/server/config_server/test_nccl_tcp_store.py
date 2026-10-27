@@ -5,9 +5,11 @@ from pathlib import Path
 import subprocess
 import sys
 import textwrap
+import pytest
 
 
-def test_tcp_store_can_start_from_daemonic_http_worker():
+@pytest.mark.parametrize("bind_host", ["127.0.0.1", "0.0.0.0"])
+def test_tcp_store_can_start_from_daemonic_http_worker(bind_host):
     code = textwrap.dedent(
         """
         import datetime
@@ -22,7 +24,7 @@ def test_tcp_store_can_start_from_daemonic_http_worker():
         with socket.socket() as sock:
             sock.bind(('127.0.0.1', 0))
             port = sock.getsockname()[1]
-        process = start_tcp_store_server('127.0.0.1', port)
+        process = start_tcp_store_server({bind_host!r}, port)
         try:
             store = dist.TCPStore(
                 host_name='127.0.0.1', port=port, world_size=None, is_master=False,
@@ -35,7 +37,7 @@ def test_tcp_store_can_start_from_daemonic_http_worker():
             process.kill()
             process.wait(timeout=10)
         """
-    )
+    ).format(bind_host=bind_host)
     env = dict(os.environ, CUDA_VISIBLE_DEVICES="")
     root = Path(__file__).resolve().parents[3]
     result = subprocess.run(
