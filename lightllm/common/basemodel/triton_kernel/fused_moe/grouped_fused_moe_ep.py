@@ -83,7 +83,10 @@ def masked_group_gemm(
     E, N, _ = w1.shape
     block_size = 128
     # groupgemm (masked layout)
-    gemm_out_a = torch.empty((E, padded_m, N), device=recv_x[0].device, dtype=dtype)
+    hidden_size = recv_x[0].shape[-1]
+    # GEMM1 is consumed by SwiGLU quantization before GEMM2 writes its output.
+    scratch = torch.empty((E * padded_m * max(N, hidden_size),), device=recv_x[0].device, dtype=dtype)
+    gemm_out_a = scratch[: E * padded_m * N].view(E, padded_m, N)
     expected_m = min(expected_m, padded_m)
     qsilu_out_scale = torch.empty((E, padded_m, N // 2 // block_size), device=recv_x[0].device, dtype=torch.float32)
     qsilu_out = torch.empty((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
@@ -100,7 +103,7 @@ def masked_group_gemm(
         clamp_up_add_one=clamp_up_add_one,
     )
     del gemm_out_a
-    gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
+    gemm_out_b = scratch[: E * padded_m * hidden_size].view(E, padded_m, hidden_size)
     _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
     return gemm_out_b
 
