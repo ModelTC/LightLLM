@@ -145,9 +145,8 @@ class DiversehBackend(ChunkedPrefillBackend):
                     new_kv_len = req_obj.get_chuncked_input_token_len()
                 else:
                     new_kv_len = req_obj.get_cur_total_len()
-                prefill_tokens = max(
-                    0, min(new_kv_len, req_obj.shm_req.input_len) - min(req_obj.cur_kv_len, req_obj.shm_req.input_len)
-                )
+                prefill_tokens = req_obj.prefill_tokens
+                req_obj.prefill_tokens = 0
                 req_obj.cur_kv_len = new_kv_len
                 if is_master_in_dp:
                     req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len

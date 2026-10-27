@@ -534,6 +534,7 @@ class InferReq:
         # cur_kv_len is the logical length already written; hold_kv_len is the
         # page-aligned physical capacity owned by this request.
         self.hold_kv_len = 0
+        self.prefill_tokens = 0
 
         # 请求需要被暂停
         self.wait_pause = False

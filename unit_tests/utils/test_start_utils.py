@@ -603,7 +603,10 @@ def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
             capture_output=True,
         )
     config = tmp_path / "hypercorn.toml"
-    config.write_text(f'certfile = "{tmp_path / "server.pem"}"\nkeyfile = "{tmp_path / "server.key"}"\n')
+    config.write_text(
+        f'certfile = "{tmp_path / "server.pem"}"\nkeyfile = "{tmp_path / "server.key"}"\n'
+        f'ca_certs = "{tmp_path / "client.pem"}"\nverify_mode = 2\n'
+    )
     monkeypatch.delenv("LIGHTLLM_READINESS_CLIENT_CERT", raising=False)
     monkeypatch.delenv("LIGHTLLM_READINESS_CLIENT_KEY", raising=False)
     if identity == "separate":
@@ -614,10 +617,10 @@ def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
         combined.write_bytes((tmp_path / "client.pem").read_bytes() + (tmp_path / "client.key").read_bytes())
         monkeypatch.setenv("LIGHTLLM_READINESS_CLIENT_CERT", str(combined))
 
-    server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    server_context.load_cert_chain(tmp_path / "server.pem", tmp_path / "server.key")
-    server_context.load_verify_locations(tmp_path / "client.pem")
-    server_context.verify_mode = ssl.CERT_REQUIRED
+    from hypercorn.__main__ import _load_config
+
+    server_context = _load_config(str(config)).create_ssl_context()
+    assert server_context.verify_mode == ssl.CERT_REQUIRED
     session = MagicMock()
     session.__enter__.return_value = session
 
@@ -648,6 +651,8 @@ def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
 
     manager = start_utils.SubmoduleManager()
     flag = Mock()
+    logger = Mock()
+    monkeypatch.setattr(start_utils, "logger", logger)
     monkeypatch.setattr(shared_arr, "SharedInt", lambda name: flag)
     monkeypatch.setattr(shm_port_args, "get_shm_port_args", lambda: SimpleNamespace(port=8000))
     monkeypatch.setattr(requests, "Session", lambda: session)
@@ -658,3 +663,8 @@ def test_readiness_monitor_mutual_tls(monkeypatch, tmp_path, identity):
     manager.start_readiness_monitor(FakeHttpServerProcess(), args)
     session.get.assert_called_once()
     assert [call.args for call in flag.set_value.call_args_list] == ([(0,)] if identity is None else [(0,), (1,)])
+    if identity is None:
+        logger.warning.assert_called_once()
+        assert logger.warning.call_args.kwargs["extra"]["reason"] == "probe_tls_failed"
+    else:
+        logger.warning.assert_not_called()

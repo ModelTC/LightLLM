@@ -1298,3 +1298,35 @@ def test_stop_cleanup_accounting(monkeypatch, cancel_second):
     assert throughput.completed == (1 if cancel_second else 2)
     fields = request_finish_fields(reasons)
     assert fields["status"] == ("abort" if cancel_second else "completed")
+
+
+@pytest.mark.parametrize("final_metadata", ["enable_rl", "enable_return_routed_experts", "prompt_logprobs"])
+def test_stop_final_metadata_has_no_simulated_token(monkeypatch, final_metadata):
+    from lightllm.server.core.objs import req as req_module
+
+    manager = _http_manager()
+    params = _params()
+    if final_metadata == "prompt_logprobs":
+        params.prompt_logprobs = 0
+    else:
+        setattr(manager.args, final_metadata, True)
+    req = _req([10, 11], params=params)
+    req.shm_logprobs.arr["rank"] = np.zeros(4)
+    req.get_output_logprobs_metadata = lambda *args: {"2": {"logprob": 0.0}}
+    manager.req_id_to_out_inf[80] = SimpleNamespace(group_req_objs=SimpleNamespace(shm_req_objs=[req]))
+    buffer = StopStrMatchBuffer(manager, params, [])
+    _handle_output(buffer, req.request_id, "helloEND", {"id": 10}, FinishStatus())
+    assert buffer.state is buffer.State.WAIT_LAST_PACK
+    assert req.is_stop_matched and req.is_aborted
+    monkeypatch.setattr(req_module, "get_env_start_args", lambda: SimpleNamespace(eos_id=[2]))
+    assert Req.mark_simulated_finished(req, FinishStatus.FINISHED_ABORTED, 1)
+    req.out_tokens_queue.push("", req.finish_token_index, False, 2)
+    output = asyncio.run(_read_http_tokens(manager, req))
+    _handle_output(buffer, *output[-1])
+    _, text, metadata, finish = buffer.ready_token_list[-1]
+    assert finish.get_finish_reason() == "stop"
+    assert text == ""
+    assert metadata["id"] is None
+    assert metadata["logprob"] is None
+    assert metadata["logprobs"] == {}
+    req.merge_final_token_metadata.assert_awaited_once()

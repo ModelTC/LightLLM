@@ -61,12 +61,23 @@ class ServiceReadiness:
             self.consecutive_successes = 0
             # A transport failure cannot establish that a live HTTP worker is unready.
             self.consecutive_failures = 0 if status is None else self.consecutive_failures + 1
-            if status not in (None, 503) and not self.ever_ready and not self.probe_failure_logged:
+            if (
+                (status not in (None, 503) or reason == "probe_tls_failed")
+                and not self.ever_ready
+                and not self.probe_failure_logged
+            ):
+                reason = reason or "unexpected_readiness_status"
                 logger.warning(
-                    "event=service.probe_failed address=%s status=%s",
+                    "event=service.probe_failed address=%s status=%s reason=%s",
                     self.address,
                     status,
-                    extra={"event": "service.probe_failed", "address": self.address, "http_status": status},
+                    reason,
+                    extra={
+                        "event": "service.probe_failed",
+                        "address": self.address,
+                        "http_status": status,
+                        "reason": reason,
+                    },
                 )
                 self.probe_failure_logged = True
             if self.ready and self.consecutive_failures >= 3:
@@ -147,6 +158,8 @@ class SubmoduleManager:
                         status = response.status_code
                     except requests.Timeout:
                         status, reason = None, "probe_timeout"
+                    except requests.exceptions.SSLError:
+                        status, reason = None, "probe_tls_failed"
                     except requests.RequestException:
                         status, reason = None, "probe_connection_failed"
                     if self.readiness_stop.is_set() or http_server_process.poll() is not None:

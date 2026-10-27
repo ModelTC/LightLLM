@@ -100,10 +100,19 @@ def request(input_len, cached=0, output_len=0, max_output=100):
     shm = SimpleNamespace(input_len=input_len, shm_cur_kv_len=cached, shm_cur_output_len=output_len)
     status = FinishStatus()
     req = SimpleNamespace(
-        cur_kv_len=cached, cur_output_len=output_len, shm_req=shm, finish_status=status, output_constraint=None
+        cur_kv_len=cached,
+        prefill_tokens=0,
+        cur_output_len=output_len,
+        shm_req=shm,
+        finish_status=status,
+        output_constraint=None,
+        req_idx=0,
+        multimodal_params=None,
     )
     req.get_cur_total_len = lambda: input_len + req.cur_output_len
     req.get_chuncked_input_token_len = lambda: min(req.cur_kv_len + 512, req.get_cur_total_len())
+    req.get_input_token_ids = lambda: np.zeros(req.get_cur_total_len(), dtype=np.int64)
+    req.get_chuncked_input_token_ids = lambda: req.get_input_token_ids()[: req.get_chuncked_input_token_len()]
     req.set_next_gen_token_id = Mock()
 
     def update(eos_ids, output_len):
@@ -136,15 +145,22 @@ def post(result, reqs, packs):
     )
 
 
+def prefill(result, reqs, chunked=True):
+    from lightllm.server.router.model_infer.mode_backend.generic_pre_process import prepare_prefill_inputs
+
+    prepare_prefill_inputs(reqs, is_chuncked_mode=chunked)
+    return result._pre_post_handle(reqs, is_chuncked_mode=chunked)
+
+
 def test_chunked_prefill_counts_computed_input_only_after_postprocessing(monkeypatch, counters):
     result = backend(monkeypatch, counters)
     req = request(1000, cached=200)
-    first = result._pre_post_handle([req], is_chuncked_mode=True)
+    first = prefill(result, [req])
     assert first[0].prefill_tokens == 512
     assert counters.totals() == (0, 0)  # No work reported before forward synchronization.
     post(result, [req], first)
     assert counters.totals() == (512, 0)
-    second = result._pre_post_handle([req], is_chuncked_mode=True)
+    second = prefill(result, [req])
     post(result, [req], second)
     assert counters.totals() == (800, 1)
 
@@ -420,3 +436,39 @@ def test_real_shared_counter_owner_and_worker_rows(monkeypatch):
         for worker in workers:
             worker.storage.detach_shm()
         owner.storage.close_shm()
+
+
+@pytest.mark.parametrize("cached", [0, 128, 2175])
+@pytest.mark.parametrize("chunked", [True, False])
+@pytest.mark.parametrize("diverse", [False, True])
+def test_recompute_generated_context(monkeypatch, counters, cached, chunked, diverse):
+    result = backend(monkeypatch, counters)
+    if diverse:
+        from lightllm.server.router.model_infer.mode_backend.diverse_backend.impl import DiversehBackend
+
+        monkeypatch.setattr(torch.cuda, "current_stream", lambda: Mock())
+        result._pre_post_handle = DiversehBackend._diverse_pre_post_handle.__get__(result)
+    req = request(128, cached=cached, output_len=2048, max_output=4096)
+    req.is_master_req = lambda: True
+    req.slave_reqs = []
+    while req.cur_kv_len < 2176:
+        packs = prefill(result, [req], chunked)
+        if req.cur_kv_len < 2176:
+            assert packs[0].prefill_tokens == 512
+            assert packs[0].output_len == 0
+        post(result, [req], packs)
+    assert counters.totals() == (2176 - cached, 1)
+    post(result, [req], result._pre_post_handle([req], is_chuncked_mode=False))
+    assert counters.totals() == (2176 - cached, 2)
+
+
+def test_mixed_prefill_excludes_decode_tokens(monkeypatch, counters):
+    result = backend(monkeypatch, counters)
+    prefill_req = request(128, cached=128, output_len=2048, max_output=4096)
+    decode_req = request(128, cached=132, output_len=5)
+    decode_req.is_decode_req_mixed_in_prefill = True
+    reqs = [prefill_req, decode_req]
+    packs = prefill(result, reqs)
+    assert [pack.prefill_tokens for pack in packs] == [512, 0]
+    post(result, reqs, packs)
+    assert counters.totals() == (512, 1)

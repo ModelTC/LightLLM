@@ -1150,8 +1150,9 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                 if req.finish_token_index != src_index:
                                     finish_status = FinishStatus(FinishStatus.NO_FINISH)
                                 else:
+                                    backend_finish_status = req.finish_status.status
                                     finish_status = FinishStatus(
-                                        FinishStatus.FINISHED_STOP if req.is_stop_matched else req.finish_status.status
+                                        FinishStatus.FINISHED_STOP if req.is_stop_matched else backend_finish_status
                                     )
 
                                     await req.merge_final_token_metadata(
@@ -1163,7 +1164,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                                     # mark_simulated_finished 追加的 EOS 只负责唤醒 Detoken/HTTP wait。
                                     # 对外将它转换成无 token 的 finish marker，VERL 会按 id=None
                                     # 跳过 token/logprob，同时仍可读取 finish status 和路由信息。
-                                    if finish_status.status == FinishStatus.FINISHED_ABORTED:
+                                    if backend_finish_status == FinishStatus.FINISHED_ABORTED:
                                         text = ""
                                         metadata["id"] = None
                                         metadata["logprob"] = None
