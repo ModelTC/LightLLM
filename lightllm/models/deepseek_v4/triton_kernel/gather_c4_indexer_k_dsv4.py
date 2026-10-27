@@ -1,10 +1,11 @@
 import torch
 import triton
 import triton.language as tl
+from .cache_io import INDEXER_PAGE_SIZE
 
 
 @triton.jit
-def _build_c4_indexer_page_table_kernel(
+def _build_indexer_page_table_kernel(
     req_idx_ptr,  # [batch] int
     c4_len_ptr,  # [batch] int
     req_to_token_ptr,
@@ -14,13 +15,14 @@ def _build_c4_indexer_page_table_kernel(
     hold_req_id,
     RATIO: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
+    BLOCK_P: tl.constexpr,
 ):
-    p = tl.program_id(0)
+    p = tl.program_id(0) * BLOCK_P + tl.arange(0, BLOCK_P)
     r = tl.program_id(1)
     req = tl.load(req_idx_ptr + r).to(tl.int64)
     c4_len = tl.load(c4_len_ptr + r).to(tl.int64)
     page_start = p * PAGE_SIZE
-    active = (req != hold_req_id) & (page_start < c4_len)
+    active = (p < page_cap) & (req != hold_req_id) & (page_start < c4_len)
 
     full_pos0 = page_start * RATIO + (RATIO - 1)
     full_slot0 = tl.load(
@@ -30,11 +32,11 @@ def _build_c4_indexer_page_table_kernel(
     ).to(tl.int64)
     c4_slot0 = full_slot0 // RATIO
     phys_page = c4_slot0 // PAGE_SIZE
-    tl.store(page_table_ptr + r * page_cap + p, tl.where(active, phys_page, 0).to(tl.int32))
+    tl.store(page_table_ptr + r * page_cap + p, tl.where(active, phys_page, 0).to(tl.int32), mask=p < page_cap)
 
 
 @torch.no_grad()
-def build_c4_indexer_page_table(
+def build_indexer_page_table(
     mem_manager,
     b_req_idx: torch.Tensor,
     c4_len: torch.Tensor,
@@ -42,14 +44,15 @@ def build_c4_indexer_page_table(
     req_to_token_indexs: torch.Tensor,
     hold_req_id: int,
     out: torch.Tensor = None,
+    compress_ratio: int = 4,
 ):
-    """Build the logical-c4-page -> physical-c4-page table expected by DeepGEMM paged logits.
+    """Build logical 64-key pages to physical compressed-slot pages.
 
     Safe only when each logical c4 page maps to a physical page with matching offsets:
         c4_slot(entry p*64 + o) == page_table[p] * 64 + o
-    which the current token-slot allocator guarantees.
+    which the current token-slot allocator guarantees for C4, C2 and C1.
     """
-    page_size = 64
+    page_size = INDEXER_PAGE_SIZE
     assert c4_cap % page_size == 0
     batch = b_req_idx.shape[0]
     page_cap = c4_cap // page_size
@@ -59,7 +62,7 @@ def build_c4_indexer_page_table(
         assert out.shape == (batch, page_cap)
         assert out.dtype == torch.int32 and out.device == b_req_idx.device and out.is_contiguous()
         page_table = out
-    _build_c4_indexer_page_table_kernel[(page_cap, batch)](
+    _build_indexer_page_table_kernel[(triton.cdiv(page_cap, 128), batch)](
         b_req_idx,
         c4_len,
         req_to_token_indexs,
@@ -67,8 +70,9 @@ def build_c4_indexer_page_table(
         page_table,
         page_cap,
         int(hold_req_id),
-        RATIO=4,
+        RATIO=compress_ratio,
         PAGE_SIZE=page_size,
-        num_warps=1,
+        BLOCK_P=128,
+        num_warps=4,
     )
     return page_table

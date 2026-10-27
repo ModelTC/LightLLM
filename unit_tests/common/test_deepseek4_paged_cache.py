@@ -1209,7 +1209,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         select()
-        state.c4_indexer_metadata = None
+        state.indexer_metadata = None
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
@@ -1221,7 +1221,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     graph.replay()
     actual = captured.clone()
     actual_lengths = captured_lengths.clone()
-    state.c4_indexer_metadata = None
+    state.indexer_metadata = None
     eager, eager_lengths = select()
     torch.testing.assert_close(actual.sort(dim=-1).values, eager.sort(dim=-1).values, rtol=0, atol=0)
     torch.testing.assert_close(actual_lengths, eager_lengths, rtol=0, atol=0)

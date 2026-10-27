@@ -2,6 +2,7 @@ import torch
 
 import triton
 import triton.language as tl
+from .cache_io import INDEXER_PAGE_SIZE
 
 
 @triton.jit
@@ -21,6 +22,7 @@ def _fwd_kernel_destindex_copy_indexer_k_dsv4(
     HEAD_DIM: tl.constexpr,
     COMPRESS_RATIO: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
+    SLAB_SIZE: tl.constexpr,
     BYTES_PER_PAGE: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
@@ -50,9 +52,12 @@ def _fwd_kernel_destindex_copy_indexer_k_dsv4(
     scale = amax / FP8_MAX
     k_fp8 = tl.clamp(vals / scale, min=FP8_MIN, max=FP8_MAX).to(tl.float8e4nv)
 
-    data_base = page * BYTES_PER_PAGE + token_in_page * HEAD_DIM
+    slab = token_in_page // SLAB_SIZE
+    offset = token_in_page % SLAB_SIZE
+    base = page * BYTES_PER_PAGE + slab * SLAB_SIZE * (HEAD_DIM + 4)
+    data_base = base + offset * HEAD_DIM
     tl.store(indexer_k_fp8 + data_base + offs_d, k_fp8)
-    scale_idx = (page * BYTES_PER_PAGE + PAGE_SIZE * HEAD_DIM) // 4 + token_in_page
+    scale_idx = (base + SLAB_SIZE * HEAD_DIM) // 4 + offset
     tl.store(indexer_k_scale + scale_idx, scale)
     return
 
@@ -74,7 +79,7 @@ def destindex_copy_indexer_k_dsv4(
     positions: [T] int — logical positions; only compression group-end rows are written.
     Compressed slots are group-end full-token slots divided by compress_ratio.
     indexer_k_cache: [num_pages, bytes_per_page] uint8 — one layer's slab from the c4 indexer
-        Packed pages contain 128B FP8 data + one FP32 scale per token.
+        Each history page contains 64-key slabs: FP8 data followed by FP32 scales.
 
     """
     seq_len = mem_index.shape[0]
@@ -100,6 +105,7 @@ def destindex_copy_indexer_k_dsv4(
         HEAD_DIM=head_dim,
         COMPRESS_RATIO=compress_ratio,
         PAGE_SIZE=page_size,
+        SLAB_SIZE=INDEXER_PAGE_SIZE,
         BYTES_PER_PAGE=bytes_per_page,
         num_warps=1,
         num_stages=1,

@@ -8,10 +8,12 @@ from .workspace import compressed_kv_capacity
 
 
 @dataclasses.dataclass
-class C4IndexerMetadata:
-    """Shared paged scorer inputs for the C4 layers of one forward."""
+class PagedIndexerMetadata:
+    """Shared paged scorer inputs for layers with the same compression ratio."""
 
+    compress_ratio: int
     row_page_table: torch.Tensor
+    logits_page_table: torch.Tensor
     valid_lengths: torch.Tensor
     context_lengths: torch.Tensor
     scheduler: torch.Tensor | None
@@ -50,7 +52,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # The first C4 layer builds metadata and later layers reuse it within this forward.
         # During CUDA Graph capture its tensor producers become graph nodes. Replay updates
         # those captured buffers from staged inputs; copy_for_cuda_graph skips this container.
-        self.c4_indexer_metadata: C4IndexerMetadata | None = None
+        self.indexer_metadata: PagedIndexerMetadata | None = None
 
     def _dsv4_index_max_kv_seq_len(self, model):
         if (
@@ -62,7 +64,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         return self.max_kv_seq_len
 
     def init_some_extra_state(self, model):
-        self.c4_indexer_metadata = None  # Rebuild for each eager forward or graph capture.
+        self.indexer_metadata = None  # Rebuild for each eager forward or graph capture.
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
         self.req_manager.init_forward_state(self)
         pos = self.position_ids

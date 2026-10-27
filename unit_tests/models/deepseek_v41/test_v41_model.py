@@ -6,7 +6,6 @@ import torch
 from lightllm.models.deepseek_v41.triton_kernel.attention import (
     pool_pairs,
     destindex_copy_kv_dsv41,
-    index_logits,
 )
 from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_q_indexer_rope_quant
@@ -323,86 +322,192 @@ def test_c2_keeps_accepted_history_after_rejecting_draft_rows(state_slots, start
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
-def test_indexer_reads_paged_source_keys_with_causal_mask(ratio):
-    n, heads = 5, 2
-    cache = torch.zeros((1, (256 // ratio) * 132), dtype=torch.uint8, device="cuda")
-    raw = torch.randn(n, 128, dtype=torch.bfloat16, device="cuda")
-    slots = torch.arange(n, dtype=torch.int32, device="cuda") * ratio + ratio - 1
-    freqs = torch.ones((16, 32), dtype=torch.complex64, device="cuda")
-    destindex_copy_indexer_k_dsv4(raw, slots, slots, cache, 256 // ratio, ratio, freqs_cis=freqs)
-    queries = torch.randn(2, heads, 128, dtype=torch.bfloat16, device="cuda")
-    weights = torch.randn(2, heads, device="cuda")
-    req = torch.zeros(2, dtype=torch.int32, device="cuda")
-    positions = torch.tensor([ratio - 1, n * ratio - 1], dtype=torch.int32, device="cuda")
-    table = torch.arange(256, dtype=torch.int32, device="cuda")[None, :]
-    query, folded_weights = fused_q_indexer_rope_quant(queries, weights, 1.0, freqs, positions, apply_hadamard=False)
-    actual = index_logits(query, folded_weights.squeeze(-1), cache, req, positions, table, ratio, n)
-    expected = torch.einsum("thd,kd->thk", _indexer_fp8_reference(queries), _indexer_fp8_reference(raw)).relu()
-    expected = (expected * weights[..., None]).sum(1)
-    expected[0, 1:] = -float("inf")
-    torch.testing.assert_close(actual, expected, atol=0.03, rtol=0.01)
+@pytest.mark.parametrize("mode", ["decode", "prefill", "prefill_paged"])
+@pytest.mark.parametrize("candidates", ["none", "source", "consumer"])
+def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monkeypatch):
+    from lightllm.models.deepseek_v4.layer_infer import indexer as indexer_module
+    from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
+
+    keys, heads, capacity = 1031, 32, 262149
+    config = DeepseekV4CacheConfig((ratio,), short_compress_ratio=2, long_compress_ratio=1, indexer_layer_ids=(0,))
+    pages = (keys * ratio + 255) // 256
+    storage = torch.full((pages * 256, 1, config.history_widths[0]), 165, dtype=torch.uint8, device="cuda")
+    manager = SimpleNamespace(cache_config=config, get_att_input_params=lambda layer: storage)
+    cache = get_indexer_k_buffer(manager, 0)
+    physical = torch.randperm(pages, device="cuda").repeat_interleave(256) * 256
+    physical += torch.arange(256, device="cuda").repeat(pages)
+    positions = torch.arange(keys * ratio, device="cuda")
+    slots = physical[: keys * ratio].int()
+    angles = torch.randn(keys * ratio + 8, 32, device="cuda")
+    freqs = torch.polar(torch.ones_like(angles), angles)
+    raw = torch.randn(keys * ratio, 128, device="cuda", dtype=torch.bfloat16)
+    destindex_copy_indexer_k_dsv4(raw, slots, positions, cache, 256 // ratio, ratio, freqs_cis=freqs)
+    closed = torch.arange(ratio - 1, keys * ratio, ratio, device="cuda")
+    k = _indexer_fp8_reference(_rope_reference(raw[closed], freqs, positions[closed] - ratio + 1))
+    # The indexer writer must leave every MLA byte untouched.
+    main_bytes = config.packed_kv_bytes(256 // ratio)
+    assert (storage.view(pages, -1)[:, :main_bytes] == 165).all()
+    table = torch.stack((physical.int(), torch.full_like(physical.int(), -1)))
+    req = torch.tensor([0, 0, 0, 1], dtype=torch.int32, device="cuda")
+    query_pos = torch.tensor([0, 129 * ratio - 1, keys * ratio - 1, 0], device="cuda")
+    query = torch.randn(4, heads, 128, dtype=torch.bfloat16, device="cuda")
+    weights = torch.randn(4, heads, device="cuda")
+    lengths = torch.tensor([keys * ratio, 1], device="cuda")
+    state = SimpleNamespace(
+        position_ids=query_pos,
+        dsv4_sparse_req_idx=req,
+        v41_index_capacity=capacity,
+        indexer_metadata=None,
+        is_prefill=mode != "decode",
+        max_q_seq_len=3,
+        total_token_num=keys * ratio + 1,
+        mem_manager=manager,
+        b_req_idx=torch.tensor([0, 1], device="cuda") if mode != "decode" else req,
+        b_seq_len=lengths if mode != "decode" else lengths[req.long()],
+        _dsv4_token_to_batch_idx=req.long(),
+        req_manager=SimpleNamespace(cache_config=config, req_to_token_indexs=table, HOLD_REQUEST_ID=1),
+        candidate_block_mask=torch.zeros(4, ((capacity + 63) // 64) * 8, dtype=torch.bool, device="cuda"),
+    )
+    state.candidate_block_mask[:, [0, 2, 17, 100]] = True
+    indexer = indexer_module.DeepseekV4IndexInfer(
+        0,
+        dict(
+            model_type="deepseek_v41",
+            rms_norm_eps=1e-20,
+            compress_ratios=[ratio],
+            index_topk=512,
+            index_head_dim=128,
+            qk_rope_head_dim=64,
+            index_n_heads=heads,
+            index_source_layer_ids=[0],
+            candidate_source_layer_id=0 if candidates == "source" else 20,
+            candidate_topk_blocks=4,
+        ),
+        1,
+    )
+    indexer.uses_candidate_blocks = candidates == "consumer"
+    indexer._indexer_q_weight = lambda *args, **kwargs: (lambda out: (out[0], out[1].squeeze(-1)))(
+        fused_q_indexer_rope_quant(query, weights, 1.0, freqs, query_pos, apply_hadamard=False)
+    )
+    # Force the same chunked metadata path used by long prefill.
+    monkeypatch.setattr(
+        indexer_module, "C4_PREFILL_LOGITS_BUDGET_BYTES", 64 * 1024 if mode == "prefill_paged" else 2 * 262400 * 4
+    )
+
+    def run():
+        return indexer._build_v41_metadata(query, query, state, None, False)
+
+    def check(result, candidate_mask):
+        q = _indexer_fp8_reference(_rope_reference(query, freqs, query_pos))
+        scores = (torch.einsum("thd,kd->thk", q, k).relu() * weights[..., None]).sum(1)
+        valid = (query_pos + 1) // ratio
+        valid.masked_fill_(req == 1, 0)
+        if candidates == "consumer":
+            scores.masked_fill_(~candidate_mask[:, torch.arange(keys, device="cuda") // 8], -float("inf"))
+        inverse = torch.full((pages * 256 // ratio,), -1, device="cuda", dtype=torch.long)
+        inverse[slots[closed].long() // ratio] = torch.arange(keys, device="cuda")
+        for row in range(4):
+            count = result["extra_lengths"][row].item()
+            expected = scores[row, : valid[row]].topk(min(512, valid[row].item())).values
+            expected = expected[expected.isfinite()]
+            assert count == expected.numel()
+            selected = result["extra_indices"][row, 0, :count].long()
+            logical = inverse[selected]
+            assert ((logical >= 0) & (logical < valid[row])).all()
+            assert selected.unique().numel() == count
+            torch.testing.assert_close(
+                scores[row, logical].sort(descending=True).values, expected, atol=0.03, rtol=0.01
+            )
+            assert (result["extra_indices"][row, 0, count:] == -1).all()
+        if candidates == "source":
+            for row in range(4):
+                recent = (valid[row].item() - 1) // 8
+                if recent >= 0:
+                    assert candidate_mask[row, recent]
+                assert candidate_mask[row].sum().item() == min(4, (valid[row].item() + 7) // 8)
+
+    check(run(), state.candidate_block_mask)
+    state.indexer_metadata = None
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        result = run()
+    captured_mask = state.candidate_block_mask
+    query.normal_()
+    query_pos.copy_(torch.tensor([ratio - 1, 257 * ratio - 1, 900 * ratio - 1, 0], device="cuda"))
+    if candidates == "consumer":
+        captured_mask.zero_()
+        captured_mask[:, [1, 5, 30]] = True
+    graph.replay()
+    check(result, captured_mask)
+    # Capture must use the real length tensors, not bake in the capture-time lengths.
+    state.indexer_metadata = None
+    eager = run()
+    torch.testing.assert_close(
+        result["extra_indices"].sort(-1).values, eager["extra_indices"].sort(-1).values, atol=0, rtol=0
+    )
+    torch.testing.assert_close(result["extra_lengths"], eager["extra_lengths"], atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
-@pytest.mark.parametrize("use_candidate_blocks", [False, True])
-def test_fp8_indexer_page_scatter_candidate_blocks_and_cuda_graph(ratio, use_candidate_blocks):
-    tokens, heads = 259, 32
-    page_size = 256 // ratio
-    cache = torch.full((3, page_size * 132), 165, dtype=torch.uint8, device="cuda")
-    positions = torch.arange(tokens * ratio, dtype=torch.int32, device="cuda")
-    physical = torch.randperm(3, device="cuda").repeat_interleave(256) * 256
-    physical += torch.arange(256, device="cuda").repeat(3)
-    slots = physical[: tokens * ratio].int()
-    raw = torch.randn((tokens * ratio, 128), dtype=torch.bfloat16, device="cuda")
-    angles = torch.randn(tokens * ratio, 32, device="cuda")
-    freqs = torch.polar(torch.ones_like(angles), angles)
-    destindex_copy_indexer_k_dsv4(raw, slots, positions, cache, page_size, ratio, freqs_cis=freqs)
-    closed = torch.arange(ratio - 1, tokens * ratio, ratio, device="cuda")
-    expected_cache = torch.full_like(cache, 165)
-    compressed = slots[closed].long() // ratio
-    pages, offsets = compressed // page_size, compressed % page_size
-    keys = _rope_reference(raw[closed], freqs, positions[closed] - ratio + 1).float()
-    scales = keys.abs().amax(-1).clamp_min(1e-4) / 448
-    quantized = (keys / scales[:, None]).to(torch.float8_e4m3fn).view(torch.uint8)
-    expected_cache[pages[:, None], offsets[:, None] * 128 + torch.arange(128, device="cuda")] = quantized
-    expected_cache[pages[:, None], page_size * 128 + offsets[:, None] * 4 + torch.arange(4, device="cuda")] = (
-        scales[:, None].contiguous().view(torch.uint8)
+def test_dense_prefill_gather_and_request_relative_logits(ratio):
+    import deep_gemm
+    from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer, gather_indexer_k
+
+    config = DeepseekV4CacheConfig((ratio,), short_compress_ratio=2, long_compress_ratio=1, indexer_layer_ids=(0,))
+    storage = torch.zeros(512, 1, config.history_widths[0], dtype=torch.uint8, device="cuda")
+    manager = SimpleNamespace(cache_config=config, get_att_input_params=lambda layer: storage)
+    positions = torch.cat((torch.arange(5 * ratio, device="cuda"), torch.arange(7 * ratio, device="cuda")))
+    slots = torch.cat((torch.arange(5 * ratio, device="cuda") + 256, torch.arange(7 * ratio, device="cuda"))).int()
+    table = torch.full((2, 256), -1, dtype=torch.int32, device="cuda")
+    table[0, : 5 * ratio] = slots[: 5 * ratio]
+    table[1, : 7 * ratio] = slots[5 * ratio :]
+    raw = torch.randn(12 * ratio, 128, dtype=torch.bfloat16, device="cuda")
+    destindex_copy_indexer_k_dsv4(
+        raw,
+        slots,
+        positions,
+        get_indexer_k_buffer(manager, 0),
+        256 // ratio,
+        ratio,
+        freqs_cis=torch.ones(7 * ratio, 32, dtype=torch.complex64, device="cuda"),
     )
-    torch.testing.assert_close(cache, expected_cache, atol=0, rtol=0)
-
-    query = torch.randn((3, heads, 128), dtype=torch.bfloat16, device="cuda")
-    weights = torch.randn((3, heads), device="cuda")
-    query_pos = torch.tensor([0, 129 * ratio - 1, tokens * ratio - 1], dtype=torch.int32, device="cuda")
-    req = torch.zeros(3, dtype=torch.int32, device="cuda")
-    table = physical.int()[None, :]
-    candidate_blocks = (
-        torch.tensor([[0, 1, -1], [0, 16, -1], [32, 0, 16]], device="cuda") if use_candidate_blocks else None
+    lengths = torch.tensor([5, 7], dtype=torch.int32, device="cuda")
+    starts = torch.tensor([0, 5], dtype=torch.int32, device="cuda")
+    keys = gather_indexer_k(
+        manager, 0, torch.arange(2, dtype=torch.int32, device="cuda"), lengths, starts, table, 12, 64
     )
-    count = 24 if use_candidate_blocks else tokens
+    expected_keys = _indexer_fp8_reference(raw[ratio - 1 :: ratio])
+    torch.testing.assert_close(keys[0].float() * keys[1][:, None], expected_keys, atol=0, rtol=0)
+    query = torch.randn(4, 32, 128, device="cuda").to(torch.float8_e4m3fn)
+    weights = torch.randn(4, 32, device="cuda")
+    first = torch.tensor([0, 0, 5, 5], dtype=torch.int32, device="cuda")
+    last = torch.tensor([1, 5, 7, 12], dtype=torch.int32, device="cuda")
+    logits = deep_gemm.fp8_mqa_logits(query, keys, weights, first, last, clean_logits=False, max_seqlen_k=64)
+    for row, (start, end) in enumerate(zip(first.tolist(), last.tolist())):
+        reference = (query[row].float() @ expected_keys[start:end].T).relu()
+        reference = (reference * weights[row, :, None]).sum(0)
+        torch.testing.assert_close(logits[row, : end - start], reference, atol=0.03, rtol=0.01)
 
-    def run():
-        q, folded_weights = fused_q_indexer_rope_quant(query, weights, 1.0, freqs, query_pos, apply_hadamard=False)
-        return index_logits(q, folded_weights.squeeze(-1), cache, req, query_pos, table, ratio, count, candidate_blocks)
 
-    def reference():
-        q = _indexer_fp8_reference(_rope_reference(query, freqs, query_pos))
-        k = _indexer_fp8_reference(_rope_reference(raw[closed], freqs, positions[closed] - ratio + 1))
-        score = torch.einsum("thd,kd->thk", q, k)
-        score = (score.relu() * weights[..., None]).sum(1)
-        if use_candidate_blocks:
-            logical = (candidate_blocks[..., None] * 8 + torch.arange(8, device="cuda")).flatten(1)
-            score = score.gather(1, logical.clamp(0, tokens - 1))
-        else:
-            logical = torch.arange(tokens, device="cuda")[None, :]
-        return score.masked_fill((logical < 0) | (logical >= ((query_pos + 1) // ratio)[:, None]), -float("inf"))
+def test_candidate_selection_2048_blocks_and_recent_block():
+    from lightllm.models.deepseek_v41.triton_kernel.attention import select_indexer_candidates
 
-    torch.testing.assert_close(run(), reference(), atol=0.03, rtol=0.01)
-    graph = torch.cuda.CUDAGraph()
-    with torch.cuda.graph(graph):
-        actual = run()
-    query.normal_()
-    graph.replay()
-    torch.testing.assert_close(actual, reference(), atol=0.03, rtol=0.01)
+    scores = torch.randn(4, 65536, device="cuda")
+    lengths = torch.tensor([0, 7, 20000, 60000], dtype=torch.int32, device="cuda")
+    mask = torch.zeros(4, 8192, dtype=torch.bool, device="cuda")
+    select_indexer_candidates(scores, lengths, mask, 2048)
+    for row, length in enumerate(lengths.tolist()):
+        blocks = (length + 7) // 8
+        expected = torch.nn.functional.pad(scores[row, :length], (0, -length % 8), value=-float("inf"))
+        expected = expected.view(-1, 8).amax(-1)
+        if blocks:
+            expected[-1] = float("inf")
+        chosen = mask[row].nonzero().flatten()
+        assert chosen.numel() == min(2048, blocks)
+        assert (chosen < blocks).all()
+        torch.testing.assert_close(
+            expected[chosen].sort(descending=True).values, expected.topk(min(2048, blocks)).values
+        )
 
 
 @pytest.mark.parametrize("ratio", [1, 2])
@@ -546,7 +651,7 @@ def test_c2_first_token_has_no_compressed_history():
             index_topk=512,
             index_head_dim=128,
             qk_rope_head_dim=64,
-            index_n_heads=2,
+            index_n_heads=32,
             index_source_layer_ids=[0],
             candidate_source_layer_id=20,
             candidate_topk_blocks=2048,
@@ -560,6 +665,10 @@ def test_c2_first_token_has_no_compressed_history():
         position_ids=torch.tensor([0], device="cuda"),
         dsv4_sparse_req_idx=torch.tensor([0], device="cuda"),
         v41_index_capacity=1,
+        indexer_metadata=None,
+        is_prefill=False,
+        b_req_idx=torch.tensor([0], dtype=torch.int32, device="cuda"),
+        b_seq_len=torch.tensor([1], dtype=torch.int32, device="cuda"),
         dsv4_swa_indices=torch.full((1, 128), -1, dtype=torch.int32, device="cuda"),
         dsv4_swa_lengths=torch.ones(1, dtype=torch.int32, device="cuda"),
         mem_manager=SimpleNamespace(cache_config=config, get_att_input_params=lambda layer: cache),
@@ -571,7 +680,7 @@ def test_c2_first_token_has_no_compressed_history():
     )
     weight = SimpleNamespace(
         idx_wq_b_=SimpleNamespace(
-            mm=lambda x, **kwargs: torch.zeros((x.shape[0], 256), dtype=x.dtype, device=x.device)
+            mm=lambda x, **kwargs: torch.zeros((x.shape[0], 4096), dtype=x.dtype, device=x.device)
         ),
         idx_weights_proj_=SimpleNamespace(mm=lambda x, out, **kwargs: out.zero_()),
     )
@@ -706,22 +815,25 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     state.dsv4_swa_indices = torch.arange(332 * 128, dtype=torch.int32, device="cuda").view(332, 128)
     state.dsv4_swa_lengths = torch.full((332,), 128, dtype=torch.int32, device="cuda")
     state.v41_sparse_selection = {"extra_indices": torch.arange(332, device="cuda")[:, None, None]}
-    state.candidate_blocks = torch.arange(332, device="cuda")[:, None]
+    state.candidate_block_mask = torch.arange(332, device="cuda")[:, None]
     state.engram_hashes = torch.arange(332, device="cuda")[:, None, None]
     state._dsv4_prefill_pad_q_len = 129
+    state.indexer_metadata = object()
     original_swa = state.dsv4_swa_indices.clone()
     rows = state.init_decoder_state()
     expected_rows = torch.cat((torch.arange(72, 203, device="cuda"), torch.arange(204, 332, device="cuda")))
     torch.testing.assert_close(rows, expected_rows)
     decoder = state.decoder_state
     assert decoder.req_manager is state.req_manager
+    assert decoder.indexer_metadata is None
+    assert state.indexer_metadata is not None
     assert decoder.max_q_seq_len == 128
     assert decoder.b_q_seq_len.tolist() == [128, 3, 128]
     assert decoder.b_ready_cache_len.tolist() == [92, 1000, 129]
     assert decoder.b_q_start_loc.tolist() == [0, 128, 131]
     assert decoder._dsv4_prefill_pad_q_len == 128
     torch.testing.assert_close(decoder.engram_hashes[:, 0, 0], expected_rows)
-    torch.testing.assert_close(decoder.candidate_blocks[:, 0], expected_rows)
+    torch.testing.assert_close(decoder.candidate_block_mask[:, 0], expected_rows)
     torch.testing.assert_close(decoder.v41_sparse_selection["extra_indices"][:, 0, 0], expected_rows)
     expected_lengths = torch.tensor([*range(1, 129), 1, 2, 3, *range(1, 129)], device="cuda", dtype=torch.int64)
     torch.testing.assert_close(decoder.dsv4_swa_lengths, expected_lengths)
@@ -797,9 +909,9 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             candidate_source_layer_id=3,
             candidate_topk_blocks=2,
             candidate_block_size=8,
-            index_n_heads=2,
+            index_n_heads=32,
             index_head_dim=128,
-            index_topk=128,
+            index_topk=512,
             hc_mult=4,
             hc_sinkhorn_iters=20,
             hc_eps=1e-6,

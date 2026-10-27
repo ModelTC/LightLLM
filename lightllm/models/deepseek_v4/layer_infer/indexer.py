@@ -1,11 +1,11 @@
 import torch
-import torch.nn.functional as F
+import triton
 import deep_gemm
 
 from lightllm.common.basemodel import BaseLayerInfer
-from ..infer_struct import C4IndexerMetadata, DeepseekV4InferStateInfo
+from ..infer_struct import PagedIndexerMetadata, DeepseekV4InferStateInfo
 from ..triton_kernel.topk_transform import topk_transform
-from ..triton_kernel.cache_io import get_indexer_k_buffer
+from ..triton_kernel.cache_io import INDEXER_PAGE_SIZE, gather_indexer_k, get_indexer_k_buffer, get_indexer_k_cache
 from ..triton_kernel.destindex_copy_indexer_k_dsv4 import destindex_copy_indexer_k_dsv4
 from ..workspace import C4_LOGITS_ALIGNMENT, C4_PREFILL_LOGITS_BUDGET_BYTES, compressed_kv_capacity
 from .compressor import CompressorInfer
@@ -198,60 +198,90 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
         return idx_q_fp8, weights.squeeze(-1)
 
-    def _build_v41_metadata(self, x, q_lora, infer_state, layer_weight, use_custom_tensor_manager):
-        from lightllm.models.deepseek_v41.triton_kernel.attention import index_logits
+    def _use_dense_prefill(self, infer_state):
+        return (
+            self.is_v41
+            and infer_state.is_prefill
+            and infer_state.max_q_seq_len > 1
+            and max(1, infer_state.total_token_num // self.compress_ratio)
+            * infer_state.mem_manager.cache_config.indexer_bytes
+            <= C4_PREFILL_LOGITS_BUDGET_BYTES
+        )
 
-        ratio = self.compress_ratio
+    def _build_v41_metadata(self, x, q_lora, infer_state, layer_weight, use_custom_tensor_manager):
+        from lightllm.models.deepseek_v41.triton_kernel.attention import (
+            mask_indexer_candidates,
+            select_indexer_candidates,
+            select_indexer_topk,
+        )
+
         source = infer_state.req_manager.cache_config.layer_to_kv_source[self.layer_idx_]
-        cache = get_indexer_k_buffer(infer_state.mem_manager, source)
+        cache = get_indexer_k_cache(infer_state.mem_manager, source)
         query, weights = self._indexer_q_weight(
             x, q_lora, infer_state, layer_weight, use_custom_tensor_manager=use_custom_tensor_manager
         )
-        candidate_blocks = infer_state.candidate_blocks if self.uses_candidate_blocks else None
-        count = infer_state.v41_index_capacity // ratio if candidate_blocks is None else candidate_blocks.shape[1] * 8
-        query_chunk_size = max(1, (64 * 1024 ** 2) // max(4 * count, 1))
-        selections, candidate_block_rows = [], []
-        for start in range(0, x.shape[0], query_chunk_size):
-            end = min(x.shape[0], start + query_chunk_size)
-            logits = index_logits(
-                query[start:end],
-                weights[start:end],
-                cache,
-                infer_state.dsv4_sparse_req_idx[start:end],
-                infer_state.position_ids[start:end],
+        capacity = compressed_kv_capacity(infer_state.v41_index_capacity, self.compress_ratio)
+        metadata = self._build_indexer_metadata(infer_state, capacity)
+        dense_prefill = self._use_dense_prefill(infer_state)
+        if dense_prefill:
+            key_lengths = (infer_state.b_seq_len // self.compress_ratio).to(torch.int32)
+            key_lengths.masked_fill_(infer_state.b_req_idx == infer_state.req_manager.HOLD_REQUEST_ID, 0)
+            key_offsets = key_lengths.cumsum(0, dtype=torch.int32) - key_lengths
+            key_starts = key_offsets[infer_state._dsv4_token_to_batch_idx.long()]
+            key_ends = key_starts + metadata.valid_lengths
+            keys = gather_indexer_k(
+                infer_state.mem_manager,
+                source,
+                infer_state.b_req_idx,
+                key_lengths,
+                key_offsets,
                 infer_state.req_manager.req_to_token_indexs,
-                ratio,
-                count,
-                None if candidate_blocks is None else candidate_blocks[start:end],
+                max(1, infer_state.total_token_num // self.compress_ratio),
+                capacity,
             )
-            k = min(count, self.index_topk)
-            values, indices = logits.topk(k, -1, sorted=False)
-            if candidate_blocks is not None:
-                positions = (candidate_blocks[start:end, :, None] * 8 + torch.arange(8, device=x.device)).flatten(1)
-                indices = positions.gather(1, indices)
-            invalid = torch.iinfo(indices.dtype).max
-            indices = indices.masked_fill(~values.isfinite(), invalid).sort(-1).values
-            indices = indices.masked_fill(indices == invalid, -1)
-            selections.append(F.pad(indices, (0, self.index_topk - k), value=-1))
-            if self.is_candidate_source:
-                scores = F.pad(logits, (0, -count % 8), value=-float("inf")).unflatten(-1, (-1, 8)).amax(-1)
-                recent = ((infer_state.position_ids[start:end] + 1) // ratio - 1) // 8
-                scores = scores.masked_fill(
-                    torch.arange(scores.shape[1], device=x.device)[None, :] == recent[:, None], float("inf")
-                )
-                top = scores.topk(min(scores.shape[1], self.candidate_topk_blocks), -1)
-                candidate_block_rows.append(torch.where(top.values > -float("inf"), top.indices, -1))
-        logical = torch.cat(selections, 0)
+        alloc = self.alloc_tensor if use_custom_tensor_manager else torch.empty
+        slots = alloc((x.shape[0], self.index_topk), dtype=torch.int32, device=x.device)
+        lengths = alloc((x.shape[0],), dtype=torch.int32, device=x.device)
         if self.is_candidate_source:
-            infer_state.candidate_blocks = torch.cat(candidate_block_rows, 0)
-        req = infer_state.dsv4_sparse_req_idx.long()
-        full_positions = logical.clamp_min(0) * ratio + ratio - 1
-        slots = infer_state.req_manager.req_to_token_indexs[req[:, None], full_positions].long() // ratio
-        valid = (logical >= 0) & (req[:, None] != infer_state.req_manager.HOLD_REQUEST_ID)
-        return {
-            "extra_indices": torch.where(valid, slots, -1).to(torch.int32)[:, None, :],
-            "extra_lengths": valid.sum(-1).to(torch.int32),
-        }
+            infer_state.candidate_block_mask = torch.zeros(
+                (x.shape[0], triton.cdiv(capacity, 8)), dtype=torch.bool, device=x.device
+            )
+        chunk_size = metadata.rows_per_chunk or x.shape[0]
+        for chunk, start in enumerate(range(0, x.shape[0], chunk_size)):
+            end = min(start + chunk_size, x.shape[0])
+            if dense_prefill:
+                logits = deep_gemm.fp8_mqa_logits(
+                    query[start:end],
+                    keys,
+                    weights[start:end],
+                    key_starts[start:end],
+                    key_ends[start:end],
+                    clean_logits=False,
+                    max_seqlen_k=capacity,
+                )
+            else:
+                scheduler = (
+                    metadata.scheduler if metadata.chunk_schedulers is None else metadata.chunk_schedulers[chunk]
+                )
+                logits = deep_gemm.fp8_paged_mqa_logits(
+                    query[start:end].unsqueeze(1),
+                    cache,
+                    weights[start:end],
+                    metadata.context_lengths[start:end],
+                    metadata.logits_page_table[start:end],
+                    scheduler,
+                    capacity,
+                    False,
+                )
+            valid = metadata.valid_lengths[start:end]
+            if self.is_candidate_source:
+                select_indexer_candidates(
+                    logits, valid, infer_state.candidate_block_mask[start:end], self.candidate_topk_blocks
+                )
+            elif self.uses_candidate_blocks:
+                mask_indexer_candidates(logits, valid, infer_state.candidate_block_mask[start:end])
+            select_indexer_topk(logits, valid, metadata.row_page_table[start:end], slots[start:end], lengths[start:end])
+        return {"extra_indices": slots.unsqueeze(1), "extra_lengths": lengths}
 
     def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, positions, c4_aux_workspace=None):
         """c4 scorer via the page-safe deep_gemm.fp8_paged_mqa_logits over the paged c4 indexer pool,
@@ -276,37 +306,43 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             )
             return slots.unsqueeze(1), lengths
 
-        paged_meta = self._build_c4_metadata(infer_state, c4_cap, c4_aux_workspace)
+        paged_meta = self._build_indexer_metadata(infer_state, c4_cap, c4_aux_workspace)
         return self._score_c4_indices(infer_state, idx_q_fp8, weights, c4_cap, paged_meta)
 
-    def _build_c4_metadata(self, infer_state: DeepseekV4InferStateInfo, c4_cap, c4_aux_workspace=None):
+    def _build_indexer_metadata(self, infer_state: DeepseekV4InferStateInfo, capacity, c4_aux_workspace=None):
         """Build once per forward; captured producers refresh these buffers on graph replay."""
-        if infer_state.c4_indexer_metadata is not None:
-            return infer_state.c4_indexer_metadata
+        if (
+            infer_state.indexer_metadata is not None
+            and infer_state.indexer_metadata.compress_ratio == self.compress_ratio
+        ):
+            return infer_state.indexer_metadata
         mem_manager = infer_state.mem_manager
-        page_size = mem_manager.cache_config.history_token_alignment // self.compress_ratio
+        page_size = INDEXER_PAGE_SIZE
         positions = infer_state.position_ids
-        from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_c4_indexer_page_table
+        from ..triton_kernel.gather_c4_indexer_k_dsv4 import build_indexer_page_table
 
         b_req_idx = infer_state.b_req_idx
         batch = b_req_idx.shape[0]
         token_num = positions.numel()
         if c4_aux_workspace is None:
-            c4_len = torch.div(infer_state.b_seq_len, 4, rounding_mode="floor").to(torch.int32)
+            history_lengths = torch.div(infer_state.b_seq_len, self.compress_ratio, rounding_mode="floor").to(
+                torch.int32
+            )
             page_table_out = row_page_table = None
         else:
-            page_cap = c4_cap // page_size
+            page_cap = capacity // page_size
             page_table_out, row_page_table = c4_aux_workspace.page_tables(batch, token_num, page_cap)
-            c4_len, _, _, _ = c4_aux_workspace.metadata(batch, token_num)
-            c4_len.copy_(torch.div(infer_state.b_seq_len, 4, rounding_mode="floor"))
-        page_table = build_c4_indexer_page_table(
+            history_lengths, _, _, _ = c4_aux_workspace.metadata(batch, token_num)
+            history_lengths.copy_(torch.div(infer_state.b_seq_len, self.compress_ratio, rounding_mode="floor"))
+        page_table = build_indexer_page_table(
             mem_manager,
             b_req_idx,
-            c4_len,
-            c4_cap,
+            history_lengths,
+            capacity,
             infer_state.req_manager.req_to_token_indexs,
             infer_state.req_manager.HOLD_REQUEST_ID,
             out=page_table_out,
+            compress_ratio=self.compress_ratio,
         )
 
         if infer_state.is_prefill:
@@ -319,23 +355,38 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             row_page_table = page_table
 
         if c4_aux_workspace is None:
-            valid_len = ((positions + 1) // 4).to(torch.int32)
+            valid_len = ((positions + 1) // self.compress_ratio).to(torch.int32)
             ctx_lens = torch.clamp(valid_len, min=1).reshape(-1, 1)
             topk_lengths = torch.clamp(torch.minimum(valid_len, torch.full_like(valid_len, self.index_topk)), min=1)
         else:
             _, valid_len, ctx_lens, topk_lengths = c4_aux_workspace.metadata(batch, token_num)
-            valid_len.copy_((positions + 1) // 4)
+            valid_len.copy_((positions + 1) // self.compress_ratio)
             torch.clamp(valid_len, min=1, out=ctx_lens[:, 0])
             torch.clamp(valid_len, min=1, max=self.index_topk, out=topk_lengths)
+        if self.is_v41:
+            valid_len.masked_fill_(infer_state.dsv4_sparse_req_idx == infer_state.req_manager.HOLD_REQUEST_ID, 0)
+            ctx_lens = valid_len.clamp_min(1).reshape(-1, 1)
+        logits_page_table = row_page_table
+        entries = mem_manager.cache_config.history_token_alignment // self.compress_ratio
+        if entries > page_size:
+            source = infer_state.req_manager.cache_config.layer_to_kv_source[self.layer_idx_]
+            packed = get_indexer_k_buffer(mem_manager, source)
+            slabs = entries // page_size
+            logits_page_table = (row_page_table // slabs) * (
+                packed.stride(0) // mem_manager.cache_config.indexer_head_dim
+            ) + (row_page_table % slabs) * (
+                page_size * mem_manager.cache_config.indexer_bytes // mem_manager.cache_config.indexer_head_dim
+            )
+        dense_prefill = self._use_dense_prefill(infer_state)
         rows_per_chunk = None
         chunk_metadata = None
         if infer_state.is_prefill:
             if c4_aux_workspace is None:
-                aligned_c4_cap = ((c4_cap + C4_LOGITS_ALIGNMENT - 1) // C4_LOGITS_ALIGNMENT) * C4_LOGITS_ALIGNMENT
-                rows_per_chunk = max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_c4_cap * 4))
+                aligned_capacity = ((capacity + C4_LOGITS_ALIGNMENT - 1) // C4_LOGITS_ALIGNMENT) * C4_LOGITS_ALIGNMENT
+                rows_per_chunk = max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_capacity * 4))
             else:
-                rows_per_chunk = c4_aux_workspace.rows_per_logits_chunk(c4_cap)
-            if positions.numel() > rows_per_chunk:
+                rows_per_chunk = c4_aux_workspace.rows_per_logits_chunk(capacity)
+            if positions.numel() > rows_per_chunk and not dense_prefill:
                 chunk_metadata = tuple(
                     deep_gemm.get_paged_mqa_logits_metadata(
                         ctx_lens[start : start + rows_per_chunk],
@@ -351,10 +402,12 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 page_size,
                 deep_gemm.get_num_sms(),
             )
-            if chunk_metadata is None
+            if chunk_metadata is None and not dense_prefill
             else None
         )
-        infer_state.c4_indexer_metadata = C4IndexerMetadata(
+        infer_state.indexer_metadata = PagedIndexerMetadata(
+            compress_ratio=self.compress_ratio,
+            logits_page_table=logits_page_table,
             row_page_table=row_page_table,
             valid_lengths=valid_len,
             context_lengths=ctx_lens,
@@ -363,22 +416,14 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             rows_per_chunk=rows_per_chunk,
             chunk_schedulers=chunk_metadata,
         )
-        return infer_state.c4_indexer_metadata
+        return infer_state.indexer_metadata
 
-    def _score_c4_indices(self, infer_state, idx_q_fp8, weights, c4_cap, paged_meta: C4IndexerMetadata):
+    def _score_c4_indices(self, infer_state, idx_q_fp8, weights, c4_cap, paged_meta: PagedIndexerMetadata):
         mem_manager = infer_state.mem_manager
         workspace = infer_state.dsv4_workspace
-        page_size = mem_manager.cache_config.history_token_alignment // self.compress_ratio
+        page_size = INDEXER_PAGE_SIZE
         index_topk = self.index_topk
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
-
-        packed = get_indexer_k_buffer(mem_manager, self.layer_idx_)
-        indexer_k_cache = packed.view(
-            packed.shape[0],
-            page_size,
-            1,
-            self.index_head_dim + 4,
-        )
+        indexer_k_cache = get_indexer_k_cache(mem_manager, self.layer_idx_)
         top_slots, _ = workspace.c4(infer_state.microbatch_index, idx_q_fp8.shape[0], index_topk)
         if paged_meta.chunk_schedulers is not None:
             for chunk_idx, start in enumerate(range(0, idx_q_fp8.shape[0], paged_meta.rows_per_chunk)):
