@@ -1,8 +1,10 @@
-import psutil
+import argparse
+import os
+import subprocess
+import sys
 import time
 import setproctitle
 import torch.distributed as dist
-import torch.multiprocessing as mp
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -14,13 +16,22 @@ def start_tcp_store_server(nccl_store_host, nccl_store_port):
     """
     start a process to run a TCPStore server.
     """
-    process = mp.Process(
-        target=_start_tcp_store_server,
-        args=(nccl_store_host, nccl_store_port),
-        daemon=True,
+    # Hypercorn workers are multiprocessing daemons and cannot create another
+    # multiprocessing.Process. An exec'ed Python child can own the TCPStore and
+    # retain the same parent-death monitoring as the other service processes.
+    return subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "lightllm.server.config_server.nccl_tcp_store",
+            "--host",
+            nccl_store_host,
+            "--port",
+            str(nccl_store_port),
+            "--parent-pid",
+            str(os.getpid()),
+        ]
     )
-    process.start()
-    return process
 
 
 def _start_tcp_store_server(nccl_store_host, nccl_store_port):
@@ -60,4 +71,16 @@ def _start_tcp_store_server(nccl_store_host, nccl_store_port):
 
     except Exception as e:
         logger.warning(str(e))
-        logger.info(f"TCPStore server {nccl_store_host}:{nccl_store_port} start failed, retrying ...")
+        logger.exception(f"TCPStore server {nccl_store_host}:{nccl_store_port} start failed")
+        raise
+
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--host", required=True)
+    parser.add_argument("--port", type=int, required=True)
+    parser.add_argument("--parent-pid", type=int, required=True)
+    args = parser.parse_args()
+    # The parent may exit during Python/torch imports, before its monitor starts.
+    if os.getppid() == args.parent_pid:
+        _start_tcp_store_server(args.host, args.port)

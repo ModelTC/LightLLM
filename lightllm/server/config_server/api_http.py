@@ -3,7 +3,7 @@ import asyncio
 import base64
 import pickle
 import setproctitle
-import multiprocessing as mp
+import subprocess
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, Query
 from threading import Lock
 from typing import Dict, List
@@ -161,7 +161,7 @@ async def allocate_global_unique_multimodal_id_range():
     return {"start_id": start_id, "end_id": end_id}
 
 
-global_store_port_to_process: Dict[int, mp.Process] = {}
+global_store_port_to_process: Dict[int, subprocess.Popen] = {}
 global_store_port_to_client_states: Dict[int, List[bool]] = {}
 global_store_port_lock = asyncio.Lock()
 
@@ -197,7 +197,7 @@ async def http_start_tcp_store_server(
                 logger.warning(f"tcp store server {tcp_store_port} already started, kill and restart it")
                 process = global_store_port_to_process[tcp_store_port]
                 process.kill()
-                process.join()
+                process.wait()
 
             global_store_port_to_process[tcp_store_port] = start_tcp_store_server(
                 args.config_server_host, tcp_store_port
