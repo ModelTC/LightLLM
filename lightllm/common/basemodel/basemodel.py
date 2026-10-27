@@ -518,7 +518,7 @@ class TpPartBaseModel:
         if new_model_output.logits_token_ids is not None:
             new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
         new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
-            origin_handle_token_num=origin_handle_token_num
+            origin_handle_token_num=origin_handle_token_num, origin_batch_size=origin_batch_size
         )
         # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
         # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。

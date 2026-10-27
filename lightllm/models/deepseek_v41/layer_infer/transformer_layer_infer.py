@@ -2,7 +2,6 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.mhc.pre_norm import hc_pre_norm_shifted
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
-from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post
 from lightllm.models.deepseek_v4.triton_kernel.cache_io import (
     get_compressed_kv_buffer,
@@ -24,7 +23,6 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.is_kv_source = layer_num in network_config["kv_source_layer_ids"]
         self.decoder_start_layer = max(network_config["kv_source_layer_ids"]) + 1
-        self.dspark_enabled = get_env_start_args().mtp_mode == "dspark"
         self.engram_index = (
             network_config["engram_layer_ids"].index(layer_num)
             if layer_num in network_config["engram_layer_ids"]
@@ -83,8 +81,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
     def context_forward(
         self, input_embdings, infer_state: DeepseekV41InferStateInfo, layer_weight: DeepseekV41TransformerLayerWeight
     ):
-        # The shared DSpark proposer commits a hidden row for every target prompt row.
-        if not infer_state.return_all_prompt_logics and not self.dspark_enabled:
+        if not infer_state.return_all_prompt_logics:
             if self.layer_num_ == self.decoder_start_layer:
                 rows = infer_state.init_decoder_state()
                 input_embdings = tuple(value[rows] for value in input_embdings)

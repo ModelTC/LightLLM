@@ -28,6 +28,20 @@ class DeepseekV41LayerHiddenCollector(DeepseekV4LayerHiddenCollector):
         streams = hidden[0] if isinstance(hidden, tuple) else hidden
         LayerHiddenCollector.add(self, layer_index, hc_contract(streams, self.model.config["hc_mult"]))
 
+    def finish_output(self, infer_state):
+        decoder = infer_state.decoder_state
+        if decoder is not None:
+            decoder_start = max(self.model.config["kv_source_layer_ids"]) + 1
+            # Configurations may select an encoder layer as well as decoder layers.
+            self.layer_hiddens = [
+                hidden[infer_state.decoder_token_indices] if layer < decoder_start else hidden
+                for layer, hidden in zip(sorted(self.layer_ids), self.layer_hiddens)
+            ]
+        output = super().finish_output(decoder if decoder is not None else infer_state)
+        if decoder is not None:
+            output.spec_hidden_prefill_ready_cache_len = decoder.b_ready_cache_len
+        return output
+
 
 class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     pre_and_post_weight_class = DeepseekV41PreAndPostLayerWeight

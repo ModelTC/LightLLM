@@ -13,6 +13,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         self.v41_index_capacity = self._dsv4_index_max_kv_seq_len(model)
         self.engram_hashes = model.engram_hasher(self) if model.engram_hasher is not None else None
         self.decoder_state = None
+        self.decoder_token_indices = None
 
     def init_decoder_state(self):
         """Keep each extend's last window after the final global-KV producer.
@@ -59,4 +60,5 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             state.engram_hashes = self.engram_hashes[rows]
         state._dsv4_prefill_pad_q_len = min(self._dsv4_prefill_pad_q_len, window)
         self.decoder_state = state
+        self.decoder_token_indices = rows
         return rows

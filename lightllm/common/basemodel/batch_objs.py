@@ -134,6 +134,10 @@ class ModelMtpOutputCollector:
     # - 未启用 MTP 时不收集投机特征，该字段同样为 None。
     spec_hidden: Optional[torch.Tensor] = None
 
+    # Optional request-aligned start positions when prefill features contain
+    # only a suffix of each request (e.g. a CED decoder's replay window).
+    spec_hidden_prefill_ready_cache_len: Optional[torch.Tensor] = None
+
     # DSpark block draft 模型直接生成的 token id，形状通常为
     # [request_count * block_size]。
     # - 仅 DSpark 启用 Markov head（markov_rank > 0）时由 head 直接生成并返回。
@@ -151,6 +155,8 @@ class ModelMtpOutputCollector:
     def to_no_ref_tensor(self) -> None:
         if self.spec_hidden is not None:
             self.spec_hidden = tensor_to_no_ref_tensor(self.spec_hidden)
+        if self.spec_hidden_prefill_ready_cache_len is not None:
+            self.spec_hidden_prefill_ready_cache_len = tensor_to_no_ref_tensor(self.spec_hidden_prefill_ready_cache_len)
         if self.draft_token_ids is not None:
             self.draft_token_ids = tensor_to_no_ref_tensor(self.draft_token_ids)
         if self.confidence_logits is not None:
@@ -170,10 +176,14 @@ class ModelMtpOutputCollector:
             collector.confidence_logits = collector.confidence_logits[: origin_batch_size // rows_per_confidence]
         return collector
 
-    def unpad_prefill(self, origin_handle_token_num: int) -> "ModelMtpOutputCollector":
+    def unpad_prefill(self, origin_handle_token_num: int, origin_batch_size: int) -> "ModelMtpOutputCollector":
         collector = copy.copy(self)
         if collector.spec_hidden is not None:
             collector.spec_hidden = collector.spec_hidden[:origin_handle_token_num]
+        if collector.spec_hidden_prefill_ready_cache_len is not None:
+            collector.spec_hidden_prefill_ready_cache_len = collector.spec_hidden_prefill_ready_cache_len[
+                :origin_batch_size
+            ]
         return collector
 
 

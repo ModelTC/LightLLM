@@ -1,39 +1,63 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
+
+from lightllm.common.basemodel.batch_objs import ModelMtpOutputCollector
 
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
 from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
-def test_dspark_prefill_uses_a_shallow_copy_for_target_hidden():
+@pytest.mark.parametrize("lengths,ready", [([3, 2], None), ([5, 2], [2, 0]), ([], [])])
+def test_dspark_prefill_commits_suffix_without_proposal(lengths, ready):
     forwarded_inputs = []
-    draft_model = SimpleNamespace(forward=forwarded_inputs.append)
+    req_num = len(lengths)
+    draft_model = SimpleNamespace(config={"sliding_window": 3}, forward=forwarded_inputs.append)
     proposer = DSparkProposer(
         backend=SimpleNamespace(draft_models=[draft_model]),
         enable_dynmaic_mtp=False,
     )
+    seq_lens = torch.tensor(lengths, dtype=torch.int32)
+    starts = seq_lens.cumsum(0, dtype=torch.int32) - seq_lens
     model_input = SimpleNamespace(
         is_prefill=True,
+        max_q_seq_len=max(lengths, default=0),
+        max_kv_seq_len=max(lengths, default=0),
+        max_cache_len=0,
         b_position_delta=None,
-        b_req_idx=torch.tensor([3, 5], dtype=torch.int32),
-        input_ids=torch.arange(5, dtype=torch.int64),
+        b_req_idx=torch.arange(req_num, dtype=torch.int32) + 3,
+        b_seq_len=seq_lens,
+        b_ready_cache_len=torch.zeros_like(seq_lens),
+        b_prefill_start_loc=starts,
+        input_ids=torch.arange(sum(lengths), dtype=torch.int64),
         mtp_draft_input_hiddens=None,
     )
-    target_hidden = torch.empty((5, 8))
-
-    proposer.fill_draft_model_kv_state(
+    hidden_rows = sum(lengths) if ready is None else sum(n - r for n, r in zip(lengths, ready))
+    target_hidden = torch.empty((hidden_rows, 8))
+    proposal = proposer.fill_draft_model_kv_state(
         target_model_input=model_input,
         target_model_output=SimpleNamespace(
-            mtp_collector=SimpleNamespace(spec_hidden=target_hidden),
+            mtp_collector=ModelMtpOutputCollector(
+                spec_hidden=target_hidden,
+                spec_hidden_prefill_ready_cache_len=None if ready is None else torch.tensor(ready, dtype=torch.int32),
+            )
         ),
-        target_next_token_ids=torch.tensor([11, 13], dtype=torch.int64),
+        target_next_token_ids=torch.arange(req_num, dtype=torch.int64) + 11,
     )
-
-    assert len(forwarded_inputs) == 1
-    assert forwarded_inputs[0] is not model_input
-    assert forwarded_inputs[0].mtp_draft_input_hiddens is target_hidden
+    assert proposal is None
+    assert len(forwarded_inputs) == (1 if hidden_rows else 0)
+    if not hidden_rows:
+        return
+    commit = forwarded_inputs[0]
+    assert commit is not model_input
+    assert commit.mtp_draft_input_hiddens is target_hidden
     assert model_input.mtp_draft_input_hiddens is None
+    expected_rows = [
+        i for start, n, r in zip(starts.tolist(), lengths, ready or [0] * req_num) for i in range(start + r, start + n)
+    ]
+    assert commit.input_ids.tolist() == expected_rows
+    assert model_input.input_ids.tolist() == list(range(sum(lengths)))
 
 
 def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):

@@ -1030,8 +1030,11 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 monkeypatch.setattr(layer, "_hc_attn_in", record_attention_input)
             inp = prefill_input(0, 256)
             out = model.forward(inp)
-            assert out.mtp_collector.spec_hidden.shape == (256, 384)
-            torch.testing.assert_close(out.mtp_collector.spec_hidden, torch.cat(captured, -1), atol=0, rtol=0)
+            assert out.mtp_collector.spec_hidden.shape == (128, 384)
+            assert out.mtp_collector.spec_hidden_prefill_ready_cache_len.tolist() == [128]
+            torch.testing.assert_close(
+                out.mtp_collector.spec_hidden, torch.cat([hidden[-128:] for hidden in captured], -1), atol=0, rtol=0
+            )
 
             class TinyDraft(DeepseekV41DSparkModel):
                 load_weights = TinyModel.load_weights
@@ -1064,7 +1067,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             assert all(layer.num_experts_per_tok == 2 for layer in draft.layers_infer)
             assert draft.pre_post_weight.markov_w1_weight_.weight_name == "mtp.2.markov_head.embed.weight"
             assert not hasattr(draft.pre_post_weight, "hc_head_fn_")
-            commit = copy(inp)
+            commit = prefill_input(128, 256)
             commit.mtp_draft_input_hiddens = out.mtp_collector.spec_hidden
             with monkeypatch.context() as kv_commit:
                 kv_commit.setattr(
@@ -1138,6 +1141,32 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             model.forward(decode_input(rejected_ids, 256))
             resumed = model.forward(decode_input(tokens[257:260], 257)).logits
             torch.testing.assert_close(resumed, clean_resume, atol=0, rtol=0)
+
+            # CED suffix commits must preserve draft SWA across a prefix-cache hit.
+            from lightllm.server.router.model_infer.mtp_speculative.proposers.dspark import DSparkProposer
+
+            proposer = DSparkProposer(backend=SimpleNamespace(draft_models=[draft]), enable_dynmaic_mtp=False)
+
+            def prefill_and_commit(start, end, req_idx=0):
+                model_input = prefill_input(start, end, req_idx)
+                output = model.forward(model_input)
+                assert proposer.fill_draft_model_kv_state(model_input, output, output.logits.argmax(-1)) is None
+
+            model.req_manager.clear_runtime_state(0)
+            prefill_and_commit(0, 256)
+            checkpoints = model.req_manager.create_small_page_cache_manager(1)
+            model.req_manager.save_state(0, 0, checkpoints, checkpoint_len=256)
+            prefill_and_commit(256, 257)
+            from lightllm.models.deepseek_v4.triton_kernel.swa_cache import gather_swa_tokens
+
+            positions = torch.arange(129, 257, device="cuda")
+            expected = gather_swa_tokens(model.req_manager, 0, positions)[5:]
+            model.req_manager.req_to_token_indexs[1, :256] = model.req_manager.req_to_token_indexs[0, :256]
+            model.req_manager.req_to_token_indexs[1, 256] = 512
+            model.req_manager.restore_state(SimpleNamespace(req_idx=1, cur_kv_len=256), checkpoints, 0)
+            prefill_and_commit(256, 257, req_idx=1)
+            actual = gather_swa_tokens(model.req_manager, 1, positions)[5:]
+            torch.testing.assert_close(actual, expected, atol=0, rtol=0)
             return
 
         # Full prompt logits keep the complete decoder path; retain the exact

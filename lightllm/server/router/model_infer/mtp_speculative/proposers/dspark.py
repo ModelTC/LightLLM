@@ -33,16 +33,27 @@ class DSparkProposer(BaseSpecProposer):
 
         target_hidden = target_model_output.mtp_collector.spec_hidden
         assert target_hidden is not None
-        assert target_hidden.shape[0] == target_model_input.input_ids.shape[0]
         if target_hidden.numel() == 0:
             return
-
-        # DSpark prefill 直接使用 target prompt 的 token 布局和 hidden，将 prompt
-        # KV 写入唯一的 parallel-block draft model。使用浅副本，避免把 draft
-        # 专用 hidden 挂到后续流程仍可能读取的 target ModelInput 上。
+        draft_model = self.backend.draft_models[0]
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
-        self.backend.draft_models[0].forward(draft_input)
+        ready = target_model_output.mtp_collector.spec_hidden_prefill_ready_cache_len
+        if ready is not None:
+            lengths = draft_input.b_seq_len - ready
+            starts = lengths.cumsum(0, dtype=lengths.dtype) - lengths
+            offsets = draft_input.b_prefill_start_loc + ready - draft_input.b_ready_cache_len - starts
+            rows = torch.arange(target_hidden.shape[0], device=target_hidden.device) + offsets.repeat_interleave(
+                lengths, output_size=target_hidden.shape[0]
+            )
+            draft_input.input_ids = draft_input.input_ids[rows]
+            draft_input.b_ready_cache_len = ready
+            draft_input.b_prefill_start_loc = starts
+            window = draft_model.config["sliding_window"]
+            draft_input.max_q_seq_len = min(draft_input.max_q_seq_len, window)
+            draft_input.max_cache_len = max(draft_input.max_cache_len, draft_input.max_kv_seq_len - window)
+        assert target_hidden.shape[0] == draft_input.input_ids.shape[0]
+        draft_model.forward(draft_input)
 
     @torch.no_grad()
     def propose_next(
