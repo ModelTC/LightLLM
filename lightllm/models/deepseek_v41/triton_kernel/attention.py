@@ -35,7 +35,7 @@ def _pool_pairs(
     current_score = tl.load(SCORE + row * SCORE_STRIDE + cols)
     gate = tl.sigmoid(current_score - previous_score)
     pooled = previous_kv + (current_kv - previous_kv) * gate
-    tl.store(OUT + row * D + cols, pooled, (pos + 1) % 2 == 0)
+    tl.store(OUT + row * D + cols, tl.where((pos + 1) % 2 == 0, pooled, 0.0))
 
 
 @triton.jit
@@ -68,7 +68,7 @@ def _commit_pair_state(
 
 
 def pool_pairs(kv, score, req, positions, state, hold_request):
-    out = torch.zeros_like(kv, dtype=torch.bfloat16)
+    out = torch.empty_like(kv, dtype=torch.bfloat16)
     _pool_pairs[(kv.shape[0],)](
         kv,
         score,

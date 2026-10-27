@@ -9,6 +9,7 @@ import numpy as np
 import torch
 import triton
 import triton.language as tl
+from triton.language.extra import libdevice
 
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.distributed.communication_op import all_reduce
@@ -192,16 +193,58 @@ class EngramEmbeddingWeight(BaseWeightTpl):
         return out.flatten(1)
 
 
+@triton.jit
+def _engram_gate(
+    STREAMS,
+    KV,
+    Q,
+    K,
+    MASK,
+    OUT,
+    STREAM_STRIDE: tl.constexpr,
+    KV_STRIDE: tl.constexpr,
+    MULT: tl.constexpr,
+    DIM: tl.constexpr,
+    EPS: tl.constexpr,
+    HAS_MASK: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row, stream = tl.program_id(0), tl.program_id(1)
+    col = tl.arange(0, BLOCK)
+    valid = col < DIM
+    h = tl.load(STREAMS + row * STREAM_STRIDE + stream * DIM + col, valid, 0).to(tl.float32)
+    key = tl.load(KV + row * KV_STRIDE + stream * DIM + col, valid, 0).to(tl.float32)
+    q = tl.load(Q + stream * DIM + col, valid, 0).to(tl.float32)
+    k = tl.load(K + stream * DIM + col, valid, 0).to(tl.float32)
+    dot = tl.sum(h * key * q * k, 0)
+    dot *= tl.rsqrt(tl.sum(h * h, 0) / DIM + EPS) * tl.rsqrt(tl.sum(key * key, 0) / DIM + EPS) * DIM ** -0.5
+    gate = tl.sigmoid(libdevice.copysign(tl.sqrt(tl.maximum(tl.abs(dot), 1e-6)), dot))
+    if HAS_MASK:
+        gate = tl.where(tl.load(MASK + row), gate, 0.0)
+    value = tl.load(KV + row * KV_STRIDE + MULT * DIM + col, valid, 0).to(tl.float32)
+    tl.store(OUT + (row * MULT + stream) * DIM + col, h + gate * value, valid)
+
+
 def engram_forward(streams, indices, weight, eps, token_mask=None):
     embedded = weight.engram_embed_.lookup(indices)
     kv = weight.engram_wkv_.mm(embedded)
     mult, dim = streams.shape[-2:]
-    key, value = kv.split((mult * dim, dim), -1)
-    key = key.float().view(-1, mult, dim)
-    h = streams.float()
-    dot = (h * key * weight.engram_q_.weight * weight.engram_k_.weight).sum(-1)
-    dot *= torch.rsqrt(h.square().mean(-1) + eps) * torch.rsqrt(key.square().mean(-1) + eps) * dim ** -0.5
-    gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
-    if token_mask is not None:
-        gate = torch.where(token_mask[:, None], gate, 0)
-    return (h + gate[..., None] * value.float()[:, None, :]).to(streams.dtype)
+    out = torch.empty(streams.shape, dtype=streams.dtype, device=streams.device)
+    _engram_gate[(streams.shape[0], mult)](
+        streams,
+        kv,
+        weight.engram_q_.weight,
+        weight.engram_k_.weight,
+        token_mask,
+        out,
+        streams.stride(0),
+        kv.stride(0),
+        mult,
+        dim,
+        eps,
+        token_mask is not None,
+        triton.next_power_of_2(dim),
+        num_warps=4,
+        enable_fp_fusion=False,
+    )
+    return out

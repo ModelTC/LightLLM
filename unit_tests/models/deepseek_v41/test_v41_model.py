@@ -269,7 +269,9 @@ def test_c2_carries_partial_groups_across_chunk_boundaries(split):
     state = torch.zeros(2, 4, 2, 512, device="cuda")
     first = pool_pairs(kv[:split], scores[:split], req[:split], positions[:split], state, 1)
     second = pool_pairs(kv[split:], scores[split:], req[split:], positions[split:], state, 1)
-    actual = torch.cat((first, second))[1::2]
+    output = torch.cat((first, second))
+    assert output[::2].count_nonzero() == 0
+    actual = output[1::2]
     expected = (kv[:6].view(3, 2, 512) * scores[:6].view(3, 2, 512).softmax(1)).sum(1).bfloat16()
     torch.testing.assert_close(actual, expected, atol=0.015625, rtol=0.008)
     torch.testing.assert_close(state[0, 6 % 4, 0], kv[-1])
@@ -1276,6 +1278,53 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         get_env_start_args.cache_clear()
         get_added_mtp_kv_layer_num.cache_clear()
         get_unique_server_name.cache_clear()
+
+
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("dim", [16, 5120])
+@pytest.mark.parametrize("masked", [False, True])
+def test_engram_gate_matches_reference_and_cuda_graph(dtype, dim, masked):
+    from lightllm.models.deepseek_v41.engram import engram_forward
+
+    tokens, mult = 7, 4
+    # Both producers may expose row slices; no contiguous copies are needed.
+    streams = torch.randn(tokens * 2, mult, dim, device="cuda", dtype=dtype)[::2]
+    kv = torch.randn(tokens * 2, (mult + 1) * dim, device="cuda", dtype=dtype)[::2]
+    streams[0].zero_()
+    kv[0, : mult * dim].zero_()
+    weight = SimpleNamespace(
+        engram_embed_=SimpleNamespace(lookup=lambda _: None),
+        engram_wkv_=SimpleNamespace(mm=lambda _: kv),
+        engram_q_=SimpleNamespace(weight=torch.randn(mult, dim, device="cuda", dtype=dtype)),
+        engram_k_=SimpleNamespace(weight=torch.randn(mult, dim, device="cuda", dtype=dtype)),
+    )
+    token_mask = torch.arange(tokens, device="cuda") % 2 == 0 if masked else None
+    eps = 1e-20
+
+    def reference():
+        h = streams.float()
+        key = kv[:, : mult * dim].float().reshape(tokens, mult, dim)
+        value = kv[:, mult * dim :].float()
+        dot = (h * key * weight.engram_q_.weight * weight.engram_k_.weight).sum(-1)
+        dot *= torch.rsqrt(h.square().mean(-1) + eps) * torch.rsqrt(key.square().mean(-1) + eps) * dim ** -0.5
+        gate = torch.sigmoid(torch.copysign(dot.abs().clamp_min(1e-6).sqrt(), dot))
+        if token_mask is not None:
+            gate = torch.where(token_mask[:, None], gate, 0)
+        return (h + gate[..., None] * value[:, None, :]).to(dtype)
+
+    def check(actual):
+        torch.testing.assert_close(actual, reference(), atol=0.015625 if dtype == torch.bfloat16 else 2e-6, rtol=1e-5)
+        if masked:
+            torch.testing.assert_close(actual[~token_mask], streams[~token_mask], atol=0, rtol=0)
+
+    check(engram_forward(streams, None, weight, eps, token_mask))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = engram_forward(streams, None, weight, eps, token_mask)
+    streams.normal_()
+    kv.normal_()
+    graph.replay()
+    check(actual)
 
 
 def test_engram_image_tokens_do_not_modify_residual_streams():
