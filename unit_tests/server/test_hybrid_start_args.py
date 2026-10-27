@@ -67,6 +67,8 @@ def test_supported_models_pass_startup_validation(launch_args, output_constraint
     args = launch_args(model_type, output_constraint_mode=output_constraint_mode, **options)
     with pytest.raises(RuntimeError, match="startup validation passed"):
         _launch_subprocesses(args)
+
+
 @pytest.mark.parametrize("mode,step", [("native", 0), ("compact", 4), ("replay", 0)])
 def test_s3_configuration_is_prepared_before_ssm_validation(launch_args, monkeypatch, tmp_path, mode, step):
     from pathlib import Path

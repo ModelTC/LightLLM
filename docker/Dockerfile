@@ -5,7 +5,7 @@ ARG PYTHON_VERSION=3.10
 ARG MAMBA_VERSION=24.7.1-0
 ARG VLLM_VERSION=0.21.0
 ARG NIXL_REF=v1.2.0
-ARG FLASH_MLA_REF=ba89a3466e9470ad08ab39738d4e7bb66989e1e7
+ARG FLASH_MLA_REF=47c35a7
 ARG DEEPGEMM_REF=891d57b4db1071624b5c8fa0d1e51cb317fa709f
 ARG DEEPEP_REF=60d44037a702f651a6e18bd4aea65ed8409051c2
 ARG DEEPEP_NCCL_VERSION=2.30.4
@@ -65,7 +65,7 @@ RUN export CPATH=/usr/local/cuda/targets/x86_64-linux/include/cccl:/usr/local/cu
     git checkout ${FLASH_MLA_REF} && \
     git submodule update --init --recursive && \
     FLASH_MLA_DISABLE_SM100="$(if [ "${ENABLE_SM100}" = "1" ]; then echo 0; else echo 1; fi)" \
-    pip install --no-build-isolation --no-cache-dir .
+    pip install --no-cache-dir .
 
 RUN apt-get update && apt-get install -y libnuma-dev && rm -rf /var/lib/apt/lists/*
 

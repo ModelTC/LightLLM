@@ -24,7 +24,9 @@ def unfused(input, limit, alpha, add_one):
 
 
 @pytest.mark.parametrize("m,n", [(1, 128), (7, 256), (33, 2048), (128, 2048), (256, 2048)])
-@pytest.mark.parametrize("limit,alpha,add_one", [(None, None, True), (7.0, 1.0, False), (7.0, 1.7, True)])
+@pytest.mark.parametrize(
+    "limit,alpha,add_one", [(None, None, True), (7.0, None, True), (7.0, 1.0, False), (7.0, 1.7, True)]
+)
 def test_fused_preserves_activation_rounding_and_ue8m0_bytes(m, n, limit, alpha, add_one):
     torch.manual_seed(1013)
     input = torch.randn(m, 2 * n, dtype=torch.bfloat16, device="cuda") * 10

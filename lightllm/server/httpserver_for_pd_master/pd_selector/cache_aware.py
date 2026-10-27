@@ -136,7 +136,9 @@ class CacheAwarePolicy:
             raise ValueError(f"request_text length must be > 1, got {len(request_text)}")
 
         if loads is None:
-            loads = {worker.connection_key: (worker.dispatched_req_num, worker.dispatched_prompt_chars) for worker in workers}
+            loads = {
+                worker.connection_key: (worker.dispatched_req_num, worker.dispatched_prompt_chars) for worker in workers
+            }
         cache_worker, cache_match = await self._get_cache_worker(workers, request_text)
 
         request_chars = len(request_text)
@@ -239,7 +241,9 @@ class CacheAwarePolicy:
     ) -> PD_Client_Obj:
         """所有节点都忙时，在 cache 亲和与 prompt 负载之间选择节点。"""
         if loads is None:
-            loads = {worker.connection_key: (worker.dispatched_req_num, worker.dispatched_prompt_chars) for worker in workers}
+            loads = {
+                worker.connection_key: (worker.dispatched_req_num, worker.dispatched_prompt_chars) for worker in workers
+            }
         least_loaded_worker = min(
             workers, key=lambda worker: (loads[worker.connection_key][1], loads[worker.connection_key][0])
         )

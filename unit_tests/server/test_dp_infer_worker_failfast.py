@@ -7,7 +7,7 @@ import pytest
 
 @pytest.mark.parametrize("exception", ["RuntimeError", "torch.OutOfMemoryError"])
 def test_inference_loop_exception_exits_worker_process(exception):
-    source = f'''
+    source = f"""
 import types
 import torch
 import lightllm.server.router.model_infer.mode_backend.dp_backend.impl as module
@@ -21,7 +21,7 @@ backend.logger = types.SimpleNamespace(exception=lambda *_: None)
 print("entered-worker", flush=True)
 backend.infer_loop()
 print("incorrectly-survived", flush=True)
-'''
+"""
     child = subprocess.run([sys.executable, "-c", source], capture_output=True, text=True, timeout=45)
     assert "entered-worker" in child.stdout, child.stderr
     assert child.returncode == 1

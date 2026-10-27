@@ -174,7 +174,7 @@ def test_replay_config_rejects_other_modes(mode):
 
 
 def test_partial_replay_config_defaults_and_serialization(monkeypatch):
-    from dataclasses import asdict
+    from dataclasses import asdict, fields
 
     monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "qwen3_5")
     args = make_argument_parser().parse_args(
@@ -183,7 +183,9 @@ def test_partial_replay_config_defaults_and_serialization(monkeypatch):
     _validate_and_normalize_ssm_config(args)
     assert args.ssm_replay_config == {"cache_len": 16, "compute_mode": "precompute", "fold_method": "raw"}
     original = StartArgs(ssm_state_mode="replay", ssm_replay_config=args.ssm_replay_config)
-    restored = StartArgs(**json.loads(json.dumps(asdict(original))))
+    serialized = json.loads(json.dumps(asdict(original)))
+    init_fields = {field.name for field in fields(StartArgs) if field.init}
+    restored = StartArgs(**{name: value for name, value in serialized.items() if name in init_fields})
     _validate_and_normalize_ssm_config(restored)
     assert restored.ssm_replay_config == args.ssm_replay_config
     assert StartArgs().ssm_replay_config == {}

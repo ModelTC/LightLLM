@@ -25,6 +25,7 @@ def _worker(address: str, dispatched_prompt_chars: int = 0, dispatched_req_num: 
     return SimpleNamespace(
         client_ip_port=address,
         connection_key=address,
+        run_status=SimpleNamespace(transfer_available=True),
         dispatched_prompt_chars=dispatched_prompt_chars,
         dispatched_req_num=dispatched_req_num,
     )
@@ -186,7 +187,7 @@ def test_cache_aware_selector_returns_selected_nodes_and_estimated_cache_hit_rat
     p_node = _worker("10.0.0.1:8000")
     d_node = SimpleNamespace(
         client_ip_port="10.0.0.2:8000",
-        run_status=SimpleNamespace(total_token_usage_rate=0.0),
+        run_status=SimpleNamespace(total_token_usage_rate=0.0, transfer_available=True),
     )
     selector.update_nodes([p_node], [d_node])
     prompt = "x" * 1025
@@ -200,10 +201,9 @@ def test_cache_aware_selector_returns_selected_nodes_and_estimated_cache_hit_rat
 
     assert selected_p_node is p_node
     assert selected_d_node is d_node
-    assert selection_extra_info == PDSelectionExtraInfo(
-        estimated_cache_hit_rate=pytest.approx(1.0),
-        cache_last_insert_time=123.0,
-    )
+    assert selection_extra_info.estimated_cache_hit_rate == pytest.approx(1.0)
+    assert selection_extra_info.cache_last_insert_time == 123.0
+    assert selection_extra_info.estimated_prefill_chars == 1
 
 
 def test_cache_aware_reinsert_refreshes_matched_node_time():
@@ -235,7 +235,8 @@ def test_cache_aware_inserts_prompt_only_when_explicitly_recorded():
 
     selected_worker, cache_info = asyncio.run(policy.select_worker([worker], prompt))
     assert selected_worker is worker
-    assert cache_info == PDSelectionExtraInfo()
+    assert cache_info.estimated_cache_hit_rate == 0
+    assert cache_info.estimated_prefill_chars == len(prompt)
     assert _prefix_match(policy, prompt).prefill_node is None
 
     _insert_prompt(policy, prompt, worker)

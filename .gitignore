@@ -11,3 +11,6 @@ logs/
 
 /benchmark/
 artifacts/
+
+# Local deployment logs, traces and runtime packages.
+/outputs/

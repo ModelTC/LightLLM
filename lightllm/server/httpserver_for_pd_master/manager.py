@@ -365,7 +365,9 @@ class HttpServerManagerForPDMaster:
                 # 共享计数和选点使用相同的预计未缓存工作量；首 token 或失败时释放同一预占值。
                 estimated_prefill_chars = selection_extra_info.estimated_prefill_chars
                 pending_prefill_load_chars = (
-                    len(prompt) if estimated_prefill_chars is None else max(1, min(len(prompt), estimated_prefill_chars))
+                    len(prompt)
+                    if estimated_prefill_chars is None
+                    else max(1, min(len(prompt), estimated_prefill_chars))
                 )
                 await self.pd_node_stats.add_dispatched_info(p_node=p_node, chars=pending_prefill_load_chars, req_num=1)
 

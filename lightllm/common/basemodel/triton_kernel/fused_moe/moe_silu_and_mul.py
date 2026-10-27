@@ -68,6 +68,7 @@ def silu_and_mul_quant_fp8(
     clamp_up_add_one=True,
     alloc_func=torch.empty,
     use_ue8m0_scales=True,
+    run_config=None,
 ):
     """Port support_ds4's fused activation/quantization, retaining GLM clamp semantics."""
     assert input.ndim == 2 and input.stride(1) == 1
@@ -84,6 +85,8 @@ def silu_and_mul_quant_fp8(
     if groups == 0:
         return quant, scale
     groups_per_cta, warps = (1, 1) if groups <= 64 else (4, 4)
+    if run_config is not None:
+        groups_per_cta, warps = run_config["GROUPS_PER_CTA"], run_config["num_warps"]
     _silu_and_mul_quant_fp8_kernel[(triton.cdiv(groups, groups_per_cta),)](
         input,
         quant,

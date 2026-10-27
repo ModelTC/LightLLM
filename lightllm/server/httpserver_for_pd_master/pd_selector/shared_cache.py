@@ -28,7 +28,12 @@ class SharedCacheState:
         self.master_id = args.pd_node_id
         self.namespace = hashlib.sha256(
             json.dumps(
-                [args.model_dir, args.model_name, "sampled_chars_v2_uncached_prefill", selector.policy.config.sample_stride]
+                [
+                    args.model_dir,
+                    args.model_name,
+                    "sampled_chars_v2_uncached_prefill",
+                    selector.policy.config.sample_stride,
+                ]
             ).encode()
         ).hexdigest()
         self.enabled_for_single_worker = not args.disable_pd_cache_high_priority

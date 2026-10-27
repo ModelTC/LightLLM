@@ -235,7 +235,7 @@ class ConstraintOutParams(ctypes.Structure):
         guided_reasoning_end: List[int],
         pd_previous_output_len: int = 0,
     ):
-        if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2**31 - 1:
+        if not isinstance(pd_previous_output_len, int) or not 0 <= pd_previous_output_len <= 2 ** 31 - 1:
             raise ValueError("pd_previous_output_len must be an integer in [0, 2147483647]")
         self.regular_constraint.initialize(regular_constraint)
         self.guided_grammar.initialize(guided_grammar, tokenizer)

@@ -118,7 +118,15 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(m
     assert not state.ssm_state.buffer[:, start : start + state.ssm_slots_per_req].any()
 
 
-def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state():
+def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state(monkeypatch):
+    # CPU-only protocol validation needs ordinary host tensors, not CUDA-pinned DMA buffers.
+    zeros = torch.zeros
+
+    def host_zeros(*args, **kwargs):
+        kwargs.pop("pin_memory", None)
+        return zeros(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "zeros", host_zeros)
     config = LinearAttCacheConfig(
         tp_world_size=4,
         full_att_all_num_kv_heads=1,

@@ -43,15 +43,33 @@ class ReqManagerForMamba(HybridAttentionReqManager):
 
     ##### 检查点恢复：CPU 缓存 → 请求 GPU 运行态 #####
 
-    def restore_state(self, req: "InferReq", state_cache_manager: LinearAttCacheManager, buffer_idx: int, checkpoint_len: Optional[int] = None):
+    def restore_state(
+        self,
+        req: "InferReq",
+        state_cache_manager: LinearAttCacheManager,
+        buffer_idx: int,
+        checkpoint_len: Optional[int] = None,
+    ):
         self.linear_state_manager.restore(req.req_idx, *state_cache_manager.get_state_cache(buffer_idx))
 
     ##### 检查点保存：请求 GPU 运行态 → CPU 缓存 #####
 
-    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int], checkpoint_lens: Optional[List[int]] = None):
+    def save_big_page_states(
+        self,
+        b_req_idx: torch.Tensor,
+        req_indexes: List[int],
+        buffer_indexes: List[int],
+        checkpoint_lens: Optional[List[int]] = None,
+    ):
         self.linear_state_manager.save_checkpoints(b_req_idx, req_indexes, buffer_indexes, self.big_page_buffers)
 
-    def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager: LinearAttCacheManager, checkpoint_len: Optional[int] = None):
+    def save_state(
+        self,
+        req_idx: int,
+        buffer_idx: int,
+        state_cache_manager: LinearAttCacheManager,
+        checkpoint_len: Optional[int] = None,
+    ):
         self.linear_state_manager.copy_accepted_state_to(req_idx, *state_cache_manager.get_state_cache(buffer_idx))
 
     ##### MTP 验证后的运行态更新 #####

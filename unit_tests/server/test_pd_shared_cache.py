@@ -390,3 +390,58 @@ def test_real_websocket_clients_share_hints_and_cancel_cleanly():
             relays.clear()
 
     asyncio.run(run())
+
+
+def test_four_masters_keep_long_prefix_on_original_dp_despite_idle_peer():
+    relay = CacheMetadataRelay()
+    selectors = [_selector(master=i) for i in range(4)]
+    peers = [_connect(relay, selector.shared_cache) for selector in selectors]
+    prompt = "shared long prefix " * 10000
+    publisher = selectors[0]
+    asyncio.run(publisher.insert_prompt_cache(prompt, publisher.prefill_nodes[0]))
+    relay.publish(peers[0], publisher.shared_cache.outgoing.get_nowait())
+    # Other masters' pending work makes the original worker busier than its peer.
+    publisher.prefill_nodes[0].dispatched_req_num = 20
+    publisher.prefill_nodes[0].dispatched_prompt_chars = 2_000_000
+    for peer, selector in zip(peers, selectors):
+        relay.publish(peer, _load(selector))
+    for peer, selector in zip(peers, selectors):
+        _drain(peer, selector.shared_cache)
+        chosen, _, info = asyncio.run(selector.select_p_d_node(prompt, None, None))
+        assert chosen is selector.prefill_nodes[0]
+        assert info.selection_reason == "long_prefix_affinity"
+        assert info.selected_pending_chars == 2_000_000
+        assert 1 <= info.estimated_prefill_chars <= selector.policy.config.sample_stride
+
+
+def test_long_prefix_keeps_affinity_when_cluster_load_is_temporarily_unknown():
+    selector = _selector()
+    prompt = "same long history " * 10000
+    node = selector.prefill_nodes[0]
+    selector.shared_cache.tree.insert_key(
+        prompt[:: selector.policy.config.sample_stride], node.connection_key, time.monotonic(), node.node_id
+    )
+    assert selector.shared_cache.cluster_loads(selector.prefill_nodes) is None
+    with patch.object(
+        selector, "_importance_sampling", side_effect=[selector.prefill_nodes[1], selector.decode_nodes[0]]
+    ):
+        chosen, _, info = asyncio.run(selector.select_p_d_node(prompt, None, None))
+    assert chosen is node
+    assert info.selection_reason == "long_prefix_affinity"
+
+
+def test_restarted_p_does_not_reuse_previous_incarnation_long_prefix_hint():
+    selector = _selector()
+    prompt = "old long history " * 10000
+    node = selector.prefill_nodes[0]
+    selector.shared_cache.tree.insert_key(
+        prompt[:: selector.policy.config.sample_stride], node.connection_key, time.monotonic(), node.node_id - 1
+    )
+    with patch.object(
+        selector, "_importance_sampling", side_effect=[selector.prefill_nodes[1], selector.decode_nodes[0]]
+    ):
+        chosen, _, info = asyncio.run(selector.select_p_d_node(prompt, None, None))
+    assert chosen is selector.prefill_nodes[1]
+    assert info.selection_reason == "worker_reported_load"
+    assert not info.cache_candidate_online
+    assert info.estimated_prefill_chars == len(prompt)

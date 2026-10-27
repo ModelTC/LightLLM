@@ -72,12 +72,7 @@ def _compress_pools(
         from_chunk = raw_rows >= q_start
         chunk_ptr = Raw + raw_rows[:, None] * RAW_STRIDE + cols[None, :]
         tail_slots = (length - 4 + pool) % TAIL_SIZE
-        tail_ptr = (
-            Tail
-            + req * TAIL_REQ_STRIDE
-            + tail_slots[:, None] * TAIL_SLOT_STRIDE
-            + cols[None, :]
-        )
+        tail_ptr = Tail + req * TAIL_REQ_STRIDE + tail_slots[:, None] * TAIL_SLOT_STRIDE + cols[None, :]
         raw = tl.where(
             from_chunk[:, None],
             tl.load(chunk_ptr, from_chunk[:, None], 0),
@@ -94,13 +89,9 @@ def _compress_pools(
         key = tl.sum(raw * weights, 0).to(tl.bfloat16).to(tl.float32).reshape(1, 128)
         for step in tl.static_range(7):
             key = _butterfly_stage(key, 64 >> step, 1 << step, 1, 128)
-        key = (key * (128**-0.5)).to(tl.bfloat16).to(tl.float32)
-        scale = tl.exp2(
-            tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(key), 1), 1e-4) / 448.0))
-        )
-        key = tl.minimum(tl.maximum(key / scale[:, None], -448.0), 448.0).to(
-            tl.float8e4nv
-        )
+        key = (key * (128 ** -0.5)).to(tl.bfloat16).to(tl.float32)
+        scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(key), 1), 1e-4) / 448.0)))
+        key = tl.minimum(tl.maximum(key / scale[:, None], -448.0), 448.0).to(tl.float8e4nv)
         loc = tl.load(Ragged + start + length - 1).to(tl.int64)
         dest = Packed + loc * PACKED_STRIDE
         tl.store(dest + cols, key.reshape(128).to(tl.uint8, bitcast=True))
@@ -135,10 +126,7 @@ def _save_pool_tails(
         mask = ((slots < TAIL_SIZE) & (positions >= 0) & (raw_rows >= q_start))[:, None]
         raw = tl.load(Raw + raw_rows[:, None] * RAW_STRIDE + cols[None, :], mask, 0)
         tl.store(
-            Tail
-            + req * TAIL_REQ_STRIDE
-            + (positions % TAIL_SIZE)[:, None] * TAIL_SLOT_STRIDE
-            + cols[None, :],
+            Tail + req * TAIL_REQ_STRIDE + (positions % TAIL_SIZE)[:, None] * TAIL_SLOT_STRIDE + cols[None, :],
             raw,
             mask,
         )
@@ -269,9 +257,7 @@ def _gather_pools(
     loc = tl.load(ReqTable + req * REQ_STRIDE + pool * 4 + 3, valid, 0).to(tl.int64)
     cols = tl.arange(0, 128)
     packed = tl.load(Packed + loc * PACKED_STRIDE + cols, valid, 0)
-    scale = tl.load(
-        (Packed + loc * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)), valid, 1.0
-    )
+    scale = tl.load((Packed + loc * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)), valid, 1.0)
     row = batch.to(tl.int64) * POOLS + pool
     tl.store(K + row * 128 + cols, packed.to(tl.float8e4nv, bitcast=True))
     tl.store(Scale + row, scale)
@@ -317,17 +303,11 @@ def _gather_paged_pools(
     rows = tl.arange(0, 64)
     cols = tl.arange(0, 128)
     # A fixed grid is replayable at 1M; the GPU length bounds the work.
-    for page in range(
-        tl.program_id(0), tl.cdiv(tl.maximum(length, 1), 64), tl.num_programs(0)
-    ):
+    for page in range(tl.program_id(0), tl.cdiv(tl.maximum(length, 1), 64), tl.num_programs(0)):
         pools = page * 64 + rows
         valid = pools < length
-        locs = tl.load(ReqTable + req * REQ_STRIDE + pools * 4 + 3, valid, 0).to(
-            tl.int64
-        )
-        keys = tl.load(
-            Packed + locs[:, None] * PACKED_STRIDE + cols[None, :], valid[:, None], 0
-        )
+        locs = tl.load(ReqTable + req * REQ_STRIDE + pools * 4 + 3, valid, 0).to(tl.int64)
+        keys = tl.load(Packed + locs[:, None] * PACKED_STRIDE + cols[None, :], valid[:, None], 0)
         scales = tl.load(
             (Packed + locs * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)),
             valid,
@@ -343,12 +323,8 @@ def gather_paged_pools(packed_buffer, req_table, req_idx, pool_lengths, max_pool
     """Pack valid pools, including one zero-key dummy page for empty rows."""
     batch = req_idx.numel()
     max_pages = triton.cdiv(max_pools, 64)
-    pages = torch.empty(
-        (batch * max_pages, 64, 1, 132), device=packed_buffer.device, dtype=torch.uint8
-    )
-    block_table = torch.arange(
-        batch * max_pages, device=pages.device, dtype=torch.int32
-    ).view(batch, max_pages)
+    pages = torch.empty((batch * max_pages, 64, 1, 132), device=packed_buffer.device, dtype=torch.uint8)
+    block_table = torch.arange(batch * max_pages, device=pages.device, dtype=torch.int32).view(batch, max_pages)
     blocks = min(max_pages, triton.cdiv(get_device_sm_count() * 4, batch))
     _gather_paged_pools[(blocks, batch)](
         packed_buffer,
@@ -386,9 +362,7 @@ def _expand_topk(
         valid = lane < length
     else:
         closed_tokens = tl.minimum(length // 4 * 4, TOPK)
-        group = tl.load(
-            Groups + row * (TOPK // 4) + lane // 4, lane < closed_tokens, -1
-        )
+        group = tl.load(Groups + row * (TOPK // 4) + lane // 4, lane < closed_tokens, -1)
         token = tl.where(
             lane < closed_tokens,
             group * 4 + lane % 4,
@@ -402,9 +376,7 @@ def _expand_topk(
 
 def expand_topk(groups, lengths, starts, ragged, topk, dense=False):
     width = triton.cdiv(topk + 3, 128) * 128
-    out = torch.empty(
-        (lengths.numel(), width), dtype=torch.int32, device=lengths.device
-    )
+    out = torch.empty((lengths.numel(), width), dtype=torch.int32, device=lengths.device)
     relative = torch.empty_like(out)
     _expand_topk[(lengths.numel(),)](
         groups,

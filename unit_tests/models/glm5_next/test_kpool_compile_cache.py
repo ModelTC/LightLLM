@@ -32,9 +32,7 @@ def test_pool_ranges_reuses_binary_across_context_and_chunk_lengths(monkeypatch)
         (513, 262144),
     ]:
         split = tokens // 2
-        lengths = (
-            torch.arange(tokens, device="cuda", dtype=torch.int32) % (max_pools * 4) + 1
-        )
+        lengths = torch.arange(tokens, device="cuda", dtype=torch.int32) % (max_pools * 4) + 1
         cu = torch.tensor([0, split, tokens], device="cuda", dtype=torch.int32)
         expected_starts = torch.cat(
             (
@@ -58,9 +56,7 @@ def test_pool_gather_reuses_binary_across_context_lengths(monkeypatch, paged):
     hashes = record_kernels(monkeypatch, kernel)
     storage = torch.zeros(64, 1, 584, device="cuda", dtype=torch.bfloat16)
     packed = storage.view(torch.uint8)[:, :, -132:]
-    source_keys = (
-        torch.randn(64, 128, device="cuda").to(torch.float8_e4m3fn).view(torch.uint8)
-    )
+    source_keys = torch.randn(64, 128, device="cuda").to(torch.float8_e4m3fn).view(torch.uint8)
     source_scales = torch.rand(64, device="cuda") + 0.1
     packed[:, 0, :128] = source_keys
     packed[:, 0, 128:] = source_scales.view(torch.uint8).view(64, 4)
@@ -73,26 +69,17 @@ def test_pool_gather_reuses_binary_across_context_lengths(monkeypatch, paged):
         counts = [max_pools, max_pools - 1]
         lengths = torch.tensor(counts, device="cuda", dtype=torch.int32)
         if paged:
-            pages, block_table = kpool.gather_paged_pools(
-                packed, table, reqs, lengths, max_pools
-            )
+            pages, block_table = kpool.gather_paged_pools(packed, table, reqs, lengths, max_pools)
             page_bytes = pages.view(pages.shape[0], -1)
         else:
-            keys, scales = kpool.gather_pools(
-                packed, table, reqs, lengths * 4, max_pools
-            )
+            keys, scales = kpool.gather_pools(packed, table, reqs, lengths * 4, max_pools)
             keys = keys.view(torch.uint8).view(2, max_pools, 128)
             scales = scales.view(2, max_pools)
         for row, count in enumerate(counts):
             if paged:
                 ids = block_table[row].long()
                 actual_keys = page_bytes[ids, : 64 * 128].reshape(-1, 128)[:count]
-                actual_scales = (
-                    page_bytes[ids, 64 * 128 :]
-                    .contiguous()
-                    .view(torch.float32)
-                    .flatten()[:count]
-                )
+                actual_scales = page_bytes[ids, 64 * 128 :].contiguous().view(torch.float32).flatten()[:count]
             else:
                 actual_keys, actual_scales = keys[row, :count], scales[row, :count]
             locs = locations[1 - row, :count].long()

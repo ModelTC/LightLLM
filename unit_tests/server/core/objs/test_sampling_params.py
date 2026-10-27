@@ -259,7 +259,7 @@ def test_stop_matching_policy_round_trip(kwargs, expected):
     assert py_restored.stop_str_match_mode.get_mode() == expected
 
 
-@pytest.mark.parametrize("mode", [-1, 0, 3, 2**32, "CONTENT_ONLY", None, 0.0])
+@pytest.mark.parametrize("mode", [-1, 0, 3, 2 ** 32, "CONTENT_ONLY", None, 0.0])
 def test_invalid_stop_str_match_mode(mode):
     params = SamplingParams()
     with pytest.raises((ValueError, TypeError)):

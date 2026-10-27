@@ -38,9 +38,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 def make_mems(monkeypatch, request):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
-    monkeypatch.setattr(
-        "lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128
-    )
+    monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
     mtp_step, state_mode, use_fp8_kv = request.param
     dtype, head_dim = (torch.uint8, 720) if use_fp8_kv else (torch.bfloat16, 584)
     mem_manager_class = FP8Glm5NextMemManager if use_fp8_kv else Glm5NextMemManager
@@ -97,16 +95,12 @@ def make_mems(monkeypatch, request):
         )
         mems = []
         for _ in range(tp):
-            mem = mem_manager_class(
-                32, dtype, 1, head_dim, 2 + int(mtp_step > 0), config
-            )
+            mem = mem_manager_class(32, dtype, 1, head_dim, 2 + int(mtp_step > 0), config)
             req = Glm5NextReqManager(3, 32, mem, config)
             assert req.linear_state_manager.ssm_slots_per_req == (
                 mtp_step + 1 if args.ssm_state_mode == "native" else 1
             )
-            assert (req.linear_state_manager.ssm_backend is None) == (
-                args.ssm_state_mode == "native"
-            )
+            assert (req.linear_state_manager.ssm_backend is None) == (args.ssm_state_mode == "native")
             mem.write_to_shm(req)
             assert mem.big_page_buffers is not None
             mems.append(mem)
@@ -119,9 +113,7 @@ def make_mems(monkeypatch, request):
 @pytest.mark.parametrize("prefill_tp,decode_tp", [(1, 1), (4, 4), (1, 4), (4, 1)])
 @pytest.mark.parametrize("remainder", range(4))
 @pytest.mark.parametrize("source_mode", ["native", "replay"])
-def test_pd_kv_and_runtime_state_roundtrip(
-    make_mems, prefill_tp, decode_tp, remainder, source_mode
-):
+def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, remainder, source_mode):
     source, dest = make_mems(prefill_tp, source_mode), make_mems(decode_tp)
     mtp_size = get_env_start_args().mtp_step + 1
     layers = source[0].layer_num
@@ -130,9 +122,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
     src_indexes = torch.randperm(32)[:length].tolist()
     dst_indexes = torch.randperm(32)[:length].tolist()
     token_bytes = source[0].head_dim * source[0].dtype.itemsize
-    packed = torch.randint(
-        0, 256, (layers, length, 1, token_bytes), dtype=torch.uint8, device="cuda"
-    )
+    packed = torch.randint(0, 256, (layers, length, 1, token_bytes), dtype=torch.uint8, device="cuda")
     conv = torch.randn(6, 3, 8, 128, 3, dtype=torch.bfloat16, device="cuda")
     ssm = torch.randn(6, 8, 128, 128, dtype=torch.float32, device="cuda")
     # Non-live slots deliberately contain stale data. The sequence length, not
@@ -141,9 +131,9 @@ def test_pd_kv_and_runtime_state_roundtrip(
     for rank, mem in enumerate(source):
         heads = slice(rank * 8 // prefill_tp, (rank + 1) * 8 // prefill_tp)
         mem.kv_buffer.view(torch.uint8)[:, src_indexes] = packed
-        mem.req_manager.linear_state_manager.conv_state.buffer[
-            :, src_req, ..., :3
-        ].copy_(conv[:, :, heads].reshape(6, -1, 3))
+        mem.req_manager.linear_state_manager.conv_state.buffer[:, src_req, ..., :3].copy_(
+            conv[:, :, heads].reshape(6, -1, 3)
+        )
         mem.req_manager.linear_state_manager.ssm_state.buffer[
             :, src_req * mem.req_manager.linear_state_manager.ssm_slots_per_req
         ].copy_(ssm[:, heads])
@@ -171,9 +161,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
                     reqs,
                     cu,
                 )
-            ssm_backend.accept_updates(
-                reqs, torch.zeros(4, dtype=torch.int32, device="cuda")
-            )
+            ssm_backend.accept_updates(reqs, torch.zeros(4, dtype=torch.int32, device="cuda"))
             ssm[:, heads].copy_(ssm_backend.get_accepted_state(src_req))
 
     untouched = []
@@ -187,9 +175,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
         ):
             mem.req_manager.linear_state_manager.ssm_backend.cursors[dst_req] = 5
         if mem.req_manager.linear_state_manager.accepted_state_index is not None:
-            mem.req_manager.linear_state_manager.accepted_state_index[dst_req] = (
-                mtp_size - 1
-            )
+            mem.req_manager.linear_state_manager.accepted_state_index[dst_req] = mtp_size - 1
         untouched.append(
             [
                 x.buffer[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
@@ -206,29 +192,19 @@ def test_pd_kv_and_runtime_state_roundtrip(
 
     source[0].write_mem_to_page_kv_move_buffer(src_indexes, 0, 0, source, prefill_tp)
     # Model a byte-preserving transport between separate P/D page buffers.
-    dest[0].kv_move_buffer.view(torch.uint8).copy_(
-        source[0].kv_move_buffer.view(torch.uint8)
-    )
+    dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
     dest[0].read_page_kv_move_buffer_to_mem(dst_indexes, 0, 0, dest, decode_tp)
     state_nbytes = source[0].req_manager.get_pd_state_size()
-    source_state_bytes = (
-        source[0].kv_move_buffer[0].view(torch.uint8).reshape(-1)[:state_nbytes]
-    )
+    source_state_bytes = source[0].kv_move_buffer[0].view(torch.uint8).reshape(-1)[:state_nbytes]
     source_state_bytes.zero_()
-    source[0].write_mem_to_page_kv_move_buffer(
-        [], 0, 0, source, prefill_tp, "att_state", src_req
-    )
+    source[0].write_mem_to_page_kv_move_buffer([], 0, 0, source, prefill_tp, "att_state", src_req)
     # The public request interface packs the same complete block as the PD helper.
     request_state_block = torch.zeros(state_nbytes, dtype=torch.uint8, device="cuda")
     for rank, mem in enumerate(source):
         mem.req_manager.get_pd_state(src_req, request_state_block, rank)
     assert torch.equal(source_state_bytes, request_state_block)
-    dest[0].kv_move_buffer.view(torch.uint8).copy_(
-        source[0].kv_move_buffer.view(torch.uint8)
-    )
-    dest[0].read_page_kv_move_buffer_to_mem(
-        [], 0, 0, dest, decode_tp, "att_state", dst_req
-    )
+    dest[0].kv_move_buffer.view(torch.uint8).copy_(source[0].kv_move_buffer.view(torch.uint8))
+    dest[0].read_page_kv_move_buffer_to_mem([], 0, 0, dest, decode_tp, "att_state", dst_req)
     torch.cuda.synchronize()
 
     for rank, mem in enumerate(dest):
@@ -248,13 +224,9 @@ def test_pd_kv_and_runtime_state_roundtrip(
         if mem.req_manager.linear_state_manager.ssm_backend is not None and hasattr(
             mem.req_manager.linear_state_manager.ssm_backend, "cursors"
         ):
-            assert (
-                mem.req_manager.linear_state_manager.ssm_backend.cursors[dst_req] == 0
-            )
+            assert mem.req_manager.linear_state_manager.ssm_backend.cursors[dst_req] == 0
         if mem.req_manager.linear_state_manager.accepted_state_index is not None:
-            assert (
-                mem.req_manager.linear_state_manager.accepted_state_index[dst_req] == 0
-            )
+            assert mem.req_manager.linear_state_manager.accepted_state_index[dst_req] == 0
         for (state, stride), expected in zip(
             (
                 (mem.req_manager.linear_state_manager.conv_state, 1),
@@ -303,9 +275,7 @@ def test_pd_page_capacity_includes_tail_without_resizing(make_mems):
     mem = make_mems(1)[0]
     helper = mem.att_state_page_helper
     # Reject a block missing even one byte of the complete state, including the tail.
-    mem.kv_move_buffer = torch.empty(
-        (1, mem.req_manager.get_pd_state_size() - 1), dtype=torch.uint8, device="cuda"
-    )
+    mem.kv_move_buffer = torch.empty((1, mem.req_manager.get_pd_state_size() - 1), dtype=torch.uint8, device="cuda")
     with pytest.raises(AssertionError, match="smaller than global linear att state"):
         helper.assert_page_size()
     shape = mem.get_paged_kv_move_buffer_shape(2, 2048)

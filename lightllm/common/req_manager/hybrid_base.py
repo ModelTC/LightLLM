@@ -58,13 +58,21 @@ class HybridAttentionReqManager(ReqManager, ABC):
         self.restore_state(req, self.small_page_buffers, req.shared_kv_node.small_page_buffer_idx, checkpoint_len)
 
     @abstractmethod
-    def restore_state(self, req: "InferReq", state_cache_manager, buffer_idx: int, checkpoint_len: Optional[int] = None):
+    def restore_state(
+        self, req: "InferReq", state_cache_manager, buffer_idx: int, checkpoint_len: Optional[int] = None
+    ):
         """CPU checkpoint → 请求 GPU 运行态；大小页共用，不负责前缀匹配或 full KV 索引恢复。"""
 
     ##### 检查点保存：请求 GPU 运行态 → CPU 缓存 #####
     # 大页批量保存、小页逐请求保存；两类入口共用 save_state，检查点槽位由调用方分配。
 
-    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int], checkpoint_lens: Optional[List[int]] = None):
+    def save_big_page_states(
+        self,
+        b_req_idx: torch.Tensor,
+        req_indexes: List[int],
+        buffer_indexes: List[int],
+        checkpoint_lens: Optional[List[int]] = None,
+    ):
         """批量保存请求 GPU 运行态到已分配的大页槽位，buffer_indexes 中的 -1 表示跳过。
 
         b_req_idx 与 req_indexes 分别为同一批请求的 GPU 索引张量和 CPU 索引列表。
