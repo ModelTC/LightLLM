@@ -73,7 +73,7 @@ def make_mems(monkeypatch, request):
     return create
 
 
-@pytest.mark.parametrize("prefill_tp,decode_tp", [(1, 1), (4, 4), (1, 4), (4, 1)])
+@pytest.mark.parametrize("prefill_tp,decode_tp", [(1, 1), (4, 4), (1, 4), (4, 1), (8, 1)])
 @pytest.mark.parametrize("remainder", range(4))
 def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, remainder):
     source, dest = make_mems(prefill_tp), make_mems(decode_tp)

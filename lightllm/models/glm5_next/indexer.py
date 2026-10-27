@@ -15,7 +15,8 @@ class Glm5NextNsaInfer:
         self.topk = network_config["index_topk"]
         self.heads = network_config["index_n_heads"]
         self.dim = network_config["index_head_dim"]
-        self.eps = network_config["rms_norm_eps"]
+        # The indexer LayerNorm has a separate epsilon from the model RMSNorm.
+        self.eps = 1e-6
 
     def select_topk_indices(self, logits, lengths, indices):
         """Select row-relative indices, with valid entries before -1 padding."""

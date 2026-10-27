@@ -6,6 +6,7 @@ from lightllm.common.quantization.quantize_method import QuantizationMethod, Wei
 from lightllm.common.quantization.registry import QUANTMETHODS
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.device_utils import is_sm100_gpu
+from lightllm.utils.envs_utils import get_env_use_ue8m0_activation_scales
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -109,7 +110,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=alloc_func,
-                use_ue8m0_scales=self.use_ue8m0_scales,
+                use_ue8m0_scales=get_env_use_ue8m0_activation_scales(
+                    self.use_ue8m0_scales, require_ue8m0=self.use_packed_ue8m0
+                ),
                 use_packed_ue8m0=self.use_packed_ue8m0,
             )
 

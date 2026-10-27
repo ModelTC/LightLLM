@@ -6,7 +6,7 @@ from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_env_use_ue8m0_scales,
+    get_env_use_ue8m0_activation_scales,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
@@ -80,6 +80,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        shared_expert_output: Optional[torch.Tensor] = None,
     ):
         output = fused_experts(
             hidden_states=input_tensor,
@@ -94,6 +95,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            shared_expert_output=shared_expert_output,
         )
         return output
 
@@ -130,7 +132,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
             num_experts=self.total_expert_num_contain_redundancy,
             use_fp8=use_fp8_w8a8,
-            round_scale=get_env_use_ue8m0_scales(),
+            round_scale=get_env_use_ue8m0_activation_scales(),
             async_finish=False,
             return_recv_hook=True,
         )

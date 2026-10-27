@@ -4,6 +4,7 @@ import triton.language as tl
 
 from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import _butterfly_stage
 from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.utils.envs_utils import get_env_use_ue8m0_activation_scales
 
 
 @triton.jit
@@ -45,6 +46,7 @@ def _compress_pools(
     SINGLE_QUERY: tl.constexpr,
     TAIL_SIZE: tl.constexpr,
     HAS_MTP_INDEX: tl.constexpr,
+    USE_UE8M0_SCALES: tl.constexpr,
 ):
     if SINGLE_QUERY:
         batch = tl.program_id(0)
@@ -88,7 +90,9 @@ def _compress_pools(
         for step in tl.static_range(7):
             key = _butterfly_stage(key, 64 >> step, 1 << step, 1, 128)
         key = (key * (128 ** -0.5)).to(tl.bfloat16).to(tl.float32)
-        scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(key), 1), 1e-4) / 448.0)))
+        scale = tl.maximum(tl.max(tl.abs(key), 1), 1e-4) / 448.0
+        if USE_UE8M0_SCALES:
+            scale = tl.exp2(tl.ceil(tl.log2(scale)))
         key = tl.minimum(tl.maximum(key / scale[:, None], -448.0), 448.0).to(tl.float8e4nv)
         loc = tl.load(Ragged + start + length - 1).to(tl.int64)
         dest = Packed + loc * PACKED_STRIDE
@@ -156,6 +160,7 @@ def compress_pools(
         single_query,
         tail.shape[1],
         mtp_index is not None,
+        USE_UE8M0_SCALES=get_env_use_ue8m0_activation_scales(default=True),
         num_warps=4,
     )
     # Complete all boundary pools before replacing the previous chunk's tail.

@@ -182,7 +182,9 @@ def test_kpool_ranges_cuda_graph_with_changing_query_boundaries(q_lens):
 
 
 @pytest.mark.parametrize("cuda_graph", [False, True])
-def test_kpool_chunk_boundaries_and_fragmented_token_kv(cuda_graph):
+@pytest.mark.parametrize("scale_format", ["auto", "fp32", "ue8m0"])
+def test_kpool_chunk_boundaries_and_fragmented_token_kv(monkeypatch, cuda_graph, scale_format):
+    monkeypatch.setenv("LIGHTLLM_ACTIVATION_SCALE_FORMAT", scale_format)
     # Unaligned chunks, reordered requests, and pools spanning old/new tails.
     seqs = [9, 7]
     ragged = torch.randperm(40, device="cuda", dtype=torch.int32)[: sum(seqs)]

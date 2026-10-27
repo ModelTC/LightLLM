@@ -17,7 +17,7 @@ from lightllm.common.basemodel.triton_kernel.mhc import (
 )
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
@@ -37,6 +37,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         self.hc_sinkhorn_iters = network_config.get("hc_sinkhorn_iters", 20)
         self.swiglu_limit = network_config["swiglu_limit"]
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        self.ep_shared_combine_bias = self.enable_ep_moe and enable_env_vars("LIGHTLLM_EP_SHARED_COMBINE_BIAS")
         self.is_moe = (
             network_config["n_routed_experts"] is not None
             and layer_num >= network_config["first_k_dense_replace"]
@@ -101,9 +102,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
-        # if fused_shared_experts is not enabled, compute shared_output
+        shared_output = None
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             shared_output = self._ffn_tp(hidden_states, infer_state, layer_weight)
+
+        combine_shared = self.ep_shared_combine_bias and infer_state.is_prefill and shared_output is not None
 
         moe_gate_dtype = layer_weight.moe_gate.data_type_
         router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
@@ -120,9 +123,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
+            **({"shared_expert_output": shared_output} if combine_shared else {}),
         )
 
-        if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
+        if shared_output is not None and not combine_shared:
             output.add_(shared_output)
 
         return output.view(num_tokens, hidden_dim)
@@ -428,6 +432,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             norm_eps=self.eps_,
             hc_eps=self.hc_eps,
             sinkhorn_iters=self.hc_sinkhorn_iters,
+            glm5_numerics=True,
         )
 
     def _forward_mhc(self, input_embeddings, infer_state, layer_weight, *, prefill):
@@ -438,11 +443,11 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             layer_output = self.context_attention_forward(layer_input, infer_state, layer_weight)
         else:
             layer_output = self.token_attention_forward(layer_input, infer_state, layer_weight)
-        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams)
+        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams, glm5_numerics=True)
 
         layer_input, residual_mix, post_mix = self._hc_pre(streams, layer_weight, "ffn", layer_weight.ffn_norm_weight_)
         layer_output = self._ffn(layer_input, infer_state, layer_weight)
-        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams)
+        streams = hc_post(layer_output, streams, residual_mix, post_mix, self.mhc_streams, glm5_numerics=True)
         # Only prefill autotuning truncates the model. Decode autotuning still
         # executes every layer and must keep all residual streams until the end.
         is_autotune_last_layer = (
