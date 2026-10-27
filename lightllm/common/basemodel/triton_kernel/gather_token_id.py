@@ -4,7 +4,7 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_size", "req_to_next_token_ids_stride", "req_to_next_token_ids_stride_1"])
 def _fwd_kernel_scatter(
     next_token_ids,
     req_to_next_token_ids,
@@ -88,7 +88,7 @@ def scatter_token(
     return
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_size", "req_to_next_token_ids_stride", "req_to_next_token_ids_stride_1"])
 def _fwd_kernel_gather(
     req_to_next_token_ids,
     req_to_next_token_ids_stride,
@@ -141,7 +141,7 @@ def gather_token(req_to_next_token_ids: torch.Tensor, b_req_idx: torch.Tensor, b
     return output
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["num_size", "req_to_next_token_ids_stride", "req_to_next_token_ids_stride_1"])
 def _fwd_kernel_gather_prefill_decode_mixed(
     input_ids,
     req_to_next_token_ids,

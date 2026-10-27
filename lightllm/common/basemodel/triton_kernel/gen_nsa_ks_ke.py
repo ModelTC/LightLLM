@@ -5,7 +5,7 @@ import triton.language as tl
 from typing import Optional
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["strided_req_to_token_index_b", "strided_req_to_token_index_s"])
 def _gen_nsa_ks_ke(
     b_seq_len,
     b_req_idx,
@@ -120,7 +120,7 @@ def gen_nsa_ks_ke(
     return ks, ke, lengths
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["hold_req_idx"])
 def _gen_same_req_mark(b_req_idx, b_same_req_mark, hold_req_idx, BLOCK_SIZE: tl.constexpr):
     cur_index = tl.program_id(0)
     cur_req_idx = tl.load(b_req_idx + cur_index)

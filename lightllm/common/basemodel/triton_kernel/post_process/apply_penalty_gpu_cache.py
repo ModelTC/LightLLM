@@ -47,7 +47,7 @@ def _fwd_kernel_apply_penalty_cache(
     return
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["batch_size"])
 def _eos_penalty(
     Logits,
     stride_logit_b,

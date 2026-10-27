@@ -93,7 +93,7 @@ def silu_and_mul_quant_fp8(input, group_size, dtype, limit=None, alloc_func=torc
     return quant, scale
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["size_m"])
 def _silu_and_mul_kernel_fast(
     input_ptr,
     output_ptr,
