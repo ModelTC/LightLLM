@@ -299,7 +299,7 @@ def test_manager_uses_shared_node_load_and_local_balancing_threshold_for_selecti
 
     async def update_dispatched_info(p_nodes):
         assert p_nodes == [cached, available]
-        cached.dispatched_prompt_chars, cached.dispatched_req_num = 500, 1
+        cached.dispatched_prompt_chars, cached.dispatched_req_num = 2000, 1
         available.dispatched_prompt_chars, available.dispatched_req_num = 100, 1
 
     manager.pd_manager.selector.pd_node_stats.update_dispatched_info.side_effect = update_dispatched_info
@@ -779,6 +779,64 @@ def test_error_before_first_token_clears_segment_counters(backend):
     manager.abort.assert_awaited_once()
     manager.remove_req.assert_awaited_once()
     manager.pd_node_stats.sub_dispatched_info.assert_awaited_once_with(p_node=prefill, chars=len("prompt"), req_num=1)
+
+
+@pytest.mark.parametrize("exit_mode", ["first_token", "error", "cancel"])
+def test_cached_work_reservation_is_released_exactly_once(backend, exit_mode):
+    async def run():
+        manager, state = _generator_manager(backend, "cache_aware")
+        cached = manager.pd_manager.prefill_nodes[0]
+        other = _node(101, "other:8000")
+        _set_nodes(manager, [other, cached], manager.pd_manager.decode_nodes)
+        prefix = "x" * 100_000
+        prompt = prefix + "y" * 1_000
+        policy = manager.pd_manager.selector.policy
+        await policy.prompt_cache_tree.insert_sampled(prefix[::512], cached.connection_key, 512)
+        expected_work = len(prompt) - (len(prefix[::512]) - 1) * 512 - 1
+        started = asyncio.Event()
+
+        async def generate_segment(p_node, _d_node, _start_time, _prompt, params, *_args):
+            assert p_node is cached
+            assert _pending(state, p_node) == (expected_work, 1)
+            started.set()
+            if exit_mode == "error":
+                raise RuntimeError("before first token")
+            if exit_mode == "cancel":
+                await asyncio.Event().wait()
+            yield (
+                params.group_request_id,
+                "x",
+                {"prompt_tokens": 50_000, "prompt_cache_len": 49_000},
+                FinishStatus(FinishStatus.FINISHED_STOP),
+            )
+            assert _pending(state, cached) == (0, 0)
+
+        manager._wait_to_token_package = generate_segment
+
+        async def consume():
+            return [item async for item in manager._generate_one_attempt(prompt, _params(), None, None, 0, 80, 50_000)]
+
+        task = asyncio.create_task(consume())
+        if exit_mode == "cancel":
+            await asyncio.wait_for(started.wait(), timeout=2)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        elif exit_mode == "error":
+            with pytest.raises(RuntimeError, match="before first token"):
+                await task
+        else:
+            await task
+        assert _pending(state, cached) == (0, 0)
+        assert _pending(state, other) == (0, 0)
+        manager.pd_node_stats.add_dispatched_info.assert_awaited_once_with(
+            p_node=cached, chars=expected_work, req_num=1
+        )
+        manager.pd_node_stats.sub_dispatched_info.assert_awaited_once_with(
+            p_node=cached, chars=expected_work, req_num=1
+        )
+
+    asyncio.run(run())
 
 
 def test_sampling_params_copy_failure_clears_initial_reservation(monkeypatch, backend):

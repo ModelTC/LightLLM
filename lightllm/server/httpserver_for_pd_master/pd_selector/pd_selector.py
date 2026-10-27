@@ -1,7 +1,7 @@
 import asyncio
 import random
 from contextlib import nullcontext
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Union, List, Tuple, Optional
 
 from lightllm.server.pd_io_struct import PD_Client_Obj
@@ -20,6 +20,13 @@ class PDSelectionExtraInfo:
 
     estimated_cache_hit_rate: float = 0.0
     cache_last_insert_time: Optional[float] = None
+    # 字符数是负载估算单位，不是真实 token/KV 命中数；非 cache-aware 策略沿用完整 prompt。
+    estimated_prefill_chars: Optional[int] = field(default=None, compare=False)
+    selection_reason: str = field(default="default", compare=False)
+    cache_candidate: Optional[str] = field(default=None, compare=False)
+    cache_candidate_online: bool = field(default=False, compare=False)
+    matched_chars: int = field(default=0, compare=False)
+    selected_pending_chars: int = field(default=0, compare=False)
 
 
 class PDSelector:
@@ -144,8 +151,9 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
         else:
             loads = self.shared_cache.cluster_loads(self.prefill_nodes)
             if loads is None:
-                p_node = self._importance_sampling(self.prefill_nodes)
-                selection_extra_info = PDSelectionExtraInfo()
+                p_node, selection_extra_info = await self.policy.select_worker(
+                    self.prefill_nodes, prompt, fallback_worker=self._importance_sampling(self.prefill_nodes)
+                )
             else:
                 p_node, selection_extra_info = await self.policy.select_worker(self.prefill_nodes, prompt, loads)
         self._check_available_nodes()
