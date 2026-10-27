@@ -78,8 +78,8 @@ def _run_launcher(stage):
     try:
         SubmoduleManager().start_submodule_processes(start_funcs=[_start_cache], start_args=[(stage, commands)])
         assert stage in ("ready", "send")
-        controller.send("send" if stage == "send" else "stop")
         child = mp.active_children()[0]
+        controller.send("send" if stage == "send" else "stop")
         child.join(timeout=5)
         assert child.exitcode == (1 if stage == "send" else 0)
     finally:
