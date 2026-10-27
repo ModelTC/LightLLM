@@ -55,9 +55,7 @@ def _silu_and_mul_post_quant_kernel(
     )
 
     for token_index in tl.range(token_id, token_num_cur_expert, block_num_per_expert, num_stages=NUM_STAGE):
-        gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(
-            tl.float32
-        )
+        gate = tl.load(input_ptr_offs + token_index * stride_input_1, mask=offs_in_d < size_n, other=0.0).to(tl.float32)
         up = tl.load(input_ptr_offs + token_index * stride_input_1 + size_n, mask=offs_in_d < size_n, other=0.0)
         if USE_LIMIT_AND_ALPHA:
             gate = tl.minimum(gate, limit)

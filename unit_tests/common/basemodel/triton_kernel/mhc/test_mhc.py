@@ -188,9 +188,9 @@ def test_glm_mhc_normalizes_before_cancelling_large_products(monkeypatch):
     monkeypatch.setitem(sys.modules, "deep_gemm", None)
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
     # Project-first overflows; normalize-first has finite cancelling products.
-    x = torch.full((1, 4 * 17), 2.0**32, device="cuda", dtype=torch.bfloat16)
+    x = torch.full((1, 4 * 17), 2.0 ** 32, device="cuda", dtype=torch.bfloat16)
     fn = torch.zeros(24, x.shape[-1], device="cuda")
-    fn[:, 0], fn[:, 1] = 2.0**110, -(2.0**110)
+    fn[:, 0], fn[:, 1] = 2.0 ** 110, -(2.0 ** 110)
     x_fp32 = x.float()
     inv_rms = torch.rsqrt(x_fp32.square().mean(-1, keepdim=True) + 1e-5)
     expected = F.linear(x_fp32 * inv_rms, fn)

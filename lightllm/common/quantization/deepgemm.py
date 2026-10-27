@@ -190,9 +190,7 @@ class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         else:
             num_groups, n, k = weight.shape
             packed_weight = torch.empty((num_groups, n, k // 2), device=weight.device, dtype=torch.int8)
-            weight_scale = torch.empty(
-                (num_groups, n, k // self.block_size), device=weight.device, dtype=torch.float32
-            )
+            weight_scale = torch.empty((num_groups, n, k // self.block_size), device=weight.device, dtype=torch.float32)
             for i in range(num_groups):
                 packed_weight[i], weight_scale[i] = per_token_cast_to_fp4(
                     weight[i], use_ue8m0=True, gran_k=self.block_size

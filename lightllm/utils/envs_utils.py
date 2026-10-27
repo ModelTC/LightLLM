@@ -82,7 +82,7 @@ def get_env_use_ue8m0_activation_scales(default=None, *, require_ue8m0=False) ->
 
     LIGHTLLM_ACTIVATION_SCALE_FORMAT: auto keeps the caller's existing policy;
     fp32 uses continuous scales; ue8m0 rounds scales upward to powers of two.
-    Indexer Q/K quantization has its own precision switch.
+    GLM5 indexer Q/K use this policy too; their payload and cache remain FP8.
     """
     scale_format = os.getenv("LIGHTLLM_ACTIVATION_SCALE_FORMAT", "auto").strip().lower()
     if scale_format == "auto":
@@ -94,11 +94,6 @@ def get_env_use_ue8m0_activation_scales(default=None, *, require_ue8m0=False) ->
     if require_ue8m0 and not use_ue8m0:
         raise ValueError("This packed DeepGEMM backend requires UE8M0 activation scales; fp32 is supported on Hopper")
     return use_ue8m0
-
-
-def get_env_glm5_indexer_bf16() -> bool:
-    """Precision ablation; set identically on all GLM5 prefill/decode workers."""
-    return os.getenv("LIGHTLLM_GLM5_INDEXER_BF16", "0").upper() in ["ON", "TRUE", "1"]
 
 
 @lru_cache(maxsize=None)

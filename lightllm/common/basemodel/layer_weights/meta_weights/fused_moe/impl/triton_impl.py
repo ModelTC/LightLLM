@@ -111,6 +111,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        shared_expert_output: Optional[torch.Tensor] = None,
     ):
         topk_weights, topk_ids, origin_topk_ids = self._select_experts(
             input_tensor=input_tensor,
@@ -140,5 +141,6 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            **({"shared_expert_output": shared_expert_output} if shared_expert_output is not None else {}),
         )
         return output

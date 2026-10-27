@@ -14,13 +14,12 @@ from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, se
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-@pytest.fixture(params=[(mtp, bf16) for mtp in (0, 2) for bf16 in (False, True)])
+@pytest.fixture(params=[0, 2])
 def make_mems(monkeypatch, request):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
-    mtp_step, indexer_bf16 = request.param
-    head_dim = 640 if indexer_bf16 else 584
+    mtp_step = request.param
     args = StartArgs(
         data_type="bfloat16",
         linear_att_hash_page_size=4,
@@ -46,8 +45,7 @@ def make_mems(monkeypatch, request):
             full_att_all_num_kv_heads=1,
             full_att_dtype=torch.bfloat16,
             full_att_num_kv_heads=1,
-            full_att_head_dim=head_dim,
-            indexer_bf16=indexer_bf16,
+            full_att_head_dim=584,
             global_linear_k_heads=8,
             global_linear_v_heads=8,
             num_linear_k_heads=8 // tp,
@@ -64,7 +62,7 @@ def make_mems(monkeypatch, request):
         )
         mems = []
         for _ in range(tp):
-            mem = Glm5NextMemManager(32, torch.bfloat16, 1, head_dim, 2 + int(mtp_step > 0), config)
+            mem = Glm5NextMemManager(32, torch.bfloat16, 1, 584, 2 + int(mtp_step > 0), config)
             req = Glm5NextReqManager(3, 32, mem, config)
             mem.write_to_shm(req)
             assert mem.big_page_buffers is not None
@@ -85,7 +83,7 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     length = 8 + remainder
     src_indexes = torch.randperm(32)[:length].tolist()
     dst_indexes = torch.randperm(32)[:length].tolist()
-    packed = torch.randint(0, 256, (layers, length, 1, source[0].head_dim * 2), dtype=torch.uint8, device="cuda")
+    packed = torch.randint(0, 256, (layers, length, 1, 1168), dtype=torch.uint8, device="cuda")
     conv = torch.randn(6, 3, 8, 128, 3, dtype=torch.bfloat16, device="cuda")
     ssm = torch.randn(6, 8, 128, 128, dtype=torch.float32, device="cuda")
     # Non-live slots deliberately contain stale data. The sequence length, not
@@ -172,4 +170,4 @@ def test_pd_page_capacity_includes_tail_without_resizing(make_mems):
     with pytest.raises(AssertionError, match="smaller than global linear att state"):
         helper.assert_page_size()
     shape = mem.get_paged_kv_move_buffer_shape(2, 2048)
-    assert shape == (2, 2048, mem.layer_num, 1, mem.head_dim)
+    assert shape == (2, 2048, mem.layer_num, 1, 584)

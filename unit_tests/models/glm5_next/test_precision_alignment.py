@@ -113,9 +113,7 @@ def test_indexer_layernorm_epsilon_preserves_pooled_topk_boundary(config, monkey
     actual_k = weight.k_norm_(projected_k, eps=indexer.eps)
     expected_k = F.layer_norm(projected_k, (dim,), weight.k_norm_.weight, weight.k_norm_.bias, eps=1e-6)
     torch.testing.assert_close(actual_k, expected_k, atol=0, rtol=0)
-    wrong_k = F.layer_norm(
-        projected_k, (dim,), weight.k_norm_.weight, weight.k_norm_.bias, eps=config["rms_norm_eps"]
-    )
+    wrong_k = F.layer_norm(projected_k, (dim,), weight.k_norm_.weight, weight.k_norm_.bias, eps=config["rms_norm_eps"])
     assert not torch.equal(expected_k, wrong_k)
 
     storage = torch.zeros(tokens + 1, 1, 584, dtype=torch.bfloat16, device="cuda")

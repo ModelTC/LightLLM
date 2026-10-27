@@ -2,6 +2,7 @@ import torch
 import triton
 import triton.language as tl
 from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import _butterfly_stage
+from lightllm.utils.envs_utils import get_env_use_ue8m0_activation_scales
 
 
 @triton.jit
@@ -13,6 +14,7 @@ def _hadamard_transform_quant_fp8_kernel(
     scale: tl.constexpr,
     BLOCK_R: tl.constexpr,
     BLOCK_N: tl.constexpr,
+    USE_UE8M0_SCALES: tl.constexpr,
 ):
     pid = tl.program_id(0)
     rows = pid * BLOCK_R + tl.arange(0, BLOCK_R)
@@ -32,7 +34,9 @@ def _hadamard_transform_quant_fp8_kernel(
     # Match the unfused path's bf16 Hadamard output before FP8 quantization.
     x = (x * scale).to(tl.bfloat16).to(tl.float32)
     absmax = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-4)
-    quant_scale = tl.exp2(tl.ceil(tl.log2(absmax * (1.0 / 448.0))))
+    quant_scale = absmax * (1.0 / 448.0)
+    if USE_UE8M0_SCALES:
+        quant_scale = tl.exp2(tl.ceil(tl.log2(quant_scale)))
     y = tl.minimum(tl.maximum(x / quant_scale[:, None], -448.0), 448.0)
 
     tl.store(Y + offsets, y, mask=row_mask[:, None])
@@ -40,7 +44,7 @@ def _hadamard_transform_quant_fp8_kernel(
 
 
 def hadamard_transform_quant_fp8(x: torch.Tensor, scale: float = 1.0) -> tuple[torch.Tensor, torch.Tensor]:
-    """Fuse Hadamard-128 with the following ue8m0 FP8 quantization."""
+    """Fuse Hadamard-128 and FP8 quantization with FP32 scale storage."""
 
     assert x.is_cuda, "hadamard_transform_quant_fp8 only supports CUDA tensors"
     assert x.dtype == torch.bfloat16, "Hadamard transform expects bfloat16 input"
@@ -64,6 +68,7 @@ def hadamard_transform_quant_fp8(x: torch.Tensor, scale: float = 1.0) -> tuple[t
         scale,
         BLOCK_R=block_r,
         BLOCK_N=128,
+        USE_UE8M0_SCALES=get_env_use_ue8m0_activation_scales(default=True),
         num_warps=2,
     )
     return output.view(original_shape), output_scale

@@ -80,6 +80,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        shared_expert_output: Optional[torch.Tensor] = None,
     ):
         output = fused_experts(
             hidden_states=input_tensor,
@@ -94,6 +95,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            shared_expert_output=shared_expert_output,
         )
         return output
 

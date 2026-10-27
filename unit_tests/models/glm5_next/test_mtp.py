@@ -72,16 +72,13 @@ def test_kda_mtp_matches_single_token_decode_and_restores_accepted_state(mtp_ste
 
 @pytest.mark.parametrize("mtp_step", [1, 2, 3, 5])
 @pytest.mark.parametrize("prefix", [1, 2, 3, 4, 7, 15])
-@pytest.mark.parametrize("indexer_bf16", [False, True])
-def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix, indexer_bf16):
+def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
     torch.manual_seed(53)
     width, capacity = mtp_step + 1, 128
     raw = torch.randn(capacity, 256, device="cuda", dtype=torch.bfloat16)
     ape = torch.randn(4, 128, device="cuda", dtype=torch.bfloat16)
     ring = torch.zeros(2, 4 + mtp_step, 256, device="cuda", dtype=torch.bfloat16)
-    packed = torch.zeros(
-        capacity, 128 if indexer_bf16 else 132, device="cuda", dtype=torch.bfloat16 if indexer_bf16 else torch.uint8
-    )
+    packed = torch.zeros(capacity, 132, device="cuda", dtype=torch.uint8)
     ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
 
     def prefill(values, destination, tail):

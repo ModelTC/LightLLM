@@ -1,6 +1,6 @@
 import dataclasses
 
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args, get_env_glm5_indexer_bf16
+from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 from .linear_att import LinearAttCacheConfig
@@ -12,7 +12,6 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
 
     index_kpool: int = 4
     index_head_dim: int = 128
-    indexer_bf16: bool = False
 
     INDEX_PADDING_BYTES = 144
 
@@ -27,12 +26,8 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
             "deepseek_sparse_attention" if i % 4 == 3 else "linear_attention" for i in range(layers)
         ]
         dtype = get_torch_dtype(args.data_type)
-        indexer_bf16 = get_env_glm5_indexer_bf16()
-        if indexer_bf16:
-            assert args.data_type in ("bf16", "bfloat16"), "BF16 indexer requires --data_type bfloat16"
         # Raw index keys and compression scores only live in request tails.
-        index_bytes = config["index_head_dim"] * dtype.itemsize if indexer_bf16 else cls.INDEX_PADDING_BYTES
-        packed_dim = config["kv_lora_rank"] + index_bytes // dtype.itemsize
+        packed_dim = config["kv_lora_rank"] + cls.INDEX_PADDING_BYTES // dtype.itemsize
         return cls(
             tp_world_size=tp,
             full_att_all_num_kv_heads=1,
@@ -54,7 +49,6 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
             draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num() if args.mtp_mode is not None else 0,
             index_kpool=config["index_kpool"],
             index_head_dim=config["index_head_dim"],
-            indexer_bf16=indexer_bf16,
         )
 
     def get_cpu_cache_full_att_bytes(self):

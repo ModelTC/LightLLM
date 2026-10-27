@@ -392,9 +392,7 @@ def moe_align_fused(expert_to_token_index, expert_to_weight, expert_token_num, t
     else:
         # Expert rows may be unordered, but grouped matmul reuses this same
         # mapping for up/down projections and writes back to original topk slots.
-        _moe_align_fused_atomic_token(
-            expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights
-        )
+        _moe_align_fused_atomic_token(expert_to_token_index, expert_to_weight, expert_token_num, topk_ids, topk_weights)
     return expert_to_token_index, expert_to_weight, expert_token_num
 
 

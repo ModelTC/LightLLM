@@ -4,6 +4,7 @@ import triton.language as tl
 
 from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import _butterfly_stage
 from lightllm.utils.device_utils import get_device_sm_count
+from lightllm.utils.envs_utils import get_env_use_ue8m0_activation_scales
 
 
 @triton.jit
@@ -45,7 +46,7 @@ def _compress_pools(
     SINGLE_QUERY: tl.constexpr,
     TAIL_SIZE: tl.constexpr,
     HAS_MTP_INDEX: tl.constexpr,
-    QUANTIZED: tl.constexpr,
+    USE_UE8M0_SCALES: tl.constexpr,
 ):
     if SINGLE_QUERY:
         batch = tl.program_id(0)
@@ -86,18 +87,17 @@ def _compress_pools(
         score = tl.exp(score - tl.max(score, 0)[None, :])
         weights = score / tl.sum(score, 0)[None, :]
         key = tl.sum(raw * weights, 0).to(tl.bfloat16).to(tl.float32).reshape(1, 128)
+        for step in tl.static_range(7):
+            key = _butterfly_stage(key, 64 >> step, 1 << step, 1, 128)
+        key = (key * (128 ** -0.5)).to(tl.bfloat16).to(tl.float32)
+        scale = tl.maximum(tl.max(tl.abs(key), 1), 1e-4) / 448.0
+        if USE_UE8M0_SCALES:
+            scale = tl.exp2(tl.ceil(tl.log2(scale)))
+        key = tl.minimum(tl.maximum(key / scale[:, None], -448.0), 448.0).to(tl.float8e4nv)
         loc = tl.load(Ragged + start + length - 1).to(tl.int64)
         dest = Packed + loc * PACKED_STRIDE
-        if QUANTIZED:
-            for step in tl.static_range(7):
-                key = _butterfly_stage(key, 64 >> step, 1 << step, 1, 128)
-            key = (key * (128**-0.5)).to(tl.bfloat16).to(tl.float32)
-            scale = tl.exp2(tl.ceil(tl.log2(tl.maximum(tl.max(tl.abs(key), 1), 1e-4) / 448.0)))
-            key = tl.minimum(tl.maximum(key / scale[:, None], -448.0), 448.0).to(tl.float8e4nv)
-            tl.store(dest + cols, key.reshape(128).to(tl.uint8, bitcast=True))
-            tl.store((dest + 128).to(tl.pointer_type(tl.float32)), tl.sum(scale, 0))
-        else:
-            tl.store(dest + cols, key.reshape(128))
+        tl.store(dest + cols, key.reshape(128).to(tl.uint8, bitcast=True))
+        tl.store((dest + 128).to(tl.pointer_type(tl.float32)), tl.sum(scale, 0))
 
 
 @triton.jit
@@ -160,7 +160,7 @@ def compress_pools(
         single_query,
         tail.shape[1],
         mtp_index is not None,
-        packed_buffer.dtype == torch.uint8,
+        USE_UE8M0_SCALES=get_env_use_ue8m0_activation_scales(default=True),
         num_warps=4,
     )
     # Complete all boundary pools before replacing the previous chunk's tail.
@@ -231,7 +231,6 @@ def _gather_pools(
     PACKED_STRIDE: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
     POOLS: tl.constexpr,
-    QUANTIZED: tl.constexpr,
 ):
     pool, batch = tl.program_id(0), tl.program_id(1)
     length = tl.load(SeqLen + batch)
@@ -240,13 +239,10 @@ def _gather_pools(
     loc = tl.load(ReqTable + req * REQ_STRIDE + pool * 4 + 3, valid, 0).to(tl.int64)
     cols = tl.arange(0, 128)
     packed = tl.load(Packed + loc * PACKED_STRIDE + cols, valid, 0)
+    scale = tl.load((Packed + loc * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)), valid, 1.0)
     row = batch.to(tl.int64) * POOLS + pool
-    if QUANTIZED:
-        scale = tl.load((Packed + loc * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)), valid, 1.0)
-        tl.store(K + row * 128 + cols, packed.to(tl.float8e4nv, bitcast=True))
-        tl.store(Scale + row, scale)
-    else:
-        tl.store(K + row * 128 + cols, packed)
+    tl.store(K + row * 128 + cols, packed.to(tl.float8e4nv, bitcast=True))
+    tl.store(Scale + row, scale)
 
 
 def gather_pools(packed_buffer, req_table, req_idx, seq_len, max_pools):
@@ -263,28 +259,9 @@ def gather_pools(packed_buffer, req_table, req_idx, seq_len, max_pools):
         packed_buffer.stride(0),
         req_table.stride(0),
         max_pools,
-        True,
         num_warps=4,
     )
     return keys, scales
-
-
-def gather_bf16_pools(packed_buffer, req_table, req_idx, seq_len, max_pools):
-    keys = torch.empty((req_idx.numel() * max_pools, 128), device=packed_buffer.device, dtype=torch.bfloat16)
-    _gather_pools[(max_pools, req_idx.numel())](
-        packed_buffer,
-        req_table,
-        req_idx,
-        seq_len,
-        keys,
-        None,
-        packed_buffer.stride(0),
-        req_table.stride(0),
-        max_pools,
-        False,
-        num_warps=4,
-    )
-    return keys
 
 
 @triton.jit

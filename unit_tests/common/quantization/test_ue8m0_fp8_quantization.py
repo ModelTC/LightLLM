@@ -61,14 +61,14 @@ def test_sgl_dispatch_uses_ue8m0_flag(monkeypatch, use_ue8m0_scales, use_packed_
     assert scales.dtype == (torch.int32 if use_packed_ue8m0 else torch.float32)
     if use_ue8m0_scales:
         actual = _unpack_scales(scales, 4) if use_packed_ue8m0 else scales
-        torch.testing.assert_close(actual, torch.full_like(actual, 2.0**-8), rtol=0, atol=0)
+        torch.testing.assert_close(actual, torch.full_like(actual, 2.0 ** -8), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("use_packed_ue8m0", [False, True])
 def test_ue8m0_rounding_at_power_of_two_boundaries(monkeypatch, use_packed_ue8m0):
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr(activation, "HAS_SGL_KERNEL", False)
-    powers = torch.tensor([2.0**exponent for exponent in (-16, -8, 0, 8, 16, 118)], device="cuda")
+    powers = torch.tensor([2.0 ** exponent for exponent in (-16, -8, 0, 8, 16, 118)], device="cuda")
     above = torch.nextafter(powers, torch.full_like(powers, float("inf")))
     below = torch.nextafter(powers, torch.zeros_like(powers))
     magnitudes = torch.cat((powers, above, below, powers.new_zeros(1))) * 448.0
@@ -134,10 +134,8 @@ def test_packed_ue8m0_scales(monkeypatch, rows, groups, group_size, use_sgl):
     x[0].zero_()
     if rows > 1:
         x[1].fill_(1e-12)
-        x[-1, -group_size:].fill_(2.0**16)
-    q, packed_scales = activation.per_token_group_quant_fp8(
-        x, group_size, use_ue8m0_scales=True, use_packed_ue8m0=True
-    )
+        x[-1, -group_size:].fill_(2.0 ** 16)
+    q, packed_scales = activation.per_token_group_quant_fp8(x, group_size, use_ue8m0_scales=True, use_packed_ue8m0=True)
 
     assert packed_scales.dtype == torch.int32
     assert packed_scales.shape == (rows, (groups + 3) // 4)
@@ -196,9 +194,9 @@ def test_deepgemm_selects_scale_format_for_machine(monkeypatch, sm100, packed_we
         seen.append(a[1].dtype)
         assert b[1].dtype == (torch.int32 if sm100 else torch.float32)
         scales = _unpack_scales(a[1], 4) if sm100 else a[1]
-        torch.testing.assert_close(scales, torch.full_like(scales, 2.0**-8), rtol=0, atol=0)
+        torch.testing.assert_close(scales, torch.full_like(scales, 2.0 ** -8), rtol=0, atol=0)
         weight_scales = _unpack_scales(b[1], 4) if sm100 else b[1]
-        torch.testing.assert_close(weight_scales, torch.full_like(weight_scales, 2.0**-8), rtol=0, atol=0)
+        torch.testing.assert_close(weight_scales, torch.full_like(weight_scales, 2.0 ** -8), rtol=0, atol=0)
         out.zero_()
 
     # Exercise format selection and real quantization on Hopper; SM100 GEMM needs a separate machine.

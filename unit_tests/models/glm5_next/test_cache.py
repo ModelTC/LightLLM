@@ -14,9 +14,7 @@ from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, se
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-@pytest.mark.parametrize("indexer_bf16", [False, True])
-def test_nope_cache_config_uses_native_mla_width(monkeypatch, indexer_bf16):
-    monkeypatch.setenv("LIGHTLLM_GLM5_INDEXER_BF16", str(int(indexer_bf16)))
+def test_nope_cache_config_uses_native_mla_width():
     config = Glm5NextCacheConfig.from_model_config(
         {
             "kv_lora_rank": 512,
@@ -33,16 +31,14 @@ def test_nope_cache_config_uses_native_mla_width(monkeypatch, indexer_bf16):
         },
         StartArgs(tp=4, data_type="bfloat16"),
     )
-    assert config.indexer_bf16 == indexer_bf16
-    assert config.full_att_head_dim == (640 if indexer_bf16 else 584)
-    assert config.full_att_head_dim * config.full_att_dtype.itemsize == 512 * 2 + (256 if indexer_bf16 else 144)
+    assert config.full_att_head_dim == 584
+    assert config.full_att_head_dim * config.full_att_dtype.itemsize == 512 * 2 + 144
 
 
 @pytest.mark.parametrize("small_page", [False, True])
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 @pytest.mark.parametrize("mtp_step", [0, 2])
-@pytest.mark.parametrize("indexer_bf16", [False, True])
-def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step, indexer_bf16):
+def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
@@ -58,14 +54,12 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     set_unique_server_name(args)
     get_env_start_args.cache_clear()
     set_env_start_args(dataclasses.asdict(args))
-    head_dim = 640 if indexer_bf16 else 584
     config = Glm5NextCacheConfig(
         tp_world_size=tp_world_size,
         full_att_all_num_kv_heads=1,
         full_att_dtype=torch.bfloat16,
         full_att_num_kv_heads=1,
-        full_att_head_dim=head_dim,
-        indexer_bf16=indexer_bf16,
+        full_att_head_dim=584,
         global_linear_k_heads=2 * tp_world_size,
         global_linear_v_heads=2 * tp_world_size,
         num_linear_k_heads=2,
@@ -81,14 +75,12 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         draft_full_att_kv_layer_num=int(mtp_step > 0),
     )
     full_layers = config.get_full_att_kv_layer_num_with_draft_model()
-    mem = Glm5NextMemManager(16, torch.bfloat16, 1, head_dim, full_layers, config)
+    mem = Glm5NextMemManager(16, torch.bfloat16, 1, 584, full_layers, config)
     req = Glm5NextReqManager(3, 16, mem, config)
     att_kv = mem.get_att_input_params(3)
     assert att_kv.shape == (17, 1, 512)
-    assert att_kv.stride(0) == head_dim
+    assert att_kv.stride(0) == 584
     index_bytes = mem.get_indexer_k_buffer(3)
-    assert index_bytes.dtype == (torch.bfloat16 if indexer_bf16 else torch.uint8)
-    assert index_bytes.shape[-1] == (128 if indexer_bf16 else 132)
     index_bytes.random_(0, 256)
     expected_index_bytes = index_bytes.clone()
     new_kv = torch.randn(2, 1, 512, dtype=torch.bfloat16, device="cuda")
@@ -141,7 +133,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     packed_bytes[:, 0].random_(0, 256)
     mem.operator.copy_mem_to_mem(torch.tensor([0]), torch.tensor([7]))
     assert torch.equal(packed_bytes[:, 0], packed_bytes[:, 7])
-    assert mem.get_cell_size() == head_dim * 2 * full_layers
+    assert mem.get_cell_size() == 584 * 2 * full_layers
     assert config.get_cpu_cache_full_att_bytes() == mem.get_cell_size() * 8
 
     from lightllm.common.basemodel.triton_kernel.linear_att_cpu_cache_copy import (

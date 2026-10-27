@@ -140,6 +140,7 @@ class FusedMoeWeight(BaseWeightTpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        shared_expert_output: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
         # Captures MoE topk expert ids for routed-experts metadata when enabled.
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
@@ -162,6 +163,7 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            **({"shared_expert_output": shared_expert_output} if shared_expert_output is not None else {}),
         )
 
     def low_latency_dispatch(

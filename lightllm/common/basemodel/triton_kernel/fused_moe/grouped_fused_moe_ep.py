@@ -221,10 +221,15 @@ def fused_experts(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    shared_expert_output: Optional[torch.Tensor] = None,
 ):
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
+    if shared_expert_output is not None and not is_prefill:
+        raise ValueError("Shared combine bias requires normal prefill combine")
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
+        if shared_expert_output is not None:
+            raise NotImplementedError("Shared combine bias requires DeepEP normal combine")
         if limit is not None:
             raise NotImplementedError("FP4 Mega MoE does not support clamped SwiGLU")
         return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
@@ -249,6 +254,7 @@ def fused_experts(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        shared_expert_output=shared_expert_output,
     )
 
 
@@ -271,7 +277,11 @@ def fused_experts_impl(
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
     block_size_k: int = 128,
+    shared_expert_output: Optional[torch.Tensor] = None,
 ):
+    # Shared output joins normal combine before its final BF16 cast.
+    if shared_expert_output is not None and not is_prefill:
+        raise ValueError("Shared combine bias requires normal prefill combine")
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
     assert topk_weights.shape == topk_idx.shape, "topk shape mismatch"
@@ -372,6 +382,7 @@ def fused_experts_impl(
             topk_weights=None,
             previous_event=previous_event,
             allocate_on_comm_stream=allocate_on_comm_stream,
+            **({"bias": shared_expert_output} if shared_expert_output is not None else {}),
         )
     else:
         # low latency dispatch
