@@ -181,8 +181,9 @@ def test_launch_dry_run_matches_current_branch_cli_and_creates_no_files(tmp_path
     env = os.environ.copy()
     env.update(
         CPU_SOURCE=str(tmp_path / "cpu source"), GPU_SOURCE=str(tmp_path / "gpu source"), RUN_DIR=str(tmp_path / "run"),
-        CONFIG_SERVER_HOST="config-service.test"
+        CONFIG_SERVER_HOST="config-service.test", MODEL_DIR=str(tmp_path / "custom model")
     )
+    env.pop("CPU_MODEL_DIR", None)
     result = subprocess.run(
         ["bash", str(root / "test/start_scripts/glm53/glm53_pd_2p2d.sh"), role, "--dry-run"],
         env=env,
@@ -198,11 +199,14 @@ def test_launch_dry_run_matches_current_branch_cli_and_creates_no_files(tmp_path
         assert args.run_mode == "pd_master" and args.httpserver_workers == 1
         assert args.select_p_d_node_strategy == "cache_aware"
         assert args.port == 60011
+        assert args.model_dir == str(tmp_path / "custom model")
         assert args.config_server_host and args.config_server_port == 60088
     elif role != "config":
         assert args.node_rank == int(role[-1]) and args.nnodes == 2
         assert args.use_config_server_to_init_nccl and args.nccl_host == "config-service.test"
         assert args.tp == args.dp == 16
+        assert args.model_dir == str(tmp_path / "custom model")
+        assert args.mtp_draft_model_dir == [str(tmp_path / "custom model")]
         assert args.llm_kv_type == "fp8kv_dsa" and args.max_req_total_len == 1048576
         assert args.ssm_state_mode == "replay" and args.ssm_replay_config["cache_len"] == 8
         assert args.config_server_host and args.config_server_port == 60088

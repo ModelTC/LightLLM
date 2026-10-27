@@ -37,12 +37,7 @@ RUN test -n "${VCS_REF}" \
 
 # Use the packages shipped in this image instead of host-specific dependency
 # directories from the original bare-metal deployment.
-ENV CPU_SOURCE=/lightllm \
-    GPU_SOURCE=/lightllm \
-    CPU_MODEL_DIR=/model \
-    MODEL_DIR=/model \
-    CPU_EXTRA_PYTHONPATH=/lightllm \
-    GPU_EXTRA_PYTHONPATH=/lightllm \
+ENV MODEL_DIR=/model \
     RUN_DIR=/var/log/lightllm \
     PYTHON_BIN=/opt/conda/bin/python \
     PATH=/opt/conda/bin:/usr/local/cuda/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \

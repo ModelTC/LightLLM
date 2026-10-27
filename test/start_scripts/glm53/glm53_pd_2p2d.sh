@@ -144,6 +144,7 @@ port = int(sys.argv[1])
 if not 0 < port < 65536:
     raise SystemExit("Invalid API port")
 with socket.socket() as listener:
+    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind(("0.0.0.0", port))
     except OSError:
