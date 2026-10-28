@@ -1,4 +1,5 @@
 import gc
+import inspect
 import os
 from pathlib import Path
 import subprocess
@@ -8,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-pytest.importorskip("flash_mla")
+pytest.importorskip("vllm")
 
 from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
@@ -24,25 +25,77 @@ def _tp_env(monkeypatch):
     gc.collect()
 
 
-def test_backend_import_without_vllm():
+def test_backend_import_without_standalone_flashmla():
     script = """
 import importlib.abc
 import sys
 
-class BlockVllm(importlib.abc.MetaPathFinder):
+class BlockStandaloneFlashMLA(importlib.abc.MetaPathFinder):
     def find_spec(self, fullname, path=None, target=None):
-        if fullname == 'vllm' or fullname.startswith('vllm.'):
-            raise ModuleNotFoundError('vllm deliberately unavailable')
+        if fullname == 'flash_mla' or fullname.startswith('flash_mla.'):
+            raise ModuleNotFoundError('standalone flash_mla deliberately unavailable')
 
-sys.meta_path.insert(0, BlockVllm())
+sys.meta_path.insert(0, BlockStandaloneFlashMLA())
 from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
-assert attention.flashmla.__name__ == 'flash_mla'
-assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.modules)
+from vllm.v1.attention.ops import flashmla
+assert attention.flashmla is flashmla
+assert not any(name == 'flash_mla' or name.startswith('flash_mla.') for name in sys.modules)
 """
     root = Path(__file__).resolve().parents[4]
     env = dict(os.environ, PYTHONPATH=str(root))
     result = subprocess.run([sys.executable, "-c", script], cwd=root, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("ratio", [0, 4, 128])
+def test_vllm_call_preserves_output_and_cache_views(monkeypatch, ratio):
+    from vllm.third_party.flashmla.flash_mla_interface import flash_mla_with_kvcache
+
+    signature = inspect.signature(flash_mla_with_kvcache)
+    config = SimpleNamespace(kv_bytes=584, swa_page_token_num=128, compressed_kv_token_alignment=256)
+    model = type("TestModel", (), {})()
+    model.config = {"num_attention_heads": 16, "compress_ratios": [0, 4, 128]}
+    model.tp_world_size_ = 1
+    model.req_manager = SimpleNamespace(cache_config=config)
+    backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
+    q = torch.zeros((2, 64, 512), dtype=torch.bfloat16)
+    storage = torch.full((2, 64, 1024), float("nan"), dtype=q.dtype)
+    out = storage[..., :512]
+    swa = torch.zeros((2, 128 * 584 + 256), dtype=torch.uint8)
+    page_size = 256 // ratio if ratio else 0
+    compressed = torch.zeros((2, page_size * 584 + 256), dtype=torch.uint8) if ratio else None
+    sched_meta = object()
+    params = dict(
+        compress_ratio=ratio,
+        head_dim_v=512,
+        softmax_scale=512 ** -0.5,
+        swa_indices=torch.zeros((2, 1, 128), dtype=torch.int32),
+        swa_lengths=torch.ones(2, dtype=torch.int32),
+        attn_sink=torch.zeros(64),
+    )
+
+    def kernel(**kwargs):
+        signature.bind(**kwargs)
+        assert kwargs["tile_scheduler_metadata"] is sched_meta
+        assert kwargs["out"].data_ptr() == out.data_ptr()
+        assert kwargs["out"].stride() == out.unsqueeze(1).stride()
+        assert kwargs["k_cache"].data_ptr() == swa.data_ptr()
+        assert kwargs["k_cache"].stride(0) == swa.stride(0)
+        if ratio:
+            assert kwargs["extra_k_cache"].data_ptr() == compressed.data_ptr()
+            assert kwargs["extra_k_cache"].shape == (2, page_size, 1, 584)
+            assert kwargs["extra_k_cache"].stride(0) == compressed.stride(0)
+        else:
+            assert kwargs["extra_k_cache"] is None
+        kwargs["out"].fill_(0.25)
+        return kwargs["out"], None
+
+    monkeypatch.setattr(attention.flashmla, "flash_mla_with_kvcache", kernel)
+    actual = backend._flashmla_att(q, (swa, compressed), params, sched_meta, out)
+    assert actual.data_ptr() == out.data_ptr()
+    assert actual.stride() == out.stride()
+    assert actual.eq(0.25).all()
+    assert storage[..., 512:].isnan().all()
 
 
 def _pool(page_size, pages):

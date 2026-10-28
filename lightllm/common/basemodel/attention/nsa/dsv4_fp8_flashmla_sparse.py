@@ -3,13 +3,12 @@ from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
 import triton
-import flash_mla as flashmla
-
+from vllm.v1.attention.ops import flashmla
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
 
 if TYPE_CHECKING:
-    from flash_mla.flash_mla_interface import FlashMLASchedMeta
+    from vllm.third_party.flashmla.flash_mla_interface import FlashMLASchedMeta
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
