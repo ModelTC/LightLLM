@@ -3,6 +3,7 @@ import os
 import uuid
 import subprocess
 import math
+from lightllm.common.eplb_utils import is_eplb_enabled
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .httpserver.req_id_generator_server import start_req_id_generator_server
@@ -172,6 +173,8 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.enable_dp_prefill_balance:
         assert args.enable_tpsp_mix_mode and args.dp > 1, "need set --enable_tpsp_mix_mode firstly and --dp > 1"
+
+    args.enable_prefill_eplb = is_eplb_enabled(args)
 
     if args.enable_ep_moe:
         allowed_ep_prefill_att_backends = {"auto", "fa3", "triton", "flashqla"}

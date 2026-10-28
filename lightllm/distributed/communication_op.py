@@ -24,17 +24,18 @@ import triton
 import torch.distributed as dist
 from torch.distributed import ReduceOp, ProcessGroup
 from typing import List, Dict, Optional, Set, Union
+from lightllm.common.eplb_utils import is_eplb_enabled
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_redundancy_expert_num,
 )
 from lightllm.utils.dist_utils import (
     get_global_world_size,
     get_dp_world_size,
+    get_node_world_size,
     create_new_group_for_current_dp,
     create_dp_special_inter_group,
 )
@@ -67,7 +68,14 @@ class CustomProcessGroup:
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def _support_custom_allreduce(self) -> bool:
-        return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
+        # CUDA IPC and symmetric-memory handles are local to one host.
+        node_world_size = get_node_world_size()
+        return (
+            self.dp_world_size <= node_world_size
+            and node_world_size % self.dp_world_size == 0
+            and self.dp_world_size in [2, 4, 6, 8]
+            and has_nvlink()
+        )
 
     def init_symm_mem_reduce(self) -> None:
         if not self._support_custom_allreduce():
@@ -193,7 +201,13 @@ class DistributeGroupManager:
         self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
-        self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
+        total_redundant_experts = (
+            get_env_start_args().eplb_num_redundant_experts_per_rank * global_world_size
+            if is_eplb_enabled(get_env_start_args())
+            else 0
+        )
+        # Both phases address the same published physical expert rows.
+        self.ll_num_experts = n_routed_experts + total_redundant_experts
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
             num_max_tokens_per_rank=self.ll_num_tokens,
@@ -233,7 +247,10 @@ class DistributeGroupManager:
             # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
             # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
             decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
-                self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
+                self.ll_decode_num_tokens,
+                self.ll_hidden,
+                global_world_size,
+                self.ll_num_experts,
             )
             microbatch_count = len(self.groups)
             min_prefill_reuse_buffer_bytes = _calculate_min_chunked_expanded_moe_reuse_buffer_bytes(
@@ -274,9 +291,11 @@ class DistributeGroupManager:
                 moe_intermediate_size,
             )
         logger.info(
-            "Initialize DeepEP MoE buffers: low_latency=%s, mega_moe=%s, expert_quant_method_names=%s",
-            enable_low_latency_buffer,
+            "Initialize DeepEP MoE buffers: low_latency=%s, mega_moe=%s, "
+            "ll_num_experts=%s, expert_quant_method_names=%s",
+            self.ep_low_latency_buffer is not None,
             enable_mega_moe_buffer,
+            self.ll_num_experts,
             sorted(expert_quant_method_names),
         )
         theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)

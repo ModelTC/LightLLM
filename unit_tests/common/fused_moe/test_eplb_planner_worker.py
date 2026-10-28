@@ -1,0 +1,130 @@
+import os
+import signal
+import subprocess
+import sys
+import time
+
+import pytest
+import torch
+
+from lightllm.common.eplb_planner_worker import EPLBPlannerWorker
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.eplb_planner import plan_eplb_candidate
+
+FULL_LOAD = torch.ones((1, 1, 1, 8), dtype=torch.int64)
+FULL_CURRENT = torch.arange(8, dtype=torch.int64).view(1, 8, 1)
+FULL = dict(
+    node_world_size=8,
+    expert_alignment=128,
+    stickiness=0.1,
+)
+RED_LOAD = torch.ones((1, 1, 1, 8), dtype=torch.int64)
+RED_CURRENT = torch.stack((torch.arange(8), (torch.arange(8) + 1) % 8), dim=-1)[None]
+RED = dict(
+    node_world_size=8,
+    expert_alignment=128,
+    stickiness=0.1,
+)
+
+
+def dead(pid):
+    try:
+        return open(f"/proc/{pid}/stat").read().split()[2] == "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+
+
+def test_worker_preserves_noncontiguous_exact_hash_samples():
+    from unit_tests.common.fused_moe.test_eplb_runtime_hash import _samples
+
+    rng = torch.Generator().manual_seed(17)
+    samples = [[torch.rand((96, 8), generator=rng).argsort(-1)[:, :2] for _ in range(4)]]
+    logical, hist = _samples(samples, 8, 4, 4)
+    packed = torch.cat((logical[..., None], hist), -1)
+    current = torch.tensor([[[0, 1, 6, 7], [0, 2, 3, 4], [0, 3, 4, 5], [1, 2, 5, 6]]])
+    settings = dict(node_world_size=4, expert_alignment=128, stickiness=0.1, replica_hash_load=packed[..., 1:])
+    expected = plan_eplb_candidate(packed[..., 0], current, **settings)
+    worker = EPLBPlannerWorker(timeout_s=30)
+    try:
+        actual, timing = worker.plan(packed[..., 0], current, **settings)
+        assert torch.equal(actual, expected)
+        assert not worker.info["cuda_initialized"]
+    finally:
+        worker.close()
+
+
+def test_worker_persistent_full_redundant_and_cpu():
+    worker = EPLBPlannerWorker(timeout_s=30)
+    pid = worker.info["pid"]
+    try:
+        for load, current, settings in ((FULL_LOAD, FULL_CURRENT, FULL), (RED_LOAD, RED_CURRENT, RED)):
+            direct = plan_eplb_candidate(load, current, **settings)
+            actual, _ = worker.plan(load, current, **settings)
+            assert torch.equal(direct, actual)
+        assert worker.info["pid"] == pid and not worker.info["cuda_initialized"]
+    finally:
+        worker.close()
+    assert dead(pid)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA-initialized serving parent")
+def test_worker_exec_does_not_reimport_cuda_initialized_main(tmp_path):
+    script = tmp_path / "serving_main.py"
+    script.write_text(
+        """import torch
+torch.cuda.init()
+from lightllm.common.eplb_planner_worker import EPLBPlannerWorker
+if __name__ == "__main__":
+    assert torch.cuda.is_initialized()
+    worker = EPLBPlannerWorker(timeout_s=30)
+    try:
+        assert not worker.info["cuda_initialized"]
+        load = torch.ones((1, 1, 1, 8), dtype=torch.int64)
+        current = torch.arange(8).view(1, 8, 1)
+        result, _ = worker.plan(load, current, node_world_size=8, expert_alignment=128, stickiness=0.1)
+        assert torch.equal(result, current)
+    finally:
+        worker.close()
+"""
+    )
+    subprocess.run([sys.executable, str(script)], capture_output=True, text=True, timeout=45, check=True)
+
+
+def test_worker_rejects_concurrent_and_timeout_cleans_child():
+    worker = EPLBPlannerWorker(timeout_s=30)
+    pid = worker.info["pid"]
+    try:
+        assert worker._rpc_lock.acquire(False)
+        with pytest.raises(RuntimeError, match="one in-flight"):
+            worker.plan(FULL_LOAD, FULL_CURRENT, **FULL)
+        worker._rpc_lock.release()
+        assert worker._process.is_alive()
+        os.kill(pid, signal.SIGSTOP)
+        worker._timeout_s = 0.05
+        with pytest.raises(TimeoutError):
+            worker.plan(FULL_LOAD, FULL_CURRENT, **FULL)
+    finally:
+        worker.close()
+    assert dead(pid)
+
+
+def test_worker_error_and_parent_watchdog_exit():
+    worker = EPLBPlannerWorker(timeout_s=30)
+    pid = worker.info["pid"]
+    try:
+        with pytest.raises(RuntimeError):
+            worker.plan(FULL_LOAD, FULL_CURRENT.repeat(1, 1, 2), **FULL)
+    finally:
+        worker.close()
+    assert dead(pid)
+    code = """import os
+from lightllm.common.eplb_planner_worker import EPLBPlannerWorker
+worker = EPLBPlannerWorker()
+print(worker.info["pid"], flush=True)
+os._exit(0)
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=45, check=True)
+    child = next(int(line) for line in result.stdout.splitlines() if line.strip().isdigit())
+    until = time.monotonic() + 5
+    while not dead(child) and time.monotonic() < until:
+        time.sleep(0.1)
+    assert dead(child)

@@ -32,6 +32,15 @@ MONITOR_INFO = {
     "lightllm_cache_hit_rate": "Prefix cache hit rate of latest completed request",
     "lightllm_gen_throughput": "Generation throughput of latest completed request (tokens/s)",
     "lightllm_num_running_reqs": "Number of running requests",
+    "lightllm_prefill_ep_critical_overhead_gflops_per_routed_token": (
+        "Estimated critical-path excess compute per logical routed source token, GFLOPs/token"
+    ),
+    "lightllm_prefill_ep_compute_critical_overhead_ratio": (
+        "Estimated excess critical compute divided by balanced compute; 0.3 means +30%"
+    ),
+    "lightllm_prefill_ep_placement_pressure_drift": (
+        "Normalized temporal drift of overloaded-rank pressure from the latest complete prefill report"
+    ),
 }
 
 
@@ -111,6 +120,9 @@ class Monitor:
         self.create_gauge("lightllm_cache_hit_rate")
         self.create_gauge("lightllm_gen_throughput")
         self.create_gauge("lightllm_num_running_reqs")
+        self.create_gauge("lightllm_prefill_ep_critical_overhead_gflops_per_routed_token")
+        self.create_gauge("lightllm_prefill_ep_compute_critical_overhead_ratio")
+        self.create_gauge("lightllm_prefill_ep_placement_pressure_drift")
 
     def create_histogram(self, name, buckets, labelnames=None):
         all_labels = ["model_name"] + (labelnames or [])

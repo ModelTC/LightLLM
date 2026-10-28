@@ -11,6 +11,10 @@ from lightllm.utils.config_utils import ffn_use_tanh_approximate_gelu
 
 
 class FuseMoeMarlin(FuseMoeTriton):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.workspace = self.create_workspace()
+
     def create_workspace(self):
         from lightllm.utils.vllm_utils import HAS_VLLM
 
@@ -33,6 +37,7 @@ class FuseMoeMarlin(FuseMoeTriton):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        dist_group=None,
     ):
         if alpha is not None or limit is not None:
             raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")

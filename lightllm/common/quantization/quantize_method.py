@@ -112,8 +112,9 @@ class QuantizationMethod(ABC):
         return weight.dtype in [torch.bfloat16, torch.float16, torch.float32, torch.float64]
 
     def _create_weight(
-        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
+        self, out_dims: List[int], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: Optional[int] = None
     ) -> Tuple[WeightPack, List[WeightPack]]:
+        """Create dense weights for None; an expert count always retains the expert axis."""
         pass
 
     def _split_weight_pack(
