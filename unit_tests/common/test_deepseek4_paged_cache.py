@@ -1930,6 +1930,80 @@ def test_full_batch_unaligned_prefill_workspace_is_bounded_and_private(cache, mt
         requests.free_req(req)
 
 
+@pytest.mark.parametrize("hit_len", [256, 768, 2816])
+@pytest.mark.parametrize("mtp_step", [0, 3, 5])
+def test_small_radix_hit_restores_continuation_at_matched_length(monkeypatch, hit_len, mtp_step):
+    from lightllm.models.deepseek_v4.triton_kernel import swa_cache
+    from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
+
+    req = InferReq.__new__(InferReq)
+    req.args = SimpleNamespace(
+        linear_att_hash_page_size=256, linear_att_page_block_num=8, max_req_total_len=4096, page_size=256
+    )
+    req.req_idx = req.cur_kv_len = req.hold_kv_len = req.cur_output_len = 0
+    req.tail_small_page_buffer_id = req.shared_kv_node = None
+    req.mm_input_spans = []
+    req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
+    req.shm_req = SimpleNamespace(input_len=hit_len + 1, prompt_cache_len=0, shm_cur_kv_len=0)
+    req.prompt_selected_logprobs = SimpleNamespace(copy_capture_slots_if_needed=lambda **kwargs: None)
+
+    node = SimpleNamespace(node_prefix_total_len=hit_len, is_big_page_node=lambda: False, small_page_buffer_idx=0)
+    big_len = hit_len // 2048 * 2048
+    big_node = SimpleNamespace(node_prefix_total_len=big_len) if big_len else None
+    radix = SimpleNamespace(
+        get_mem_index_value_by_node=lambda node: torch.arange(hit_len),
+        free_radix_cache_to_get_enough_token=lambda **kwargs: None,
+        mem_manager=SimpleNamespace(
+            alloc=lambda need_size: torch.arange(4096, 4096 + need_size),
+            operator=SimpleNamespace(copy_mem_to_mem=lambda *args: None),
+        ),
+        deref_to_first_big_page_node=lambda **kwargs: big_node,
+    )
+    requests = DeepseekV4ReqManager.__new__(DeepseekV4ReqManager)
+    requests.cache_config = SimpleNamespace(sliding_window=128, short_compress_ratio=4, n_c4=1)
+    requests.c4_state_tokens = 8 + mtp_step
+    requests.req_to_token_indexs = torch.empty((1, 4096), dtype=torch.int64)
+    requests.req_to_c4_state = torch.full((1, 1, requests.c4_state_tokens, 2), -1.0)
+    requests.req_to_c4_indexer_state = torch.full_like(requests.req_to_c4_state, -1.0)
+    checkpoint = (torch.ones((1, 128, 1)), torch.arange(8).float().view(1, 4, 2), torch.ones((1, 4, 2)))
+    requests.small_page_buffers = SimpleNamespace(get_state_cache=lambda index: checkpoint)
+    monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
+    monkeypatch.setattr(g_infer_context, "req_manager", requests)
+    monkeypatch.setattr(g_infer_context, "radix_cache", radix)
+    monkeypatch.setattr(g_infer_context, "retain_hybrid_prefix", lambda *args: node)
+    monkeypatch.setattr(g_infer_context, "get_can_alloc_token_num", lambda: 8192)
+
+    # Run the real restore_state on CPU; replace only CUDA allocation/copy boundaries.
+    original_arange = torch.arange
+
+    def cpu_arange(*args, **kwargs):
+        if kwargs.get("device") == "cuda":
+            kwargs["device"] = "cpu"
+        return original_arange(*args, **kwargs)
+
+    monkeypatch.setattr(torch, "arange", cpu_arange)
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda tensor, **kwargs: tensor)
+    restored_swa = []
+    monkeypatch.setattr(
+        swa_cache,
+        "scatter_swa_state",
+        lambda manager, req_idx, positions, state: restored_swa.append((positions.clone(), state)),
+    )
+    req._hybrid_match_radix_cache()
+
+    assert req.cur_kv_len == req.hold_kv_len == req.shm_req.shm_cur_kv_len == req.shm_req.prompt_cache_len == hit_len
+    assert req.shared_kv_node is big_node
+    assert len(restored_swa) == 1
+    positions, swa = restored_swa[0]
+    torch.testing.assert_close(positions, torch.arange(hit_len - 128, hit_len))
+    torch.testing.assert_close(swa, checkpoint[0])
+    slots = torch.arange(hit_len - 4, hit_len) % requests.c4_state_tokens
+    for actual, saved in ((requests.req_to_c4_state, checkpoint[1]), (requests.req_to_c4_indexer_state, checkpoint[2])):
+        expected = torch.full_like(actual[:, 0], -1.0)
+        expected.index_copy_(1, slots, saved)
+        torch.testing.assert_close(actual[:, 0], expected)
+
+
 def test_cross_dp_pointer_table_pairs_matching_tp_shards(monkeypatch):
     from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
 

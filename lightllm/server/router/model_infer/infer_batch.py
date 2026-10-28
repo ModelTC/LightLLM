@@ -790,6 +790,7 @@ class InferReq:
                             )
 
                             self.shared_kv_node = share_node  # 只是为了保证 restore_small_page_state 正确调用
+                            self.cur_kv_len = int(shared_kv_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                             g_infer_context.req_manager.restore_small_page_state(
                                 req=self,
                             )
@@ -797,7 +798,6 @@ class InferReq:
 
                             big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
                             self.shared_kv_node = big_page_shared_node
-                            self.cur_kv_len = int(shared_kv_len)  # 序列化问题, 该对象可能为numpy.int64，用 int(*)转换
                             self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         else:
                             # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
