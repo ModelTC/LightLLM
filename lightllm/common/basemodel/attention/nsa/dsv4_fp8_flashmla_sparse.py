@@ -26,17 +26,20 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     @classmethod
     def get_swa_prefill_workspace(cls, model):
         """由 backend 复用计算临时区；模型在 KV 容量评估前调用，以计入实际显存占用。"""
-        if model.args.run_mode == "decode":
-            return None, 0
         config = model.req_manager.cache_config
         page_token_num = config.swa_page_token_num
-        max_forward_tokens = max(model.batch_max_tokens, model.max_req_num) + 2 * model.tp_world_size_
-        capacity = (
-            triton.cdiv(
-                max_forward_tokens + model.max_req_num * (config.sliding_window + 2 * page_token_num), page_token_num
+        if model.args.run_mode == "decode":
+            # D only needs the reserved HOLD page for the startup padding prefill.
+            capacity = 0
+        else:
+            max_forward_tokens = max(model.batch_max_tokens, model.max_req_num) + 2 * model.tp_world_size_
+            capacity = (
+                triton.cdiv(
+                    max_forward_tokens + model.max_req_num * (config.sliding_window + 2 * page_token_num),
+                    page_token_num,
+                )
+                * page_token_num
             )
-            * page_token_num
-        )
         regions = 1 + int(model.args.enable_prefill_microbatch_overlap)
         # 每个 microbatch 使用独立临时区；最后一页留给 HOLD 请求。
         token_num = regions * capacity + page_token_num

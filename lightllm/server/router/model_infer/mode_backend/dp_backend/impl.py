@@ -596,8 +596,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 draft_step=spec_plan.draft_step,
                 accept_len=mtp_accept_len,
-                accept_len_cpu=mtp_accept_len_cpu,
-                accept_len_ready_event=verify_event,
             )
             if req_num > 0:
                 mtp_utils.scatter_mtp_next_tokens(
@@ -869,13 +867,10 @@ class DPChunkedPrefillBackend(ModeBackend):
                 target_model_output0=model_output0,
                 target_next_token_ids0=target_next_token_ids0,
                 accept_len0=mtp_accept_len0,
-                accept_len_cpu0=mtp_accept_len_cpu0,
                 target_model_input1=model_input1,
                 target_model_output1=model_output1,
                 target_next_token_ids1=target_next_token_ids1,
                 accept_len1=mtp_accept_len1,
-                accept_len_cpu1=mtp_accept_len_cpu1,
-                accept_len_ready_event=verify_event,
                 draft_step=spec_plan.draft_step,
             )
             if req_num > 0:

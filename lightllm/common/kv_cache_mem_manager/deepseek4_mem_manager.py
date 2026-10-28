@@ -38,6 +38,10 @@ class DeepseekV4MemoryManager(MemoryManager):
     def get_cell_size(self):
         return sum(self.cache_config.compressed_kv_slot_bytes)
 
+    def get_fixed_memory_size(self):
+        # Request rings and prefill scratch are allocated before profiling; only HOLD KV remains.
+        return self.get_cell_size() * get_env_start_args().page_size
+
     def _init_buffers(self, size, dtype, head_num, head_dim, layer_num):
         self.kv_buffer = [
             torch.zeros((size + self.page_size, head_num, slot_bytes), dtype=dtype, device="cuda")
@@ -60,10 +64,6 @@ class DeepseekV4MemoryManager(MemoryManager):
 
     def _free_buffers(self):
         self.kv_buffer = self.big_page_buffers = None
-
-    def free_all(self):
-        super().free_all()
-        self.big_page_buffers.clear_to_init_state()
 
     def get_att_input_params(self, layer_index):
         index = self.cache_config.layer_to_compressed_kv_idx.get(layer_index)
