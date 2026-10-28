@@ -20,7 +20,6 @@ def select_mem_manager_class():
     # case 1
     # 先判断是否是 deepseek 系列的模型
     model_class = get_llm_model_class()
-
     from lightllm.models import DeepseekV4TpPartModel
 
     if issubclass(model_class, DeepseekV4TpPartModel):

@@ -2,6 +2,7 @@
 # Uses sgl_kernel.flash_mla and sgl_kernel.flash_attn from the sglang kernel library.
 
 import dataclasses
+import weakref
 import torch
 from typing import Tuple, TYPE_CHECKING
 
@@ -22,10 +23,10 @@ class NsaFlashMlaSparseAttBackend(BaseAttBackend):
         ]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparsePrefillAttState":
-        return NsaFlashMlaSparsePrefillAttState(backend=self, infer_state=infer_state)
+        return NsaFlashMlaSparsePrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparseDecodeAttState":
-        return NsaFlashMlaSparseDecodeAttState(backend=self, infer_state=infer_state)
+        return NsaFlashMlaSparseDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

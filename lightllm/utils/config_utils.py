@@ -8,77 +8,10 @@ from lightllm.utils.log_utils import init_logger
 logger = init_logger(__name__)
 
 
-def normalize_deepseek_v4_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize the newer DeepSeek-V4 layer schema for existing runtimes."""
-    if config.get("model_type") != "deepseek_v4":
-        return config
-
-    if "num_hash_layers" not in config:
-        mlp_layer_types = config.get("mlp_layer_types")
-        if isinstance(mlp_layer_types, list):
-            num_hash_layers = sum(layer_type == "hash_moe" for layer_type in mlp_layer_types)
-            if mlp_layer_types[:num_hash_layers] != ["hash_moe"] * num_hash_layers:
-                raise ValueError("DeepSeek-V4 hash_moe layers must form a contiguous prefix")
-            config["num_hash_layers"] = num_hash_layers
-
-    if "rope_scaling" not in config:
-        rope_parameters = config.get("rope_parameters")
-        if isinstance(rope_parameters, dict):
-            compress_rope = rope_parameters.get("compress")
-            if isinstance(compress_rope, dict):
-                config["rope_scaling"] = dict(compress_rope)
-
-    if "compress_ratios" in config:
-        return config
-
-    layer_types = config.get("layer_types")
-    compress_rates = config.get("compress_rates")
-    if not isinstance(layer_types, list) or not isinstance(compress_rates, dict):
-        return config
-
-    ratios = []
-    for layer_type in layer_types:
-        # Uncompressed layer types (for example sliding_attention) are omitted
-        # from the new mapping and therefore use a compression ratio of zero.
-        ratio = compress_rates.get(layer_type, 0)
-        if ratio not in (0, 4, 128):
-            raise ValueError(f"Unsupported DeepSeek-V4 compression ratio {ratio!r} for layer type {layer_type!r}")
-        ratios.append(ratio)
-
-    # Older checkpoints include one trailing entry for the optional MTP KV
-    # layer. Preserve that layout so both regular and MTP paths can slice it.
-    if len(ratios) == config.get("num_hidden_layers"):
-        ratios.append(0)
-
-    config["compress_ratios"] = ratios
-    return config
-
-
-def get_deepseek_v4_compress_rates(config: Dict[str, Any], layer_num: int) -> List[int]:
-    """Build KV compression rates for target and runtime-added draft layers."""
-    target_layer_num = config.get("n_layer", config.get("num_hidden_layers"))
-    if target_layer_num is None:
-        raise ValueError("DeepSeek-V4 config is missing num_hidden_layers")
-    target_layer_num = int(target_layer_num)
-    rates = list(config["compress_ratios"])
-    if len(rates) < target_layer_num:
-        raise ValueError(
-            f"DeepSeek-V4 compress_ratios has {len(rates)} entries, "
-            f"but the target model has {target_layer_num} layers"
-        )
-
-    if len(rates) < layer_num:
-        # The draft layer count comes from the selected draft model and need not match
-        # num_nextn_predict_layers in the independently trained target. Missing draft
-        # KV layers use sliding-window attention, whose compression ratio is zero.
-        rates.extend([0] * (layer_num - len(rates)))
-    return rates[:layer_num]
-
-
 def get_config_json(model_path: str):
     with open(os.path.join(model_path, "config.json"), "r") as file:
         json_obj = json.load(file)
-    return normalize_deepseek_v4_config(json_obj)
+    return json_obj
 
 
 def get_generation_config_diff_dict(model_path: str) -> Dict[str, Any]:
@@ -86,6 +19,24 @@ def get_generation_config_diff_dict(model_path: str) -> Dict[str, Any]:
 
     generation_cfg = GenerationConfig.from_pretrained(model_path, trust_remote_code=True).to_diff_dict()
     return {key: value for key, value in generation_cfg.items() if value is not None}
+
+
+def auto_set_page_size(args) -> None:
+    """Select the model's default KV page size."""
+    if args.page_size == 1 and get_model_type(args.model_dir) == "deepseek_v4":
+        args.page_size = 256
+
+
+def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
+    """Align CPU cache pages with the model's checkpoint boundaries."""
+    if not args.enable_cpu_cache:
+        return
+
+    if is_hybrid_model:
+        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    elif args.cpu_cache_token_page_size is None:
+        args.cpu_cache_token_page_size = 256
 
 
 def get_running_max_req_size_per_dp(args) -> int:
@@ -578,6 +529,10 @@ def get_model_type(model_path: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Failed to get model_type from {model_path}: {e}")
         return None
+
+
+def get_default_disable_chunked_mm_input(model_path: str) -> bool:
+    return get_model_type(model_path) in ("neo_chat", "deepseek_v4", "gemma4")
 
 
 @lru_cache(maxsize=None)

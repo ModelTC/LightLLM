@@ -82,7 +82,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help=(
             "Disable PD Master-managed resource wait limiting and retries for requests rejected as server busy. "
             "Configure this option only on PD Master. By default, PD Master sends timeout details to P/D nodes, "
-            "which only enforce the received values, and retries busy requests."
+            "which only enforce the received values. Busy requests are returned without retrying by default; "
+            "set LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS to a positive value to enable retries while this "
+            "feature is enabled. Requests that have already streamed response tokens are not restarted."
         ),
     )
     parser.add_argument(
@@ -141,15 +143,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--pd_kv_page_num",
         type=int,
-        default=None,
-        help="pd mode, kv move page_num; defaults to 8 for DeepSeek-V4 and 16 otherwise.",
+        default=16,
+        help="pd mode, kv move page_num",
     )
 
     parser.add_argument(
         "--pd_kv_page_size",
         type=int,
-        default=None,
-        help="pd mode, kv page size; defaults to 2048 for DeepSeek-V4 and 1024 otherwise.",
+        default=1024,
+        help="pd mode, kv page size",
     )
 
     parser.add_argument(
@@ -330,6 +332,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--detail_log", action="store_true", help="enable to print input infos in requests.")
     parser.add_argument(
+        "--pd_detail_log",
+        action="store_true",
+        help=(
+            "enable verbose per-block PD KV transfer debug logs. "
+            "Request-level debug logs and warning/error logs do not require this flag."
+        ),
+    )
+    parser.add_argument(
         "--disable_shm_warning",
         action="store_true",
         default=False,
@@ -378,11 +388,23 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument(
-        "--short_prefill_token_threshold",
-        type=int,
-        default=None,
-        help="""Enable short prefill request priority scheduling.
-        The remaining tokens are calculated after prefix-cache matching. Disabled by default.""",
+        "--disable_chunked_mm_input",
+        action="store_true",
+        help="Keep image/audio blocks in one prefill step. Enabled by default for Neo, DeepSeek-V4 and Gemma4.",
+    )
+    parser.add_argument(
+        "--prefill_queue_strategy",
+        choices=("auto", "default", "promote_shortest", "hrrn"),
+        default="auto",
+        help="""Order ready requests before resource allocation.
+        Decode requests are identified first, remain in arrival order, and are not reordered by these policies.
+        auto (default): automatically select hrrn for Prefill nodes (run_mode=prefill),
+        and default for normal and Decode nodes. Explicit policies override this automatic selection.
+        default: preserve FCFS order for prefill requests with the same infer_high_priority value.
+        promote_shortest: keep negative-priority requests first in arrival order, then move one
+        shortest non-negative-priority prefill request to the front of the normal requests.
+        hrrn: order normal prefill requests by token-based highest response ratio next to favor
+        short requests while aging long-waiting requests; negative-priority requests remain first.""",
     )
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")
     vocab_topk_choices = [2, 8, 16, 32, 64, 128, 256, 512]

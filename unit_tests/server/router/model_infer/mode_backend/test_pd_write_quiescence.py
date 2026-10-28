@@ -43,7 +43,6 @@ def _task(**kwargs):
         request_id=123,
         start_kv_index=0,
         end_kv_index=4,
-        request_kv_len=4,
         time_out_secs=10,
         pd_master_node_id=0,
         prefill_dp_index=0,
@@ -63,7 +62,13 @@ def _task(**kwargs):
         first_gen_token_logprob=None,
     )
     values.update(kwargs)
-    return PDChunckedTransTask(**values)
+    task = PDChunckedTransTask(**values)
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import (
+        _SharedTimeOutMark,
+    )
+
+    task.shared_time_out_mark = _SharedTimeOutMark()
+    return task
 
 
 def _module(cls):
@@ -246,12 +251,12 @@ def test_prefill_err_never_turns_into_a_false_done_confirmation(query_raises):
 
 
 def test_nixl_retains_handle_when_transfer_submission_raises():
-    task = _task(src_page_index=0, dst_page_index=1, transfer_nbytes=16)
+    task = _task(src_page_index=0, dst_page_index=1)
     transporter = NixlKVTransporter.__new__(NixlKVTransporter)
     transporter.remote_agents = {"D": object()}
     transporter._write_contexts = {}
-    transporter._get_local_page_xfer_handles = MagicMock(return_value="src")
-    transporter._get_remote_page_xfer_handles = MagicMock(return_value="dst")
+    transporter.page_local_xfer_handles = "src"
+    transporter.remote_agents["D"] = SimpleNamespace(page_xfer_handles="dst")
     transporter.nixl_agent = SimpleNamespace(make_prepped_xfer=MagicMock(return_value=7))
 
     def transfer(handle):
@@ -547,7 +552,7 @@ def _start_recovery(module):
 
 
 def _uncertain_source(module):
-    task = _task(src_page_index=0, dst_page_index=1, write_id="allocation-1", transfer_nbytes=16)
+    task = _task(src_page_index=0, dst_page_index=1, write_id="allocation-1")
     task.write_submitted = True
     task.xfer_handle = 7
     module.waiting_dict[task.get_key()] = task
@@ -731,14 +736,14 @@ def test_nixl_post_error_is_not_mistaken_for_an_unposted_handles_done_state():
     transporter = NixlKVTransporter.__new__(NixlKVTransporter)
     transporter.remote_agents = {"D": object()}
     transporter._write_contexts = {}
-    transporter._get_local_page_xfer_handles = MagicMock(return_value="src")
-    transporter._get_remote_page_xfer_handles = MagicMock(return_value="dst")
+    transporter.page_local_xfer_handles = "src"
+    transporter.remote_agents["D"] = SimpleNamespace(page_xfer_handles="dst")
     transporter.nixl_agent = SimpleNamespace(
         make_prepped_xfer=MagicMock(return_value=7),
         transfer=MagicMock(return_value="ERR"),
         check_xfer_state=MagicMock(return_value="DONE"),
     )
-    task = _task(src_page_index=0, dst_page_index=1, transfer_nbytes=16)
+    task = _task(src_page_index=0, dst_page_index=1)
     with pytest.raises(RuntimeError, match="submission returned ERR"):
         transporter.write_blocks_paged(task)
     assert task.write_submitted and task.xfer_handle == 7

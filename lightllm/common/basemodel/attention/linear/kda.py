@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import dataclasses
+import weakref
 from typing import TYPE_CHECKING
 
 import torch
@@ -47,10 +48,10 @@ class KDALinearAttBackend(BaseAttBackend):
         self.mtp_step = model.args.mtp_step
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo"):
-        return KDAPrefillAttState(backend=self, infer_state=infer_state)
+        return KDAPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state: "InferStateInfo"):
-        return KDADecodeAttState(backend=self, infer_state=infer_state)
+        return KDADecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def split_qkv(self, mixed_qkv: torch.Tensor):
         return mixed_qkv.split(self.tp_hidden_size, dim=-1)

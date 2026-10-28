@@ -137,6 +137,7 @@ def lightllm_per_token_group_quant_fp8(
     assert x.is_contiguous(), "`x` is not contiguous"
 
     xs_n = x.shape[-1] // group_size
+    x_s = x_s.view(-1, x_s.shape[-1])
     xs_stride_m, xs_stride_n = x_s.stride()
     finfo = torch.finfo(dtype)
     fp8_max = finfo.max

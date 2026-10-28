@@ -169,14 +169,11 @@ class _PrefillTransModule:
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
                 cur_mem.write_mem_to_page_kv_move_buffer(
-                    mem_indexes=[cur_mem.HOLD_TOKEN_MEMINDEXES[0]],
+                    mem_indexes=[0],
                     page_index=0,
                     dp_index=dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
-                    start_kv_index=0,
-                    request_kv_len=1,
-                    req_idx=cur_mem.req_to_token_indexs.shape[0] - 1,
                 )
                 torch.cuda.current_stream().synchronize()
         return
@@ -347,14 +344,12 @@ class _PrefillTransModule:
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
-                trans_task.transfer_nbytes = cur_mem.write_mem_to_page_kv_move_buffer(
+                cur_mem.write_mem_to_page_kv_move_buffer(
                     trans_task.mem_indexes,
                     page_index=trans_task.src_page_index,
                     dp_index=trans_task.prefill_dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
-                    start_kv_index=trans_task.start_kv_index,
-                    request_kv_len=trans_task.request_kv_len,
                     page_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
                 )
@@ -704,7 +699,7 @@ class _PrefillTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.info(f"trans task ret fail:{ret}")
+            logger.warning(f"trans task ret fail:{ret}")
 
             if trans_task.error_info is not None:
                 self._abort(request_id=trans_task.request_id, error_info=trans_task.error_info)

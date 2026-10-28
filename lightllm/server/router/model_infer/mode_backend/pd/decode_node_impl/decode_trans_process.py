@@ -154,7 +154,6 @@ class _DecodeTransModule:
             self.transfer_status = PDTransferStatus(args)
             self.transfer_status.set_quarantined_pages(device_id, 0)
         self.last_stop_retry_time = 0.0
-        self.request_last_progress_time: Dict[int, float] = {}
         self.request_page_task_queue = queue.Queue()
         self.ready_page_task_queue = queue.Queue()
         self.success_queue = queue.Queue()
@@ -180,21 +179,17 @@ class _DecodeTransModule:
         return
 
     def _warmup(self):
-        cur_mem = self.mem_managers[self.device_id]
-        with torch.cuda.stream(stream=self.copy_cuda_stream):
-            cur_mem.kv_move_buffer[0].zero_()
-            for dp_index in range(self.args.dp // self.args.nnodes):
+        for dp_index in range(self.args.dp // self.args.nnodes):
+            with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cur_mem = self.mem_managers[self.device_id]
                 cur_mem.read_page_kv_move_buffer_to_mem(
-                    mem_indexes=[cur_mem.HOLD_TOKEN_MEMINDEXES[0]],
+                    mem_indexes=[0],
                     page_index=0,
                     dp_index=dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
-                    start_kv_index=0,
-                    request_kv_len=1,
-                    req_idx=cur_mem.req_to_token_indexs.shape[0] - 1,
                 )
-            torch.cuda.current_stream().synchronize()
+                torch.cuda.current_stream().synchronize()
         return
 
     @log_exception
@@ -263,7 +258,9 @@ class _DecodeTransModule:
                 continue
 
             with self.waiting_dict_lock:
+                shared_time_out_mark = _SharedTimeOutMark()
                 for task in trans_task_group.task_list:
+                    task.shared_time_out_mark = shared_time_out_mark
                     if task.need_transfer_page():
                         self.waiting_dict[task.get_key()] = task
                     else:
@@ -307,11 +304,6 @@ class _DecodeTransModule:
                 ):
                     return None
             self.waiting_dict.pop(notify_task.get_key())
-
-            # Decode creates every page task before prefill starts producing pages.
-            # A matched notify is forward progress for the request, so future pages
-            # use an idle timeout instead of their original creation time.
-            self.request_last_progress_time[local_trans_task.request_id] = time.time()
 
             return local_trans_task
 
@@ -381,11 +373,11 @@ class _DecodeTransModule:
                         if remote_trans_task.write_stage == "request":
                             local_trans_task = self._pop_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
+                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
-                                local_trans_task.transfer_nbytes = remote_trans_task.transfer_nbytes
                                 self.request_page_task_queue.put(local_trans_task)
                                 logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
                             else:
@@ -410,6 +402,7 @@ class _DecodeTransModule:
                         if remote_trans_task.write_stage == "done":
                             local_trans_task = self._pop_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
+                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
@@ -436,26 +429,13 @@ class _DecodeTransModule:
     def _check_tasks_time_out(self):
         with self.waiting_dict_lock:
             timeout_tasks = []
-            pending_request_ids = set()
             now = time.time()
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.start_trans_time is None:
-                    request_last_progress = self.request_last_progress_time.get(trans_task.request_id)
-                    is_timeout = (
-                        request_last_progress is not None and now - request_last_progress > trans_task.time_out_secs
-                    )
-                else:
-                    is_timeout = trans_task.time_out()
-                if is_timeout:
+                if trans_task.shared_time_out_mark.time_out(trans_task):
                     if self.use_write_quiescence:
                         self._fail_waiting_task_locked(trans_task, "time out in accept_peer_task_loop")
                     else:
                         timeout_tasks.append(self.waiting_dict.pop(key))
-                elif trans_task.start_trans_time is None:
-                    pending_request_ids.add(trans_task.request_id)
-            for request_id in list(self.request_last_progress_time):
-                if request_id not in pending_request_ids:
-                    self.request_last_progress_time.pop(request_id)
 
         for trans_task in timeout_tasks:
             trans_task.error_info = "time out in accept_peer_task_loop"
@@ -530,8 +510,6 @@ class _DecodeTransModule:
                     dp_index=trans_task.decode_dp_index,
                     mem_managers=self.mem_managers,
                     dp_world_size=self.dp_world_size,
-                    start_kv_index=trans_task.start_kv_index,
-                    request_kv_len=trans_task.request_kv_len,
                     page_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
                 )
@@ -586,7 +564,7 @@ class _DecodeTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.info(f"trans task ret fail:{ret}")
+            logger.warning(f"trans task ret fail:{ret}")
 
             if trans_task.error_info is not None:
                 # 提前终结所有有问题的属于同一个请求的任务。
@@ -595,3 +573,18 @@ class _DecodeTransModule:
                     error_info=trans_task.error_info,
                 )
                 self.transporter.send_error_info_to_prefill_node(trans_task=trans_task)
+
+
+class _SharedTimeOutMark:
+    """Pending pages share request progress; active pages keep their own deadline."""
+
+    def __init__(self):
+        self.update()
+
+    def update(self):
+        self.time_mark = time.time()
+
+    def time_out(self, task: PDChunckedTransTask) -> bool:
+        if task.start_trans_time is not None:
+            return task.time_out()
+        return time.time() - self.time_mark > task.time_out_secs

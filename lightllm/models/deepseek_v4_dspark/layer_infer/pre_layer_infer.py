@@ -23,6 +23,7 @@ class DeepseekV4DSparkPreLayerInfer(DeepseekV4PreLayerInfer):
             infer_state.mtp_draft_input_hiddens,
             use_custom_tensor_mananger=False,
         )
+        infer_state.mtp_draft_input_hiddens = None
         return layer_weight.main_norm_weight_(
             input=target_hidden,
             eps=self.eps_,

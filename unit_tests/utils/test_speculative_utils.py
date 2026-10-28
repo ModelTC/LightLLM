@@ -1,3 +1,4 @@
+import weakref
 import json
 from importlib import import_module
 from types import SimpleNamespace
@@ -5,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.base_att as base_att_module
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
@@ -115,15 +117,14 @@ def test_attention_backend_selects_causality(monkeypatch, mtp_mode, is_draft_mod
 @pytest.mark.parametrize("state_class", [Fa3PrefillAttState, MlaFa3PrefillAttState])
 def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
     monkeypatch.setattr(import_module(Fa3PrefillAttState.__module__), "page_table_copy", lambda **kwargs: None)
-    infer_state = SimpleNamespace(
-        b1_cu_q_seq_len=torch.tensor([0, 1, 2], dtype=torch.int32),
-        b1_cu_kv_seq_len=torch.tensor([0, 3, 7], dtype=torch.int32),
-        b_req_idx=torch.tensor([0, 1], dtype=torch.int32),
-        batch_size=2,
-        max_kv_seq_len=4,
-        input_ids=torch.empty(2, dtype=torch.int64),
-        req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4)),
-    )
+    infer_state = InferStateInfo()
+    infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
+    infer_state.b1_cu_kv_seq_len = torch.tensor([0, 3, 7], dtype=torch.int32)
+    infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
+    infer_state.batch_size = 2
+    infer_state.max_kv_seq_len = 4
+    infer_state.input_ids = torch.empty(2, dtype=torch.int64)
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, dtype=torch.int32).reshape(2, 4))
     state = state_class(
         backend=SimpleNamespace(uses_causal_attention=lambda: False, page_size=1, infer_page_size=1),
         infer_state=infer_state,
@@ -136,12 +137,11 @@ def test_fa3_prefill_state_owns_causality(monkeypatch, state_class):
 
 @pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
 def test_fa3_decode_state_owns_causality(state_class):
-    infer_state = SimpleNamespace(
-        b1_cu_q_seq_len=torch.tensor([0, 1, 2], dtype=torch.int32),
-        b1_cu_kv_seq_len=torch.tensor([0, 3, 7], dtype=torch.int32),
-        b_req_idx=torch.tensor([0, 1], dtype=torch.int32),
-        b_seq_len=torch.tensor([3, 4], dtype=torch.int32),
-    )
+    infer_state = InferStateInfo()
+    infer_state.b1_cu_q_seq_len = torch.tensor([0, 1, 2], dtype=torch.int32)
+    infer_state.b1_cu_kv_seq_len = torch.tensor([0, 3, 7], dtype=torch.int32)
+    infer_state.b_req_idx = torch.tensor([0, 1], dtype=torch.int32)
+    infer_state.b_seq_len = torch.tensor([3, 4], dtype=torch.int32)
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 0),
@@ -152,7 +152,7 @@ def test_fa3_decode_state_owns_causality(state_class):
             uses_causal_attention=lambda: False,
             uses_dynamic_spec_verify_layout=lambda: False,
         ),
-        infer_state=infer_state,
+        _infer_state_weak_ref=weakref.ref(infer_state),
     )
     state._init_page_table = lambda _: None
 
@@ -168,12 +168,12 @@ def test_triton_mtp_decode_state_builds_group_markers():
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: 2),
         req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1),
     )
+    infer_state = InferStateInfo()
+    infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")
+    infer_state.max_kv_seq_len = 4
     state = TritonDecodeAttState(
         backend=SimpleNamespace(model=model),
-        infer_state=SimpleNamespace(
-            b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
-            max_kv_seq_len=4,
-        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
     )
 
     state.init_state()
@@ -185,13 +185,13 @@ def test_triton_mtp_decode_state_builds_group_markers():
 @pytest.mark.parametrize("state_class", [Fa3DecodeAttState, MlaFa3DecodeAttState])
 def test_fa3_dynamic_decode_state_builds_group_markers(state_class):
     model = SimpleNamespace(req_manager=SimpleNamespace(HOLD_REQUEST_ID=-1))
+    infer_state = InferStateInfo()
+    infer_state.b_req_idx = torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda")
+    infer_state.b_seq_len = torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda")
+    infer_state.batch_size = 4
     state = state_class(
         backend=SimpleNamespace(model=model),
-        infer_state=SimpleNamespace(
-            b_req_idx=torch.tensor([7, 7, -1, -1], dtype=torch.int32, device="cuda"),
-            b_seq_len=torch.tensor([3, 4, 2, 2], dtype=torch.int32, device="cuda"),
-            batch_size=4,
-        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
     )
 
     b_att_req_idx = state._init_dynamic_spec_verify_state(draft_step=2)
@@ -361,9 +361,25 @@ def test_qwen35_dflash_added_kv_layers_come_from_nested_draft_config(tmp_path):
     assert envs_utils.get_added_mtp_kv_layer_num() == 5
 
 
-def test_dspark_added_kv_layers_come_from_draft_config(tmp_path):
+@pytest.mark.parametrize(
+    "draft_config,expected_layer_num",
+    [
+        ({"num_hidden_layers": 6}, 6),
+        (
+            {
+                "model_type": "deepseek_v4",
+                "num_hidden_layers": 61,
+                "compress_ratios": [4] * 61 + [0] * 3,
+                "dspark_target_layer_ids": [15, 31, 47],
+                "dspark_block_size": 8,
+            },
+            3,
+        ),
+    ],
+)
+def test_dspark_added_kv_layers_come_from_draft_config(tmp_path, draft_config, expected_layer_num):
     config_path = tmp_path / "config.json"
-    config_path.write_text(json.dumps({"num_hidden_layers": 6}))
+    config_path.write_text(json.dumps(draft_config))
 
     envs_utils.get_env_start_args.cache_clear()
     envs_utils.get_added_mtp_kv_layer_num.cache_clear()
@@ -376,7 +392,7 @@ def test_dspark_added_kv_layers_come_from_draft_config(tmp_path):
         }
     )
 
-    assert envs_utils.get_added_mtp_kv_layer_num() == 6
+    assert envs_utils.get_added_mtp_kv_layer_num() == expected_layer_num
 
 
 def test_eagle3_added_kv_layers_come_from_draft_config(tmp_path):

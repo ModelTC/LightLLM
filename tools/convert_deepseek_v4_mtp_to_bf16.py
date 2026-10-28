@@ -211,12 +211,8 @@ def dequantize_mxfp4(
 
 def _load_index(model_dir: Path) -> Tuple[Path, dict]:
     index_path = model_dir / "model.safetensors.index.json"
-    if not index_path.is_file():
-        raise FileNotFoundError(f"missing safetensors index: {index_path}")
     with index_path.open("r", encoding="utf-8") as file:
         index = json.load(file)
-    if not isinstance(index.get("weight_map"), dict):
-        raise ValueError(f"invalid weight_map in {index_path}")
     return index_path, index
 
 
@@ -242,8 +238,6 @@ def _inspect_specs(
     original_nbytes = 0
     for shard, names in names_by_shard.items():
         shard_path = model_dir / shard
-        if not shard_path.is_file():
-            raise FileNotFoundError(f"missing shard: {shard_path}")
         with safe_open(shard_path, framework="pt", device="cpu") as file:
             shard_keys = set(file.keys())
             missing = set(names) - shard_keys
@@ -400,7 +394,6 @@ def _convert_spec(
     if spec.conversion == "preserve":
         return source_file.get_tensor(spec.name).contiguous()
 
-    assert spec.scale_name is not None
     weight_slice = source_file.get_slice(spec.name)
     scale = source_file.get_tensor(spec.scale_name)
     if spec.conversion == "fp8_block":

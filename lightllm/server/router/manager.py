@@ -416,7 +416,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             # 作用同 _router_aborted 类似
             req_group.append(req)
 
-            logger.info(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
+            logger.debug(f"router recive req id {req.request_id} cost time {time.time() - req.start_time} s")
         self.req_queue.extend(req_group)
         self.send_to_detokenization.send_pyobj(group_req_indexes, protocol=pickle.HIGHEST_PROTOCOL)
         return
@@ -428,7 +428,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         )
 
         if new_batch is not None and len(new_batch.reqs) > 0:
-            logger.info(f"generate new batch, {new_batch.simple_log()}")
+            logger.debug(f"generate new batch, {new_batch.simple_log()}")
 
         self.schedule_new_batch = Batch.merge_two_batch(self.schedule_new_batch, new_batch)
         return

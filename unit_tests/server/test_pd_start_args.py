@@ -7,15 +7,8 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 @pytest.mark.parametrize(
     "page_size,hash_page_size,cpu_page_size", [(1, 256, None), (256, 512, None), (256, 256, 4096), (256, 256, None)]
 )
-def test_dsv4_page_and_checkpoint_configuration(monkeypatch, page_size, hash_page_size, cpu_page_size):
-    for name in (
-        "_set_envs_and_config",
-        "auto_set_max_req_total_len",
-        "auto_set_fused_shared_experts",
-        "set_unique_server_name",
-    ):
-        monkeypatch.setattr("lightllm.server.api_start." + name, lambda args: None)
-    monkeypatch.setattr("lightllm.server.api_start.get_model_type", lambda model_dir: "deepseek_v4")
+def test_dsv4_page_and_checkpoint_configuration(startup_args, monkeypatch, page_size, hash_page_size, cpu_page_size):
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda model_dir: "deepseek_v4")
     monkeypatch.setattr("lightllm.server.api_start.is_hybrid_att_model", lambda model_dir: True)
 
     def validation_finished(args):

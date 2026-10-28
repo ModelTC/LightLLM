@@ -97,6 +97,7 @@ class StartArgs:
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
     detail_log: bool = field(default=False)
+    pd_detail_log: bool = field(default=False)
     router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
@@ -104,7 +105,11 @@ class StartArgs:
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
-    short_prefill_token_threshold: Optional[int] = field(default=None)
+    disable_chunked_mm_input: bool = field(default=False)
+    # "auto" resolves to hrrn for Prefill nodes and default otherwise.
+    prefill_queue_strategy: str = field(
+        default="auto", metadata={"choices": ["auto", "default", "promote_shortest", "hrrn"]}
+    )
     diverse_mode: bool = field(default=False)
     target_vocab_topk_sampling: Optional[int] = field(
         default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
@@ -215,8 +220,8 @@ class StartArgs:
     mtp_step: int = field(default=0)
     mtp_dynamic_verify: bool = field(default=False)
     kv_quant_calibration_config_path: Optional[str] = field(default=None)
-    pd_kv_page_num: Optional[int] = field(default=None)
-    pd_kv_page_size: Optional[int] = field(default=None)
+    pd_kv_page_num: int = field(default=16)
+    pd_kv_page_size: int = field(default=1024)
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)
@@ -231,7 +236,6 @@ class StartArgs:
 
     disable_shm_warning: bool = field(default=False)
     dp_balancer: str = field(default="bs_balancer", metadata={"choices": ["round_robin", "bs_balancer", "cache_aware"]})
-    enable_fused_shared_experts: bool = field(default=False)
     enable_mps: bool = field(default=False)
     multinode_router_gloo_port: int = field(default=20001)
     schedule_time_interval: float = field(default=0.03)

@@ -17,7 +17,6 @@ class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         final_layer = network_config["n_layer"] + network_config["dspark_layer_num"] - 1
         self.stage_id = layer_num - network_config["n_layer"]
         self.is_last_layer = layer_num == final_layer
-        assert self.compress_ratio == 0, "DeepSeek-V4 DSpark draft layers must be SWA-only"
 
     def context_forward(
         self,
@@ -29,13 +28,5 @@ class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         if self.stage_id == 0:
             all_kv = self.context_wkv_weight.mm(input_embdings, use_custom_tensor_mananger=False)
             infer_state.context_kv = all_kv.split(self.head_dim_, dim=-1)
-        infer_state.mem_manager.pack_mla_kv_to_cache_fused_norm_rope(
-            layer_index=self.layer_num_,
-            swa_slots=infer_state.dsv4_swa_write_slots,
-            kv=infer_state.context_kv[self.stage_id],
-            kv_weight=layer_weight.kv_norm_.weight,
-            eps=self.eps_,
-            freqs_cis=self.freqs_cis,
-            positions=infer_state.position_ids,
-        )
+        self._norm_rope_and_cache_kv(infer_state.context_kv[self.stage_id], infer_state, layer_weight)
         return input_embdings

@@ -29,6 +29,9 @@ from lightllm.utils.config_utils import (
     is_hybrid_att_model,
     auto_set_max_req_total_len,
     get_model_type,
+    get_default_disable_chunked_mm_input,
+    auto_set_page_size,
+    auto_set_cpu_cache_token_page_size,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
 )
@@ -62,17 +65,6 @@ def _launch_subprocesses(args: StartArgs):
     auto_set_max_req_total_len(args)
     auto_set_fused_shared_experts(args)
     set_unique_server_name(args)
-    model_type = get_model_type(args.model_dir)
-    if args.pd_kv_page_num is None:
-        args.pd_kv_page_num = 8 if model_type == "deepseek_v4" else 16
-    if args.pd_kv_page_size is None:
-        args.pd_kv_page_size = 2048 if model_type == "deepseek_v4" else 1024
-    if args.enable_cpu_cache and model_type == "deepseek_v4" and args.llm_kv_type in (None, "None"):
-        args.llm_kv_type = "fp8kv_dsa"
-    if args.enable_cpu_cache and model_type == "deepseek_v4" and args.cache_placement_strategy == "adaptive":
-        logger.warning("DeepSeek-V4 CPU cache does not support adaptive placement; using legacy placement")
-        args.cache_placement_strategy = "legacy"
-
     if args.enable_mps:
         from lightllm.utils.device_utils import enable_mps
 
@@ -81,15 +73,8 @@ def _launch_subprocesses(args: StartArgs):
     if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
 
-    if model_type == "deepseek_v4":
-        if args.page_size != 256 or args.linear_att_hash_page_size != 256:
-            logger.warning(
-                "DeepSeek-V4 forces --page_size and --linear_att_hash_page_size to 256 (got %s and %s)",
-                args.page_size,
-                args.linear_att_hash_page_size,
-            )
-        args.page_size = 256
-        args.linear_att_hash_page_size = 256
+    _auto_set_prefill_queue_strategy(args)
+    auto_set_page_size(args)
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
@@ -340,6 +325,16 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
+    args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
+        args.model_dir
+    )
+    if args.disable_chunked_mm_input and not args.disable_vision:
+        assert args.batch_max_tokens >= args.max_image_token_count, (
+            "--disable_chunked_mm_input requires batch_max_tokens >= max_image_token_count, "
+            f"but got {args.batch_max_tokens}, {args.max_image_token_count}. "
+            "Increase --batch_max_tokens or reduce --max_image_token_count."
+        )
+
     # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
         # 小页池大小只对 hybrid 模型生效。
@@ -354,24 +349,7 @@ def _launch_subprocesses(args: StartArgs):
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if (
-        args.enable_cpu_cache
-        and is_hybrid_att_model(args.model_dir)
-        and get_model_type(args.model_dir) != "deepseek_v4"
-    ):
-        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
-    elif args.enable_cpu_cache and get_model_type(args.model_dir) == "deepseek_v4":
-        big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        if big_page_tokens <= args.max_req_total_len:
-            if args.cpu_cache_token_page_size is None:
-                args.cpu_cache_token_page_size = big_page_tokens
-            if args.cpu_cache_token_page_size != big_page_tokens:
-                raise ValueError("DeepSeek-V4 CPU cache pages must match the hybrid big-page checkpoint interval")
-        elif args.cpu_cache_token_page_size is None:
-            args.cpu_cache_token_page_size = 2048
-    elif args.enable_cpu_cache and args.cpu_cache_token_page_size is None:
-        args.cpu_cache_token_page_size = 2048 if get_model_type(args.model_dir) == "deepseek_v4" else 256
+    auto_set_cpu_cache_token_page_size(args, is_hybrid_model)
     if args.enable_cpu_cache:
         assert (
             args.cpu_cache_token_page_size % args.page_size == 0
@@ -791,3 +769,10 @@ def _validate_pd_features(args: StartArgs):
         args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
     ):
         raise ValueError("PD mode does not support RL, routed experts or prompt logprobs")
+
+
+def _auto_set_prefill_queue_strategy(args: StartArgs) -> None:
+    """自动选择 prefill 排队策略；显式指定策略时保留用户配置。"""
+    if args.prefill_queue_strategy == "auto":
+        args.prefill_queue_strategy = "hrrn" if args.run_mode == "prefill" else "default"
+        logger.info(f"run_mode={args.run_mode}, auto set prefill_queue_strategy to {args.prefill_queue_strategy}")

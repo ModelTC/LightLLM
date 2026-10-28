@@ -24,10 +24,6 @@ class DeepSeekV4Tokenizer:
     def __getattr__(self, name):
         return getattr(self.tokenizer, name)
 
-    @property
-    def xgrammar_tokenizer(self):
-        return self.tokenizer
-
     def get_added_vocab(self):
         if self._added_vocab is None:
             self._added_vocab = self.tokenizer.get_added_vocab()
@@ -75,12 +71,9 @@ class DeepSeekV4Tokenizer:
                 continue
 
             image = images[image_index]
-            cache_skip = len(input_ids) % 4
-            compress_pad = 3 - cache_skip
-            image.block_start_idx = len(input_ids)
-            image.start_idx = len(input_ids) + compress_pad
+            image.start_idx = len(input_ids)
+            cache_skip = image.start_idx % 4
             input_ids.extend(range(image.token_id + cache_skip, image.token_id + image.token_num))
-            image.block_end_idx = len(input_ids)
             image_index += 1
 
         return input_ids
@@ -98,20 +91,11 @@ class DeepSeekV4Tokenizer:
         if self._encoding_module is not None:
             return self._encoding_module
 
-        # Prefer the encoder shipped inside the model dir (respects any model-specific
-        # customization); fall back to the copy vendored in this repo, because some
-        # DeepSeek-V4 releases (e.g. the FP8 weights) do NOT ship an encoding/ dir.
-        # vLLM/sglang likewise vendor this encoder in-tree instead of depending on the
-        # model directory.
+        # Prefer checkpoint customizations; use the bundled encoder when absent.
         encoding_path = os.path.join(self.model_dir, "encoding", "encoding_dsv4.py")
         if not os.path.exists(encoding_path):
             encoding_path = os.path.join(os.path.dirname(__file__), "encoding", "encoding_dsv4.py")
-        if not os.path.exists(encoding_path):
-            raise FileNotFoundError(f"DeepSeek-V4 encoding file not found: {encoding_path}")
-
         spec = importlib.util.spec_from_file_location("lightllm_deepseek_v4_encoding_dsv4", encoding_path)
-        if spec is None or spec.loader is None:
-            raise ImportError(f"failed to load DeepSeek-V4 encoding module from {encoding_path}")
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self._encoding_module = module
@@ -134,20 +118,20 @@ class DeepSeekV4Tokenizer:
 
         msgs = copy.deepcopy(msgs)
 
-        # The model's DSML encoder (encode_arguments_to_dsml in encoding_dsv4.py) expects
-        # function.arguments as a JSON string and parses it internally. Upstream,
-        # build_prompt._normalize_tool_call_arguments converts arguments from the OpenAI
-        # JSON string to a dict (needed by Qwen3.x-style Jinja templates). A dict hits the
-        # encoder's except-branch and gets wrapped under a single name="arguments" param,
-        # which the model then imitates and amplifies across turns until required fields go
-        # missing. Re-serialize dicts back to JSON strings so the encoder emits one
-        # <parameter> per real arg.
+        # build_prompt normalizes tool arguments to dicts. The DSML encoder needs
+        # JSON strings to encode each named argument separately.
         for msg in msgs:
             content = msg.get("content")
-            if isinstance(content, list) and all(
-                isinstance(part, dict) and part.get("type") == "text" for part in content
-            ):
-                msg["content"] = "".join(part.get("text") or "" for part in content)
+            if isinstance(content, list):
+                parts = []
+                for part in content:
+                    if part["type"] == "text":
+                        parts.append(part.get("text") or "")
+                    elif part["type"] in ("image_url", "image"):
+                        parts.append("<｜deepseek_image｜>")
+                    else:
+                        raise ValueError(f"Unsupported DeepSeek-V4 content type: {part['type']}")
+                msg["content"] = "".join(parts)
             for tc in msg.get("tool_calls") or []:
                 fn = tc.get("function")
                 if isinstance(fn, dict) and isinstance(fn.get("arguments"), dict):
@@ -172,14 +156,14 @@ class DeepSeekV4Tokenizer:
             if not injected:
                 msgs.insert(0, {"role": "system", "content": "", "tools": wrapped_tools})
 
-        if thinking is None:
-            thinking = bool(enable_thinking) if enable_thinking is not None else True
-        thinking_mode = "thinking" if thinking else "chat"
         effort = kwargs.get("reasoning_effort")
+        if thinking is None:
+            thinking = bool(enable_thinking) if enable_thinking is not None else effort != "none"
+        thinking_mode = "thinking" if thinking else "chat"
+        if effort == "none":
+            effort = None
         if thinking and effort is None:
             effort = os.getenv("LIGHTLLM_DSV4_THINKING_EFFORT", "high")
-        if effort not in ("low", "max", "high", None):
-            effort = None
         encoding = self._get_encoding_module()
         prompt = encoding.encode_messages(
             msgs,

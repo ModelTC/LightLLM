@@ -92,7 +92,8 @@ class UpStatusManager:
                                 task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
                                 upkv_status: PDUpKVStatus = await task_queue.get()
                                 await websocket.send(pickle.dumps(upkv_status))
-                                logger.info(f"up kv status: {upkv_status}")
+                                # KV readiness is reported once per request, not once per transfer page.
+                                logger.debug(f"up kv status: {upkv_status}")
                             else:
                                 await asyncio.sleep(3)
                         except BaseException as e:

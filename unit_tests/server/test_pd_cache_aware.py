@@ -23,6 +23,7 @@ pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
 def _worker(address: str, dispatched_prompt_chars: int = 0, dispatched_req_num: int = 0):
     return SimpleNamespace(
+        run_status=SimpleNamespace(transfer_available=True),
         client_ip_port=address,
         connection_key=address,
         dispatched_prompt_chars=dispatched_prompt_chars,
@@ -186,7 +187,7 @@ def test_cache_aware_selector_returns_selected_nodes_and_estimated_cache_hit_rat
     p_node = _worker("10.0.0.1:8000")
     d_node = SimpleNamespace(
         client_ip_port="10.0.0.2:8000",
-        run_status=SimpleNamespace(total_token_usage_rate=0.0),
+        run_status=SimpleNamespace(total_token_usage_rate=0.0, transfer_available=True),
     )
     selector.update_nodes([p_node], [d_node])
     prompt = "x" * 1025

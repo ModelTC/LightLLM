@@ -288,7 +288,7 @@ class TpPartBaseModel:
         cuda_graph_grow_step_size = self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model)
         self.graph = (
             None
-            if self.args.run_mode == "prefill" or self.disable_cudagraph
+            if self.disable_cudagraph
             else CudaGraph(
                 batch_step_size_before_split=cuda_graph_grow_step_size,
                 split_batch_size=self.args.graph_split_batch_size * decode_tokens_per_request,
@@ -309,7 +309,7 @@ class TpPartBaseModel:
         # Draft models use self.run_mode="normal" even when the node is decode-only.
         self.prefill_graph = (
             None
-            if self.args.run_mode == "decode" or not get_env_start_args().enable_prefill_cudagraph
+            if not get_env_start_args().enable_prefill_cudagraph
             else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
         )
         if self.prefill_graph is not None:
@@ -398,7 +398,6 @@ class TpPartBaseModel:
 
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
-        infer_state.mtp_draft_swa_pages = model_input.mtp_draft_swa_pages
 
         if infer_state.is_prefill:
             infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
@@ -628,9 +627,10 @@ class TpPartBaseModel:
 
         model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
         infer_state = self._create_inferstate(model_input)
-        # attention backend 会根据该标记准备 CUDA Graph capture 专用状态，
+        # attention backend 会根据执行方式准备 capture、replay 或 eager 状态，
         # 因此必须在 init_att_state 之前完成赋值。
-        infer_state.is_cuda_graph = need_capture
+        infer_state.is_cuda_graph_capture = need_capture
+        infer_state.is_cuda_graph_replay = use_cuda_graph and not need_capture
         infer_state.init_some_extra_state(self)
         infer_state.init_att_state()
 
@@ -648,7 +648,6 @@ class TpPartBaseModel:
     def _context_forward(self, infer_state: InferStateInfo):
 
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
-        infer_state.mtp_draft_input_hiddens = None
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
             infer_state.prepare_prefill_dp_balance()
@@ -734,7 +733,7 @@ class TpPartBaseModel:
         del post_output
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
-        if infer_state.is_cuda_graph:
+        if infer_state.is_cuda_graph_capture:
             model_output.to_no_ref_tensor()
 
         return model_output
@@ -844,12 +843,14 @@ class TpPartBaseModel:
             padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
             padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
             infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            infer_state0.is_cuda_graph = need_capture
+            infer_state0.is_cuda_graph_capture = need_capture
+            infer_state0.is_cuda_graph_replay = not need_capture
             infer_state0.init_some_extra_state(self)
             infer_state0.init_att_state()
 
             infer_state1 = self._create_inferstate(padded_model_input1, 1)
-            infer_state1.is_cuda_graph = need_capture
+            infer_state1.is_cuda_graph_capture = need_capture
+            infer_state1.is_cuda_graph_replay = not need_capture
             infer_state1.init_some_extra_state(self)
             infer_state1.init_att_state()
 
@@ -979,7 +980,7 @@ class TpPartBaseModel:
         model_output1 = self._create_model_output(post_output1, infer_state1)
         del post_output, post_output1
 
-        if infer_state.is_cuda_graph:
+        if infer_state.is_cuda_graph_capture:
             model_output.to_no_ref_tensor()
             model_output1.to_no_ref_tensor()
 
@@ -988,8 +989,6 @@ class TpPartBaseModel:
     @final
     @torch.no_grad()
     def _check_max_len_infer(self):
-        if self.args.run_mode == "decode":
-            return
         disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
         if disable_check_max_len_infer:
             logger.info("disable_check_max_len_infer is true")
@@ -1065,16 +1064,12 @@ class TpPartBaseModel:
         Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
         torch.distributed.barrier()
 
-        warmup_max_tokens = self.batch_max_tokens
-        if self.args.run_mode == "decode":
-            decode_rows = self.max_req_num * self.mtp_manager.get_decode_tokens_per_request(self.is_mtp_draft_model)
-            warmup_max_tokens = min(warmup_max_tokens, decode_rows)
         warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
 
-        if warmup_max_tokens not in warmup_lengths:
-            warmup_lengths.append(warmup_max_tokens)
+        if self.batch_max_tokens not in warmup_lengths:
+            warmup_lengths.append(self.batch_max_tokens)
 
-        warmup_lengths = [e for e in warmup_lengths if e <= warmup_max_tokens]
+        warmup_lengths = [e for e in warmup_lengths if e <= self.batch_max_tokens]
 
         warmup_lengths.sort(reverse=True)
 

@@ -86,9 +86,6 @@ class MemoryManager:
     def get_cell_size(self):
         return 2 * self.head_num * self.head_dim * self.layer_num * torch._utils._element_size(self.dtype)
 
-    def get_fixed_memory_size(self):
-        return 0
-
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
         num_kv_head = get_num_key_value_heads(get_env_start_args().model_dir)
         return (
@@ -171,8 +168,6 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
-        start_kv_index: int,
-        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
@@ -196,7 +191,7 @@ class MemoryManager:
         # keep for debug
         # logger.info(f"src token tensor {self.kv_buffer[:, mem_indexes[0], 0, 0]}")
         # logger.info(f"src page token tensor {cur_page[0, :, 0, 0]}")
-        return cur_page.numel() * cur_page.element_size()
+        return
 
     def read_page_kv_move_buffer_to_mem(
         self,
@@ -205,8 +200,6 @@ class MemoryManager:
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
-        start_kv_index: int,
-        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
@@ -292,7 +285,8 @@ class MemoryManager:
             node_world_size = get_node_world_size()
             shm_name = f"mem_manager_{get_current_rank_in_node()}"
             obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
-            obj_size = len(obj_bytes_array[0])
+            # Each consumer needs its own IPC ref-counter; its pickle size can vary.
+            obj_size = max(len(obj_bytes) for obj_bytes in obj_bytes_array)
             shm = create_or_link_shm(
                 name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"
             )
@@ -301,7 +295,7 @@ class MemoryManager:
             shm.buf[4:8] = obj_size.to_bytes(4, "little")
             start_index = 8
             for obj_bytes in obj_bytes_array:
-                shm.buf[start_index : start_index + obj_size] = obj_bytes
+                shm.buf[start_index : start_index + obj_size] = obj_bytes.ljust(obj_size, b"\0")
                 start_index += obj_size
 
     @staticmethod

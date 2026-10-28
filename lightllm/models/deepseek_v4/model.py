@@ -1,17 +1,10 @@
-import math
 import os
-import time
 
 import torch
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
-    DSV4_CPU_CACHE_TOKEN_PAGE_SIZE,
-    DSV4_PROMPT_CACHE_PAGE_SIZE,
-    DSV4_SWA_PAGE_SIZE,
-)
+from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4PreAndPostLayerWeight,
 )
@@ -28,31 +21,43 @@ from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
-from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import DSV4_NSA_BACKENDS
+from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
+    DSV4_NSA_BACKENDS,
+    DeepseekV4FlashMlaFp8SparseAttBackend,
+)
+from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
+from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
-from lightllm.models.deepseek_v4.layer_infer.hyper_connection import (
-    hc_head,
-    hc_post,
-    mhc_warmup_token_sizes,
-)
 from lightllm.models.llama.yarn_rotary_utils import (
     find_correction_range,
     linear_ramp_mask,
 )
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
-from lightllm.utils.config_utils import (
-    get_deepseek_v4_compress_rates,
-    normalize_deepseek_v4_config,
-)
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
-from lightllm.common.eplb_utils import (
-    EPLB_MAX_STAGING_DEPTH,
-    extract_eplb_expert_tensors,
-)
 
 logger = init_logger(__name__)
+
+
+class DeepseekV4LayerHiddenCollector(LayerHiddenCollector):
+    """Materialize deferred mHC streams before collecting draft-model features."""
+
+    def _load_layer_ids(self):
+        layer_ids = self.model.config.get("dspark_target_layer_ids")
+        if layer_ids is None:
+            return super()._load_layer_ids()
+        layer_ids = frozenset(map(int, layer_ids))
+        assert layer_ids and all(0 <= layer < self.layer_num for layer in layer_ids)
+        return layer_ids
+
+    def add(self, layer_index: int, hidden):
+        if layer_index not in self.layer_ids:
+            return
+        hc_mult = self.model.config["hc_mult"]
+        if isinstance(hidden, tuple):
+            hidden = hc_post(*hidden, streams=hc_mult)
+        super().add(layer_index=layer_index, hidden=hc_contract(hidden, hc_mult))
 
 
 class DeepseekV4TpPartModel(LlamaTpPartModel):
@@ -67,11 +72,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     post_layer_infer_class = DeepseekV4PostLayerInfer
     transformer_layer_infer_class = DeepseekV4TransformerLayerInfer
 
-    def _init_config(self):
-        super()._init_config()
-        normalize_deepseek_v4_config(self.config)
-        return
-
     infer_state_class = DeepseekV4InferStateInfo
 
     def _verify_params(self):
@@ -79,96 +79,41 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         assert self.config["o_groups"] % self.tp_world_size_ == 0
         assert self.config["index_n_heads"] % self.tp_world_size_ == 0
+        if self.args.enable_dp_prefill_balance:
+            raise ValueError(
+                "DeepSeek-V4 does not support --enable_dp_prefill_balance: KV slots remain in request order"
+            )
+        if self.args.enable_ep_moe:
+            if self.args.enable_tpsp_mix_mode and self.tp_world_size_ > 1:
+                raise ValueError("DeepSeek-V4 EP with TP-SP is not supported: FFN and mHC token layouts differ")
+            if self.args.enable_prefill_eplb:
+                raise ValueError("DeepSeek-V4 preselected MoE routing does not yet support redundant experts")
         return
 
     def _init_req_manager(self):
-        create_max_seq_len = 0
-        if self.batch_max_tokens is not None:
-            create_max_seq_len = max(create_max_seq_len, self.batch_max_tokens)
-        if self.max_seq_length is not None:
-            create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
-
+        cache_config = DeepseekV4CacheConfig.from_model_config(self.config, self.args)
         self.req_manager = DeepseekV4ReqManager(
             self.max_req_num,
-            create_max_seq_len,
-            sliding_window=self.config["sliding_window"],
+            self.max_seq_length,
+            None,
+            cache_config,
+            mtp_step=self.args.mtp_step,
         )
-        return
-
-    def _get_compress_rates(self, layer_num):
-        return get_deepseek_v4_compress_rates(self.config, layer_num)
 
     def _init_mem_manager(self):
-        layer_num = self.config["n_layer"] + get_added_mtp_kv_layer_num()
-        state_mtp_step = 0 if self.args.run_mode == "prefill" else self.args.mtp_step
-        reservations = self._get_post_profile_memory_reservations()
-        retain = self.config["sliding_window"] + DSV4_PROMPT_CACHE_PAGE_SIZE
-        decode_width = max(state_mtp_step + 1, 2 * state_mtp_step)
-        # The retained window may straddle one extra physical page.
-        per_req_pages = math.ceil((retain + decode_width - 1) / DSV4_SWA_PAGE_SIZE) + 1
-        window_pages = self.max_req_num * per_req_pages
-        if self.args.run_mode != "prefill" and self.args.mtp_mode == "dspark":
-            window_pages += self.max_req_num
-        swa_page_num = window_pages
-        if self.args.run_mode != "decode":
-            swa_page_num += math.ceil(self.batch_max_tokens / DSV4_SWA_PAGE_SIZE)
+        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
+        cache_config = self.req_manager.cache_config
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
             dtype=self.data_type,
             head_num=1,
-            head_dim=self.config["head_dim"],
-            layer_num=layer_num,
-            compress_rates=self._get_compress_rates(layer_num),
-            indexer_head_dim=self.config["index_head_dim"],
-            max_request_num=self.max_req_num,
-            mtp_step=state_mtp_step,
-            swa_page_num=swa_page_num,
-            cpu_cache_token_page_size=(
-                DSV4_CPU_CACHE_TOKEN_PAGE_SIZE
-                if self.args.cpu_cache_token_page_size is None
-                else self.args.cpu_cache_token_page_size
-            ),
+            head_dim=cache_config.head_dim,
+            layer_num=cache_config.layer_num,
             mem_fraction=self.mem_fraction,
-            memory_reservations=reservations,
+            cache_config=cache_config,
         )
         self.req_manager.bind_mem_manager(self.mem_manager)
         return
-
-    def _get_post_profile_memory_reservations(self):
-        """Only buffers which are not yet visible to cuda.mem_get_info()."""
-        weights = self._get_eplb_weights()
-        staging = _get_eplb_staging_nbytes(weights)
-        sampling = _get_eplb_sampling_peak_nbytes(weights)
-        return {name: value for name, value in (("eplb_staging", staging), ("eplb_sampling", sampling)) if value}
-
-    def _get_eplb_weights(self):
-        if self.is_mtp_draft_model or not self.args.enable_prefill_eplb:
-            return []
-        weights = []
-        seen = set()
-        for layer_weight in self.trans_layers_weight:
-            experts = getattr(layer_weight, "experts_", None)
-            state = getattr(experts, "expert_parallel_state", None)
-            if getattr(state, "eplb", None) is None or id(experts) in seen:
-                continue
-            seen.add(id(experts))
-            weights.append(experts)
-        return weights
-
-    def get_mtp_profile_weight_exclusion(self):
-        """Rows present only in target EPLB; the DSpark draft disables EPLB."""
-        total = 0
-        seen = set()
-        for experts in self._get_eplb_weights():
-            eplb = experts.expert_parallel_state.eplb
-            redundant = eplb.num_redundant_experts_per_rank
-            for _, tensor in extract_eplb_expert_tensors(experts):
-                key = (tensor.data_ptr(), tensor.numel(), tensor.element_size())
-                if key in seen:
-                    continue
-                seen.add(key)
-                total += redundant * tensor[0].numel() * tensor.element_size()
-        return total
 
     def _init_att_backend(self):
         args = get_env_start_args()
@@ -180,35 +125,18 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
         self.decode_att_backend = get_nsa_decode_att_backend_class(index=0, backend_map=DSV4_NSA_BACKENDS)(model=self)
 
-        real_q_head_num = self.prefill_att_backend.real_q_head_num
+        tp_q_head_num = self.prefill_att_backend.tp_q_head_num
         padded_q_head_num = self.prefill_att_backend.padded_q_head_num
-        self.dsv4_workspace.init_flashmla_prefill_q(
-            real_q_head_num=real_q_head_num,
-            padded_q_head_num=padded_q_head_num,
-            head_dim=self.config["head_dim"],
-            dtype=self.data_type,
-        )
-        if padded_q_head_num != real_q_head_num:
-            self.dsv4_workspace.init_flashmla_prefill_full_out(
-                q_head_num=padded_q_head_num,
-                head_dim_v=self.config["head_dim"],
+        if not self.is_mtp_draft_model:
+            # Drafts share this buffer after the main model has captured its CUDA graphs.
+            self.dsv4_workspace.init_flashmla_prefill_q(
+                tp_q_head_num=tp_q_head_num,
+                padded_q_head_num=padded_q_head_num,
+                head_dim=self.config["head_dim"],
                 dtype=self.data_type,
             )
-        if self.run_mode != "decode":
-            self.dsv4_workspace.init_flashmla_prefill_split_kv_workspace(
-                q_head_num=padded_q_head_num,
-                head_dim_v=self.config["head_dim"],
-            )
-        for layer_infer, layer_weight in zip(self.layers_infer, self.trans_layers_weight):
+        for layer_infer in self.layers_infer:
             layer_infer.flashmla_q_head_num_ = padded_q_head_num
-            if padded_q_head_num == real_q_head_num:
-                continue
-            attn_sink = layer_weight.attn_sink_.weight
-            assert attn_sink.shape == (real_q_head_num,)
-            padded_attn_sink = torch.zeros((padded_q_head_num,), dtype=attn_sink.dtype, device=attn_sink.device)
-            padded_attn_sink[: attn_sink.shape[0]].copy_(attn_sink)
-            padded_attn_sink.load_ok = attn_sink.load_ok
-            layer_weight.attn_sink_.weight = padded_attn_sink
         return
 
     def _init_custom(self):
@@ -217,127 +145,53 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
             prefill_aux_stream = torch.cuda.Stream()
         self.dsv4_workspace = DeepseekV4Workspace(self)
-        if self.dsv4_workspace.needs_c4_prefill_aux(self):
-            import deep_gemm
-
-            if "out:" not in (deep_gemm.fp8_paged_mqa_logits.__doc__ or ""):
-                raise RuntimeError(
-                    "C4 prefill overlap workspace requires a DeepGEMM build whose "
-                    "fp8_paged_mqa_logits API accepts out="
-                )
-            assert prefill_aux_stream is not None
+        if prefill_aux_stream is not None and self.run_mode == "prefill" and 4 in self.config["compress_ratios"]:
             with torch.cuda.stream(prefill_aux_stream):
                 self.dsv4_workspace.init_c4_prefill_aux(self)
-        if prefill_aux_stream is not None:
-            for layer in self.layers_infer:
-                layer.dsv4_prefill_aux_stream = prefill_aux_stream
+        for layer in self.layers_infer:
+            layer.dsv4_prefill_aux_stream = prefill_aux_stream
         dist_group_manager.new_deepep_group(
             n_routed_experts=self.config["n_routed_experts"],
             hidden_size=self.config["hidden_size"],
             expert_quant_method_names=dist_group_manager.get_moe_quant_methods(self.trans_layers_weight),
-            num_experts_per_tok=self.config.get("num_experts_per_tok", 1),
-            moe_intermediate_size=self.config.get("moe_intermediate_size", self.config.get("intermediate_size")),
+            num_experts_per_tok=self.config["num_experts_per_tok"],
+            moe_intermediate_size=self.config["moe_intermediate_size"],
         )
         return
 
-    @torch.no_grad()
-    def _kernel_warmup(self):
-        if self.is_mtp_draft_model:
-            return
-
-        layer_infer = self.layers_infer[0]
-        layer_weight = self.trans_layers_weight[0]
-        hidden_size = self.config["hidden_size"]
-        hc_mult = self.config["hc_mult"]
-        split_token_sizes = mhc_warmup_token_sizes(
-            max_tokens=self.batch_max_tokens,
-            hidden_size=hidden_size,
-            hc_mult=hc_mult,
-        )
-        token_sizes = sorted(set(split_token_sizes + [size for size in (1, 8, 17) if size <= self.batch_max_tokens]))
-
-        started = time.perf_counter()
-        logger.info(
-            "warming DeepSeek-V4 mHC TileLang kernels for token sizes %s",
-            token_sizes,
-        )
-        residual = torch.zeros(
-            max(token_sizes),
-            hc_mult,
-            hidden_size,
-            dtype=torch.bfloat16,
-            device="cuda",
-        )
-        for token_size in split_token_sizes:
-            layer_infer._hc_attn_in(residual[:token_size], layer_weight)
-
-        for token_size in (size for size in (1, 8, 17) if size <= self.batch_max_tokens):
-            hc_state = layer_infer._hc_attn_in(residual[:token_size], layer_weight)
-            hc_state = layer_infer._hc_ffn_in(*hc_state, layer_weight)
-
-        streams = hc_post(*hc_state)
-        hc_head(
-            streams,
-            self.pre_post_weight.hc_head_fn_.weight,
-            self.pre_post_weight.hc_head_scale_.weight,
-            self.pre_post_weight.hc_head_base_.weight,
-            hc_mult,
-            hidden_size,
-            self.config["rms_norm_eps"],
-            self.config.get("hc_eps", 1e-6),
-            torch.empty,
-        )
-
-        torch.cuda.synchronize()
-        del residual, hc_state, streams
-        torch.cuda.empty_cache()
-        logger.info(
-            "DeepSeek-V4 mHC TileLang warmup finished in %.2f seconds (%d split-K variants)",
-            time.perf_counter() - started,
-            len(split_token_sizes),
-        )
-        return
-
-    def prepare_mtp_layer_hidden(self, layer_index: int, hidden):
-        """Materialize the official per-layer DSpark feature from the deferred mHC state."""
-        if isinstance(hidden, tuple):
-            streams = hc_post(*hidden)
+    def _init_hidden_collector(self):
+        if not self.is_mtp_draft_model and self.mtp_manager.args.mtp_mode == "dspark":
+            self.hidden_collector_prototype = DeepseekV4LayerHiddenCollector(self)
         else:
-            streams = hidden.view(-1, self.config["hc_mult"], self.config["hidden_size"])
-        return streams.mean(dim=1)
+            super()._init_hidden_collector()
+            if isinstance(self.hidden_collector_prototype, LayerHiddenCollector):
+                self.hidden_collector_prototype = DeepseekV4LayerHiddenCollector(self)
 
-    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
-        if model_input.batch_size == 0 or (model_input.is_prefill and self.is_mtp_draft_model):
-            return
-        # Runtime inputs retain CPU mirrors. Synthetic warmup inputs are created on GPU.
-        req_ids = model_input.b_req_idx_cpu
-        seq_lens = model_input.b_seq_len_cpu
-        if req_ids is None:
-            req_ids = model_input.b_req_idx.cpu()
-            seq_lens = model_input.b_seq_len.cpu()
-        if req_ids.numel() == 0:
-            return
-        if model_input.is_prefill:
-            ready_lens = model_input.b_ready_cache_len_cpu
-            if ready_lens is None:
-                ready_lens = model_input.b_ready_cache_len.cpu()
-            self.req_manager.prepare_prefill(req_ids, ready_lens, seq_lens)
+    def _init_cudagraph(self):
+        if self.args.run_mode == "prefill":
+            self.graph = None
         else:
-            mtp_indices = model_input.b_mtp_index_cpu
-            if mtp_indices is None:
-                mtp_indices = model_input.b_mtp_index.cpu()
-            self.req_manager.prepare_decode(req_ids, seq_lens, mtp_indices)
+            super()._init_cudagraph()
 
-    def _select_mem_indexes(self, model_input: ModelInput):
-        mem_indexes = super()._select_mem_indexes(model_input)
-        self._prepare_dsv4_slots(model_input)
-        return mem_indexes
+    def _init_prefill_cuda_graph(self):
+        if self.args.run_mode == "decode":
+            self.prefill_graph = None
+        else:
+            super()._init_prefill_cuda_graph()
+
+    def _autotune_warmup(self):
+        if self.args.run_mode != "decode":
+            super()._autotune_warmup()
+
+    def _check_max_len_infer(self):
+        if self.args.run_mode != "decode":
+            super()._check_max_len_infer()
 
     def _init_to_get_rotary(self):
         # Interleaved (GPT-J) rope. Build complex64 freqs_cis tables (_freqs_cis_*) following the
         # gemma4 two-variant convention; the fused CUDA Q/K kernels consume them directly, while
         # _cos_cached_*/_sin_cached_* are .real/.imag views of the same storage for the inverse
-        # rope and compressor paths (deepseek2's interleaved triton rotary_emb_fwd).
+        # rope and compressor paths.
         # Pure sliding-window layers use unscaled rope_theta. Compressed layers use
         # compress_rope_theta with YaRN for both local SWA and compressed attention.
         # Kept fp32 for accuracy (the apply upcasts anyway).
@@ -348,7 +202,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         # max_req_total_len / max_position_embeddings, up to 1M). Capping them shorter makes
         # init_some_extra_state's index_select(cos/sin, position_ids) read OOB past the table at
         # contexts beyond the cap (device-side assert / crash). ~268MB total at 1M, fp32x32 x4 views.
-        max_seq = max(int(self.max_seq_length), int(cfg.get("max_position_embeddings", 8192)))
+        max_seq = max(self.max_seq_length, cfg["max_position_embeddings"])
         freq_exponents = torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim
         positions = torch.arange(max_seq, dtype=torch.float32, device="cuda")
 
@@ -362,7 +216,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 beta_slow = rs.get("beta_slow", 1)
                 factor = rs.get("factor", 1)
                 if factor is None:
-                    factor = cfg.get("max_position_embeddings", max_seq) / orig_max
+                    factor = cfg["max_position_embeddings"] / orig_max
                 low, high = find_correction_range(beta_fast, beta_slow, dim, base, orig_max)
                 smooth = 1 - linear_ramp_mask(low, high, dim // 2).cuda()
                 freqs = freqs / factor * (1 - smooth) + freqs * smooth
@@ -387,53 +241,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             layer.cos_compress_table = self._cos_cached_compress
             layer.sin_compress_table = self._sin_cached_compress
             # the indexer-Q fused kernel (compress rope) needs the complex compress freqs table.
-            if getattr(layer, "index_infer", None) is not None:
-                layer.index_infer.freqs_cis = self._freqs_cis_compress
+            layer.index_infer.freqs_cis = self._freqs_cis_compress
         return
 
 
 class DeepseekV4VisionTpPartModel(DeepseekV4TpPartModel):
     has_vision = True
-
-
-def _get_eplb_staging_nbytes(weights) -> int:
-    """Owned bytes for NIXL's reusable staging rows, excluding live expert weights."""
-    if not weights:
-        return 0
-    depth = min(EPLB_MAX_STAGING_DEPTH, len(weights))
-    redundant = weights[0].expert_parallel_state.eplb.num_redundant_experts_per_rank
-    one_row_nbytes = sum(
-        tensor[0].numel() * tensor.element_size() for _, tensor in extract_eplb_expert_tensors(weights[0])
-    )
-    return depth * redundant * one_row_nbytes
-
-
-def _get_eplb_sampling_peak_nbytes(weights) -> int:
-    """Peak temporary bytes of EPLB sample collection, excluding route counters.
-
-    _collect_local_samples keeps stack(counters), index_select output and index
-    temporaries live together.  Counters are persistent state and intentionally
-    excluded.  CUDA allocator rounding is represented by 512-byte alignment.
-    """
-    counters = []
-    seen = set()
-    for weight in weights:
-        state = getattr(weight, "expert_parallel_state", None)
-        eplb = getattr(state, "eplb", None)
-        counter = getattr(eplb, "route_counter", None)
-        if counter is None or id(counter) in seen:
-            continue
-        seen.add(id(counter))
-        counters.append(counter)
-    if not counters:
-        return 0
-    first = counters[0]
-    if any(tuple(counter.shape) != tuple(first.shape) or counter.dtype != first.dtype for counter in counters):
-        raise ValueError("EPLB route counters must have identical shape and dtype")
-    align = lambda value: (value + 511) // 512 * 512
-    stack_bytes = align(len(counters) * first.numel() * first.element_size())
-    # index_select has the stack shape.  The int64 selection index is bounded
-    # by one ring axis; this is the selection peak, not a claim that every
-    # arithmetic intermediate remains live.
-    index_temp_bytes = align(first.shape[0] * 8)
-    return 2 * stack_bytes + index_temp_bytes

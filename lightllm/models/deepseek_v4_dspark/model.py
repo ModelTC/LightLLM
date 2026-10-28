@@ -3,7 +3,6 @@ import os
 from typing import List
 
 import torch
-import torch.nn.functional as F
 from safetensors import safe_open
 from tqdm import tqdm
 
@@ -49,13 +48,10 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     infer_state_class = DeepseekV4DSparkInferStateInfo
 
     def __init__(self, kvargs: dict):
-        self._pre_init(kvargs)
-        super().__init__(kvargs)
-
-    def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
         assert not self.mtp_previous_draft_models, "DeepSeek-V4 DSpark uses one parallel draft model"
+        super().__init__(kvargs)
 
     def _init_config(self):
         super()._init_config()
@@ -91,7 +87,6 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             self.quant_cfg.quant_cfg[layer_idx]["fused_moe"] = expert_quant_type
 
     def _init_weights(self, start_layer_index=None):
-        assert start_layer_index is None
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type,
             network_config=self.config,
@@ -134,27 +129,9 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         new_batch_size = max(new_batch_size, self.block_size)
         new_batch_size = ((new_batch_size + self.block_size - 1) // self.block_size) * self.block_size
 
-        padded_input = super()._create_padded_decode_model_input(model_input, new_batch_size)
-        scratch_pages = model_input.mtp_draft_swa_pages
-        if padded_input is model_input or scratch_pages is None:
-            return padded_input
-
-        assert new_batch_size % self.block_size == 0
-        page_num = model_input.batch_size // self.block_size
-        padded_page_num = new_batch_size // self.block_size
-        assert scratch_pages.shape == (page_num,)
-        # HOLD rows ignore the page value. Pad only the CUDA Graph input; the CPU
-        # owner list must continue to contain exactly the pages that were allocated.
-        padded_input.mtp_draft_swa_pages = F.pad(
-            scratch_pages,
-            (0, padded_page_num - page_num),
-            mode="constant",
-            value=0,
-        )
-        return padded_input
+        return super()._create_padded_decode_model_input(model_input, new_batch_size)
 
     def _init_infer_layer(self, start_layer_index=None):
-        assert start_layer_index is None
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
         first_layer = self.config["n_layer"]
@@ -183,25 +160,13 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             layer.sin_compress_table = self._sin_cached_compress
         self.layers_infer[0].context_wkv_weight = self.context_wkv_weight
 
-    def _prepare_dsv4_slots(self, model_input: ModelInput) -> None:
-        # Target-hidden commits use target SWA; proposal blocks own separate scratch pages.
-        return
-
-    @torch.no_grad()
-    def forward(self, model_input: ModelInput):
-        if model_input.is_prefill or model_input.mtp_draft_input_hiddens is not None:
-            return super().forward(model_input)
-        pages_cpu, pages = self.mem_manager.alloc_dspark_swa_block(model_input.batch_size, self.block_size)
-        model_input.mtp_draft_swa_pages_cpu = pages_cpu
-        model_input.mtp_draft_swa_pages = pages
-        try:
-            return super().forward(model_input)
-        finally:
-            self.mem_manager.free_dspark_swa_block(pages_cpu)
-
     def _decode(self, model_input: ModelInput) -> ModelOutput:
         if model_input.mtp_draft_input_hiddens is None:
             return super()._decode(model_input)
+        # KV-only commits have no collectives. Empty DP ranks only participate
+        # in the subsequent full draft proposal, through the ordinary padding.
+        if model_input.batch_size == 0:
+            return ModelOutput(logits=model_input.mtp_draft_input_hiddens.new_empty((0, 1)))
 
         assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size
         infer_state = self._create_inferstate(model_input)
@@ -216,10 +181,6 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         assert token_num % self.block_size == 0
         return {
             "mtp_draft_input_hiddens": None,
-            # CUDA Graph capture must take the same direct scratch-slot branch
-            # as runtime. HOLD rows never dereference the page value, but the
-            # tensor gives the captured graph stable storage for replay copies.
-            "mtp_draft_swa_pages": torch.zeros(token_num // self.block_size, dtype=torch.int32, device="cuda"),
         }
 
     def _autotune_warmup(self):
@@ -238,10 +199,8 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             return
 
         index_file = os.path.join(self.weight_dir_, "model.safetensors.index.json")
-        assert utils.PetrelHelper.exists(index_file), "DeepSeek-V4 DSpark requires model.safetensors.index.json"
         weight_map = utils.PetrelHelper.load_json(index_file)["weight_map"]
         candidate_files = sorted({file_ for key, file_ in weight_map.items() if key.startswith("mtp.")})
-        assert candidate_files, "DeepSeek-V4 DSpark weights with prefix mtp.* were not found"
 
         loaded_key_count = 0
         desc = f"pid {os.getpid()} Loading DeepSeek-V4 DSpark weights"
@@ -260,7 +219,8 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             gc.collect()
 
         self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
+        for weight in self.trans_layers_weight:
+            weight.verify_load()
         self._load_context_wkv_weights()
         logger.info("loaded DeepSeek-V4 DSpark weights: %d tensors", loaded_key_count)
 

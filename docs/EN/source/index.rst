@@ -57,7 +57,7 @@ Documentation List
    Anthropic Messages API <tutorial/anthropic>
    Function Calling <tutorial/function_calling>
    Reasoning Parser <tutorial/reasoning_parser>
-   APIServer Parameters <tutorial/api_server_args_zh>
+   APIServer Parameters <tutorial/api_server_args>
    Lightllm API Introduction <tutorial/api_param>
 
 .. toctree::

@@ -34,13 +34,9 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
     transformer_layer_infer_class = DeepseekV4MTPTransformerLayerInfer
 
     def __init__(self, kvargs: dict):
-        self._pre_init(kvargs)
-        super().__init__(kvargs)
-        return
-
-    def _pre_init(self, kvargs: dict):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
+        super().__init__(kvargs)
         return
 
     def _init_custom(self):
@@ -66,7 +62,6 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         return
 
     def _init_weights(self, start_layer_index=None):
-        assert start_layer_index is None
         mtp_layer_index = self.config["n_layer"]
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
@@ -84,7 +79,6 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         return
 
     def _init_infer_layer(self, start_layer_index=None):
-        assert start_layer_index is None
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
         total_pre_layers_num = len(self.main_model.layers_infer)
@@ -115,10 +109,8 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
             return super().load_weights(weight_dict)
 
         index_file = os.path.join(self.weight_dir_, "model.safetensors.index.json")
-        assert utils.PetrelHelper.exists(index_file), "DeepSeek-V4 MTP requires model.safetensors.index.json."
         weight_map = utils.PetrelHelper.load_json(index_file)["weight_map"]
         candidate_files = sorted({file_ for key, file_ in weight_map.items() if key.startswith("mtp.0.")})
-        assert len(candidate_files) > 0, "DeepSeek-V4 MTP weights with prefix mtp.0. were not found."
 
         loaded_key_count = 0
         desc = f"pid {os.getpid()} Loading DeepSeek-V4 MTP weights"
@@ -137,7 +129,8 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
             gc.collect()
 
         self.pre_post_weight.verify_load()
-        [weight.verify_load() for weight in self.trans_layers_weight]
+        for weight in self.trans_layers_weight:
+            weight.verify_load()
         logger.info(f"loaded DeepSeek-V4 MTP weights: {loaded_key_count} tensors")
         return
 

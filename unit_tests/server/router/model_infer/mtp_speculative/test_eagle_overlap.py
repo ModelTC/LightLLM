@@ -105,7 +105,6 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
-        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -146,7 +145,6 @@ def test_overlap_eagle_supports_variable_verify_layout(monkeypatch):
 def test_overlap_eagle_supports_empty_verify_rows():
     draft_model = _DraftModel()
     backend = SimpleNamespace(
-        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -184,7 +182,6 @@ def test_overlap_eagle_returns_dynamic_schedule_scores(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
-        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -235,7 +232,6 @@ def test_overlap_eagle_no_att_supports_dynamic_draft_step():
     device = "cuda"
     draft_model = _DraftModel()
     backend = SimpleNamespace(
-        is_deepseek_v4=False,
         max_draft_step=3,
         draft_models=[draft_model],
         _gen_argmax_token_ids_and_prob=lambda output: (
@@ -288,7 +284,6 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
     _patch_cpu_req_start_rows(monkeypatch)
     draft_model = _DraftModel()
     backend = SimpleNamespace(
-        is_deepseek_v4=False,
         max_draft_step=2,
         draft_models=[draft_model],
         model=SimpleNamespace(
@@ -333,7 +328,6 @@ def test_autoregressive_eagle_reuses_overlap_inputs(monkeypatch):
 def test_eagle3_maps_draft_token_ids_in_proposer():
     proposer = Eagle3Proposer.__new__(Eagle3Proposer)
     proposer.backend = SimpleNamespace(
-        is_deepseek_v4=False,
         draft_models=[SimpleNamespace(map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100)],
         _gen_argmax_token_ids=lambda _: torch.tensor([1, 2]),
         _gen_argmax_token_ids_and_prob=lambda _: (
@@ -353,7 +347,6 @@ def test_eagle3_maps_draft_token_ids_in_proposer():
 def test_dp_overlap_eagle3_maps_draft_token_ids_in_proposer():
     proposer = DpOverlapEagle3Proposer.__new__(DpOverlapEagle3Proposer)
     proposer.backend = SimpleNamespace(
-        is_deepseek_v4=False,
         draft_models=[SimpleNamespace(map_draft_vocab_to_main_vocab=lambda token_ids: token_ids + 100)],
         _gen_argmax_token_ids=lambda _: torch.tensor([1, 2]),
         _gen_argmax_token_ids_and_prob=lambda _: (

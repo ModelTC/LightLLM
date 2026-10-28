@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from lightllm.server.core.objs import FinishStatus, SamplingParams
+from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.server.httpserver.pd_loop import _pd_process_generate
 from lightllm.server.httpserver_for_pd_master.manager import (
     HttpServerManagerForPDMaster,
@@ -254,6 +255,7 @@ def test_pd_node_error_report_send_failure_is_contained():
 def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager._abort_notify_tasks = set()
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
@@ -292,9 +294,84 @@ def test_pd_master_generate_error_marks_request_and_wakes_all_waiters():
     asyncio.run(run())
 
 
+@pytest.mark.parametrize(
+    "terminal_status, output_index",
+    [
+        (FinishStatus.FINISHED_ERROR, 1),
+        (FinishStatus.FINISHED_ABORTED, 1),
+        (FinishStatus.FINISHED_LENGTH, 2),
+        (FinishStatus.FINISHED_STOP, 2),
+    ],
+)
+def test_pd_master_first_token_dedup_preserves_terminal_status(terminal_status, output_index):
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(pd_node_id=1)
+        manager.req_id_to_out_inf = {}
+        manager.next_request_queue_metric_time = 0.0
+        manager.metric_client = MagicMock()
+        p_node = SimpleNamespace(send_control_message=AsyncMock())
+        d_node = SimpleNamespace(send_control_message=AsyncMock())
+        sampling_params = SamplingParams()
+        sampling_params.group_request_id = 123
+        sampling_params.max_new_tokens = 4
+
+        async def handshake(event, _request, **kwargs):
+            if kwargs["stage"] == "prefill":
+                event.prompt_ids = [1, 2]
+            else:
+                event.upkv_status = SimpleNamespace(pd_kv_trans_params=pickle.dumps(SimpleNamespace(ready_kv_len=0)))
+                status = manager.req_id_to_out_inf[123]
+                status.out_token_info_list.extend(
+                    [
+                        (
+                            123,
+                            "first",
+                            {"count_output_tokens": 1, "node_mode": "prefill"},
+                            FinishStatus(FinishStatus.FINISHED_LENGTH),
+                        ),
+                        (
+                            123,
+                            "duplicate",
+                            {"count_output_tokens": 1, "node_mode": "decode"},
+                            FinishStatus(FinishStatus.NO_FINISH),
+                        ),
+                        (
+                            123,
+                            "terminal",
+                            {"count_output_tokens": output_index, "node_mode": "decode"},
+                            FinishStatus(terminal_status),
+                        ),
+                    ]
+                )
+                status.event.set()
+
+        manager._wait_for_event_or_disconnect = AsyncMock(side_effect=handshake)
+        stream = manager.fetch_pd_stream(
+            p_node,
+            d_node,
+            "prompt",
+            sampling_params,
+            MultimodalParams(),
+            SimpleNamespace(is_disconnected=AsyncMock(return_value=False)),
+        )
+        try:
+            first = await asyncio.wait_for(anext(stream), timeout=1)
+            assert first[1] == "first"
+            assert not first[3].is_finished()
+            terminal = await asyncio.wait_for(anext(stream), timeout=1)
+            assert terminal[1] == "terminal"
+            assert terminal[3].status == terminal_status
+        finally:
+            await stream.aclose()
+
+    asyncio.run(run())
+
+
 def test_pd_master_request_rejection_becomes_server_busy_error():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager._abort_notify_tasks = set()
         manager.args = SimpleNamespace(config_server_host=None)
         manager.pd_manager = MagicMock()
         manager.timer_log = AsyncMock()
@@ -332,6 +409,7 @@ def test_pd_master_request_rejection_becomes_server_busy_error():
 def test_pd_master_generate_error_wakes_resource_wait(event_name):
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager._abort_notify_tasks = set()
         req_status = ReqStatus(123, MagicMock(), MagicMock())
         request = SimpleNamespace(is_disconnected=AsyncMock(return_value=False))
         wait_task = asyncio.create_task(
@@ -359,6 +437,7 @@ def test_pd_master_generate_error_wakes_resource_wait(event_name):
 def test_pd_master_abort_removes_request_even_when_node_notifications_fail():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager._abort_notify_tasks = set()
         manager.req_id_to_out_inf = {}
         p_node = SimpleNamespace(send_control_message=AsyncMock(side_effect=ConnectionError("p down")))
         d_node = SimpleNamespace(send_control_message=AsyncMock(side_effect=ConnectionError("d down")))
@@ -374,6 +453,7 @@ def test_pd_master_abort_removes_request_even_when_node_notifications_fail():
 def test_pd_master_abort_uses_explicit_nodes_when_request_status_is_missing():
     async def run():
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager._abort_notify_tasks = set()
         manager.req_id_to_out_inf = {}
         p_node = SimpleNamespace(send_control_message=AsyncMock())
         d_node = SimpleNamespace(send_control_message=AsyncMock())
@@ -402,6 +482,7 @@ def test_pd_master_abort_does_not_wait_for_disconnected_node_inflight_send():
         await send_started.wait()
 
         manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager._abort_notify_tasks = set()
         manager.req_id_to_out_inf = {123: ReqStatus(123, p_node, d_node)}
         p_node.websocket = None
 

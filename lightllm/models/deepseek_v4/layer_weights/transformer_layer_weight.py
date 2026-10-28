@@ -2,6 +2,7 @@ import torch
 from lightllm.common.basemodel import TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.layer_weights.meta_weights import (
+    MMWeightTpl,
     ROWMMWeight,
     COLMMWeight,
     ROWBMMWeight,
@@ -10,7 +11,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     TpAttSinkWeight,
     FusedMoeWeight,
 )
-from ..triton_kernel.quant_convert import dequant_fp8_block_to_bf16
+from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import BMMWeightTpl
+from .quant_utils import prepare_fp8_weights
 
 
 class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
@@ -20,10 +22,6 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
     HC + CSA, and routed experts are checkpointed as MXFP4 (fp4 release) or
     FP8 block-128 (fp8 release, same layout as the dense fp8 weights).
     """
-
-    def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
-        super().__init__(layer_num, data_type, network_config, quant_cfg)
-        return
 
     def _parse_config(self):
         cfg = self.network_config_
@@ -47,8 +45,6 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         self.has_indexer = self.compress_ratio == 4
         self.is_hash = self.layer_num_ < self.num_hash_layers
         self.has_vision = cfg.get("vision_n_layers", 0) > 0
-        assert self.n_heads % self.tp_world_size_ == 0
-        assert self.o_groups % self.tp_world_size_ == 0
         self.prefix = f"layers.{self.layer_num_}"
 
     def _init_weight(self):
@@ -85,16 +81,19 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
         )
         self.q_norm_ = RMSNormWeight(dim=self.q_lora_rank, weight_name=f"{p}.q_norm.weight", data_type=self.data_type_)
         self.kv_norm_ = RMSNormWeight(dim=self.head_dim, weight_name=f"{p}.kv_norm.weight", data_type=self.data_type_)
+        # Sparse FlashMLA requires sink weights for every head in its 64-head tiles.
         self.attn_sink_ = TpAttSinkWeight(
-            all_q_head_num=self.n_heads, weight_name=f"{p}.attn_sink", data_type=torch.float32
+            all_q_head_num=self.n_heads,
+            weight_name=f"{p}.attn_sink",
+            data_type=torch.float32,
+            head_padding_multiple=64,
         )
         # grouped low-rank output projection (wo_a per-group [in, o_lora], wo_b row-parallel
         # [groups*o_lora -> hidden]).
         per_group_in = self.n_heads * self.head_dim // self.o_groups
-        # Keep the training BF16 weights. On Blackwell, one group per rank can
-        # use a plain GEMM; multiple groups use a grouped bmm.
-        major, _ = torch.cuda.get_device_capability()
-        self.o_proj_use_mm = (self.o_groups // self.tp_world_size_) == 1 and major >= 10
+        # Match the official BF16 wo_a computation; FP8 checkpoint weights are dequantized on load.
+        # A single local group uses GEMM; multiple groups use batched GEMM.
+        self.o_proj_use_mm = (self.o_groups // self.tp_world_size_) == 1
         if self.o_proj_use_mm:
             self.wo_a_ = ROWMMWeight(
                 in_dim=per_group_in,
@@ -215,10 +214,8 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             self.gate_bias_vl_ = ParameterWeight(
                 weight_name=f"{p}.gate.bias_vl", data_type=torch.float32, weight_shape=(self.n_routed_experts,)
             )
-        # shared expert (dense, bf16 after de-quant): w1=gate, w3=up fused (row), w2=down (col).
-        # Named gate_up_proj/down_proj so the inherited Llama `_ffn_tp` (fused gate_up matmul +
-        # silu_and_mul triton kernel, no swiglu clamp) drives it directly. Order [w1, w3] = [gate, up]
-        # matches silu_and_mul_fwd's blocked layout (first half gate, second half up).
+        # Shared expert: w1/w3 fuse gate/up in the row projection; w2 projects down.
+        # _ffn_tp consumes [gate, up] and applies the configured SwiGLU clamp before down_proj.
         sp = f"{p}.shared_experts"
         # EP keeps a complete shared expert per rank, so its output needs no per-layer all-reduce.
         enable_ep_moe = get_env_start_args().enable_ep_moe
@@ -242,7 +239,7 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
             tp_rank=shared_tp_rank,
             tp_world_size=shared_tp_world_size,
         )
-        self.experts_ = FusedMoeWeight(
+        self.experts = FusedMoeWeight(
             gate_proj_name="w1",
             down_proj_name="w2",
             up_proj_name="w3",
@@ -292,57 +289,25 @@ class DeepseekV4TransformerLayerWeight(TransformerLayerWeight):
 
     # ------------------------------------------------------------------ loading
     def load_hf_weights(self, weights):
-        self._dequant_in_place(weights)
-        return super().load_hf_weights(weights)
+        matrix_weights = (
+            weight for weight in self.__dict__.values() if isinstance(weight, (MMWeightTpl, BMMWeightTpl))
+        )
+        prepare_fp8_weights(weights, matrix_weights, self.data_type_)
 
-    def _fp8_scale_renames(self):
-        """Map weight name -> the scale name its quant method loads (e.g. `weight_scale_inv`
-        for DeepGEMM). Read from each MM weight's own `weight_scale_names`, so the rename
-        target always matches what that weight will look up; no-quant weights have None
-        entries and are skipped."""
-        renames = {}
-        for attr in self.__dict__.values():
-            weight_names = getattr(attr, "weight_names", ())
-            scale_names = getattr(attr, "weight_scale_names", ())
-            for weight_name, scale_name in zip(weight_names, scale_names):
-                if scale_name is not None:
-                    renames[weight_name] = scale_name
-        return renames
-
-    def _dequant_in_place(self, weights):
-        p = self.prefix + "."
-        scale_renames = self._fp8_scale_renames()
-        # Convert every `.scale` belonging to this layer. Weights are loaded incrementally
-        # per safetensors shard, so the paired weight may live in another shard:
-        # - routed expert `.scale` follows the fused_moe quant method's weight_scale_suffix:
-        #   MXFP4 consumes `.scale` as-is, FP8 DeepGEMM expects `.weight_scale_inv` (rename only);
-        # - FP8 matmul scales only need renaming for DeepGEMM, no weight required;
-        # - FP8 pairs on no-quant paths (including wo_a) are expanded to bf16,
-        #   the only case that truly requires weight and scale in the same shard.
-        expert_scale_suffix = self.experts_.quant_method.weight_scale_suffix
-        for scale_k in [k for k in list(weights.keys()) if k.startswith(p) and k.endswith(".scale")]:
-            if scale_k.startswith(f"{p}ffn.experts."):
-                if expert_scale_suffix is not None and expert_scale_suffix != "scale":
-                    weights[scale_k[: -len("scale")] + expert_scale_suffix] = weights[scale_k].to(torch.float32)
-                    del weights[scale_k]
-                continue
-            k = scale_k[: -len(".scale")] + ".weight"
-            target = scale_renames.get(k)
-            if target is not None:  # FP8 e4m3, block-128 scale, run by DeepGEMM directly
-                weights[target] = weights[scale_k].to(torch.float32)
-                del weights[scale_k]
-            else:
-                weights[k] = dequant_fp8_block_to_bf16(weights[k], weights[scale_k]).to(self.data_type_)
-                del weights[scale_k]
-        # Grouped bmm needs [groups, in, o_lora]; the plain GEMM keeps [groups*o_lora, in].
+        # MXFP4 loads expert .scale unchanged; FP8 expert kernels expect their own suffix.
+        expert_scale_suffix = self.experts.quant_method.weight_scale_suffix
+        if expert_scale_suffix is not None and expert_scale_suffix != "scale":
+            expert_prefix = f"{self.prefix}.ffn.experts."
+            for scale_name in tuple(weights):
+                if scale_name.startswith(expert_prefix) and scale_name.endswith(".scale"):
+                    runtime_scale_name = scale_name.removesuffix("scale") + expert_scale_suffix
+                    weights[runtime_scale_name] = weights[scale_name].to(torch.float32)
+                    del weights[scale_name]
+        # Batched GEMM loads [groups, in, o_lora]; single-group GEMM keeps [groups*o_lora, in].
         if not self.o_proj_use_mm:
             woa = f"{self.prefix}.attn.wo_a.weight"
             if woa in weights and weights[woa].dim() == 2:
                 w = weights[woa]
                 per_group_in = self.n_heads * self.head_dim // self.o_groups
                 weights[woa] = w.view(self.o_groups, self.o_lora_rank, per_group_in).transpose(1, 2)
-        # Keep c4 overlap APE in checkpoint layout [4, 2*head_dim]. SGLang reorders it
-        # because its compressor consumes ape.view(8, head_dim) by window offset. LightLLM
-        # adds APE into each token's two score halves before compression using position % 4,
-        # so the raw checkpoint layout is the equivalent representation here.
-        return
+        return super().load_hf_weights(weights)

@@ -309,7 +309,7 @@ class PDAgentMetadata:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: Optional[bytes] = None
-    page_xfer_handles: Optional[Dict[int, object]] = None
+    page_xfer_handles: Optional[int] = None
 
 
 @dataclass
@@ -317,7 +317,6 @@ class PDChunckedTransTask:
     request_id: int
     start_kv_index: int
     end_kv_index: int
-    request_kv_len: int
     time_out_secs: int
 
     pd_master_node_id: int
@@ -353,7 +352,6 @@ class PDChunckedTransTask:
     # transfer params
     src_page_index: Optional[int] = None
     dst_page_index: Optional[int] = None
-    transfer_nbytes: Optional[int] = None
 
     # xfer_handle
     xfer_handle: Optional[int] = None

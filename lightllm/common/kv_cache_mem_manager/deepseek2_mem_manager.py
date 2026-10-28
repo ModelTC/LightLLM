@@ -41,8 +41,6 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
-        start_kv_index: int,
-        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):
@@ -58,7 +56,7 @@ class Deepseek2MemoryManager(MemoryManager):
             kv_buffer=dp_mems[0].kv_buffer,
             mode="write",
         )
-        return cur_page.numel() * cur_page.element_size()
+        return
 
     def read_page_kv_move_buffer_to_mem(
         self,
@@ -67,8 +65,6 @@ class Deepseek2MemoryManager(MemoryManager):
         dp_index: int,
         mem_managers: List["MemoryManager"],
         dp_world_size: int,
-        start_kv_index: int,
-        request_kv_len: int,
         page_kind: str = "kv",
         req_idx: int = None,
     ):

@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from ..base_att import AttControl
 from .fp import FlashInferAttBackend, FlashInferPrefillAttState, FlashInferDecodeAttState
@@ -28,10 +29,10 @@ class Fp8FlashInferAttBackend(FlashInferAttBackend):
         )
 
     def create_att_prefill_state(self, infer_state) -> "Fp8FlashInferPrefillAttState":
-        return Fp8FlashInferPrefillAttState(backend=self, infer_state=infer_state)
+        return Fp8FlashInferPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state) -> "Fp8FlashInferDecodeAttState":
-        return Fp8FlashInferDecodeAttState(backend=self, infer_state=infer_state)
+        return Fp8FlashInferDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

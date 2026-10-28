@@ -1,9 +1,8 @@
-from lightllm.common.kv_cache_mem_manager.deepseek4_mem_manager import (
-    DSV4_SWA_PAGE_SIZE,
-)
+import torch
+
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
-from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_index import (
-    build_dspark_swa_index,
+from lightllm.models.deepseek_v4.triton_kernel.build_dspark_swa_indices import (
+    build_dspark_swa_indices,
 )
 
 
@@ -13,29 +12,27 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
     # Produced by the first context layer after DP rebalance, consumed per stage.
     context_kv: tuple
 
-    def init_some_extra_state(self, model):
-        super().init_some_extra_state(model)
-        if self.is_prefill or self.mtp_draft_swa_pages is None:
-            # Target-hidden commit passes use target-owned mappings. Proposal
-            # blocks, including CUDA Graph HOLD capture, always carry scratch
-            # pages and replace these base indices below.
-            return
+    def _init_swa_metadata(self, model):
+        if self.is_prefill or self.mtp_draft_input_hiddens is not None:
+            # Context commits use causal target positions. Proposals attend to
+            # history plus the complete block in the ring's future slots.
+            return super()._init_swa_metadata(model)
 
-        (self.dsv4_swa_indices, self.dsv4_swa_lengths, self.dsv4_swa_write_slots,) = model.dsv4_workspace.dspark_swa(
-            self.microbatch_index,
-            self.position_ids.numel(),
-        )
-        build_dspark_swa_index(
-            req_idx=self.dsv4_sparse_req_idx,
-            positions=self.position_ids,
-            req_to_swa_pages=self.req_manager.req_to_swa_pages,
-            scratch_pages=self.mtp_draft_swa_pages,
-            swa_index=self.dsv4_swa_indices,
-            swa_length=self.dsv4_swa_lengths,
+        pos = self.position_ids
+        swa_width = ((self.req_manager.cache_config.sliding_window + model.block_size + 127) // 128) * 128
+        self.dsv4_swa_indices = torch.empty((pos.numel(), swa_width), dtype=torch.int32, device=pos.device)
+        self.dsv4_swa_lengths = torch.empty_like(pos, dtype=torch.int32)
+        self.dsv4_swa_write_slots = torch.empty_like(pos, dtype=torch.int32)
+        self.dsv4_swa_runtime_write_slots = None
+        build_dspark_swa_indices(
+            token_req_idx=self.dsv4_sparse_req_idx,
+            position_ids=self.position_ids,
+            req_manager=self.req_manager,
+            swa_indices=self.dsv4_swa_indices,
+            swa_lengths=self.dsv4_swa_lengths,
             swa_write_slots=self.dsv4_swa_write_slots,
-            window=model.config["sliding_window"],
+            sliding_window=model.config["sliding_window"],
             block_size=model.block_size,
-            page_size=DSV4_SWA_PAGE_SIZE,
             hold_req_id=self.req_manager.HOLD_REQUEST_ID,
-            hold_swa_slot=self.mem_manager.swa_pool.HOLD_TOKEN_MEMINDEX,
+            hold_swa_slot=self.req_manager.HOLD_SWA_SLOT,
         )
