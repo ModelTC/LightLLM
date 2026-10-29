@@ -29,15 +29,15 @@ def get_indexer_k_buffer(mem_manager, layer_index):
     return packed_kv_pages[:, begin : begin + entries * config.indexer_bytes]
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TOKEN_NUM", "COPY_NUM"])
 def _copy_compressed_kv_kernel(
     kv_buffer,
     kv_move_buffer,
     mem_indexes,
     page_indexes,
     layer_byte_offset,
-    TOKEN_NUM: tl.constexpr,
-    COPY_NUM: tl.constexpr,
+    TOKEN_NUM,
+    COPY_NUM,
     PAGE_TOKENS: tl.constexpr,
     PAGE_STRIDE: tl.constexpr,
     SLOT_BYTES: tl.constexpr,
@@ -105,7 +105,7 @@ def copy_compressed_kv_pages(
         layer_byte_offset += page_size * slot_bytes
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TOKEN_NUM"])
 def _copy_cpu_cache_kernel(
     kv_buffer,
     big_page_state_buffer,
@@ -114,7 +114,7 @@ def _copy_cpu_cache_kernel(
     page_indexes,
     page_readies,
     cpu_cache_tensor,
-    TOKEN_NUM: tl.constexpr,
+    TOKEN_NUM,
     PAGE_TOKENS: tl.constexpr,
     PAGE_BYTES: tl.constexpr,
     STATE_BYTES: tl.constexpr,

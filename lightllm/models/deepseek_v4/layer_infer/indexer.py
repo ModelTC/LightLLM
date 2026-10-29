@@ -96,7 +96,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 use_custom_tensor_manager=use_custom_tensor_manager,
                 c4_aux_workspace=c4_aux_workspace,
             )
-            extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q_fp8, weights)
+            extra_indices, extra_lengths = self._c4_indices(infer_state, idx_q_fp8, weights, c4_aux_workspace)
         elif self.compress_ratio == 128:
             extra_indices = infer_state.dsv4_c128_indices.unsqueeze(1)
             extra_lengths = infer_state.dsv4_c128_lengths
@@ -148,7 +148,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         )  # fp8 [T,H,d]; weights [T,H,1] with q-scale + weight_scale folded
         return idx_q_fp8, weights.squeeze(-1)
 
-    def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights):
+    def _c4_indices(self, infer_state: DeepseekV4InferStateInfo, idx_q_fp8, weights, c4_aux_workspace=None):
         """Return all closed C4 entries for short contexts, or select TopK by paged scoring."""
         index_topk = self.index_topk
         max_entries = max(1, infer_state.max_kv_seq_len // 4)
@@ -185,6 +185,9 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         for chunk_idx, scheduler in enumerate(paged_meta.schedulers):
             start = chunk_idx * paged_meta.rows_per_chunk
             end = min(start + paged_meta.rows_per_chunk, idx_q_fp8.shape[0])
+            output_args = {}
+            if c4_aux_workspace is not None and c4_aux_workspace.logits_out_supported:
+                output_args["out"] = c4_aux_workspace.logits(end - start, c4_cap)
             logits = deep_gemm.fp8_paged_mqa_logits(
                 idx_q_fp8[start:end].unsqueeze(1),
                 indexer_k_cache,
@@ -194,6 +197,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 scheduler,
                 c4_cap,
                 False,
+                **output_args,
             )
             indexer_topk(
                 logits,
@@ -202,5 +206,5 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 top_slots[start:end],
                 page_size,
             )
-            del logits  # Release this chunk before allocating the next one.
+            del logits
         return top_slots.unsqueeze(1), infer_state.dsv4_c4_lengths

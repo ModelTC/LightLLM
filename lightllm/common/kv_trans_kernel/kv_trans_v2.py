@@ -303,3 +303,67 @@ def kv_trans_for_dp(
     )
 
     return
+
+
+@triton.jit
+def _kv_trans_prefill_node_batch_kernel(
+    source_pools,
+    destination_pools,
+    slot_bytes,
+    tasks,
+    blocks,
+    block_num,
+    LAYERS: tl.constexpr,
+    DP_SIZE: tl.constexpr,
+    BLOCK_BYTES: tl.constexpr,
+):
+    # Each task owns its index arrays. Copy all layer layouts without expanding
+    # a source-rank array per token or launching one kernel per layer.
+    work = tl.program_id(0)
+    rows = tl.arange(0, 32)
+    cols = tl.arange(0, BLOCK_BYTES)
+    while work < block_num * LAYERS:
+        layer = work % LAYERS
+        block = work // LAYERS
+        task = tl.load(blocks + block * 2)
+        start = tl.load(blocks + block * 2 + 1) * 256
+        source_dp = tl.load(tasks + task * 4)
+        src_indexes = tl.load(tasks + task * 4 + 1).to(tl.pointer_type(tl.int32))
+        dst_indexes = tl.load(tasks + task * 4 + 2).to(tl.pointer_type(tl.int32))
+        length = tl.load(tasks + task * 4 + 3)
+        width = tl.load(slot_bytes + layer).to(tl.int64)
+        source = tl.load(source_pools + layer * DP_SIZE + source_dp).to(tl.pointer_type(tl.uint8))
+        destination = tl.load(destination_pools + layer).to(tl.pointer_type(tl.uint8))
+        for offset in range(0, 256, 32):
+            indexes = start + offset + rows
+            src = tl.load(src_indexes + indexes, mask=indexes < length, other=0).to(tl.int64)
+            dst = tl.load(dst_indexes + indexes, mask=indexes < length, other=0).to(tl.int64)
+            mask = (indexes[:, None] < length) & (cols[None, :] < width)
+            values = tl.load(source + src[:, None] * width + cols[None, :], mask=mask, other=0)
+            tl.store(destination + dst[:, None] * width + cols[None, :], values, mask=mask)
+        work += tl.num_programs(0)
+
+
+def kv_trans_v2_for_p_node_batch(source_pools, destination_pools, slot_bytes, tasks, blocks, max_slot_bytes):
+    """Copy byte-addressed token slots for a batch of requests and layer layouts.
+
+    source_pools is [layer, DP], destination_pools/slot_bytes are [layer].
+    tasks is uint64 [task, (source DP, int32 source-index pointer,
+    int32 destination-index pointer, length)]; blocks is [task, 256-token block].
+    The caller retains pools and index arrays until the stream completes.
+    """
+    layers, dp_size = source_pools.shape
+    assert destination_pools.numel() == slot_bytes.numel() == layers
+    assert tasks.shape[1] == 4 and blocks.shape[1] == 2
+    _kv_trans_prefill_node_batch_kernel[(20,)](
+        source_pools,
+        destination_pools,
+        slot_bytes,
+        tasks,
+        blocks,
+        blocks.shape[0],
+        LAYERS=layers,
+        DP_SIZE=dp_size,
+        BLOCK_BYTES=triton.next_power_of_2(max_slot_bytes),
+        num_warps=4,
+    )

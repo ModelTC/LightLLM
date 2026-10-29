@@ -5,7 +5,6 @@ from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_mega_moe
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.triton_ep_impl import FuseMoeTritonEP
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
@@ -384,8 +383,10 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         if layer_weight.o_proj_use_mm:
             o = layer_weight.wo_a_.mm(o.reshape(T, -1))  # [T, o_lora]
         else:
-            o = o.reshape(T, self.tp_groups, -1).transpose(0, 1)  # [groups, T, per_group_in]
-            o = layer_weight.wo_a_.bmm(o).transpose(0, 1).reshape(T, -1)  # [T, groups*o_lora]
+            grouped_o = o.reshape(T, self.tp_groups, -1).transpose(0, 1)
+            o = self.alloc_tensor((T, self.tp_groups, layer_weight.wo_a_.dim2), dtype=o.dtype, device=o.device)
+            layer_weight.wo_a_.bmm(grouped_o, out=o.transpose(0, 1))
+            o = o.view(T, -1)
         o = layer_weight.wo_b_.mm(o)
         return self._tpsp_reduce(input=o, infer_state=infer_state)
 
@@ -533,22 +534,26 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
-        shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(
-            gate_up,
-            shared,
-            alpha=1.0,
-            limit=self.swiglu_limit,
-            clamp_up_add_one=False,
-        )
-        del gate_up
-        return layer_weight.down_proj.mm(shared)
+        return layer_weight.down_proj.mm_swiglu(gate_up, limit=self.swiglu_limit)
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)
         x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
         topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
+        if not infer_state.is_prefill and layer_weight.experts.fuse_moe_impl.supports_decode_shared_expert_overlap:
+            out = layer_weight.experts.experts_with_topk(
+                input_tensor=x,
+                topk_weights=topk_weights,
+                topk_ids=topk_indices,
+                is_prefill=False,
+                infer_state=infer_state,
+                clamp_limit=self.swiglu_limit,
+                alloc_tensor_func=self.alloc_tensor,
+                shared_expert_func=lambda: self._ffn_tp(x, infer_state, layer_weight),
+            )
+            return out if self.enable_ep_moe else self._tpsp_reduce(input=out, infer_state=infer_state)
+
         # Routed experts can overwrite x in place, so compute the shared expert first.
         shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
         routed = layer_weight.experts.experts_with_topk(
@@ -558,6 +563,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             is_prefill=infer_state.is_prefill,
             infer_state=infer_state,
             clamp_limit=self.swiglu_limit,
+            alloc_tensor_func=self.alloc_tensor,
         )
         out = routed + shared
         if self.enable_ep_moe:

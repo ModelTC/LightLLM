@@ -21,6 +21,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         self.tp_q_head_num = model.config["num_attention_heads"] // model.tp_world_size_
         # Sparse FlashMLA uses 64-head tiles; TP can leave fewer local Q heads.
         self.padded_q_head_num = ((self.tp_q_head_num + 63) // 64) * 64
+        self._flashmla_workspace_op = getattr(torch.ops._flashmla_C, "sparse_decode_fwd_with_workspace", None)
         self.compress_ratios = tuple(dict.fromkeys(model.config["compress_ratios"]))
 
     @classmethod
@@ -65,6 +66,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         nsa_dict: dict,
         sched_meta: "FlashMLASchedMeta",
         out: torch.Tensor,
+        split_workspace=None,
     ) -> torch.Tensor:
         """Attend to SWA plus optional compressed KV and return all padded Q heads."""
         swa_packed, compressed_packed = packed_kv
@@ -83,25 +85,45 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             swa_packed.shape[0], config.swa_page_token_num, 1, bytes_per_token
         )
 
-        padded_out, _ = flashmla.flash_mla_with_kvcache(
-            q=q.unsqueeze(1),
-            k_cache=swa_cache,
-            block_table=None,
-            cache_seqlens=None,
-            head_dim_v=nsa_dict["head_dim_v"],
-            tile_scheduler_metadata=sched_meta,
-            num_splits=None,
-            softmax_scale=nsa_dict["softmax_scale"],
-            causal=False,
-            is_fp8_kvcache=True,
-            indices=nsa_dict["swa_indices"],
-            attn_sink=nsa_dict["attn_sink"],
-            topk_length=nsa_dict["swa_lengths"],
-            extra_k_cache=compressed_cache,
-            extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
-            extra_topk_length=nsa_dict.get("extra_lengths"),
-            out=out.unsqueeze(1),
-        )
+        if split_workspace is not None:
+            padded_out, _, metadata, num_splits = self._flashmla_workspace_op(
+                q.unsqueeze(1),
+                swa_cache,
+                nsa_dict["swa_indices"],
+                nsa_dict["swa_lengths"],
+                nsa_dict["attn_sink"],
+                sched_meta.tile_scheduler_metadata,
+                sched_meta.num_splits,
+                compressed_cache,
+                nsa_dict.get("extra_indices"),
+                nsa_dict.get("extra_lengths"),
+                nsa_dict["head_dim_v"],
+                nsa_dict["softmax_scale"],
+                out.unsqueeze(1),
+                *split_workspace,
+            )
+            sched_meta.tile_scheduler_metadata = metadata
+            sched_meta.num_splits = num_splits
+        else:
+            padded_out, _ = flashmla.flash_mla_with_kvcache(
+                q=q.unsqueeze(1),
+                k_cache=swa_cache,
+                block_table=None,
+                cache_seqlens=None,
+                head_dim_v=nsa_dict["head_dim_v"],
+                tile_scheduler_metadata=sched_meta,
+                num_splits=None,
+                softmax_scale=nsa_dict["softmax_scale"],
+                causal=False,
+                is_fp8_kvcache=True,
+                indices=nsa_dict["swa_indices"],
+                attn_sink=nsa_dict["attn_sink"],
+                topk_length=nsa_dict["swa_lengths"],
+                extra_k_cache=compressed_cache,
+                extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
+                extra_topk_length=nsa_dict.get("extra_lengths"),
+                out=out.unsqueeze(1),
+            )
         return padded_out[:, 0]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":
@@ -113,11 +135,18 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class _PrefillAttState(BasePrefillAttState):
+    split_workspace: Optional[Tuple[torch.Tensor, torch.Tensor]] = None
     sched_meta_by_ratio: dict[int, "FlashMLASchedMeta"] | None = None
 
     def prepare_swa_workspace(self, infer_state):
         from lightllm.models.deepseek_v4.triton_kernel.swa_cache import prepare_swa_prefill_workspace
 
+        workspace = infer_state.dsv4_workspace
+        if workspace.flashmla_prefill_o_accum is not None:
+            self.split_workspace = (
+                workspace.flashmla_prefill_o_accum[infer_state.microbatch_index],
+                workspace.flashmla_prefill_lse_accum[infer_state.microbatch_index],
+            )
         requests = infer_state.req_manager
         self.swa_buffer, capacity = self.backend.get_swa_prefill_workspace(self.backend.model)
         self.HOLD_SWA_SLOT = self.swa_buffer.shape[1] - self.backend.cache_config.swa_page_token_num
@@ -159,6 +188,7 @@ class _PrefillAttState(BasePrefillAttState):
             nsa_dict,
             self.sched_meta_by_ratio[nsa_dict["compress_ratio"]],
             out=out,
+            split_workspace=self.split_workspace,
         )
         return padded_out[:, : self.backend.tp_q_head_num]
 

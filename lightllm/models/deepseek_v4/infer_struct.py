@@ -5,7 +5,7 @@ from lightllm.common.basemodel import InferStateInfo
 from lightllm.common.req_manager import DeepseekV4ReqManager
 from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
 
-C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
+from .workspace import C4_PREFILL_LOGITS_BUDGET_BYTES
 
 
 @dataclasses.dataclass
@@ -59,6 +59,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.c4_indexer_metadata = None  # Rebuild for each eager forward or graph capture.
         self.dsv4_c4_indices = None
         self.dsv4_c4_lengths = None
+        self.dsv4_workspace = model.dsv4_workspace
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
         if self.is_prefill:
             self.prefill_att_state.prepare_swa_workspace(self)
@@ -81,7 +82,6 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         else:
             self.dsv4_sparse_req_idx = self.b_req_idx
             self._dsv4_token_to_batch_idx = None
-        self.dsv4_workspace = model.dsv4_workspace
         self._init_swa_metadata(model)
 
         from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices

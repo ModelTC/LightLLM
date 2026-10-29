@@ -12,6 +12,7 @@ from lightllm.server.core.objs.shm_array import ShmArray
 from ...infer_batch import InferReq
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 import torch.distributed as dist
 
 
@@ -61,6 +62,12 @@ class DPKVSharedMoudle:
             dtype=torch.uint64,
             device="cuda",
         )
+        buffers = self.backend.model.mem_manager.kv_buffer
+        self.dsv4_destination_pool_ptrs = torch.tensor(
+            [buffer.data_ptr() for buffer in buffers], dtype=torch.uint64, device="cuda"
+        )
+        self.dsv4_slot_bytes = torch.tensor([buffer.shape[-1] for buffer in buffers], dtype=torch.int64, device="cuda")
+        self.dsv4_max_slot_bytes = max(buffer.shape[-1] for buffer in buffers)
         return
 
     def fill_reqs_info(self, reqs: List[InferReq]):
@@ -312,24 +319,38 @@ class DPKVSharedMoudle:
         self._transfer_dsv4_source_data(trans_tasks, matches, transfer_plan)
         if trans_tasks:
             req_manager = g_infer_context.req_manager
-            from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_p_node
+            from lightllm.common.kv_trans_kernel.kv_trans_v2 import kv_trans_v2_for_p_node_batch
 
-            source_indexes = torch.cat([task.max_kv_len_mem_indexes for task in trans_tasks])
-            destination_indexes = torch.cat([task.mem_indexes for task in trans_tasks]).cuda(non_blocking=True)
-            source_ranks = torch.tensor(
-                [task.max_kv_len_dp_rank for task in trans_tasks for _ in range(len(task.mem_indexes))],
-                dtype=torch.int32,
-                device="cuda",
-            )
-            for layer, buffer in enumerate(self.backend.model.mem_manager.kv_buffer):
-                kv_trans_v2_for_p_node(
-                    input_mems=self.dsv4_source_pool_ptrs[layer],
-                    input_idx=source_indexes,
-                    input_dp_idx=source_ranks,
-                    output=buffer,
-                    output_idx=destination_indexes,
-                    dp_size_in_node=self.backend.dp_size_in_node,
+            task_meta = []
+            block_counts = []
+            for task in trans_tasks:
+                req = task.req
+                length = len(task.mem_indexes)
+                destination = req_manager.req_to_token_indexs[req.req_idx, req.cur_kv_len : req.cur_kv_len + length]
+                task_meta.extend(
+                    [task.max_kv_len_dp_rank, task.max_kv_len_mem_indexes.data_ptr(), destination.data_ptr(), length]
                 )
+                block_counts.append((length + 255) // 256)
+            # Round-robin request blocks so short requests do not wait behind one long copy.
+            blocks = [
+                value
+                for block in range(max(block_counts))
+                for index, count in enumerate(block_counts)
+                if block < count
+                for value in (index, block)
+            ]
+            metadata = g_pin_mem_manager.gen_from_list(
+                key="dsv4_dp_copy_tasks", data=task_meta + blocks, dtype=torch.uint64
+            ).cuda(non_blocking=True)
+            task_elements = len(task_meta)
+            kv_trans_v2_for_p_node_batch(
+                source_pools=self.dsv4_source_pool_ptrs,
+                destination_pools=self.dsv4_destination_pool_ptrs,
+                slot_bytes=self.dsv4_slot_bytes,
+                tasks=metadata[:task_elements].view(-1, 4),
+                blocks=metadata[task_elements:].view(-1, 2),
+                max_slot_bytes=self.dsv4_max_slot_bytes,
+            )
             big_tokens = self.backend.args.linear_att_hash_page_size * self.backend.args.linear_att_page_block_num
             for task in trans_tasks:
                 req = task.req
