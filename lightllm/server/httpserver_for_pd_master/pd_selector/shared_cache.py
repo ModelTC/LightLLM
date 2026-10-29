@@ -9,6 +9,7 @@ import uuid
 import websockets
 
 from lightllm.utils.log_utils import init_logger
+from .prompt_cache_key import prompt_cache_key
 
 
 logger = init_logger(__name__)
@@ -31,7 +32,7 @@ class SharedCacheState:
                 [
                     args.model_dir,
                     args.model_name,
-                    "sampled_chars_v2_uncached_prefill",
+                    "contiguous_block_digest_v3_uncached_prefill",
                     selector.policy.config.sample_stride,
                 ]
             ).encode()
@@ -57,13 +58,13 @@ class SharedCacheState:
         message = {
             "kind": "hint",
             "id": self.local_sequence,
-            "key": prompt[:: self.selector.policy.config.sample_stride],
+            "key": prompt_cache_key(prompt, self.selector.policy.config.sample_stride),
             "worker": worker.connection_key,
             "node_id": worker.node_id,
             "observed_at": time.time(),
         }
         # A lost hint only reduces affinity. Never wait for a slow relay in the request path.
-        if len(message["key"].encode("utf-8")) > 64 * 1024 or self.outgoing.full():
+        if len(json.dumps(message, ensure_ascii=False).encode("utf-8")) > 96 * 1024 or self.outgoing.full():
             self.dropped_hints += 1
             return
         self.outgoing.put_nowait(message)
@@ -180,7 +181,7 @@ class SharedCacheState:
                                 continue
                             payload = json.dumps(hint, ensure_ascii=False)
                             # JSON escaping can expand an otherwise small sampled key.
-                            if len(payload.encode("utf-8")) > 64 * 1024:
+                            if len(payload.encode("utf-8")) > 96 * 1024:
                                 self.dropped_hints += 1
                                 continue
                             await websocket.send(payload)

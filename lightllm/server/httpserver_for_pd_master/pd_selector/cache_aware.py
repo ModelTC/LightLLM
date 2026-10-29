@@ -9,7 +9,7 @@ PD Master 的 cache-aware prefill 选点策略。
 实现要点：
   - 用前缀树（见 PromptCacheTree）记录「成功进入推理的 prompt -> 处理它的 worker」；
   - 树中的 prefill_node 对应 worker.connection_key，可区分同一服务的不同 DP 连接；
-  - prompt 会按 sample_stride 抽稀后再插入/匹配，降低树的深度与内存；
+  - prompt 按连续字符块生成摘要后插入/匹配，降低树的深度与内存；
   - 根据推理侧返回的平均 prompt cache 命中率，动态调整 cache 亲和与负载均衡的权重；
   - 以预计未缓存字符数估算新增 Prefill 工作量，缓存节点与冷节点的新增成本不同；
   - 长且高匹配的前缀保持原 P/DP 亲和，避免空闲优先和相对负载阈值反复搬移长请求；
@@ -29,6 +29,7 @@ from lightllm.utils.log_utils import init_logger
 
 from .pd_selector import PDSelectionExtraInfo
 from .prompt_cache_tree import PromptCacheMatchResult
+from .prompt_cache_key import prompt_cache_key
 
 
 logger = init_logger(__name__)
@@ -53,8 +54,8 @@ class CacheAwareConfig:
     max_node_count: int = 1_000_000
     # 每次 LRU 驱逐的叶节点数量。
     evict_node_batch: int = 10_000
-    # 每隔 sample_stride 个字符抽 1 个作为前缀树 key，降低匹配开销与内存。
-    sample_stride: int = 512
+    # 每个连续字符块生成一个摘要，避免跳过 session 差异而虚报高命中。
+    sample_stride: int = 2048
     # 保护已处理的长前缀；这是历史位置亲和，不代表 KV 一定仍驻留。
     long_prefix_min_chars: int = 65536
     long_prefix_min_hit_rate: float = 0.8
@@ -196,7 +197,7 @@ class CacheAwarePolicy:
     ) -> tuple[Optional[PD_Client_Obj], PromptCacheMatchResult]:
         """在指定候选节点中返回达到匹配阈值的 cache 节点。"""
         result = await self.prompt_cache_tree.prefix_match_sampled(
-            request_text[:: self.config.sample_stride],
+            prompt_cache_key(request_text, self.config.sample_stride),
             len(request_text),
             self.config.sample_stride,
         )

@@ -3,9 +3,12 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from threading import Lock, RLock
-from typing import Dict, Optional
+from typing import Dict, Optional, Sequence, Union
 
 from sortedcontainers import SortedDict
+
+
+PromptCacheKey = Union[str, Sequence[str]]
 
 
 @dataclass(slots=True)
@@ -15,7 +18,7 @@ class PromptCacheMatchResult:
     # 匹配终点关联的 prefill 连接标识（connection_key），可区分同一服务的不同 DP 连接；
     # 匹配停在 root 时为 None。该标识记录历史处理位置，不保证 KV cache 仍然驻留。
     prefill_node: Optional[str]
-    # 匹配到的原始 prompt 字符数：从 text[0] 到最后一个命中采样点（含）的连续前缀长度。
+    # 匹配到的原始 prompt 字符数；摘要 key 按完整块计数，旧字符串 key 按采样点计数。
     matched_char_count: int
     # 输入 prompt 的原始字符数 len(text)。
     input_char_count: int
@@ -41,7 +44,8 @@ class PromptCacheTree:
     """
     用于 cache-aware 选点的 prompt 前缀缓存树。
 
-    调用方先按 sample_stride 将 prompt 抽稀成 key，树再按单字符建树/匹配。
+    调用方按 sample_stride 个连续字符生成一个摘要，树按摘要序列建树/匹配；
+    仍接受旧字符串 key，以保留组件 API 的采样点计数语义。
     整棵树节点数有上限；超限时按 LRU 从叶节点批量删除。
     """
 
@@ -72,7 +76,7 @@ class PromptCacheTree:
         self._lock = RLock()
         self._time_mark_lock = Lock()
 
-    def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+    def insert_sampled(self, key: PromptCacheKey, prefill_node: str, sample_stride: int) -> None:
         """将抽稀后的 prompt key 写入树，并关联到 prefill_node。
 
         路径上的节点会更新 last_prefill_node 与 LRU 时间戳；写入后若超
@@ -99,7 +103,11 @@ class PromptCacheTree:
             self._leaf_lru.clear()
 
     def insert_key(
-        self, key: str, prefill_node: str, last_insert_time: Optional[float], prefill_node_epoch: Optional[int] = None
+        self,
+        key: PromptCacheKey,
+        prefill_node: str,
+        last_insert_time: Optional[float],
+        prefill_node_epoch: Optional[int] = None,
     ) -> None:
         """Insert a sampled relay hint without refreshing its age or worker incarnation."""
         if prefill_node is None:
@@ -144,7 +152,9 @@ class PromptCacheTree:
             child = None
             self._evict_if_needed()
 
-    def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+    def prefix_match_sampled(
+        self, key: PromptCacheKey, input_char_count: int, sample_stride: int
+    ) -> PromptCacheMatchResult:
         """匹配已经按 sample_stride 抽稀的 prompt key。
 
         Args:
@@ -181,8 +191,12 @@ class PromptCacheTree:
                 prefill_node = node.last_prefill_node
             if matched <= 0:
                 matched_char_count = 0
-            else:
+            elif isinstance(key, str):
                 matched_char_count = min((matched - 1) * sample_stride + 1, input_char_count)
+            else:
+                # One sequence element covers every character in its block;
+                # legacy sampled strings retain their conservative semantics.
+                matched_char_count = min(matched * sample_stride, input_char_count)
             return PromptCacheMatchResult(
                 prefill_node=prefill_node,
                 matched_char_count=matched_char_count,

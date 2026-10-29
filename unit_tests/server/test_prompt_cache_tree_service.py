@@ -25,6 +25,7 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_clie
     create_prompt_cache_tree_client,
 )
 from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import PromptCacheTreeState
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_key import prompt_cache_key
 from lightllm.utils.net_utils import get_abstract_unix_socket_address
 
 SAMPLE_STRIDE = CacheAwareConfig().sample_stride
@@ -186,6 +187,26 @@ def test_concurrent_prompts_remain_separate(rpc_tree_cluster):
             "prefill-0",
             "prefill-1",
         ]
+
+    asyncio.run(run())
+
+
+def test_real_rpc_clients_preserve_complete_digest_blocks(rpc_tree_cluster):
+    _, clients = rpc_tree_cluster
+    prompt = "same history " * 1000
+    key = prompt_cache_key(prompt, SAMPLE_STRIDE)
+    changed = prompt[:1] + "X" + prompt[2:]
+
+    async def run():
+        await clients[0].insert_sampled(key, "prefill/dp5", SAMPLE_STRIDE)
+        exact = await clients[1].prefix_match_sampled(key, len(prompt), SAMPLE_STRIDE)
+        assert exact.prefill_node == "prefill/dp5"
+        assert exact.matched_char_count == len(prompt)
+        missing = await clients[2].prefix_match_sampled(
+            prompt_cache_key(changed, SAMPLE_STRIDE), len(changed), SAMPLE_STRIDE
+        )
+        assert missing.prefill_node is None
+        assert missing.matched_char_count == 0
 
     asyncio.run(run())
 

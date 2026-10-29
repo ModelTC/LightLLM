@@ -1,6 +1,9 @@
 import torch
 
-from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
+from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_num_warps
+from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import (
+    LlamaMultimodalPreLayerInfer,
+)
 
 
 class Glm5NextMTPPreLayerInfer(LlamaMultimodalPreLayerInfer):
@@ -13,6 +16,27 @@ class Glm5NextMTPPreLayerInfer(LlamaMultimodalPreLayerInfer):
     def _fuse_hidden(self, input_embeddings, infer_state, layer_weight):
         previous_hidden = infer_state.mtp_draft_input_hiddens
         assert input_embeddings.shape[0] == previous_hidden.shape[0]
+        # Exact rounding was validated against the standard eight-warp norms.
+        # Respect custom RMSNORM_WARPS by retaining their established path.
+        if (
+            rmsnorm_num_warps == 8
+            and input_embeddings.is_cuda
+            and input_embeddings.shape[-1] == 4096
+            and input_embeddings.dtype in (torch.bfloat16, torch.float16)
+        ):
+            from lightllm.models.glm5_next_mtp.triton_kernel.fused_eh_norm import (
+                fused_mtp_norm,
+            )
+
+            normed = fused_mtp_norm(
+                input_embeddings,
+                previous_hidden,
+                layer_weight.main_norm_weight_.weight,
+                layer_weight.enorm_weight_.weight,
+                layer_weight.hnorm_weight_.weight,
+                self.eps_,
+            )
+            return layer_weight.eh_proj_weight_.mm(normed)
         layer_weight.main_norm_weight_(input=previous_hidden, eps=self.eps_, out=previous_hidden)
         layer_weight.enorm_weight_(input=input_embeddings, eps=self.eps_, out=input_embeddings)
         layer_weight.hnorm_weight_(input=previous_hidden, eps=self.eps_, out=previous_hidden)

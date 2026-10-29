@@ -165,6 +165,22 @@ class HttpServerManagerForPDMaster:
         # Image boundaries are already in prompt_ids; expansion only inserts image tokens.
         return len(prompt_ids) + image_tokens + audio_tokens + audio_count
 
+    def _prepare_prefill_prompt(self, prompt, multimodal_params, sampling_params):
+        """Keep exact pure-text IDs already computed for admission at the Master.
+
+        Routing and stop matching retain the original string. Multimodal inputs,
+        continuation segments, and overlong raw text retain P's encoding path.
+        """
+        if (
+            not getattr(self.args, "enable_multimodal", True)
+            and not multimodal_params.images
+            and not multimodal_params.audios
+            and len(prompt) <= self.args.max_req_total_len * 8
+        ):
+            prompt_ids = self.tokenizer.encode(prompt, None, add_special_tokens=sampling_params.add_special_tokens)
+            return len(prompt_ids), prompt_ids
+        return self.tokens(prompt, multimodal_params, sampling_params), None
+
     async def select_p_d_node(
         self,
         prompt: Union[str, List[int]],
@@ -224,7 +240,9 @@ class HttpServerManagerForPDMaster:
         await multimodal_params.verify_and_preload(request)
         # 计算输入的 input_token_num, 进行校验，如果输入+输出参数设置太长，则将
         # sampling_params 的参数进行修正。
-        input_token_num = await asyncio.to_thread(self.tokens, prompt, multimodal_params, sampling_params)
+        input_token_num, prefill_prompt_ids = await asyncio.to_thread(
+            self._prepare_prefill_prompt, prompt, multimodal_params, sampling_params
+        )
         from lightllm.server.httpserver.manager import HttpServerManager
 
         HttpServerManager._check_and_repair_length(self, prompt_tokens=input_token_num, sampling_params=sampling_params)
@@ -257,6 +275,7 @@ class HttpServerManagerForPDMaster:
                     start_time,
                     origin_group_request_id + choice_index,
                     input_token_num,
+                    prefill_prompt_ids,
                 )
             )
 
@@ -280,6 +299,7 @@ class HttpServerManagerForPDMaster:
         start_time: float,
         origin_request_id: int,
         input_token_num: int,
+        prefill_prompt_ids: Optional[List[int]] = None,
     ):
         """节点繁忙时重新选择 P/D 节点，并在配置的探测周期内重试。"""
         retry_start_time = time.monotonic()
@@ -295,6 +315,7 @@ class HttpServerManagerForPDMaster:
                     start_time,
                     origin_request_id,
                     input_token_num,
+                    prefill_prompt_ids,
                 )
                 async with aclosing(generator):
                     async for result in generator:
@@ -336,6 +357,7 @@ class HttpServerManagerForPDMaster:
         start_time: float,
         origin_request_id: int,
         input_token_num: int,
+        prefill_prompt_ids: Optional[List[int]] = None,
     ):
         """执行一次完整的单 choice 生成尝试。
 
@@ -462,7 +484,7 @@ class HttpServerManagerForPDMaster:
                     p_node,
                     d_node,
                     start_time if segment_index == 0 else time.time(),
-                    block_prompt,
+                    prefill_prompt_ids if segment_index == 0 and prefill_prompt_ids is not None else block_prompt,
                     sampling_params,
                     multimodal_params,
                     request,
@@ -803,7 +825,7 @@ class HttpServerManagerForPDMaster:
         p_node: PD_Client_Obj,
         d_node: PD_Client_Obj,
         start_time: float,
-        prompt: str,
+        prompt: Union[str, List[int]],
         sampling_params: SamplingParams,
         multimodal_params: MultimodalParams,
         request: Request,

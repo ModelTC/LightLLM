@@ -13,6 +13,7 @@ from lightllm.server.httpserver_for_pd_master.pd_selector.cache_aware import (
     CacheAwarePolicy,
 )
 from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_tree import PromptCacheTree
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_key import prompt_cache_key
 from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import (
     LoadBalancedCacheAwareSelector,
     PDSelectionExtraInfo,
@@ -37,13 +38,19 @@ def _local_policy(config):
 
 def _insert_prompt(policy, prompt, worker):
     sample_stride = policy.config.sample_stride
-    asyncio.run(policy.prompt_cache_tree.insert_sampled(prompt[::sample_stride], worker.connection_key, sample_stride))
+    asyncio.run(
+        policy.prompt_cache_tree.insert_sampled(
+            prompt_cache_key(prompt, sample_stride), worker.connection_key, sample_stride
+        )
+    )
 
 
 def _prefix_match(policy, prompt):
     sample_stride = policy.config.sample_stride
     return asyncio.run(
-        policy.prompt_cache_tree.prefix_match_sampled(prompt[::sample_stride], len(prompt), sample_stride)
+        policy.prompt_cache_tree.prefix_match_sampled(
+            prompt_cache_key(prompt, sample_stride), len(prompt), sample_stride
+        )
     )
 
 
@@ -254,13 +261,13 @@ def test_cache_aware_keeps_cache_worker_when_inflight_load_is_balanced():
     selected_worker, cache_info = asyncio.run(policy.select_worker([cache_worker, least_loaded_worker], prompt))
 
     assert selected_worker is cache_worker
-    # 前缀树每 512 个字符抽样一次，命中率保持原有的保守估算方式。
-    assert cache_info.estimated_cache_hit_rate == pytest.approx(1025 / len(prompt))
+    # An exact digest sequence covers the whole historical prompt.
+    assert cache_info.estimated_cache_hit_rate == 1.0
 
 
 def test_cache_aware_uses_least_loaded_worker_when_cache_worker_is_overloaded():
     policy = _local_policy(CacheAwareConfig())
-    cache_worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=2000, dispatched_req_num=2)
+    cache_worker = _worker("10.0.0.1:8000", dispatched_prompt_chars=3000, dispatched_req_num=2)
     least_loaded_worker = _worker("10.0.0.2:8000", dispatched_prompt_chars=100, dispatched_req_num=2)
     prompt = "shared prefix " * 100
     _insert_prompt(policy, prompt, cache_worker)
@@ -294,7 +301,7 @@ def test_cache_aware_compares_uncached_work_even_when_other_worker_is_idle():
 
     assert selected_worker is cache_worker
     assert extra.selection_reason == "cache_work"
-    assert extra.estimated_prefill_chars == len(prompt) - 1025
+    assert extra.estimated_prefill_chars == 1
 
 
 def test_cache_aware_randomly_selects_an_idle_worker_without_cache_match():

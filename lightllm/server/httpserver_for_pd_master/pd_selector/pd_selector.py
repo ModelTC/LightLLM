@@ -9,6 +9,7 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.error_utils import PDTransportUnavailableError, ServerBusyError
 from lightllm.utils.log_utils import init_logger
+from .prompt_cache_key import prompt_cache_key
 
 
 logger = init_logger(__name__)
@@ -180,7 +181,7 @@ class LoadBalancedCacheAwareSelector(AdaptiveLoadSelector):
             return
         sample_stride = self.policy.config.sample_stride
         await self.policy.prompt_cache_tree.insert_sampled(
-            prompt[::sample_stride], p_node.connection_key, sample_stride
+            prompt_cache_key(prompt, sample_stride), p_node.connection_key, sample_stride
         )
 
     async def run_metadata_sync(self) -> None:

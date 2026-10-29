@@ -112,17 +112,23 @@ hold only the heuristics that must be shared across workers:
 
 * ``pd_node_stats_client.py`` / ``pd_node_stats_server.py`` manage pending Prefill characters and
   request counts.
-* ``prompt_cache_tree_client.py`` / ``prompt_cache_tree_server.py`` manage the sampled prompt prefix
-  tree.
+* ``prompt_cache_tree_client.py`` / ``prompt_cache_tree_server.py`` manage the prefix tree of
+  contiguous prompt-block digests.
 
 The selector reads counter snapshots for its current P-node candidates and selects from that local
 candidate set. ``add_dispatched_info`` atomically increments both counters after selection, and
 ``sub_dispatched_info`` decrements them later. The shared service stores data by ``connection_key``;
 it does not maintain a worker node registry or choose candidates.
 
-The cache-aware policy samples the prompt by ``sample_stride`` before calling
-``prefix_match_sampled`` or ``insert_sampled``. Hit-rate windows and dynamic thresholds remain local
-to each worker. Per-token messages, GPU token load, and request objects remain process-local.
+The cache-aware policy hashes every contiguous ``sample_stride``-character block (2048 by default)
+before calling ``prefix_match_sampled`` or ``insert_sampled``. Each digest covers every character in
+its block, preventing sparse character sampling from treating distinct sessions as highly matched
+prefixes. These are historical location hints, not proof of GPU KV residency; measure actual reuse
+with the response's ``cached_tokens``. Hit-rate windows and dynamic thresholds remain local to each
+worker. Per-token messages, GPU token load, and request objects remain process-local.
+
+Independent Masters use a versioned namespace for config-server replication. Upgrade every Master
+together when moving from sampled keys to contiguous-block digests so they can share hints.
 
 Health and proxy behavior
 -------------------------

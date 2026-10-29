@@ -12,7 +12,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.net_utils import get_pd_master_unix_socket_address
 from ..async_utils import await_cancellation_safe
-from .prompt_cache_tree import PromptCacheMatchResult, PromptCacheTree
+from .prompt_cache_tree import PromptCacheKey, PromptCacheMatchResult, PromptCacheTree
 
 RPC_TIMEOUT_SECONDS = 5
 logger = init_logger(__name__)
@@ -28,10 +28,12 @@ class LocalPromptCacheTreeClient:
             evict_node_batch=config.evict_node_batch,
         )
 
-    async def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+    async def prefix_match_sampled(
+        self, key: PromptCacheKey, input_char_count: int, sample_stride: int
+    ) -> PromptCacheMatchResult:
         return self.prompt_cache_tree.prefix_match_sampled(key, input_char_count, sample_stride)
 
-    async def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+    async def insert_sampled(self, key: PromptCacheKey, prefill_node: str, sample_stride: int) -> None:
         self.prompt_cache_tree.insert_sampled(key, prefill_node, sample_stride)
 
 
@@ -50,7 +52,9 @@ class RemotePromptCacheTreeClient:
             },
         )
 
-    async def prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+    async def prefix_match_sampled(
+        self, key: PromptCacheKey, input_char_count: int, sample_stride: int
+    ) -> PromptCacheMatchResult:
         return await self._run_rpc(
             self._prefix_match_sampled,
             key,
@@ -58,7 +62,7 @@ class RemotePromptCacheTreeClient:
             sample_stride,
         )
 
-    async def insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+    async def insert_sampled(self, key: PromptCacheKey, prefill_node: str, sample_stride: int) -> None:
         await self._run_rpc(
             self._insert_sampled,
             key,
@@ -82,7 +86,9 @@ class RemotePromptCacheTreeClient:
             os.kill(os.getpid(), signal.SIGTERM)
             raise
 
-    def _prefix_match_sampled(self, key: str, input_char_count: int, sample_stride: int) -> PromptCacheMatchResult:
+    def _prefix_match_sampled(
+        self, key: PromptCacheKey, input_char_count: int, sample_stride: int
+    ) -> PromptCacheMatchResult:
         with self.lock:
             result = obtain(self.connection.root.prefix_match_sampled(key, input_char_count, sample_stride))
         prefill_node, matched_char_count, input_char_count, last_insert_time = result
@@ -93,7 +99,7 @@ class RemotePromptCacheTreeClient:
             last_insert_time=last_insert_time,
         )
 
-    def _insert_sampled(self, key: str, prefill_node: str, sample_stride: int) -> None:
+    def _insert_sampled(self, key: PromptCacheKey, prefill_node: str, sample_stride: int) -> None:
         with self.lock:
             obtain(self.connection.root.insert_sampled(key, prefill_node, sample_stride))
 

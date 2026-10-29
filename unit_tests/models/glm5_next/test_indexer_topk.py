@@ -97,7 +97,7 @@ def test_topk_without_vllm(indexer, monkeypatch):
     _assert_topk(logits, lengths, indices)
 
 
-@pytest.mark.parametrize("mtp_size", [1, 3, 6])
+@pytest.mark.parametrize("mtp_size", [1, 3, 4, 6])
 @pytest.mark.parametrize("requests,max_pools", [(5, 640), (5, 1024), (5, 262144), (64, 640)])
 def test_paged_decode_matches_nonpaged_with_graph_and_mtp(indexer, monkeypatch, mtp_size, requests, max_pools):
     pytest.importorskip("deep_gemm")

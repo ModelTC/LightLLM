@@ -1,3 +1,5 @@
+import os
+
 import torch
 import triton
 
@@ -5,6 +7,15 @@ from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
 
 from .triton_kernel.index_quant import hadamard_transform_quant_fp8
 from .triton_kernel.kpool import compress_pools, gather_pools, gather_paged_pools, get_pool_ranges, expand_topk
+
+
+def prefill_logits_query_chunk(query_rows, max_pools, budget_mib):
+    """Bound the FP32 temporary without changing the per-query indexer math."""
+    if not 16 <= budget_mib <= 1024:
+        raise ValueError("GLM prefill logits budget must be between 16 and 1024 MiB")
+    if max_pools <= 0:
+        raise ValueError("max_pools must be positive")
+    return max(1, min(query_rows, budget_mib * 1024 * 1024 // 4 // max_pools))
 
 
 class Glm5NextNsaInfer:
@@ -16,6 +27,9 @@ class Glm5NextNsaInfer:
         self.heads = network_config["index_n_heads"]
         self.dim = network_config["index_head_dim"]
         self.eps = network_config["rms_norm_eps"]
+        self.prefill_logits_budget_mib = int(os.environ.get("LIGHTLLM_GLM53_PREFILL_LOGITS_MIB", "64"))
+        # Validate at construction, before the first long request allocates a temporary.
+        prefill_logits_query_chunk(1, 1, self.prefill_logits_budget_mib)
 
     def select_topk_indices(self, logits, lengths, indices):
         """Select row-relative indices, with valid entries before -1 padding."""
@@ -83,9 +97,9 @@ class Glm5NextNsaInfer:
             att_state.lengths, infer_state.b1_cu_q_seq_len, infer_state.max_q_seq_len, max_pools
         )
         groups = torch.empty((q_fp8.shape[0], self.topk // 4), dtype=torch.int32, device=q_fp8.device)
-        # Budget 64 MiB for FP32 logits. At 1M tokens this permits 64 queries per chunk,
-        # limiting Q parallelism even when the prefill batch contains many tokens.
-        chunk_size = max(1, min(q_fp8.shape[0], 16 * 1024 * 1024 // max_pools))
+        # Keep the established 64 MiB default. Larger explicit budgets let long-context
+        # deployments trade temporary memory for more query parallelism and fewer launches.
+        chunk_size = prefill_logits_query_chunk(q_fp8.shape[0], max_pools, self.prefill_logits_budget_mib)
         import deep_gemm
 
         for start in range(0, q_fp8.shape[0], chunk_size):
@@ -100,6 +114,8 @@ class Glm5NextNsaInfer:
                 max_seqlen_k=max_pools,
             )
             self.select_topk_indices(logits, lengths[start:end], groups[start:end])
+            # Release before the next RHS allocation; otherwise two chunks overlap.
+            del logits
         return groups
 
     def _get_decode_indices(self, q_fp8, weights, packed_buffer, infer_state, att_state, max_pools):

@@ -11,6 +11,8 @@ from .flashmla_sparse import (
 
 
 class Glm5NextSparseAttBackend(NsaFlashMlaSparseAttBackend):
+    parallel_ragged_indices = True
+
     def create_att_prefill_state(self, infer_state):
         return Glm5NextSparsePrefillState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 

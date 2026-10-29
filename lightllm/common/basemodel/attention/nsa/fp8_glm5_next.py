@@ -9,6 +9,8 @@ from .glm5_next import Glm5NextSparsePrefillState
 
 
 class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
+    parallel_ragged_indices = True
+
     def __init__(self, model):
         super().__init__(model=model)
         # Match the backend's existing microbatch-separated ragged buffers.

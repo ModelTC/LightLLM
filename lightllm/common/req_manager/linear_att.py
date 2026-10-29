@@ -19,7 +19,9 @@ class ReqManagerForMamba(HybridAttentionReqManager):
 
     ##### 管理器初始化与检查点缓存池 #####
 
-    def __init__(self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig):
+    def __init__(
+        self, max_request_num, max_sequence_length, mem_manager, linear_config: LinearAttCacheConfig, *, state_args=None
+    ):
         super().__init__(max_request_num, max_sequence_length, mem_manager)
         args = get_env_start_args()
         self.mtp_step = args.mtp_step
@@ -29,7 +31,9 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             assert args.enable_prefill_decode_mixed is False
         self.big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
         self.linear_config = linear_config
-        self.linear_state_manager = LinearStateManager(max_request_num, linear_config, args, kda=self.kda)
+        self.linear_state_manager = LinearStateManager(
+            max_request_num, linear_config, args if state_args is None else state_args, kda=self.kda
+        )
         self.pd_state = LinearAttPDState(self.linear_state_manager)
 
     def create_small_page_cache_manager(self, size: int):

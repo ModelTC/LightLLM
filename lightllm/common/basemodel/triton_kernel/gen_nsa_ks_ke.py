@@ -20,6 +20,7 @@ def _gen_nsa_ks_ke(
     ragged_mem_index,
     BLOCK_REQ: tl.constexpr,
     BLOCK_SEQ_SPLIT: tl.constexpr,
+    COPY_RAGGED: tl.constexpr = True,
 ):
     cur_index = tl.program_id(0)
     # 只处理最后一个同样req_idx的req进行处理，代表seq_len最长的那个。
@@ -65,22 +66,53 @@ def _gen_nsa_ks_ke(
             mask=mask,
         )
 
-    for block_index in range(tl.cdiv(cur_total_len, BLOCK_SEQ_SPLIT)):
-        block_start = block_index * BLOCK_SEQ_SPLIT
-        block_end = min(cur_total_len, (block_index + 1) * BLOCK_SEQ_SPLIT)
-        mask = (block_start + tl.arange(0, BLOCK_SEQ_SPLIT)) < block_end
+    if COPY_RAGGED:
+        for block_index in range(tl.cdiv(cur_total_len, BLOCK_SEQ_SPLIT)):
+            block_start = block_index * BLOCK_SEQ_SPLIT
+            block_end = min(cur_total_len, (block_index + 1) * BLOCK_SEQ_SPLIT)
+            mask = (block_start + tl.arange(0, BLOCK_SEQ_SPLIT)) < block_end
 
-        src_mem_index_ptr = (
-            req_to_token_index
-            + strided_req_to_token_index_b * cur_req_idx
-            + block_start
-            + tl.arange(0, BLOCK_SEQ_SPLIT)
-        )
-        src_mem_index = tl.load(src_mem_index_ptr, mask=mask, other=-1)
-        tl.store(
-            ragged_mem_index + pre_sum_seq_len + block_start + tl.arange(0, BLOCK_SEQ_SPLIT), src_mem_index, mask=mask
-        )
+            src_mem_index_ptr = (
+                req_to_token_index
+                + strided_req_to_token_index_b * cur_req_idx
+                + block_start
+                + tl.arange(0, BLOCK_SEQ_SPLIT)
+            )
+            src_mem_index = tl.load(src_mem_index_ptr, mask=mask, other=-1)
+            tl.store(
+                ragged_mem_index + pre_sum_seq_len + block_start + tl.arange(0, BLOCK_SEQ_SPLIT),
+                src_mem_index,
+                mask=mask,
+            )
     return
+
+
+@triton.jit
+def _copy_nsa_ragged_tiles(
+    b_seq_len,
+    b_req_idx,
+    b_same_req_mark,
+    req_to_token_index,
+    ragged_mem_index,
+    stride: tl.constexpr,
+    BLOCK_REQ: tl.constexpr,
+    TILE: tl.constexpr,
+):
+    index = tl.program_id(0)
+    tile = tl.program_id(1)
+    mark = tl.load(b_same_req_mark + index)
+    total = tl.load(b_seq_len + index)
+    if mark == 0 or tile * TILE >= total:
+        return
+    off = tl.arange(0, BLOCK_REQ)
+    prior_marks = tl.load(b_same_req_mark + off, off < index, 0)
+    prior_seq = tl.load(b_seq_len + off, (off < index) & (prior_marks != 0), 0)
+    start = tl.sum(prior_seq)
+    row = tl.load(b_req_idx + index)
+    position = tile * TILE + tl.arange(0, TILE)
+    mask = position < total
+    values = tl.load(req_to_token_index + row * stride + position, mask, -1)
+    tl.store(ragged_mem_index + start + position, values, mask)
 
 
 @torch.no_grad()
@@ -92,6 +124,7 @@ def gen_nsa_ks_ke(
     q_token_num: int,
     ragged_mem_index: torch.Tensor,
     hold_req_idx: int = -1,
+    max_seq_len: Optional[int] = None,
 ):
     """
     hold_req_idx 这是一个特殊req idx，主要是用于padding 请求数量时使用，所以其处理存在特殊性。
@@ -101,6 +134,12 @@ def gen_nsa_ks_ke(
     ke = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     lengths = torch.empty((q_token_num,), dtype=torch.int32, device=b_seq_len.device)
     b_same_req_mark = gen_same_req_mark(b_req_idx, hold_req_idx=hold_req_idx)
+    # Long GLM index tables otherwise traverse the entire prefix on one CTA.
+    # init_att_state runs outside the model graph, so this bound is refreshed
+    # for each decode call. Keep the established short/unspecified path.
+    parallel_copy = max_seq_len is not None and max_seq_len >= 32768
+    if parallel_copy:
+        assert req_to_token_index.stride(1) == 1
 
     _gen_nsa_ks_ke[(batch_size,)](
         b_seq_len=b_seq_len,
@@ -116,7 +155,19 @@ def gen_nsa_ks_ke(
         ragged_mem_index=ragged_mem_index,
         BLOCK_REQ=triton.next_power_of_2(batch_size),
         BLOCK_SEQ_SPLIT=256,
+        COPY_RAGGED=not parallel_copy,
     )
+    if parallel_copy:
+        _copy_nsa_ragged_tiles[(batch_size, triton.cdiv(max_seq_len, 4096))](
+            b_seq_len,
+            b_req_idx,
+            b_same_req_mark,
+            req_to_token_index,
+            ragged_mem_index,
+            req_to_token_index.stride(0),
+            triton.next_power_of_2(batch_size),
+            4096,
+        )
     return ks, ke, lengths
 
 

@@ -12,12 +12,13 @@ from lightllm.server.config_server.cache_metadata import CacheMetadataRelay, rel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.httpserver_for_pd_master.pd_selector.pd_selector import LoadBalancedCacheAwareSelector
 from lightllm.server.pd_io_struct import PD_Client_Obj
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_key import prompt_cache_key
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
 
 def _prefix_match(tree, prompt):
-    return tree.prefix_match_sampled(prompt[:: tree.sample_stride], len(prompt), tree.sample_stride)
+    return tree.prefix_match_sampled(prompt_cache_key(prompt, tree.sample_stride), len(prompt), tree.sample_stride)
 
 
 async def _estimated(selector, worker, prompt):
@@ -198,7 +199,7 @@ def test_worker_restart_at_same_address_invalidates_hint_but_connection_change_d
     peer = _connect(CacheMetadataRelay(), state)
     del peer
     prompt = "x" * 1025
-    event = {**_hint(key="xxx"), "seq": 1}
+    event = {**_hint(key=prompt_cache_key("x" * 1025, 2048)), "seq": 1}
     state.apply(event)
     worker = selector.prefill_nodes[0]
     worker.connection_id = "new-master-connection"
@@ -215,7 +216,7 @@ def test_dp_ranks_are_distinct_cache_targets():
     state = selector.shared_cache
     relay = CacheMetadataRelay()
     peer = _connect(relay, state)
-    relay.publish(peer, _hint(key="xxx", worker=worker.connection_key))
+    relay.publish(peer, _hint(key=prompt_cache_key("x" * 1025, 2048), worker=worker.connection_key))
     _drain(peer, state)
     assert asyncio.run(_estimated(selector, worker, "x" * 1025)).estimated_cache_hit_rate == 1
     worker.dp_index = 4
@@ -227,11 +228,11 @@ def test_reconnect_replays_missing_events_without_refreshing_old_hint_age():
     selector = _selector()
     state = selector.shared_cache
     peer = _connect(relay, state)
-    relay.publish(peer, _hint(key="xxx", observed_at=time.time() - 120))
+    relay.publish(peer, _hint(key=prompt_cache_key("x" * 1025, 2048), observed_at=time.time() - 120))
     _drain(peer, state)
     relay.unsubscribe(peer)
     publisher, _ = relay.subscribe("other", 2, None, 0)
-    relay.publish(publisher, _hint(key="yyy", seq=2))
+    relay.publish(publisher, _hint(key=prompt_cache_key("y" * 1025, 2048), seq=2))
     _connect(relay, state)
     assert state.cursor == 2
     result = _prefix_match(selector.shared_cache.tree, "x" * 1025)
@@ -245,7 +246,7 @@ def test_duplicate_hint_does_not_change_order_owner_age_or_lru():
     selector = _selector()
     state = selector.shared_cache
     peer = _connect(relay, state)
-    hint = _hint(key="xxx")
+    hint = _hint(key=prompt_cache_key("x" * 1025, 2048))
     relay.publish(peer, hint)
     _drain(peer, state)
     tree = selector.shared_cache.tree
@@ -264,7 +265,7 @@ def test_unrecoverable_gap_or_relay_restart_clears_old_tree_and_queued_hints(res
     selector = _selector()
     state = selector.shared_cache
     peer = _connect(relay, state)
-    relay.publish(peer, _hint(key="xxx"))
+    relay.publish(peer, _hint(key=prompt_cache_key("x" * 1025, 2048)))
     _drain(peer, state)
     relay.unsubscribe(peer)
     asyncio.run(selector.insert_prompt_cache("unsent" * 200, selector.prefill_nodes[0]))
@@ -273,7 +274,7 @@ def test_unrecoverable_gap_or_relay_restart_clears_old_tree_and_queued_hints(res
         relay = CacheMetadataRelay(max_log_bytes=500)
     publisher, _ = relay.subscribe("other", 2, None, 0)
     for seq in range(2, 8):
-        relay.publish(publisher, _hint(key="yyy", seq=seq))
+        relay.publish(publisher, _hint(key=prompt_cache_key("y" * 1025, 2048), seq=seq))
     _connect(relay, state)
     assert state.outgoing.empty()
     assert state.cursor == relay.sequence
@@ -285,7 +286,7 @@ def test_future_timestamp_is_not_eligible_for_fresh_cache_priority():
     selector = _selector()
     state = selector.shared_cache
     _connect(CacheMetadataRelay(), state)
-    state.apply({**_hint(key="xxx", observed_at=time.time() + 100), "seq": 1})
+    state.apply({**_hint(key=prompt_cache_key("x" * 1025, 2048), observed_at=time.time() + 100), "seq": 1})
     result = asyncio.run(_estimated(selector, selector.prefill_nodes[0], "x" * 1025))
     assert result.estimated_cache_hit_rate == 1
     assert result.cache_last_insert_time is None
@@ -414,12 +415,33 @@ def test_four_masters_keep_long_prefix_on_original_dp_despite_idle_peer():
         assert 1 <= info.estimated_prefill_chars <= selector.policy.config.sample_stride
 
 
+def test_four_masters_do_not_confuse_sessions_between_old_sample_points():
+    relay = CacheMetadataRelay()
+    selectors = [_selector(master=i) for i in range(4)]
+    peers = [_connect(relay, selector.shared_cache) for selector in selectors]
+    prompt = "x" * 200000
+    changed = prompt[:17] + "Y" + prompt[18:]
+    assert changed[::512] == prompt[::512]
+    publisher = selectors[0]
+    asyncio.run(publisher.insert_prompt_cache(prompt, publisher.prefill_nodes[0]))
+    relay.publish(peers[0], publisher.shared_cache.outgoing.get_nowait())
+    for peer, selector in zip(peers, selectors):
+        _drain(peer, selector.shared_cache)
+        info = asyncio.run(_estimated(selector, selector.prefill_nodes[0], changed))
+        assert info.estimated_cache_hit_rate == 0
+        assert info.matched_chars == 0
+        assert info.selection_reason != "long_prefix_affinity"
+
+
 def test_long_prefix_keeps_affinity_when_cluster_load_is_temporarily_unknown():
     selector = _selector()
     prompt = "same long history " * 10000
     node = selector.prefill_nodes[0]
     selector.shared_cache.tree.insert_key(
-        prompt[:: selector.policy.config.sample_stride], node.connection_key, time.monotonic(), node.node_id
+        prompt_cache_key(prompt, selector.policy.config.sample_stride),
+        node.connection_key,
+        time.monotonic(),
+        node.node_id,
     )
     assert selector.shared_cache.cluster_loads(selector.prefill_nodes) is None
     with patch.object(
@@ -435,7 +457,10 @@ def test_restarted_p_does_not_reuse_previous_incarnation_long_prefix_hint():
     prompt = "old long history " * 10000
     node = selector.prefill_nodes[0]
     selector.shared_cache.tree.insert_key(
-        prompt[:: selector.policy.config.sample_stride], node.connection_key, time.monotonic(), node.node_id - 1
+        prompt_cache_key(prompt, selector.policy.config.sample_stride),
+        node.connection_key,
+        time.monotonic(),
+        node.node_id - 1,
     )
     with patch.object(
         selector, "_importance_sampling", side_effect=[selector.prefill_nodes[1], selector.decode_nodes[0]]

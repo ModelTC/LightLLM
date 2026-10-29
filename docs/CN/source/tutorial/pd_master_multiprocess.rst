@@ -105,17 +105,23 @@ config server 的 ``/registered_objects`` 协议。单机多进程 PD Master 本
 
 * ``pd_node_stats_client.py`` / ``pd_node_stats_server.py`` 管理 Prefill pending
   字符数和请求数。
-* ``prompt_cache_tree_client.py`` / ``prompt_cache_tree_server.py`` 管理抽稀后的
-  prompt 前缀树。
+* ``prompt_cache_tree_client.py`` / ``prompt_cache_tree_server.py`` 管理 prompt
+  连续块摘要的前缀树。
 
 Selector 先从统计服务读取当前候选 P 节点的计数快照，再在本地候选集合中选点；选中后
 通过 ``add_dispatched_info`` 原子增加两个计数，请求进入后续阶段时通过
 ``sub_dispatched_info`` 扣减。共享端只按 ``connection_key`` 管理数据，不保存 worker
 节点注册表，也不决定候选集合。
 
-Cache-aware 策略在 worker 内按 ``sample_stride`` 对 prompt 抽稀，再调用共享树的
-``prefix_match_sampled`` 和 ``insert_sampled``。命中率窗口和动态阈值仍是各 worker
-私有数据。逐 token 数据、GPU token load 和请求对象始终保留在本地进程。
+Cache-aware 策略在 worker 内将每个连续的 ``sample_stride`` 字符块（默认 2048）
+计算为一个摘要，再调用共享树的 ``prefix_match_sampled`` 和 ``insert_sampled``。
+摘要覆盖块内全部字符，避免只取少数采样字符时将不同会话误判为高前缀匹配。
+前缀树仅记录历史处理位置，不证明 GPU KV 仍驻留；实际命中需使用请求返回的
+``cached_tokens``。命中率窗口和动态阈值仍是各 worker 私有数据。逐 token 数据、
+GPU token load 和请求对象始终保留在本地进程。
+
+独立 Master 的 config-server 同步使用带版本的 namespace；从旧采样 key 升级到
+连续块摘要时，应同时更新全部 Master，避免不同版本无法共享提示。
 
 健康检查和代理行为
 ------------------

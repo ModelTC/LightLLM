@@ -1,3 +1,5 @@
+from copy import copy
+
 from lightllm.common.state_cache_manager import LayerCache
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -18,12 +20,27 @@ class Glm5NextReqManager(ReqManagerForMamba):
         assert (
             get_env_start_args().linear_att_hash_page_size % linear_config.index_kpool == 0
         ), "GLM K-pool requires cache pages aligned to index_kpool"
-        super().__init__(max_request_num, max_sequence_length, mem_manager, linear_config)
+        args = get_env_start_args()
+        state_args = None
+        if args.run_mode == "prefill" and args.ssm_state_mode == "native":
+            # This role never verifies speculative tokens. Retain draft model
+            # KV, but only one committed KDA state and the base conv window.
+            state_args = copy(args)
+            state_args.mtp_step = 0
+        super().__init__(max_request_num, max_sequence_length, mem_manager, linear_config, state_args=state_args)
+        tail_step = self.mtp_step
+        if args.run_mode in ("prefill", "decode"):
+            # PD transports the raw ring as a fixed layout. P and D can use
+            # different verify widths; modulo addressing must still agree.
+            # KDA validation supports at most 15 speculative tokens.
+            if not 0 <= tail_step <= 15:
+                raise ValueError("GLM PD indexer state supports mtp_step between 0 and 15")
+            tail_step = 15
         self.req_to_indexer_tail = LayerCache(
             size=max_request_num + 1,
             # Raw keys/gates are computation state, even when packed KV is FP8.
             dtype=linear_config.conv_state_dtype,
-            shape=(linear_config.index_kpool + self.mtp_step, 2 * linear_config.index_head_dim),
+            shape=(linear_config.index_kpool + tail_step, 2 * linear_config.index_head_dim),
             layer_num=linear_config.get_full_att_kv_layer_num_with_draft_model(),
             device="cuda",
         )

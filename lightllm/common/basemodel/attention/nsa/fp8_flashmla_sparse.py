@@ -51,6 +51,9 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
             q_token_num=self.infer_state.input_ids.shape[0],
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
+            max_seq_len=(
+                self.infer_state.max_kv_seq_len if getattr(self.backend, "parallel_ragged_indices", False) else None
+            ),
         )
         return
 
@@ -142,6 +145,9 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
             q_token_num=self.infer_state.b_seq_len.shape[0],
             ragged_mem_index=self.ragged_mem_index,
             hold_req_idx=self.infer_state.req_manager.HOLD_REQUEST_ID,
+            max_seq_len=(
+                self.infer_state.max_kv_seq_len if getattr(self.backend, "parallel_ragged_indices", False) else None
+            ),
         )
         flash_mla = get_flash_mla()
 

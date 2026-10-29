@@ -63,11 +63,17 @@ CONFIG_SERVER_HOST=lightllm-config glm53-pd p0 --dry-run
 CONFIG_SERVER_HOST=lightllm-config glm53-pd master --dry-run
 ```
 
-The measured configuration stays 1M context, P128/D256, MTP3, BF16 SSM,
-Replay8/precompute/raw, `fp8kv_dsa`, P batch4096/chunk2048, D batch1024,
-P memory .75 / D .85, D KV cap 2,800,000 per GPU, graph batch16
+The current measured configuration supports a 1M context limit with P128/D256,
+BF16 SSM and `fp8kv_dsa`. P uses MTP1/native while still filling draft KV;
+D uses MTP3/Replay8/precompute/raw. P batch/chunk are 8192/8192 with a bounded
+512 MiB indexer-logits workspace and memory fraction .73. D batch is 1024,
+memory fraction .85, KV cap 2,800,000 per GPU, graph batch16
 (P graphs disabled, D graphs enabled). Master resource waits are 200 seconds;
 GPU KV transfer timeout is 600 seconds; Schema limit is 65536 for every role.
+Every P and D uses transfer page size 32768 and page count 2. These defaults
+were checked across 4K/32K/128K/512K/1M workloads on 32 H100 80GB GPUs;
+capacity and latency must be rechecked on other hardware. See the
+[parameter table and overrides](../test/start_scripts/glm53/README_glm53_optim_2p2d.md).
 
 ## Build and verify
 

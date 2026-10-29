@@ -13,6 +13,7 @@ from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 from lightllm.server.pd_io_struct import PD_Client_Obj
+from lightllm.server.httpserver_for_pd_master.pd_selector.prompt_cache_key import prompt_cache_key
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
 
@@ -244,7 +245,73 @@ def test_single_block_prefill_hit_persists_past_decode_zeros(monkeypatch):
     assert cached and all(c == 30 for c in cached), cached
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.3)]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "h"
+    assert mgr.inserted_prompt_caches[0][0] == prompt_cache_key("hello", 2048)
+
+
+@pytest.mark.parametrize("special_tokens", [False, True])
+@pytest.mark.parametrize("choices", [1, 2])
+def test_pure_text_reuses_admission_ids_for_each_choice_without_changing_routing_text(
+    monkeypatch, special_tokens, choices
+):
+    from unittest.mock import Mock
+
+    manager = _make_manager(monkeypatch)
+    manager.args.enable_multimodal = False
+    manager.args.max_req_total_len = 1048576
+    ids = [101, 3, 42] if special_tokens else [3, 42]
+    manager.tokenizer.encode = Mock(return_value=ids)
+    manager.tokens = Mock(side_effect=AssertionError("Do not encode a second time for admission"))
+    params = SamplingParams()
+    params.init(None, max_new_tokens=2, n=choices, best_of=choices, add_special_tokens=special_tokens)
+    _collect(manager, params, monkeypatch, [(2, FinishStatus.FINISHED_STOP)] * choices)
+    manager.tokenizer.encode.assert_called_once_with("hello", None, add_special_tokens=special_tokens)
+    assert len(manager.segment_inputs) == choices
+    assert all(prompt == ids for prompt, _ in manager.segment_inputs)
+    # Both the cache hint and reservation remain based on the original text.
+    assert all(key == prompt_cache_key("hello", 2048) for key, _ in manager.inserted_prompt_caches)
+
+
+def test_prefill_ids_are_not_incrementally_extended_across_a_bpe_boundary(monkeypatch):
+    from tokenizers import Tokenizer, models
+    from unittest.mock import Mock
+
+    tokenizer = Tokenizer(models.BPE({"P": 0, "x": 1, "Px": 2}, [("P", "x")]))
+    manager = _make_manager(monkeypatch)
+    del manager.tokens
+    manager.args.enable_multimodal = False
+    manager.args.max_req_total_len = 1048576
+    manager.tokenizer.encode = Mock(
+        side_effect=lambda text, _multimodal=None, **kwargs: tokenizer.encode(text, **kwargs).ids
+    )
+    params = SamplingParams()
+    params.init(None, max_new_tokens=4, regular_constraint=".*")
+    _collect(
+        manager,
+        params,
+        monkeypatch,
+        [(2, FinishStatus.FINISHED_PD_DECODE_CAPACITY), (2, FinishStatus.FINISHED_STOP)],
+        prompt="P",
+        first_token_text="x",
+    )
+    assert manager.segment_inputs == [([0], 0), ("Px", 0)]
+    assert [call.args[0] for call in manager.tokenizer.encode.call_args_list] == ["P", "Px"]
+
+
+@pytest.mark.parametrize("reason", ["multimodal_mode", "image", "audio", "raw_character_limit"])
+def test_prefill_id_reuse_preserves_original_fallbacks(monkeypatch, reason):
+    from unittest.mock import Mock
+
+    manager = _make_manager(monkeypatch)
+    manager.args.enable_multimodal = reason == "multimodal_mode"
+    manager.args.max_req_total_len = 1 if reason == "raw_character_limit" else 1048576
+    manager.tokens = Mock(return_value=7)
+    manager.tokenizer.encode = Mock(side_effect=AssertionError("Fallback must keep its own tokenizer path"))
+    multimodal = SimpleNamespace(
+        images=[object()] if reason == "image" else [], audios=[object()] if reason == "audio" else []
+    )
+    params = SimpleNamespace(add_special_tokens=False)
+    assert manager._prepare_prefill_prompt("long text", multimodal, params) == (7, None)
+    manager.tokens.assert_called_once_with("long text", multimodal, params)
 
 
 @pytest.mark.parametrize("mode", [StopStrMatchMode.ALL_TEXT, StopStrMatchMode.CONTENT_ONLY])
@@ -311,7 +378,7 @@ def test_dynamic_split_keeps_first_segment_hit(monkeypatch):
     assert cached == [50, 50, 50, 50], cached
     assert mgr.recorded_cache_hit_rates == [pytest.approx(0.5)]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "h"
+    assert mgr.inserted_prompt_caches[0][0] == prompt_cache_key("hello", 2048)
     # 无约束请求不需要计算语法状态重放长度。
     assert mgr.segment_inputs == [
         ("hello", 0),
@@ -538,7 +605,7 @@ def test_completed_prefill_inserts_cache_when_first_output_is_decode(monkeypatch
     )
     assert cached == [30, 30, 30]
     assert len(mgr.inserted_prompt_caches) == 1
-    assert mgr.inserted_prompt_caches[0][0] == "h"
+    assert mgr.inserted_prompt_caches[0][0] == prompt_cache_key("hello", 2048)
 
 
 @pytest.mark.parametrize("include", [False, True])

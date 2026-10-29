@@ -14,6 +14,10 @@ Mount the same model at MODEL_DIR (default /model) on all GPU hosts.
 Logs: RUN_DIR/logs/ROLE.log and stdout (RUN_DIR defaults /var/log/lightllm).
 Overrides: CONFIG_SERVER_PORT, CONFIG_SERVER_BIND_HOST, MODEL_DIR, CPU_MODEL_DIR, SOURCE_DIR,
 CPU_SOURCE, GPU_SOURCE, PYTHON_BIN, RUN_DIR, MASTER_PORT, DISK_CACHE_DIR.
+Tuning overrides: P_BATCH_MAX_TOKENS, P_CHUNKED_PREFILL_SIZE,
+P_MEM_FRACTION, P_MTP_STEP, P_SSM_STATE_MODE, LIGHTLLM_GLM53_PREFILL_LOGITS_MIB,
+PD_KV_PAGE_SIZE, PD_KV_PAGE_NUM.
+Use the same PD_KV_PAGE_SIZE/PD_KV_PAGE_NUM on every P and D role.
 --dry-run prints commands and paths without starting services or writing files.
 EOF
 }
@@ -100,21 +104,27 @@ else
     --nnodes 2 --node_rank "$NODE_RANK" --nccl_host "$CONFIG_SERVER_HOST" --nccl_port "$NCCL_PORT"
     --use_config_server_to_init_nccl
     --config_server_host "$CONFIG_SERVER_HOST" --config_server_port "$CONFIG_SERVER_PORT"
-    --pd_trans_mode nixl --pd_kv_page_size 16384 --pd_kv_page_num 1
+    --pd_trans_mode nixl --pd_kv_page_size "${PD_KV_PAGE_SIZE:-32768}" --pd_kv_page_num "${PD_KV_PAGE_NUM:-2}"
     --tp 16 --dp 16 --enable_ep_moe --host 0.0.0.0 --port "$PORT"
     --graph_max_batch_size 16 --max_req_total_len 1048576
-    --mtp_mode eagle_with_att --mtp_draft_model_dir "$MODEL_DIR" --mtp_step 3
+    --mtp_mode eagle_with_att --mtp_draft_model_dir "$MODEL_DIR"
     --quant_type fp8w8a8-b128-deepgemm --linear_att_ssm_data_type bfloat16
     --llm_kv_type fp8kv_dsa --tool_call_parser glm47 --reasoning_parser glm45
     --linear_att_hash_page_size 2048 --linear_att_cache_size 64
-    --ssm_state_mode replay
-    --ssm_replay_config '{"cache_len":8,"compute_mode":"precompute","fold_method":"raw"}'
   )
   if [[ "$RUN_MODE" == prefill ]]; then
+    P_SSM_STATE_MODE="${P_SSM_STATE_MODE:-native}"
+    ARGS+=(--mtp_step "${P_MTP_STEP:-1}" --ssm_state_mode "$P_SSM_STATE_MODE")
+    case "$P_SSM_STATE_MODE" in
+      replay) ARGS+=(--ssm_replay_config '{"cache_len":8,"compute_mode":"precompute","fold_method":"raw"}') ;;
+      native) ;;
+      *) echo 'P_SSM_STATE_MODE must be native or replay' >&2; exit 2 ;;
+    esac
+    SERVICE_ENV+=("LIGHTLLM_GLM53_PREFILL_LOGITS_MIB=${LIGHTLLM_GLM53_PREFILL_LOGITS_MIB:-512}")
     ARGS+=(
       --use_dp_split_mode_connect_pd_master
-      --batch_max_tokens 4096 --chunked_prefill_size 2048
-      --running_max_req_size 128 --mem_fraction 0.75 --disable_cudagraph
+      --batch_max_tokens "${P_BATCH_MAX_TOKENS:-8192}" --chunked_prefill_size "${P_CHUNKED_PREFILL_SIZE:-8192}"
+      --running_max_req_size 128 --mem_fraction "${P_MEM_FRACTION:-0.73}" --disable_cudagraph
       --linear_att_page_block_num 8
       --enable_cpu_cache --cpu_cache_storage_size 1024
       --enable_disk_cache --disk_cache_storage_size 10240
@@ -122,6 +132,8 @@ else
     )
   else
     ARGS+=(
+      --mtp_step 3 --ssm_state_mode replay
+      --ssm_replay_config '{"cache_len":8,"compute_mode":"precompute","fold_method":"raw"}'
       --batch_max_tokens 1024 --running_max_req_size 256
       --max_total_token_num 2800000 --mem_fraction 0.85
       --enable_profiling torch_profiler
@@ -147,7 +159,6 @@ port = int(sys.argv[1])
 if not 0 < port < 65536:
     raise SystemExit("Invalid API port")
 with socket.socket() as listener:
-    listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     try:
         listener.bind(("0.0.0.0", port))
     except OSError:
