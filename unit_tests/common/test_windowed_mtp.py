@@ -27,7 +27,9 @@ def test_checkpoint_and_cpu_rank_layout():
     store.req_to_seq_len[0] = 9
     buffers = SimpleNamespace(kv_buffer=torch.zeros(2, 2, 4, 2, 3), seq_lens=torch.zeros(2, dtype=torch.int64))
     manager = ReqManagerForWindowedMTP.__new__(ReqManagerForWindowedMTP)
-    manager.mem_manager = SimpleNamespace(windowed_draft_kv=store, big_page_buffers=SimpleNamespace(draft_window=buffers))
+    manager.mem_manager = SimpleNamespace(
+        windowed_draft_kv=store, big_page_buffers=SimpleNamespace(draft_window=buffers)
+    )
     manager.save_big_page_states(torch.tensor([0]), [SimpleNamespace(req_idx=0)], [1])
     store.restore_checkpoint(2, buffers, 1)
     torch.testing.assert_close(store.kv_buffer[:, 8:12], expected, rtol=0, atol=0)
@@ -166,7 +168,7 @@ def test_fa3_graph_refreshes_request_state(tensor_cache, sliding_window):
             noise = runtime.noise_kv[batch * block_size : (batch + 1) * block_size]
             kv = torch.cat((history, noise)).float()
             q = runtime.query[batch * block_size : (batch + 1) * block_size].float()
-            scores = torch.einsum("qhd,kd->hqk", q, kv[:, 0]) * head_dim**-0.5
+            scores = torch.einsum("qhd,kd->hqk", q, kv[:, 0]) * head_dim ** -0.5
             if sliding_window:
                 q_pos = torch.arange(block_size, device="cuda") + len(history)
                 k_pos = torch.arange(len(kv), device="cuda")
