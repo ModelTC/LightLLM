@@ -114,7 +114,7 @@ def reduction_reference(inputs):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("block_n", [16, 64])
 @pytest.mark.parametrize("capacity", [2, 128])
-@pytest.mark.parametrize("dtype,head_dim", [(torch.bfloat16, 128), (torch.float16, 64)])
+@pytest.mark.parametrize("dtype,head_dim", [(torch.bfloat16, 128), (torch.float16, 64), (torch.bfloat16, 256)])
 def test_all_configs_reduce_only_valid_blocks(block_n, capacity, dtype, head_dim):
     lengths = [1, block_n, block_n + 1, capacity * block_n, capacity * block_n + 8192]
     mid = torch.randn(len(lengths), 4, capacity, head_dim, dtype=dtype, device="cuda")

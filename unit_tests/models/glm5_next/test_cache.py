@@ -67,11 +67,9 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         head_linear_k_dim=128,
         head_linear_v_dim=128,
         conv_kernel_size=4,
-        linear_layer_num=3,
         conv_state_dtype=torch.bfloat16,
         ssm_state_dtype=torch.float32,
-        full_attention_interval=4,
-        all_layer_num=4,
+        layer_types=("linear_attention",) * 3 + ("deepseek_sparse_attention",),
         draft_full_att_kv_layer_num=int(mtp_step > 0),
     )
     full_layers = config.get_full_att_kv_layer_num_with_draft_model()

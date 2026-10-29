@@ -53,11 +53,9 @@ def make_mems(monkeypatch, request):
             head_linear_k_dim=128,
             head_linear_v_dim=128,
             conv_kernel_size=4,
-            linear_layer_num=6,
             conv_state_dtype=torch.bfloat16,
             ssm_state_dtype=torch.float32,
-            full_attention_interval=4,
-            all_layer_num=8,
+            layer_types=(("linear_attention",) * 3 + ("deepseek_sparse_attention",)) * 2,
             draft_full_att_kv_layer_num=int(mtp_step > 0),
         )
         mems = []

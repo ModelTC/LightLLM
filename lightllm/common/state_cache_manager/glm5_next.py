@@ -21,10 +21,6 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
         linear = config["linear_attn_config"]
         tp = args.tp // args.dp
         assert linear["num_heads"] % tp == 0
-        layers = config["num_hidden_layers"]
-        assert config["layer_types"] == [
-            "deepseek_sparse_attention" if i % 4 == 3 else "linear_attention" for i in range(layers)
-        ]
         dtype = get_torch_dtype(args.data_type)
         # Raw index keys and compression scores only live in request tails.
         packed_dim = config["kv_lora_rank"] + cls.INDEX_PADDING_BYTES // dtype.itemsize
@@ -41,11 +37,9 @@ class Glm5NextCacheConfig(LinearAttCacheConfig):
             head_linear_k_dim=linear["head_dim"],
             head_linear_v_dim=linear["head_dim"],
             conv_kernel_size=linear["short_conv_kernel_size"],
-            linear_layer_num=len(linear["kda_layers"]),
             conv_state_dtype=dtype,
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
-            full_attention_interval=4,
-            all_layer_num=layers,
+            layer_types=config["layer_types"],
             draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num() if args.mtp_mode is not None else 0,
             index_kpool=config["index_kpool"],
             index_head_dim=config["index_head_dim"],

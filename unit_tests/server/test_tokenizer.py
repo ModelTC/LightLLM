@@ -105,6 +105,7 @@ with tempfile.TemporaryDirectory() as directory:
         ({"model_type": "qwen3_vl", "vision_config": {}}, "qwen3_vl.model", "QWen3VLTokenizer"),
         ({"model_type": "qwen3_vl_moe", "vision_config": {}}, "qwen3_vl.model", "QWen3VLTokenizer"),
         ({"model_type": "qwen3_5", "vision_config": {}}, "qwen3_5.model", "QWen3_5Tokenizer"),
+        ({"model_type": "sensenova_loop", "vision_config": {}}, "qwen3_5.model", "QWen3_5Tokenizer"),
         ({"model_type": "qwen3_5_moe", "vision_config": {}}, "qwen3_5.model", "QWen3_5Tokenizer"),
         ({"thinker_config": {}}, "qwen3_omni_moe_thinker.model", "QWen3OmniTokenizer"),
         ({"model_type": "internvl_chat"}, "internvl.model", "InternvlTokenizer"),
@@ -124,6 +125,7 @@ def test_selected_multimodal_tokenizer_is_loaded(monkeypatch, config, module_nam
     monkeypatch.setattr(module.AutoTokenizer, "from_pretrained", lambda *a, **kw: base_tokenizer)
     processor = SimpleNamespace(image_processor=object())
     monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", lambda *a, **kw: processor)
+    monkeypatch.setattr(transformers.AutoImageProcessor, "from_pretrained", lambda *a, **kw: processor.image_processor)
     vision = ModuleType("lightllm.models.qwen2_vl.vision_process")
     vision.Qwen2VLImageProcessor = SimpleNamespace(from_pretrained=lambda *a, **kw: processor.image_processor)
     monkeypatch.setitem(sys.modules, vision.__name__, vision)

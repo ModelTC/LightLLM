@@ -66,6 +66,7 @@ Documentation List
 
    GLM-4.7-Flash Deployment <cookbook/glm4_deployment>
    Qwen3.5 Deployment <cookbook/qwen35_deployment>
+   SenseNova Loop Deployment <cookbook/sensenova_loop_deployment>
 
 .. toctree::
    :maxdepth: 1

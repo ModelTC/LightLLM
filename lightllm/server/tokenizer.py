@@ -126,14 +126,12 @@ def get_tokenizer(
         tokenizer = QWen3VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
-    elif model_type in ["qwen3_5", "qwen3_5_moe"] and "vision_config" in model_cfg:
-        from transformers import AutoProcessor
+    elif model_type in ["qwen3_5", "sensenova_loop", "qwen3_5_moe"] and "vision_config" in model_cfg:
         from ..models.qwen3_5.model import QWen3_5Tokenizer
+        from transformers import AutoImageProcessor
 
-        processor = AutoProcessor.from_pretrained(tokenizer_name)
-        tokenizer = QWen3_5Tokenizer(
-            tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
-        )
+        image_processor = AutoImageProcessor.from_pretrained(tokenizer_name)
+        tokenizer = QWen3_5Tokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
     elif model_cfg.get("thinker_config") is not None:
         from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
         from transformers import AutoProcessor

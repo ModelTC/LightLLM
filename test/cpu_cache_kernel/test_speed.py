@@ -6,9 +6,9 @@ Test configuration (matching the user's LinearAttCacheConfig):
     full_att_num_kv_heads=1, full_att_head_dim=256,
     num_linear_k_heads=2, num_linear_v_heads=8,
     head_linear_k_dim=128, head_linear_v_dim=128,
-    conv_kernel_size=4, linear_layer_num=36,
+    conv_kernel_size=4, 36 linear layers and 12 full-attention layers,
     conv_state_dtype=torch.bfloat16, ssm_state_dtype=torch.float32,
-    full_attention_interval=4, all_layer_num=48
+    layer_types=(linear_attention, linear_attention, linear_attention, full_attention) * 12
 """
 
 import os
@@ -47,16 +47,16 @@ linear_config = LinearAttCacheConfig(
     full_att_dtype=torch.bfloat16,
     full_att_num_kv_heads=1,
     full_att_head_dim=256,
+    global_linear_k_heads=16,
+    global_linear_v_heads=64,
     num_linear_k_heads=2,
     num_linear_v_heads=8,
     head_linear_k_dim=128,
     head_linear_v_dim=128,
     conv_kernel_size=4,
-    linear_layer_num=36,
     conv_state_dtype=torch.bfloat16,
     ssm_state_dtype=torch.float32,
-    full_attention_interval=4,
-    all_layer_num=48,
+    layer_types=("linear_attention", "linear_attention", "linear_attention", "full_attention") * 12,
 )
 print(f"LinearAttCacheConfig:\n{linear_config}\n", flush=True)
 
@@ -64,7 +64,7 @@ print(f"LinearAttCacheConfig:\n{linear_config}\n", flush=True)
 # Step 2 – derive sizes from the config
 # ---------------------------------------------------------------------------
 big_page_token_num = _env_args["cpu_cache_token_page_size"]  # 512
-full_att_layer_num = linear_config.all_layer_num // linear_config.full_attention_interval  # 12
+full_att_layer_num = linear_config.get_main_model_full_att_layer_num()  # 12
 
 full_att_bytes = linear_config.get_cpu_cache_full_att_bytes()  # per big page
 conv_bytes = linear_config.get_cpu_cache_conv_bytes()

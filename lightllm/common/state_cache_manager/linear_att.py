@@ -30,12 +30,32 @@ class LinearAttCacheConfig:
     head_linear_k_dim: int
     head_linear_v_dim: int
     conv_kernel_size: int
-    linear_layer_num: int
     conv_state_dtype: torch.dtype
     ssm_state_dtype: torch.dtype
-    full_attention_interval: int
-    all_layer_num: int  # 包括 linear att 和 full att 的层加起来的层数
+    layer_types: tuple[str, ...]
     draft_full_att_kv_layer_num: int = 0
+    linear_layer_num: int = dataclasses.field(init=False)
+    all_layer_num: int = dataclasses.field(init=False)
+
+    def __post_init__(self):
+        self.layer_types = tuple(self.layer_types)
+        indices = []
+        full_count = linear_count = 0
+        for kind in self.layer_types:
+            if kind == "linear_attention":
+                indices.append(linear_count)
+                linear_count += 1
+            else:
+                indices.append(full_count)
+                full_count += 1
+        # MTP draft layers only use full-attention KV slots after the main model.
+        indices.extend(range(full_count, full_count + self.draft_full_att_kv_layer_num))
+        self._layer_indices = tuple(indices)
+        self.linear_layer_num = linear_count
+        self.all_layer_num = len(self.layer_types)
+
+    def get_linear_state_layer_index(self, layer_index: int) -> int:
+        return self._layer_indices[layer_index]
 
     def get_conv_dim(self):
         # 第一项对应q的参数，第二项对应k的参数，第三项对应v的参数
@@ -49,7 +69,6 @@ class LinearAttCacheConfig:
 
     def get_main_model_full_att_layer_num(self):
         full_att_layer_num = self.all_layer_num - self.linear_layer_num
-        assert full_att_layer_num == self.all_layer_num // self.full_attention_interval
         return full_att_layer_num
 
     def get_full_att_kv_layer_num_with_draft_model(self):
@@ -58,16 +77,7 @@ class LinearAttCacheConfig:
     def get_full_att_kv_layer_index(self, layer_index: int) -> int:
         """Map a global target/draft layer index to the packed full-attention cache."""
 
-        layer_index = int(layer_index)
-        if layer_index >= self.all_layer_num:
-            kv_layer_index = layer_index - self.linear_layer_num
-        else:
-            kv_layer_index = layer_index // self.full_attention_interval
-        assert 0 <= kv_layer_index < self.get_full_att_kv_layer_num_with_draft_model(), (
-            f"layer {layer_index} maps outside the packed full-attention KV cache: "
-            f"slot={kv_layer_index}, slots={self.get_full_att_kv_layer_num_with_draft_model()}"
-        )
-        return kv_layer_index
+        return self._layer_indices[layer_index]
 
     def get_conv_state_shape(self):
         # Base committed sliding-window state, without speculative MTP tail.
@@ -117,17 +127,13 @@ class LinearAttCacheConfig:
         from transformers.configuration_utils import PretrainedConfig
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
-        model_type = model_cfg["model_type"]
-        assert model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]
-        llm_config = model_cfg
-        try:
-            llm_config = llm_config["text_config"]
-        except:
-            pass
+        llm_config = model_cfg.get("text_config", model_cfg)
+        layer_types = llm_config["layer_types"]
+        if model_cfg["model_type"] == "sensenova_loop":
+            from lightllm.models.sensenova_loop.config import get_loop_layer_types
 
-        n_layer = llm_config["num_hidden_layers"]
-
-        tp_world_size = get_env_start_args().tp // get_env_start_args().dp
+            layer_types = get_loop_layer_types(model_cfg["loop_settings"], llm_config)
+        tp_world_size = args.tp // args.dp
         full_att_dtype = (
             torch.uint8 if args.llm_kv_type in {"fp8kv_sph", "fp8kv_spt"} else get_torch_dtype(args.data_type)
         )
@@ -144,11 +150,9 @@ class LinearAttCacheConfig:
             head_linear_k_dim=llm_config["linear_key_head_dim"],
             head_linear_v_dim=llm_config["linear_value_head_dim"],
             conv_kernel_size=llm_config["linear_conv_kernel_dim"],
-            linear_layer_num=n_layer - (n_layer // llm_config["full_attention_interval"]),
             conv_state_dtype=get_torch_dtype(args.data_type),
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
-            full_attention_interval=llm_config["full_attention_interval"],
-            all_layer_num=n_layer,
+            layer_types=layer_types,
             draft_full_att_kv_layer_num=get_added_mtp_kv_layer_num(),
         )
 

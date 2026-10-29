@@ -11,7 +11,7 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 )
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
     FP8StaticPerHeadQuantQwen3NextMemManager,
     FP8StaticPerTensorQuantQwen3NextMemManager,
@@ -25,7 +25,6 @@ logger = init_logger(__name__)
 
 
 class Qwen3NextTpPartModel(Qwen3MOEModel):
-
     # weight class
     pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight
@@ -60,31 +59,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         start_args: StartArgs = get_env_start_args()
-        ssm_dtype_dict = {"bfloat16": torch.bfloat16, "float32": torch.float32}
-        draft_full_att_kv_layer_num = get_added_mtp_kv_layer_num()
-        full_att_dtype = torch.uint8 if start_args.llm_kv_type in {"fp8kv_sph", "fp8kv_spt"} else self.data_type
-        self.linear_config = LinearAttCacheConfig(
-            tp_world_size=self.tp_world_size_,
-            full_att_all_num_kv_heads=self.config["num_key_value_heads"],
-            full_att_dtype=full_att_dtype,
-            full_att_num_kv_heads=self.num_kv_heads,
-            full_att_head_dim=self.config["head_dim"],
-            global_linear_k_heads=self.config["linear_num_key_heads"],
-            global_linear_v_heads=self.config["linear_num_value_heads"],
-            num_linear_k_heads=max(1, self.config["linear_num_key_heads"] // self.tp_world_size_),
-            num_linear_v_heads=max(1, self.config["linear_num_value_heads"] // self.tp_world_size_),
-            head_linear_k_dim=self.config["linear_key_head_dim"],
-            head_linear_v_dim=self.config["linear_value_head_dim"],
-            conv_kernel_size=self.config["linear_conv_kernel_dim"],
-            linear_layer_num=self.config["n_layer"]
-            - (self.config["n_layer"] // self.config["full_attention_interval"]),
-            conv_state_dtype=self.data_type,
-            ssm_state_dtype=ssm_dtype_dict[start_args.linear_att_ssm_data_type],
-            full_attention_interval=self.config["full_attention_interval"],
-            all_layer_num=self.config["n_layer"],
-            draft_full_att_kv_layer_num=draft_full_att_kv_layer_num,
-        )
-
         if start_args.llm_kv_type == "None":
             mem_manager_class = Qwen3NextMemManager
         elif start_args.llm_kv_type == "fp8kv_sph":
@@ -104,6 +78,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         )
 
     def _init_req_manager(self):
+        self.linear_config = LinearAttCacheConfig.load_from_args()
         create_max_seq_len = 0
 
         if self.batch_max_tokens is not None:
@@ -112,7 +87,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
         self.req_manager = ReqManagerForMamba(
-            self.max_req_num, create_max_seq_len, None, linear_config=LinearAttCacheConfig.load_from_args()
+            self.max_req_num, create_max_seq_len, None, linear_config=self.linear_config
         )
         return
 

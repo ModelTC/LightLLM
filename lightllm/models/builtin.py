@@ -114,6 +114,9 @@ ModelRegistry.register(
 )
 ModelRegistry.register("qwen3", "lightllm.models.qwen3.model:Qwen3TpPartModel")
 ModelRegistry.register(["qwen3_5"], "lightllm.models.qwen3_5.model:Qwen3_5TpPartModel", is_multimodal=True)
+ModelRegistry.register(
+    "sensenova_loop", "lightllm.models.sensenova_loop.model:SenseNovaLoopTpPartModel", is_multimodal=True
+)
 ModelRegistry.register("qwen3_5_moe", "lightllm.models.qwen3_5_moe.model:Qwen3_5MOETpPartModel", is_multimodal=True)
 ModelRegistry.register("qwen3_moe", "lightllm.models.qwen3_moe.model:Qwen3MOEModel")
 ModelRegistry.register(
@@ -186,7 +189,7 @@ DraftModelRegistry.register(
     "lightllm.models.qwen3_5_moe_mtp.model:Qwen3_5MoeMTPModel",
 )
 DraftModelRegistry.register(
-    ("qwen3_5", "qwen3_5_text"),
+    ("qwen3_5", "qwen3_5_text", "sensenova_loop"),
     ("vanilla_with_att", "eagle_with_att"),
     "lightllm.models.qwen3_5_mtp.model:Qwen3_5MTPModel",
 )

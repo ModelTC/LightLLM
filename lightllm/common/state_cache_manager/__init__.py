@@ -17,6 +17,6 @@ def get_hybrid_cache_config():
         return DeepseekV4CacheConfig.from_model_config(model_cfg, args)
     if model_type in ("glm5_next", "glm5_next_text"):
         return Glm5NextCacheConfig.from_model_config(model_cfg, args)
-    if model_type in ("qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"):
+    if model_type in ("qwen3_5", "sensenova_loop", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"):
         return LinearAttCacheConfig.load_from_args()
     raise ValueError("No hybrid state-cache layout registered for this model")

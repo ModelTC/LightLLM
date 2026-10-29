@@ -50,11 +50,9 @@ def linear_cache(monkeypatch, tmp_path, request):
         head_linear_k_dim=8,
         head_linear_v_dim=8,
         conv_kernel_size=3,
-        linear_layer_num=1,
         conv_state_dtype=torch.bfloat16,
         ssm_state_dtype=torch.float32,
-        full_attention_interval=2,
-        all_layer_num=2,
+        layer_types=("linear_attention", "full_attention"),
     )
     mem = Qwen3NextMemManager(384, torch.bfloat16, 1, 8, 1, config)
     requests = ReqManagerForMamba(2, 512, mem, config)
