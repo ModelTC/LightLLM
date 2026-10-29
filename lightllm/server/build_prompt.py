@@ -53,6 +53,13 @@ def tokenizer_supports_force_thinking() -> bool:
 
     assert tokenizer is not None
 
+    # Tokenizers that encode prompts in Python (e.g. DeepSeek-V4) have no Jinja
+    # chat_template string to inspect, so advertise thinking support via an
+    # explicit attribute instead.
+    if getattr(tokenizer, "supports_thinking", False):
+        logger.info("tokenizer_supports_force_thinking : True (explicit attribute)")
+        return True
+
     try:
         ans = "thinking" in tokenizer.chat_template or "enable_thinking" in tokenizer.chat_template
         logger.debug(f"chat_template: {tokenizer.chat_template}")

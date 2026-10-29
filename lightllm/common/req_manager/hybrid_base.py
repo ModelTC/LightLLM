@@ -35,9 +35,8 @@ class HybridAttentionReqManager(ReqManager, ABC):
     def create_small_page_cache_manager(self, size: int):
         """创建并持有 CPU 小页池，返回同一池供 radix 使用；size 是槽位数，不是 token 数。"""
 
-    @abstractmethod
     def init_hybrid_attention_state(self, req: "InferReq"):
-        """无前缀缓存命中时，初始化已分配请求槽位的 GPU 运行态。"""
+        """无前缀缓存命中时初始化 GPU 运行态；需要初始化的模型覆写。"""
 
     def restore_big_page_state(self, big_page_buffer_idx: int, req: "InferReq"):
         """将指定大页槽位的 CPU checkpoint 恢复到请求 GPU 运行态。"""
@@ -51,19 +50,19 @@ class HybridAttentionReqManager(ReqManager, ABC):
     def restore_state(self, req: "InferReq", state_cache_manager, buffer_idx: int):
         """CPU checkpoint → 请求 GPU 运行态；大小页共用，不负责前缀匹配或 full KV 索引恢复。"""
 
-    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
+    def save_big_page_states(self, b_req_idx: torch.Tensor, reqs: List["InferReq"], buffer_indexes: List[int]):
         """批量保存请求 GPU 运行态到已分配的大页槽位，buffer_indexes 中的 -1 表示跳过。
 
-        b_req_idx 与 req_indexes 分别为同一批请求的 GPU 索引张量和 CPU 索引列表。
+        b_req_idx 与 reqs 分别为同一批请求的 GPU 索引张量和 CPU 请求对象列表。
         默认逐请求保存，模型可覆盖为批量拷贝算子。
         """
-        for req_idx, buffer_idx in zip(req_indexes, buffer_indexes):
+        for req, buffer_idx in zip(reqs, buffer_indexes):
             if buffer_idx != -1:
-                self.save_state(req_idx, buffer_idx, self.big_page_buffers)
+                self.save_state(req, buffer_idx, self.big_page_buffers)
 
     @abstractmethod
-    def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager):
-        """请求 GPU 运行态 → 指定 CPU checkpoint 槽位；大小页共用，调用方负责分配槽位。"""
+    def save_state(self, req: "InferReq", buffer_idx: int, state_cache_manager):
+        """保存本轮 prefill 终点的运行态；在更新 req.cur_kv_len 前调用，大小页共用。"""
 
     def update_mtp_state(self, b_req_mtp_start_loc, b_req_idx, b_mtp_index, accepted_index, verify_width):
         """接受推测 token 后更新运行态位置；需要调整状态索引的模型覆写。"""

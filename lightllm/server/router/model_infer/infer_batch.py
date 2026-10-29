@@ -454,7 +454,7 @@ class InferenceContext:
         if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
             self.req_manager.save_big_page_states(
                 b_req_idx=b_req_idx,
-                req_indexes=[req.req_idx for req in reqs],
+                reqs=reqs,
                 buffer_indexes=big_page_buffer_ids,
             )
 
@@ -471,7 +471,7 @@ class InferenceContext:
                     if req.tail_small_page_buffer_id is not None:
                         dst_buffer_idx = req.tail_small_page_buffer_id
                         self.req_manager.save_state(
-                            req_idx=req.req_idx,
+                            req=req,
                             buffer_idx=dst_buffer_idx,
                             state_cache_manager=self.radix_cache.small_page_buffers,
                         )
@@ -637,7 +637,11 @@ class InferReq:
         # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
-        self.mm_input_spans = get_mm_input_spans(self.multimodal_params) if self.args.disable_chunked_mm_input else []
+        self.mm_input_spans = (
+            get_mm_input_spans(self.get_input_token_ids(), self.multimodal_params)
+            if self.args.disable_chunked_mm_input
+            else []
+        )
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()

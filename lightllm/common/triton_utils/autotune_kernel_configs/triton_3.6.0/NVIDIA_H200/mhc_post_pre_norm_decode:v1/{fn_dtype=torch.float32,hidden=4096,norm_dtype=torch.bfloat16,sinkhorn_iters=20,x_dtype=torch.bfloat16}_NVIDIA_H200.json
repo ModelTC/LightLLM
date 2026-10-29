@@ -1,0 +1,20 @@
+{
+  "1": {
+    "BLOCK_M": 1,
+    "n_splits": 8,
+    "norm_num_warps": 8,
+    "num_warps": 4
+  },
+  "16": {
+    "BLOCK_M": 4,
+    "n_splits": 8,
+    "norm_num_warps": 8,
+    "num_warps": 4
+  },
+  "8": {
+    "BLOCK_M": 2,
+    "n_splits": 4,
+    "norm_num_warps": 8,
+    "num_warps": 8
+  }
+}
