@@ -67,7 +67,7 @@ class ReqManagerForMamba(HybridAttentionReqManager):
         )
         return self.small_page_buffers
 
-    def save_big_page_states(self, b_req_idx: torch.Tensor, req_indexes: List[int], buffer_indexes: List[int]):
+    def save_big_page_states(self, b_req_idx: torch.Tensor, reqs: List["InferReq"], buffer_indexes: List[int]):
         from lightllm.common.basemodel.triton_kernel.linear_att_copy import copy_linear_att_state_to_kv_buffer
 
         buffer_indexes_cpu = buffer_indexes
@@ -83,15 +83,16 @@ class ReqManagerForMamba(HybridAttentionReqManager):
             mtp_step=self.mtp_step,
         )
         if state_cache_manager.draft_window is not None:
-            for req_idx, buffer_idx in zip(req_indexes, buffer_indexes_cpu):
+            for req, buffer_idx in zip(reqs, buffer_indexes_cpu):
                 if buffer_idx != -1:
                     self.mem_manager.windowed_draft_kv.save_checkpoint(
-                        req_idx, state_cache_manager.draft_window, buffer_idx
+                        req.req_idx, state_cache_manager.draft_window, buffer_idx
                     )
         return
 
-    def save_state(self, req_idx: int, buffer_idx: int, state_cache_manager: LinearAttCacheManager):
+    def save_state(self, req: "InferReq", buffer_idx: int, state_cache_manager: LinearAttCacheManager):
         # checkpoint 只保存标准 conv 窗口和请求的基准 SSM 状态，不包含 MTP 扩展运行态。
+        req_idx = req.req_idx
         conv_cache_width = self.linear_config.get_conv_state_shape()[-1]
         gpu_conv_state = self.req_to_conv_state.buffer[:, req_idx, ..., :conv_cache_width]
         gpu_ssm_state = self.req_to_ssm_state.buffer[:, req_idx * (self.mtp_step + 1), ...]

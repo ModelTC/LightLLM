@@ -2,6 +2,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep as ep
+from lightllm.common.quantization import Quantcfg
 
 
 pytestmark = pytest.mark.skipif(
@@ -11,8 +12,15 @@ pytestmark = pytest.mark.skipif(
 
 
 @pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
 @pytest.mark.parametrize("alpha,limit,add_one", [(None, None, True), (1.0, 10.0, False), (1.702, 7.0, True)])
-def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, alpha, limit, add_one):
+def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_ue8m0_scales, alpha, limit, add_one):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0")
+    monkeypatch.delenv("LIGHTLLM_USE_UE8M0_SCALES")
+    config = {"quant_method": "fp8", "weight_block_size": [128, 128]}
+    if use_ue8m0_scales:
+        config["scale_fmt"] = "ue8m0"
+    Quantcfg({"n_layer": 1, "quantization_config": config})
     # Identity projections isolate activation/FP8 behavior from GEMM rounding.
     dim, padded = 128, 128
     x = torch.linspace(-24, 24, 5 * dim, device="cuda").view(5, dim).to(torch.float8_e4m3fn)
@@ -69,5 +77,7 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, alph
     gate = (gate * torch.sigmoid(gate * (alpha or 1.0))).bfloat16().float()
     activation = (gate * up).bfloat16().float()
     scales = activation.abs().amax(-1, keepdim=True).clamp(min=1e-10) / 448
+    if use_ue8m0_scales:
+        scales = torch.exp2(torch.ceil(torch.log2(scales)))
     expected = ((activation / scales).to(torch.float8_e4m3fn).float() * scales).bfloat16()
     torch.testing.assert_close(actual, expected, atol=0.05, rtol=0.02)

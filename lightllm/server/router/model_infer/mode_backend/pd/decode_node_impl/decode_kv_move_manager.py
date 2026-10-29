@@ -1,4 +1,6 @@
 import inspect
+import logging
+import os
 import pickle
 import setproctitle
 import torch.multiprocessing as mp
@@ -21,35 +23,44 @@ def start_decode_kv_move_manager_process(args, info_queue: mp.Queue):
     event = mp.Event()
     proc = mp.Process(target=_init_env, args=(args, info_queue, event))
     proc.start()
-    event.wait()
-    assert proc.is_alive()
+    while not event.wait(timeout=1):
+        if not proc.is_alive():
+            raise RuntimeError("decode kv move manager process failed during initialization")
+    if not proc.is_alive():
+        raise RuntimeError("decode kv move manager process exited during initialization")
     logger.info("decode kv move manager process started")
     return
 
 
 def _init_env(args, info_queue: mp.Queue, event: mp.Event):
-    start_parent_check_thread()
-    import lightllm.utils.rpyc_fix_utils as _
+    try:
+        start_parent_check_thread()
+        import lightllm.utils.rpyc_fix_utils as _
 
-    # 注册graceful 退出的处理
-    graceful_registry(inspect.currentframe().f_code.co_name)
-    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::decode_kv_move_manager")
+        # 注册graceful 退出的处理
+        graceful_registry(inspect.currentframe().f_code.co_name)
+        setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::decode_kv_move_manager")
 
-    from .up_status import start_up_kv_status_process
+        from .up_status import start_up_kv_status_process
 
-    up_status_in_queue = mp.SimpleQueue()
-    start_up_kv_status_process(args, up_status_in_queue)
+        up_status_in_queue = mp.SimpleQueue()
+        start_up_kv_status_process(args, up_status_in_queue)
 
-    from .decode_trans_process import start_decode_trans_process
+        from .decode_trans_process import start_decode_trans_process
 
-    manager = DecodeKVMoveManager(
-        args=args,
-        info_queue=info_queue,
-        start_trans_process_func=start_decode_trans_process,
-        up_status_in_queue=up_status_in_queue,
-    )
-    assert manager is not None
-    event.set()
+        manager = DecodeKVMoveManager(
+            args=args,
+            info_queue=info_queue,
+            start_trans_process_func=start_decode_trans_process,
+            up_status_in_queue=up_status_in_queue,
+        )
+        assert manager is not None
+        event.set()
+    except BaseException:
+        logger.exception("decode kv move manager process failed during initialization")
+        # Skip multiprocessing's child joins; workers detect this exit via parent check.
+        os._exit(1)
+
     while True:
         time.sleep(100)
     return
@@ -90,8 +101,9 @@ class DecodeKVMoveManager(BaseKVMoveManager):
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task_group)
-                if isinstance(task_group, PDChunckedTransTaskGroup):
-                    logger.info(
+                # A task group covers the whole request, so this log does not require pd_detail_log.
+                if isinstance(task_group, PDChunckedTransTaskGroup) and logger.isEnabledFor(logging.DEBUG):
+                    logger.debug(
                         f"kv move manager dispatch task group {task_group.task_list[0].to_str()} to device {device_id}"
                     )
 

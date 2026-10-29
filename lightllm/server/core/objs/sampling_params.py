@@ -3,7 +3,7 @@ import json
 import ctypes
 from typing import Optional, List, Tuple, Union
 from transformers import GenerationConfig
-from lightllm.server.req_id_generator import MAX_BEST_OF
+from lightllm.server.httpserver.req_id_generator_server import MAX_BEST_OF
 from lightllm.utils.envs_utils import get_env_start_args
 from .pd_kv_trans_params import PDKVTransParamObj
 
@@ -320,9 +320,10 @@ class SamplingParams(ctypes.Structure):
         ("_initial_reasoning_state", ctypes.c_int),
         ("exponential_decay_length_penalty", ExponentialDecayLengthPenalty),
         ("group_request_id", ctypes.c_int64),  # p d mode used params
-        # 由 PD Master 为分段续跑或预计 cache 命中率较高的请求设置，表示请求需
-        # 以高优先级插入 Router 调度队列。
-        ("pd_high_priority_request", ctypes.c_bool),
+        # 由 PD Master 设置，仅用于 HTTP 资源申请和 Router 等待队列调度。
+        ("high_priority_request", ctypes.c_bool),
+        # PD 内部通信使用的 prefill 排队优先级；0 表示普通请求，负值表示高优先级请求。
+        ("infer_high_priority", ctypes.c_int),
         # P/D 节点的资源等待超时，由 PD Master 下发。非负值用于控制 shm_req 申请和
         # Router 等待进入推理系统的时限；负数表示永久等待。
         ("pd_node_resource_wait_timeout_seconds", ctypes.c_int),
@@ -373,7 +374,8 @@ class SamplingParams(ctypes.Structure):
         self.input_penalty = kwargs.get("input_penalty", DEFAULT_INPUT_PENALTY)
         self.group_request_id = kwargs.get("group_request_id", -1)
         # PD Master 的内部调度信息，不能由外部请求参数开启或修改。
-        self.pd_high_priority_request = False
+        self.high_priority_request = False
+        self.infer_high_priority = 0
         self.pd_node_resource_wait_timeout_seconds = -1
         self.suggested_dp_index = kwargs.get("suggested_dp_index", -1)
 
@@ -555,7 +557,8 @@ class SamplingParams(ctypes.Structure):
             "pd_previous_output_len": self.constraint_out_params.pd_previous_output_len,
             "invalid_token_ids": self.invalid_token_ids.to_list(),
             "group_request_id": self.group_request_id,
-            "pd_high_priority_request": self.pd_high_priority_request,
+            "high_priority_request": self.high_priority_request,
+            "infer_high_priority": self.infer_high_priority,
             "pd_node_resource_wait_timeout_seconds": self.pd_node_resource_wait_timeout_seconds,
             "skip_special_tokens": self.skip_special_tokens,
             "add_special_tokens": self.add_special_tokens,
@@ -578,11 +581,13 @@ def _check_and_store_int_token_ids(dst, ids: List[int], max_length: int, name: s
 
     The type check runs against the input ``ids`` (not the zero-filled destination buffer), so a non-int
     entry fails fast with a clear message instead of surfacing an opaque ctypes ``TypeError`` at the
-    assignment below.
+    assignment below. The bound check guards the same assignment: ``dst`` stores 32-bit signed ints
+    and ctypes silently wraps out-of-range values (``2**31`` would become ``-2147483648``), and a
+    negative id would later be used as a pointer offset into the logits tensor by the triton kernel.
 
     Args:
         dst: destination ctypes array, declared as ``c_int * max_length``.
-        ids: caller-supplied token ids; every element must be an ``int``.
+        ids: caller-supplied token ids; every element must be an ``int`` in ``[0, 2**31)``.
         max_length: capacity of ``dst``.
         name: field name used in the error messages.
 
@@ -592,5 +597,6 @@ def _check_and_store_int_token_ids(dst, ids: List[int], max_length: int, name: s
     size = len(ids)
     assert size <= max_length, f"Too many {name}: {size} > {max_length}."
     assert all(isinstance(e, int) for e in ids), f"all {name} must be int."
+    assert all(0 <= e < 2 ** 31 for e in ids), f"all {name} must be int in [0, 2**31)."
     dst[:size] = ids[:]
     return size

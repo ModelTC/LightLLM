@@ -1,4 +1,5 @@
 import dataclasses
+import weakref
 import torch
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
@@ -99,10 +100,10 @@ class LinearAttBackend(BaseAttBackend, ABC):
             return query, key, value
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "LinearAttPrefillAttState":
-        return LinearAttPrefillAttState(backend=self, infer_state=infer_state)
+        return LinearAttPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
     def create_att_decode_state(self, infer_state: "InferStateInfo") -> "LinearAttDecodeAttState":
-        return LinearAttDecodeAttState(backend=self, infer_state=infer_state)
+        return LinearAttDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 @dataclasses.dataclass

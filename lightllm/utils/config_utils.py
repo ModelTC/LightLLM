@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from functools import lru_cache
 from .envs_utils import get_env_start_args
 from lightllm.common.build_utils import repair_config
@@ -24,6 +24,33 @@ def load_config(weight_dir_):
     return config
 
 
+def get_generation_config_dict(model_path: str) -> Dict[str, Any]:
+    from transformers import GenerationConfig
+
+    generation_cfg = GenerationConfig.from_pretrained(model_path, trust_remote_code=True)
+    if get_model_type(model_path) == "deepseek_v4":
+        return {key: value for key, value in generation_cfg.to_diff_dict().items() if value is not None}
+    return generation_cfg.to_dict()
+
+
+def auto_set_page_size(args) -> None:
+    """Select the model's default KV page size."""
+    if args.page_size == 1 and get_model_type(args.model_dir) == "deepseek_v4":
+        args.page_size = 256
+
+
+def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
+    """Align CPU cache pages with the model's checkpoint boundaries."""
+    if not args.enable_cpu_cache:
+        return
+
+    if is_hybrid_model:
+        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    elif args.cpu_cache_token_page_size is None:
+        args.cpu_cache_token_page_size = 256
+
+
 def get_running_max_req_size_per_dp(args) -> int:
     """Return the request capacity for one local DP rank."""
     if args.running_max_req_size < 1:
@@ -32,7 +59,7 @@ def get_running_max_req_size_per_dp(args) -> int:
     local_dp_size = max(1, args.dp // args.nnodes)
     # Cache fetch and beam groups need the full capacity.
     requires_global_capacity = args.enable_dp_prompt_cache_fetch or args.diverse_mode
-    if local_dp_size > 1 and not requires_global_capacity:
+    if local_dp_size > 1 and not requires_global_capacity and is_hybrid_att_model(args.model_dir):
         return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
     return args.running_max_req_size
 
@@ -427,6 +454,8 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen3VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
+        elif model_type == "deepseek_v4":
+            return model_cfg.get("vision_n_layers", 0) > 0
         elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
             # TarsierVisionTransformerPretrainedModel
             return True
@@ -498,7 +527,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
 def is_hybrid_att_model(model_path: str) -> bool:
     """Models whose non-full attention state follows hybrid checkpoint pages."""
-    return is_linear_att_mixed_model(model_path)
+    return get_model_type(model_path) == "deepseek_v4" or is_linear_att_mixed_model(model_path)
 
 
 def get_model_type(model_path: str) -> Optional[str]:
@@ -510,6 +539,10 @@ def get_model_type(model_path: str) -> Optional[str]:
     except Exception as e:
         logger.error(f"Failed to get model_type from {model_path}: {e}")
         return None
+
+
+def get_default_disable_chunked_mm_input(model_path: str) -> bool:
+    return get_model_type(model_path) in ("neo_chat", "deepseek_v4", "gemma4")
 
 
 @lru_cache(maxsize=None)
@@ -552,6 +585,10 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     if model_type == "deepseek_v32":
         return "deepseekv32"
 
+    # DeepSeek V4
+    if model_type == "deepseek_v4":
+        return "deepseekv4"
+
     return None
 
 
@@ -576,6 +613,10 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         "qwen3_5_moe_text",
     ]:
         return "qwen3"
+
+    # DeepSeek V4
+    if model_type == "deepseek_v4":
+        return "deepseek-v4"
 
     # DeepSeek V3
     if model_type in ["deepseek_v3", "deepseek_v31", "deepseek_v32"]:

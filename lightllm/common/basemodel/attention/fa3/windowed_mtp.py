@@ -1,3 +1,5 @@
+import weakref
+
 import torch
 
 from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState
@@ -8,7 +10,7 @@ class WindowedMTPAttBackend(BaseAttBackend):
     """Non-causal block attention over retained draft KV and temporary noise KV."""
 
     def create_att_decode_state(self, infer_state):
-        return WindowedMTPDecodeAttState(backend=self, infer_state=infer_state)
+        return WindowedMTPDecodeAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
 
 class WindowedMTPDecodeAttState(BaseDecodeAttState):

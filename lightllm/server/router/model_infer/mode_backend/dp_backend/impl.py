@@ -32,10 +32,12 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         spec_mode = get_env_start_args().mtp_mode
         if spec_mode is not None:
-            if spec_mode in ("dspark", "dflash", "dflash2"):
-                raise NotImplementedError(
-                    "DP backend does not support DFlash/DFlash2/DSpark parallel block drafting yet."
-                )
+            if spec_mode in ("dflash", "dflash2"):
+                raise NotImplementedError("DP backend does not support DFlash/DFlash2 parallel block drafting yet.")
+            if spec_mode == "dspark" and (
+                self.enable_prefill_microbatch_overlap or self.enable_decode_microbatch_overlap
+            ):
+                raise NotImplementedError("DP DSpark does not support prefill/decode microbatch overlap yet.")
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
             else:
@@ -71,10 +73,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
         )
 
-        self.dp_overlap_spec_engine = DPOverlapSpecEngine(
-            **engine_kwargs,
-            common_engine=self.spec_engine,
-        )
+        self.dp_overlap_spec_engine = None
+        if self.enable_prefill_microbatch_overlap or self.enable_decode_microbatch_overlap:
+            self.dp_overlap_spec_engine = DPOverlapSpecEngine(
+                **engine_kwargs,
+                common_engine=self.spec_engine,
+            )
         self.prefill_draft_engine = (
             self.dp_overlap_spec_engine if self.enable_prefill_microbatch_overlap else self.spec_engine
         )
@@ -125,7 +129,7 @@ class DPChunkedPrefillBackend(ModeBackend):
 
                 self._try_read_new_reqs()
 
-                prefill_reqs, decode_reqs = self._get_classed_reqs(
+                prefill_reqs, decode_reqs, prefill_tokens = self._get_classed_reqs(
                     no_decode=self.classed_req_no_decode,
                     strict_prefill=self.classed_req_strict_prefill,
                     recover_paused=self.control_state_machine.try_recover_paused_reqs(),
@@ -146,6 +150,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     # 进行一次流同步，保证 _try_read_new_reqs 中的一些算子操作，必然已经完成。
                     # 防止后续的推理流程读取到显存中可能存在错误的数据。
                     g_infer_context.get_overlap_stream().wait_stream(torch.cuda.current_stream())
+                    self.processed_prefill_tokens += prefill_tokens
                     self.prefill(
                         event_pack=event_pack,
                         prefill_reqs=prefill_reqs,

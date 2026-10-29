@@ -45,7 +45,7 @@ class Batch:
         unfinished_req_ids = []
         for req in self.reqs:
             if req.shm_infer_released:
-                logger.info(f"router release req id {req.request_id}")
+                logger.debug(f"router release req id {req.request_id}")
                 if not req.is_aborted:
                     router_statics.update(req.candetoken_out_len)
 

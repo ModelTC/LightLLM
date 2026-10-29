@@ -79,7 +79,9 @@ def test_silu_and_mul_masked(expert_num, token_num, hidden_dim):
     return
 
 
-def test_silu_and_mul_masked_skips_padded_tokens():
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
+def test_silu_and_mul_masked_skips_padded_tokens(monkeypatch, use_ue8m0_scales):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", str(int(use_ue8m0_scales)))
     expert_num = 3
     token_num = 4
     hidden_dim = 256
@@ -109,16 +111,26 @@ def test_silu_and_mul_masked_skips_padded_tokens():
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16])
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
 @pytest.mark.parametrize("alpha,limit,add_one", [(1.0, 10.0, False), (1.702, 7.0, True)])
-def test_clamped_swiglu_quantization_matches_reference(dtype, alpha, limit, add_one):
+def test_clamped_swiglu_quantization_matches_reference(monkeypatch, dtype, use_ue8m0_scales, alpha, limit, add_one):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", str(int(use_ue8m0_scales)))
     torch.manual_seed(53)
     x = (torch.randn(3, 5, 4096, device="cuda") * 16).to(dtype)
+    x[1, 0].zero_()
     masked_m = torch.tensor([0, 2, 5], dtype=torch.int32, device="cuda")
     out = torch.full((3, 5, 2048), 1.0, dtype=torch.float8_e4m3fn, device="cuda")
     scales = torch.full((3, 5, 16), 7.0, dtype=torch.float32, device="cuda")
 
     silu_and_mul_masked_post_quant_fwd(
-        x, out, scales, 128, masked_m, alpha=alpha, limit=limit, clamp_up_add_one=add_one
+        x,
+        out,
+        scales,
+        128,
+        masked_m,
+        alpha=alpha,
+        limit=limit,
+        clamp_up_add_one=add_one,
     )
 
     gate, up = x.float().chunk(2, dim=-1)
@@ -127,6 +139,8 @@ def test_clamped_swiglu_quantization_matches_reference(dtype, alpha, limit, add_
     activation = (gate * (up.clamp(-limit, limit) + int(add_one))).to(dtype).float()
     groups = activation.reshape(3, 5, 16, 128)
     expected_scales = groups.abs().amax(-1).clamp(min=1e-10) / 448
+    if use_ue8m0_scales:
+        expected_scales = torch.exp2(torch.ceil(torch.log2(expected_scales)))
     expected_q = (groups / expected_scales.unsqueeze(-1)).clamp(-448, 448).to(torch.float8_e4m3fn)
     expected = (expected_q.float() * expected_scales.unsqueeze(-1)).reshape(3, 5, 2048)
     actual = out.float() * scales.repeat_interleave(128, dim=-1)

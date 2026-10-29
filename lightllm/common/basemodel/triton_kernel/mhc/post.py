@@ -8,6 +8,36 @@ import torch
 import triton
 import triton.language as tl
 
+from lightllm.common.triton_utils.autotuner import autotune
+from .configs import post_configs, post_key
+
+
+@triton.jit
+def _hc_post_values(layer_value, residual_0, residual_1, residual_2, residual_3, mix_base, post_base):
+    """Shared four-stream arithmetic for standalone post and fused post/projection."""
+    accumulator_0 = layer_value * tl.load(post_base)
+    accumulator_1 = layer_value * tl.load(post_base + 1)
+    accumulator_2 = layer_value * tl.load(post_base + 2)
+    accumulator_3 = layer_value * tl.load(post_base + 3)
+
+    accumulator_0 += residual_0 * tl.load(mix_base)
+    accumulator_0 += residual_1 * tl.load(mix_base + 4)
+    accumulator_0 += residual_2 * tl.load(mix_base + 8)
+    accumulator_0 += residual_3 * tl.load(mix_base + 12)
+    accumulator_1 += residual_0 * tl.load(mix_base + 1)
+    accumulator_1 += residual_1 * tl.load(mix_base + 5)
+    accumulator_1 += residual_2 * tl.load(mix_base + 9)
+    accumulator_1 += residual_3 * tl.load(mix_base + 13)
+    accumulator_2 += residual_0 * tl.load(mix_base + 2)
+    accumulator_2 += residual_1 * tl.load(mix_base + 6)
+    accumulator_2 += residual_2 * tl.load(mix_base + 10)
+    accumulator_2 += residual_3 * tl.load(mix_base + 14)
+    accumulator_3 += residual_0 * tl.load(mix_base + 3)
+    accumulator_3 += residual_1 * tl.load(mix_base + 7)
+    accumulator_3 += residual_2 * tl.load(mix_base + 11)
+    accumulator_3 += residual_3 * tl.load(mix_base + 15)
+    return accumulator_0, accumulator_1, accumulator_2, accumulator_3
+
 
 @triton.jit
 def _hc_post_4stream_kernel(
@@ -50,27 +80,9 @@ def _hc_post_4stream_kernel(
 
     post_base = post_mix + token * post_stride_m
     mix_base = residual_mix + token * mix_stride_m
-    accumulator_0 = layer_value * tl.load(post_base)
-    accumulator_1 = layer_value * tl.load(post_base + 1)
-    accumulator_2 = layer_value * tl.load(post_base + 2)
-    accumulator_3 = layer_value * tl.load(post_base + 3)
-
-    accumulator_0 += residual_0 * tl.load(mix_base)
-    accumulator_0 += residual_1 * tl.load(mix_base + 4)
-    accumulator_0 += residual_2 * tl.load(mix_base + 8)
-    accumulator_0 += residual_3 * tl.load(mix_base + 12)
-    accumulator_1 += residual_0 * tl.load(mix_base + 1)
-    accumulator_1 += residual_1 * tl.load(mix_base + 5)
-    accumulator_1 += residual_2 * tl.load(mix_base + 9)
-    accumulator_1 += residual_3 * tl.load(mix_base + 13)
-    accumulator_2 += residual_0 * tl.load(mix_base + 2)
-    accumulator_2 += residual_1 * tl.load(mix_base + 6)
-    accumulator_2 += residual_2 * tl.load(mix_base + 10)
-    accumulator_2 += residual_3 * tl.load(mix_base + 14)
-    accumulator_3 += residual_0 * tl.load(mix_base + 3)
-    accumulator_3 += residual_1 * tl.load(mix_base + 7)
-    accumulator_3 += residual_2 * tl.load(mix_base + 11)
-    accumulator_3 += residual_3 * tl.load(mix_base + 15)
+    accumulator_0, accumulator_1, accumulator_2, accumulator_3 = _hc_post_values(
+        layer_value, residual_0, residual_1, residual_2, residual_3, mix_base, post_base
+    )
 
     output_base = output + token * out_stride_m + hidden_offsets
     tl.store(output_base, accumulator_0, mask=hidden_mask)
@@ -79,12 +91,21 @@ def _hc_post_4stream_kernel(
     tl.store(output_base + 3 * hidden, accumulator_3, mask=hidden_mask)
 
 
+@autotune(
+    kernel_name="mhc_post:v1",
+    configs_gen_func=post_configs,
+    static_key_func=post_key,
+    run_key_func=lambda layer_output: layer_output.shape[0],
+    benchmark_repeats=32,
+    benchmark_retries=5,
+)
 def hc_post(
     layer_output: torch.Tensor,
     residual: torch.Tensor,
     residual_mix: torch.Tensor,
     post_mix: torch.Tensor,
     streams: int,
+    run_config: dict = None,
 ) -> torch.Tensor:
     """用一次 Triton launch 将子层输出混回残差 streams。
 
@@ -107,13 +128,14 @@ def hc_post(
 
     tokens, hidden = layer_output.shape
     assert streams == 4, "the fused mHC kernel is specialized for four streams"
-    assert layer_output.is_contiguous() and residual.is_contiguous()
     output = torch.empty(
         (tokens, streams * hidden),
         dtype=layer_output.dtype,
         device=layer_output.device,
     )
-    block_h = min(triton.next_power_of_2(hidden), 1024)
+    if run_config is None:
+        run_config = {"BLOCK_H": 512 if tokens <= 32 else 1024, "num_warps": 4}
+    block_h = min(triton.next_power_of_2(hidden), run_config["BLOCK_H"])
     _hc_post_4stream_kernel[(tokens, triton.cdiv(hidden, block_h))](
         layer_output,
         residual,
@@ -127,6 +149,6 @@ def hc_post(
         post_stride_m=post_mix.stride(0),
         out_stride_m=output.stride(0),
         BLOCK_H=block_h,
-        num_warps=8,
+        num_warps=run_config["num_warps"],
     )
     return output

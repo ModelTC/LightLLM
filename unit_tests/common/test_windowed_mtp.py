@@ -19,12 +19,16 @@ def tensor_cache():
 
 
 def test_checkpoint_and_cpu_rank_layout():
+    from lightllm.common.req_manager.windowed_mtp import ReqManagerForWindowedMTP
+
     store = WindowKVStore(3, 2, 1, 3, torch.float32, "cpu", 4)
     expected = torch.arange(48, dtype=torch.float32).view(2, 4, 2, 3)
     store.kv_buffer[:, :4].copy_(expected)
     store.req_to_seq_len[0] = 9
     buffers = SimpleNamespace(kv_buffer=torch.zeros(2, 2, 4, 2, 3), seq_lens=torch.zeros(2, dtype=torch.int64))
-    store.save_checkpoint(0, buffers, 1)
+    manager = ReqManagerForWindowedMTP.__new__(ReqManagerForWindowedMTP)
+    manager.mem_manager = SimpleNamespace(windowed_draft_kv=store, big_page_buffers=SimpleNamespace(draft_window=buffers))
+    manager.save_big_page_states(torch.tensor([0]), [SimpleNamespace(req_idx=0)], [1])
     store.restore_checkpoint(2, buffers, 1)
     torch.testing.assert_close(store.kv_buffer[:, 8:12], expected, rtol=0, atol=0)
     assert store.req_to_seq_len.tolist() == [9, 0, 9]
@@ -98,7 +102,7 @@ def test_commit_and_pack(window, tensor_cache):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("sliding_window", [0, 4])
 def test_fa3_graph_refreshes_request_state(tensor_cache, sliding_window):
-    from lightllm.common.basemodel.attention.fa3.windowed_mtp import WindowedMTPDecodeAttState
+    from lightllm.common.basemodel.attention.fa3.windowed_mtp import WindowedMTPAttBackend
     from lightllm.common.basemodel.cuda_graph import CudaGraph
     from lightllm.common.basemodel.infer_struct import InferStateInfo
     from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
@@ -124,7 +128,7 @@ def test_fa3_graph_refreshes_request_state(tensor_cache, sliding_window):
         state.mem_manager = SimpleNamespace(windowed_draft_kv=store)
         state.query = torch.randn(4, 2, head_dim, dtype=torch.bfloat16, device="cuda")
         state.noise_kv = torch.randn(4, 2, head_dim, dtype=torch.bfloat16, device="cuda")
-        state.decode_att_state = WindowedMTPDecodeAttState(backend=backend, infer_state=state)
+        state.decode_att_state = WindowedMTPAttBackend.create_att_decode_state(backend, state)
         state.init_att_state()
         return state
 

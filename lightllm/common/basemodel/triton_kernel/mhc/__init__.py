@@ -26,18 +26,29 @@ fn: [M, K]，scale: [3]，base: [M] 为可学习参数。
        out[t, j, h] = post_mix[t, j] * y[t, h] + sum_i residual_mix[t, i, j] * R[t, i, h]
    out 展平为 [T, K]，作为下一子层的 x；i、j 分别是输入、输出 stream。
 
-4. hc_contract：模型末尾沿 S 维取均值，[T, K] -> [T, H]。
+4. hc_post_pre_norm：完成上一子层延迟的 post，再执行下一子层的 pre + RMSNorm。
+   小 decode batch 融合 post 和投影；其余 batch 复用 hc_post / hc_pre_norm。
+
+5. hc_contract：模型末尾沿 S 维取均值，[T, K] -> [T, H]。
+   hc_head：DeepSeek-V4 使用可学习的 sigmoid 门控合并 streams，[T, K] -> [T, H]。
+   head 后的最终 RMSNorm 由模型调用。
 
 hc_pre_norm / hc_post 仅支持 S = 4；hc_pre_norm 要求 bf16 激活和 fp32 fn。
+共享算子接入 LightLLM autotune：LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 在模型
+GENERAL warmup 阶段搜索配置，之后按 GPU、Triton 版本、hidden 和 tokens 复用缓存。
+搜索仅调整 launch / 分片配置及循环展开，保留 FP32 计算、BF16 舍入边界和 Sinkhorn 除法。
 """
 
+from .head import hc_head
 from .post import hc_post
-from .pre_norm import hc_pre_norm
+from .pre_norm import hc_post_pre_norm, hc_pre_norm
 from .streams import hc_contract, hc_expand
 
 __all__ = [
     "hc_contract",
     "hc_expand",
+    "hc_head",
     "hc_post",
+    "hc_post_pre_norm",
     "hc_pre_norm",
 ]

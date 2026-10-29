@@ -40,6 +40,7 @@ TOOLS_TAG_LIST = [
     "[TOOL_CALLS]",
     "<｜tool▁calls▁begin｜>",
     "<｜DSML｜function_calls>",
+    "<｜DSML｜tool_calls>",
 ]
 
 
@@ -60,14 +61,16 @@ class StreamingParseResult:
 
 
 def _find_common_prefix(s1: str, s2: str) -> str:
-    prefix = ""
-    min_length = min(len(s1), len(s2))
-    for i in range(0, min_length):
-        if s1[i] == s2[i]:
-            prefix += s1[i]
+    # Binary search on slice comparisons, which run in C, instead of building
+    # the prefix one character at a time. Invariant: s1[:low] == s2[:low].
+    low, high = 0, min(len(s1), len(s2))
+    while low < high:
+        mid = (low + high + 1) // 2
+        if s1[low:mid] == s2[low:mid]:
+            low = mid
         else:
-            break
-    return prefix
+            high = mid - 1
+    return s1[:low]
 
 
 def _partial_json_loads(input_str: str, flags: Allow) -> Tuple[Any, int]:
@@ -1934,6 +1937,15 @@ class Qwen3CoderDetector(BaseFormatDetector):
             self._buffer = current_text[eot_pos + len(self.eot_token) :].lstrip()
 
 
+class DeepSeekV4Detector(DeepSeekV32Detector):
+    """DeepSeek-V4 uses the V3.2 DSML payload with a tool_calls wrapper."""
+
+    def __init__(self):
+        super().__init__()
+        self.bot_token = f"<{self.dsml_token}tool_calls>"
+        self.eot_token = f"</{self.dsml_token}tool_calls>"
+
+
 class FunctionCallParser:
     """
     Parser for function/tool calls in model outputs.
@@ -1947,6 +1959,7 @@ class FunctionCallParser:
         "deepseekv3": DeepSeekV3Detector,
         "deepseekv31": DeepSeekV31Detector,
         "deepseekv32": DeepSeekV32Detector,
+        "deepseekv4": DeepSeekV4Detector,
         "glm47": Glm47Detector,
         "kimi_k2": KimiK2Detector,
         "llama3": Llama32Detector,

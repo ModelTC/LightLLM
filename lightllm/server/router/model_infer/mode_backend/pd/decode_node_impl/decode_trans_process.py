@@ -100,11 +100,13 @@ def _init_env(
             up_status_in_queue=up_status_in_queue,
         )
         assert manager is not None
+        task_out_queue.put("module_ready")
 
         while True:
             time.sleep(100)
 
     except Exception as e:
+        task_out_queue.put("init_failed")
         logger.exception(str(e))
         logger.error(f"Fatal error happened in kv trans process: {e}")
         pass
@@ -210,7 +212,9 @@ class _DecodeTransModule:
             trans_task_group: PDChunckedTransTaskGroup = self.recv_task_group_queue.get()
 
             with self.waiting_dict_lock:
+                shared_time_out_mark = _SharedTimeOutMark()
                 for task in trans_task_group.task_list:
+                    task.shared_time_out_mark = shared_time_out_mark
                     if task.need_transfer_page():
                         self.waiting_dict[task.get_key()] = task
                     else:
@@ -290,12 +294,14 @@ class _DecodeTransModule:
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
+                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
                                 local_trans_task.prefill_page_reg_desc = remote_trans_task.prefill_page_reg_desc
                                 self.request_page_task_queue.put(local_trans_task)
-                                logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
+                                if self.args.pd_detail_log:
+                                    logger.debug(f"recv WRITE request from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # This does not necessarily mean the WRITE protocol state is corrupted.
                                 # A common benign case is: decode has already received an abort for this
@@ -319,10 +325,12 @@ class _DecodeTransModule:
                             with self.waiting_dict_lock:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
+                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
-                                logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
+                                if self.args.pd_detail_log:
+                                    logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -346,7 +354,7 @@ class _DecodeTransModule:
         with self.waiting_dict_lock:
             timeout_tasks = []
             for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.time_out():
+                if trans_task.shared_time_out_mark.time_out(trans_task):
                     timeout_tasks.append(self.waiting_dict.pop(key))
 
         for trans_task in timeout_tasks:
@@ -423,13 +431,14 @@ class _DecodeTransModule:
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
 
-            if trans_task.start_trans_time is not None:
-                logger.debug(
-                    f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
-                    f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
-                )
-            else:
-                logger.debug(f"trans task ret success:{ret}")
+            if self.args.pd_detail_log:
+                if trans_task.start_trans_time is not None:
+                    logger.debug(
+                        f"trans task ret success:{ret} cost time: {trans_task.transfer_time()} s "
+                        f"read_page_gpu_time: {read_page_gpu_time_ms:.3f} ms"
+                    )
+                else:
+                    logger.debug(f"trans task ret success:{ret}")
 
     @log_exception
     def fail_loop(self):
@@ -446,7 +455,7 @@ class _DecodeTransModule:
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
-            logger.info(f"trans task ret fail:{ret}")
+            logger.warning(f"trans task ret fail:{ret}")
 
             if trans_task.error_info is not None:
                 # 提前终结所有有问题的属于同一个请求的任务。
@@ -455,3 +464,18 @@ class _DecodeTransModule:
                     error_info=trans_task.error_info,
                 )
                 self.transporter.send_error_info_to_prefill_node(trans_task=trans_task)
+
+
+class _SharedTimeOutMark:
+    """Pending pages share request progress; active pages keep their own deadline."""
+
+    def __init__(self):
+        self.update()
+
+    def update(self):
+        self.time_mark = time.time()
+
+    def time_out(self, task: PDChunckedTransTask) -> bool:
+        if task.start_trans_time is not None:
+            return task.time_out()
+        return time.time() - self.time_mark > task.time_out_secs

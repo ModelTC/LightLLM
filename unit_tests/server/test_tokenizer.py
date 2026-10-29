@@ -13,7 +13,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("model_type", ["llama", "deepseek_v32"])
+@pytest.mark.parametrize("model_type", ["llama", "deepseek_v32", "deepseek_v4"])
 def test_tokenizer_imports_are_isolated(model_type):
     result = subprocess.run(
         [
@@ -25,7 +25,6 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-from types import ModuleType
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import AutoConfig, PreTrainedTokenizerFast
@@ -36,7 +35,13 @@ class RejectUnrelatedModels(importlib.abc.MetaPathFinder):
         if fullname.startswith("lightllm.models."):
             allowed = {"lightllm.models.registry", "lightllm.models.draft_registry", "lightllm.models.builtin"}
             if model_type == "deepseek_v32":
-                allowed.add("lightllm.models.deepseek3_2")
+                allowed.update({
+                    "lightllm.models.deepseek3_2",
+                    "lightllm.models.deepseek3_2.tokenizer",
+                    "lightllm.models.deepseek3_2.encoding_dsv32",
+                })
+            if model_type == "deepseek_v4":
+                allowed.update({"lightllm.models.deepseek_v4", "lightllm.models.deepseek_v4.tokenizer"})
             if fullname not in allowed:
                 raise AssertionError("Unexpected model import: " + fullname)
 sys.meta_path.insert(0, RejectUnrelatedModels())
@@ -44,10 +49,6 @@ from lightllm.server import tokenizer as module
 assert not any(name.startswith("lightllm.models.") for name in sys.modules)
 
 if model_type == "deepseek_v32":
-    # Keep the real HF config registration, replacing only the implementation wrapper.
-    wrapper = ModuleType("lightllm.models.deepseek3_2.model")
-    wrapper.DeepSeekV32Tokenizer = lambda tokenizer: tokenizer
-    sys.modules[wrapper.__name__] = wrapper
     original = module.AutoTokenizer.from_pretrained
     def load(*args, **kwargs):
         assert AutoConfig.for_model("deepseek_v32").model_type == "deepseek_v32"
@@ -62,6 +63,20 @@ with tempfile.TemporaryDirectory() as directory:
     }))
     tokenizer = module.get_tokenizer(directory)
     assert tokenizer.encode("hello") == [0]
+    if model_type == "deepseek_v32":
+        assert tokenizer.__class__.__module__ == "lightllm.models.deepseek3_2.tokenizer"
+        prompt = tokenizer.apply_chat_template(messages=[{"role": "user", "content": "hello"}])
+        assert "hello" in prompt
+        thinking_prompt = tokenizer.apply_chat_template(
+            messages=[{"role": "user", "content": "hello"}], thinking=True
+        )
+        assert "<think>" in thinking_prompt
+        tool_prompt = tokenizer.apply_chat_template(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[{"name": "echo", "description": "Echo text", "parameters": {"type": "object"}}],
+        )
+        assert "<functions>" in tool_prompt and "echo" in tool_prompt
+        assert "lightllm.models.deepseek3_2.model" not in sys.modules
 """,
             model_type,
         ],

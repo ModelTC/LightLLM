@@ -52,6 +52,7 @@ class NcclKVTransporter:
         self.tp_idx = tp_idx
         self.kv_move_buffer = kv_move_buffer
         args = get_env_start_args()
+        self.args = args
         assert args.run_mode in ["prefill", "decode"], args.run_mode
         self.is_prefill_node = args.run_mode == "prefill"
         self.capture_telemetry = False
@@ -129,7 +130,7 @@ class NcclKVTransporter:
         return
 
     def send_write_done_task_to_decode_node(self, trans_task: PDChunckedTransTask):
-        new_trans_task = self._copy_notify_task(trans_task)
+        new_trans_task = trans_task.copy_for_notify()
         new_trans_task.write_stage = "done"
         new_trans_task.prefill_agent_name = self.agent_name
         new_trans_task.prefill_agent_metadata = self.agent_metadata
@@ -139,7 +140,7 @@ class NcclKVTransporter:
         return
 
     def send_write_request_task_to_decode_node(self, trans_task: PDChunckedTransTask):
-        new_trans_task = self._copy_notify_task(trans_task)
+        new_trans_task = trans_task.copy_for_notify()
         new_trans_task.write_stage = "request"
         new_trans_task.prefill_agent_name = self.agent_name
         new_trans_task.prefill_agent_metadata = self.agent_metadata
@@ -154,7 +155,7 @@ class NcclKVTransporter:
 
         self._get_peer(trans_task.prefill_agent_name).start_recv(trans_task)
 
-        new_trans_task = self._copy_notify_task(trans_task)
+        new_trans_task = trans_task.copy_for_notify()
         new_trans_task.write_stage = "ready"
         new_trans_task.decode_agent_name = self.agent_name
         new_trans_task.decode_agent_metadata = self.agent_metadata
@@ -166,7 +167,7 @@ class NcclKVTransporter:
     def send_error_info_to_prefill_node(self, trans_task: PDChunckedTransTask):
         if trans_task.prefill_agent_name is None:
             return
-        new_trans_task = self._copy_notify_task(trans_task)
+        new_trans_task = trans_task.copy_for_notify()
         new_trans_task.write_stage = "error"
         new_trans_task.decode_agent_name = self.agent_name
         new_trans_task.decode_agent_metadata = self.agent_metadata
@@ -176,7 +177,7 @@ class NcclKVTransporter:
         return
 
     def send_error_info_to_decode_node(self, trans_task: PDChunckedTransTask):
-        new_trans_task = self._copy_notify_task(trans_task)
+        new_trans_task = trans_task.copy_for_notify()
         new_trans_task.write_stage = "error"
         new_trans_task.prefill_agent_name = self.agent_name
         new_trans_task.prefill_agent_metadata = self.agent_metadata
@@ -237,12 +238,6 @@ class NcclKVTransporter:
     def _get_remote_metadata(self, remote_agent_name: str) -> NcclAgentMetadata:
         remote_agent = self.remote_agents[remote_agent_name]
         return pickle.loads(remote_agent.agent_metadata)
-
-    def _copy_notify_task(self, trans_task: PDChunckedTransTask) -> PDChunckedTransTask:
-        new_trans_task: PDChunckedTransTask = copy.copy(trans_task)
-        new_trans_task.mem_indexes = None
-        new_trans_task.xfer_handle = None
-        return new_trans_task
 
     def _get_notify_source_agent_name(self, notify: bytes) -> str:
         notify_obj = pickle.loads(notify)
@@ -306,10 +301,11 @@ class _NcclPeer:
         event = torch.cuda.Event()
         event.record(stream)
 
-        logger.info(
-            f"NCCL send page posted request_id={trans_task.request_id} "
-            f"src_page={trans_task.src_page_index} dst_agent={self.peer_name}"
-        )
+        if self.transporter.args.pd_detail_log:
+            logger.debug(
+                f"NCCL send page posted request_id={trans_task.request_id} "
+                f"src_page={trans_task.src_page_index} dst_agent={self.peer_name}"
+            )
         return _NcclXferHandle(peer_name=self.peer_name, event=event)
 
     def start_recv(self, trans_task: PDChunckedTransTask):
@@ -360,9 +356,10 @@ class _NcclPeer:
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
-            logger.info(
-                f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"
-            )
+            if self.transporter.args.pd_detail_log:
+                logger.debug(
+                    f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"
+                )
         except BaseException as e:
             trans_task.error_info = str(e)
             logger.exception(str(e))

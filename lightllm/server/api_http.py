@@ -46,7 +46,13 @@ from .httpserver_for_pd_master.manager import HttpServerManagerForPDMaster
 from .api_lightllm import lightllm_get_score
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.error_utils import ClientDisconnected, InvalidRequestError, SERVER_BUSY_MESSAGE, ServerBusyError
+from lightllm.utils.error_utils import (
+    ClientDisconnected,
+    GenerationError,
+    InvalidRequestError,
+    SERVER_BUSY_MESSAGE,
+    ServerBusyError,
+)
 from lightllm.server.metrics.manager import MetricClient
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.shm_port_args import get_shm_port_args
@@ -103,10 +109,8 @@ class G_Objs:
             self.model_created = int(time.time())
 
         if args.run_mode == "pd_master":
-            self.metric_client = MetricClient(get_shm_port_args().metric_port)
-            self.httpserver_manager = HttpServerManagerForPDMaster(
-                args=args,
-            )
+            self.httpserver_manager = HttpServerManagerForPDMaster(args=args)
+            self.metric_client = self.httpserver_manager.metric_client
         else:
             self.metric_client = MetricClient(get_shm_port_args().metric_port)
             self.httpserver_manager = HttpServerManager(args=args)
@@ -181,6 +185,11 @@ async def invalid_request_exception_handler(request: Request, exc: InvalidReques
     return create_error_response(HTTPStatus.BAD_REQUEST, str(exc))
 
 
+@app.exception_handler(GenerationError)
+async def generation_exception_handler(request: Request, exc: GenerationError) -> JSONResponse:
+    return create_error_response(HTTPStatus.INTERNAL_SERVER_ERROR, str(exc))
+
+
 @app.get("/liveness")
 @app.post("/liveness")
 def liveness():
@@ -209,10 +218,17 @@ def get_model_name():
 @app.post("/get_server_info")
 def get_server_info():
     if is_dataclass(g_objs.args):
-        return asdict(g_objs.args)
-
-    # HTTP workers restore StartArgs from the environment as an EasyDict.
-    return dict(g_objs.args)
+        info = asdict(g_objs.args)
+    else:
+        # HTTP workers restore StartArgs from the environment as an EasyDict.
+        info = dict(g_objs.args)
+    # P/D 节点通过此接口获取 PD master 的 worker 端口列表；单 worker 直接返回当前端口。
+    if info.get("run_mode") == "pd_master":
+        if info["httpserver_workers"] == 1:
+            info["pd_master_multi_ports"] = [info["port"]]
+        else:
+            info["pd_master_multi_ports"] = get_shm_port_args().pd_master_multi_ports
+    return info
 
 
 @app.get("/get_weight_version")
@@ -534,7 +550,7 @@ from .api_http_rl import router as rl_router
 
 app.include_router(rl_router)
 
-# PD 分离控制面接口（P/D 注册与 KV 状态上报），见 api_http_pd.py
+# PD 分离控制面接口（worker 发现、P/D 注册与 KV 状态上报），见 api_http_pd.py
 from .api_http_pd import router as pd_router
 
 app.include_router(pd_router)

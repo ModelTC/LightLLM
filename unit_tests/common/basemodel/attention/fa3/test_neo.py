@@ -5,6 +5,7 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.attention.fa3 import fp, neo
 
 
@@ -70,18 +71,17 @@ def test_prefill_initializes_paged_kv_metadata_and_forwards_image_ends(monkeypat
             list(range(3 * page_size, 4 * page_size)) + list(range(page_size, 2 * page_size)),
         ]
     )
-    infer_state = SimpleNamespace(
-        batch_size=2,
-        max_kv_seq_len=2 * page_size,
-        max_q_seq_len=2,
-        input_ids=torch.zeros(3, dtype=torch.int64, device="cuda"),
-        b_req_idx=indices([1, 0]),
-        b_seq_len=indices([2 * page_size, 2 * page_size - 1]),
-        b1_cu_q_seq_len=indices([0, 2, 3]).long(),
-        b1_cu_kv_seq_len=indices([0, 2 * page_size, 4 * page_size - 1]).long(),
-        b_image_token_end=image_ends,
-        req_manager=SimpleNamespace(req_to_token_indexs=req_to_token_indexs),
-    )
+    infer_state = InferStateInfo()
+    infer_state.batch_size = 2
+    infer_state.max_kv_seq_len = 2 * page_size
+    infer_state.max_q_seq_len = 2
+    infer_state.input_ids = torch.zeros(3, dtype=torch.int64, device="cuda")
+    infer_state.b_req_idx = indices([1, 0])
+    infer_state.b_seq_len = indices([2 * page_size, 2 * page_size - 1])
+    infer_state.b1_cu_q_seq_len = indices([0, 2, 3]).long()
+    infer_state.b1_cu_kv_seq_len = indices([0, 2 * page_size, 4 * page_size - 1]).long()
+    infer_state.b_image_token_end = image_ends
+    infer_state.req_manager = SimpleNamespace(req_to_token_indexs=req_to_token_indexs)
     backend = SimpleNamespace(uses_causal_attention=lambda: True, infer_page_size=page_size)
     state = neo.NeoFa3AttBackend.create_att_prefill_state(backend, infer_state)
     state.init_state()

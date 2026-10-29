@@ -5,9 +5,15 @@ import subprocess
 import math
 from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
+from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import set_env_start_args, set_unique_server_name, get_unique_server_name
+from lightllm.utils.envs_utils import (
+    get_env_start_args,
+    get_unique_server_name,
+    set_env_start_args,
+    set_unique_server_name,
+)
 from lightllm.utils.shm_port_args import get_shm_port_args
 from lightllm.utils.net_utils import validate_ports
 from .detokenization.manager import start_detokenization_process
@@ -21,9 +27,12 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_hybrid_att_model,
     auto_set_max_req_total_len,
+    auto_set_page_size,
+    auto_set_cpu_cache_token_page_size,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
+    get_default_disable_chunked_mm_input,
 )
 from lightllm.utils.dist_check_utils import auto_configure_allreduce_flags_from_args
 
@@ -62,6 +71,9 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.run_mode not in ["normal", "prefill", "decode", "visual_only"]:
         return
+
+    _auto_set_prefill_queue_strategy(args)
+    auto_set_page_size(args)
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
@@ -291,6 +303,16 @@ def _launch_subprocesses(args: StartArgs):
             f"but got {args.batch_max_tokens}, {args.chunked_prefill_size}"
         )
 
+    args.disable_chunked_mm_input = args.disable_chunked_mm_input or get_default_disable_chunked_mm_input(
+        args.model_dir
+    )
+    if args.disable_chunked_mm_input and not args.disable_vision:
+        assert args.batch_max_tokens >= args.max_image_token_count, (
+            "--disable_chunked_mm_input requires batch_max_tokens >= max_image_token_count, "
+            f"but got {args.batch_max_tokens}, {args.max_image_token_count}. "
+            "Increase --batch_max_tokens or reduce --max_image_token_count."
+        )
+
     # hybrid checkpoint 参数自动设置；保留现有 linear_att_* 启动参数名。
     if args.linear_att_cache_size is None:
         # 小页池大小只对 hybrid 模型生效。
@@ -305,9 +327,7 @@ def _launch_subprocesses(args: StartArgs):
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache and is_hybrid_model:
-        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    auto_set_cpu_cache_token_page_size(args, is_hybrid_model)
     if args.enable_cpu_cache:
         assert (
             args.cpu_cache_token_page_size % args.page_size == 0
@@ -443,6 +463,10 @@ def _launch_subprocesses(args: StartArgs):
         ],
         start_args=[(args,)],
     )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
 
     router_process, _ = process_manager.start_submodule_processes(
         start_funcs=[start_router_process, start_detokenization_process],
@@ -530,6 +554,10 @@ def pd_master_start(args: StartArgs):
         ],
         start_args=[(args,)],
     )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
 
     command = [
         "hypercorn",
@@ -556,6 +584,52 @@ def pd_master_start(args: StartArgs):
 
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
+
+
+def pd_master_multi_worker_start(args: StartArgs):
+    """Start multiple PD master workers on one host behind HAProxy."""
+    _validate_pd_features(args)
+    from .httpserver_for_pd_master.multiprocess import (
+        start_multiprocess_pd_master,
+        validate_multiprocess_pd_master_args,
+    )
+    from .httpserver_for_pd_master.pd_selector.pd_node_stats_server import start_pd_node_stats_server
+    from .httpserver_for_pd_master.pd_selector.prompt_cache_tree_server import start_prompt_cache_tree_server
+
+    haproxy_binary = validate_multiprocess_pd_master_args(args)
+    _set_envs_and_config(args)
+    set_unique_server_name(args)
+
+    auto_set_max_req_total_len(args)
+    auto_set_response_parsers(args)
+    process_manager.setup_exit_controller()
+    set_env_start_args(args)
+    get_env_start_args.cache_clear()
+    ports = get_shm_port_args(create=True)
+    worker_ports = ports.pd_master_multi_ports
+    validate_ports([args.port, ports.metric_port, *worker_ports])
+    logger.info("PD master worker ports: %s", worker_ports)
+    process_manager.start_submodule_processes(
+        start_funcs=[start_metric_manager],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_req_id_generator_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_pd_node_stats_server],
+        start_args=[(args,)],
+    )
+    process_manager.start_submodule_processes(
+        start_funcs=[start_prompt_cache_tree_server],
+        start_args=[(args,)],
+    )
+    return start_multiprocess_pd_master(
+        args,
+        ports=ports,
+        haproxy_binary=haproxy_binary,
+    )
 
 
 def visual_only_start(args):
@@ -647,3 +721,10 @@ def _validate_pd_features(args: StartArgs):
         args.enable_rl or args.enable_return_routed_experts or args.enable_prompt_logprobs
     ):
         raise ValueError("PD mode does not support RL, routed experts or prompt logprobs")
+
+
+def _auto_set_prefill_queue_strategy(args: StartArgs) -> None:
+    """自动选择 prefill 排队策略；显式指定策略时保留用户配置。"""
+    if args.prefill_queue_strategy == "auto":
+        args.prefill_queue_strategy = "hrrn" if args.run_mode == "prefill" else "default"
+        logger.info(f"run_mode={args.run_mode}, auto set prefill_queue_strategy to {args.prefill_queue_strategy}")

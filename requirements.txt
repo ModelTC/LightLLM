@@ -84,6 +84,8 @@ frozendict==2.4.6
 atomics==1.0.3
 easydict==1.13
 hypercorn==0.18.0
+# Native HTTP/SSE entry point for multiprocess PD master, bundled with its shared libraries.
+ray-haproxy==2.8.25; sys_platform == "linux" and (platform_machine == "x86_64" or platform_machine == "aarch64")
 # SM90 NoPE MLA (512 latent dimensions, zero RoPE dimensions).
 flashinfer-python[cu13]==0.6.18
 flashinfer-cubin==0.6.18

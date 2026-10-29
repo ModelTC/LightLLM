@@ -1,6 +1,7 @@
 import asyncio
 import json
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 from easydict import EasyDict
@@ -8,7 +9,20 @@ from easydict import EasyDict
 from lightllm.server.api_cli import make_argument_parser
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
+from lightllm.server.httpserver_for_pd_master.pd_selector import pd_node_stats_client
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
+from lightllm.server.httpserver_for_pd_master.pd_selector import prompt_cache_tree_client
+
+
+@pytest.fixture(autouse=True)
+def local_pd_master_clients(monkeypatch):
+    start_args = SimpleNamespace(httpserver_workers=1)
+    monkeypatch.setattr(pd_node_stats_client, "get_env_start_args", lambda: start_args)
+    monkeypatch.setattr(
+        prompt_cache_tree_client,
+        "get_env_start_args",
+        lambda: start_args,
+    )
 
 
 def test_pd_node_self_request_limit_cli_defaults_to_enabled_and_can_be_disabled():
@@ -74,6 +88,37 @@ def test_get_server_info_serializes_runtime_easydict(monkeypatch):
     assert api_http.get_server_info() == dict(runtime_args)
 
 
+@pytest.mark.parametrize(
+    "runtime,worker_ports",
+    [(False, None), (True, None), (True, [8100, 8101])],
+)
+def test_pd_master_server_info_reports_worker_ports_without_changing_start_args(monkeypatch, runtime, worker_ports):
+    from lightllm.server import api_http
+
+    worker_count = 1 if worker_ports is None else len(worker_ports)
+    start_args = StartArgs(
+        run_mode="pd_master",
+        httpserver_workers=worker_count,
+        pd_node_id=100,
+    )
+    original = vars(start_args).copy()
+    args = EasyDict(original) if runtime else start_args
+    monkeypatch.setattr(api_http.g_objs, "args", args)
+    if worker_ports is not None:
+        monkeypatch.setattr(
+            api_http,
+            "get_shm_port_args",
+            lambda: SimpleNamespace(pd_master_multi_ports=worker_ports),
+        )
+
+    expected_ports = worker_ports or [start_args.port]
+    assert api_http.get_server_info() == {
+        **original,
+        "pd_master_multi_ports": expected_ports,
+    }
+    assert (dict(args) if runtime else vars(args)) == original
+
+
 def test_get_server_info_serializes_start_args_dataclass(monkeypatch):
     from lightllm.server import api_http
 
@@ -89,7 +134,7 @@ def test_pd_master_models_endpoint_has_created_timestamp(monkeypatch):
     from lightllm.server import api_http
 
     args = StartArgs(run_mode="pd_master", model_dir="/tmp/test-model", model_name="test-model")
-    manager = SimpleNamespace(get_real_supported_max_req_total_len=lambda: 1024)
+    manager = SimpleNamespace(get_real_supported_max_req_total_len=lambda: 1024, metric_client=object())
     monkeypatch.setattr(api_http, "init_tokenizer", lambda *_args, **_kwargs: None)
     monkeypatch.setattr(api_http.SamplingParams, "load_generation_cfg", lambda _model_dir: None)
     monkeypatch.setattr(api_http.CompletionRequest, "load_generation_cfg", lambda _model_dir: None)
@@ -443,15 +488,125 @@ def test_elastic_pd_master_health_does_not_check_individual_pd_nodes(monkeypatch
     assert "pd_nodes_healthy" not in response_body
 
 
-@pytest.mark.parametrize("run_mode", ["pd_master", "prefill", "decode"])
+@pytest.mark.parametrize(
+    "run_mode,start_name,workers",
+    [
+        ("pd_master", "pd_master_start", 1),
+        ("pd_master", "pd_master_multi_worker_start", 2),
+        ("prefill", "_launch_subprocesses", 1),
+        ("decode", "_launch_subprocesses", 1),
+    ],
+)
 @pytest.mark.parametrize("feature", ["enable_rl", "enable_return_routed_experts", "enable_prompt_logprobs"])
-def test_pd_rejects_final_metadata_features_before_startup(monkeypatch, run_mode, feature):
+def test_pd_rejects_final_metadata_features_before_startup(monkeypatch, run_mode, start_name, workers, feature):
     from lightllm.server import api_start
 
     def unexpected_startup(*args, **kwargs):
         pytest.fail("Unsupported PD features must be rejected before process setup")
 
     monkeypatch.setattr(api_start.mp, "set_start_method", unexpected_startup)
-    start = api_start.pd_master_start if run_mode == "pd_master" else api_start._launch_subprocesses
+    start = getattr(api_start, start_name)
     with pytest.raises(ValueError, match="PD mode does not support"):
-        start(StartArgs(run_mode=run_mode, **{feature: True}))
+        start(StartArgs(run_mode=run_mode, httpserver_workers=workers, **{feature: True}))
+
+
+@pytest.mark.parametrize("workers", [1, 2, 0])
+def test_pd_master_cli_dispatches_to_the_requested_startup_mode(monkeypatch, workers):
+    from lightllm.server import api_server, api_start
+
+    single, multiple = Mock(), Mock()
+    monkeypatch.setattr(api_start, "pd_master_start", single)
+    monkeypatch.setattr(api_start, "pd_master_multi_worker_start", multiple)
+    monkeypatch.setattr(api_server, "set_log_node_role", Mock())
+    monkeypatch.setattr(api_server.torch.multiprocessing, "set_start_method", Mock())
+    args = StartArgs(run_mode="pd_master", httpserver_workers=workers)
+
+    if workers == 0:
+        with pytest.raises(ValueError, match="httpserver_workers.*at least 1"):
+            api_server.launch_server(args)
+        single.assert_not_called()
+        multiple.assert_not_called()
+    else:
+        api_server.launch_server(args)
+        expected, unexpected = (single, multiple) if workers == 1 else (multiple, single)
+        expected.assert_called_once_with(args)
+        unexpected.assert_not_called()
+
+
+def test_multiworker_preflight_failure_precedes_environment_and_process_initialization(monkeypatch):
+    from lightllm.server import api_start
+    from lightllm.server.httpserver_for_pd_master import multiprocess
+
+    preflight = Mock(side_effect=ValueError("preflight rejected"))
+    configure = Mock(side_effect=AssertionError("Environment setup must follow preflight"))
+    launch = Mock(side_effect=AssertionError("Process startup must follow preflight"))
+    monkeypatch.setattr(multiprocess, "validate_multiprocess_pd_master_args", preflight)
+    monkeypatch.setattr(multiprocess, "start_multiprocess_pd_master", launch)
+    monkeypatch.setattr(api_start, "_set_envs_and_config", configure)
+    args = StartArgs(run_mode="pd_master", httpserver_workers=2)
+
+    with pytest.raises(ValueError, match="preflight rejected"):
+        api_start.pd_master_multi_worker_start(args)
+
+    preflight.assert_called_once_with(args)
+    configure.assert_not_called()
+    launch.assert_not_called()
+
+
+def test_multiworker_starts_required_services_in_order(monkeypatch):
+    from lightllm.server import api_start
+    from lightllm.server.httpserver_for_pd_master import multiprocess
+    from lightllm.server.httpserver_for_pd_master.pd_selector import pd_node_stats_server
+    from lightllm.server.httpserver_for_pd_master.pd_selector import prompt_cache_tree_server
+
+    args = StartArgs(run_mode="pd_master", port=8000, httpserver_workers=2)
+    ports = SimpleNamespace(
+        close=Mock(),
+        metric_port=8104,
+        pd_master_multi_ports=[8100, 8101],
+    )
+    metric_server = Mock(name="metric_server")
+    request_id_server = Mock(name="request_id_server")
+    stats_server = Mock(name="stats_server")
+    tree_server = Mock(name="tree_server")
+    started_services = []
+    manager = Mock()
+    manager.start_submodule_processes.side_effect = lambda *, start_funcs, start_args: started_services.append(
+        start_funcs[0]
+    )
+    launch = Mock(return_value="completed")
+    publish = Mock()
+    read_start_args = Mock()
+    validate_ports = Mock()
+
+    monkeypatch.setattr(api_start, "process_manager", manager)
+    monkeypatch.setattr(api_start, "start_metric_manager", metric_server)
+    monkeypatch.setattr(api_start, "start_req_id_generator_server", request_id_server)
+    monkeypatch.setattr(api_start, "_set_envs_and_config", Mock())
+    monkeypatch.setattr(api_start, "set_unique_server_name", Mock())
+    monkeypatch.setattr(api_start, "auto_set_max_req_total_len", Mock())
+    monkeypatch.setattr(api_start, "auto_set_response_parsers", Mock())
+    monkeypatch.setattr(api_start, "set_env_start_args", publish)
+    monkeypatch.setattr(api_start, "get_env_start_args", read_start_args)
+    monkeypatch.setattr(api_start, "get_shm_port_args", Mock(return_value=ports))
+    monkeypatch.setattr(api_start, "validate_ports", validate_ports)
+    monkeypatch.setattr(multiprocess, "validate_multiprocess_pd_master_args", Mock(return_value="haproxy"))
+    monkeypatch.setattr(multiprocess, "start_multiprocess_pd_master", launch)
+    monkeypatch.setattr(pd_node_stats_server, "start_pd_node_stats_server", stats_server)
+    monkeypatch.setattr(prompt_cache_tree_server, "start_prompt_cache_tree_server", tree_server)
+
+    assert api_start.pd_master_multi_worker_start(args) == "completed"
+    assert started_services == [metric_server, request_id_server, stats_server, tree_server]
+    manager.setup_exit_controller.assert_called_once_with()
+    manager.terminate_all_processes.assert_not_called()
+    ports.close.assert_not_called()
+    multiprocess.validate_multiprocess_pd_master_args.assert_called_once_with(args)
+    publish.assert_called_once_with(args)
+    read_start_args.cache_clear.assert_called_once_with()
+    api_start.get_shm_port_args.assert_called_once_with(create=True)
+    validate_ports.assert_called_once_with([8000, 8104, 8100, 8101])
+    launch.assert_called_once_with(
+        args,
+        ports=ports,
+        haproxy_binary="haproxy",
+    )

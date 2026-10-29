@@ -1,3 +1,4 @@
+import os
 import pytest
 import torch
 import torch.nn.functional as F
@@ -9,6 +10,11 @@ from lightllm.common.quantization import deepgemm
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="requires CUDA")
+
+
+@pytest.fixture(autouse=True)
+def preserve_ue8m0_env(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0"))
 
 
 def _unpack_scales(packed, groups):
@@ -113,6 +119,24 @@ def test_activation_scales_and_quantized_values(monkeypatch, layout, group_size,
         assert scales.stride() == (1, 20)
     elif layout == "row":
         assert scales.stride() == (groups, 1)
+
+
+@pytest.mark.parametrize("shape", [(2, 3, 256), (2, 3, 4, 256)])
+@pytest.mark.parametrize("group_size", [64, 128])
+@pytest.mark.parametrize("use_ue8m0_scales", [False, True])
+def test_nd_activation_scales_preserve_row_major_output(monkeypatch, shape, group_size, use_ue8m0_scales):
+    monkeypatch.setattr(activation, "HAS_SGL_KERNEL", False)
+    x = torch.randn(shape, device="cuda", dtype=torch.bfloat16)
+    x[0, 0].zero_()
+    q, scales = activation.per_token_group_quant_fp8(x, group_size, use_ue8m0_scales=use_ue8m0_scales)
+    groups = shape[-1] // group_size
+    reference_scales = x.float().view(*shape[:-1], groups, group_size).abs().amax(-1).clamp_min(1e-10) / 448
+    if use_ue8m0_scales:
+        reference_scales = reference_scales.log2().ceil().exp2()
+    reference_q = (x.float().view(*shape[:-1], groups, group_size) / reference_scales[..., None]).to(q.dtype)
+    assert scales.shape == (*shape[:-1], groups)
+    torch.testing.assert_close(scales, reference_scales, rtol=0, atol=0)
+    torch.testing.assert_close(q.float(), reference_q.view_as(x).float(), rtol=0, atol=0)
 
 
 @pytest.mark.parametrize("use_sgl", [False, True])
@@ -434,24 +458,46 @@ def test_redundancy_expert_update_packs_scales(monkeypatch, packed_weight_layout
 
 @pytest.mark.skipif(not deepgemm.HAS_DEEPGEMM, reason="requires DeepGEMM")
 @pytest.mark.parametrize("is_prefill", [False, True])
-def test_ep_moe_uses_logical_block_size_with_packed_weights(monkeypatch, is_prefill):
+@pytest.mark.parametrize("sm100", [False, True])
+@pytest.mark.parametrize("scale_source", ["none", "env", "config"])
+def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_prefill, sm100, scale_source):
     from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep as ep
+    from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
 
-    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1")
-    monkeypatch.setattr(deepgemm, "is_sm100_gpu", lambda: True)
-    method = Quantcfg({"n_layer": 1}, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
+    monkeypatch.delenv("LIGHTLLM_USE_UE8M0_SCALES", raising=False)
+    assert not get_env_use_ue8m0_scales()
+    config = {"n_layer": 1}
+    if scale_source == "env":
+        monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "1")
+    elif scale_source == "config":
+        config["quantization_config"] = {"quant_method": "fp8", "weight_block_size": [128, 128], "scale_fmt": "ue8m0"}
+    use_ue8m0_scales = scale_source != "none"
+    monkeypatch.setattr(deepgemm, "is_sm100_gpu", lambda: sm100)
+    method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
+    assert get_env_use_ue8m0_scales() == use_ue8m0_scales
     w13, _ = method.create_moe_weight([128, 128], 512, torch.bfloat16, 0, 2)
     w2, _ = method.create_moe_weight([512], 128, torch.bfloat16, 0, 2)
     x = torch.randn((3, 512), device="cuda", dtype=torch.bfloat16)
     q, sf = ep.quantize_fused_experts_input(x, w13, method)
     assert q.shape == x.shape and sf.shape == (3, 4)
+    assert sf.dtype == torch.float32
+    expected_scales = x.float().reshape(3, 4, 128).abs().amax(-1).clamp_min(1e-10) / 448
+    if use_ue8m0_scales:
+        expected_scales = torch.exp2(torch.ceil(torch.log2(expected_scales)))
+        expected_q = (x.float().reshape(3, 4, 128) / expected_scales.unsqueeze(-1)).to(q.dtype).reshape_as(q)
+        torch.testing.assert_close(q.float(), expected_q.float(), atol=0, rtol=0)
+    torch.testing.assert_close(sf, expected_scales)
     seen = []
     monkeypatch.setattr(ep.dist_group_manager, "ep_buffer", object(), raising=False)
     monkeypatch.setattr(ep.dist_group_manager, "ep_low_latency_buffer", object(), raising=False)
 
     def check_dispatch(**kwargs):
         seen.append(kwargs["block_size_k"])
-        assert kwargs["w1_scale"].dtype == kwargs["w2_scale"].dtype == torch.int32
+        assert (
+            kwargs["w1_scale"].dtype
+            == kwargs["w2_scale"].dtype
+            == (torch.int32 if sm100 and use_ue8m0_scales else torch.float32)
+        )
         return x
 
     monkeypatch.setattr(ep, "fused_experts_impl", check_dispatch)

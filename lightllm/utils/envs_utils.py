@@ -55,11 +55,6 @@ def get_model_infer_recursion_limit() -> int:
 
 
 @lru_cache(maxsize=None)
-def get_pd_master_recursion_limit() -> int:
-    return int(os.getenv("LIGHTLLM_PD_MASTER_RECURSION_LIMIT", "4000"))
-
-
-@lru_cache(maxsize=None)
 def get_llm_data_type() -> torch.dtype:
     data_type: str = get_env_start_args().data_type
     if data_type in ["fp16", "float16"]:
@@ -76,6 +71,10 @@ def get_llm_data_type() -> torch.dtype:
 @lru_cache(maxsize=None)
 def enable_env_vars(args):
     return os.getenv(args, "False").upper() in ["ON", "TRUE", "1"]
+
+
+def get_env_use_ue8m0_scales() -> bool:
+    return os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
 
 
 @lru_cache(maxsize=None)
@@ -316,6 +315,10 @@ def get_mtp_weight_layer_num() -> int:
 def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
     with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
         draft_config = json.load(json_file)
+
+    if draft_config.get("model_type") == "deepseek_v4":
+        return len(draft_config["dspark_target_layer_ids"])
+
     # Use the effective draft backbone config when the checkpoint stores it nested.
     draft_config.update(draft_config.get("dflash_config", {}))
     # A draft model may contain multiple attention layers; each layer needs a
@@ -339,8 +342,8 @@ def get_pd_node_continuation_resource_wait_timeout_seconds() -> int:
 
 @lru_cache(maxsize=None)
 def get_pd_node_busy_retry_timeout_seconds() -> int:
-    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒。"""
-    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 120)))
+    """PD Master 收到节点繁忙错误后的最长重试时间，单位为秒；0 表示不重试。"""
+    return max(0, int(os.getenv("LIGHTLLM_PD_NODE_BUSY_RETRY_TIMEOUT_SECONDS", 0)))
 
 
 @lru_cache(maxsize=None)

@@ -21,7 +21,7 @@ from ..tokenizer import get_tokenizer
 from ..pd_io_struct import NodeRole, ObjType, PDDecodeNodeInfo
 from ..embed_cache.utils import get_shm_name_data, create_shm
 from ..multimodal_params import AudioItem, MultimodalParams, ImageItem
-from ..req_id_generator import ReqIDGenerator
+from .req_id_generator_client import ReqIDGenerator
 from .async_queue import AsyncQueue
 from .stop_seq_match import wrap_stop_match_stream
 from .grammar import create_output_grammar_compiler
@@ -416,7 +416,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
             if pd_upload_websocket is not None and self.pd_mode.is_P():
                 # 在 pd 模式下的 prefill 节点，为了兼容多模态推理流程，需要先上报 encode 好的 prompt ids，
                 # 再等待 pd_master 下发对应请求的 decode 节点信息，然后执行后续流程。
-                logger.info(
+                logger.debug(
                     f"pd prefill node upload group_req_id {group_request_id} prompt ids len : {len(prompt_ids)}"
                 )
                 await pd_upload_websocket.send(
@@ -449,11 +449,11 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 await self._register_running_request()
                 running_request_registered = True
 
-            # 申请资源并存储。PD 高优先级请求仍以更短的间隔重试；资源等待上限
+            # 申请资源并存储。高优先级请求仍以更短的间隔重试；资源等待上限
             # 完全由 PD Master 下发，与请求优先级无关。
             alloced_req_indexes = await self._alloc_shm_req_indexes(
                 sampling_params.n,
-                pd_high_priority_request=sampling_params.pd_high_priority_request,
+                high_priority_request=sampling_params.high_priority_request,
                 pd_node_resource_wait_timeout_seconds=sampling_params.pd_node_resource_wait_timeout_seconds,
             )
             req_objs: List[Req] = []
@@ -567,7 +567,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def _alloc_shm_req_indexes(
         self,
         req_num: int,
-        pd_high_priority_request: bool = False,
+        high_priority_request: bool = False,
         pd_node_resource_wait_timeout_seconds: int = -1,
     ) -> List[int]:
         """为一个请求一次性申请全部 shm_req 索引，等待时不占用部分槽。
@@ -589,7 +589,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 空闲槽不足时整组重试，避免多个 n > 1 的请求各占部分槽后互相等待。
         alloced_req_indexes = await self.shm_req_manager.async_alloc_req_indexes(req_num)
         # 保持相同的退避起点，仅通过系数让高优先级请求更快地重新尝试获取 shm_req。
-        sleep_time_factor = 0.2 if pd_high_priority_request else 1
+        sleep_time_factor = 0.2 if high_priority_request else 1
         sleep_time = 0.1
         while alloced_req_indexes is None:
             if alloc_deadline is not None and time.monotonic() >= alloc_deadline:
@@ -886,7 +886,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                         mtp_avg_verify_tokens_per_step = mtp_verify_token_num / max(mtp_total_verify_steps, 1)
                         mtp_avg_accepted_tokens_per_step = mtp_accepted_token_num / max(mtp_total_verify_steps, 1)
                         format_start_time = datetime.datetime.fromtimestamp(start_time).strftime("%Y-%m-%d %H:%M:%S")
-                        logger.info(
+                        logger.debug(
                             f"X-Request-Id:{x_request_id} "
                             f"X-Session-Id:{x_session_id} start_time:{format_start_time} "
                             f"lightllm_req_id:{group_request_id} first_token_cost:{first_token_cost_ms}ms "
@@ -937,7 +937,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
     async def stop_request(self, request_id: int):
         """停止指定 choice，保留同组其他请求。"""
-        from ..req_id_generator import convert_sub_id_to_group_id
+        from .req_id_generator_server import convert_sub_id_to_group_id
 
         req_status = self.req_id_to_out_inf.get(convert_sub_id_to_group_id(request_id))
         if req_status is not None:

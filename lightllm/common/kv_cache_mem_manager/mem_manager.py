@@ -324,7 +324,8 @@ class MemoryManager:
                 obj_bytes_array = [ForkingPickler.dumps(self).tobytes() for _ in range(node_world_size * 2)]
             finally:
                 self.big_page_buffers = big_page_buffers
-            obj_size = len(obj_bytes_array[0])
+            # Each consumer needs its own IPC ref-counter; its pickle size can vary.
+            obj_size = max(len(obj_bytes) for obj_bytes in obj_bytes_array)
             shm = create_or_link_shm(
                 name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"
             )
@@ -333,7 +334,7 @@ class MemoryManager:
             shm.buf[4:8] = obj_size.to_bytes(4, "little")
             start_index = 8
             for obj_bytes in obj_bytes_array:
-                shm.buf[start_index : start_index + obj_size] = obj_bytes
+                shm.buf[start_index : start_index + obj_size] = obj_bytes.ljust(obj_size, b"\0")
                 start_index += obj_size
 
     @staticmethod

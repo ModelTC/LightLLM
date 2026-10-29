@@ -48,6 +48,7 @@ from lightllm.server.multi_level_kv_cache import (
     CacheTier,
     create_cache_placement_controller,
 )
+from .prefill_queue_strategy import create_prefill_queue_strategy
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
@@ -78,6 +79,8 @@ class ModeBackend:
         self._radix_tree_merge_counter: int = 0
         self._enable_radix_tree_timer_merge: bool = enable_radix_tree_timer_merge()
         self._radix_tree_merge_update_delta: int = get_radix_tree_merge_update_delta()
+        # 已提交执行的 prefill token 总数，作为 HRRN 与墙上时间无关的 aging 轴。
+        self.processed_prefill_tokens: int = 0
         pass
 
     def init_model(self, kvargs):
@@ -261,6 +264,9 @@ class ModeBackend:
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
         self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
+
+        # 策略可能读取模型、缓存管理器和 rank 等全局调度状态，因此在 backend 完成初始化后再创建。
+        self.prefill_queue_strategy = create_prefill_queue_strategy(self)
 
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
@@ -617,35 +623,6 @@ class ModeBackend:
             )
         return
 
-    def _reorder_pd_high_priority_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
-        """将 PD 分段续跑的高优先级请求前置，普通请求保持在其后。"""
-        # PD 分段续跑请求已经完成前一段推理，需要优先进入本轮调度；将请求拆分后再拼接，
-        # 保持各自原有顺序，并确保高优先级请求位于普通请求之前。
-        high_priority_reqs = [req for req in ready_reqs if req.shm_req.sample_params.pd_high_priority_request]
-        normal_reqs = [req for req in ready_reqs if not req.shm_req.sample_params.pd_high_priority_request]
-        return high_priority_reqs + normal_reqs
-
-    def _reorder_long_prefill_reqs(self, ready_reqs: List[InferReq]) -> List[InferReq]:
-        """
-        提升一个短 prefill 请求的优先级。
-        """
-        short_token_threshold = self.args.short_prefill_token_threshold
-        if short_token_threshold is None:
-            return ready_reqs
-
-        def remaining_prefill_tokens(req: InferReq) -> int:
-            return max(0, req.shm_req.input_len - req.cur_kv_len)
-
-        sorted_reqs = sorted(
-            ready_reqs,
-            key=lambda req: (remaining_prefill_tokens(req), req.shm_req.group_req_id),
-        )
-        if sorted_reqs and remaining_prefill_tokens(sorted_reqs[0]) <= short_token_threshold:
-            target_req = sorted_reqs[0]
-            ready_reqs.remove(target_req)
-            ready_reqs.insert(0, target_req)
-        return ready_reqs
-
     # 一些可以复用的通用功能函数
     def _alloc_req_kv_mem(
         self,
@@ -670,30 +647,52 @@ class ModeBackend:
         req_obj.hold_kv_len = new_hold_kv_len
         return mem_indexes
 
+    @staticmethod
+    def _is_decode_req(req: InferReq, no_decode: bool, strict_prefill: bool) -> bool:
+        """判断请求在当前调度轮次中是否按 decode 请求处理。"""
+        if no_decode:
+            return False
+
+        is_decode = req.cur_kv_len + 1 == req.get_cur_total_len()
+        if not is_decode:
+            return False
+
+        if strict_prefill:
+            is_at_prompt_boundary = req.cur_kv_len + 1 == req.shm_req.input_len
+            if is_at_prompt_boundary:
+                return False
+
+        return True
+
     def _get_classed_reqs(
         self,
         req_ids: List[int] = None,
         no_decode: bool = False,
         strict_prefill: bool = False,
         recover_paused: bool = False,
-    ):
-        """
-        当将参数 no_decode 设置为True后，返回的 decode_reqs 永远为空list，主要是
-        PD 分离的某些backend需要用这个参数进行控制，因为P节点永远只进行Prefill,
-        避免一些特殊情况，如 radix cache 命中后，只有1token需要prefill，这个判断
-        条件和decode请求的分类条件相同。所以添加一个参数进行区分。
+    ) -> Tuple[List[InferReq], List[InferReq], int]:
+        """按队列策略选择本轮可执行的请求，并为其分配 KV cache。
 
-        strict_prefill参数用于控制当 cur_kv_len + 1 == input_len 时，是否将请求
-        分为 prefill,当 strict_prefill 设置为True时，表示需要将这个请求分为 prefill,
-        为 False 时，将这个请求分为decode。 strict_prefill 主要是用于diverse mode
-        使用时，其他模式目前不使用。
+        Args:
+            req_ids: 待处理的请求 ID；为 None 时使用推理上下文中的全部请求。
+            no_decode: 为 True 时，所有请求均按 prefill 处理，返回的 decode_reqs 为空。
+                用于 PD Prefill 节点，确保缓存命中后仅剩一个 token 的 prompt 仍执行 prefill。
+            strict_prefill: 为 True 时，满足 decode 判定但位于 prompt 边界
+                （cur_kv_len + 1 == input_len）的请求仍按 prefill 处理；
+                为 False 时，该请求按 decode 处理。no_decode=True 时优先遵循 no_decode。
+            recover_paused: 是否在本轮请求选择完成后尝试恢复已暂停的请求。
+                恢复后的请求从后续调度轮次开始参与选择。
 
-        将请求分类返回:
-        1. wait_pause_reqs 因为推理资源不够，等待被暂停的请求。
-        2. paused_reqs 已经被暂停的请求，可能会被恢复。
-        3. finished_reqs 需要释放的请求, 包含正常结束和aborted退出的请求。
-        4. prefill_reqs 需要进行prefill操作的请求
-        5. decode_reqs 需要进行decode操作的请求
+        Returns:
+            (prefill_reqs, decode_reqs, prefill_tokens)：本轮选出的 prefill 请求、
+            decode 请求，以及 prefill batch 需要计算的 token 数。启用 prefill/decode
+            混合执行且预算允许时，decode 请求会并入 prefill_reqs，decode_reqs 为空，
+            prefill_tokens 包含并入的 decode token。该计数仅表示本轮选中的工作量，
+            是否执行由调用方决定，不代表后端累计已提交的 prefill token 数。
+
+        等待暂停、已暂停和已结束的请求在函数内部处理，不作为返回值。
+        函数会更新请求状态，并处理结束请求的释放、资源不足请求的暂停及可选的暂停恢复；
+        overlap 模式下，部分结束请求会延迟到后续轮次清理。
         """
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
@@ -705,12 +704,15 @@ class ModeBackend:
             req_ids = g_infer_context.infer_req_ids
 
         if len(req_ids) == 0:
-            return [], []
+            return [], [], 0
 
         ready_reqs = self._filter_not_ready_reqs(req_ids)
         support_overlap = self.support_overlap
-        ready_reqs = self._reorder_pd_high_priority_reqs(ready_reqs)
-        ready_reqs = self._reorder_long_prefill_reqs(ready_reqs)
+        ready_reqs = self.prefill_queue_strategy.reorder(
+            ready_reqs,
+            no_decode=no_decode,
+            strict_prefill=strict_prefill,
+        )
 
         wait_pause_reqs = []
         paused_reqs = []
@@ -749,14 +751,7 @@ class ModeBackend:
                     finished_reqs.append(req_obj)
                     continue
 
-            if no_decode:
-                is_decode = False
-            else:
-                is_decode = req_obj.cur_kv_len + 1 == req_obj.get_cur_total_len()
-                if is_decode and strict_prefill and req_obj.cur_kv_len + 1 == req_obj.shm_req.input_len:
-                    is_decode = False
-
-            if is_decode:
+            if self._is_decode_req(req_obj, no_decode=no_decode, strict_prefill=strict_prefill):
                 # KV 容量检查使用额外分配量，已有页的剩余容量可以覆盖部分或全部 decode 需求。
                 _, alloc_token_num = req_obj.decode_need_token_num()
                 # page_size 较小时，decode 会频繁触发 KV 内存分配。此处额外预申请不超过 8 个 token，
@@ -845,6 +840,7 @@ class ModeBackend:
         # 则将 decode 请求合并到 prefill 请求中。
         if self.args.enable_prefill_decode_mixed and len(prefill_reqs) > 0 and len(decode_reqs) > 0:
             if prefill_tokens + len(decode_reqs) <= self.batch_max_tokens:
+                prefill_tokens += len(decode_reqs)
                 for decode_req in decode_reqs:
                     # 给 decode req 添加一个属性标签，标识其为混合prefill的请求。
                     # 在 prefill 阶段，会根据这个属性标签， 对这些请求的处理进行一些
@@ -853,7 +849,7 @@ class ModeBackend:
                     prefill_reqs.append(decode_req)
                 decode_reqs = []
 
-        return prefill_reqs, decode_reqs
+        return prefill_reqs, decode_reqs, prefill_tokens
 
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:

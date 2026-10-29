@@ -55,6 +55,7 @@ class StartArgs:
                 "qwen",
                 "deepseekv31",
                 "deepseekv32",
+                "deepseekv4",
                 "glm47",
                 "kimi_k2",
                 "qwen3_coder",
@@ -67,6 +68,7 @@ class StartArgs:
             "choices": [
                 "deepseek-r1",
                 "deepseek-v3",
+                "deepseek-v4",
                 "glm45",
                 "gpt-oss",
                 "kimi",
@@ -95,6 +97,7 @@ class StartArgs:
     use_config_server_to_init_nccl: bool = field(default=False)
     trust_remote_code: bool = field(default=False)
     detail_log: bool = field(default=False)
+    pd_detail_log: bool = field(default=False)
     router_token_ratio: float = field(default=None)
     router_max_wait_tokens: int = field(default=1)
     disable_aggressive_schedule: bool = field(default=False)
@@ -102,7 +105,11 @@ class StartArgs:
     disable_dynamic_prompt_cache: bool = field(default=False)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
-    short_prefill_token_threshold: Optional[int] = field(default=None)
+    disable_chunked_mm_input: bool = field(default=False)
+    # "auto" resolves to hrrn for Prefill nodes and default otherwise.
+    prefill_queue_strategy: str = field(
+        default="auto", metadata={"choices": ["auto", "default", "promote_shortest", "hrrn"]}
+    )
     diverse_mode: bool = field(default=False)
     target_vocab_topk_sampling: Optional[int] = field(
         default=None, metadata={"choices": [2, 8, 16, 32, 64, 128, 256, 512]}
@@ -218,7 +225,7 @@ class StartArgs:
     pd_node_id: int = field(default=-1)
     enable_cpu_cache: bool = field(default=False)
     cpu_cache_storage_size: float = field(default=2)
-    cpu_cache_token_page_size: int = field(default=256)
+    cpu_cache_token_page_size: Optional[int] = field(default=None)
     cache_placement_strategy: str = field(default="adaptive", metadata={"choices": ["adaptive", "legacy"]})
     enable_disk_cache: bool = field(default=False)
     disk_cache_storage_size: float = field(default=10)

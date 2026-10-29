@@ -14,8 +14,8 @@ class ReqManagerForWindowedMTP(HybridAttentionReqManager):
     def init_hybrid_attention_state(self, req):
         self.mem_manager.windowed_draft_kv.reset_req(req.req_idx)
 
-    def save_state(self, req_idx, buffer_idx, state_cache_manager):
-        self.mem_manager.windowed_draft_kv.save_checkpoint(req_idx, state_cache_manager.draft_window, buffer_idx)
+    def save_state(self, req, buffer_idx, state_cache_manager):
+        self.mem_manager.windowed_draft_kv.save_checkpoint(req.req_idx, state_cache_manager.draft_window, buffer_idx)
 
     def restore_state(self, req, state_cache_manager, buffer_idx):
         self.mem_manager.windowed_draft_kv.restore_checkpoint(req.req_idx, state_cache_manager.draft_window, buffer_idx)

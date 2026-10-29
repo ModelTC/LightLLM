@@ -2,8 +2,9 @@
 import torch
 import numpy as np
 import collections
-from typing import Tuple, Dict, Set, List, Optional, Union
+from typing import Tuple, Dict, Set, List, Optional, Union, Sequence
 from sortedcontainers import SortedSet
+from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 from .shared_arr import SharedArray
 
 
@@ -247,13 +248,16 @@ class RadixCache:
                 self.evict_tree_set.add(new_node)
             return 0, new_node
 
-    def match_prefix(self, key, update_refs=False):
+    def match_prefix(self, key, update_refs=False, mm_input_spans: Sequence[Tuple[int, int]] = ()):
         aligned_len = len(key) // self.page_size * self.page_size
         if aligned_len == 0:
             return None, 0, None
         key = key[:aligned_len]
         ans_value_list = []
         tree_node = self._match_prefix_helper(self.root_node, key, ans_value_list, update_refs=update_refs)
+        tree_node, ans_value_list = self._trim_unusable_match_tail(
+            tree_node, ans_value_list, mm_input_spans=mm_input_spans, update_refs=update_refs
+        )
         if tree_node != self.root_node:
             if len(ans_value_list) != 0:
                 value = torch.concat(ans_value_list)
@@ -264,6 +268,32 @@ class RadixCache:
             if update_refs:
                 self.dec_node_ref_counter(self.root_node)
             return None, 0, None
+
+    def _trim_unusable_match_tail(
+        self,
+        tree_node: TreeNode,
+        ans_value_list: list,
+        mm_input_spans: Sequence[Tuple[int, int]],
+        update_refs: bool = False,
+    ):
+        """沿父节点回退到图片外，只撤销尾部引用，保留匹配时的访问时间。"""
+        while tree_node is not self.root_node:
+            node_end = tree_node.node_prefix_total_len
+            if clamp_mm_cache_len(node_end, mm_input_spans) == node_end:
+                break
+
+            if update_refs:
+                if tree_node.is_leaf():
+                    self.evict_tree_set.discard(tree_node)
+                tree_node.ref_counter -= 1
+                if tree_node.ref_counter == 0:
+                    self.refed_tokens_num.arr[0] -= len(tree_node.token_mem_index_value)
+                if tree_node.is_leaf():
+                    self.evict_tree_set.add(tree_node)
+
+            ans_value_list.pop()
+            tree_node = tree_node.parent
+        return tree_node, ans_value_list
 
     def _match_prefix_helper(
         self, node: TreeNode, key: torch.Tensor, ans_value_list: list, update_refs=False

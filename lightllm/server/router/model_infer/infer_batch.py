@@ -17,10 +17,11 @@ from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import (
     HybridAttPagedTreeNode,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.server.req_id_generator import convert_sub_id_to_group_id
+from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
@@ -36,6 +37,7 @@ logger = init_logger(__name__)
 
 @dataclass
 class InferenceContext:
+    backend: Optional["ModeBackend"] = None
     req_manager: ReqManager = None  # gpu 请求管理
     radix_cache: Union[HybridAttPagedRadixCache, RadixCache] = None
     shm_req_manager: ShmReqManager = None  # 共享内存请求对象管理
@@ -431,21 +433,28 @@ class InferenceContext:
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
         big_page_buffer_ids = []
         for req in reqs:
+            # 保存时尚未更新 req.cur_kv_len；它是本轮 chunk 起点，cur_input_len 是终点。
             cur_input_len = req.get_chuncked_input_token_len()
-            if cur_input_len % big_page_token_num == 0 and cur_input_len <= req.hybrid_cache_len:
+            first_page_end = (req.cur_kv_len // big_page_token_num + 1) * big_page_token_num
+            state_buffer_id = -1
+            last_page_end = min(cur_input_len, req.hybrid_cache_len)
+            # 完整图片可能跨过多个大页结束点，例如页长 256、chunk [128, 768) 覆盖 256/512/768。
+            # 这些页的 KV 都有效，仍需为 radix 插入和 CPU offload 分配对应槽位。
+            for page_end in range(first_page_end, last_page_end + 1, big_page_token_num):
                 big_page_id = self.radix_cache.big_page_buffers.alloc_one_state_cache()
                 assert big_page_id is not None
-                big_page_buffer_ids.append(big_page_id)
-                assert cur_input_len not in req.hybrid_len_to_big_page_id
-                req.hybrid_len_to_big_page_id[cur_input_len] = big_page_id
-            else:
-                big_page_buffer_ids.append(-1)
+                assert page_end not in req.hybrid_len_to_big_page_id
+                req.hybrid_len_to_big_page_id[page_end] = big_page_id
+                # 当前运行态只对应 chunk 终点；图片内部页尾不保存 state，匹配时也不能在此恢复。
+                if page_end == cur_input_len:
+                    state_buffer_id = big_page_id
+            big_page_buffer_ids.append(state_buffer_id)
 
         assert len(b_req_idx) == len(big_page_buffer_ids)
         if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
             self.req_manager.save_big_page_states(
                 b_req_idx=b_req_idx,
-                req_indexes=[req.req_idx for req in reqs],
+                reqs=reqs,
                 buffer_indexes=big_page_buffer_ids,
             )
 
@@ -462,7 +471,7 @@ class InferenceContext:
                     if req.tail_small_page_buffer_id is not None:
                         dst_buffer_idx = req.tail_small_page_buffer_id
                         self.req_manager.save_state(
-                            req_idx=req.req_idx,
+                            req=req,
                             buffer_idx=dst_buffer_idx,
                             state_cache_manager=self.radix_cache.small_page_buffers,
                         )
@@ -628,6 +637,11 @@ class InferReq:
         # 仅载入调用方显式指定的 token ID 序列；字符串由 detokenization / HTTP 匹配。
         self.stop_sequences = self.sampling_param.shm_param.stop_sequences.to_token_ids_list()
         self.multimodal_params = self.multimodal_params.to_dict()
+        self.mm_input_spans = (
+            get_mm_input_spans(self.get_input_token_ids(), self.multimodal_params)
+            if self.args.disable_chunked_mm_input
+            else []
+        )
         self.shared_kv_node: Union[TreeNode, HybridAttPagedTreeNode] = None
 
         self.finish_status = FinishStatus()
@@ -649,7 +663,9 @@ class InferReq:
             input_token_ids = self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
             key = torch.tensor(input_token_ids, dtype=torch.int64, device="cpu")
             key = key[0 : len(key) - 1]  # 最后一个不需要，因为需要一个额外的token，让其在prefill的时候输出下一个token的值
-            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(key, update_refs=True)
+            share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
+                key, update_refs=True, mm_input_spans=self.mm_input_spans
+            )
             if share_node is not None:
                 self.shared_kv_node = share_node
                 ready_cache_len = share_node.node_prefix_total_len
@@ -683,7 +699,7 @@ class InferReq:
             key = torch.tensor(input_token_ids[0:match_tokens], dtype=torch.int64, device="cpu")
             assert len(key) == len(block_hashs) * hash_page_size
             share_node, kv_len, value_tensor = g_infer_context.radix_cache.match_prefix(
-                key, block_hashs=block_hashs, update_refs=True
+                key, block_hashs=block_hashs, update_refs=True, mm_input_spans=self.mm_input_spans
             )
             if share_node is not None:
                 assert self.tail_small_page_buffer_id is None
@@ -756,7 +772,9 @@ class InferReq:
                             self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
                         else:
                             # 没有充足的token 容量时， 直接找到最接近的大页，进行大页恢复
-                            share_node = radix_cache.deref_to_first_big_page_node(node=share_node)
+                            share_node = radix_cache.deref_to_first_big_page_node(
+                                node=share_node, mm_input_spans=self.mm_input_spans
+                            )
                             if share_node is not None:
                                 assert share_node.is_big_page_node()
                                 # 大页匹配
@@ -833,6 +851,7 @@ class InferReq:
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
+        chunked_end = adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
         return self.shm_req.shm_prompt_ids.arr[0:chunked_end]
 
     def get_chuncked_input_token_ids_for_hybrid_att(self):
@@ -848,12 +867,13 @@ class InferReq:
             # hybrid checkpoint 对应需要存储的部分。
             end = self.hybrid_cache_len
 
+        end = adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
         return self.shm_req.shm_prompt_ids.arr[0:end]
 
     def get_chuncked_input_token_len(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
-        return chunked_end
+        return adjust_mm_chunk_end(chunked_start, chunked_end, self.mm_input_spans)
 
     def get_chuncked_input_token_len_for_hybrid_att(self):
         big_page_token_num = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
@@ -864,7 +884,7 @@ class InferReq:
         end = min(total_end, chunked_end, big_page_end)
         if chunked_start < self.hybrid_cache_len < end:
             end = self.hybrid_cache_len
-        return end
+        return adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
 
     def set_next_gen_token_id(self, next_token_id: int, logprob: float, output_len: int, rank: int = -1):
         index = self.shm_req.input_len + output_len

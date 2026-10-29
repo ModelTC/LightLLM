@@ -381,7 +381,7 @@ def test_pd_node_returns_busy_while_first_token_request_waits_in_router(mode):
             router_arrival_time=0,
             infer_start_time=0,
             sample_params=SimpleNamespace(
-                pd_high_priority_request=False,
+                high_priority_request=False,
                 pd_node_resource_wait_timeout_seconds=20,
             ),
         )
@@ -440,14 +440,14 @@ def test_httpserver_keeps_started_requests_and_requests_with_remaining_master_ti
         router_arrival_time=1.0,
         infer_start_time=0.0,
         sample_params=SimpleNamespace(
-            pd_high_priority_request=False,
+            high_priority_request=False,
             pd_node_resource_wait_timeout_seconds=60,
         ),
     )
     started_req = SimpleNamespace(
         router_arrival_time=1.0,
         infer_start_time=2.0,
-        sample_params=SimpleNamespace(pd_high_priority_request=False),
+        sample_params=SimpleNamespace(high_priority_request=False),
     )
     req_status = _req_status([waiting_req, started_req])
 
@@ -483,7 +483,7 @@ def test_batch_allocation_retries_with_priority_backoff(high_priority):
         manager = _make_manager(NodeRole.D)
         manager.shm_req_manager.async_alloc_req_indexes = AsyncMock(side_effect=[None, None, [0, 1]])
         with patch("lightllm.server.httpserver.manager.asyncio.sleep", new_callable=AsyncMock) as sleep:
-            assert await manager._alloc_shm_req_indexes(2, pd_high_priority_request=high_priority) == [0, 1]
+            assert await manager._alloc_shm_req_indexes(2, high_priority_request=high_priority) == [0, 1]
         factor = 0.2 if high_priority else 1
         assert [call.args[0] for call in sleep.await_args_list] == pytest.approx([0.1 * factor, 0.11 * factor])
         assert [call.args for call in manager.shm_req_manager.async_alloc_req_indexes.await_args_list] == [(2,)] * 3

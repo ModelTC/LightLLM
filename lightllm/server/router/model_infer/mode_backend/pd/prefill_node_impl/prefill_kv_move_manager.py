@@ -1,4 +1,6 @@
 import inspect
+import logging
+import os
 import setproctitle
 import torch.multiprocessing as mp
 import time
@@ -20,27 +22,36 @@ def start_prefill_kv_move_manager_process(args, info_queue: mp.Queue):
     event = mp.Event()
     proc = mp.Process(target=_init_env, args=(args, info_queue, event))
     proc.start()
-    event.wait()
-    assert proc.is_alive()
+    while not event.wait(timeout=1):
+        if not proc.is_alive():
+            raise RuntimeError("prefill kv move manager process failed during initialization")
+    if not proc.is_alive():
+        raise RuntimeError("prefill kv move manager process exited during initialization")
     logger.info("prefill kv move manager process started")
     return
 
 
 def _init_env(args, info_queue: mp.Queue, event: mp.Event):
-    start_parent_check_thread()
-    import lightllm.utils.rpyc_fix_utils as _
+    try:
+        start_parent_check_thread()
+        import lightllm.utils.rpyc_fix_utils as _
 
-    # 注册graceful 退出的处理
-    graceful_registry(inspect.currentframe().f_code.co_name)
-    setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::prefill_kv_move_manager")
+        # 注册graceful 退出的处理
+        graceful_registry(inspect.currentframe().f_code.co_name)
+        setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::prefill_kv_move_manager")
 
-    from .prefill_trans_process import start_prefill_trans_process
+        from .prefill_trans_process import start_prefill_trans_process
 
-    manager = PrefillKVMoveManager(
-        args=args, info_queue=info_queue, start_trans_process_func=start_prefill_trans_process
-    )
-    assert manager is not None
-    event.set()
+        manager = PrefillKVMoveManager(
+            args=args, info_queue=info_queue, start_trans_process_func=start_prefill_trans_process
+        )
+        assert manager is not None
+        event.set()
+    except BaseException:
+        logger.exception("prefill kv move manager process failed during initialization")
+        # Skip multiprocessing's child joins; workers detect this exit via parent check.
+        os._exit(1)
+
     while True:
         time.sleep(100)
     return
@@ -72,7 +83,11 @@ class PrefillKVMoveManager(BaseKVMoveManager):
             try:
                 trans_process: KVTransProcess = self.kv_trans_processes[device_id]
                 trans_process.task_in_queue.put(task)
-                if isinstance(task, PDChunckedTransTask):
-                    logger.info(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
+                if (
+                    isinstance(task, PDChunckedTransTask)
+                    and self.args.pd_detail_log
+                    and logger.isEnabledFor(logging.DEBUG)
+                ):
+                    logger.debug(f"kv move manager dispatch task {task.to_str()} to device {device_id}")
             except BaseException as e:
                 logger.exception(str(e))
