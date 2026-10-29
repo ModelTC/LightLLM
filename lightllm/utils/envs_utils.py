@@ -270,6 +270,8 @@ def enable_cpu_cache_numa_interleave() -> bool:
 @lru_cache(maxsize=None)
 def get_added_mtp_kv_layer_num() -> int:
     args = get_env_start_args()
+    if getattr(args, "mtp_windowed", False):
+        return 0
     mtp_mode = args.mtp_mode
 
     if mtp_mode is None:
@@ -305,6 +307,8 @@ def get_mtp_weight_layer_num() -> int:
         return args.mtp_step
     if mtp_mode == "eagle_no_att":
         return 1
+    if args.mtp_windowed:
+        return _get_mtp_draft_backbone_layer_num(args.mtp_draft_model_dir[0])
     return get_added_mtp_kv_layer_num()
 
 

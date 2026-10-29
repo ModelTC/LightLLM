@@ -40,6 +40,9 @@ class DSparkProposer(BaseSpecProposer):
         # DSpark prefill 直接使用 target prompt 的 token 布局和 hidden，将 prompt
         # KV 写入唯一的 parallel-block draft model。使用浅副本，避免把 draft
         # 专用 hidden 挂到后续流程仍可能读取的 target ModelInput 上。
+        if getattr(self.backend.draft_models[0], "uses_windowed_draft_kv", False):
+            self.backend.draft_models[0].commit_window_kv(target_model_input, target_hidden)
+            return
         draft_input = copy.copy(target_model_input)
         draft_input.mtp_draft_input_hiddens = target_hidden
         self.backend.draft_models[0].forward(draft_input)
@@ -81,12 +84,16 @@ class DSparkProposer(BaseSpecProposer):
 
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
 
-        # target verify 的行布局和 mem_indexes 已经对应本轮所有被验证 token。
-        # 仅附加 target hidden 后执行一次 draft forward，即可把这些行提交到
-        # DSpark KV cache；浅副本保证 target_model_input 本身不被修改。
-        verify_draft_input = copy.copy(target_model_input)
-        verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
-        draft_model.forward(verify_draft_input)
+        # full 模式通过 draft forward 写入 verify 行对应的 KV；windowed 模式
+        # 沿用 verify 行进行投影，仅将接受且仍在窗口内的行写入独立缓存。
+        if getattr(draft_model, "uses_windowed_draft_kv", False):
+            draft_model.commit_window_kv(
+                target_model_input, target_model_output.mtp_collector.spec_hidden, b_req_mtp_start_loc, accept_len
+            )
+        else:
+            verify_draft_input = copy.copy(target_model_input)
+            verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
+            draft_model.forward(verify_draft_input)
 
         # DSpark 每个请求固定展开一个完整 block。block 第一行是
         # accepted-tail anchor，其余行使用 mask token，由 parallel backbone

@@ -1,11 +1,10 @@
 import os
 import gc
-import json
 import torch
 from contextlib import contextmanager
 from transformers import AutoModelForCausalLM
 import argparse
-from lightllm.common.build_utils import repair_config
+from lightllm.utils.config_utils import load_config
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_mtp_weight_layer_num
 
@@ -74,28 +73,20 @@ def profile_mtp_weight_memory(model):
     weight_memory_before = torch.cuda.memory_allocated()
     yield
     target_weight_bytes = torch.cuda.memory_allocated() - weight_memory_before
+    if model.args.mtp_windowed:
+        from lightllm.common.state_cache_manager.windowed_mtp import load_window_state_config
+
+        config = load_window_state_config(model.args)
+        draft_cache_bytes = (model.max_req_num + 1) * config.get_state_bytes(model.data_type.itemsize)
+        total_gpu_bytes = torch.cuda.get_device_properties(get_current_device_id()).total_memory
+        # Include the window reservation in the existing per-rank budget reduction.
+        model.mem_fraction -= draft_cache_bytes / total_gpu_bytes
     model.mem_fraction = get_mtp_adjusted_mem_fraction(
         mem_fraction=model.mem_fraction,
         target_weight_bytes=target_weight_bytes,
         target_layer_num=model.config["n_layer"],
         mtp_layer_num=get_mtp_weight_layer_num(),
     )
-
-
-def load_config(weight_dir_):
-    """
-    Load model configuration from the specified directory
-    Args:
-        weight_dir_: Path to the weight directory
-    Returns:
-        config: Model configuration
-    """
-    with open(os.path.join(weight_dir_, "config.json"), "r") as json_file:
-        config = json.load(json_file)
-    repair_config(config, same_names=["num_attention_heads", "n_head"])
-    repair_config(config, same_names=["hidden_size", "n_embd", "n_embed"])
-    repair_config(config, same_names=["num_hidden_layers", "n_layer"])
-    return config
 
 
 def load_model(model_dir, tp_size, data_type):

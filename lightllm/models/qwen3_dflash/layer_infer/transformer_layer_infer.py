@@ -26,6 +26,11 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Qwen3DFlashInferStateInfo,
         layer_weight: Qwen3DFlashTransformerLayerWeight,
     ) -> torch.Tensor:
+        cache_kv = self._get_context_kv(input_embdings, infer_state, layer_weight)
+        self._post_cache_kv(cache_kv, infer_state, layer_weight)
+        return input_embdings
+
+    def _get_context_kv(self, input_embdings, infer_state, layer_weight):
         token_num, _ = input_embdings.shape
         cache_kv = layer_weight.kv_proj.mm(input_embdings, use_custom_tensor_mananger=False)
         qk_rmsnorm_forward(
@@ -41,8 +46,30 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.position_sin,
             partial_rotary_factor=self.partial_rotary_factor,
         )
-        self._post_cache_kv(cache_kv, infer_state, layer_weight)
-        return input_embdings
+        return cache_kv
+
+    def token_attention_forward(self, input_embdings, infer_state, layer_weight):
+        att_state = infer_state.decode_att_state
+        if not att_state.backend.model.uses_windowed_draft_kv:
+            return super().token_attention_forward(input_embdings, infer_state, layer_weight)
+
+        q, noise_kv = self._get_qkv(input_embdings, infer_state, layer_weight)
+        windowed_kv = att_state.prepare_kv(self.layer_num_, noise_kv, alloc_func=self.alloc_tensor)
+        output = self._token_attention_kernel(q, infer_state, layer_weight, windowed_kv=windowed_kv)
+        return self._get_o(output, infer_state, layer_weight)
+
+    def _token_attention_kernel(self, q, infer_state, layer_weight, windowed_kv=None):
+        # Windowed KV is prepared by the backend; ordinary KV stays in the memory manager.
+        if windowed_kv is None:
+            return super()._token_attention_kernel(q, infer_state, layer_weight)
+        k, v = windowed_kv
+        output = infer_state.decode_att_state.decode_att(
+            q=q.view(-1, self.tp_q_head_num_, self.head_dim_),
+            k=k,
+            v=v,
+            alloc_func=self.alloc_tensor,
+        )
+        return output.view(q.shape)
 
     def _get_qkv(self, input, infer_state: Qwen3DFlashInferStateInfo, layer_weight: Qwen3DFlashTransformerLayerWeight):
         q = layer_weight.q_proj.mm(input, use_custom_tensor_mananger=False)

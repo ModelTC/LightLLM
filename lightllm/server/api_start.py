@@ -148,7 +148,7 @@ def _launch_subprocesses(args: StartArgs):
         args.graph_max_len_in_batch = args.max_req_total_len
 
     # mode setting check.
-    is_hybrid_model = is_hybrid_att_model(args.model_dir)
+    is_hybrid_model = is_hybrid_att_model(args.model_dir) or args.mtp_windowed
     if is_hybrid_model:
         # 混合注意力模型的状态缓存依赖动态缓存和分块预填充，与是否开启输出约束无关。
         assert not args.disable_dynamic_prompt_cache, "hybrid attention models require dynamic prompt cache"
@@ -216,6 +216,12 @@ def _launch_subprocesses(args: StartArgs):
     else:
         assert args.mtp_draft_model_dir is None
         assert args.mtp_step == 0
+
+    if args.mtp_windowed:
+        assert args.mtp_window_size > 0
+        assert args.mtp_mode in ("dflash", "dspark", "dflash2"), "windowed draft KV requires dflash, dspark or dflash2"
+        if args.llm_kv_type not in (None, "None"):
+            raise ValueError("windowed draft KV currently requires unquantized KV")
 
     # automatically set visual_dp based on visual_tp and the per-node world size.
     # In visual proxy mode keep the caller-provided visual_dp / visual_tp.

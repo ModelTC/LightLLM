@@ -5,7 +5,9 @@ from lightllm.common.basemodel.attention import (
     Fp8Fa3AttBackend,
 )
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
+from lightllm.common.basemodel.attention.fa3.windowed_mtp import WindowedMTPAttBackend
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
@@ -13,12 +15,14 @@ from lightllm.models.qwen3_dflash.layer_infer.pre_layer_infer import Qwen3DFlash
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import Qwen3DFlashPreAndPostLayerWeight
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight
+from lightllm.server.router.model_infer.pin_mem_manager import g_pin_mem_manager
 
 
 class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 
     is_mtp_draft_model = True
+    uses_windowed_draft_kv = False
 
     pre_and_post_weight_class = Qwen3DFlashPreAndPostLayerWeight
     transformer_weight_class = Qwen3DFlashTransformerLayerWeight
@@ -41,6 +45,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
 
         assert self.args.mtp_step <= self.config["block_size"]
         self.config["block_size"] = self.args.mtp_step
+        self.uses_windowed_draft_kv = getattr(self.args, "mtp_windowed", False)
 
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
@@ -52,10 +57,20 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.req_manager = self.main_model.req_manager
 
     def _init_mem_manager(self):
-        # Draft KV uses target-owned cache slots.
+        # The shared manager owns target KV and, when enabled, draft window KV.
         self.mem_manager = self.main_model.mem_manager
+        if self.uses_windowed_draft_kv:
+            self.mem_manager.init_windowed_draft_kv(self.req_manager.max_request_num)
 
     def _init_att_backend(self):
+        if self.uses_windowed_draft_kv:
+            from lightllm.utils.sgl_utils import flash_attn_with_kvcache
+
+            if flash_attn_with_kvcache is None:
+                raise NotImplementedError("Windowed MTP requires FA3")
+
+            self.prefill_att_backend = self.decode_att_backend = WindowedMTPAttBackend(model=self)
+            return
         super()._init_att_backend()
         # FA3 is currently the only backend that supports non-causal block decode.
         # TODO: Remove this restriction after Triton and FlashInfer support non-causal block decode.
@@ -85,8 +100,57 @@ class Qwen3DFlashModel(LlamaTpPartModel):
             for i in range(self.config["n_layer"])
         ]
 
+    @torch.no_grad()
+    def commit_window_kv(self, model_input, hidden, b_req_mtp_start_loc=None, accept_len=None):
+        """Commit accepted target features to the bounded draft KV store."""
+        if hidden.numel() == 0:
+            return
+        store = self.mem_manager.windowed_draft_kv
+        if model_input.is_prefill:
+            b_req_idx = model_input.b_req_idx
+            b_start_loc = model_input.b_prefill_start_loc
+            b_ready_cache_len = model_input.b_ready_cache_len
+            b_commit_len, _, _, _, position_ids = gen_prefill_params(
+                hidden.shape[0], b_ready_cache_len, model_input.b_seq_len
+            )
+        else:
+            b_start_loc = b_req_mtp_start_loc
+            b_req_idx = model_input.b_req_idx.index_select(0, b_start_loc)
+            b_ready_cache_len = model_input.b_seq_len.index_select(0, b_start_loc) - 1
+            b_commit_len = accept_len
+            position_ids = model_input.b_seq_len - 1
+        # Preserve the target's packed prefill or verify rows, including dynamic verify layouts.
+        mem_index = store.prepare_write_indices(
+            b_req_idx,
+            b_start_loc,
+            b_ready_cache_len,
+            b_commit_len,
+            token_num=hidden.shape[0],
+            alloc_func=self.pre_infer.alloc_tensor,
+        )
+        infer_state = self.infer_state_class()
+        infer_state.mtp_draft_input_hiddens = hidden
+        features = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
+        infer_state.position_cos = self._cos_cached.index_select(0, position_ids)
+        infer_state.position_sin = self._sin_cached.index_select(0, position_ids)
+        for i, (layer, weight) in enumerate(zip(self.layers_infer, self.trans_layers_weight)):
+            kv = layer._get_context_kv(features, infer_state, weight)
+            store.write(i, mem_index, kv)
+
+    def _select_mem_indexes(self, model_input: ModelInput):
+        if self.uses_windowed_draft_kv and not model_input.is_prefill:
+            # Windowed draft blocks do not write into the target's request pages.
+            hold_mem_index = self.mem_manager.HOLD_TOKEN_MEMINDEXES[0]
+            return g_pin_mem_manager.get_const_gpu_tensor(
+                key=f"window_mtp_mem_indexes_{hold_mem_index}_{model_input.b_req_idx.dtype}",
+                shape=model_input.b_req_idx.shape,
+                fill_value=hold_mem_index,
+                dtype=model_input.b_req_idx.dtype,
+            )
+        return super()._select_mem_indexes(model_input)
+
     def _decode(self, model_input: ModelInput) -> ModelOutput:
-        if model_input.mtp_draft_input_hiddens is None:
+        if self.uses_windowed_draft_kv or model_input.mtp_draft_input_hiddens is None:
             return super()._decode(model_input)
 
         assert model_input.mtp_draft_input_hiddens.shape[0] == model_input.batch_size

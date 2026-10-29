@@ -12,10 +12,15 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         self.conv_group_size_ = int(network_config["conv_group_size"])
         self.sliding_window_ = int(network_config.get("sliding_window", 0) or 0)
 
-    def _token_attention_kernel(self, q, infer_state, layer_weight):
-        k, v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
-        k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
-        v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
+    def _token_attention_kernel(self, q, infer_state, layer_weight, windowed_kv=None):
+        if windowed_kv is None:
+            # Ordinary cache: reshape the shared storage layout to the draft model's KV heads.
+            k, v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+            k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
+            v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
+        else:
+            # Windowed cache: history + current block, already packed as [batch, seq, heads, dim].
+            k, v = windowed_kv
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         use_sliding_window = self.sliding_window_ > 0
         # DFlash2 attention is non-causal, so its local window must retain both

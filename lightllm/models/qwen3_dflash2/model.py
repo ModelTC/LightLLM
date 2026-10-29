@@ -20,10 +20,7 @@ class Qwen3DFlash2Model(Qwen3DFlashModel):
 
     def _init_config(self):
         super()._init_config()
-        dflash_config = self.config.get("dflash_config", {})
-        if not isinstance(dflash_config, dict):
-            raise ValueError("dflash_config must be an object in the DFlash2 checkpoint config")
-        self.config.update(dflash_config)
+        self.config.update(self.config.get("dflash_config", {}))
 
         rope_parameters = self.config.get("rope_parameters", {})
         if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
@@ -54,6 +51,7 @@ class Qwen3DFlash2Model(Qwen3DFlashModel):
         physical_block_size = self.args.mtp_step + 1
         assert physical_block_size <= self.config["block_size"]
         self.config["block_size"] = physical_block_size
+        self.uses_windowed_draft_kv = getattr(self.args, "mtp_windowed", False)
 
     def _init_custom(self):
         # The released Qwen3.8 drafter uses its own Qwen3 rotary layout.
@@ -62,6 +60,8 @@ class Qwen3DFlash2Model(Qwen3DFlashModel):
         self.mask_token_id = int(self.config["mask_token_id"])
 
     def _init_mem_manager(self):
+        if self.uses_windowed_draft_kv:
+            return super()._init_mem_manager()
         main_mem_manager = self.main_model.mem_manager
         draft_head_num = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
         draft_width = draft_head_num * self.config["head_dim"]

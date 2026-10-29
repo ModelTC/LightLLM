@@ -4,7 +4,6 @@ import os
 import gc
 import copy
 import math
-import json
 import torch
 import torch.nn.functional as F
 import triton
@@ -15,8 +14,7 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.common.req_manager import ReqManager
-from lightllm.common.build_utils import repair_config
+from lightllm.common.req_manager import ReqManager, ReqManagerForWindowedMTP
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
     select_kv_index_from_req_prefill,
@@ -27,6 +25,7 @@ from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.config_utils import load_config
 from lightllm.utils.dist_utils import get_dp_world_size
 from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
 from lightllm.utils.envs_utils import (
@@ -146,12 +145,7 @@ class TpPartBaseModel:
         return
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+        self.config = load_config(self.weight_dir_)
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return
@@ -237,7 +231,8 @@ class TpPartBaseModel:
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
+        req_manager_class = ReqManagerForWindowedMTP if self.args.mtp_windowed else ReqManager
+        self.req_manager = req_manager_class(self.max_req_num, create_max_seq_len, None)
         return
 
     def _init_infer_layer(self, start_layer_index=0):

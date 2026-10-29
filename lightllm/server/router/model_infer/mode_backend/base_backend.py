@@ -218,7 +218,9 @@ class ModeBackend:
                 [rank for rank in range(self.global_world_size)], backend="nccl"
             )
 
-        if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
+        if not self.args.mtp_windowed and (
+            self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch
+        ):
             # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
             # 读取
             self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
@@ -250,6 +252,11 @@ class ModeBackend:
         if self.args.mtp_mode is not None:
             self.init_mtp_draft_model(model_kvargs)
             self.init_spec_engine()
+
+        # window PD 需要在 draft 分配独立缓存后再导出。
+        if self.args.mtp_windowed and self.is_pd_mode:
+            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            dist.barrier(group=self.node_nccl_group)
 
         if self.args.enable_cpu_cache:
             self.multi_level_cache_module = MultiLevelKvCacheModule(self)

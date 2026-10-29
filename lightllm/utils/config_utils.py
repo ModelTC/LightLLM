@@ -3,6 +3,7 @@ import os
 from typing import Any, Dict, Optional, List
 from functools import lru_cache
 from .envs_utils import get_env_start_args
+from lightllm.common.build_utils import repair_config
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -12,6 +13,15 @@ def get_config_json(model_path: str):
     with open(os.path.join(model_path, "config.json"), "r") as file:
         json_obj = json.load(file)
     return json_obj
+
+
+def load_config(weight_dir_):
+    """Read model configuration and normalize the common architecture aliases."""
+    config = get_config_json(weight_dir_)
+    repair_config(config, same_names=["num_attention_heads", "n_head"])
+    repair_config(config, same_names=["hidden_size", "n_embd", "n_embed"])
+    repair_config(config, same_names=["num_hidden_layers", "n_layer"])
+    return config
 
 
 def get_generation_config_dict(model_path: str) -> Dict[str, Any]:
