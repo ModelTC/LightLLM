@@ -34,27 +34,34 @@ class WindowKVStore:
         if self.kv_buffer.is_cuda:
             torch.cuda.current_stream(self.kv_buffer.device).synchronize()
 
-    def prepare(
+    def prepare_write_indices(
         self,
         b_req_idx,
-        target_hidden,
         b_start_loc,
         b_ready_cache_len,
-        b_q_seq_len,
-        max_q_seq_len,
+        b_commit_len,
+        token_num,
         alloc_func=torch.empty,
     ):
-        from lightllm.common.basemodel.triton_kernel.windowed_mtp import gather_window_hidden
+        """Map committed window rows to cache slots without changing the source layout.
 
-        return gather_window_hidden(
-            target_hidden,
+        token_num is the source hidden row count; b_start_loc indexes that same layout.
+        b_commit_len counts each request's new prompt rows or accepted verify rows.
+
+        This also updates req_to_seq_len before any layer's KV is written. The caller
+        must enqueue all layer writes on the same CUDA stream before reading or
+        checkpointing the window state; this is not a side-effect-free index query.
+        """
+        from lightllm.common.basemodel.triton_kernel.windowed_mtp import prepare_window_write_indices
+
+        return prepare_window_write_indices(
             b_req_idx,
             b_start_loc,
             b_ready_cache_len,
-            b_q_seq_len,
+            b_commit_len,
             self.req_to_seq_len,
-            max_q_seq_len,
             self.capacity,
+            token_num=token_num,
             alloc_func=alloc_func,
         )
 

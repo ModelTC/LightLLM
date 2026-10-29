@@ -4,92 +4,59 @@ import triton.language as tl
 
 
 @triton.jit
-def _gather_window_hidden(
-    target_hidden,
+def _prepare_window_write_indices(
     b_req_idx,
     b_start_loc,
     b_ready_cache_len,
-    b_q_seq_len,
-    out_hidden,
-    out_position_ids,
+    b_commit_len,
     out_mem_index,
     req_to_seq_len,
-    stride_hidden_bs,
-    stride_hidden_d,
-    stride_out_bs,
-    stride_out_d,
-    hidden_dim: tl.constexpr,
-    max_q_seq_len: tl.constexpr,
     window_size: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
-    cur_token = tl.program_id(0)
-    cur_batch = tl.program_id(1)
+    cur_batch = tl.program_id(0)
     cur_req_idx = tl.load(b_req_idx + cur_batch).to(tl.int64)
     cur_ready_cache_len = tl.load(b_ready_cache_len + cur_batch)
-    cur_q_seq_len = tl.load(b_q_seq_len + cur_batch)
-    cur_seq_len = cur_ready_cache_len + cur_q_seq_len
+    cur_commit_len = tl.load(b_commit_len + cur_batch)
+    cur_seq_len = cur_ready_cache_len + cur_commit_len
     cur_start_loc = tl.load(b_start_loc + cur_batch)
 
-    # A chunk larger than the ring only needs its most recent positions.
-    cur_window_start = tl.maximum(cur_ready_cache_len, cur_seq_len - window_size)
-    cur_position = cur_window_start + cur_token
-    token_mask = cur_position < cur_seq_len
-    src_index = cur_start_loc + cur_position - cur_ready_cache_len
-    out_index = cur_batch * max_q_seq_len + cur_token
-    offs_d = tl.program_id(2) * BLOCK + tl.arange(0, BLOCK)
-    hidden = tl.load(
-        target_hidden + src_index.to(tl.int64) * stride_hidden_bs + offs_d * stride_hidden_d,
-        mask=token_mask & (offs_d < hidden_dim),
-        other=0,
-    )
-    tl.store(out_hidden + out_index * stride_out_bs + offs_d * stride_out_d, hidden, mask=offs_d < hidden_dim)
-    if tl.program_id(2) == 0:
-        tl.store(out_position_ids + out_index, tl.where(token_mask, cur_position, -1))
-        # This is a logical token index into the standard [token, head, dim] KV view.
-        mem_index = cur_req_idx * window_size + cur_position % window_size
-        tl.store(out_mem_index + out_index, tl.where(token_mask, mem_index, -1))
-        if cur_token == 0:
-            tl.store(req_to_seq_len + cur_req_idx, cur_seq_len)
+    # Only the retained tail may write: older rows would collide in the ring.
+    tail_start = tl.maximum(0, cur_commit_len - window_size)
+    for start in range(tail_start, cur_commit_len, BLOCK):
+        row = start + tl.arange(0, BLOCK)
+        position = cur_ready_cache_len + row
+        mem_index = cur_req_idx * window_size + position % window_size
+        tl.store(out_mem_index + cur_start_loc + row, mem_index, mask=row < cur_commit_len)
+    # Publish the new length now; the caller must order all layer KV writes before any state reads.
+    tl.store(req_to_seq_len + cur_req_idx, cur_seq_len)
 
 
-def gather_window_hidden(
-    target_hidden,
+def prepare_window_write_indices(
     b_req_idx,
     b_start_loc,
     b_ready_cache_len,
-    b_q_seq_len,
+    b_commit_len,
     req_to_seq_len,
-    max_q_seq_len,
     window_size,
+    token_num,
     alloc_func=torch.empty,
 ):
-    max_q_seq_len = min(max_q_seq_len, window_size)
-    token_num = b_req_idx.numel() * max_q_seq_len
-    out_hidden = alloc_func((token_num, target_hidden.shape[1]), dtype=target_hidden.dtype, device=target_hidden.device)
-    position_ids = alloc_func((token_num,), dtype=torch.int64, device=target_hidden.device)
-    mem_index = alloc_func((token_num,), dtype=torch.int32, device=target_hidden.device)
-    if token_num:
-        _gather_window_hidden[(max_q_seq_len, b_req_idx.numel(), triton.cdiv(target_hidden.shape[1], 512))](
-            target_hidden,
+    """Return one destination per source token; rejected and expired rows stay -1."""
+    mem_index = alloc_func((token_num,), dtype=torch.int32, device=b_req_idx.device)
+    mem_index.fill_(-1)
+    if b_req_idx.numel():
+        _prepare_window_write_indices[(b_req_idx.numel(),)](
             b_req_idx,
             b_start_loc,
             b_ready_cache_len,
-            b_q_seq_len,
-            out_hidden,
-            position_ids,
+            b_commit_len,
             mem_index,
             req_to_seq_len,
-            stride_hidden_bs=target_hidden.stride(0),
-            stride_hidden_d=target_hidden.stride(1),
-            stride_out_bs=out_hidden.stride(0),
-            stride_out_d=out_hidden.stride(1),
-            hidden_dim=target_hidden.shape[1],
-            max_q_seq_len=max_q_seq_len,
             window_size=window_size,
-            BLOCK=512,
+            BLOCK=256,
         )
-    return out_hidden, position_ids, mem_index
+    return mem_index
 
 
 @triton.jit

@@ -23,6 +23,18 @@ class WindowedMTPDecodeAttState(BaseDecodeAttState):
             + self.block_size
         )
 
+    def prepare_kv(self, layer_index, noise_kv, alloc_func=torch.empty):
+        """Pack retained history and the current block in the backend's KV layout."""
+        scratch = self.infer_state.mem_manager.windowed_draft_kv.pack(
+            layer_index - self.backend.model.draft_layer_start,
+            self.b_req_idx,
+            noise_kv,
+            self.block_size,
+            alloc_func=alloc_func,
+        )
+        head_num = noise_kv.shape[1] // 2
+        return scratch[:, :, :head_num], scratch[:, :, head_num:]
+
     def decode_att(self, q, k, v, att_control: AttControl = AttControl(), alloc_func=torch.empty):
         return flash_attn_with_kvcache(
             q.view(-1, self.block_size, q.shape[-2], q.shape[-1]),
@@ -30,5 +42,6 @@ class WindowedMTPDecodeAttState(BaseDecodeAttState):
             v,
             cache_seqlens=self.cache_seqlens,
             causal=False,
+            window_size=att_control.sliding_window if att_control.use_sliding_window else (-1, -1),
             softmax_scale=q.shape[-1] ** -0.5,
         ).view(q.shape)

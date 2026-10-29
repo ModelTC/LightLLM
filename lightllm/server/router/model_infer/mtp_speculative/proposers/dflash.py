@@ -82,7 +82,7 @@ class DFlashProposer(BaseSpecProposer):
         accepted_tail_rows = (b_req_mtp_start_loc + accept_len - 1).long()
 
         # full 模式通过 draft forward 写入 verify 行对应的 KV；windowed 模式
-        # 只将接受的 target hidden 投影并写入独立窗口，不保留被拒绝的行。
+        # 沿用 verify 行进行投影，仅将接受且仍在窗口内的行写入独立缓存。
         if getattr(draft_model, "uses_windowed_draft_kv", False):
             draft_model.commit_window_kv(
                 target_model_input, target_model_output.mtp_collector.spec_hidden, b_req_mtp_start_loc, accept_len

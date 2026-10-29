@@ -833,9 +833,14 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--mtp_windowed",
         action="store_true",
-        help="Use a sliding window for draft KV in DFlash-style MTP.",
+        help="""Use sliding-window draft KV storage for DFlash, DSpark or DFlash2.""",
     )
-    parser.add_argument("--mtp_window_size", type=int, default=512)
+    parser.add_argument(
+        "--mtp_window_size",
+        type=int,
+        default=512,
+        help="""Number of tokens retained in the draft KV cache when mtp_windowed is enabled.""",
+    )
     parser.add_argument(
         "--mtp_dynamic_verify",
         action="store_true",

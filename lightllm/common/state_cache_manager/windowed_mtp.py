@@ -5,8 +5,7 @@ from dataclasses import dataclass
 import torch
 
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.build_utils import repair_config
-from lightllm.utils.config_utils import get_config_json
+from lightllm.utils.config_utils import load_config
 from .base import StateCacheManager
 from .layer_cache import LayerCache
 
@@ -38,16 +37,9 @@ class WindowStateCacheConfig:
 
 
 def load_window_state_config(args):
-    config = get_config_json(args.mtp_draft_model_dir[0])
-    # Match the existing draft initialization order: base aliases, Llama KV
-    # defaults, then the overrides applied by Qwen3.5 adapters.
-    # Do not normalize again after merging: runtime also retains those aliases.
-    merge_nested = config.get("model_type") in ("qwen3_5", "qwen3_5_text")
-    repair_config(config, same_names=["num_attention_heads", "n_head"])
-    repair_config(config, same_names=["hidden_size", "n_embd", "n_embed"])
-    repair_config(config, same_names=["num_hidden_layers", "n_layer"])
+    config = load_config(args.mtp_draft_model_dir[0])
     config.setdefault("num_key_value_heads", config["num_attention_heads"])
-    if merge_nested:
+    if config.get("model_type") in ("qwen3_5", "qwen3_5_text") or args.mtp_mode == "dflash2":
         config.update(config.get("dflash_config", {}))
     return WindowStateCacheConfig.from_model_config(config, args.mtp_window_size, args.tp // args.dp)
 

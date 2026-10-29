@@ -7,6 +7,7 @@ from lightllm.common.basemodel.attention import (
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.fa3.windowed_mtp import WindowedMTPAttBackend
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
+from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_prefill_params
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
@@ -104,32 +105,32 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         """Commit accepted target features to the bounded draft KV store."""
         if hidden.numel() == 0:
             return
+        store = self.mem_manager.windowed_draft_kv
         if model_input.is_prefill:
             b_req_idx = model_input.b_req_idx
             b_start_loc = model_input.b_prefill_start_loc
             b_ready_cache_len = model_input.b_ready_cache_len
-            b_q_seq_len = model_input.b_seq_len - b_ready_cache_len
-            max_q_seq_len = model_input.max_q_seq_len
+            b_commit_len, _, _, _, position_ids = gen_prefill_params(
+                hidden.shape[0], b_ready_cache_len, model_input.b_seq_len
+            )
         else:
             b_start_loc = b_req_mtp_start_loc
             b_req_idx = model_input.b_req_idx.index_select(0, b_start_loc)
             b_ready_cache_len = model_input.b_seq_len.index_select(0, b_start_loc) - 1
-            b_q_seq_len = accept_len
-            max_q_seq_len = self.args.mtp_step + 1
-        store = self.mem_manager.windowed_draft_kv
-        features, position_ids, mem_index = store.prepare(
+            b_commit_len = accept_len
+            position_ids = model_input.b_seq_len - 1
+        # Preserve the target's packed prefill or verify rows, including dynamic verify layouts.
+        mem_index = store.prepare_write_indices(
             b_req_idx,
-            hidden,
             b_start_loc,
             b_ready_cache_len,
-            b_q_seq_len,
-            max_q_seq_len,
+            b_commit_len,
+            token_num=hidden.shape[0],
             alloc_func=self.pre_infer.alloc_tensor,
         )
         infer_state = self.infer_state_class()
-        infer_state.mtp_draft_input_hiddens = features
+        infer_state.mtp_draft_input_hiddens = hidden
         features = self.pre_infer.context_forward(None, infer_state, self.pre_post_weight)
-        position_ids = position_ids.clamp_min(0)
         infer_state.position_cos = self._cos_cached.index_select(0, position_ids)
         infer_state.position_sin = self._sin_cached.index_select(0, position_ids)
         for i, (layer, weight) in enumerate(zip(self.layers_infer, self.trans_layers_weight)):

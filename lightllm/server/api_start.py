@@ -207,7 +207,7 @@ def _launch_subprocesses(args: StartArgs):
 
     if args.mtp_windowed:
         assert args.mtp_window_size > 0
-        assert args.mtp_mode in ("dflash", "dspark"), "windowed draft KV requires dflash or dspark"
+        assert args.mtp_mode in ("dflash", "dspark", "dflash2"), "windowed draft KV requires dflash, dspark or dflash2"
         if args.llm_kv_type not in (None, "None"):
             raise ValueError("windowed draft KV currently requires unquantized KV")
 
