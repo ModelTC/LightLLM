@@ -2,8 +2,6 @@ import os
 import json
 import torch
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.models.gemma3.infer_struct import Gemma3InferStateInfo
 from lightllm.models.gemma3.layer_infer.post_layer_infer import Gemma3PostLayerInfer
 from lightllm.models.gemma3.layer_infer.pre_layer_infer import Gemma3PreLayerInfer
@@ -138,16 +136,13 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         self.head_dim_ = 256
         self._init_to_get_rotary()
 
-    def _init_mem_manager(self):
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=torch.bfloat16,
-            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
-            head_dim=256,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
-        return
+    @classmethod
+    def _full_attention_options(cls, config, args):
+        from lightllm.common.basemodel.basemodel_utils import get_full_attention_options
+
+        options = get_full_attention_options(config, args)
+        options.update(dim=256, dtype=torch.bfloat16)
+        return options
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

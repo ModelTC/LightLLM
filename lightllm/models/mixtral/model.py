@@ -1,7 +1,6 @@
 import torch
 import numpy as np
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.kv_cache_mem_manager import MemoryManager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaPreAndPostLayerWeight
@@ -35,6 +34,14 @@ class MixtralTpPartModel(TpPartBaseModel):
         super()._init_config()
         return
 
+    def _init_att_resource_manager(self):
+        from lightllm.common.att_resources import AttResourceManager
+        from lightllm.common.basemodel.basemodel_utils import init_model_full_attention
+
+        if not self.is_mtp_draft_model:
+            self.att_resource_manager = AttResourceManager(request_capacity=self.max_req_num + 1)
+        init_model_full_attention(self)
+
     def _verify_params(self):
         assert self.load_way in ["HF"], "mixtral only supports HF format to load Now!"
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
@@ -43,18 +50,6 @@ class MixtralTpPartModel(TpPartBaseModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
-        return
-
-    def _init_mem_manager(self):
-        self.mem_manager = MemoryManager(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
-            head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
-            layer_num=self.config["num_hidden_layers"],
-            always_copy=False,
-            mem_fraction=self.mem_fraction,
-        )
         return
 
     def _init_to_get_rotary(self, default_base=10000):

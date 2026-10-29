@@ -18,6 +18,15 @@ class Qwen3DFlash2Model(Qwen3DFlashModel):
     post_layer_infer_class = Qwen3DFlash2PostLayerInfer
     transformer_layer_infer_class = Qwen3DFlash2TransformerLayerInfer
 
+    @classmethod
+    def _resource_config(cls, model_config):
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+
+        config = get_resource_config(model_config)
+        config.update(config.get("dflash_config", {}))
+        config["n_layer"] = config["num_hidden_layers"]
+        return config
+
     def _init_config(self):
         super()._init_config()
         dflash_config = self.config.get("dflash_config", {})
@@ -60,18 +69,6 @@ class Qwen3DFlash2Model(Qwen3DFlashModel):
         LlamaTpPartModel._init_custom(self)
         self.block_size = int(self.config["block_size"])
         self.mask_token_id = int(self.config["mask_token_id"])
-
-    def _init_mem_manager(self):
-        main_mem_manager = self.main_model.mem_manager
-        draft_head_num = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-        draft_width = draft_head_num * self.config["head_dim"]
-        target_width = main_mem_manager.head_num * main_mem_manager.head_dim
-        assert draft_width == target_width, (
-            "DFlash2 draft and target KV must have equal flat widths: "
-            f"draft=({draft_head_num}, {self.config['head_dim']}), "
-            f"target=({main_mem_manager.head_num}, {main_mem_manager.head_dim})"
-        )
-        self.mem_manager = main_mem_manager
 
     def _init_weights(self, start_layer_index=None):
         super()._init_weights(start_layer_index=start_layer_index)

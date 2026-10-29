@@ -226,7 +226,7 @@ class PrefillCudaGraph:
             del b_req_idx
             del b_seq_len
 
-            model.mem_manager.free_all()
+            model.att_resource_manager.full_att_allocator.free_all()
             model.req_manager.free_all()
             # release local tensors
             for var_name, var_value in list(locals().items()):
@@ -289,7 +289,7 @@ class PrefillCudaGraph:
 
             _, _ = model.microbatch_overlap_prefill(prefill_batches[0], prefill_batches[1])
 
-            model.mem_manager.free_all()
+            model.att_resource_manager.full_att_allocator.free_all()
             model.req_manager.free_all()
 
             del prefill_batches

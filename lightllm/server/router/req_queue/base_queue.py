@@ -3,7 +3,7 @@ from typing import List, Dict
 from lightllm.utils.infer_utils import calculate_time
 from ..batch import Batch, Req
 from lightllm.server.core.objs import FinishStatus
-from lightllm.utils.config_utils import get_fixed_kv_len, get_running_max_req_size_per_dp
+from lightllm.utils.config_utils import get_running_max_req_size_per_dp
 from lightllm.server.core.objs import StartArgs
 from lightllm.utils.log_utils import init_logger
 
@@ -18,11 +18,7 @@ class BaseQueue:
         from lightllm.server.router.manager import RouterManager
 
         self.router: RouterManager = router
-        # max_total_token_num - get_fixed_kv_len() 是为了减去被特定
-        # 推理模式预先占用了部分token kv 资源，这会导致整体可用的kv 资源
-        # 在极端情况下减少，在非特定模式下，get_fixed_kv_len() 返回的都是
-        # 0， 不会有任何影响。
-        self.max_total_tokens = args.max_total_token_num - get_fixed_kv_len()
+        self.max_total_tokens = args.max_total_token_num
         self.running_max_req_size = get_running_max_req_size_per_dp(args)
         self.waiting_req_list: List[Req] = []  # List of queued requests
         self.router_token_ratio = args.router_token_ratio  # ratio to determine whether the router is busy

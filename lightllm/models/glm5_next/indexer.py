@@ -16,10 +16,11 @@ class Glm5NextNsaInfer:
         self.heads = network_config["index_n_heads"]
         self.dim = network_config["index_head_dim"]
         self.eps = network_config["rms_norm_eps"]
+        self.pool_size = network_config["index_kpool"]
 
     def select_topk_indices(self, logits, lengths, indices):
         """Select row-relative indices, with valid entries before -1 padding."""
-        if HAS_VLLM:
+        if HAS_VLLM and hasattr(vllm_ops, "top_k_per_row_decode"):
             # next_n=1 treats each query as an independent row, including prefill.
             # The decode entry splits long rows before merging their candidates.
             # Tested with vLLM 0.22.1; persistent_topk can drop candidates (#51782).
@@ -36,8 +37,12 @@ class Glm5NextNsaInfer:
         k = layer_weight.k_norm_(layer_weight.wk_proj_.mm(hidden_states), eps=self.eps)
         gate = layer_weight.index_kpool_compress_gate.mm(hidden_states)
         raw = torch.cat((k, gate), -1)
-        tail = infer_state.req_manager.get_indexer_tail_buffer(self.layer_idx)
-        packed_buffer = infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx)
+        role = infer_state.att_resource_role
+        tail = getattr(
+            infer_state.att_resource_manager, f"{role}_indexer_kpool_c{self.pool_size}_tail_state"
+        ).get_layer_view(self.layer_idx)
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        packed_buffer = state.get_layer_view(self.layer_idx).indexer_k
         compress_pools(
             raw=raw,
             tail=tail,

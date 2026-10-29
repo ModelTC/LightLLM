@@ -9,8 +9,6 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -34,6 +32,14 @@ class LlamaTpPartModel(TpPartBaseModel):
         super().__init__(kvargs)
         return
 
+    def _init_att_resource_manager(self):
+        from lightllm.common.att_resources import AttResourceManager
+        from lightllm.common.basemodel.basemodel_utils import init_model_full_attention
+
+        if not self.is_mtp_draft_model:
+            self.att_resource_manager = AttResourceManager(request_capacity=self.max_req_num + 1)
+        init_model_full_attention(self)
+
     def _init_config(self):
         super()._init_config()
         # rename key
@@ -50,19 +56,6 @@ class LlamaTpPartModel(TpPartBaseModel):
         assert self.load_way in ["HF", "DS"], "llama only supports HF and DS format to load Now!"
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        return
-
-    def _init_mem_manager(self):
-        head_dim_ = self.config["hidden_size"] // self.config["num_attention_heads"]
-        head_dim_ = self.config.get("head_dim", head_dim_)
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
-            head_dim=head_dim_,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
         return
 
     def _init_custom(self):

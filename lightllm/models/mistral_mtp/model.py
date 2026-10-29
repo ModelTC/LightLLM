@@ -45,10 +45,6 @@ class MistralMTPModel(MistralTpPartModel):
         self.req_manager = self.main_model.req_manager
         return
 
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
-        return
-
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
         self.config["n_layer"] = 1

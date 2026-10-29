@@ -65,7 +65,7 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     model = model_class.__new__(model_class)
     model._cos_cached = torch.arange(24).view(6, 4)
     model._sin_cached = model._cos_cached + 100
-    model.mem_manager = object()
+    model.att_resource_manager = object()
     model.pre_post_weight = object()
 
     target_hiddens = torch.arange(6, dtype=torch.float32).view(2, 3)
@@ -104,7 +104,9 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     assert isinstance(output, ModelOutput)
     assert output.logits.shape == (2, 1)
     infer_state = observed_states[0]
-    assert infer_state.mem_manager is model.mem_manager
+    assert not hasattr(infer_state, "full_att_state")
+    assert infer_state.att_resource_manager is model.att_resource_manager
+    assert infer_state.is_draft_model
     assert infer_state.mem_index is mem_indexes
     assert torch.equal(infer_state.position_cos, model._cos_cached[[2, 4]])
     assert torch.equal(infer_state.position_sin, model._sin_cached[[2, 4]])

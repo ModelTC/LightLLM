@@ -12,7 +12,7 @@ import lightllm.common.basemodel.attention.create_linear_utils as linear_create_
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
-from lightllm.common.state_cache_manager import LinearAttCacheConfig
+from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
 from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator
 
@@ -60,29 +60,6 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
 
     assert ssm_states.dtype == cache_dtype
     assert torch.equal(ssm_states, final_state.to(cache_dtype))
-
-
-def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None):
-    model = SimpleNamespace(
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
-    )
-    infer_state = InferStateInfo()
-    infer_state.batch_size = b_req_idx.shape[0]
-    infer_state.b_req_idx = b_req_idx
-    infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
-    infer_state.req_manager = SimpleNamespace(
-        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
-        req_to_mtp_state_index=req_to_mtp_state_index,
-    )
-    state = gdn.LinearAttDecodeAttState(
-        backend=SimpleNamespace(
-            model=model,
-            uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-    return state, infer_state
 
 
 def test_decode_state_initializes_normal_layout():
@@ -205,7 +182,7 @@ def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     )
     load_calls = []
     monkeypatch.setattr(
-        LinearAttCacheConfig,
+        Qwen3NextResourceConfig,
         "load_from_args",
         staticmethod(lambda: load_calls.append(True) or linear_config),
     )
@@ -359,3 +336,26 @@ def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_
 
     assert backend_class is FlashQlaLinearAttBackend
     assert validate_calls == ["flashqla2", "flashqla3"]
+
+
+def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None):
+    model = SimpleNamespace(
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
+    )
+    infer_state = InferStateInfo()
+    infer_state.batch_size = b_req_idx.shape[0]
+    infer_state.b_req_idx = b_req_idx
+    infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
+    infer_state.req_manager = SimpleNamespace(
+        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
+    )
+    state = gdn.LinearAttDecodeAttState(
+        backend=SimpleNamespace(
+            model=model,
+            linear_state=SimpleNamespace(mtp_state_index=req_to_mtp_state_index),
+            uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
+        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
+    )
+    return state, infer_state

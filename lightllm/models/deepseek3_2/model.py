@@ -12,6 +12,12 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
     # infer class
     transformer_layer_infer_class = Deepseek3_2TransformerLayerInfer
 
+    @classmethod
+    def _full_attention_options(cls, config, args):
+        options = super()._full_attention_options(config, args)
+        options["packed"] = True
+        return options
+
     def _init_att_backend(self):
         self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)
         self.decode_att_backend = get_nsa_decode_att_backend_class(index=0)(model=self)

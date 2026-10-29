@@ -568,8 +568,8 @@ class StaticBenchmarkExecutor:
             req_id = int(req_id)
             max_target_len_by_req[req_id] = max(max_target_len_by_req.get(req_id, 0), int(target_len))
 
-        mem_manager = self.model.req_manager.mem_manager
-        page_size = mem_manager.page_size
+        allocator = self.model.att_resource_manager.full_att_allocator
+        page_size = allocator.page_size
         for req_id, target_len in max_target_len_by_req.items():
             new_hold_kv_len = align_up(target_len, page_size)
             old_hold_kv_len = self._hold_kv_len_by_req.get(req_id, 0)
@@ -577,7 +577,7 @@ class StaticBenchmarkExecutor:
                 continue
 
             alloc_token_num = new_hold_kv_len - old_hold_kv_len
-            mem_indexes = mem_manager.alloc(alloc_token_num)
+            mem_indexes = allocator.alloc(alloc_token_num)
             self.model.req_manager.req_to_token_indexs[req_id, old_hold_kv_len:new_hold_kv_len].copy_(mem_indexes)
             self._hold_kv_len_by_req[req_id] = new_hold_kv_len
 
@@ -729,7 +729,7 @@ class StaticBenchmarkExecutor:
         return torch.tensor(req_indexes, dtype=torch.int32, device="cpu")
 
     def _reset_model_cache(self):
-        self.model.mem_manager.free_all()
+        self.model.att_resource_manager.full_att_allocator.free_all()
         self.model.req_manager.free_all()
         self._hold_kv_len_by_req.clear()
         torch.cuda.synchronize()
@@ -1182,13 +1182,12 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
     if args.mtp_mode not in MTP_MODES:
         return []
 
-    os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
     draft_models = []
     for draft_dir in args.mtp_draft_model_dir:
         mtp_cfg, _ = PretrainedConfig.get_config_dict(draft_dir)
         mtp_kvargs = {
             "weight_dir": draft_dir,
-            "max_total_token_num": main_model.mem_manager.size,
+            "max_total_token_num": main_kvargs["max_total_token_num"],
             "load_way": main_kvargs["load_way"],
             "max_req_num": main_kvargs["max_req_num"],
             "max_seq_length": main_kvargs["max_seq_length"],
@@ -1271,11 +1270,40 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
 
         torch.cuda.empty_cache()
         model, _ = get_model(model_cfg, model_kvargs)
-        cases = resolve_batch_max_prefill_cases(args, cases, model.mem_manager.size)
-        cases = resolve_profile_decode_cases(args, cases, model.mem_manager.size)
+        draft_models = init_mtp_draft_models(args, model_kvargs, model)
+        from lightllm.utils.envs_utils import set_model_init_status
+        from lightllm.utils.torch_memory_saver_utils import MemoryTag
+        from lightllm.common.att_resources import AttResourceManager
+
+        models = (model, *draft_models)
+        assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"
+        for item in models:
+            item.prepare_att_resources()
+        manager: AttResourceManager = model.att_resource_manager
+        assert all(item.max_req_num == model.max_req_num for item in models), "models must share the request domain"
+        assert all(item.att_resource_manager is manager for item in models), "models must share one resource manager"
+        with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            manager.initialize_resources(
+                model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
+            )
+        for item in models:
+            item.init_runtime()
+        torch.cuda.empty_cache()
+        set_model_init_status(True)
+        cases = resolve_batch_max_prefill_cases(args, cases, model.att_resource_manager.full_att_allocator.size)
+        cases = resolve_profile_decode_cases(args, cases, model.att_resource_manager.full_att_allocator.size)
         if defer_cudagraph:
             init_deferred_cudagraph(args, cases, model_kvargs, model)
-        draft_models = init_mtp_draft_models(args, model_kvargs, model)
+            for draft in draft_models:
+                batch_size = args.graph_max_batch_size
+                if args.enable_decode_microbatch_overlap:
+                    batch_size //= 2
+                batch_size *= draft.mtp_manager.get_decode_tokens_per_request(True)
+                draft.graph_max_batch_size = draft._align_decode_batch_size(batch_size)
+                draft.disable_cudagraph = False
+                draft._init_att_backend()
+                draft._init_att_backend1()
+                draft._init_cudagraph()
         token_source = TokenSource(args)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)
 

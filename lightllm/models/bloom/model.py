@@ -24,6 +24,14 @@ class BloomTpPartModel(TpPartBaseModel):
         super().__init__(kvargs)
         return
 
+    def _init_att_resource_manager(self):
+        from lightllm.common.att_resources import AttResourceManager
+        from lightllm.common.basemodel.basemodel_utils import init_model_full_attention
+
+        if not self.is_mtp_draft_model:
+            self.att_resource_manager = AttResourceManager(request_capacity=self.max_req_num + 1)
+        init_model_full_attention(self)
+
     def _init_config(self):
         super()._init_config()
         # rename key

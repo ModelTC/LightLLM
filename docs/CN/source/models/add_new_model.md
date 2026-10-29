@@ -109,7 +109,7 @@ class TpPartBaseModel:
         self._verify_must()
         self._verify_params()
         self._init_weights()
-        self._init_mem_manager()
+        self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
@@ -124,9 +124,13 @@ class TpPartBaseModel:
 | ---------------------------- | ------------------------------------------------------------ |
 | def _init_config(self)：     | 读取初始化模型的 config.json,  并进行一些 key 名的同名合法化操作 |
 | def _verify_params(self)：   | 校验参数                                                     |
-| def _init_mem_manager(self): | 初始化 token attention 使用的 mem manager 对象               |
+| def _init_att_resource_manager(self): | 由具体模型创建管理器并准备全部 attention State：KV meta State、GDN/KDA 固定运行态和 indexer tail；由模型侧 helper 根据 main 和前序 draft 的配置解析静态量化标定偏移 |
 | def _init_some_value(self):  | 初始化推理框架会使用的一些成员变量的值                       |
 | def _init_custom(self):      | 一些模型自己的个性化初始化，比如 llama 初始化自己的Rotary值  |
+
+全部 main/draft 模型构造完成后，`ModeBackend.init_model` 先调用各模型的 `prepare_att_resources()` 准备自身 State，再统一分配共享资源。随后按 main、各 draft 的顺序逐个调用 `init_runtime()`，每次完整执行本模型的 HOLD 页和 backend 绑定、warmup、padded-request 与 CUDA Graph 初始化；main 还在该方法末尾执行最大长度检查。全部模型完成后发布就绪标志。仅保留资源准备和运行时初始化两个单模型公共入口，均不接收 draft 列表。
+
+资源准备仍通过私有 hook `_init_att_resource_manager` 交给具体模型或模型族实现。标定偏移由模型侧根据 main 和前序 draft 的 full-attention 层定义计算，构造函数不调用该 hook。hook 内部可复用 `basemodel_utils.init_model_full_attention` 构建普通 KV 定义；helper 不构成独立启动阶段。
 
 ## 2. 添加 bloom 模型的示例说明
 
@@ -319,9 +323,6 @@ class BloomPreLayerInfer(PreLayerInferTpl):
         self.vob_end_id_ = tp_vocab_size_ * (self.tp_rank_ + 1)
         return
     
-    def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
-        return layernorm_forward(input, layer_weight.pre_norm_weight_, layer_weight.pre_norm_bias_, eps=self.eps_)
-
     def context_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: BloomPreAndPostLayerWeight):
         total_token_num = infer_state.total_token_num
         input_ids = input_ids[0:total_token_num]
@@ -346,6 +347,9 @@ class BloomPreLayerInfer(PreLayerInferTpl):
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)
         return input_embdings
+
+    def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
+        return layernorm_forward(input, layer_weight.pre_norm_weight_, layer_weight.pre_norm_bias_, eps=self.eps_)
 ~~~
 
 ***transformer_layer_infer.py***
@@ -416,9 +420,10 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     
     def _token_attention_kernel(self, q, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
         o_tensor = torch.empty_like(q)
+        k_cache, v_cache = infer_state.full_att_state.get_layer_view(self.layer_num_)
         token_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0: self.tp_k_head_num_, :],
-                            infer_state.mem_manager.kv_buffer[self.layer_num_][:, self.tp_k_head_num_: self.tp_k_head_num_+ self.tp_v_head_num_, :],
+                            k_cache,
+                            v_cache,
                             o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
                             layer_weight.tp_alibi,
                             infer_state.b_loc,
@@ -470,9 +475,6 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         self.embed_dim_ = network_config["n_embed"]
         return
     
-    def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
-        return layernorm_forward(input, layer_weight.final_norm_weight_, layer_weight.final_norm_bias_, eps=self.eps_)
-
     def soft_max(self, data):
         return torch.softmax(data.permute(1, 0).float(), dim=-1)
 
@@ -507,6 +509,9 @@ class BloomPostLayerInfer(PostLayerInferTpl):
             ans_logics = gather_data.permute(1, 0).float()
             gather_data = None
             return ans_logics
+
+    def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
+        return layernorm_forward(input, layer_weight.final_norm_weight_, layer_weight.final_norm_bias_, eps=self.eps_)
 ~~~
 
 ### （3） 实现模型的框架类

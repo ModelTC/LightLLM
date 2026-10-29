@@ -2,7 +2,6 @@ import os
 import json
 import torch
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
@@ -11,7 +10,7 @@ from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerI
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
 from lightllm.models.gemma4.layer_weights.pre_and_post_layer_weight import Gemma4PreAndPostLayerWeight
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
@@ -31,7 +30,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def __init__(self, kvargs):
         # head_dim_ is used by the default _init_to_get_rotary which we
         # override; still set it to the sliding-layer head_dim for consistency
-        # with the mem manager and any generic helpers.
+        # with the full-attention storage and any generic helpers.
         self.head_dim_ = 256
         super().__init__(kvargs)
         return
@@ -80,7 +79,10 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         )
         return
 
-    def _init_mem_manager(self):
+    @classmethod
+    def _full_attention_options(cls, config, args):
+        from lightllm.common.basemodel.basemodel_utils import get_full_attention_options
+
         # Uniform per-layer KV cache layout. The per-layer cache slot must fit
         # whichever layer type has the largest per-token K/V width: sliding
         # (num_key_value_heads * head_dim) or full
@@ -90,21 +92,16 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         # (2*512 > 2*256), so it uses 4 storage slots of 256 dims.
         # Gemma4TransformerLayerInfer.__init__ computes the same value and
         # uses it to pack/unpack K/V at write/read time.
-        head_dim = self.config["head_dim"]
-        num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
-        sliding_total = self.config["num_key_value_heads"] * self.config["head_dim"]
-        full_total = num_global_kv * self.config["global_head_dim"]
+        head_dim = config["head_dim"]
+        num_global_kv = config.get("num_global_key_value_heads") or config["num_key_value_heads"]
+        sliding_total = config["num_key_value_heads"] * head_dim
+        full_total = num_global_kv * config["global_head_dim"]
         per_token_k_width = max(sliding_total, full_total)
-        head_num_per_rank = (per_token_k_width // head_dim) // self.tp_world_size_
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=head_num_per_rank,
-            head_dim=head_dim,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
-        return
+        if per_token_k_width % head_dim:
+            raise ValueError("Gemma4 KV width must contain complete storage heads")
+        options = get_full_attention_options(config, args)
+        options.update(heads=per_token_k_width // head_dim, dim=head_dim)
+        return options
 
     def _init_att_backend(self):
         # Gemma-4 has per-layer heterogeneous attention: sliding layers use

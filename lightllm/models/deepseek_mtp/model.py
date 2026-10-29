@@ -32,10 +32,6 @@ class Deepseek3MTPModel(Deepseek2TpPartModel):
         self.req_manager = self.main_model.req_manager
         return
 
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
-        return
-
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
         self.pre_post_weight = self.pre_and_post_weight_class(

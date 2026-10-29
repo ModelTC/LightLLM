@@ -99,9 +99,10 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             },
         )
 
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
         mla_out = infer_state.prefill_att_state.prefill_att(
             q=q_all,
-            k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
+            k=state.get_layer_view(layer_id=self.layer_num_).kv,
             v=None,
             att_control=att_control,
         )
@@ -141,9 +142,10 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             },
         )
 
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
         o_tensor = infer_state.decode_att_state.decode_att(
             q=(q_nope, q_rope),
-            k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
+            k=state.get_layer_view(layer_id=self.layer_num_).kv,
             v=None,
             att_control=att_control,
         )
@@ -196,11 +198,12 @@ class NsaInfer:
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
         destindex_copy_indexer_ks(
             K_fp8=k_fp8,
             K_scale=k_scale,
             DestLoc=infer_state.mem_index,
-            O_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
+            O_buffer=state.get_layer_view(self.layer_idx_).indexer_k,
         )
 
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
@@ -216,7 +219,7 @@ class NsaInfer:
             mtp_step = get_env_start_args().mtp_step
         # Use efficient Triton kernel to extract FP8 keys and scales from buffer
         k_fp8_, k_scale_ = extract_indexer_ks(
-            I_buffer=infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx_),
+            I_buffer=state.get_layer_view(self.layer_idx_).indexer_k,
             b_seq_len=infer_state.b_seq_len,
             b_req_idx=infer_state.b_req_idx,
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,

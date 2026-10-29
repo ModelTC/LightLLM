@@ -39,10 +39,13 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
     def init_state(self):
         super().init_state()
         batch_size = self.infer_state.batch_size
-        mem_manager = self.backend.model.mem_manager
+        state = getattr(
+            self.infer_state.att_resource_manager,
+            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
+        )
 
-        offline_scales: torch.Tensor = mem_manager.scales
-        head_num = mem_manager.head_num
+        offline_scales: torch.Tensor = state.scales
+        head_num = state.config.head_num
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
         self.k_descale = (
             offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
@@ -82,8 +85,12 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         k_head_dim = k.shape[2]
         cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
-        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
-        static_q_scales = self.backend.model.mem_manager.q_scales[layer_index]
+        state = getattr(
+            self.infer_state.att_resource_manager,
+            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
+        )
+        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, state=state)
+        static_q_scales = state.q_scales[layer_index]
         q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales)
         q_scale = static_q_scales.view(1, k_head_num).expand(self.infer_state.b_seq_len.shape[0], k_head_num)
         o = flash_attn_with_kvcache(
@@ -114,12 +121,15 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
     def init_state(self):
         self.backend: Fp8Fa3AttBackend = self.backend
 
-        mem_manager = self.backend.model.mem_manager
+        state = getattr(
+            self.infer_state.att_resource_manager,
+            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
+        )
         super().init_state()
 
         att_batch_size = self.b_att_seq_len.shape[0]
-        offline_scales: torch.Tensor = mem_manager.scales
-        head_num = mem_manager.head_num
+        offline_scales: torch.Tensor = state.scales
+        head_num = state.config.head_num
 
         # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
         self.k_descale = (
@@ -167,11 +177,15 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
 
-        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, att_state=self)
+        state = getattr(
+            self.infer_state.att_resource_manager,
+            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
+        )
+        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, state=state)
 
         q_head_num = q.shape[1]
         att_batch_size = self.b_att_seq_len.shape[0]
-        static_q_scales = self.backend.model.mem_manager.q_scales
+        static_q_scales = state.q_scales
         q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales[layer_index])
         q_scale = static_q_scales[layer_index].view(1, k_head_num).expand(att_batch_size, k_head_num)
         o = flash_attn_with_kvcache(

@@ -4,9 +4,8 @@ from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepse
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args, get_added_mtp_kv_layer_num
+from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class, get_mla_prefill_att_backend_class
 
@@ -57,18 +56,13 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     def _verify_params(self):
         return super()._verify_params()
 
-    def _init_mem_manager(self):
-        manager_class = select_mem_manager_class()
+    @classmethod
+    def _full_attention_options(cls, config, args):
+        from lightllm.common.basemodel.basemodel_utils import get_full_attention_options
 
-        self.mem_manager = manager_class(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=1,
-            head_dim=self.config["kv_lora_rank"] + self.config["qk_rope_head_dim"],
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
-        return
+        options = get_full_attention_options(config, args)
+        options.update(heads=1, dim=config["kv_lora_rank"] + config["qk_rope_head_dim"], mla=True)
+        return options
 
     def _init_to_get_yarn_rotary(self):
         from lightllm.models.llama.yarn_rotary_utils import find_correction_range, linear_ramp_mask, get_deepseek_mscale

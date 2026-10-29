@@ -61,14 +61,15 @@ class NixlKVTransporter:
         return self.nixl_agent.get_new_notifs()
 
     def _register_kv_move_buffer(self, kv_move_buffer: Tensor):
-        self.num_pages, self.page_size, self.num_layers, self.kv_head_num, self.head_dims = kv_move_buffer.shape
-        self.dtype_byte_size = kv_move_buffer.element_size()
-        self.page_len = self.page_size * self.num_layers * self.kv_head_num * self.head_dims * self.dtype_byte_size
+        self.num_pages = kv_move_buffer.shape[0]
+        self.page_len = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
         self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
         self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
 
     def _create_paged_xfer_handles(self, reg_desc: "nixlBind.nixlRegDList", page_num: int, agent_name: str = ""):
-        base_addr, _, device_id, _ = reg_desc[0]
+        base_addr, registered_bytes, device_id, _ = reg_desc[0]
+        if registered_bytes != page_num * self.page_len:
+            raise ValueError("PD peers must use the same page byte capacity")
         pages_data = []
         for page_id in range(page_num):
             pages_data.append((base_addr + page_id * self.page_len, self.page_len, device_id))

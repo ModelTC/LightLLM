@@ -9,6 +9,7 @@ def _fwd_kernel_destindex_copy_kv_per_head_fp8(
     KV,
     Dest_loc,
     Out,
+    Out_v,
     scale,
     stride_kv_bs,
     stride_kv_h,
@@ -22,6 +23,7 @@ def _fwd_kernel_destindex_copy_kv_per_head_fp8(
     FP8_MIN: tl.constexpr,
     FP8_MAX: tl.constexpr,
     IS_PER_TENSOR_QUANT: tl.constexpr,
+    SPLIT_KV: tl.constexpr,
 ):
     cur_index = tl.program_id(0)
     offs_h = tl.arange(0, BLOCK_HEAD)
@@ -30,7 +32,13 @@ def _fwd_kernel_destindex_copy_kv_per_head_fp8(
     dest_index = tl.load(Dest_loc + cur_index).to(tl.int64)
 
     kv_ptrs = KV + cur_index * stride_kv_bs + stride_kv_h * offs_h[:, None] + stride_kv_d * offs_d[None, :]
-    o_ptrs = Out + dest_index * stride_o_bs + stride_o_h * offs_h[:, None] + stride_o_d * offs_d[None, :]
+    if SPLIT_KV:
+        # 两块独立分配的 K/V 具有相同形状和 stride，输入仍按 K heads、V heads 排列。
+        k_ptrs = Out + dest_index * stride_o_bs + stride_o_h * offs_h[:, None] + stride_o_d * offs_d[None, :]
+        v_ptrs = Out_v + dest_index * stride_o_bs + stride_o_h * (offs_h[:, None] - head_num // 2) + stride_o_d * offs_d[None, :]
+        o_ptrs = tl.where(offs_h[:, None] < head_num // 2, k_ptrs, v_ptrs)
+    else:
+        o_ptrs = Out + dest_index * stride_o_bs + stride_o_h * offs_h[:, None] + stride_o_d * offs_d[None, :]
 
     # to fp8
     if not IS_PER_TENSOR_QUANT:
@@ -50,15 +58,20 @@ def _fwd_kernel_destindex_copy_kv_per_head_fp8(
 
 
 @torch.no_grad()
-def destindex_copy_kv_fp8(KV, DestLoc, scales, Out, is_per_tensor_quant=False):
+def destindex_copy_kv_fp8(KV, DestLoc, scales, Out, is_per_tensor_quant=False, Out_v=None):
     """
-    当 is_per_tensor_quant 为 False 时，为 为 per_head 量化。
+    当 is_per_tensor_quant 为 False 时，为 per_head 量化。
+    Out_v 非空时，Out/Out_v 分别为 K/V 存储；否则沿用合并输出布局。
     """
     seq_len = DestLoc.shape[0]
     head_num = KV.shape[1]
     assert head_num % 2 == 0
     head_dim = KV.shape[2]
-    assert KV.shape[1] == Out.shape[1] and KV.shape[2] == Out.shape[2]
+    if Out_v is None:
+        assert KV.shape[1] == Out.shape[1] and KV.shape[2] == Out.shape[2]
+    else:
+        assert KV.shape[1] == 2 * Out.shape[1] and KV.shape[2] == Out.shape[2]
+        assert Out_v.shape == Out.shape and Out_v.stride() == Out.stride()
     BLOCK_HEAD = triton.next_power_of_2(head_num)
     grid = (seq_len,)
     num_warps = 1
@@ -67,6 +80,7 @@ def destindex_copy_kv_fp8(KV, DestLoc, scales, Out, is_per_tensor_quant=False):
         KV,
         DestLoc,
         Out,
+        Out if Out_v is None else Out_v,
         scales,
         KV.stride(0),
         KV.stride(1),
@@ -80,6 +94,7 @@ def destindex_copy_kv_fp8(KV, DestLoc, scales, Out, is_per_tensor_quant=False):
         FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,
         FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
         IS_PER_TENSOR_QUANT=is_per_tensor_quant,
+        SPLIT_KV=Out_v is not None,
         num_warps=num_warps,
         num_stages=1,
     )

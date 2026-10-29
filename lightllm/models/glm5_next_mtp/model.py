@@ -61,10 +61,26 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     def _init_req_manager(self):
         self.req_manager = self.main_model.req_manager
-        self.linear_config = self.main_model.linear_config
 
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
+    def _init_att_resource_manager(self):
+        from lightllm.models.glm5_next.att_resource_manager import init_model_att_tail
+        from lightllm.common.basemodel.basemodel_utils import init_model_full_attention
+
+        self.linear_config = self.main_model.linear_config
+        init_model_att_tail(self)
+        init_model_full_attention(self)
+
+    @classmethod
+    def _resource_config(cls, model_config):
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+
+        config = get_resource_config(model_config)
+        config.update(num_hidden_layers=1, n_layer=1)
+        return config
+
+    @classmethod
+    def _full_attention_options(cls, config, args):
+        return dict(heads=1, dim=config["kv_lora_rank"], layer_ids=(0,), packed=True)
 
     def _init_att_backend(self):
         backend_class = (

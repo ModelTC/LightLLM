@@ -1,5 +1,3 @@
-import os
-
 import numpy as np
 import torch
 import time
@@ -15,7 +13,6 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.common.req_manager import HybridAttentionReqManager
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
@@ -147,39 +144,49 @@ class ModeBackend:
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
-        set_random_seed(2147483647)
-        self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
+        self.draft_models = []
+        if self.args.mtp_mode is not None:
+            self.init_mtp_draft_model(model_kvargs)
+        from lightllm.utils.envs_utils import set_model_init_status
+        from lightllm.utils.torch_memory_saver_utils import MemoryTag
+        from lightllm.common.att_resources import AttResourceManager
 
-        if self.is_hybrid_att_model:
-            self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
-                size=self.args.linear_att_cache_size,
+        models = (self.model, *self.draft_models)
+        assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"
+        for item in models:
+            item.prepare_att_resources()
+        manager: AttResourceManager = self.model.att_resource_manager
+        assert all(item.max_req_num == self.model.max_req_num for item in models), "models must share the request domain"
+        assert all(item.att_resource_manager is manager for item in models), "models must share one resource manager"
+        with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            manager.initialize_resources(
+                self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
             )
-        else:
-            self.small_page_buffers = None
+        for item in models:
+            item.init_runtime()
+        torch.cuda.empty_cache()
+        set_model_init_status(True)
+        set_random_seed(2147483647)
+        self.is_hybrid_att_model = bool(self.model.att_resource_manager.get_bounded_attention_states())
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
             if self.is_hybrid_att_model:
                 self.radix_cache = HybridAttPagedRadixCache(
-                    total_token_num=self.model.mem_manager.size,
+                    total_token_num=self.model.att_resource_manager.full_att_allocator.size,
                     rank_in_node=self.rank_in_node,
                     hash_page_size=self.args.linear_att_hash_page_size,
                     big_page_num=self.args.linear_att_page_block_num,
-                    kv_cache_mem_manager=self.model.mem_manager,
-                    small_page_buffers=self.small_page_buffers,
+                    att_resource_manager=self.model.att_resource_manager,
                 )
             else:
                 self.radix_cache = RadixCache(
-                    total_token_num=self.model.mem_manager.size,
+                    total_token_num=self.model.att_resource_manager.full_att_allocator.size,
                     rank_in_node=self.rank_in_node,
-                    mem_manager=self.model.mem_manager,
+                    att_resource_manager=self.model.att_resource_manager,
                     page_size=self.args.page_size,
                 )
-
-        if "prompt_cache_kv_buffer" in model_cfg:
-            assert self.use_dynamic_prompt_cache
-            self.preload_prompt_cache_kv_buffer(model_cfg)
 
         self.logger.info(f"loaded model class {self.model.__class__}")
 
@@ -219,16 +226,26 @@ class ModeBackend:
             )
 
         if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
-            # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
-            # 读取
-            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
+            from lightllm.server.router.model_infer.shared_att_resources_utils import publish_att_resources
+
+            # PD 和 DP 使用独立导出，避免 PD 读者收到大小页池或 DP 读者丢失页池。
+            if self.args.run_mode in ("prefill", "decode"):
+                publish_att_resources(
+                    self.model.att_resource_manager, self.model.req_manager.req_to_token_indexs,
+                    kind="pd", reader_count=self.node_world_size,
+                )
+            if self.args.enable_dp_prompt_cache_fetch:
+                publish_att_resources(
+                    self.model.att_resource_manager, self.model.req_manager.req_to_token_indexs,
+                    kind="dp", reader_count=self.dp_size_in_node - 1,
+                )
             dist.barrier(group=self.node_nccl_group)
 
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
         if self.is_master_in_dp:
             # Capture 只保存 allocator 管理的真实 KV 槽位，HOLD 页对应的 padding 写入由 kernel 过滤。
-            kv_cache_size = self.model.mem_manager.size
+            kv_cache_size = self.model.att_resource_manager.full_att_allocator.size
             if self.args.enable_prompt_logprobs:
                 mgr = PromptLogprobsCaptureManager.get_instance()
                 if mgr is not None:
@@ -248,7 +265,6 @@ class ModeBackend:
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
         if self.args.mtp_mode is not None:
-            self.init_mtp_draft_model(model_kvargs)
             self.init_spec_engine()
 
         if self.args.enable_cpu_cache:
@@ -274,7 +290,7 @@ class ModeBackend:
 
     def init_dp_kv_shared(self):
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
-        from lightllm.common.kv_cache_mem_manager import MemoryManager
+        from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
 
         torch.cuda.set_device(get_current_device_id())
 
@@ -284,17 +300,25 @@ class ModeBackend:
             backend=self,
         )
 
-        # Collect mem_managers from all ranks
-        self.mem_managers = []
-        for rank_idx in range(self.node_world_size):
+        # 每个 DP 只保留对应 TP 分片，统一以节点内 DP rank 索引。
+        self.dp_att_resource_managers = {}
+        self.dp_req_to_token_indices = {}
+        # 取节点内的 TP 起点，兼容单个 TP 组跨节点、rank_in_dp 超过本节点 rank 范围的情况。
+        for dp_rank, rank_idx in enumerate(
+            range(self.rank_in_node % self.dp_world_size, self.node_world_size, self.dp_world_size)
+        ):
             if rank_idx != self.rank_in_node:
-                self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
+                att_resource_manager, req_to_token_indices = load_att_resources(rank_idx, kind="dp")
+                att_resource_manager.register_page_pools_pin_memory()
             else:
-                self.mem_managers.append(self.model.mem_manager)
+                att_resource_manager = self.model.att_resource_manager
+                req_to_token_indices = self.model.req_manager.req_to_token_indexs
+            self.dp_att_resource_managers[dp_rank] = att_resource_manager
+            self.dp_req_to_token_indices[dp_rank] = req_to_token_indices
         return
 
     def get_max_total_token_num(self):
-        return self.model.mem_manager.size
+        return self.model.att_resource_manager.full_att_allocator.size
 
     def infer_loop(self):
         raise NotImplementedError()
@@ -311,9 +335,10 @@ class ModeBackend:
         spec_mode = self.args.mtp_mode
         is_chained_draft = spec_mode in ("vanilla_with_att", "vanilla_no_att")
 
-        os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
-
         draft_model_count = self.max_draft_step if is_chained_draft else 1
+        from lightllm.common.att_resources.utils import MAX_DRAFT_MODELS
+
+        assert 0 < draft_model_count <= MAX_DRAFT_MODELS, "at most 36 draft models are supported"
         draft_model_dirs = self.args.mtp_draft_model_dir
         assert draft_model_dirs is not None
         assert len(draft_model_dirs) >= draft_model_count
@@ -322,7 +347,7 @@ class ModeBackend:
             draft_model_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[i])
             draft_model_kvargs = {
                 "weight_dir": draft_model_dirs[i],
-                "max_total_token_num": self.model.mem_manager.size,
+                "max_total_token_num": main_kvargs["max_total_token_num"],
                 "load_way": main_kvargs["load_way"],
                 "max_req_num": main_kvargs.get("max_req_num", 1000),
                 "max_seq_length": main_kvargs.get("max_seq_length", 1024 * 5),
@@ -632,7 +657,7 @@ class ModeBackend:
 
         old_hold_kv_len = req_obj.hold_kv_len
         new_hold_kv_len = old_hold_kv_len + alloc_token_num
-        mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
+        mem_indexes = g_infer_context.att_resource_manager.full_att_allocator.alloc(alloc_token_num)
         # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
         g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
             mem_indexes, non_blocking=no_blcoking_copy
@@ -1008,27 +1033,6 @@ class ModeBackend:
         all_reduce(self.dp_reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
         max_decode_num = self.dp_reduce_tensor.item()
         return max_decode_num
-
-    def preload_prompt_cache_kv_buffer(self, model_cfg):
-        self.logger.info("Preload prompt cache kv buffer.")
-        cur_rank = dist.get_rank()
-        prompt_cache_kv_buffer_path = os.path.join(
-            self.weight_dir, model_cfg["prompt_cache_kv_buffer"][f"rank_{cur_rank}"]
-        )
-        page_size = self.args.page_size
-        intact_kv_len = len(model_cfg["prompt_cache_token_ids"]) // page_size * page_size
-        if intact_kv_len == 0:
-            return
-
-        prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
-        prompt_cache_kv_buffer = {name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()}
-        intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
-        self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
-        intact_token_ids = torch.tensor(
-            model_cfg["prompt_cache_token_ids"][:intact_kv_len], dtype=torch.int64, device="cpu"
-        )
-        self.radix_cache.insert(intact_token_ids, intact_kv_index)
-        self.radix_cache.match_prefix(intact_token_ids, update_refs=True)
 
     def init_rank_infos(self):
         self.node_world_size = get_node_world_size()

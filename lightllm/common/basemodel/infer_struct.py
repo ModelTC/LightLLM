@@ -1,7 +1,7 @@
 import torch
 import triton
 import collections
-from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.att_resources.att_resource_manager import AttResourceManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
@@ -47,7 +47,8 @@ class InferStateInfo:
         self.is_prefill: bool = None
         self.is_draft_model: bool = False
 
-        self.mem_manager: MemoryManager = None
+        self.att_resource_manager: AttResourceManager = None
+        self.att_resource_role: str = "main"  # main 或 draft0 .. draft35，区分共享管理器中的 State。
         self.req_manager: ReqManager = None
 
         self.mem_index: torch.Tensor = None

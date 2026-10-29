@@ -124,8 +124,7 @@ def test_notification_payload(backend, page_kind, method, stage, destination):
     if backend is NcclKVTransporter:
         transporter.host_ip = "127.0.0.1"
         transporter.control_channel = SimpleNamespace(port=1234, send_notif=Mock())
-        transporter.kv_move_buffer = SimpleNamespace(dtype="float16")
-        transporter.page_size = transporter.num_layers = transporter.kv_head_num = transporter.head_dims = 1
+        transporter.kv_move_buffer = SimpleNamespace(dtype="uint8", shape=(12, 128))
         transporter._get_remote_metadata = Mock(return_value=SimpleNamespace(host_ip="127.0.0.2", control_port=4321))
         transporter._get_peer = Mock(return_value=SimpleNamespace(start_recv=Mock()))
     else:
@@ -190,3 +189,33 @@ def test_receiver_rejects_payload_with_decode_local_mark():
     )
     assert result.returncode != 0
     assert b"decode modules are unavailable to the receiver" in result.stderr
+
+
+def test_nixl_rejects_different_peer_page_capacity_before_registering_handles():
+    transporter = NixlKVTransporter.__new__(NixlKVTransporter)
+    transporter.page_len = 128
+    transporter.nixl_agent = SimpleNamespace(get_xfer_descs=Mock(), prep_xfer_dlist=Mock())
+    with pytest.raises(ValueError, match="same page byte capacity"):
+        transporter._create_paged_xfer_handles([(4096, 512, 0, None)], 2, "peer")
+    transporter.nixl_agent.get_xfer_descs.assert_not_called()
+    transporter._create_paged_xfer_handles([(4096, 256, 0, None)], 2, "peer")
+    transporter.nixl_agent.get_xfer_descs.assert_called_once_with([(4096, 128, 0), (4224, 128, 0)], "VRAM")
+
+
+def test_nccl_checks_peer_page_shape_before_accepting_agent():
+    from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclAgentMetadata
+
+    transporter = NcclKVTransporter.__new__(NcclKVTransporter)
+    transporter.remote_agents = {}
+    transporter.kv_move_buffer = SimpleNamespace(shape=(2, 128), dtype="torch.uint8")
+    peer = SimpleNamespace(
+        agent_name="peer",
+        agent_metadata=pickle.dumps(NcclAgentMetadata("peer", "127.0.0.1", 1234, 0)),
+        page_reg_desc=pickle.dumps({"page_shape": (256,), "dtype": "torch.uint8"}),
+    )
+    with pytest.raises(ValueError, match="same page shape"):
+        transporter.connect_add_remote_agent(peer)
+    assert not transporter.remote_agents
+    peer.page_reg_desc = pickle.dumps({"page_shape": (128,), "dtype": "torch.uint8"})
+    transporter.connect_add_remote_agent(peer)
+    assert transporter.remote_agents["peer"] is peer

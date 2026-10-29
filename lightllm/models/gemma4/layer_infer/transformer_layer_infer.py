@@ -21,7 +21,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     time. The KV cache layout is uniform (sliding shape: num_kv_heads=16,
     head_dim=256); full-attention layers pack their (4, 512) tensor into the
     first 8 heads of the 16-head slot at cache-write time, then reshape on
-    read. See Gemma4TpPartModel._init_mem_manager for context.
+    read. See Gemma4TpPartModel._full_attention_options for context.
     """
 
     def __init__(self, layer_num, network_config):
@@ -195,7 +195,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _get_layer_kv(self, infer_state: InferStateInfo):
         # KV-shared layers read from the target layer's cache slot.
         layer_idx = self.kv_share_target_layer_ if self.is_kv_shared_ else self.layer_num_
-        _k_raw, _v_raw = infer_state.mem_manager.get_att_input_params(layer_index=layer_idx)
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        _k_raw, _v_raw = state.get_layer_view(layer_id=layer_idx)
         # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim). Use .view
         # (not .reshape) so any non-contiguous layout from a future mem_manager
         # backend fails loudly instead of silently copying — slice + view is

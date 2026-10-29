@@ -45,7 +45,6 @@ def test_reject_invalid_global_capacity(capacity):
 
 def _make_dp_queue(monkeypatch, balancer):
     monkeypatch.setattr("lightllm.utils.config_utils.is_hybrid_att_model", lambda _: True)
-    monkeypatch.setattr("lightllm.server.router.req_queue.base_queue.get_fixed_kv_len", lambda: 0)
     args = StartArgs(
         running_max_req_size=32,
         dp=8,

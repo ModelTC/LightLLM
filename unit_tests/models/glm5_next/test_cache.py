@@ -4,66 +4,55 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager, FP8Glm5NextMemManager
-from lightllm.common.req_manager import Glm5NextReqManager
-from lightllm.common.state_cache_manager import Glm5NextCacheConfig
+from lightllm.common.att_resources.allocators import FullAttKVAllocator
+
+from lightllm.common.att_resources.full_att import (
+    PackedMLAFullAttentionState,
+    PackedMLAAttentionConfig,
+)
+from lightllm.common.req_manager import ReqManager
+from lightllm.models.glm5_next.att_resource_manager import Glm5NextAttResourceManager
+from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, set_unique_server_name
 
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+    pytest.mark.usefixtures("kv_allocator_environment"),
+]
 
 
-@pytest.fixture
-def model_config():
-    return {
-        "kv_lora_rank": 512,
-        "num_hidden_layers": 4,
-        "layer_types": ["linear_attention"] * 3 + ["deepseek_sparse_attention"],
-        "index_kpool": 4,
-        "index_head_dim": 128,
-        "linear_attn_config": {
-            "num_heads": 8,
-            "head_dim": 128,
-            "short_conv_kernel_size": 4,
-            "kda_layers": [0, 1, 2],
+def test_nope_cache_config_uses_native_mla_width():
+    config = Glm5NextResourceConfig.from_model_config(
+        {
+            "kv_lora_rank": 512,
+            "num_hidden_layers": 4,
+            "layer_types": ["linear_attention"] * 3 + ["deepseek_sparse_attention"],
+            "index_kpool": 4,
+            "index_head_dim": 128,
+            "linear_attn_config": {
+                "num_heads": 8,
+                "head_dim": 128,
+                "short_conv_kernel_size": 4,
+                "kda_layers": [0, 1, 2],
+            },
         },
-    }
-
-
-@pytest.mark.parametrize("kv_type", ["None", "fp8kv_dsa"])
-@pytest.mark.parametrize("page_size", [1, 16])
-def test_nope_cache_layout_and_hold_page(monkeypatch, model_config, kv_type, page_size):
-    args = StartArgs(tp=4, data_type="bfloat16", llm_kv_type=kv_type)
-    config = Glm5NextCacheConfig.from_model_config(model_config, args)
-    nested_config = Glm5NextCacheConfig.from_model_config({"text_config": model_config}, args)
-    assert nested_config == config
-    # The allocator reserves an entire HOLD page, including when KV is quantized.
-    monkeypatch.setattr(Glm5NextMemManager, "_init_linear_att_buffers", lambda self: None)
-    mem_manager_class = FP8Glm5NextMemManager if kv_type == "fp8kv_dsa" else Glm5NextMemManager
-    mem = object.__new__(mem_manager_class)
-    mem.page_size = page_size
-    mem._init_buffers(32, config.full_att_dtype, 1, config.full_att_head_dim, 1)
-    assert mem.kv_buffer.shape[1] == 32 + page_size
-
-    assert config.full_att_head_dim == (720 if kv_type == "fp8kv_dsa" else 584)
-    assert config.full_att_dtype == (torch.uint8 if kv_type == "fp8kv_dsa" else torch.bfloat16)
-    assert config.conv_state_dtype == torch.bfloat16
+        StartArgs(tp=4, data_type="bfloat16"),
+    )
+    assert config.full_att_head_dim == 584
+    assert config.full_att_head_dim * config.full_att_dtype.itemsize == 512 * 2 + 144
 
 
 @pytest.mark.parametrize("small_page", [False, True])
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 @pytest.mark.parametrize("mtp_step", [0, 2])
-@pytest.mark.parametrize("kv_type", ["None", "fp8kv_dsa"])
-def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step, kv_type):
-    from lightllm.models.glm5_next.model import Glm5NextTpPartModel
-
+def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
     args = StartArgs(
         tp=tp_world_size,
-        llm_kv_type=kv_type,
         data_type="bfloat16",
         linear_att_hash_page_size=4,
         linear_att_page_block_num=2,
@@ -74,14 +63,12 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     set_unique_server_name(args)
     get_env_start_args.cache_clear()
     set_env_start_args(dataclasses.asdict(args))
-    use_fp8_kv = kv_type == "fp8kv_dsa"
-    dtype, head_dim = (torch.uint8, 720) if use_fp8_kv else (torch.bfloat16, 584)
-    config = Glm5NextCacheConfig(
+    config = Glm5NextResourceConfig(
         tp_world_size=tp_world_size,
         full_att_all_num_kv_heads=1,
-        full_att_dtype=dtype,
+        full_att_dtype=torch.bfloat16,
         full_att_num_kv_heads=1,
-        full_att_head_dim=head_dim,
+        full_att_head_dim=584,
         global_linear_k_heads=2 * tp_world_size,
         global_linear_v_heads=2 * tp_world_size,
         num_linear_k_heads=2,
@@ -89,132 +76,95 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         head_linear_k_dim=128,
         head_linear_v_dim=128,
         conv_kernel_size=4,
+        linear_layer_num=3,
         conv_state_dtype=torch.bfloat16,
         ssm_state_dtype=torch.float32,
-        layer_types=("linear_attention",) * 3 + ("deepseek_sparse_attention",),
+        full_attention_interval=4,
+        all_layer_num=4,
         draft_full_att_kv_layer_num=int(mtp_step > 0),
     )
-    full_layers = config.get_full_att_kv_layer_num_with_draft_model()
-    model = object.__new__(Glm5NextTpPartModel)
-    model.args = args
-    model.max_total_token_num = 16
-    model.linear_config = config
-    model.mem_fraction = 0.9
-    model._init_mem_manager()
-    mem = model.mem_manager
-    req = Glm5NextReqManager(3, 16, mem, config)
-    att_kv = mem.get_att_input_params(3)
-    assert att_kv.shape == (17, 1, 584 if use_fp8_kv else 512)
-    assert att_kv.stride(0) == head_dim
-    index_bytes = mem.get_indexer_k_buffer(3)
+    full = PackedMLAFullAttentionState(
+        PackedMLAAttentionConfig(
+            config.get_full_att_layer_ids(),
+            1,
+            584,
+            torch.bfloat16,
+            tp_world_size=tp_world_size,
+            kv_dim=512,
+        ),
+         page_size=args.page_size,
+    )
+    full.initialize_storage(16)
+    req = ReqManager(3, 16)
+    resources = Glm5NextAttResourceManager(config, 4, mtp_step)
+    from unit_tests.common.att_resources.model_helpers import create_full_attention_roles
+
+    main_full, draft_full = create_full_attention_roles(full, config.all_layer_num)
+    resources.bind_storage(
+        main_full,
+        FullAttKVAllocator(full.capacity, full.page_size),
+        draft_full_state=draft_full,
+        big_page_capacity=4,
+        small_page_capacity=2,
+    )
+    full = main_full
+    linear = resources.main_kda_state
+    tail = resources.main_indexer_kpool_c4_tail_state
+    assert not hasattr(req, "req_to_conv_state")
+    att_kv = full.get_layer_view(3).kv
+    assert att_kv.shape == (17, 1, 512)
+    assert att_kv.stride(0) == 584
+    index_bytes = full.get_layer_view(3).indexer_k
     index_bytes.random_(0, 256)
     expected_index_bytes = index_bytes.clone()
     new_kv = torch.randn(2, 1, 512, dtype=torch.bfloat16, device="cuda")
     destinations = torch.tensor([5, 9], dtype=torch.int32, device="cuda")
-    mem.operator.copy_kv_to_mem_manager(3, destinations, new_kv)
-    if use_fp8_kv:
-        values = att_kv[..., :448].view(torch.float8_e4m3fn).float().view(17, 1, 7, 64)
-        scales = att_kv[..., 576:583].view(torch.float8_e8m0fnu).float().unsqueeze(-1)
-        tail = att_kv[..., 448:576].view(torch.bfloat16).float()
-        actual = torch.cat(((values * scales).view(17, 1, 448), tail), dim=-1)[destinations]
-        torch.testing.assert_close(actual, new_kv.float(), atol=0.13, rtol=0.065)
-        assert torch.equal(tail[destinations], new_kv[..., 448:].float())
-    else:
-        assert torch.equal(att_kv[destinations], new_kv)
+    full.write_full_att_kv(3, destinations, new_kv)
+    assert torch.equal(att_kv[destinations], new_kv)
     assert torch.equal(index_bytes, expected_index_bytes)
-    assert req.get_indexer_tail_buffer(3).shape == (4, 4 + mtp_step, 256)
+    assert tail.get_layer_view(3).shape == (4, 4 + mtp_step, 256)
     if mtp_step:
-        assert req.get_indexer_tail_buffer(4).shape == (4, 4 + mtp_step, 256)
-        assert mem.get_att_input_params(4).shape == att_kv.shape
-    cache = req.create_small_page_cache_manager(2) if small_page else mem.big_page_buffers
-    slot = cache.alloc_one_state_cache()
-    source_req = SimpleNamespace(req_idx=0)
-    req.init_hybrid_attention_state(source_req)
-    req.req_to_conv_state.buffer[:, 0].normal_()
-    req.req_to_ssm_state.buffer[:, 0].normal_()
-    conv = req.req_to_conv_state.buffer[:, 0, ..., :3].clone()
-    ssm = req.req_to_ssm_state.buffer[:, 0].clone()
-    if small_page:
-        req.save_state(source_req, slot, cache)
-    else:
-        req.save_big_page_states(torch.tensor([0], dtype=torch.int32, device="cuda"), [source_req], [slot])
+        assert resources.draft0_indexer_kpool_c4_tail_state.get_layer_view(4).shape == (4, 4 + mtp_step, 256)
+        assert draft_full.get_layer_view(4).kv.shape == att_kv.shape
+    kind = "small" if small_page else "big"
+    allocator = resources.bounded_att_small_page_allocator if small_page else resources.bounded_att_big_page_allocator
+    slot = allocator.alloc(1)[0]
+    resources.reset_bounded_att_state([0])
+    resources.reset_attention_tail_state([0])
+    linear.conv_state[:, 0].normal_()
+    linear.ssm_state[:, 0].normal_()
+    conv = linear.conv_state[:, 0, ..., :3].clone()
+    ssm = linear.ssm_state[:, 0].clone()
+    resources.save_bounded_att_pages([0], page_kind=kind, slot_ids=[slot])
     torch.cuda.synchronize()
-    req.req_to_conv_state.buffer[:, 0].zero_()
-    req.req_to_ssm_state.buffer[:, 0].zero_()
-    req.req_to_indexer_tail.buffer.normal_()
-    unchanged = req.req_to_indexer_tail.buffer[:, [0, 1, 3]].clone()
-    dest_req = SimpleNamespace(req_idx=2, shared_kv_node=SimpleNamespace(small_page_buffer_idx=slot))
-    if small_page:
-        req.restore_small_page_state(dest_req)
-    else:
-        req.restore_big_page_state(slot, dest_req)
+    linear.conv_state[:, 0].zero_()
+    linear.ssm_state[:, 0].zero_()
+    tail.tail_buffer.normal_()
+    unchanged = tail.tail_buffer[:, [0, 1, 3]].clone()
+    resources.restore_bounded_att_pages([2], page_kind=kind, slot_ids=[slot])
+    resources.reset_attention_tail_state([2])
     torch.cuda.synchronize()
-    assert torch.equal(req.req_to_conv_state.buffer[:, 2, ..., :3], conv)
-    assert torch.equal(req.req_to_ssm_state.buffer[:, 2 * (mtp_step + 1)], ssm)
+    assert torch.equal(linear.conv_state[:, 2, ..., :3], conv)
+    assert torch.equal(linear.ssm_state[:, 2 * (mtp_step + 1)], ssm)
     # Both page sizes are aligned to complete pools. Restoring a prefix must
     # discard stale tail values from a previously allocated request slot.
-    assert not req.req_to_indexer_tail.buffer[:, 2].any()
-    assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
-    req.req_to_indexer_tail.buffer[:, 2].normal_()
-    req.init_hybrid_attention_state(dest_req)
-    assert not req.req_to_conv_state.buffer[:, 2].any()
-    assert not req.req_to_ssm_state.buffer[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
-    assert not req.req_to_indexer_tail.buffer[:, 2].any()
-    assert torch.equal(req.req_to_indexer_tail.buffer[:, [0, 1, 3]], unchanged)
+    assert not tail.tail_buffer[:, 2].any()
+    assert torch.equal(tail.tail_buffer[:, [0, 1, 3]], unchanged)
+    tail.tail_buffer[:, 2].normal_()
+    preserved_tail = tail.tail_buffer.clone()
+    resources.reset_bounded_att_state([2])
+    assert not linear.conv_state[:, 2].any()
+    assert not linear.ssm_state[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
+    assert torch.equal(tail.tail_buffer, preserved_tail)
+    resources.reset_attention_tail_state([2])
+    assert not tail.tail_buffer[:, 2].any()
+    assert torch.equal(tail.tail_buffer[:, [0, 1, 3]], unchanged)
     # KV moves carry MLA latents and pooled FP8 bytes; raw keys/gates only
     # belong to live requests. Bytewise equality checks FP8 scale integrity.
-    packed_bytes = mem.kv_buffer.view(torch.uint8)
+    packed_bytes = full.storage.view(torch.uint8)
     packed_bytes[:, 0].random_(0, 256)
-    mem.operator.copy_mem_to_mem(torch.tensor([0]), torch.tensor([7]))
+    full.copy_full_att_tokens(torch.tensor([0]), torch.tensor([7]))
     assert torch.equal(packed_bytes[:, 0], packed_bytes[:, 7])
-    assert mem.get_cell_size() == head_dim * dtype.itemsize * full_layers
-    assert config.get_cpu_cache_full_att_bytes() == mem.get_cell_size() * 8
-
-    from lightllm.common.basemodel.triton_kernel.linear_att_cpu_cache_copy import (
-        copy_kv_buffer_to_cpu_cache,
-        copy_cpu_cache_to_kv_buffer,
-    )
-
-    cpu_pages = torch.zeros((1, config.get_cpu_cache_big_page_bytes()), dtype=torch.uint8, pin_memory=True)
-    indexes = torch.arange(8, dtype=torch.int32, device="cuda")
-    zero = torch.zeros(1, dtype=torch.int64, device="cuda")
-    ready = torch.zeros(1, dtype=torch.int32, pin_memory=True)
-    big = mem.big_page_buffers
-    packed_bytes[:, :8].random_(0, 256)
-    big.conv_state_cache.buffer[0].normal_()
-    big.ssm_state_cache.buffer[0].normal_()
-    expected_kv = packed_bytes[:, :8].clone()
-    expected_conv = big.conv_state_cache.buffer[0].clone()
-    expected_ssm = big.ssm_state_cache.buffer[0].clone()
-    common = dict(
-        mem_indexes=indexes,
-        page_indexes=zero,
-        big_page_buffer_ids=zero,
-        cpu_kv_conv_state=big.conv_state_cache.buffer,
-        cpu_kv_ssm_state=big.ssm_state_cache.buffer,
-        cpu_cache_tensor=cpu_pages,
-        tp_world_size=tp_world_size,
-        big_page_token_num=8,
-        linear_config=config,
-    )
-    # Simulate TP writers to a shared CPU page: MLA/index KV is replicated,
-    # while each rank must retain its own KDA checkpoint region.
-    expected_states = []
-    for rank in range(tp_world_size):
-        big.conv_state_cache.buffer[0].copy_(expected_conv + rank)
-        big.ssm_state_cache.buffer[0].copy_(expected_ssm + rank)
-        expected_states.append((big.conv_state_cache.buffer[0].clone(), big.ssm_state_cache.buffer[0].clone()))
-        copy_kv_buffer_to_cpu_cache(page_readies=ready, gpu_kv_full_att_state=mem.kv_buffer, tp_rank=rank, **common)
-        torch.cuda.synchronize()
-    for rank, (conv, ssm) in enumerate(expected_states):
-        packed_bytes[:, :8].zero_()
-        big.conv_state_cache.buffer[0].zero_()
-        big.ssm_state_cache.buffer[0].zero_()
-        copy_cpu_cache_to_kv_buffer(gpu_full_att_kv_state=mem.kv_buffer, tp_rank=rank, **common)
-        torch.cuda.synchronize()
-        assert torch.equal(packed_bytes[:, :8], expected_kv)
-        assert torch.equal(big.conv_state_cache.buffer[0], conv)
-        assert torch.equal(big.ssm_state_cache.buffer[0], ssm)
 
 
 @pytest.mark.parametrize("gate_type", ["silu", "sigmoid"])

@@ -12,7 +12,7 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
     light_mem = pytest.importorskip("light_mem")
     from lightllm.server.multi_level_kv_cache.disk_cache_worker import DiskCacheWorker
 
-    client = cpu_cache_factory(CpuKVCacheMeta(3, 1, 1, 1, 4096, torch.uint8, 0, torch.uint8))
+    client = cpu_cache_factory(CpuKVCacheMeta(3, 4096))
     pages, _ = client.allocate_pages([11, 22, 33], False)
     for index in pages:
         client.cpu_kv_cache_tensor[index].fill_(index + 1)
@@ -69,19 +69,19 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
         return torch.arange(count, dtype=torch.int32)
 
     module = common.MultiLevelKvCacheModule.__new__(common.MultiLevelKvCacheModule)
-    module.args = SimpleNamespace(page_size=1)
+    module.args = SimpleNamespace(page_size=1, cpu_cache_token_page_size=256)
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
+        is_hybrid_att_model=False,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1)),
-            mem_manager=SimpleNamespace(
-                operator=SimpleNamespace(
-                    load_cpu_cache_to_gpu=lambda **kwargs: copied_pages.extend(kwargs["page_indexes"].tolist())
-                )
+            att_resource_manager=SimpleNamespace(
+                get_cpu_transfer_layouts=lambda: {},
+                read_req_from_cpu=lambda buffer, pages, tokens, **kwargs: copied_pages.extend(pages),
             ),
         ),
     )

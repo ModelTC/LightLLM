@@ -7,8 +7,6 @@ from lightllm.models.starcoder2.layer_infer.transformer_layer_infer import Starc
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
 
 from lightllm.common.build_utils import repair_config
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.common.basemodel import TpPartBaseModel
 
 
@@ -27,6 +25,14 @@ class Starcoder2TpPartModel(TpPartBaseModel):
         super().__init__(kvargs)
         return
 
+    def _init_att_resource_manager(self):
+        from lightllm.common.att_resources import AttResourceManager
+        from lightllm.common.basemodel.basemodel_utils import init_model_full_attention
+
+        if not self.is_mtp_draft_model:
+            self.att_resource_manager = AttResourceManager(request_capacity=self.max_req_num + 1)
+        init_model_full_attention(self)
+
     def _init_config(self):
         super()._init_config()
         repair_config(self.config, same_names=["norm_epsilon", "rms_norm_eps", "layer_norm_epsilon"])
@@ -43,17 +49,6 @@ class Starcoder2TpPartModel(TpPartBaseModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
-        return
-
-    def _init_mem_manager(self):
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
-            head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
         return
 
     def _init_some_value(self):

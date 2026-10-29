@@ -4,12 +4,13 @@ import weakref
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING, Tuple, Union, Dict
+from typing import Optional, TYPE_CHECKING, Tuple, Dict
 
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
+    from lightllm.common.att_resources.full_att import FullAttentionState
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -76,14 +77,13 @@ class BaseAttBackend:
         return not is_parallel_block_draft
 
     def _find_layer_index(
-        self, k: torch.Tensor, v: torch.Tensor, att_state: Union["BasePrefillAttState", "BaseDecodeAttState"]
+        self, k: torch.Tensor, v: torch.Tensor, state: "FullAttentionState"
     ) -> int:
-        kv_buffer = att_state.infer_state.mem_manager.kv_buffer
-        layer_count = len(kv_buffer)
-        find_dict = {kv_buffer[i].data_ptr(): i for i in range(layer_count)}
-        key = min(k.data_ptr(), v.data_ptr())
-        assert key in find_dict
-        return find_dict[key]
+        for layer_index, layer_id in enumerate(state.config.layer_ids):
+            layer_k, layer_v = state.get_layer_view(layer_id)
+            if k.data_ptr() == layer_k.data_ptr() and v.data_ptr() == layer_v.data_ptr():
+                return layer_index
+        raise AssertionError("K/V views do not belong to the same State layer")
 
 
 @dataclass

@@ -8,10 +8,7 @@ from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
-from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager, FP8Glm5NextMemManager
-from lightllm.common.req_manager import Glm5NextReqManager
-from lightllm.common.state_cache_manager import Glm5NextCacheConfig
+from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
@@ -21,11 +18,39 @@ from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeig
 
 
 class Glm5NextTpPartModel(TpPartBaseModel):
+    is_hybrid_att_model = True
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextPreLayerInfer
     post_layer_infer_class = LlamaPostLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
+
+    @classmethod
+    def create_bounded_attention_definition(cls, model_config, args, *, model_layer_ids, tp_rank=0, tp_world_size=1):
+        from lightllm.common.att_resources.bounded_att import create_kda_state, ConvSSMStateConfig
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+
+        config = get_resource_config(model_config, model_class=cls)
+        cfg = Glm5NextResourceConfig.from_model_config(config, args, include_draft=False)
+        layers = tuple(layer for i, layer in enumerate(model_layer_ids) if (i + 1) % cfg.full_attention_interval)
+        if not layers:
+            return None
+        state = create_kda_state(
+            config=ConvSSMStateConfig(
+                layer_ids=layers,
+                global_k_heads=cfg.global_linear_k_heads,
+                global_v_heads=cfg.global_linear_v_heads,
+                key_dim=cfg.head_linear_k_dim,
+                value_dim=cfg.head_linear_v_dim,
+                conv_width=cfg.conv_kernel_size - 1,
+                conv_dtype=cfg.conv_state_dtype,
+                ssm_dtype=cfg.ssm_state_dtype,
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
+            ),
+            request_capacity=1, device="meta",
+        )
+        return state
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json")) as f:
@@ -42,12 +67,6 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         super()._verify_params()
         assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
         assert not self.args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
-        if self.args.llm_kv_type not in ("None", "fp8kv_dsa"):
-            raise ValueError("GLM-5.3 Flash supports only --llm_kv_type None or fp8kv_dsa")
-        if self.args.llm_kv_type == "fp8kv_dsa" and (
-            self.config["kv_lora_rank"] != 512 or self.data_type != torch.bfloat16
-        ):
-            raise ValueError("GLM-5.3 Flash fp8kv_dsa requires kv_lora_rank=512 and --data_type bfloat16")
 
     def autotune_layers(self):
         return 4
@@ -65,32 +84,33 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
-    def _init_req_manager(self):
-        self.linear_config = Glm5NextCacheConfig.from_model_config(self.config, self.args)
-        self.req_manager = Glm5NextReqManager(
-            self.max_req_num,
-            max(self.batch_max_tokens or 0, self.max_seq_length or 0),
-            None,
-            linear_config=self.linear_config,
-        )
+    def _init_att_resource_manager(self):
+        from .att_resource_manager import Glm5NextAttResourceManager, init_model_att_tail
+        from lightllm.common.basemodel.basemodel_utils import init_model_full_attention, init_model_bounded_attention
 
-    def _init_mem_manager(self):
-        mem_manager_class = FP8Glm5NextMemManager if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextMemManager
-        self.mem_manager = mem_manager_class(
-            size=self.max_total_token_num,
-            dtype=self.linear_config.full_att_dtype,
-            num_kv_heads=1,
-            head_dim=self.linear_config.full_att_head_dim,
-            full_att_layer_num=self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
-            linear_config=self.linear_config,
-            mem_fraction=self.mem_fraction,
-        )
+        self.linear_config = Glm5NextResourceConfig.from_model_config(self.config, self.args, include_draft=False)
+        if self.args.linear_att_hash_page_size % self.linear_config.index_kpool:
+            raise ValueError("GLM cache pages must align to index_kpool")
+        if self.args.mtp_step and self.args.enable_prefill_decode_mixed:
+            raise ValueError("MTP linear attention does not support mixed prefill/decode")
+        if not self.is_mtp_draft_model:
+            self.att_resource_manager = Glm5NextAttResourceManager(
+                self.linear_config, self.max_req_num + 1, self.args.mtp_step,
+                tp_rank=self.tp_rank_, linear_layer_ids=(), full_layer_ids=(),
+            )
+        init_model_bounded_attention(self)
+        init_model_att_tail(self)
+        init_model_full_attention(self)
+
+    @classmethod
+    def _full_attention_options(cls, config, args):
+        if args.llm_kv_type != "None":
+            raise ValueError(f"GLM K-pool does not support llm_kv_type={args.llm_kv_type}")
+        cfg = Glm5NextResourceConfig.from_model_config(config, args, include_draft=False)
+        return dict(heads=1, dim=config["kv_lora_rank"], layer_ids=cfg.get_full_att_layer_ids(), packed=True)
 
     def _init_att_backend(self):
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
-        self.prefill_att_backend = backend_class(model=self)
+        self.prefill_att_backend = Glm5NextSparseAttBackend(model=self)
         self.decode_att_backend = self.prefill_att_backend
 
     def _init_att_backend1(self):

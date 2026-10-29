@@ -10,6 +10,15 @@ class Qwen3_5DFlashModel(Qwen3DFlashModel):
 
     pre_and_post_weight_class = Qwen35DFlashPreAndPostLayerWeight
 
+    @classmethod
+    def _resource_config(cls, model_config):
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+
+        config = get_resource_config(model_config)
+        config.update(config.get("dflash_config", {}))
+        config["n_layer"] = config["num_hidden_layers"]
+        return config
+
     def _init_config(self):
         super()._init_config()
         self.config.update(self.config.get("dflash_config", {}))
@@ -27,19 +36,6 @@ class Qwen3_5DFlashModel(Qwen3DFlashModel):
         LlamaTpPartModel._init_custom(self)
         self.block_size = self.config["block_size"]
         self.mask_token_id = self.config["mask_token_id"]
-
-    def _init_mem_manager(self):
-        target_mem_manager = self.main_model.mem_manager
-        draft_kv_shape = (self.config["num_key_value_heads"], self.config["head_dim"])
-        target_kv_shape = (
-            target_mem_manager.linear_config.full_att_all_num_kv_heads,
-            target_mem_manager.head_dim,
-        )
-        assert draft_kv_shape == target_kv_shape, (
-            "Qwen3.5 parallel block drafter requires matching draft and target KV shapes, "
-            f"got draft={draft_kv_shape}, target={target_kv_shape}."
-        )
-        super()._init_mem_manager()
 
     def _init_weights(self, start_layer_index=None):
         super()._init_weights(start_layer_index=start_layer_index)

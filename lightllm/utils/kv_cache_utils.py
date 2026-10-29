@@ -12,23 +12,12 @@ from lightllm.utils.envs_utils import (
     get_env_start_args,
     enable_huge_page,
     enable_cpu_cache_numa_interleave,
-    get_llm_data_type,
-    get_added_mtp_kv_layer_num,
 )
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.config_utils import get_num_key_value_heads, get_head_dim, get_layer_num, is_hybrid_att_model
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.common.kv_cache_mem_manager import (
-    MemoryManager,
-    PPLINT8KVMemoryManager,
-    PPLINT4KVMemoryManager,
-    Deepseek2MemoryManager,
-)
 
 from typing import List, Tuple, Optional
 from tqdm import tqdm
 from lightllm.utils.dist_utils import get_current_device_id
-from lightllm.common.state_cache_manager import get_hybrid_cache_config
 
 logger = init_logger(__name__)
 
@@ -62,67 +51,22 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    is_hybrid_model = is_hybrid_att_model(args.model_dir)
-    mem_manager_class = None if is_hybrid_model else select_mem_manager_class()
-    if is_hybrid_model:
-        hybrid_config = get_hybrid_cache_config()
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=1,
-            layer_num=1,
-            num_heads=1,
-            head_dim=hybrid_config.get_cpu_cache_big_page_bytes(),
-            data_type=torch.uint8,
-            scale_head_dim=0,
-            scale_data_type=get_llm_data_type(),
-        )
-    elif mem_manager_class is Deepseek2MemoryManager:
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
-            num_heads=1,
-            head_dim=512 + 64,
-            data_type=get_llm_data_type(),
-            scale_head_dim=0,
-            scale_data_type=get_llm_data_type(),
-        )
-    elif mem_manager_class is MemoryManager:
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
-            num_heads=get_num_key_value_heads(args.model_dir) * 2,
-            head_dim=get_head_dim(args.model_dir),
-            data_type=get_llm_data_type(),
-            scale_head_dim=0,
-            scale_data_type=get_llm_data_type(),
-        )
-    elif mem_manager_class is PPLINT8KVMemoryManager:
-        cpu_cache_meta = CpuKVCacheMeta(
-            page_num=0,
-            token_page_size=args.cpu_cache_token_page_size,
-            layer_num=get_layer_num(args.model_dir),
-            num_heads=get_num_key_value_heads(args.model_dir) * 2,
-            head_dim=get_head_dim(args.model_dir),
-            data_type=torch.int8,
-            scale_head_dim=get_head_dim(args.model_dir) // 8,
-            scale_data_type=get_llm_data_type(),
-        )
-    else:
-        logger.error(f"not support mem manager: {mem_manager_class} for cpu kv cache")
-        raise Exception(f"not support mem manager: {mem_manager_class} for cpu kv cache")
+    from lightllm.utils.att_resource_config import build_cpu_cache_layouts, cpu_cache_namespace
 
-    if args.mtp_mode is not None:
-        # TODO 可能会存在不同mtp模式的精度问题
-        if not is_hybrid_model:
-            # 对于非 hybrid 模型，需要额外增加 mtp 的 kv 层数，
-            # 对于 hybrid 模型，如 qwen 3.5 mtp，已经将 kv 数据
-            # 打包成一个块了，所以不需要额外增加，其 layer_num 一直都保持为 1
-            cpu_cache_meta.layer_num += get_added_mtp_kv_layer_num()
+    layouts = build_cpu_cache_layouts()
+    page_bytes = 0
+    for layout in layouts.values():
+        page_bytes = max(page_bytes, layout.byte_end)
+    # State 区间按 8 字节对齐，整个 CPU 物理页再按 16 字节对齐。
+    page_bytes = (page_bytes + 15) // 16 * 16
+    cpu_cache_meta = CpuKVCacheMeta(
+        page_num=0,
+        page_bytes=page_bytes,
+        cache_namespace=cpu_cache_namespace(),
+    )
 
     cpu_cache_page_num = int(
-        (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.calcu_one_page_size())
+        (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.page_bytes)
     )
     cpu_cache_meta.page_num = cpu_cache_page_num
 
@@ -133,36 +77,19 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
 
 @dataclasses.dataclass
 class CpuKVCacheMeta:
+    """External byte-page storage, independent of model tensor dimensions."""
+
     page_num: int
-    token_page_size: int
-    layer_num: int
-    num_heads: int
-    head_dim: int
-    data_type: torch.dtype
-    scale_head_dim: int
-    scale_data_type: torch.dtype
+    page_bytes: int
+    cache_namespace: str = ""
 
-    def calcu_size(self):
-        return self.page_num * self.calcu_one_page_size()
+    def __post_init__(self):
+        if self.page_num < 0 or self.page_bytes <= 0:
+            raise ValueError("CPU cache requires a nonnegative page count and positive page size")
 
-    def calcu_one_page_size(self):
-        return (
-            self.token_page_size
-            * self.layer_num
-            * self.num_heads
-            * (self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize)
-        )
-
-    def get_merged_head_dim(self):
-        """
-        返回将head_dim 和 scale_head_dim 看成融合成一个head_dim时候, head_dim的长度。
-        """
-        assert (
-            self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize
-        ) % self.data_type.itemsize == 0
-        return (
-            self.head_dim * self.data_type.itemsize + self.scale_head_dim * self.scale_data_type.itemsize
-        ) // self.data_type.itemsize
+    @property
+    def size_bytes(self):
+        return self.page_num * self.page_bytes
 
 
 @lru_cache(maxsize=None)

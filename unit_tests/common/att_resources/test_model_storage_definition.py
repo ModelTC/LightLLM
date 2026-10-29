@@ -1,0 +1,165 @@
+"""Model-specific storage geometry must also describe external cache pages."""
+
+from __future__ import annotations
+
+from unit_tests.common.att_resources.model_helpers import read_kv_storage
+
+from unit_tests.common.att_resources.model_helpers import rebuild_full_state
+
+from typing import TYPE_CHECKING
+import dataclasses
+import json
+from functools import partial
+
+from unit_tests.common.att_resources.model_helpers import prepare_model_states
+
+import pytest
+import torch
+
+from lightllm.models.bloom.model import BloomTpPartModel
+from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.qwen2.model import Qwen2TpPartModel
+from lightllm.models.starcoder.model import StarcoderTpPartModel
+from lightllm.models.starcoder2.model import Starcoder2TpPartModel
+from lightllm.models.mistral.model import MistralTpPartModel
+from lightllm.models.mixtral.model import MixtralTpPartModel
+from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
+from lightllm.models.gemma3.model import Gemma3TpPartModel
+from lightllm.models.gemma4.model import Gemma4TpPartModel
+from lightllm.server.core.objs.start_args_type import StartArgs
+from lightllm.utils.att_resource_config import build_cpu_cache_layouts
+from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from unit_tests.common.att_resources.test_quantized_full_state import KINDS, make_quant_state
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.common.basemodel.basemodel import TpPartBaseModel
+    from pathlib import Path
+
+
+@pytest.fixture
+def args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    value = StartArgs(
+        model_dir=str(tmp_path),
+        data_type="float16",
+        tp=4,
+        dp=1,
+        page_size=4,
+        enable_cpu_cache=True,
+        cpu_cache_token_page_size=8,
+        run_mode="prefill",
+        pd_kv_page_size=8,
+    )
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(value)))
+    get_env_start_args.cache_clear()
+    yield value
+    get_env_start_args.cache_clear()
+
+
+CASES = [
+    (BloomTpPartModel, {}, 8, 16, 2),
+    (LlamaTpPartModel, {"num_key_value_heads": 4, "head_dim": 32}, 4, 32, 1),
+    (Qwen2TpPartModel, {"num_key_value_heads": 2}, 2, 16, 1),
+    (StarcoderTpPartModel, {}, 1, 16, 1),
+    (Starcoder2TpPartModel, {"num_key_value_heads": 4}, 4, 16, 1),
+    (MistralTpPartModel, {"num_key_value_heads": 4, "head_dim": 32}, 4, 32, 1),
+    (MixtralTpPartModel, {"num_key_value_heads": 4}, 4, 16, 1),
+    (Gemma_2bTpPartModel, {"num_key_value_heads": 2}, 2, 16, 2),
+    (Gemma3TpPartModel, {"num_key_value_heads": 4}, 4, 256, 1),
+    (
+        Gemma4TpPartModel,
+        {"num_key_value_heads": 4, "head_dim": 256, "num_global_key_value_heads": None, "global_head_dim": 512},
+        8,
+        256,
+        2,
+    ),
+    (
+        Gemma4TpPartModel,
+        {"num_key_value_heads": 16, "head_dim": 256, "num_global_key_value_heads": 4, "global_head_dim": 512},
+        16,
+        256,
+        4,
+    ),
+]
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("model_cls,overrides,global_heads,dim,local_heads", CASES)
+def test_model_and_cpu_service_use_identical_storage_geometry(
+    args: StartArgs | EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    model_cls: type[TpPartBaseModel],
+    overrides: dict[str, object],
+    global_heads: int,
+    dim: int,
+    local_heads: int,
+):
+    # Exercise raw HF aliases as well as a wrapped multimodal config.
+    config = dict(model_type="llama", n_head=8, n_embd=128, n_layer=2, **overrides)
+    wrapped = {"model_type": "gemma4", "text_config": config} if model_cls is Gemma4TpPartModel else config
+    (tmp_path / "config.json").write_text(json.dumps(wrapped))
+    monkeypatch.setattr("lightllm.utils.llm_utils.get_llm_model_class", lambda: model_cls)
+    service_layout = next(iter(build_cpu_cache_layouts().values()))
+    for rank in range(args.tp):
+        model = model_cls.__new__(model_cls)
+        model.config, model.args = wrapped, args
+        model.tp_rank_, model.tp_world_size_ = rank, args.tp
+        model.max_total_token_num, model.max_req_num = 19, 1
+        prepare_model_states(model)
+        resources = model.att_resource_manager
+        resources.initialize_resources(args, token_capacity=model.max_total_token_num, mem_fraction=args.mem_fraction)
+        (state,) = resources.get_full_attention_states("main")
+        assert state.config.head_num == local_heads and state.config.head_dim == dim
+        assert state.k_storage.shape == state.v_storage.shape == (2, 20, local_heads, dim)
+        assert read_kv_storage(state).dtype == (torch.bfloat16 if model_cls is Gemma3TpPartModel else torch.float16)
+        assert resources.full_att_allocator.size == 16
+        layout = resources.get_cpu_transfer_layouts()[state.resource_id]
+        assert (layout.byte_start, layout.byte_end) == (service_layout.byte_start, service_layout.byte_end)
+        # 两层 GQA，K/V 各 global_heads 个 head，按实际 KV 精度计算全局传输页。
+        expected_pd_bytes = 2 * args.pd_kv_page_size * 2 * global_heads * dim * read_kv_storage(state).element_size()
+        assert resources.get_pd_page_bytes() == expected_pd_bytes
+        fields = layout.regions
+        assert all(region.shape[2] == global_heads for region in fields)
+        assert not hasattr(model, "mem_manager")
+
+
+@pytest.mark.parametrize("kind", KINDS)
+def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
+    monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    pd_args: EasyDict,
+):
+    state = make_quant_state(kind, "cpu")
+    reference = AttResourceManager(request_capacity=1)
+    reference.set_att_state("main", state)
+    reference.full_att_allocator = FullAttKVAllocator(state.capacity, state.page_size, pin_memory=False)
+    reference.finish_state_creation()
+    args = StartArgs(page_size=4, run_mode="prefill", pd_kv_page_size=8, pd_kv_page_num=3)
+    reserve = reference.get_pd_page_bytes() * args.pd_kv_page_num
+    required = state.get_token_bytes() * (32 + args.page_size)
+    # One byte below the full 32-token budget must drop a complete page.
+    total = 1 << 30
+    free = required - 1 + reserve + total // 4
+    observed_devices = []
+
+    def memory_info(device: str | torch.device | int):
+        observed_devices.append(device)
+        return free, total
+
+    monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
+    monkeypatch.setattr(torch.cuda, "mem_get_info", memory_info)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
+    monkeypatch.setattr("lightllm.common.att_resources.att_resource_manager.get_current_device_id", lambda: 3)
+    monkeypatch.setattr(
+        "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
+    )
+    template = rebuild_full_state(state, config=state.config, token_capacity=0, device="meta")
+    resources = AttResourceManager(request_capacity=1)
+    resources.set_att_state("main", rebuild_full_state(template, config=template.config))
+    resources.initialize_resources(args, token_capacity=None, mem_fraction=0.75, device="cpu")
+    assert resources.full_att_allocator.size == 28
+    assert resources.get_pd_page_bytes() == reference.get_pd_page_bytes()
+    assert observed_devices == [torch.device("cuda", 3)]

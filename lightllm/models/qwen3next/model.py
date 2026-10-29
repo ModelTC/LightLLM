@@ -12,19 +12,15 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.kv_cache_mem_manager.qwen3next_mem_manager import (
-    FP8StaticPerHeadQuantQwen3NextMemManager,
-    FP8StaticPerTensorQuantQwen3NextMemManager,
-    Qwen3NextMemManager,
-)
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.common.req_manager import ReqManagerForMamba
-from lightllm.common.state_cache_manager import LinearAttCacheConfig
+from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
 
 logger = init_logger(__name__)
 
 
 class Qwen3NextTpPartModel(Qwen3MOEModel):
+    is_hybrid_att_model = True
+
     # weight class
     pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
     transformer_weight_class = Qwen3NextTransformerLayerWeight
@@ -38,6 +34,33 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     def __init__(self, kvargs) -> None:
         self._init_triton()
         super().__init__(kvargs)
+
+    @classmethod
+    def create_bounded_attention_definition(cls, model_config, args, *, model_layer_ids, tp_rank=0, tp_world_size=1):
+        from lightllm.common.att_resources.bounded_att import create_gdn_state, ConvSSMStateConfig
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+
+        config = get_resource_config(model_config, model_class=cls)
+        cfg = Qwen3NextResourceConfig.from_model_config(config, args, include_draft=False)
+        layers = tuple(layer for i, layer in enumerate(model_layer_ids) if (i + 1) % cfg.full_attention_interval)
+        if not layers:
+            return None
+        state = create_gdn_state(
+            config=ConvSSMStateConfig(
+                layer_ids=layers,
+                global_k_heads=cfg.global_linear_k_heads,
+                global_v_heads=cfg.global_linear_v_heads,
+                key_dim=cfg.head_linear_k_dim,
+                value_dim=cfg.head_linear_v_dim,
+                conv_width=cfg.conv_kernel_size - 1,
+                conv_dtype=cfg.conv_state_dtype,
+                ssm_dtype=cfg.ssm_state_dtype,
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
+            ),
+            request_capacity=1, device="meta",
+        )
+        return state
 
     def _init_triton(self):
         def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
@@ -56,45 +79,35 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
-    def _init_mem_manager(self):
+    def _init_att_resource_manager(self):
+        from .att_resource_manager import Qwen3NextAttResourceManager
+        from lightllm.common.basemodel.basemodel_utils import init_model_full_attention, init_model_bounded_attention
+
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
         start_args: StartArgs = get_env_start_args()
-        if start_args.llm_kv_type == "None":
-            mem_manager_class = Qwen3NextMemManager
-        elif start_args.llm_kv_type == "fp8kv_sph":
-            mem_manager_class = FP8StaticPerHeadQuantQwen3NextMemManager
-        elif start_args.llm_kv_type == "fp8kv_spt":
-            mem_manager_class = FP8StaticPerTensorQuantQwen3NextMemManager
-        else:
-            raise ValueError(f"Qwen3Next does not support llm_kv_type={start_args.llm_kv_type}")
-        self.mem_manager = mem_manager_class(
-            size=self.max_total_token_num,
-            dtype=self.data_type,
-            num_kv_heads=self.num_kv_heads,
-            head_dim=self.config["head_dim"],
-            full_att_layer_num=self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
-            linear_config=self.linear_config,
-            mem_fraction=self.mem_fraction,
+        self.linear_config = Qwen3NextResourceConfig.from_model_config(self.config, start_args, include_draft=False)
+
+        if start_args.mtp_step and start_args.enable_prefill_decode_mixed:
+            raise ValueError("MTP linear attention does not support mixed prefill/decode")
+        if not self.is_mtp_draft_model:
+            self.att_resource_manager = Qwen3NextAttResourceManager(
+                self.linear_config, self.max_req_num + 1, start_args.mtp_step, tp_rank=self.tp_rank_, layer_ids=()
+            )
+        init_model_bounded_attention(self)
+        init_model_full_attention(self)
+
+    @classmethod
+    def _full_attention_options(cls, config, args):
+        if args.llm_kv_type not in ("None", "fp8kv_sph", "fp8kv_spt"):
+            raise ValueError(f"Qwen3Next does not support llm_kv_type={args.llm_kv_type}")
+        cfg = Qwen3NextResourceConfig.from_model_config(config, args, include_draft=False)
+        return dict(
+            heads=cfg.full_att_all_num_kv_heads, dim=cfg.full_att_head_dim, layer_ids=cfg.get_full_att_layer_ids()
         )
-
-    def _init_req_manager(self):
-        self.linear_config = LinearAttCacheConfig.load_from_args()
-        create_max_seq_len = 0
-
-        if self.batch_max_tokens is not None:
-            create_max_seq_len = max(create_max_seq_len, self.batch_max_tokens)
-        if self.max_seq_length is not None:
-            create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
-
-        self.req_manager = ReqManagerForMamba(
-            self.max_req_num, create_max_seq_len, None, linear_config=self.linear_config
-        )
-        return
 
     def _init_att_backend1(self):
-        # MTP draft models only keep full-attention layers and reuse the main
-        # model's managers, so they do not need LinearAttBackend.
-        if getattr(self, "is_mtp_draft_model", False):
+        role = self.att_resource_role
+        if getattr(self.att_resource_manager, f"{role}_gdn_state", None) is None:
             self.prefill_att_backend1 = None
             self.decode_att_backend1 = None
             return

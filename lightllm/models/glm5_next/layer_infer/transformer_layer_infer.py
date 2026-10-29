@@ -159,9 +159,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
         return infer_state.prefill_att_state.prefill_att(
             q=q,
-            k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
+            k=state.get_layer_view(layer_id=self.layer_num_).kv,
             v=None,
             att_control=AttControl(
                 nsa_prefill=True,
@@ -240,9 +241,10 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
         del infer_state.get_topk_indices_params
         q_rope = q_nope[..., :0]
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
         return infer_state.decode_att_state.decode_att(
             q=(q_nope, q_rope),
-            k=infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_),
+            k=state.get_layer_view(layer_id=self.layer_num_).kv,
             v=None,
             att_control=AttControl(
                 nsa_decode=True,

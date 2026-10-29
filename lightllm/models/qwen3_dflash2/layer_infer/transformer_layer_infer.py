@@ -13,7 +13,8 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         self.sliding_window_ = int(network_config.get("sliding_window", 0) or 0)
 
     def _token_attention_kernel(self, q, infer_state, layer_weight):
-        k, v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        k, v = state.get_layer_view(layer_id=self.layer_num_)
         k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
         v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
@@ -34,8 +35,9 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
-        storage_head_num = infer_state.mem_manager.head_num
-        storage_head_dim = infer_state.mem_manager.head_dim
+        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        storage_head_num = state.config.head_num
+        storage_head_dim = state.config.head_dim
         storage_kv = cache_kv.view(cache_kv.shape[0], 2 * storage_head_num, storage_head_dim)
         return super()._post_cache_kv(storage_kv, infer_state, layer_weight)
 

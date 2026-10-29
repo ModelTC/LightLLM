@@ -292,7 +292,7 @@ class CudaGraph:
             del b_req_idx
             del b_seq_len
 
-            model.mem_manager.free_all()
+            model.att_resource_manager.full_att_allocator.free_all()
             model.req_manager.free_all()
             # release local tensors
             for var_name, var_value in list(locals().items()):
@@ -354,7 +354,7 @@ class CudaGraph:
 
             _, _ = model.microbatch_overlap_decode(decode_batches[0], decode_batches[1])
 
-            model.mem_manager.free_all()
+            model.att_resource_manager.full_att_allocator.free_all()
             model.req_manager.free_all()
 
             del decode_batches

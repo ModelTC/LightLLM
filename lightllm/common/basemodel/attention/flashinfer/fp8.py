@@ -66,9 +66,13 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
-        k_descale = self.infer_state.mem_manager.cpu_scales[layer_index][0]
-        v_descale = self.infer_state.mem_manager.cpu_scales[layer_index][1]
+        state = getattr(
+            self.infer_state.att_resource_manager,
+            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_tensor_state",
+        )
+        layer_index = self.backend._find_layer_index(k=k, v=v, state=state)
+        k_descale = state.cpu_scales[layer_index][0]
+        v_descale = state.cpu_scales[layer_index][1]
         self.prefill_wrapper.run(
             q,
             (k, v),
@@ -118,10 +122,14 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
 
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
+        state = getattr(
+            self.infer_state.att_resource_manager,
+            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_tensor_state",
+        )
+        layer_index = self.backend._find_layer_index(k=k, v=v, state=state)
 
-        k_descale = self.infer_state.mem_manager.cpu_scales[layer_index][0]
-        v_descale = self.infer_state.mem_manager.cpu_scales[layer_index][1]
+        k_descale = state.cpu_scales[layer_index][0]
+        v_descale = state.cpu_scales[layer_index][1]
         self.decode_wrapper.run(
             q,
             (k, v),

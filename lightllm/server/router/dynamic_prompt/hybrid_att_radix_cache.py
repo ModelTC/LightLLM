@@ -2,7 +2,6 @@ import torch
 import numpy as np
 from typing import Tuple, Dict, Set, List, Optional, Sequence
 from sortedcontainers import SortedSet, SortedDict
-from lightllm.common.state_cache_manager import StateCacheManager
 from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
 from .shared_arr import SharedArray
 from .radix_cache import time_gen
@@ -117,11 +116,8 @@ class HybridAttPagedRadixCache:
         rank_in_node: int,
         hash_page_size: int,
         big_page_num: int,
-        kv_cache_mem_manager=None,
-        small_page_buffers=None,
+        att_resource_manager,
     ):
-        from lightllm.common.kv_cache_mem_manager import MemoryManager
-
         assert hash_page_size >= 1, "hash_page_size must be >= 1"
         assert big_page_num >= 1, "big_page_num must be >= 1"
 
@@ -130,9 +126,7 @@ class HybridAttPagedRadixCache:
         self.big_page_tokens = hash_page_size * big_page_num
         self.total_token_num = total_token_num
 
-        self.mem_manager: MemoryManager = kv_cache_mem_manager
-
-        self.big_page_buffers: StateCacheManager = self.mem_manager.big_page_buffers
+        self.att_resource_manager = att_resource_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -151,7 +145,15 @@ class HybridAttPagedRadixCache:
         self.refed_tokens_num.arr[0] = 0
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
-        self.small_page_buffers: StateCacheManager = small_page_buffers
+
+    def _release_pages(self, page_kind, slot_ids):
+        resources = self.att_resource_manager
+        allocator = (
+            resources.bounded_att_big_page_allocator
+            if page_kind == "big"
+            else resources.bounded_att_small_page_allocator
+        )
+        allocator.free(slot_ids)
 
     def _discard_node(self, node: HybridAttPagedTreeNode):
         if node.is_leaf():
@@ -248,7 +250,7 @@ class HybridAttPagedRadixCache:
                     new_big_page_buffer_id = len_to_big_page_id.pop(child.node_prefix_total_len, None)
                     if new_big_page_buffer_id is not None:
                         # 因为节点已经存在，所以无法插入，但是要释放对应的buffer_id 节点
-                        self.big_page_buffers.free_state_cache([new_big_page_buffer_id])
+                        self._release_pages("big", [new_big_page_buffer_id])
 
                     # 已经存在了
                     sub_prefix_len, ans_node = self._insert_helper(
@@ -303,7 +305,7 @@ class HybridAttPagedRadixCache:
                             self._add_node(child)
                         else:
                             # 节点已有 checkpoint，释放本次重复申请的槽位。
-                            self.small_page_buffers.free_state_cache(free_indexes=[block_state_idxs[0]])
+                            self._release_pages("small", slot_ids=[block_state_idxs[0]])
 
                     sub_prefix_len, ans_node = self._insert_helper(
                         child,
@@ -585,9 +587,8 @@ class HybridAttPagedRadixCache:
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
-        assert self.mem_manager is not None
-        if need_token_num > self.mem_manager.allocator.can_use_mem_size:
-            need_evict_token_num = need_token_num - self.mem_manager.allocator.can_use_mem_size
+        if need_token_num > self.att_resource_manager.full_att_allocator.can_use_mem_size:
+            need_evict_token_num = need_token_num - self.att_resource_manager.full_att_allocator.can_use_mem_size
             release_mems = []
             small_page_buffer_ids = []
 
@@ -598,16 +599,17 @@ class HybridAttPagedRadixCache:
 
             self._evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
-            self.mem_manager.free(mem_index)
+            self.att_resource_manager.full_att_allocator.free(mem_index)
             small_page_buffer_ids = [idx for idx in small_page_buffer_ids if idx is not None]
             if len(small_page_buffer_ids) > 0:
-                self.small_page_buffers.free_state_cache(small_page_buffer_ids)
+                self._release_pages("small", small_page_buffer_ids)
         return
 
     def free_one_small_page_buffer(self):
-        if self.small_page_buffers is None:
+        allocator = self.att_resource_manager.bounded_att_small_page_allocator
+        if allocator is None:
             return
-        if self.small_page_buffers.get_free_cache_num() > 0:
+        if allocator.free_count > 0:
             return
         if len(self._evict_tree_set_for_state_cache) == 0:
             return
@@ -616,7 +618,7 @@ class HybridAttPagedRadixCache:
         self._discard_node(node)
 
         assert node.small_page_buffer_idx is not None
-        self.small_page_buffers.free_state_cache(free_indexes=[node.small_page_buffer_idx])
+        self._release_pages("small", slot_ids=[node.small_page_buffer_idx])
         node.small_page_buffer_idx = None
 
         self._add_node(node)
@@ -639,7 +641,7 @@ class HybridAttPagedRadixCache:
 
             if node.is_big_page_node():
                 assert node.big_page_buffer_idx is not None
-                self.big_page_buffers.free_state_cache([node.big_page_buffer_idx])
+                self._release_pages("big", [node.big_page_buffer_idx])
 
             evict_callback(node.token_mem_index_value, node.small_page_buffer_idx)
             self.tree_total_tokens_num.arr[0] -= len(node.token_mem_index_value)

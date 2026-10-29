@@ -49,10 +49,6 @@ class Qwen3DFlashModel(LlamaTpPartModel):
     def _init_req_manager(self):
         self.req_manager = self.main_model.req_manager
 
-    def _init_mem_manager(self):
-        # Draft KV uses target-owned cache slots.
-        self.mem_manager = self.main_model.mem_manager
-
     def _init_att_backend(self):
         super()._init_att_backend()
         # FA3 is currently the only backend that supports non-causal block decode.
@@ -98,7 +94,8 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
-        infer_state.mem_manager = self.mem_manager
+        infer_state.att_resource_manager = self.att_resource_manager
+        infer_state.is_draft_model = True
         infer_state.mem_index = self._select_mem_indexes(model_input)
 
         # 这里调用的是 DFlash 覆写后的 context_forward：pre layer 只投影 target hidden，

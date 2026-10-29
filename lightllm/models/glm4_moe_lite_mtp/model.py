@@ -24,15 +24,21 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
 
+    @classmethod
+    def _resource_config(cls, model_config):
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+
+        config = get_resource_config(model_config)
+        count = config.get("num_nextn_predict_layers", 1)
+        config.update(num_hidden_layers=count, n_layer=count)
+        return config
+
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached
 
     def _init_req_manager(self):
         self.req_manager = self.main_model.req_manager
-
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
 
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None

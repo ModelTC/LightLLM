@@ -191,9 +191,11 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
         uses_dynamic_spec_verify_layout=lambda: dynamic,
         split_qkv=lambda x: x.split(hidden, -1),
     )
-    manager = SimpleNamespace(
-        req_to_mtp_state_index=accepted_offsets, HOLD_REQUEST_ID=3, get_mamba_cache=lambda layer: (conv, ssm)
+    backend.linear_state = SimpleNamespace(
+        mtp_state_index=accepted_offsets,
+        get_layer_view=lambda layer: (conv, ssm),
     )
+    manager = SimpleNamespace(HOLD_REQUEST_ID=3)
     infer = InferStateInfo()
     infer.batch_size = tokens
     infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)

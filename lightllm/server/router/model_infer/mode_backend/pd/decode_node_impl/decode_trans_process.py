@@ -8,7 +8,9 @@ import queue
 import pickle
 from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.att_resources import AttResourceManager
+from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
+from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
 from lightllm.server.pd_io_struct import (
     PDChunckedTransTask,
     PDChunckedTransTaskGroup,
@@ -83,20 +85,20 @@ def _init_env(
 
         task_out_queue.put("proc_start")
 
-        # 从共享内存读取所有rank的mem_manager
+        # 从共享内存读取所有 rank 的 attention 资源
         node_world_size = args.tp // args.nnodes
-        mem_managers: List[MemoryManager] = [
-            MemoryManager.loads_from_shm(rank_in_node=rank) for rank in range(node_world_size)
+        resource_managers: List[AttResourceManager] = [
+            load_att_resources(rank, kind="pd")[0] for rank in range(node_world_size)
         ]
 
-        task_out_queue.put("get_mem_managers_ok")
+        task_out_queue.put("get_resources_ok")
 
         manager = _DecodeTransModule(
             args=args,
             device_id=device_id,
             task_in_queue=task_in_queue,
             task_out_queue=task_out_queue,
-            mem_managers=mem_managers,
+            resource_managers=resource_managers,
             up_status_in_queue=up_status_in_queue,
         )
         assert manager is not None
@@ -119,7 +121,7 @@ class _DecodeTransModule:
         device_id: int,
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
-        mem_managers: List[MemoryManager],
+        resource_managers: List[AttResourceManager],
         up_status_in_queue: Optional[mp.SimpleQueue],
     ):
         self.args = args
@@ -127,12 +129,12 @@ class _DecodeTransModule:
         self.device_id = device_id
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
-        self.mem_managers = mem_managers
+        self.resource_managers = resource_managers
         self.up_status_in_queue = up_status_in_queue
-        cur_mem_manager: MemoryManager = self.mem_managers[device_id]
-        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
-            page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
+        kv_move_buffer = allocate_transfer_buffer(
+            self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
         )
+        self.kv_move_buffer = kv_move_buffer
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -170,13 +172,23 @@ class _DecodeTransModule:
     def _warmup(self):
         for dp_index in range(self.args.dp // self.args.nnodes):
             with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    mem_indexes=[0],
+                copy_page(
+                    self.resource_managers,
+                    self.kv_move_buffer,
+                    write=True,
+                    token_indices=torch.tensor([0], dtype=torch.long, device=self.kv_move_buffer.device),
                     page_index=0,
                     dp_index=dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
+                    tp_size=self.dp_world_size,
+                )
+                copy_page(
+                    self.resource_managers,
+                    self.kv_move_buffer,
+                    write=False,
+                    token_indices=torch.tensor([0], dtype=torch.long, device=self.kv_move_buffer.device),
+                    page_index=0,
+                    dp_index=dp_index,
+                    tp_size=self.dp_world_size,
                 )
                 torch.cuda.current_stream().synchronize()
         return
@@ -396,15 +408,19 @@ class _DecodeTransModule:
             copy_end_event = torch.cuda.Event(enable_timing=True)
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 copy_start_event.record(self.copy_cuda_stream)
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    trans_task.mem_indexes,
+                copy_page(
+                    self.resource_managers,
+                    self.kv_move_buffer,
+                    write=False,
+                    token_indices=torch.tensor(
+                        trans_task.mem_indexes, dtype=torch.long, device=self.kv_move_buffer.device
+                    ),
                     page_index=trans_task.dst_page_index,
                     dp_index=trans_task.decode_dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
-                    page_kind=trans_task.page_kind,
+                    tp_size=self.dp_world_size,
+                    kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
+                    state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
                 )
                 copy_end_event.record(self.copy_cuda_stream)
             self.success_queue.put((copy_end_event, copy_start_event, trans_task))

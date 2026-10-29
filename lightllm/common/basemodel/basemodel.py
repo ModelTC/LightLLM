@@ -13,8 +13,6 @@ from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.kv_cache_mem_manager import MemoryManager
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
@@ -27,12 +25,10 @@ from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
 from lightllm.common.quantization import Quantcfg
 from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.dist_utils import get_dp_world_size
-from lightllm.utils.profile_max_tokens import profile_mtp_weight_memory
+from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_llm_data_type,
-    get_added_mtp_kv_layer_num,
 )
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput, PostLayerOutput
@@ -41,7 +37,6 @@ from lightllm.common.basemodel.hidden_collector import (
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
 from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.utils.envs_utils import set_model_init_status
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 from lightllm.utils.infer_utils import post_empty_cache
 from lightllm.utils.torch_memory_saver_utils import (
@@ -70,6 +65,7 @@ class TpPartBaseModel:
 
     # infer state class
     infer_state_class = InferStateInfo
+    is_hybrid_att_model = False
 
     def __init__(self, kvargs):
         self.args = get_env_start_args()
@@ -97,6 +93,7 @@ class TpPartBaseModel:
         self.expert_dtype = kvargs.get("expert_dtype", None)
         self.mem_fraction = kvargs.get("mem_fraction", 0.9)
         self.tp_world_size_ = get_dp_world_size()
+        self.tp_rank_ = get_current_rank_in_dp()
         self.enable_tpsp_mix_mode = get_env_start_args().enable_tpsp_mix_mode
         self.graph_max_batch_size = self._align_decode_batch_size(self.graph_max_batch_size)
 
@@ -109,41 +106,63 @@ class TpPartBaseModel:
         self._init_quant()
 
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
-        with profile_mtp_weight_memory(self):
-            with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
-                self._init_weights()
+        with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
+            self._init_weights()
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             self._init_req_manager()
-            self._init_mem_manager()
-
-        # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
-        # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
-        # 因此 req_manager 创建时暂不传入 mem_manager，需要在两者初始化完成后再进行绑定。
-        self.req_manager.bind_mem_manager(self.mem_manager)
-        self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
         self.load_weights(self.weight_dict)
+        # The backend calls each model's runtime stages after all weights are loaded.
+        self.graph = None
+        return
 
+    @property
+    def att_resource_role(self) -> str:
+        """当前模型的资源前缀；每个 draft 独立拥有 State。"""
+        from lightllm.common.att_resources.utils import MAX_DRAFT_MODELS
+
+        if not self.is_mtp_draft_model:
+            return "main"
+        draft_index = len(self.mtp_previous_draft_models)
+        assert draft_index < MAX_DRAFT_MODELS, "at most 36 draft models are supported"
+        return f"draft{draft_index}"
+
+    def prepare_att_resources(self) -> None:
+        """Prepare this model's attention States from its own configuration."""
+        assert getattr(self, "att_resource_manager", None) is None, "resources already initialized"
+        if self.is_mtp_draft_model:
+            self.att_resource_manager = self.main_model.att_resource_manager
+            assert not self.att_resource_manager._states_created, "State creation is already finished"
+            assert self.max_req_num + 1 == self.att_resource_manager._request_capacity, "models must share the request domain"
+        with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            self._init_att_resource_manager()
+
+    def init_runtime(self) -> None:
+        """Initialize this model's backends, warmup and graphs after shared allocation."""
+        self.req_manager.bind_hold_page(self.att_resource_manager.full_att_allocator.hold_token_indices)
+        self._check_mem_size()
         self._init_att_backend()
         self._init_att_backend1()
-
-        logger.info(f"use prefill att backend: {self.prefill_att_backend.__class__.__name__}")
-        logger.info(f"use decode att backend: {self.decode_att_backend.__class__.__name__}")
-        if self.prefill_att_backend1 is not None:
-            logger.info(f"use prefill att backend1: {self.prefill_att_backend1.__class__.__name__}")
-            logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
-
         self._init_hidden_collector()
+        role = self.att_resource_role
+        logger.info(
+            f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
+            f"{type(self.decode_att_backend).__name__}"
+        )
+        if self.prefill_att_backend1 is not None:
+            logger.info(
+                f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
+                f"{type(self.decode_att_backend1).__name__}"
+            )
+
         self._autotune_warmup()
         self._init_padded_req()
         self._init_cudagraph()
         self._init_prefill_cuda_graph()
-        self._check_max_len_infer()
-        torch.cuda.empty_cache()
-        set_model_init_status(True)
-        return
+        if not self.is_mtp_draft_model:
+            self._check_max_len_infer()
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
@@ -196,20 +215,12 @@ class TpPartBaseModel:
         [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
-    def _init_mem_manager(self):
-        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        self.mem_manager: MemoryManager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=self.config["num_attention_heads"] // self.tp_world_size_,
-            head_dim=self.config["n_embed"] // self.config["num_attention_heads"],
-            layer_num=self.config["n_layer"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
-        return
+    def _init_att_resource_manager(self) -> None:
+        """Prepare all owned attention States using model-specific configuration."""
+        raise NotImplementedError
 
     def _check_mem_size(self):
-        self.max_total_token_num = self.mem_manager.size
+        self.max_total_token_num = self.att_resource_manager.full_att_allocator.size
 
         assert (
             self.max_total_token_num > self.batch_max_tokens
@@ -230,6 +241,9 @@ class TpPartBaseModel:
         return
 
     def _init_req_manager(self):
+        if self.is_mtp_draft_model:
+            self.req_manager = self.main_model.req_manager
+            return
         create_max_seq_len = 0
 
         if self.batch_max_tokens is not None:
@@ -237,7 +251,7 @@ class TpPartBaseModel:
         if self.max_seq_length is not None:
             create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
 
-        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len, None)
+        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len)
         return
 
     def _init_infer_layer(self, start_layer_index=0):
@@ -260,6 +274,11 @@ class TpPartBaseModel:
         return
 
     def _init_att_backend(self):
+        role = self.att_resource_role
+        if not self.att_resource_manager.get_full_attention_states(role):
+            # FFN-only and linear-only models do not need a full-attention backend.
+            self.prefill_att_backend = self.decode_att_backend = None
+            return
         self.prefill_att_backend: BaseAttBackend = get_prefill_att_backend_class(index=0)(model=self)
         self.decode_att_backend: BaseAttBackend = get_decode_att_backend_class(index=0)(model=self)
         return
@@ -352,6 +371,7 @@ class TpPartBaseModel:
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_draft_model = self.is_mtp_draft_model
+        infer_state.att_resource_role = self.att_resource_role
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
@@ -374,8 +394,8 @@ class TpPartBaseModel:
 
         infer_state.multimodal_params = model_input.multimodal_params
 
-        infer_state.mem_manager = self.mem_manager
         infer_state.req_manager = self.req_manager
+        infer_state.att_resource_manager = self.att_resource_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
@@ -385,13 +405,21 @@ class TpPartBaseModel:
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
         if infer_state.is_prefill:
-            infer_state.prefill_att_state = self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
+            infer_state.prefill_att_state = (
+                self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
+                if self.prefill_att_backend is not None
+                else None
+            )
             if self.prefill_att_backend1 is not None:
                 infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
                     infer_state=infer_state
                 )
         else:
-            infer_state.decode_att_state = self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
+            infer_state.decode_att_state = (
+                self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
+                if self.decode_att_backend is not None
+                else None
+            )
             if self.decode_att_backend1 is not None:
                 infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
                     infer_state=infer_state
@@ -988,9 +1016,9 @@ class TpPartBaseModel:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-            page_size = self.mem_manager.page_size
+            page_size = self.att_resource_manager.full_att_allocator.page_size
             alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-            mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
+            mem_indexes = self.att_resource_manager.full_att_allocator.alloc(alloc_token_num).cuda()
             self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
@@ -1024,7 +1052,7 @@ class TpPartBaseModel:
             torch.argmax(prob_out, dim=1, keepdim=True)
             prob_out = None
             self.req_manager.free_all()
-            self.mem_manager.free_all()
+            self.att_resource_manager.full_att_allocator.free_all()
             logger.info(f"check max_len {self.batch_max_tokens} infer ok")
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
@@ -1069,9 +1097,9 @@ class TpPartBaseModel:
                     0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
                 )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-                page_size = self.mem_manager.page_size
+                page_size = self.att_resource_manager.full_att_allocator.page_size
                 alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-                mem_indexes = self.mem_manager.alloc(alloc_token_num).cuda()
+                mem_indexes = self.att_resource_manager.full_att_allocator.alloc(alloc_token_num).cuda()
                 self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
@@ -1105,14 +1133,14 @@ class TpPartBaseModel:
                 )
                 del model_output
                 self.req_manager.free_all()
-                self.mem_manager.free_all()
+                self.att_resource_manager.full_att_allocator.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 logger.exception(str(e))
                 self.req_manager.free_all()
-                self.mem_manager.free_all()
+                self.att_resource_manager.full_att_allocator.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()
         self.layers_num = layer_num_bak
