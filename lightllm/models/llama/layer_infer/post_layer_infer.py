@@ -230,6 +230,9 @@ class LlamaPostLayerInfer(PostLayerInferTpl):
     ) -> PostLayerOutput:
         """按 draft 配置返回候选 logits，未开启时回退到完整词表。"""
 
+        if infer_state.b_logits_row_idx is not None:
+            hidden = hidden.index_select(0, infer_state.b_logits_row_idx)
+            token_num = hidden.shape[0]
         top_k = get_env_start_args().draft_vocab_topk_sampling
         if top_k is None:
             return self._lm_head_and_gather(hidden, token_num, layer_weight, infer_state)

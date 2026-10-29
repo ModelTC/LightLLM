@@ -344,3 +344,38 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
     assert seen_sizes == [expected_size] * (2 if overlap else 1)
     torch.testing.assert_close(output.logits, expected)
     torch.testing.assert_close(torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1), expected)
+
+
+@pytest.mark.parametrize("origin", [0, 5, 10, 15])
+def test_selected_draft_logits_unpad_preserves_physical_hidden_rows(origin):
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    output = ModelOutput(
+        logits=torch.arange(12).view(3, 4),
+        logits_token_ids=torch.arange(12).view(3, 4),
+        mtp_collector=ModelMtpOutputCollector(spec_hidden=torch.arange(45).view(15, 3)),
+        input_rows_per_logit=5,
+    )
+    unpadded = model._create_unpad_decode_model_output(output, origin)
+    assert unpadded.logits.shape == (origin // 5, 4)
+    assert unpadded.logits_token_ids.shape == (origin // 5, 4)
+    assert unpadded.mtp_collector.spec_hidden.shape == (origin, 3)
+    assert output.mtp_collector.spec_hidden.shape == (15, 3)
+    assert unpadded.input_rows_per_logit == 5
+
+
+@pytest.mark.parametrize("disabled", [None, "dynamic", "overlap", "tpsp", "tp", "mode", "steps", "model", "target"])
+def test_draft_tail_scope(disabled):
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model.args = StartArgs(
+        mtp_mode="eagle_with_att" if disabled != "mode" else "eagle_no_att",
+        mtp_step=0 if disabled == "steps" else 4,
+    )
+    model.is_mtp_draft_model = disabled != "target"
+    model.tp_world_size_ = 2 if disabled == "tp" else 1
+    model.config = {"model_type": "qwen3_5_text" if disabled != "model" else "qwen3_next"}
+    model.args.mtp_dynamic_verify = disabled == "dynamic"
+    model.args.enable_decode_microbatch_overlap = disabled == "overlap"
+    model.args.enable_tpsp_mix_mode = disabled == "tpsp"
+    assert model.should_project_draft_tail_logits() == (disabled is None)
