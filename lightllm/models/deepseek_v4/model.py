@@ -102,8 +102,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_mem_manager(self):
         DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
-        self.dsv4_workspace = DeepseekV4Workspace(self)
-        self.dsv4_workspace.init_persistent_scratch(self)
         cache_config = self.req_manager.cache_config
         self.mem_manager = DeepseekV4MemoryManager(
             self.max_total_token_num,
@@ -143,6 +141,8 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
+        self.dsv4_workspace = DeepseekV4Workspace(self)
+        self.dsv4_workspace.init_persistent_scratch(self)
         prefill_aux_stream = None
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
             prefill_aux_stream = torch.cuda.Stream()

@@ -12,7 +12,7 @@ import deep_gemm
 import torch
 
 
-C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
+C4_PREFILL_LOGITS_BUDGET_BYTES = 256 * 1024 * 1024
 
 
 class DeepseekV4C4PrefillWorkspace:
@@ -84,7 +84,7 @@ class DeepseekV4Workspace:
         self.flashmla_prefill_lse_accum = None
 
     def init_persistent_scratch(self, model):
-        # Allocate before KV capacity profiling, rather than consume its free-memory budget later.
+        # Allocate after the KV pool, using the remaining runtime headroom.
         overlap = model.args.enable_decode_microbatch_overlap or model.args.enable_prefill_microbatch_overlap
         regions = 1 + int(overlap)
         self.c128_compress_scratch = torch.empty(
@@ -103,10 +103,20 @@ class DeepseekV4Workspace:
             heads = ((model.config["num_attention_heads"] // model.tp_world_size_ + 63) // 64) * 64
             splits = self.token_capacity + torch.cuda.get_device_properties().multi_processor_count
             shape = (regions, splits, 1, heads)
-            self.flashmla_prefill_o_accum = torch.empty(
-                (*shape, model.config["head_dim"]), dtype=torch.float32, device="cuda"
-            )
-            self.flashmla_prefill_lse_accum = torch.empty(shape, dtype=torch.float32, device="cuda")
+            o_shape = (*shape, model.config["head_dim"])
+            o_bytes = math.prod(o_shape) * torch.float32.itemsize
+            lse_bytes = math.prod(shape) * torch.float32.itemsize
+            if self.c4_prefill_aux is not None:
+                # The auxiliary stream joins before attention; logits and split-KV never overlap.
+                arena = torch.empty(
+                    max(self.c4_prefill_aux.scratch.numel(), o_bytes + lse_bytes), dtype=torch.uint8, device="cuda"
+                )
+                self.c4_prefill_aux.scratch = arena
+                self.flashmla_prefill_o_accum = arena[:o_bytes].view(torch.float32).view(o_shape)
+                self.flashmla_prefill_lse_accum = arena[o_bytes : o_bytes + lse_bytes].view(torch.float32).view(shape)
+            else:
+                self.flashmla_prefill_o_accum = torch.empty(o_shape, dtype=torch.float32, device="cuda")
+                self.flashmla_prefill_lse_accum = torch.empty(shape, dtype=torch.float32, device="cuda")
 
     def init_c4_prefill_aux(self, model):
         self.c4_prefill_aux = DeepseekV4C4PrefillWorkspace(

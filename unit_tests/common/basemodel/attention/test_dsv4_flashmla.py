@@ -98,6 +98,36 @@ def test_vllm_call_preserves_output_and_cache_views(monkeypatch, ratio):
     assert storage[..., 512:].isnan().all()
 
 
+@pytest.mark.parametrize("run_mode", ["normal", "prefill", "decode"])
+@pytest.mark.parametrize("overlap", [False, True])
+@pytest.mark.parametrize("layers", [3, 46])
+def test_swa_workspace_includes_decode_padding_request(monkeypatch, run_mode, overlap, layers):
+    config = SimpleNamespace(swa_page_token_num=128, sliding_window=128, layer_num=layers, swa_slot_bytes=585)
+    model = SimpleNamespace(
+        args=SimpleNamespace(run_mode=run_mode, enable_prefill_microbatch_overlap=overlap),
+        req_manager=SimpleNamespace(cache_config=config),
+        batch_max_tokens=2048,
+        max_req_num=2,
+        tp_world_size_=1,
+    )
+    monkeypatch.setattr(
+        attention.DeepseekV4FlashMlaFp8SparseAttBackend,
+        "get_gpu_workspace_buffer",
+        staticmethod(lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype)),
+    )
+
+    buffer, capacity = attention.DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(model)
+
+    # D still executes the one-token HOLD prefill in TpPartBaseModel._init_padded_req.
+    assert buffer is not None
+    if run_mode == "decode":
+        assert capacity == 0
+        assert buffer.shape == (layers, 128, 585)
+    else:
+        assert capacity >= 2048 + 2 + 2 * (128 + 256)
+        assert buffer.shape == (layers, (1 + int(overlap)) * capacity + 128, 585)
+
+
 def _pool(page_size, pages):
     stride = ((page_size * 584 + 575) // 576) * 576
     buffer = torch.zeros((pages, stride), dtype=torch.uint8, device="cuda")
@@ -404,3 +434,67 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
             atol=5e-4,
         )
         previous_meta = current_meta
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("heads", [16, 64, 128])
+@pytest.mark.parametrize("ratio", [0, 4, 128])
+def test_prefill_accumulation_workspace_matches_reference_and_is_reusable(heads, ratio):
+    backend, _, q, pool, decoded, extra_decoded, params = _case(heads, ratio)
+    if backend._flashmla_workspace_op is None:
+        pytest.skip("FlashMLA binary has no accumulation workspace API")
+    splits = q.shape[0] + torch.cuda.get_device_properties().multi_processor_count
+    workspace = (
+        torch.empty((splits, 1, backend.padded_q_head_num, 512), device="cuda", dtype=torch.float32),
+        torch.empty((splits, 1, backend.padded_q_head_num), device="cuda", dtype=torch.float32),
+    )
+    pointers = tuple(buffer.data_ptr() for buffer in workspace)
+    out = torch.empty_like(q)
+    for _ in range(2):
+        q.normal_(0, 0.1)
+        actual = backend._flashmla_att(q, pool, params, attention.flashmla.get_mla_metadata()[0], out, workspace)
+        assert actual.data_ptr() == out.data_ptr()
+        assert tuple(buffer.data_ptr() for buffer in workspace) == pointers
+        torch.testing.assert_close(
+            actual[:, :heads], _reference(q, decoded, extra_decoded, params, heads), rtol=0.02, atol=5e-4
+        )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("heads", [16, 64, 128])
+@pytest.mark.parametrize("ratio", [0, 4, 128])
+def test_prefill_full_batch_reuses_clobbered_logits_arena(monkeypatch, heads, ratio):
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
+
+    backend, _, q, pool, decoded, extra_decoded, params = _case(heads, ratio)
+    if backend._flashmla_workspace_op is None:
+        pytest.skip("FlashMLA binary has no accumulation workspace API")
+    model = SimpleNamespace(
+        batch_max_tokens=8,
+        tp_world_size_=1,
+        max_seq_length=16384,
+        run_mode="prefill",
+        args=SimpleNamespace(enable_decode_microbatch_overlap=False, enable_prefill_microbatch_overlap=False),
+        config=dict(head_dim=512, num_attention_heads=heads, index_n_heads=2, index_head_dim=128, compress_ratios=[4]),
+    )
+    workspace = DeepseekV4Workspace(model)
+    workspace.init_persistent_scratch(model)
+    assert workspace.flashmla_prefill_o_accum.data_ptr() == workspace.c4_prefill_aux.scratch.data_ptr()
+    state = backend.create_att_prefill_state(None)
+    state.init_state()
+    state.split_workspace = (workspace.flashmla_prefill_o_accum[0], workspace.flashmla_prefill_lse_accum[0])
+    native_attention = backend._flashmla_att
+    calls = []
+
+    def full_batch_attention(queries, *args, **kwargs):
+        calls.append(queries.shape[0])
+        return native_attention(queries, *args, **kwargs)
+
+    monkeypatch.setattr(backend, "_flashmla_att", full_batch_attention)
+    for _ in range(2):
+        workspace.c4_prefill_aux.scratch.fill_(255)
+        q.normal_(0, 0.1)
+        actual = state.prefill_att(q, pool, None, att_control=attention.AttControl(nsa_prefill_dict=params))
+        torch.testing.assert_close(actual, _reference(q, decoded, extra_decoded, params, heads), rtol=0.02, atol=5e-4)
+    assert calls == [q.shape[0], q.shape[0]]
+    assert set(state.sched_meta_by_ratio) == set(backend.compress_ratios)
