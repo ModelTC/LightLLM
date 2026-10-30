@@ -1,0 +1,16 @@
+{
+  "decision": "freeze",
+  "source_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
+  "replay_sha256": "b807f6d05db0ee5d3d829dc90da1dd5702f3d0777eab68b0894053fdf6118476",
+  "validation_public_sha256": "98edc484b6d05c30f31a1becdee5660fa10b826d459d193baca32fe219237ebf",
+  "priority_comparison_public_sha256": "6d268de48ae491ad76c58903ee0678d2cec96db492ab3b31b2745c026ecbe1fb",
+  "retention_seconds": 3,
+  "fraction": 0.5,
+  "reason": "Freeze FIFO-first cached backfill for independent assessment: all six validation pairs and three direct predecessor comparisons passed exact workload/output parity and GPU isolation. Fast agent and pressure gains over Off are meaningful; no universal gain claim.",
+  "known_tradeoffs": [
+    "Versus Off, ordinary p95 TTFT remains worse in mixed workloads; output-shaped ratio0.6747 and fast-agent ratio0.8092 in seed42 validation.",
+    "Abandoned wall ratio0.972, expired0.997, real-wait1.007: no meaningful benefit expected.",
+    "Versus unconditional priority, ordinary fast-agent p95 improves1.0675x but agent mean worsens0.8396x; pressure wall0.911x. FIFO fairness is a deliberate bounded scheduling choice, not universally faster."
+  ],
+  "heldout_tuning": "No independent performance used. Keep source, policy, cases, seeds and caps fixed; publish all outcomes."
+}

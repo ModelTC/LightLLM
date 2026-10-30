@@ -1,5 +1,6 @@
 import pytest
 import easydict
+import uuid
 from types import SimpleNamespace
 from lightllm.server.core.objs.req import Req, ChunkedPrefillReq, SamplingParams
 from lightllm.server.core.objs.token_metadata import ReqFinalTokenMetadata
@@ -9,8 +10,9 @@ from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args
 
 @pytest.fixture(scope="module", autouse=True)
 def setup_module_env():
+    service_name = f"test_req_{uuid.uuid4().hex}"
     with pytest.MonkeyPatch.context() as monkeypatch:
-        monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: "test_req_service_0")
+        monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: service_name)
         monkeypatch.setenv("LIGHTLLM_START_ARGS", "{}")
         set_env_start_args(
             easydict.EasyDict(

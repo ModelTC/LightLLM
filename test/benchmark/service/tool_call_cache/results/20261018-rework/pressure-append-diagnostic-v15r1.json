@@ -1,0 +1,40 @@
+{
+  "scope": "Completed pressure-c24 pair only; distinguish actual append continuations from synthetic compaction resets; current replay resets to the same system/reference namespace, so cross-compaction prefix identity is an explicit sensitivity. No whole-study inference.",
+  "source_revision": "5bae2ef5ea481bbf53da26007169c94737d86062",
+  "groups": {
+    "candidate": {
+      "initial": {
+        "requests": 24,
+        "prompt_tokens": 144998,
+        "cached_tokens": 104
+      },
+      "append-continuation": {
+        "requests": 163,
+        "prompt_tokens": 1044207,
+        "cached_tokens": 612137
+      },
+      "context-reset": {
+        "requests": 5,
+        "prompt_tokens": 35625,
+        "cached_tokens": 25
+      }
+    },
+    "control": {
+      "initial": {
+        "requests": 24,
+        "prompt_tokens": 144998,
+        "cached_tokens": 105
+      },
+      "append-continuation": {
+        "requests": 163,
+        "prompt_tokens": 1044207,
+        "cached_tokens": 9201
+      },
+      "context-reset": {
+        "requests": 5,
+        "prompt_tokens": 35625,
+        "cached_tokens": 26
+      }
+    }
+  }
+}

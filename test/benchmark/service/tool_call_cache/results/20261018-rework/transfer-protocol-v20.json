@@ -1,0 +1,390 @@
+{
+  "status": "Prespecified pending validation review; no independent test run",
+  "service_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
+  "harness_revision": "b491a8807239a3cfdc091613b79d23cd403b44cd",
+  "replay_sha256": "431867c105905499b344f7596b60ae7b262af4e4307206bc10650241210f6f2a",
+  "retention_seconds": 3,
+  "fraction": 0.5,
+  "hint_limits": {
+    "endpoints": 64,
+    "minimum_tokens": 256,
+    "oldest_ordinary_successful_bypasses": 8
+  },
+  "source_data": {
+    "validation": "CacheWise pinned181c435a090d328d00bbbee4c8eeb27d32f3abd2",
+    "heldout": "TraceLab public sanitizedv0.0.1 metadata",
+    "heldout_sha256": "668427a4e71717cb93596269d9c63f65cb62cae8e317d099f8b50e734f679690"
+  },
+  "validation_cases": [
+    {
+      "name": "pressure-c24",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 24,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "agent50-c16-fast",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent50",
+        "min_tool_wait": 0.25,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "expired-agent25-c16",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 0,
+        "max_wait": 4,
+        "mix": "agent25",
+        "min_tool_wait": 4,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "abandoned-agent25-c16",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent25",
+        "min_tool_wait": 0.25,
+        "abandon_fraction": 1,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "output-shaped-agent50-c8",
+      "options": {
+        "turns": 4,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 8,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent50",
+        "min_tool_wait": 0.25,
+        "output_scale": 0.5,
+        "max_output_target": 256,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "realwait-trace-c16",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    }
+  ],
+  "heldout_cases": [
+    {
+      "name": "low-pressure-c4",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 6000,
+        "compaction_identity": "fresh",
+        "sessions": 4,
+        "split": "test",
+        "context_scale": 0.05,
+        "wait_scale": 1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "pressure-c24",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 24,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "agent25-c16-fast",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent25",
+        "min_tool_wait": 0.25,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "agent50-c16-fast",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent50",
+        "min_tool_wait": 0.25,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "ordinary-c8",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 8,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "mix": "ordinary",
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "expired-agent25-c16",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0,
+        "max_wait": 4,
+        "mix": "agent25",
+        "min_tool_wait": 4,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "abandoned-agent25-c16",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent25",
+        "min_tool_wait": 0.25,
+        "abandon_fraction": 1,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "output-shaped-agent50-c8",
+      "options": {
+        "turns": 4,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 8,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent50",
+        "min_tool_wait": 0.25,
+        "output_scale": 0.5,
+        "max_output_target": 256,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "realwait-trace-c16",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    }
+  ],
+  "defaultoff_cases": [
+    {
+      "name": "pressure-c24",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 24,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "ordinary-c8",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 8,
+        "split": "test",
+        "context_scale": 0.25,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "mix": "ordinary",
+        "ordinary_output": "json-string"
+      }
+    }
+  ],
+  "seeds": [
+    42,
+    43,
+    44
+  ],
+  "normal_assignments": [
+    {
+      "candidate_gpu": 0,
+      "off_gpu": 1,
+      "reverse_order": false
+    },
+    {
+      "candidate_gpu": 1,
+      "off_gpu": 0,
+      "reverse_order": true
+    }
+  ],
+  "defaultoff_assignments": [
+    {
+      "off_gpu": 1,
+      "original_gpu": 4,
+      "reverse_order": false
+    },
+    {
+      "off_gpu": 4,
+      "original_gpu": 1,
+      "reverse_order": true
+    }
+  ],
+  "pairs": {
+    "validation_before_freeze": 6,
+    "normal_heldout": 54,
+    "defaultoff_heldout": 12,
+    "priority_comparison_before_freeze": 3
+  },
+  "original_revision": "22888b4237aa2c895fc24176e08089cf14bc6c89",
+  "model": "Qwen3-4B BF16 TP1 H200, same pinnedimage/cache32768/request16384/batch8192/maxrunning32/debug/FlashInferdecode+Tritonprefill",
+  "freeze_rule": "Evaluate all6 prespecified CacheWise sensitivity/negative cases before freeze; archive source, harness and validation report hashes. Never tune policy using independent heldout performance. Gate file belongs to agent workflow and is not a user permission request. Abort and clean up rather than silently modifying a running snapshot.",
+  "compaction_sensitivity": "Fresh long-context identity after source/cap reset; prior shared-identity validation remains archived, never pooled.",
+  "source_shape_limits": "Synthetic content; explicit context scales/wait caps/output caps; no exact production replay or original output preservation claim. Report distributions, compactions, cohorts and all neutral/negative outcomes.",
+  "uncertainty": "3workload seeds, limited descriptive seed-cluster bootstrap intervals; hardware crossover repetitions share seed cluster; no production guarantee.",
+  "scheduling": "FIFO-feasible heads first, cached backfill only when blocked, same max8successful bypasses",
+  "predecessor": "v16 stopped after6valid CacheWise cases before any independent inference due cold-tail cost; all results retained",
+  "priority_control_revision": "5bae2ef5ea481bbf53da26007169c94737d86062",
+  "priority_comparison_cases": [
+    {
+      "name": "pressure-c24",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 24,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "agent50-c16-fast",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent50",
+        "min_tool_wait": 0.25,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "output-shaped-agent50-c8",
+      "options": {
+        "turns": 4,
+        "max_prompt_tokens": 12000,
+        "compaction_identity": "fresh",
+        "sessions": 8,
+        "split": "validation",
+        "context_scale": 0.08,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent50",
+        "min_tool_wait": 0.25,
+        "output_scale": 0.5,
+        "max_output_target": 256,
+        "ordinary_output": "json-string"
+      }
+    }
+  ],
+  "benchmark_repair": {
+    "previous_attempt": "v17 independent phase stopped after six matching pairs and one failed pair; full phase excluded",
+    "reason": "v17 punctuation drift; v18 constrained long ordinary output exceeded heuristic budget before any independent inference; full incomplete phases excluded",
+    "policy_unchanged_since_before_original_independent_inference": true,
+    "strict_pair_checks_unchanged": true,
+    "ordinary_output": "json-string exact enum schema, actual tokenizer plus literal byte/EOS budget; both short and shaped replies",
+    "revalidation": "Repeat all fixed validation cases before complete independent rerun; no case/seed/parameter selection using independent performance"
+  }
+}

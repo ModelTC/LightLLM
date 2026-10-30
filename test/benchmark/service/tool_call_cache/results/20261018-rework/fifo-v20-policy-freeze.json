@@ -1,0 +1,23 @@
+{
+  "decision": "freeze",
+  "source_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
+  "harness_revision": "b491a8807239a3cfdc091613b79d23cd403b44cd",
+  "replay_sha256": "431867c105905499b344f7596b60ae7b262af4e4307206bc10650241210f6f2a",
+  "validation_public_sha256": "2bcd7e70a91b587a75faf2a331cc458da49974e605f9e28a496f537b611d74bc",
+  "priority_comparison_public_sha256": "b28caff62a8e7e0a21566a69ebb6d1674748d95f0e14514f79261b83a0cf9d93",
+  "retention_seconds": 3,
+  "fraction": 0.5,
+  "reason": "All six repaired validation pairs plus all three predecessor comparisons passed strict prompts, signatures, generated counts and GPU isolation. Keep the same cache source and policy fixed since before the original independent inference; only benchmark output correctness repaired. Meaningful conditional gains over Off justify completing the independent assessment, not a universal-win claim.",
+  "known_tradeoffs": [
+    "Against Off: wall1.191x fast-agent,1.148x shaped,1.229x pressure; abandoned0.979x,expired0.998x,realwait1.049x. Single validationseed42.",
+    "Ordinary p95 TTFT ratios against Off remain0.8221x fast-agent and0.7698x shaped, despite improved ordinary mean request ratios1.0871x and1.1196x.",
+    "Against old priority5bae, fast-agent wall0.915x, agent mean0.8601x and ordinary p95TTFT0.9399x: FIFO does not establish a latency or throughput improvement against that predecessor. Pressure1.014x andshaped1.015x. Direct single-seed GPU assignments are not crossover evidence.",
+    "FIFO-feasible-head ordering is an explicit bounded scheduling contract, not proof of better p95. Feature remains disabled by default."
+  ],
+  "excluded_attempts": {
+    "v17": "Incomplete independent phase: six prior matched pairs and one failed ordinary punctuation pair all excluded.",
+    "v18": "Incomplete validation: ordinary JSON truncated by estimated budget, no independent requests.",
+    "v19": "Untimed first-service setup stopped to balance all service long-output preflight; zero measured pairs."
+  },
+  "independent_rule": "Full prespecified cases, seeds and hardware/order crossover; no policy or parameter tuning using independent performance. Rerun whole phases after benchmark correctness repair; preserve all outcomes."
+}

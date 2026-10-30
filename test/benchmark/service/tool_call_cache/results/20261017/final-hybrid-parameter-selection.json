@@ -1,0 +1,37 @@
+{
+  "status": "selected_on_validation_before_heldout",
+  "retention_seconds": 30,
+  "fraction": 0.5,
+  "selection_rule": "Prefer3s unless30s improves trace-c16 reported prefill reduction by>2pp and wall speedup by>2%, without>2% relative ordinary-request slowdown.",
+  "trace_c16_short": {
+    "prefill_reduction": -0.013354729835295842,
+    "wall_speedup": 0.9978607244511527,
+    "request_speedup": 0.9835550217496476
+  },
+  "trace_c16_long": {
+    "prefill_reduction": 0.04015751508327414,
+    "wall_speedup": 1.0343025149415572,
+    "request_speedup": 1.0500994495210334
+  },
+  "ordinary_short": {
+    "prefill_reduction": -0.04867646063964903,
+    "wall_speedup": 0.9958983376670232,
+    "request_speedup": 0.9597270838089543
+  },
+  "ordinary_long": {
+    "prefill_reduction": -0.005705641380884178,
+    "wall_speedup": 0.9993125925053273,
+    "request_speedup": 0.9923907819062253
+  },
+  "source_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+  "heldout_case_sha256": "b2bbd6f42ef366474b22e925708c093e17bd37f64d447eac92bb1b4b20e6f325",
+  "candidate_group": [
+    0,
+    1
+  ],
+  "control_group": [
+    4,
+    5
+  ],
+  "recorded_unix": 1792256479.5962052
+}

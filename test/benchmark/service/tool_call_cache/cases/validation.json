@@ -1,0 +1,5 @@
+[
+  {"name": "trace-c8", "options": {"sessions": 8, "turns": 10, "split": "validation", "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "trace-c16", "options": {"sessions": 16, "turns": 10, "split": "validation", "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}},
+  {"name": "ordinary-c8", "options": {"sessions": 8, "turns": 10, "split": "validation", "mix": "ordinary", "context_scale": 0.05, "wait_scale": 0.1, "max_wait": 5}}
+]

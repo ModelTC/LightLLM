@@ -1,0 +1,79 @@
+{
+  "scope": "All 84 complete exploratory/validation pairs, including 9 repaired-harness FIFO-first pairs; excluded incomplete phases never pooled",
+  "source_labels": {
+    "380d1ebd9a2b605fb6349a5c3f4d9a1c81d0b8db": "budget-only",
+    "6df137db54f97078c5e13804cc59ed9fddd482ed": "stable-prefix",
+    "8fe7ec01bb6fa85a58c77be8e003cade1ee9b19c": "reserved-KV",
+    "0e68cc17feecbcf85e43d9a69c7ebe9471e10bab": "static-headroom control",
+    "dcd3551c53a13c5613d8a8b644870de00dd57820": "historical eviction policy",
+    "5bae2ef5ea481bbf53da26007169c94737d86062": "continuation priority",
+    "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec": "FIFO-first cached backfill"
+  },
+  "complete_pairs": {
+    "v11": 12,
+    "v13": 16,
+    "v14": 16,
+    "v15r1": 16,
+    "fresh-v16": 6,
+    "fifo-v17-validation": 6,
+    "fifo-v17-priority-comparison": 3,
+    "fifo-v20-validation": 6,
+    "fifo-v20-priority": 3
+  },
+  "root_experiments": {
+    "v13": "261018-082521-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "v14": "261018-091042-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "v15r1": "261018-093545-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "fresh-v16": "261018-100200-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "fifo-v17-validation-report": "261018-105321-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "fifo-v17-priority-report": "261018-105614-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "tracelab-return-timing": "261018-110942-python-tmp-agent-cache-rework-20261018-analyze-t",
+    "actual-tokenizer-budget": "261018-112531-docker-run-rm-entrypoint-python-e-HF-HOME-tmp-hf",
+    "fifo-v20-validation-report": "261018-114309-python3-mtc-sufubao-tool-call-cache-rework-20261",
+    "fifo-v20-priority-report": "261018-114556-python3-mtc-sufubao-tool-call-cache-rework-20261"
+  },
+  "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+  "candidate_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
+  "uncompressed_input_artifact_sha256": {
+    "budget-v11-validation.json": "be2709aa7bec20758760f2a1720a1c8dad135244bf30c52d5c88eeefaca67ed3",
+    "stable-prefix-v13-validation.json": "18fb699219e3e00f9ce6e7ead8dd544a635af294980d0f04098e85dc85ceb1c9",
+    "reserved-kv-v14-validation.json": "f5f6b1505ba7537bc8e1d31b5b0058f3a6615721e92f1701570d2d0e9815b196",
+    "cache-counters-v13-v14.json": "bc4aeff3d7f3a0e04eeb161720c1bf6d77b7b4a08362037d8716c69134e655d4",
+    "continuation-v15r1-validation.json": "2690a1a5769242dbf03c723b8f0f775a8a0c875cd7024c0afc30c9b34cf57133",
+    "cache-counters-v13-v15r1.json": "67137badf9bf575796bccbeed64e76a9b499e7c777af33e636584f98902be04b",
+    "pressure-append-diagnostic-v15r1.json": "6ceaaad1d0beebcbfb53073ba27b018eb7642a049b97d1040708a4054bd8f76c",
+    "priority-fresh-v16-validation.json": "60fabce605dbb3eef83c1866e9a5014d72f16f4808f0750357687aaab546c64b",
+    "fifo-v17-validation.json": "98edc484b6d05c30f31a1becdee5660fa10b826d459d193baca32fe219237ebf",
+    "fifo-v17-priority.json": "6d268de48ae491ad76c58903ee0678d2cec96db492ab3b31b2745c026ecbe1fb",
+    "fifo-v20-validation.json": "2bcd7e70a91b587a75faf2a331cc458da49974e605f9e28a496f537b611d74bc",
+    "fifo-v20-priority.json": "b28caff62a8e7e0a21566a69ebb6d1674748d95f0e14514f79261b83a0cf9d93"
+  },
+  "compressed_report_sha256": {
+    "budget-v11-validation.json.gz": "625fadeea207f9bae0c125dadb4a10071f7d4b101c18e0cd1c488d48e473fbd1",
+    "stable-prefix-v13-validation.json.gz": "03706c93331c978d72d48d7b01a25c2d6cf7d151720756943afe536d5b188edb",
+    "reserved-kv-v14-validation.json.gz": "c8e58980b7a2c0f4508dd186d709d7001a51320ba3a491e6d52c5c89c57e7d43",
+    "continuation-v15r1-validation.json.gz": "0a990d537fe0cbb00499ee1fe6a7b84df7e55d1745dbaa887ec021dc53b1ff67",
+    "priority-fresh-v16-validation.json.gz": "5f89e48370c330ce8855bf625e2414ea648531f8d7156b26eb8a3410572bfd55",
+    "fifo-v17-validation.json.gz": "c3cd53e0744128995d0a0aa5b9a1ad18adaef64b30c754b8a4daadc242f8685d",
+    "fifo-v17-priority.json.gz": "ab54de6b228db0b00c014c7cf226be51e1cd3ba9000ce5e04d3609d463b88df8",
+    "fifo-v20-validation.json.gz": "38a9d376a3e2c03fdfcec16773c529ec01a75244befef4bb575c78ad1f1dcd2d",
+    "fifo-v20-priority.json.gz": "3883df4baed0a3e697f8edd8acde225025e54de129f73425cdb45c3ca30c6e7d"
+  },
+  "fresh_v16_parent_exit": {
+    "exit_code": 1,
+    "reason": "Intentional internal review abort before independent test",
+    "valid_pairs": 6,
+    "heldout_requests": 0
+  },
+  "numeric_diagnostic_sha256": {
+    "tracelab-observed-returns-v17.json": "7aa0f29a2af4daa4eabf9a16eb39bd9a7615d53ae307ce568b1473e484b20d4b",
+    "excluded-v17-independent-parity.json": "c087c4bfa846f8b8fc62c983e7e4a1ad158958dbbea36c1e2414bc90939ffa1c",
+    "excluded-v18-output-budget.json": "a09475016b794db440052db086848ec978fb678ef9d7be0888c4f43430586ded",
+    "tokenizer-budget-v19.json": "6cf375260b00bbdc965102fc8515d9cd92a08b1bf827865d9f014efaf7b01b32"
+  },
+  "configuration_artifact_sha256": {
+    "transfer-protocol-v20.json": "c249862a097f7f03fa8c439937edd89dfad1d38df7efc54485fb64a418ba4eed",
+    "hybrid-transfer-protocol-v20.json": "ab441c51ca2a5e9e3625d126015889e7b7c388f6bb51f5e6a20a1e9465a31f2e",
+    "harness-transfer-v20.json": "0aef9b7c8cf86eaf7faa9d48276fbc2e0ef20c3ab2f547e5fa4343847a100346"
+  }
+}

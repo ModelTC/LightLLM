@@ -1,0 +1,14 @@
+{
+  "status": "excluded-incomplete-validation",
+  "source_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
+  "harness_revision": "9b7a1fd7d58b51c8064bc731a34784553d29edfc",
+  "phase": "fresh-validation-transfer-a in study-normal-transfer-a-v18",
+  "reason": "The new exact JSON-string mode retained an estimated output limit; a source-shaped ordinary response on the disabled control was cut off before the complete JSON literal. Client JSON validation stopped the run.",
+  "independent_requests": 0,
+  "whole_phase_excluded": true,
+  "own_services_cleaned": true,
+  "followup_supervisor_stopped_before_launch": true,
+  "repair": "Compute complete JSON literal budget using actual tokenizer plus conservative literal byte and EOS allowance; unchanged cache source/policy and strict parity. Repeat full validation and independent plan.",
+  "proof": "tokenizer-budget-v19.json:513 targets each actual tokenizer,275 had insufficient old budgets; new budgets fit prompt and request limits",
+  "proof_experiment": "261018-112531-docker-run-rm-entrypoint-python-e-HF-HOME-tmp-hf"
+}
