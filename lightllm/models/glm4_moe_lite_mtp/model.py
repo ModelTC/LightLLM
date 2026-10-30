@@ -25,10 +25,10 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
 
     @classmethod
-    def _resource_config(cls, model_config):
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
-
-        config = get_resource_config(model_config)
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        config = super().normalize_model_config(model_config)
+        # checkpoint 中 MTP 权重接在 main 层之后；重复规范化不能覆盖这个起点。
+        config.setdefault("mtp_checkpoint_layer_start", config["num_hidden_layers"])
         count = config.get("num_nextn_predict_layers", 1)
         config.update(num_hidden_layers=count, n_layer=count)
         return config
@@ -40,7 +40,7 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
 
-        mtp_layer_start = self.config["num_hidden_layers"]
+        mtp_layer_start = self.config["mtp_checkpoint_layer_start"]
         num_mtp_layers = self.config.get("num_nextn_predict_layers", 1)
 
         self.pre_post_weight = self.pre_and_post_weight_class(

@@ -16,7 +16,6 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
     from transformers.configuration_utils import PretrainedConfig
     from lightllm.models import get_draft_model_class
     from lightllm.common.att_resources.utils import MAX_DRAFT_MODELS
-    from lightllm.common.basemodel.basemodel_utils import get_resource_config
     from lightllm.utils.llm_utils import get_llm_model_class
 
     # 阶段一：读取 main 和启用 attention 的 draft 配置，不构造实际模型。
@@ -35,7 +34,8 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
     manager = AttResourceManager(request_capacity=0)  # 只描述 meta 布局，不分配请求或缓存存储。
     logical_layer_start = 0
     for role, model_class, config in models:
-        count = get_resource_config(config, model_class=model_class)["num_hidden_layers"]
+        config = model_class.normalize_model_config(config)
+        count = config["num_hidden_layers"]
         logical_layer_ids = tuple(range(logical_layer_start, logical_layer_start + count))
         full_states = model_class._create_full_att_states(
             model_config=config, args=args, model_logical_layer_ids=logical_layer_ids,

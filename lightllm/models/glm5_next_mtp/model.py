@@ -33,9 +33,8 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     def _init_config(self):
         # Reuse the validated target configuration without changing its mHC layout.
-        self.config = deepcopy(self.main_model.config)
+        self.config = self.normalize_model_config(deepcopy(self.main_model.config))
         assert self.config.get("num_nextn_predict_layers") == 1, "GLM NextN requires one native MTP block"
-        self.config["mhc"] = False
 
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
@@ -45,7 +44,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
         self.pre_post_weight.main_norm_weight_ = self.main_model.pre_post_weight.final_norm_weight_
         self.trans_layers_weight = [
             self.transformer_weight_class(
-                layer_num=self.config["num_hidden_layers"],
+                layer_num=self.config["mtp_checkpoint_layer_start"],
                 data_type=self.data_type,
                 network_config=self.config,
                 quant_cfg=self.quant_cfg,
@@ -83,10 +82,9 @@ class Glm5NextMTPModel(TpPartBaseModel):
     ) -> list["FullAttentionState"]:
         """原生 GLM draft 的自有层采用 NoPE packed MLA，与 main 分别持有存储。"""
         from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
         if not logical_layer_groups:
             return []
@@ -119,10 +117,9 @@ class Glm5NextMTPModel(TpPartBaseModel):
     ) -> list["AttentionTailState"]:
         """直接选择本模型需要 K-pool tail 的层，不依赖 full State 创建过程。"""
         from lightllm.common.att_resources.att_tail import create_kpool_state, KPoolStateConfig
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         logical_layer_ids = model_logical_layer_ids
         if not logical_layer_ids:
             return []
@@ -143,11 +140,12 @@ class Glm5NextMTPModel(TpPartBaseModel):
         return [state]
 
     @classmethod
-    def _resource_config(cls, model_config):
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
-
-        config = get_resource_config(model_config)
-        config.update(num_hidden_layers=1, n_layer=1)
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """区分 draft 自有层数与 checkpoint 中的 MTP 权重层起点。"""
+        config = super().normalize_model_config(model_config)
+        # checkpoint 中 MTP 权重接在 main 层之后；重复规范化不能覆盖这个起点。
+        config.setdefault("mtp_checkpoint_layer_start", config["num_hidden_layers"])
+        config.update(num_hidden_layers=1, n_layer=1, mhc=False)
         return config
 
     def _init_att_backend(self):

@@ -30,21 +30,11 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
         return
 
     @classmethod
-    def _resource_config(cls, model_config):
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
-
-        config = get_resource_config(model_config)
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """原生 MTP 只包含一个 full-attention 层，与 main 共用 checkpoint。"""
+        config = super().normalize_model_config(model_config)
         config.update(full_attention_interval=1, num_hidden_layers=1, n_layer=1)
         return config
-
-    def _init_config(self):
-        super()._init_config()
-        # MTP draft model: reuses the main model's config, but overrides the following:
-        # 因为 qwen3.5 的 mtp 和 main 是存储在一起的，所以需要进行修复。
-        self.config["full_attention_interval"] = 1
-        self.config["num_hidden_layers"] = 1
-        self.config["n_layer"] = 1
-        return
 
     def _init_some_value(self):
         super()._init_some_value()

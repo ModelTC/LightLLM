@@ -1676,7 +1676,20 @@ State config 保存未切分的全局 head 数、当前 `tp_rank` / `tp_world_si
 
 full-attention 的 `replicated=True` 表示每个 rank 保存全部 head，例如复制的 MLA latent；否则按 head 均匀切分，全局 head 数小于 TP 时按组复制。KDA/GDN 的 K、V head 分别应用切分或分组复制规则。布局 helper 根据全局数量和本地数量计算 head 起点及副本写入者。只改变 config 的 TP 坐标即可重新计算目标分片，无需依赖来源 manager 的额外映射；实际数据迁移仍通过传输接口完成。
 
-`basemodel_utils.py` 仅保留 `get_resource_config(model_config, *, model_class=None)`，处理字段别名、text config 和模型专有的配置转换。原生 MTP、DFlash 等模型可通过 `_resource_config` 将原始配置转为自己的有效层配置；该工具不选择 attention 算法、不构造 State，也不通过 options 字典分派布局。
+模型类统一暴露 `normalize_model_config(model_config)`：不创建实例、不加载权重或初始化 CUDA，返回新的有效配置，重复调用保持结果不变。模型启动读取配置后、CPU 服务创建 meta State 前，以及各模型 State 工厂，都使用这个入口。DFlash 的嵌套覆盖、原生 MTP 的自有层数等差异由子类实现，不再保留 `_resource_config` 这条单独的转换路径。`basemodel_utils.py` 只处理通用 text_config 展开和字段别名，不反射调用模型方法，也不选择 attention 算法。
+
+DFlash 先合并 `dflash_config`，再同步 `num_hidden_layers` / `n_layer` 等别名，避免运行时与 CPU 页布局使用不同层数。GLM 原生 MTP 的有效层数描述 draft 自身；`mtp_checkpoint_layer_start` 单独保留 checkpoint 中接在 main 层后的权重起点，用于 transformer 和 pre/post 权重加载，重复规范化不会改变这个起点。
+
+```mermaid
+flowchart LR
+    A[模型启动读取配置] --> C[模型类 normalize_model_config]
+    B[CPU cache 读取配置] --> C
+    C --> D[模型专有覆盖与通用别名同步]
+    D --> E[模型初始化及权重加载]
+    D --> F[模型 State 工厂]
+    F --> G[实际资源分配或 CPU meta 布局]
+```
+
 
 GQA、MLA、packed MLA 的选择以及全局逻辑层分组直接写在模型的 `_create_full_att_states()` 中。普通模型按 `model_logical_layer_ids` 创建独立层，Qwen/GLM 选择混合模型的 full 层，Gemma4 根据共享关系将多个逻辑层放入同一物理分组。各模型不再提供 `_full_attention_options`。算法级 `create_gqa_state()` / `create_mla_state()` 继续负责量化版本、存储布局及算法专有的 TP 副本规则。
 

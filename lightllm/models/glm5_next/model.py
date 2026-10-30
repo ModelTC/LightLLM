@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING
 import torch
 import triton
 
-from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
@@ -47,9 +46,8 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     ) -> list["BoundedAttentionState"]:
         """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
         from lightllm.common.att_resources.bounded_att import create_kda_state, ConvSSMStateConfig
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
         cfg = Glm5NextResourceConfig.from_model_config(config, args)
         logical_layer_ids = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
@@ -74,16 +72,18 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         )
         return [state]
 
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """保留外层量化配置，并统一 GLM 文本配置的别名及 autotune 层数。"""
+        config = super().normalize_model_config(model_config)
+        if "quantization_config" in model_config:
+            config["quantization_config"] = dict(model_config["quantization_config"])
+        config["autotune_layer_num"] = 4
+        return config
+
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json")) as f:
-            outer_config = json.load(f)
-        self.config = dict(outer_config.get("text_config", outer_config))
-        if "quantization_config" in outer_config:
-            self.config["quantization_config"] = dict(outer_config["quantization_config"])
-        self.config["autotune_layer_num"] = 4
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+            self.config = self.normalize_model_config(json.load(f))
 
     def _verify_params(self):
         super()._verify_params()
@@ -117,10 +117,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     ) -> list["FullAttentionState"]:
         """GLM full-attention 层采用 NoPE packed MLA，并保存压缩 indexer 字段。"""
         from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         assert args.llm_kv_type == "None", "GLM K-pool requires unquantized KV"
         cfg = Glm5NextResourceConfig.from_model_config(config, args)
         logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
@@ -155,10 +154,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     ) -> list["AttentionTailState"]:
         """直接选择本模型需要 K-pool tail 的层，不依赖 full State 创建过程。"""
         from lightllm.common.att_resources.att_tail import create_kpool_state, KPoolStateConfig
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         cfg = Glm5NextResourceConfig.from_model_config(config, args)
         logical_layer_ids = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_layer_indices())
         if not logical_layer_ids:

@@ -15,7 +15,6 @@ from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weight
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
     select_kv_index_from_req_prefill,
@@ -201,13 +200,20 @@ class TpPartBaseModel:
         if not self.is_mtp_draft_model:
             self._check_max_len_infer()
 
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """返回当前模型的有效配置，供模型初始化和 CPU cache 共用。
+
+        不依赖模型实例、权重或 CUDA；不修改输入配置，重复调用应保持结果不变。
+        子类负责模型专有的配置覆盖，通用工具仅展开 text_config 并同步字段别名。
+        """
+        from lightllm.common.basemodel.basemodel_utils import normalize_model_config
+
+        return normalize_model_config(model_config)
+
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+            self.config = self.normalize_model_config(json.load(json_file))
         if self.finetune_config:
             self.config["vocab_size"] = self.finetune_config.vocab_size
         return

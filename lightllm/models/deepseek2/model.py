@@ -70,10 +70,9 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
     ) -> list["FullAttentionState"]:
         """DeepSeek MLA 保存 latent 与 RoPE，TP 副本规则由 MLA 创建入口处理。"""
         from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
         if not logical_layer_groups:
             return []

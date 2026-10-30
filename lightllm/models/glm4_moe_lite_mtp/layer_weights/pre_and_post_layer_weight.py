@@ -14,7 +14,7 @@ class Glm4MoeLiteMTPPreAndPostLayerWeight(PreAndPostLayerWeight):
         self.quant_cfg: Quantcfg = quant_cfg
 
         if layer_idx is None:
-            layer_idx = network_config["num_hidden_layers"]
+            layer_idx = network_config["mtp_checkpoint_layer_start"]
 
         hidden_size = network_config["hidden_size"]
         self.eh_proj_weight_ = ROWMMWeight(

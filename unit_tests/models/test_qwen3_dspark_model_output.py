@@ -299,49 +299,39 @@ def test_fixed_dspark_does_not_require_confidence_head(monkeypatch):
     model._verify_params()
 
 
-def test_qwen35_dspark_adapter_uses_current_checkpoint_rope_layout(monkeypatch):
-    def init_dspark_config(self):
-        self.config = {
-            "dflash_config": {"mask_token_id": 1},
-            "rope_parameters": {
-                "rope_theta": 1_000_000,
-                "factor": 32.0,
-                "original_max_position_embeddings": 8192,
-                "rope_type": "yarn",
-            },
-        }
+def test_qwen35_dspark_adapter_uses_current_checkpoint_rope_layout():
+    raw_config = {
+        "dflash_config": {"mask_token_id": 1},
+        "rope_parameters": {
+            "rope_theta": 1_000_000,
+            "factor": 32.0,
+            "original_max_position_embeddings": 8192,
+            "rope_type": "yarn",
+        },
+    }
+    config = Qwen3_5DSparkModel.normalize_model_config(raw_config)
 
-    monkeypatch.setattr(Qwen3DSparkModel, "_init_config", init_dspark_config)
-    model = Qwen3_5DSparkModel.__new__(Qwen3_5DSparkModel)
-
-    model._init_config()
-
-    assert model.config["rope_scaling"] == model.config["rope_parameters"]
-    assert model.config["rope_theta"] == 1_000_000
-    assert model.config["partial_rotary_factor"] == 1.0
-    assert model.config["mask_token_id"] == 1
+    assert config["rope_scaling"] == config["rope_parameters"]
+    assert config["rope_theta"] == 1_000_000
+    assert config["partial_rotary_factor"] == 1.0
+    assert config["mask_token_id"] == 1
 
 
-def test_qwen35_dspark_adapter_preserves_custom_partial_rotary_layout(monkeypatch):
-    def init_dspark_config(self):
-        self.config = {
-            "dflash_config": {"mask_token_id": 1},
-            "rope_parameters": {
-                "mrope_interleaved": True,
-                "mrope_section": [11, 11, 10],
-                "partial_rotary_factor": 0.25,
-                "rope_theta": 10_000_000,
-                "rope_type": "default",
-            },
-        }
+def test_qwen35_dspark_adapter_preserves_custom_partial_rotary_layout():
+    raw_config = {
+        "dflash_config": {"mask_token_id": 1},
+        "rope_parameters": {
+            "mrope_interleaved": True,
+            "mrope_section": [11, 11, 10],
+            "partial_rotary_factor": 0.25,
+            "rope_theta": 10_000_000,
+            "rope_type": "default",
+        },
+    }
+    config = Qwen3_5DSparkModel.normalize_model_config(raw_config)
 
-    monkeypatch.setattr(Qwen3DSparkModel, "_init_config", init_dspark_config)
-    model = Qwen3_5DSparkModel.__new__(Qwen3_5DSparkModel)
-
-    model._init_config()
-
-    assert model.config["partial_rotary_factor"] == 0.25
-    assert model.config["rope_scaling"] == model.config["rope_parameters"]
+    assert config["partial_rotary_factor"] == 0.25
+    assert config["rope_scaling"] == config["rope_parameters"]
 
 
 def test_qwen3_parallel_block_draft_applies_partial_rotary_factor(monkeypatch):

@@ -97,10 +97,9 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     ) -> list["FullAttentionState"]:
         """按 Gemma4 的 attention 宽度和共享关系创建物理 KV 层。"""
         from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         # 每层的 KV 槽位须容纳 sliding/full 两类 attention 的最大宽度。
         head_dim = config["head_dim"]
         num_global_kv = config.get("num_global_key_value_heads") or config["num_key_value_heads"]

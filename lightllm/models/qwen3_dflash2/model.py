@@ -19,28 +19,23 @@ class Qwen3DFlash2Model(Qwen3DFlashModel):
     transformer_layer_infer_class = Qwen3DFlash2TransformerLayerInfer
 
     @classmethod
-    def _resource_config(cls, model_config):
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
-
-        config = get_resource_config(model_config)
-        config.update(config.get("dflash_config", {}))
-        config["n_layer"] = config["num_hidden_layers"]
-        return config
-
-    def _init_config(self):
-        super()._init_config()
-        dflash_config = self.config.get("dflash_config", {})
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """合并 draft 专有配置，再同步别名及 rotary 参数；启动与 CPU cache 使用同一结果。"""
+        config = model_config.get("text_config", model_config).copy()
+        dflash_config = config.get("dflash_config", {})
         if not isinstance(dflash_config, dict):
             raise ValueError("dflash_config must be an object in the DFlash2 checkpoint config")
-        self.config.update(dflash_config)
+        config.update(dflash_config)
+        config = super().normalize_model_config(config)
 
-        rope_parameters = self.config.get("rope_parameters", {})
-        if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
-            self.config["rope_theta"] = rope_parameters["rope_theta"]
-        if "partial_rotary_factor" in rope_parameters and "partial_rotary_factor" not in self.config:
-            self.config["partial_rotary_factor"] = rope_parameters["partial_rotary_factor"]
-        if rope_parameters and "rope_scaling" not in self.config:
-            self.config["rope_scaling"] = rope_parameters
+        rope_parameters = config.get("rope_parameters", {})
+        if "rope_theta" in rope_parameters and "rope_theta" not in config:
+            config["rope_theta"] = rope_parameters["rope_theta"]
+        if "partial_rotary_factor" in rope_parameters and "partial_rotary_factor" not in config:
+            config["partial_rotary_factor"] = rope_parameters["partial_rotary_factor"]
+        if rope_parameters and "rope_scaling" not in config:
+            config["rope_scaling"] = rope_parameters
+        return config
 
     def _verify_params(self):
         LlamaTpPartModel._verify_params(self)

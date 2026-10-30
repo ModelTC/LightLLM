@@ -150,9 +150,8 @@ class Gemma3TpPartModel(LlamaTpPartModel):
     ) -> list["FullAttentionState"]:
         """Gemma3 使用固定 256 维 BF16 KV，不随权重精度改变。"""
         from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
         if not logical_layer_groups:
             return []

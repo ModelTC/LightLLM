@@ -52,9 +52,8 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     ) -> list["BoundedAttentionState"]:
         """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
         from lightllm.common.att_resources.bounded_att import create_gdn_state, ConvSSMStateConfig
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         assert config["num_attention_heads"] % tp_world_size == 0
         assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
         cfg = Qwen3NextResourceConfig.from_model_config(config, args)
@@ -108,10 +107,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
     ) -> list["FullAttentionState"]:
         """按 Qwen 混合层周期选择 full-attention 层，保留全局逻辑层号。"""
         from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
-        from lightllm.common.basemodel.basemodel_utils import get_resource_config
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        config = get_resource_config(model_config, model_class=cls)
+        config = cls.normalize_model_config(model_config)
         assert args.llm_kv_type in ("None", "fp8kv_sph", "fp8kv_spt"), "unsupported Qwen3Next KV encoding"
         cfg = Qwen3NextResourceConfig.from_model_config(config, args)
         logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
