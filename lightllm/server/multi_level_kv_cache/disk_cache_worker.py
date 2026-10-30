@@ -54,8 +54,7 @@ class DiskCacheWorker:
         if not cache_dir:
             cache_dir = os.path.join(tempfile.gettempdir(), f"lightllm_disk_cache_{get_unique_server_name()}")
         os.makedirs(cache_dir, exist_ok=True)
-        namespace = cpu_cache_client.kv_cache_tensor_meta.cache_namespace
-        cache_file = os.path.join(cache_dir, f"cache_file_{namespace}" if namespace else "cache_file")
+        cache_file = os.path.join(cache_dir, "cache_file")
 
         self.max_concurrent_write_tasks = max_concurrent_write_tasks
         self._page_major_tensor = self._prepare_tensor(cpu_cache_client.cpu_kv_cache_tensor)

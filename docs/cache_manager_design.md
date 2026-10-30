@@ -1652,7 +1652,7 @@ full-attention 的 `replicated=True` 表示每个 rank 保存全部 head，例�
 
 `basemodel_utils.py` 提供 `get_resource_config(model_config, *, model_class=None)` 和 `get_full_attention_options(config, args, *, model_class=None)`，统一处理字段别名、text config 和默认 KV 维度。它们是普通工具函数，BaseModel 不再声明对应的 `_resource_config`、`_full_attention_options` 方法；具体模型仅在存在专有规则时提供可选 hook，并调用工具函数取得默认配置。传入 `model_class` 时，工具函数选择该模型的专有实现，否则使用通用逻辑。
 
-同一文件中的 `create_full_attention_definition(model_class, ...)` 和 `create_bounded_attention_definition(model_class, ...)` 只返回包含完整 config 的 meta State，不再单独返回全局 head 数。full-attention 构建使用上述配置工具；linear 构建调用具体模型可选的 `create_bounded_attention_definition` 实现，纯 full-attention 模型由工具返回空定义，基类不保留空实现。CPU 服务读取 main 和各 draft 自己的配置，通过相同的工具入口生成联合页；原生 MTP 和 DFlash 等配置转换由对应模型实现。CPU 页包含所有参与的 linear State，并为各角色安排对应区域；磁盘缓存命名空间包含 main/draft 模型版本。静态量化标定按本模型实际 full-attention 层区间选取，CPU 服务和推理端复用相同的布局构建流程。
+同一文件中的 `create_full_attention_definition(model_class, ...)` 和 `create_bounded_attention_definition(model_class, ...)` 只返回包含完整 config 的 meta State，不再单独返回全局 head 数。full-attention 构建使用上述配置工具；linear 构建调用具体模型可选的 `create_bounded_attention_definition` 实现，纯 full-attention 模型由工具返回空定义，基类不保留空实现。CPU 服务读取 main 和各 draft 自己的配置，通过相同的工具入口生成联合页；原生 MTP 和 DFlash 等配置转换由对应模型实现。CPU 页包含所有参与的 linear State，并为各角色安排对应区域。静态量化标定按本模型实际 full-attention 层区间选取，CPU 服务和推理端复用相同的布局构建流程。
 
 资源容量确定后，buffer 地址及已绑定视图保持稳定。初始化 helper 不持有推理请求映射，也不引入请求级生命周期接口。后续模型扩展通过准备自己的 State 和实现所需 backend 完成；不需要将 draft 限定为 full attention。
 
@@ -1717,7 +1717,7 @@ P/D 使用相同模型和 main/draft 资源集合，允许不同 TP 与 `mtp_ste
 
 ### 8.3 CPU/Disk 与 DP fetch
 
-CPU 联合页使用字节存储，从偏移 0 开始按具体 State 的字段布局保存数据，不预留格式页头或状态长度、版本字段。各资源区域由模型配置与 State 字段确定，TP 副本由明确的单个写入者更新共享区域。CPU 服务绑定时核对页大小，读回长度由任务参数提供，前缀与槽位的关联由调用方维护。磁盘文件按 main/draft 模型路径及文件版本隔离。
+CPU 联合页使用字节存储，从偏移 0 开始按具体 State 的字段布局保存数据，不预留格式页头或状态长度、版本字段。各资源区域由模型配置与 State 字段确定，TP 副本由明确的单个写入者更新共享区域。CPU 服务绑定时核对页大小，读回长度由任务参数提供，前缀与槽位的关联由调用方维护。磁盘缓存使用配置目录下的固定文件名 `cache_file`。
 
 GPU→CPU 保存状态页完成后，才能在 CPU 上重排或复制这些快照；主机侧读取必须等待保存完成，不能只向另一个 CUDA stream 排入依赖。CPU 页的 ready 发布仍由调用流程在全部参与资源与 TP 分片传输完成后执行。
 

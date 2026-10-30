@@ -21,7 +21,6 @@ from lightllm.models import Deepseek2TpPartModel, Deepseek3_2TpPartModel, LlamaT
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.models.glm5_next.model import Glm5NextTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.att_resource_config import cpu_cache_namespace
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args, get_unique_server_name
 from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
 
@@ -277,29 +276,6 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
     assert not buffer[:2].any()
 
 
-def test_cpu_namespace_isolates_model_revision(runtime: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    args = StartArgs(model_dir=str(tmp_path))
-    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(args)))
-    get_env_start_args.cache_clear()
-    (tmp_path / "config.json").write_text("{}")
-    initial = cpu_cache_namespace()
-    (tmp_path / "model.safetensors").write_bytes(b"first revision")
-    updated = cpu_cache_namespace()
-    assert updated != initial
-    (tmp_path / "model.safetensors").write_bytes(b"second revision")
-    assert cpu_cache_namespace() != updated
-
-
-def test_cpu_namespace_includes_draft_revision(runtime: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    draft_dir = tmp_path / "draft"
-    draft_dir.mkdir()
-    args = StartArgs(model_dir=str(tmp_path), mtp_draft_model_dir=[str(draft_dir)])
-    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(args)))
-    get_env_start_args.cache_clear()
-    before = cpu_cache_namespace()
-    (draft_dir / "model.safetensors").write_bytes(b"new draft weights")
-    assert cpu_cache_namespace() != before
-
 
 @pytest.mark.parametrize("hybrid", [False, True])
 def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
@@ -415,7 +391,7 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
         assert (main_linear_state(resources).ssm_state[:, 1] == 5).all()
 
 
-def test_disk_preserves_resource_pages_and_isolates_new_model_revision(
+def test_disk_preserves_resource_pages(
     runtime: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -449,11 +425,4 @@ def test_disk_preserves_resource_pages_and_isolates_new_model_revision(
     for storage_buffer in full_state_test_buffers(full).values():
         storage_buffer.zero_()
     resources.read_req_from_cpu(client.cpu_kv_cache_tensor, pages, torch.arange(16, dtype=torch.long, device="cuda"), layouts=resources.get_cpu_transfer_layouts())
-    # 模型版本改变后使用独立磁盘文件，即使页大小及 token 哈希相同也不命中旧数据。
-    (tmp_path / "model.safetensors").write_bytes(b"new model revision")
-    next_meta = dataclasses.replace(meta, cache_namespace=cpu_cache_namespace())
-    other_client = cpu_cache_factory(next_meta)
-    other = DiskCacheWorker(0.125, other_client, str(tmp_path / "disk"))
-    assert not any(other.service.query([11, 22]))
-    assert any((tmp_path / "disk").glob(f"cache_file_{meta.cache_namespace}*"))
-    assert any((tmp_path / "disk").glob(f"cache_file_{next_meta.cache_namespace}*"))
+    assert any((tmp_path / "disk").glob("cache_file*"))

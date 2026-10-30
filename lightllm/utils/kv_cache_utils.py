@@ -51,7 +51,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    from lightllm.utils.att_resource_config import build_cpu_cache_layouts, cpu_cache_namespace
+    from lightllm.utils.att_resource_config import build_cpu_cache_layouts
 
     layouts = build_cpu_cache_layouts()
     page_bytes = 0
@@ -62,7 +62,6 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     cpu_cache_meta = CpuKVCacheMeta(
         page_num=0,
         page_bytes=page_bytes,
-        cache_namespace=cpu_cache_namespace(),
     )
 
     cpu_cache_page_num = int(
@@ -81,7 +80,6 @@ class CpuKVCacheMeta:
 
     page_num: int
     page_bytes: int
-    cache_namespace: str = ""
 
     def __post_init__(self):
         if self.page_num < 0 or self.page_bytes <= 0:

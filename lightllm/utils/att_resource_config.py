@@ -5,7 +5,6 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 import hashlib
 import json
-from pathlib import Path
 
 import torch
 
@@ -204,19 +203,3 @@ def build_cpu_cache_layouts():
             args.cpu_cache_token_page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         ), "hybrid CPU pages must match the large state-page token boundary"
     return manager.get_cpu_transfer_layouts()
-
-
-def cpu_cache_namespace():
-    """按 main/draft 模型路径及文件版本隔离磁盘缓存。"""
-    args = get_env_start_args()
-    directories = [args.model_dir, *(args.mtp_draft_model_dir or [])]
-    revisions = []
-    for directory in directories:
-        directory = Path(directory).resolve()
-        artifacts = []
-        for pattern in ("*.safetensors", "*.bin", "*.index.json", "config.json"):
-            for path in sorted(directory.glob(pattern)):
-                stat = path.stat()
-                artifacts.append((path.name, stat.st_size, stat.st_mtime_ns))
-        revisions.append((str(directory), artifacts))
-    return hashlib.sha256(repr(revisions).encode()).hexdigest()
