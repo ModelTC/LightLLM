@@ -62,17 +62,17 @@ class NixlKVTransporter:
 
     def _register_kv_move_buffer(self, kv_move_buffer: Tensor):
         self.num_pages = kv_move_buffer.shape[0]
-        self.page_len = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
+        self.page_bytes = kv_move_buffer[0].numel() * kv_move_buffer.element_size()
         self.page_reg_desc = self.nixl_agent.register_memory(kv_move_buffer)
         self.page_local_xfer_handles = self._create_paged_xfer_handles(self.page_reg_desc, self.num_pages)
 
     def _create_paged_xfer_handles(self, reg_desc: "nixlBind.nixlRegDList", page_num: int, agent_name: str = ""):
         base_addr, registered_bytes, device_id, _ = reg_desc[0]
-        if registered_bytes != page_num * self.page_len:
-            raise ValueError("PD peers must use the same page byte capacity")
+        # NIXL 原生描述记录整块注册内存的字节数，按对端页数检查单页容量是否一致。
+        assert registered_bytes == page_num * self.page_bytes, "PD peers must use the same page byte capacity"
         pages_data = []
         for page_id in range(page_num):
-            pages_data.append((base_addr + page_id * self.page_len, self.page_len, device_id))
+            pages_data.append((base_addr + page_id * self.page_bytes, self.page_bytes, device_id))
         descs = self.nixl_agent.get_xfer_descs(pages_data, "VRAM")
         return self.nixl_agent.prep_xfer_dlist(agent_name, descs, "VRAM")
 

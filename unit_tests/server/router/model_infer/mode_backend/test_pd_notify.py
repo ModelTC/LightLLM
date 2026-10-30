@@ -193,29 +193,31 @@ def test_receiver_rejects_payload_with_decode_local_mark():
 
 def test_nixl_rejects_different_peer_page_capacity_before_registering_handles():
     transporter = NixlKVTransporter.__new__(NixlKVTransporter)
-    transporter.page_len = 128
+    transporter.page_bytes = 128
     transporter.nixl_agent = SimpleNamespace(get_xfer_descs=Mock(), prep_xfer_dlist=Mock())
-    with pytest.raises(ValueError, match="same page byte capacity"):
+    with pytest.raises(AssertionError, match="same page byte capacity"):
         transporter._create_paged_xfer_handles([(4096, 512, 0, None)], 2, "peer")
     transporter.nixl_agent.get_xfer_descs.assert_not_called()
     transporter._create_paged_xfer_handles([(4096, 256, 0, None)], 2, "peer")
     transporter.nixl_agent.get_xfer_descs.assert_called_once_with([(4096, 128, 0), (4224, 128, 0)], "VRAM")
 
 
-def test_nccl_checks_peer_page_shape_before_accepting_agent():
+def test_nccl_checks_peer_page_bytes_before_accepting_agent():
     from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclAgentMetadata
 
     transporter = NcclKVTransporter.__new__(NcclKVTransporter)
     transporter.remote_agents = {}
-    transporter.kv_move_buffer = SimpleNamespace(shape=(2, 128), dtype="torch.uint8")
+    transporter.kv_move_buffer = SimpleNamespace(shape=(2, 128))
+    transporter.num_pages = 2
+    assert pickle.loads(transporter.local_page_mem_desc) == {"num_pages": 2, "page_bytes": 128}
     peer = SimpleNamespace(
         agent_name="peer",
         agent_metadata=pickle.dumps(NcclAgentMetadata("peer", "127.0.0.1", 1234, 0)),
-        page_reg_desc=pickle.dumps({"page_shape": (256,), "dtype": "torch.uint8"}),
+        page_reg_desc=pickle.dumps({"page_bytes": 256}),
     )
-    with pytest.raises(ValueError, match="same page shape"):
+    with pytest.raises(AssertionError, match="same page byte capacity"):
         transporter.connect_add_remote_agent(peer)
     assert not transporter.remote_agents
-    peer.page_reg_desc = pickle.dumps({"page_shape": (128,), "dtype": "torch.uint8"})
+    peer.page_reg_desc = transporter.local_page_mem_desc
     transporter.connect_add_remote_agent(peer)
     assert transporter.remote_agents["peer"] is peer
