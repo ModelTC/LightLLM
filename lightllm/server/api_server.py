@@ -1,5 +1,6 @@
 import torch
 from .api_cli import add_cli_args
+from lightllm.common.quantization import load_quant_config
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger, set_log_node_role
 
@@ -7,6 +8,11 @@ logger = init_logger(__name__)
 
 
 def launch_server(args: StartArgs):
+    for quant_type, quant_cfg in (("quant_type", "quant_cfg"), ("vit_quant_type", "vit_quant_cfg")):
+        try:
+            load_quant_config(getattr(args, quant_type), getattr(args, quant_cfg), platform=args.hardware_platform)
+        except ValueError as e:
+            raise ValueError(f"--{quant_type}/--{quant_cfg}: {e}") from e
     if args.use_dp_split_mode_connect_pd_master and args.run_mode != "prefill":
         raise ValueError("--use_dp_split_mode_connect_pd_master only supports prefill")
     set_log_node_role(args.run_mode)

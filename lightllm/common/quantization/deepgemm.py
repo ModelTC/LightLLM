@@ -3,7 +3,6 @@ import torch
 from typing import Optional, List, Union, Tuple
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
-from lightllm.common.quantization.registry import QUANTMETHODS
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import per_token_group_quant_fp8
 from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.log_utils import init_logger
@@ -45,7 +44,6 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         return "base-deepgemm"
 
 
-@QUANTMETHODS.register("fp8w8a8-b128-deepgemm", platform="cuda")
 class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -160,7 +158,6 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register("fp4fp8-b32-deepgemm", platform="cuda")
 class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()

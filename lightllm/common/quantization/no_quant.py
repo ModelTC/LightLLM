@@ -2,11 +2,8 @@ import torch
 from typing import Optional, List, Union, Tuple
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
-from lightllm.common.quantization.registry import QUANTMETHODS
 
 
-@QUANTMETHODS.register("none", platform="musa")
-@QUANTMETHODS.register("none", platform="cuda")
 class NoQuantization(QuantizationMethod):
     """No quantization - uses full precision weights."""
 

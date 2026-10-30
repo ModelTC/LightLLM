@@ -2,7 +2,6 @@ import torch
 from typing import Any, Optional, Tuple, List
 
 from lightllm.common.quantization.quantize_method import QuantizationMethod, WeightPack
-from lightllm.common.quantization.registry import QUANTMETHODS
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.log_utils import init_logger
 
@@ -66,7 +65,6 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
         return "awq-base"
 
 
-@QUANTMETHODS.register("awq", platform="cuda")
 class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -135,7 +133,6 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register("awq_marlin", platform="cuda")
 class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
