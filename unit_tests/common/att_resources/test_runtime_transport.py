@@ -60,10 +60,10 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
     page = allocate_transfer_buffer(managers[0], 1, device=device)
     if device == "cpu":
         with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            copy_page([managers[0]], page, page_index=0, dp_index=0, tp_size=1, token_indices=source_indices, write=True)
+            copy_page(node_att_managers=[managers[0]], pd_page_buffers=page, pd_page_index=0, dp_rank_in_node=0, tp_world_size=1, token_indices=source_indices, write_to_pd_buffer=True)
     else:
-        copy_page([managers[0]], page, page_index=0, dp_index=0, tp_size=1, token_indices=source_indices, write=True)
-        copy_page([managers[1]], page, page_index=0, dp_index=0, tp_size=1, token_indices=pd_indices, write=False)
+        copy_page(node_att_managers=[managers[0]], pd_page_buffers=page, pd_page_index=0, dp_rank_in_node=0, tp_world_size=1, token_indices=source_indices, write_to_pd_buffer=True)
+        copy_page(node_att_managers=[managers[1]], pd_page_buffers=page, pd_page_index=0, dp_rank_in_node=0, tp_world_size=1, token_indices=pd_indices, write_to_pd_buffer=False)
         assert_token_fields_equal(src, [1, 3], dst, [4, 6])
 
     cpu_pages = torch.empty((1, managers[0].get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=device == "cuda")
@@ -287,26 +287,26 @@ def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, targe
     page = allocate_transfer_buffer(source[0][0], 1, device="cuda")
     for kind in ("kv", "att_state"):
         copy_page(
-            [m for m, _ in source],
-            page,
-            page_index=0,
-            dp_index=0,
-            tp_size=source_tp,
+            node_att_managers=[m for m, _ in source],
+            pd_page_buffers=page,
+            pd_page_index=0,
+            dp_rank_in_node=0,
+            tp_world_size=source_tp,
             token_indices=torch.tensor([0, 3], dtype=torch.long, device="cuda"),
-            kind=kind,
+            task_kind=kind,
             req_idx=1,
-            write=True,
+            write_to_pd_buffer=True,
         )
         copy_page(
-            [m for m, _ in target],
-            page,
-            page_index=0,
-            dp_index=0,
-            tp_size=target_tp,
+            node_att_managers=[m for m, _ in target],
+            pd_page_buffers=page,
+            pd_page_index=0,
+            dp_rank_in_node=0,
+            tp_world_size=target_tp,
             token_indices=torch.tensor([4, 7], dtype=torch.long, device="cuda"),
-            kind=kind,
+            task_kind=kind,
             req_idx=2,
-            write=False,
+            write_to_pd_buffer=False,
         )
     for rank, (manager, full) in enumerate(target):
         for field_index, field in enumerate(full_state_test_fields(full, full_state_test_buffers(full)).values()):

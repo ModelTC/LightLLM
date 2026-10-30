@@ -1652,7 +1652,7 @@ full-attention 的 `replicated=True` 表示每个 rank 保存全部 head，例�
 
 `basemodel_utils.py` 提供 `get_resource_config(model_config, *, model_class=None)` 和 `get_full_attention_options(config, args, *, model_class=None)`，统一处理字段别名、text config 和默认 KV 维度。它们是普通工具函数，BaseModel 不再声明对应的 `_resource_config`、`_full_attention_options` 方法；具体模型仅在存在专有规则时提供可选 hook，并调用工具函数取得默认配置。传入 `model_class` 时，工具函数选择该模型的专有实现，否则使用通用逻辑。
 
-同一文件中的 `create_full_attention_definition(model_class, ...)` 和 `create_bounded_attention_definition(model_class, ...)` 只返回包含完整 config 的 meta State，不再单独返回全局 head 数。full-attention 构建使用上述配置工具；linear 构建调用具体模型可选的 `create_bounded_attention_definition` 实现，纯 full-attention 模型由工具返回空定义，基类不保留空实现。CPU 服务读取 main 和各 draft 自己的配置，通过相同的工具入口生成联合页；原生 MTP 和 DFlash 等配置转换由对应模型实现。CPU 页包含所有参与的 linear State，并为各角色安排对应区域。静态量化标定按本模型实际 full-attention 层区间选取，CPU 服务和推理端复用相同的布局构建流程。
+同一文件中的 `create_full_attention_definition(model_class, ...)` 和 `create_bounded_attention_definition(model_class, ...)` 只返回包含完整 config 的 meta State，不再单独返回全局 head 数。full-attention 构建使用上述配置工具，直接构造 `FullAttentionConfig` 并调用算法级 `create_gqa_state` / `create_mla_state`，不再经由额外的 State 构建转发函数；linear 构建调用具体模型可选的 `create_bounded_attention_definition` 实现，纯 full-attention 模型由工具返回空定义，基类不保留空实现。CPU 服务读取 main 和各 draft 自己的配置，通过相同的工具入口生成联合页；原生 MTP 和 DFlash 等配置转换由对应模型实现。CPU 页包含所有参与的 linear State，并为各角色安排对应区域。静态量化标定按明确的物理行起点和本模型 full-attention 物理层数选取，不再根据可选起点推断 main/draft 合并层数；CPU 服务和推理端复用相同的布局构建流程。`att_resource_config.py` 仅保留标定加载和 CPU 服务布局构建。
 
 资源容量确定后，buffer 地址及已绑定视图保持稳定。初始化 helper 不持有推理请求映射，也不引入请求级生命周期接口。后续模型扩展通过准备自己的 State 和实现所需 backend 完成；不需要将 draft 限定为 full attention。
 

@@ -197,16 +197,16 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 task = _task(peer, kind)
                 with torch.cuda.stream(copy_stream):
                     copy_page(
-                        [resources],
-                        buffer,
-                        page_index=task.src_page_index,
-                        dp_index=0,
-                        tp_size=1,
+                        node_att_managers=[resources],
+                        pd_page_buffers=buffer,
+                        pd_page_index=task.src_page_index,
+                        dp_rank_in_node=0,
+                        tp_world_size=1,
                         token_indices=torch.tensor(task.mem_indexes, dtype=torch.long, device=device),
-                        kind=kind,
+                        task_kind=kind,
                         req_idx=1,
                         state_token_len=task.end_kv_index,
-                        write=True,
+                        write_to_pd_buffer=True,
                     )
                 # The production sender publishes a page only after its copy event completes.
                 copy_stream.synchronize()
@@ -238,16 +238,16 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 # Match production: unpack on a separate stream after the done notification.
                 with torch.cuda.stream(copy_stream):
                     copy_page(
-                        [resources],
-                        buffer,
-                        page_index=request.dst_page_index,
-                        dp_index=0,
-                        tp_size=1,
+                        node_att_managers=[resources],
+                        pd_page_buffers=buffer,
+                        pd_page_index=request.dst_page_index,
+                        dp_rank_in_node=0,
+                        tp_world_size=1,
                         token_indices=torch.tensor([8, 12, 10, 15, 11], dtype=torch.long, device=device) if kind == "kv" else torch.tensor([], dtype=torch.long, device=device),
-                        kind=kind,
+                        task_kind=kind,
                         req_idx=2,
                         state_token_len=request.end_kv_index,
-                        write=False,
+                        write_to_pd_buffer=False,
                     )
                 copy_stream.synchronize()
             expected = _snapshot(resources, full, [8, 12, 10, 15, 11], 2, 0)

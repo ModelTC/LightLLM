@@ -173,22 +173,13 @@ class _DecodeTransModule:
         for dp_index in range(self.args.dp // self.args.nnodes):
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 copy_page(
-                    self.resource_managers,
-                    self.kv_move_buffer,
-                    write=True,
+                    node_att_managers=self.resource_managers,
+                    pd_page_buffers=self.kv_move_buffer,
+                    write_to_pd_buffer=False,
                     token_indices=torch.tensor([0], dtype=torch.long, device=self.kv_move_buffer.device),
-                    page_index=0,
-                    dp_index=dp_index,
-                    tp_size=self.dp_world_size,
-                )
-                copy_page(
-                    self.resource_managers,
-                    self.kv_move_buffer,
-                    write=False,
-                    token_indices=torch.tensor([0], dtype=torch.long, device=self.kv_move_buffer.device),
-                    page_index=0,
-                    dp_index=dp_index,
-                    tp_size=self.dp_world_size,
+                    pd_page_index=0,
+                    dp_rank_in_node=dp_index,
+                    tp_world_size=self.dp_world_size,
                 )
                 torch.cuda.current_stream().synchronize()
         return
@@ -409,16 +400,16 @@ class _DecodeTransModule:
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 copy_start_event.record(self.copy_cuda_stream)
                 copy_page(
-                    self.resource_managers,
-                    self.kv_move_buffer,
-                    write=False,
+                    node_att_managers=self.resource_managers,
+                    pd_page_buffers=self.kv_move_buffer,
+                    write_to_pd_buffer=False,
                     token_indices=torch.tensor(
                         trans_task.mem_indexes, dtype=torch.long, device=self.kv_move_buffer.device
                     ),
-                    page_index=trans_task.dst_page_index,
-                    dp_index=trans_task.decode_dp_index,
-                    tp_size=self.dp_world_size,
-                    kind=trans_task.page_kind,
+                    pd_page_index=trans_task.dst_page_index,
+                    dp_rank_in_node=trans_task.decode_dp_index,
+                    tp_world_size=self.dp_world_size,
+                    task_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
                     state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
                 )

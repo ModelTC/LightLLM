@@ -168,29 +168,29 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     assert source_resources[0].get_pd_bounded_att_or_tail_transfer_layouts().keys() == dest_resources[0].get_pd_bounded_att_or_tail_transfer_layouts().keys()
     for kind in ("kv", "att_state"):
         copy_page(
-            source_resources,
-            source_buffer,
-            page_index=0,
-            dp_index=0,
-            tp_size=prefill_tp,
+            node_att_managers=source_resources,
+            pd_page_buffers=source_buffer,
+            pd_page_index=0,
+            dp_rank_in_node=0,
+            tp_world_size=prefill_tp,
             token_indices=torch.tensor(src_indexes if kind == "kv" else [], dtype=torch.long, device="cuda"),
-            kind=kind,
+            task_kind=kind,
             req_idx=src_req,
             state_token_len=length,
-            write=True,
+            write_to_pd_buffer=True,
         )
         dest_buffer.copy_(source_buffer)
         copy_page(
-            dest_resources,
-            dest_buffer,
-            page_index=0,
-            dp_index=0,
-            tp_size=decode_tp,
+            node_att_managers=dest_resources,
+            pd_page_buffers=dest_buffer,
+            pd_page_index=0,
+            dp_rank_in_node=0,
+            tp_world_size=decode_tp,
             token_indices=torch.tensor(dst_indexes if kind == "kv" else [], dtype=torch.long, device="cuda"),
-            kind=kind,
+            task_kind=kind,
             req_idx=dst_req,
             state_token_len=length,
-            write=False,
+            write_to_pd_buffer=False,
         )
     torch.cuda.synchronize()
 

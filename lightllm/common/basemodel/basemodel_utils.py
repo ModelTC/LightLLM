@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
+import hashlib
+import json
 from lightllm.common.build_utils import repair_config
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from lightllm.common.att_resources.full_att import FullAttentionState
     from easydict import EasyDict
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.server.core.objs.start_args_type import StartArgs
@@ -65,23 +68,51 @@ def create_full_attention_definition(
     tp_rank: int = 0,
     tp_world_size: int = 1,
     model_logical_layer_ids: Sequence[int] | None = None,
-    calibration_storage_layer_start: int | None = None,
-):
-    """Build a meta State using the model's configuration and storage hooks."""
-    from lightllm.utils.att_resource_config import build_full_attention_state
+    calibration_storage_layer_start: int = 0,
+) -> FullAttentionState | None:
+    """按模型配置直接创建算法 State；静态 FP8 使用当前模型的物理层标定区间。"""
+    from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state, create_mla_state
+    from lightllm.utils.att_resource_config import load_static_fp8_calibration
+    from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
     config = get_resource_config(model_config, model_class=model_class)
     options = get_full_attention_options(config, args, model_class=model_class, model_logical_layer_ids=model_logical_layer_ids)
     if not options["logical_layer_groups"]:
         return None
-    state = build_full_attention_state(
-        args,
-        **options,
+    mla = options.get("mla", False)
+    packed = options.get("packed", False)
+    dtype = options.get("dtype")
+    layout_config = FullAttentionConfig(
+        logical_layer_groups=options["logical_layer_groups"],
+        global_head_num=options["heads"],
+        head_dim=options["dim"],
+        dtype=get_torch_dtype(args.data_type) if dtype is None else dtype,
         tp_rank=tp_rank,
         tp_world_size=tp_world_size,
-        calibration_storage_layer_start=calibration_storage_layer_start,
+        replicated=options.get("replicated", False) or mla or packed,
     )
-    return state
+    if mla or packed:
+        return create_mla_state(
+            config=layout_config, kv_type=args.llm_kv_type, packed=packed, page_size=args.page_size, device="meta",
+        )
+
+    scales = q_scales = None
+    calibration_id = ""
+    if args.llm_kv_type in ("fp8kv_sph", "fp8kv_spt"):
+        calibration, scales, q_scales = load_static_fp8_calibration(
+            args=args,
+            per_head=args.llm_kv_type == "fp8kv_sph",
+            storage_layer_count=len(layout_config.logical_layer_groups),
+            heads=layout_config.head_num,
+            tp_rank=tp_rank,
+            tp_world_size=tp_world_size,
+            storage_layer_start=calibration_storage_layer_start,
+        )
+        calibration_id = hashlib.sha256(json.dumps(calibration, sort_keys=True).encode()).hexdigest()
+    return create_gqa_state(
+        config=layout_config, kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+        scales=scales, q_scales=q_scales, calibration_id=calibration_id,
+    )
 
 
 def create_bounded_attention_definition(
