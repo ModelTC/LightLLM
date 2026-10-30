@@ -36,9 +36,14 @@ class Glm5NextTpPartModel(TpPartBaseModel):
 
     @classmethod
     def _create_bounded_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
-        tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        model_logical_layer_ids: tuple[int, ...],
+        request_capacity: int = 1,
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+        device: str = "meta",
     ) -> list["BoundedAttentionState"]:
         """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
         from lightllm.common.att_resources.bounded_att import create_kda_state, ConvSSMStateConfig
@@ -63,7 +68,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
             ),
-            request_capacity=request_capacity, mtp_step=args.mtp_step, device=device,
+            request_capacity=request_capacity,
+            mtp_step=args.mtp_step,
+            device=device,
         )
         return [state]
 
@@ -101,8 +108,12 @@ class Glm5NextTpPartModel(TpPartBaseModel):
 
     @classmethod
     def _create_full_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """GLM full-attention 层采用 NoPE packed MLA，并保存压缩 indexer 字段。"""
         from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
@@ -121,17 +132,26 @@ class Glm5NextTpPartModel(TpPartBaseModel):
                 global_head_num=1,
                 head_dim=config["kv_lora_rank"],
                 dtype=get_torch_dtype(args.data_type),
-                tp_rank=tp_rank, tp_world_size=tp_world_size,
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
             ),
-            kv_type=args.llm_kv_type, packed=True, page_size=args.page_size, device="meta",
+            kv_type=args.llm_kv_type,
+            packed=True,
+            page_size=args.page_size,
+            device="meta",
         )
         return [state]
 
     @classmethod
     def _create_att_tail_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
-        tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        model_logical_layer_ids: tuple[int, ...],
+        request_capacity: int = 1,
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+        device: str = "meta",
     ) -> list["AttentionTailState"]:
         """直接选择本模型需要 K-pool tail 的层，不依赖 full State 创建过程。"""
         from lightllm.common.att_resources.att_tail import create_kpool_state, KPoolStateConfig
@@ -147,10 +167,15 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         state = create_kpool_state(
             config=KPoolStateConfig(
                 logical_layer_ids=logical_layer_ids,
-                pool_size=config["index_kpool"], head_dim=config["index_head_dim"],
-                dtype=get_torch_dtype(args.data_type), tp_rank=tp_rank, tp_world_size=tp_world_size,
+                pool_size=config["index_kpool"],
+                head_dim=config["index_head_dim"],
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
             ),
-            request_capacity=request_capacity, mtp_step=args.mtp_step, device=device,
+            request_capacity=request_capacity,
+            mtp_step=args.mtp_step,
+            device=device,
         )
         return [state]
 

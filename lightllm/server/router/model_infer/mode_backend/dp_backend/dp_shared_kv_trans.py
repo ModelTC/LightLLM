@@ -81,7 +81,10 @@ class DPKVSharedMoudle:
         rank_max_radix_cache_lens = np.max(available_lens, axis=1)
         # 为本 DP 负责的请求选择可用前缀最长的来源。
         for req_index, req, max_req_radix_cache_len, req_dp_rank in zip(
-            list(range(len(reqs))), reqs, rank_max_radix_cache_lens, req_dp_ranks
+            list(range(len(reqs))),
+            reqs,
+            rank_max_radix_cache_lens,
+            req_dp_ranks,
         ):
             # 当前请求是本 dp_rank 负责的
             is_current_dp_handle = req_dp_rank == self.dp_rank_in_node

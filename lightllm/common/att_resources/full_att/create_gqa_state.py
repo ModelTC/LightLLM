@@ -14,7 +14,6 @@ from .static_fp8_state import StaticFP8AttentionConfig, StaticFP8FullAttentionSt
 
 def create_gqa_state(
     config: FullAttentionConfig,
-    *,
     kv_type: Literal["None", "int4kv", "int8kv", "fp8kv_spt", "fp8kv_sph"] = "None",
     page_size: int = 1,
     device: str | torch.device = "cuda",

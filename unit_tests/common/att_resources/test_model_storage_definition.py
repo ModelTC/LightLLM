@@ -106,7 +106,13 @@ def test_model_and_cpu_service_use_identical_storage_geometry(
     local_heads: int,
 ):
     # Exercise raw HF aliases as well as a wrapped multimodal config.
-    config = dict(model_type="llama", n_head=8, n_embd=128, n_layer=2, **overrides)
+    config = dict(
+        model_type="llama",
+        n_head=8,
+        n_embd=128,
+        n_layer=2,
+        **overrides,
+    )
     wrapped = {"model_type": "gemma4", "text_config": config} if model_cls is Gemma4TpPartModel else config
     (tmp_path / "config.json").write_text(json.dumps(wrapped))
     monkeypatch.setattr("lightllm.utils.llm_utils.get_llm_model_class", lambda: model_cls)
@@ -151,7 +157,12 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
     reference.set_att_state("main", state)
     reference.full_att_allocator = FullAttKVAllocator(state.capacity, state.page_size, pin_memory=False)
     reference.finish_state_creation()
-    args = StartArgs(page_size=4, run_mode="prefill", pd_kv_page_size=8, pd_kv_page_num=3)
+    args = StartArgs(
+        page_size=4,
+        run_mode="prefill",
+        pd_kv_page_size=8,
+        pd_kv_page_num=3,
+    )
     reserve = reference.get_pd_page_bytes() * args.pd_kv_page_num
     required = state.get_token_bytes() * (32 + args.page_size)
     # One byte below the full 32-token budget must drop a complete page.
@@ -170,11 +181,21 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
     monkeypatch.setattr(
         "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
-    template = rebuild_full_state(state, config=state.config, token_capacity=0, device="meta")
+    template = rebuild_full_state(
+        template=state,
+        config=state.config,
+        token_capacity=0,
+        device="meta",
+    )
     resources = AttResourceManager(request_capacity=1)
     resources.set_att_state("main", rebuild_full_state(template, config=template.config))
     resources.finish_state_creation()
-    resources.initialize_resources(args, token_capacity=None, mem_fraction=0.75, device="cpu")
+    resources.initialize_resources(
+        args=args,
+        token_capacity=None,
+        mem_fraction=0.75,
+        device="cpu",
+    )
     assert resources.full_att_allocator.size == 28
     assert resources.get_pd_page_bytes() == reference.get_pd_page_bytes()
     assert observed_devices == [torch.device("cuda", 3)]
@@ -189,12 +210,19 @@ def test_cpu_layout_uses_all_model_factory_states(
     class MixedStorageModel(LlamaTpPartModel):
         @classmethod
         def _create_full_att_states(
-            cls, model_config: dict[str, object], args: StartArgs | EasyDict, *,
-            model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+            cls,
+            model_config: dict[str, object],
+            args: StartArgs | EasyDict,
+            model_logical_layer_ids: tuple[int, ...],
+            tp_rank: int = 0,
+            tp_world_size: int = 1,
         ) -> list[FullAttentionState]:
             (template,) = super()._create_full_att_states(
-                model_config=model_config, args=args, model_logical_layer_ids=model_logical_layer_ids,
-                tp_rank=tp_rank, tp_world_size=tp_world_size,
+                model_config=model_config,
+                args=args,
+                model_logical_layer_ids=model_logical_layer_ids,
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
             )
             return [
                 GQAFullAttentionState(
@@ -209,7 +237,12 @@ def test_cpu_layout_uses_all_model_factory_states(
                 ),
             ]
 
-    config = dict(model_type="llama", num_attention_heads=8, hidden_size=128, num_hidden_layers=3)
+    config = dict(
+        model_type="llama",
+        num_attention_heads=8,
+        hidden_size=128,
+        num_hidden_layers=3,
+    )
     (tmp_path / "config.json").write_text(json.dumps(config))
     monkeypatch.setattr("lightllm.utils.llm_utils.get_llm_model_class", lambda: MixedStorageModel)
     cpu_layouts = build_cpu_cache_layouts()

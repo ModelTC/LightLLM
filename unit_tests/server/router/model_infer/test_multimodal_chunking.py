@@ -51,7 +51,10 @@ def test_bounded_reset_preserves_tail_and_cache_miss_resets_all(monkeypatch):
     monkeypatch.setattr(g_infer_context, "att_resource_manager", resources)
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(
-        linear_att_hash_page_size=4, linear_att_page_block_num=2, max_req_total_len=16, page_size=4
+        linear_att_hash_page_size=4,
+        linear_att_page_block_num=2,
+        max_req_total_len=16,
+        page_size=4,
     )
     req.req_idx = 1
     req.cur_kv_len = req.cur_output_len = 0
@@ -93,7 +96,11 @@ def test_bounded_reset_preserves_tail_and_cache_miss_resets_all(monkeypatch):
     ],
 )
 def test_hybrid_chunks_save_state_only_at_original_boundaries(
-    input_len, big_page_num, spans, expected_big, expected_small
+    input_len,
+    big_page_num,
+    spans,
+    expected_big,
+    expected_small,
 ):
     from lightllm.server.router.model_infer.infer_batch import InferReq, InferenceContext
 
@@ -143,7 +150,13 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     [(1, True, 1201, 1024), (1, False, 700, 512), (128, True, 0, 1024), (128, False, 640, 512)],
 )
 def test_full_attention_gpu_restore_stays_outside_image(
-    monkeypatch, tmp_path, cpu_cache_factory, page_size, same_image, gpu_end, cpu_end
+    monkeypatch,
+    tmp_path,
+    cpu_cache_factory,
+    page_size,
+    same_image,
+    gpu_end,
+    cpu_end,
 ):
     from lightllm.server.multi_level_kv_cache.manager import MultiLevelKVCacheManager
     from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
@@ -313,7 +326,9 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
             att_resource_manager=SimpleNamespace(
                 get_cpu_transfer_layouts=lambda: {},
                 bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: list(range(count))),
-                read_req_from_cpu=lambda buffer, pages, tokens, **kwargs: loaded.append(req.hold_kv_len),
+                read_req_from_cpu=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded.append(
+                    req.hold_kv_len
+                ),
             ),
         ),
     )

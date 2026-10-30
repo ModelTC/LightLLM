@@ -24,16 +24,26 @@ if TYPE_CHECKING:
 
 def make_state(
     cls: type[KDAState] | type[GDNState] = KDAState,
-    *,
     device: str | torch.device | int = "cpu",
     heads: int = 1,
     mtp_step: int = 2,
 ):
     config = ConvSSMStateConfig(
-        logical_layer_ids=(1, 3), global_k_heads=heads, global_v_heads=heads, key_dim=2, value_dim=2, conv_width=2,
-        conv_dtype=torch.float32, ssm_dtype=torch.float32,
+        logical_layer_ids=(1, 3),
+        global_k_heads=heads,
+        global_v_heads=heads,
+        key_dim=2,
+        value_dim=2,
+        conv_width=2,
+        conv_dtype=torch.float32,
+        ssm_dtype=torch.float32,
     )
-    state = cls(config, request_capacity=3, mtp_step=mtp_step, device=device)
+    state = cls(
+        config=config,
+        request_capacity=3,
+        mtp_step=mtp_step,
+        device=device,
+    )
     manager = AttResourceManager(request_capacity=3)
     manager.set_att_state("main", state)
     state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
@@ -61,8 +71,18 @@ def page_layout(state: KDAState | GDNState):
                 axes=("channel", "layer", "window"),
                 shape=conv_shape,
                 axis_slices=(
-                    AxisSlice(axis="channel", src_start=0, dst_start=0, length=cfg.conv_channels),
-                    AxisSlice(axis="window", src_start=0, dst_start=0, length=cfg.conv_width),
+                    AxisSlice(
+                        axis="channel",
+                        src_start=0,
+                        dst_start=0,
+                        length=cfg.conv_channels,
+                    ),
+                    AxisSlice(
+                        axis="window",
+                        src_start=0,
+                        dst_start=0,
+                        length=cfg.conv_width,
+                    ),
                 ),
             ),
             TransferRegion(
@@ -73,9 +93,24 @@ def page_layout(state: KDAState | GDNState):
                 axes=("layer", "head", "key_dim", "value_dim"),
                 shape=ssm_shape,
                 axis_slices=(
-                    AxisSlice(axis="head", src_start=0, dst_start=0, length=cfg.num_v_heads),
-                    AxisSlice(axis="key_dim", src_start=0, dst_start=0, length=cfg.key_dim),
-                    AxisSlice(axis="value_dim", src_start=0, dst_start=0, length=cfg.value_dim),
+                    AxisSlice(
+                        axis="head",
+                        src_start=0,
+                        dst_start=0,
+                        length=cfg.num_v_heads,
+                    ),
+                    AxisSlice(
+                        axis="key_dim",
+                        src_start=0,
+                        dst_start=0,
+                        length=cfg.key_dim,
+                    ),
+                    AxisSlice(
+                        axis="value_dim",
+                        src_start=0,
+                        dst_start=0,
+                        length=cfg.value_dim,
+                    ),
                 ),
             ),
         ),
@@ -94,10 +129,21 @@ def test_prefill_state_is_saved_and_restored(
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     config = ConvSSMStateConfig(
-        logical_layer_ids=(1, 3), global_k_heads=1, global_v_heads=1, key_dim=2, value_dim=2, conv_width=2,
-        conv_dtype=torch.float32, ssm_dtype=torch.float32,
+        logical_layer_ids=(1, 3),
+        global_k_heads=1,
+        global_v_heads=1,
+        key_dim=2,
+        value_dim=2,
+        conv_width=2,
+        conv_dtype=torch.float32,
+        ssm_dtype=torch.float32,
     )
-    state = cls(config, request_capacity=3, mtp_step=2, device=device)
+    state = cls(
+        config=config,
+        request_capacity=3,
+        mtp_step=2,
+        device=device,
+    )
     assert state.resource_id is None and not hasattr(config, "resource_id")
     assert state.big_pages_pool is None and state.small_pages_pool is None
     conv, ssm = state.get_layer_view(3)
@@ -132,12 +178,23 @@ def test_prefill_state_is_saved_and_restored(
 
 def test_gdn_dimensions_and_page_restore():
     config = replace(
-        make_state().config, global_k_heads=1, global_v_heads=2, key_dim=2, value_dim=3
+        make_state().config,
+        global_k_heads=1,
+        global_v_heads=2,
+        key_dim=2,
+        value_dim=3,
     )
-    state = GDNState(config, request_capacity=3, mtp_step=2, device="cpu")
+    state = GDNState(
+        config=config,
+        request_capacity=3,
+        mtp_step=2,
+        device="cpu",
+    )
     state.initialize_page_pools(big_page_capacity=2, small_page_capacity=2, pin_memory=False)
     conv = torch.arange(40, dtype=config.conv_dtype).reshape(2, 10, 2)
-    ssm = torch.arange(24, dtype=config.ssm_dtype).reshape(2, 2, 2, 3)
+    ssm = torch.arange(24, dtype=config.ssm_dtype).reshape(
+        shape=(2, 2, 2, 3),
+    )
     state.conv_state[:, 0, :, :2].copy_(conv)
     state.ssm_state[:, 0].copy_(ssm)
     for page_kind in ("big", "small"):
@@ -178,16 +235,38 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
     source.save_bounded_att_pages([0], page_kind="big", slot_ids=[0])
     layout = page_layout(source)
     buffer = torch.full((3, layout.byte_end), 255, dtype=torch.uint8)
-    source.write_page_state_to_cpu("big", [0], buffer, [2], layout=layout)
+    source.write_page_state_to_cpu(
+        page_kind="big",
+        slot_ids=[0],
+        cpu_page_buffers=buffer,
+        cpu_page_indices=[2],
+        layout=layout,
+    )
     assert (buffer[:2] == 255).all() and (buffer[2, :16] == 255).all()
     target = make_state(cls)
-    target.read_page_state_from_cpu(buffer, [2], big_page_slot_ids=[1], layout=layout)
+    target.read_page_state_from_cpu(
+        cpu_page_buffers=buffer,
+        cpu_page_indices=[2],
+        big_page_slot_ids=[1],
+        layout=layout,
+    )
     target.restore_bounded_att_pages([2], page_kind="big", slot_ids=[1])
     assert (target.conv_state[:, 2, :, :2] == 13).all()
     assert (target.ssm_state[:, 6] == 29).all()
     # 页池只保存快照数据；前缀关联由调用方维护，读回的快照可以再次写出。
-    target.read_page_state_from_cpu(buffer, [2], big_page_slot_ids=[0], layout=layout)
-    target.write_page_state_to_cpu("big", [0], buffer, [0], layout=layout)
+    target.read_page_state_from_cpu(
+        cpu_page_buffers=buffer,
+        cpu_page_indices=[2],
+        big_page_slot_ids=[0],
+        layout=layout,
+    )
+    target.write_page_state_to_cpu(
+        page_kind="big",
+        slot_ids=[0],
+        cpu_page_buffers=buffer,
+        cpu_page_indices=[0],
+        layout=layout,
+    )
     assert torch.equal(buffer[0], buffer[2])
 
 
@@ -206,11 +285,26 @@ def test_pd_roundtrip_uses_baseline_state_and_page_relative_offset(
     source.ssm_state[:, 0].fill_(47)
     layout = page_layout(source)
     # PD 只传 Conv/SSM，仍保留非零区域起点以覆盖组合页偏移。
-    allocation = torch.full((3, layout.byte_end), 254, dtype=torch.uint8, device=device)
+    allocation = torch.full(
+        size=(3, layout.byte_end),
+        fill_value=254,
+        dtype=torch.uint8,
+        device=device,
+    )
     page = allocation[1]
-    source.write_to_pd_buffer(0, allocation, pd_page_index=1, layout=layout)
+    source.write_to_pd_buffer(
+        req_idx=0,
+        pd_page_buffers=allocation,
+        pd_page_index=1,
+        layout=layout,
+    )
     target = make_state(cls, device=device, mtp_step=1)
-    target.read_from_pd_buffer(allocation, 2, pd_page_index=1, layout=layout)
+    target.read_from_pd_buffer(
+        pd_page_buffers=allocation,
+        req_idx=2,
+        pd_page_index=1,
+        layout=layout,
+    )
     assert (target.conv_state[:, 2, :, :2] == 23).all()
     assert (target.ssm_state[:, 4] == 47).all()
     assert (allocation[0] == 254).all() and (allocation[2] == 254).all()

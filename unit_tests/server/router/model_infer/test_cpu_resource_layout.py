@@ -76,7 +76,6 @@ def make_runtime(
     encoding: str,
     model_cls: type[TpPartBaseModel],
     tp: int,
-    *,
     mtp_layers: int = 0,
 ):
     hybrid = kind.startswith("qwen") or kind == "glm"
@@ -119,7 +118,12 @@ def make_runtime(
         mtp_step=mtp_layers,
     )
     if mtp_layers:
-        draft_config = dict(config, num_hidden_layers=1, n_layer=1, full_attention_interval=1)
+        draft_config = dict(
+            config,
+            num_hidden_layers=1,
+            n_layer=1,
+            full_attention_interval=1,
+        )
         draft_dir = tmp_path / "draft"
         draft_dir.mkdir()
         (draft_dir / "config.json").write_text(json.dumps(draft_config))
@@ -170,7 +174,12 @@ def make_runtime(
             draft.is_mtp_draft_model = True
             draft.main_model, draft.mtp_previous_draft_models = model, list(drafts)
             draft.args = args
-            draft.config = dict(config, num_hidden_layers=1, n_layer=1, full_attention_interval=1)
+            draft.config = dict(
+                config,
+                num_hidden_layers=1,
+                n_layer=1,
+                full_attention_interval=1,
+            )
             draft.max_total_token_num, draft.max_req_num = 16, 1
             draft.tp_world_size_, draft.tp_rank_ = tp, rank
             prepare_model_states(draft, logical_layer_ids=(config["num_hidden_layers"] + step,))
@@ -196,7 +205,15 @@ def test_cpu_service_describes_main_and_draft_as_distinct_resources(
     model_cls: type[TpPartBaseModel],
     tp: int,
 ):
-    meta, managers = make_runtime(monkeypatch, tmp_path, kind, encoding, model_cls, tp, mtp_layers=2)
+    meta, managers = make_runtime(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        kind=kind,
+        encoding=encoding,
+        model_cls=model_cls,
+        tp=tp,
+        mtp_layers=2,
+    )
     for resources in managers:
         (main,) = resources.get_full_attention_states("main")
         (draft,) = resources.get_full_attention_states("draft0")
@@ -223,7 +240,14 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
     model_cls: type[TpPartBaseModel],
     tp: int,
 ):
-    meta, managers = make_runtime(monkeypatch, tmp_path, kind, encoding, model_cls, tp)
+    meta, managers = make_runtime(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        kind=kind,
+        encoding=encoding,
+        model_cls=model_cls,
+        tp=tp,
+    )
     # No byte-size formulas duplicated in the test: check the service's actual
     # meta-device descriptors against every real model's layout.
     for resources in managers:
@@ -255,7 +279,13 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
                 if "token" in f.axes
             }
         )
-        resources.write_req_to_cpu(torch.arange(8, dtype=torch.long, device="cuda"), buffer, [2], layouts=resources.get_cpu_transfer_layouts(), **kwargs)
+        resources.write_req_to_cpu(
+            token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
+            cpu_page_buffers=buffer,
+            cpu_page_indices=[2],
+            layouts=resources.get_cpu_transfer_layouts(),
+            **kwargs,
+        )
     torch.cuda.synchronize()
     for resources, fields in zip(managers, expected):
         (full,) = resources.get_full_attention_states("main")
@@ -268,7 +298,18 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
                 big_page_slot_ids=[slot],
                 req_idx=1,
             )
-        resources.read_req_from_cpu(buffer, [2], torch.arange(8, 16, dtype=torch.long, device="cuda"), layouts=resources.get_cpu_transfer_layouts(), **kwargs)
+        resources.read_req_from_cpu(
+            cpu_page_buffers=buffer,
+            cpu_page_indices=[2],
+            token_indices=torch.arange(
+                start=8,
+                end=16,
+                dtype=torch.long,
+                device="cuda",
+            ),
+            layouts=resources.get_cpu_transfer_layouts(),
+            **kwargs,
+        )
         if resources.bounded_att_big_page_allocator is not None:
             assert (main_linear_state(resources).conv_state[:, 1] == 3).all()
             assert (main_linear_state(resources).ssm_state[:, 1] == 5).all()
@@ -292,7 +333,14 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
     from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
 
     kind, encoding, cls = ("qwen", "None", Qwen3NextTpPartModel) if hybrid else ("int4", "int4kv", LlamaTpPartModel)
-    meta, (resources,) = make_runtime(monkeypatch, tmp_path, kind, encoding, cls, 1)
+    meta, (resources,) = make_runtime(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        kind=kind,
+        encoding=encoding,
+        model_cls=cls,
+        tp=1,
+    )
     meta.page_num = 2
     client = cpu_cache_factory(meta)
     pages, _ = client.allocate_pages([11, 22], disk_offload_enable=False)
@@ -383,7 +431,11 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
         destination = resources.bounded_att_big_page_allocator.alloc(1)[0]
         kwargs = dict(big_page_slot_ids=[destination], req_idx=1)
     resources.read_req_from_cpu(
-        client.cpu_kv_cache_tensor, [pages[1]], torch.arange(8, dtype=torch.long, device="cuda"), layouts=resources.get_cpu_transfer_layouts(), **kwargs
+        cpu_page_buffers=client.cpu_kv_cache_tensor,
+        cpu_page_indices=[pages[1]],
+        token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
+        layouts=resources.get_cpu_transfer_layouts(),
+        **kwargs,
     )
     for field in full_state_test_fields(full, full_state_test_buffers(full)).values():
         if "token" in field.axes:
@@ -404,14 +456,26 @@ def test_disk_preserves_resource_pages(
     pytest.importorskip("light_mem")
     from lightllm.server.multi_level_kv_cache.disk_cache_worker import DiskCacheWorker
 
-    meta, (resources,) = make_runtime(monkeypatch, tmp_path, "packed_fp8", "fp8kv_dsa", Deepseek3_2TpPartModel, 1)
+    meta, (resources,) = make_runtime(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        kind="packed_fp8",
+        encoding="fp8kv_dsa",
+        model_cls=Deepseek3_2TpPartModel,
+        tp=1,
+    )
     meta.page_num = 2
     client = cpu_cache_factory(meta)
     pages, _ = client.allocate_pages([11, 22], disk_offload_enable=True)
     (full,) = resources.get_full_attention_states("main")
     for storage_buffer in full_state_test_buffers(full).values():
         storage_buffer.random_(0, 256)
-    resources.write_req_to_cpu(torch.arange(16, dtype=torch.long, device="cuda"), client.cpu_kv_cache_tensor, pages, layouts=resources.get_cpu_transfer_layouts())
+    resources.write_req_to_cpu(
+        token_indices=torch.arange(16, dtype=torch.long, device="cuda"),
+        cpu_page_buffers=client.cpu_kv_cache_tensor,
+        cpu_page_indices=pages,
+        layouts=resources.get_cpu_transfer_layouts(),
+    )
     torch.cuda.synchronize()
     expected = client.cpu_kv_cache_tensor.clone()
     worker = DiskCacheWorker(0.125, client, str(tmp_path / "disk"))
@@ -426,5 +490,10 @@ def test_disk_preserves_resource_pages(
     assert torch.equal(client.cpu_kv_cache_tensor, expected)
     for storage_buffer in full_state_test_buffers(full).values():
         storage_buffer.zero_()
-    resources.read_req_from_cpu(client.cpu_kv_cache_tensor, pages, torch.arange(16, dtype=torch.long, device="cuda"), layouts=resources.get_cpu_transfer_layouts())
+    resources.read_req_from_cpu(
+        cpu_page_buffers=client.cpu_kv_cache_tensor,
+        cpu_page_indices=pages,
+        token_indices=torch.arange(16, dtype=torch.long, device="cuda"),
+        layouts=resources.get_cpu_transfer_layouts(),
+    )
     assert any((tmp_path / "disk").glob("cache_file*"))

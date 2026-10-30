@@ -42,7 +42,6 @@ class GQAFullAttentionState(FullAttentionState):
         self,
         layout_config: FullAttentionConfig,
         page_size: int = 1,
-        *,
         device: str | torch.device = "cuda",
     ) -> None:
         """只记录布局配置，KV 与 HOLD 页由后续统一容量初始化分配。"""
@@ -157,7 +156,6 @@ class GQAFullAttentionState(FullAttentionState):
         token_indices: torch.Tensor,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
-        *,
         layout: StateTransferLayout,
         cpu_page_readies: list[bool] | None = None,
     ) -> None:
@@ -179,7 +177,6 @@ class GQAFullAttentionState(FullAttentionState):
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
         token_indices: torch.Tensor,
-        *,
         layout: StateTransferLayout,
     ) -> None:
         """从指定 CPU 页读回 token 数据，保留目标中由其他资源或 TP 分片持有的区域。"""
@@ -233,7 +230,6 @@ class GQAFullAttentionState(FullAttentionState):
         self,
         token_indices: torch.Tensor,
         pd_page_buffers: torch.Tensor,
-        *,
         pd_page_index: int,
         layout: StateTransferLayout,
     ) -> None:
@@ -253,7 +249,6 @@ class GQAFullAttentionState(FullAttentionState):
         self,
         pd_page_buffers: torch.Tensor,
         token_indices: torch.Tensor,
-        *,
         pd_page_index: int,
         layout: StateTransferLayout,
     ) -> None:
@@ -280,7 +275,10 @@ class GQAFullAttentionState(FullAttentionState):
         regions = []
         logger.debug(
             "%s building transfer regions: TP=%d/%d, tokens_per_page=%d",
-            self.resource_id, config.tp_rank, config.tp_world_size, page_tokens,
+            self.resource_id,
+            config.tp_rank,
+            config.tp_world_size,
+            page_tokens,
         )
         # 阶段一：按本方案固定字段计算形状和 dtype，不分配 meta 存储。
         field_specs = (
@@ -335,11 +333,20 @@ class GQAFullAttentionState(FullAttentionState):
             byte_offset = field_region.byte_end
             logger.debug(
                 "%s field %s: head_start=%d, heads=%d, replicas=%d, write_enabled=%s, bytes=[%d, %d)",
-                self.resource_id, field_name, head_start, local_head_count, replica_count,
-                write_enabled, field_region.byte_start, field_region.byte_end,
+                self.resource_id,
+                field_name,
+                head_start,
+                local_head_count,
+                replica_count,
+                write_enabled,
+                field_region.byte_start,
+                field_region.byte_end,
             )
         logger.debug(
-            "%s transfer regions built: fields=%d, total_bytes=%d", self.resource_id, len(regions), byte_offset
+            "%s transfer regions built: fields=%d, total_bytes=%d",
+            self.resource_id,
+            len(regions),
+            byte_offset,
         )
         return tuple(regions)
 

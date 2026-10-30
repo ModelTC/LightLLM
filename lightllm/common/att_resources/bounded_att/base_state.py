@@ -45,7 +45,6 @@ class BoundedAttentionState(ABC):
         self,
         big_page_capacity: int,
         small_page_capacity: int = 0,
-        *,
         device: str | torch.device | int = "cpu",
         pin_memory: bool = True,
     ) -> None:
@@ -72,12 +71,12 @@ class BoundedAttentionState(ABC):
         ...
 
     @abstractmethod
-    def save_bounded_att_pages(self, req_indices: List[int], *, page_kind: PageKind, slot_ids: List[int]) -> None:
+    def save_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
         """将 prefill 完成后的基准运行态保存到指定页槽位，前缀关联由调用方维护。"""
         ...
 
     @abstractmethod
-    def restore_bounded_att_pages(self, req_indices: List[int], *, page_kind: PageKind, slot_ids: List[int]) -> None:
+    def restore_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
         """从调用方选定的页槽位恢复运行态和控制信息，保留源快照数据。"""
         ...
 
@@ -110,7 +109,6 @@ class BoundedAttentionState(ABC):
         slot_ids: List[int],
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
-        *,
         layout: StateTransferLayout,
         cpu_page_readies: list[bool] | None = None,
     ) -> None:
@@ -122,7 +120,6 @@ class BoundedAttentionState(ABC):
         self,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
-        *,
         big_page_slot_ids: List[int],
         layout: StateTransferLayout,
     ) -> None:
@@ -167,8 +164,11 @@ class BoundedAttentionState(ABC):
 
     @abstractmethod
     def write_to_pd_buffer(
-        self, req_idx: int, pd_page_buffers: torch.Tensor,
-        *, pd_page_index: int, layout: StateTransferLayout,
+        self,
+        req_idx: int,
+        pd_page_buffers: torch.Tensor,
+        pd_page_index: int,
+        layout: StateTransferLayout,
     ) -> None:
         """将指定槽位的 prefill 基准运行态写入 PD 页。
 
@@ -178,8 +178,11 @@ class BoundedAttentionState(ABC):
 
     @abstractmethod
     def read_from_pd_buffer(
-        self, pd_page_buffers: torch.Tensor, req_idx: int,
-        *, pd_page_index: int, layout: StateTransferLayout,
+        self,
+        pd_page_buffers: torch.Tensor,
+        req_idx: int,
+        pd_page_index: int,
+        layout: StateTransferLayout,
     ) -> None:
         """将 PD 页恢复到指定请求槽位并规范化控制信息，不写入大小页池。"""
         ...

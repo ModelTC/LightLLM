@@ -55,19 +55,33 @@ def main():
     )
     tokens = args.tokens_per_page * args.pages
     full = GQAFullAttentionState(
-        FullAttentionConfig(tuple((layer,) for layer in tuple(range(12))), 1, 256, torch.bfloat16, 0, 8),
+        FullAttentionConfig(
+            logical_layer_groups=tuple((layer,) for layer in tuple(range(12))),
+            global_head_num=1,
+            head_dim=256,
+            dtype=torch.bfloat16,
+            tp_rank=0,
+            tp_world_size=8,
+        ),
     )
     full.initialize_storage(tokens)
     resources = AttResourceManager(request_capacity=1)
     bounded_state = create_gdn_state(
         config=ConvSSMStateConfig(
             logical_layer_ids=tuple(layer for layer in range(cfg.all_layer_num) if (layer + 1) % cfg.full_attention_interval),
-            global_k_heads=cfg.global_linear_k_heads, global_v_heads=cfg.global_linear_v_heads,
-            key_dim=cfg.head_linear_k_dim, value_dim=cfg.head_linear_v_dim,
-            conv_width=cfg.conv_kernel_size - 1, conv_dtype=cfg.conv_state_dtype, ssm_dtype=cfg.ssm_state_dtype,
-            tp_rank=0, tp_world_size=cfg.tp_world_size,
+            global_k_heads=cfg.global_linear_k_heads,
+            global_v_heads=cfg.global_linear_v_heads,
+            key_dim=cfg.head_linear_k_dim,
+            value_dim=cfg.head_linear_v_dim,
+            conv_width=cfg.conv_kernel_size - 1,
+            conv_dtype=cfg.conv_state_dtype,
+            ssm_dtype=cfg.ssm_state_dtype,
+            tp_rank=0,
+            tp_world_size=cfg.tp_world_size,
         ),
-        request_capacity=1, mtp_step=0, device="cuda",
+        request_capacity=1,
+        mtp_step=0,
+        device="cuda",
     )
     bounded_state.initialize_page_pools(big_page_capacity=args.pages + 2, small_page_capacity=0)
     resources.set_att_state("main", full)
@@ -87,9 +101,9 @@ def main():
     torch.cuda.synchronize()
     token_indices = torch.arange(tokens, dtype=torch.int64, device="cuda")
     resources.write_req_to_cpu(
-        token_indices,
-        cpu_page_buffers,
-        pages,
+        token_indices=token_indices,
+        cpu_page_buffers=cpu_page_buffers,
+        cpu_page_indices=pages,
         layouts=resources.get_cpu_transfer_layouts(),
         big_page_slot_ids=slots,
     )
@@ -97,9 +111,9 @@ def main():
 
     def restore():
         resources.read_req_from_cpu(
-            cpu_page_buffers,
-            pages,
-            token_indices,
+            cpu_page_buffers=cpu_page_buffers,
+            cpu_page_indices=pages,
+            token_indices=token_indices,
             layouts=resources.get_cpu_transfer_layouts(),
             big_page_slot_ids=slots,
             req_idx=0,

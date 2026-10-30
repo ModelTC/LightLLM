@@ -57,7 +57,13 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     cpu_args.cpu_cache_token_page_size = 4
-    config = FullAttentionConfig(((0,),), heads, 4, torch.float32, replicated=replicated)
+    config = FullAttentionConfig(
+        logical_layer_groups=((0,),),
+        global_head_num=heads,
+        head_dim=4,
+        dtype=torch.float32,
+        replicated=replicated,
+    )
     reference = state_cls(config, page_size=4, device="cuda")
     reference.initialize_storage(4)
     for storage_buffer in full_state_test_buffers(reference).values():
@@ -76,14 +82,24 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
         assert layout.byte_end == reference_layout.byte_end
         for name, field in full_state_test_fields(source, full_state_test_buffers(source)).items():
             field.tensor.copy_(fields[name][:, :, start:end])
-        source.write_to_cpu(torch.arange(4, dtype=torch.long, device="cuda"), buffer, [0], layout=layout)
+        source.write_to_cpu(
+            token_indices=torch.arange(4, dtype=torch.long, device="cuda"),
+            cpu_page_buffers=buffer,
+            cpu_page_indices=[0],
+            layout=layout,
+        )
 
     for rank, (start, end) in enumerate(target_ranges):
         target = state_cls(replace(restored_config, tp_rank=rank, tp_world_size=len(target_ranges)), page_size=4, device="cuda")
         target.initialize_storage(4)
         layout = cpu_layout(target)
         assert layout.byte_end == reference_layout.byte_end
-        target.read_from_cpu(buffer, [0], torch.arange(4, dtype=torch.long, device="cuda"), layout=layout)
+        target.read_from_cpu(
+            cpu_page_buffers=buffer,
+            cpu_page_indices=[0],
+            token_indices=torch.arange(4, dtype=torch.long, device="cuda"),
+            layout=layout,
+        )
         for name, field in full_state_test_fields(target, full_state_test_buffers(target)).items():
             torch.testing.assert_close(field.tensor[:, :4], fields[name][:, :4, start:end])
 
@@ -91,8 +107,16 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
 def test_bounded_config_keeps_distinct_global_heads_when_local_heads_are_replicated(cpu_args: EasyDict):
     cpu_args.cpu_cache_token_page_size = 4
     config = ConvSSMStateConfig(
-        logical_layer_ids=(0,), global_k_heads=2, global_v_heads=4, key_dim=2, value_dim=3, conv_width=2,
-        conv_dtype=torch.float32, ssm_dtype=torch.float32, tp_rank=7, tp_world_size=8,
+        logical_layer_ids=(0,),
+        global_k_heads=2,
+        global_v_heads=4,
+        key_dim=2,
+        value_dim=3,
+        conv_width=2,
+        conv_dtype=torch.float32,
+        ssm_dtype=torch.float32,
+        tp_rank=7,
+        tp_world_size=8,
     )
     source = GDNState(config, request_capacity=1, device="meta")
     assert config.num_k_heads == config.num_v_heads == 1
@@ -120,18 +144,34 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
     pd_args.pd_kv_page_size = page_tokens
     if bounded:
         config = ConvSSMStateConfig(
-            logical_layer_ids=(0,), global_k_heads=2, global_v_heads=4, key_dim=2, value_dim=2, conv_width=2,
-            conv_dtype=torch.float32, ssm_dtype=torch.float32, tp_world_size=8,
+            logical_layer_ids=(0,),
+            global_k_heads=2,
+            global_v_heads=4,
+            key_dim=2,
+            value_dim=2,
+            conv_width=2,
+            conv_dtype=torch.float32,
+            ssm_dtype=torch.float32,
+            tp_world_size=8,
         )
         source = GDNState(config, request_capacity=1, device="meta")
         other_config = replace(config, logical_layer_ids=(1,), global_k_heads=4)
     else:
-        config = FullAttentionConfig(((0,),), 2, 4, torch.float32, tp_world_size=8)
+        config = FullAttentionConfig(
+            logical_layer_groups=((0,),),
+            global_head_num=2,
+            head_dim=4,
+            dtype=torch.float32,
+            tp_world_size=8,
+        )
         source = GQAFullAttentionState(config, page_size=4, device="meta")
         other_config = replace(config, logical_layer_groups=((1,),), global_head_num=4)
     if bounded:
         other = type(source)(
-            other_config, request_capacity=source.request_capacity, mtp_step=source.mtp_step, device="meta"
+            config=other_config,
+            request_capacity=source.request_capacity,
+            mtp_step=source.mtp_step,
+            device="meta",
         )
     else:
         other = rebuild_full_state(source, config=other_config)

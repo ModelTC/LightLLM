@@ -7,7 +7,7 @@ from collections import deque
 
 
 class StatePageAllocator:
-    def __init__(self, size: int, *, reserved_slots: int = 0):
+    def __init__(self, size: int, reserved_slots: int = 0):
         self.size = size
         self.reserved_slots = reserved_slots
         if not 0 <= self.reserved_slots <= self.size:

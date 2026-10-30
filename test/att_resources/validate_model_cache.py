@@ -52,7 +52,12 @@ from static_benchmark import (
 
 @torch.inference_mode()
 def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpPartBaseModel] = ()):
-    executor = StaticBenchmarkExecutor(args, model, draft_models, TokenSource(args))
+    executor = StaticBenchmarkExecutor(
+        args=args,
+        model=model,
+        draft_models=draft_models,
+        token_source=TokenSource(args),
+    )
     resources = model.att_resource_manager
     (full_state,) = resources.get_full_attention_states("main")
     for draft in draft_models:
@@ -74,12 +79,22 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
     source_req = executor._alloc_req_indexes(1)
     resources.reset_bounded_att_state(source_req.tolist())
     resources.reset_attention_tail_state(source_req.tolist())
-    tokens = np.random.default_rng(42).integers(100, 10000, (1, prefix_len), dtype=np.int64)
+    tokens = np.random.default_rng(42).integers(
+        low=100,
+        high=10000,
+        size=(1, prefix_len),
+        dtype=np.int64,
+    )
     for page, length in zip(pages, lengths):
         batch = executor._make_prefill_input(tokens[:, page * page_tokens : length], source_req, page * page_tokens)
         output = model.forward(batch)
         if draft_models:
-            executor._fill_mtp_prefill_kv(None, batch, output, executor._argmax_ids(output.logits))
+            executor._fill_mtp_prefill_kv(
+                case=None,
+                main_prefill_input=batch,
+                main_output=output,
+                first_next_ids=executor._argmax_ids(output.logits),
+            )
         if hybrid:
             resources.save_bounded_att_pages(source_req.tolist(), page_kind="big", slot_ids=[source_slots[page]])
     torch.cuda.synchronize()
@@ -88,9 +103,9 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
 
     cpu = torch.zeros((len(pages), resources.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
     resources.write_req_to_cpu(
-        source_indices,
-        cpu,
-        pages,
+        token_indices=source_indices,
+        cpu_page_buffers=cpu,
+        cpu_page_indices=pages,
         layouts=resources.get_cpu_transfer_layouts(),
         page_kind="big" if hybrid else None,
         slot_ids=source_slots,
@@ -103,7 +118,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
     if runtime_layouts:
         pd["att_state"] = torch.empty((1, resources.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
     resources.write_to_pd_buffer(
-        pd["kv"],
+        pd_page_buffers=pd["kv"],
         pd_page_index=0,
         kind="kv",
         layouts=full_att_layouts,
@@ -111,7 +126,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
     )
     if "att_state" in pd:
         resources.write_to_pd_buffer(
-            pd["att_state"],
+            pd_page_buffers=pd["att_state"],
             pd_page_index=0,
             kind="att_state",
             layouts=runtime_layouts,
@@ -137,9 +152,9 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
             if hybrid:
                 allocated_slots.extend(slots)
             resources.read_req_from_cpu(
-                cpu,
-                pages,
-                indices,
+                cpu_page_buffers=cpu,
+                cpu_page_indices=pages,
+                token_indices=indices,
                 layouts=resources.get_cpu_transfer_layouts(),
                 big_page_slot_ids=slots,
                 req_idx=int(request[0]) if getattr(resources, "cpu_tail_restore", False) else None,
@@ -157,7 +172,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
             )
         else:
             resources.read_from_pd_buffer(
-                pd["kv"],
+                pd_page_buffers=pd["kv"],
                 pd_page_index=0,
                 kind="kv",
                 layouts=full_att_layouts,
@@ -165,7 +180,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
             )
             if "att_state" in pd:
                 resources.read_from_pd_buffer(
-                    pd["att_state"],
+                    pd_page_buffers=pd["att_state"],
                     pd_page_index=0,
                     kind="att_state",
                     layouts=runtime_layouts,
@@ -189,12 +204,12 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
             request_rows, mtp_index = executor._build_mtp_decode_index_tensors(request, step_width)
             lengths = executor._build_mtp_seq_len(torch.tensor([sequence_length], dtype=torch.int32), step_width)
             batch = executor._make_decode_input(
-                step_width,
-                request_rows,
-                mtp_index,
-                lengths,
-                next_token.repeat(step_width),
-                int(lengths[-1]),
+                batch_size=step_width,
+                req_idx=request_rows,
+                mtp_index=mtp_index,
+                seq_len=lengths,
+                input_ids=next_token.repeat(step_width),
+                max_kv_seq_len=int(lengths[-1]),
             )
             output = model.forward(batch)
             logits = [output.logits.clone()]
@@ -214,7 +229,12 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
         for kind, request in targets.items():
             actual = decode(request)
             for restored_logits, reference_logits in zip(actual, reference):
-                torch.testing.assert_close(restored_logits, reference_logits, rtol=1e-4, atol=1e-4)
+                torch.testing.assert_close(
+                    actual=restored_logits,
+                    expected=reference_logits,
+                    rtol=1e-4,
+                    atol=1e-4,
+                )
                 assert torch.equal(restored_logits.argmax(dim=-1), reference_logits.argmax(dim=-1))
             errors[kind].append(float((actual[0] - reference[0]).abs().max()))
             if draft_models:

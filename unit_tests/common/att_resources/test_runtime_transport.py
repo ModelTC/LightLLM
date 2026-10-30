@@ -31,7 +31,10 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
-    kind: str, device: str, pd_args: EasyDict, monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    device: str,
+    pd_args: EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
@@ -60,37 +63,99 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
     page = allocate_transfer_buffer(managers[0], 1, device=device)
     if device == "cpu":
         with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            copy_page(node_att_managers=[managers[0]], pd_page_buffers=page, pd_page_index=0, dp_rank_in_node=0, tp_world_size=1, token_indices=source_indices, write_to_pd_buffer=True)
+            copy_page(
+                node_att_managers=[managers[0]],
+                pd_page_buffers=page,
+                pd_page_index=0,
+                dp_rank_in_node=0,
+                tp_world_size=1,
+                token_indices=source_indices,
+                write_to_pd_buffer=True,
+            )
     else:
-        copy_page(node_att_managers=[managers[0]], pd_page_buffers=page, pd_page_index=0, dp_rank_in_node=0, tp_world_size=1, token_indices=source_indices, write_to_pd_buffer=True)
-        copy_page(node_att_managers=[managers[1]], pd_page_buffers=page, pd_page_index=0, dp_rank_in_node=0, tp_world_size=1, token_indices=pd_indices, write_to_pd_buffer=False)
-        assert_token_fields_equal(src, [1, 3], dst, [4, 6])
+        copy_page(
+            node_att_managers=[managers[0]],
+            pd_page_buffers=page,
+            pd_page_index=0,
+            dp_rank_in_node=0,
+            tp_world_size=1,
+            token_indices=source_indices,
+            write_to_pd_buffer=True,
+        )
+        copy_page(
+            node_att_managers=[managers[1]],
+            pd_page_buffers=page,
+            pd_page_index=0,
+            dp_rank_in_node=0,
+            tp_world_size=1,
+            token_indices=pd_indices,
+            write_to_pd_buffer=False,
+        )
+        assert_token_fields_equal(
+            source=src,
+            source_ids=[1, 3],
+            target=dst,
+            target_ids=[4, 6],
+        )
 
     cpu_pages = torch.empty((1, managers[0].get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=device == "cuda")
     if device == "cpu":
         with pytest.raises(AssertionError, match="CUDA State storage"):
-            managers[0].write_req_to_cpu(source_indices, cpu_pages, [0], layouts=managers[0].get_cpu_transfer_layouts())
+            managers[0].write_req_to_cpu(
+                token_indices=source_indices,
+                cpu_page_buffers=cpu_pages,
+                cpu_page_indices=[0],
+                layouts=managers[0].get_cpu_transfer_layouts(),
+            )
     else:
-        managers[0].write_req_to_cpu(source_indices, cpu_pages, [0], layouts=managers[0].get_cpu_transfer_layouts())
+        managers[0].write_req_to_cpu(
+            token_indices=source_indices,
+            cpu_page_buffers=cpu_pages,
+            cpu_page_indices=[0],
+            layouts=managers[0].get_cpu_transfer_layouts(),
+        )
         if device == "cuda":
             torch.cuda.synchronize()
-        managers[1].read_req_from_cpu(cpu_pages, [0], cpu_indices, layouts=managers[1].get_cpu_transfer_layouts())
-        assert_token_fields_equal(src, [1, 3], dst, [5, 7])
+        managers[1].read_req_from_cpu(
+            cpu_page_buffers=cpu_pages,
+            cpu_page_indices=[0],
+            token_indices=cpu_indices,
+            layouts=managers[1].get_cpu_transfer_layouts(),
+        )
+        assert_token_fields_equal(
+            source=src,
+            source_ids=[1, 3],
+            target=dst,
+            target_ids=[5, 7],
+        )
 
     if device == "cpu":
         with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
             managers[1].copy_from_other_dp(
-                remote_att_manager=managers[0], src_token_indexes=source_indices, dst_token_indexes=dp_indices,
-                src_big_page_ids=[], dst_big_page_ids=[], src_req_idx=0, dst_req_idx=0,
+                remote_att_manager=managers[0],
+                src_token_indexes=source_indices,
+                dst_token_indexes=dp_indices,
+                src_big_page_ids=[],
+                dst_big_page_ids=[],
+                src_req_idx=0,
+                dst_req_idx=0,
             )
         return
     managers[1].copy_from_other_dp(
         remote_att_manager=managers[0],
         src_token_indexes=source_indices,
         dst_token_indexes=dp_indices,
-        src_big_page_ids=[], dst_big_page_ids=[], src_req_idx=0, dst_req_idx=0,
+        src_big_page_ids=[],
+        dst_big_page_ids=[],
+        src_req_idx=0,
+        dst_req_idx=0,
     )
-    assert_token_fields_equal(src, [1, 3], dst, [0, 2])
+    assert_token_fields_equal(
+        source=src,
+        source_ids=[1, 3],
+        target=dst,
+        target_ids=[0, 2],
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -108,9 +173,19 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
     from lightllm.server.router.model_infer.mode_backend.dp_backend import dp_shared_kv_trans as module
 
     with torch.cuda.device(source_device):
-        source, source_full = make_resources(glm, 1, 0, 2)
+        source, source_full = make_resources(
+            glm=glm,
+            tp=1,
+            rank=0,
+            mtp=2,
+        )
     with torch.cuda.device(0):
-        target, target_full = make_resources(glm, 1, 0, 2)
+        target, target_full = make_resources(
+            glm=glm,
+            tp=1,
+            rank=0,
+            mtp=2,
+        )
     for i, field in enumerate(full_state_test_fields(source_full, full_state_test_buffers(source_full)).values()):
         if "token" in field.axes:
             field.tensor.fill_(i + 5)
@@ -132,12 +207,20 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
         source_pool = main_linear_state(source).big_pages_pool
         source_pool.conv_state[src_big_page_ids[0]].fill_(51)
         source_pool.ssm_state[src_big_page_ids[0]].fill_(53)
-    req = SimpleNamespace(req_idx=2, cur_kv_len=4, hold_kv_len=8, hybrid_len_to_big_page_id={})
+    req = SimpleNamespace(
+        req_idx=2,
+        cur_kv_len=4,
+        hold_kv_len=8,
+        hybrid_len_to_big_page_id={},
+    )
     task = module.TransTask(
-        dst_req=req, src_dp_rank=1, src_req_idx=1,
+        dst_req=req,
+        src_dp_rank=1,
+        src_req_idx=1,
         src_token_indexes=torch.tensor([0, 1, 2, 3], dtype=torch.int32, device=f"cuda:{source_device}"),
         dst_token_indexes=torch.tensor([8, 9, 10, 11]),
-        src_big_page_ids=src_big_page_ids, dst_big_page_ids=dst_big_page_ids,
+        src_big_page_ids=src_big_page_ids,
+        dst_big_page_ids=dst_big_page_ids,
     )
     syncs = []
 
@@ -160,7 +243,12 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
     worker.big_page_tokens = 4
     worker.kv_trans([task])
     assert syncs == ["node"] and req.cur_kv_len == 8
-    assert_token_fields_equal(source_full, [0, 1, 2, 3], target_full, [8, 9, 10, 11])
+    assert_token_fields_equal(
+        source=source_full,
+        source_ids=[0, 1, 2, 3],
+        target=target_full,
+        target_ids=[8, 9, 10, 11],
+    )
     assert (main_linear_state(target).conv_state[:, 2, ..., :2] == 13).all()
     assert (main_linear_state(target).ssm_state[:, 6] == 17).all()
     assert main_linear_state(target).mtp_state_index[2] == 0
@@ -192,8 +280,11 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
     (True, ("dp", "pd")),
 ])
 def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
-    monkeypatch: pytest.MonkeyPatch, p2p: bool, share_pools: bool,
-    ipc_kinds: tuple[str, ...], cpu_args: EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
+    p2p: bool,
+    share_pools: bool,
+    ipc_kinds: tuple[str, ...],
+    cpu_args: EasyDict,
 ):
     cpu_args.enable_dp_prompt_cache_fetch = share_pools
     from lightllm.utils.envs_utils import get_unique_server_name
@@ -208,7 +299,12 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
     monkeypatch.setattr(mp.reductions.reduce_tensor, "__code__", mp.reductions.reduce_tensor.__code__)
     source_device = int(p2p)
     with torch.cuda.device(source_device):
-        resources, full = make_resources(True, 1, 0, 2)
+        resources, full = make_resources(
+            glm=True,
+            tp=1,
+            rank=0,
+            mtp=2,
+        )
     for storage_buffer in full_state_test_buffers(full).values():
         storage_buffer.fill_(9)
     for storage_buffer in full_state_test_buffers(full).values():
@@ -226,7 +322,12 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
     mapping[1, 0] = 7
     torch.cuda.synchronize(source_device)
     for kind in ipc_kinds:
-        shared_att_resources_utils.publish_att_resources(resources, mapping, kind=kind, reader_count=1)
+        shared_att_resources_utils.publish_att_resources(
+            resources=resources,
+            request_mapping=mapping,
+            kind=kind,
+            reader_count=1,
+        )
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe()
     process = ctx.Process(target=_ipc_worker, args=(child, ipc_kinds))
@@ -263,8 +364,18 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
 @pytest.mark.parametrize("source_tp,target_tp", [(1, 4), (4, 1), (2, 8), (8, 2)])
 def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, target_tp: int, pd_args: EasyDict):
     pd_args.pd_kv_page_size = 128
-    source = [make_resources(False, source_tp, rank, 2) for rank in range(source_tp)]
-    target = [make_resources(False, target_tp, rank, 2) for rank in range(target_tp)]
+    source = [make_resources(
+        glm=False,
+        tp=source_tp,
+        rank=rank,
+        mtp=2,
+    ) for rank in range(source_tp)]
+    target = [make_resources(
+        glm=False,
+        tp=target_tp,
+        rank=rank,
+        mtp=2,
+    ) for rank in range(target_tp)]
     for rank, (manager, full) in enumerate(source):
         for field_index, field in enumerate(full_state_test_fields(full, full_state_test_buffers(full)).values()):
             for local_head in range(full.config.head_num):

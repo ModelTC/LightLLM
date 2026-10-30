@@ -84,7 +84,6 @@ class AttResourceManager:
         model_name: str,
         att_type: str,
         logical_layer_id: int,
-        *,
         state_class: type[FullAttentionState | BoundedAttentionState | AttentionTailState] | None = None,
     ) -> FullAttentionState | BoundedAttentionState | AttentionTailState:
         """按模型角色、算法/方案字符串和逻辑层选择唯一 State，缓存查询结果。
@@ -161,7 +160,6 @@ class AttResourceManager:
     def initialize_resources(
         self,
         args: StartArgs | EasyDict,
-        *,
         token_capacity: int | None,
         mem_fraction: float,
         device: str | torch.device | int = "cuda",
@@ -212,8 +210,8 @@ class AttResourceManager:
         # State 对象保持不变，查询缓存继续引用相同对象；固定运行态不重复分配。
         big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
         self.initialize_storage(
-            token_capacity,
-            args.page_size,
+            token_capacity=token_capacity,
+            page_size=args.page_size,
             big_page_tokens=big_page_tokens,
             small_page_capacity=args.linear_att_cache_size or 0,
             device=device,
@@ -229,7 +227,6 @@ class AttResourceManager:
         self,
         token_capacity: int,
         page_size: int,
-        *,
         big_page_tokens: int,
         small_page_capacity: int = 0,
         device: str | torch.device | int = "cuda",
@@ -390,7 +387,7 @@ class AttResourceManager:
 
     # Bounded attention 状态页：供 radix/CPU cache 复用；未启用对应页池时操作报错。
     # 调用方提供已分配的大小页槽位；发布前完成保存，解除引用并结束使用后直接归还 allocator。
-    def save_bounded_att_pages(self, req_indices: List[int], *, page_kind: PageKind, slot_ids: List[int]) -> None:
+    def save_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
         """将 prefill 运行态保存到全部参与 State 的同类页池、同一组槽位。"""
         bounded_states = self.get_bounded_attention_states()
         assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
@@ -401,7 +398,7 @@ class AttResourceManager:
         for state in bounded_states:
             state.save_bounded_att_pages(req_indices, page_kind=page_kind, slot_ids=slot_ids)
 
-    def restore_bounded_att_pages(self, req_indices: List[int], *, page_kind: PageKind, slot_ids: List[int]) -> None:
+    def restore_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
         """将调用方选定的页快照恢复到对应请求槽位的运行态。"""
         bounded_states = self.get_bounded_attention_states()
         assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
@@ -418,7 +415,6 @@ class AttResourceManager:
         self,
         req_indices: torch.Tensor,
         accepted_steps: torch.Tensor,
-        *,
         role: str,
     ) -> None:
         """传入 CUDA 请求索引和 int32 接受步数，包含基准输入步；无参与 State 时为空操作。"""
@@ -485,7 +481,6 @@ class AttResourceManager:
         token_indices: torch.Tensor,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
-        *,
         layouts: Mapping[str, StateTransferLayout],
         cpu_page_readies: List[bool] | None = None,
         big_page_slot_ids: List[int] | None = None,
@@ -516,8 +511,11 @@ class AttResourceManager:
         # 阶段一：统一写出本批 full-attention token 数据。
         for state in full_states:
             state.write_to_cpu(
-                token_indices, cpu_page_buffers, cpu_page_indices,
-                layout=layouts[state.resource_id], cpu_page_readies=cpu_page_readies,
+                token_indices=token_indices,
+                cpu_page_buffers=cpu_page_buffers,
+                cpu_page_indices=cpu_page_indices,
+                layout=layouts[state.resource_id],
+                cpu_page_readies=cpu_page_readies,
             )
 
         # 阶段二：分别从大小页池取快照，写入对应 CPU 页面，不修改请求运行态。
@@ -525,13 +523,21 @@ class AttResourceManager:
             layout = layouts[state.resource_id]
             if big_page_slot_ids:
                 state.write_page_state_to_cpu(
-                    page_kind="big", slot_ids=big_page_slot_ids, cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=big_cpu_page_indices, layout=layout, cpu_page_readies=big_page_readies,
+                    page_kind="big",
+                    slot_ids=big_page_slot_ids,
+                    cpu_page_buffers=cpu_page_buffers,
+                    cpu_page_indices=big_cpu_page_indices,
+                    layout=layout,
+                    cpu_page_readies=big_page_readies,
                 )
             if small_page_slot_ids:
                 state.write_page_state_to_cpu(
-                    page_kind="small", slot_ids=small_page_slot_ids, cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=small_cpu_page_indices, layout=layout, cpu_page_readies=small_page_readies,
+                    page_kind="small",
+                    slot_ids=small_page_slot_ids,
+                    cpu_page_buffers=cpu_page_buffers,
+                    cpu_page_indices=small_cpu_page_indices,
+                    layout=layout,
+                    cpu_page_readies=small_page_readies,
                 )
 
     def read_req_from_cpu(
@@ -539,7 +545,6 @@ class AttResourceManager:
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
         token_indices: torch.Tensor,
-        *,
         layouts: Mapping[str, StateTransferLayout],
         big_page_slot_ids: List[int] | None = None,
         req_idx: int | None = None,
@@ -567,12 +572,19 @@ class AttResourceManager:
 
         # 阶段一：恢复 full-attention token 数据；各 State 负责对应布局的搬运约束。
         for state in full_states:
-            state.read_from_cpu(cpu_page_buffers, cpu_page_indices, token_indices, layout=layouts[state.resource_id])
+            state.read_from_cpu(
+                cpu_page_buffers=cpu_page_buffers,
+                cpu_page_indices=cpu_page_indices,
+                token_indices=token_indices,
+                layout=layouts[state.resource_id],
+            )
 
         # 阶段二：完整页和末尾碎页统一读入大页池，碎页使用追加的 LOAD 槽位。
         for state in bounded_states:
             state.read_page_state_from_cpu(
-                cpu_page_buffers, cpu_page_indices, big_page_slot_ids=load_big_page_slot_ids,
+                cpu_page_buffers=cpu_page_buffers,
+                cpu_page_indices=cpu_page_indices,
+                big_page_slot_ids=load_big_page_slot_ids,
                 layout=layouts[state.resource_id],
             )
 
@@ -688,7 +700,6 @@ class AttResourceManager:
     def write_to_pd_buffer(
         self,
         pd_page_buffers: torch.Tensor,
-        *,
         pd_page_index: int,
         kind: Literal["kv", "att_state"],
         layouts: Mapping[str, StateTransferLayout],
@@ -703,7 +714,10 @@ class AttResourceManager:
                 assert token_indices is not None, "KV PD pages require token indices"
                 for state in self.get_full_attention_states():
                     state.write_to_pd_buffer(
-                        token_indices, pd_page_buffers, pd_page_index=pd_page_index, layout=layouts[state.resource_id]
+                        token_indices=token_indices,
+                        pd_page_buffers=pd_page_buffers,
+                        pd_page_index=pd_page_index,
+                        layout=layouts[state.resource_id],
                     )
 
             case "att_state":
@@ -716,13 +730,19 @@ class AttResourceManager:
                 # 阶段一：写出 bounded 的 prefill 基准运行态。
                 for state in self.get_bounded_attention_states():
                     state.write_to_pd_buffer(
-                        req_idx, pd_page_buffers, pd_page_index=pd_page_index, layout=layouts[state.resource_id]
+                        req_idx=req_idx,
+                        pd_page_buffers=pd_page_buffers,
+                        pd_page_index=pd_page_index,
+                        layout=layouts[state.resource_id],
                     )
 
                 # 阶段二：按前缀长度写出 tail 逻辑窗口，适配两端各自的 MTP ring。
                 for state in tail_states:
                     state.write_to_pd_buffer(
-                        req_idx, pd_page_buffers, pd_page_index=pd_page_index, state_token_len=state_token_len,
+                        req_idx=req_idx,
+                        pd_page_buffers=pd_page_buffers,
+                        pd_page_index=pd_page_index,
+                        state_token_len=state_token_len,
                         layout=layouts[state.resource_id],
                     )
 
@@ -732,7 +752,6 @@ class AttResourceManager:
     def read_from_pd_buffer(
         self,
         pd_page_buffers: torch.Tensor,
-        *,
         pd_page_index: int,
         kind: Literal["kv", "att_state"],
         layouts: Mapping[str, StateTransferLayout],
@@ -747,7 +766,10 @@ class AttResourceManager:
                 assert token_indices is not None, "KV PD pages require token indices"
                 for state in self.get_full_attention_states():
                     state.read_from_pd_buffer(
-                        pd_page_buffers, token_indices, pd_page_index=pd_page_index, layout=layouts[state.resource_id]
+                        pd_page_buffers=pd_page_buffers,
+                        token_indices=token_indices,
+                        pd_page_index=pd_page_index,
+                        layout=layouts[state.resource_id],
                     )
 
             case "att_state":
@@ -760,13 +782,19 @@ class AttResourceManager:
                 # 阶段一：恢复 bounded 的 prefill 基准运行态。
                 for state in self.get_bounded_attention_states():
                     state.read_from_pd_buffer(
-                        pd_page_buffers, req_idx, pd_page_index=pd_page_index, layout=layouts[state.resource_id]
+                        pd_page_buffers=pd_page_buffers,
+                        req_idx=req_idx,
+                        pd_page_index=pd_page_index,
+                        layout=layouts[state.resource_id],
                     )
 
                 # 阶段二：按前缀长度恢复 tail 逻辑窗口，适配两端各自的 MTP ring。
                 for state in tail_states:
                     state.read_from_pd_buffer(
-                        pd_page_buffers, req_idx, pd_page_index=pd_page_index, state_token_len=state_token_len,
+                        pd_page_buffers=pd_page_buffers,
+                        req_idx=req_idx,
+                        pd_page_index=pd_page_index,
+                        state_token_len=state_token_len,
                         layout=layouts[state.resource_id],
                     )
 

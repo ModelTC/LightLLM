@@ -10,7 +10,7 @@ if TYPE_CHECKING:
 
 
 def get_resource_config(
-    model_config: dict[str, object], *, model_class: type[TpPartBaseModel] | None = None,
+    model_config: dict[str, object], model_class: type[TpPartBaseModel] | None = None,
 ) -> dict[str, object]:
     """优先采用模型专有配置转换；默认展开 text_config 并补齐常见字段别名。"""
     build_config = getattr(model_class, "_resource_config", None)

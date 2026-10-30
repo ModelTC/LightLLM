@@ -9,10 +9,17 @@ from lightllm.common.att_resources.types import (
 )
 
 
-def make_tail(*, device: str | torch.device | int = "cpu", mtp_step: int = 2):
+def make_tail( device: str | torch.device | int = "cpu", mtp_step: int = 2):
     return KPoolAttentionTailState(
-        KPoolStateConfig(logical_layer_ids=(3, 7), pool_size=4, head_dim=2, dtype=torch.float32),
-        request_capacity=3, mtp_step=mtp_step, device=device
+        config=KPoolStateConfig(
+            logical_layer_ids=(3, 7),
+            pool_size=4,
+            head_dim=2,
+            dtype=torch.float32,
+        ),
+        request_capacity=3,
+        mtp_step=mtp_step,
+        device=device,
     )
 
 
@@ -33,8 +40,18 @@ def tail_layout(state: KPoolAttentionTailState):
                 axes=("layer", "window", "channel"),
                 shape=shape,
                 axis_slices=(
-                    AxisSlice(axis="window", src_start=0, dst_start=0, length=shape[1]),
-                    AxisSlice(axis="channel", src_start=0, dst_start=0, length=4),
+                    AxisSlice(
+                        axis="window",
+                        src_start=0,
+                        dst_start=0,
+                        length=shape[1],
+                    ),
+                    AxisSlice(
+                        axis="channel",
+                        src_start=0,
+                        dst_start=0,
+                        length=4,
+                    ),
                 ),
             ),
         ),
@@ -53,7 +70,10 @@ def test_tail_reset_clears_selected_requests_only():
 @pytest.mark.parametrize("source_step,target_step", [(0, 0), (0, 5), (2, 0), (1, 3)])
 @pytest.mark.parametrize("length", [0, 1, 3, 4, 5, 11, 12])
 def test_pd_logical_window_restores_different_mtp_rings(
-    device: str, source_step: int, target_step: int, length: int,
+    device: str,
+    source_step: int,
+    target_step: int,
+    length: int,
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
@@ -65,9 +85,26 @@ def test_pd_logical_window_restores_different_mtp_rings(
     layout = tail_layout(source)
     assert layout == tail_layout(target)
     assert source.get_pd_transfer_regions() == target.get_pd_transfer_regions()
-    pages = torch.full((3, layout.byte_end + 16), 253, dtype=torch.uint8, device=device)
-    source.write_to_pd_buffer(1, pages, pd_page_index=1, state_token_len=length, layout=layout)
-    target.read_from_pd_buffer(pages, 2, pd_page_index=1, state_token_len=length, layout=layout)
+    pages = torch.full(
+        size=(3, layout.byte_end + 16),
+        fill_value=253,
+        dtype=torch.uint8,
+        device=device,
+    )
+    source.write_to_pd_buffer(
+        req_idx=1,
+        pd_page_buffers=pages,
+        pd_page_index=1,
+        state_token_len=length,
+        layout=layout,
+    )
+    target.read_from_pd_buffer(
+        pd_page_buffers=pages,
+        req_idx=2,
+        pd_page_index=1,
+        state_token_len=length,
+        layout=layout,
+    )
     expected = torch.zeros_like(target.tail_buffer[:, 2])
     for position in range(max(0, length - 4), length):
         expected[:, position % (4 + target_step)] = source.tail_buffer[:, 1, position % (4 + source_step)]

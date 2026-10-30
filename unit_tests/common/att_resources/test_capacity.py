@@ -41,7 +41,12 @@ if TYPE_CHECKING:
 
 
 def definition(kind: str):
-    config = FullAttentionConfig(((0,), (2,)), 2, 16, torch.bfloat16)
+    config = FullAttentionConfig(
+        logical_layer_groups=((0,), (2,)),
+        global_head_num=2,
+        head_dim=16,
+        dtype=torch.bfloat16,
+    )
     if kind in ("int4", "int8"):
         return GroupQuantizedFullAttentionState(
             GroupQuantizedAttentionConfig(**vars(config), bits=4 if kind == "int4" else 8),
@@ -64,7 +69,10 @@ def definition(kind: str):
         fp8 = kind == "packed_fp8"
         kv_dim = 512 if kind == "packed_glm" else 576
         config = replace(
-            config, global_head_num=1, head_dim=800 if fp8 else kv_dim + 72, dtype=torch.uint8 if fp8 else config.dtype
+            config,
+            global_head_num=1,
+            head_dim=800 if fp8 else kv_dim + 72,
+            dtype=torch.uint8 if fp8 else config.dtype,
         )
         return PackedMLAFullAttentionState(
             PackedMLAAttentionConfig(**vars(config), kv_dim=kv_dim, fp8_nope_dim=512 if fp8 else 0), page_size=4, device="meta"
@@ -74,7 +82,7 @@ def definition(kind: str):
     return GQAFullAttentionState(config, page_size=4, device="meta")
 
 
-def allocated_bytes(state: FullAttentionState, *, token_only: bool = False):
+def allocated_bytes(state: FullAttentionState, token_only: bool = False):
     buffers = list(full_state_test_buffers(state).values())
     if not token_only and isinstance(state, StaticFP8FullAttentionState):
         buffers.append(state.scales)
@@ -96,7 +104,12 @@ def test_budget_matches_token_stores_including_hold_and_padding(
     pd_args: EasyDict,
 ):
     template = definition(kind)
-    state = rebuild_full_state(template, config=template.config, token_capacity=20, device="cpu")
+    state = rebuild_full_state(
+        template=template,
+        config=template.config,
+        token_capacity=20,
+        device="cpu",
+    )
     actual = allocated_bytes(state, token_only=True)
     planning = AttResourceManager(request_capacity=1)
     planning.set_att_state("main", rebuild_full_state(template, config=template.config))
@@ -118,7 +131,12 @@ def test_budget_matches_token_stores_including_hold_and_padding(
     manager.finish_state_creation()
     (state,) = manager.get_full_attention_states("main")
     assert manager.get_pd_page_bytes() == pd_page_bytes
-    args = StartArgs(page_size=4, run_mode="prefill", pd_kv_page_size=8, pd_kv_page_num=3)
+    args = StartArgs(
+        page_size=4,
+        run_mode="prefill",
+        pd_kv_page_size=8,
+        pd_kv_page_num=3,
+    )
     reserve = manager.get_pd_page_bytes() * args.pd_kv_page_num
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
@@ -133,12 +151,27 @@ def test_budget_matches_token_stores_including_hold_and_padding(
         resources.finish_state_creation()
         if expected is None:
             with pytest.raises(MemoryError, match="HOLD"):
-                resources.initialize_resources(args, token_capacity=None, mem_fraction=1.0, device="cpu")
+                resources.initialize_resources(
+                    args=args,
+                    token_capacity=None,
+                    mem_fraction=1.0,
+                    device="cpu",
+                )
         elif expected == 0:
             with pytest.raises(AssertionError, match="at least one complete page"):
-                resources.initialize_resources(args, token_capacity=None, mem_fraction=1.0, device="cpu")
+                resources.initialize_resources(
+                    args=args,
+                    token_capacity=None,
+                    mem_fraction=1.0,
+                    device="cpu",
+                )
         else:
-            resources.initialize_resources(args, token_capacity=None, mem_fraction=1.0, device="cpu")
+            resources.initialize_resources(
+                args=args,
+                token_capacity=None,
+                mem_fraction=1.0,
+                device="cpu",
+            )
             assert resources.full_att_allocator.size == expected
             assert resources.get_pd_page_bytes() == manager.get_pd_page_bytes()
 
@@ -151,7 +184,13 @@ def test_shared_allocator_accounts_for_distinct_state_stores():
     manager.finish_state_creation()
     expected = sum(
         allocated_bytes(
-            rebuild_full_state(state, config=state.config, token_capacity=12, page_size=4, device="cpu"),
+            rebuild_full_state(
+                template=state,
+                config=state.config,
+                token_capacity=12,
+                page_size=4,
+                device="cpu",
+            ),
             token_only=True,
         )
         for state in (main, draft)
@@ -166,15 +205,32 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     pd_args: EasyDict,
 ):
     config = ConvSSMStateConfig(
-        logical_layer_ids=(0,), global_k_heads=2, global_v_heads=2 if state_cls is KDAState else 4, key_dim=3,
-        value_dim=3 if state_cls is KDAState else 5, conv_width=1, conv_dtype=torch.bfloat16,
+        logical_layer_ids=(0,),
+        global_k_heads=2,
+        global_v_heads=2 if state_cls is KDAState else 4,
+        key_dim=3,
+        value_dim=3 if state_cls is KDAState else 5,
+        conv_width=1,
+        conv_dtype=torch.bfloat16,
         ssm_dtype=torch.float32,
     )
     tail = KPoolAttentionTailState(
-        KPoolStateConfig(logical_layer_ids=(1,), pool_size=4, head_dim=3, dtype=torch.bfloat16),
-        request_capacity=3, mtp_step=3, device="cpu",
+        config=KPoolStateConfig(
+            logical_layer_ids=(1,),
+            pool_size=4,
+            head_dim=3,
+            dtype=torch.bfloat16,
+        ),
+        request_capacity=3,
+        mtp_step=3,
+        device="cpu",
     )
-    reference = state_cls(config, request_capacity=3, mtp_step=3, device="cpu")
+    reference = state_cls(
+        config=config,
+        request_capacity=3,
+        mtp_step=3,
+        device="cpu",
+    )
     conv = reference.conv_state[:, 0, :, : config.conv_width]
     ssm = reference.ssm_state[:, 0]
     bounded_bytes = conv.numel() * conv.element_size() + ssm.numel() * ssm.element_size()
@@ -191,11 +247,25 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     pages = torch.zeros((2, manager.get_pd_page_bytes()), dtype=torch.uint8)
     layouts = manager.get_pd_bounded_att_or_tail_transfer_layouts()
     assert {region.field for layout in layouts.values() for region in layout.regions} == {"conv", "ssm", "tail"}
-    manager.write_to_pd_buffer(pages, pd_page_index=1, kind="att_state", layouts=layouts, req_idx=0, state_token_len=8)
+    manager.write_to_pd_buffer(
+        pd_page_buffers=pages,
+        pd_page_index=1,
+        kind="att_state",
+        layouts=layouts,
+        req_idx=0,
+        state_token_len=8,
+    )
     reference.conv_state.zero_()
     reference.ssm_state.zero_()
     tail.tail_buffer.zero_()
-    manager.read_from_pd_buffer(pages, pd_page_index=1, kind="att_state", layouts=layouts, req_idx=0, state_token_len=8)
+    manager.read_from_pd_buffer(
+        pd_page_buffers=pages,
+        pd_page_index=1,
+        kind="att_state",
+        layouts=layouts,
+        req_idx=0,
+        state_token_len=8,
+    )
     assert (reference.conv_state[:, 0, :, : config.conv_width] == 2).all()
     assert (reference.ssm_state[:, 0] == 3).all()
     expected_tail = torch.zeros_like(tail.tail_buffer[:, 0])
@@ -222,7 +292,12 @@ def test_pd_layout_reserves_aligned_storage_for_mixed_token_formats(
         (GQAFullAttentionState, "main", 3, torch.bfloat16),
         (GQAFullAttentionState, "main", 1, torch.float32),
     ):
-        config = FullAttentionConfig(((0,),), 1, dim, dtype)
+        config = FullAttentionConfig(
+            logical_layer_groups=((0,),),
+            global_head_num=1,
+            head_dim=dim,
+            dtype=dtype,
+        )
         manager.set_att_state(role, state_cls(config, page_size=1, device="meta"))
     manager.finish_state_creation()
     # 无页头；三个 State 的 3-token 区域分别由 6/36/24 字节对齐到 8/40/24。
@@ -230,7 +305,12 @@ def test_pd_layout_reserves_aligned_storage_for_mixed_token_formats(
     monkeypatch.setattr(
         "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
-    manager.initialize_storage(4, 1, big_page_tokens=4, device="cuda")
+    manager.initialize_storage(
+        token_capacity=4,
+        page_size=1,
+        big_page_tokens=4,
+        device="cuda",
+    )
     assert manager.get_pd_page_bytes() == 72
     states = manager.get_full_attention_states()
     for i, state in enumerate(states, 1):
@@ -240,12 +320,24 @@ def test_pd_layout_reserves_aligned_storage_for_mixed_token_formats(
     page = pages[1]
     layouts = manager.get_pd_full_att_transfer_layouts()
     assert [min(region.byte_start for region in layouts[state.resource_id].regions) for state in states] == [0, 8, 48]
-    manager.write_to_pd_buffer(page.unsqueeze(0), pd_page_index=0, kind="kv", layouts=layouts, token_indices=torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"))
+    manager.write_to_pd_buffer(
+        pd_page_buffers=page.unsqueeze(0),
+        pd_page_index=0,
+        kind="kv",
+        layouts=layouts,
+        token_indices=torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"),
+    )
     assert (page[:6].view(torch.bfloat16) == 1).all()
     for state in states:
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.zero_()
-    manager.read_from_pd_buffer(page.unsqueeze(0), pd_page_index=0, kind="kv", layouts=layouts, token_indices=torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"))
+    manager.read_from_pd_buffer(
+        pd_page_buffers=page.unsqueeze(0),
+        pd_page_index=0,
+        kind="kv",
+        layouts=layouts,
+        token_indices=torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"),
+    )
     for i, state in enumerate(states, 1):
         assert (read_kv_storage(state)[:, :3] == i).all()
     assert not pages[0].any()
@@ -254,7 +346,10 @@ def test_pd_layout_reserves_aligned_storage_for_mixed_token_formats(
 @pytest.mark.parametrize("layout_first", [False, True])
 @pytest.mark.parametrize("transfer", ["cpu", "pd"])
 def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
-    monkeypatch: pytest.MonkeyPatch, pd_args: EasyDict, layout_first: bool, transfer: str
+    monkeypatch: pytest.MonkeyPatch,
+    pd_args: EasyDict,
+    layout_first: bool,
+    transfer: str,
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
@@ -269,8 +364,12 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
 
     pd_args.pd_kv_page_size = pd_args.cpu_cache_token_page_size = 3
     config = GroupQuantizedAttentionConfig(
-        logical_layer_groups=((0,),), global_head_num=1, head_dim=128,
-        dtype=torch.float32, bits=8, group_size=128,
+        logical_layer_groups=((0,),),
+        global_head_num=1,
+        head_dim=128,
+        dtype=torch.float32,
+        bits=8,
+        group_size=128,
     )
     manager = AttResourceManager(request_capacity=1)
     prepared_full_state = AlignedFieldsState(config, page_size=1, device="cuda")
@@ -295,7 +394,11 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
     layouts = get_layouts()
     assert get_layouts() is layouts
     pages = torch.full(
-        (3, 1600), 91, dtype=torch.uint8, device="cpu" if transfer == "cpu" else "cuda", pin_memory=transfer == "cpu"
+        size=(3, 1600),
+        fill_value=91,
+        dtype=torch.uint8,
+        device="cpu" if transfer == "cpu" else "cuda",
+        pin_memory=transfer == "cpu",
     )
     for index, state in enumerate(manager.get_full_attention_states()):
         layout = layouts[state.resource_id]
@@ -306,11 +409,33 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
             field.tensor.zero_()
             field.tensor[:, :3].fill_(index * 4 + field_index + 1)
     if transfer == "cpu":
-        manager.write_req_to_cpu(torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"), pages, [1], layouts=layouts)
-        manager.read_req_from_cpu(pages, [1], torch.tensor([4, 5, 6], dtype=torch.long, device="cuda"), layouts=layouts)
+        manager.write_req_to_cpu(
+            token_indices=torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"),
+            cpu_page_buffers=pages,
+            cpu_page_indices=[1],
+            layouts=layouts,
+        )
+        manager.read_req_from_cpu(
+            cpu_page_buffers=pages,
+            cpu_page_indices=[1],
+            token_indices=torch.tensor([4, 5, 6], dtype=torch.long, device="cuda"),
+            layouts=layouts,
+        )
     else:
-        manager.write_to_pd_buffer(pages, pd_page_index=1, kind="kv", layouts=layouts, token_indices=torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"))
-        manager.read_from_pd_buffer(pages, pd_page_index=1, kind="kv", layouts=layouts, token_indices=torch.tensor([4, 5, 6], dtype=torch.long, device="cuda"))
+        manager.write_to_pd_buffer(
+            pd_page_buffers=pages,
+            pd_page_index=1,
+            kind="kv",
+            layouts=layouts,
+            token_indices=torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"),
+        )
+        manager.read_from_pd_buffer(
+            pd_page_buffers=pages,
+            pd_page_index=1,
+            kind="kv",
+            layouts=layouts,
+            token_indices=torch.tensor([4, 5, 6], dtype=torch.long, device="cuda"),
+        )
     for state in manager.get_full_attention_states():
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             torch.testing.assert_close(field.tensor[:, 4:7], field.tensor[:, :3])
@@ -336,12 +461,23 @@ def test_pd_runtime_capacity_includes_field_padding(
     manager = AttResourceManager(request_capacity=1)
     if full_page_tokens is not None:
         pd_args.pd_kv_page_size = full_page_tokens
-        config = FullAttentionConfig(((0,),), 1, 1, torch.float32)
+        config = FullAttentionConfig(
+            logical_layer_groups=((0,),),
+            global_head_num=1,
+            head_dim=1,
+            dtype=torch.float32,
+        )
         manager.set_att_state("main", GQAFullAttentionState(config, page_size=1, device="meta"))
     state = PaddedGDNState(
         ConvSSMStateConfig(
-            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
-            conv_dtype=torch.bfloat16, ssm_dtype=torch.float32,
+            logical_layer_ids=(0,),
+            global_k_heads=1,
+            global_v_heads=1,
+            key_dim=1,
+            value_dim=1,
+            conv_width=1,
+            conv_dtype=torch.bfloat16,
+            ssm_dtype=torch.float32,
         ),
         request_capacity=1, device="cpu",
     )
@@ -365,10 +501,24 @@ def test_pd_runtime_capacity_includes_field_padding(
     pages = torch.full((3, expected), 91, dtype=torch.uint8)
     state.conv_state.fill_(3)
     state.ssm_state.fill_(5)
-    manager.write_to_pd_buffer(pages, pd_page_index=1, kind="att_state", layouts=layouts, req_idx=0, state_token_len=8)
+    manager.write_to_pd_buffer(
+        pd_page_buffers=pages,
+        pd_page_index=1,
+        kind="att_state",
+        layouts=layouts,
+        req_idx=0,
+        state_token_len=8,
+    )
     state.conv_state.zero_()
     state.ssm_state.zero_()
-    manager.read_from_pd_buffer(pages, pd_page_index=1, kind="att_state", layouts=layouts, req_idx=0, state_token_len=8)
+    manager.read_from_pd_buffer(
+        pd_page_buffers=pages,
+        pd_page_index=1,
+        kind="att_state",
+        layouts=layouts,
+        req_idx=0,
+        state_token_len=8,
+    )
     assert (state.conv_state == 3).all() and (state.ssm_state == 5).all()
     assert (pages[[0, 2]] == 91).all() and (pages[1, 80:] == 91).all()
     assert len(warnings) == int(full_page_tokens == 8)
@@ -398,7 +548,12 @@ def test_page_bytes_refresh_with_storage_dependent_layout(
 
     pd_args.pd_kv_page_size = pd_args.cpu_cache_token_page_size = 3
     manager = AttResourceManager(request_capacity=1)
-    config = FullAttentionConfig(((0,),), 1, 3, torch.bfloat16)
+    config = FullAttentionConfig(
+        logical_layer_groups=((0,),),
+        global_head_num=1,
+        head_dim=3,
+        dtype=torch.bfloat16,
+    )
     manager.set_att_state("main", PaddedState(config, page_size=1, device="meta"))
     manager.finish_state_creation()
     get_page_bytes = manager.get_cpu_page_bytes if transfer == "cpu" else manager.get_pd_page_bytes
@@ -406,7 +561,12 @@ def test_page_bytes_refresh_with_storage_dependent_layout(
     monkeypatch.setattr(
         "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
-    manager.initialize_storage(8, 4, big_page_tokens=8, device="cpu")
+    manager.initialize_storage(
+        token_capacity=8,
+        page_size=4,
+        big_page_tokens=8,
+        device="cpu",
+    )
     assert get_page_bytes() == (80 if transfer == "cpu" else 72)
     layouts = manager.get_cpu_transfer_layouts() if transfer == "cpu" else manager.get_pd_full_att_transfer_layouts()
     assert layouts["main_gqa_bf16_state"].byte_end == 72
@@ -420,20 +580,38 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
     pd_args: EasyDict,
 ):
     manager = AttResourceManager(request_capacity=1)
-    config = FullAttentionConfig(((0,),), 1, 1, torch.float32)
+    config = FullAttentionConfig(
+        logical_layer_groups=((0,),),
+        global_head_num=1,
+        head_dim=1,
+        dtype=torch.float32,
+    )
     full_state = GQAFullAttentionState(config, page_size=1, device="meta")
     manager.set_att_state("main", full_state)
     for cls, role in ((KDAState, "main"), (GDNState, "draft0")):
         config = ConvSSMStateConfig(
-            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
-            conv_dtype=torch.float32, ssm_dtype=torch.float32,
+            logical_layer_ids=(0,),
+            global_k_heads=1,
+            global_v_heads=1,
+            key_dim=1,
+            value_dim=1,
+            conv_width=1,
+            conv_dtype=torch.float32,
+            ssm_dtype=torch.float32,
         )
         state = cls(config, request_capacity=1, device="meta")
         manager.set_att_state(role, state)
     if with_tail:
         state = KPoolAttentionTailState(
-            KPoolStateConfig(logical_layer_ids=(0,), pool_size=4, head_dim=1, dtype=torch.float32),
-            request_capacity=1, mtp_step=0, device="meta",
+            config=KPoolStateConfig(
+                logical_layer_ids=(0,),
+                pool_size=4,
+                head_dim=1,
+                dtype=torch.float32,
+            ),
+            request_capacity=1,
+            mtp_step=0,
+            device="meta",
         )
         manager.set_att_state("main", state)
     # 两份运行态各占 16 字节数据，tail 另占 32 字节，无页头及长度、版本字段。
@@ -453,7 +631,11 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 @pytest.mark.parametrize("page_tokens", [1, 3])
 def test_cpu_page_bytes_derive_from_cached_transfer_layouts(
-    monkeypatch: pytest.MonkeyPatch, cpu_args: EasyDict, kind: str, tp_world_size: int, page_tokens: int
+    monkeypatch: pytest.MonkeyPatch,
+    cpu_args: EasyDict,
+    kind: str,
+    tp_world_size: int,
+    page_tokens: int,
 ):
     cpu_args.cpu_cache_token_page_size = page_tokens
     template = definition(kind)
@@ -462,15 +644,32 @@ def test_cpu_page_bytes_derive_from_cached_transfer_layouts(
     q_scales = torch.ones((len(config.logical_layer_groups), config.head_num)) if kind == "static_head" else None
     manager = AttResourceManager(request_capacity=3)
     for role in ("main", "draft0"):
-        manager.set_att_state(role, rebuild_full_state(template, config=config, scales=scales, q_scales=q_scales))
+        manager.set_att_state(role, rebuild_full_state(
+            template=template,
+            config=config,
+            scales=scales,
+            q_scales=q_scales,
+        ))
     for state_cls, v_heads, value_dim in ((KDAState, 1, 1), (GDNState, 2, 3)):
         # 奇数长度的 BF16 Conv 与 FP32 SSM 之间需要补齐，MTP 候选区不应计入页大小。
         bounded_config = ConvSSMStateConfig(
-            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=v_heads, key_dim=1, value_dim=value_dim, conv_width=1,
-            conv_dtype=torch.bfloat16, ssm_dtype=torch.float32, tp_rank=tp_world_size - 1,
+            logical_layer_ids=(0,),
+            global_k_heads=1,
+            global_v_heads=v_heads,
+            key_dim=1,
+            value_dim=value_dim,
+            conv_width=1,
+            conv_dtype=torch.bfloat16,
+            ssm_dtype=torch.float32,
+            tp_rank=tp_world_size - 1,
             tp_world_size=tp_world_size,
         )
-        bounded = state_cls(bounded_config, request_capacity=3, mtp_step=2, device="meta")
+        bounded = state_cls(
+            config=bounded_config,
+            request_capacity=3,
+            mtp_step=2,
+            device="meta",
+        )
         manager.set_att_state("main", bounded)
     manager.finish_state_creation()
     # CPU 容量和布局都只依赖 State 的 CPU 字段描述，不读取 GPU 存储开销或 PD 布局。
@@ -503,8 +702,14 @@ def test_cpu_bounded_capacity_includes_state_field_padding(cpu_args: EasyDict):
     manager = AttResourceManager(request_capacity=1)
     state = PaddedGDNState(
         ConvSSMStateConfig(
-            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
-            conv_dtype=torch.bfloat16, ssm_dtype=torch.float32,
+            logical_layer_ids=(0,),
+            global_k_heads=1,
+            global_v_heads=1,
+            key_dim=1,
+            value_dim=1,
+            conv_width=1,
+            conv_dtype=torch.bfloat16,
+            ssm_dtype=torch.float32,
         ),
         request_capacity=1, device="meta",
     )
@@ -525,7 +730,12 @@ def test_cpu_packed_page_excludes_unused_gpu_row_padding(kind: str, cpu_args: Ea
     states = []
     for encoding in ("gqa", kind):
         template = definition(encoding)
-        state = rebuild_full_state(template, config=template.config, token_capacity=8, device="cuda")
+        state = rebuild_full_state(
+            template=template,
+            config=template.config,
+            token_capacity=8,
+            device="cuda",
+        )
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.view(torch.uint8).fill_(211)
         states.append(state)
@@ -546,12 +756,27 @@ def test_cpu_packed_page_excludes_unused_gpu_row_padding(kind: str, cpu_args: Ea
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             field.tensor[:, :3].fill_(value)
             field.tensor[:, 4:7].zero_()
-    pages = torch.full((3, manager.get_cpu_page_bytes()), 165, dtype=torch.uint8, pin_memory=True)
-    manager.write_req_to_cpu(torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"), pages, [1], layouts=layouts)
+    pages = torch.full(
+        size=(3, manager.get_cpu_page_bytes()),
+        fill_value=165,
+        dtype=torch.uint8,
+        pin_memory=True,
+    )
+    manager.write_req_to_cpu(
+        token_indices=torch.tensor([0, 1, 2], dtype=torch.long, device="cuda"),
+        cpu_page_buffers=pages,
+        cpu_page_indices=[1],
+        layouts=layouts,
+    )
     torch.cuda.synchronize()
     assert (pages[1, data_end:gqa_start] == 165).all()
     assert (pages[[0, 2]] == 165).all()
-    manager.read_req_from_cpu(pages, [1], torch.tensor([4, 5, 6], dtype=torch.long, device="cuda"), layouts=layouts)
+    manager.read_req_from_cpu(
+        cpu_page_buffers=pages,
+        cpu_page_indices=[1],
+        token_indices=torch.tensor([4, 5, 6], dtype=torch.long, device="cuda"),
+        layouts=layouts,
+    )
     for value, state in enumerate((packed, gqa), 3):
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             assert (field.tensor[:, 4:7] == value).all()
@@ -565,10 +790,21 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
     manager.bounded_att_small_page_allocator = StatePageAllocator(1)
     for state_cls, role, value_dim in ((KDAState, "draft0", 1), (GDNState, "main", 3)):
         config = ConvSSMStateConfig(
-            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=value_dim, conv_width=1,
-            conv_dtype=torch.bfloat16, ssm_dtype=torch.float32,
+            logical_layer_ids=(0,),
+            global_k_heads=1,
+            global_v_heads=1,
+            key_dim=1,
+            value_dim=value_dim,
+            conv_width=1,
+            conv_dtype=torch.bfloat16,
+            ssm_dtype=torch.float32,
         )
-        state = state_cls(config, request_capacity=1, mtp_step=2, device="cpu")
+        state = state_cls(
+            config=config,
+            request_capacity=1,
+            mtp_step=2,
+            device="cpu",
+        )
         state.initialize_page_pools(big_page_capacity=2, small_page_capacity=1, pin_memory=False)
         manager.set_att_state(role, state)
     manager.finish_state_creation()
@@ -585,14 +821,23 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
     manager.save_bounded_att_pages([0], page_kind="big", slot_ids=source_slots)
     pages = torch.full((2, manager.get_cpu_page_bytes()), 87, dtype=torch.uint8)
     manager.write_req_to_cpu(
-        torch.tensor([], dtype=torch.long), pages, [1], layouts=layouts, big_page_slot_ids=source_slots
+        token_indices=torch.tensor([], dtype=torch.long),
+        cpu_page_buffers=pages,
+        cpu_page_indices=[1],
+        layouts=layouts,
+        big_page_slot_ids=source_slots,
     )
     assert (pages[0] == 87).all()
     assert (pages[1, 12:16] == 87).all()
     manager.reset_bounded_att_state([0])
     target_slots = manager.bounded_att_big_page_allocator.alloc(1)
     manager.read_req_from_cpu(
-        pages, [1], torch.tensor([], dtype=torch.long), layouts=layouts, big_page_slot_ids=target_slots, req_idx=0
+        cpu_page_buffers=pages,
+        cpu_page_indices=[1],
+        token_indices=torch.tensor([], dtype=torch.long),
+        layouts=layouts,
+        big_page_slot_ids=target_slots,
+        req_idx=0,
     )
     for i, state in enumerate(states):
         assert (state.conv_state[:, 0, :, :1] == i + 3).all()
@@ -608,12 +853,23 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     pd_args.pd_kv_page_size = 3
     pd_args.cpu_cache_token_page_size = 3
     manager = AttResourceManager(request_capacity=1)
-    config = FullAttentionConfig(((0,),), 1, 3, torch.bfloat16)
+    config = FullAttentionConfig(
+        logical_layer_groups=((0,),),
+        global_head_num=1,
+        head_dim=3,
+        dtype=torch.bfloat16,
+    )
     manager.set_att_state("main", GQAFullAttentionState(config, page_size=1, device="meta"))
     manager.set_att_state("main", GDNState(
         ConvSSMStateConfig(
-            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
-            conv_dtype=torch.bfloat16, ssm_dtype=torch.bfloat16,
+            logical_layer_ids=(0,),
+            global_k_heads=1,
+            global_v_heads=1,
+            key_dim=1,
+            value_dim=1,
+            conv_width=1,
+            conv_dtype=torch.bfloat16,
+            ssm_dtype=torch.bfloat16,
         ),
         request_capacity=1, device="cpu",
     ))
@@ -626,7 +882,12 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     monkeypatch.setattr(
         "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
-    manager.initialize_storage(8, 4, big_page_tokens=8, device="cpu")
+    manager.initialize_storage(
+        token_capacity=8,
+        page_size=4,
+        big_page_tokens=8,
+        device="cpu",
+    )
     after = getter()
     after_layout = after[state.resource_id]
     assert after is not before and getter() is after
@@ -660,7 +921,10 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
 
     pd_args.cpu_cache_token_page_size = pd_args.pd_kv_page_size = 4
     config = FullAttentionConfig(
-        logical_layer_groups=((0,),), global_head_num=1, head_dim=2, dtype=torch.float32
+        logical_layer_groups=((0,),),
+        global_head_num=1,
+        head_dim=2,
+        dtype=torch.float32,
     )
     manager = AttResourceManager(request_capacity=1)
     prepared_full_state = ReversedCpuRegionsState(config, page_size=4, device="cuda")
@@ -687,14 +951,49 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
 
     page_bytes = manager.get_cpu_page_bytes() if transfer == "cpu" else manager.get_pd_page_bytes()
     pages = torch.zeros(
-        (1, page_bytes), dtype=torch.uint8, device="cpu" if transfer == "cpu" else "cuda", pin_memory=transfer == "cpu"
+        size=(1, page_bytes),
+        dtype=torch.uint8,
+        device="cpu" if transfer == "cpu" else "cuda",
+        pin_memory=transfer == "cpu",
     )
     if transfer == "cpu":
-        manager.write_req_to_cpu(torch.arange(4, dtype=torch.long, device="cuda"), pages, [0], layouts=layouts)
-        manager.read_req_from_cpu(pages, [0], torch.arange(4, 8, dtype=torch.long, device="cuda"), layouts=layouts)
+        manager.write_req_to_cpu(
+            token_indices=torch.arange(4, dtype=torch.long, device="cuda"),
+            cpu_page_buffers=pages,
+            cpu_page_indices=[0],
+            layouts=layouts,
+        )
+        manager.read_req_from_cpu(
+            cpu_page_buffers=pages,
+            cpu_page_indices=[0],
+            token_indices=torch.arange(
+                start=4,
+                end=8,
+                dtype=torch.long,
+                device="cuda",
+            ),
+            layouts=layouts,
+        )
     else:
-        manager.write_to_pd_buffer(pages, pd_page_index=0, kind="kv", layouts=layouts, token_indices=torch.arange(4, dtype=torch.long, device="cuda"))
-        manager.read_from_pd_buffer(pages, pd_page_index=0, kind="kv", layouts=layouts, token_indices=torch.arange(4, 8, dtype=torch.long, device="cuda"))
+        manager.write_to_pd_buffer(
+            pd_page_buffers=pages,
+            pd_page_index=0,
+            kind="kv",
+            layouts=layouts,
+            token_indices=torch.arange(4, dtype=torch.long, device="cuda"),
+        )
+        manager.read_from_pd_buffer(
+            pd_page_buffers=pages,
+            pd_page_index=0,
+            kind="kv",
+            layouts=layouts,
+            token_indices=torch.arange(
+                start=4,
+                end=8,
+                dtype=torch.long,
+                device="cuda",
+            ),
+        )
     for state in manager.get_full_attention_states():
         torch.testing.assert_close(read_kv_storage(state)[:, 4:8], read_kv_storage(state)[:, :4])
         assert not read_kv_storage(state)[:, 8:].any()

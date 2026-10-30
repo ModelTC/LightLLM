@@ -41,9 +41,14 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     @classmethod
     def _create_bounded_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
-        tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        model_logical_layer_ids: tuple[int, ...],
+        request_capacity: int = 1,
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+        device: str = "meta",
     ) -> list["BoundedAttentionState"]:
         """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
         from lightllm.common.att_resources.bounded_att import create_gdn_state, ConvSSMStateConfig
@@ -69,7 +74,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
             ),
-            request_capacity=request_capacity, mtp_step=args.mtp_step, device=device,
+            request_capacity=request_capacity,
+            mtp_step=args.mtp_step,
+            device=device,
         )
         return [state]
 
@@ -92,8 +99,12 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     @classmethod
     def _create_full_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """按 Qwen 混合层周期选择 full-attention 层，保留全局逻辑层号。"""
         from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
@@ -112,9 +123,12 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
                 global_head_num=cfg.full_att_all_num_kv_heads,
                 head_dim=cfg.full_att_head_dim,
                 dtype=get_torch_dtype(args.data_type),
-                tp_rank=tp_rank, tp_world_size=tp_world_size,
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
             ),
-            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+            kv_type=args.llm_kv_type,
+            page_size=args.page_size,
+            device="meta",
         )
         return [state]
 

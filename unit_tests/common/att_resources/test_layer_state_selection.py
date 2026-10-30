@@ -26,7 +26,10 @@ def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
     model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     state = GQAFullAttentionState(
         layout_config=FullAttentionConfig(
-            logical_layer_groups=((0,),), global_head_num=1, head_dim=128, dtype=torch.bfloat16,
+            logical_layer_groups=((0,),),
+            global_head_num=1,
+            head_dim=128,
+            dtype=torch.bfloat16,
         ), device="meta",
     )
     monkeypatch.setattr(
@@ -47,7 +50,10 @@ def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str, mo
         for dtype, groups in ((torch.bfloat16, ((0, 2),)), (torch.float16, ((3,),))):
             manager.set_att_state(model_role, GQAFullAttentionState(
                 layout_config=FullAttentionConfig(
-                    logical_layer_groups=groups, global_head_num=1, head_dim=128, dtype=dtype,
+                    logical_layer_groups=groups,
+                    global_head_num=1,
+                    head_dim=128,
+                    dtype=dtype,
                 ), device="meta",
             ))
     model = TpPartBaseModel.__new__(TpPartBaseModel)
@@ -154,7 +160,12 @@ def test_mla_selection_excludes_same_layer_tail() -> None:
     assert not tail.has_logical_layer(0)
     assert manager.get_att_state("main", "mla", 7) is state
     assert manager.get_att_state("main", "kpool", 7) is tail
-    assert manager.get_att_state("main", "", 7, state_class=FullAttentionState) is state
+    assert manager.get_att_state(
+        model_name="main",
+        att_type="",
+        logical_layer_id=7,
+        state_class=FullAttentionState,
+    ) is state
     with pytest.raises(AssertionError, match="expected exactly one"):
         manager.get_att_state("main", "", 7)
 

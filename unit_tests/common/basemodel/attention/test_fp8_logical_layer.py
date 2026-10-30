@@ -30,8 +30,10 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
 ) -> None:
     template = definition("static_head" if backend_name == "fa3" else "static_tensor")
     state = rebuild_full_state(
-        template, config=replace(template.config, logical_layer_groups=((3, 7), (8, 11))),
-        token_capacity=8, device="cpu",
+        template=template,
+        config=replace(template.config, logical_layer_groups=((3, 7), (8, 11))),
+        token_capacity=8,
+        device="cpu",
     )
     state.scales[0].fill_(2)
     state.scales[1].fill_(5)
@@ -81,8 +83,13 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         attention.decode_max_q_seq_len = 1
         attention.causal = True
     else:
-        def run(q: torch.Tensor, kv: tuple[torch.Tensor, torch.Tensor], *,
-                k_scale: float, v_scale: float, out: torch.Tensor) -> None:
+        def run(
+            q: torch.Tensor,
+            paged_kv_cache: tuple[torch.Tensor, torch.Tensor],
+            k_scale: float,
+            v_scale: float,
+            out: torch.Tensor,
+        ) -> None:
             assert k_scale == v_scale == expected_scale
             calls.append(operation)
             out.copy_(q)
@@ -97,7 +104,12 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
     q = torch.ones((1, state.config.head_num, state.config.head_dim))
     if operation == "prefill":
-        output = layer._context_attention_kernel(q=q, kv=None, infer_state=infer, layer_weight=None)
+        output = layer._context_attention_kernel(
+            q=q,
+            kv=None,
+            infer_state=infer,
+            layer_weight=None,
+        )
     else:
         output = layer._token_attention_kernel(q=q, infer_state=infer, layer_weight=None)
     assert torch.equal(output, q)

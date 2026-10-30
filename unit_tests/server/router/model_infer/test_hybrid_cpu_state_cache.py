@@ -67,13 +67,20 @@ def linear_cache(monkeypatch, tmp_path, request):
         layer_types=("linear_attention", "full_attention"),
     )
     full = GQAFullAttentionState(
-        FullAttentionConfig(tuple((layer,) for layer in config.get_full_att_logical_layer_ids()), 1, 8, torch.bfloat16),
+        FullAttentionConfig(
+            logical_layer_groups=tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
+            global_head_num=1,
+            head_dim=8,
+            dtype=torch.bfloat16,
+        ),
          page_size=args.page_size,
     )
     full.initialize_storage(384)
     requests = ReqManager(2, 512)
     resources = build_hybrid_resources(
-        config=config, request_capacity=3, mtp_step=0,
+        config=config,
+        request_capacity=3,
+        mtp_step=0,
         full_state=full,
         full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
         big_page_capacity=5,
@@ -97,7 +104,10 @@ def linear_cache(monkeypatch, tmp_path, request):
 
 @pytest.mark.parametrize("token_num", [320, 384])
 def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
-    monkeypatch, linear_cache, cpu_cache_factory, token_num
+    monkeypatch,
+    linear_cache,
+    cpu_cache_factory,
+    token_num,
 ):
     from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
     from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
@@ -163,7 +173,9 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     module.cpu_cache_client = client
     module.gloo_group = None
     module.backend = SimpleNamespace(
-        is_master_in_dp=True, is_hybrid_att_model=True, dp_world_size=1,
+        is_master_in_dp=True,
+        is_hybrid_att_model=True,
+        dp_world_size=1,
         model=SimpleNamespace(req_manager=requests, att_resource_manager=resources),
     )
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
@@ -215,10 +227,16 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     torch.testing.assert_close(linear.ssm_state[:, 0].cpu(), expected_states[1])
 
     # Model data validity and multimodal resume boundaries are separate checks.
-    tree = HybridAttPagedRadixCache(384, 103, 64, 2, resources)
+    tree = HybridAttPagedRadixCache(
+        total_token_num=384,
+        rank_in_node=103,
+        hash_page_size=64,
+        big_page_num=2,
+        att_resource_manager=resources,
+    )
     cache_len = max(req.hybrid_len_to_big_page_id)
     tree.insert(
-        torch.arange(cache_len),
+        key=torch.arange(cache_len),
         value=restored_indices[:cache_len].cpu(),
         block_hashs=list(range(1, cache_len // 64 + 1)),
         block_state_idxs=[None] * (cache_len // 64),
@@ -226,7 +244,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     )
     for length, expected in [(128, 128 if first_page_has_state else 0), (256, 256)]:
         node, matched, _ = tree.match_prefix(
-            torch.arange(length),
+            key=torch.arange(length),
             block_hashs=list(range(1, length // 64 + 1)),
             update_refs=True,
             mm_input_spans=req.mm_input_spans,
@@ -234,7 +252,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
         assert matched == expected
         tree.dec_node_ref_counter(node)
     req.shared_kv_node, _, _ = tree.match_prefix(
-        torch.arange(cache_len),
+        key=torch.arange(cache_len),
         block_hashs=list(range(1, cache_len // 64 + 1)),
         update_refs=True,
         mm_input_spans=req.mm_input_spans,
@@ -245,7 +263,10 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
 @pytest.mark.parametrize("shared_prefix", [False, True])
 @pytest.mark.parametrize("allocated_pages", [0, 1, 2])
 def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
-    monkeypatch, linear_cache, shared_prefix, allocated_pages,
+    monkeypatch,
+    linear_cache,
+    shared_prefix,
+    allocated_pages,
 ):
     from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as common
 
@@ -255,8 +276,12 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     monkeypatch.setattr(g_infer_context, "radix_cache", SimpleNamespace(get_big_page_ids_by_node=lambda node: shared_slots))
     big_slots = {128 * (i + 1): slot for i, slot in enumerate(slots) if not shared_prefix or i > 0}
     req = SimpleNamespace(
-        req_idx=0, shared_kv_node=None, hybrid_len_to_big_page_id=big_slots,
-        tail_small_page_buffer_id=None, cur_kv_len=256, cache_tiers=(CacheTier.CPU,),
+        req_idx=0,
+        shared_kv_node=None,
+        hybrid_len_to_big_page_id=big_slots,
+        tail_small_page_buffer_id=None,
+        cur_kv_len=256,
+        cache_tiers=(CacheTier.CPU,),
         shm_req=SimpleNamespace(
             token_hash_list=SimpleNamespace(get_all=lambda: [11, 22]),
             token_hash_page_len_list=SimpleNamespace(get_all=lambda: [128, 256]),
@@ -265,18 +290,25 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     requested_hashes = []
     writes = []
 
-    def allocate_pages(hashes, *, disk_offload_enable):
+    def allocate_pages(hashes, disk_offload_enable):
         requested_hashes.append(list(hashes))
         return list(range(allocated_pages)) + [-1] * (len(hashes) - allocated_pages), [False] * len(hashes)
 
-    def write_to_cpu(token_indices, cpu_page_buffers, cpu_page_indices, **kwargs):
+    def write_to_cpu(
+        token_indices,
+        cpu_page_buffers,
+        cpu_page_indices,
+        **kwargs,
+    ):
         writes.append((token_indices.numel(), cpu_page_indices, kwargs["big_page_slot_ids"], kwargs["small_page_slot_ids"]))
 
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = get_env_start_args()
     module.gloo_group = None
     module.backend = SimpleNamespace(
-        is_master_in_dp=True, is_hybrid_att_model=True, dp_world_size=1,
+        is_master_in_dp=True,
+        is_hybrid_att_model=True,
+        dp_world_size=1,
         model=SimpleNamespace(att_resource_manager=resources, req_manager=requests),
     )
     module.cpu_cache_client = SimpleNamespace(

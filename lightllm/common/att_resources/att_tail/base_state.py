@@ -69,16 +69,24 @@ class AttentionTailState(ABC):
 
     @abstractmethod
     def write_to_pd_buffer(
-        self, req_idx: int, pd_page_buffers: torch.Tensor,
-        *, pd_page_index: int, state_token_len: int, layout: StateTransferLayout,
+        self,
+        req_idx: int,
+        pd_page_buffers: torch.Tensor,
+        pd_page_index: int,
+        state_token_len: int,
+        layout: StateTransferLayout,
     ) -> None:
         """按 state_token_len 对应的 prefill 终点导出逻辑窗口，不导出推测候选历史。"""
         ...
 
     @abstractmethod
     def read_from_pd_buffer(
-        self, pd_page_buffers: torch.Tensor, req_idx: int,
-        *, pd_page_index: int, state_token_len: int, layout: StateTransferLayout,
+        self,
+        pd_page_buffers: torch.Tensor,
+        req_idx: int,
+        pd_page_index: int,
+        state_token_len: int,
+        layout: StateTransferLayout,
     ) -> None:
         """按 state_token_len 将逻辑窗口恢复到本地运行态，适配本地 MTP 容量。"""
         ...

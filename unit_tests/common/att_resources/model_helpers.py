@@ -52,7 +52,6 @@ def bind_test_fp8_calibration(
 
 def rebuild_full_state(
     template: FullAttentionState,
-    *,
     config: FullAttentionConfig | None = None,
     token_capacity: int | None = None,
     page_size: int | None = None,
@@ -98,7 +97,7 @@ def main_linear_state(resources: AttResourceManager):
     return state
 
 
-def prepare_model_states(model: TpPartBaseModel, *, logical_layer_ids: Sequence[int] | None = None):
+def prepare_model_states(model: TpPartBaseModel, logical_layer_ids: Sequence[int] | None = None):
     config = model.config.get("text_config", model.config)
     if logical_layer_ids is None:
         logical_layer_ids = range(config.get("num_hidden_layers", config.get("n_layer")))
@@ -126,7 +125,9 @@ def create_full_attention_roles(
         config = replace(template.config, logical_layer_groups=layers[start:end])
         if isinstance(template, StaticFP8FullAttentionState):
             state = rebuild_full_state(
-                template, config=config, scales=template.scales[start:end].clone(),
+                template=template,
+                config=config,
+                scales=template.scales[start:end].clone(),
                 q_scales=None if template.q_scales is None else template.q_scales[start:end].clone(),
             )
         else:
@@ -191,7 +192,6 @@ def build_hybrid_resources(
     mtp_step: int,
     full_state: FullAttentionState,
     full_allocator: FullAttKVAllocator,
-    *,
     big_page_capacity: int,
     small_page_capacity: int,
     draft_full_state: FullAttentionState | None = None,
@@ -222,7 +222,9 @@ def build_hybrid_resources(
             tp_rank=tp_rank,
             tp_world_size=config.tp_world_size,
         ),
-        request_capacity=request_capacity, mtp_step=mtp_step, device="cuda",
+        request_capacity=request_capacity,
+        mtp_step=mtp_step,
+        device="cuda",
     )
     bounded_state.initialize_page_pools(
         big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity, pin_memory=True,
@@ -236,10 +238,15 @@ def build_hybrid_resources(
             tail = create_kpool_state(
                 config=KPoolStateConfig(
                     logical_layer_ids=tuple(layer for group in state.config.logical_layer_groups for layer in group),
-                    pool_size=config.index_kpool, head_dim=config.index_head_dim, dtype=config.full_att_dtype,
-                    tp_rank=tp_rank, tp_world_size=config.tp_world_size,
+                    pool_size=config.index_kpool,
+                    head_dim=config.index_head_dim,
+                    dtype=config.full_att_dtype,
+                    tp_rank=tp_rank,
+                    tp_world_size=config.tp_world_size,
                 ),
-                request_capacity=request_capacity, mtp_step=mtp_step, device="cuda",
+                request_capacity=request_capacity,
+                mtp_step=mtp_step,
+                device="cuda",
             )
             manager.set_att_state(role, tail)
     manager.full_att_allocator = full_allocator

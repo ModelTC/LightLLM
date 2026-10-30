@@ -138,7 +138,6 @@ class MultiLevelKvCacheModule(object):
         req: InferReq,
         cpu_page_indices: List[int],
         page_lengths: List[int],
-        *,
         start_token_len: int,
     ) -> None:
         """恢复已选定的请求前缀页面，分配资源并登记完整大页引用。
@@ -179,9 +178,9 @@ class MultiLevelKvCacheModule(object):
 
         # 阶段三：统一恢复各类 State；异常直接向上传播，不在此处回收或继续执行。
         resources.read_req_from_cpu(
-            self.cpu_cache_client.cpu_kv_cache_tensor,
-            cpu_page_indices,
-            token_indices,
+            cpu_page_buffers=self.cpu_cache_client.cpu_kv_cache_tensor,
+            cpu_page_indices=cpu_page_indices,
+            token_indices=token_indices,
             layouts=resources.get_cpu_transfer_layouts(),
             big_page_slot_ids=big_page_slot_ids,
             req_idx=req.req_idx if self.backend.is_hybrid_att_model else None,

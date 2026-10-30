@@ -30,7 +30,12 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 @pytest.mark.parametrize("capture", [False, True])
 def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, capture: bool):
     template = definition(kind)
-    state = rebuild_full_state(template, config=replace(template.config, logical_layer_groups=((3,), (8,))), token_capacity=8, device="cuda")
+    state = rebuild_full_state(
+        template=template,
+        config=replace(template.config, logical_layer_groups=((3,), (8,))),
+        token_capacity=8,
+        device="cuda",
+    )
     for storage_buffer in full_state_test_buffers(state).values():
         storage_buffer.zero_()
     manager = AttResourceManager(request_capacity=2)
@@ -45,13 +50,28 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
     infer.mem_index = torch.tensor([1, 5], dtype=torch.int32, device="cuda")
     heads = 1 if kind == "packed_glm" else 2 * state.config.head_num
     dim = state.config.kv_dim if kind == "packed_glm" else state.config.head_dim
-    kv = torch.full((2, heads, dim), 0.5, dtype=torch.bfloat16, device="cuda")
+    kv = torch.full(
+        size=(2, heads, dim),
+        fill_value=0.5,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     layer = SimpleNamespace(layer_num_=8)
-    TransformerLayerInferTpl._post_cache_kv(layer, kv, infer, None)
+    TransformerLayerInferTpl._post_cache_kv(
+        self=layer,
+        cache_kv=kv,
+        infer_state=infer,
+        layer_weight=None,
+    )
     if capture:
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
-            TransformerLayerInferTpl._post_cache_kv(layer, kv, infer, None)
+            TransformerLayerInferTpl._post_cache_kv(
+                self=layer,
+                cache_kv=kv,
+                infer_state=infer,
+                layer_weight=None,
+            )
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.zero_()
         graph.replay()
@@ -76,13 +96,27 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
 
 def test_packed_fp8_prefill_combines_history_and_fresh_kv_with_sparse_remapping():
     template = definition("packed_fp8")
-    state = rebuild_full_state(template, config=template.config, token_capacity=8, device="cuda")
+    state = rebuild_full_state(
+        template=template,
+        config=template.config,
+        token_capacity=8,
+        device="cuda",
+    )
     for storage_buffer in full_state_test_buffers(state).values():
         storage_buffer.zero_()
     history_ids = torch.tensor([3, 7], dtype=torch.int32, device="cuda")
-    history = torch.randn(2, 1, 576, dtype=torch.bfloat16, device="cuda")
+    history = torch.randn(
+        size=(2, 1, 576),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     state.write_full_att_kv(0, history_ids, history)
-    fresh = torch.full((1, 1, 576), 123, dtype=torch.bfloat16, device="cuda")
+    fresh = torch.full(
+        size=(1, 1, 576),
+        fill_value=123,
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     topk = torch.tensor([[7, 5, 3, 7, -1], [5, -1, -1, -1, -1]], dtype=torch.int32, device="cuda")
     compact, mapped = get_prefill_kv_cache_and_remap_indices_triton(
         packed_kv=state.get_layer_view(0).kv,
@@ -96,7 +130,17 @@ def test_packed_fp8_prefill_combines_history_and_fresh_kv_with_sparse_remapping(
     assert mapped[0, 0] == mapped[0, 3]
     assert torch.equal(compact[mapped[0, 1]], fresh[0])
     assert torch.equal(compact[mapped[1, 0]], fresh[0])
-    torch.testing.assert_close(compact[mapped[0, 0], :, :512], history[1, :, :512], atol=0.15, rtol=0.08)
-    torch.testing.assert_close(compact[mapped[0, 2], :, :512], history[0, :, :512], atol=0.15, rtol=0.08)
+    torch.testing.assert_close(
+        actual=compact[mapped[0, 0], :, :512],
+        expected=history[1, :, :512],
+        atol=0.15,
+        rtol=0.08,
+    )
+    torch.testing.assert_close(
+        actual=compact[mapped[0, 2], :, :512],
+        expected=history[0, :, :512],
+        atol=0.15,
+        rtol=0.08,
+    )
     assert torch.equal(compact[mapped[0, 0], :, 512:], history[1, :, 512:])
     assert torch.equal(compact[mapped[0, 2], :, 512:], history[0, :, 512:])

@@ -32,7 +32,10 @@ class GDNState(BoundedAttentionState):
     # ========================================================================
 
     def __init__(
-        self, config: ConvSSMStateConfig, request_capacity: int, mtp_step: int = 0, *,
+        self,
+        config: ConvSSMStateConfig,
+        request_capacity: int,
+        mtp_step: int = 0,
         device: str | torch.device = "cuda",
     ) -> None:
         """按请求容量创建 Conv/SSM 运行态和 MTP 游标；大小页池延后初始化。"""
@@ -71,7 +74,6 @@ class GDNState(BoundedAttentionState):
         self,
         big_page_capacity: int,
         small_page_capacity: int = 0,
-        *,
         device: str | torch.device | int = "cpu",
         pin_memory: bool = True,
     ) -> None:
@@ -79,12 +81,22 @@ class GDNState(BoundedAttentionState):
         assert self.big_pages_pool is None and self.small_pages_pool is None, "page pools already initialized"
         assert big_page_capacity >= 0 and small_page_capacity >= 0, "page capacities must be nonnegative"
         self.big_pages_pool = (
-            GDNPagesPool(size=big_page_capacity, config=self.config, device=device, pin_memory=pin_memory)
+            GDNPagesPool(
+                size=big_page_capacity,
+                config=self.config,
+                device=device,
+                pin_memory=pin_memory,
+            )
             if big_page_capacity
             else None
         )
         self.small_pages_pool = (
-            GDNPagesPool(size=small_page_capacity, config=self.config, device=device, pin_memory=pin_memory)
+            GDNPagesPool(
+                size=small_page_capacity,
+                config=self.config,
+                device=device,
+                pin_memory=pin_memory,
+            )
             if small_page_capacity
             else None
         )
@@ -112,7 +124,7 @@ class GDNState(BoundedAttentionState):
             if self.mtp_state_index is not None:
                 self.mtp_state_index[req_idx].fill_(0)
 
-    def save_bounded_att_pages(self, req_indices: List[int], *, page_kind: PageKind, slot_ids: List[int]) -> None:
+    def save_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
         """将 prefill 完成后的 Conv/SSM 基准状态直接保存到指定页池槽位。"""
         assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
         assert len(req_indices) == len(slot_ids), "request and page counts differ"
@@ -125,7 +137,7 @@ class GDNState(BoundedAttentionState):
             pool.conv_state[slot_id].copy_(self.conv_state[:, req_idx, :, : self.config.conv_width], non_blocking=True)
             pool.ssm_state[slot_id].copy_(self.ssm_state[:, req_idx * (self.mtp_step + 1)], non_blocking=True)
 
-    def restore_bounded_att_pages(self, req_indices: List[int], *, page_kind: PageKind, slot_ids: List[int]) -> None:
+    def restore_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
         """从指定页池槽位恢复 Conv/SSM 到目标基准位置，并将游标归零。"""
         assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
         assert len(req_indices) == len(slot_ids), "request and page counts differ"
@@ -167,7 +179,6 @@ class GDNState(BoundedAttentionState):
         slot_ids: List[int],
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
-        *,
         layout: StateTransferLayout,
         cpu_page_readies: list[bool] | None = None,
     ) -> None:
@@ -189,7 +200,13 @@ class GDNState(BoundedAttentionState):
             if cpu_page_readies is not None and cpu_page_readies[index]:
                 continue
             fields = self._fields(pool.conv_state[slot], pool.ssm_state[slot])
-            copies.extend(bounded_att_buffer_copies(fields, cpu_page_buffers, layout, page_index=page, write=True))
+            copies.extend(bounded_att_buffer_copies(
+                fields=fields,
+                page_buffers=cpu_page_buffers,
+                layout=layout,
+                page_index=page,
+                write=True,
+            ))
         for src_tensor, dst_tensor in copies:
             dst_tensor.copy_(src_tensor, non_blocking=True)
 
@@ -197,7 +214,6 @@ class GDNState(BoundedAttentionState):
         self,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
-        *,
         big_page_slot_ids: List[int],
         layout: StateTransferLayout,
     ) -> None:
@@ -214,7 +230,13 @@ class GDNState(BoundedAttentionState):
         # 页池与缓存页均在 CPU 时应使用 CPU 批量复制，仅有 GPU 端且主机内存可访问时使用传输 kernel。
         for page, slot in zip(cpu_page_indices, big_page_slot_ids):
             fields = self._fields(pool.conv_state[slot], pool.ssm_state[slot])
-            copies.extend(bounded_att_buffer_copies(fields, cpu_page_buffers, layout, page_index=page, write=False))
+            copies.extend(bounded_att_buffer_copies(
+                fields=fields,
+                page_buffers=cpu_page_buffers,
+                layout=layout,
+                page_index=page,
+                write=False,
+            ))
         for src_tensor, dst_tensor in copies:
             dst_tensor.copy_(src_tensor, non_blocking=True)
 
@@ -281,28 +303,46 @@ class GDNState(BoundedAttentionState):
         return self._get_transfer_regions()
 
     def write_to_pd_buffer(
-        self, req_idx: int, pd_page_buffers: torch.Tensor,
-        *, pd_page_index: int, layout: StateTransferLayout,
+        self,
+        req_idx: int,
+        pd_page_buffers: torch.Tensor,
+        pd_page_index: int,
+        layout: StateTransferLayout,
     ) -> None:
         """将 prefill 基准运行态写入 PD 页；调用方保证源 MTP 游标为 0。"""
         assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         fields = self._runtime_fields(req_idx)
         # TODO：将 Conv/SSM 的 PD 打包融合到一次 kernel，直接写指定页的字段偏移并保留 TP 写入规则。
-        copies = bounded_att_buffer_copies(fields, pd_page_buffers, layout, page_index=pd_page_index, write=True)
+        copies = bounded_att_buffer_copies(
+            fields=fields,
+            page_buffers=pd_page_buffers,
+            layout=layout,
+            page_index=pd_page_index,
+            write=True,
+        )
         for src_tensor, dst_tensor in copies:
             dst_tensor.copy_(src_tensor, non_blocking=True)
 
     def read_from_pd_buffer(
-        self, pd_page_buffers: torch.Tensor, req_idx: int,
-        *, pd_page_index: int, layout: StateTransferLayout,
+        self,
+        pd_page_buffers: torch.Tensor,
+        req_idx: int,
+        pd_page_index: int,
+        layout: StateTransferLayout,
     ) -> None:
         """将 PD 页恢复到指定请求槽位并规范化控制信息，不写入大小页池。"""
         assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         fields = self._runtime_fields(req_idx)
         # TODO：融合 PD 页中 Conv/SSM 的恢复与目标游标清零，按布局切片直接写入基准运行态。
-        copies = bounded_att_buffer_copies(fields, pd_page_buffers, layout, page_index=pd_page_index, write=False)
+        copies = bounded_att_buffer_copies(
+            fields=fields,
+            page_buffers=pd_page_buffers,
+            layout=layout,
+            page_index=pd_page_index,
+            write=False,
+        )
         for src_tensor, dst_tensor in copies:
             dst_tensor.copy_(src_tensor, non_blocking=True)
         if self.mtp_state_index is not None:
@@ -323,7 +363,10 @@ class GDNState(BoundedAttentionState):
         regions = []
         logger.debug(
             "%s building transfer regions: TP=%d/%d, Conv shape=%s",
-            self.resource_id, config.tp_rank, config.tp_world_size, conv_shape,
+            self.resource_id,
+            config.tp_rank,
+            config.tp_world_size,
+            conv_shape,
         )
 
         # 阶段二：Conv 按 Q/K/V 拼接；三个映射共用同一块全局 Conv 区域，不能重复累计字节数。
@@ -354,15 +397,25 @@ class GDNState(BoundedAttentionState):
                         dst_start=target_channel_start,
                         length=local_channel_count,
                     ),
-                    AxisSlice(axis="window", src_start=0, dst_start=0, length=config.conv_width),
+                    AxisSlice(
+                        axis="window",
+                        src_start=0,
+                        dst_start=0,
+                        length=config.conv_width,
+                    ),
                 ),
                 write_enabled=write_enabled,
             )
             regions.append(conv_region)
             logger.debug(
                 "%s Conv %s: local_channel_start=%d, global_channel_start=%d, channels=%d, replicas=%d, write_enabled=%s",
-                self.resource_id, name, local_channel_start, target_channel_start,
-                local_channel_count, replica_count, write_enabled,
+                self.resource_id,
+                name,
+                local_channel_start,
+                target_channel_start,
+                local_channel_count,
+                replica_count,
+                write_enabled,
             )
             local_channel_start += local_channel_count
             global_channel_start += global_head_count * head_dim
@@ -382,16 +435,36 @@ class GDNState(BoundedAttentionState):
             axes=("layer", "head", "key_dim", "value_dim"),
             shape=ssm_shape,
             axis_slices=(
-                AxisSlice(axis="head", src_start=0, dst_start=head_start, length=config.num_v_heads),
-                AxisSlice(axis="key_dim", src_start=0, dst_start=0, length=config.key_dim),
-                AxisSlice(axis="value_dim", src_start=0, dst_start=0, length=config.value_dim),
+                AxisSlice(
+                    axis="head",
+                    src_start=0,
+                    dst_start=head_start,
+                    length=config.num_v_heads,
+                ),
+                AxisSlice(
+                    axis="key_dim",
+                    src_start=0,
+                    dst_start=0,
+                    length=config.key_dim,
+                ),
+                AxisSlice(
+                    axis="value_dim",
+                    src_start=0,
+                    dst_start=0,
+                    length=config.value_dim,
+                ),
             ),
             write_enabled=write_enabled,
         )
         regions.append(ssm_region)
         logger.debug(
             "%s transfer regions built: SSM head_start=%d, heads=%d, write_enabled=%s, SSM bytes=[%d, %d)",
-            self.resource_id, head_start, config.num_v_heads, write_enabled, ssm_region.byte_start, ssm_region.byte_end,
+            self.resource_id,
+            head_start,
+            config.num_v_heads,
+            write_enabled,
+            ssm_region.byte_start,
+            ssm_region.byte_end,
         )
         return tuple(regions)
 

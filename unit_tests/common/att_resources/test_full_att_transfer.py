@@ -114,11 +114,31 @@ def test_full_att_pages_copy_all_fields_with_bounded_grid(
         patch.setattr(torch.Tensor, "tolist", reject_gather)
         with torch.cuda.stream(stream):
             if transfer == "cpu":
-                source.write_to_cpu(token_indices=src_ids, cpu_page_buffers=page_view, cpu_page_indices=page_indices, layout=layout)
-                target.read_from_cpu(cpu_page_buffers=page_view, cpu_page_indices=page_indices, token_indices=dst_ids, layout=layout)
+                source.write_to_cpu(
+                    token_indices=src_ids,
+                    cpu_page_buffers=page_view,
+                    cpu_page_indices=page_indices,
+                    layout=layout,
+                )
+                target.read_from_cpu(
+                    cpu_page_buffers=page_view,
+                    cpu_page_indices=page_indices,
+                    token_indices=dst_ids,
+                    layout=layout,
+                )
             else:
-                source.write_to_pd_buffer(token_indices=src_ids, pd_page_buffers=page_view, pd_page_index=3, layout=layout)
-                target.read_from_pd_buffer(pd_page_buffers=page_view, token_indices=dst_ids, pd_page_index=3, layout=layout)
+                source.write_to_pd_buffer(
+                    token_indices=src_ids,
+                    pd_page_buffers=page_view,
+                    pd_page_index=3,
+                    layout=layout,
+                )
+                target.read_from_pd_buffer(
+                    pd_page_buffers=page_view,
+                    token_indices=dst_ids,
+                    pd_page_index=3,
+                    layout=layout,
+                )
         stream.synchronize()
 
     # 比较整行原始字节：packed padding 沿用目标填充值，字段数据来自源存储。
@@ -239,7 +259,11 @@ def _peer_transfer_worker(
 @pytest.mark.parametrize("readies", [[False, True, False], [True, False, True], [True, True, True], [False, False, False]])
 @pytest.mark.parametrize("grid_num", [1, 36])
 def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
-    kind: str, readies: list[bool], grid_num: int, pd_args: EasyDict, monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    readies: list[bool],
+    grid_num: int,
+    pd_args: EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     pd_args.cpu_cache_token_page_size = 5
     state = rebuild_full_state(definition(kind), token_capacity=32, device="cuda")
@@ -252,15 +276,28 @@ def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
         buffer.view(torch.uint8).random_(0, 256)
     regions = state.get_cpu_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id, tokens_per_page=5, byte_start=0,
-        byte_end=max(region.byte_end for region in regions), regions=regions,
+        resource_id=state.resource_id,
+        tokens_per_page=5,
+        byte_start=0,
+        byte_end=max(region.byte_end for region in regions),
+        regions=regions,
     )
     # 页编号不连续，token 索引带 stride；最后一页只写三个 token。
     page_indices = [3, 0, 4]
     token_indices = torch.arange(26, dtype=torch.int32, device="cuda")[::2]
-    baseline = torch.full((6, layout.byte_end + 32), 173, dtype=torch.uint8, pin_memory=True)
+    baseline = torch.full(
+        size=(6, layout.byte_end + 32),
+        fill_value=173,
+        dtype=torch.uint8,
+        pin_memory=True,
+    )
     pages = torch.full_like(baseline, 173, pin_memory=True)
-    state.write_to_cpu(token_indices, baseline[:, 16:-16], page_indices, layout=layout)
+    state.write_to_cpu(
+        token_indices=token_indices,
+        cpu_page_buffers=baseline[:, 16:-16],
+        cpu_page_indices=page_indices,
+        layout=layout,
+    )
     torch.cuda.synchronize()
     expected = pages.clone()
     for page, ready in zip(page_indices, readies):
@@ -274,7 +311,11 @@ def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
         if all(readies):
             patch.setattr(torch, "tensor", reject_allocation)
         state.write_to_cpu(
-            token_indices, pages[:, 16:-16], page_indices, layout=layout, cpu_page_readies=readies,
+            token_indices=token_indices,
+            cpu_page_buffers=pages[:, 16:-16],
+            cpu_page_indices=page_indices,
+            layout=layout,
+            cpu_page_readies=readies,
         )
     torch.cuda.synchronize()
     # 整页比较同时覆盖 KV、量化 scale、packed indexer 字段及前后 padding。

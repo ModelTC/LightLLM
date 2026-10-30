@@ -49,10 +49,17 @@ def test_fill_orders_radix_and_owned_pages_and_clears_reused_rows(monkeypatch: p
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: None)
     req = SimpleNamespace(
-        cur_kv_len=24, req_idx=7, shared_kv_node=node,
+        cur_kv_len=24,
+        req_idx=7,
+        shared_kv_node=node,
         hybrid_len_to_big_page_id={24: 3, 16: 12, 32: 88},
     )
-    second = SimpleNamespace(cur_kv_len=8, req_idx=5, shared_kv_node=None, hybrid_len_to_big_page_id={8: 6})
+    second = SimpleNamespace(
+        cur_kv_len=8,
+        req_idx=5,
+        shared_kv_node=None,
+        hybrid_len_to_big_page_id={8: 6},
+    )
     module.fill_reqs_info([req, second])
     assert module.shared_req_infos.arr[:, 0].tolist() == [[24, 7], [8, 5]]
     assert module.shared_req_big_page_ids.arr[:, 0].tolist() == [[40, 12, 3, -1], [6, -1, -1, -1]]
@@ -106,7 +113,11 @@ def test_missing_source_page_fails_before_allocating(monkeypatch: pytest.MonkeyP
 @pytest.mark.parametrize("local_dp_rank", [0, 1])
 @pytest.mark.parametrize("local_len,remote_len", [(24, 16), (24, 24), (31, 24), (0, 0)])
 def test_local_longest_prefix_skips_copy_but_keeps_barriers(
-    monkeypatch: pytest.MonkeyPatch, hybrid: bool, local_dp_rank: int, local_len: int, remote_len: int,
+    monkeypatch: pytest.MonkeyPatch,
+    hybrid: bool,
+    local_dp_rank: int,
+    local_len: int,
+    remote_len: int,
 ):
     # 并列最长且本地为 DP 1 时，argmax 会优先选 DP 0；仍应在选择来源前跳过复制。
     allocate_pages = Mock(side_effect=AssertionError("unexpected big page allocation"))
@@ -121,9 +132,13 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
     )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = SimpleNamespace(
-        is_hybrid_att_model=hybrid, is_master_in_dp=True, node_nccl_group="node",
+        is_hybrid_att_model=hybrid,
+        is_master_in_dp=True,
+        node_nccl_group="node",
         model=SimpleNamespace(att_resource_manager=manager),
-        dp_att_resource_managers={}, dp_req_to_token_indices={}, _alloc_req_kv_mem=allocate_tokens,
+        dp_att_resource_managers={},
+        dp_req_to_token_indices={},
+        _alloc_req_kv_mem=allocate_tokens,
     )
     module.dp_rank_in_node = local_dp_rank
     module.big_page_tokens = 8 if hybrid else 0
@@ -134,9 +149,13 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
     )
     owned_pages = {length: 70 + length // 8 for length in range(8, local_len + 1, 8)} if hybrid else {}
     req = SimpleNamespace(
-        req_idx=7, cur_kv_len=local_len, hold_kv_len=local_len,
-        shared_kv_node=None, hybrid_len_to_big_page_id=owned_pages.copy(),
-        get_cur_total_len=lambda: 32, _kv_cache_alloc_need=allocation_need,
+        req_idx=7,
+        cur_kv_len=local_len,
+        hold_kv_len=local_len,
+        shared_kv_node=None,
+        hybrid_len_to_big_page_id=owned_pages.copy(),
+        get_cur_total_len=lambda: 32,
+        _kv_cache_alloc_need=allocation_need,
         shm_req=SimpleNamespace(shm_cur_kv_len=local_len),
     )
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", SimpleNamespace(get_can_alloc_token_num=available_tokens))
@@ -160,7 +179,10 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
     allocator = StatePageAllocator(capacity)
     allocations = []
     req = SimpleNamespace(
-        req_idx=0, cur_kv_len=8, hold_kv_len=8, hybrid_len_to_big_page_id={8: 77},
+        req_idx=0,
+        cur_kv_len=8,
+        hold_kv_len=8,
+        hybrid_len_to_big_page_id={8: 77},
         get_cur_total_len=lambda: 32,
     )
     req._kv_cache_alloc_need = lambda length: ((length + 3) // 4) * 4 - req.hold_kv_len
@@ -172,7 +194,10 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
 
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = SimpleNamespace(
-        is_hybrid_att_model=True, dp_world_size=2, rank_in_dp=1, node_nccl_group=None,
+        is_hybrid_att_model=True,
+        dp_world_size=2,
+        rank_in_dp=1,
+        node_nccl_group=None,
         model=SimpleNamespace(att_resource_manager=SimpleNamespace(bounded_att_big_page_allocator=allocator)),
         dp_req_to_token_indices={1: torch.arange(64, dtype=torch.int32).reshape(2, 32)},
         _alloc_req_kv_mem=allocate,

@@ -38,7 +38,12 @@ def clear_mtp_capacity_cache():
 @pytest.mark.parametrize("glm", [False, True])
 @pytest.mark.parametrize("mtp", [0, 2])
 @pytest.mark.parametrize("mode", ["normal", "prefill"])
-def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPatch, glm: bool, mtp: int, mode: str):
+def test_real_model_resource_hooks_and_shared_draft(
+    monkeypatch: pytest.MonkeyPatch,
+    glm: bool,
+    mtp: int,
+    mode: str,
+):
     args = StartArgs(
         run_mode=mode,
         data_type="bfloat16",
@@ -117,7 +122,12 @@ def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPa
         draft.args, draft.data_type = args, torch.bfloat16
         draft.tp_rank_, draft.tp_world_size_ = 0, 1
         draft.max_req_num, draft.max_total_token_num = model.max_req_num, None
-        draft.config = dict(model.config, num_hidden_layers=1, n_layer=1, full_attention_interval=1)
+        draft.config = dict(
+            model.config,
+            num_hidden_layers=1,
+            n_layer=1,
+            full_attention_interval=1,
+        )
         draft.max_seq_length, draft.batch_max_tokens = model.max_seq_length, model.batch_max_tokens
         prepare_model_states(draft, logical_layer_ids=(4,))
         assert draft.att_resource_manager is model.att_resource_manager

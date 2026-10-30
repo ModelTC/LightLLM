@@ -18,7 +18,6 @@ def transfer_gqa_pages(
     token_indices: torch.Tensor,
     page_buffers: torch.Tensor,
     page_indices: list[int],
-    *,
     layout: StateTransferLayout,
     write: bool,
     grid_num: int = 36,

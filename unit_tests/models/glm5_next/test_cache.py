@@ -47,7 +47,12 @@ def test_nope_cache_config_uses_native_mla_width():
 @pytest.mark.parametrize("small_page", [False, True])
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 @pytest.mark.parametrize("mtp_step", [0, 2])
-def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, tp_world_size, mtp_step):
+def test_hybrid_checkpoint_restore_and_packed_kv_copy(
+    monkeypatch,
+    small_page,
+    tp_world_size,
+    mtp_step,
+):
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setattr("lightllm.common.req_manager.req_sampling_params.get_vocab_size", lambda _: 128)
@@ -85,10 +90,10 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     )
     full = PackedMLAFullAttentionState(
         PackedMLAAttentionConfig(
-            tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
-            1,
-            584,
-            torch.bfloat16,
+            logical_layer_groups=tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
+            global_head_num=1,
+            head_dim=584,
+            dtype=torch.bfloat16,
             tp_world_size=tp_world_size,
             kv_dim=512,
         ),
@@ -100,7 +105,9 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
 
     main_full, draft_full = create_full_attention_roles(full, config.all_layer_num)
     resources = build_hybrid_resources(
-        config=config, request_capacity=4, mtp_step=mtp_step,
+        config=config,
+        request_capacity=4,
+        mtp_step=mtp_step,
         full_state=main_full,
         full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
         draft_full_state=draft_full,
@@ -117,7 +124,11 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     index_bytes = full.get_layer_view(3).indexer_k
     index_bytes.random_(0, 256)
     expected_index_bytes = index_bytes.clone()
-    new_kv = torch.randn(2, 1, 512, dtype=torch.bfloat16, device="cuda")
+    new_kv = torch.randn(
+        size=(2, 1, 512),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     destinations = torch.tensor([5, 9], dtype=torch.int32, device="cuda")
     full.write_full_att_kv(3, destinations, new_kv)
     assert torch.equal(att_kv[destinations], new_kv)
@@ -171,27 +182,68 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
 def test_gated_norm_gate_type_and_strided_gate(gate_type):
     from lightllm.common.basemodel.triton_kernel.norm.gated_rmsnorm import gated_rmsnorm_forward
 
-    x = torch.randn(12, 128, device="cuda", dtype=torch.bfloat16)
-    gate = torch.randn(3, 8, 128, device="cuda", dtype=torch.bfloat16)[:, :4]
+    x = torch.randn(
+        size=(12, 128),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    gate = torch.randn(
+        size=(3, 8, 128),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )[:, :4]
     weight = torch.randn(128, device="cuda", dtype=torch.bfloat16)
-    actual = gated_rmsnorm_forward(x, weight, None, 1e-5, gate, gate_type=gate_type)
+    actual = gated_rmsnorm_forward(
+        x=x,
+        weight=weight,
+        bias=None,
+        eps=1e-5,
+        z=gate,
+        gate_type=gate_type,
+    )
     expected = x.float() * torch.rsqrt(x.float().square().mean(-1, keepdim=True) + 1e-5) * weight.float()
     z = gate.reshape(12, 128).float()
     expected *= z.sigmoid() if gate_type == "sigmoid" else torch.nn.functional.silu(z)
-    torch.testing.assert_close(actual, expected.bfloat16(), atol=0.008, rtol=0.008)
+    torch.testing.assert_close(
+        actual=actual,
+        expected=expected.bfloat16(),
+        atol=0.008,
+        rtol=0.008,
+    )
 
 
 @pytest.mark.parametrize("add_one", [False, True])
 def test_clamped_swiglu_preserves_gpt_oss_default(add_one):
     from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 
-    x = torch.linspace(-25, 25, 2048, device="cuda", dtype=torch.bfloat16).view(4, 512)
-    out = torch.empty(4, 256, device="cuda", dtype=torch.bfloat16)
+    x = torch.linspace(
+        start=-25,
+        end=25,
+        steps=2048,
+        device="cuda",
+        dtype=torch.bfloat16,
+    ).view(4, 512)
+    out = torch.empty(
+        size=(4, 256),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
     kwargs = {} if add_one else {"clamp_up_add_one": False}
     alpha, limit = (1.702, 7.0) if add_one else (1.0, 10.0)
-    silu_and_mul_fwd(x, out, limit=limit, alpha=alpha, **kwargs)
+    silu_and_mul_fwd(
+        input=x,
+        output=out,
+        limit=limit,
+        alpha=alpha,
+        **kwargs,
+    )
     gate, up = x.float().chunk(2, -1)
     gate = gate.clamp(max=limit)
     gate = (gate * torch.sigmoid(alpha * gate)).bfloat16().float()
     expected = gate * (up.clamp(-limit, limit) + int(add_one))
-    torch.testing.assert_close(out, expected.bfloat16(), atol=0.008, rtol=0.008)
+    torch.testing.assert_close(
+        actual=out,
+        expected=expected.bfloat16(),
+        atol=0.008,
+        rtol=0.008,
+    )

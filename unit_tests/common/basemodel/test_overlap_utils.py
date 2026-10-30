@@ -68,7 +68,12 @@ def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch
 
     def fake_gather(**kwargs):
         events.append("gather")
-        return torch.arange(40, 46, dtype=torch.int64, device="cuda")
+        return torch.arange(
+            start=40,
+            end=46,
+            dtype=torch.int64,
+            device="cuda",
+        )
 
     monkeypatch.setattr(basemodel, "gather_token", fake_gather)
 

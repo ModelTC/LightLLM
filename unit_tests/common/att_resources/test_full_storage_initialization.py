@@ -38,14 +38,25 @@ def test_model_storage_write_and_copy_preserve_all_fields(
     encoding: str,
     model_cls: type[TpPartBaseModel],
 ):
-    _, (resources,) = make_runtime(monkeypatch, tmp_path, kind, encoding, model_cls, 1)
+    _, (resources,) = make_runtime(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        kind=kind,
+        encoding=encoding,
+        model_cls=model_cls,
+        tp=1,
+    )
     (state,) = resources.get_full_attention_states("main")
     config = state.config
     for storage_buffer in full_state_test_buffers(state).values():
         storage_buffer.zero_()
     ids = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
     dim = config.kv_dim if isinstance(state, PackedMLAFullAttentionState) else config.head_dim
-    kv = torch.randn(2, (1 if "kv" in full_state_test_buffers(state) else 2) * config.head_num, dim, device="cuda", dtype=torch.bfloat16)
+    kv = torch.randn(
+        size=(2, (1 if "kv" in full_state_test_buffers(state) else 2) * config.head_num, dim),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
     state.write_full_att_kv(config.logical_layer_groups[-1][0], ids, kv)
     if len(config.logical_layer_groups) > 1:
         assert not read_kv_storage(state)[0].any()
@@ -71,7 +82,14 @@ def test_auto_profile_fits_actual_gpu_storage_and_pd_pages(
     encoding: str,
     model_cls: type[TpPartBaseModel],
 ):
-    _, (reference,) = make_runtime(monkeypatch, tmp_path, kind, encoding, model_cls, 1)
+    _, (reference,) = make_runtime(
+        monkeypatch=monkeypatch,
+        tmp_path=tmp_path,
+        kind=kind,
+        encoding=encoding,
+        model_cls=model_cls,
+        tp=1,
+    )
     (state,) = reference.get_full_attention_states("main")
     args = get_env_start_args()
     args.run_mode, args.pd_kv_page_size, args.pd_kv_page_num = mode, 8, 3

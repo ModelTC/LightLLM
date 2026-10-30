@@ -20,7 +20,6 @@ if TYPE_CHECKING:
 def publish_att_resources(
     resources: AttResourceManager,
     request_mapping: torch.Tensor,
-    *,
     kind: Literal["pd", "dp"],
     reader_count: int,
 ) -> None:
@@ -56,7 +55,7 @@ def publish_att_resources(
 
 
 def load_att_resources(
-    rank_in_node: int, *, kind: Literal["pd", "dp"],
+    rank_in_node: int, kind: Literal["pd", "dp"],
 ) -> tuple[AttResourceManager, torch.Tensor]:
     """读取指定用途的资源；DP 接收方随后通过 manager 统一注册共享页池。"""
     assert kind in ("pd", "dp"), f"unknown IPC storage kind {kind}"

@@ -73,7 +73,6 @@ class PackedMLAFullAttentionState(FullAttentionState):
         self,
         layout_config: PackedMLAAttentionConfig,
         page_size: int = 1,
-        *,
         device: str | torch.device = "cuda",
     ) -> None:
         """按 packed MLA 配置准备 KV 与 indexer 存储。"""
@@ -208,7 +207,6 @@ class PackedMLAFullAttentionState(FullAttentionState):
         token_indices: torch.Tensor,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
-        *,
         layout: StateTransferLayout,
         cpu_page_readies: list[bool] | None = None,
     ) -> None:
@@ -232,7 +230,6 @@ class PackedMLAFullAttentionState(FullAttentionState):
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
         token_indices: torch.Tensor,
-        *,
         layout: StateTransferLayout,
     ) -> None:
         """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
@@ -295,7 +292,6 @@ class PackedMLAFullAttentionState(FullAttentionState):
         self,
         token_indices: torch.Tensor,
         pd_page_buffers: torch.Tensor,
-        *,
         pd_page_index: int,
         layout: StateTransferLayout,
     ) -> None:
@@ -317,7 +313,6 @@ class PackedMLAFullAttentionState(FullAttentionState):
         self,
         pd_page_buffers: torch.Tensor,
         token_indices: torch.Tensor,
-        *,
         pd_page_index: int,
         layout: StateTransferLayout,
     ) -> None:
@@ -346,7 +341,10 @@ class PackedMLAFullAttentionState(FullAttentionState):
         regions = []
         logger.debug(
             "%s building transfer regions: TP=%d/%d, tokens_per_page=%d",
-            self.resource_id, config.tp_rank, config.tp_world_size, page_tokens,
+            self.resource_id,
+            config.tp_rank,
+            config.tp_world_size,
+            page_tokens,
         )
         # 阶段一：按本方案固定字段计算形状和 dtype，不分配 meta 存储。
         if config.fp8_nope_dim:
@@ -409,11 +407,20 @@ class PackedMLAFullAttentionState(FullAttentionState):
             byte_offset = field_region.byte_end
             logger.debug(
                 "%s field %s: head_start=%d, heads=%d, replicas=%d, write_enabled=%s, bytes=[%d, %d)",
-                self.resource_id, field_name, head_start, local_head_count, replica_count,
-                write_enabled, field_region.byte_start, field_region.byte_end,
+                self.resource_id,
+                field_name,
+                head_start,
+                local_head_count,
+                replica_count,
+                write_enabled,
+                field_region.byte_start,
+                field_region.byte_end,
             )
         logger.debug(
-            "%s transfer regions built: fields=%d, total_bytes=%d", self.resource_id, len(regions), byte_offset
+            "%s transfer regions built: fields=%d, total_bytes=%d",
+            self.resource_id,
+            len(regions),
+            byte_offset,
         )
         return tuple(regions)
 

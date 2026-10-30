@@ -9,7 +9,6 @@ def att_tail_buffer_copies(
     tail: torch.Tensor,
     page_buffers: torch.Tensor,
     layout: StateTransferLayout,
-    *,
     page_index: int,
     state_token_len: int,
     write: bool,

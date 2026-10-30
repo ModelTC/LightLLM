@@ -157,14 +157,24 @@ def _worker(connection: Connection, backend: str, sender: bool):
         torch.set_num_threads(2)
         set_env_start_args(StartArgs(run_mode="prefill" if sender else "decode", pd_kv_page_size=32))
         get_env_start_args.cache_clear()
-        resources, full = make_resources(True, 1, 0, 2)
+        resources, full = make_resources(
+            glm=True,
+            tp=1,
+            rank=0,
+            mtp=2,
+        )
         buffer = allocate_transfer_buffer(resources, 3, device=f"cuda:{device}")
         buffer.fill_(93 if sender else 11)
         copy_stream = torch.cuda.Stream()
         if backend == "nccl":
             from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclKVTransporter
 
-            transporter = NcclKVTransporter(os.getpid(), device, buffer, host_ip="127.0.0.1")
+            transporter = NcclKVTransporter(
+                node_id=os.getpid(),
+                tp_idx=device,
+                kv_move_buffer=buffer,
+                host_ip="127.0.0.1",
+            )
         else:
             from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
 
@@ -173,10 +183,10 @@ def _worker(connection: Connection, backend: str, sender: bool):
             (
                 "metadata",
                 PDAgentMetadata(
-                    transporter.agent_name,
-                    transporter.agent_metadata,
-                    transporter.num_pages,
-                    transporter.local_page_mem_desc,
+                    agent_name=transporter.agent_name,
+                    agent_metadata=transporter.agent_metadata,
+                    num_pages=transporter.num_pages,
+                    page_reg_desc=transporter.local_page_mem_desc,
                 ),
             )
         )
@@ -192,7 +202,13 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 (state.conv_state, state.ssm_state, resources.main_kpool_c4_bf16_state.tail_buffer)
             ):
                 tensor.copy_(torch.arange(tensor.numel(), device=device).reshape(tensor.shape) % (23 + i * 7))
-            expected = _snapshot(resources, full, [3, 0, 7, 1, 9], 1, 0)
+            expected = _snapshot(
+                resources=resources,
+                full=full,
+                indices=[3, 0, 7, 1, 9],
+                req_idx=1,
+                cursor=0,
+            )
             for kind in ("kv", "att_state"):
                 task = _task(peer, kind)
                 with torch.cuda.stream(copy_stream):
@@ -211,7 +227,12 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 # The production sender publishes a page only after its copy event completes.
                 copy_stream.synchronize()
                 transporter.send_write_request_task_to_decode_node(task)
-                ready = _notification(transporter, "ready", pending, task.get_key())
+                ready = _notification(
+                    transporter=transporter,
+                    stage="ready",
+                    pending=pending,
+                    key=task.get_key(),
+                )
                 assert ready.get_key() == task.get_key()
                 task.dst_page_index = ready.dst_page_index
                 task.xfer_handle = transporter.write_blocks_paged(task)
@@ -233,7 +254,12 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 assert request.page_kind == kind
                 request.dst_page_index = 2 if kind == "kv" else 1
                 transporter.send_write_ready_task_to_prefill_node(request)
-                done = _notification(transporter, "done", pending, request.get_key())
+                done = _notification(
+                    transporter=transporter,
+                    stage="done",
+                    pending=pending,
+                    key=request.get_key(),
+                )
                 assert done.get_key() == request.get_key()
                 # Match production: unpack on a separate stream after the done notification.
                 with torch.cuda.stream(copy_stream):
@@ -250,7 +276,13 @@ def _worker(connection: Connection, backend: str, sender: bool):
                         write_to_pd_buffer=False,
                     )
                 copy_stream.synchronize()
-            expected = _snapshot(resources, full, [8, 12, 10, 15, 11], 2, 0)
+            expected = _snapshot(
+                resources=resources,
+                full=full,
+                indices=[8, 12, 10, 15, 11],
+                req_idx=2,
+                cursor=0,
+            )
             assert main_linear_state(resources).mtp_state_index[2] == 0
             assert not main_linear_state(resources).conv_state[:, :2].any()
             assert not main_linear_state(resources).ssm_state[:, :6].any()

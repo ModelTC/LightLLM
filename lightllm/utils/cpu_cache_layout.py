@@ -41,8 +41,11 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
             model_config=config, args=args, model_logical_layer_ids=logical_layer_ids,
         )
         bounded_states = model_class._create_bounded_att_states(
-            model_config=config, args=args, model_logical_layer_ids=logical_layer_ids,
-            request_capacity=1, device="meta",
+            model_config=config,
+            args=args,
+            model_logical_layer_ids=logical_layer_ids,
+            request_capacity=1,
+            device="meta",
         )
         # tail 不占 CPU 页；无需创建 tail，也不需要实际模型或临时 CUDA 运行态。
         for state in (*full_states, *bounded_states):

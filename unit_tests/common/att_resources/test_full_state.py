@@ -24,7 +24,12 @@ from lightllm.common.att_resources.types import (
 
 
 def full_state(cls: type[FullAttentionState] = GQAFullAttentionState, device: str | torch.device | int = "cpu"):
-    prepared_full_state = cls(FullAttentionConfig(((2,), (5,)), 1, 4, torch.float32), page_size=4, device=device)
+    prepared_full_state = cls(FullAttentionConfig(
+        logical_layer_groups=((2,), (5,)),
+        global_head_num=1,
+        head_dim=4,
+        dtype=torch.float32,
+    ), page_size=4, device=device)
     prepared_full_state.initialize_storage(12)
     return prepared_full_state
 
@@ -42,8 +47,18 @@ def layout_for(state: FullAttentionState):
                 axes=("token", "layer", "head", "dim"),
                 shape=(4, 2, 1, 4),
                 axis_slices=(
-                    AxisSlice(axis="head", src_start=0, dst_start=0, length=1),
-                    AxisSlice(axis="dim", src_start=0, dst_start=0, length=4),
+                    AxisSlice(
+                        axis="head",
+                        src_start=0,
+                        dst_start=0,
+                        length=1,
+                    ),
+                    AxisSlice(
+                        axis="dim",
+                        src_start=0,
+                        dst_start=0,
+                        length=4,
+                    ),
                 ),
             )
         )
@@ -96,18 +111,43 @@ def test_full_attention_write_copy_and_pd(
         with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
             state.copy_full_att_tokens(ids, torch.tensor([8, 9], dtype=torch.int32, device=device))
     layout = layout_for(state)
-    pages = torch.full((3, layout.byte_end), 255, dtype=torch.uint8, device=device)
+    pages = torch.full(
+        size=(3, layout.byte_end),
+        fill_value=255,
+        dtype=torch.uint8,
+        device=device,
+    )
     if device == "cpu":
         with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            state.write_to_pd_buffer(ids, pages, pd_page_index=1, layout=layout)
+            state.write_to_pd_buffer(
+                token_indices=ids,
+                pd_page_buffers=pages,
+                pd_page_index=1,
+                layout=layout,
+            )
         with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            state.read_from_pd_buffer(pages, ids, pd_page_index=1, layout=layout)
+            state.read_from_pd_buffer(
+                pd_page_buffers=pages,
+                token_indices=ids,
+                pd_page_index=1,
+                layout=layout,
+            )
         return
-    state.write_to_pd_buffer(ids, pages, pd_page_index=1, layout=layout)
+    state.write_to_pd_buffer(
+        token_indices=ids,
+        pd_page_buffers=pages,
+        pd_page_index=1,
+        layout=layout,
+    )
     target = full_state(cls, device)
     for storage_buffer in full_state_test_buffers(target).values():
         storage_buffer.zero_()
-    target.read_from_pd_buffer(pages, torch.tensor([5, 6], dtype=torch.long, device=device), pd_page_index=1, layout=layout)
+    target.read_from_pd_buffer(
+        pd_page_buffers=pages,
+        token_indices=torch.tensor([5, 6], dtype=torch.long, device=device),
+        pd_page_index=1,
+        layout=layout,
+    )
     assert torch.equal(read_kv_storage(target)[:, [5, 6]], read_kv_storage(state)[:, [1, 3]])
     assert (pages[0] == 255).all() and (pages[2] == 255).all()
     assert not read_kv_storage(target)[:, 0].any()
@@ -130,12 +170,27 @@ def test_cpu_partial_last_page(state_offset: int, extra_page_bytes: int):
             for r in layout.regions
         ),
     )
-    buffer = torch.full((4, layout.byte_end + extra_page_bytes), 252, dtype=torch.uint8, pin_memory=True)
-    state.write_to_cpu(torch.tensor([0, 1, 2, 3, 7], dtype=torch.long, device="cuda"), buffer, [2, 0], layout=layout)
+    buffer = torch.full(
+        size=(4, layout.byte_end + extra_page_bytes),
+        fill_value=252,
+        dtype=torch.uint8,
+        pin_memory=True,
+    )
+    state.write_to_cpu(
+        token_indices=torch.tensor([0, 1, 2, 3, 7], dtype=torch.long, device="cuda"),
+        cpu_page_buffers=buffer,
+        cpu_page_indices=[2, 0],
+        layout=layout,
+    )
     target = full_state(device="cuda")
     for storage_buffer in full_state_test_buffers(target).values():
         storage_buffer.zero_()
-    target.read_from_cpu(buffer, [2, 0], torch.tensor([6, 7, 8, 9, 10], dtype=torch.long, device="cuda"), layout=layout)
+    target.read_from_cpu(
+        cpu_page_buffers=buffer,
+        cpu_page_indices=[2, 0],
+        token_indices=torch.tensor([6, 7, 8, 9, 10], dtype=torch.long, device="cuda"),
+        layout=layout,
+    )
     assert torch.equal(read_kv_storage(target)[:, [6, 7, 8, 9, 10]], read_kv_storage(state)[:, [0, 1, 2, 3, 7]])
     assert (buffer[[1, 3]] == 252).all()
     assert (buffer[:, :layout.byte_start] == 252).all() and (buffer[:, layout.byte_end:] == 252).all()
@@ -148,9 +203,19 @@ def test_invalid_late_region_shape_cannot_partially_write_pd_page():
     region = replace(region, byte_end=region.byte_end - region.dtype.itemsize)
     bad = replace(layout, regions=(*layout.regions[:-1], region))
     # 直接构造 Tensor 视图时，字节数与 shape 不匹配仍会在提交复制前失败。
-    buffer = torch.full((layout.byte_end + 256,), 53, dtype=torch.uint8, device="cuda")
+    buffer = torch.full(
+        size=(layout.byte_end + 256,),
+        fill_value=53,
+        dtype=torch.uint8,
+        device="cuda",
+    )
     with pytest.raises(RuntimeError, match="shape"):
-        state.write_to_pd_buffer(torch.tensor([0], dtype=torch.long, device="cuda"), buffer.unsqueeze(0), pd_page_index=0, layout=bad)
+        state.write_to_pd_buffer(
+            token_indices=torch.tensor([0], dtype=torch.long, device="cuda"),
+            pd_page_buffers=buffer.unsqueeze(0),
+            pd_page_index=0,
+            layout=bad,
+        )
     assert (buffer == 53).all()
 
 
@@ -158,7 +223,12 @@ def test_invalid_late_region_shape_cannot_partially_write_pd_page():
 def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    config = FullAttentionConfig(((1,), (3,), (5,), (7,), (9,), (11,)), 1, 4, torch.float32)
+    config = FullAttentionConfig(
+        logical_layer_groups=((1,), (3,), (5,), (7,), (9,), (11,)),
+        global_head_num=1,
+        head_dim=4,
+        dtype=torch.float32,
+    )
     source = GQAFullAttentionState(config, page_size=4, device=device)
     source.initialize_storage(12)
     target = GQAFullAttentionState(config, page_size=4, device=device)

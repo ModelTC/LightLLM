@@ -73,10 +73,10 @@ def make_mems(monkeypatch, request):
             monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", str(tp))
             full = PackedMLAFullAttentionState(
                 PackedMLAAttentionConfig(
-                    tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
-                    1,
-                    584,
-                    torch.bfloat16,
+                    logical_layer_groups=tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
+                    global_head_num=1,
+                    head_dim=584,
+                    dtype=torch.bfloat16,
                     tp_rank=rank,
                     tp_world_size=tp,
                     kv_dim=512,
@@ -86,7 +86,10 @@ def make_mems(monkeypatch, request):
             full.initialize_storage(32)
             main, draft = create_full_attention_roles(full, config.all_layer_num)
             resources = build_hybrid_resources(
-                config=config, request_capacity=4, mtp_step=local_mtp_step, tp_rank=rank,
+                config=config,
+                request_capacity=4,
+                mtp_step=local_mtp_step,
+                tp_rank=rank,
                 full_state=main,
                 full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
                 draft_full_state=draft,
@@ -111,7 +114,13 @@ def make_mems(monkeypatch, request):
 @pytest.mark.parametrize("prefill_tp,decode_tp", [(1, 1), (4, 4), (1, 4), (4, 1)])
 @pytest.mark.parametrize("remainder", range(4))
 @pytest.mark.parametrize("decode_mtp_step", [0, 1, 5])
-def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, remainder, decode_mtp_step):
+def test_pd_kv_and_runtime_state_roundtrip(
+    make_mems,
+    prefill_tp,
+    decode_tp,
+    remainder,
+    decode_mtp_step,
+):
     source, dest = make_mems(prefill_tp), make_mems(decode_tp, target_mtp_step=decode_mtp_step)
     mtp_size = get_env_start_args().mtp_step + 1
     dst_mtp_size = decode_mtp_step + 1
@@ -120,12 +129,30 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     length = 8 + remainder
     src_indexes = torch.randperm(32)[:length].tolist()
     dst_indexes = torch.randperm(32)[:length].tolist()
-    packed = torch.randint(0, 256, (layers, length, 1, 1168), dtype=torch.uint8, device="cuda")
-    conv = torch.randn(6, 3, 8, 128, 3, dtype=torch.bfloat16, device="cuda")
-    ssm = torch.randn(6, 8, 128, 128, dtype=torch.float32, device="cuda")
+    packed = torch.randint(
+        low=0,
+        high=256,
+        size=(layers, length, 1, 1168),
+        dtype=torch.uint8,
+        device="cuda",
+    )
+    conv = torch.randn(
+        size=(6, 3, 8, 128, 3),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
+    ssm = torch.randn(
+        size=(6, 8, 128, 128),
+        dtype=torch.float32,
+        device="cuda",
+    )
     # Non-live slots deliberately contain stale data. The sequence length, not
     # the bytes in these slots, controls subsequent K-pool completion.
-    tail = torch.randn(layers, 3 + mtp_size, 256, dtype=torch.bfloat16, device="cuda")
+    tail = torch.randn(
+        size=(layers, 3 + mtp_size, 256),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     for rank, mem in enumerate(source):
         heads = slice(rank * 8 // prefill_tp, (rank + 1) * 8 // prefill_tp)
         offset = 0
@@ -227,7 +254,11 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     # Continue through the next pool boundary on P and on the restored D state.
     # Different physical KV/request slots must yield identical pooled FP8 bytes.
     count = 4 - remainder
-    raw = torch.randn(count, 256, dtype=torch.bfloat16, device="cuda")
+    raw = torch.randn(
+        size=(count, 256),
+        dtype=torch.bfloat16,
+        device="cuda",
+    )
     ape = torch.randn(4, 128, device="cuda")
     tensor = lambda values: torch.tensor(values, dtype=torch.int32, device="cuda")
     outputs = []
@@ -271,48 +302,115 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
     from lightllm.common.att_resources.types import StateTransferLayout
 
     torch.manual_seed(53)
-    config = KPoolStateConfig(logical_layer_ids=(0,), pool_size=4, head_dim=128, dtype=torch.bfloat16)
-    source = create_kpool_state(config=config, request_capacity=2, mtp_step=source_step, device="cuda")
-    target = create_kpool_state(config=config, request_capacity=2, mtp_step=target_step, device="cuda")
-    raw = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16)
-    ape = torch.randn(4, 128, device="cuda", dtype=torch.bfloat16)
-    packed = torch.zeros(64, 132, device="cuda", dtype=torch.uint8)
+    config = KPoolStateConfig(
+        logical_layer_ids=(0,),
+        pool_size=4,
+        head_dim=128,
+        dtype=torch.bfloat16,
+    )
+    source = create_kpool_state(
+        config=config,
+        request_capacity=2,
+        mtp_step=source_step,
+        device="cuda",
+    )
+    target = create_kpool_state(
+        config=config,
+        request_capacity=2,
+        mtp_step=target_step,
+        device="cuda",
+    )
+    raw = torch.randn(
+        size=(64, 256),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    ape = torch.randn(
+        size=(4, 128),
+        device="cuda",
+        dtype=torch.bfloat16,
+    )
+    packed = torch.zeros(
+        size=(64, 132),
+        device="cuda",
+        dtype=torch.uint8,
+    )
     ragged = torch.arange(64, device="cuda", dtype=torch.int32)
 
     def prefill(values, destination, tail):
         count = len(values)
         compress_pools(
-            raw=values, tail=tail, packed_buffer=destination, ape=ape,
-            lengths=torch.arange(1, count + 1, device="cuda", dtype=torch.int32),
-            starts=torch.zeros(count, device="cuda", dtype=torch.int32), ragged=ragged,
+            raw=values,
+            tail=tail,
+            packed_buffer=destination,
+            ape=ape,
+            lengths=torch.arange(
+                start=1,
+                end=count + 1,
+                device="cuda",
+                dtype=torch.int32,
+            ),
+            starts=torch.zeros(count, device="cuda", dtype=torch.int32),
+            ragged=ragged,
             req_idx=torch.zeros(1, device="cuda", dtype=torch.int32),
             cu_q_lens=torch.tensor([0, count], device="cuda", dtype=torch.int32),
-            seq_lens=torch.tensor([count], device="cuda", dtype=torch.int32), max_q_len=count,
+            seq_lens=torch.tensor([count], device="cuda", dtype=torch.int32),
+            max_q_len=count,
         )
 
     prefill(raw[:prefix], packed, source.get_layer_view(0))
     regions = source.get_pd_transfer_regions()
     assert regions == target.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=source.resource_id, tokens_per_page=None,
-        byte_start=0, byte_end=regions[-1].byte_end, regions=regions,
+        resource_id=source.resource_id,
+        tokens_per_page=None,
+        byte_start=0,
+        byte_end=regions[-1].byte_end,
+        regions=regions,
     )
     pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
-    source.write_to_pd_buffer(0, pages, pd_page_index=0, state_token_len=prefix, layout=layout)
+    source.write_to_pd_buffer(
+        req_idx=0,
+        pd_page_buffers=pages,
+        pd_page_index=0,
+        state_token_len=prefix,
+        layout=layout,
+    )
     target.tail_buffer.fill_(17)
-    target.read_from_pd_buffer(pages, 0, pd_page_index=0, state_token_len=prefix, layout=layout)
+    target.read_from_pd_buffer(
+        pd_page_buffers=pages,
+        req_idx=0,
+        pd_page_index=0,
+        state_token_len=prefix,
+        layout=layout,
+    )
     assert (target.tail_buffer[:, 1] == 17).all()
     width = target_step + 1
     # 第一次验证后回访已接受位置；新增候选历史必须由 D 的本地 ring 正确保留。
     for start, count in [(prefix, width), (prefix + 1, 1), (prefix + 2, 1), (prefix + 1, width)]:
-        raw[start:start + count] = torch.randn(count, 256, device="cuda", dtype=torch.bfloat16)
-        lengths = torch.arange(start + 1, start + count + 1, device="cuda", dtype=torch.int32)
+        raw[start:start + count] = torch.randn(
+            size=(count, 256),
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        lengths = torch.arange(
+            start=start + 1,
+            end=start + count + 1,
+            device="cuda",
+            dtype=torch.int32,
+        )
         compress_pools(
-            raw=raw[start:start + count], tail=target.get_layer_view(0), packed_buffer=packed, ape=ape,
-            lengths=lengths, starts=torch.zeros(count, device="cuda", dtype=torch.int32), ragged=ragged,
+            raw=raw[start:start + count],
+            tail=target.get_layer_view(0),
+            packed_buffer=packed,
+            ape=ape,
+            lengths=lengths,
+            starts=torch.zeros(count, device="cuda", dtype=torch.int32),
+            ragged=ragged,
             req_idx=torch.zeros(count, device="cuda", dtype=torch.int32),
             cu_q_lens=torch.arange(count + 1, device="cuda", dtype=torch.int32),
-            seq_lens=lengths, max_q_len=1,
+            seq_lens=lengths,
+            max_q_len=1,
             mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
         )
         expected = torch.zeros_like(packed)

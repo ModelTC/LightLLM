@@ -96,10 +96,10 @@ def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[i
         tokens.extend(99 if offset == accepted - 1 else 10 + offset for offset in range(width))
         expected_mask.extend(int(offset < accepted) for offset in range(width))
     accept_lengths, accepted_index = verify_mtp_tokens(
-        backend,
-        torch.tensor(tokens, device="cuda"),
-        torch.tensor(reqs, dtype=torch.int32, device="cuda"),
-        torch.tensor(starts, dtype=torch.int32, device="cuda"),
+        backend=backend,
+        next_token_ids=torch.tensor(tokens, device="cuda"),
+        b_req_idx=torch.tensor(reqs, dtype=torch.int32, device="cuda"),
+        b_req_mtp_start_loc=torch.tensor(starts, dtype=torch.int32, device="cuda"),
         b_mtp_index=torch.tensor([step for width in widths for step in range(width)], dtype=torch.int32, device="cuda"),
     )
     assert accept_lengths.tolist() == [3, 1, 2]

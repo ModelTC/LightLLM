@@ -53,7 +53,6 @@ class KPoolAttentionTailState(AttentionTailState):
         config: KPoolStateConfig,
         request_capacity: int,
         mtp_step: int = 0,
-        *,
         device: str | torch.device = "cuda",
     ) -> None:
         """为各层、各请求创建原始 key/gate ring，包含 MTP 所需额外历史。"""
@@ -119,30 +118,62 @@ class KPoolAttentionTailState(AttentionTailState):
             axes=("layer", "window", "channel"),
             shape=(len(config.logical_layer_ids), window_size, channels),
             axis_slices=(
-                AxisSlice(axis="window", src_start=0, dst_start=0, length=window_size),
-                AxisSlice(axis="channel", src_start=0, dst_start=0, length=channels),
+                AxisSlice(
+                    axis="window",
+                    src_start=0,
+                    dst_start=0,
+                    length=window_size,
+                ),
+                AxisSlice(
+                    axis="channel",
+                    src_start=0,
+                    dst_start=0,
+                    length=channels,
+                ),
             ),
             write_enabled=config.tp_rank == 0,
         )
         return (tail_region,)
 
     def write_to_pd_buffer(
-        self, req_idx: int, pd_page_buffers: torch.Tensor,
-        *, pd_page_index: int, state_token_len: int, layout: StateTransferLayout,
+        self,
+        req_idx: int,
+        pd_page_buffers: torch.Tensor,
+        pd_page_index: int,
+        state_token_len: int,
+        layout: StateTransferLayout,
     ) -> None:
         """将 prefill 末尾的逻辑窗口写入 PD 页；state_token_len 为已执行的前缀长度。"""
-        copies = self._pd_buffer_copies(pd_page_buffers, pd_page_index, req_idx, state_token_len, layout, write=True)
+        copies = self._pd_buffer_copies(
+            pd_page_buffers=pd_page_buffers,
+            pd_page_index=pd_page_index,
+            req_idx=req_idx,
+            state_token_len=state_token_len,
+            layout=layout,
+            write=True,
+        )
         for src_tensor, dst_tensor in copies:
             dst_tensor.copy_(src_tensor, non_blocking=True)
 
     def read_from_pd_buffer(
-        self, pd_page_buffers: torch.Tensor, req_idx: int,
-        *, pd_page_index: int, state_token_len: int, layout: StateTransferLayout,
+        self,
+        pd_page_buffers: torch.Tensor,
+        req_idx: int,
+        pd_page_index: int,
+        state_token_len: int,
+        layout: StateTransferLayout,
     ) -> None:
         """按前缀长度将逻辑窗口放回本地 ring，清零其余候选历史，允许两端 MTP 步数不同。"""
         # TODO：PD 恢复可按目标 ring 槽位一次写入有效历史或零，融合清零和逐窗口复制；
         # 避免同一 kernel 内先清零再恢复造成竞争，同时清除窗口外的旧候选历史。
-        copies = self._pd_buffer_copies(pd_page_buffers, pd_page_index, req_idx, state_token_len, layout, write=False)
+        copies = self._pd_buffer_copies(
+            pd_page_buffers=pd_page_buffers,
+            pd_page_index=pd_page_index,
+            req_idx=req_idx,
+            state_token_len=state_token_len,
+            layout=layout,
+            write=False,
+        )
         self.tail_buffer[:, req_idx].fill_(0)
         for src_tensor, dst_tensor in copies:
             dst_tensor.copy_(src_tensor, non_blocking=True)
@@ -158,7 +189,6 @@ class KPoolAttentionTailState(AttentionTailState):
         req_idx: int,
         state_token_len: int,
         layout: StateTransferLayout,
-        *,
         write: bool,
     ) -> list[tuple[torch.Tensor, torch.Tensor]]:
         """为 PD prefill 交接生成复制视图，允许 P/D 使用不同的 MTP 步数。
@@ -197,6 +227,10 @@ class KPoolAttentionTailState(AttentionTailState):
         assert state_token_len >= 0, "PD tail requires a nonnegative prefix length"
         # helper 按 L 和本地 ring 实际容量逐位置取视图，不创建索引 Tensor 或读取 GPU 游标。
         return att_tail_buffer_copies(
-            self.tail_buffer[:, req_idx], pd_page_buffers, layout,
-            page_index=pd_page_index, state_token_len=state_token_len, write=write,
+            tail=self.tail_buffer[:, req_idx],
+            page_buffers=pd_page_buffers,
+            layout=layout,
+            page_index=pd_page_index,
+            state_token_len=state_token_len,
+            write=write,
         )

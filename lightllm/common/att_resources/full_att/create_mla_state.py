@@ -14,7 +14,6 @@ from .packed_mla_state import PackedMLAAttentionConfig, PackedMLAFullAttentionSt
 
 def create_mla_state(
     config: FullAttentionConfig,
-    *,
     kv_type: Literal["None", "fp8kv_dsa"] = "None",
     packed: bool = False,
     indexer_dim: int = 128,

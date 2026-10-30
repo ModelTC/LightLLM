@@ -125,7 +125,6 @@ class Qwen3NextResourceConfig:
         cls,
         model_cfg: dict[str, object],
         args: StartArgs | EasyDict,
-        *,
         include_draft: bool = True,
     ):
         llm_config = model_cfg.get("text_config", model_cfg)

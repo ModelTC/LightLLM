@@ -62,8 +62,12 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         )
 
     def _fp8_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty,
-        *, logical_layer_id: int,
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        logical_layer_id: int,
+        alloc_func=torch.empty,
     ) -> torch.Tensor:
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
@@ -76,8 +80,8 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         k_descale = state.cpu_scales[storage_layer_index][0]
         v_descale = state.cpu_scales[storage_layer_index][1]
         self.prefill_wrapper.run(
-            q,
-            (k, v),
+            q=q,
+            paged_kv_cache=(k, v),
             k_scale=k_descale,
             v_scale=v_descale,
             out=o_tensor,
@@ -119,9 +123,8 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        alloc_func=torch.empty,
-        *,
         logical_layer_id: int,
+        alloc_func=torch.empty,
     ):
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
 
@@ -136,8 +139,8 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         k_descale = state.cpu_scales[storage_layer_index][0]
         v_descale = state.cpu_scales[storage_layer_index][1]
         self.decode_wrapper.run(
-            q,
-            (k, v),
+            q=q,
+            paged_kv_cache=(k, v),
             k_scale=k_descale,
             v_scale=v_descale,
             out=o_tensor,

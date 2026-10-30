@@ -32,7 +32,13 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-def make_resources(glm: bool, tp: int, rank: int, mtp: int, *, draft_layers: int = 0):
+def make_resources(
+    glm: bool,
+    tp: int,
+    rank: int,
+    mtp: int,
+    draft_layers: int = 0,
+):
     gk, gv = (4, 4) if glm else (2, 4)
     local_k, local_v = max(1, gk // tp), max(1, gv // tp)
     heads = 1 if glm else max(1, 2 // tp)
@@ -60,7 +66,13 @@ def make_resources(glm: bool, tp: int, rank: int, mtp: int, *, draft_layers: int
     if glm:
         full = PackedMLAFullAttentionState(
             PackedMLAAttentionConfig(
-                tuple((layer,) for layer in (3, *range(4, 4 + draft_layers))), 1, 584, torch.bfloat16, rank, tp, kv_dim=512
+                logical_layer_groups=tuple((layer,) for layer in (3, *range(4, 4 + draft_layers))),
+                global_head_num=1,
+                head_dim=584,
+                dtype=torch.bfloat16,
+                tp_rank=rank,
+                tp_world_size=tp,
+                kv_dim=512,
             ),
              page_size=4,
         )
@@ -68,14 +80,22 @@ def make_resources(glm: bool, tp: int, rank: int, mtp: int, *, draft_layers: int
     else:
         full = GQAFullAttentionState(
             FullAttentionConfig(
-                tuple((layer,) for layer in (1, 3, *range(4, 4 + draft_layers))), 2, 16, torch.bfloat16, rank, tp
+                logical_layer_groups=tuple((layer,) for layer in (1, 3, *range(4, 4 + draft_layers))),
+                global_head_num=2,
+                head_dim=16,
+                dtype=torch.bfloat16,
+                tp_rank=rank,
+                tp_world_size=tp,
             ),
              page_size=4,
         )
         full.initialize_storage(16)
     main, draft = create_full_attention_roles(full, 4)
     resources = build_hybrid_resources(
-        config=config, request_capacity=3, mtp_step=mtp, tp_rank=rank,
+        config=config,
+        request_capacity=3,
+        mtp_step=mtp,
+        tp_rank=rank,
         full_state=main,
         full_allocator=FullAttKVAllocator(16, 4),
         draft_full_state=draft,
@@ -88,9 +108,24 @@ def make_resources(glm: bool, tp: int, rank: int, mtp: int, *, draft_layers: int
 @pytest.mark.parametrize("glm", [False, True])
 @pytest.mark.parametrize("tp", [1, 2, 4])
 @pytest.mark.parametrize("mtp", [0, 2])
-def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(glm: bool, tp: int, mtp: int, cpu_args: EasyDict):
-    sources = [make_resources(glm, tp, rank, mtp) for rank in range(tp)]
-    targets = [make_resources(glm, tp, rank, mtp) for rank in range(tp)]
+def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
+    glm: bool,
+    tp: int,
+    mtp: int,
+    cpu_args: EasyDict,
+):
+    sources = [make_resources(
+        glm=glm,
+        tp=tp,
+        rank=rank,
+        mtp=mtp,
+    ) for rank in range(tp)]
+    targets = [make_resources(
+        glm=glm,
+        tp=tp,
+        rank=rank,
+        mtp=mtp,
+    ) for rank in range(tp)]
     expected = []
     for rank, (resources, full) in enumerate(sources):
         cfg = main_linear_state(resources).config
@@ -117,9 +152,9 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(glm: bool, tp: i
     buffer = torch.zeros((2, size), dtype=torch.uint8, pin_memory=True)
     for resources, full in sources:
         resources.write_req_to_cpu(
-            torch.arange(8, dtype=torch.long, device="cuda"),
-            buffer,
-            [1],
+            token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
+            cpu_page_buffers=buffer,
+            cpu_page_indices=[1],
             layouts=resources.get_cpu_transfer_layouts(),
             big_page_slot_ids=[0],
         )
@@ -129,9 +164,14 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(glm: bool, tp: i
             resources.main_kpool_c4_bf16_state.tail_buffer.fill_(13)
         slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
         resources.read_req_from_cpu(
-            buffer,
-            [1],
-            torch.arange(8, 16, dtype=torch.long, device="cuda"),
+            cpu_page_buffers=buffer,
+            cpu_page_indices=[1],
+            token_indices=torch.arange(
+                start=8,
+                end=16,
+                dtype=torch.long,
+                device="cuda",
+            ),
             layouts=resources.get_cpu_transfer_layouts(),
             big_page_slot_ids=[slot],
             req_idx=1,
@@ -155,6 +195,11 @@ def test_cpu_layout_query_does_not_require_cpu_cache_enabled(monkeypatch: pytest
     args = StartArgs(enable_cpu_cache=False, cpu_cache_token_page_size=8)  # 未启用缓存时也可查询全局页配置。
     monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(args)))
     get_env_start_args.cache_clear()
-    resources, _ = make_resources(True, 1, 0, 0)
+    resources, _ = make_resources(
+        glm=True,
+        tp=1,
+        rank=0,
+        mtp=0,
+    )
     assert all(layout.tokens_per_page == 8 for layout in resources.get_cpu_transfer_layouts().values())
     get_env_start_args.cache_clear()

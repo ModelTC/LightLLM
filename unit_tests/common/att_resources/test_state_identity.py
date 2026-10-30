@@ -144,9 +144,14 @@ def test_set_att_state_rejects_invalid_draft_numbers(role: str):
         manager.set_att_state(role, definition("gqa"))
 
 
-def allocated_state(kind: str, *, device: str = "cpu"):
+def allocated_state(kind: str, device: str = "cpu"):
     template = definition(kind)
-    return rebuild_full_state(template, config=template.config, token_capacity=8, device=device)
+    return rebuild_full_state(
+        template=template,
+        config=template.config,
+        token_capacity=8,
+        device=device,
+    )
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -184,8 +189,18 @@ def test_independent_role_states_copy_and_transfer_distinct_layers(kind: str, cp
     target.full_att_allocator = FullAttKVAllocator(8, 4, pin_memory=False)
     target.finish_state_creation()
     page = torch.zeros((1, source.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
-    source.write_req_to_cpu(torch.tensor([0, 1], dtype=torch.long, device="cuda"), page, [0], layouts=source.get_cpu_transfer_layouts())
-    target.read_req_from_cpu(page, [0], torch.tensor([6, 7], dtype=torch.long, device="cuda"), layouts=source.get_cpu_transfer_layouts())
+    source.write_req_to_cpu(
+        token_indices=torch.tensor([0, 1], dtype=torch.long, device="cuda"),
+        cpu_page_buffers=page,
+        cpu_page_indices=[0],
+        layouts=source.get_cpu_transfer_layouts(),
+    )
+    target.read_req_from_cpu(
+        cpu_page_buffers=page,
+        cpu_page_indices=[0],
+        token_indices=torch.tensor([6, 7], dtype=torch.long, device="cuda"),
+        layouts=source.get_cpu_transfer_layouts(),
+    )
     for src, dst in ((main, target_main), (draft, target_draft)):
         fields = {name: field.tensor for name, field in full_state_test_fields(dst, full_state_test_buffers(dst)).items()}
         for name, field in full_state_test_fields(src, full_state_test_buffers(src)).items():
@@ -242,13 +257,19 @@ def test_mixed_quantization_in_one_role_remains_distinct_in_copy_and_cpu_pages(c
     layouts = manager.get_cpu_transfer_layouts()
     page = torch.zeros((1, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8, pin_memory=True)
     manager.write_req_to_cpu(
-        torch.tensor([0, 1], dtype=torch.long, device="cuda"), page, [0], layouts=layouts
+        token_indices=torch.tensor([0, 1], dtype=torch.long, device="cuda"),
+        cpu_page_buffers=page,
+        cpu_page_indices=[0],
+        layouts=layouts,
     )
     for state in (full, quant):
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             field.tensor[:, 6:8].zero_()
     manager.read_req_from_cpu(
-        page, [0], torch.tensor([6, 7], dtype=torch.long, device="cuda"), layouts=layouts
+        cpu_page_buffers=page,
+        cpu_page_indices=[0],
+        token_indices=torch.tensor([6, 7], dtype=torch.long, device="cuda"),
+        layouts=layouts,
     )
     for state in (full, quant):
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
@@ -262,7 +283,12 @@ def test_token_copy_captures_large_index_sets_and_preserves_complete_buffers(kin
     state = rebuild_full_state(template, token_capacity=512, device="cuda")
     # 覆盖 int32/int64 和非连续索引；128 个元素足以触发旧 isin 实现的同步路径。
     source = torch.arange(256, dtype=torch.int32, device="cuda")[::2]
-    target = torch.arange(256, 512, dtype=torch.int64, device="cuda")[::2]
+    target = torch.arange(
+        start=256,
+        end=512,
+        dtype=torch.int64,
+        device="cuda",
+    )[::2]
     buffers = tuple(full_state_test_buffers(state).values())
     for buffer in buffers:
         buffer.view(torch.uint8).random_(0, 256)

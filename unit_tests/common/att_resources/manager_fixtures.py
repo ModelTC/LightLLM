@@ -19,12 +19,14 @@ if TYPE_CHECKING:
 
 
 class MainDraftTestResourceManager(AttResourceManager):
-    def __init__(self, device: str | torch.device | int = "cpu", *, with_tail: bool = True, tail_pool_size: int = 4):
+    def __init__(self, device: str | torch.device | int = "cpu", with_tail: bool = True, tail_pool_size: int = 4):
         super().__init__(request_capacity=3)
         self.set_att_state("main", make_state(device=device))
         draft_state = GDNState(
-            replace(self.main_kda_conv_fp32_ssm_fp32_state.config, global_v_heads=2),
-            request_capacity=3, mtp_step=self.main_kda_conv_fp32_ssm_fp32_state.mtp_step, device=device,
+            config=replace(self.main_kda_conv_fp32_ssm_fp32_state.config, global_v_heads=2),
+            request_capacity=3,
+            mtp_step=self.main_kda_conv_fp32_ssm_fp32_state.mtp_step,
+            device=device,
         )
         draft_state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
         self.set_att_state("draft0", draft_state)
@@ -39,8 +41,10 @@ class MainDraftTestResourceManager(AttResourceManager):
         if with_tail:
             tail = make_tail(device=device)
             state = KPoolAttentionTailState(
-                replace(tail.config, pool_size=tail_pool_size),
-                request_capacity=tail.request_capacity, mtp_step=tail.mtp_step, device=tail.tail_buffer.device,
+                config=replace(tail.config, pool_size=tail_pool_size),
+                request_capacity=tail.request_capacity,
+                mtp_step=tail.mtp_step,
+                device=tail.tail_buffer.device,
             )
             self.set_att_state("main", state)
         self.full_att_allocator = FullAttKVAllocator(12, page_size=4, pin_memory=False)

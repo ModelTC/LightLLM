@@ -37,16 +37,31 @@ KINDS = ("int4", "int8", "fp8_tensor", "fp8_head", "packed", "packed_fp8")
 
 def make_quant_state(kind: str, device: str | torch.device | int):
     if kind in ("int4", "int8"):
-        config = GroupQuantizedAttentionConfig(((1,), (3,)), 2, 16, torch.float16, bits=int(kind[-1]))
+        config = GroupQuantizedAttentionConfig(
+            logical_layer_groups=((1,), (3,)),
+            global_head_num=2,
+            head_dim=16,
+            dtype=torch.float16,
+            bits=int(kind[-1]),
+        )
         prepared_full_state = GroupQuantizedFullAttentionState(config, page_size=4, device=device)
         prepared_full_state.initialize_storage(8)
         return prepared_full_state
     if kind.startswith("fp8_"):
         per_head = kind == "fp8_head"
         config = StaticFP8AttentionConfig(
-            ((1,), (3,)), 2, 16, torch.uint8, scale_mode="per_head" if per_head else "per_tensor"
+            logical_layer_groups=((1,), (3,)),
+            global_head_num=2,
+            head_dim=16,
+            dtype=torch.uint8,
+            scale_mode="per_head" if per_head else "per_tensor",
         )
-        scales = torch.arange(1, 9 if per_head else 5, dtype=torch.float32, device=device).reshape(2, -1) / 16
+        scales = torch.arange(
+            start=1,
+            end=9 if per_head else 5,
+            dtype=torch.float32,
+            device=device,
+        ).reshape(2, -1) / 16
         prepared_full_state = StaticFP8FullAttentionState(config, page_size=4, device=device)
         bind_test_fp8_calibration(
             state=prepared_full_state, scales=scales,
@@ -56,7 +71,11 @@ def make_quant_state(kind: str, device: str | torch.device | int):
         return prepared_full_state
     fp8 = kind == "packed_fp8"
     config = PackedMLAAttentionConfig(
-        ((1,), (3,)), 1, 800 if fp8 else 648, torch.uint8 if fp8 else torch.bfloat16, fp8_nope_dim=512 if fp8 else 0
+        logical_layer_groups=((1,), (3,)),
+        global_head_num=1,
+        head_dim=800 if fp8 else 648,
+        dtype=torch.uint8 if fp8 else torch.bfloat16,
+        fp8_nope_dim=512 if fp8 else 0,
     )
     prepared_full_state = PackedMLAFullAttentionState(config, page_size=4, device=device)
     prepared_full_state.initialize_storage(8)
@@ -78,7 +97,12 @@ def transfer_layout(state: FullAttentionState):
                 axes=field.axes,
                 shape=shape,
                 axis_slices=tuple(
-                    AxisSlice(axis=axis, src_start=0, dst_start=0, length=dim)
+                    AxisSlice(
+                        axis=axis,
+                        src_start=0,
+                        dst_start=0,
+                        length=dim,
+                    )
                     for axis, dim in zip(field.axes, shape) if axis not in ("layer", "token")
                 ),
             )
@@ -121,28 +145,78 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
         field.tensor[:, 0].fill_(i + 11)
     if device == "cuda":
         source.copy_full_att_tokens(torch.tensor([0, 2], dtype=torch.long, device=device), torch.tensor([4, 5], dtype=torch.long, device=device))
-        assert_token_fields_equal(source, [0, 2], source, [4, 5])
+        assert_token_fields_equal(
+            source=source,
+            source_ids=[0, 2],
+            target=source,
+            target_ids=[4, 5],
+        )
     layout = transfer_layout(source)
     cpu = torch.zeros((2, layout.byte_end), dtype=torch.uint8, pin_memory=device == "cuda")
     if device == "cpu":
         with pytest.raises(AssertionError, match="CUDA State storage"):
-            source.write_to_cpu(torch.tensor([0, 1, 2, 3, 4], device=device), cpu, [1, 0], layout=layout)
+            source.write_to_cpu(
+                token_indices=torch.tensor([0, 1, 2, 3, 4], device=device),
+                cpu_page_buffers=cpu,
+                cpu_page_indices=[1, 0],
+                layout=layout,
+            )
     else:
-        source.write_to_cpu(torch.tensor([0, 1, 2, 3, 4], dtype=torch.long, device=device), cpu, [1, 0], layout=layout)
+        source.write_to_cpu(
+            token_indices=torch.tensor([0, 1, 2, 3, 4], dtype=torch.long, device=device),
+            cpu_page_buffers=cpu,
+            cpu_page_indices=[1, 0],
+            layout=layout,
+        )
         if device == "cuda":
             torch.cuda.synchronize()
-        target.read_from_cpu(cpu, [1, 0], torch.tensor([1, 2, 3, 4, 5], dtype=torch.long, device=device), layout=layout)
-        assert_token_fields_equal(source, [0, 1, 2, 3, 4], target, [1, 2, 3, 4, 5])
+        target.read_from_cpu(
+            cpu_page_buffers=cpu,
+            cpu_page_indices=[1, 0],
+            token_indices=torch.tensor([1, 2, 3, 4, 5], dtype=torch.long, device=device),
+            layout=layout,
+        )
+        assert_token_fields_equal(
+            source=source,
+            source_ids=[0, 1, 2, 3, 4],
+            target=target,
+            target_ids=[1, 2, 3, 4, 5],
+        )
     page = torch.empty(layout.byte_end, dtype=torch.uint8, device=device)
     if device == "cpu":
         with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            source.write_to_pd_buffer(torch.tensor([0, 3], dtype=torch.long, device=device), page.unsqueeze(0), pd_page_index=0, layout=layout)
+            source.write_to_pd_buffer(
+                token_indices=torch.tensor([0, 3], dtype=torch.long, device=device),
+                pd_page_buffers=page.unsqueeze(0),
+                pd_page_index=0,
+                layout=layout,
+            )
         with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            target.read_from_pd_buffer(page.unsqueeze(0), torch.tensor([6, 7], dtype=torch.long, device=device), pd_page_index=0, layout=layout)
+            target.read_from_pd_buffer(
+                pd_page_buffers=page.unsqueeze(0),
+                token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
+                pd_page_index=0,
+                layout=layout,
+            )
     else:
-        source.write_to_pd_buffer(torch.tensor([0, 3], dtype=torch.long, device=device), page.unsqueeze(0), pd_page_index=0, layout=layout)
-        target.read_from_pd_buffer(page.unsqueeze(0), torch.tensor([6, 7], dtype=torch.long, device=device), pd_page_index=0, layout=layout)
-        assert_token_fields_equal(source, [0, 3], target, [6, 7])
+        source.write_to_pd_buffer(
+            token_indices=torch.tensor([0, 3], dtype=torch.long, device=device),
+            pd_page_buffers=page.unsqueeze(0),
+            pd_page_index=0,
+            layout=layout,
+        )
+        target.read_from_pd_buffer(
+            pd_page_buffers=page.unsqueeze(0),
+            token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
+            pd_page_index=0,
+            layout=layout,
+        )
+        assert_token_fields_equal(
+            source=source,
+            source_ids=[0, 3],
+            target=target,
+            target_ids=[6, 7],
+        )
     src_indices = torch.tensor([0, 1], dtype=torch.int32, device=device)
     dst_indices = torch.tensor([0, 2], dtype=torch.int64, device=device)
 
@@ -170,7 +244,12 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
             dst_token_indices=dst_indices,
             remote_dp_full_att_state=source,
         )
-    assert_token_fields_equal(source, [0, 1], target, [0, 2])
+    assert_token_fields_equal(
+        source=source,
+        source_ids=[0, 1],
+        target=target,
+        target_ids=[0, 2],
+    )
 
 
 @pytest.mark.parametrize("kind", KINDS)
@@ -188,7 +267,9 @@ def test_cuda_compute_write_preserves_unrelated_fields(kind: str):
     ids = torch.tensor([1, 6], dtype=torch.int32, device="cuda")
     state.write_full_att_kv(1, ids, kv)
     if isinstance(state, GroupQuantizedFullAttentionState):
-        quant = read_kv_storage(state)[0, ids].reshape(2, heads, -1, state.config.group_size * state.config.bits // 8)
+        quant = read_kv_storage(state)[0, ids].reshape(
+            shape=(2, heads, -1, state.config.group_size * state.config.bits // 8),
+        )
         if state.config.bits == 4:
             raw = quant.to(torch.uint8)
             quant = torch.stack(((raw & 15).to(torch.int16) - 7, (raw >> 4).to(torch.int16) - 7), -1).flatten(-2)
@@ -199,7 +280,12 @@ def test_cuda_compute_write_preserves_unrelated_fields(kind: str):
         if state.config.scale_mode == "per_tensor":
             scales = scales.repeat_interleave(state.config.head_num)
         dequant = read_kv_storage(state)[0, ids].view(torch.float8_e4m3fn).float() * scales[None, :, None]
-        torch.testing.assert_close(dequant, kv.float(), rtol=0.13, atol=0.03)
+        torch.testing.assert_close(
+            actual=dequant,
+            expected=kv.float(),
+            rtol=0.13,
+            atol=0.03,
+        )
     else:
         view = state.get_layer_view(1)
         assert (view.indexer_k == 29).all()

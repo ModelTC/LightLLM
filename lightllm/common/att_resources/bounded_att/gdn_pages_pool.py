@@ -14,7 +14,6 @@ class GDNPagesPool:
         self,
         size: int,
         config: ConvSSMStateConfig,
-        *,
         device: str | torch.device | int = "cpu",
         pin_memory: bool = True,
     ) -> None:

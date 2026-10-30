@@ -28,7 +28,12 @@ SCHEMES = ["gqa", "int4", "int8", "static_head", "static_tensor", "mla", "packed
 def test_shared_layers_use_two_physical_stores(kind: str, pd_args: "EasyDict") -> None:
     template = definition(kind)
     config = replace(template.config, logical_layer_groups=((0, 4), (8, 11)))
-    state = rebuild_full_state(template, config=config, token_capacity=8, device="cpu")
+    state = rebuild_full_state(
+        template=template,
+        config=config,
+        token_capacity=8,
+        device="cpu",
+    )
     assert all(state.has_logical_layer(logical_layer_id) for logical_layer_id in (0, 4, 8, 11))
     assert not state.has_logical_layer(1)
     assert all(buffer.shape[0] == 2 for buffer in full_state_test_buffers(state).values())
@@ -55,14 +60,24 @@ def test_shared_layers_use_two_physical_stores(kind: str, pd_args: "EasyDict") -
 @pytest.mark.parametrize("groups", [((),), ((0,), (0,)), ((0, 0),), (0, 4)])
 def test_invalid_layer_groups_are_rejected(groups: tuple) -> None:
     with pytest.raises(AssertionError):
-        FullAttentionConfig(logical_layer_groups=groups, global_head_num=1, head_dim=128, dtype=torch.bfloat16)
+        FullAttentionConfig(
+            logical_layer_groups=groups,
+            global_head_num=1,
+            head_dim=128,
+            dtype=torch.bfloat16,
+        )
 
 
 def test_model_local_shared_groups_preserve_global_logical_layer_ids(pd_args: "EasyDict") -> None:
     pd_args.data_type = "bfloat16"
     config = dict(
-        num_hidden_layers=6, num_attention_heads=4, num_key_value_heads=2, hidden_size=512,
-        head_dim=128, global_head_dim=128, num_kv_shared_layers=2,
+        num_hidden_layers=6,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        hidden_size=512,
+        head_dim=128,
+        global_head_dim=128,
+        num_kv_shared_layers=2,
         layer_types=["sliding_attention", "full_attention"] * 3,
     )
     (state,) = Gemma4TpPartModel._create_full_att_states(
@@ -83,10 +98,16 @@ def test_shared_layers_transfer_each_physical_layer_once(
     pd_args.cpu_cache_token_page_size = pd_args.pd_kv_page_size = 4
     template = definition(kind)
     source = rebuild_full_state(
-        template, config=replace(template.config, logical_layer_groups=((0, 4), (8,))), token_capacity=8, device="cuda",
+        template=template,
+        config=replace(template.config, logical_layer_groups=((0, 4), (8,))),
+        token_capacity=8,
+        device="cuda",
     )
     target = rebuild_full_state(
-        template, config=replace(template.config, logical_layer_groups=((20, 24), (28,))), token_capacity=8, device="cuda",
+        template=template,
+        config=replace(template.config, logical_layer_groups=((20, 24), (28,))),
+        token_capacity=8,
+        device="cuda",
     )
     source_buffers = full_state_test_buffers(source)
     target_buffers = full_state_test_buffers(target)
@@ -105,21 +126,31 @@ def test_shared_layers_transfer_each_physical_layer_once(
     if transfer == "cpu":
         pages = torch.zeros((2, managers[0].get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
         managers[0].write_req_to_cpu(
-            token_indices=src_ids, cpu_page_buffers=pages, cpu_page_indices=[1],
+            token_indices=src_ids,
+            cpu_page_buffers=pages,
+            cpu_page_indices=[1],
             layouts=managers[0].get_cpu_transfer_layouts(),
         )
         managers[1].read_req_from_cpu(
-            cpu_page_buffers=pages, cpu_page_indices=[1], token_indices=dst_ids,
+            cpu_page_buffers=pages,
+            cpu_page_indices=[1],
+            token_indices=dst_ids,
             layouts=managers[1].get_cpu_transfer_layouts(),
         )
     else:
         pages = torch.zeros((2, managers[0].get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
         managers[0].write_to_pd_buffer(
-            pd_page_buffers=pages, pd_page_index=1, kind="kv", token_indices=src_ids,
+            pd_page_buffers=pages,
+            pd_page_index=1,
+            kind="kv",
+            token_indices=src_ids,
             layouts=managers[0].get_pd_full_att_transfer_layouts(),
         )
         managers[1].read_from_pd_buffer(
-            pd_page_buffers=pages, pd_page_index=1, kind="kv", token_indices=dst_ids,
+            pd_page_buffers=pages,
+            pd_page_index=1,
+            kind="kv",
+            token_indices=dst_ids,
             layouts=managers[1].get_pd_full_att_transfer_layouts(),
         )
     torch.cuda.synchronize()

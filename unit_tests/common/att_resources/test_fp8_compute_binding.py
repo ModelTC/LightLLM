@@ -45,8 +45,12 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
         scales[1] += 10
         q_scales = None if kind == "static_tensor" else template.q_scales + value
         states.append(rebuild_full_state(
-            template, config=replace(template.config, logical_layer_groups=((3,), (8,))), token_capacity=8, device="cuda",
-            scales=scales, q_scales=q_scales,
+            template=template,
+            config=replace(template.config, logical_layer_groups=((3,), (8,))),
+            token_capacity=8,
+            device="cuda",
+            scales=scales,
+            q_scales=q_scales,
         ))
     manager = AttResourceManager(request_capacity=2)
     manager.set_att_state("main", states[0])
@@ -54,7 +58,12 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
     manager.full_att_allocator = FullAttKVAllocator(8, 4, pin_memory=False)
     # Another encoding in the same role must not supply the FP8 calibration.
     plain = definition("gqa")
-    plain = rebuild_full_state(plain, config=plain.config, token_capacity=8, device="cuda")
+    plain = rebuild_full_state(
+        template=plain,
+        config=plain.config,
+        token_capacity=8,
+        device="cuda",
+    )
     manager.set_att_state(role, plain)
     manager.finish_state_creation()
     selected = getattr(manager, f"{role}_{template.get_state_type()}_state")
@@ -98,9 +107,19 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
         return torch.empty(shape, dtype=dtype, device=device)
 
     if prefill:
-        att.prefill_att(q, k, v, alloc_func=allocate)
+        att.prefill_att(
+            q=q,
+            k=k,
+            v=v,
+            alloc_func=allocate,
+        )
     else:
-        att.decode_att(q, k, v, alloc_func=allocate)
+        att.decode_att(
+            q=q,
+            k=k,
+            v=v,
+            alloc_func=allocate,
+        )
     if kind == "static_head":
         heads = selected.config.head_num
         torch.testing.assert_close(observed["q_scales"], selected.q_scales[1])
@@ -119,10 +138,18 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
     from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
 
     scale_count = 2 if scale_mode == "per_tensor" else 2 * head_num
-    scales = torch.arange(1, scale_count + 1, dtype=torch.float32, device="cuda").unsqueeze(0) / 4
+    scales = torch.arange(
+        start=1,
+        end=scale_count + 1,
+        dtype=torch.float32,
+        device="cuda",
+    ).unsqueeze(0) / 4
     state = StaticFP8FullAttentionState(
         layout_config=StaticFP8AttentionConfig(
-            logical_layer_groups=((5,),), global_head_num=head_num, head_dim=128, dtype=torch.bfloat16,
+            logical_layer_groups=((5,),),
+            global_head_num=head_num,
+            head_dim=128,
+            dtype=torch.bfloat16,
             scale_mode=scale_mode,
         ),
         page_size=4, device="cuda",
@@ -149,7 +176,10 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
     # 算子的原合并输出入口仍应保持相同的量化结果。
     combined = torch.zeros((12, 2 * head_num, 128), dtype=torch.uint8, device="cuda")
     destindex_copy_kv_fp8(
-        KV=kv, DestLoc=indices, scales=scales[0], Out=combined.view(torch.float8_e4m3fn),
+        KV=kv,
+        DestLoc=indices,
+        scales=scales[0],
+        Out=combined.view(torch.float8_e4m3fn),
         is_per_tensor_quant=scale_mode == "per_tensor",
     )
     assert torch.equal(combined[indices], actual)

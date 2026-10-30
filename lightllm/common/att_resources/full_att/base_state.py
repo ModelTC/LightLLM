@@ -109,7 +109,6 @@ class FullAttentionState(ABC):
         self,
         layout_config: FullAttentionConfig,
         page_size: int = 1,
-        *,
         device: str | torch.device = "cuda",
     ) -> None:
         """只准备 State 配置，不分配 KV 或 HOLD 页；存储由后续统一容量初始化。"""
@@ -176,7 +175,6 @@ class FullAttentionState(ABC):
         token_indices: torch.Tensor,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
-        *,
         layout: StateTransferLayout,
         cpu_page_readies: list[bool] | None = None,
     ) -> None:
@@ -189,7 +187,6 @@ class FullAttentionState(ABC):
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
         token_indices: torch.Tensor,
-        *,
         layout: StateTransferLayout,
     ) -> None:
         """从指定 CPU 页读回 token 数据，保留目标中由其他资源或 TP 分片持有的区域。"""
@@ -226,7 +223,6 @@ class FullAttentionState(ABC):
         self,
         token_indices: torch.Tensor,
         pd_page_buffers: torch.Tensor,
-        *,
         pd_page_index: int,
         layout: StateTransferLayout,
     ) -> None:
@@ -238,7 +234,6 @@ class FullAttentionState(ABC):
         self,
         pd_page_buffers: torch.Tensor,
         token_indices: torch.Tensor,
-        *,
         pd_page_index: int,
         layout: StateTransferLayout,
     ) -> None:

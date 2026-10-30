@@ -246,7 +246,13 @@ def test_backend_allocates_all_roles_before_warmup(
         if via_backend:
             with pytest.raises(RuntimeReady):
                 backend.init_model(
-                    dict(args=args, world_size=1, load_way="HF", weight_dir=str(tmp_path), max_total_token_num=None)
+                    dict(
+                        args=args,
+                        world_size=1,
+                        load_way="HF",
+                        weight_dir=str(tmp_path),
+                        max_total_token_num=None,
+                    )
                 )
         else:
             assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"

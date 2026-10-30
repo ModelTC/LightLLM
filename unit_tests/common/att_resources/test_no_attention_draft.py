@@ -24,7 +24,12 @@ def draft_model(mode: str):
     draft.args = StartArgs(mtp_mode=mode, data_type="bfloat16")
     draft.max_req_num = 2
     draft.layers_infer = [SimpleNamespace(layer_num_=2)]
-    draft.config = dict(num_attention_heads=2, num_key_value_heads=1, hidden_size=8, num_hidden_layers=1)
+    draft.config = dict(
+        num_attention_heads=2,
+        num_key_value_heads=1,
+        hidden_size=8,
+        num_hidden_layers=1,
+    )
     draft.tp_rank_, draft.tp_world_size_ = 0, 1
     main = LlamaTpPartModel.__new__(LlamaTpPartModel)
     main.args, main.config = draft.args, dict(draft.config, num_hidden_layers=2)

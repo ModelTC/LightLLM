@@ -150,7 +150,12 @@ def test_need_token_num_distinguishes_compute_and_page_allocation():
     ],
 )
 def test_prefill_scheduler_checks_compute_and_kv_budgets_separately(
-    monkeypatch, hold_kv_len, can_alloc_token_num, batch_max_tokens, expected_alloc_sizes, second_req_wait_pause
+    monkeypatch,
+    hold_kv_len,
+    can_alloc_token_num,
+    batch_max_tokens,
+    expected_alloc_sizes,
+    second_req_wait_pause,
 ):
     context, backend = _make_context(monkeypatch)
     backend.args.enable_cpu_cache = False
@@ -466,7 +471,12 @@ def test_recover_paused_reqs_requires_capacity_for_the_full_sequence(monkeypatch
         req_to_token_indexs=torch.arange(8, dtype=torch.int32)[None, :],
     )
     infer_context.get_can_alloc_token_num = lambda: 4
-    req = _make_paused_req(req_idx=0, target_kv_len=8, page_size=4, chunk_kv_len=4)
+    req = _make_paused_req(
+        req_idx=0,
+        target_kv_len=8,
+        page_size=4,
+        chunk_kv_len=4,
+    )
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(infer_batch, "custom_cat", lambda tensors: torch.cat(tensors))
 
@@ -482,7 +492,12 @@ def test_recover_paused_reqs_accounts_for_rematched_prefix(monkeypatch):
     infer_context.args = SimpleNamespace(page_size=4)
     infer_context.backend = SimpleNamespace(disable_chunked_prefill=False)
     infer_context.get_can_alloc_token_num = lambda: 12
-    req = _make_paused_req(req_idx=0, target_kv_len=9, page_size=4, match_kv_len=8)
+    req = _make_paused_req(
+        req_idx=0,
+        target_kv_len=9,
+        page_size=4,
+        match_kv_len=8,
+    )
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", False)
 
     infer_context.recover_paused_reqs([req], is_master_in_dp=True)
@@ -517,7 +532,13 @@ def _make_req(req_idx):
     return req
 
 
-def _make_paused_req(req_idx, target_kv_len, page_size, match_kv_len=0, chunk_kv_len=None):
+def _make_paused_req(
+    req_idx,
+    target_kv_len,
+    page_size,
+    match_kv_len=0,
+    chunk_kv_len=None,
+):
     if chunk_kv_len is None:
         chunk_kv_len = target_kv_len
     req = SimpleNamespace(

@@ -15,7 +15,6 @@ def bounded_att_buffer_copies(
     fields: Mapping[str, TensorField],
     page_buffers: torch.Tensor,
     layout: StateTransferLayout,
-    *,
     page_index: int,
     write: bool,
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:

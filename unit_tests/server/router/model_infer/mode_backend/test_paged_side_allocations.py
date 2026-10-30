@@ -24,7 +24,13 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
     backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
     backend.is_master_in_dp = False
-    backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(table, req, alloc_sizes, next_index, size)
+    backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(
+        table=table,
+        req=req,
+        alloc_sizes=alloc_sizes,
+        next_index=next_index,
+        alloc_token_num=size,
+    )
 
     def create_task(**kwargs):
         tasks.append(
@@ -80,7 +86,12 @@ def test_pd_prefill_rejects_unaligned_transfer_page_size():
     req = SimpleNamespace(cur_kv_len=4, shm_req=SimpleNamespace(input_len=10))
 
     with pytest.raises(AssertionError, match="pd_kv_page_size must be divisible by page_size"):
-        backend._prefill_chuncked_handle_func(req, next_token_id=1, next_token_prob=1.0, output_len=0)
+        backend._prefill_chuncked_handle_func(
+            req_obj=req,
+            next_token_id=1,
+            next_token_prob=1.0,
+            output_len=0,
+        )
 
 
 @pytest.mark.parametrize("tp_size,tp_rank", [(1, 0), (2, 0), (2, 1)])
@@ -108,7 +119,13 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
         dp_req_to_token_indices={0: source_table, 1: source_table},
         is_hybrid_att_model=False,
     )
-    backend._alloc_req_kv_mem = lambda cur_req, size: _reserve_into_table(table, cur_req, alloc_sizes, next_index, size)
+    backend._alloc_req_kv_mem = lambda cur_req, size: _reserve_into_table(
+        table=table,
+        req=cur_req,
+        alloc_sizes=alloc_sizes,
+        next_index=next_index,
+        alloc_token_num=size,
+    )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = backend
     module.dp_rank_in_node = 0
@@ -142,7 +159,13 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
         (2, 4, 1, [1]),
     ],
 )
-def test_dp_imports_only_matching_tp_shards(monkeypatch, node_size, tp_size, rank_in_node, expected_ranks):
+def test_dp_imports_only_matching_tp_shards(
+    monkeypatch,
+    node_size,
+    tp_size,
+    rank_in_node,
+    expected_ranks,
+):
     from lightllm.server.router.model_infer.mode_backend import base_backend
     from lightllm.server.router.model_infer import shared_att_resources_utils
 
@@ -156,7 +179,7 @@ def test_dp_imports_only_matching_tp_shards(monkeypatch, node_size, tp_size, ran
         )
         tables[rank] = object()
 
-    def load_storage(rank, *, kind):
+    def load_storage(rank, kind):
         assert kind == "dp"
         imported_ranks.append(rank)
         return managers[rank], tables[rank]
@@ -195,7 +218,13 @@ def _bind_alloc_need(req, page_size):
     return req
 
 
-def _reserve_into_table(table, req, alloc_sizes, next_index, alloc_token_num):
+def _reserve_into_table(
+    table,
+    req,
+    alloc_sizes,
+    next_index,
+    alloc_token_num,
+):
     if alloc_token_num == 0:
         return None
     alloc_sizes.append(alloc_token_num)

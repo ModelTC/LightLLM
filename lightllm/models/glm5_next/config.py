@@ -27,7 +27,7 @@ class Glm5NextResourceConfig(Qwen3NextResourceConfig):
     INDEX_PADDING_BYTES = 144
 
     @classmethod
-    def from_model_config(cls, config: dict[str, object], args: StartArgs | EasyDict, *, include_draft: bool = True):
+    def from_model_config(cls, config: dict[str, object], args: StartArgs | EasyDict, include_draft: bool = True):
         config = config.get("text_config", config)
         linear = config["linear_attn_config"]
         tp = args.tp // args.dp

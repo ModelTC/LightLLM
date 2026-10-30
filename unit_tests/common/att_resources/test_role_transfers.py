@@ -21,8 +21,20 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
     glm: bool, pd_args: EasyDict, monkeypatch: pytest.MonkeyPatch,
 ):
     pd_args.pd_kv_page_size = 128
-    source, _ = make_resources(glm, 1, 0, 2, draft_layers=2)
-    target, _ = make_resources(glm, 1, 0, 2, draft_layers=2)
+    source, _ = make_resources(
+        glm=glm,
+        tp=1,
+        rank=0,
+        mtp=2,
+        draft_layers=2,
+    )
+    target, _ = make_resources(
+        glm=glm,
+        tp=1,
+        rank=0,
+        mtp=2,
+        draft_layers=2,
+    )
     for index, role in enumerate(("main", "draft0")):
         state = getattr(source, f"{role}_mla_packed_bf16_state" if glm else f"{role}_gqa_bf16_state")
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
@@ -39,14 +51,14 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
         ("att_state", "get_pd_bounded_att_or_tail_transfer_layouts"),
     ):
         source.write_to_pd_buffer(
-            page.unsqueeze(0),
+            pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
             layouts=getattr(source, getter)(),
             **({"token_indices": torch.tensor([0, 1], dtype=torch.long, device="cuda")} if kind == "kv" else {"req_idx": 0, "state_token_len": 8}),
         )
         target.read_from_pd_buffer(
-            page.unsqueeze(0),
+            pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
             layouts=getattr(target, getter)(),
@@ -64,8 +76,10 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             remote_att_manager=source,
             src_token_indexes=src_indices,
             dst_token_indexes=dst_indices,
-            src_big_page_ids=[], dst_big_page_ids=[],
-            src_req_idx=0, dst_req_idx=2,
+            src_big_page_ids=[],
+            dst_big_page_ids=[],
+            src_req_idx=0,
+            dst_req_idx=2,
         )
     for index, role in enumerate(("main", "draft0")):
         state = getattr(target, f"{role}_mla_packed_bf16_state" if glm else f"{role}_gqa_bf16_state")
@@ -85,18 +99,23 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
     torch.cuda.synchronize()
     cpu = torch.empty((1, source.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
     source.write_req_to_cpu(
-        torch.arange(8, dtype=torch.long, device="cuda"),
-        cpu,
-        [0],
+        token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
+        cpu_page_buffers=cpu,
+        cpu_page_indices=[0],
         layouts=source.get_cpu_transfer_layouts(),
         big_page_slot_ids=[slot],
     )
     torch.cuda.synchronize()
     dst_slot = target.bounded_att_big_page_allocator.alloc(1)[0]
     target.read_req_from_cpu(
-        cpu,
-        [0],
-        torch.arange(8, 16, dtype=torch.long, device="cuda"),
+        cpu_page_buffers=cpu,
+        cpu_page_indices=[0],
+        token_indices=torch.arange(
+            start=8,
+            end=16,
+            dtype=torch.long,
+            device="cuda",
+        ),
         layouts=target.get_cpu_transfer_layouts(),
         big_page_slot_ids=[dst_slot],
         req_idx=1,

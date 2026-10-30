@@ -28,9 +28,14 @@ def test_page_pool_allocation_strategy(
         pytest.skip("CUDA required for pinned memory")
     cpu_args.enable_dp_prompt_cache_fetch = dp_fetch
     config = ConvSSMStateConfig(
-        logical_layer_ids=(0, 2), global_k_heads=1, global_v_heads=1,
-        key_dim=4, value_dim=4, conv_width=3,
-        conv_dtype=torch.bfloat16, ssm_dtype=torch.float32,
+        logical_layer_ids=(0, 2),
+        global_k_heads=1,
+        global_v_heads=1,
+        key_dim=4,
+        value_dim=4,
+        conv_width=3,
+        conv_dtype=torch.bfloat16,
+        ssm_dtype=torch.float32,
     )
     pool = pool_cls(size=2, config=config, pin_memory=pin_memory)
     assert pool.conv_state.shape == (2, 2, 12, 3)
@@ -99,9 +104,14 @@ def test_pinned_page_pool_survives_queue_on_another_gpu(
     cpu_args.enable_dp_prompt_cache_fetch = True
     torch.cuda.set_device(0)
     config = ConvSSMStateConfig(
-        logical_layer_ids=(0, 2), global_k_heads=1, global_v_heads=1,
-        key_dim=4, value_dim=4, conv_width=3,
-        conv_dtype=torch.float32, ssm_dtype=torch.float32,
+        logical_layer_ids=(0, 2),
+        global_k_heads=1,
+        global_v_heads=1,
+        key_dim=4,
+        value_dim=4,
+        conv_width=3,
+        conv_dtype=torch.float32,
+        ssm_dtype=torch.float32,
     )
     pool = pool_cls(size=2, config=config)
     tensors = (pool.conv_state, pool.ssm_state)

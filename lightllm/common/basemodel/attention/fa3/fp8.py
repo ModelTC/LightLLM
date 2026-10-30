@@ -76,8 +76,12 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         )
 
     def _fp8_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty,
-        *, logical_layer_id: int,
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        logical_layer_id: int,
+        alloc_func=torch.empty,
     ) -> torch.Tensor:
         self.backend: Fp8Fa3AttBackend = self.backend  # for typing
 
@@ -85,8 +89,12 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         q_head_dim = q.shape[2]
         k_head_num = k.shape[1]
         k_head_dim = k.shape[2]
-        cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
-        cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
+        cache_k = k.view(
+            size=(-1, 1, k_head_num, k_head_dim),
+        ).view(torch.float8_e4m3fn)
+        cache_v = v.view(
+            size=(-1, 1, k_head_num, k_head_dim),
+        ).view(torch.float8_e4m3fn)
         state = getattr(
             self.infer_state.att_resource_manager,
             f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
@@ -172,15 +180,18 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        alloc_func=torch.empty,
-        *,
         logical_layer_id: int,
+        alloc_func=torch.empty,
     ):
         k_head_num = k.shape[1]
         k_head_dim = k.shape[2]
 
-        cache_k = k.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
-        cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
+        cache_k = k.view(
+            size=(-1, 1, k_head_num, k_head_dim),
+        ).view(torch.float8_e4m3fn)
+        cache_v = v.view(
+            size=(-1, 1, k_head_num, k_head_dim),
+        ).view(torch.float8_e4m3fn)
 
         state = getattr(
             self.infer_state.att_resource_manager,

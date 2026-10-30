@@ -22,11 +22,11 @@ if TYPE_CHECKING:
     from easydict import EasyDict
 
 
-def composition(device: str | torch.device | int = "cpu", *, with_tail: bool = True, tail_pool_size: int = 4):
+def composition(device: str | torch.device | int = "cpu", with_tail: bool = True, tail_pool_size: int = 4):
     return MainDraftTestResourceManager(device, with_tail=with_tail, tail_pool_size=tail_pool_size)
 
 
-def layouts_for(manager: AttResourceManager, *, kind: str = "cpu"):
+def layouts_for(manager: AttResourceManager, kind: str = "cpu"):
     layouts = []
     if kind != "att_state":
         layouts += [layout_for(state) for state in (manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)]
@@ -109,8 +109,10 @@ def test_disabled_domains():
 def test_reset_tail_clears_all_tail_states_and_preserves_linear():
     first = make_tail()
     second = KPoolAttentionTailState(
-        replace(first.config, pool_size=3),
-        request_capacity=first.request_capacity, mtp_step=first.mtp_step, device=first.tail_buffer.device,
+        config=replace(first.config, pool_size=3),
+        request_capacity=first.request_capacity,
+        mtp_step=first.mtp_step,
+        device=first.tail_buffer.device,
     )
     first.tail_buffer.fill_(5)
     second.tail_buffer.fill_(7)
@@ -155,9 +157,9 @@ def test_cpu_all_linear_pages_and_tail_reset_at_final_boundary(device: str | tor
         (3, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8, pin_memory=device == "cuda"
     )
     source.write_req_to_cpu(
-        torch.arange(8, dtype=torch.long, device=device),
-        pages,
-        [2, 0],
+        token_indices=torch.arange(8, dtype=torch.long, device=device),
+        cpu_page_buffers=pages,
+        cpu_page_indices=[2, 0],
         layouts=layouts,
         big_page_slot_ids=slots,
     )
@@ -168,9 +170,14 @@ def test_cpu_all_linear_pages_and_tail_reset_at_final_boundary(device: str | tor
     assert tail.resource_id not in layouts
     target_slots = target.bounded_att_big_page_allocator.alloc(2)
     target.read_req_from_cpu(
-        pages,
-        [2, 0],
-        torch.arange(4, 12, dtype=torch.long, device=device),
+        cpu_page_buffers=pages,
+        cpu_page_indices=[2, 0],
+        token_indices=torch.arange(
+            start=4,
+            end=12,
+            dtype=torch.long,
+            device=device,
+        ),
         layouts=layouts,
         big_page_slot_ids=target_slots,
         req_idx=2,
@@ -208,8 +215,12 @@ def test_cpu_restore_owns_partial_slot_and_restores_final_runtime(token_count: i
         source.save_bounded_att_pages([page_count - 1], page_kind="small", slot_ids=small_slots)
         torch.cuda.synchronize()
     source.write_req_to_cpu(
-        torch.arange(token_count, device="cuda"), pages, page_ids,
-        layouts=layouts, big_page_slot_ids=source_slots[:token_count // 4], small_page_slot_ids=small_slots,
+        token_indices=torch.arange(token_count, device="cuda"),
+        cpu_page_buffers=pages,
+        cpu_page_indices=page_ids,
+        layouts=layouts,
+        big_page_slot_ids=source_slots[:token_count // 4],
+        small_page_slot_ids=small_slots,
     )
     torch.cuda.synchronize()
 
@@ -221,8 +232,12 @@ def test_cpu_restore_owns_partial_slot_and_restores_final_runtime(token_count: i
     original_slots = slots.copy()
     free_count = allocator.free_count
     target.read_req_from_cpu(
-        pages, page_ids, torch.arange(4, 4 + token_count, device="cuda"),
-        layouts=layouts, big_page_slot_ids=slots, req_idx=2,
+        cpu_page_buffers=pages,
+        cpu_page_indices=page_ids,
+        token_indices=torch.arange(4, 4 + token_count, device="cuda"),
+        layouts=layouts,
+        big_page_slot_ids=slots,
+        req_idx=2,
     )
     torch.cuda.synchronize()
     assert slots == original_slots
@@ -252,9 +267,9 @@ def test_cpu_restore_resets_selected_tail_after_all_pages(tail_pool_size: int):
     layouts = layouts_for(source)
     pages = torch.empty((2, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8, pin_memory=True)
     source.write_req_to_cpu(
-        torch.arange(8, dtype=torch.long, device="cuda"),
-        pages,
-        [0, 1],
+        token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
+        cpu_page_buffers=pages,
+        cpu_page_indices=[0, 1],
         layouts=layouts,
         big_page_slot_ids=slots,
     )
@@ -264,9 +279,9 @@ def test_cpu_restore_resets_selected_tail_after_all_pages(tail_pool_size: int):
     tail.tail_buffer.fill_(37)
     # 缓存流程保证最终前缀 L=8 是可恢复边界；中间页 L=4 不单独重置 tail。
     target.read_req_from_cpu(
-        pages,
-        [0, 1],
-        torch.arange(8, dtype=torch.long, device="cuda"),
+        cpu_page_buffers=pages,
+        cpu_page_indices=[0, 1],
+        token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
         layouts=layouts,
         big_page_slot_ids=target_slots,
         req_idx=0,
@@ -286,16 +301,30 @@ def test_pd_composition_and_dp_copy_keep_resource_identity(device: str | torch.d
         page = torch.empty(max(layout.byte_end for layout in layouts.values()), dtype=torch.uint8, device=device)
         src_args = {"token_indices": torch.tensor([0, 2], dtype=torch.long, device=device)} if kind == "kv" else {"req_idx": 1, "state_token_len": 8}
         dst_args = {"token_indices": torch.tensor([5, 7], dtype=torch.long, device=device)} if kind == "kv" else {"req_idx": 2, "state_token_len": 8}
-        source.write_to_pd_buffer(page.unsqueeze(0), pd_page_index=0, kind=kind, layouts=layouts, **src_args)
-        target.read_from_pd_buffer(page.unsqueeze(0), pd_page_index=0, kind=kind, layouts=layouts, **dst_args)
+        source.write_to_pd_buffer(
+            pd_page_buffers=page.unsqueeze(0),
+            pd_page_index=0,
+            kind=kind,
+            layouts=layouts,
+            **src_args,
+        )
+        target.read_from_pd_buffer(
+            pd_page_buffers=page.unsqueeze(0),
+            pd_page_index=0,
+            kind=kind,
+            layouts=layouts,
+            **dst_args,
+        )
     dp_tail = dp_target.get_attention_tail_states()[0]
     dp_tail.tail_buffer.fill_(19)
     dp_target.copy_from_other_dp(
         remote_att_manager=source,
         src_token_indexes=torch.tensor([0, 2], dtype=torch.int32, device=device),
         dst_token_indexes=torch.tensor([5, 7], dtype=torch.long, device=device),
-        src_big_page_ids=[], dst_big_page_ids=[],
-        src_req_idx=1, dst_req_idx=2,
+        src_big_page_ids=[],
+        dst_big_page_ids=[],
+        src_req_idx=1,
+        dst_req_idx=2,
     )
     for a, b in zip(
         (target.main_gqa_fp32_state, target.draft0_mla_fp32_state),
@@ -327,8 +356,10 @@ def test_dp_copy_resets_only_selected_tail_requests(pd_args: EasyDict):
         remote_att_manager=source,
         src_token_indexes=torch.empty(0, dtype=torch.long),
         dst_token_indexes=torch.empty(0, dtype=torch.long),
-        src_big_page_ids=[], dst_big_page_ids=[],
-        src_req_idx=1, dst_req_idx=2,
+        src_big_page_ids=[],
+        dst_big_page_ids=[],
+        src_req_idx=1,
+        dst_req_idx=2,
     )
     assert all(not state.tail_buffer[:, 2].any() for state in tails)
     assert all((state.tail_buffer[:, :2] == 19).all() for state in tails)
@@ -365,7 +396,8 @@ def test_dp_copy_includes_selected_runtime_and_main_draft_pages(copy_tokens: boo
         dst_token_indexes=torch.tensor([5, 7] if copy_tokens else [], dtype=torch.long, device=device),
         src_big_page_ids=[2, 0] if copy_pages else [],
         dst_big_page_ids=[0, 1] if copy_pages else [],
-        src_req_idx=1, dst_req_idx=2,
+        src_req_idx=1,
+        dst_req_idx=2,
     )
 
     for state in target.get_full_attention_states():
@@ -418,10 +450,20 @@ def test_cpu_ready_joint_pages_preserve_full_and_bounded_fields(readies: list[bo
     layouts = layouts_for(source)
     page_ids = [2, 0, 3]
     token_ids = torch.arange(10, device="cuda")
-    baseline = torch.full((4, max(layout.byte_end for layout in layouts.values())), 139, dtype=torch.uint8, pin_memory=True)
+    baseline = torch.full(
+        size=(4, max(layout.byte_end for layout in layouts.values())),
+        fill_value=139,
+        dtype=torch.uint8,
+        pin_memory=True,
+    )
     pages = torch.full_like(baseline, 139, pin_memory=True)
     source.write_req_to_cpu(
-        token_ids, baseline, page_ids, layouts=layouts, big_page_slot_ids=big_slots, small_page_slot_ids=small_slots,
+        token_indices=token_ids,
+        cpu_page_buffers=baseline,
+        cpu_page_indices=page_ids,
+        layouts=layouts,
+        big_page_slot_ids=big_slots,
+        small_page_slot_ids=small_slots,
     )
     torch.cuda.synchronize()
     expected = pages.clone()
@@ -432,8 +474,13 @@ def test_cpu_ready_joint_pages_preserve_full_and_bounded_fields(readies: list[bo
     masked_big_slots = [-999 if readies[i] else slot for i, slot in enumerate(big_slots)]
     masked_small_slots = [-999] if readies[2] else small_slots
     source.write_req_to_cpu(
-        token_ids, pages, page_ids, layouts=layouts, cpu_page_readies=readies,
-        big_page_slot_ids=masked_big_slots, small_page_slot_ids=masked_small_slots,
+        token_indices=token_ids,
+        cpu_page_buffers=pages,
+        cpu_page_indices=page_ids,
+        layouts=layouts,
+        cpu_page_readies=readies,
+        big_page_slot_ids=masked_big_slots,
+        small_page_slot_ids=masked_small_slots,
     )
     torch.cuda.synchronize()
     assert torch.equal(pages, expected)

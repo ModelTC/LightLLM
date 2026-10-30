@@ -30,7 +30,12 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
     pd_args.pd_kv_page_size = 4
     # P 保存完整 heads，D 只恢复 rank 1 的一半 heads；两侧外部页格式相同。
     source = GQAFullAttentionState(
-        layout_config=FullAttentionConfig(logical_layer_groups=((2,), (5,)), global_head_num=4, head_dim=128, dtype=dtype),
+        layout_config=FullAttentionConfig(
+            logical_layer_groups=((2,), (5,)),
+            global_head_num=4,
+            head_dim=128,
+            dtype=dtype,
+        ),
         page_size=4,
         device="cuda",
     )
@@ -65,7 +70,12 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
             regions=tuple(regions),
         ))
     layout, target_layout = layouts
-    pages = torch.full(size=(3, layout.byte_end + 64), fill_value=91, dtype=torch.uint8, device="cuda")
+    pages = torch.full(
+        size=(3, layout.byte_end + 64),
+        fill_value=91,
+        dtype=torch.uint8,
+        device="cuda",
+    )
     page_view = pages[:, 32:-32]  # 页池视图的真实跨度大于可见宽度。
     src_ids = torch.tensor(data=[6, 9, 1, 9, 7, 9], dtype=torch.int32, device="cuda")[::2][:token_count]
     dst_ids = torch.tensor(data=[2, 6, 4], dtype=torch.int64, device="cuda")[:token_count]
@@ -81,8 +91,18 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
         patch.setattr(torch.Tensor, "index_copy_", reject_gather)
         patch.setattr(torch.Tensor, "tolist", reject_gather)
         with torch.cuda.stream(stream):
-            source.write_to_pd_buffer(token_indices=src_ids, pd_page_buffers=page_view, pd_page_index=1, layout=layout)
-            target.read_from_pd_buffer(pd_page_buffers=page_view, token_indices=dst_ids, pd_page_index=1, layout=target_layout)
+            source.write_to_pd_buffer(
+                token_indices=src_ids,
+                pd_page_buffers=page_view,
+                pd_page_index=1,
+                layout=layout,
+            )
+            target.read_from_pd_buffer(
+                pd_page_buffers=page_view,
+                token_indices=dst_ids,
+                pd_page_index=1,
+                layout=target_layout,
+            )
         stream.synchronize()
     for tensor, expected_bytes in zip((target.k_storage, target.v_storage), expected):
         assert torch.equal(tensor[:, dst_ids].contiguous().view(torch.uint8), expected_bytes)
@@ -98,7 +118,10 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
     # 反向验证分片写出：rank 1 只修改全局 heads [2, 4)，rank 0 区域保持原始字节。
     pages.fill_(91)
     target.write_to_pd_buffer(
-        token_indices=dst_ids, pd_page_buffers=page_view, pd_page_index=2, layout=target_layout,
+        token_indices=dst_ids,
+        pd_page_buffers=page_view,
+        pd_page_index=2,
+        layout=target_layout,
     )
     for region, expected_bytes in zip(target_layout.regions, expected):
         external = page_view[2, region.byte_start:region.byte_end].view(dtype).view(region.shape)
@@ -115,7 +138,12 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
     # MQA 的 KV head 在 TP ranks 间复制，非首 rank 禁止写出但仍能读回。
     state = GQAFullAttentionState(
         layout_config=FullAttentionConfig(
-            logical_layer_groups=((0,), (2,)), global_head_num=1, head_dim=128, dtype=torch.bfloat16, tp_world_size=2, tp_rank=1,
+            logical_layer_groups=((0,), (2,)),
+            global_head_num=1,
+            head_dim=128,
+            dtype=torch.bfloat16,
+            tp_world_size=2,
+            tp_rank=1,
         ),
         page_size=4,
         device="cuda",
@@ -125,16 +153,29 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
     state.v_storage.fill_(19)
     regions = state.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id, tokens_per_page=4, byte_start=0,
-        byte_end=max(region.byte_end for region in regions), regions=regions,
+        resource_id=state.resource_id,
+        tokens_per_page=4,
+        byte_start=0,
+        byte_end=max(region.byte_end for region in regions),
+        regions=regions,
     )
     pages = torch.zeros(size=(2, layout.byte_end), dtype=torch.uint8, device="cuda")
     for region, value in zip(regions, (3, 7)):
         pages[1, region.byte_start:region.byte_end].view(region.dtype).fill_(value)
     snapshot = pages.clone()
     ids = torch.tensor(data=[5, 1], dtype=torch.int32, device="cuda")
-    state.write_to_pd_buffer(token_indices=ids, pd_page_buffers=pages, pd_page_index=1, layout=layout)
-    state.read_from_pd_buffer(pd_page_buffers=pages, token_indices=ids, pd_page_index=1, layout=layout)
+    state.write_to_pd_buffer(
+        token_indices=ids,
+        pd_page_buffers=pages,
+        pd_page_index=1,
+        layout=layout,
+    )
+    state.read_from_pd_buffer(
+        pd_page_buffers=pages,
+        token_indices=ids,
+        pd_page_index=1,
+        layout=layout,
+    )
     assert torch.equal(pages, snapshot)
     assert (state.k_storage[:, ids] == 3).all() and (state.v_storage[:, ids] == 7).all()
     assert (state.k_storage[:, [0, 2, 3, 4, 6, 7]] == 19).all()
@@ -153,7 +194,12 @@ def test_gqa_pd_direct_copy_through_peer_ipc(pd_args: EasyDict, monkeypatch: pyt
         pytest.skip("CUDA peer access required")
     pd_args.pd_kv_page_size = 4
     state = GQAFullAttentionState(
-        layout_config=FullAttentionConfig(logical_layer_groups=((0,), (2,)), global_head_num=2, head_dim=128, dtype=torch.bfloat16),
+        layout_config=FullAttentionConfig(
+            logical_layer_groups=((0,), (2,)),
+            global_head_num=2,
+            head_dim=128,
+            dtype=torch.bfloat16,
+        ),
         page_size=4,
         device="cuda:1",
     )
@@ -165,8 +211,11 @@ def test_gqa_pd_direct_copy_through_peer_ipc(pd_args: EasyDict, monkeypatch: pyt
     torch.cuda.synchronize(device=1)
     regions = state.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id, tokens_per_page=4, byte_start=0,
-        byte_end=max(region.byte_end for region in regions), regions=regions,
+        resource_id=state.resource_id,
+        tokens_per_page=4,
+        byte_start=0,
+        byte_end=max(region.byte_end for region in regions),
+        regions=regions,
     )
     monkeypatch.setattr(mp.reductions.reduce_tensor, "__code__", reduce_tensor.__code__)
     payload = bytes(ForkingPickler.dumps(state))

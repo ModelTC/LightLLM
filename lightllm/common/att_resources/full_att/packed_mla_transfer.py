@@ -17,7 +17,6 @@ def transfer_packed_mla_pages(
     token_indices: torch.Tensor,
     page_buffers: torch.Tensor,
     page_indices: list[int],
-    *,
     layout: StateTransferLayout,
     kv_dim: int,
     indexer_offset: int,

@@ -26,7 +26,6 @@ CUDA_HOST_REGISTER_MAPPED = 2
 def create_page_pool_tensor(
     size: tuple[int, ...],
     dtype: torch.dtype,
-    *,
     device: str | torch.device | int = "cpu",
     pin_memory: bool = True,
 ) -> torch.Tensor:
@@ -43,7 +42,12 @@ def create_page_pool_tensor(
 
     # 阶段一：未启用 DP fetch 时沿用 torch 分配；GPU 页池也保持原设备分配方式。
     if not shared:
-        tensor = torch.empty(size=size, dtype=dtype, device=device, pin_memory=pin_memory)
+        tensor = torch.empty(
+            size=size,
+            dtype=dtype,
+            device=device,
+            pin_memory=pin_memory,
+        )
         reason = "GPU device allocation" if device.type != "cpu" else "DP prompt cache fetch disabled"
         logger.info(
             f"Allocated bounded attention page pool: shape={size}, dtype={dtype}, bytes={nbytes}, "
@@ -94,7 +98,12 @@ def register_page_pool_tensor(tensor: torch.Tensor) -> None:
     torch.cuda.check_error(torch.cuda.cudart().cudaHostRegister(ptr, nbytes, flags))
     # finalizer 绑定 Storage，所有本地 Tensor 及视图释放后才注销，不能绑在单个 Tensor 上。
     # 正常释放时等待 GPU 完成使用；解释器退出时交给进程清理，避免 CUDA 已关闭后再调用。
-    cleanup = finalize(storage, _unregister_page_pool_storage, ptr, device_id)
+    cleanup = finalize(
+        storage,
+        _unregister_page_pool_storage,
+        ptr,
+        device_id,
+    )
     cleanup.atexit = False
     logger.info(
         f"Registered shared bounded attention page pool: bytes={nbytes}, cuda_device={device_id}, "

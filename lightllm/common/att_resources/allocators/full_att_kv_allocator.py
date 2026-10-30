@@ -19,15 +19,25 @@ logger = init_logger(__name__)
 
 
 class FullAttKVAllocator:
-    def __init__(self, size: int, page_size: int = 1, *, pin_memory: bool = True):
+    def __init__(self, size: int, page_size: int = 1, pin_memory: bool = True):
         assert size >= 0 and page_size > 0 and size % page_size == 0, "KV capacity must contain complete pages"
         assert size + page_size - 1 <= np.iinfo(np.int32).max, "KV token indices including HOLD must fit in int32"
         self.size = size
         self.page_size = page_size
-        self.mem_state = torch.arange(self.size, dtype=torch.int32, device="cpu", pin_memory=pin_memory)
+        self.mem_state = torch.arange(
+            end=self.size,
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
         self.mark_start = 0
         self.mark_end = self.size
-        self._mem_state_return = torch.empty(self.size * 3, dtype=torch.int32, device="cpu", pin_memory=pin_memory)
+        self._mem_state_return = torch.empty(
+            size=(self.size * 3,),
+            dtype=torch.int32,
+            device="cpu",
+            pin_memory=pin_memory,
+        )
         self._return_start = 0
         self.can_use_mem_size = self.size
         rank_in_node = get_current_rank_in_node()

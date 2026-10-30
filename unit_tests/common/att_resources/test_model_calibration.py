@@ -103,9 +103,11 @@ def test_calibration_binds_all_model_states_after_creation(tmp_path: Path, encod
         states = []
         if not (model.is_mtp_draft_model and model.args.mtp_mode in ("vanilla_no_att", "eagle_no_att")):
             states = model._create_full_att_states(
-                model_config=model.config, args=model.args,
+                model_config=model.config,
+                args=model.args,
                 model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
-                tp_rank=model.tp_rank_, tp_world_size=model.tp_world_size_,
+                tp_rank=model.tp_rank_,
+                tp_world_size=model.tp_world_size_,
             )
         for state in states:
             assert state.resource_id is None
@@ -139,7 +141,11 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
     q_scales = scales[:, :2] + 20
     calibration_path = tmp_path / "calibration.json"
     calibration_path.write_text(json.dumps(dict(
-        num_layers=4, num_head=2, quant_type="per_head", scales_shape=[4, 4], scales=scales.tolist(),
+        num_layers=4,
+        num_head=2,
+        quant_type="per_head",
+        scales_shape=[4, 4],
+        scales=scales.tolist(),
         q_calibration=dict(num_head=2, scales_shape=[4, 2], scales=q_scales.tolist()),
     )))
     args = StartArgs(kv_quant_calibration_config_path=str(calibration_path))
@@ -163,8 +169,12 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
         ):
             state = create_gqa_state(
                 config=FullAttentionConfig(
-                    logical_layer_groups=groups, global_head_num=4, head_dim=16, dtype=torch.bfloat16,
-                    tp_rank=tp_rank, tp_world_size=tp_world_size,
+                    logical_layer_groups=groups,
+                    global_head_num=4,
+                    head_dim=16,
+                    dtype=torch.bfloat16,
+                    tp_rank=tp_rank,
+                    tp_world_size=tp_world_size,
                 ), kv_type=encoding, device="meta",
             )
             manager.set_att_state(role, state)
@@ -188,11 +198,19 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
 
 @pytest.mark.parametrize("encoding", ["fp8kv_spt", "fp8kv_sph"])
 def test_cpu_layout_does_not_require_calibration_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cpu_args: EasyDict, encoding: str,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    cpu_args: EasyDict,
+    encoding: str,
 ):
     from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
 
-    config = dict(model_type="llama", num_attention_heads=2, hidden_size=32, num_hidden_layers=2)
+    config = dict(
+        model_type="llama",
+        num_attention_heads=2,
+        hidden_size=32,
+        num_hidden_layers=2,
+    )
     (tmp_path / "config.json").write_text(json.dumps(config))
     cpu_args.model_dir = str(tmp_path)
     cpu_args.llm_kv_type = encoding
@@ -212,7 +230,10 @@ def test_deferred_calibration_keeps_unit_scale_policy(encoding: str):
 
     state = create_gqa_state(
         config=FullAttentionConfig(
-            logical_layer_groups=((0, 1), (2,)), global_head_num=2, head_dim=16, dtype=torch.bfloat16,
+            logical_layer_groups=((0, 1), (2,)),
+            global_head_num=2,
+            head_dim=16,
+            dtype=torch.bfloat16,
         ), kv_type=encoding, device="cpu",
     )
     manager = AttResourceManager(request_capacity=1)

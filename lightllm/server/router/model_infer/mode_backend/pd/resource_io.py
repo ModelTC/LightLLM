@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     from typing import Literal
 
 
-def allocate_transfer_buffer(resources: AttResourceManager, page_count: int, *, device: str | torch.device | int):
+def allocate_transfer_buffer(resources: AttResourceManager, page_count: int, device: str | torch.device | int):
     if page_count <= 0:
         raise ValueError("PD buffer must contain pages")
     return torch.empty((page_count, resources.get_pd_page_bytes()), dtype=torch.uint8, device=device)
@@ -20,15 +20,14 @@ def allocate_transfer_buffer(resources: AttResourceManager, page_count: int, *, 
 def copy_page(
     node_att_managers: Sequence[AttResourceManager],
     pd_page_buffers: torch.Tensor,
-    *,
     pd_page_index: int,
     dp_rank_in_node: int,
     tp_world_size: int,
     token_indices: torch.Tensor,
+    write_to_pd_buffer: bool,
     task_kind: Literal["kv", "att_state"] = "kv",
     req_idx: int | None = None,
     state_token_len: int | None = None,
-    write_to_pd_buffer: bool,
 ) -> None:
     """选择节点内指定 DP 的 TP 组，检查整组布局后提交 PD 页面读写。
 
