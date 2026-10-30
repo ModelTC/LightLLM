@@ -144,7 +144,7 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         self._init_to_get_rotary()
 
     @classmethod
-    def _create_full_att_states(
+    def create_full_att_states(
         cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:

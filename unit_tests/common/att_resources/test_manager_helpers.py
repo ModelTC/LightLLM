@@ -72,8 +72,9 @@ def init_source(manager: AttResourceManager):
     return slots
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
 def test_shared_slots_save_restore_and_propagate_failure(monkeypatch: pytest.MonkeyPatch):
-    manager = composition()
+    manager = composition(device="cuda")
     slots = init_source(manager)
     manager.restore_bounded_att_pages([2], page_kind="big", slot_ids=[slots[0]])
     for i, state in enumerate((manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)):
@@ -106,6 +107,7 @@ def test_disabled_domains():
         empty_manager.copy_full_att_tokens(torch.tensor([0], dtype=torch.long), torch.tensor([1], dtype=torch.long))
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
 def test_reset_tail_clears_all_tail_states_and_preserves_linear():
     first = make_tail()
     second = KPoolAttentionTailState(
@@ -123,7 +125,7 @@ def test_reset_tail_clears_all_tail_states_and_preserves_linear():
     tail_manager.reset_attention_tail_state([0, 1])
     assert not first.tail_buffer[:, :2].any() and not second.tail_buffer[:, :2].any()
     assert (first.tail_buffer[:, 2] == 5).all() and (second.tail_buffer[:, 2] == 7).all()
-    manager = composition()
+    manager = composition(device="cuda")
     init_source(manager)
     # Preserve accepted-state cursors as well as both algorithms' runtime and
     # cached pages. A full reset here would silently corrupt a prefix restore.
@@ -346,8 +348,9 @@ def test_pd_composition_and_dp_copy_keep_resource_identity(device: str | torch.d
     assert (source.get_attention_tail_states()[0].tail_buffer[:, 1] == 9).all()
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
 def test_dp_copy_resets_only_selected_tail_requests(pd_args: EasyDict):
-    source, target = composition(), composition()
+    source, target = composition(device="cuda"), composition(device="cuda")
     init_source(source)
     tails = target.get_attention_tail_states()
     for state in tails:
@@ -367,9 +370,9 @@ def test_dp_copy_resets_only_selected_tail_requests(pd_args: EasyDict):
 
 @pytest.mark.parametrize("copy_tokens,copy_pages", [(True, True), (True, False), (False, True)])
 def test_dp_copy_includes_selected_runtime_and_main_draft_pages(copy_tokens: bool, copy_pages: bool):
-    if copy_tokens and not torch.cuda.is_available():
+    if not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    device = "cuda" if copy_tokens else "cpu"
+    device = "cuda"
     source, target = composition(device), composition(device)
     init_source(source)
     for state in target.get_full_attention_states():

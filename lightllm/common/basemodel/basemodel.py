@@ -158,16 +158,16 @@ class TpPartBaseModel:
 
             # 当前模型拥有的全局逻辑层 ID，按模型内部层顺序排列；各工厂自行选择参与层及共享分组。
             logical_layer_ids = tuple(layer.layer_num_ for layer in self.layers_infer)
-            full_states = self._create_full_att_states(
+            full_states = self.create_full_att_states(
                 model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
                 tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
             )
-            bounded_states = self._create_bounded_att_states(
+            bounded_states = self.create_bounded_att_states(
                 model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
                 request_capacity=self.max_req_num + 1, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
                 device="cuda",
             )
-            tail_states = self._create_att_tail_states(
+            tail_states = self.create_att_tail_states(
                 model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
                 request_capacity=self.max_req_num + 1, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
                 device="cuda",
@@ -259,7 +259,7 @@ class TpPartBaseModel:
         return
 
     @classmethod
-    def _create_full_att_states(
+    def create_full_att_states(
         cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
@@ -271,7 +271,7 @@ class TpPartBaseModel:
         return []
 
     @classmethod
-    def _create_bounded_att_states(
+    def create_bounded_att_states(
         cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
         model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
         tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
@@ -283,7 +283,7 @@ class TpPartBaseModel:
         return []
 
     @classmethod
-    def _create_att_tail_states(
+    def create_att_tail_states(
         cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
         model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
         tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",

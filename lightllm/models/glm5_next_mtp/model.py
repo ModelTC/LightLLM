@@ -72,7 +72,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
     @classmethod
-    def _create_full_att_states(
+    def create_full_att_states(
         cls,
         model_config: dict[str, object],
         args: "StartArgs | EasyDict",
@@ -105,7 +105,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
         return [state]
 
     @classmethod
-    def _create_att_tail_states(
+    def create_att_tail_states(
         cls,
         model_config: dict[str, object],
         args: "StartArgs | EasyDict",

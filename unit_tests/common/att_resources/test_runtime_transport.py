@@ -186,6 +186,13 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
             rank=0,
             mtp=2,
         )
+    if source_device != 0:
+        # 此测试直接传入另一张卡的 Tensor，未走 IPC 导入；装配阶段先建立 peer 映射。
+        # 生产拷贝入口只使用已映射的资源，不负责打开设备间访问。
+        from cuda.bindings import runtime
+
+        error, = runtime.cudaDeviceEnablePeerAccess(source_device, 0)
+        assert error in (runtime.cudaError_t.cudaSuccess, runtime.cudaError_t.cudaErrorPeerAccessAlreadyEnabled)
     for i, field in enumerate(full_state_test_fields(source_full, full_state_test_buffers(source_full)).values()):
         if "token" in field.axes:
             field.tensor.fill_(i + 5)
@@ -317,7 +324,8 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
                 pool.conv_state.zero_()
                 pool.ssm_state.zero_()
     slot = resources.bounded_att_big_page_allocator.alloc(1)
-    resources.save_bounded_att_pages([0], page_kind="big", slot_ids=slot)
+    with torch.cuda.device(source_device):
+        resources.save_bounded_att_pages([0], page_kind="big", slot_ids=slot)
     mapping = torch.zeros((3, 16), dtype=torch.int32, device=f"cuda:{source_device}")
     mapping[1, 0] = 7
     torch.cuda.synchronize(source_device)

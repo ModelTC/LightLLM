@@ -22,6 +22,8 @@ if TYPE_CHECKING:
     from lightllm.common.att_resources.types import PageKind
 
 
+pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for aggregated copies")
+
 def make_state(
     cls: type[KDAState] | type[GDNState] = KDAState,
     device: str | torch.device | int = "cpu",
@@ -118,7 +120,7 @@ def page_layout(state: KDAState | GDNState):
 
 
 @pytest.mark.parametrize("cls,pool_cls", [(KDAState, KDAPagesPool), (GDNState, GDNPagesPool)])
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("device", ["cuda"])
 @pytest.mark.parametrize("page_kind", ["big", "small"])
 def test_prefill_state_is_saved_and_restored(
     cls: type[KDAState] | type[GDNState],
@@ -188,9 +190,9 @@ def test_gdn_dimensions_and_page_restore():
         config=config,
         request_capacity=3,
         mtp_step=2,
-        device="cpu",
+        device="cuda",
     )
-    state.initialize_page_pools(big_page_capacity=2, small_page_capacity=2, pin_memory=False)
+    state.initialize_page_pools(big_page_capacity=2, small_page_capacity=2, pin_memory=True)
     conv = torch.arange(40, dtype=config.conv_dtype).reshape(2, 10, 2)
     ssm = torch.arange(24, dtype=config.ssm_dtype).reshape(
         shape=(2, 2, 2, 3),
@@ -202,15 +204,15 @@ def test_gdn_dimensions_and_page_restore():
     state.reset_bounded_att_state([0])
     for req, page_kind in enumerate(("big", "small"), start=1):
         state.restore_bounded_att_pages([req], page_kind=page_kind, slot_ids=[0])
-        assert torch.equal(state.conv_state[:, req, :, :2], conv)
-        assert torch.equal(state.ssm_state[:, req * 3], ssm)
+        assert torch.equal(state.conv_state[:, req, :, :2].cpu(), conv)
+        assert torch.equal(state.ssm_state[:, req * 3].cpu(), ssm)
     with pytest.raises(AssertionError, match="equal Q/K/V"):
         KDAPagesPool(2, config, pin_memory=False)
 
 
 @pytest.mark.parametrize("cls", [KDAState, GDNState])
 def test_reset_requests_preserves_pages(cls: type[KDAState] | type[GDNState]):
-    state = make_state(cls)
+    state = make_state(cls, device="cuda")
     state.conv_state[:, 0].fill_(7)
     state.ssm_state[:, 0:3].fill_(11)
     state.save_bounded_att_pages([0], page_kind="small", slot_ids=[0])
@@ -229,12 +231,12 @@ def test_reset_requests_preserves_pages(cls: type[KDAState] | type[GDNState]):
 
 @pytest.mark.parametrize("cls", [KDAState, GDNState])
 def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
-    source = make_state(cls)
+    source = make_state(cls, device="cuda")
     source.conv_state[:, 0].fill_(13)
     source.ssm_state[:, 0].fill_(29)
     source.save_bounded_att_pages([0], page_kind="big", slot_ids=[0])
     layout = page_layout(source)
-    buffer = torch.full((3, layout.byte_end), 255, dtype=torch.uint8)
+    buffer = torch.full((3, layout.byte_end), 255, dtype=torch.uint8, pin_memory=True)
     source.write_page_state_to_cpu(
         page_kind="big",
         slot_ids=[0],
@@ -242,8 +244,9 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
         cpu_page_indices=[2],
         layout=layout,
     )
+    torch.cuda.synchronize()
     assert (buffer[:2] == 255).all() and (buffer[2, :16] == 255).all()
-    target = make_state(cls)
+    target = make_state(cls, device="cuda")
     target.read_page_state_from_cpu(
         cpu_page_buffers=buffer,
         cpu_page_indices=[2],
@@ -267,10 +270,11 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
         cpu_page_indices=[0],
         layout=layout,
     )
+    torch.cuda.synchronize()
     assert torch.equal(buffer[0], buffer[2])
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("device", ["cuda"])
 @pytest.mark.parametrize("cls", [KDAState, GDNState])
 def test_pd_roundtrip_uses_baseline_state_and_page_relative_offset(
     cls: type[KDAState] | type[GDNState],
@@ -313,7 +317,7 @@ def test_pd_roundtrip_uses_baseline_state_and_page_relative_offset(
 
 
 @pytest.mark.parametrize("cls", [KDAState, GDNState])
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.parametrize("device", ["cuda"])
 @pytest.mark.parametrize("src_mtp_step,dst_mtp_step", [(0, 2), (2, 1)])
 def test_dp_runtime_copy_preserves_pages_and_other_requests(cls, device, src_mtp_step, dst_mtp_step):
     if device == "cuda" and not torch.cuda.is_available():
@@ -355,8 +359,8 @@ def test_dp_runtime_copy_preserves_pages_and_other_requests(cls, device, src_mtp
 
 @pytest.mark.parametrize("cls", [KDAState, GDNState])
 def test_dp_big_page_copy_preserves_runtime_and_other_pages(cls):
-    source = make_state(cls)
-    target = make_state(cls)
+    source = make_state(cls, device="cuda")
+    target = make_state(cls, device="cuda")
     for page in range(3):
         source.big_pages_pool.conv_state[page].fill_(10 + page)
         source.big_pages_pool.ssm_state[page].fill_(20 + page)
@@ -374,6 +378,7 @@ def test_dp_big_page_copy_preserves_runtime_and_other_pages(cls):
         src_page_ids=[2, 0], dst_page_ids=[0, 1], remote_dp_bounded_state=source,
     )
 
+    torch.cuda.synchronize()
     for src_page, dst_page in ((2, 0), (0, 1)):
         assert torch.equal(target.big_pages_pool.conv_state[dst_page], src_conv[src_page])
         assert torch.equal(target.big_pages_pool.ssm_state[dst_page], src_ssm[src_page])

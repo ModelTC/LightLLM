@@ -33,7 +33,7 @@ def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
         ), device="meta",
     )
     monkeypatch.setattr(
-        LlamaTpPartModel, "_create_full_att_states", classmethod(lambda cls, **kwargs: [state]),
+        LlamaTpPartModel, "create_full_att_states", classmethod(lambda cls, **kwargs: [state]),
     )
 
     model.prepare_att_resources()

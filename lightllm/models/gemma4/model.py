@@ -87,7 +87,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         return
 
     @classmethod
-    def _create_full_att_states(
+    def create_full_att_states(
         cls,
         model_config: dict[str, object],
         args: "StartArgs | EasyDict",

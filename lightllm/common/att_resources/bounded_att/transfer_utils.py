@@ -12,41 +12,35 @@ from ..types import StateTransferLayout, TensorField, TransferRegion
 # ========================================================================
 
 def bounded_att_buffer_copies(
-    fields: Mapping[str, TensorField],
+    page_fields: list[Mapping[str, TensorField]],
     page_buffers: torch.Tensor,
     layout: StateTransferLayout,
-    page_index: int,
+    page_indices: list[int],
     write: bool,
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """生成一份 bounded 状态与外部页之间的复制计划，不处理 token 数量。
+) -> list[list[tuple[torch.Tensor, torch.Tensor]]]:
+    """按传输区域收集所有页面的复制视图，每个返回批次只包含一种 shape。
 
-    fields 由 State 选取运行态或大小页快照，例如 KDA/GDN 的 Conv、SSM。
-    每份快照完整复制；Conv 的 Q/K/V 区间可以分别映射到同一全局字段。
-    page_buffers 至少为二维，第一维统一表示页；不接受没有页维度的单页 Tensor。
-    page_index 必须显式传入；CPU/PD 调用方均传入页集合和实际物理页索引。
-    返回 (源视图, 目标视图) 列表，由调用方遍历执行 dst.copy_(src, non_blocking=True)。
+    page_fields 与 page_indices 一一对应，调用方已排除 ready 页。
+    Conv 的 Q/K/V 切片与 SSM 分别成批，不将不同字段或不同 TP 切片混入同一次拷贝。
+    page_buffers 的第一维为物理页；这里只创建视图，由调用方逐批提交 Triton 算子。
     """
-    # CPU/PD 统一沿第一维选页，再按字节解释页内存储，不复制数据。
     assert page_buffers.ndim >= 2, "page buffers must include a leading page dimension"
-    page_buffer = page_buffers[page_index]
-    page_bytes = page_buffer.view(torch.uint8).view(-1)
-    copies = []
+    batches = []
     for region in layout.regions:
-        # 阶段一：定位快照字段和外部页中的全局状态区域。
-        assert region.field in fields, f"unknown transfer field {region.field}"
-        field = fields[region.field]
-        # region 起止位置相对整页，按字段 dtype 和 shape 直接构造外部视图。
-        external = page_bytes[region.byte_start:region.byte_end].view(region.dtype).view(region.shape)
         if write and not region.write_enabled:
             continue
-
-        # 阶段二：按 channel/head 等 TP 切片生成视图，Conv 窗口及 SSM 状态完整保留。
-        local_view, external_view = _copy_pair(field, external, region)
-        # 比较切片后的实际复制范围，避免 copy_ 隐式广播掩盖布局错误。
-        assert local_view.shape == external_view.shape, "local and external copy views must have the same shape"
-        # 写出只由选定的 TP 副本执行；读回覆盖每个副本自己的分片。
-        copies.append((local_view, external_view) if write else (external_view, local_view))
-    return copies
+        copies = []
+        for fields, page_index in zip(page_fields, page_indices):
+            # 阶段一：按字节区间定位当前页的字段，构造外部存储视图。
+            field = fields[region.field]
+            page_bytes = page_buffers[page_index].view(torch.uint8).view(-1)
+            external = page_bytes[region.byte_start:region.byte_end].view(region.dtype).view(region.shape)
+            # 阶段二：同一区域使用相同的 TP 切片，所有页面生成的视图 shape 一致。
+            local_view, external_view = _copy_pair(field, external, region)
+            assert local_view.shape == external_view.shape, "local and external copy views must have the same shape"
+            copies.append((local_view, external_view) if write else (external_view, local_view))
+        batches.append(copies)
+    return batches
 
 
 # ========================================================================

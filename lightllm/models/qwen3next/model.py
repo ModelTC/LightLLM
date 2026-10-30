@@ -40,7 +40,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super().__init__(kvargs)
 
     @classmethod
-    def _create_bounded_att_states(
+    def create_bounded_att_states(
         cls,
         model_config: dict[str, object],
         args: "StartArgs | EasyDict",
@@ -97,7 +97,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
     @classmethod
-    def _create_full_att_states(
+    def create_full_att_states(
         cls,
         model_config: dict[str, object],
         args: "StartArgs | EasyDict",

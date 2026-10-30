@@ -102,7 +102,7 @@ def test_calibration_binds_all_model_states_after_creation(tmp_path: Path, encod
         model.att_resource_manager = manager
         states = []
         if not (model.is_mtp_draft_model and model.args.mtp_mode in ("vanilla_no_att", "eagle_no_att")):
-            states = model._create_full_att_states(
+            states = model.create_full_att_states(
                 model_config=model.config,
                 args=model.args,
                 model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),

@@ -199,6 +199,7 @@ def test_shared_allocator_accounts_for_distinct_state_stores():
 
 
 @pytest.mark.parametrize("state_cls", [KDAState, GDNState])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
 def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     monkeypatch: pytest.MonkeyPatch,
     state_cls: type[KDAState] | type[GDNState],
@@ -223,13 +224,13 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
         ),
         request_capacity=3,
         mtp_step=3,
-        device="cpu",
+        device="cuda",
     )
     reference = state_cls(
         config=config,
         request_capacity=3,
         mtp_step=3,
-        device="cpu",
+        device="cuda",
     )
     conv = reference.conv_state[:, 0, :, : config.conv_width]
     ssm = reference.ssm_state[:, 0]
@@ -244,7 +245,7 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     reference.conv_state.fill_(2)
     reference.ssm_state.fill_(3)
     tail.tail_buffer.fill_(4)
-    pages = torch.zeros((2, manager.get_pd_page_bytes()), dtype=torch.uint8)
+    pages = torch.zeros((2, manager.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
     layouts = manager.get_pd_bounded_att_or_tail_transfer_layouts()
     assert {region.field for layout in layouts.values() for region in layout.regions} == {"conv", "ssm", "tail"}
     manager.write_to_pd_buffer(
@@ -446,6 +447,7 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
 
 
 @pytest.mark.parametrize("full_page_tokens", [None, 8, 10, 16])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
 def test_pd_runtime_capacity_includes_field_padding(
     monkeypatch: pytest.MonkeyPatch,
     pd_args: EasyDict,
@@ -479,7 +481,7 @@ def test_pd_runtime_capacity_includes_field_padding(
             conv_dtype=torch.bfloat16,
             ssm_dtype=torch.float32,
         ),
-        request_capacity=1, device="cpu",
+        request_capacity=1, device="cuda",
     )
     manager.set_att_state("main", state)
     manager.finish_state_creation()
@@ -498,7 +500,7 @@ def test_pd_runtime_capacity_includes_field_padding(
     assert manager.get_pd_page_bytes() == expected
     assert manager.get_pd_bounded_att_or_tail_transfer_layouts() is layouts
     # 实际传输页可大于运行态布局，选中第二页后仍从该页起点搬运。
-    pages = torch.full((3, expected), 91, dtype=torch.uint8)
+    pages = torch.full((3, expected), 91, dtype=torch.uint8, device="cuda")
     state.conv_state.fill_(3)
     state.ssm_state.fill_(5)
     manager.write_to_pd_buffer(
@@ -783,6 +785,7 @@ def test_cpu_packed_page_excludes_unused_gpu_row_padding(kind: str, cpu_args: Ea
 
 
 @pytest.mark.parametrize("page_tokens", [1, 9])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
 def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: EasyDict, page_tokens: int):
     cpu_args.cpu_cache_token_page_size = page_tokens
     manager = AttResourceManager(request_capacity=1)
@@ -803,9 +806,9 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
             config=config,
             request_capacity=1,
             mtp_step=2,
-            device="cpu",
+            device="cuda",
         )
-        state.initialize_page_pools(big_page_capacity=2, small_page_capacity=1, pin_memory=False)
+        state.initialize_page_pools(big_page_capacity=2, small_page_capacity=1, pin_memory=True)
         manager.set_att_state(role, state)
     manager.finish_state_creation()
     states = manager.get_bounded_attention_states()
@@ -819,7 +822,7 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
         state.ssm_state.fill_(i + 7)
     source_slots = manager.bounded_att_big_page_allocator.alloc(1)
     manager.save_bounded_att_pages([0], page_kind="big", slot_ids=source_slots)
-    pages = torch.full((2, manager.get_cpu_page_bytes()), 87, dtype=torch.uint8)
+    pages = torch.full((2, manager.get_cpu_page_bytes()), 87, dtype=torch.uint8, pin_memory=True)
     manager.write_req_to_cpu(
         token_indices=torch.tensor([], dtype=torch.long),
         cpu_page_buffers=pages,
@@ -827,6 +830,7 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
         layouts=layouts,
         big_page_slot_ids=source_slots,
     )
+    torch.cuda.synchronize()
     assert (pages[0] == 87).all()
     assert (pages[1, 12:16] == 87).all()
     manager.reset_bounded_att_state([0])

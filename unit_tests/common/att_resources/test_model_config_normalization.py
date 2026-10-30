@@ -52,7 +52,7 @@ def test_dflash_runtime_and_cpu_state_use_overridden_config(
     assert raw_config == original
 
     args = StartArgs(data_type="bfloat16", llm_kv_type="None", page_size=4)
-    (state,) = model_class._create_full_att_states(
+    (state,) = model_class.create_full_att_states(
         model_config=cpu_config,
         args=args,
         model_logical_layer_ids=tuple(range(cpu_config["num_hidden_layers"])),

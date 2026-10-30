@@ -13,6 +13,7 @@ from .base_state import BoundedAttentionState
 from .conv_ssm_types import ConvSSMStateConfig
 from .gdn_pages_pool import GDNPagesPool
 from .transfer_utils import bounded_att_buffer_copies
+from .copy_kernel import copy_bounded_att_tensors
 
 if TYPE_CHECKING:
     from lightllm.common.att_resources.types import PageKind
@@ -129,27 +130,28 @@ class GDNState(BoundedAttentionState):
         assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
         assert len(req_indices) == len(slot_ids), "request and page counts differ"
         pool = self._pool(page_kind)
-        # TODO：将多请求 Conv/SSM 保存融合为按 req/slot 索引搬运的 kernel；
-        # GPU 直访 CPU 页池需保证页池为可访问的 pinned/registered 内存，完成通知仍由调用方负责。
         # TODO：大小页仅在 prefill 阶段保存，mtp_state_index 始终为 0，可直接复制基准状态。
         # 若以后支持 decode/MTP 后保存，需要按已接受游标选择 Conv 窗口和 SSM 槽位。
+        conv_copies, ssm_copies = [], []
         for req_idx, slot_id in zip(req_indices, slot_ids):
-            pool.conv_state[slot_id].copy_(self.conv_state[:, req_idx, :, : self.config.conv_width], non_blocking=True)
-            pool.ssm_state[slot_id].copy_(self.ssm_state[:, req_idx * (self.mtp_step + 1)], non_blocking=True)
+            conv_copies.append((self.conv_state[:, req_idx, :, : self.config.conv_width], pool.conv_state[slot_id]))
+            ssm_copies.append((self.ssm_state[:, req_idx * (self.mtp_step + 1)], pool.ssm_state[slot_id]))
+        copy_bounded_att_tensors(copies=conv_copies)
+        copy_bounded_att_tensors(copies=ssm_copies)
 
     def restore_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
         """从指定页池槽位恢复 Conv/SSM 到目标基准位置，并将游标归零。"""
         assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
         assert len(req_indices) == len(slot_ids), "request and page counts differ"
-        # TODO：融合多请求 Conv/SSM 恢复及目标游标清零，直接按 slot/req 索引写入基准位置；
-        # CPU 页池须满足 GPU 可访问条件，并保持未参与请求和其他候选区不变。
         pool = self._pool(page_kind)
+        conv_copies, ssm_copies = [], []
         for req_idx, slot_id in zip(req_indices, slot_ids):
-            self.conv_state[:, req_idx, :, : self.config.conv_width].copy_(
-                pool.conv_state[slot_id], non_blocking=True,
-            )
-            self.ssm_state[:, req_idx * (self.mtp_step + 1)].copy_(pool.ssm_state[slot_id], non_blocking=True)
-            if self.mtp_state_index is not None:
+            conv_copies.append((pool.conv_state[slot_id], self.conv_state[:, req_idx, :, : self.config.conv_width]))
+            ssm_copies.append((pool.ssm_state[slot_id], self.ssm_state[:, req_idx * (self.mtp_step + 1)]))
+        copy_bounded_att_tensors(copies=conv_copies)
+        copy_bounded_att_tensors(copies=ssm_copies)
+        if self.mtp_state_index is not None:
+            for req_idx in req_indices:
                 self.mtp_state_index[req_idx].fill_(0)
 
     def commit_bounded_att_state(
@@ -192,23 +194,21 @@ class GDNState(BoundedAttentionState):
         assert len(slot_ids) == len(cpu_page_indices), "CPU page and slot counts differ"
         if cpu_page_readies is not None:
             assert len(cpu_page_readies) == len(cpu_page_indices), "CPU page and ready counts differ"
-        copies = []
-        # TODO：批量融合 Conv/SSM 多页写出及 TP 切片，减少逐槽位、逐字段 copy_；
-        # 页池与缓存页均在 CPU 时应使用 CPU 批量复制，仅有 GPU 端且主机内存可访问时使用传输 kernel。
+        page_fields, page_indices = [], []
         for index, (slot, page) in enumerate(zip(slot_ids, cpu_page_indices)):
-            # ready 页的完整联合数据保持不变，也无需构造快照复制视图。
+            # ready 页不参与复制；同一传输区域的所有页面组成一个同形状批次。
             if cpu_page_readies is not None and cpu_page_readies[index]:
                 continue
-            fields = self._fields(pool.conv_state[slot], pool.ssm_state[slot])
-            copies.extend(bounded_att_buffer_copies(
-                fields=fields,
-                page_buffers=cpu_page_buffers,
-                layout=layout,
-                page_index=page,
-                write=True,
-            ))
-        for src_tensor, dst_tensor in copies:
-            dst_tensor.copy_(src_tensor, non_blocking=True)
+            page_fields.append(self._fields(pool.conv_state[slot], pool.ssm_state[slot]))
+            page_indices.append(page)
+        for copies in bounded_att_buffer_copies(
+            page_fields=page_fields,
+            page_buffers=cpu_page_buffers,
+            layout=layout,
+            page_indices=page_indices,
+            write=True,
+        ):
+            copy_bounded_att_tensors(copies=copies)
 
     def read_page_state_from_cpu(
         self,
@@ -225,20 +225,15 @@ class GDNState(BoundedAttentionState):
         assert isinstance(big_page_slot_ids, list), "slot indices must be a list"
         assert isinstance(cpu_page_indices, list), "CPU page indices must be a list"
         assert len(cpu_page_indices) == len(big_page_slot_ids), "CPU page and slot counts differ"
-        copies = []
-        # TODO：批量融合 Conv/SSM 多页读入及 TP 切片，减少逐槽位、逐字段 copy_；
-        # 页池与缓存页均在 CPU 时应使用 CPU 批量复制，仅有 GPU 端且主机内存可访问时使用传输 kernel。
-        for page, slot in zip(cpu_page_indices, big_page_slot_ids):
-            fields = self._fields(pool.conv_state[slot], pool.ssm_state[slot])
-            copies.extend(bounded_att_buffer_copies(
-                fields=fields,
-                page_buffers=cpu_page_buffers,
-                layout=layout,
-                page_index=page,
-                write=False,
-            ))
-        for src_tensor, dst_tensor in copies:
-            dst_tensor.copy_(src_tensor, non_blocking=True)
+        page_fields = [self._fields(pool.conv_state[slot], pool.ssm_state[slot]) for slot in big_page_slot_ids]
+        for copies in bounded_att_buffer_copies(
+            page_fields=page_fields,
+            page_buffers=cpu_page_buffers,
+            layout=layout,
+            page_indices=cpu_page_indices,
+            write=False,
+        ):
+            copy_bounded_att_tensors(copies=copies)
 
     # ========================================================================
     # 四、DP 迁移：大页快照与基准运行态
@@ -260,13 +255,13 @@ class GDNState(BoundedAttentionState):
         dst_pool = self.big_pages_pool
         assert src_pool is not None and dst_pool is not None, "DP big page copy requires both page pools"
         # 大页保存的是基准快照，与请求槽位及 MTP 候选区无关；页的引用和使用期限由调用方管理。
-        # TODO：改用 Triton kernel 按页索引批量复制 Conv/SSM，在 CUDA stream 上异步执行。
-        # 两端为 pinned CPU Tensor 时，当前 copy_ 仍执行 CPU 复制，non_blocking=True 不生效；
-        # kernel 需直接访问本进程已注册且 GPU 可寻址的两端页池，调用方须建立源页就绪依赖，
-        # 并在复制完成前保留源、目标页的引用；当前 CPU 路径须先确认源页 GPU 写入已完成。
+        # 页池均须在本进程注册；GPU 在当前流直接访问两端 CPU 存储，完成后才能归还页面。
+        conv_copies, ssm_copies = [], []
         for src_page, dst_page in zip(src_page_ids, dst_page_ids):
-            dst_pool.conv_state[dst_page].copy_(src_pool.conv_state[src_page], non_blocking=True)
-            dst_pool.ssm_state[dst_page].copy_(src_pool.ssm_state[src_page], non_blocking=True)
+            conv_copies.append((src_pool.conv_state[src_page], dst_pool.conv_state[dst_page]))
+            ssm_copies.append((src_pool.ssm_state[src_page], dst_pool.ssm_state[dst_page]))
+        copy_bounded_att_tensors(copies=conv_copies)
+        copy_bounded_att_tensors(copies=ssm_copies)
 
     def copy_run_time_state_from_other_dp(
         self,
@@ -282,16 +277,21 @@ class GDNState(BoundedAttentionState):
         )
         # TODO：当前 DP fetch 只复制 prefill 基准状态，源 MTP 游标为 0；
         # 若以后支持 decode/MTP 后迁移，需按已接受游标选择源 Conv 窗口及 SSM 槽位。
-        # TODO：融合多请求 Conv/SSM 的 DP 复制与目标游标清零；跨设备源存储需可通过 peer/IPC 访问。
+        # 跨设备源存储必须已通过 peer/IPC 映射，批量复制不改变双方页池。
+        conv_copies, ssm_copies = [], []
         for src_req, dst_req in zip(src_req_indices, dst_req_indices):
-            self.conv_state[:, dst_req, :, : self.config.conv_width].copy_(
-                remote_dp_bounded_state.conv_state[:, src_req, :, : self.config.conv_width], non_blocking=True,
-            )
-            self.ssm_state[:, dst_req * (self.mtp_step + 1)].copy_(
+            conv_copies.append((
+                remote_dp_bounded_state.conv_state[:, src_req, :, : self.config.conv_width],
+                self.conv_state[:, dst_req, :, : self.config.conv_width],
+            ))
+            ssm_copies.append((
                 remote_dp_bounded_state.ssm_state[:, src_req * (remote_dp_bounded_state.mtp_step + 1)],
-                non_blocking=True,
-            )
-            if self.mtp_state_index is not None:
+                self.ssm_state[:, dst_req * (self.mtp_step + 1)],
+            ))
+        copy_bounded_att_tensors(copies=conv_copies)
+        copy_bounded_att_tensors(copies=ssm_copies)
+        if self.mtp_state_index is not None:
+            for dst_req in dst_req_indices:
                 self.mtp_state_index[dst_req].fill_(0)
 
     # ========================================================================
@@ -313,16 +313,14 @@ class GDNState(BoundedAttentionState):
         assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         fields = self._runtime_fields(req_idx)
-        # TODO：将 Conv/SSM 的 PD 打包融合到一次 kernel，直接写指定页的字段偏移并保留 TP 写入规则。
-        copies = bounded_att_buffer_copies(
-            fields=fields,
+        for copies in bounded_att_buffer_copies(
+            page_fields=[fields],
             page_buffers=pd_page_buffers,
             layout=layout,
-            page_index=pd_page_index,
+            page_indices=[pd_page_index],
             write=True,
-        )
-        for src_tensor, dst_tensor in copies:
-            dst_tensor.copy_(src_tensor, non_blocking=True)
+        ):
+            copy_bounded_att_tensors(copies=copies)
 
     def read_from_pd_buffer(
         self,
@@ -335,16 +333,14 @@ class GDNState(BoundedAttentionState):
         assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         fields = self._runtime_fields(req_idx)
-        # TODO：融合 PD 页中 Conv/SSM 的恢复与目标游标清零，按布局切片直接写入基准运行态。
-        copies = bounded_att_buffer_copies(
-            fields=fields,
+        for copies in bounded_att_buffer_copies(
+            page_fields=[fields],
             page_buffers=pd_page_buffers,
             layout=layout,
-            page_index=pd_page_index,
+            page_indices=[pd_page_index],
             write=False,
-        )
-        for src_tensor, dst_tensor in copies:
-            dst_tensor.copy_(src_tensor, non_blocking=True)
+        ):
+            copy_bounded_att_tensors(copies=copies)
         if self.mtp_state_index is not None:
             self.mtp_state_index[req_idx].fill_(0)
 

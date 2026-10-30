@@ -37,10 +37,10 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
         config = model_class.normalize_model_config(config)
         count = config["num_hidden_layers"]
         logical_layer_ids = tuple(range(logical_layer_start, logical_layer_start + count))
-        full_states = model_class._create_full_att_states(
+        full_states = model_class.create_full_att_states(
             model_config=config, args=args, model_logical_layer_ids=logical_layer_ids,
         )
-        bounded_states = model_class._create_bounded_att_states(
+        bounded_states = model_class.create_bounded_att_states(
             model_config=config,
             args=args,
             model_logical_layer_ids=logical_layer_ids,

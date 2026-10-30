@@ -209,7 +209,7 @@ def test_cpu_layout_uses_all_model_factory_states(
 
     class MixedStorageModel(LlamaTpPartModel):
         @classmethod
-        def _create_full_att_states(
+        def create_full_att_states(
             cls,
             model_config: dict[str, object],
             args: StartArgs | EasyDict,
@@ -217,7 +217,7 @@ def test_cpu_layout_uses_all_model_factory_states(
             tp_rank: int = 0,
             tp_world_size: int = 1,
         ) -> list[FullAttentionState]:
-            (template,) = super()._create_full_att_states(
+            (template,) = super().create_full_att_states(
                 model_config=model_config,
                 args=args,
                 model_logical_layer_ids=model_logical_layer_ids,
