@@ -147,11 +147,13 @@ class _PrefillTransModule:
     def _warmup(self):
         for dp_index in range(self.args.dp // self.args.nnodes):
             with torch.cuda.stream(stream=self.copy_cuda_stream):
+                cpu_token_indices = torch.tensor([0], dtype=torch.long, device="cpu")
+                token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
                 copy_page(
                     node_att_managers=self.resource_managers,
                     pd_page_buffers=self.kv_move_buffer,
                     write_to_pd_buffer=True,
-                    token_indices=torch.tensor([0], dtype=torch.long, device=self.kv_move_buffer.device),
+                    token_indices=token_indices,
                     pd_page_index=0,
                     dp_rank_in_node=dp_index,
                     tp_world_size=self.dp_world_size,
@@ -206,13 +208,17 @@ class _PrefillTransModule:
 
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
+                # 只有 KV 页使用 token 索引；att_state 直接按请求槽位搬运运行态。
+                token_indices = None
+                if trans_task.page_kind == "kv":
+                    cpu_token_indices = torch.tensor(trans_task.mem_indexes, dtype=torch.long, device="cpu")
+                    # 索引上传和后续页拷贝使用同一流，保证执行顺序。
+                    token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
                 copy_page(
                     node_att_managers=self.resource_managers,
                     pd_page_buffers=self.kv_move_buffer,
                     write_to_pd_buffer=True,
-                    token_indices=torch.tensor(
-                        trans_task.mem_indexes, dtype=torch.long, device=self.kv_move_buffer.device
-                    ),
+                    token_indices=token_indices,
                     pd_page_index=trans_task.src_page_index,
                     dp_rank_in_node=trans_task.prefill_dp_index,
                     tp_world_size=self.dp_world_size,

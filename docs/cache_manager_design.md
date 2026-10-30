@@ -1661,6 +1661,8 @@ bounded/indexer 的运行态布局使用同一规则：按字段的实际最大�
 
 PD master 负责校验连接参数，长度通过传输任务的 `end_kv_index` 传递；资源层不附加 PD 页布局指纹及长度、版本字段。两个布局 getter 与页大小查询均使用 `lru_cache`，存储初始化后一起清除缓存。
 
+P/D 传输进程为每次 KV 任务创建普通 CPU token 索引 Tensor，在 `copy_cuda_stream` 中调用 `cuda(non_blocking=True)` 上传，后续 State 拷贝沿用同一流；预热使用相同路径。不预分配或保留 pinned 索引页缓冲，普通 CPU 内存也不保证 H2D 全程异步。`att_state` 任务按请求槽位搬运，不创建或上传 token 索引。
+
 CPU 使用相同的依赖方向：`get_cpu_page_bytes()` → `get_cpu_transfer_layouts()` → 各 State 的 `get_cpu_transfer_regions()`。布局 getter 读取全局 `cpu_cache_token_page_size`，在管理器内部直接展开聚合：依次取得 full-attention 和 bounded 的字段区间，平移为页内位置，以 `max(region.byte_end)` 向上对齐到 8 字节作为当前 State 的终点。页大小查询再取 `max(layout.byte_end)` 并按 16 字节对齐。字段之间的 dtype 对齐及 State 实现要求的内部 padding 均计入容量；未参与传输的 GPU packed 行 padding、静态标定参数不占 CPU 页。bounded 每页只保存一份快照，不乘页内 token 数，也不包含 MTP 候选区、游标或其他页池槽位。Attention tail 不参与 CPU 联合页，读回时按最终前缀边界重置；快照接口仅用于 PD。
 
 State 的全局存储字节数查询继续描述存储开销，不用于推导 CPU/PD 传输容量。CPU 联合页不预留页头、长度或版本字段。布局及其派生页大小均按需缓存，实际存储分配后一起清理，避免继续使用 meta 准备阶段的布局尺寸。

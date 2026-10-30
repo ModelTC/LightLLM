@@ -23,7 +23,7 @@ def copy_page(
     pd_page_index: int,
     dp_rank_in_node: int,
     tp_world_size: int,
-    token_indices: torch.Tensor,
+    token_indices: torch.Tensor | None,
     write_to_pd_buffer: bool,
     task_kind: Literal["kv", "att_state"] = "kv",
     req_idx: int | None = None,
@@ -33,6 +33,7 @@ def copy_page(
 
     node_att_managers 按节点内 DP 编号、组内 TP rank 顺序平铺。
     pd_page_buffers 是 PD 页集合，pd_page_index 选择本次传输的页。
+    token_indices 在 kv 任务中为 CUDA 索引；att_state 任务传 None，不进行索引上传。
     write_to_pd_buffer=True 将 State 写入发送页；False 从接收页恢复 State。
     """
     tp_att_managers = node_att_managers[dp_rank_in_node * tp_world_size : (dp_rank_in_node + 1) * tp_world_size]
