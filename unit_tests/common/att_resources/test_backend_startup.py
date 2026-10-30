@@ -250,7 +250,7 @@ def test_backend_allocates_all_roles_before_warmup(
     if main_linear:
         assert manager.main_gdn_state.mtp_state_index[0] == draft_count
     for i, state in enumerate(draft_states):
-        assert len(state.config.layer_ids) == 1
+        assert len(state.config.logical_layer_ids) == 1
         manager.commit_bounded_att_state(
             torch.tensor([0], dtype=torch.int32, device="cuda"),
             torch.tensor([i + 2], dtype=torch.int32, device="cuda"), role=f"draft{i}",
@@ -265,7 +265,7 @@ def test_backend_allocates_all_roles_before_warmup(
             assert {buffer.data_ptr() for buffer in full_state_test_buffers(main_state).values()}.isdisjoint(
                 buffer.data_ptr() for buffer in full_state_test_buffers(draft_state).values()
             )
-            assert len(draft_state.config.layer_ids) == 1
+            assert len(draft_state.config.logical_layer_groups) == 1
         else:
             assert not manager.get_full_attention_states(f"draft{i}")
 

@@ -9,8 +9,8 @@ import torch
 class ConvSSMStateConfig:
     """KDA/GDN 的层布局、维度、dtype 和 TP 配置；不包含模型角色或资源身份。"""
 
-    # 本 State 管理的逻辑层编号；顺序对应 Conv/SSM Tensor 的物理层轴，编号不能重复。
-    layer_ids: tuple[int, ...]
+    # 本 State 管理的逻辑层编号；当前每个逻辑层独占一份运行态，列表顺序对应物理层轴，编号不能重复。
+    logical_layer_ids: tuple[int, ...]
     # TP 切分前的全局 K head 数，不计 TP 副本；Q 使用相同的 head 数和维度。
     global_k_heads: int
     # TP 切分前的全局 V head 数；GDN 可与 K 不同，KDA 要求两者相等。

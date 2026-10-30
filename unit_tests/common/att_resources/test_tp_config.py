@@ -57,7 +57,7 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     cpu_args.cpu_cache_token_page_size = 4
-    config = FullAttentionConfig((0,), heads, 4, torch.float32, replicated=replicated)
+    config = FullAttentionConfig(((0,),), heads, 4, torch.float32, replicated=replicated)
     reference = state_cls(config, page_size=4, device="cuda")
     reference.initialize_storage(4)
     for storage_buffer in full_state_test_buffers(reference).values():
@@ -91,7 +91,7 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
 def test_bounded_config_keeps_distinct_global_heads_when_local_heads_are_replicated(cpu_args: EasyDict):
     cpu_args.cpu_cache_token_page_size = 4
     config = ConvSSMStateConfig(
-        layer_ids=(0,), global_k_heads=2, global_v_heads=4, key_dim=2, value_dim=3, conv_width=2,
+        logical_layer_ids=(0,), global_k_heads=2, global_v_heads=4, key_dim=2, value_dim=3, conv_width=2,
         conv_dtype=torch.float32, ssm_dtype=torch.float32, tp_rank=7, tp_world_size=8,
     )
     source = GDNState(config, request_capacity=1, device="meta")
@@ -120,15 +120,15 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
     pd_args.pd_kv_page_size = page_tokens
     if bounded:
         config = ConvSSMStateConfig(
-            layer_ids=(0,), global_k_heads=2, global_v_heads=4, key_dim=2, value_dim=2, conv_width=2,
+            logical_layer_ids=(0,), global_k_heads=2, global_v_heads=4, key_dim=2, value_dim=2, conv_width=2,
             conv_dtype=torch.float32, ssm_dtype=torch.float32, tp_world_size=8,
         )
         source = GDNState(config, request_capacity=1, device="meta")
-        other_config = replace(config, layer_ids=(1,), global_k_heads=4)
+        other_config = replace(config, logical_layer_ids=(1,), global_k_heads=4)
     else:
-        config = FullAttentionConfig((0,), 2, 4, torch.float32, tp_world_size=8)
+        config = FullAttentionConfig(((0,),), 2, 4, torch.float32, tp_world_size=8)
         source = GQAFullAttentionState(config, page_size=4, device="meta")
-        other_config = replace(config, layer_ids=(1,), global_head_num=4)
+        other_config = replace(config, logical_layer_groups=((1,),), global_head_num=4)
     if bounded:
         other = type(source)(
             other_config, request_capacity=source.request_capacity, mtp_step=source.mtp_step, device="meta"

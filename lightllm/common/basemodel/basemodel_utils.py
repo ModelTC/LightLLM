@@ -29,7 +29,7 @@ def get_full_attention_options(
     args: StartArgs | EasyDict,
     *,
     model_class: type[TpPartBaseModel] | None = None,
-    model_layer_ids: Sequence[int] | None = None,
+    model_logical_layer_ids: Sequence[int] | None = None,
 ):
     """Return default KV geometry or the model's specialized storage options."""
     build_options = getattr(model_class, "_full_attention_options", None)
@@ -38,10 +38,22 @@ def get_full_attention_options(
     else:
         heads = config.get("num_key_value_heads", config["num_attention_heads"])
         dim = config.get("head_dim", config["hidden_size"] // config["num_attention_heads"])
-        layers = config["num_hidden_layers"]
-        options = dict(heads=heads, dim=dim, layer_ids=tuple(range(layers)))
-    if model_layer_ids is not None:
-        options["layer_ids"] = tuple(model_layer_ids[i] for i in options["layer_ids"] if i < len(model_layer_ids))
+        logical_layer_count = config["num_hidden_layers"]
+        options = dict(
+            heads=heads, dim=dim,
+            logical_layer_groups=tuple((logical_layer_id,) for logical_layer_id in range(logical_layer_count)),
+        )
+    if model_logical_layer_ids is not None:
+        # 模型选项使用本模型内的层号；转换为实际逻辑层号时保留共享分组及物理层顺序。
+        options["logical_layer_groups"] = tuple(
+            tuple(
+                model_logical_layer_ids[local_logical_layer_id]
+                for local_logical_layer_id in logical_layer_group
+                if local_logical_layer_id < len(model_logical_layer_ids)
+            )
+            for logical_layer_group in options["logical_layer_groups"]
+            if any(local_logical_layer_id < len(model_logical_layer_ids) for local_logical_layer_id in logical_layer_group)
+        )
     return options
 
 
@@ -52,22 +64,22 @@ def create_full_attention_definition(
     *,
     tp_rank: int = 0,
     tp_world_size: int = 1,
-    model_layer_ids: Sequence[int] | None = None,
-    calibration_layer_start: int | None = None,
+    model_logical_layer_ids: Sequence[int] | None = None,
+    calibration_storage_layer_start: int | None = None,
 ):
     """Build a meta State using the model's configuration and storage hooks."""
     from lightllm.utils.att_resource_config import build_full_attention_state
 
     config = get_resource_config(model_config, model_class=model_class)
-    options = get_full_attention_options(config, args, model_class=model_class, model_layer_ids=model_layer_ids)
-    if not options["layer_ids"]:
+    options = get_full_attention_options(config, args, model_class=model_class, model_logical_layer_ids=model_logical_layer_ids)
+    if not options["logical_layer_groups"]:
         return None
     state = build_full_attention_state(
         args,
         **options,
         tp_rank=tp_rank,
         tp_world_size=tp_world_size,
-        calibration_layer_start=calibration_layer_start,
+        calibration_storage_layer_start=calibration_storage_layer_start,
     )
     return state
 
@@ -77,7 +89,7 @@ def create_bounded_attention_definition(
     model_config: dict[str, object],
     args: StartArgs | EasyDict,
     *,
-    model_layer_ids: Sequence[int],
+    model_logical_layer_ids: Sequence[int],
     tp_rank: int = 0,
     tp_world_size: int = 1,
 ):
@@ -86,15 +98,15 @@ def create_bounded_attention_definition(
     if create_definition is None:
         return None
     return create_definition(
-        model_config, args, model_layer_ids=model_layer_ids, tp_rank=tp_rank, tp_world_size=tp_world_size
+        model_config, args, model_logical_layer_ids=model_logical_layer_ids, tp_rank=tp_rank, tp_world_size=tp_world_size
     )
 
 
-def get_model_calibration_layer_start(model: TpPartBaseModel) -> int:
-    """Count preceding models' full-attention layers without initializing their States."""
+def get_model_calibration_storage_layer_start(model: TpPartBaseModel) -> int:
+    """按前序模型的物理层数累计标定表行偏移，不创建 State，也不使用逻辑层号作为行号。"""
     if not model.is_mtp_draft_model:
         return 0
-    layer_start = 0
+    storage_layer_start = 0
     for previous in (model.main_model, *model.mtp_previous_draft_models):
         if previous.is_mtp_draft_model and previous.args.mtp_mode in ("vanilla_no_att", "eagle_no_att"):
             continue
@@ -103,10 +115,10 @@ def get_model_calibration_layer_start(model: TpPartBaseModel) -> int:
             config,
             previous.args,
             model_class=type(previous),
-            model_layer_ids=tuple(layer.layer_num_ for layer in previous.layers_infer),
+            model_logical_layer_ids=tuple(layer.layer_num_ for layer in previous.layers_infer),
         )
-        layer_start += len(options["layer_ids"])
-    return layer_start
+        storage_layer_start += len(options["logical_layer_groups"])
+    return storage_layer_start
 
 
 def init_model_full_attention(model: TpPartBaseModel) -> None:
@@ -119,17 +131,18 @@ def init_model_full_attention(model: TpPartBaseModel) -> None:
         model.args,
         tp_rank=model.tp_rank_,
         tp_world_size=model.tp_world_size_,
-        model_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
-        calibration_layer_start=get_model_calibration_layer_start(model),
+        model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
+        calibration_storage_layer_start=get_model_calibration_storage_layer_start(model),
     )
     if definition is None:
         return
     model.att_resource_manager.set_att_state(model.att_resource_role, definition)
     # 层和 indexer 只记录规范成员名，推理时直接访问管理器中已分配的 State。
     name = definition.resource_id
+    # 绑定所有逻辑层，包括共享消费者；State 自己将逻辑层号映射到物理层。
+    logical_layer_ids = {logical_layer_id for logical_layer_group in definition.config.logical_layer_groups for logical_layer_id in logical_layer_group}
     for layer in model.layers_infer:
-        layer_id = layer.kv_share_target_layer_ if getattr(layer, "is_kv_shared_", False) else layer.layer_num_
-        if layer_id in definition.config.layer_ids:
+        if layer.layer_num_ in logical_layer_ids:
             layer.full_att_state_name = name
             if hasattr(layer, "indexer"):
                 layer.indexer.full_att_state_name = name
@@ -139,7 +152,7 @@ def init_model_bounded_attention(model: TpPartBaseModel) -> None:
     """按当前模型的配置创建请求运行态，并直接挂到共享管理器；大小页稍后分配。"""
     definition = create_bounded_attention_definition(
         type(model), model.config, model.args,
-        model_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
+        model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
         tp_rank=model.tp_rank_, tp_world_size=model.tp_world_size_,
     )
     if definition is None:

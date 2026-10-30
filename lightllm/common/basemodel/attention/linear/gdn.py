@@ -141,7 +141,7 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         layer_num = linear_att_dict["layer_num"]
         backend: LinearAttBackend = self.backend
 
-        conv_states, ssm_states = self.backend.linear_state.get_layer_view(layer_num)
+        conv_states, ssm_states = self.backend.linear_state.get_layer_view(logical_layer_id=layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
         if backend.mtp_step > 0:
@@ -283,7 +283,7 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         backend: LinearAttBackend = self.backend
 
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        conv_states, ssm_states = self.backend.linear_state.get_layer_view(layer_num)
+        conv_states, ssm_states = self.backend.linear_state.get_layer_view(logical_layer_id=layer_num)
 
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:

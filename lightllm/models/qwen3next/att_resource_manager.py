@@ -29,17 +29,17 @@ class Qwen3NextAttResourceManager(AttResourceManager):
         tp_rank: int = 0,
         device: str | torch.device | int = "cuda",
         role: str = "main",
-        layer_ids: Sequence[int] | None = None,
+        logical_layer_ids: Sequence[int] | None = None,
     ):
         super().__init__(request_capacity=request_capacity)
         self.cache_config = cache_config
-        layers = (
+        logical_layer_ids = (
             tuple(i for i in range(cache_config.all_layer_num) if (i + 1) % cache_config.full_attention_interval)
-            if layer_ids is None
-            else tuple(layer_ids)
+            if logical_layer_ids is None
+            else tuple(logical_layer_ids)
         )
         config = ConvSSMStateConfig(
-            layer_ids=layers,
+            logical_layer_ids=logical_layer_ids,
             global_k_heads=cache_config.global_linear_k_heads,
             global_v_heads=cache_config.global_linear_v_heads,
             key_dim=cache_config.head_linear_k_dim,
@@ -50,7 +50,7 @@ class Qwen3NextAttResourceManager(AttResourceManager):
             tp_rank=tp_rank,
             tp_world_size=cache_config.tp_world_size,
         )
-        if layers:
+        if logical_layer_ids:
             state = create_gdn_state(config=config, request_capacity=request_capacity, mtp_step=mtp_step, device=device)
             self.set_att_state(role, state)
 
@@ -66,14 +66,16 @@ class Qwen3NextAttResourceManager(AttResourceManager):
         """按已确定的 KV 容量绑定存储，创建本模型的大小页池与共享分配器。"""
         assert self.full_att_allocator is None, "attention storage is already bound"
         assert all(
-            layer < self.cache_config.all_layer_num for layer in full_state.config.layer_ids
+            logical_layer_id < self.cache_config.all_layer_num
+            for logical_layer_group in full_state.config.logical_layer_groups for logical_layer_id in logical_layer_group
         ), "main State must only contain main layers"
         assert (draft_full_state is not None) == bool(
             self.cache_config.draft_full_att_kv_layer_num
         ), "draft State must match the model configuration"
         if draft_full_state is not None:
             assert all(
-                layer >= self.cache_config.all_layer_num for layer in draft_full_state.config.layer_ids
+                logical_layer_id >= self.cache_config.all_layer_num
+                for logical_layer_group in draft_full_state.config.logical_layer_groups for logical_layer_id in logical_layer_group
             ), "draft State must only contain draft layers"
 
         state = self.main_gdn_state

@@ -11,7 +11,7 @@ from lightllm.common.att_resources.types import (
 
 def make_tail(*, device: str | torch.device | int = "cpu", mtp_step: int = 2):
     return KPoolAttentionTailState(
-        KPoolStateConfig(layer_ids=(3, 7), pool_size=4, head_dim=2, dtype=torch.float32),
+        KPoolStateConfig(logical_layer_ids=(3, 7), pool_size=4, head_dim=2, dtype=torch.float32),
         request_capacity=3, mtp_step=mtp_step, device=device
     )
 

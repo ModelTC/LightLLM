@@ -82,6 +82,14 @@ CASES = [
         256,
         4,
     ),
+    (
+        Gemma4TpPartModel,
+        {"num_key_value_heads": 4, "head_dim": 256, "global_head_dim": 256,
+         "num_kv_shared_layers": 1, "layer_types": ["full_attention", "full_attention"]},
+        4,
+        256,
+        1,
+    ),
 ]
 
 
@@ -113,13 +121,18 @@ def test_model_and_cpu_service_use_identical_storage_geometry(
         resources.initialize_resources(args, token_capacity=model.max_total_token_num, mem_fraction=args.mem_fraction)
         (state,) = resources.get_full_attention_states("main")
         assert state.config.head_num == local_heads and state.config.head_dim == dim
-        assert state.k_storage.shape == state.v_storage.shape == (2, 20, local_heads, dim)
+        storage_layers = 2 - (config.get("num_kv_shared_layers") or 0)
+        assert state.k_storage.shape == state.v_storage.shape == (storage_layers, 20, local_heads, dim)
+        if storage_layers == 1:
+            assert state.config.logical_layer_groups == ((0, 1),)
+            assert model.layers_infer[0].full_att_state_name == model.layers_infer[1].full_att_state_name
+            assert state.get_layer_view(logical_layer_id=0)[0].data_ptr() == state.get_layer_view(logical_layer_id=1)[0].data_ptr()
         assert read_kv_storage(state).dtype == (torch.bfloat16 if model_cls is Gemma3TpPartModel else torch.float16)
         assert resources.full_att_allocator.size == 16
         layout = resources.get_cpu_transfer_layouts()[state.resource_id]
         assert (layout.byte_start, layout.byte_end) == (service_layout.byte_start, service_layout.byte_end)
-        # 两层 GQA，K/V 各 global_heads 个 head，按实际 KV 精度计算全局传输页。
-        expected_pd_bytes = 2 * args.pd_kv_page_size * 2 * global_heads * dim * read_kv_storage(state).element_size()
+        # 按物理层数计算传输页；共享消费者不重复增加 KV 或传输容量。
+        expected_pd_bytes = storage_layers * args.pd_kv_page_size * 2 * global_heads * dim * read_kv_storage(state).element_size()
         assert resources.get_pd_page_bytes() == expected_pd_bytes
         fields = layout.regions
         assert all(region.shape[2] == global_heads for region in fields)

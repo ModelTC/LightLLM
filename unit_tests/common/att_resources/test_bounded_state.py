@@ -30,7 +30,7 @@ def make_state(
     mtp_step: int = 2,
 ):
     config = ConvSSMStateConfig(
-        layer_ids=(1, 3), global_k_heads=heads, global_v_heads=heads, key_dim=2, value_dim=2, conv_width=2,
+        logical_layer_ids=(1, 3), global_k_heads=heads, global_v_heads=heads, key_dim=2, value_dim=2, conv_width=2,
         conv_dtype=torch.float32, ssm_dtype=torch.float32,
     )
     state = cls(config, request_capacity=3, mtp_step=mtp_step, device=device)
@@ -42,10 +42,10 @@ def make_state(
 
 def page_layout(state: KDAState | GDNState):
     cfg = state.config
-    conv_shape = (cfg.conv_channels, len(cfg.layer_ids), cfg.conv_width)
-    conv_bytes = cfg.conv_channels * len(cfg.layer_ids) * cfg.conv_width * 4
-    ssm_shape = (len(cfg.layer_ids), cfg.num_v_heads, cfg.key_dim, cfg.value_dim)
-    ssm_bytes = len(cfg.layer_ids) * cfg.num_v_heads * cfg.key_dim * cfg.value_dim * 4
+    conv_shape = (cfg.conv_channels, len(cfg.logical_layer_ids), cfg.conv_width)
+    conv_bytes = cfg.conv_channels * len(cfg.logical_layer_ids) * cfg.conv_width * 4
+    ssm_shape = (len(cfg.logical_layer_ids), cfg.num_v_heads, cfg.key_dim, cfg.value_dim)
+    ssm_bytes = len(cfg.logical_layer_ids) * cfg.num_v_heads * cfg.key_dim * cfg.value_dim * 4
     end = 16 + conv_bytes + ssm_bytes
     return StateTransferLayout(
         resource_id=state.resource_id,
@@ -94,7 +94,7 @@ def test_prefill_state_is_saved_and_restored(
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
     config = ConvSSMStateConfig(
-        layer_ids=(1, 3), global_k_heads=1, global_v_heads=1, key_dim=2, value_dim=2, conv_width=2,
+        logical_layer_ids=(1, 3), global_k_heads=1, global_v_heads=1, key_dim=2, value_dim=2, conv_width=2,
         conv_dtype=torch.float32, ssm_dtype=torch.float32,
     )
     state = cls(config, request_capacity=3, mtp_step=2, device=device)

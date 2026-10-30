@@ -63,7 +63,7 @@ def make_resources(glm: bool, tp: int, rank: int, mtp: int, *, draft_layers: int
     if glm:
         full = PackedMLAFullAttentionState(
             PackedMLAAttentionConfig(
-                (3, *range(4, 4 + draft_layers)), 1, 584, torch.bfloat16, rank, tp, kv_dim=512
+                tuple((layer,) for layer in (3, *range(4, 4 + draft_layers))), 1, 584, torch.bfloat16, rank, tp, kv_dim=512
             ),
              page_size=4,
         )
@@ -71,7 +71,7 @@ def make_resources(glm: bool, tp: int, rank: int, mtp: int, *, draft_layers: int
     else:
         full = GQAFullAttentionState(
             FullAttentionConfig(
-                (1, 3, *range(4, 4 + draft_layers)), 2, 16, torch.bfloat16, rank, tp
+                tuple((layer,) for layer in (1, 3, *range(4, 4 + draft_layers))), 2, 16, torch.bfloat16, rank, tp
             ),
              page_size=4,
         )

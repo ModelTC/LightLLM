@@ -37,14 +37,14 @@ KINDS = ("int4", "int8", "fp8_tensor", "fp8_head", "packed", "packed_fp8")
 
 def make_quant_state(kind: str, device: str | torch.device | int):
     if kind in ("int4", "int8"):
-        config = GroupQuantizedAttentionConfig((1, 3), 2, 16, torch.float16, bits=int(kind[-1]))
+        config = GroupQuantizedAttentionConfig(((1,), (3,)), 2, 16, torch.float16, bits=int(kind[-1]))
         prepared_full_state = GroupQuantizedFullAttentionState(config, page_size=4, device=device)
         prepared_full_state.initialize_storage(8)
         return prepared_full_state
     if kind.startswith("fp8_"):
         per_head = kind == "fp8_head"
         config = StaticFP8AttentionConfig(
-            (1, 3), 2, 16, torch.uint8, scale_mode="per_head" if per_head else "per_tensor", calibration_id="test"
+            ((1,), (3,)), 2, 16, torch.uint8, scale_mode="per_head" if per_head else "per_tensor", calibration_id="test"
         )
         scales = torch.arange(1, 9 if per_head else 5, dtype=torch.float32, device=device).reshape(2, -1) / 16
         prepared_full_state = StaticFP8FullAttentionState(config, page_size=4, device=device, scales=scales)
@@ -52,7 +52,7 @@ def make_quant_state(kind: str, device: str | torch.device | int):
         return prepared_full_state
     fp8 = kind == "packed_fp8"
     config = PackedMLAAttentionConfig(
-        (1, 3), 1, 800 if fp8 else 648, torch.uint8 if fp8 else torch.bfloat16, fp8_nope_dim=512 if fp8 else 0
+        ((1,), (3,)), 1, 800 if fp8 else 648, torch.uint8 if fp8 else torch.bfloat16, fp8_nope_dim=512 if fp8 else 0
     )
     prepared_full_state = PackedMLAFullAttentionState(config, page_size=4, device=device)
     prepared_full_state.initialize_storage(8)

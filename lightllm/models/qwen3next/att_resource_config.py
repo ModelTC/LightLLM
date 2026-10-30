@@ -74,7 +74,7 @@ class Qwen3NextResourceConfig:
     def get_full_att_kv_layer_num_with_draft_model(self):
         return self.get_main_model_full_att_layer_num() + self.draft_full_att_kv_layer_num
 
-    def get_full_att_layer_ids(self):
+    def get_full_att_logical_layer_ids(self):
         """Logical model layers stored in each physical full-attention row."""
         return tuple(range(self.full_attention_interval - 1, self.all_layer_num, self.full_attention_interval)) + tuple(
             range(self.all_layer_num, self.all_layer_num + self.draft_full_att_kv_layer_num)

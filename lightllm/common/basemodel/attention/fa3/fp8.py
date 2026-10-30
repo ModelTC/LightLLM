@@ -89,8 +89,8 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             self.infer_state.att_resource_manager,
             f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
         )
-        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, state=state)
-        static_q_scales = state.q_scales[layer_index]
+        storage_layer_index = self.backend._find_storage_layer_index(k=cache_k, v=cache_v, state=state)
+        static_q_scales = state.q_scales[storage_layer_index]
         q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales)
         q_scale = static_q_scales.view(1, k_head_num).expand(self.infer_state.b_seq_len.shape[0], k_head_num)
         o = flash_attn_with_kvcache(
@@ -106,8 +106,8 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale,
-            k_descale=self.k_descale[layer_index],
-            v_descale=self.v_descale[layer_index],
+            k_descale=self.k_descale[storage_layer_index],
+            v_descale=self.v_descale[storage_layer_index],
             return_softmax_lse=False,
         )
         return o
@@ -181,13 +181,13 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             self.infer_state.att_resource_manager,
             f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
         )
-        layer_index = self.backend._find_layer_index(k=cache_k, v=cache_v, state=state)
+        storage_layer_index = self.backend._find_storage_layer_index(k=cache_k, v=cache_v, state=state)
 
         q_head_num = q.shape[1]
         att_batch_size = self.b_att_seq_len.shape[0]
         static_q_scales = state.q_scales
-        q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales[layer_index])
-        q_scale = static_q_scales[layer_index].view(1, k_head_num).expand(att_batch_size, k_head_num)
+        q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales[storage_layer_index])
+        q_scale = static_q_scales[storage_layer_index].view(1, k_head_num).expand(att_batch_size, k_head_num)
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, k_head_dim),
             k_cache=cache_k,
@@ -201,8 +201,8 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale.view(att_batch_size, k_head_num),
-            k_descale=self.k_descale[layer_index],
-            v_descale=self.v_descale[layer_index],
+            k_descale=self.k_descale[storage_layer_index],
+            v_descale=self.v_descale[storage_layer_index],
             return_softmax_lse=False,
         )
         return o

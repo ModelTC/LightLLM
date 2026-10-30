@@ -40,9 +40,9 @@ class Glm5NextNsaInfer:
         role = infer_state.att_resource_role
         tail = getattr(
             infer_state.att_resource_manager, f"{role}_indexer_kpool_c{self.pool_size}_tail_state"
-        ).get_layer_view(self.layer_idx)
+        ).get_layer_view(logical_layer_id=self.layer_idx)
         state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
-        packed_buffer = state.get_layer_view(self.layer_idx).indexer_k
+        packed_buffer = state.get_layer_view(logical_layer_id=self.layer_idx).indexer_k
         compress_pools(
             raw=raw,
             tail=tail,

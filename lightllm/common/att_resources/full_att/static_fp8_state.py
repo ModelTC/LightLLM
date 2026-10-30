@@ -56,14 +56,14 @@ class StaticFP8FullAttentionState(FullAttentionState):
         """按静态 FP8 配置准备 KV 存储，并保留传入的标定参数。"""
         # 标定 Tensor 由 State 持有，在接收构造参数时校验，不重复放入 config。
         heads = 1 if layout_config.scale_mode == "per_tensor" else layout_config.head_num
-        assert scales is not None and scales.shape == (len(layout_config.layer_ids), 2 * heads), (
+        assert scales is not None and scales.shape == (len(layout_config.logical_layer_groups), 2 * heads), (
             "calibration scales do not match KV layers and heads"
         )
         assert scales.dtype == torch.float32 and bool((torch.isfinite(input=scales) & (scales > 0)).all()), (
             "calibration scales must be finite positive float32 values"
         )
         if q_scales is not None:
-            assert q_scales.shape == (len(layout_config.layer_ids), layout_config.head_num) and (
+            assert q_scales.shape == (len(layout_config.logical_layer_groups), layout_config.head_num) and (
                 q_scales.dtype == torch.float32
             ), "Q calibration does not match layers and heads"
         self.scales = scales
@@ -71,7 +71,12 @@ class StaticFP8FullAttentionState(FullAttentionState):
         self.cpu_scales = None  # 实际存储初始化时准备计算 backend 使用的 CPU 标定值。
         self.config = layout_config
         self.resource_id: str | None = None  # 由 manager 绑定模型角色时设置。
-        self._layer_mapping = {layer: i for i, layer in enumerate(layout_config.layer_ids)}
+        # 外层下标是物理层位置；组内多个逻辑层映射到同一份 KV/量化字段存储。
+        self._logical_to_storage_layer = {
+            logical_layer_id: storage_layer_index
+            for storage_layer_index, logical_layer_group in enumerate(layout_config.logical_layer_groups)
+            for logical_layer_id in logical_layer_group
+        }
         self.page_size = page_size
         self.device = torch.device(device=device)
         self.capacity = 0
@@ -101,7 +106,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
         """由配置累计当前 TP rank 的 K/V 单 token 开销，无需分配存储。"""
         config = self.config
         return (
-            len(config.layer_ids) * 2 * config.head_num * config.head_dim
+            len(config.logical_layer_groups) * 2 * config.head_num * config.head_dim
             * self.storage_dtype.itemsize
         )
 
@@ -109,15 +114,15 @@ class StaticFP8FullAttentionState(FullAttentionState):
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
 
-    def get_layer_view(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+    def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""
-        layer = self._layer_mapping[layer_id]
-        return self.k_storage[layer], self.v_storage[layer]
+        storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
+        return self.k_storage[storage_layer_index], self.v_storage[storage_layer_index]
 
-    def write_full_att_kv(self, layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
+    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """按固定 per-tensor 或 per-head scale 量化输入 K/V，写入 FP8 编码。"""
         assert token_indices.is_cuda, "token indices must reside on CUDA"
-        layer = self._layer_mapping[layer_id]
+        storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         if not len(token_indices):
             return
         assert self.k_storage.is_cuda, "KV writes require CUDA storage"
@@ -126,10 +131,10 @@ class StaticFP8FullAttentionState(FullAttentionState):
         destindex_copy_kv_fp8(
             KV=kv,
             DestLoc=token_indices,
-            scales=self.scales[layer],
-            Out=self.k_storage[layer].view(torch.float8_e4m3fn),
+            scales=self.scales[storage_layer_index],
+            Out=self.k_storage[storage_layer_index].view(torch.float8_e4m3fn),
             is_per_tensor_quant=self.config.scale_mode == "per_tensor",
-            Out_v=self.v_storage[layer].view(torch.float8_e4m3fn),
+            Out_v=self.v_storage[storage_layer_index].view(torch.float8_e4m3fn),
         )
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
@@ -318,7 +323,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
         )
         for field_name, field_dtype, field_width, last_axis in field_specs:
             axes = ("layer", "token", "head", last_axis)
-            local_shape = (len(config.layer_ids), page_tokens, config.head_num, field_width)
+            local_shape = (len(config.logical_layer_groups), page_tokens, config.head_num, field_width)
             global_shape = list(local_shape)
             global_shape[axes.index("token")] = page_tokens
             head_axis = axes.index("head")
@@ -374,7 +379,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
 
     def _storage_shape(self) -> tuple[int, ...]:
         return (
-            len(self.config.layer_ids),
+            len(self.config.logical_layer_groups),
             self.capacity + self.page_size,
             self.config.head_num,
             self.config.head_dim,

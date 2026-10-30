@@ -85,7 +85,7 @@ class KDAPrefillAttState(BasePrefillAttState):
         raw_beta = params["raw_beta"]
         backend: KDALinearAttBackend = self.backend
 
-        conv_states, ssm_states = self.backend.linear_state.get_layer_view(layer_num)
+        conv_states, ssm_states = self.backend.linear_state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
         mixed_qkv = causal_conv1d_fn(
             mixed_qkv.transpose(0, 1),
@@ -206,7 +206,7 @@ class KDADecodeAttState(BaseDecodeAttState):
         raw_beta = params["raw_beta"]
         backend: KDALinearAttBackend = self.backend
 
-        conv_states, ssm_states = self.backend.linear_state.get_layer_view(layer_num)
+        conv_states, ssm_states = self.backend.linear_state.get_layer_view(logical_layer_id=layer_num)
         conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=self.b_conv_buffer_idx)
         conv_update = causal_conv1d_update
         if backend.mtp_step > 0:

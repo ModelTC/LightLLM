@@ -36,18 +36,18 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super().__init__(kvargs)
 
     @classmethod
-    def create_bounded_attention_definition(cls, model_config, args, *, model_layer_ids, tp_rank=0, tp_world_size=1):
+    def create_bounded_attention_definition(cls, model_config, args, *, model_logical_layer_ids, tp_rank=0, tp_world_size=1):
         from lightllm.common.att_resources.bounded_att import create_gdn_state, ConvSSMStateConfig
         from lightllm.common.basemodel.basemodel_utils import get_resource_config
 
         config = get_resource_config(model_config, model_class=cls)
         cfg = Qwen3NextResourceConfig.from_model_config(config, args, include_draft=False)
-        layers = tuple(layer for i, layer in enumerate(model_layer_ids) if (i + 1) % cfg.full_attention_interval)
-        if not layers:
+        logical_layer_ids = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
+        if not logical_layer_ids:
             return None
         state = create_gdn_state(
             config=ConvSSMStateConfig(
-                layer_ids=layers,
+                logical_layer_ids=logical_layer_ids,
                 global_k_heads=cfg.global_linear_k_heads,
                 global_v_heads=cfg.global_linear_v_heads,
                 key_dim=cfg.head_linear_k_dim,
@@ -91,7 +91,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             raise ValueError("MTP linear attention does not support mixed prefill/decode")
         if not self.is_mtp_draft_model:
             self.att_resource_manager = Qwen3NextAttResourceManager(
-                self.linear_config, self.max_req_num + 1, start_args.mtp_step, tp_rank=self.tp_rank_, layer_ids=()
+                self.linear_config, self.max_req_num + 1, start_args.mtp_step, tp_rank=self.tp_rank_, logical_layer_ids=()
             )
         init_model_bounded_attention(self)
         init_model_full_attention(self)
@@ -102,7 +102,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
             raise ValueError(f"Qwen3Next does not support llm_kv_type={args.llm_kv_type}")
         cfg = Qwen3NextResourceConfig.from_model_config(config, args, include_draft=False)
         return dict(
-            heads=cfg.full_att_all_num_kv_heads, dim=cfg.full_att_head_dim, layer_ids=cfg.get_full_att_layer_ids()
+            heads=cfg.full_att_all_num_kv_heads, dim=cfg.full_att_head_dim, logical_layer_groups=tuple((logical_layer_id,) for logical_layer_id in cfg.get_full_att_logical_layer_ids())
         )
 
     def _init_att_backend1(self):

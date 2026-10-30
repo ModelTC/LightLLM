@@ -15,8 +15,8 @@ if TYPE_CHECKING:
 
 @dataclass(frozen=True)
 class KPoolStateConfig:
-    # 本 State 管理的逻辑层号；顺序对应 tail_buffer 的 layer 轴，不要求编号连续。
-    layer_ids: tuple[int, ...]
+    # 本 State 管理的逻辑层号；当前每层独占一份 tail，列表顺序对应物理层轴，不要求编号连续。
+    logical_layer_ids: tuple[int, ...]
     # K-pool 的池化步长/压缩比例，单位为原始 token；例如 4 表示每 4 个 token 形成一个池化组。
     # 无快照前缀恢复要求长度对齐该步长；ring 的实际槽位数为 pool_size + State.mtp_step。
     pool_size: int
@@ -34,7 +34,7 @@ class KPoolStateConfig:
     def __post_init__(self) -> None:
         """构造配置时检查维度、层号和 TP 范围。"""
         assert min(self.pool_size, self.head_dim) > 0, "invalid K-pool dimensions"
-        assert self.layer_ids and len(set(self.layer_ids)) == len(self.layer_ids), (
+        assert self.logical_layer_ids and len(set(self.logical_layer_ids)) == len(self.logical_layer_ids), (
             "tail layers must be nonempty and unique"
         )
         assert 0 <= self.tp_rank < self.tp_world_size, "invalid TP rank"
@@ -61,10 +61,13 @@ class KPoolAttentionTailState(AttentionTailState):
         self.request_capacity = request_capacity  # 包含预留的 HOLD 请求槽位。
         self.mtp_step = mtp_step  # ring 额外保留的 MTP 历史槽位数。
         self.resource_id: str | None = None  # 由 manager 绑定模型角色时设置。
-        self._layer_mapping = {layer: i for i, layer in enumerate(config.layer_ids)}
+        self._logical_to_storage_layer = {
+            logical_layer_id: storage_layer_index
+            for storage_layer_index, logical_layer_id in enumerate(config.logical_layer_ids)
+        }
         self.tail_buffer = torch.zeros(
             (
-                len(config.layer_ids),
+                len(config.logical_layer_ids),
                 request_capacity,
                 config.pool_size + mtp_step,
                 2 * config.head_dim,
@@ -81,9 +84,9 @@ class KPoolAttentionTailState(AttentionTailState):
     # 二、Attention tail：计算视图与无快照重置
     # ========================================================================
 
-    def get_layer_view(self, layer_id: int) -> torch.Tensor:
+    def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """返回该层所有请求的原生 ring 视图，末轴包含 key 和 gate。"""
-        return self.tail_buffer[self._layer_mapping[layer_id]]
+        return self.tail_buffer[self._logical_to_storage_layer[logical_layer_id]]
 
     def reset_attention_tail_state(
         self,
@@ -106,10 +109,10 @@ class KPoolAttentionTailState(AttentionTailState):
         tail_region = TransferRegion(
             field="tail",
             byte_start=0,
-            byte_end=len(config.layer_ids) * window_size * channels * config.dtype.itemsize,
+            byte_end=len(config.logical_layer_ids) * window_size * channels * config.dtype.itemsize,
             dtype=config.dtype,
             axes=("layer", "window", "channel"),
-            shape=(len(config.layer_ids), window_size, channels),
+            shape=(len(config.logical_layer_ids), window_size, channels),
             axis_slices=(
                 AxisSlice(axis="window", src_start=0, dst_start=0, length=window_size),
                 AxisSlice(axis="channel", src_start=0, dst_start=0, length=channels),

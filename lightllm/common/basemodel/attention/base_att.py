@@ -76,13 +76,14 @@ class BaseAttBackend:
         is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash", "dflash2")
         return not is_parallel_block_draft
 
-    def _find_layer_index(
+    def _find_storage_layer_index(
         self, k: torch.Tensor, v: torch.Tensor, state: "FullAttentionState"
     ) -> int:
-        for layer_index, layer_id in enumerate(state.config.layer_ids):
-            layer_k, layer_v = state.get_layer_view(layer_id)
+        # 标定参数按物理层排列；每组只检查一个代表逻辑层，避免共享层重复计数。
+        for storage_layer_index, logical_layer_group in enumerate(state.config.logical_layer_groups):
+            layer_k, layer_v = state.get_layer_view(logical_layer_id=logical_layer_group[0])
             if k.data_ptr() == layer_k.data_ptr() and v.data_ptr() == layer_v.data_ptr():
-                return layer_index
+                return storage_layer_index
         raise AssertionError("K/V views do not belong to the same State layer")
 
 

@@ -58,7 +58,12 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         """按分组量化配置准备 KV 与动态 scale 存储。"""
         self.config = layout_config
         self.resource_id: str | None = None  # 由 manager 绑定模型角色时设置。
-        self._layer_mapping = {layer: i for i, layer in enumerate(layout_config.layer_ids)}
+        # 外层下标是物理层位置；组内多个逻辑层映射到同一份 KV/量化字段存储。
+        self._logical_to_storage_layer = {
+            logical_layer_id: storage_layer_index
+            for storage_layer_index, logical_layer_group in enumerate(layout_config.logical_layer_groups)
+            for logical_layer_id in logical_layer_group
+        }
         self.page_size = page_size
         self.device = torch.device(device=device)
         self.capacity = 0
@@ -79,7 +84,7 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         self.k_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
         self.v_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
         shape = (
-            len(self.config.layer_ids), token_capacity + self.page_size,
+            len(self.config.logical_layer_groups), token_capacity + self.page_size,
             self.config.head_num, self.config.head_dim // self.config.group_size,
         )
         self.k_scales = torch.empty(size=shape, dtype=self.config.dtype, device=self.device)
@@ -90,21 +95,21 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         config = self.config
         head_bytes = config.head_dim * config.bits // 8
         head_bytes += config.head_dim // config.group_size * config.dtype.itemsize
-        return len(config.layer_ids) * 2 * config.head_num * head_bytes
+        return len(config.logical_layer_groups) * 2 * config.head_num * head_bytes
 
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
 
-    def get_layer_view(self, layer_id: int) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+    def get_layer_view(self, logical_layer_id: int) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
         """返回该层 K/V 编码数据及各自的分组 scale 视图。"""
-        layer = self._layer_mapping[layer_id]
-        return (self.k_storage[layer], self.k_scales[layer]), (self.v_storage[layer], self.v_scales[layer])
+        storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
+        return (self.k_storage[storage_layer_index], self.k_scales[storage_layer_index]), (self.v_storage[storage_layer_index], self.v_scales[storage_layer_index])
 
-    def write_full_att_kv(self, layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
+    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """量化输入浮点 K/V，并将编码数据和分组 scale 写入相同 token 位置。"""
         assert token_indices.is_cuda, "token indices must reside on CUDA"
-        layer = self._layer_mapping[layer_id]
+        storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         if not len(token_indices):
             return
         assert self.k_storage.is_cuda, "KV writes require CUDA storage"
@@ -121,8 +126,8 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
                 destindex_copy_int4kv(
                     KV=values,
                     DestLoc=token_indices,
-                    KV_buffer=storage[layer],
-                    KV_scale_buffer=scales_buffer[layer],
+                    KV_buffer=storage[storage_layer_index],
+                    KV_scale_buffer=scales_buffer[storage_layer_index],
                     quant_group_size=self.config.group_size,
                 )
             else:
@@ -131,8 +136,8 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
                 destindex_copy_quantize_kv(
                     K=values,
                     DestLoc=token_indices,
-                    Out=storage[layer],
-                    Out_scale=scales_buffer[layer],
+                    Out=storage[storage_layer_index],
+                    Out_scale=scales_buffer[storage_layer_index],
                     quant_group_dim=self.config.group_size,
                 )
 
@@ -347,7 +352,7 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         )
         for field_name, field_dtype, field_width, last_axis in field_specs:
             axes = ("layer", "token", "head", last_axis)
-            local_shape = (len(config.layer_ids), page_tokens, config.head_num, field_width)
+            local_shape = (len(config.logical_layer_groups), page_tokens, config.head_num, field_width)
             global_shape = list(local_shape)
             global_shape[axes.index("token")] = page_tokens
             head_axis = axes.index("head")
@@ -403,6 +408,6 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
 
     def _storage_shape(self) -> tuple[int, ...]:
         return (
-            len(self.config.layer_ids), self.capacity + self.page_size,
+            len(self.config.logical_layer_groups), self.capacity + self.page_size,
             self.config.head_num, self.config.head_dim * self.config.bits // 8,
         )

@@ -67,7 +67,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         layer_types=("linear_attention", "full_attention"),
     )
     full = GQAFullAttentionState(
-        FullAttentionConfig(config.get_full_att_layer_ids(), 1, 8, torch.bfloat16),
+        FullAttentionConfig(tuple((layer,) for layer in config.get_full_att_logical_layer_ids()), 1, 8, torch.bfloat16),
          page_size=args.page_size,
     )
     full.initialize_storage(384)

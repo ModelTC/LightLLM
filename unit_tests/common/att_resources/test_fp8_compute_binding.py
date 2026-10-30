@@ -43,7 +43,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
         scales[1] += 10
         q_scales = None if kind == "static_tensor" else template.q_scales + value
         states.append(rebuild_full_state(
-            template, config=replace(template.config, layer_ids=(3, 8)), token_capacity=8, device="cuda",
+            template, config=replace(template.config, logical_layer_groups=((3,), (8,))), token_capacity=8, device="cuda",
             scales=scales, q_scales=q_scales,
         ))
     manager = AttResourceManager(request_capacity=2)
@@ -120,7 +120,7 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
     scales = torch.arange(1, scale_count + 1, dtype=torch.float32, device="cuda").unsqueeze(0) / 4
     state = StaticFP8FullAttentionState(
         layout_config=StaticFP8AttentionConfig(
-            layer_ids=(5,), global_head_num=head_num, head_dim=128, dtype=torch.bfloat16,
+            logical_layer_groups=((5,),), global_head_num=head_num, head_dim=128, dtype=torch.bfloat16,
             scale_mode=scale_mode, calibration_id="split-storage",
         ),
         page_size=4, device="cuda", scales=scales,
@@ -131,7 +131,7 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
     state.v_storage.zero_()
     indices = torch.tensor([1, 6], dtype=torch.int32, device="cuda")
     kv = torch.randn((2, 2 * head_num, 128), dtype=torch.bfloat16, device="cuda")
-    state.write_full_att_kv(layer_id=5, token_indices=indices, kv=kv)
+    state.write_full_att_kv(logical_layer_id=5, token_indices=indices, kv=kv)
     k, v = state.get_layer_view(5)
     assert k.untyped_storage().data_ptr() != v.untyped_storage().data_ptr()
     actual = torch.cat((k[indices], v[indices]), dim=1)

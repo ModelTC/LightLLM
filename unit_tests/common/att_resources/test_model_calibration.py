@@ -109,7 +109,7 @@ def test_calibration_slices_follow_model_configs_before_other_states_exist(tmp_p
         if not expected_layers:
             assert state is None
             continue
-        assert state.config.layer_ids == expected_layers
+        assert state.config.logical_layer_groups == tuple((layer,) for layer in expected_layers)
         assert read_kv_storage(state) is None
         assert torch.equal(state.scales[:, 0], scales[start:end])
         if encoding == "fp8kv_sph":

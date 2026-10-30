@@ -84,17 +84,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         kv_shared_count = network_config.get("num_kv_shared_layers") or 0
         total_layers = network_config["num_hidden_layers"]
         self.is_kv_shared_ = kv_shared_count > 0 and layer_num >= total_layers - kv_shared_count
-        self.kv_share_target_layer_ = None
-        if self.is_kv_shared_:
-            cutoff = total_layers - kv_shared_count
-            for j in range(cutoff - 1, -1, -1):
-                if network_config["layer_types"][j] == layer_type:
-                    self.kv_share_target_layer_ = j
-                    break
-            assert self.kv_share_target_layer_ is not None, (
-                f"layer {layer_num} ({layer_type}) is KV-shared but no earlier non-shared "
-                f"layer of the same type found below cutoff={cutoff}"
-            )
 
         # Always 1.0: NoPE dims for full-attn layers are zero-padded into
         # cos/sin (cos=1, sin=0 → identity), so the kernel walks the whole
@@ -193,10 +182,9 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         return AttControl(use_sliding_window=False, sliding_window=(-1, -1))
 
     def _get_layer_kv(self, infer_state: InferStateInfo):
-        # KV-shared layers read from the target layer's cache slot.
-        layer_idx = self.kv_share_target_layer_ if self.is_kv_shared_ else self.layer_num_
+        # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。
         state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
-        _k_raw, _v_raw = state.get_layer_view(layer_id=layer_idx)
+        _k_raw, _v_raw = state.get_layer_view(logical_layer_id=self.layer_num_)
         # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim). Use .view
         # (not .reshape) so any non-contiguous layout from a future mem_manager
         # backend fails loudly instead of silently copying — slice + view is

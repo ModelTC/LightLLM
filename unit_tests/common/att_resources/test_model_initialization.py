@@ -120,7 +120,7 @@ def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPa
         draft.max_req_num, draft.max_total_token_num = model.max_req_num, None
         draft.config = dict(model.config, num_hidden_layers=1, n_layer=1, full_attention_interval=1)
         draft._init_req_manager()
-        prepare_model_states(draft, layer_ids=(4,))
+        prepare_model_states(draft, logical_layer_ids=(4,))
         assert draft.att_resource_manager is model.att_resource_manager
         assert read_kv_storage(owned_states(draft.att_resource_manager.__dict__, FullAttentionState)[0]) is None
         drafts.append(draft)
@@ -135,8 +135,8 @@ def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPa
     assert resources.full_att_allocator.size == full_state.capacity == 32
     assert not hasattr(model, "mem_manager")
     assert not hasattr(model, "full_att_state")
-    assert full_state.config.layer_ids == tuple(
-        layer for layer in model.linear_config.get_full_att_layer_ids() if layer < model.config["num_hidden_layers"]
+    assert full_state.config.logical_layer_groups == tuple(
+        (layer,) for layer in model.linear_config.get_full_att_logical_layer_ids() if layer < model.config["num_hidden_layers"]
     )
     assert observed == [main_linear_state(resources).conv_state.data_ptr()]
     assert resources.bounded_att_big_page_allocator.size == 6
@@ -155,7 +155,9 @@ def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPa
         (draft_state,) = resources.get_full_attention_states("draft0")
         assert draft_state is not full_state
         assert draft_state.capacity == full_state.capacity
-        assert set(draft_state.config.layer_ids).isdisjoint(full_state.config.layer_ids)
+        assert {layer for group in draft_state.config.logical_layer_groups for layer in group}.isdisjoint(
+            layer for group in full_state.config.logical_layer_groups for layer in group
+        )
         assert not hasattr(draft, "mem_manager")
         assert not hasattr(draft, "mtp_state_cursors")
         assert observed == [main_linear_state(resources).conv_state.data_ptr()]

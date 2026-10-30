@@ -46,8 +46,8 @@ def test_model_storage_write_and_copy_preserve_all_fields(
     ids = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
     dim = config.kv_dim if isinstance(state, PackedMLAFullAttentionState) else config.head_dim
     kv = torch.randn(2, (1 if "kv" in full_state_test_buffers(state) else 2) * config.head_num, dim, device="cuda", dtype=torch.bfloat16)
-    state.write_full_att_kv(config.layer_ids[-1], ids, kv)
-    if len(config.layer_ids) > 1:
+    state.write_full_att_kv(config.logical_layer_groups[-1][0], ids, kv)
+    if len(config.logical_layer_groups) > 1:
         assert not read_kv_storage(state)[0].any()
     resources.copy_full_att_tokens(ids, torch.tensor([1, 5], dtype=torch.int32, device="cuda"))
     for name, field in full_state_test_fields(state, full_state_test_buffers(state)).items():

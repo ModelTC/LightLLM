@@ -24,7 +24,7 @@ from lightllm.common.att_resources.types import (
 
 
 def full_state(cls: type[FullAttentionState] = GQAFullAttentionState, device: str | torch.device | int = "cpu"):
-    prepared_full_state = cls(FullAttentionConfig((2, 5), 1, 4, torch.float32), page_size=4, device=device)
+    prepared_full_state = cls(FullAttentionConfig(((2,), (5,)), 1, 4, torch.float32), page_size=4, device=device)
     prepared_full_state.initialize_storage(12)
     return prepared_full_state
 
@@ -158,7 +158,7 @@ def test_invalid_late_region_shape_cannot_partially_write_pd_page():
 def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    config = FullAttentionConfig((1, 3, 5, 7, 9, 11), 1, 4, torch.float32)
+    config = FullAttentionConfig(((1,), (3,), (5,), (7,), (9,), (11,)), 1, 4, torch.float32)
     source = GQAFullAttentionState(config, page_size=4, device=device)
     source.initialize_storage(12)
     target = GQAFullAttentionState(config, page_size=4, device=device)
@@ -185,7 +185,7 @@ def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int)
 
     # 拒绝将单层数据广播到多层，失败时目标 token 保持原值。
     single_layer_source = GQAFullAttentionState(
-        replace(config, layer_ids=config.layer_ids[:1]), page_size=4, device=device
+        replace(config, logical_layer_groups=config.logical_layer_groups[:1]), page_size=4, device=device
     )
     single_layer_source.initialize_storage(12)
     for storage_buffer in full_state_test_buffers(single_layer_source).values():

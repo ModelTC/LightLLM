@@ -29,7 +29,7 @@ class AttentionTailState(ABC):
     # ========================================================================
 
     @abstractmethod
-    def get_layer_view(self, layer_id: int) -> Any:
+    def get_layer_view(self, logical_layer_id: int) -> Any:
         """按逻辑层号返回尾部状态计算所需的存储视图。"""
         ...
 

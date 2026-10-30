@@ -39,7 +39,7 @@ if TYPE_CHECKING:
 
 
 def definition(kind: str):
-    config = FullAttentionConfig((0, 2), 2, 16, torch.bfloat16)
+    config = FullAttentionConfig(((0,), (2,)), 2, 16, torch.bfloat16)
     if kind in ("int4", "int8"):
         return GroupQuantizedFullAttentionState(
             GroupQuantizedAttentionConfig(**vars(config), bits=4 if kind == "int4" else 8),
@@ -158,19 +158,19 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     pd_args: EasyDict,
 ):
     config = ConvSSMStateConfig(
-        layer_ids=(0,), global_k_heads=2, global_v_heads=2 if state_cls is KDAState else 4, key_dim=3,
+        logical_layer_ids=(0,), global_k_heads=2, global_v_heads=2 if state_cls is KDAState else 4, key_dim=3,
         value_dim=3 if state_cls is KDAState else 5, conv_width=1, conv_dtype=torch.bfloat16,
         ssm_dtype=torch.float32,
     )
     tail = KPoolAttentionTailState(
-        KPoolStateConfig(layer_ids=(1,), pool_size=4, head_dim=3, dtype=torch.bfloat16),
+        KPoolStateConfig(logical_layer_ids=(1,), pool_size=4, head_dim=3, dtype=torch.bfloat16),
         request_capacity=3, mtp_step=3, device="cpu",
     )
     reference = state_cls(config, request_capacity=3, mtp_step=3, device="cpu")
     conv = reference.conv_state[:, 0, :, : config.conv_width]
     ssm = reference.ssm_state[:, 0]
     bounded_bytes = conv.numel() * conv.element_size() + ssm.numel() * ssm.element_size()
-    tail_bytes = len(tail.config.layer_ids) * tail.config.pool_size * 2 * tail.config.head_dim * tail.config.dtype.itemsize
+    tail_bytes = len(tail.config.logical_layer_ids) * tail.config.pool_size * 2 * tail.config.head_dim * tail.config.dtype.itemsize
     manager = AttResourceManager(request_capacity=3)
     manager.set_att_state("main", reference)
     manager.set_att_state("main", tail)
@@ -214,7 +214,7 @@ def test_pd_layout_reserves_aligned_storage_for_mixed_token_formats(
         (GQAFullAttentionState, "main", 3, torch.bfloat16),
         (GQAFullAttentionState, "main", 1, torch.float32),
     ):
-        config = FullAttentionConfig((0,), 1, dim, dtype)
+        config = FullAttentionConfig(((0,),), 1, dim, dtype)
         manager.set_att_state(role, state_cls(config, page_size=1, device="meta"))
     manager.finish_state_creation()
     # 无页头；三个 State 的 3-token 区域分别由 6/36/24 字节对齐到 8/40/24。
@@ -261,7 +261,7 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
 
     pd_args.pd_kv_page_size = pd_args.cpu_cache_token_page_size = 3
     config = GroupQuantizedAttentionConfig(
-        layer_ids=(0,), global_head_num=1, head_dim=128,
+        logical_layer_groups=((0,),), global_head_num=1, head_dim=128,
         dtype=torch.float32, bits=8, group_size=128,
     )
     manager = AttResourceManager(request_capacity=1)
@@ -328,11 +328,11 @@ def test_pd_runtime_capacity_includes_field_padding(
     manager = AttResourceManager(request_capacity=1)
     if full_page_tokens is not None:
         pd_args.pd_kv_page_size = full_page_tokens
-        config = FullAttentionConfig((0,), 1, 1, torch.float32)
+        config = FullAttentionConfig(((0,),), 1, 1, torch.float32)
         manager.set_att_state("main", GQAFullAttentionState(config, page_size=1, device="meta"))
     state = PaddedGDNState(
         ConvSSMStateConfig(
-            layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
+            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
             conv_dtype=torch.bfloat16, ssm_dtype=torch.float32,
         ),
         request_capacity=1, device="cpu",
@@ -390,7 +390,7 @@ def test_page_bytes_refresh_with_storage_dependent_layout(
 
     pd_args.pd_kv_page_size = pd_args.cpu_cache_token_page_size = 3
     manager = AttResourceManager(request_capacity=1)
-    config = FullAttentionConfig((0,), 1, 3, torch.bfloat16)
+    config = FullAttentionConfig(((0,),), 1, 3, torch.bfloat16)
     manager.set_att_state("main", PaddedState(config, page_size=1, device="meta"))
     manager.finish_state_creation()
     get_page_bytes = manager.get_cpu_page_bytes if transfer == "cpu" else manager.get_pd_page_bytes
@@ -412,19 +412,19 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
     pd_args: EasyDict,
 ):
     manager = AttResourceManager(request_capacity=1)
-    config = FullAttentionConfig((0,), 1, 1, torch.float32)
+    config = FullAttentionConfig(((0,),), 1, 1, torch.float32)
     full_state = GQAFullAttentionState(config, page_size=1, device="meta")
     manager.set_att_state("main", full_state)
     for cls, role in ((KDAState, "main"), (GDNState, "draft0")):
         config = ConvSSMStateConfig(
-            layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
+            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
             conv_dtype=torch.float32, ssm_dtype=torch.float32,
         )
         state = cls(config, request_capacity=1, device="meta")
         manager.set_att_state(role, state)
     if with_tail:
         state = KPoolAttentionTailState(
-            KPoolStateConfig(layer_ids=(0,), pool_size=4, head_dim=1, dtype=torch.float32),
+            KPoolStateConfig(logical_layer_ids=(0,), pool_size=4, head_dim=1, dtype=torch.float32),
             request_capacity=1, mtp_step=0, device="meta",
         )
         manager.set_att_state("main", state)
@@ -450,15 +450,15 @@ def test_cpu_page_bytes_derive_from_cached_transfer_layouts(
     cpu_args.cpu_cache_token_page_size = page_tokens
     template = definition(kind)
     config = replace(template.config, tp_world_size=tp_world_size, tp_rank=tp_world_size - 1)
-    scales = torch.ones((len(config.layer_ids), 2 * config.head_num)) if kind == "static_head" else None
-    q_scales = torch.ones((len(config.layer_ids), config.head_num)) if kind == "static_head" else None
+    scales = torch.ones((len(config.logical_layer_groups), 2 * config.head_num)) if kind == "static_head" else None
+    q_scales = torch.ones((len(config.logical_layer_groups), config.head_num)) if kind == "static_head" else None
     manager = AttResourceManager(request_capacity=3)
     for role in ("main", "draft0"):
         manager.set_att_state(role, rebuild_full_state(template, config=config, scales=scales, q_scales=q_scales))
     for state_cls, v_heads, value_dim in ((KDAState, 1, 1), (GDNState, 2, 3)):
         # 奇数长度的 BF16 Conv 与 FP32 SSM 之间需要补齐，MTP 候选区不应计入页大小。
         bounded_config = ConvSSMStateConfig(
-            layer_ids=(0,), global_k_heads=1, global_v_heads=v_heads, key_dim=1, value_dim=value_dim, conv_width=1,
+            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=v_heads, key_dim=1, value_dim=value_dim, conv_width=1,
             conv_dtype=torch.bfloat16, ssm_dtype=torch.float32, tp_rank=tp_world_size - 1,
             tp_world_size=tp_world_size,
         )
@@ -495,7 +495,7 @@ def test_cpu_bounded_capacity_includes_state_field_padding(cpu_args: EasyDict):
     manager = AttResourceManager(request_capacity=1)
     state = PaddedGDNState(
         ConvSSMStateConfig(
-            layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
+            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
             conv_dtype=torch.bfloat16, ssm_dtype=torch.float32,
         ),
         request_capacity=1, device="meta",
@@ -557,7 +557,7 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
     manager.bounded_att_small_page_allocator = StatePageAllocator(1)
     for state_cls, role, value_dim in ((KDAState, "draft0", 1), (GDNState, "main", 3)):
         config = ConvSSMStateConfig(
-            layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=value_dim, conv_width=1,
+            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=value_dim, conv_width=1,
             conv_dtype=torch.bfloat16, ssm_dtype=torch.float32,
         )
         state = state_cls(config, request_capacity=1, mtp_step=2, device="cpu")
@@ -600,11 +600,11 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     pd_args.pd_kv_page_size = 3
     pd_args.cpu_cache_token_page_size = 3
     manager = AttResourceManager(request_capacity=1)
-    config = FullAttentionConfig((0,), 1, 3, torch.bfloat16)
+    config = FullAttentionConfig(((0,),), 1, 3, torch.bfloat16)
     manager.set_att_state("main", GQAFullAttentionState(config, page_size=1, device="meta"))
     manager.set_att_state("main", GDNState(
         ConvSSMStateConfig(
-            layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
+            logical_layer_ids=(0,), global_k_heads=1, global_v_heads=1, key_dim=1, value_dim=1, conv_width=1,
             conv_dtype=torch.bfloat16, ssm_dtype=torch.bfloat16,
         ),
         request_capacity=1, device="cpu",
@@ -652,7 +652,7 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
 
     pd_args.cpu_cache_token_page_size = pd_args.pd_kv_page_size = 4
     config = FullAttentionConfig(
-        layer_ids=(0,), global_head_num=1, head_dim=2, dtype=torch.float32
+        logical_layer_groups=((0,),), global_head_num=1, head_dim=2, dtype=torch.float32
     )
     manager = AttResourceManager(request_capacity=1)
     prepared_full_state = ReversedCpuRegionsState(config, page_size=4, device="cuda")

@@ -101,6 +101,21 @@ class Gemma4TpPartModel(LlamaTpPartModel):
             raise ValueError("Gemma4 KV width must contain complete storage heads")
         options = get_full_attention_options(config, args)
         options.update(heads=per_token_k_width // head_dim, dim=head_dim)
+        shared_logical_layer_count = config.get("num_kv_shared_layers") or 0
+        if shared_logical_layer_count:
+            # 后部共享层读取同类型的最后一个非共享层；仅生产层占一份物理 KV。
+            # 由模型配置生成分组，GPU State 和 CPU cache 布局使用完全相同的层顺序。
+            storage_layer_count = config["num_hidden_layers"] - shared_logical_layer_count
+            assert 0 < storage_layer_count < config["num_hidden_layers"], "invalid KV-shared layer count"
+            logical_layer_groups = [[logical_layer_id] for logical_layer_id in range(storage_layer_count)]
+            for logical_layer_id in range(storage_layer_count, config["num_hidden_layers"]):
+                for source_logical_layer_id in range(storage_layer_count - 1, -1, -1):
+                    if config["layer_types"][source_logical_layer_id] == config["layer_types"][logical_layer_id]:
+                        logical_layer_groups[source_logical_layer_id].append(logical_layer_id)
+                        break
+                else:
+                    raise AssertionError("KV-shared layer requires an earlier producer of the same attention type")
+            options["logical_layer_groups"] = tuple(tuple(logical_layer_group) for logical_layer_group in logical_layer_groups)
         return options
 
     def _init_att_backend(self):

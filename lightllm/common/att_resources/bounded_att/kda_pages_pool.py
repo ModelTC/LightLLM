@@ -25,15 +25,15 @@ class KDAPagesPool:
         self.size = size
         device = torch.device(device)
         pin_memory = pin_memory and device.type == "cpu"
-        layers, heads, dim = len(config.layer_ids), config.num_k_heads, config.key_dim
+        storage_layer_count, heads, dim = len(config.logical_layer_ids), config.num_k_heads, config.key_dim
         self.conv_state = create_page_pool_tensor(
-            size=(size, layers, 3 * heads * dim, config.conv_width),
+            size=(size, storage_layer_count, 3 * heads * dim, config.conv_width),
             dtype=config.conv_dtype,
             device=device,
             pin_memory=pin_memory,
         )
         self.ssm_state = create_page_pool_tensor(
-            size=(size, layers, heads, dim, dim),
+            size=(size, storage_layer_count, heads, dim, dim),
             dtype=config.ssm_dtype,
             device=device,
             pin_memory=pin_memory,

@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("page_device", ["cpu", "cuda"])
 def test_gqa_grid_stride_covers_all_tokens(grid_num: int, page_device: str, pd_args: "EasyDict") -> None:
     pd_args.pd_kv_page_size = 32
-    config = FullAttentionConfig(layer_ids=(0, 2, 4), global_head_num=3, head_dim=128, dtype=torch.bfloat16)
+    config = FullAttentionConfig(logical_layer_groups=((0,), (2,), (4,)), global_head_num=3, head_dim=128, dtype=torch.bfloat16)
     source = GQAFullAttentionState(layout_config=config, page_size=32, device="cuda")
     target = GQAFullAttentionState(layout_config=config, page_size=32, device="cuda")
     source.initialize_storage(token_capacity=128)

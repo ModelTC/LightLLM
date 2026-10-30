@@ -40,15 +40,18 @@ class KDAState(BoundedAttentionState):
         self.resource_id: str | None = None  # 由 AttResourceManager.set_att_state() 绑定时设置。
         self.request_capacity = request_capacity  # 包含预留的 HOLD 请求槽位。
         self.mtp_step = mtp_step
-        self._layer_mapping = {layer: i for i, layer in enumerate(config.layer_ids)}
-        num_layers = len(config.layer_ids)
+        self._logical_to_storage_layer = {
+            logical_layer_id: storage_layer_index
+            for storage_layer_index, logical_layer_id in enumerate(config.logical_layer_ids)
+        }
+        storage_layer_count = len(config.logical_layer_ids)
         self.conv_state = torch.zeros(
-            (num_layers, request_capacity, config.conv_channels, config.conv_width + mtp_step),
+            (storage_layer_count, request_capacity, config.conv_channels, config.conv_width + mtp_step),
             dtype=config.conv_dtype,
             device=device,
         )
         self.ssm_state = torch.zeros(
-            (num_layers, request_capacity * (mtp_step + 1), config.num_v_heads, config.key_dim, config.value_dim),
+            (storage_layer_count, request_capacity * (mtp_step + 1), config.num_v_heads, config.key_dim, config.value_dim),
             dtype=config.ssm_dtype,
             device=device,
         )
@@ -86,10 +89,10 @@ class KDAState(BoundedAttentionState):
     # 二、Bounded attention：计算视图、运行态重置、大小页与 MTP 提交
     # ========================================================================
 
-    def get_layer_view(self, layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """返回该层 Conv/SSM Tensor 引用；MTP 游标和步数直接从 State 读取。"""
-        layer = self._layer_mapping[layer_id]
-        return self.conv_state[layer], self.ssm_state[layer]
+    def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
+        """按逻辑层号映射到物理层，返回 Conv/SSM Tensor 引用；MTP 游标和步数直接从 State 读取。"""
+        storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
+        return self.conv_state[storage_layer_index], self.ssm_state[storage_layer_index]
 
     def reset_bounded_att_state(self, req_indices: List[int]) -> None:
         """清零指定请求的 Conv 历史、全部 SSM 候选及 MTP 游标，保留页池快照。"""
@@ -305,9 +308,9 @@ class KDAState(BoundedAttentionState):
         """依次描述全局 Conv 和 SSM 区域，并标明当前 TP rank 的读写范围。"""
         # 阶段一：确定全局 Conv 形状；只传有效历史窗口，不包含 MTP 候选区和游标。
         config = self.config
-        layer_count = len(config.layer_ids)
+        storage_layer_count = len(config.logical_layer_ids)
         conv_channels = 2 * config.global_k_heads * config.key_dim + config.global_v_heads * config.value_dim
-        conv_shape = (layer_count, conv_channels, config.conv_width)
+        conv_shape = (storage_layer_count, conv_channels, config.conv_width)
         conv_byte_end = prod(conv_shape) * config.conv_dtype.itemsize
         regions = []
         logger.debug(
@@ -360,7 +363,7 @@ class KDAState(BoundedAttentionState):
         replica_count = config.tp_world_size * config.num_v_heads // config.global_v_heads
         head_start = config.tp_rank // replica_count * config.num_v_heads
         write_enabled = config.tp_rank % replica_count == 0
-        ssm_shape = (layer_count, config.global_v_heads, config.key_dim, config.value_dim)
+        ssm_shape = (storage_layer_count, config.global_v_heads, config.key_dim, config.value_dim)
         element_bytes = config.ssm_dtype.itemsize
         ssm_byte_start = (conv_byte_end + element_bytes - 1) // element_bytes * element_bytes
         ssm_region = TransferRegion(

@@ -26,18 +26,18 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
 
     @classmethod
-    def create_bounded_attention_definition(cls, model_config, args, *, model_layer_ids, tp_rank=0, tp_world_size=1):
+    def create_bounded_attention_definition(cls, model_config, args, *, model_logical_layer_ids, tp_rank=0, tp_world_size=1):
         from lightllm.common.att_resources.bounded_att import create_kda_state, ConvSSMStateConfig
         from lightllm.common.basemodel.basemodel_utils import get_resource_config
 
         config = get_resource_config(model_config, model_class=cls)
         cfg = Glm5NextResourceConfig.from_model_config(config, args, include_draft=False)
-        layers = tuple(layer for i, layer in enumerate(model_layer_ids) if (i + 1) % cfg.full_attention_interval)
-        if not layers:
+        logical_layer_ids = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
+        if not logical_layer_ids:
             return None
         state = create_kda_state(
             config=ConvSSMStateConfig(
-                layer_ids=layers,
+                logical_layer_ids=logical_layer_ids,
                 global_k_heads=cfg.global_linear_k_heads,
                 global_v_heads=cfg.global_linear_v_heads,
                 key_dim=cfg.head_linear_k_dim,
@@ -96,7 +96,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         if not self.is_mtp_draft_model:
             self.att_resource_manager = Glm5NextAttResourceManager(
                 self.linear_config, self.max_req_num + 1, self.args.mtp_step,
-                tp_rank=self.tp_rank_, linear_layer_ids=(), full_layer_ids=(),
+                tp_rank=self.tp_rank_, bounded_logical_layer_ids=(), full_att_logical_layer_ids=(),
             )
         init_model_bounded_attention(self)
         init_model_att_tail(self)
@@ -107,7 +107,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         if args.llm_kv_type != "None":
             raise ValueError(f"GLM K-pool does not support llm_kv_type={args.llm_kv_type}")
         cfg = Glm5NextResourceConfig.from_model_config(config, args, include_draft=False)
-        return dict(heads=1, dim=config["kv_lora_rank"], layer_ids=cfg.get_full_att_layer_ids(), packed=True)
+        return dict(heads=1, dim=config["kv_lora_rank"], logical_layer_groups=tuple((logical_layer_id,) for logical_layer_id in cfg.get_full_att_logical_layer_ids()), packed=True)
 
     def _init_att_backend(self):
         self.prefill_att_backend = Glm5NextSparseAttBackend(model=self)

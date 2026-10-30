@@ -67,11 +67,11 @@ def main_linear_state(resources: AttResourceManager):
     return resources.main_gdn_state
 
 
-def prepare_model_states(model: TpPartBaseModel, *, layer_ids: Sequence[int] | None = None):
+def prepare_model_states(model: TpPartBaseModel, *, logical_layer_ids: Sequence[int] | None = None):
     config = model.config.get("text_config", model.config)
-    if layer_ids is None:
-        layer_ids = range(config.get("num_hidden_layers", config.get("n_layer")))
-    model.layers_infer = [SimpleNamespace(layer_num_=i) for i in layer_ids]
+    if logical_layer_ids is None:
+        logical_layer_ids = range(config.get("num_hidden_layers", config.get("n_layer")))
+    model.layers_infer = [SimpleNamespace(layer_num_=i) for i in logical_layer_ids]
     if not hasattr(model, "torch_memory_saver"):
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     model.prepare_att_resources()
@@ -81,16 +81,18 @@ def create_full_attention_roles(
     template: FullAttentionState, main_layer_count: int,
 ) -> tuple[FullAttentionState, FullAttentionState | None]:
     """仅用于测试：按配置层号创建各自拥有独立存储的 main 和单个 draft。"""
-    layers = template.config.layer_ids
-    boundary = sum(layer < main_layer_count for layer in layers)
-    assert boundary and all(layer < main_layer_count for layer in layers[:boundary])
-    assert all(layer >= main_layer_count for layer in layers[boundary:]), "draft layers must follow main layers"
+    layers = template.config.logical_layer_groups
+    boundary = sum(all(layer < main_layer_count for layer in group) for group in layers)
+    assert boundary and all(layer < main_layer_count for group in layers[:boundary] for layer in group)
+    assert all(layer >= main_layer_count for group in layers[boundary:] for layer in group), (
+        "draft layers must follow main layers and cannot share main storage"
+    )
     states = []
     for start, end in ((0, boundary), (boundary, len(layers))):
         if start == end:
             states.append(None)
             continue
-        config = replace(template.config, layer_ids=layers[start:end])
+        config = replace(template.config, logical_layer_groups=layers[start:end])
         if isinstance(template, StaticFP8FullAttentionState):
             state = rebuild_full_state(
                 template, config=config, scales=template.scales[start:end].clone(),

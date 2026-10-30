@@ -73,7 +73,7 @@ def make_mems(monkeypatch, request):
             monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", str(tp))
             full = PackedMLAFullAttentionState(
                 PackedMLAAttentionConfig(
-                    config.get_full_att_layer_ids(),
+                    tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
                     1,
                     584,
                     torch.bfloat16,
@@ -115,7 +115,7 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     source, dest = make_mems(prefill_tp), make_mems(decode_tp, target_mtp_step=decode_mtp_step)
     mtp_size = get_env_start_args().mtp_step + 1
     dst_mtp_size = decode_mtp_step + 1
-    layers = sum(len(state.config.layer_ids) for state in source[0].full_states)
+    layers = sum(len(state.config.logical_layer_groups) for state in source[0].full_states)
     src_req, dst_req = 0, 2
     length = 8 + remainder
     src_indexes = torch.randperm(32)[:length].tolist()
@@ -130,14 +130,14 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
         heads = slice(rank * 8 // prefill_tp, (rank + 1) * 8 // prefill_tp)
         offset = 0
         for state in mem.full_states:
-            end = offset + len(state.config.layer_ids)
+            end = offset + len(state.config.logical_layer_groups)
             state.storage.view(torch.uint8)[:, src_indexes] = packed[offset:end]
             offset = end
         mem.linear.conv_state[:, src_req, ..., :3].copy_(conv[:, :, heads].reshape(6, -1, 3))
         mem.linear.ssm_state[:, src_req * mtp_size].copy_(ssm[:, heads])
         offset = 0
         for state in mem.tails:
-            end = offset + len(state.config.layer_ids)
+            end = offset + len(state.config.logical_layer_ids)
             state.tail_buffer[:, src_req].copy_(tail[offset:end])
             offset = end
 
@@ -198,8 +198,8 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
         heads = slice(rank * 8 // decode_tp, (rank + 1) * 8 // decode_tp)
         for state, source_state in zip(mem.full_states, source[0].full_states):
             expected = full_state_test_fields(source_state, {"kv": source_state.storage})
-            for field in full_state_test_fields(state, {"kv": state.storage}).values():
-                source_field = expected[field.name]
+            for name, field in full_state_test_fields(state, {"kv": state.storage}).items():
+                source_field = expected[name]
                 assert torch.equal(
                     field.tensor[:, dst_indexes].contiguous().view(torch.uint8),
                     source_field.tensor[:, src_indexes].contiguous().view(torch.uint8),
@@ -251,11 +251,16 @@ def test_pd_kv_and_runtime_state_roundtrip(make_mems, prefill_tp, decode_tp, rem
     assert torch.equal(*outputs)
 
 
-def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch):
+def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch, caplog):
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 8)
     mem = make_mems(1)[0]
-    with pytest.raises(AssertionError, match="must be at least the complete attention runtime"):
-        mem.resources.get_pd_page_bytes()
+    full_bytes = max(layout.byte_end for layout in mem.resources.get_pd_full_att_transfer_layouts().values())
+    runtime_bytes = max(
+        layout.byte_end for layout in mem.resources.get_pd_bounded_att_or_tail_transfer_layouts().values()
+    )
+    assert runtime_bytes > full_bytes
+    assert mem.resources.get_pd_page_bytes() == runtime_bytes
+    assert "smaller than the complete attention runtime" in caplog.text
 
 
 @pytest.mark.parametrize("source_step,target_step", [(0, 1), (0, 5), (3, 2), (5, 1)])
@@ -266,7 +271,7 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
     from lightllm.common.att_resources.types import StateTransferLayout
 
     torch.manual_seed(53)
-    config = KPoolStateConfig(layer_ids=(0,), pool_size=4, head_dim=128, dtype=torch.bfloat16)
+    config = KPoolStateConfig(logical_layer_ids=(0,), pool_size=4, head_dim=128, dtype=torch.bfloat16)
     source = create_kpool_state(config=config, request_capacity=2, mtp_step=source_step, device="cuda")
     target = create_kpool_state(config=config, request_capacity=2, mtp_step=target_step, device="cuda")
     raw = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16)

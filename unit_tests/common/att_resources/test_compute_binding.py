@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 @pytest.mark.parametrize("capture", [False, True])
 def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, capture: bool):
     template = definition(kind)
-    state = rebuild_full_state(template, config=replace(template.config, layer_ids=(3, 8)), token_capacity=8, device="cuda")
+    state = rebuild_full_state(template, config=replace(template.config, logical_layer_groups=((3,), (8,))), token_capacity=8, device="cuda")
     for storage_buffer in full_state_test_buffers(state).values():
         storage_buffer.zero_()
     manager = AttResourceManager(request_capacity=2)
@@ -70,7 +70,7 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
             actual = actual.view(torch.float8_e4m3fn).float() * state.scales[1][None, :, None]
             # Backends index fixed scales by physical row, even when model layer
             # IDs are sparse or include appended draft layers.
-            assert BaseAttBackend._find_layer_index(None, k, v, state) == 1
+            assert BaseAttBackend._find_storage_layer_index(None, k, v, state) == 1
             assert state.cpu_scales.shape == (2, 4)
         assert torch.equal(actual, kv)
 

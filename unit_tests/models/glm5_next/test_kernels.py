@@ -585,11 +585,12 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     tail = torch.zeros(2, 4, 256, device="cuda", dtype=torch.bfloat16)
     ragged = torch.randperm(tokens + 9, device="cuda", dtype=torch.int32)[:tokens]
     full_att_state = SimpleNamespace(
-        get_layer_view=lambda _: SimpleNamespace(indexer_k=storage.view(torch.uint8)[:, :, -132:]),
+        get_layer_view=lambda logical_layer_id: SimpleNamespace(indexer_k=storage.view(torch.uint8)[:, :, -132:]),
     )
     infer = SimpleNamespace(
+        att_resource_role="main",
         att_resource_manager=SimpleNamespace(
-            main_indexer_kpool_c4_tail_state=SimpleNamespace(get_layer_view=lambda _: tail),
+            main_indexer_kpool_c4_tail_state=SimpleNamespace(get_layer_view=lambda logical_layer_id: tail),
             main_mla_packed_bf16_state=full_att_state,
         ),
         is_draft_model=False,

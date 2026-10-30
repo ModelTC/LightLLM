@@ -14,7 +14,7 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
 
     def _token_attention_kernel(self, q, infer_state, layer_weight):
         state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
-        k, v = state.get_layer_view(layer_id=self.layer_num_)
+        k, v = state.get_layer_view(logical_layer_id=self.layer_num_)
         k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
         v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)

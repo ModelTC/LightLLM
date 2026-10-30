@@ -155,7 +155,7 @@ def test_independent_role_states_copy_and_transfer_distinct_layers(kind: str, cp
     cpu_args.cpu_cache_token_page_size = 4
     physical = allocated_state(kind, device="cuda")
     main, draft = create_full_attention_roles(physical, 1)
-    assert main.config.layer_ids == (0,) and draft.config.layer_ids == (2,)
+    assert main.config.logical_layer_groups == ((0,),) and draft.config.logical_layer_groups == ((2,),)
     for role, state, layer in (("main", main, 0), ("draft0", draft, 1)):
         physical_buffers = full_state_test_buffers(physical)
         for name, buffer in full_state_test_buffers(state).items():
@@ -203,7 +203,7 @@ def test_explicit_members_keep_role_and_scheme_distinct_even_with_overlapping_la
     manager.set_att_state("draft0", draft)
     manager.full_att_allocator = FullAttKVAllocator(main.capacity, main.page_size, pin_memory=False)
     template = allocated_state("int8")
-    quant = rebuild_full_state(template, config=replace(template.config, layer_ids=(4, 6)))
+    quant = rebuild_full_state(template, config=replace(template.config, logical_layer_groups=((4,), (6,))))
     manager.set_att_state("main", quant)
     if overlap:
         overlapping = allocated_state("static_head")

@@ -174,7 +174,7 @@ def make_runtime(
             draft.config = dict(config, num_hidden_layers=1, n_layer=1, full_attention_interval=1)
             draft.max_total_token_num, draft.max_req_num = 16, 1
             draft.tp_world_size_, draft.tp_rank_ = tp, rank
-            prepare_model_states(draft, layer_ids=(config["num_hidden_layers"] + step,))
+            prepare_model_states(draft, logical_layer_ids=(config["num_hidden_layers"] + step,))
             drafts.append(draft)
         model.att_resource_manager.initialize_resources(
             args, token_capacity=model.max_total_token_num, mem_fraction=args.mem_fraction
@@ -200,7 +200,9 @@ def test_cpu_service_describes_main_and_draft_as_distinct_resources(
         (main,) = resources.get_full_attention_states("main")
         (draft,) = resources.get_full_attention_states("draft0")
         assert main is not draft
-        assert set(main.config.layer_ids).isdisjoint(draft.config.layer_ids)
+        assert {layer for group in main.config.logical_layer_groups for layer in group}.isdisjoint(
+            layer for group in draft.config.logical_layer_groups for layer in group
+        )
         assert main.capacity == draft.capacity == resources.full_att_allocator.size
         assert {main.resource_id, draft.resource_id} <= resources.get_cpu_transfer_layouts().keys()
         layout_end = max(layout.byte_end for layout in resources.get_cpu_transfer_layouts().values())

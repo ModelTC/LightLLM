@@ -80,7 +80,12 @@ class PackedMLAFullAttentionState(FullAttentionState):
         self.config = layout_config
         self.storage_dtype = layout_config.dtype  # 实际 KV 编码类型；量化子类显式设置，区别于 scale 精度。
         self.resource_id: str | None = None  # 由 manager 绑定模型角色时设置。
-        self._layer_mapping = {layer: i for i, layer in enumerate(layout_config.layer_ids)}
+        # 外层下标是物理层位置；组内多个逻辑层映射到同一份 KV/量化字段存储。
+        self._logical_to_storage_layer = {
+            logical_layer_id: storage_layer_index
+            for storage_layer_index, logical_layer_group in enumerate(layout_config.logical_layer_groups)
+            for logical_layer_id in logical_layer_group
+        }
         self.page_size = page_size
         self.device = torch.device(device=device)
         self.capacity = 0
@@ -101,7 +106,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
         """由配置计算当前 TP rank 的单 token 开销，包含 packed 行 padding，无需分配存储。"""
         config = self.config
         return (
-            len(config.layer_ids) * config.head_num * config.head_dim
+            len(config.logical_layer_groups) * config.head_num * config.head_dim
             * self.storage_dtype.itemsize
         )
 
@@ -121,18 +126,18 @@ class PackedMLAFullAttentionState(FullAttentionState):
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
 
-    def get_layer_view(self, layer_id: int) -> PackedMLALayerView:
+    def get_layer_view(self, logical_layer_id: int) -> PackedMLALayerView:
         """分别返回 KV 与 packed indexer key/scale 的视图，保持原行步长。"""
-        row = self.storage[self._layer_mapping[layer_id]]
+        row = self.storage[self._logical_to_storage_layer[logical_layer_id]]
         raw = row.view(torch.uint8)
         kv = raw[..., : self.kv_nbytes] if self.config.fp8_nope_dim else row[..., : self.config.kv_dim]
         indexer = raw[..., self.indexer_offset : self.indexer_offset + self.config.indexer_dim + 4]
         return PackedMLALayerView(kv=kv, indexer_k=indexer)
 
-    def write_full_att_kv(self, layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
+    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """写入 MLA KV 及其量化参数，保留同一 token 行中的 indexer 区域。"""
         assert token_indices.is_cuda, "token indices must reside on CUDA"
-        layer = self._layer_mapping[layer_id]
+        storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         if not len(token_indices):
             return
         assert self.storage.is_cuda, "KV writes require CUDA storage"
@@ -141,7 +146,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
                 destindex_copy_kv_flashmla_fp8,
             )
 
-            raw = self.storage[layer]
+            raw = self.storage[storage_layer_index]
             destindex_copy_kv_flashmla_fp8(
                 KV_nope=kv[..., :512],
                 KV_rope=kv[..., 512:],
@@ -153,7 +158,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
         else:
             from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 
-            destindex_copy_kv(K=kv, DestLoc=token_indices, Out=self.storage[layer, ..., : self.config.kv_dim])
+            destindex_copy_kv(K=kv, DestLoc=token_indices, Out=self.storage[storage_layer_index, ..., : self.config.kv_dim])
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
@@ -350,7 +355,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
         ))
         for field_name, field_dtype, field_width, last_axis in field_specs:
             axes = ("layer", "token", "head", last_axis)
-            local_shape = (len(config.layer_ids), page_tokens, config.head_num, field_width)
+            local_shape = (len(config.logical_layer_groups), page_tokens, config.head_num, field_width)
             global_shape = list(local_shape)
             global_shape[axes.index("token")] = page_tokens
             head_axis = axes.index("head")
@@ -406,7 +411,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
 
     def _storage_shape(self) -> tuple[int, ...]:
         return (
-            len(self.config.layer_ids),
+            len(self.config.logical_layer_groups),
             self.capacity + self.page_size,
             self.config.head_num,
             self.config.head_dim,

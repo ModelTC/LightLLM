@@ -53,7 +53,7 @@ def main():
     )
     tokens = args.tokens_per_page * args.pages
     full = GQAFullAttentionState(
-        FullAttentionConfig(tuple(range(12)), 1, 256, torch.bfloat16, 0, 8),
+        FullAttentionConfig(tuple((layer,) for layer in tuple(range(12))), 1, 256, torch.bfloat16, 0, 8),
     )
     full.initialize_storage(tokens)
     resources = Qwen3NextAttResourceManager(cfg, request_capacity=1, mtp_step=0)

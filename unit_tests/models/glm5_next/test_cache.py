@@ -85,7 +85,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     )
     full = PackedMLAFullAttentionState(
         PackedMLAAttentionConfig(
-            config.get_full_att_layer_ids(),
+            tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
             1,
             584,
             torch.bfloat16,
@@ -163,7 +163,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     # belong to live requests. Bytewise equality checks FP8 scale integrity.
     packed_bytes = full.storage.view(torch.uint8)
     packed_bytes[:, 0].random_(0, 256)
-    full.copy_full_att_tokens(torch.tensor([0]), torch.tensor([7]))
+    full.copy_full_att_tokens(torch.tensor([0], device="cuda"), torch.tensor([7], device="cuda"))
     assert torch.equal(packed_bytes[:, 0], packed_bytes[:, 7])
 
 

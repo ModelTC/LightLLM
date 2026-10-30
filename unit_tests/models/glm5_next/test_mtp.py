@@ -193,7 +193,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
     )
     backend.linear_state = SimpleNamespace(
         mtp_state_index=accepted_offsets,
-        get_layer_view=lambda layer: (conv, ssm),
+        get_layer_view=lambda logical_layer_id: (conv, ssm),
     )
     manager = SimpleNamespace(HOLD_REQUEST_ID=3)
     infer = InferStateInfo()

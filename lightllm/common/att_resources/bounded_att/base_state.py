@@ -44,7 +44,7 @@ class BoundedAttentionState(ABC):
     # ========================================================================
 
     @abstractmethod
-    def get_layer_view(self, layer_id: int) -> Any:
+    def get_layer_view(self, logical_layer_id: int) -> Any:
         """按逻辑层号返回运行态和算法控制信息的计算视图。"""
         ...
 

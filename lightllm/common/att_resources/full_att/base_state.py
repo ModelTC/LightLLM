@@ -15,8 +15,13 @@ from lightllm.common.att_resources.types import (
 
 @dataclass(frozen=True)
 class FullAttentionConfig:
-    # 当前 State 管理的逻辑层号；元组顺序对应 storage 的 layer 轴顺序，不要求层号连续。
-    layer_ids: tuple[int, ...]
+    # 物理存储层与逻辑推理层的对应关系，外层顺序就是所有 Tensor 的 layer 轴顺序。
+    # 每个非空内层元组列出共享同一份存储的逻辑层号；层号可以不连续，但不能重复出现。
+    # 例如 ((0, 4), (8,)) 只分配两层：逻辑层 0/4 使用 storage[0]，逻辑层 8 使用 storage[1]。
+    # 不共享时写成 ((0,), (4,), (8,))，此时分配三层；容量和传输按 len(logical_layer_groups) 计算。
+    # 组内共享该方案的全部字段（KV、scale、indexer 等），因此布局及配套参数必须兼容。
+    # 分组不决定执行顺序或写入者：模型负责让共享消费者跳过 KV 写入，避免覆盖生产层数据。
+    logical_layer_groups: tuple[tuple[int, ...], ...]
     # TP 切分前的 KV head 数：GQA 的 K/V 各有这么多个，不把二者相加，也不计 TP 副本。
     # 不是 query head 数；例如全局 8 个 KV head，实际有 8 个 K head 和 8 个 V head。
     # MLA 的压缩 latent 作为一个 KV 字段存储，通常设为 1，并在各 TP rank 复制。
@@ -43,6 +48,20 @@ class FullAttentionConfig:
         return self.global_head_num if self.replicated else max(1, self.global_head_num // self.tp_world_size)
 
     def __post_init__(self) -> None:
+        # 只保留这一份分组配置；层号映射在 State 构造时展开，不另存逻辑/物理层数。
+        assert isinstance(self.logical_layer_groups, tuple) and all(
+            isinstance(logical_layer_group, tuple) and logical_layer_group
+            for logical_layer_group in self.logical_layer_groups
+        ), "layer groups must be a tuple of nonempty tuples"
+        logical_layer_ids = [
+            logical_layer_id
+            for logical_layer_group in self.logical_layer_groups
+            for logical_layer_id in logical_layer_group
+        ]
+        assert all(isinstance(logical_layer_id, int) and logical_layer_id >= 0 for logical_layer_id in logical_layer_ids), (
+            "logical layer IDs must be nonnegative integers"
+        )
+        assert len(logical_layer_ids) == len(set(logical_layer_ids)), "a logical layer must belong to exactly one storage group"
         assert self.global_head_num > 0 and 0 <= self.tp_rank < self.tp_world_size
         assert (
             self.replicated
@@ -82,12 +101,12 @@ class FullAttentionState(ABC):
 
     @abstractmethod
     def initialize_storage(self, token_capacity: int) -> None:
-        """按 token 容量创建独立存储，沿用已设置的页大小、设备及配套参数。"""
+        """按 token 容量和 logical_layer_groups 的物理层数创建存储，沿用已设置的页大小、设备及配套参数。"""
         raise NotImplementedError()
 
     @abstractmethod
     def get_token_bytes(self) -> int:
-        """返回当前 TP rank 的单 token 存储字节数，包含动态量化参数和行 padding。"""
+        """累计当前 TP rank 各物理层的单 token 字节数，包含动态量化参数和行 padding；共享逻辑层不重复计数。"""
         raise NotImplementedError()
 
     # ========================================================================
@@ -95,12 +114,12 @@ class FullAttentionState(ABC):
     # ========================================================================
 
     @abstractmethod
-    def get_layer_view(self, layer_id: int) -> Any:
-        """按逻辑层号返回计算所需的存储视图，具体字段由该布局定义。"""
+    def get_layer_view(self, logical_layer_id: int) -> Any:
+        """按逻辑层号返回存储视图；同组逻辑层返回同一物理层的数据，具体字段由该布局定义。"""
         raise NotImplementedError()
 
     @abstractmethod
-    def write_full_att_kv(self, layer_id: int, token_indices: torch.Tensor, kv: Any) -> None:
+    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: Any) -> None:
         """向已分配位置写入一层 KV，并完成该布局要求的编码、量化和关联参数更新。"""
         raise NotImplementedError()
 

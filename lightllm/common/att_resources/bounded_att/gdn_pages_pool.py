@@ -23,13 +23,13 @@ class GDNPagesPool:
         device = torch.device(device)
         pin_memory = pin_memory and device.type == "cpu"
         self.conv_state = create_page_pool_tensor(
-            size=(size, len(config.layer_ids), config.conv_channels, config.conv_width),
+            size=(size, len(config.logical_layer_ids), config.conv_channels, config.conv_width),
             dtype=config.conv_dtype,
             device=device,
             pin_memory=pin_memory,
         )
         self.ssm_state = create_page_pool_tensor(
-            size=(size, len(config.layer_ids), config.num_v_heads, config.key_dim, config.value_dim),
+            size=(size, len(config.logical_layer_ids), config.num_v_heads, config.key_dim, config.value_dim),
             dtype=config.ssm_dtype,
             device=device,
             pin_memory=pin_memory,

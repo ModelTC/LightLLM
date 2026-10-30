@@ -24,14 +24,17 @@ def init_model_att_tail(model: Glm5NextTpPartModel) -> None:
     config = get_resource_config(model.config, model_class=type(model))
     options = get_full_attention_options(
         config, model.args, model_class=type(model),
-        model_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
+        model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
     )
-    if not options["layer_ids"]:
+    if not options["logical_layer_groups"]:
         return
     cfg = model.linear_config
     state = create_kpool_state(
         config=KPoolStateConfig(
-            layer_ids=options["layer_ids"], pool_size=cfg.index_kpool,
+            logical_layer_ids=tuple(
+                logical_layer_id for logical_layer_group in options["logical_layer_groups"]
+                for logical_layer_id in logical_layer_group
+            ), pool_size=cfg.index_kpool,
             head_dim=cfg.index_head_dim, dtype=cfg.full_att_dtype,
             tp_rank=model.tp_rank_, tp_world_size=model.tp_world_size_,
         ),
@@ -54,19 +57,19 @@ class Glm5NextAttResourceManager(AttResourceManager):
         tp_rank: int = 0,
         device: str | torch.device | int = "cuda",
         role: str = "main",
-        linear_layer_ids: Sequence[int] | None = None,
-        full_layer_ids: Sequence[int] | None = None,
+        bounded_logical_layer_ids: Sequence[int] | None = None,
+        full_att_logical_layer_ids: Sequence[int] | None = None,
     ):
         super().__init__(request_capacity=request_capacity)
         self.cache_config = cache_config
         self.cpu_tail_restore = True
-        layers = (
+        logical_layer_ids = (
             tuple(i for i in range(cache_config.all_layer_num) if (i + 1) % cache_config.full_attention_interval)
-            if linear_layer_ids is None
-            else tuple(linear_layer_ids)
+            if bounded_logical_layer_ids is None
+            else tuple(bounded_logical_layer_ids)
         )
         config = ConvSSMStateConfig(
-            layer_ids=layers,
+            logical_layer_ids=logical_layer_ids,
             global_k_heads=cache_config.global_linear_k_heads,
             global_v_heads=cache_config.global_linear_v_heads,
             key_dim=cache_config.head_linear_k_dim,
@@ -77,11 +80,11 @@ class Glm5NextAttResourceManager(AttResourceManager):
             tp_rank=tp_rank,
             tp_world_size=cache_config.tp_world_size,
         )
-        if layers:
+        if logical_layer_ids:
             state = create_kda_state(config=config, request_capacity=request_capacity, mtp_step=mtp_step, device=device)
             self.set_att_state(role, state)
         self.att_tail_type = f"indexer_kpool_c{cache_config.index_kpool}_tail"
-        own_full_layers = (
+        own_full_att_logical_layer_ids = (
             tuple(
                 range(
                     cache_config.full_attention_interval - 1,
@@ -89,12 +92,12 @@ class Glm5NextAttResourceManager(AttResourceManager):
                     cache_config.full_attention_interval,
                 )
             )
-            if full_layer_ids is None
-            else tuple(full_layer_ids)
+            if full_att_logical_layer_ids is None
+            else tuple(full_att_logical_layer_ids)
         )
-        tail_layers = [(role, own_full_layers)]
+        tail_logical_layers_by_role = [(role, own_full_att_logical_layer_ids)]
         if role == "main" and cache_config.draft_full_att_kv_layer_num:
-            tail_layers.append(
+            tail_logical_layers_by_role.append(
                 (
                     "draft0",
                     tuple(
@@ -105,11 +108,11 @@ class Glm5NextAttResourceManager(AttResourceManager):
                     ),
                 )
             )
-        for role, layers in tail_layers:
-            if layers:
+        for role, logical_layer_ids in tail_logical_layers_by_role:
+            if logical_layer_ids:
                 state = create_kpool_state(
                     config=KPoolStateConfig(
-                        layer_ids=layers,
+                        logical_layer_ids=logical_layer_ids,
                         pool_size=cache_config.index_kpool,
                         head_dim=cache_config.index_head_dim,
                         dtype=cache_config.full_att_dtype,
@@ -132,14 +135,16 @@ class Glm5NextAttResourceManager(AttResourceManager):
         """按已确定的 KV 容量绑定存储，创建本模型的大小页池与共享分配器。"""
         assert self.full_att_allocator is None, "attention storage is already bound"
         assert all(
-            layer < self.cache_config.all_layer_num for layer in full_state.config.layer_ids
+            logical_layer_id < self.cache_config.all_layer_num
+            for logical_layer_group in full_state.config.logical_layer_groups for logical_layer_id in logical_layer_group
         ), "main State must only contain main layers"
         assert (draft_full_state is not None) == bool(
             self.cache_config.draft_full_att_kv_layer_num
         ), "draft State must match the model configuration"
         if draft_full_state is not None:
             assert all(
-                layer >= self.cache_config.all_layer_num for layer in draft_full_state.config.layer_ids
+                logical_layer_id >= self.cache_config.all_layer_num
+                for logical_layer_group in draft_full_state.config.logical_layer_groups for logical_layer_id in logical_layer_group
             ), "draft State must only contain draft layers"
 
         state = self.main_kda_state

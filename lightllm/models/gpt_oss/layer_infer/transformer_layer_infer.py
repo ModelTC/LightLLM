@@ -73,7 +73,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_sliding_window = False
 
         state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
-        _k, _v = state.get_layer_view(layer_id=self.layer_num_)
+        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.prefill_att_state.prefill_att(
             q=_q,
@@ -101,7 +101,7 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             use_sliding_window = False
 
         state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
-        _k, _v = state.get_layer_view(layer_id=self.layer_num_)
+        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.decode_att_state.decode_att(
             q=_q,

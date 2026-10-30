@@ -207,7 +207,7 @@ def _copy_gqa_pages(
         if copy_block:
             dim = offsets % WIDTH
             head = offsets // WIDTH % HEADS
-            layer = offsets // (WIDTH * HEADS * token_count)
+            storage_layer_index = offsets // (WIDTH * HEADS * token_count)
             slot = tl.load(pointer=TOKEN_IDS + token * TOKEN_STRIDE, mask=valid, other=0).to(dtype=tl.int64)
             page = tl.load(pointer=PAGE_IDS + token // PAGE_TOKENS, mask=valid, other=0).to(dtype=tl.int64)
 
@@ -215,14 +215,14 @@ def _copy_gqa_pages(
             # EXTERNAL 已指向当前字段在联合页中的起点；这里无需再次加 region.byte_start。
             # EXTERNAL_STRIDES[0] 使用整个外部页的跨度，不能替换为当前 K/V 字段的大小。
             local_offset = (
-                layer * LOCAL_STRIDES[0]
+                storage_layer_index * LOCAL_STRIDES[0]
                 + slot * LOCAL_STRIDES[1]
                 + head * LOCAL_STRIDES[2]
                 + dim * LOCAL_STRIDES[3]
             )
             external_offset = (
                 page * EXTERNAL_STRIDES[0]
-                + layer * EXTERNAL_STRIDES[1]
+                + storage_layer_index * EXTERNAL_STRIDES[1]
                 + (token % PAGE_TOKENS) * EXTERNAL_STRIDES[2]
                 + head * EXTERNAL_STRIDES[3]
                 + dim * EXTERNAL_STRIDES[4]

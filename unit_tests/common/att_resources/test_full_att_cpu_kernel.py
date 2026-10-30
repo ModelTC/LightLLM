@@ -200,7 +200,7 @@ def test_full_state_interfaces_reject_cpu_token_indices(kind: str) -> None:
     cpu_pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, pin_memory=True)
     pd_pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
-        state.write_full_att_kv(state.config.layer_ids[0], cpu_ids, torch.empty(0, device="cuda"))
+        state.write_full_att_kv(state.config.logical_layer_groups[0][0], cpu_ids, torch.empty(0, device="cuda"))
     for src, dst in ((cpu_ids, cuda_ids), (cuda_ids, cpu_ids)):
         with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
             state.copy_full_att_tokens(src, dst)

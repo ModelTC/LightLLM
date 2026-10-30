@@ -70,9 +70,9 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
             self.infer_state.att_resource_manager,
             f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_tensor_state",
         )
-        layer_index = self.backend._find_layer_index(k=k, v=v, state=state)
-        k_descale = state.cpu_scales[layer_index][0]
-        v_descale = state.cpu_scales[layer_index][1]
+        storage_layer_index = self.backend._find_storage_layer_index(k=k, v=v, state=state)
+        k_descale = state.cpu_scales[storage_layer_index][0]
+        v_descale = state.cpu_scales[storage_layer_index][1]
         self.prefill_wrapper.run(
             q,
             (k, v),
@@ -126,10 +126,10 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
             self.infer_state.att_resource_manager,
             f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_tensor_state",
         )
-        layer_index = self.backend._find_layer_index(k=k, v=v, state=state)
+        storage_layer_index = self.backend._find_storage_layer_index(k=k, v=v, state=state)
 
-        k_descale = state.cpu_scales[layer_index][0]
-        v_descale = state.cpu_scales[layer_index][1]
+        k_descale = state.cpu_scales[storage_layer_index][0]
+        v_descale = state.cpu_scales[storage_layer_index][1]
         self.decode_wrapper.run(
             q,
             (k, v),

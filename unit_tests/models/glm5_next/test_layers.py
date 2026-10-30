@@ -173,7 +173,7 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     layer.full_att_state_name = "main_mla_packed_bf16_state"
     state.att_resource_manager = SimpleNamespace(
         main_mla_packed_bf16_state=SimpleNamespace(
-            get_layer_view=lambda layer_id: SimpleNamespace(kv=kv)
+            get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv)
         )
     )
     state.prefill_att_state = Glm5NextSparsePrefillState()
@@ -433,7 +433,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         assert state is not main.att_resource_manager.main_mla_packed_bf16_state
         assert not hasattr(draft, "full_att_state")
         assert state.storage.device.type == "meta"
-        assert state.config.layer_ids == (4 + step,)
+        assert state.config.logical_layer_groups == ((4 + step,),)
         assert state.resource_id == f"draft{step}_mla_packed_bf16_state"
         assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
         assert getattr(draft.att_resource_manager, f"draft{step}_indexer_kpool_c4_tail_state").tail_buffer.is_cuda

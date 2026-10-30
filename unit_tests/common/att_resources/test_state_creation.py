@@ -32,7 +32,7 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
     kv_type: str, expected_type: str, storage_dtype: torch.dtype, width: int,
 ):
     config = FullAttentionConfig(
-        layer_ids=(3, 7), global_head_num=8, head_dim=128, dtype=torch.bfloat16, tp_rank=2, tp_world_size=4,
+        logical_layer_groups=((3,), (7,)), global_head_num=8, head_dim=128, dtype=torch.bfloat16, tp_rank=2, tp_world_size=4,
     )
     scales = torch.full((2, 4 if kv_type == "fp8kv_sph" else 2), 0.5, dtype=torch.float32)
     q_scales = torch.ones((2, 2), dtype=torch.float32) if kv_type == "fp8kv_sph" else None
@@ -42,7 +42,7 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
     )
     assert state.get_state_type() == expected_type
     assert state.resource_id is None
-    assert state.config.layer_ids == (3, 7)
+    assert state.config.logical_layer_groups == ((3,), (7,))
     assert state.config.global_head_num == 8 and state.config.head_num == 2
     assert state.config.tp_rank == 2 and state.config.tp_world_size == 4
     assert state.config.head_dim == config.head_dim and config.dtype == torch.bfloat16
@@ -73,7 +73,7 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
     packed: bool, kv_type: str, kv_dim: int, row_width: int, expected_type: str,
 ):
     config = FullAttentionConfig(
-        layer_ids=(2, 6), global_head_num=1, head_dim=kv_dim, dtype=torch.bfloat16, tp_rank=1, tp_world_size=4,
+        logical_layer_groups=((2,), (6,)), global_head_num=1, head_dim=kv_dim, dtype=torch.bfloat16, tp_rank=1, tp_world_size=4,
     )
     state = create_mla_state(config=config, packed=packed, kv_type=kv_type, page_size=4, device="meta")
     assert state.get_state_type() == expected_type
@@ -91,7 +91,7 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
 @pytest.mark.parametrize("create_state", [create_kda_state, create_gdn_state])
 def test_bounded_creation_allocates_runtime_but_defers_pools(create_state: Callable[..., BoundedAttentionState]):
     config = ConvSSMStateConfig(
-        layer_ids=(0, 2), global_k_heads=2, global_v_heads=2,
+        logical_layer_ids=(0, 2), global_k_heads=2, global_v_heads=2,
         key_dim=8, value_dim=8, conv_width=3, conv_dtype=torch.bfloat16, ssm_dtype=torch.float32,
     )
     state = create_state(config=config, request_capacity=3, mtp_step=2, device="cpu")
@@ -103,7 +103,7 @@ def test_bounded_creation_allocates_runtime_but_defers_pools(create_state: Calla
 
 
 def test_kpool_creation_preserves_pool_and_mtp_dimensions():
-    config = KPoolStateConfig(layer_ids=(3, 7), pool_size=4, head_dim=128, dtype=torch.bfloat16)
+    config = KPoolStateConfig(logical_layer_ids=(3, 7), pool_size=4, head_dim=128, dtype=torch.bfloat16)
     state = create_kpool_state(config=config, request_capacity=3, mtp_step=2, device="cpu")
     assert state.config is config and state.resource_id is None
     assert state.tail_buffer.shape == (2, 3, 6, 256)
@@ -111,7 +111,7 @@ def test_kpool_creation_preserves_pool_and_mtp_dimensions():
 
 
 def test_create_rejects_encoding_from_another_logical_family():
-    config = FullAttentionConfig(layer_ids=(0,), global_head_num=1, head_dim=576, dtype=torch.bfloat16)
+    config = FullAttentionConfig(logical_layer_groups=((0,),), global_head_num=1, head_dim=576, dtype=torch.bfloat16)
     with pytest.raises(AssertionError, match="unsupported GQA encoding"):
         create_gqa_state(config=config, kv_type="fp8kv_dsa", device="meta")
     with pytest.raises(AssertionError, match="unsupported packed MLA encoding"):

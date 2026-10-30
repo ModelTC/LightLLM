@@ -12,7 +12,7 @@ def test_quantized_kv_buffers_include_the_full_hold_page():
     allocations = []
     for bits in (8, 4):
         state = GroupQuantizedFullAttentionState(
-            GroupQuantizedAttentionConfig((0, 1, 2), 2, 16, torch.float16, bits=bits),
+            GroupQuantizedAttentionConfig(((0,), (1,), (2,)), 2, 16, torch.float16, bits=bits),
              page_size=4, device="cpu",
         )
         state.initialize_storage(32)

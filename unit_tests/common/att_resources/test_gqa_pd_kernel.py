@@ -30,7 +30,7 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
     pd_args.pd_kv_page_size = 4
     # P 保存完整 heads，D 只恢复 rank 1 的一半 heads；两侧外部页格式相同。
     source = GQAFullAttentionState(
-        layout_config=FullAttentionConfig(layer_ids=(2, 5), global_head_num=4, head_dim=128, dtype=dtype),
+        layout_config=FullAttentionConfig(logical_layer_groups=((2,), (5,)), global_head_num=4, head_dim=128, dtype=dtype),
         page_size=4,
         device="cuda",
     )
@@ -115,7 +115,7 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
     # MQA 的 KV head 在 TP ranks 间复制，非首 rank 禁止写出但仍能读回。
     state = GQAFullAttentionState(
         layout_config=FullAttentionConfig(
-            layer_ids=(0, 2), global_head_num=1, head_dim=128, dtype=torch.bfloat16, tp_world_size=2, tp_rank=1,
+            logical_layer_groups=((0,), (2,)), global_head_num=1, head_dim=128, dtype=torch.bfloat16, tp_world_size=2, tp_rank=1,
         ),
         page_size=4,
         device="cuda",
@@ -153,7 +153,7 @@ def test_gqa_pd_direct_copy_through_peer_ipc(pd_args: EasyDict, monkeypatch: pyt
         pytest.skip("CUDA peer access required")
     pd_args.pd_kv_page_size = 4
     state = GQAFullAttentionState(
-        layout_config=FullAttentionConfig(layer_ids=(0, 2), global_head_num=2, head_dim=128, dtype=torch.bfloat16),
+        layout_config=FullAttentionConfig(logical_layer_groups=((0,), (2,)), global_head_num=2, head_dim=128, dtype=torch.bfloat16),
         page_size=4,
         device="cuda:1",
     )

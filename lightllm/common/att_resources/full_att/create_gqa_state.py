@@ -33,7 +33,7 @@ def create_gqa_state(
         return GQAFullAttentionState(layout_config=config, page_size=page_size, device=device)
     if kv_type in ("int4kv", "int8kv"):
         quant_config = GroupQuantizedAttentionConfig(
-            layer_ids=config.layer_ids,
+            logical_layer_groups=config.logical_layer_groups,
             global_head_num=config.global_head_num,
             head_dim=config.head_dim,
             dtype=config.dtype,
@@ -48,7 +48,7 @@ def create_gqa_state(
     assert scales is not None, "static FP8 requires calibration scales"
     assert kv_type != "fp8kv_sph" or q_scales is not None, "per-head FP8 requires Q calibration scales"
     quant_config = StaticFP8AttentionConfig(
-        layer_ids=config.layer_ids,
+        logical_layer_groups=config.logical_layer_groups,
         global_head_num=config.global_head_num,
         head_dim=config.head_dim,
         dtype=torch.uint8,

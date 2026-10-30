@@ -17,7 +17,7 @@ from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
 
@@ -26,40 +26,47 @@ def load_static_fp8_calibration(
     args: StartArgs | EasyDict,
     *,
     per_head: bool,
-    layers: int,
+    storage_layer_count: int,
     heads: int,
     tp_rank: int = 0,
     tp_world_size: int = 1,
-    layer_start: int | None = None,
+    storage_layer_start: int | None = None,
 ):
-    """Load and validate the same fixed parameters for model and cache metadata.
+    """读取模型和 CPU cache 共用的静态标定参数。
 
-    Returned tensors remain on CPU so validation and capacity planning precede
-    GPU allocation. TP replicas select the same calibrated head values.
+    storage_layer_count 是当前 State 的物理层数；storage_layer_start 是其在标定表中的
+    物理行起点，两者都不是逻辑层号。共享逻辑层使用同一行标定参数，不重复占用行。
+    返回 Tensor 保留在 CPU；当前 TP 分片在每行中选取对应的 head 参数。
     """
     path = args.kv_quant_calibration_config_path
     if path is None:
         if per_head:
             raise ValueError("fp8kv_sph requires kv_quant_calibration_config_path with q_calibration")
-        return {"scale": "unit"}, torch.ones((layers, 2), dtype=torch.float32), None
+        return {"scale": "unit"}, torch.ones((storage_layer_count, 2), dtype=torch.float32), None
     with open(path) as f:
         cfg = json.load(f)
-    stored_layers = cfg["num_layers"]
-    draft_layers = get_added_mtp_kv_layer_num() if layer_start is None else 0
-    if layer_start is not None:
-        if layer_start < 0 or layer_start + layers > stored_layers:
+    calibrated_storage_layer_count = cfg["num_layers"]
+    expected_draft_storage_layer_count = get_added_mtp_kv_layer_num() if storage_layer_start is None else 0
+    if storage_layer_start is not None:
+        if storage_layer_start < 0 or storage_layer_start + storage_layer_count > calibrated_storage_layer_count:
             raise ValueError("calibration does not cover this model's attention layers")
     elif per_head and ("num_target_layers" in cfg or "num_draft_layers" in cfg):
-        target, draft = cfg["num_target_layers"], cfg["num_draft_layers"]
+        calibrated_target_storage_layer_count = cfg["num_target_layers"]
+        calibrated_draft_storage_layer_count = cfg["num_draft_layers"]
         if (
-            draft < 0
-            or target + draft != stored_layers
-            or target != layers - draft_layers
-            or (draft_layers > 0 and draft != draft_layers)
+            calibrated_draft_storage_layer_count < 0
+            or calibrated_target_storage_layer_count + calibrated_draft_storage_layer_count != calibrated_storage_layer_count
+            or calibrated_target_storage_layer_count != storage_layer_count - expected_draft_storage_layer_count
+            or (
+                expected_draft_storage_layer_count > 0
+                and calibrated_draft_storage_layer_count != expected_draft_storage_layer_count
+            )
         ):
             raise ValueError("calibration target/draft layer layout does not match the runtime")
-    elif stored_layers != layers:
-        raise ValueError(f"calibration num_layers {stored_layers} does not match runtime {layers}")
+    elif calibrated_storage_layer_count != storage_layer_count:
+        raise ValueError(
+            f"calibration num_layers {calibrated_storage_layer_count} does not match runtime {storage_layer_count}"
+        )
 
     if not per_head:
         from lightllm.utils.config_utils import get_model_architectures
@@ -79,8 +86,8 @@ def load_static_fp8_calibration(
             raise ValueError(f"calibration scales and scales_shape must match {shape}")
         if not bool((torch.isfinite(tensor) & (tensor > 0)).all()):
             raise ValueError("calibration scales must be finite and positive")
-        start = layer_start or 0
-        return tensor[start : start + layers]
+        first_storage_layer_index = storage_layer_start or 0
+        return tensor[first_storage_layer_index : first_storage_layer_index + storage_layer_count]
 
     def shard(tensor: torch.Tensor, calibrated_heads: int):
         if calibrated_heads <= 0 or (heads * tp_world_size) % calibrated_heads:
@@ -90,15 +97,15 @@ def load_static_fp8_calibration(
 
     if per_head:
         calibrated_heads = cfg["num_head"]
-        all_scales = scale_tensor(cfg, (stored_layers, 2 * calibrated_heads))
+        all_scales = scale_tensor(cfg, (calibrated_storage_layer_count, 2 * calibrated_heads))
         k, v = all_scales.split(calibrated_heads, dim=-1)
         scales = torch.cat((shard(k, calibrated_heads), shard(v, calibrated_heads)), dim=-1)
         q_cfg = cfg.get("q_calibration")
         if not q_cfg:
             raise ValueError("fp8kv_sph calibration config requires q_calibration")
-        q_scales = shard(scale_tensor(q_cfg, (stored_layers, q_cfg["num_head"])), q_cfg["num_head"])
+        q_scales = shard(scale_tensor(q_cfg, (calibrated_storage_layer_count, q_cfg["num_head"])), q_cfg["num_head"])
     else:
-        scales, q_scales = scale_tensor(cfg, (stored_layers, 2)), None
+        scales, q_scales = scale_tensor(cfg, (calibrated_storage_layer_count, 2)), None
     return cfg, scales, q_scales
 
 
@@ -107,19 +114,19 @@ def build_full_attention_state(
     *,
     heads: int,
     dim: int,
-    layer_ids: Sequence[int],
+    logical_layer_groups: tuple[tuple[int, ...], ...],
     mla: bool = False,
     packed: bool = False,
     dtype: torch.dtype | None = None,
     replicated: bool = False,
     tp_rank: int = 0,
     tp_world_size: int = 1,
-    calibration_layer_start: int | None = None,
+    calibration_storage_layer_start: int | None = None,
 ) -> FullAttentionState:
     """将模型和启动配置转换为算法 create 参数，返回容量规划所需的 meta State。"""
     dtype = get_torch_dtype(args.data_type) if dtype is None else dtype
     config = FullAttentionConfig(
-        layer_ids=tuple(layer_ids),
+        logical_layer_groups=logical_layer_groups,
         global_head_num=heads,
         head_dim=dim,
         dtype=dtype,
@@ -137,11 +144,11 @@ def build_full_attention_state(
         calibration, scales, q_scales = load_static_fp8_calibration(
             args,
             per_head=args.llm_kv_type == "fp8kv_sph",
-            layers=len(layer_ids),
+            storage_layer_count=len(logical_layer_groups),
             heads=config.head_num,
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
-            layer_start=calibration_layer_start,
+            storage_layer_start=calibration_storage_layer_start,
         )
         calibration_id = hashlib.sha256(json.dumps(calibration, sort_keys=True).encode()).hexdigest()
     return create_gqa_state(
@@ -174,22 +181,22 @@ def build_cpu_cache_layouts():
             models.append((f"draft{index}", get_draft_model_class(config, args.mtp_mode), config))
 
     manager = AttResourceManager(request_capacity=0)  # 只描述 meta 布局，不分配请求或缓存存储。
-    layer_start = calibration_start = 0
+    logical_layer_start = calibration_storage_layer_start = 0
     for role, model_class, config in models:
         count = get_resource_config(config, model_class=model_class)["num_hidden_layers"]
-        layer_ids = tuple(range(layer_start, layer_start + count))
+        logical_layer_ids = tuple(range(logical_layer_start, logical_layer_start + count))
         full = create_full_attention_definition(
-            model_class, config, args, model_layer_ids=layer_ids, calibration_layer_start=calibration_start
+            model_class, config, args, model_logical_layer_ids=logical_layer_ids, calibration_storage_layer_start=calibration_storage_layer_start
         )
         bounded = create_bounded_attention_definition(
-            model_class, config, args, model_layer_ids=layer_ids
+            model_class, config, args, model_logical_layer_ids=logical_layer_ids
         )
         for state in (full, bounded):
             if state is None:
                 continue
             manager.set_att_state(role, state)
-        layer_start += count
-        calibration_start += len(full.config.layer_ids) if full is not None else 0
+        logical_layer_start += count
+        calibration_storage_layer_start += len(full.config.logical_layer_groups) if full is not None else 0
 
     manager.finish_state_creation()
     if manager.get_bounded_attention_states():

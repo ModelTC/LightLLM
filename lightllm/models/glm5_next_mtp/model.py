@@ -80,7 +80,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     @classmethod
     def _full_attention_options(cls, config, args):
-        return dict(heads=1, dim=config["kv_lora_rank"], layer_ids=(0,), packed=True)
+        return dict(heads=1, dim=config["kv_lora_rank"], logical_layer_groups=((0,),), packed=True)
 
     def _init_att_backend(self):
         backend_class = (

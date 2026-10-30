@@ -39,7 +39,12 @@ class MLAFullAttentionState(FullAttentionState):
         self.config = layout_config
         self.storage_dtype = layout_config.dtype  # 实际 KV 编码类型；量化子类显式设置，区别于 scale 精度。
         self.resource_id: str | None = None  # 由 manager 绑定模型角色时设置。
-        self._layer_mapping = {layer: i for i, layer in enumerate(layout_config.layer_ids)}
+        # 外层下标是物理层位置；组内多个逻辑层映射到同一份 KV/量化字段存储。
+        self._logical_to_storage_layer = {
+            logical_layer_id: storage_layer_index
+            for storage_layer_index, logical_layer_group in enumerate(layout_config.logical_layer_groups)
+            for logical_layer_id in logical_layer_group
+        }
         self.page_size = page_size
         self.device = torch.device(device=device)
         self.capacity = 0
@@ -59,7 +64,7 @@ class MLAFullAttentionState(FullAttentionState):
         """由配置计算当前 TP rank 的单 token 开销，包含 packed 行 padding，无需分配存储。"""
         config = self.config
         return (
-            len(config.layer_ids) * config.head_num * config.head_dim
+            len(config.logical_layer_groups) * config.head_num * config.head_dim
             * self.storage_dtype.itemsize
         )
 
@@ -67,20 +72,20 @@ class MLAFullAttentionState(FullAttentionState):
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
 
-    def get_layer_view(self, layer_id: int) -> torch.Tensor:
+    def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """按逻辑层号返回压缩 latent 视图，不拆分为 GQA 的 K/V head。"""
-        return self.storage[self._layer_mapping[layer_id]]
+        return self.storage[self._logical_to_storage_layer[logical_layer_id]]
 
-    def write_full_att_kv(self, layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
+    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """通过 CUDA 算子将形状匹配的 MLA latent 数据写入指定物理 token 位置。"""
         assert token_indices.is_cuda, "token indices must reside on CUDA"
-        layer = self._layer_mapping[layer_id]
+        storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         if not len(token_indices):
             return
         assert self.storage.is_cuda, "KV writes require CUDA storage"
         from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 
-        destindex_copy_kv(K=kv, DestLoc=token_indices, Out=self.storage[layer])
+        destindex_copy_kv(K=kv, DestLoc=token_indices, Out=self.storage[storage_layer_index])
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
@@ -244,7 +249,7 @@ class MLAFullAttentionState(FullAttentionState):
         field_specs = (("kv", self.storage_dtype, config.head_dim, "dim"),)
         for field_name, field_dtype, field_width, last_axis in field_specs:
             axes = ("layer", "token", "head", last_axis)
-            local_shape = (len(config.layer_ids), page_tokens, config.head_num, field_width)
+            local_shape = (len(config.logical_layer_groups), page_tokens, config.head_num, field_width)
             global_shape = list(local_shape)
             global_shape[axes.index("token")] = page_tokens
             head_axis = axes.index("head")
@@ -300,7 +305,7 @@ class MLAFullAttentionState(FullAttentionState):
 
     def _storage_shape(self) -> tuple[int, ...]:
         return (
-            len(self.config.layer_ids),
+            len(self.config.logical_layer_groups),
             self.capacity + self.page_size,
             self.config.head_num,
             self.config.head_dim,

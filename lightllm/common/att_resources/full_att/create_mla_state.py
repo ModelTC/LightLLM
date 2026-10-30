@@ -41,7 +41,7 @@ def create_mla_state(
     kv_bytes = 656 if fp8 else config.head_dim * config.dtype.itemsize
     row_bytes = (kv_bytes + indexer_dim + 4 + 15) // 16 * 16
     packed_config = PackedMLAAttentionConfig(
-        layer_ids=config.layer_ids,
+        logical_layer_groups=config.logical_layer_groups,
         global_head_num=config.global_head_num,
         head_dim=row_bytes // storage_dtype.itemsize,
         dtype=storage_dtype,
