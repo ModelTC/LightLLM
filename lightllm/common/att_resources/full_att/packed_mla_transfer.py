@@ -22,14 +22,17 @@ def transfer_packed_mla_pages(
     indexer_offset: int,
     indexer_dim: int,
     write: bool,
-    grid_num: int = 36,
+    grid_num: int = 24,
     page_readies: list[bool] | None = None,
+    num_warps: int = 8,
+    num_stages: int = 1,
 ) -> None:
     """直接搬运 latent 及配套字段；CPU 传入页列表，PD 传入 [pd_page_index]，同步由调用方负责。
 
     外部页为 pinned/注册 CPU 内存或当前设备的 CUDA PD buffer。
     单页和多页统一通过页索引 Tensor 定位，共用布局和拷贝 kernel。
-    grid_num 控制每个字段发射的 program 数，默认 36；kernel 跳步循环覆盖全部元素。
+    grid_num 控制每个字段发射的 program 数，默认 24；kernel 跳步循环覆盖全部搬运单元。
+    num_warps 控制每个 program 的 warp 数，num_stages 控制循环级流水深度。
     """
     assert grid_num > 0, "grid_num must be positive"
     assert kv_storage.is_cuda, "page transfers require CUDA State storage"
@@ -125,12 +128,34 @@ def transfer_packed_mla_pages(
         copy_views.append((local, external))
 
     # 阶段三：每个 传输字段一次 launch，覆盖全部层、有效 token 和外部页。
-    # elements 是标量元素数，不是字节数；每个字段固定发射 grid_num 个 program。
+    # elements 是转换后搬运单元数，不是字节数；每个字段固定发射 grid_num 个 program。
     # 超出一轮 grid 覆盖范围的数据由 kernel 跳步处理，没有 gather/scatter 中间存储。
     # stream/event 同步由调用方负责，函数返回不表示 CPU 页已经可读取或复用。
     # TODO：当前 CPU/PD 已直接按索引搬运，可进一步将 KV、indexer 及各量化字段 的逐字段 launch 融合，
     # 共用 token/page 索引；保留各字段 dtype、stride、TP 切片、write_enabled 和页内 padding。
     for local, external in copy_views:
+        # 连续字段按最大 8 字节整数 view 搬运，减少索引计算和访存指令；不做数值转换。
+        # token/head/page 轴各有寻址语义，保持维数，只改变最内轴的搬运单位。
+        # 行宽、两端起点及外层 stride 都须对齐；packed 字段或 TP 切片不满足时保留原宽度。
+        if local.stride(-1) == external.stride(-1) == 1:
+            element_bytes = local.element_size()
+            for transfer_bytes, transfer_dtype in ((8, torch.int64), (4, torch.int32), (2, torch.int16)):
+                if transfer_bytes <= element_bytes:
+                    break
+                elements_per_unit = transfer_bytes // element_bytes
+                if (
+                    local.shape[-1] % elements_per_unit != 0
+                    or local.data_ptr() % transfer_bytes != 0
+                    or external.data_ptr() % transfer_bytes != 0
+                    or local.storage_offset() % elements_per_unit != 0
+                    or external.storage_offset() % elements_per_unit != 0
+                    or any(stride % elements_per_unit for stride in local.stride()[:-1])
+                    or any(stride % elements_per_unit for stride in external.stride()[:-1])
+                ):
+                    continue
+                local = local.view(transfer_dtype)
+                external = external.view(transfer_dtype)
+                break
         elements = local.shape[0] * token_count * local.shape[2] * local.shape[3]
         _copy_packed_mla_pages[(grid_num,)](
             LOCAL=local,
@@ -149,7 +174,9 @@ def transfer_packed_mla_pages(
             WIDTH=local.shape[3],
             ELEMENT_BYTES=local.element_size(),
             WRITE=write,
-            BLOCK=256,
+            BLOCK=1024,
+            NUM_STAGES=num_stages,
+            num_warps=num_warps,
         )
 
 
@@ -169,7 +196,7 @@ def _copy_packed_mla_pages(
     PAGE_READIES,  # 可选的 GPU bool 数组；True 表示该逻辑页已就绪，禁止覆盖。
     # 本次搬运范围：只覆盖有效 token，不包含尾页空余位置。
     token_count,  # 本次有效 token 数；调用方保证大于 0。
-    element_count,  # layer 数 × token_count × HEADS × WIDTH，单位为标量元素。
+    element_count,  # layer 数 × token_count × HEADS × WIDTH，单位为转换后的搬运单元。
     # 编译期寻址配置：stride 的单位是元素数，不是字节数。
     TOKEN_STRIDE: tl.constexpr,  # token 索引步长，直接支持切片视图，不创建连续副本。
     LOCAL_STRIDES: tl.constexpr,  # 对应 LOCAL 的四个轴，保留原 GPU 存储步长。
@@ -181,7 +208,8 @@ def _copy_packed_mla_pages(
     ELEMENT_BYTES: tl.constexpr,  # 单个元素字节数，用于选择同宽整数指针。
     HAS_PAGE_READIES: tl.constexpr,  # 无 ready 标记时编译掉检查，保持 PD/读回路径。
     WRITE: tl.constexpr,  # True：KV→外部页；False：外部页→KV。
-    BLOCK: tl.constexpr,  # 每个 program 处理的标量元素数，当前调用方传入 256。
+    BLOCK: tl.constexpr,  # 每个 program 每轮处理的搬运单元数。
+    NUM_STAGES: tl.constexpr,  # tl.range 的循环流水深度，不是 launch 的同名选项。
 ):
     # 阶段一：把两侧指针解释为同宽整数指针，逐位保留数据（包括 NaN 位模式）。
     # 这里只改变指针类型，不进行数值转换；元素宽度不变，因此原 stride 仍然有效。
@@ -206,7 +234,7 @@ def _copy_packed_mla_pages(
     grid_stride = tl.num_programs(axis=0).to(dtype=tl.int64) * BLOCK
     block_offsets = tl.arange(start=0, end=BLOCK)
     # 起点超出 element_count 的 program 不进入循环；最后一块通过 valid 屏蔽尾部元素。
-    for block_start in range(program_start, element_count, grid_stride):
+    for block_start in tl.range(program_start, element_count, grid_stride, num_stages=NUM_STAGES):
         offsets = block_start + block_offsets
         valid = offsets < element_count
         token = offsets // (WIDTH * HEADS) % token_count

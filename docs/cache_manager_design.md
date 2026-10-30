@@ -1212,7 +1212,27 @@ DP 副本之间使用相同的 State 成员名。`copy_from_other_dp` 接收远�
 
 full-attention 使用 `copy_tokens_from_other_dp(src_token_indices, dst_token_indices, remote_dp_full_att_state)` 指定源对象和配对索引；bounded State 分别通过 `copy_big_page_state_from_other_dp` 与 `copy_run_time_state_from_other_dp` 指定源对象和配对索引，不接收字段映射。full-attention DP 的源、目标 token 索引必须是位于各自存储设备上的 CUDA Tensor；源索引可为 int32/int64，目标索引须为 int64（当前 `index_copy_` 的要求）。manager 和 State 直接使用传入索引，不进行设备迁移、dtype 转换或 Python list 转换；bounded 请求索引仍为 `list[int]`。布局及编码兼容检查使用断言。full-attention 所有 token 索引入口（KV 写入、本地 token 复制、CPU/PD 页读写及 DP 复制）都只接受 CUDA Tensor，由调用方准备好索引；State 不迁移设备、不转换 dtype，也不调用 `contiguous()` 创建副本。CPU cache 页面仍在主机内存，token 索引仍须位于 CUDA。PD 网络任务中的 `mem_indexes` 仍以列表序列化，由传输进程在调用 `copy_page` 前显式创建设备上的整数 Tensor。State 的四个公开页读写接口将显式存储成员交给本方案的 `transfer_*_pages`；CPU 传入页索引列表，PD 传入包含指定页索引的列表，不再保留 `_buffer_io()`。CPU/PD/DP 显式访问各实现的存储成员：GQA/静态 FP8 使用 `k_storage`、`v_storage`，分组量化同时操作 `k_scales`、`v_scales`，MLA 使用 `storage`；本地变量和页切片逐项列出，具体 State 不提供统一枚举存储 buffer 的接口。完整 token 复制同样直接对各存储成员调用搬运算子。所有 full-attention CPU/PD 共用 kernel 和本地 token 复制 kernel 均按输入索引的 stride 寻址，直接支持非连续 CUDA 索引，保留 int32/int64 类型；DP fetch 的源索引直接取自远端 CUDA 请求表，目标 allocator 返回 CPU int32 索引，因此由 DP 调用方在进入 manager 前一次性准备当前设备的 CUDA int64 索引，供全部 State 共用；State 仅断言索引为 CUDA Tensor，不重复转换。页布局由对应 State 生成，调用方保证读回目标索引唯一；搬运时仅保留页大小和页数等必要检查，不逐次重建字段集合或回读索引去重。
 
-CPU 直接索引拷贝的实现约束：每个传输字段用真实 Tensor stride 计算本地槽位和外部页地址，支持独立 K/V、动态 scale、packed MLA 的 RoPE/indexer 字段及 TP 切片。按同宽整数搬运原始编码，保留浮点 NaN 等位模式；未参与字段、其他 TP 分片、GPU packed padding 和最后一页的无效 token 均不写入。写出时遵守 `write_enabled`，读回不受它限制。写入的 CPU 页 ID、读回的目标 token 索引由调用方保证无冲突；一次调用只分配少量索引 Tensor，临时显存不随 KV 数据量增长。CPU cache 搬运仅支持 CUDA State，不提供 CPU 参考路径或回退。GQA、静态 FP8、分组量化、MLA、packed MLA 各自提供专用入口和 kernel 文件；GQA/静态 FP8 显式接收 K/V，分组量化再接收 K/V scale，MLA 接收 latent，packed MLA 接收 packed 存储及 KV/indexer 区间参数。每个 full-attention 方案的 CPU/PD 共用本方案的 `transfer_*_pages` 入口及一个双向 kernel，显式接收 K/V、token 索引、`page_buffers` 和 `page_indices: list[int]`。CPU 传入页索引列表，PD 入口将单个 `pd_page_index` 转为 `[pd_page_index]`，公共 State 接口保持原有语义。读写均直接寻址，不使用 `index_select`、`index_copy_` 或中间 KV Tensor；单页和多页统一构造 GPU 页索引 Tensor，由 kernel 按 `PAGE_IDS[token // PAGE_TOKENS]` 定位物理页，不再设置单页特判。各 `transfer_*_pages(..., grid_num=36)` 控制每个字段发射的 program 数；kernel 从 `program_id * BLOCK` 开始，按 `num_programs * BLOCK` 跳步循环，因此 grid 数量固定时仍可覆盖任意搬运范围。先构造全部参与字段的视图，再逐字段提交 kernel，保留 TP 切片、副本写出规则及尾页有效范围。网络收发和同步继续由调用方负责。静态 FP8 标定参数不随页传输，动态量化 scale 与 token 一起传输；packed MLA 只搬运有效字段，保留本地行 padding。所有 full-attention 页搬运和 KV 写入均要求 CUDA State；CPU 实例仅用于布局、容量等描述性操作与测试。DP 保持各自的数据操作路径。
+CPU 直接索引拷贝的实现约束：每个传输字段用真实 Tensor stride 计算本地槽位和外部页地址，支持独立 K/V、动态 scale、packed MLA 的 RoPE/indexer 字段及 TP 切片。按同宽整数搬运原始编码，保留浮点 NaN 等位模式；未参与字段、其他 TP 分片、GPU packed padding 和最后一页的无效 token 均不写入。写出时遵守 `write_enabled`，读回不受它限制。写入的 CPU 页 ID、读回的目标 token 索引由调用方保证无冲突；一次调用只分配少量索引 Tensor，临时显存不随 KV 数据量增长。CPU cache 搬运仅支持 CUDA State，不提供 CPU 参考路径或回退。GQA、静态 FP8、分组量化、MLA、packed MLA 各自提供专用入口和 kernel 文件；GQA/静态 FP8 显式接收 K/V，分组量化再接收 K/V scale，MLA 接收 latent，packed MLA 接收 packed 存储及 KV/indexer 区间参数。每个 full-attention 方案的 CPU/PD 共用本方案的 `transfer_*_pages` 入口及一个双向 kernel，显式接收 K/V、token 索引、`page_buffers` 和 `page_indices: list[int]`。CPU 传入页索引列表，PD 入口将单个 `pd_page_index` 转为 `[pd_page_index]`，公共 State 接口保持原有语义。读写均直接寻址，不使用 `index_select`、`index_copy_` 或中间 KV Tensor；单页和多页统一构造 GPU 页索引 Tensor，由 kernel 按 `PAGE_IDS[token // PAGE_TOKENS]` 定位物理页，不再设置单页特判。各 `transfer_*_pages(..., grid_num=24, num_warps=8, num_stages=1)` 控制每个字段的发射配置，默认 `BLOCK=1024`；kernel 从 `program_id * BLOCK` 开始，以 `tl.range(..., num_stages=NUM_STAGES)` 按 `num_programs * BLOCK` 跳步循环，因此 grid 数量固定时仍可覆盖任意搬运范围。先构造全部参与字段的视图，再逐字段提交 kernel，保留 TP 切片、副本写出规则及尾页有效范围。网络收发和同步继续由调用方负责。静态 FP8 标定参数不随页传输，动态量化 scale 与 token 一起传输；packed MLA 只搬运有效字段，保留本地行 padding。所有 full-attention 页搬运和 KV 写入均要求 CUDA State；CPU 实例仅用于布局、容量等描述性操作与测试。DP 保持各自的数据操作路径。
+
+full-attention 的宽类型搬运只调整字段最内轴，不合并具有独立寻址语义的 layer/token/head/page 轴。两端末轴连续，且行宽、起点、storage_offset、外层 stride 都满足对齐时，依次尝试 8/4/2 字节的整数 view；不满足时保留原元素宽度。view 不复制数据、不转换数值，WIDTH、ELEMENT_BYTES、各轴 stride 和搬运单元总数均由转换后的视图得到，浮点 NaN、量化 payload 和 scale 的原始位模式保持不变。页起点、页跨度不满足宽对齐或最内维不连续时须正确回退；TP 切片、乱序 token/page 索引、ready 页跳过、尾页及 packed padding 的语义不变。五类方案继续使用各自的专用入口和 kernel，不新增通用 State 或合并字段 launch。
+
+full-attention 参数在 H200 上实测：先对 GQA 的小/中/大规模、CPU/PD 双向搬运比较 12 个组合，再在 INT4、INT8、静态 FP8、MLA 和三种 packed 布局上比较入选组合，共 68 个场景。候选包含 grid=24/36、BLOCK=256/512/1024/2048、warps=4/8、循环 stages=1/2/3/4；固定配置 24/1024/8/1 的速度几何平均约为旧实现的 2.12 倍。小块不保证更快，本轮最多增加约 1.74 μs。旧实现为未扩宽 view 的 grid=36、BLOCK=256、默认 4 warps、普通 range 循环。计时预先准备页索引并预热编译，随机顺序执行 CUDA Graph，三轮取中位数；每个候选均与旧实现逐字节对照。
+
+进一步使用 16 个独立地址数据块连续发射，覆盖五类专用实现的 CPU/PD 双向操作，共 20 个场景。每块 16 层、1025 个有效 token、64 token/页，使用乱序物理 token 与页索引；GQA/量化 GQA 为 8 个 KV head、head_dim=128，MLA 使用单 latent head。核函数七轮取平均，完整 API 五轮取平均；块间不做同步。下面是代表性结果（GB/s，按有效载荷计），完整 API 包含视图准备、页索引上传、发射及末尾同步，不含 buffer 分配或 PD 网络收发。新配置未测试与推理计算并发的影响。
+
+| 布局及方向 | 旧核带宽 | 新核带宽 | 旧完整 API | 新完整 API |
+| --- | ---: | ---: | ---: | ---: |
+| GQA CPU→GPU | 11.72 | 43.83 | 11.63 | 43.26 |
+| GQA GPU→CPU | 29.59 | 50.07 | 29.22 | 49.56 |
+| GQA PD 页→KV | 30.44 | 205.40 | 30.08 | 198.41 |
+| INT4 CPU→GPU | 7.34 | 43.91 | 7.03 | 42.47 |
+| 静态 FP8 CPU→GPU | 6.10 | 43.73 | 6.08 | 42.13 |
+| MLA CPU→GPU | 11.87 | 45.58 | 11.50 | 43.81 |
+| packed FP8 MLA CPU→GPU | 7.02 | 43.55 | 6.90 | 39.12 |
+| packed FP8 MLA PD 页→KV | 16.93 | 169.67 | 16.54 | 48.24 |
+
+packed MLA 等多字段布局的 Python 准备及逐字段发射开销仍会限制完整调用吞吐；因此核带宽不能直接当作完整 CPU cache 或 PD 吞吐。字段融合仍保留为后续优化，不在本轮引入。
+
 
 
 
