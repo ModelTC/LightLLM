@@ -9,10 +9,9 @@ class Internlm2RewardPostLayerInfer(LlamaPostLayerInfer):
     def token_forward(
         self, input_embdings, infer_state: LlamaInferStateInfo, layer_weight: Internlm2RewardPreAndPostLayerWeight
     ):
-        last_input, token_num = self._slice_get_last_input(input_embdings, infer_state)
+        last_input, _, final_hidden = self._prepare_output_hidden(input_embdings, infer_state, layer_weight)
 
         input_embdings = None
-        last_input = self._norm(last_input, infer_state, layer_weight)
         score = layer_weight.score_head_.mm(last_input)
 
-        return PostLayerOutput(logits=score)
+        return PostLayerOutput(logits=score, final_hidden=final_hidden)

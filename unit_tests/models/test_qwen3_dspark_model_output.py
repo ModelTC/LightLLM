@@ -212,8 +212,15 @@ def test_dspark_non_markov_head_does_not_treat_candidate_columns_as_token_ids():
         logits=torch.randn(4, 2),
         logits_token_ids=torch.tensor([[10, 20], [30, 40], [50, 60], [70, 80]]),
     )
-    post_infer._draft_lm_head_and_gather = lambda *args: candidate_output
     observed = {}
+    hidden = torch.randn(4, 3)
+    post_infer._norm = lambda hidden, infer_state, layer_weight: hidden + 1
+
+    def draft_head(normed_hidden, *args):
+        torch.testing.assert_close(normed_hidden, hidden + 1)
+        return candidate_output
+
+    post_infer._draft_lm_head_and_gather = draft_head
 
     def predict_confidence_logits(*args, sampled_tokens, **kwargs):
         observed["sampled_tokens"] = sampled_tokens
@@ -232,7 +239,7 @@ def test_dspark_non_markov_head_does_not_treat_candidate_columns_as_token_ids():
         hidden_collector=collector,
     )
 
-    output = post_infer.token_forward(torch.randn(4, 3), infer_state, object())
+    output = post_infer.token_forward(hidden, infer_state, object())
 
     assert output is candidate_output
     assert observed["sampled_tokens"] is None
