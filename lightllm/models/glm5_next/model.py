@@ -51,7 +51,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
 
         config = get_resource_config(model_config, model_class=cls)
         assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
-        cfg = Glm5NextResourceConfig.from_model_config(config, args, include_draft=False)
+        cfg = Glm5NextResourceConfig.from_model_config(config, args)
         logical_layer_ids = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
         if not logical_layer_ids:
             return []
@@ -122,15 +122,15 @@ class Glm5NextTpPartModel(TpPartBaseModel):
 
         config = get_resource_config(model_config, model_class=cls)
         assert args.llm_kv_type == "None", "GLM K-pool requires unquantized KV"
-        cfg = Glm5NextResourceConfig.from_model_config(config, args, include_draft=False)
-        logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_logical_layer_ids())
+        cfg = Glm5NextResourceConfig.from_model_config(config, args)
+        logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
         if not logical_layer_groups:
             return []
         state = create_mla_state(
             config=FullAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
                 global_head_num=1,
-                head_dim=config["kv_lora_rank"],
+                head_dim=cfg.full_att_head_dim,
                 dtype=get_torch_dtype(args.data_type),
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
@@ -159,8 +159,8 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = get_resource_config(model_config, model_class=cls)
-        cfg = Glm5NextResourceConfig.from_model_config(config, args, include_draft=False)
-        logical_layer_ids = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_logical_layer_ids())
+        cfg = Glm5NextResourceConfig.from_model_config(config, args)
+        logical_layer_ids = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_layer_indices())
         if not logical_layer_ids:
             return []
         assert args.linear_att_hash_page_size % config["index_kpool"] == 0, "GLM cache pages must align to index_kpool"

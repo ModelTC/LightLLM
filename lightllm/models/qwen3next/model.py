@@ -57,7 +57,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         config = get_resource_config(model_config, model_class=cls)
         assert config["num_attention_heads"] % tp_world_size == 0
         assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
-        cfg = Qwen3NextResourceConfig.from_model_config(config, args, include_draft=False)
+        cfg = Qwen3NextResourceConfig.from_model_config(config, args)
         logical_layer_ids = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
         if not logical_layer_ids:
             return []
@@ -113,8 +113,8 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
         config = get_resource_config(model_config, model_class=cls)
         assert args.llm_kv_type in ("None", "fp8kv_sph", "fp8kv_spt"), "unsupported Qwen3Next KV encoding"
-        cfg = Qwen3NextResourceConfig.from_model_config(config, args, include_draft=False)
-        logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_logical_layer_ids())
+        cfg = Qwen3NextResourceConfig.from_model_config(config, args)
+        logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
         if not logical_layer_groups:
             return []
         state = create_gqa_state(

@@ -102,8 +102,9 @@ def _validate_flashqla():
     from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 
     linear_config = Qwen3NextResourceConfig.load_from_args()
-    num_k_heads = linear_config.num_linear_k_heads
-    num_v_heads = linear_config.num_linear_v_heads
+    # 配置只保存全局 head 数，校验算子的输入按当前 TP 大小计算本地分片。
+    num_k_heads = max(1, linear_config.global_linear_k_heads // linear_config.tp_world_size)
+    num_v_heads = max(1, linear_config.global_linear_v_heads // linear_config.tp_world_size)
     head_k_dim = linear_config.head_linear_k_dim
     head_v_dim = linear_config.head_linear_v_dim
     qkv_dtype = linear_config.conv_state_dtype

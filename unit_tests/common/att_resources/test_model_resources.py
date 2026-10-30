@@ -40,28 +40,20 @@ def make_resources(
     draft_layers: int = 0,
 ):
     gk, gv = (4, 4) if glm else (2, 4)
-    local_k, local_v = max(1, gk // tp), max(1, gv // tp)
-    heads = 1 if glm else max(1, 2 // tp)
     cls = Glm5NextResourceConfig if glm else Qwen3NextResourceConfig
     config = cls(
         tp_world_size=tp,
         full_att_all_num_kv_heads=1 if glm else 2,
-        full_att_dtype=torch.bfloat16,
-        full_att_num_kv_heads=heads,
-        full_att_head_dim=584 if glm else 16,
+        full_att_head_dim=512 if glm else 16,
         global_linear_k_heads=gk,
         global_linear_v_heads=gv,
-        num_linear_k_heads=local_k,
-        num_linear_v_heads=local_v,
         head_linear_k_dim=8,
         head_linear_v_dim=8,
         conv_kernel_size=3,
-        linear_layer_num=3 if glm else 2,
         conv_state_dtype=torch.bfloat16,
         ssm_state_dtype=torch.float32,
         full_attention_interval=4 if glm else 2,
         all_layer_num=4,
-        draft_full_att_kv_layer_num=draft_layers,
     )
     if glm:
         full = PackedMLAFullAttentionState(

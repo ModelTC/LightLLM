@@ -52,13 +52,9 @@ def linear_cache(monkeypatch, tmp_path, request):
     config = Qwen3NextResourceConfig(
         tp_world_size=1,
         full_att_all_num_kv_heads=1,
-        full_att_dtype=torch.bfloat16,
-        full_att_num_kv_heads=1,
         full_att_head_dim=8,
         global_linear_k_heads=1,
         global_linear_v_heads=1,
-        num_linear_k_heads=1,
-        num_linear_v_heads=1,
         head_linear_k_dim=8,
         head_linear_v_dim=8,
         conv_kernel_size=3,
@@ -68,7 +64,7 @@ def linear_cache(monkeypatch, tmp_path, request):
     )
     full = GQAFullAttentionState(
         FullAttentionConfig(
-            logical_layer_groups=tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
+            logical_layer_groups=tuple((layer,) for layer in config.get_full_att_layer_indices()),
             global_head_num=1,
             head_dim=8,
             dtype=torch.bfloat16,

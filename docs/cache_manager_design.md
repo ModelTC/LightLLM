@@ -1640,6 +1640,8 @@ BaseModel 提供三个默认返回空列表的 `classmethod` 扩展点，具体�
 
 `model_logical_layer_ids` 表示当前模型拥有的全局逻辑层 ID，按模型内部层顺序排列；main/draft 保留现有全局编号机制。具体模型自行选择各类 State 的参与层和共享分组，该参数不代表物理存储层数，也不要求每个 State 使用全部层。
 
+`Qwen3NextResourceConfig` 及其 GLM 配置只描述当前模型，保留 `from_model_config()`、`load_from_args()` 和 `get_full_att_layer_indices()` 三个入口。层查询返回模型内部序号，由模型工厂转换为实际逻辑层 ID；不追加 draft 层，不计算物理层映射、Conv/SSM 存储形状或字节数。配置只保存全局 head 数，本地 TP 分片由 State 或后端校验调用方计算。full-attention 维度保存原始特征宽度，GLM 的 indexer 字段和 packed padding 由具体 State 的创建入口处理。
+
 三个接口显式接收模型配置、启动参数、逻辑层号和 TP 信息；bounded/tail 接口另收请求容量和设备，full 工厂不接收标定起点。`prepare_att_resources()` 为 main 直接创建空的 `AttResourceManager`，draft 引用同一实例；随后用真实请求容量和 CUDA 设备调用模型工厂，并统一按模型角色注册所有返回对象。无 attention 的 draft 仅共享管理器，不创建自身资源。所有模型统一使用 `AttResourceManager`，模型差异由三类 State 工厂及具体 State 实现表达。ReqManager 的创建与共享关系仍由 backend 组织。
 
 

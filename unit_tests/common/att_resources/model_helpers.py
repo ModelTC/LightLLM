@@ -240,7 +240,7 @@ def build_hybrid_resources(
                     logical_layer_ids=tuple(layer for group in state.config.logical_layer_groups for layer in group),
                     pool_size=config.index_kpool,
                     head_dim=config.index_head_dim,
-                    dtype=config.full_att_dtype,
+                    dtype=state.config.dtype,
                     tp_rank=tp_rank,
                     tp_world_size=config.tp_world_size,
                 ),

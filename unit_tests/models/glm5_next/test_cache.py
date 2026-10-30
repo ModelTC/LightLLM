@@ -40,8 +40,8 @@ def test_nope_cache_config_uses_native_mla_width():
         },
         StartArgs(tp=4, data_type="bfloat16"),
     )
-    assert config.full_att_head_dim == 584
-    assert config.full_att_head_dim * config.full_att_dtype.itemsize == 512 * 2 + 144
+    # 模型配置保留原始 latent 宽度；packed 行宽由 State 创建入口计算。
+    assert config.full_att_head_dim == 512
 
 
 @pytest.mark.parametrize("small_page", [False, True])
@@ -71,26 +71,23 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     config = Glm5NextResourceConfig(
         tp_world_size=tp_world_size,
         full_att_all_num_kv_heads=1,
-        full_att_dtype=torch.bfloat16,
-        full_att_num_kv_heads=1,
-        full_att_head_dim=584,
+        full_att_head_dim=512,
         global_linear_k_heads=2 * tp_world_size,
         global_linear_v_heads=2 * tp_world_size,
-        num_linear_k_heads=2,
-        num_linear_v_heads=2,
         head_linear_k_dim=128,
         head_linear_v_dim=128,
         conv_kernel_size=4,
-        linear_layer_num=3,
         conv_state_dtype=torch.bfloat16,
         ssm_state_dtype=torch.float32,
         full_attention_interval=4,
         all_layer_num=4,
-        draft_full_att_kv_layer_num=int(mtp_step > 0),
     )
+    full_layer_ids = config.get_full_att_layer_indices()
+    if mtp_step:
+        full_layer_ids += (config.all_layer_num,)
     full = PackedMLAFullAttentionState(
         PackedMLAAttentionConfig(
-            logical_layer_groups=tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
+            logical_layer_groups=tuple((layer,) for layer in full_layer_ids),
             global_head_num=1,
             head_dim=584,
             dtype=torch.bfloat16,

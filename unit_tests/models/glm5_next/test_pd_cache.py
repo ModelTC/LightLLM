@@ -50,30 +50,27 @@ def make_mems(monkeypatch, request):
         config = Glm5NextResourceConfig(
             tp_world_size=tp,
             full_att_all_num_kv_heads=1,
-            full_att_dtype=torch.bfloat16,
-            full_att_num_kv_heads=1,
-            full_att_head_dim=584,
+            full_att_head_dim=512,
             global_linear_k_heads=8,
             global_linear_v_heads=8,
-            num_linear_k_heads=8 // tp,
-            num_linear_v_heads=8 // tp,
             head_linear_k_dim=128,
             head_linear_v_dim=128,
             conv_kernel_size=4,
-            linear_layer_num=6,
             conv_state_dtype=torch.bfloat16,
             ssm_state_dtype=torch.float32,
             full_attention_interval=4,
             all_layer_num=8,
-            draft_full_att_kv_layer_num=int(mtp_step > 0),
         )
+        full_layer_ids = config.get_full_att_layer_indices()
+        if mtp_step:
+            full_layer_ids += (config.all_layer_num,)
         mems = []
         for rank in range(tp):
             monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", str(rank))
             monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", str(tp))
             full = PackedMLAFullAttentionState(
                 PackedMLAAttentionConfig(
-                    logical_layer_groups=tuple((layer,) for layer in config.get_full_att_logical_layer_ids()),
+                    logical_layer_groups=tuple((layer,) for layer in full_layer_ids),
                     global_head_num=1,
                     head_dim=584,
                     dtype=torch.bfloat16,

@@ -179,8 +179,9 @@ def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear
 
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     linear_config = SimpleNamespace(
-        num_linear_k_heads=2,
-        num_linear_v_heads=4,
+        tp_world_size=2,
+        global_linear_k_heads=4,
+        global_linear_v_heads=8,
         head_linear_k_dim=8,
         head_linear_v_dim=16,
         conv_state_dtype=torch.bfloat16,
