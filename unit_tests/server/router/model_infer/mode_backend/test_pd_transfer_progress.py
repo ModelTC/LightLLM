@@ -87,7 +87,7 @@ def test_dispatch_shares_timeout_mark_with_all_pages_in_each_group(monkeypatch):
 
     assert first.shared_time_out_mark is second.shared_time_out_mark is empty.shared_time_out_mark
     assert unrelated.shared_time_out_mark is not first.shared_time_out_mark
-    assert first.shared_time_out_mark.time_mark == 100.0
+    assert first.shared_time_out_mark.time_mark is None
     assert module.waiting_dict == {task.get_key(): task for task in (first, second, unrelated)}
     assert module.success_queue.get_nowait() == (None, None, empty)
     assert empty.start_trans_time == 100.0
@@ -95,12 +95,30 @@ def test_dispatch_shares_timeout_mark_with_all_pages_in_each_group(monkeypatch):
     assert restored[0].shared_time_out_mark is restored[1].shared_time_out_mark is restored[2].shared_time_out_mark
 
 
-def test_waiting_pages_timeout_from_shared_progress_and_initial_deadline(monkeypatch):
+def test_first_notify_wait_does_not_charge_prefill_queueing(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(decode_trans_process.time, "time", lambda: now[0])
+    first, second = make_task(1, 0), make_task(1, 1)
+    module = make_module()
+    module.recv_task_group_queue = _SequenceQueue(PDChunckedTransTaskGroup([first, second]))
+
+    with pytest.raises(_StopLoop):
+        module.dispatch_task_loop()
+
+    now[0] = 1000.0
+    module._check_tasks_time_out()
+    assert module.failed_queue.empty()
+    assert len(module.waiting_dict) == 2
+    assert first.shared_time_out_mark.time_mark is None
+
+
+def test_waiting_pages_timeout_from_shared_progress(monkeypatch):
     now = [100.0]
     monkeypatch.setattr(decode_trans_process.time, "time", lambda: now[0])
     first, second, unrelated = make_task(1, 0), make_task(1, 1), make_task(2, 0)
     first.shared_time_out_mark = second.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
     unrelated.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
+    unrelated.shared_time_out_mark.update()
     for task in (first, second, unrelated):
         task.create_time = 0.0
     module = make_module(first, second, unrelated)
@@ -134,24 +152,24 @@ def test_matched_notifications_refresh_local_siblings_only(monkeypatch, stage):
     remote.shared_time_out_mark.time_mark = -100.0
     module.transporter.get_new_notifs = lambda: {"prefill": [pickle.dumps(remote)]}
 
-    now[0] = 109.0
+    now[0] = 1009.0
     with monkeypatch.context() as patch:
         patch.setattr(module, "_check_tasks_time_out", Mock(side_effect=_StopLoop))
         with pytest.raises(_StopLoop):
             module.accept_peer_task_loop()
 
-    assert sibling.shared_time_out_mark.time_mark == 109.0
-    assert unrelated.shared_time_out_mark.time_mark == 100.0
+    assert sibling.shared_time_out_mark.time_mark == 1009.0
+    assert unrelated.shared_time_out_mark.time_mark is None
     target_queue = module.request_page_task_queue if stage == "request" else module.ready_page_task_queue
     assert target_queue.get_nowait() is first
 
     # The repeated notify cannot keep siblings alive once its waiting task was removed.
-    now[0] = 110.0
+    now[0] = 1010.0
     with monkeypatch.context() as patch:
         patch.setattr(module, "_check_tasks_time_out", Mock(side_effect=_StopLoop))
         with pytest.raises(_StopLoop):
             module.accept_peer_task_loop()
-    assert sibling.shared_time_out_mark.time_mark == 109.0
+    assert sibling.shared_time_out_mark.time_mark == 1009.0
     module.transporter.send_error_info_to_prefill_node.assert_called_once()
 
 

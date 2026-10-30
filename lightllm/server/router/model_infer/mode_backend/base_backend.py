@@ -564,6 +564,9 @@ class ModeBackend:
                         # pd decode 节点需要预填充 prefill 节点发送过来的产生的首token信息，以使
                         # 推理过程可以继续。
                         if self.is_pd_decode_mode:
+                            if obj.checkpoint_len:
+                                assert obj.checkpoint_len == req.hybrid_cache_len
+                                req.pd_checkpoint_received_len = obj.checkpoint_len
                             if obj.first_gen_token_id is not None:
                                 assert req.cur_output_len == 0
                                 req.cur_output_len += 1
@@ -704,8 +707,7 @@ class ModeBackend:
         self._timer_merge_radix_tree()
 
         if self.args.enable_cpu_cache and (
-            (self.is_deepseek_v4 and self.is_master_in_dp)
-            or (not self.is_deepseek_v4 and len(g_infer_context.infer_req_ids) > 0)
+            self.is_deepseek_v4 or (not self.is_deepseek_v4 and len(g_infer_context.infer_req_ids) > 0)
         ):
             self.multi_level_cache_module.update_cpu_cache_task_states()
 
@@ -860,10 +862,13 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
+        cpu_store_reqs = [] if self.args.enable_cpu_cache and self.is_deepseek_v4 and self.is_master_in_dp else None
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
         for req_obj in run_reqs:
             req_obj: InferReq = req_obj
+            if cpu_store_reqs is not None and req_obj.cur_kv_len < req_obj.shm_req.input_len:
+                cpu_store_reqs.append(req_obj)
             if is_chuncked_mode:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
             else:
@@ -883,6 +888,10 @@ class ModeBackend:
             req_obj.cur_output_len += 1
             pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len)
             update_func_objs.append(pack)
+        if cpu_store_reqs:
+            self.multi_level_cache_module.store_completed_prefill_pages(
+                reqs=cpu_store_reqs, producer_stream=g_infer_context.get_overlap_stream()
+            )
         return update_func_objs
 
     # 一些可以复用的通用功能函数

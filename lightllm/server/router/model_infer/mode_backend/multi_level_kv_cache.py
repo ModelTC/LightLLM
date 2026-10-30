@@ -9,7 +9,7 @@ from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.config_utils import is_hybrid_att_model
-from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args, get_dsv4_cpu_cache_max_pages_per_task
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
 from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
@@ -40,6 +40,13 @@ class MultiLevelKvCacheModule(object):
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
+        if backend.is_deepseek_v4:
+            self.dsv4_sessions = {}
+            self.dsv4_load_tasks = deque()
+            self.dsv4_store_tasks = deque()
+            self.dsv4_staging_slots = [Dsv4StagingSlot(), Dsv4StagingSlot()]
+            self.dsv4_max_pages_per_task = get_dsv4_cpu_cache_max_pages_per_task()
+            assert self.dsv4_max_pages_per_task > 0
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -67,6 +74,14 @@ class MultiLevelKvCacheModule(object):
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
+            if self.backend.is_deepseek_v4 and is_master_in_dp:
+                self.dsv4_sessions[req.req_id] = Dsv4CpuCacheSession(
+                    request_id=req.req_id,
+                    next_page_index=len(page_list),
+                    leased_pages=list(page_list),
+                    token_num=(req.shm_req.token_hash_page_len_list.get_all()[len(page_list) - 1] if page_list else 0),
+                    disk_offload_enable=self.args.enable_disk_cache,
+                )
             # 需要返回 prompt logprobs 的请求不应加载 cpu cache：
             # 命中后会复用缓存 kv、跳过推理，拿不到对应 logprobs。
             # match 侧通常已跳过；这里仍要 deref 已 match 的 page，避免引用泄漏。
@@ -144,14 +159,23 @@ class MultiLevelKvCacheModule(object):
                     idle_token_num -= need_token_num
                     req.cur_kv_len = req.cur_kv_len + need_token_num
 
-                    mem_manager.operator.load_cpu_cache_to_gpu(
+                    checkpoint_leases = mem_manager.operator.load_cpu_cache_to_gpu(
                         mem_indexes=mem_indexes_cuda,
                         page_indexes=page_indexes_cuda,
                         cpu_cache_client=self.cpu_cache_client,
                         req=req,
                     )
+                    if self.backend.is_deepseek_v4:
+                        for pool, page_ids in checkpoint_leases:
+                            pool.retain_state_cache(page_ids)
+                        load_event = torch.cuda.Event()
+                        load_event.record()
+                        self.dsv4_load_tasks.append(Dsv4LoadTask(load_event, checkpoint_leases))
+                        if is_master_in_dp:
+                            self.dsv4_sessions[req.req_id].load_event = load_event
 
-                torch.cuda.current_stream().synchronize()
+                if not self.backend.is_deepseek_v4:
+                    torch.cuda.current_stream().synchronize()
 
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -160,16 +184,201 @@ class MultiLevelKvCacheModule(object):
 
         dist.barrier(group=self.init_sync_group)
 
-        if self.backend.is_master_in_dp:
+        if self.backend.is_master_in_dp and not self.backend.is_deepseek_v4:
             self.cpu_cache_client.lock.acquire_sleep1ms()
             self.cpu_cache_client.deref_pages(page_list=all_page_list)
             self.cpu_cache_client.lock.release()
         return
 
+    def _poll_dsv4_store_tasks(self, wait_for_one=False):
+        while self.dsv4_load_tasks and self.dsv4_load_tasks[0].load_event.query():
+            task = self.dsv4_load_tasks.popleft()
+            for pool, page_ids in task.checkpoint_leases:
+                pool.free_state_cache(page_ids)
+        if wait_for_one:
+            self.dsv4_store_tasks[0].store_event.synchronize()
+        while self.dsv4_store_tasks and self.dsv4_store_tasks[0].store_event.query():
+            task = self.dsv4_store_tasks.popleft()
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            try:
+                self.cpu_cache_client.update_pages_status_to_ready(page_list=task.owner_pages, deref=False)
+            finally:
+                self.cpu_cache_client.lock.release()
+            for pool, page_ids in task.checkpoint_leases:
+                pool.free_state_cache(page_ids)
+            task.slot.in_use = False
+            for session in task.sessions:
+                session.pending_tasks -= 1
+
+        for req_id, session in list(self.dsv4_sessions.items()):
+            if not session.closing or session.pending_tasks:
+                continue
+            if session.load_event is not None and not session.load_event.query():
+                continue
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            try:
+                if session.disk_offload_enable and session.leased_pages:
+                    # Disk groups must be a complete root-to-tail hash chain. A
+                    # page owned by another in-flight store may not be ready yet.
+                    if not self.cpu_cache_client.check_allpages_ready(session.leased_pages):
+                        continue
+                    self.cpu_cache_client.update_pages_status_to_ready(
+                        session.leased_pages,
+                        deref=True,
+                        disk_offload_enable=True,
+                        token_num_in_page_list=session.token_num,
+                    )
+                else:
+                    self.cpu_cache_client.deref_pages(list(reversed(session.leased_pages)))
+            finally:
+                self.cpu_cache_client.lock.release()
+            del self.dsv4_sessions[req_id]
+
+    def store_completed_prefill_pages(self, reqs, producer_stream):
+        """Snapshot completed V4 pages while request KV/checkpoints are still owned."""
+        mem_manager = self.backend.model.mem_manager
+        req_manager = self.backend.model.req_manager
+        page_tokens = self.args.cpu_cache_token_page_size
+        store_pages = []
+        closing_sessions = {}
+        self.cpu_cache_client.lock.acquire_sleep1ms()
+        try:
+            for req in reqs:
+                session = self.dsv4_sessions.get(req.req_id)
+                if session is None or session.closing:
+                    continue
+                if req.shm_req.group_req_id != req.shm_req.request_id:
+                    session.closing = True
+                    continue
+                page_lens = req.shm_req.token_hash_page_len_list.get_all()
+                target = bisect.bisect_right(page_lens, req.cur_kv_len)
+                target = self._handle_hybrid_att_last_page(req, target, page_lens)
+                start = session.next_page_index
+                if target <= start:
+                    continue
+                hashes = req.shm_req.token_hash_list.get_all()
+                pages, owners = self.cpu_cache_client.allocate_pages(
+                    hashes[start:target], disk_offload_enable=False, return_ownership=True
+                )
+                shared_ids = g_infer_context.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
+                for index, (cpu_page, owner) in enumerate(zip(pages, owners), start):
+                    if cpu_page == -1:
+                        closing_sessions[session.request_id] = session
+                        break
+                    session.leased_pages.append(cpu_page)
+                    session.next_page_index += 1
+                    session.token_num = page_lens[index]
+                    if not owner:
+                        continue
+                    end = page_lens[index]
+                    if end % page_tokens:
+                        pool, checkpoint_id = req_manager.small_page_buffers, req.tail_small_page_buffer_id
+                    else:
+                        pool = mem_manager.big_page_buffers
+                        checkpoint_id = (
+                            shared_ids[index] if index < len(shared_ids) else req.hybrid_len_to_big_page_id[end]
+                        )
+                    # Checkpoints are shared pinned CPU pages. CUDA stream ordering
+                    # alone cannot protect them from reuse by another DP rank.
+                    pool.retain_state_cache([checkpoint_id])
+                    store_pages.append(
+                        Dsv4StorePage(
+                            session=session,
+                            cpu_page_index=cpu_page,
+                            source_mem_indexes=req_manager.req_to_token_indexs[req.req_idx, index * page_tokens : end],
+                            checkpoint_pool=pool,
+                            checkpoint_id=checkpoint_id,
+                        )
+                    )
+                if session.next_page_index == len(hashes):
+                    closing_sessions[session.request_id] = session
+        finally:
+            self.cpu_cache_client.lock.release()
+
+        for start in range(0, len(store_pages), self.dsv4_max_pages_per_task):
+            self._submit_dsv4_store_batch(store_pages[start : start + self.dsv4_max_pages_per_task], producer_stream)
+        for session in closing_sessions.values():
+            session.closing = True
+
+    def _submit_dsv4_store_batch(self, pages, producer_stream):
+        self._poll_dsv4_store_tasks()
+        slot = next((slot for slot in self.dsv4_staging_slots if not slot.in_use), None)
+        if slot is None:
+            self._poll_dsv4_store_tasks(wait_for_one=True)
+            slot = next(slot for slot in self.dsv4_staging_slots if not slot.in_use)
+        page_num = len(pages)
+        mem_manager = self.backend.model.mem_manager
+        page_bytes = self.cpu_cache_client.cpu_kv_cache_tensor[0].numel()
+        with torch.cuda.stream(producer_stream):
+            if slot.buffer is None or len(slot.buffer) < page_num:
+                slot.buffer = torch.empty((page_num, page_bytes), dtype=torch.uint8, device="cuda")
+            source_indexes = []
+            state_ids = []
+            for page in pages:
+                indexes = page.source_mem_indexes
+                if len(indexes) < self.args.cpu_cache_token_page_size:
+                    # A final small page occupies a full CPU page, but only its
+                    # real token slots may be read from the request table.
+                    indexes = torch.cat(
+                        [indexes, indexes.new_full((self.args.cpu_cache_token_page_size - len(indexes),), -1)]
+                    )
+                source_indexes.append(indexes)
+                if page.checkpoint_pool is mem_manager.big_page_buffers:
+                    state_ids.append(page.checkpoint_id)
+                else:
+                    state_ids.append(-page.checkpoint_id - 1)
+            staging = slot.buffer[:page_num]
+            state_ids_cuda = torch.tensor(state_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
+            mem_manager.operator.pack_cpu_cache_pages(
+                torch.cat(source_indexes),
+                state_ids_cuda,
+                staging,
+                self.backend.model.req_manager.small_page_buffers.buffer,
+            )
+            pack_event = torch.cuda.Event()
+            pack_event.record()
+        torch.cuda.current_stream().wait_event(pack_event)
+        cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
+        with torch.cuda.stream(cpu_stream):
+            cpu_stream.wait_event(pack_event)
+            mem_manager.operator.scatter_packed_cpu_cache_pages(
+                staging,
+                torch.tensor([page.cpu_page_index for page in pages], dtype=torch.int32, pin_memory=True).cuda(
+                    non_blocking=True
+                ),
+                self.cpu_cache_client,
+            )
+            store_event = torch.cuda.Event()
+            store_event.record()
+        slot.in_use = True
+        sessions = list({page.session.request_id: page.session for page in pages}.values())
+        for session in sessions:
+            session.pending_tasks += 1
+        self.dsv4_store_tasks.append(
+            Dsv4StoreTask(
+                owner_pages=[page.cpu_page_index for page in pages],
+                sessions=sessions,
+                slot=slot,
+                store_event=store_event,
+                checkpoint_leases=[(page.checkpoint_pool, [page.checkpoint_id]) for page in pages],
+            )
+        )
+
     def offload_finished_reqs_to_cpu_cache(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
         将满足cpu kv cache 卸载条件的请求进行处理, 并返回真的满足退出条件的请求list。
         """
+        if self.backend.is_deepseek_v4:
+            if self.backend.is_master_in_dp:
+                for req in finished_reqs:
+                    session = self.dsv4_sessions.get(req.req_id)
+                    if session is not None:
+                        session.closing = True
+                self._poll_dsv4_store_tasks()
+            # GPU sources have been packed on the producer stream. The independent
+            # staging-to-host copy owns its pages, not the finished request.
+            return finished_reqs
+
         # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
         # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
         true_finished_reqs = []
@@ -338,6 +547,10 @@ class MultiLevelKvCacheModule(object):
         return move_block_size
 
     def update_cpu_cache_task_states(self):
+        if self.backend.is_deepseek_v4:
+            self._poll_dsv4_store_tasks()
+            return
+
         if self.backend.is_master_in_dp:
             trans_ok_tasks = []
             while len(self.cpu_cache_handle_queue) != 0:
@@ -372,6 +585,48 @@ class MultiLevelKvCacheModule(object):
             for task in trans_ok_tasks:
                 task.req_obj.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.FINISHED
         return
+
+
+@dataclasses.dataclass
+class Dsv4CpuCacheSession:
+    request_id: int
+    next_page_index: int = 0
+    leased_pages: List[int] = dataclasses.field(default_factory=list)
+    token_num: int = 0
+    pending_tasks: int = 0
+    closing: bool = False
+    disk_offload_enable: bool = False
+    load_event: Optional[torch.cuda.Event] = None
+
+
+@dataclasses.dataclass
+class Dsv4StagingSlot:
+    buffer: Optional[torch.Tensor] = None
+    in_use: bool = False
+
+
+@dataclasses.dataclass
+class Dsv4LoadTask:
+    load_event: torch.cuda.Event
+    checkpoint_leases: list
+
+
+@dataclasses.dataclass
+class Dsv4StorePage:
+    session: Dsv4CpuCacheSession
+    cpu_page_index: int
+    source_mem_indexes: torch.Tensor
+    checkpoint_pool: object
+    checkpoint_id: int
+
+
+@dataclasses.dataclass
+class Dsv4StoreTask:
+    owner_pages: List[int]
+    sessions: list
+    slot: Dsv4StagingSlot
+    store_event: torch.cuda.Event
+    checkpoint_leases: list
 
 
 @dataclasses.dataclass

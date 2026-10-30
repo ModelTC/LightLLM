@@ -17,6 +17,7 @@ from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.dist_utils import set_current_device_id
 from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 
 
@@ -57,6 +58,7 @@ def _init_env(
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::prefill_trans:Device{device_id}")
 
     try:
+        set_current_device_id(device_id)
         torch.cuda.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
         task_out_queue.put("proc_start")
@@ -344,7 +346,7 @@ class _PrefillTransModule:
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 cur_mem = self.mem_managers[self.device_id]
-                cur_mem.write_mem_to_page_kv_move_buffer(
+                trans_task.transfer_nbytes = cur_mem.write_mem_to_page_kv_move_buffer(
                     trans_task.mem_indexes,
                     page_index=trans_task.src_page_index,
                     dp_index=trans_task.prefill_dp_index,
@@ -352,6 +354,11 @@ class _PrefillTransModule:
                     dp_world_size=self.dp_world_size,
                     page_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
+                    **(
+                        {"checkpoint": (trans_task.checkpoint_page_kind, trans_task.checkpoint_buffer_id)}
+                        if trans_task.checkpoint_len
+                        else {}
+                    ),
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()

@@ -80,6 +80,17 @@ class PDDecodeNode(ChunkedPrefillBackend):
             if req_obj.pd_task_num != (req_obj.pd_task_failed_num + req_obj.pd_task_success_num):
                 continue
 
+            if self.is_deepseek_v4 and (
+                req_obj.pd_task_failed_num > 0 or req_obj.pd_checkpoint_received_len != req_obj.hybrid_cache_len
+            ):
+                # Never publish an allocated but unreceived continuation checkpoint.
+                if req_obj.tail_small_page_buffer_id is not None:
+                    self.small_page_buffers.free_state_cache([req_obj.tail_small_page_buffer_id])
+                    req_obj.tail_small_page_buffer_id = None
+                checkpoint_id = req_obj.hybrid_len_to_big_page_id.pop(req_obj.hybrid_cache_len, None)
+                if checkpoint_id is not None:
+                    self.model.mem_manager.big_page_buffers.free_state_cache([checkpoint_id])
+
             if req_obj.pd_task_failed_num > 0:
                 # KV 传输失败：强制补 finish token 并结束。
                 # abort 优先标 ABORTED；纯传输错误标 ERROR（不再误用 STOP）。
@@ -212,6 +223,21 @@ class PDDecodeNode(ChunkedPrefillBackend):
         else:
             raise ValueError(f"unknown PD trans page kind {page_kind}")
 
+        checkpoint_id, checkpoint_kind = None, None
+        if page_kind == "att_state" and self.is_deepseek_v4 and req_obj.hybrid_cache_len:
+            big_tokens = self.args.linear_att_hash_page_size * self.args.linear_att_page_block_num
+            if req_obj.hybrid_cache_len % big_tokens:
+                self.radix_cache.free_one_small_page_buffer()
+                checkpoint_id = self.small_page_buffers.alloc_one_state_cache()
+                checkpoint_kind = "small"
+                assert req_obj.tail_small_page_buffer_id is None
+                req_obj.tail_small_page_buffer_id = checkpoint_id
+            else:
+                checkpoint_id = self.model.mem_manager.big_page_buffers.alloc_one_state_cache()
+                checkpoint_kind = "big"
+                if checkpoint_id is not None:
+                    req_obj.hybrid_len_to_big_page_id[req_obj.hybrid_cache_len] = checkpoint_id
+
         trans_task = PDChunckedTransTask(
             request_id=req_obj.req_id,
             start_kv_index=kv_start_index,
@@ -235,6 +261,8 @@ class PDDecodeNode(ChunkedPrefillBackend):
             first_gen_token_logprob=None,
             page_kind=page_kind,
             req_idx=req_idx,
+            checkpoint_buffer_id=checkpoint_id,
+            checkpoint_page_kind=checkpoint_kind,
         )
         group.task_list.append(trans_task)
         req_obj.pd_task_num += 1

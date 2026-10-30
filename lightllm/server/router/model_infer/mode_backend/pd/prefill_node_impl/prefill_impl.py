@@ -159,5 +159,22 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             page_kind=page_kind,
             req_idx=req_idx,
         )
+        if page_kind == "att_state" and self.is_deepseek_v4:
+            if req_obj.tail_small_page_buffer_id is not None:
+                trans_task.checkpoint_buffer_id = req_obj.tail_small_page_buffer_id
+                trans_task.checkpoint_page_kind = "small"
+            elif req_obj.hybrid_cache_len in req_obj.hybrid_len_to_big_page_id:
+                trans_task.checkpoint_buffer_id = req_obj.hybrid_len_to_big_page_id[req_obj.hybrid_cache_len]
+                trans_task.checkpoint_page_kind = "big"
+            elif req_obj.shared_kv_node is not None and (
+                req_obj.shared_kv_node.node_prefix_total_len == req_obj.hybrid_cache_len
+            ):
+                node = req_obj.shared_kv_node
+                trans_task.checkpoint_page_kind = "big" if node.is_big_page_node() else "small"
+                trans_task.checkpoint_buffer_id = (
+                    node.big_page_buffer_idx if node.is_big_page_node() else node.small_page_buffer_idx
+                )
+            if trans_task.checkpoint_buffer_id is not None:
+                trans_task.checkpoint_len = req_obj.hybrid_cache_len
         req_obj.pd_task_num += 1
         return trans_task

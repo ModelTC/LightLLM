@@ -90,6 +90,11 @@ class DeepseekV4MemoryManager(MemoryManager):
             "req_to_c128_state",
         ):
             setattr(self, name, getattr(req_manager, name))
+        self.pd_checkpoint_metas = {}
+        if get_env_start_args().run_mode in ("prefill", "decode"):
+            for kind, pool in (("small", req_manager.small_page_buffers), ("big", self.big_page_buffers)):
+                storage = pool.layer_cache
+                self.pd_checkpoint_metas[kind] = (storage.shm.name, pool.size, pool.buffer.shape[-1])
         return super().write_to_shm(req_manager)
 
     def get_paged_kv_move_buffer_shape(self, page_num, page_size):
@@ -98,7 +103,8 @@ class DeepseekV4MemoryManager(MemoryManager):
         state_bytes = (
             math.prod(swa_shape) + sum(math.prod(shape) for shape in compressor_shapes) * torch.float32.itemsize
         )
-        return (page_num, 1, 1, 1, max(compressed_kv_bytes, state_bytes))
+        checkpoint_bytes = self.cache_config.get_checkpoint_bytes()
+        return (page_num, 1, 1, 1, max(compressed_kv_bytes, state_bytes + checkpoint_bytes))
 
     def alloc_paged_kv_move_buffer(self, page_num, page_size):
         self.pd_kv_page_size = page_size
@@ -107,12 +113,20 @@ class DeepseekV4MemoryManager(MemoryManager):
         return kv_move_buffer
 
     def write_mem_to_page_kv_move_buffer(
-        self, mem_indexes, page_index, dp_index, mem_managers, dp_world_size, page_kind="kv", req_idx=None
+        self,
+        mem_indexes,
+        page_index,
+        dp_index,
+        mem_managers,
+        dp_world_size,
+        page_kind="kv",
+        req_idx=None,
+        checkpoint=None,
     ):
         if page_kind != "kv":
             assert page_kind == "att_state", f"unknown page_kind={page_kind}"
             dp_mems = mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]
-            return self.att_state_page_helper.write_req_to_page(page_index, req_idx, dp_mems)
+            return self.att_state_page_helper.write_req_to_page(page_index, req_idx, dp_mems, checkpoint)
         pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
         pin_indexes.numpy()[:] = mem_indexes
         page = self.kv_move_buffer[page_index]
@@ -122,17 +136,28 @@ class DeepseekV4MemoryManager(MemoryManager):
             page_indexes=torch.zeros(1, dtype=torch.int32, device=page.device),
             kv_move_buffer=page.view(1, -1),
             to_pages=True,
-            page_size=self.pd_kv_page_size,
+            page_size=triton.cdiv(len(mem_indexes), self.cache_config.compressed_kv_token_alignment)
+            * self.cache_config.compressed_kv_token_alignment,
             round_tail=True,
         )
+        copy_num = triton.cdiv(len(mem_indexes), self.cache_config.compressed_kv_token_alignment)
+        return copy_num * self.cache_config.compressed_kv_token_alignment * self.get_cell_size()
 
     def read_page_kv_move_buffer_to_mem(
-        self, mem_indexes, page_index, dp_index, mem_managers, dp_world_size, page_kind="kv", req_idx=None
+        self,
+        mem_indexes,
+        page_index,
+        dp_index,
+        mem_managers,
+        dp_world_size,
+        page_kind="kv",
+        req_idx=None,
+        checkpoint=None,
     ):
         if page_kind != "kv":
             assert page_kind == "att_state", f"unknown page_kind={page_kind}"
             dp_mems = mem_managers[dp_index * dp_world_size : (dp_index + 1) * dp_world_size]
-            return self.att_state_page_helper.read_page_to_req(page_index, req_idx, dp_mems)
+            return self.att_state_page_helper.read_page_to_req(page_index, req_idx, dp_mems, checkpoint)
         pin_indexes = self._buffer_mem_indexes_tensors[page_index][: len(mem_indexes)]
         pin_indexes.numpy()[:] = mem_indexes
         indexes = pin_indexes.cuda(non_blocking=True)
@@ -145,7 +170,8 @@ class DeepseekV4MemoryManager(MemoryManager):
                 page_indexes=page_ids,
                 kv_move_buffer=page.view(1, -1),
                 to_pages=False,
-                page_size=self.pd_kv_page_size,
+                page_size=triton.cdiv(len(mem_indexes), self.cache_config.compressed_kv_token_alignment)
+                * self.cache_config.compressed_kv_token_alignment,
                 round_tail=True,
             )
 
@@ -155,15 +181,43 @@ class DeepseekV4AttStatePageHelper:
 
     def __init__(self, mem_manager):
         self.mem_manager = mem_manager
+        self.checkpoint_storages = {}
 
-    def write_req_to_page(self, page_index, req_idx, dp_mems):
-        page = self.mem_manager.kv_move_buffer[page_index]
-        self._copy_req_state(page, dp_mems[0], req_idx, write=True)
+    def _checkpoint(self, mem, checkpoint):
+        from lightllm.common.state_cache_manager.layer_cache import LayerCache
 
-    def read_page_to_req(self, page_index, req_idx, dp_mems):
-        page = self.mem_manager.kv_move_buffer[page_index]
+        kind, buffer_id = checkpoint
+        name, size, nbytes = mem.pd_checkpoint_metas[kind]
+        if name not in self.checkpoint_storages:
+            # Attach only the data, not allocator metadata or its initialization lock.
+            self.checkpoint_storages[name] = LayerCache(
+                size=size,
+                dtype=torch.uint8,
+                shape=(nbytes,),
+                layer_num=1,
+                device="cpu",
+                size_first=True,
+                shm_name=name,
+                shm_create=False,
+            )
+        return self.checkpoint_storages[name].buffer[buffer_id, 0]
+
+    def write_req_to_page(self, page_index, req_idx, dp_mems, checkpoint=None):
+        page = self.mem_manager.kv_move_buffer[page_index].reshape(-1)
+        nbytes = self._copy_req_state(page, dp_mems[0], req_idx, write=True)
+        if checkpoint is not None:
+            state = self._checkpoint(dp_mems[0], checkpoint)
+            page[nbytes : nbytes + state.numel()].copy_(state, non_blocking=True)
+            nbytes += state.numel()
+        return nbytes
+
+    def read_page_to_req(self, page_index, req_idx, dp_mems, checkpoint=None):
+        page = self.mem_manager.kv_move_buffer[page_index].reshape(-1)
         for mem in dp_mems:
-            self._copy_req_state(page, mem, req_idx, write=False)
+            nbytes = self._copy_req_state(page, mem, req_idx, write=False)
+            if checkpoint is not None:
+                state = self._checkpoint(mem, checkpoint)
+                state.copy_(page[nbytes : nbytes + state.numel()], non_blocking=True)
 
     def _copy_req_state(self, page, mem, req_idx, *, write):
         data = page.reshape(-1)
@@ -179,3 +233,4 @@ class DeepseekV4AttStatePageHelper:
             else:
                 state.copy_(page_state, non_blocking=True)
             offset += nbytes
+        return offset

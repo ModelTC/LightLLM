@@ -90,6 +90,24 @@ class FP8PerTokenGroupQuantDeepseek3_2MemOperator(BaseMemManagerOperator):
 
 
 class DeepseekV4MemOperator(BaseMemManagerOperator):
+    def pack_cpu_cache_pages(self, mem_indexes, big_page_buffer_ids, staging, small_page_state_buffer):
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_kv_buffer_to_cpu_cache
+
+        copy_kv_buffer_to_cpu_cache(
+            mem_manager=self.mem_manager,
+            mem_indexes=mem_indexes,
+            page_indexes=torch.arange(len(staging), dtype=torch.int32, device=staging.device),
+            page_readies=None,
+            big_page_buffer_ids=big_page_buffer_ids,
+            cpu_cache_tensor=staging,
+            small_page_state_buffer=small_page_state_buffer,
+        )
+
+    def scatter_packed_cpu_cache_pages(self, staging, page_indexes, cpu_cache_client):
+        from lightllm.models.deepseek_v4.triton_kernel.cache_io import scatter_cpu_cache_pages
+
+        scatter_cpu_cache_pages(staging, page_indexes, cpu_cache_client.cpu_kv_cache_tensor)
+
     def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
         """仅复制压缩 KV 和 indexer K；SWA、compressor 状态由 ReqManager 恢复。"""
         from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
@@ -158,7 +176,7 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
         page_indexes: torch.Tensor,
         cpu_cache_client: "CpuKvCacheClient",
         req: "InferReq",
-    ) -> None:
+    ) -> list:
         from lightllm.server.router.model_infer.infer_batch import g_infer_context
         from lightllm.models.deepseek_v4.triton_kernel.cache_io import copy_cpu_cache_to_kv_buffer, copy_state_cache
 
@@ -176,6 +194,7 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
             big_page_buffer_ids_cpu.append(page_id)
             max_kv_len -= page_token_num
         big_page_buffer_ids_cpu.reverse()
+        checkpoint_leases = [(mem_manager.big_page_buffers, list(big_page_buffer_ids_cpu))]
 
         # 碎页：先将状态读入临时大页，再恢复请求运行态。
         has_tail_page = len(mem_indexes) % page_token_num != 0
@@ -198,6 +217,7 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
             small_page_buffer_id = req_manager.small_page_buffers.alloc_one_state_cache()
             if small_page_buffer_id is not None:
                 req.tail_small_page_buffer_id = small_page_buffer_id
+                checkpoint_leases.append((req_manager.small_page_buffers, [small_page_buffer_id]))
                 # 临时大页会被复用，先将碎页状态保留到小页池。
                 copy_state_cache(
                     src_state=mem_manager.big_page_buffers.buffer[big_page_buffer_ids_cpu[-1]],
@@ -205,3 +225,4 @@ class DeepseekV4MemOperator(BaseMemManagerOperator):
                 )
 
         req_manager.restore_big_page_state(big_page_buffer_idx=big_page_buffer_ids_cpu[-1], req=req)
+        return checkpoint_leases

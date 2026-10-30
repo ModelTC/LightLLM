@@ -255,8 +255,10 @@ def test_nixl_retains_handle_when_transfer_submission_raises():
     transporter = NixlKVTransporter.__new__(NixlKVTransporter)
     transporter.remote_agents = {"D": object()}
     transporter._write_contexts = {}
-    transporter.page_local_xfer_handles = "src"
-    transporter.remote_agents["D"] = SimpleNamespace(page_xfer_handles="dst")
+    transporter.page_len = 128
+    transporter._remote_agents_lock = threading.Lock()
+    transporter.page_local_xfer_handles = {128: "src"}
+    transporter.remote_agents["D"] = SimpleNamespace(page_xfer_handles={128: "dst"})
     transporter.nixl_agent = SimpleNamespace(make_prepped_xfer=MagicMock(return_value=7))
 
     def transfer(handle):
@@ -736,8 +738,10 @@ def test_nixl_post_error_is_not_mistaken_for_an_unposted_handles_done_state():
     transporter = NixlKVTransporter.__new__(NixlKVTransporter)
     transporter.remote_agents = {"D": object()}
     transporter._write_contexts = {}
-    transporter.page_local_xfer_handles = "src"
-    transporter.remote_agents["D"] = SimpleNamespace(page_xfer_handles="dst")
+    transporter.page_len = 128
+    transporter._remote_agents_lock = threading.Lock()
+    transporter.page_local_xfer_handles = {128: "src"}
+    transporter.remote_agents["D"] = SimpleNamespace(page_xfer_handles={128: "dst"})
     transporter.nixl_agent = SimpleNamespace(
         make_prepped_xfer=MagicMock(return_value=7),
         transfer=MagicMock(return_value="ERR"),

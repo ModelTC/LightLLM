@@ -607,6 +607,7 @@ class InferReq:
         self.pd_task_failed_num: int = 0
         self.pd_task_finished_keys: set[str] = set()
         self.pd_trans_device_id: int = -1
+        self.pd_checkpoint_received_len: int = 0
 
         # hybrid checkpoint 槽位：prefill 到达边界后保存运行态，供请求释放时插入 radix cache。
         # 方便被后续的请求使用，因为这种资源是有限的，也可能不存在的情况，申请不到时, 为None，则这种小块对应长度的 kv 无法
@@ -795,6 +796,11 @@ class InferReq:
                                 req=self,
                             )
                             self.shared_kv_node = None
+                            if self.args.run_mode == "prefill" and shared_kv_len == self.hybrid_cache_len:
+                                # The final runtime ring may overwrite this aligned prefix before PD packing.
+                                checkpoint_id = share_node.small_page_buffer_idx
+                                radix_cache.small_page_buffers.retain_state_cache([checkpoint_id])
+                                self.tail_small_page_buffer_id = checkpoint_id
 
                             big_page_shared_node = radix_cache.deref_to_first_big_page_node(node=share_node)
                             self.shared_kv_node = big_page_shared_node

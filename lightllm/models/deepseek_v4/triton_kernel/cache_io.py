@@ -31,11 +31,10 @@ def get_indexer_k_buffer(mem_manager, layer_index):
 
 @triton.jit(do_not_specialize=["TOKEN_NUM", "COPY_NUM"])
 def _copy_compressed_kv_kernel(
-    kv_buffer,
+    kv_buffers,
     kv_move_buffer,
     mem_indexes,
     page_indexes,
-    layer_byte_offset,
     TOKEN_NUM,
     COPY_NUM,
     PAGE_TOKENS: tl.constexpr,
@@ -45,7 +44,17 @@ def _copy_compressed_kv_kernel(
     ROUND_TAIL: tl.constexpr,
     BLOCK_BYTES: tl.constexpr,
 ):
-    kv_buffer = kv_buffer.to(tl.pointer_type(tl.uint8))
+    layer = tl.program_id(1)
+    kv_address = tl.full((), 0, tl.int64)
+    slot_bytes = tl.full((), 0, tl.int32)
+    layer_byte_offset = tl.full((), 0, tl.int64)
+    offset = 0
+    for i in tl.static_range(len(SLOT_BYTES)):
+        kv_address = tl.where(layer == i, kv_buffers[i].to(tl.int64), kv_address)
+        slot_bytes = tl.where(layer == i, SLOT_BYTES[i], slot_bytes)
+        layer_byte_offset = tl.where(layer == i, offset, layer_byte_offset)
+        offset += PAGE_TOKENS * SLOT_BYTES[i]
+    kv_buffer = kv_address.to(tl.pointer_type(tl.uint8))
     tokens = tl.program_id(0) * 32 + tl.arange(0, 32)
     slot = tl.load(mem_indexes + tokens, tokens < TOKEN_NUM, -1).to(tl.int64)
     if ROUND_TAIL:
@@ -57,15 +66,15 @@ def _copy_compressed_kv_kernel(
     valid = (tokens < COPY_NUM) & (slot >= 0)
     page_id = tl.load(page_indexes + page, tokens < COPY_NUM, 0).to(tl.int64)
     columns = tl.arange(0, BLOCK_BYTES)
-    kv_ptr = kv_buffer + slot[:, None] * SLOT_BYTES + columns[None, :]
+    kv_ptr = kv_buffer + slot[:, None] * slot_bytes + columns[None, :]
     page_ptr = (
         kv_move_buffer
         + page_id[:, None] * PAGE_STRIDE
         + layer_byte_offset
-        + (tokens % PAGE_TOKENS)[:, None] * SLOT_BYTES
+        + (tokens % PAGE_TOKENS)[:, None] * slot_bytes
         + columns[None, :]
     )
-    mask = valid[:, None] & (columns[None, :] < SLOT_BYTES)
+    mask = valid[:, None] & (columns[None, :] < slot_bytes)
     if TO_PAGES:
         tl.store(page_ptr, tl.load(kv_ptr, mask, 0), mask)
     else:
@@ -83,32 +92,29 @@ def copy_compressed_kv_pages(
         if round_tail
         else mem_indexes.numel()
     )
-    layer_byte_offset = 0
-    for kv_buffer in mem_manager.kv_buffer:
-        slot_bytes = kv_buffer.shape[-1]
-        _copy_compressed_kv_kernel[(triton.cdiv(copy_num, 32),)](
-            kv_buffer.data_ptr(),
-            kv_move_buffer,
-            mem_indexes,
-            page_indexes,
-            layer_byte_offset,
-            TOKEN_NUM=mem_indexes.numel(),
-            COPY_NUM=copy_num,
-            PAGE_TOKENS=page_size,
-            PAGE_STRIDE=kv_move_buffer.stride(0),
-            SLOT_BYTES=slot_bytes,
-            TO_PAGES=to_pages,
-            ROUND_TAIL=round_tail,
-            BLOCK_BYTES=triton.next_power_of_2(slot_bytes),
-            num_warps=4,
-        )
-        layer_byte_offset += page_size * slot_bytes
+    slot_bytes = config.compressed_kv_slot_bytes
+    _copy_compressed_kv_kernel[(triton.cdiv(copy_num, 32), len(slot_bytes))](
+        tuple(mem_manager.kv_buffer),
+        kv_move_buffer,
+        mem_indexes,
+        page_indexes,
+        TOKEN_NUM=mem_indexes.numel(),
+        COPY_NUM=copy_num,
+        PAGE_TOKENS=page_size,
+        PAGE_STRIDE=kv_move_buffer.stride(0),
+        SLOT_BYTES=slot_bytes,
+        TO_PAGES=to_pages,
+        ROUND_TAIL=round_tail,
+        BLOCK_BYTES=triton.next_power_of_2(max(slot_bytes)),
+        num_warps=4,
+    )
 
 
 @triton.jit(do_not_specialize=["TOKEN_NUM"])
 def _copy_cpu_cache_kernel(
     kv_buffer,
     big_page_state_buffer,
+    small_page_state_buffer,
     mem_indexes,
     big_page_buffer_ids,
     page_indexes,
@@ -121,6 +127,7 @@ def _copy_cpu_cache_kernel(
     SLOT_BYTES: tl.constexpr,
     TO_CPU_CACHE: tl.constexpr,
     HAS_READIES: tl.constexpr,
+    HAS_SMALL_STATES: tl.constexpr,
     BLOCK: tl.constexpr,
 ):
     page = tl.program_id(0)
@@ -152,6 +159,9 @@ def _copy_cpu_cache_kernel(
     # 页尾的 SWA、C4 和 indexer 状态已连续存储，作为一整块复制。
     state_id = tl.load(big_page_buffer_ids + page).to(tl.int64)
     state = big_page_state_buffer + state_id * STATE_BYTES
+    if HAS_SMALL_STATES:
+        if state_id < 0:
+            state = small_page_state_buffer + (-state_id - 1) * STATE_BYTES
     for block in range(block_start, tl.cdiv(STATE_BYTES, BLOCK), block_step):
         offsets = block * BLOCK + tl.arange(0, BLOCK)
         mask = offsets < STATE_BYTES
@@ -163,13 +173,22 @@ def _copy_cpu_cache_kernel(
 
 
 def _copy_cpu_cache_pages(
-    mem_manager, mem_indexes, big_page_buffer_ids, page_indexes, cpu_cache_tensor, *, to_cpu_cache, page_readies=None
+    mem_manager,
+    mem_indexes,
+    big_page_buffer_ids,
+    page_indexes,
+    cpu_cache_tensor,
+    *,
+    to_cpu_cache,
+    page_readies=None,
+    small_page_state_buffer=None,
 ):
     assert len(big_page_buffer_ids) == len(page_indexes)
     cpu_cache_pages = cpu_cache_tensor.view(cpu_cache_tensor.shape[0], -1)
     _copy_cpu_cache_kernel[(len(page_indexes), 12)](
         tuple(mem_manager.kv_buffer),
         mem_manager.big_page_buffers.buffer,
+        small_page_state_buffer,
         mem_indexes,
         big_page_buffer_ids,
         page_indexes,
@@ -182,13 +201,20 @@ def _copy_cpu_cache_pages(
         SLOT_BYTES=mem_manager.cache_config.compressed_kv_slot_bytes,
         TO_CPU_CACHE=to_cpu_cache,
         HAS_READIES=page_readies is not None,
+        HAS_SMALL_STATES=small_page_state_buffer is not None,
         BLOCK=4096,
         num_warps=4,
     )
 
 
 def copy_kv_buffer_to_cpu_cache(
-    mem_manager, mem_indexes, page_indexes, page_readies, big_page_buffer_ids, cpu_cache_tensor
+    mem_manager,
+    mem_indexes,
+    page_indexes,
+    page_readies,
+    big_page_buffer_ids,
+    cpu_cache_tensor,
+    small_page_state_buffer=None,
 ):
     _copy_cpu_cache_pages(
         mem_manager,
@@ -198,12 +224,31 @@ def copy_kv_buffer_to_cpu_cache(
         cpu_cache_tensor,
         to_cpu_cache=True,
         page_readies=page_readies,
+        small_page_state_buffer=small_page_state_buffer,
     )
 
 
 def copy_cpu_cache_to_kv_buffer(mem_manager, mem_indexes, big_page_buffer_ids, page_indexes, cpu_cache_tensor):
     _copy_cpu_cache_pages(
         mem_manager, mem_indexes, big_page_buffer_ids, page_indexes, cpu_cache_tensor, to_cpu_cache=False
+    )
+
+
+@triton.jit
+def _scatter_cpu_cache_pages_kernel(staging, page_indexes, cpu_pages, PAGE_BYTES: tl.constexpr, BLOCK: tl.constexpr):
+    page = tl.program_id(0)
+    offsets = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
+    destination = tl.load(page_indexes + page).to(tl.int64)
+    mask = offsets < PAGE_BYTES
+    values = tl.load(staging + page * PAGE_BYTES + offsets, mask, 0)
+    tl.store(cpu_pages + destination * PAGE_BYTES + offsets, values, mask)
+
+
+def scatter_cpu_cache_pages(staging, page_indexes, cpu_cache_tensor):
+    page_bytes = staging.shape[1]
+    assert cpu_cache_tensor[0].numel() == page_bytes
+    _scatter_cpu_cache_pages_kernel[(len(page_indexes), triton.cdiv(page_bytes, 4096))](
+        staging, page_indexes, cpu_cache_tensor, PAGE_BYTES=page_bytes, BLOCK=4096, num_warps=4
     )
 
 

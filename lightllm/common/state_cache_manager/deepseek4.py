@@ -113,16 +113,35 @@ class DeepseekV4CacheConfig:
         args = get_env_start_args()
         return args.cpu_cache_token_page_size * sum(self.compressed_kv_slot_bytes)
 
-    def get_cpu_cache_big_page_bytes(self):
+    def get_checkpoint_bytes(self):
         # MLA KV and compressor state are replicated across TP ranks.
         swa_bytes = math.prod(self.get_swa_state_shape())
         c4_bytes = math.prod(self.get_c4_state_shape()) * torch.float32.itemsize
         indexer_bytes = math.prod(self.get_indexer_state_shape()) * torch.float32.itemsize
-        return self.get_cpu_cache_full_att_bytes() + swa_bytes + c4_bytes + indexer_bytes
+        return swa_bytes + c4_bytes + indexer_bytes
+
+    def get_cpu_cache_big_page_bytes(self):
+        return self.get_cpu_cache_full_att_bytes() + self.get_checkpoint_bytes()
 
 
 class DeepseekV4StateCacheManager(StateCacheManager):
     """Pinned continuation checkpoints; compressed KV stays in token pages."""
+
+    @classmethod
+    def create_dp_shared(cls, name, size, keep_num=0, **kwargs):
+        args = get_env_start_args()
+        if args.dp // args.nnodes == 1 and args.run_mode in ("prefill", "decode"):
+            from lightllm.utils.dist_utils import get_current_rank_in_dp
+
+            # Transport attaches to checkpoint storage even with a single DP owner.
+            return cls(
+                size=size,
+                keep_num=keep_num,
+                shm_name=f"{name}_tp_{get_current_rank_in_dp()}",
+                shm_create=True,
+                **kwargs,
+            )
+        return super().create_dp_shared(name=name, size=size, keep_num=keep_num, **kwargs)
 
     def __init__(self, size, cache_config: DeepseekV4CacheConfig, keep_num=0, shm_name=None, shm_create=False):
         super().__init__(size, keep_num, shm_name, shm_create)

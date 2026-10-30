@@ -23,6 +23,7 @@ from lightllm.server.core.objs import StartArgs
 from ..kv_transporter import create_kv_transporter
 from lightllm.utils.error_utils import log_exception
 from lightllm.utils.envs_utils import get_unique_server_name
+from lightllm.utils.dist_utils import set_current_device_id
 from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 
 logger = init_logger(__name__)
@@ -81,6 +82,7 @@ def _init_env(
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::decode_trans:Device{device_id}")
 
     try:
+        set_current_device_id(device_id)
         torch.cuda.set_device(device_id)
         graceful_registry(inspect.currentframe().f_code.co_name)
 
@@ -374,6 +376,8 @@ class _DecodeTransModule:
                             local_trans_task = self._pop_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
                                 local_trans_task.shared_time_out_mark.update()
+                                local_trans_task.transfer_nbytes = remote_trans_task.transfer_nbytes
+                                local_trans_task.checkpoint_len = remote_trans_task.checkpoint_len
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
@@ -512,6 +516,11 @@ class _DecodeTransModule:
                     dp_world_size=self.dp_world_size,
                     page_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
+                    **(
+                        {"checkpoint": (trans_task.checkpoint_page_kind, trans_task.checkpoint_buffer_id)}
+                        if trans_task.checkpoint_len and trans_task.checkpoint_buffer_id is not None
+                        else {}
+                    ),
                 )
                 copy_end_event.record(self.copy_cuda_stream)
             self.success_queue.put((copy_end_event, copy_start_event, trans_task))

@@ -309,7 +309,7 @@ class PDAgentMetadata:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: Optional[bytes] = None
-    page_xfer_handles: Optional[int] = None
+    page_xfer_handles: Optional[Dict[int, int]] = None
 
 
 @dataclass
@@ -352,6 +352,8 @@ class PDChunckedTransTask:
     # transfer params
     src_page_index: Optional[int] = None
     dst_page_index: Optional[int] = None
+    # Valid packed bytes; None retains full-page transfers for other models.
+    transfer_nbytes: Optional[int] = None
 
     # xfer_handle
     xfer_handle: Optional[int] = None
@@ -368,6 +370,10 @@ class PDChunckedTransTask:
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
+    # Local checkpoint destination/source; never adopt the peer's buffer index.
+    checkpoint_buffer_id: Optional[int] = None
+    checkpoint_page_kind: Optional[str] = None
+    checkpoint_len: int = 0
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
@@ -437,6 +443,7 @@ class PDChunckedTransTask:
             first_gen_token_id=self.first_gen_token_id,
             first_gen_token_logprob=self.first_gen_token_logprob,
             page_kind=self.page_kind,
+            checkpoint_len=self.checkpoint_len,
         )
         return ret
 
@@ -467,6 +474,7 @@ class PDChunckedTransTaskRet:
     first_gen_token_id: Optional[int] = None
     first_gen_token_logprob: Optional[float] = None
     page_kind: str = "kv"
+    checkpoint_len: int = 0
 
     def get_key(self) -> str:
         return f"{self.request_id}_{self.page_kind}_{self.start_kv_index}_{self.end_kv_index}"

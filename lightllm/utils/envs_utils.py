@@ -250,6 +250,11 @@ def enable_triton_mtp_kernel() -> bool:
 
 
 @lru_cache(maxsize=None)
+def get_dsv4_cpu_cache_max_pages_per_task() -> int:
+    return int(os.getenv("LIGHTLLM_DSV4_CPU_CACHE_MAX_PAGES_PER_TASK", 4))
+
+
+@lru_cache(maxsize=None)
 def get_disk_cache_prompt_limit_length():
     return int(os.getenv("LIGHTLLM_DISK_CACHE_PROMPT_LIMIT_LENGTH", 2048))
 
