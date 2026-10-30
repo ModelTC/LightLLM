@@ -190,7 +190,7 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
 def test_cpu_layout_does_not_require_calibration_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cpu_args: EasyDict, encoding: str,
 ):
-    from lightllm.utils.att_resource_config import build_cpu_cache_layouts
+    from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
 
     config = dict(model_type="llama", num_attention_heads=2, hidden_size=32, num_hidden_layers=2)
     (tmp_path / "config.json").write_text(json.dumps(config))

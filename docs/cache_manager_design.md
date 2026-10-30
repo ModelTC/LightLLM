@@ -327,6 +327,9 @@ lightllm/common/
 lightllm/models/<model>/
 ├── model.py                              # 三类 State 创建接口，决定本模型的资源组合
 └── att_resource_config.py                # 模型配置与可复用的 State 创建工具
+
+lightllm/utils/
+└── cpu_cache_layout.py                   # build_cpu_cache_layouts：构建 CPU cache 联合页布局
 ```
 
 `allocators/` 与三类 State 目录平级。`full_att_kv_allocator.py` 提供 full-attention 的 KV 分配器，对外使用 token 数量和索引，内部遵守整页分配约束；`state_page_allocator.py` 提供 bounded-attention 的状态槽位分配器，管理器按需创建大小页两个独立实例。后者的分配能力不限定为 linear attention，使用它也不要求继承 `BoundedAttentionState`。
@@ -363,7 +366,7 @@ token 复制、bounded 运行态重置、大小页保存/恢复、MTP 提交及 
 
 GQA/MLA 的 `config` 使用逻辑 `FullAttentionConfig`。GQA 的 `kv_type` 使用现有编码名 `"None"`、`"int4kv"`、`"int8kv"`、`"fp8kv_spt"`、`"fp8kv_sph"`；`group_size` 仅对 INT4/INT8 生效。静态 FP8 构造函数和创建入口不接收标定参数，`scales`、`q_scales` 初始均为 `None`；全部 State 就绪后，统一加载流程只能通过 `bind_calibration()` 初始化标定。各 DP 使用相同的标定配置，不额外生成或校验标定内容指纹。MLA 的 `config.head_dim` 始终传逻辑 latent 维度，`packed=True` 时由入口计算包含 indexer、scale 和对齐的物理行宽；`"fp8kv_dsa"` 仅用于 packed MLA。
 
-`lightllm/utils/att_resource_config.py` 负责把启动参数和标定文件转换为这些显式参数，并调用对应算法入口。full-attention 创建时仍为零普通 token 容量，后续由管理器统一分配；bounded 和 tail 按请求容量直接创建运行态，大小页池另行初始化。GPU 启动与 CPU cache 元数据使用同一套算法创建逻辑。
+各模型的三类 State 工厂负责构造配置并调用对应算法入口；`lightllm/utils/cpu_cache_layout.py` 复用模型工厂创建 meta State，生成 CPU cache 联合页布局，不加载标定。full-attention 的实际存储由管理器后续统一分配；GPU 启动时 bounded 和 tail 按请求容量直接创建运行态，大小页池另行初始化。GPU 启动与 CPU cache 元数据使用同一套算法创建逻辑。
 
 ```python
 state = create_gqa_state(
@@ -1665,7 +1668,7 @@ full-attention 的 `replicated=True` 表示每个 rank 保存全部 head，例�
 
 GQA、MLA、packed MLA 的选择以及全局逻辑层分组直接写在模型的 `_create_full_att_states()` 中。普通模型按 `model_logical_layer_ids` 创建独立层，Qwen/GLM 选择混合模型的 full 层，Gemma4 根据共享关系将多个逻辑层放入同一物理分组。各模型不再提供 `_full_attention_options`。算法级 `create_gqa_state()` / `create_mla_state()` 继续负责量化版本、存储布局及算法专有的 TP 副本规则。
 
-CPU 服务读取 main 和各 draft 自己的配置，直接调用模型类的 full/bounded 工厂，不构造模型实例。返回的 State 列表注册到临时管理器，再由 `get_cpu_transfer_layouts()` 聚合联合页。CPU 页可以包含同一模型的多个 State；静态标定不参与布局计算。无 attention 的 draft 由模型准备流程和 CPU 布局调用方跳过。`att_resource_config.py` 仅保留 CPU 服务布局构建；标定加载由管理器组织，具体格式由静态 FP8 State 解释。
+CPU 服务读取 main 和各 draft 自己的配置，直接调用模型类的 full/bounded 工厂，不构造模型实例。返回的 State 列表注册到临时管理器，再由 `get_cpu_transfer_layouts()` 聚合联合页。CPU 页可以包含同一模型的多个 State；静态标定不参与布局计算。无 attention 的 draft 由模型准备流程和 CPU 布局调用方跳过。`lightllm/utils/cpu_cache_layout.py` 负责 CPU 服务布局构建；标定加载由管理器组织，具体格式由静态 FP8 State 解释。
 
 资源容量确定后，buffer 地址及已绑定视图保持稳定。初始化 helper 不持有推理请求映射，也不引入请求级生命周期接口。后续模型扩展通过准备自己的 State 和实现所需 backend 完成；不需要将 draft 限定为 full attention。
 

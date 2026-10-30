@@ -51,7 +51,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
     args = get_env_start_args()
     assert args.enable_cpu_cache
 
-    from lightllm.utils.att_resource_config import build_cpu_cache_layouts
+    from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
 
     layouts = build_cpu_cache_layouts()
     page_bytes = 0

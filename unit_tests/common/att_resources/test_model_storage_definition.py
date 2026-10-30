@@ -27,7 +27,7 @@ from lightllm.models.gemma_2b.model import Gemma_2bTpPartModel
 from lightllm.models.gemma3.model import Gemma3TpPartModel
 from lightllm.models.gemma4.model import Gemma4TpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.att_resource_config import build_cpu_cache_layouts
+from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.att_resources import AttResourceManager
 from lightllm.common.att_resources.allocators import FullAttKVAllocator

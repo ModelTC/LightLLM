@@ -20,7 +20,7 @@ from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
-from lightllm.utils.att_resource_config import build_cpu_cache_layouts
+from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
 
 if TYPE_CHECKING:
