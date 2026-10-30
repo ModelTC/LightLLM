@@ -26,21 +26,22 @@ def health_monitor(url, all_process_ids):
         if all_processes_is_alive:
             response = requests.get(url, timeout=60)
             if response.status_code == 200:
-                logger.info("Health check passed")
+                if consecutive_failures:
+                    logger.info("event=health.recovered previous_failures=%s", consecutive_failures)
                 consecutive_failures = 0
             else:
                 raise Exception(f"Health check failed with status code: {response.status_code}")
         else:
             raise Exception("not all processes is alive")
     except asyncio.TimeoutError:
-        logger.error("Health check request timed out")
+        logger.warning("event=health.check_failed reason=timeout")
         consecutive_failures += 1
     except Exception as e:
-        logger.error(f"Health check failed with exception: {e}")
+        logger.warning("event=health.check_failed reason=%s", e)
         consecutive_failures += 1
 
     if consecutive_failures >= 3:
-        logger.error(f"kill all process consecutive_failures: {consecutive_failures}")
+        logger.critical("event=health.termination consecutive_failures=%s", consecutive_failures)
         import signal
 
         # 先kill父进程的子进程
@@ -95,16 +96,15 @@ def start_health_check_process(args, pipe_writer):
     pipe_writer.send("init ok")
 
     all_process_ids = get_all_cared_pids()
-    logger.info(f"health monitor care process ids {all_process_ids}")
+    logger.debug(f"health monitor care process ids {all_process_ids}")
 
-    global consecutive_failures
     host, port = args.host, get_shm_port_args().port
     url = f"http://{host}:{port}/health".format(host=host, port=port)
     interval_seconds = int(os.environ.get("HEALTH_CHECK_INTERVAL_SECONDS", 88))
     logger.info("Waiting for the server to start up.")
     logger.info(f"check interval seconds {interval_seconds}")
     time.sleep(6)
-    logger.info("Server has started, starting the health check process.")
+    logger.info("event=health.monitor_started interval_s=%s", interval_seconds)
 
     while True:
         health_monitor(url, all_process_ids)

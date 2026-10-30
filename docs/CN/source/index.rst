@@ -48,6 +48,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    :maxdepth: 1
    :caption: 部署教程
 
+   日志配置与分级 <tutorial/logging>
    DeepSeek R1 部署 <tutorial/deepseek_deployment>
    单机多进程 PD Master <tutorial/pd_master_multiprocess>
    FP8 KV 量化与校准 <tutorial/fp8_kv_quantization>

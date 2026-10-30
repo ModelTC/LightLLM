@@ -4,6 +4,7 @@ import signal
 import subprocess
 import sys
 import time
+import threading
 import multiprocessing as mp
 import psutil
 from lightllm.utils.log_utils import init_logger
@@ -14,10 +15,158 @@ from lightllm.utils.service_shm_cleanup import start_launcher_shm_cleanup_proces
 logger = init_logger(__name__)
 
 
+class ServiceReadiness:
+    """Announce initial readiness, then require three failures or two recovery probes."""
+
+    def __init__(self, flag, args, address, started):
+        self.flag, self.args, self.address, self.started = flag, args, address, started
+        self.ready = False
+        self.ever_ready = False
+        self.waiting_logged = False
+        self.probe_failure_logged = False
+        self.consecutive_failures = 0
+        self.consecutive_successes = 0
+
+    def observe(self, status, reason=None):
+        if status == 200:
+            self.consecutive_failures = 0
+            self.consecutive_successes += 1
+            if self.ever_ready and not self.ready and self.consecutive_successes < 2:
+                return
+            if not self.ready:
+                event = "service.recovered" if self.ever_ready else "service.ready"
+                elapsed = round(time.monotonic() - self.started, 2)
+                duration_key = "uptime_s" if self.ever_ready else "startup_s"
+                fields = {
+                    "event": event,
+                    "run_mode": self.args.run_mode,
+                    "model": self.args.model_name,
+                    "address": self.address,
+                    duration_key: elapsed,
+                }
+                logger.info(
+                    "event=%s role=%s model=%s address=%s %s=%.2f",
+                    event,
+                    self.args.run_mode,
+                    self.args.model_name,
+                    self.address,
+                    duration_key,
+                    elapsed,
+                    extra=fields,
+                )
+                self.flag.set_value(1)
+                self.ready = self.ever_ready = True
+        else:
+            self.consecutive_successes = 0
+            # A transport failure cannot establish that a live HTTP worker is unready.
+            self.consecutive_failures = 0 if status is None else self.consecutive_failures + 1
+            if (
+                (status not in (None, 503) or reason == "probe_tls_failed")
+                and not self.ever_ready
+                and not self.probe_failure_logged
+            ):
+                reason = reason or "unexpected_readiness_status"
+                logger.warning(
+                    "event=service.probe_failed address=%s status=%s reason=%s",
+                    self.address,
+                    status,
+                    reason,
+                    extra={
+                        "event": "service.probe_failed",
+                        "address": self.address,
+                        "http_status": status,
+                        "reason": reason,
+                    },
+                )
+                self.probe_failure_logged = True
+            if self.ready and self.consecutive_failures >= 3:
+                reason = reason or ("probe_connection_failed" if status is None else "readiness_probe_failed")
+                self.flag.set_value(0)
+                self.ready = False
+                logger.warning(
+                    "event=service.unavailable reason=%s status=%s",
+                    reason,
+                    status,
+                    extra={"event": "service.unavailable", "reason": reason, "http_status": status},
+                )
+            elif status == 503 and not self.waiting_logged and not self.ever_ready:
+                logger.info(
+                    "event=service.waiting reason=pd_nodes_not_ready",
+                    extra={"event": "service.waiting", "reason": "pd_nodes_not_ready"},
+                )
+                self.waiting_logged = True
+
+
 class SubmoduleManager:
     def __init__(self):
         self.processes = []
         self.process_names = {}
+        self.readiness_stop = threading.Event()
+
+    def start_readiness_monitor(self, http_server_process, args):
+        """Announce readiness after the bound HTTP endpoint and PD topology agree."""
+        import requests
+        from lightllm.server.router.dynamic_prompt.shared_arr import SharedInt
+        from lightllm.utils.shm_port_args import get_shm_port_args
+
+        ready_flag = SharedInt("service_ready")
+        ready_flag.set_value(0)
+        bind_host = args.config_server_host if args.run_mode == "config_server" else args.host
+        if bind_host is None:
+            return
+        ports = get_shm_port_args()
+        port = ports.config_server_port if args.run_mode == "config_server" else ports.port
+        host = {"0.0.0.0": "127.0.0.1", "::": "::1"}.get(bind_host, bind_host)
+        host = f"[{host}]" if ":" in host else host
+        tls_config = None
+        if getattr(args, "hypercorn_config", None) and not (
+            args.run_mode == "pd_master" and args.httpserver_workers > 1
+        ):
+            from hypercorn.__main__ import _load_config
+
+            config = _load_config(args.hypercorn_config)
+            if config.ssl_enabled:
+                tls_config = config
+        scheme = "https" if tls_config else "http"
+        address = f"{scheme}://{host}:{port}"
+        started = float(os.getenv("LIGHTLLM_SERVICE_START_TIME", str(time.monotonic())))
+        self.readiness_stop.clear()
+
+        def monitor():
+            state = ServiceReadiness(ready_flag, args, address, started)
+            with requests.Session() as session:
+                session.trust_env = False
+                if tls_config:
+                    import ssl
+                    from requests.adapters import HTTPAdapter
+
+                    context = ssl.create_default_context(cafile=tls_config.certfile)
+                    context.check_hostname = False
+                    context.verify_flags |= ssl.VERIFY_X509_PARTIAL_CHAIN
+                    client_cert = os.getenv("LIGHTLLM_READINESS_CLIENT_CERT")
+                    if client_cert:
+                        context.load_cert_chain(client_cert, os.getenv("LIGHTLLM_READINESS_CLIENT_KEY"))
+                    adapter = HTTPAdapter()
+                    adapter.init_poolmanager(1, 1, ssl_context=context, assert_hostname=False)
+                    session.mount("https://", adapter)
+                    session.verify = tls_config.certfile
+                while not self.readiness_stop.is_set() and http_server_process.poll() is None:
+                    reason = None
+                    try:
+                        response = session.get(address + "/readiness", timeout=1)
+                        status = response.status_code
+                    except requests.Timeout:
+                        status, reason = None, "probe_timeout"
+                    except requests.exceptions.SSLError:
+                        status, reason = None, "probe_tls_failed"
+                    except requests.RequestException:
+                        status, reason = None, "probe_connection_failed"
+                    if self.readiness_stop.is_set() or http_server_process.poll() is not None:
+                        break
+                    state.observe(status, reason=reason)
+                    self.readiness_stop.wait(0.5)
+
+        threading.Thread(target=monitor, name="service-readiness", daemon=True).start()
 
     def start_submodule_processes(self, start_funcs=[], start_args=[]):
         assert len(start_funcs) == len(start_args)
@@ -48,7 +197,7 @@ class SubmoduleManager:
                 self._cleanup_after_process_failure(None)
                 sys.exit(1)
             else:
-                logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
+                logger.debug("Worker initialized: component=%s", start_funcs[index].__name__)
 
         assert all([proc.is_alive() for proc in processes])
         return managed_processes
@@ -79,6 +228,7 @@ class SubmoduleManager:
     def terminate_all_processes(self):
         from lightllm.utils.envs_utils import get_env_start_args
 
+        self.readiness_stop.set()
         for proc in self.processes:
             if proc.is_running():
                 kill_recursive(proc)
@@ -97,7 +247,7 @@ class SubmoduleManager:
 
             stop_mps()
         if not alive_pids:
-            logger.info("All processes terminated gracefully.")
+            logger.info("event=service.stopped cleanup=complete")
 
     def setup_exit_controller(self):
         """启动 launcher 的独立资源清理进程。
@@ -119,13 +269,13 @@ class SubmoduleManager:
         """在子进程启动完成后安装退出信号处理函数，覆盖启动阶段的处理函数。"""
 
         def signal_handler(sig, _frame):
+            self.readiness_stop.set()
             if sig == signal.SIGINT:
                 logger.info("Received SIGINT (Ctrl+C), forcing immediate exit...")
                 if http_server_process is not None:
                     kill_recursive(http_server_process)
 
                 self.terminate_all_processes()
-                logger.info("All processes have been forcefully terminated.")
                 sys.exit(0)
 
             if sig == signal.SIGTERM:
@@ -143,16 +293,15 @@ class SubmoduleManager:
                     kill_recursive(http_server_process)
 
             self.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully.")
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGHUP, signal_handler)
 
-        logger.info(f"start process pid {os.getpid()}")
+        logger.debug("Launcher pid=%s", os.getpid())
         if http_server_process is not None:
-            logger.info(f"http server pid {http_server_process.pid}")
+            logger.debug("HTTP server pid=%s", http_server_process.pid)
 
     def supervise_processes(self, http_server_process=None):
         """Watch the HTTP server, when present, and all registered submodules.
@@ -195,6 +344,7 @@ class SubmoduleManager:
 
     def _cleanup_after_process_failure(self, http_server_process):
         """Best-effort cleanup before the launcher exits with a failure."""
+        self.readiness_stop.set()
         if http_server_process is not None and http_server_process.poll() is None:
             try:
                 kill_recursive(http_server_process)
@@ -230,7 +380,7 @@ def start_submodule_processes(start_funcs=[], start_args=[]):
                 proc.kill()
             sys.exit(1)
         else:
-            logger.info(f"init func {start_funcs[index].__name__} : {str(init_state)}")
+            logger.debug("Worker initialized: component=%s", start_funcs[index].__name__)
 
     assert all([proc.is_alive() for proc in processes])
     return
@@ -241,16 +391,16 @@ def kill_recursive(proc):
         parent = psutil.Process(proc.pid)
         children = parent.children(recursive=True)
     except psutil.NoSuchProcess:
-        logger.warning(f"Process {proc.pid} does not exist.")
+        logger.debug(f"Process {proc.pid} does not exist.")
         return
 
     for process in [*reversed(children), parent]:
         try:
-            logger.info(f"Killing process {process.pid}")
+            logger.debug(f"Killing process {process.pid}")
             process.kill()
         except psutil.NoSuchProcess:
             # A concurrent exit must not skip the remaining children or parent.
-            logger.warning(f"Process {process.pid} does not exist.")
+            logger.debug(f"Process {process.pid} does not exist.")
 
 
 process_manager = SubmoduleManager()

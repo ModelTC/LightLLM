@@ -66,11 +66,12 @@ async def websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             assert data == "heartbeat"
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
-        logger.error(f"registered_pd_master_obj {registered_pd_master_obj} has error {str(e)}")
-        logger.exception(str(e))
+    except WebSocketDisconnect:
+        logger.info("Registration connection closed: peer=%s:%s", client_ip, client_port)
+    except Exception as e:
+        logger.exception(f"registered_pd_master_obj {registered_pd_master_obj} has error {str(e)}")
     finally:
-        logger.error(f"registered_pd_master_obj {registered_pd_master_obj} removed")
+        logger.info(f"registered_pd_master_obj {registered_pd_master_obj} removed")
         with registered_pd_master_obj_lock:
             registered_pd_master_objs.pop(registered_pd_master_obj.node_id, None)
     return
@@ -90,11 +91,12 @@ async def visual_websocket_endpoint(websocket: WebSocket):
         while True:
             data = await websocket.receive_text()
             assert data == "heartbeat"
-    except (WebSocketDisconnect, Exception, RuntimeError) as e:
-        logger.error(f"registered_visual_server_obj {registered_visual_server_obj} has error {str(e)}")
-        logger.exception(str(e))
+    except WebSocketDisconnect:
+        logger.info("Registration connection closed: peer=%s:%s", client_ip, client_port)
+    except Exception as e:
+        logger.exception(f"registered_visual_server_obj {registered_visual_server_obj} has error {str(e)}")
     finally:
-        logger.error(f"registered_visual_server_obj {registered_visual_server_obj} removed")
+        logger.info(f"registered_visual_server_obj {registered_visual_server_obj} removed")
         with registered_visual_server_obj_lock:
             registered_visual_server_objs.pop(registered_visual_server_obj.node_id, None)
     return
@@ -176,9 +178,6 @@ async def http_start_tcp_store_server(
     Returns:
         dict: A dictionary containing the status of the server.
     """
-    global global_store_port_to_process
-    global global_store_port_to_client_states
-    global global_store_port_lock
 
     args = get_env_start_args()
 

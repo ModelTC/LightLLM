@@ -9,6 +9,7 @@ import numpy as np
 
 from lightllm.server.core.objs import StopStrMatchMode, FinishStatus, SamplingParams
 from lightllm.server.router.model_infer.infer_batch import InferReq
+from lightllm.server.httpserver_for_pd_master import manager as pd_master_module
 from lightllm.server.httpserver_for_pd_master.manager import HttpServerManagerForPDMaster, PDManager
 from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtraInfo
 from lightllm.server.pd_io_struct import PD_Client_Obj
@@ -27,6 +28,7 @@ def _make_manager(monkeypatch):
     mgr.req_id_to_out_inf = {}
     mgr.args = SimpleNamespace(
         disable_pd_master_decode_capacity_limit=True,
+        mtp_step=0,
         reasoning_parser=None,
         enable_rl=False,
         enable_return_routed_experts=False,
@@ -106,7 +108,7 @@ def _collect(
 ):
     segment_iter = iter(segments)
 
-    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt_ids, sp, multimodal_params, request, **_kwargs):
         mgr.segment_inputs.append(
             pickle.loads(pickle.dumps((prompt_ids, sp.constraint_out_params.pd_previous_output_len)))
         )
@@ -171,7 +173,7 @@ def test_pd_token_id_stop_matches_across_capacity_segments(monkeypatch, mode, hi
         params.init(None, stop_sequences=[stop_ids], stop_str_match_mode=mode, max_new_tokens=6)
         segments = []
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal, request, **_kwargs):
             index = len(segments)
             segments.append(sp.group_request_id)
             req = InferReq.__new__(InferReq)
@@ -288,7 +290,7 @@ def test_error_result_records_hit_rate_without_inserting_prompt_cache(monkeypatc
     sampling_params.best_of = 1
     sampling_params.max_new_tokens = 1
 
-    async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args):
+    async def failed_wait(_p_node, _d_node, _start_time, _prompt_ids, sp, *_args, **_kwargs):
         yield (
             sp.group_request_id,
             "",
@@ -336,7 +338,7 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
         _initial_reasoning_state=1,
     )
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         assert sp.stop_str_match_mode.get_mode() == (StopStrMatchMode.ALL_TEXT)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
         yield sp.group_request_id, "reasonENDextra", metadata, FinishStatus(FinishStatus.FINISHED_LENGTH)
@@ -361,7 +363,6 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
 def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
-
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(
@@ -379,7 +380,7 @@ def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
     )
     segment_modes = []
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         segment_modes.append(sp._initial_reasoning_state)
         assert sp.stop_str_match_mode.get_mode() == StopStrMatchMode.CONTENT_ONLY
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
@@ -488,7 +489,7 @@ def test_pd_stop_prefix_survives_capacity_split(monkeypatch, include, parser, co
     )
     segments = []
 
-    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+    async def fake_wait(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
         segments.append(prompt)
         metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1}
         if len(segments) == 1:
@@ -575,7 +576,7 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 
         manager.stop_request = stop_and_notify
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
             segments.append(prompt)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
             try:
@@ -607,9 +608,10 @@ def test_application_stop_discards_late_pd_output_and_closes_segment(monkeypatch
 
 
 @pytest.mark.parametrize(
-    "exit_mode, token_count", [("finish", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)]
+    "exit_mode, token_count",
+    [("finish", 2), ("capacity", 2), ("close", 1), ("error", 1), ("empty", 0), ("empty_prompt", 2)],
 )
-def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, token_count):
+def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, exit_mode, token_count):
     import math
     import time
     from unittest.mock import MagicMock
@@ -621,7 +623,8 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
     params = SamplingParams()
     params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4, group_request_id=80)
     request = SimpleNamespace(headers={"X-Request-Id": "summary-test"}, is_disconnected=lambda: asyncio.sleep(0, False))
-    caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
+    summary = MagicMock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
 
     async def raw_stream(*_args):
         if exit_mode == "empty":
@@ -633,7 +636,9 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
         yield 80, "first", dict(metadata), FinishStatus()
         if exit_mode == "error":
             raise RuntimeError("decode failed")
-        yield 80, "last", dict(metadata), FinishStatus(FinishStatus.FINISHED_LENGTH)
+        yield 80, "last", dict(metadata), FinishStatus(
+            FinishStatus.FINISHED_PD_DECODE_CAPACITY if exit_mode == "capacity" else FinishStatus.FINISHED_LENGTH
+        )
 
     manager.fetch_pd_stream = raw_stream
 
@@ -650,11 +655,20 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
             assert len([result async for result in generator]) == token_count
 
     asyncio.run(run())
-    summaries = [record.getMessage() for record in caplog.records if "out_token_counter:" in record.getMessage()]
+    summaries = summary.call_args_list
     if token_count:
         assert len(summaries) == 1
-        assert "X-Request-Id:summary-test" in summaries[0]
-        assert f"out_token_counter:{token_count}" in summaries[0]
+        assert summaries[0].kwargs["x_request_id"] == "summary-test"
+        assert summaries[0].kwargs["output_tokens"] == token_count
+        assert summaries[0].kwargs["status"] == (
+            "error"
+            if exit_mode == "error"
+            else "abort"
+            if exit_mode == "close"
+            else "continued"
+            if exit_mode == "capacity"
+            else "completed"
+        )
         manager.first_time_costs.add.assert_called_once()
         manager.per_token_costs.add.assert_called_once()
         assert math.isfinite(manager.per_token_costs.add.call_args.args[0])
@@ -671,7 +685,8 @@ def test_pd_segment_summary_is_recorded_on_exit(monkeypatch, caplog, exit_mode, 
 
 
 @pytest.mark.parametrize("late_status", [FinishStatus.NO_FINISH, FinishStatus.FINISHED_PD_DECODE_CAPACITY])
-def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_status):
+@pytest.mark.parametrize("close_directly", [False, True])
+def test_pd_stopped_choice_records_segment_summary(monkeypatch, late_status, close_directly):
     import time
     from unittest.mock import AsyncMock, MagicMock
 
@@ -683,7 +698,8 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
     params = SamplingParams()
     params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
     request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
-    caplog.set_level("INFO", logger="lightllm.server.httpserver_for_pd_master.manager")
+    summary = MagicMock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
 
     async def raw_stream(_p_node, _d_node, _prompt, sampling_params, *_args):
         metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
@@ -698,14 +714,21 @@ def test_pd_stopped_choice_records_segment_summary(monkeypatch, caplog, late_sta
         await manager.stop_request(80)
         # stop_request 只做标记，恢复生成时才停止当前 P/D 分段。
         manager.abort.assert_not_awaited()
-        with pytest.raises(StopAsyncIteration):
-            await generator.__anext__()
+        if close_directly:
+            await generator.aclose()
+        else:
+            with pytest.raises(StopAsyncIteration):
+                await generator.__anext__()
         assert not manager.active_req_ids
         manager.abort.assert_awaited_once()
-        summaries = [record.getMessage() for record in caplog.records if "out_token_counter:" in record.getMessage()]
+        summaries = summary.call_args_list
         assert len(summaries) == 1
-        assert "lightllm_req_id:1" in summaries[0]
-        manager.metric_client.histogram_observe.assert_any_call("lightllm_request_generated_tokens", 2)
+        assert summaries[0].args[0] == 1
+        assert summaries[0].kwargs["status"] == "completed"
+        assert summaries[0].kwargs["finish_reason"] == "stop"
+        manager.metric_client.histogram_observe.assert_any_call(
+            "lightllm_request_generated_tokens", 1 if close_directly else 2
+        )
 
     asyncio.run(run())
 
@@ -730,7 +753,7 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
 
         manager.remove_req = remove_req
 
-        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request):
+        async def raw_segment(p_node, d_node, start_time, prompt, sp, multimodal_params, request, **_kwargs):
             index = len(segments)
             segments.append(sp.group_request_id)
             metadata = {"prompt_tokens": 10, "prompt_cache_len": 0, "count_output_tokens": 1, "id": 10}
@@ -767,3 +790,202 @@ def test_application_pd_stop_leaves_sibling_choice_running(monkeypatch):
         assert not manager.active_req_ids
 
     asyncio.run(asyncio.wait_for(run(), timeout=2))
+
+
+@pytest.mark.parametrize("bad_metadata", [False, True, "busy"])
+def test_pd_failure_emits_one_summary_with_output_counts(monkeypatch, bad_metadata):
+    import time
+    from unittest.mock import AsyncMock, MagicMock
+
+    manager = _make_manager(monkeypatch)
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.metric_client = MagicMock()
+    manager.abort = AsyncMock()
+    summary = MagicMock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
+    request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
+
+    async def raw_stream(_p, _d, _prompt, sp, *_args):
+        metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
+        yield sp.group_request_id, "first", dict(metadata), FinishStatus()
+        if bad_metadata == "busy":
+            from lightllm.utils.error_utils import ServerBusyError
+
+            raise ServerBusyError("decode busy")
+        if bad_metadata:
+            yield sp.group_request_id + 1, "bad", dict(metadata), FinishStatus()
+        else:
+            raise RuntimeError("decode failed")
+
+    manager.fetch_pd_stream = raw_stream
+
+    async def run():
+        from lightllm.utils.error_utils import ServerBusyError
+
+        error = ServerBusyError if bad_metadata == "busy" else AssertionError if bad_metadata else RuntimeError
+        with pytest.raises(error):
+            async for _ in manager._generate_one("prompt", params, None, request, time.time(), 80, 10):
+                pass
+        summary.assert_called_once()
+        assert summary.call_args.kwargs["status"] == ("busy" if bad_metadata == "busy" else "error")
+        assert summary.call_args.kwargs["output_tokens"] == (2 if bad_metadata is True else 1)
+        assert not manager._summary_states
+        assert not manager.active_req_ids
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("mode", ["disabled", "expired", "retry_success"])
+def test_busy_before_first_token_logs_only_terminal_outcome(monkeypatch, mode):
+    import time
+    from unittest.mock import Mock, MagicMock
+    from lightllm.utils.error_utils import ServerBusyError
+
+    manager = _make_manager(monkeypatch)
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.metric_client = MagicMock()
+    manager.abort = AsyncMock()
+    manager.enable_pd_node_self_request_limit = mode != "disabled"
+    manager.pd_node_busy_retry_timeout_seconds = 0 if mode == "expired" else 120
+    summary = Mock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *_a, **_kw: []), max_new_tokens=1)
+    request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
+    attempts = []
+
+    async def raw_stream(_p, _d, _prompt, sp, *_args):
+        attempts.append(sp.group_request_id)
+        if len(attempts) == 1:
+            raise ServerBusyError("decode busy")
+        summary.assert_not_called()
+        yield sp.group_request_id, "done", {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 0}, FinishStatus(
+            FinishStatus.FINISHED_LENGTH
+        )
+
+    manager.fetch_pd_stream = raw_stream
+
+    async def run():
+        stream = manager._generate_one("prompt", params, None, request, time.time(), 80, 10)
+        if mode == "retry_success":
+            assert len([item async for item in stream]) == 1
+            assert len(attempts) == 2
+        else:
+            with pytest.raises(ServerBusyError):
+                async for _ in stream:
+                    pass
+            assert len(attempts) == 1
+        summary.assert_called_once()
+        fields = summary.call_args.kwargs
+        assert fields["status"] == ("completed" if mode == "retry_success" else "busy")
+        if mode != "retry_success":
+            assert "output_tokens" not in fields
+        assert not manager._summary_states
+        assert not manager.active_req_ids
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("retry_enabled", [False, True])
+@pytest.mark.parametrize("failure_site", ["stream", "dispatch"])
+def test_pd_continuation_busy_before_first_token_emits_terminal_summary(monkeypatch, retry_enabled, failure_site):
+    import time
+    from unittest.mock import MagicMock
+    from lightllm.utils.error_utils import ServerBusyError
+
+    manager = _make_manager(monkeypatch)
+    manager.enable_pd_node_self_request_limit = retry_enabled
+    manager.first_time_costs = MagicMock()
+    manager.per_token_costs = MagicMock()
+    manager.abort = AsyncMock()
+    summary = MagicMock()
+    monkeypatch.setattr(pd_master_module, "log_request_summary", summary)
+    params = SamplingParams()
+    params.init(SimpleNamespace(encode=lambda *_args, **_kwargs: []), max_new_tokens=4)
+    request = SimpleNamespace(headers={}, is_disconnected=lambda: asyncio.sleep(0, False))
+    attempts = 0
+
+    async def raw_stream(_p, _d, _prompt, sp, *_args):
+        nonlocal attempts
+        attempts += 1
+        metadata = {"id": 1, "prompt_tokens": 10, "prompt_cache_len": 3}
+        if attempts == 1:
+            yield sp.group_request_id, "first", dict(metadata), FinishStatus()
+            yield sp.group_request_id, "", dict(metadata), FinishStatus(FinishStatus.FINISHED_PD_DECODE_CAPACITY)
+        else:
+            raise ServerBusyError("segment busy before first token")
+
+    manager.fetch_pd_stream = raw_stream
+    if failure_site == "dispatch":
+        original_dispatch = manager.pd_node_stats.add_dispatched_info
+        dispatch_count = 0
+
+        async def dispatch(**kwargs):
+            nonlocal dispatch_count
+            dispatch_count += 1
+            if dispatch_count == 2:
+                raise ServerBusyError("continuation dispatch failed")
+            await original_dispatch(**kwargs)
+
+        manager.pd_node_stats.add_dispatched_info = dispatch
+
+    async def consume():
+        return [item async for item in manager._generate_one("prompt", params, None, request, time.time(), 80, 10)]
+
+    async def run():
+        with pytest.raises(ServerBusyError):
+            await consume()
+        assert [call.kwargs["status"] for call in summary.call_args_list] == ["continued", "busy"]
+        assert [call.args[0] for call in summary.call_args_list] == [1, 80]
+        assert attempts == (2 if failure_site == "stream" else 1)
+        assert not manager._summary_states
+        assert not manager.active_req_ids
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("headers, expected", [({"X-Request-Id": "header-id"}, "header-id"), ({}, "context-id")])
+def test_fetch_pd_stream_sends_request_context_to_both_nodes(headers, expected):
+    from lightllm.server.pd_io_struct import ObjType
+    from lightllm.utils.log_utils import set_http_request_id, reset_http_request_id
+
+    class StopAfterDispatch(Exception):
+        pass
+
+    async def run():
+        manager = HttpServerManagerForPDMaster.__new__(HttpServerManagerForPDMaster)
+        manager.args = SimpleNamespace(pd_node_id=1)
+        manager.req_id_to_out_inf = {}
+        params = SamplingParams()
+        params.group_request_id = 123
+        params.max_new_tokens = 8
+        p_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+        d_node = SimpleNamespace(websocket=SimpleNamespace(send_bytes=AsyncMock()))
+
+        async def wait(event, *args, stage, **kwargs):
+            if stage == "prefill":
+                event.prompt_ids = [1, 2, 3]
+            else:
+                raise StopAfterDispatch()
+
+        manager._wait_for_event_or_disconnect = wait
+        token = set_http_request_id("context-id")
+        try:
+            stream = manager.fetch_pd_stream(p_node, d_node, "prompt", params, None, SimpleNamespace(headers=headers))
+            with pytest.raises(StopAfterDispatch):
+                await anext(stream)
+        finally:
+            reset_http_request_id(token)
+        for node, prompt, max_tokens in ((p_node, "prompt", 1), (d_node, [1, 2, 3], 8)):
+            node.websocket.send_bytes.assert_awaited_once()
+            kind, (sent_prompt, sent_params, _), metadata = pickle.loads(node.websocket.send_bytes.call_args.args[0])
+            assert kind == ObjType.REQ
+            assert sent_prompt == prompt
+            assert sent_params.max_new_tokens == max_tokens
+            assert metadata == {"http_request_id": expected}
+
+    asyncio.run(run())

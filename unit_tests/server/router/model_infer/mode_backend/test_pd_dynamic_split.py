@@ -77,7 +77,7 @@ def test_pd_decode_capacity_shortage_is_delayed_for_overlap(monkeypatch):
     assert req.sampling_param.shm_param.max_new_tokens == 65535
     assert not req.wait_pause
     filter_reqs.assert_called_once_with(finished_reqs=[])
-    assert logger.info.call_args.args[0] == (
+    logger.warning.assert_called_once_with(
         "force early finish for PD decode req_id=1 because token capacity is insufficient"
     )
 
@@ -96,7 +96,7 @@ def test_pd_decode_capacity_shortage_is_filtered_without_overlap(monkeypatch):
     assert req.sampling_param.shm_param.max_new_tokens == 65535
     assert not req.wait_pause
     filter_reqs.assert_called_once_with(finished_reqs=[req])
-    assert logger.info.call_args.args[0] == (
+    logger.warning.assert_called_once_with(
         "force early finish for PD decode req_id=1 because token capacity is insufficient"
     )
 

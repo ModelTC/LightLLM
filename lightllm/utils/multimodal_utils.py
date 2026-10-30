@@ -30,7 +30,7 @@ class UrlResourcePool:
         cached = self._cache.get(key)
         if cached is not None:
             self._cache.move_to_end(key)
-            logger.info("url_pool hit")
+            logger.debug("url_pool hit")
         return cached
 
     def put(self, url: str, proxy: Optional[str], content: bytes) -> None:
@@ -80,7 +80,7 @@ def _get_xhttp_client(proxy=None):
 
 
 async def fetch_resource(url, request: Request, timeout, proxy=None):
-    logger.info(f"Begin to download resource from url: {url}")
+    logger.debug(f"Begin to download resource from url: {url}")
     cached = URL_RESOURCE_POOL.get(url, proxy)
     if cached is not None:
         return cached
@@ -102,6 +102,6 @@ async def fetch_resource(url, request: Request, timeout, proxy=None):
     content = b"".join(ans_bytes)
     end_time = time.time()
     cost_time = end_time - start_time
-    logger.info(f"Download url {url} resource cost time: {cost_time} seconds")
+    logger.debug(f"Download url {url} resource cost time: {cost_time} seconds")
     URL_RESOURCE_POOL.put(url, proxy, content)
     return content

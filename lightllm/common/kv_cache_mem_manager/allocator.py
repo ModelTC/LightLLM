@@ -71,8 +71,6 @@ class KvCacheAllocator:
         self.can_use_mem_size += len(free_index)
         self.shared_can_use_token_num.set_value(self.can_use_mem_size)
 
-        if self.can_use_mem_size == len(self.mem_state):
-            logger.debug(f"freed all gpu mem size {self.can_use_mem_size}")
         return
 
     def free_all(self):

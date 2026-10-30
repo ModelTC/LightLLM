@@ -28,7 +28,6 @@ logger = init_logger(__name__)
 
 
 class MemoryManager:
-
     operator_class = NormalMemOperator
 
     def __init__(self, size, dtype, head_num, head_dim, layer_num, always_copy=False, mem_fraction=0.9):
@@ -259,7 +258,7 @@ class MemoryManager:
             shm = create_or_link_shm(
                 name=shm_name, expected_size=obj_size * (node_world_size * 2) + 4 + 4, force_mode="create"
             )
-            logger.info(f"create shm {shm.name} size {shm.size} for mem manger shared buffer")
+            logger.debug(f"create shm {shm.name} size {shm.size} for mem manger shared buffer")
             shm.buf[0:4] = (node_world_size * 2).to_bytes(4, "little")
             shm.buf[4:8] = obj_size.to_bytes(4, "little")
             start_index = 8
@@ -271,7 +270,7 @@ class MemoryManager:
     def loads_from_shm(rank_in_node: int) -> "MemoryManager":
         shm_name = f"mem_manager_{rank_in_node}"
         lock = FileLock(f"/tmp/{get_service_shm_name('mem_manager_lock')}")
-        logger.info(f"get memmanager from shm {shm_name}")
+        logger.debug(f"get memmanager from shm {shm_name}")
         with lock:
             shm = create_or_link_shm(name=shm_name, expected_size=-1, force_mode="link")
             left_num = int.from_bytes(shm.buf[0:4], "little")

@@ -76,7 +76,7 @@ class TestLazyAttentionImports(unittest.TestCase):
             },
             "lightllm.utils.envs_utils": {"get_env_start_args": lambda: self.args},
             "lightllm.utils.backend_validator": {"validate": self.validate},
-            "lightllm.utils.log_utils": {"init_logger": lambda name: Mock()},
+            "lightllm.utils.log_utils": {"init_logger": lambda name: Mock(), "log_info_on_leader": Mock()},
         }
         for name, attributes in dependencies.items():
             module = ModuleType(name)
@@ -166,15 +166,19 @@ class TestLazyAttentionImports(unittest.TestCase):
         self.assertEqual(self.imports.imported, [f"{ATTENTION}.triton.neo"])
 
     def test_neo_auto_selection_still_falls_back_without_image_token_interface(self):
-        self.imports.allow("fa3.neo", "NeoFa3AttBackend", HAS_FLASH_ATTN_INTERFACE=False)
+        require_neo_fa3 = Mock(side_effect=ImportError("Neo FA3 requires image_token_end support"))
+        self.imports.allow(
+            "fa3.neo", "NeoFa3AttBackend", HAS_FLASH_ATTN_INTERFACE=False, require_neo_fa3=require_neo_fa3
+        )
         backend = self.imports.allow("triton.neo", "NeoTritonAttBackend")
         self.args.llm_prefill_att_backend = ["auto"]
 
         self.assertIs(self.attention.get_neo_prefill_att_backend_class(), backend)
         self.validate.assert_called_once_with("triton")
         self.args.llm_prefill_att_backend = ["fa3"]
-        with self.assertRaises(KeyError):
+        with self.assertRaisesRegex(ImportError, "image_token_end support"):
             self.attention.get_neo_prefill_att_backend_class()
+        require_neo_fa3.assert_called_once_with()
 
     def test_neo_auto_selection_uses_supported_fa3(self):
         backend = self.imports.allow("fa3.neo", "NeoFa3AttBackend", HAS_FLASH_ATTN_INTERFACE=True)

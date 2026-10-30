@@ -14,7 +14,6 @@ class RewardModelBackend(ChunkedPrefillBackend):
         return
 
     def reward_prefill(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):
-
         assert self.disable_chunked_prefill is True
         model_input, run_reqs = prepare_prefill_inputs(prefill_reqs, is_chuncked_mode=not self.disable_chunked_prefill)
 
@@ -28,6 +27,7 @@ class RewardModelBackend(ChunkedPrefillBackend):
         for req_obj, score in zip(run_reqs, scores):
             # prefill and decode is same
             req_obj: InferReq = req_obj
+            prefill_tokens = max(0, req_obj.shm_req.input_len - req_obj.cur_kv_len)
             req_obj.cur_kv_len = req_obj.get_cur_total_len()
 
             req_obj.cur_output_len += 1
@@ -35,6 +35,7 @@ class RewardModelBackend(ChunkedPrefillBackend):
             req_obj.update_finish_status(self.eos_id, output_len=req_obj.cur_output_len)
 
             if self.is_master_in_dp:
+                self.engine_counters.add(prefill_tokens, 1)
                 # 写入 reward_score
                 req_obj.shm_req.reward_score = score
 

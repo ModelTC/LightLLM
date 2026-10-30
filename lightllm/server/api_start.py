@@ -7,7 +7,7 @@ from lightllm.utils.start_utils import process_manager
 from .metrics.manager import start_metric_manager
 from .httpserver.req_id_generator_server import start_req_id_generator_server
 from .embed_cache.manager import start_cache_manager
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_startup_config, get_http_logging_args
 from lightllm.utils.envs_utils import (
     get_env_start_args,
     get_unique_server_name,
@@ -134,7 +134,7 @@ def _launch_subprocesses(args: StartArgs):
 
     assert args.zmq_mode in ["tcp://", "ipc:///tmp/"]
 
-    logger.info(f"use tgi api: {args.use_tgi_api}")
+    logger.debug(f"use tgi api: {args.use_tgi_api}")
 
     # 当使用config_server来初始化nccl时，nccl_host和config_server_host必须一致
     if args.use_config_server_to_init_nccl:
@@ -354,7 +354,7 @@ def _launch_subprocesses(args: StartArgs):
         zmq_mode = f"{args.zmq_mode}_{get_unique_server_name()}_"
         args.zmq_mode = None  # args 的参数不能直接设置，只能先设置None，再设置才能成功
         args.zmq_mode = zmq_mode
-        logger.info(f"zmq mode head: {args.zmq_mode}")
+        logger.debug(f"zmq mode head: {args.zmq_mode}")
 
     # p d 分离模式下用于标识节点的id
     args.pd_node_id = uuid.uuid4().int
@@ -395,7 +395,7 @@ def _launch_subprocesses(args: StartArgs):
     # 多机用于收发node ip, 这个地方修改了args env,所以需要重新设置一下。
     send_and_receive_node_ip(args)
     set_env_start_args(args)
-    logger.info(f"all start args:{args}")
+    log_startup_config(logger, args)
 
     if args.enable_multimodal:
         process_manager.start_submodule_processes(
@@ -491,12 +491,7 @@ def normal_or_p_d_start(args: StartArgs):
         f"{args.httpserver_workers}",
         "--bind",
         f"{args.host}:{get_shm_port_args().port}",
-        "--log-level",
-        "info",
-        "--access-logfile",
-        "-",
-        "--error-logfile",
-        "-",
+        *get_http_logging_args(application_access=True),
         "lightllm.server.api_http:app",
     ]
 
@@ -512,6 +507,7 @@ def normal_or_p_d_start(args: StartArgs):
         from lightllm.server.health_monitor.manager import start_health_check_process
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
+    process_manager.start_readiness_monitor(http_server_process, args)
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
 
@@ -534,13 +530,13 @@ def pd_master_start(args: StartArgs):
     else:
         args.pd_node_id = 0
 
-    logger.info(f"use tgi api: {args.use_tgi_api}")
+    logger.debug(f"use tgi api: {args.use_tgi_api}")
 
     validate_ports([args.port])
     set_env_start_args(args)
     process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
-    logger.info(f"all start args:{args}")
+    log_startup_config(logger, args)
 
     process_manager.start_submodule_processes(
         start_funcs=[
@@ -560,12 +556,7 @@ def pd_master_start(args: StartArgs):
         "1",
         "--bind",
         f"{args.host}:{get_shm_port_args().port}",
-        "--log-level",
-        "info",
-        "--access-logfile",
-        "-",
-        "--error-logfile",
-        "-",
+        *get_http_logging_args(application_access=True),
         "lightllm.server.api_http:app",
     ]
 
@@ -576,6 +567,7 @@ def pd_master_start(args: StartArgs):
 
         process_manager.start_submodule_processes(start_funcs=[start_health_check_process], start_args=[(args,)])
 
+    process_manager.start_readiness_monitor(http_server_process, args)
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
 
@@ -602,6 +594,7 @@ def pd_master_multi_worker_start(args: StartArgs):
     ports = get_shm_port_args(create=True)
     worker_ports = ports.pd_master_multi_ports
     validate_ports([args.port, ports.metric_port, *worker_ports])
+    log_startup_config(logger, args)
     logger.info("PD master worker ports: %s", worker_ports)
     process_manager.start_submodule_processes(
         start_funcs=[start_metric_manager],
@@ -656,7 +649,7 @@ def visual_only_start(args):
     set_env_start_args(args)
     process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
-    logger.info(f"all start args:{args}")
+    log_startup_config(logger, args)
 
     from .visualserver.visual_only_manager import start_visual_process
 
@@ -684,7 +677,7 @@ def config_server_start(args):
     set_env_start_args(args)
     process_manager.setup_exit_controller()
     get_shm_port_args(create=True)
-    logger.info(f"all start args:{args}")
+    log_startup_config(logger, args)
 
     if args.config_server_visual_redis_port is not None:
         start_redis_service(args)
@@ -696,16 +689,12 @@ def config_server_start(args):
         "1",
         "--bind",
         f"{args.config_server_host}:{get_shm_port_args().config_server_port}",
-        "--log-level",
-        "info",
-        "--access-logfile",
-        "-",
-        "--error-logfile",
-        "-",
+        *get_http_logging_args(),
         "lightllm.server.config_server.api_http:app",
     ]
 
     http_server_process = subprocess.Popen(command)
+    process_manager.start_readiness_monitor(http_server_process, args)
     process_manager.setup_signal_handlers(http_server_process)
     process_manager.supervise_processes(http_server_process)
 

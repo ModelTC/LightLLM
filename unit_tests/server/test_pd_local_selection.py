@@ -596,7 +596,17 @@ def test_cache_aware_selection_and_initial_reservation_are_serialized_per_worker
         request_ids = iter(range(8, 8 * (request_count + 1), 8))
         manager.id_gen = SimpleNamespace(generate_id=lambda: next(request_ids))
 
-        async def generate_segment(p_node, _d_node, _start_time, _prompt, params, _multimodal, _request):
+        async def generate_segment(
+            p_node,
+            _d_node,
+            _start_time,
+            _prompt,
+            params,
+            _multimodal,
+            _request,
+            origin_request_id=None,
+            summary_state=None,
+        ):
             selected_nodes.append(p_node)
             if len(selected_nodes) == request_count:
                 all_reserved.set()
@@ -645,7 +655,9 @@ def test_segment_counters_clear_at_first_token_and_restart_for_continuation(back
     prefill = manager.pd_manager.prefill_nodes[0]
     segments = []
 
-    async def generate_segment(p_node, d_node, start_time, prompt, params, multimodal, request):
+    async def generate_segment(
+        p_node, d_node, start_time, prompt, params, multimodal, request, origin_request_id=None, summary_state=None
+    ):
         segments.append(prompt)
         assert _pending(state, p_node) == (len(prompt), 1)
         yield (
@@ -697,7 +709,17 @@ def test_continuation_tokenization_failure_clears_reserved_counter(backend):
     params = SamplingParams()
     params.init(None, max_new_tokens=3, regular_constraint="ab")
 
-    async def generate_first_segment(_p_node, _d_node, _start_time, _prompt, params, _multimodal, _request):
+    async def generate_first_segment(
+        _p_node,
+        _d_node,
+        _start_time,
+        _prompt,
+        params,
+        _multimodal,
+        _request,
+        origin_request_id=None,
+        summary_state=None,
+    ):
         yield (
             params.group_request_id,
             "x",
@@ -736,7 +758,9 @@ def test_error_output_records_hit_rate_without_inserting_cache(backend):
     manager, state = _generator_manager(backend, "cache_aware")
     prefill = manager.pd_manager.prefill_nodes[0]
 
-    async def generate_segment(p_node, d_node, start_time, prompt, params, multimodal, request):
+    async def generate_segment(
+        p_node, d_node, start_time, prompt, params, multimodal, request, origin_request_id=None, summary_state=None
+    ):
         yield (
             params.group_request_id,
             "",
@@ -763,7 +787,7 @@ def test_error_before_first_token_clears_segment_counters(backend):
     manager, state = _generator_manager(backend)
     prefill = manager.pd_manager.prefill_nodes[0]
 
-    async def generate_segment(*_args):
+    async def generate_segment(*_args, origin_request_id=None, summary_state=None):
         assert _pending(state, prefill) == (len("prompt"), 1)
         raise RuntimeError("before first token")
         yield
@@ -815,7 +839,7 @@ def test_connection_closed_during_counter_update_fails_at_dispatch_and_clears_lo
             created.set()
             await complete.wait()
 
-        async def generate_segment(p_node, d_node, *_args):
+        async def generate_segment(p_node, d_node, *_args, origin_request_id=None, summary_state=None):
             assert p_node is prefill and d_node is decode
             raise ConnectionError("selected PD connection closed")
             yield
@@ -866,7 +890,7 @@ def test_cancelled_request_clears_counters_before_removing_request(backend):
 
         manager.remove_req.side_effect = remove_req
 
-        async def generate_segment(*_args):
+        async def generate_segment(*_args, origin_request_id=None, summary_state=None):
             started.set()
             await asyncio.Event().wait()
             yield
@@ -904,7 +928,17 @@ def test_cancellation_after_counter_release_does_not_release_twice(backend):
 
         manager.pd_node_stats.sub_dispatched_info = AsyncMock(side_effect=sub_dispatched_info)
 
-        async def generate_segment(_p_node, _d_node, _start_time, _prompt, params, _multimodal, _request):
+        async def generate_segment(
+            _p_node,
+            _d_node,
+            _start_time,
+            _prompt,
+            params,
+            _multimodal,
+            _request,
+            origin_request_id=None,
+            summary_state=None,
+        ):
             yield params.group_request_id, "x", {"prompt_tokens": 1}, FinishStatus()
 
         manager._wait_to_token_package = generate_segment

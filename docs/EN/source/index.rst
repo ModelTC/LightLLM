@@ -47,6 +47,7 @@ Documentation List
    :maxdepth: 1
    :caption: Deployment Tutorials
 
+   Logging <tutorial/logging>
    DeepSeek R1 Deployment <tutorial/deepseek_deployment>
    FP8 KV Quantization and Calibration <tutorial/fp8_kv_quantization>
    Multi-Level Cache Deployment <tutorial/multi_level_cache_deployment>

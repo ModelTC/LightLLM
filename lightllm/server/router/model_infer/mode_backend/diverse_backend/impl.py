@@ -40,7 +40,6 @@ class DiversehBackend(ChunkedPrefillBackend):
         )
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
-
             model_output = self.model.forward(model_input)
             logits = model_output.logits
 
@@ -139,6 +138,8 @@ class DiversehBackend(ChunkedPrefillBackend):
                     new_kv_len = req_obj.get_chuncked_input_token_len()
                 else:
                     new_kv_len = req_obj.get_cur_total_len()
+                prefill_tokens = req_obj.prefill_tokens
+                req_obj.prefill_tokens = 0
                 req_obj.cur_kv_len = new_kv_len
                 if is_master_in_dp:
                     req_obj.shm_req.shm_cur_kv_len = req_obj.cur_kv_len
@@ -146,7 +147,7 @@ class DiversehBackend(ChunkedPrefillBackend):
                 # 对于没有到达需要输出 token 阶段的请求，直接略过, 说明还
                 # 处于chuncked prefill kv 填充的阶段。
                 if req_obj.cur_kv_len < req_obj.get_cur_total_len():
-                    pack = InferReqUpdatePack(req_obj=req_obj, output_len=0)
+                    pack = InferReqUpdatePack(req_obj=req_obj, output_len=0, prefill_tokens=prefill_tokens)
                     update_func_objs.append(pack)
                     pre_master_req_pack = pack
                     # TODO 如果 diverse mode 需要支持 pd 分离，则应该每个分块prefill后都进行相关的复制，
@@ -155,7 +156,9 @@ class DiversehBackend(ChunkedPrefillBackend):
 
                 # 将生成的下一个token的信息写入到管理对象中。
                 req_obj.cur_output_len += 1
-                pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len)
+                pack = InferReqUpdatePack(
+                    req_obj=req_obj, output_len=req_obj.cur_output_len, prefill_tokens=prefill_tokens
+                )
                 update_func_objs.append(pack)
                 pre_master_req_pack = pack
                 if req_obj.slave_reqs:

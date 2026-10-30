@@ -46,7 +46,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         # Set Triton allocator for TMA descriptors
         # This is required for kernels in common/.../linear_att/fla/ops/solve_tril.py
         triton.set_allocator(_triton_allocator)
-        logger.info("Triton allocator set for Qwen3Next model")
+        logger.debug("Triton allocator set for Qwen3Next model")
         return
 
     def autotune_layers(self):

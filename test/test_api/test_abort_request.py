@@ -17,14 +17,17 @@ So the test verifies the contract that actually exists today:
   Stage A: bogus request_id           -> HTTP 200, server log "not exist" warning
   Stage B: abort_all on an idle server -> HTTP 200, no errors
   Stage C: abort_all on a running stream
-            -> HTTP 200; server log shows "aborted group_request_id N" warning
+            -> HTTP 200; server log shows an abort DEBUG record
             -> the stream terminates within reasonable time (whether via abort or
                natural max_new_tokens completion)
   Stage D: abort by SPECIFIC request_id on a running stream
             -> resolve the lightllm_req_id from the server log (via X-Request-Id),
                POST /abort_request with that exact id, verify the targeted log
-               warning lands and the stream terminates
+               record lands and the stream terminates
   Stage E: server remains healthy and answers a fresh /generate
+
+For log assertions, start the server with LIGHTLLM_LOG_LEVEL=DEBUG and
+LIGHTLLM_LOG_REQUEST_SAMPLE_RATE=1. Both text and JSON logging are supported.
 
 Usage:
   python test/test_api/test_abort_request.py \
@@ -245,6 +248,19 @@ def lookup_lightllm_req_id_from_log(server_log_path: str, x_request_id: str, tim
         m = pattern.search(tail)
         if m:
             return int(m.group(1))
+        for line in tail.splitlines():
+            try:
+                event = json.loads(line)
+            except ValueError:
+                event = None
+            if isinstance(event, dict):
+                if event.get("event") == "request.received" and event.get("http_request_id") == x_request_id:
+                    return int(event["request_id"])
+            elif "event=request.received" in line:
+                client = re.search(r"http_request_id=['\"]?([^'\"\s]+)", line)
+                internal = re.search(r"\brequest_id=(\d+)", line)
+                if client and internal and client.group(1) == x_request_id:
+                    return int(internal.group(1))
         time.sleep(0.1)
     return None
 
@@ -304,13 +320,13 @@ def stage_c_abort_running(url: str, server_log_path: Optional[str]) -> bool:
 
     # The api itself succeeded; whether the stream got a clean 'abort' finish reason
     # depends on which mode-backend the server is running. We DO assert the abort
-    # warning landed in the server log though, scoped to log content produced after
+    # record landed in the server log though, scoped to log content produced after
     # this stage started so we don't match earlier-stage residue.
     if server_log_path:
         if target_id is not None:
-            pat = re.compile(rf"aborted group_request_id {target_id}\b")
+            pat = re.compile(rf"(?:aborted group_request_id |Request aborted: request_id=){target_id}\b")
         else:
-            pat = re.compile(r"aborted group_request_id \d+")
+            pat = re.compile(r"(?:aborted group_request_id |Request aborted: request_id=)\d+")
         hit = grep_log_after_offset(server_log_path, log_offset, pat, timeout=5.0)
         if not hit:
             fail("could not find 'aborted group_request_id' in server log (post-stage)")
@@ -355,7 +371,7 @@ def stage_d_abort_by_id(url: str, server_log_path: Optional[str]) -> bool:
     n = len(out.get("events") or [])
     print(f"  stream events received: {n}, finish_reason={fr!r}")
 
-    pat = re.compile(rf"aborted group_request_id {target_id}\b")
+    pat = re.compile(rf"(?:aborted group_request_id |Request aborted: request_id=){target_id}\b")
     hit = grep_log_after_offset(server_log_path, log_offset, pat, timeout=5.0)
     if not hit:
         fail(f"could not find 'aborted group_request_id {target_id}' in server log (post-stage)")

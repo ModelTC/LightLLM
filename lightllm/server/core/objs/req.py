@@ -124,6 +124,7 @@ class Req(ctypes.Structure):
         # True 只表示已发出停止信号，不表示推理已经退出，也不直接决定 API 的 finish_reason。
         # HTTP 因 stop 发起 abort 时，输出缓冲记录的结束原因仍为 stop；后续 abort marker 只用于收尾。
         ("is_aborted", ctypes.c_bool),
+        ("is_stop_matched", ctypes.c_bool),
         # 当FinishStatus 是正常结束状态时，finish_token_index 用于标识结束的
         # token 的index位置
         ("finish_token_index", ctypes.c_int),
@@ -182,6 +183,7 @@ class Req(ctypes.Structure):
         self.is_paused = False
         self.finish_status = FinishStatus()
         self.is_aborted = False
+        self.is_stop_matched = False
         self.shm_infer_released = False
         self.shm_cur_kv_len = 0
         self.shm_cur_output_len = 0

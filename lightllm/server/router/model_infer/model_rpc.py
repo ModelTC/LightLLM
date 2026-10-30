@@ -26,7 +26,7 @@ from lightllm.server.router.model_infer.mode_backend import (
 from lightllm.server.router.model_infer.mode_backend.redundancy_expert_manager import RedundancyExpertManager
 from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
 from lightllm.server.core.objs.start_args_type import StartArgs
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, set_log_context, log_info_on_leader
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name, get_model_infer_recursion_limit
@@ -47,7 +47,7 @@ class ModelRpcServer(rpyc.Service):
         self.rank_in_node = rank_in_node
         self.backend = None
         self.rl_backend_ops = None
-        logger.info(f"Initialized RPC server for rank {self.rank}.")
+        logger.debug(f"Initialized RPC server for rank {self.rank}.")
         return
 
     def exposed_init_model(self, kvargs):
@@ -82,7 +82,12 @@ class ModelRpcServer(rpyc.Service):
         else:
             self.backend = ChunkedPrefillBackend()
 
-        logger.info(f"use {self.backend.__class__.__name__}")
+        log_info_on_leader(
+            logger,
+            "event=engine.backend_selected backend=%s",
+            self.backend.__class__.__name__,
+            extra={"event": "engine.backend_selected", "backend": self.backend.__class__.__name__},
+        )
         self.backend.init_model(kvargs)
         self.rl_backend_ops = RlBackendOps(self.backend) if self.args.enable_rl else None
 
@@ -163,10 +168,18 @@ def _init_env(
 
     # spawn 不继承父进程的递归上限；在启动推理线程前为每个 rank 显式设置。
     sys.setrecursionlimit(get_model_infer_recursion_limit())
-    logger.info(f"Model inference rank {rank} Python recursion limit: {sys.getrecursionlimit()}")
+    logger.debug(f"Model inference rank {rank} Python recursion limit: {sys.getrecursionlimit()}")
 
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
+    tp_size = max(1, args.tp // args.dp)
+    set_log_context(
+        component="model_infer",
+        node_rank=args.node_rank,
+        global_rank=rank,
+        tp_rank=rank % tp_size,
+        dp_rank=rank // tp_size,
+    )
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::model_infer:RANK{rank}")
     start_parent_check_thread()
 

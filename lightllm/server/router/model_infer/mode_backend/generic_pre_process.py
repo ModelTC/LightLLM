@@ -45,9 +45,11 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_mtp_index.append(0)
         if hasattr(req, "is_decode_req_mixed_in_prefill"):
             b_is_decode_req.append(True)
+            req.prefill_tokens = 0
             del req.is_decode_req_mixed_in_prefill
         else:
             b_is_decode_req.append(False)
+            req.prefill_tokens = input_token_len
 
     # DP 模式下某个 rank 可能没有本地请求。这里保留真实的 0 shape，
     # 推理所需的 dummy request 统一由 BaseModel 在执行前补齐。

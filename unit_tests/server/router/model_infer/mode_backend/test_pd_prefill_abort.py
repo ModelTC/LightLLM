@@ -166,3 +166,76 @@ def test_prefill_abort_only_fails_tasks_not_submitted_to_transporter():
         "active": active_task,
         "unrelated": unrelated_task,
     }
+
+
+@pytest.mark.parametrize("debug", [False, True])
+@pytest.mark.parametrize("telemetry", [False, True])
+@pytest.mark.parametrize("notify_fails", [False, True])
+def test_completed_transfer_reaches_recycling_queue_with_compact_logging(monkeypatch, telemetry, notify_fails, debug):
+    task = SimpleNamespace(
+        xfer_handle=object(),
+        request_id=123,
+        error_info=None,
+        get_key=lambda: "transfer-123",
+        to_str=lambda: "request_id=123",
+    )
+    module = _PrefillTransModule.__new__(_PrefillTransModule)
+    module.waiting_dict_lock = threading.Lock()
+    module.waiting_dict = {task.get_key(): task}
+    module.success_queue, module.failed_queue = queue.Queue(), queue.Queue()
+    module.transporter = MagicMock()
+    module.transporter.check_task_status.return_value = "DONE"
+    module.transporter.capture_telemetry = telemetry
+    module.transporter.nixl_agent.get_xfer_telemetry.return_value = SimpleNamespace(
+        totalBytes=4096,
+        xferDuration=20,
+        postDuration=2,
+    )
+    logger = MagicMock()
+    logger.isEnabledFor.return_value = debug
+    monkeypatch.setattr(prefill_trans_process, "logger", logger)
+    if notify_fails:
+        module.transporter.send_write_done_task_to_decode_node.side_effect = ConnectionError("peer gone")
+    module._update_task_status_once()
+    assert not module.waiting_dict
+    if notify_fails:
+        assert module.failed_queue.get_nowait() is task
+        assert module.success_queue.empty()
+        logger.exception.assert_called_once()
+    else:
+        assert module.success_queue.get_nowait() is task
+        assert module.failed_queue.empty()
+    if telemetry and debug:
+        module.transporter.nixl_agent.get_xfer_telemetry.assert_called_once_with(task.xfer_handle)
+        assert logger.debug.call_args.kwargs["extra"]["bytes_total"] == 4096
+    else:
+        module.transporter.nixl_agent.get_xfer_telemetry.assert_not_called()
+        logger.debug.assert_not_called()
+
+
+@pytest.mark.parametrize("rank", [0, 1])
+def test_optional_cache_compaction_debug_is_rate_limited_and_tp_leader_only(monkeypatch, rank):
+    from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
+    from lightllm.utils import log_utils
+
+    now = [0.0]
+    monkeypatch.setattr(log_utils.time, "monotonic", lambda: now[0])
+    backend = ModeBackend.__new__(ModeBackend)
+    backend.rank_in_dp = rank
+    backend.logger = MagicMock()
+    backend.logger.isEnabledFor.return_value = True
+    backend._radix_tree_merge_counter = 0
+    backend._enable_radix_tree_timer_merge = True
+    backend._radix_tree_merge_update_delta = 1
+    backend.radix_cache = MagicMock()
+    for _ in range(2000):
+        backend._timer_merge_radix_tree()
+    assert backend.radix_cache.merge_unreferenced_nodes.call_count == 2000
+    if rank == 0:
+        assert backend.logger.debug.call_count == 1
+        now[0] = 10
+        backend._debug_compactions.flush()
+        assert backend.logger.debug.call_count == 2
+        assert sum(call.kwargs["extra"]["count"] for call in backend.logger.debug.call_args_list) == 2000
+    else:
+        backend.logger.debug.assert_not_called()

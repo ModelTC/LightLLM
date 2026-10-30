@@ -33,7 +33,7 @@ def get_hostname_ip():
         result = subprocess.run(["hostname", "-i"], capture_output=True, text=True, check=True)
         # 兼容 hostname -i 命令输出多个 ip 的情况
         result = result.stdout.strip().split(" ")[0]
-        logger.info(f"get hostname ip {result}")
+        logger.debug(f"get hostname ip {result}")
         return result
     except subprocess.CalledProcessError as e:
         logger.exception(f"Error executing command: {e}")
@@ -59,4 +59,4 @@ def validate_ports(ports: list):
                 sock.bind(("", port))
             except OSError as e:
                 raise RuntimeError(f"port {port} has been used") from e
-    logger.info(f"validated ports: {ports}")
+    logger.debug(f"validated ports: {ports}")

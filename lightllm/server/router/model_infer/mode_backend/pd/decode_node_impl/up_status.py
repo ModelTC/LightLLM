@@ -10,7 +10,7 @@ import setproctitle
 from typing import Dict
 from dataclasses import asdict
 from lightllm.server.pd_io_struct import PDUpKVStatus
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, set_log_context, log_debug_event, log_repeated_exception
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.pd_io_struct import PD_Master_Obj
 import torch.multiprocessing as mp
@@ -31,7 +31,6 @@ class UpStatusManager:
         asyncio.run(self.task_loop())
 
     async def task_loop(self):
-
         self.id_to_handle_task: Dict[int, asyncio.Task] = {}
         self.id_to_handle_queue: Dict[int, asyncio.Queue] = {}
 
@@ -42,7 +41,7 @@ class UpStatusManager:
                 from lightllm.server.httpserver.pd_loop import _get_pd_master_objs
 
                 id_to_pd_master_obj = await _get_pd_master_objs(self.args)
-                logger.info(f"get pd_master_objs {id_to_pd_master_obj}")
+                # Connection changes are already logged by the HTTP registration loop.
 
                 if id_to_pd_master_obj is not None:
                     for node_id, pd_master_obj in list(self.id_to_handle_task.items()):
@@ -50,7 +49,7 @@ class UpStatusManager:
                             self.id_to_handle_task[node_id].cancel()
                             self.id_to_handle_task.pop(node_id, None)
                             self.id_to_handle_queue.pop(node_id, None)
-                            logger.info(f"up_kv_status_task {pd_master_obj} cancelled")
+                            logger.debug(f"up_kv_status_task {pd_master_obj} cancelled")
 
                     for node_id, pd_master_obj in id_to_pd_master_obj.items():
                         if node_id not in self.id_to_handle_task:
@@ -92,20 +91,18 @@ class UpStatusManager:
                                 task_queue = self.id_to_handle_queue[pd_master_obj.node_id]
                                 upkv_status: PDUpKVStatus = await task_queue.get()
                                 await websocket.send(pickle.dumps(upkv_status))
-                                # KV readiness is reported once per request, not once per transfer page.
-                                logger.debug(f"up kv status: {upkv_status}")
+                                # Successful KV status forwarding is represented by request/transfer summaries.
                             else:
                                 await asyncio.sleep(3)
                         except BaseException as e:
                             logger.error(str(e))
                             raise e
             except asyncio.CancelledError:
-                logger.info(f"up_kv_status_task {pd_master_obj} cancelled")
+                logger.debug(f"up_kv_status_task {pd_master_obj} cancelled")
                 return
 
-            except Exception as e:
-                logger.error(f"connetion to pd_master {pd_master_obj} has error: {str(e)}")
-                logger.exception(str(e))
+            except Exception:
+                log_repeated_exception(logger, "pd.status_connection_failed", master=pd_master_obj.host_ip_port)
                 await asyncio.sleep(10)
                 logger.info("reconnection to pd_master")
 
@@ -113,9 +110,10 @@ class UpStatusManager:
 def _init_env(args, task_in_queue: mp.SimpleQueue):
     start_parent_check_thread()
     graceful_registry(inspect.currentframe().f_code.co_name)
+    set_log_context(component="kv_status")
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::pd_up_kv_status")
     up_kv_manager = UpStatusManager(args, task_in_queue)
-    logger.info(f"up kv manager {str(up_kv_manager)} start ok")
+    logger.info("event=kv_status.ready manager=%s", type(up_kv_manager).__name__)
     while True:
         time.sleep(666)
     return

@@ -7,7 +7,7 @@ from . import (
     FP8StaticPerHeadQuantMemManager,
     FP8StaticPerTensorQuantMemManager,
 )
-from lightllm.utils.log_utils import init_logger
+from lightllm.utils.log_utils import init_logger, log_info_on_leader
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.llm_utils import get_llm_model_class
 from functools import lru_cache
@@ -38,18 +38,18 @@ def select_mem_manager_class():
             mem_class = FP8PerTokenGroupQuantDeepseek3_2MemoryManager
         else:
             mem_class = Deepseek3_2MemoryManager
-        logger.info(f"Model kv cache using default, mem_manager class: {mem_class}")
+        log_info_on_leader(logger, f"Model kv cache using default, mem_manager class: {mem_class}")
         return mem_class
 
     from lightllm.models import Deepseek2TpPartModel
 
     if issubclass(model_class, Deepseek2TpPartModel):
         mem_class = Deepseek2MemoryManager
-        logger.info(f"Model kv cache using default, mem_manager class: {mem_class}")
+        log_info_on_leader(logger, f"Model kv cache using default, mem_manager class: {mem_class}")
         return mem_class
 
     # case normal
-    logger.info(f"mode setting params: {get_env_start_args().llm_kv_type}")
+    log_info_on_leader(logger, f"mode setting params: {get_env_start_args().llm_kv_type}")
     if get_env_start_args().llm_kv_type == "int8kv":
         memory_manager_class = PPLINT8KVMemoryManager
     elif get_env_start_args().llm_kv_type == "int4kv":
@@ -61,7 +61,7 @@ def select_mem_manager_class():
     elif get_env_start_args().llm_kv_type == "None":
         memory_manager_class = MemoryManager
 
-    logger.info(f"Model kv cache using mem_manager class: {memory_manager_class}")
+    log_info_on_leader(logger, f"Model kv cache using mem_manager class: {memory_manager_class}")
     return memory_manager_class
 
 
