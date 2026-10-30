@@ -3,6 +3,7 @@ import triton
 import triton.language as tl
 import torch.nn.functional as F
 import numpy as np
+
 from lightllm.common.req_manager import ReqSamplingParamsManager
 
 
@@ -89,27 +90,29 @@ def apply_penalty_gpu_cache(
     b_mask_eos_reqs: torch.Tensor,
     eos_ids: torch.Tensor,
     sampling_params_manager: ReqSamplingParamsManager,
+    skip_token_penalties: bool = False,
 ):
     assert Logits.is_contiguous()
-    BLOCK_P = 2048
-    num_warps = 8
-    vocab_size = sampling_params_manager.vocab_size
-    req_to_out_token_id_counter = sampling_params_manager.req_to_out_token_id_counter
-    _fwd_kernel_apply_penalty_cache[(Logits.shape[0], triton.cdiv(vocab_size, BLOCK_P))](
-        Logits=Logits,
-        stride_logit_b=Logits.stride(0),
-        stride_logit_s=Logits.stride(1),
-        b_req_idx=b_req_idx,
-        req_to_presence_penalty=sampling_params_manager.req_to_presence_penalty,
-        req_to_frequency_penalty=sampling_params_manager.req_to_frequency_penalty,
-        req_to_repetition_penalty=sampling_params_manager.req_to_repetition_penalty,
-        req_to_out_token_id_counter=req_to_out_token_id_counter,
-        stride_counter_r=req_to_out_token_id_counter.stride(0),
-        stride_counter_s=req_to_out_token_id_counter.stride(1),
-        vocab_size=vocab_size,
-        BLOCK_P=BLOCK_P,
-        num_warps=num_warps,
-    )
+    if not skip_token_penalties:
+        BLOCK_P = 2048
+        num_warps = 8
+        vocab_size = sampling_params_manager.vocab_size
+        req_to_out_token_id_counter = sampling_params_manager.req_to_out_token_id_counter
+        _fwd_kernel_apply_penalty_cache[(Logits.shape[0], triton.cdiv(vocab_size, BLOCK_P))](
+            Logits=Logits,
+            stride_logit_b=Logits.stride(0),
+            stride_logit_s=Logits.stride(1),
+            b_req_idx=b_req_idx,
+            req_to_presence_penalty=sampling_params_manager.req_to_presence_penalty,
+            req_to_frequency_penalty=sampling_params_manager.req_to_frequency_penalty,
+            req_to_repetition_penalty=sampling_params_manager.req_to_repetition_penalty,
+            req_to_out_token_id_counter=req_to_out_token_id_counter,
+            stride_counter_r=req_to_out_token_id_counter.stride(0),
+            stride_counter_s=req_to_out_token_id_counter.stride(1),
+            vocab_size=vocab_size,
+            BLOCK_P=BLOCK_P,
+            num_warps=num_warps,
+        )
 
     BLOCK = 128
     grid = (triton.cdiv(Logits.shape[0], BLOCK),)
