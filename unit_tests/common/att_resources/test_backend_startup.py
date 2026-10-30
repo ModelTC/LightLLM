@@ -127,6 +127,18 @@ def test_backend_allocates_all_roles_before_warmup(
     mapping = SimpleNamespace(bind_hold_page=lambda indices: None)
 
     def mark_backends(model: TpPartBaseModel):
+        # 第一个模型初始化 backend 前，全部 State 已创建完成，可通过缓存查询取得资源。
+        for item in models:
+            for state in item.att_resource_manager.get_full_attention_states(item.att_resource_role):
+                logical_layer_ids = {layer_id for group in state.config.logical_layer_groups for layer_id in group}
+                for layer in item.layers_infer:
+                    if layer.layer_num_ in logical_layer_ids:
+                        assert item.att_resource_manager.get_att_state(
+                            model_name=item.att_resource_role,
+                            att_type="",
+                            logical_layer_id=layer.layer_num_,
+                            state_class=type(state),
+                        ) is state
         model.prefill_att_backend = model.decode_att_backend = object()
         model.prefill_att_backend1 = model.decode_att_backend1 = None
         model.backends_bound = True
@@ -181,8 +193,8 @@ def test_backend_allocates_all_roles_before_warmup(
         manager = models[0].att_resource_manager
         states = manager.get_full_attention_states()
         assert all(read_kv_storage(state) is None for state in states)
-        assert manager.draft0_gdn_state.conv_state.is_cuda
-        assert manager.draft0_gdn_state.big_pages_pool is None
+        assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.conv_state.is_cuda
+        assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.big_pages_pool is None
         assert manager.full_att_allocator is None
         assert not warmed
         return manager.get_full_att_token_bytes() * (32 + args.page_size), 0
@@ -248,7 +260,7 @@ def test_backend_allocates_all_roles_before_warmup(
     )
     assert all(not state.mtp_state_index.any() for state in draft_states)
     if main_linear:
-        assert manager.main_gdn_state.mtp_state_index[0] == draft_count
+        assert manager.main_gdn_conv_bf16_ssm_fp32_state.mtp_state_index[0] == draft_count
     for i, state in enumerate(draft_states):
         assert len(state.config.logical_layer_ids) == 1
         manager.commit_bounded_att_state(

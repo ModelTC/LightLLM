@@ -125,7 +125,7 @@ def test_model_and_cpu_service_use_identical_storage_geometry(
         assert state.k_storage.shape == state.v_storage.shape == (storage_layers, 20, local_heads, dim)
         if storage_layers == 1:
             assert state.config.logical_layer_groups == ((0, 1),)
-            assert model.layers_infer[0].full_att_state_name == model.layers_infer[1].full_att_state_name
+            assert resources.get_att_state("main", "gqa", 0) is resources.get_att_state("main", "gqa", 1)
             assert state.get_layer_view(logical_layer_id=0)[0].data_ptr() == state.get_layer_view(logical_layer_id=1)[0].data_ptr()
         assert read_kv_storage(state).dtype == (torch.bfloat16 if model_cls is Gemma3TpPartModel else torch.float16)
         assert resources.full_att_allocator.size == 16

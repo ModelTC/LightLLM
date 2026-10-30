@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from lightllm.common.att_resources.bounded_att import KDAState
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
@@ -38,7 +39,10 @@ class KDALinearAttBackend(BaseAttBackend):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         role = model.att_resource_role
-        self.linear_state = getattr(model.att_resource_manager, f"{role}_kda_state")
+        (self.linear_state,) = (
+            state for state in model.att_resource_manager.get_bounded_attention_states(role)
+            if isinstance(state, KDAState)
+        )
         config = model.config["linear_attn_config"]
         self.num_heads = config["num_heads"]
         self.head_dim = config["head_dim"]

@@ -1,3 +1,4 @@
+from lightllm.common.att_resources.full_att import FullAttentionState
 import torch
 import triton
 import torch.distributed as dist
@@ -44,7 +45,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.prefill_att_state.prefill_att(
@@ -62,7 +68,12 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.decode_att_state.decode_att(q=_q, k=_k, v=_v, alloc_func=self.alloc_tensor)

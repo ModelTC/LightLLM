@@ -93,7 +93,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
 
     def get_state_type(self) -> str:
         """返回 packed MLA 编码方案标记，区分 FP8 与原始精度。"""
-        encoding = "fp8" if self.config.fp8_nope_dim else dtype_name(dtype=self.config.dtype)
+        encoding = f"fp8_group{self.config.quant_group_size}" if self.config.fp8_nope_dim else dtype_name(dtype=self.config.dtype)
         return "mla_packed_" + encoding
 
     def initialize_storage(self, token_capacity: int) -> None:
@@ -125,6 +125,10 @@ class PackedMLAFullAttentionState(FullAttentionState):
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
+
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
+        return logical_layer_id in self._logical_to_storage_layer
 
     def get_layer_view(self, logical_layer_id: int) -> PackedMLALayerView:
         """分别返回 KV 与 packed indexer key/scale 的视图，保持原行步长。"""

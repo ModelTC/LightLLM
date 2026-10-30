@@ -23,19 +23,19 @@ class MainDraftTestResourceManager(AttResourceManager):
         super().__init__(request_capacity=3)
         self.set_att_state("main", make_state(device=device))
         draft_state = GDNState(
-            replace(self.main_kda_state.config, global_v_heads=2),
-            request_capacity=3, mtp_step=self.main_kda_state.mtp_step, device=device,
+            replace(self.main_kda_conv_fp32_ssm_fp32_state.config, global_v_heads=2),
+            request_capacity=3, mtp_step=self.main_kda_conv_fp32_ssm_fp32_state.mtp_step, device=device,
         )
         draft_state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
         self.set_att_state("draft0", draft_state)
         self.set_att_state("main", full_state(device=device))
         prepared_full_state = MLAFullAttentionState(
-            self.main_full_att_fp32_state.config,
-            page_size=self.main_full_att_fp32_state.page_size, device=device,
+            self.main_gqa_fp32_state.config,
+            page_size=self.main_gqa_fp32_state.page_size, device=device,
         )
-        prepared_full_state.initialize_storage(self.main_full_att_fp32_state.capacity)
+        prepared_full_state.initialize_storage(self.main_gqa_fp32_state.capacity)
         self.set_att_state("draft0", prepared_full_state)
-        self.att_tail_type = f"indexer_kpool_c{tail_pool_size}_tail"
+        self.att_tail_type = f"kpool_c{tail_pool_size}_fp32"
         if with_tail:
             tail = make_tail(device=device)
             state = KPoolAttentionTailState(

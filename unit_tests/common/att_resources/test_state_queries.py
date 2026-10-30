@@ -66,10 +66,10 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
     results = {(query.__name__, role): query(role) for query in queries for role in (None, "main", "draft0")}
     assert manager._get_states.cache_info().currsize == 9
     assert manager.get_full_attention_states() == (
-        manager.draft0_mla_fp32_state, manager.main_full_att_fp32_state,
+        manager.draft0_mla_fp32_state, manager.main_gqa_fp32_state,
     )
-    assert manager.get_bounded_attention_states("main") == (manager.main_kda_state,)
-    assert manager.get_bounded_attention_states("draft0") == (manager.draft0_gdn_state,)
+    assert manager.get_bounded_attention_states("main") == (manager.main_kda_conv_fp32_ssm_fp32_state,)
+    assert manager.get_bounded_attention_states("draft0") == (manager.draft0_gdn_conv_fp32_ssm_fp32_state,)
     assert manager.get_attention_tail_states("draft0") == ()
 
     hits = manager._get_states.cache_info().hits
@@ -79,7 +79,7 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
         with pytest.raises(AssertionError, match="unknown model role"):
             query("target")
     assert manager._get_states.cache_info().hits == hits + 9
-    manager.main_kda_state.conv_state.fill_(7)
+    manager.main_kda_conv_fp32_ssm_fp32_state.conv_state.fill_(7)
     assert (manager.get_bounded_attention_states("main")[0].conv_state == 7).all()
 
 
@@ -172,7 +172,7 @@ def test_clearing_query_cache_releases_manager_and_states():
     manager.get_bounded_attention_states()
     manager.get_attention_tail_states()
     manager_ref = weakref.ref(manager)
-    state_ref = weakref.ref(manager.main_kda_state)
+    state_ref = weakref.ref(manager.main_kda_conv_fp32_ssm_fp32_state)
     del manager
     gc.collect()
     assert manager_ref() is not None and state_ref() is not None

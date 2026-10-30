@@ -63,7 +63,7 @@ class GQAFullAttentionState(FullAttentionState):
 
     def get_state_type(self) -> str:
         """返回 GQA KV 精度对应的存储方案标记。"""
-        return "full_att_" + dtype_name(dtype=self.config.dtype)
+        return "gqa_" + dtype_name(dtype=self.config.dtype)
 
     def initialize_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
@@ -83,6 +83,10 @@ class GQAFullAttentionState(FullAttentionState):
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
+
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
+        return logical_layer_id in self._logical_to_storage_layer
 
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""

@@ -38,19 +38,19 @@ def test_commit_selects_state_for_one_role():
         torch.tensor([3], dtype=torch.int32, device="cuda"),
         role="main",
     )
-    for state in (manager.main_kda_state, manager.main_gdn_state):
+    for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.main_gdn_conv_fp32_ssm_fp32_state):
         assert state.mtp_state_index.tolist() == [2, 1, 1]
         selected = state.mtp_state_index[0].item()
         assert (state.ssm_state[:, selected] == 12).all()
-    assert manager.draft0_gdn_state.mtp_state_index.tolist() == [1, 1, 1]
+    assert manager.draft0_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [1, 1, 1]
     manager.commit_bounded_att_state(
         torch.tensor([0], dtype=torch.int32, device="cuda"),
         torch.tensor([1], dtype=torch.int32, device="cuda"),
         role="draft0",
     )
-    assert manager.draft0_gdn_state.mtp_state_index.tolist() == [0, 1, 1]
-    assert manager.main_kda_state.mtp_state_index.tolist() == [2, 1, 1]
-    assert manager.main_gdn_state.mtp_state_index.tolist() == [2, 1, 1]
+    assert manager.draft0_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 1, 1]
+    assert manager.main_kda_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [2, 1, 1]
+    assert manager.main_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [2, 1, 1]
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -104,6 +104,6 @@ def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[i
     )
     assert accept_lengths.tolist() == [3, 1, 2]
     assert accepted_index.tolist() == expected_mask
-    assert manager.main_kda_state.mtp_state_index.tolist() == [0, 1, 2]
-    assert manager.main_gdn_state.mtp_state_index.tolist() == [0, 1, 2]
-    assert manager.draft0_gdn_state.mtp_state_index.tolist() == [0, 0, 0]
+    assert manager.main_kda_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 1, 2]
+    assert manager.main_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 1, 2]
+    assert manager.draft0_gdn_conv_fp32_ssm_fp32_state.mtp_state_index.tolist() == [0, 0, 0]

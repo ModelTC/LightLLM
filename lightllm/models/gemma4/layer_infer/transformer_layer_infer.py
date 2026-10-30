@@ -1,3 +1,4 @@
+from lightllm.common.att_resources.full_att import FullAttentionState
 import math
 import torch
 import torch.nn as nn
@@ -183,7 +184,12 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _get_layer_kv(self, infer_state: InferStateInfo):
         # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         _k_raw, _v_raw = state.get_layer_view(logical_layer_id=self.layer_num_)
         # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim). Use .view
         # (not .reshape) so any non-contiguous layout from a future mem_manager

@@ -1,3 +1,4 @@
+from lightllm.common.att_resources.full_att import FullAttentionState
 import torch
 import triton
 
@@ -38,10 +39,17 @@ class Glm5NextNsaInfer:
         gate = layer_weight.index_kpool_compress_gate.mm(hidden_states)
         raw = torch.cat((k, gate), -1)
         role = infer_state.att_resource_role
-        tail = getattr(
-            infer_state.att_resource_manager, f"{role}_indexer_kpool_c{self.pool_size}_tail_state"
+        tail = infer_state.att_resource_manager.get_att_state(
+            model_name=role,
+            att_type=f"kpool_c{self.pool_size}",
+            logical_layer_id=self.layer_idx,
         ).get_layer_view(logical_layer_id=self.layer_idx)
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="mla",
+            logical_layer_id=self.layer_idx,
+            state_class=FullAttentionState,
+        )
         packed_buffer = state.get_layer_view(logical_layer_id=self.layer_idx).indexer_k
         compress_pools(
             raw=raw,

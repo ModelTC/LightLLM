@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.att_resources.utils import dtype_name
 from lightllm.common.att_resources.allocators import StatePageAllocator
 from lightllm.common.att_resources.bounded_att import create_kda_state, ConvSSMStateConfig
 from lightllm.common.att_resources.att_tail import create_kpool_state, KPoolStateConfig
@@ -83,7 +84,7 @@ class Glm5NextAttResourceManager(AttResourceManager):
         if logical_layer_ids:
             state = create_kda_state(config=config, request_capacity=request_capacity, mtp_step=mtp_step, device=device)
             self.set_att_state(role, state)
-        self.att_tail_type = f"indexer_kpool_c{cache_config.index_kpool}_tail"
+        self.att_tail_type = f"kpool_c{cache_config.index_kpool}_{dtype_name(dtype=cache_config.full_att_dtype)}"
         own_full_att_logical_layer_ids = (
             tuple(
                 range(
@@ -147,7 +148,11 @@ class Glm5NextAttResourceManager(AttResourceManager):
                 for logical_layer_group in draft_full_state.config.logical_layer_groups for logical_layer_id in logical_layer_group
             ), "draft State must only contain draft layers"
 
-        state = self.main_kda_state
+        state = getattr(
+            self,
+            f"main_kda_conv_{dtype_name(dtype=self.cache_config.conv_state_dtype)}"
+            f"_ssm_{dtype_name(dtype=self.cache_config.ssm_state_dtype)}_state",
+        )
         state.initialize_page_pools(
             big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity,
             pin_memory=state.conv_state.is_cuda,

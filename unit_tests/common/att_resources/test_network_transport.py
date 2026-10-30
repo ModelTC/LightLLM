@@ -143,7 +143,7 @@ def _snapshot(
     state = main_linear_state(resources)
     result["conv"] = state.conv_state[:, req_idx, ..., cursor : cursor + state.config.conv_width].float().cpu().numpy()
     result["ssm"] = state.ssm_state[:, req_idx * 3 + cursor].cpu().numpy()
-    tail = resources.main_indexer_kpool_c4_tail_state.tail_buffer[:, req_idx]
+    tail = resources.main_kpool_c4_bf16_state.tail_buffer[:, req_idx]
     result["tail"] = torch.stack([tail[:, position % tail.shape[1]] for position in range(1, 5)], dim=1).float().cpu().numpy()
     return result
 
@@ -189,7 +189,7 @@ def _worker(connection: Connection, backend: str, sender: bool):
                     field.tensor.copy_(values)
             state = main_linear_state(resources)
             for i, tensor in enumerate(
-                (state.conv_state, state.ssm_state, resources.main_indexer_kpool_c4_tail_state.tail_buffer)
+                (state.conv_state, state.ssm_state, resources.main_kpool_c4_bf16_state.tail_buffer)
             ):
                 tensor.copy_(torch.arange(tensor.numel(), device=device).reshape(tensor.shape) % (23 + i * 7))
             expected = _snapshot(resources, full, [3, 0, 7, 1, 9], 1, 0)
@@ -254,7 +254,7 @@ def _worker(connection: Connection, backend: str, sender: bool):
             assert main_linear_state(resources).mtp_state_index[2] == 0
             assert not main_linear_state(resources).conv_state[:, :2].any()
             assert not main_linear_state(resources).ssm_state[:, :6].any()
-            assert not resources.main_indexer_kpool_c4_tail_state.tail_buffer[:, :2].any()
+            assert not resources.main_kpool_c4_bf16_state.tail_buffer[:, :2].any()
             assert not read_kv_storage(full)[:, [0, 1, 2, 3]].any()
             assert (pool.conv_state == 41).all()
             assert (pool.ssm_state == 43).all()

@@ -75,7 +75,7 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
 
     def get_state_type(self) -> str:
         """返回量化位数、分组大小及 scale 精度对应的存储方案标记。"""
-        return f"full_att_int{self.config.bits}_group{self.config.group_size}_{dtype_name(dtype=self.config.dtype)}_scale"
+        return f"gqa_int{self.config.bits}_group{self.config.group_size}_{dtype_name(dtype=self.config.dtype)}_scale"
 
     def initialize_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配独立的量化 KV 与配套动态 scale。"""
@@ -100,6 +100,10 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
+
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
+        return logical_layer_id in self._logical_to_storage_layer
 
     def get_layer_view(self, logical_layer_id: int) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
         """返回该层 K/V 编码数据及各自的分组 scale 视图。"""

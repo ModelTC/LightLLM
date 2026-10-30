@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 import torch
 
+from ..utils import dtype_name
 from ..types import AxisSlice, TransferRegion
 from .base_state import AttentionTailState
 from .transfer_utils import att_tail_buffer_copies
@@ -77,12 +78,16 @@ class KPoolAttentionTailState(AttentionTailState):
         )
 
     def get_state_type(self) -> str:
-        """返回包含 K-pool 压缩比例的 tail 方案标记。"""
-        return f"indexer_kpool_c{self.config.pool_size}_tail"
+        """返回 K-pool 压缩比例及存储精度。"""
+        return f"kpool_c{self.config.pool_size}_{dtype_name(dtype=self.config.dtype)}"
 
     # ========================================================================
     # 二、Attention tail：计算视图与无快照重置
     # ========================================================================
+
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
+        return logical_layer_id in self._logical_to_storage_layer
 
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """返回该层所有请求的原生 ring 视图，末轴包含 key 和 gate。"""

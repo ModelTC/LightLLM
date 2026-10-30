@@ -108,8 +108,8 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
         small_page_capacity=2,
     )
     full = main_full
-    linear = resources.main_kda_state
-    tail = resources.main_indexer_kpool_c4_tail_state
+    linear = resources.main_kda_conv_bf16_ssm_fp32_state
+    tail = resources.main_kpool_c4_bf16_state
     assert not hasattr(req, "req_to_conv_state")
     att_kv = full.get_layer_view(3).kv
     assert att_kv.shape == (17, 1, 512)
@@ -124,7 +124,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     assert torch.equal(index_bytes, expected_index_bytes)
     assert tail.get_layer_view(3).shape == (4, 4 + mtp_step, 256)
     if mtp_step:
-        assert resources.draft0_indexer_kpool_c4_tail_state.get_layer_view(4).shape == (4, 4 + mtp_step, 256)
+        assert resources.draft0_kpool_c4_bf16_state.get_layer_view(4).shape == (4, 4 + mtp_step, 256)
         assert draft_full.get_layer_view(4).kv.shape == att_kv.shape
     kind = "small" if small_page else "big"
     allocator = resources.bounded_att_small_page_allocator if small_page else resources.bounded_att_big_page_allocator

@@ -1,3 +1,4 @@
+from lightllm.common.att_resources.bounded_att import GDNState
 import dataclasses
 import weakref
 import torch
@@ -29,7 +30,10 @@ class LinearAttBackend(BaseAttBackend, ABC):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         role = model.att_resource_role
-        self.linear_state = getattr(model.att_resource_manager, f"{role}_gdn_state")
+        (self.linear_state,) = (
+            state for state in model.att_resource_manager.get_bounded_attention_states(role)
+            if isinstance(state, GDNState)
+        )
         self._init_linear_layer_metadata(network_config=model.config, tp_world_size=model.tp_world_size_)
         self.prefill_kernel = self.get_prefill_kernel()
 

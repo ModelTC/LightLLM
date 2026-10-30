@@ -107,7 +107,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
     def _init_att_backend1(self):
         role = self.att_resource_role
-        if getattr(self.att_resource_manager, f"{role}_gdn_state", None) is None:
+        if not self.att_resource_manager.get_bounded_attention_states(role):
             self.prefill_att_backend1 = None
             self.decode_att_backend1 = None
             return

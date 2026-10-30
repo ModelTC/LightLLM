@@ -24,7 +24,20 @@ class BoundedAttentionState(ABC):
 
     @abstractmethod
     def get_state_type(self) -> str:
-        """返回具体算法与存储方案标记，用于生成资源成员名；绑定后须保持稳定。"""
+        """返回算法与存储方案标记，用于生成资源成员名。
+
+        返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att/att_tail 类别前缀，
+        也不带 main/draftN 角色或最终的 _state；类别由 Python State 类型表达。
+        管理器统一生成 resource_id = f"{model_name}_{get_state_type()}_state"，与成员名完全一致。
+        同角色下不同算法、精度或量化方案必须使用不同标记，同方案的全部逻辑层放在同一实例。
+        层号、容量、设备、TP rank 和请求信息不进入名称；完整布局仍由 config 描述。
+        注册后返回值保持稳定，实际分配与 CPU/DP/PD 传输均使用相同标记。
+
+        KDA/GDN 格式为 {kda|gdn}_conv_{Conv精度}_ssm_{SSM精度}。
+        两份状态精度分别标明，不能只写一个 dtype，例如 kda_conv_bf16_ssm_fp32，
+        对应 draft0_kda_conv_bf16_ssm_fp32_state。不同精度方案可以在同一角色下共存。
+        其他 bounded 算法使用自己的算法名及方案参数，不复用 kda/gdn 标记。
+        """
         ...
 
     @abstractmethod
@@ -42,6 +55,11 @@ class BoundedAttentionState(ABC):
     # ========================================================================
     # 二、Bounded attention：计算视图、运行态重置、大小页与 MTP 提交
     # ========================================================================
+
+    @abstractmethod
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """判断当前 State 是否服务该逻辑层；仅查询层映射，不依赖存储分配。"""
+        ...
 
     @abstractmethod
     def get_layer_view(self, logical_layer_id: int) -> Any:

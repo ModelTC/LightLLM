@@ -105,7 +105,7 @@ def main():
         + full.v_storage[:, :tokens].numel() * full.v_storage.element_size()
     )
     pool = (
-        resources.main_kda_state if hasattr(resources, "main_kda_state") else resources.main_gdn_state
+        resources.main_kda_conv_bf16_ssm_fp32_state if hasattr(resources, "main_kda_conv_bf16_ssm_fp32_state") else resources.main_gdn_conv_bf16_ssm_fp32_state
     ).big_pages_pool
     state_bytes = args.pages * sum(t[0].numel() * t.element_size() for t in (pool.conv_state, pool.ssm_state))
     median = statistics.median(times)

@@ -106,7 +106,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     full, resources, requests, config = linear_cache
     disable_chunked_mm_input = get_env_start_args().disable_chunked_mm_input
     first_page_has_state = not disable_chunked_mm_input
-    linear = resources.main_gdn_state
+    linear = resources.main_gdn_conv_bf16_ssm_fp32_state
     big = linear.big_pages_pool
     small = linear.small_pages_pool
     big_states = {}

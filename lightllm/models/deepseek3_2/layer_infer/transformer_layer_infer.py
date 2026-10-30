@@ -1,3 +1,4 @@
+from lightllm.common.att_resources.full_att import FullAttentionState
 import torch
 from typing import Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -99,7 +100,12 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             },
         )
 
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="mla",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         mla_out = infer_state.prefill_att_state.prefill_att(
             q=q_all,
             k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
@@ -142,7 +148,12 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             },
         )
 
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="mla",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         o_tensor = infer_state.decode_att_state.decode_att(
             q=(q_nope, q_rope),
             k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
@@ -198,7 +209,12 @@ class NsaInfer:
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="mla",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         destindex_copy_indexer_ks(
             K_fp8=k_fp8,
             K_scale=k_scale,

@@ -24,13 +24,13 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
     source, _ = make_resources(glm, 1, 0, 2, draft_layers=2)
     target, _ = make_resources(glm, 1, 0, 2, draft_layers=2)
     for index, role in enumerate(("main", "draft0")):
-        state = getattr(source, f"{role}_mla_packed_bf16_state" if glm else f"{role}_full_att_bf16_state")
+        state = getattr(source, f"{role}_mla_packed_bf16_state" if glm else f"{role}_gqa_bf16_state")
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             if "token" in field.axes:
                 field.tensor.fill_(11 + index)
         if glm:
-            getattr(source, f"{role}_indexer_kpool_c4_tail_state").tail_buffer[:, 0].fill_(7 + index)
-            getattr(target, f"{role}_indexer_kpool_c4_tail_state").tail_buffer[:, 2].fill_(19)
+            getattr(source, f"{role}_kpool_c4_bf16_state").tail_buffer[:, 0].fill_(7 + index)
+            getattr(target, f"{role}_kpool_c4_bf16_state").tail_buffer[:, 2].fill_(19)
     main_linear_state(source).conv_state.fill_(3)
     main_linear_state(source).ssm_state.fill_(5)
     page = torch.empty(source.get_pd_page_bytes(), dtype=torch.uint8, device="cuda")
@@ -68,12 +68,12 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             src_req_idx=0, dst_req_idx=2,
         )
     for index, role in enumerate(("main", "draft0")):
-        state = getattr(target, f"{role}_mla_packed_bf16_state" if glm else f"{role}_full_att_bf16_state")
+        state = getattr(target, f"{role}_mla_packed_bf16_state" if glm else f"{role}_gqa_bf16_state")
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             if "token" in field.axes:
                 assert (field.tensor[:, 8:12] == 11 + index).all()
         if glm:
-            tail = getattr(target, f"{role}_indexer_kpool_c4_tail_state").tail_buffer
+            tail = getattr(target, f"{role}_kpool_c4_bf16_state").tail_buffer
             expected_tail = torch.zeros_like(tail[:, 1])
             for position in range(4, 8):
                 expected_tail[:, position % tail.shape[2]].fill_(7 + index)
@@ -102,10 +102,10 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
         req_idx=1,
     )
     for index, role in enumerate(("main", "draft0")):
-        state = getattr(target, f"{role}_mla_packed_bf16_state" if glm else f"{role}_full_att_bf16_state")
+        state = getattr(target, f"{role}_mla_packed_bf16_state" if glm else f"{role}_gqa_bf16_state")
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             if "token" in field.axes:
                 assert (field.tensor[:, 8:16] == 11 + index).all()
         if glm:
-            assert not getattr(target, f"{role}_indexer_kpool_c4_tail_state").tail_buffer[:, 1].any()
-            assert not getattr(target, f"{role}_indexer_kpool_c4_tail_state").tail_buffer[:, 2].any()
+            assert not getattr(target, f"{role}_kpool_c4_bf16_state").tail_buffer[:, 1].any()
+            assert not getattr(target, f"{role}_kpool_c4_bf16_state").tail_buffer[:, 2].any()

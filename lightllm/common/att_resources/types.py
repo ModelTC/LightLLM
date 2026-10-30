@@ -182,7 +182,7 @@ class StateTransferLayout:
         ...     ),
         ... )
         >>> layout = StateTransferLayout(
-        ...     resource_id="main_full_att_fp16_state",
+        ...     resource_id="main_gqa_fp16_state",
         ...     tokens_per_page=8,
         ...     byte_start=16384, byte_end=49152,
         ...     regions=(k_region, replace(k_region, field="v", byte_start=32768, byte_end=49152)),

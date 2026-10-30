@@ -29,9 +29,9 @@ def composition(device: str | torch.device | int = "cpu", *, with_tail: bool = T
 def layouts_for(manager: AttResourceManager, *, kind: str = "cpu"):
     layouts = []
     if kind != "att_state":
-        layouts += [layout_for(state) for state in (manager.main_full_att_fp32_state, manager.draft0_mla_fp32_state)]
+        layouts += [layout_for(state) for state in (manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)]
     if kind != "kv":
-        layouts += [page_layout(state) for state in (manager.main_kda_state, manager.draft0_gdn_state)]
+        layouts += [page_layout(state) for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)]
         if kind == "att_state":
             layouts += [tail_layout(state) for state in manager.get_attention_tail_states("main")]
     offset = 0
@@ -52,12 +52,12 @@ def layouts_for(manager: AttResourceManager, *, kind: str = "cpu"):
 
 
 def init_source(manager: AttResourceManager):
-    for i, state in enumerate((manager.main_full_att_fp32_state, manager.draft0_mla_fp32_state)):
+    for i, state in enumerate((manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)):
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.copy_(
                         torch.arange(storage_buffer.numel(), device=storage_buffer.device).reshape_as(storage_buffer) + i
                     )
-    for i, state in enumerate((manager.main_kda_state, manager.draft0_gdn_state)):
+    for i, state in enumerate((manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)):
         state.conv_state[:, 0].fill_(11 + i)
         state.conv_state[:, 1].fill_(23 + i)
         state.ssm_state[:, :3].fill_(31 + i)
@@ -67,7 +67,7 @@ def init_source(manager: AttResourceManager):
         state.tail_buffer[:, 1].fill_(9)
     slots = manager.bounded_att_big_page_allocator.alloc(2)
     manager.save_bounded_att_pages([0, 1], page_kind="big", slot_ids=slots)
-    if manager.main_kda_state.conv_state.is_cuda:
+    if manager.main_kda_conv_fp32_ssm_fp32_state.conv_state.is_cuda:
         torch.cuda.synchronize()
     return slots
 
@@ -76,14 +76,14 @@ def test_shared_slots_save_restore_and_propagate_failure(monkeypatch: pytest.Mon
     manager = composition()
     slots = init_source(manager)
     manager.restore_bounded_att_pages([2], page_kind="big", slot_ids=[slots[0]])
-    for i, state in enumerate((manager.main_kda_state, manager.draft0_gdn_state)):
+    for i, state in enumerate((manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)):
         assert (state.conv_state[:, 2, :, :2] == 11 + i).all()
         assert (state.ssm_state[:, 6] == 31 + i).all()
 
     def fail(*args: object, **kwargs: object):
         raise RuntimeError("simulated copy failure")
 
-    monkeypatch.setattr(manager.draft0_gdn_state, "save_bounded_att_pages", fail)
+    monkeypatch.setattr(manager.draft0_gdn_conv_fp32_ssm_fp32_state, "save_bounded_att_pages", fail)
     with pytest.raises(RuntimeError):
         manager.save_bounded_att_pages([0, 1], page_kind="big", slot_ids=slots)
     assert manager.bounded_att_big_page_allocator.free_count == 1
@@ -125,13 +125,13 @@ def test_reset_tail_clears_all_tail_states_and_preserves_linear():
     init_source(manager)
     # Preserve accepted-state cursors as well as both algorithms' runtime and
     # cached pages. A full reset here would silently corrupt a prefix restore.
-    for state in (manager.main_kda_state, manager.draft0_gdn_state):
+    for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state):
         state.mtp_state_index[1] = 2
     tensors = [
-        *full_state_test_buffers(manager.main_full_att_fp32_state).values(),
+        *full_state_test_buffers(manager.main_gqa_fp32_state).values(),
         *full_state_test_buffers(manager.draft0_mla_fp32_state).values(),
     ]
-    for state in (manager.main_kda_state, manager.draft0_gdn_state):
+    for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state):
         tensors.extend((
             state.conv_state, state.ssm_state, state.mtp_state_index,
             state.big_pages_pool.conv_state, state.big_pages_pool.ssm_state,
@@ -176,19 +176,19 @@ def test_cpu_all_linear_pages_and_tail_reset_at_final_boundary(device: str | tor
         req_idx=2,
     )
     for src, dst in zip(
-        (source.main_kda_state, source.draft0_gdn_state), (target.main_kda_state, target.draft0_gdn_state)
+        (source.main_kda_conv_fp32_ssm_fp32_state, source.draft0_gdn_conv_fp32_ssm_fp32_state), (target.main_kda_conv_fp32_ssm_fp32_state, target.draft0_gdn_conv_fp32_ssm_fp32_state)
     ):
         for src_slot, dst_slot in zip(slots, target_slots):
             assert torch.equal(src.big_pages_pool.conv_state[src_slot], dst.big_pages_pool.conv_state[dst_slot])
             assert torch.equal(src.big_pages_pool.ssm_state[src_slot], dst.big_pages_pool.ssm_state[dst_slot])
     assert (tail.tail_buffer[:, :2] == 37).all()
     assert not tail.tail_buffer[:, 2].any()
-    for i, state in enumerate((target.main_kda_state, target.draft0_gdn_state)):
+    for i, state in enumerate((target.main_kda_conv_fp32_ssm_fp32_state, target.draft0_gdn_conv_fp32_ssm_fp32_state)):
         assert (state.conv_state[:, 2, :, :2] == 23 + i).all()
         assert (state.ssm_state[:, 6] == 47 + i).all()
     for src, dst in zip(
-        (source.main_full_att_fp32_state, source.draft0_mla_fp32_state),
-        (target.main_full_att_fp32_state, target.draft0_mla_fp32_state),
+        (source.main_gqa_fp32_state, source.draft0_mla_fp32_state),
+        (target.main_gqa_fp32_state, target.draft0_mla_fp32_state),
     ):
         assert torch.equal(read_kv_storage(src)[:, :8], read_kv_storage(dst)[:, 4:12])
 
@@ -298,12 +298,12 @@ def test_pd_composition_and_dp_copy_keep_resource_identity(device: str | torch.d
         src_req_idx=1, dst_req_idx=2,
     )
     for a, b in zip(
-        (target.main_full_att_fp32_state, target.draft0_mla_fp32_state),
-        (dp_target.main_full_att_fp32_state, dp_target.draft0_mla_fp32_state),
+        (target.main_gqa_fp32_state, target.draft0_mla_fp32_state),
+        (dp_target.main_gqa_fp32_state, dp_target.draft0_mla_fp32_state),
     ):
         assert torch.equal(read_kv_storage(a)[:, [5, 7]], read_kv_storage(b)[:, [5, 7]])
     for a, b in zip(
-        (target.main_kda_state, target.draft0_gdn_state), (dp_target.main_kda_state, dp_target.draft0_gdn_state)
+        (target.main_kda_conv_fp32_ssm_fp32_state, target.draft0_gdn_conv_fp32_ssm_fp32_state), (dp_target.main_kda_conv_fp32_ssm_fp32_state, dp_target.draft0_gdn_conv_fp32_ssm_fp32_state)
     ):
         assert torch.equal(a.conv_state[:, 2], b.conv_state[:, 2])
         assert torch.equal(a.ssm_state[:, 6], b.ssm_state[:, 6])

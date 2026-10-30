@@ -401,7 +401,7 @@ def test_page_bytes_refresh_with_storage_dependent_layout(
     manager.initialize_storage(8, 4, big_page_tokens=8, device="cpu")
     assert get_page_bytes() == (80 if transfer == "cpu" else 72)
     layouts = manager.get_cpu_transfer_layouts() if transfer == "cpu" else manager.get_pd_full_att_transfer_layouts()
-    assert layouts["main_full_att_bf16_state"].byte_end == 72
+    assert layouts["main_gqa_bf16_state"].byte_end == 72
 
 
 @pytest.mark.parametrize("with_tail", [False, True])
@@ -435,7 +435,7 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
     manager.finish_state_creation()
     assert manager.get_pd_page_bytes() == max(runtime_page_bytes, runtime_page_bytes + extra_tokens * 8)
     assert manager.full_att_allocator is None
-    assert read_kv_storage(manager.main_full_att_fp32_state) is None
+    assert read_kv_storage(manager.main_gqa_fp32_state) is None
     assert not hasattr(manager, "pd_transfer_layouts")
 
 
@@ -613,7 +613,7 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     getter = getattr(manager, f"get_{transfer}_transfer_layouts")
     before = getter()
     assert getter() is before
-    state = manager.main_gdn_state if transfer == "pd_bounded_att_or_tail" else manager.main_full_att_bf16_state
+    state = manager.main_gdn_conv_bf16_ssm_bf16_state if transfer == "pd_bounded_att_or_tail" else manager.main_gqa_bf16_state
     before_layout = before[state.resource_id]
     monkeypatch.setattr(
         "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
@@ -623,7 +623,7 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     after_layout = after[state.resource_id]
     assert after is not before and getter() is after
     assert after_layout is not before_layout
-    full_state = manager.main_full_att_bf16_state
+    full_state = manager.main_gqa_bf16_state
     assert full_state.page_size == 4 and not read_kv_storage(full_state).is_meta
     page_bytes = manager.get_cpu_page_bytes() if transfer == "cpu" else manager.get_pd_page_bytes()
     if transfer == "pd_bounded_att_or_tail":

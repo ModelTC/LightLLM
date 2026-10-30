@@ -62,8 +62,8 @@ def test_numbered_drafts_keep_resource_id_order_and_unique_members():
     assert [state.resource_id.split("_", 1)[0] for state in manager.get_full_attention_states()] == [
         "draft0", "draft10", "draft1", "draft2", "draft35", "main",
     ]
-    assert manager.get_full_attention_states("draft1") == (manager.draft1_full_att_bf16_state,)
-    assert manager.get_full_attention_states("draft10") == (manager.draft10_full_att_bf16_state,)
+    assert manager.get_full_attention_states("draft1") == (manager.draft1_gqa_bf16_state,)
+    assert manager.get_full_attention_states("draft10") == (manager.draft10_gqa_bf16_state,)
 
 
 def test_custom_state_type_controls_registered_resource_name():
@@ -72,14 +72,14 @@ def test_custom_state_type_controls_registered_resource_name():
 
     class CustomGQAState(GQAFullAttentionState):
         def get_state_type(self) -> str:
-            return "full_att_custom_fp32"
+            return "gqa_custom_fp32"
 
     state = full_state(CustomGQAState)
     manager = AttResourceManager(request_capacity=1)
     manager.set_att_state("draft0", state)
     manager.finish_state_creation()
-    assert manager.draft0_full_att_custom_fp32_state is state
-    assert state.resource_id == "draft0_full_att_custom_fp32_state"
+    assert manager.draft0_gqa_custom_fp32_state is state
+    assert state.resource_id == "draft0_gqa_custom_fp32_state"
     assert manager.get_full_attention_states("draft0") == (state,)
     assert not hasattr(state, "state_type")
 
@@ -209,13 +209,13 @@ def test_explicit_members_keep_role_and_scheme_distinct_even_with_overlapping_la
         overlapping = allocated_state("static_head")
         manager.set_att_state("main", overlapping)
     manager.finish_state_creation()
-    assert manager.main_full_att_bf16_state is main
-    assert manager.draft0_full_att_bf16_state is draft
-    assert manager.main_full_att_int8_group8_bf16_scale_state is quant
+    assert manager.main_gqa_bf16_state is main
+    assert manager.draft0_gqa_bf16_state is draft
+    assert manager.main_gqa_int8_group8_bf16_scale_state is quant
     assert manager.get_full_attention_states("draft0") == (draft,)
     expected = [main, quant]
     if overlap:
-        assert manager.main_full_att_fp8_static_per_head_state is overlapping
+        assert manager.main_gqa_fp8_static_per_head_state is overlapping
         expected.append(overlapping)
     assert manager.get_full_attention_states("main") == tuple(sorted(expected, key=lambda state: state.resource_id))
 
@@ -225,8 +225,8 @@ def test_mixed_quantization_in_one_role_remains_distinct_in_copy_and_cpu_pages(c
     cpu_args.cpu_cache_token_page_size = 4
     full = allocated_state("gqa", device="cuda")
     quant = allocated_state("int8", device="cuda")
-    assert full.get_state_type() == "full_att_bf16"
-    assert quant.get_state_type() == "full_att_int8_group8_bf16_scale"
+    assert full.get_state_type() == "gqa_bf16"
+    assert quant.get_state_type() == "gqa_int8_group8_bf16_scale"
     for state in (full, quant):
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             field.tensor.fill_(5)

@@ -1,3 +1,4 @@
+from lightllm.common.att_resources.full_att import FullAttentionState
 import os
 import torch
 import torch.distributed as dist
@@ -33,7 +34,12 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         raise Exception("need to impl")
 
     def _post_cache_kv(self, cache_kv, infer_state: InferStateInfo, layer_weight):
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         state.write_full_att_kv(
             logical_layer_id=self.layer_num_,
             token_indices=infer_state.mem_index,

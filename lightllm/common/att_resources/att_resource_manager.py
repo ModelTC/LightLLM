@@ -60,17 +60,57 @@ class AttResourceManager:
     def set_att_state(
         self, model_name: str, state: FullAttentionState | BoundedAttentionState | AttentionTailState
     ) -> None:
-        """按模型角色和具体方案绑定已创建的 State，保留原对象及其存储。"""
+        """按模型角色和具体方案注册 State，保留原对象及其存储。
+
+        成员名和 resource_id 均为 {model_name}_{state.get_state_type()}_state。
+        model_name 为 main 或 draft0..draft35；State 只返回中间的算法/存储方案标记，
+        不自行添加角色或 _state。各 State 基类的 get_state_type 注释规定具体命名格式。
+        同角色、同标记不能重复注册；成员名是资源身份，不代表完整布局兼容性。
+        """
         assert not self._states_created, "State creation is already finished"
         assert model_name in MODEL_ROLES, f"unknown model role {model_name}"
         state_type = state.get_state_type()
-        assert state_type.isidentifier(), f"invalid State type {state_type}"
+        assert state_type.isidentifier() and state_type.islower(), f"invalid State type {state_type}"
         name = f"{model_name}_{state_type}_state"
         assert name not in self.__dict__, f"State {name} is already bound"
         assert all(state is not value for value in self.__dict__.values()), "a State cannot belong to multiple model roles"
         # config 只描述布局，资源身份仅保存在 State；绑定时保留原配置对象。
         state.resource_id = name
         setattr(self, name, state)
+
+    @lru_cache(maxsize=None)
+    def get_att_state(
+        self,
+        model_name: str,
+        att_type: str,
+        logical_layer_id: int,
+        *,
+        state_class: type[FullAttentionState | BoundedAttentionState | AttentionTailState] | None = None,
+    ) -> FullAttentionState | BoundedAttentionState | AttentionTailState:
+        """按模型角色、算法/方案字符串和逻辑层选择唯一 State，缓存查询结果。
+
+        model_name 为 main 或 draft0..draft35，按完整角色前缀匹配，避免 draft1 匹配 draft10。
+        att_type 在 get_state_type() 返回的字符串中做包含匹配，如 gqa、gqa_int8、mla_packed。
+        通用推理模板可传空字符串，并通过 state_class 指定资源类别；具体算法传自己的标记。
+        同层存在多类资源时，state_class 可进一步区分；最终必须恰好匹配一个 State。
+        全部模型 State 创建完成后才允许查询；后续原地分配存储不改变缓存对象身份。
+        """
+        assert self._states_created, "State creation must finish before querying"
+        assert model_name in MODEL_ROLES, f"unknown model role {model_name}"
+        matches = [
+            state
+            for name, state in self.__dict__.items()
+            if name.startswith(model_name + "_")
+            and isinstance(state, (FullAttentionState, BoundedAttentionState, AttentionTailState))
+            and att_type in state.get_state_type()
+            and (state_class is None or isinstance(state, state_class))
+            and state.has_logical_layer(logical_layer_id)
+        ]
+        assert len(matches) == 1, (
+            f"expected exactly one attention State: {model_name=}, {att_type=}, {logical_layer_id=}, "
+            f"matches={[state.resource_id for state in matches]}"
+        )
+        return matches[0]
 
     def initialize_resources(
         self,

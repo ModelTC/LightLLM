@@ -68,7 +68,7 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         state = getattr(
             self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_tensor_state",
+            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_tensor_state",
         )
         storage_layer_index = self.backend._find_storage_layer_index(k=k, v=v, state=state)
         k_descale = state.cpu_scales[storage_layer_index][0]
@@ -124,7 +124,7 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
         state = getattr(
             self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_tensor_state",
+            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_tensor_state",
         )
         storage_layer_index = self.backend._find_storage_layer_index(k=k, v=v, state=state)
 

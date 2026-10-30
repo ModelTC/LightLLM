@@ -205,7 +205,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 logits.append(output.logits.clone())
             if draft_models and hybrid:
                 (
-                    resources.main_kda_state if hasattr(resources, "main_kda_state") else resources.main_gdn_state
+                    resources.main_kda_conv_bf16_ssm_fp32_state if hasattr(resources, "main_kda_conv_bf16_ssm_fp32_state") else resources.main_gdn_conv_bf16_ssm_fp32_state
                 ).commit_bounded_att_state(request, [accepted_width])
             return logits
 

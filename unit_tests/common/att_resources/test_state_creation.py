@@ -21,11 +21,11 @@ from lightllm.common.att_resources.att_tail import KPoolStateConfig, create_kpoo
 @pytest.mark.parametrize(
     "kv_type, expected_type, storage_dtype, width",
     [
-        ("None", "full_att_bf16", torch.bfloat16, 128),
-        ("int4kv", "full_att_int4_group16_bf16_scale", torch.int8, 64),
-        ("int8kv", "full_att_int8_group16_bf16_scale", torch.int8, 128),
-        ("fp8kv_spt", "full_att_fp8_static_per_tensor", torch.uint8, 128),
-        ("fp8kv_sph", "full_att_fp8_static_per_head", torch.uint8, 128),
+        ("None", "gqa_bf16", torch.bfloat16, 128),
+        ("int4kv", "gqa_int4_group16_bf16_scale", torch.int8, 64),
+        ("int8kv", "gqa_int8_group16_bf16_scale", torch.int8, 128),
+        ("fp8kv_spt", "gqa_fp8_static_per_tensor", torch.uint8, 128),
+        ("fp8kv_sph", "gqa_fp8_static_per_head", torch.uint8, 128),
     ],
 )
 def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
@@ -66,7 +66,7 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
         (False, "None", 576, 576, "mla_bf16"),
         (True, "None", 576, 648, "mla_packed_bf16"),
         (True, "None", 512, 584, "mla_packed_bf16"),
-        (True, "fp8kv_dsa", 576, 800, "mla_packed_fp8"),
+        (True, "fp8kv_dsa", 576, 800, "mla_packed_fp8_group128"),
     ],
 )
 def test_mla_creation_computes_packed_width_from_logical_dimensions(
@@ -107,7 +107,7 @@ def test_kpool_creation_preserves_pool_and_mtp_dimensions():
     state = create_kpool_state(config=config, request_capacity=3, mtp_step=2, device="cpu")
     assert state.config is config and state.resource_id is None
     assert state.tail_buffer.shape == (2, 3, 6, 256)
-    assert state.get_state_type() == "indexer_kpool_c4_tail"
+    assert state.get_state_type() == "kpool_c4_bf16"
 
 
 def test_create_rejects_encoding_from_another_logical_family():

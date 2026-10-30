@@ -137,15 +137,6 @@ def init_model_full_attention(model: TpPartBaseModel) -> None:
     if definition is None:
         return
     model.att_resource_manager.set_att_state(model.att_resource_role, definition)
-    # 层和 indexer 只记录规范成员名，推理时直接访问管理器中已分配的 State。
-    name = definition.resource_id
-    # 绑定所有逻辑层，包括共享消费者；State 自己将逻辑层号映射到物理层。
-    logical_layer_ids = {logical_layer_id for logical_layer_group in definition.config.logical_layer_groups for logical_layer_id in logical_layer_group}
-    for layer in model.layers_infer:
-        if layer.layer_num_ in logical_layer_ids:
-            layer.full_att_state_name = name
-            if hasattr(layer, "indexer"):
-                layer.indexer.full_att_state_name = name
 
 
 def init_model_bounded_attention(model: TpPartBaseModel) -> None:
@@ -157,9 +148,9 @@ def init_model_bounded_attention(model: TpPartBaseModel) -> None:
     )
     if definition is None:
         return
-    from lightllm.common.att_resources.bounded_att import create_gdn_state, create_kda_state
+    from lightllm.common.att_resources.bounded_att import GDNState, KDAState, create_gdn_state, create_kda_state
 
-    create_state = {"gdn": create_gdn_state, "kda": create_kda_state}[definition.get_state_type()]
+    create_state = {GDNState: create_gdn_state, KDAState: create_kda_state}[type(definition)]
     state = create_state(
         config=definition.config, request_capacity=model.max_req_num + 1, mtp_step=model.args.mtp_step, device="cuda"
     )

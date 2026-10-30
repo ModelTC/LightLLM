@@ -47,7 +47,7 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
     heads = 1 if kind == "packed_glm" else 2 * state.config.head_num
     dim = state.config.kv_dim if kind == "packed_glm" else state.config.head_dim
     kv = torch.full((2, heads, dim), 0.5, dtype=torch.bfloat16, device="cuda")
-    layer = SimpleNamespace(layer_num_=8, full_att_state_name=state.resource_id)
+    layer = SimpleNamespace(layer_num_=8)
     TransformerLayerInferTpl._post_cache_kv(layer, kv, infer, None)
     if capture:
         graph = torch.cuda.CUDAGraph()

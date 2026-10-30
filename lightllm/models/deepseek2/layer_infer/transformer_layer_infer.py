@@ -1,3 +1,4 @@
+from lightllm.common.att_resources.full_att import FullAttentionState
 import os
 import torch
 import triton
@@ -103,7 +104,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="mla",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         kv = state.get_layer_view(logical_layer_id=self.layer_num_)
 
         out = infer_state.decode_att_state.decode_att(
@@ -120,7 +126,12 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
     ):
-        state = getattr(infer_state.att_resource_manager, self.full_att_state_name)
+        state = infer_state.att_resource_manager.get_att_state(
+            model_name=infer_state.att_resource_role,
+            att_type="mla",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
         compressed_kv = state.get_layer_view(logical_layer_id=self.layer_num_)
 
         total_token_num = infer_state.total_token_num

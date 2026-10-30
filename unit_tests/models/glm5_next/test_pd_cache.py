@@ -97,8 +97,8 @@ def make_mems(monkeypatch, request):
                 SimpleNamespace(
                     full=main,
                     full_states=tuple(state for state in (main, draft) if state is not None),
-                    linear=resources.main_kda_state,
-                    tail=resources.main_indexer_kpool_c4_tail_state,
+                    linear=resources.main_kda_conv_bf16_ssm_fp32_state,
+                    tail=resources.main_kpool_c4_bf16_state,
                     tails=resources.get_attention_tail_states(),
                     resources=resources,
                 )

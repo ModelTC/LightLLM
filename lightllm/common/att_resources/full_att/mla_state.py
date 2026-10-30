@@ -72,6 +72,10 @@ class MLAFullAttentionState(FullAttentionState):
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
 
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
+        return logical_layer_id in self._logical_to_storage_layer
+
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """按逻辑层号返回压缩 latent 视图，不拆分为 GQA 的 K/V head。"""
         return self.storage[self._logical_to_storage_layer[logical_layer_id]]

@@ -62,9 +62,8 @@ def owned_states(attributes: Mapping[str, object], state_class: type | tuple[typ
 
 
 def main_linear_state(resources: AttResourceManager):
-    if hasattr(resources, "main_kda_state"):
-        return resources.main_kda_state
-    return resources.main_gdn_state
+    (state,) = resources.get_bounded_attention_states("main")
+    return state
 
 
 def prepare_model_states(model: TpPartBaseModel, *, logical_layer_ids: Sequence[int] | None = None):

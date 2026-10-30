@@ -7,6 +7,7 @@ import torch
 
 from lightllm.utils.log_utils import init_logger
 
+from ..utils import dtype_name
 from ..types import AxisSlice, StateTransferLayout, TensorField, TransferRegion
 from .base_state import BoundedAttentionState
 from .conv_ssm_types import ConvSSMStateConfig
@@ -60,8 +61,11 @@ class KDAState(BoundedAttentionState):
         self.small_pages_pool = None
 
     def get_state_type(self) -> str:
-        """返回 KDA 算法标记。"""
-        return "kda"
+        """返回 KDA 算法及 Conv/SSM 存储精度。"""
+        return (
+            f"kda_conv_{dtype_name(dtype=self.config.conv_dtype)}"
+            f"_ssm_{dtype_name(dtype=self.config.ssm_dtype)}"
+        )
 
     def initialize_page_pools(
         self,
@@ -88,6 +92,10 @@ class KDAState(BoundedAttentionState):
     # ========================================================================
     # 二、Bounded attention：计算视图、运行态重置、大小页与 MTP 提交
     # ========================================================================
+
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
+        return logical_layer_id in self._logical_to_storage_layer
 
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号映射到物理层，返回 Conv/SSM Tensor 引用；MTP 游标和步数直接从 State 读取。"""

@@ -590,8 +590,10 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     infer = SimpleNamespace(
         att_resource_role="main",
         att_resource_manager=SimpleNamespace(
-            main_indexer_kpool_c4_tail_state=SimpleNamespace(get_layer_view=lambda logical_layer_id: tail),
-            main_mla_packed_bf16_state=full_att_state,
+            get_att_state=lambda att_type, **kwargs: (
+                SimpleNamespace(get_layer_view=lambda logical_layer_id: tail)
+                if "kpool" in att_type else full_att_state
+            ),
         ),
         is_draft_model=False,
         is_prefill=True,
@@ -616,7 +618,6 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         {"index_topk": 2048, "index_n_heads": heads, "index_head_dim": dim, "rms_norm_eps": 1e-5, "index_kpool": 4},
         1,
     )
-    indexer.full_att_state_name = "main_mla_packed_bf16_state"
     _, full = indexer._get_indices(hidden, hidden, infer, state, weights)
     assert full[-1, 2048].item() == tokens - 1  # Always-selected incomplete tail.
     assert full[0, 0].item() == 0 and (full[0, 1:] == -1).all()

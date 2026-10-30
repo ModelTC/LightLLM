@@ -41,7 +41,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         batch_size = self.infer_state.batch_size
         state = getattr(
             self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
+            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
         )
 
         offline_scales: torch.Tensor = state.scales
@@ -87,7 +87,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         cache_v = v.view(-1, 1, k_head_num, k_head_dim).view(torch.float8_e4m3fn)
         state = getattr(
             self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
+            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
         )
         storage_layer_index = self.backend._find_storage_layer_index(k=cache_k, v=cache_v, state=state)
         static_q_scales = state.q_scales[storage_layer_index]
@@ -123,7 +123,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
 
         state = getattr(
             self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
+            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
         )
         super().init_state()
 
@@ -179,7 +179,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
 
         state = getattr(
             self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_full_att_fp8_static_per_head_state",
+            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
         )
         storage_layer_index = self.backend._find_storage_layer_index(k=cache_k, v=cache_v, state=state)
 

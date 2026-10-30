@@ -85,7 +85,23 @@ class FullAttentionState(ABC):
     # 具体存储和量化方案标识，用于 main/draft State 成员命名。
     @abstractmethod
     def get_state_type(self) -> str:
-        """返回具体算法与存储方案标记，用于生成资源成员名；绑定后须保持稳定。"""
+        """返回算法与存储方案标记，用于生成资源成员名。
+
+        返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att/att_tail 类别前缀，
+        也不带 main/draftN 角色或最终的 _state；类别由 Python State 类型表达。
+        管理器统一生成 resource_id = f"{model_name}_{get_state_type()}_state"，与成员名完全一致。
+        同角色下不同算法、精度或量化方案必须使用不同标记，同方案的全部逻辑层放在同一实例。
+        层号、容量、设备、TP rank 和请求信息不进入名称；完整布局仍由 config 描述。
+        注册后返回值保持稳定，实际分配与 CPU/DP/PD 传输均使用相同标记。
+
+        - GQA 浮点 KV：gqa_{bf16|fp16|fp32}。
+        - GQA 分组量化：gqa_int{4|8}_group{分组大小}_{scale精度}_scale。
+        - GQA 静态 FP8：gqa_fp8_static_{per_tensor|per_head}。
+        - MLA 浮点：mla_{精度}；KV/indexer 联合存储：mla_packed_{精度}。
+        - MLA packed FP8：mla_packed_fp8_group{分组大小}，当前内核固定为 group128。
+        例如 gqa_int8_group128_bf16_scale 对应 main_gqa_int8_group128_bf16_scale_state。
+        新量化实现必须区分影响方案选择的位宽、分组、scale 方式及精度，不编码标定数值。
+        """
         ...
 
     @abstractmethod
@@ -112,6 +128,11 @@ class FullAttentionState(ABC):
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
+
+    @abstractmethod
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """判断当前 State 是否服务该逻辑层；仅查询层映射，不依赖存储分配。"""
+        ...
 
     @abstractmethod
     def get_layer_view(self, logical_layer_id: int) -> Any:

@@ -86,7 +86,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
 
     def get_state_type(self) -> str:
         """返回包含 per-tensor 或 per-head 标定方式的 FP8 方案标记。"""
-        return "full_att_fp8_static_" + self.config.scale_mode
+        return "gqa_fp8_static_" + self.config.scale_mode
 
     def initialize_storage(self, token_capacity: int) -> None:
         """绑定 KV 与真实标定参数，并预备 FlashInfer 使用的 CPU scale。"""
@@ -113,6 +113,10 @@ class StaticFP8FullAttentionState(FullAttentionState):
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
+
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
+        return logical_layer_id in self._logical_to_storage_layer
 
     def get_layer_view(self, logical_layer_id: int) -> tuple[torch.Tensor, torch.Tensor]:
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""

@@ -21,12 +21,29 @@ class AttentionTailState(ABC):
 
     @abstractmethod
     def get_state_type(self) -> str:
-        """返回具体算法与存储方案标记，用于生成资源成员名；绑定后须保持稳定。"""
+        """返回算法与存储方案标记，用于生成资源成员名。
+
+        返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att/att_tail 类别前缀，
+        也不带 main/draftN 角色或最终的 _state；类别由 Python State 类型表达。
+        管理器统一生成 resource_id = f"{model_name}_{get_state_type()}_state"，与成员名完全一致。
+        同角色下不同算法、精度或量化方案必须使用不同标记，同方案的全部逻辑层放在同一实例。
+        层号、容量、设备、TP rank 和请求信息不进入名称；完整布局仍由 config 描述。
+        注册后返回值保持稳定，实际分配与 CPU/DP/PD 传输均使用相同标记。
+
+        K-pool 格式为 kpool_c{压缩比例}_{存储精度}，例如 kpool_c4_bf16，
+        对应 main_kpool_c4_bf16_state；同压缩比例的不同存储精度使用不同名称。
+        新实现使用具体算法及必要方案参数，不仅返回 indexer 或 tail 这种通用名称。
+        """
         ...
 
     # ========================================================================
     # 二、Attention tail：计算视图与无快照重置
     # ========================================================================
+
+    @abstractmethod
+    def has_logical_layer(self, logical_layer_id: int) -> bool:
+        """判断当前 State 是否服务该逻辑层；仅查询层映射，不依赖存储分配。"""
+        ...
 
     @abstractmethod
     def get_layer_view(self, logical_layer_id: int) -> Any:

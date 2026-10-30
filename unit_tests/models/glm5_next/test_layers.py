@@ -170,9 +170,9 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (indices, indices))
     state = InferStateInfo()
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    layer.full_att_state_name = "main_mla_packed_bf16_state"
+    state.att_resource_role = "main"
     state.att_resource_manager = SimpleNamespace(
-        main_mla_packed_bf16_state=SimpleNamespace(
+        get_att_state=lambda **kwargs: SimpleNamespace(
             get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv)
         )
     )
@@ -423,8 +423,8 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     for model in (main, *drafts):
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     main.prepare_att_resources()
-    assert main.att_resource_manager.main_kda_state.conv_state.is_cuda
-    assert main.att_resource_manager.main_indexer_kpool_c4_tail_state.tail_buffer.is_cuda
+    assert main.att_resource_manager.main_kda_conv_bf16_ssm_fp32_state.conv_state.is_cuda
+    assert main.att_resource_manager.main_kpool_c4_bf16_state.tail_buffer.is_cuda
     for step, draft in enumerate(drafts):
         draft.prepare_att_resources()
         assert draft.att_resource_manager is main.att_resource_manager
@@ -432,11 +432,11 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         state = getattr(draft.att_resource_manager, f"draft{step}_mla_packed_bf16_state")
         assert state is not main.att_resource_manager.main_mla_packed_bf16_state
         assert not hasattr(draft, "full_att_state")
-        assert state.storage.device.type == "meta"
+        assert state.storage is None
         assert state.config.logical_layer_groups == ((4 + step,),)
         assert state.resource_id == f"draft{step}_mla_packed_bf16_state"
         assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
-        assert getattr(draft.att_resource_manager, f"draft{step}_indexer_kpool_c4_tail_state").tail_buffer.is_cuda
+        assert getattr(draft.att_resource_manager, f"draft{step}_kpool_c4_bf16_state").tail_buffer.is_cuda
 
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):
