@@ -164,7 +164,6 @@ class Autotuner:
         benchmark_repeats: int = 3,
         benchmark_retries: int = 3,
     ):
-
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
@@ -237,15 +236,6 @@ class Autotuner:
                 _copy_kwargs["run_config"] = run_config
                 self.kernel_warmup(static_key, *args, **_copy_kwargs)
 
-        if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
-            if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
-                logger.warning(
-                    f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)},"
-                    f"the performance may be suboptimal!"
-                    f"You can use LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 to enable autotune.",
-                )
-            self.cached_configs[static_key] = {}
-
         if Autotuner.is_kernel_autotune_warmup(self.kernel_type) and autotune_level in [
             AutotuneLevel.ADAPTIVE_AUTOTUNE,
             AutotuneLevel.FORCE_AUTOTUNE,
@@ -310,6 +300,15 @@ class Autotuner:
             logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
+        else:
+            self.cached_configs[static_key] = {}
+            if get_triton_autotune_level() == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
+                if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
+                    logger.warning(
+                        f"No kernel config for {self.kernel_name} in {KernelConfigs.get_config_file_name(static_key)},"
+                        f"the performance may be suboptimal!"
+                        f"You can use LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 to enable autotune.",
+                    )
         return True
 
     def kernel_warmup(self, static_key, *args, **kwargs):

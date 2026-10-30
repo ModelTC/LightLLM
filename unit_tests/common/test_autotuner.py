@@ -45,6 +45,32 @@ def make_kernel(tmp_path, monkeypatch, name, kernel_type=None, warmup_all_exist_
     return kernel, calls, benchmarks, cache_dir / "configs.json"
 
 
+@pytest.mark.parametrize("level", [0, 1, 2])
+def test_missing_config_is_checked_once_and_can_be_tuned_later(tmp_path, monkeypatch, level):
+    monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: level)
+    kernel, calls, benchmarks, cache_file = make_kernel(tmp_path, monkeypatch, "missing_history")
+    exists = autotuner_module.os.path.exists
+    checks = []
+
+    def check(path):
+        if str(path) == str(cache_file):
+            checks.append(path)
+        return exists(path)
+
+    monkeypatch.setattr(autotuner_module.os.path, "exists", check)
+    for size in [8, 16, 8, 32, 16, 8]:
+        assert kernel(size) is None
+    assert len(checks) == 1
+    assert len(calls) == 6 and benchmarks == []
+
+    if level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
+        with Autotuner.autotune_warmup():
+            assert kernel(16) == {"block": 2}
+        assert len(benchmarks) == 2
+        assert kernel(16) == {"block": 2}
+        assert json.loads(cache_file.read_text()) == {"16": {"block": 2}}
+
+
 @pytest.mark.parametrize("repeat_override,retry_override", [(None, None), (8, 2)])
 def test_short_kernel_benchmark_sampling_options(monkeypatch, repeat_override, retry_override):
     calls, replays = [], []
