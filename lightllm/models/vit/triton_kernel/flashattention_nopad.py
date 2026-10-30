@@ -164,47 +164,16 @@ try:
         cu_seqlens,
         max_seqlen,
     ):
-        head_dim = q.shape[-1]
-        softmax_scale = head_dim ** -0.5
-        window_size = (-1, -1)
-        torch.ops.sgl_kernel.fwd.default(
+        flash_attn_varlen_func(
             q,
             k,
             v,
-            None,  # k_new
-            None,  # v_new
-            None,  # qv
-            o,  # out
-            cu_seqlens,
-            cu_seqlens,
-            None,  # cu_seqlens_k_new
-            None,
-            None,
-            max_seqlen,
-            max_seqlen,
-            None,  # page_table,
-            None,  # kv_batch_idx
-            None,  # leftpad_k
-            None,  # rotary cos
-            None,  # rotary sin
-            None,  # seqlens_rotary
-            None,
-            None,
-            None,
-            softmax_scale,
-            False,
-            window_size[0],
-            window_size[1],
-            0,  # attention_chunk
-            0.0,  # softcap
-            is_rotary_interleaved=False,
-            scheduler_metadata=None,
-            num_splits=1,
-            pack_gqa=None,
-            sm_margin=0,
-            sinks=None,
-            sparse_mask_fine=None,
-            only_qv=False,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            max_seqlen_q=max_seqlen,
+            max_seqlen_k=max_seqlen,
+            causal=False,
+            out=o,
         )
         return o
 
