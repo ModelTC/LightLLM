@@ -37,6 +37,7 @@ def cache(monkeypatch, tmp_path, request):
     (tmp_path / "config.json").write_text(json.dumps({"vocab_size": 100}))
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
+    monkeypatch.setenv("LIGHTLLM_DP_RANK_IN_NODE", "0")
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", str(torch.cuda.current_device()))
     monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", "test_dsv4_paged_cache")
     monkeypatch.setenv(
@@ -44,6 +45,8 @@ def cache(monkeypatch, tmp_path, request):
         json.dumps(
             {
                 "page_size": page_size,
+                "dp": 1,
+                "nnodes": 1,
                 "run_mode": "normal",
                 "linear_att_hash_page_size": page_size,
                 "linear_att_page_block_num": 8,
@@ -251,6 +254,7 @@ def _test_backend(requests, token_capacity=8192):
     model.batch_max_tokens = token_capacity
     model.max_seq_length = requests.req_to_token_indexs.shape[1]
     model.has_vision = False
+    model.has_bidirectional_image_attention = False
     model.args = SimpleNamespace(
         run_mode="normal",
         enable_prefill_microbatch_overlap=True,
@@ -267,15 +271,16 @@ def _prepare_prefill(requests, req_ids, starts, ends, microbatch_index=0):
         requests._test_backend = _test_backend(requests)
         requests._test_prefill_states = {}
     state = requests._test_backend.create_att_prefill_state(None)
-    state.prepare_swa_workspace(
-        SimpleNamespace(
-            req_manager=requests,
-            b_req_idx=req_ids,
-            b_ready_cache_len=starts,
-            b_seq_len=ends,
-            microbatch_index=microbatch_index,
-        )
+    inputs = SimpleNamespace(
+        dsv4_workspace=SimpleNamespace(flashmla_prefill_o_accum=None),
+        req_manager=requests,
+        b_req_idx=req_ids,
+        b_ready_cache_len=starts,
+        b_seq_len=ends,
+        microbatch_index=microbatch_index,
     )
+    state.prepare_swa_workspace(inputs)
+    state._test_inputs = inputs
     requests._test_prefill_states.update((req, state) for req in req_ids.tolist())
     if not hasattr(requests, "_test_prefill_ends"):
         requests._test_prefill_ends = {}
@@ -765,10 +770,14 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
     sin = torch.zeros_like(cos)
     weight = torch.ones(head_dim, dtype=torch.float32, device="cuda")
 
+    scratch = SimpleNamespace(c128_compress_scratch=torch.empty((1, length, head_dim), device="cuda"))
+
     def compress(req_idx, slots, start, end, decode=False):
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")
         width = end - start
         state = SimpleNamespace(
+            dsv4_workspace=scratch,
+            microbatch_index=0,
             mem_manager=manager,
             req_manager=requests,
             mem_index=slots[start:end],
@@ -1070,6 +1079,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
         hashes = compute_token_list_hash(tokens, hash_page_size)
         req.shm_req = SimpleNamespace(
             input_len=total_len,
+            sample_params=req.sampling_param,
             shm_prompt_ids=SimpleNamespace(arr=tokens),
             hybrid_token_hash_list=SimpleNamespace(size=len(hashes), get_all=lambda: hashes),
             shm_cur_kv_len=0,
@@ -1131,7 +1141,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
 
 @pytest.mark.parametrize("page_cap", [3, 130])
 def test_c4_indexer_page_table_uses_each_query_request_and_causal_length(cache, page_cap):
-    from lightllm.models.deepseek_v4.triton_kernel.build_c4_indexer_page_table import build_c4_indexer_page_table
+    from lightllm.models.deepseek_v4.triton_kernel.build_indexer_page_table import build_indexer_page_table
 
     manager, requests = cache
     first, first_slots = _reserve(manager, requests, 512)
@@ -1142,7 +1152,7 @@ def test_c4_indexer_page_table_uses_each_query_request_and_causal_length(cache, 
     c4_lengths = torch.tensor(lengths, dtype=torch.int32, device="cuda")
     storage = torch.full((len(req_ids) * page_cap + 7,), -17, dtype=torch.int32, device="cuda")
     out = storage[:-7].view(len(req_ids), page_cap)
-    actual = build_c4_indexer_page_table(
+    actual = build_indexer_page_table(
         token_req_idx,
         c4_lengths,
         page_cap * 64,
@@ -1161,7 +1171,7 @@ def test_c4_indexer_page_table_uses_each_query_request_and_causal_length(cache, 
     torch.testing.assert_close(actual, expected, rtol=0, atol=0)
     assert actual.data_ptr() == out.data_ptr()
     assert storage[-7:].eq(-17).all()
-    empty = build_c4_indexer_page_table(
+    empty = build_indexer_page_table(
         token_req_idx[:0],
         c4_lengths[:0],
         page_cap * 64,
@@ -1221,7 +1231,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         select()
-        state.c4_indexer_metadata = None
+        state.indexer_metadata = None
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph, stream=stream):
@@ -1233,7 +1243,7 @@ def test_c4_indexer_metadata_scoring_and_graph_replay(cache, monkeypatch, mode):
     graph.replay()
     actual = captured.clone()
     actual_lengths = captured_lengths.clone()
-    state.c4_indexer_metadata = None
+    state.indexer_metadata = None
     eager, eager_lengths = select()
     torch.testing.assert_close(actual.sort(dim=-1).values, eager.sort(dim=-1).values, rtol=0, atol=0)
     torch.testing.assert_close(actual_lengths, eager_lengths, rtol=0, atol=0)
@@ -1342,6 +1352,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
         max_seq_length=4096,
         graph=None,
         has_vision=False,
+        has_bidirectional_image_attention=False,
         args=args,
         req_manager=requests,
         tp_world_size_=1,
@@ -1395,7 +1406,11 @@ def test_empty_dspark_commit_is_local_but_proposal_keeps_common_padding_path(mon
     from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
 
     model = DeepseekV4DSparkModel.__new__(DeepseekV4DSparkModel)
-    model_input = SimpleNamespace(batch_size=0, mtp_draft_input_hiddens=torch.empty((0, 8), device="cuda"))
+    model_input = SimpleNamespace(
+        batch_size=0,
+        input_ids=torch.empty(0, dtype=torch.int64, device="cuda"),
+        mtp_draft_input_hiddens=torch.empty((0, 8), device="cuda"),
+    )
     # A KV-only empty commit is local; a full proposal still takes the common
     # model path and participates in DP collectives through HOLD padding.
     output = model._decode(model_input)
@@ -1416,7 +1431,7 @@ def test_empty_dspark_commit_is_local_but_proposal_keeps_common_padding_path(mon
 def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     cache, monkeypatch, length, prefix, exhaust_small_pool
 ):
-    """Offload after the runtime ring is overwritten, then resume through the common loader."""
+    """Stage saved checkpoints independently of request teardown, then resume asynchronously."""
     from collections import deque
     from lightllm.server.multi_level_kv_cache import CacheTier
     from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -1464,7 +1479,10 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     client = SimpleNamespace(
         cpu_kv_cache_tensor=pages,
         lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
-        allocate_pages=lambda hashes, **kwargs: (list(range(1, len(hashes) + 1)), [False] * len(hashes)),
+        allocate_pages=lambda hashes, **kwargs: (
+            list(range(1, len(hashes) + 1)),
+            [kwargs.get("return_ownership", False)] * len(hashes),
+        ),
         update_pages_status_to_ready=lambda **kwargs: published.append(kwargs),
         deref_pages=lambda page_list: released.extend(page_list),
     )
@@ -1511,40 +1529,40 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         cpu_cache_token_page_size=page_tokens,
         linear_att_hash_page_size=256,
         disable_linear_att_small_page_cpu_cache=False,
+        enable_disk_cache=False,
     )
     module.backend = SimpleNamespace(
-        is_master_in_dp=True, dp_world_size=1, model=SimpleNamespace(mem_manager=manager, req_manager=requests)
+        is_master_in_dp=True,
+        is_deepseek_v4=True,
+        dp_world_size=1,
+        model=SimpleNamespace(mem_manager=manager, req_manager=requests),
     )
     module.cpu_cache_client = client
     module.cpu_cache_handle_queue = deque()
+    module.dsv4_sessions = {42: common.Dsv4CpuCacheSession(42)}
+    module.dsv4_load_tasks = deque()
+    module.dsv4_store_tasks = deque()
+    module.dsv4_staging_slots = [common.Dsv4StagingSlot(), common.Dsv4StagingSlot()]
+    module.dsv4_max_pages_per_task = 4
     module.page_index_buffer = torch.empty(8, dtype=torch.int32, device="cuda")
     module.page_ready_buffer = torch.empty(8, dtype=torch.bool, device="cuda")
     module.gloo_group = module.filter_group = module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
-    assert module.offload_finished_reqs_to_cpu_cache([req]) == []
-    assert req.cpu_cache_task_status.is_running()
+    module.store_completed_prefill_pages([req], producer)
+    assert module.offload_finished_reqs_to_cpu_cache([req]) == [req]
     torch.cuda.synchronize()
     module.update_cpu_cache_task_states()
     assert module.offload_finished_reqs_to_cpu_cache([req]) == [req]
     assert published == [
         dict(
             page_list=list(range(1, len(ends) + 1)),
-            deref=True,
-            disk_offload_enable=False,
-            token_num_in_page_list=length,
+            deref=False,
         )
     ]
     flat = pages.view(pages.shape[0], -1)
     for i, expected in enumerate(expected_checkpoints, 1):
         torch.testing.assert_close(
             flat[i, manager.cache_config.get_cpu_cache_full_att_bytes() :], expected, rtol=0, atol=0
-        )
-    if tail is not None:
-        torch.testing.assert_close(
-            manager.big_page_buffers.buffer[manager.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID],
-            expected_checkpoints[-1],
-            rtol=0,
-            atol=0,
         )
 
     destination = requests.alloc()
@@ -1554,6 +1572,7 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         requests.req_to_token_indexs[destination, :prefix] = dst
         manager.operator.copy_mem_to_mem(src[:prefix], dst)
     restored = SimpleNamespace(
+        req_id=43,
         req_idx=destination,
         cur_kv_len=prefix,
         hold_kv_len=prefix,
@@ -1590,7 +1609,9 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     module.load_cpu_cache_to_reqs([restored])
     torch.cuda.synchronize()
     assert restored.cur_kv_len == restored.hold_kv_len == length
-    assert released == list(range(1, len(ends) + 1))
+    assert released == list(reversed(range(1, len(ends) + 1)))
+    assert module.offload_finished_reqs_to_cpu_cache([restored]) == [restored]
+    assert released == list(reversed(range(1, len(ends) + 1))) * 2
     if length % page_tokens:
         torch.testing.assert_close(
             manager.big_page_buffers.buffer[manager.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID],
@@ -1639,13 +1660,13 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
 
     manager, requests = cache
     req, held = _reserve(manager, requests, 2048)
-    reference = torch.zeros((1, 17, 74880), dtype=torch.uint8, device="cuda")
-    kv = torch.randn((2048, 512), dtype=torch.bfloat16, device="cuda")
+    reference = torch.zeros((3, 17, 74880), dtype=torch.uint8, device="cuda")
+    kv = torch.randn((3, 2048, 512), dtype=torch.bfloat16, device="cuda")
     weight = torch.randn(512, dtype=torch.bfloat16, device="cuda")
     angles = torch.randn((2048, 32), device="cuda")
     freqs = torch.complex(angles.cos(), angles.sin())
     layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
-    layer.layer_num_, layer.eps_, layer.freqs_cis = 2, 1e-6, freqs
+    layer.eps_, layer.freqs_cis = 1e-6, freqs
     layer_weight = SimpleNamespace(kv_norm_=SimpleNamespace(weight=weight))
     for start, end in ((0, 255), (255, 641), (641, 1100), (1100, 2048)):
         _prepare_swa(requests, req, start, end)
@@ -1671,32 +1692,38 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
             req_manager=requests,
             is_prefill=True,
             prefill_att_state=requests._test_prefill_states[req],
+            b_req_idx=requests._test_prefill_states[req]._test_inputs.b_req_idx,
+            b_ready_cache_len=requests._test_prefill_states[req]._test_inputs.b_ready_cache_len,
             dsv4_swa_write_slots=slots,
             dsv4_swa_runtime_write_slots=runtime,
             position_ids=positions,
         )
-        layer._norm_rope_and_cache_kv(kv[start:end], state, layer_weight)
-        fused_kv_norm_rope_to_swa(kv[start:end], weight, 1e-6, freqs, positions, positions, reference[0], 128)
-        visible = torch.arange(max(0, start - 127), end, device="cuda")
-        # 第八个 scale 字节仅用于对齐；workspace 复用时无需保持其初始值。
-        torch.testing.assert_close(
-            _read_swa(requests, 2, req, visible)[:, :-1],
-            _read_packed_rows(reference, 0, visible)[:, :-1],
-            rtol=0,
-            atol=0,
-        )
-        logical = positions[:, None] - torch.arange(128, device="cuda")[None, :]
-        valid = logical >= 0
-        expected_slots = _swa_slots(requests, req, logical.clamp_min(0))
-        torch.testing.assert_close(indices[valid], expected_slots[valid].to(torch.int32))
+        for layer_idx in range(3):
+            layer.layer_num_ = layer_idx
+            layer._norm_rope_and_cache_kv(kv[layer_idx, start:end], state, layer_weight)
+            fused_kv_norm_rope_to_swa(
+                kv[layer_idx, start:end], weight, 1e-6, freqs, positions, positions, reference[layer_idx], 128
+            )
+            visible = torch.arange(max(0, start - 127), end, device="cuda")
+            # 第八个 scale 字节仅用于对齐；workspace 复用时无需保持其初始值。
+            torch.testing.assert_close(
+                _read_swa(requests, layer_idx, req, visible)[:, :-1],
+                _read_packed_rows(reference, layer_idx, visible)[:, :-1],
+                rtol=0,
+                atol=0,
+            )
+            logical = positions[:, None] - torch.arange(128, device="cuda")[None, :]
+            valid = logical >= 0
+            expected_slots = _swa_slots(requests, req, logical.clamp_min(0))
+            torch.testing.assert_close(indices[valid], expected_slots[valid].to(torch.int32))
+            tail = torch.arange(max(0, end - requests.sliding_window), end, device="cuda")
+            torch.testing.assert_close(
+                _read_swa(requests, layer_idx, req, tail, prefill=False)[:, :-1],
+                _read_packed_rows(reference, layer_idx, tail)[:, :-1],
+                rtol=0,
+                atol=0,
+            )
         _finish_prefill(requests, [req])
-        tail = torch.arange(max(0, end - requests.sliding_window), end, device="cuda")
-        torch.testing.assert_close(
-            _read_swa(requests, 2, req, tail)[:, :-1],
-            _read_packed_rows(reference, 0, tail)[:, :-1],
-            rtol=0,
-            atol=0,
-        )
     requests.free([req], held)
 
 
@@ -1760,8 +1787,9 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
     backend = _test_backend(requests, token_capacity=128)
     model = backend.model
     model.has_vision = True
+    model.has_bidirectional_image_attention = True
     model.config["vision_max_n_token"] = 384
-    model.dsv4_workspace = None
+    model.dsv4_workspace = SimpleNamespace(flashmla_prefill_o_accum=None)
     rope = torch.zeros((len(input_ids), 32), device="cuda")
     model._cos_cached_sliding = model._sin_cached_sliding = rope
     model._cos_cached_compress = model._sin_cached_compress = rope
@@ -1813,6 +1841,7 @@ def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     backend = _test_backend(requests)
     model = backend.model
     model.has_vision = False
+    model.has_bidirectional_image_attention = False
     rope = torch.zeros((8, 32), device="cuda")
     model._cos_cached_sliding = model._sin_cached_sliding = rope
     model._cos_cached_compress = model._sin_cached_compress = rope
@@ -1938,7 +1967,11 @@ def test_small_radix_hit_restores_continuation_at_matched_length(monkeypatch, hi
 
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(
-        linear_att_hash_page_size=256, linear_att_page_block_num=8, max_req_total_len=4096, page_size=256
+        linear_att_hash_page_size=256,
+        linear_att_page_block_num=8,
+        max_req_total_len=4096,
+        page_size=256,
+        run_mode="normal",
     )
     req.req_idx = req.cur_kv_len = req.hold_kv_len = req.cur_output_len = 0
     req.tail_small_page_buffer_id = req.shared_kv_node = None
@@ -2011,7 +2044,10 @@ def test_cross_dp_pointer_table_pairs_matching_tp_shards(monkeypatch):
     monkeypatch.setattr(torch, "tensor", lambda data, **kwargs: original_tensor(data, dtype=kwargs["dtype"]))
     memories = [
         SimpleNamespace(
-            kv_buffer=[SimpleNamespace(data_ptr=lambda value=10 * rank + layer: value) for layer in range(2)]
+            kv_buffer=[
+                SimpleNamespace(shape=(1, 1, layer + 1), data_ptr=lambda value=10 * rank + layer: value)
+                for layer in range(2)
+            ]
         )
         for rank in range(8)
     ]
@@ -2032,9 +2068,10 @@ def test_cross_dp_token_slot_copy_restores_state_at_received_length(monkeypatch)
     monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))
     monkeypatch.setattr(shared.dist, "barrier", lambda **kwargs: None)
     copied = []
-    monkeypatch.setattr(kv_trans_v2, "kv_trans_v2_for_p_node", lambda **kwargs: copied.append(kwargs))
+    monkeypatch.setattr(kv_trans_v2, "kv_trans_v2_for_p_node_batch", lambda **kwargs: copied.append(kwargs))
     req = SimpleNamespace(
         req_id=123,
+        req_idx=0,
         cur_kv_len=0,
         hold_kv_len=4,
         hybrid_len_to_big_page_id={4: 7},
@@ -2042,7 +2079,10 @@ def test_cross_dp_token_slot_copy_restores_state_at_received_length(monkeypatch)
     )
     states = object()
     restored = []
-    requests = SimpleNamespace(restore_state=lambda r, pool, slot: restored.append((r.cur_kv_len, pool, slot)))
+    requests = SimpleNamespace(
+        req_to_token_indexs=torch.arange(4, 12, dtype=torch.int32).view(1, 8),
+        restore_state=lambda r, pool, slot: restored.append((r.cur_kv_len, pool, slot)),
+    )
     monkeypatch.setattr(shared.g_infer_context, "req_manager", requests)
     module = shared.DPKVSharedMoudle.__new__(shared.DPKVSharedMoudle)
     module._transfer_dsv4_source_data = lambda *args: None
@@ -2058,14 +2098,21 @@ def test_cross_dp_token_slot_copy_restores_state_at_received_length(monkeypatch)
     module.dp_rank_in_node = 0
     module.dsv4_source_pool_ptrs = original_tensor([[10, 20], [30, 40]], dtype=torch.uint64)
     task = shared.TransTask(req, torch.arange(4, 8, dtype=torch.int32), 1, 1, torch.arange(4, dtype=torch.int32))
+    module.dsv4_destination_pool_ptrs = original_tensor([b.data_ptr() for b in buffers], dtype=torch.uint64)
+    module.dsv4_slot_bytes = original_tensor([16, 32], dtype=torch.int64)
+    module.dsv4_max_slot_bytes = 32
+    monkeypatch.setattr(
+        shared.g_pin_mem_manager, "gen_from_list", lambda key, data, dtype: original_tensor(data, dtype=dtype)
+    )
     module.kv_trans_dsv4([task], {}, [])
-    assert len(copied) == 2
-    for layer, call in enumerate(copied):
-        assert call["output"] is buffers[layer]
-        assert call["input_mems"].tolist() == module.dsv4_source_pool_ptrs[layer].tolist()
-        assert call["input_idx"].tolist() == [0, 1, 2, 3]
-        assert call["output_idx"].tolist() == [4, 5, 6, 7]
-        assert call["input_dp_idx"].tolist() == [1, 1, 1, 1]
+    assert len(copied) == 1
+    call = copied[0]
+    assert call["source_pools"] is module.dsv4_source_pool_ptrs
+    assert call["tasks"].tolist() == [
+        [1, task.max_kv_len_mem_indexes.data_ptr(), requests.req_to_token_indexs.data_ptr(), 4]
+    ]
+    assert call["blocks"].tolist() == [[0, 0]]
+    assert call["slot_bytes"].tolist() == [16, 32]
     assert restored == [(4, states, 7)]
     assert req.shm_req.prompt_cache_len == req.shm_req.shm_cur_kv_len == 4
 

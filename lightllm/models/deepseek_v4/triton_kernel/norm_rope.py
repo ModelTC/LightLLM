@@ -22,6 +22,7 @@ def _q_norm_rope_kernel(
     num_rows,
     NUM_HEADS: tl.constexpr,
     EPS: tl.constexpr,
+    APPLY_NORM: tl.constexpr,
     BLOCK_R: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
@@ -36,7 +37,7 @@ def _q_norm_rope_kernel(
         mask=row[:, None] < num_rows,
         other=0,
     ).to(tl.float32)
-    norm = tl.rsqrt(tl.sum(x * x, axis=1) / 512 + EPS)
+    norm = tl.rsqrt(tl.sum(x * x, axis=1) / 512 + EPS) if APPLY_NORM else tl.full((BLOCK_R,), 1.0, tl.float32)
     # Main Q rounds RMSNorm to BF16 before applying RoPE.
     x = (x * norm[:, None]).to(tl.bfloat16).to(tl.float32)
     out_base = q_output + batch[:, None] * q_output_stride + head[:, None] * 512
@@ -73,6 +74,7 @@ def _kv_norm_rope_to_swa_kernel(
     SWA_PAGE_TOKEN_NUM: tl.constexpr,
     PAGE_BYTES: tl.constexpr,
     WRITE_SWA_RUNTIME: tl.constexpr,
+    BF16_ROUNDING: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
     row = tl.program_id(0)
@@ -81,8 +83,12 @@ def _kv_norm_rope_to_swa_kernel(
         tl.extra.cuda.gdc_wait()
     x = tl.load(kv + row * kv_stride + dim).to(tl.float32)
     w = tl.load(kv_norm_weight + dim).to(tl.float32)
-    norm = tl.rsqrt(tl.sum(x * x, axis=0) / 512 + EPS)
+    norm = (
+        1 / tl.sqrt(tl.sum(x * x, axis=0) / 512 + EPS) if BF16_ROUNDING else tl.rsqrt(tl.sum(x * x, axis=0) / 512 + EPS)
+    )
     x = x * norm * w
+    if BF16_ROUNDING:
+        x = x.to(tl.bfloat16).to(tl.float32)
     groups = tl.arange(0, 8)
     cols = tl.arange(0, 64)
     grouped = tl.reshape(x, (8, 64))
@@ -101,6 +107,8 @@ def _kv_norm_rope_to_swa_kernel(
     rope = tl.reshape(
         tl.join(real * cos[None, :] - imag * sin[None, :], real * sin[None, :] + imag * cos[None, :]), (8, 64)
     )
+    if BF16_ROUNDING:
+        rope = rope.to(tl.bfloat16).to(tl.float32)
     for destination in tl.static_range(2 if WRITE_SWA_RUNTIME else 1):
         slot = tl.load(swa_write_slots + row) if destination == 0 else tl.load(swa_runtime_write_slots + row)
         slot = slot.to(tl.int64)
@@ -135,6 +143,7 @@ def _indexer_rope_hadamard_quant_kernel(
     num_rows,
     NUM_HEADS: tl.constexpr,
     WEIGHT_SCALE: tl.constexpr,
+    APPLY_HADAMARD: tl.constexpr,
     BLOCK_R: tl.constexpr,
     USE_PDL: tl.constexpr,
 ):
@@ -153,9 +162,12 @@ def _indexer_rope_hadamard_quant_kernel(
     x = tl.reshape(tl.join(real * cos - imag * sin, real * sin + imag * cos), (BLOCK_R, 128))
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
-    for stage in tl.static_range(7):
-        x = _butterfly_stage(x, 64 >> stage, 1 << stage, BLOCK_R, 128)
-    x = x * 0.08838834764831845
+    if APPLY_HADAMARD:
+        for stage in tl.static_range(7):
+            x = _butterfly_stage(x, 64 >> stage, 1 << stage, BLOCK_R, 128)
+        x = x * 0.08838834764831845
+    else:
+        x = x.to(tl.bfloat16).to(tl.float32)
     scale = tl.maximum(tl.max(tl.abs(x), axis=1), 1e-4) / 448
     tl.store(
         q_fp8 + row[:, None] * 128 + dim[None, :], tl.clamp(x / scale[:, None], -448, 448), mask=row[:, None] < num_rows
@@ -165,7 +177,7 @@ def _indexer_rope_hadamard_quant_kernel(
 
 
 @torch.no_grad()
-def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, position_ids):
+def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, position_ids, apply_norm=True):
     """RMSNorm/RoPE for BF16 Q [T, heads, 512], allowing padded head strides.
 
     freqs_cis is contiguous complex64 [max_position, 32]; position_ids is int32/int64 [T].
@@ -184,6 +196,7 @@ def fused_q_norm_rope(q_input, q_output, eps, freqs_cis, position_ids):
             rows,
             NUM_HEADS=q_input.shape[1],
             EPS=float(eps),
+            APPLY_NORM=apply_norm,
             BLOCK_R=block_r,
             num_warps=warps,
             num_stages=1,
@@ -203,6 +216,7 @@ def fused_kv_norm_rope_to_swa(
     swa_page_token_num,
     swa_runtime_write_slots=None,
     req_to_swa=None,
+    bf16_rounding=False,
 ):
     """将 BF16 KV [T, 512] 归一化、旋转并写入 packed SWA。
 
@@ -213,6 +227,12 @@ def fused_kv_norm_rope_to_swa(
     slot. NoPE uses FP8 with UE8M0 scales; the last 64 dimensions use BF16 RoPE.
     """
     if kv.shape[0]:
+        if bf16_rounding:
+            from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_num_warps
+
+            num_warps = rmsnorm_num_warps
+        else:
+            num_warps = 1 if kv.shape[0] >= 512 else 8
         flat = swa_kv_buffer.view(-1)
         _kv_norm_rope_to_swa_kernel[(kv.shape[0],)](
             kv,
@@ -228,14 +248,15 @@ def fused_kv_norm_rope_to_swa(
             SWA_PAGE_TOKEN_NUM=swa_page_token_num,
             PAGE_BYTES=swa_kv_buffer.shape[-1],
             WRITE_SWA_RUNTIME=swa_runtime_write_slots is not None,
-            num_warps=1 if kv.shape[0] >= 512 else 8,
+            BF16_ROUNDING=bf16_rounding,
+            num_warps=num_warps,
             num_stages=1,
             **get_pdl_launch_kwargs(kv.device),
         )
 
 
 @torch.no_grad()
-def fused_q_indexer_rope_hadamard_quant(
+def fused_q_indexer_rope_quant(
     q_input,
     weight,
     weight_scale,
@@ -243,6 +264,7 @@ def fused_q_indexer_rope_hadamard_quant(
     position_ids,
     q_fp8=None,
     weights_out=None,
+    apply_hadamard=True,
 ):
     """RoPE/Hadamard-128 and FP8 quantization for contiguous BF16 indexer Q.
 
@@ -266,6 +288,7 @@ def fused_q_indexer_rope_hadamard_quant(
             rows,
             NUM_HEADS=q_input.shape[1],
             WEIGHT_SCALE=float(weight_scale),
+            APPLY_HADAMARD=apply_hadamard,
             BLOCK_R=block_r,
             num_warps=1,
             num_stages=1,

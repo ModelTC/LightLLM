@@ -15,6 +15,8 @@ from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel im
     per_token_group_quant_fp8,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
+    ep_expanded_to_masked,
+    ep_masked_to_expanded,
     ep_build_m_indices,
     ep_compact_metadata,
     ep_gather_chunk,
@@ -46,6 +48,45 @@ except:
 
 def get_ep_num_sms() -> int:
     return getattr(dist_group_manager, "ep_num_sms", None) or 0
+
+
+def deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts):
+    buffer = dist_group_manager.ep_buffer
+    # DP ranks may have different local batch sizes. This collective capacity
+    # must be identical on every rank, including CUDA graph replays.
+    capacity = get_deepep_num_max_dispatch_tokens_per_rank_decode()
+    qinput = per_token_group_quant_fp8(hidden_states, 128)
+    # Compute-stream ownership lets CUDA Graph reuse receive storage across layers.
+    recv_x, _, recv_weights, handle, _ = buffer.dispatch(
+        qinput,
+        topk_idx=topk_idx,
+        topk_weights=topk_weights,
+        num_experts=num_experts,
+        num_max_tokens_per_rank=capacity,
+        expert_alignment=128,
+        do_expand=True,
+        do_cpu_sync=False,
+        async_with_compute_stream=False,
+        allocate_on_comm_stream=False,
+        num_sms=get_ep_num_sms(),
+    )
+    max_m = triton.cdiv(capacity * buffer.num_ranks, 128) * 128
+    recv_x, counts = ep_expanded_to_masked(recv_x, handle.psum_num_recv_tokens_per_expert, max_m)
+    return recv_x, counts, (handle, recv_weights)
+
+
+def deepep_v2_decode_combine(gemm_out, handle):
+    native_handle, recv_weights = handle
+    expanded = ep_masked_to_expanded(gemm_out, native_handle.psum_num_recv_tokens_per_expert, recv_weights)
+    output, _, _ = dist_group_manager.ep_buffer.combine(
+        expanded,
+        native_handle,
+        topk_weights=None,
+        num_sms=get_ep_num_sms(),
+        async_with_compute_stream=False,
+        allocate_on_comm_stream=False,
+    )
+    return output, lambda: None
 
 
 def use_mega_moe(quant_method: Any) -> bool:
@@ -92,8 +133,8 @@ def masked_group_gemm(
     gemm_out_a = alloc_tensor_func((E, padded_m, N), device=recv_x[0].device, dtype=dtype)
     expected_m = min(expected_m, padded_m)
     qsilu_out_scale = alloc_tensor_func(
-        (E, padded_m, N // 2 // block_size), device=recv_x[0].device, dtype=torch.float32
-    )
+        (E, N // 2 // block_size, padded_m), device=recv_x[0].device, dtype=torch.float32
+    ).transpose(1, 2)
     qsilu_out = alloc_tensor_func((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
     _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
 
@@ -439,16 +480,21 @@ def fused_experts_impl(
     else:
         # low latency dispatch
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
-        expected_m = triton.cdiv(hidden_states.shape[0] * buffer.group_size * topk_idx.shape[1], num_experts)
-        recv_x, masked_m, handle, event, hook = buffer.low_latency_dispatch(
-            hidden_states,
-            topk_idx,
-            num_max_dispatch_tokens_per_rank,
-            num_experts,
-            use_fp8=use_fp8_w8a8,
-            async_finish=False,
-            return_recv_hook=False,
-        )
+        if dist_group_manager.ep_decode_use_v2:
+            recv_x, masked_m, handle = deepep_v2_decode_dispatch(hidden_states, topk_idx, topk_weights, num_experts)
+            world_size = dist_group_manager.ep_buffer.num_ranks
+        else:
+            world_size = buffer.group_size
+            recv_x, masked_m, handle, event, hook = buffer.low_latency_dispatch(
+                hidden_states,
+                topk_idx,
+                num_max_dispatch_tokens_per_rank,
+                num_experts,
+                use_fp8=use_fp8_w8a8,
+                async_finish=False,
+                return_recv_hook=False,
+            )
+        expected_m = triton.cdiv(hidden_states.shape[0] * world_size * topk_idx.shape[1], num_experts)
         # deepgemm
         gemm_out_b = masked_group_gemm(
             recv_x,
@@ -465,9 +511,13 @@ def fused_experts_impl(
             clamp_up_add_one=clamp_up_add_one,
         )
         # low latency combine
-        combined_x, event_overlap, hook = buffer.low_latency_combine(
-            gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
-        )
+        if dist_group_manager.ep_decode_use_v2:
+            combined_x, hook = deepep_v2_decode_combine(gemm_out_b, handle)
+            hook()
+        else:
+            combined_x, event_overlap, hook = buffer.low_latency_combine(
+                gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
+            )
     return combined_x
 
 

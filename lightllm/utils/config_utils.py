@@ -23,7 +23,7 @@ def get_generation_config_diff_dict(model_path: str) -> Dict[str, Any]:
 
 def auto_set_page_size(args) -> None:
     """Select the model's default KV page size."""
-    if args.page_size == 1 and get_model_type(args.model_dir) == "deepseek_v4":
+    if args.page_size == 1 and get_model_type(args.model_dir) in ("deepseek_v4", "deepseek_v41"):
         args.page_size = 256
 
 
@@ -446,6 +446,8 @@ def has_vision_module(model_path: str) -> bool:
             return True
         elif model_type == "deepseek_v4":
             return model_cfg.get("vision_n_layers", 0) > 0
+        elif model_type == "deepseek_v41":
+            return (model_cfg.get("vision_config") or {}).get("num_hidden_layers", 0) > 0
         elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
             # TarsierVisionTransformerPretrainedModel
             return True
@@ -517,7 +519,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
 def is_hybrid_att_model(model_path: str) -> bool:
     """Models whose non-full attention state follows hybrid checkpoint pages."""
-    return get_model_type(model_path) == "deepseek_v4" or is_linear_att_mixed_model(model_path)
+    return get_model_type(model_path) in ("deepseek_v4", "deepseek_v41") or is_linear_att_mixed_model(model_path)
 
 
 def get_model_type(model_path: str) -> Optional[str]:
@@ -576,6 +578,8 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
         return "deepseekv32"
 
     # DeepSeek V4
+    if model_type == "deepseek_v41":
+        return "deepseekv41"
     if model_type == "deepseek_v4":
         return "deepseekv4"
 
@@ -605,7 +609,7 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         return "qwen3"
 
     # DeepSeek V4 defaults to thinking and supports per-request opt-out.
-    if model_type == "deepseek_v4":
+    if model_type in ("deepseek_v4", "deepseek_v41"):
         return "deepseek-v4"
 
     # DeepSeek V3 variants enable thinking only when explicitly requested.

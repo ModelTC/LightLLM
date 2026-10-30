@@ -1,8 +1,10 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import pytest
 import torch
 
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import deepgemm_impl
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.base_impl import FuseMoeBaseImpl
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.deepgemm_impl import FuseMoeDeepGEMM
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import fused_moe_weight
@@ -15,6 +17,7 @@ def test_shared_expert_executes_between_combine_send_and_receive(monkeypatch):
     backend.quant_method = SimpleNamespace(method_name="fp8w8a8-b128-deepgemm")
     backend.supports_decode_shared_expert_overlap = True
     backend.n_routed_experts = 256
+    backend.expert_parallel_state = SimpleNamespace(world_size=8)
     monkeypatch.setattr(dist_group_manager, "ep_low_latency_buffer", SimpleNamespace(group_size=8))
     x = torch.ones((24, 4))
     weights = torch.ones((24, 6))
@@ -90,32 +93,59 @@ def test_overlap_keeps_logical_route_capture_with_weight_owner(monkeypatch):
     assert weight.fuse_moe_impl._fused_experts.call_args.kwargs["shared_expert_func"] is shared
 
 
-def test_inplace_backend_still_computes_shared_before_routed(monkeypatch):
+@pytest.mark.parametrize("is_prefill", [False, True])
+@pytest.mark.parametrize("supports_overlap", [False, True])
+def test_dsv4_shared_expert_order_and_allocator(is_prefill, supports_overlap):
     layer = object.__new__(transformer_layer_infer.DeepseekV4TransformerLayerInfer)
     layer.embed_dim_ = 4
     layer.enable_ep_moe = True
+    layer.moe_shared_stream = None
     layer._tpsp_allgather = lambda input, infer_state: input
-    layer._select_experts = Mock(return_value=(None, None, None))
-    state = SimpleNamespace(is_prefill=False)
-    weight = SimpleNamespace(
-        gate_weight_=SimpleNamespace(mm=Mock(return_value=None)),
-        experts_=SimpleNamespace(fuse_moe_impl=SimpleNamespace(supports_decode_shared_expert_overlap=False)),
-    )
-    monkeypatch.setattr(transformer_layer_infer, "get_moe_capture_callback", lambda *_args: None)
+    layer._select_experts = Mock(return_value=(None, None))
+    layer.alloc_tensor = Mock()
+    layer.swiglu_limit = 10.0
+    state = SimpleNamespace(is_prefill=is_prefill)
     layer.layer_num_ = 0
     events = []
 
-    def shared(input, **_kwargs):
+    def shared(input, *_args, **_kwargs):
         events.append("shared")
         return input * 2
 
-    def routed(x, *_args):
+    def routed(input_tensor, **kwargs):
+        assert kwargs["alloc_tensor_func"] is layer.alloc_tensor
         events.append("routed")
-        x.fill_(9)
-        return torch.full_like(x, 3)
+        callback = kwargs.get("shared_expert_func")
+        if callback is not None:
+            events.append("combine_send")
+            shared_output = callback()
+            events.append("combine_recv")
+            return torch.full_like(input_tensor, 3) + shared_output
+        input_tensor.fill_(9)
+        return torch.full_like(input_tensor, 3)
 
+    weight = SimpleNamespace(
+        experts=SimpleNamespace(
+            fuse_moe_impl=SimpleNamespace(supports_decode_shared_expert_overlap=supports_overlap),
+            experts_with_topk=routed,
+        ),
+    )
     layer._ffn_tp = shared
-    layer._routed_experts = routed
     out = layer._ffn(torch.ones((2, 4)), state, weight)
-    assert events == ["shared", "routed"]
+    expected = ["routed", "combine_send", "shared", "combine_recv"]
+    assert events == (expected if supports_overlap and not is_prefill else ["shared", "routed"])
     assert torch.equal(out, torch.full_like(out, 5))
+
+
+def test_dsv4_shared_expert_uses_selected_fused_activation():
+    layer = object.__new__(transformer_layer_infer.DeepseekV4TransformerLayerInfer)
+    layer.embed_dim_, layer.swiglu_limit = 4, 10.0
+    x = torch.ones((2, 4))
+    projected = torch.ones((2, 8))
+    expected = torch.full_like(x, 5)
+    weight = SimpleNamespace(
+        gate_up_proj=SimpleNamespace(mm=Mock(return_value=projected)),
+        down_proj=SimpleNamespace(mm_swiglu=Mock(return_value=expected)),
+    )
+    assert layer._ffn_tp(x, SimpleNamespace(), weight) is expected
+    weight.down_proj.mm_swiglu.assert_called_once_with(projected, limit=10.0, use_custom_tensor_mananger=True)

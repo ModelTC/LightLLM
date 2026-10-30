@@ -57,13 +57,17 @@ def get_tokenizer(
     if model_type == "deepseek_v32":
         # Register the custom config before AutoTokenizer tries to resolve it.
         from ..models import deepseek3_2  # noqa: F401
-    if model_type == "deepseek_v4":
+    if model_type in ("deepseek_v4", "deepseek_v41"):
         from ..models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
 
         if tokenizer_mode == "slow":
             raise ValueError("DeepSeek-V4 requires a fast tokenizer loaded from tokenizer.json")
         tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
         logger.info("Using DeepSeek-V4 tokenizer mode with Python-based chat template encoding.")
+        if model_type == "deepseek_v41":
+            from ..models.deepseek_v41.tokenizer import DeepSeekV41Tokenizer
+
+            return DeepSeekV41Tokenizer(tokenizer, tokenizer_name, model_cfg)
         return DeepSeekV4Tokenizer(tokenizer, tokenizer_name, model_cfg)
 
     try:

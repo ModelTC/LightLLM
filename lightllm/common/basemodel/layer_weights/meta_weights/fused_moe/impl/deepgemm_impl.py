@@ -17,6 +17,8 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     quantize_fused_experts_input,
     use_mega_moe,
     check_ep_expert_dtype,
+    deepep_v2_decode_dispatch,
+    deepep_v2_decode_combine,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
@@ -69,6 +71,11 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_weights: torch.Tensor,
     ):
         topk_idx = topk_idx.to(torch.long)
+        if dist_group_manager.ep_decode_use_v2:
+            recv_x, masked_m, handle = deepep_v2_decode_dispatch(
+                hidden_states, topk_idx, topk_weights, self.n_routed_experts
+            )
+            return recv_x, masked_m, topk_idx, topk_weights, handle, lambda: None
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
         use_fp8_w8a8 = self.quant_method.method_name != "none"
         recv_x, masked_m, handle, event, hook = dist_group_manager.ep_low_latency_buffer.low_latency_dispatch(
@@ -247,6 +254,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         topk_weights: torch.Tensor,
         handle: Any,
     ):
+        if dist_group_manager.ep_decode_use_v2:
+            return deepep_v2_decode_combine(gemm_out_b, handle)
         combined_x, event_overlap, hook = dist_group_manager.ep_low_latency_buffer.low_latency_combine(
             gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=True
         )
@@ -362,7 +371,7 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             )
             dispatch_hook()
             expected_m = triton.cdiv(
-                input_tensor.shape[0] * dist_group_manager.ep_low_latency_buffer.group_size * topk_ids.shape[1],
+                input_tensor.shape[0] * self.expert_parallel_state.world_size * topk_ids.shape[1],
                 self.n_routed_experts,
             )
             gemm_out = self.masked_group_gemm(

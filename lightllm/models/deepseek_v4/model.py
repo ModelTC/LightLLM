@@ -64,6 +64,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     req_manager: DeepseekV4ReqManager
     mem_manager: DeepseekV4MemoryManager
     has_vision = False
+    has_bidirectional_image_attention = False
 
     pre_and_post_weight_class = DeepseekV4PreAndPostLayerWeight
     transformer_weight_class = DeepseekV4TransformerLayerWeight
@@ -155,6 +156,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             num_experts_per_tok=self.config["num_experts_per_tok"],
             moe_intermediate_size=self.config["moe_intermediate_size"],
         )
+        self.moe_shared_stream = torch.cuda.Stream() if dist_group_manager.ep_decode_use_v2 else None
+        for layer in self.layers_infer:
+            layer.moe_shared_stream = self.moe_shared_stream
         return
 
     def _init_hidden_collector(self):
@@ -196,11 +200,8 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         cfg = self.config
         rs = cfg.get("rope_scaling", {}) or {}
         dim = cfg["qk_rope_head_dim"]
-        # The rope tables MUST span every absolute position any request can produce (the served
-        # max_req_total_len / max_position_embeddings, up to 1M). Capping them shorter makes
-        # init_some_extra_state's index_select(cos/sin, position_ids) read OOB past the table at
-        # contexts beyond the cap (device-side assert / crash). ~268MB total at 1M, fp32x32 x4 views.
-        max_seq = max(self.max_seq_length, cfg["max_position_embeddings"])
+        # Served length includes the MTP margin; YaRN uses the checkpoint maximum.
+        max_seq = self.max_seq_length
         freq_exponents = torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim
         positions = torch.arange(max_seq, dtype=torch.float32, device="cuda")
 
@@ -245,3 +246,4 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
 class DeepseekV4VisionTpPartModel(DeepseekV4TpPartModel):
     has_vision = True
+    has_bidirectional_image_attention = True

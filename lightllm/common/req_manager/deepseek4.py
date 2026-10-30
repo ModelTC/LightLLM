@@ -69,7 +69,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         checkpoint_len = req.get_chuncked_input_token_len()
         positions = torch.arange(checkpoint_len - config.sliding_window, checkpoint_len, device="cuda")
         swa.copy_(gather_swa_state(self, req_idx, positions), non_blocking=True)
-        if not config.n_c4:
+        if config.short_compress_ratio != 4 or not config.n_c4:
             return
         positions = torch.arange(checkpoint_len - config.short_compress_ratio, checkpoint_len, device="cuda")
         state_slots = positions % self.c4_state_tokens
@@ -84,7 +84,7 @@ class DeepseekV4ReqManager(HybridAttentionReqManager):
         swa, c4, indexer = state_cache_manager.get_state_cache(buffer_idx)
         positions = torch.arange(req.cur_kv_len - config.sliding_window, req.cur_kv_len, device="cuda")
         scatter_swa_state(self, req.req_idx, positions, swa.cuda(non_blocking=True))
-        if config.n_c4:
+        if config.short_compress_ratio == 4 and config.n_c4:
             positions = torch.arange(req.cur_kv_len - config.short_compress_ratio, req.cur_kv_len, device="cuda")
             slots = positions % self.c4_state_tokens
             self.req_to_c4_state[:, req.req_idx].index_copy_(1, slots, c4.cuda(non_blocking=True))

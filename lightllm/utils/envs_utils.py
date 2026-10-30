@@ -328,7 +328,10 @@ def _get_mtp_draft_backbone_layer_num(draft_model_dir: str) -> int:
     with open(os.path.join(draft_model_dir, "config.json"), "r") as json_file:
         draft_config = json.load(json_file)
 
-    if draft_config.get("model_type") == "deepseek_v4":
+    model_type = draft_config.get("model_type")
+    if model_type == "deepseek_v41":
+        draft_config = draft_config["text_config"]
+    if model_type in ("deepseek_v4", "deepseek_v41"):
         return len(draft_config["dspark_target_layer_ids"])
 
     # Use the effective draft backbone config when the checkpoint stores it nested.

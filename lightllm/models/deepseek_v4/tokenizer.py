@@ -11,6 +11,7 @@ class DeepSeekV4Tokenizer:
     # chat_template_kwargs={"thinking": true}. It has no Jinja chat_template string,
     # so advertise thinking support explicitly for tokenizer_supports_force_thinking().
     supports_thinking = True
+    supports_content_blocks = False
 
     def __init__(self, tokenizer, model_dir, model_config=None):
         self.tokenizer = tokenizer
@@ -72,7 +73,7 @@ class DeepSeekV4Tokenizer:
 
             image = images[image_index]
             image.start_idx = len(input_ids)
-            cache_skip = image.start_idx % 4
+            cache_skip = 0 if self.model_config.get("vision_row_major", False) else image.start_idx % 4
             input_ids.extend(range(image.token_id + cache_skip, image.token_id + image.token_num))
             image_index += 1
 
@@ -122,8 +123,10 @@ class DeepSeekV4Tokenizer:
         # JSON strings to encode each named argument separately.
         for msg in msgs:
             content = msg.get("content")
-            if isinstance(content, list) and all(
-                isinstance(part, dict) and part.get("type") == "text" for part in content
+            if (
+                isinstance(content, list)
+                and not self.supports_content_blocks
+                and all(isinstance(part, dict) and part.get("type") == "text" for part in content)
             ):
                 msg["content"] = "".join(part.get("text") or "" for part in content)
             for tc in msg.get("tool_calls") or []:
@@ -158,7 +161,7 @@ class DeepSeekV4Tokenizer:
             effort = None
         if thinking and effort is None:
             effort = os.getenv("LIGHTLLM_DSV4_THINKING_EFFORT", "high")
-        if effort not in ("low", "max", "high", None):
+        if not (self.supports_content_blocks and type(effort) is int) and effort not in ("low", "max", "high", None):
             effort = None
         encoding = self._get_encoding_module()
         prompt = encoding.encode_messages(

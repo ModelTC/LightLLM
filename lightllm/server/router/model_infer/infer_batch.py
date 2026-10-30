@@ -201,6 +201,7 @@ class InferenceContext:
                 assert len(req.hybrid_len_to_big_page_id) == 0
         req.cur_kv_len = 0
         req.hold_kv_len = 0
+        req.token_history_ready = False
         req.shm_req.shm_cur_kv_len = req.cur_kv_len
         return
 
@@ -409,7 +410,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -667,6 +667,7 @@ class InferReq:
             self.pd_trans_kv_start_index = self.sampling_param.pd_decode_node.ready_kv_len
 
         self.cur_kv_len = 0
+        self.token_history_ready = False
         self.cur_output_len = 0
         self.prompt_selected_logprobs = PromptSelectedLogprobsExt(self)
         self.final_token_metadata = FinalTokenMetadataExt(self)
@@ -882,6 +883,16 @@ class InferReq:
 
     def get_input_token_ids(self):
         return self.shm_req.shm_prompt_ids.arr[0 : self.get_cur_total_len()]
+
+    def get_token_lookback(self, depth):
+        if self.token_history_ready:
+            return None
+        self.token_history_ready = True
+        start = self.cur_kv_len
+        if start == 0:
+            return None
+        ids = self.get_input_token_ids()[max(0, start - depth) : start].tolist()
+        return self.req_idx, start, ids
 
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len

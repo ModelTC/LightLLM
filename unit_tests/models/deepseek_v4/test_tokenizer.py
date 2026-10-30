@@ -44,6 +44,12 @@ def test_mixed_content_preserves_image_order_and_expands_placeholders(tokenizer,
         }
     ]
     original = copy.deepcopy(messages)
+
+    def encode_messages(messages, **kwargs):
+        assert messages == original
+        return f"before{IMAGE_TOKEN}between{IMAGE_TOKEN}after"
+
+    tokenizer._encoding_module = SimpleNamespace(encode_messages=encode_messages)
     prompt = tokenizer.apply_chat_template(messages=messages, tokenize=tokenize)
     if not tokenize:
         assert f"before{IMAGE_TOKEN}between{IMAGE_TOKEN}after" in prompt

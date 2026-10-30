@@ -167,6 +167,7 @@ class DistributeGroupManager:
         self.ep_balance_monitor_group = None
         self.ep_buffer = None
         self.ep_low_latency_buffer = None
+        self.ep_decode_use_v2 = False
         self.ep_prefill_moe_workspace = None
         self.ep_mega_moe_buffer = None
         self.ep_mega_moe_mma_type = None
@@ -244,6 +245,7 @@ class DistributeGroupManager:
         """
         args = get_env_start_args()
         enable_ep_moe = args.enable_ep_moe
+        self.ep_decode_use_v2 = args.ep_moe_backend == "deepep_v2"
         prefill_num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
         decode_num_max_dispatch_tokens_per_rank = (
             None if args.run_mode == "prefill" else get_deepep_num_max_dispatch_tokens_per_rank_decode()
@@ -260,6 +262,8 @@ class DistributeGroupManager:
             self.ep_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
+        if self.ep_decode_use_v2 and expert_quant_method_names != {FP8_MOE_QUANT_METHOD}:
+            raise ValueError("--ep_moe_backend deepep_v2 requires FP8 DeepGEMM experts")
 
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
@@ -284,7 +288,9 @@ class DistributeGroupManager:
         self.ll_decode_num_experts = n_routed_experts
         self.ep_buffer = deep_ep.ElasticBuffer(
             deepep_group,
-            num_max_tokens_per_rank=self.ll_num_tokens,
+            num_max_tokens_per_rank=(
+                max(self.ll_num_tokens, self.ll_decode_num_tokens or 0) if self.ep_decode_use_v2 else self.ll_num_tokens
+            ),
             hidden=self.ll_hidden,
             num_topk=num_experts_per_tok,
             use_fp8_dispatch=True,
@@ -306,18 +312,23 @@ class DistributeGroupManager:
 
         if (
             self.ep_triton_moe_quant_method is None
+            and not self.ep_decode_use_v2
             and is_sm100_gpu()
             and FP4_MOE_QUANT_METHOD in expert_quant_method_names
         ):
             self.ep_mega_moe_mma_type = "fp8xfp4"
             self.ep_mega_moe_quant_method = FP4_MOE_QUANT_METHOD
-        elif self.ep_triton_moe_quant_method is None and (
-            enable_env_vars("LIGHTLLM_ENABLE_SM90_FP8_MEGA_MOE")
-            and is_sm90_gpu()
-            and FP8_MOE_QUANT_METHOD in expert_quant_method_names
-            and total_redundant_experts == 0
-            and args.nnodes == 1
-            and not args.enable_rl
+        elif (
+            self.ep_triton_moe_quant_method is None
+            and not self.ep_decode_use_v2
+            and (
+                enable_env_vars("LIGHTLLM_ENABLE_SM90_FP8_MEGA_MOE")
+                and is_sm90_gpu()
+                and FP8_MOE_QUANT_METHOD in expert_quant_method_names
+                and total_redundant_experts == 0
+                and args.nnodes == 1
+                and not args.enable_rl
+            )
         ):
             self.ep_mega_moe_mma_type = "fp8xfp8"
             self.ep_mega_moe_quant_method = FP8_MOE_QUANT_METHOD
@@ -329,8 +340,8 @@ class DistributeGroupManager:
             method_name != fused_moe_quant_method for method_name in expert_quant_method_names
         )
 
-        enable_low_latency_buffer = has_legacy_moe_layer and args.run_mode != "prefill"
-        enable_prefill_workspace = has_legacy_moe_layer and args.run_mode == "prefill"
+        enable_low_latency_buffer = has_legacy_moe_layer and args.run_mode != "prefill" and not self.ep_decode_use_v2
+        enable_prefill_workspace = has_legacy_moe_layer and (args.run_mode == "prefill" or self.ep_decode_use_v2)
 
         if enable_low_latency_buffer:
             # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
@@ -453,9 +464,11 @@ class DistributeGroupManager:
                 # its SM reservation based on decode's logical expert count.
                 deep_ep.Buffer.set_num_sms(low_latency_sms - low_latency_sms % 2)
             deep_gemm_sms = max(device_sms - deepep_sms, 2)
-            if self.ep_low_latency_buffer is not None and get_env_start_args().run_mode == "decode":
-                # Pure Decode uses the separate low-latency communication pool,
-                # rather than Prefill's persistent dispatch/compute partition.
+            if (
+                self.ep_low_latency_buffer is not None or self.ep_decode_use_v2
+            ) and get_env_start_args().run_mode == "decode":
+                # Decode executes routed GEMMs after dispatch instead of
+                # keeping Prefill's persistent communication/compute partition.
                 deep_gemm_sms = device_sms
             if self.ep_mega_moe_mma_type == "fp8xfp8":
                 deep_gemm_sms -= deep_gemm_sms % 2

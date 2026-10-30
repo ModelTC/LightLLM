@@ -1,12 +1,19 @@
 # Copyright 2023-2024 SGLang Team
 # SPDX-License-Identifier: Apache-2.0
 
+import inspect
+
 import torch
 import triton
 import triton.language as tl
 
+from flashinfer import top_k_page_table_transform
+
 from lightllm.utils.vllm_utils import vllm_ops
 from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
+
+
+_FLASHINFER_SUPPORTS_PAGE_SIZE = "page_size" in inspect.signature(top_k_page_table_transform).parameters
 
 
 @triton.jit
@@ -151,7 +158,7 @@ def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_
             num_stages=1,
             **get_pdl_launch_kwargs(scores.device),
         )
-    elif scores.shape[1] > 2048 or topk != 512:
+    elif scores.shape[1] > 2048 or topk != 512 or not _FLASHINFER_SUPPORTS_PAGE_SIZE:
         vllm_ops.top_k_per_row_decode(
             scores,
             1,
@@ -178,8 +185,6 @@ def indexer_topk(scores, valid_lengths, page_table, compressed_kv_indices, page_
         )
     else:
         # FlashInfer's DSA-specialized path requires a 512-entry selection.
-        from flashinfer import top_k_page_table_transform
-
         top_k_page_table_transform(
             scores,
             page_table,

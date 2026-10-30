@@ -30,22 +30,14 @@ class DeepseekV4DSparkPostLayerInfer(Qwen3DSparkPostLayerInfer):
         logits = layer_weight.confidence_head_weight_.mm(features.flatten(0, -2).float())
         return logits.view(features.shape[:-1])
 
-    def token_forward(
-        self,
-        input_embdings: torch.Tensor,
-        infer_state,
-        layer_weight: DeepseekV4DSparkPreAndPostLayerWeight,
-    ):
-        if infer_state.is_prefill:
-            return PostLayerOutput(logits=input_embdings.new_empty((0,)))
-
+    def _mix_hc_streams(self, input_embdings, layer_weight):
         cfg = layer_weight.network_config_
         if isinstance(input_embdings, tuple):
             input_embdings = hc_post(*input_embdings, streams=cfg["hc_mult"])
         out = self.alloc_tensor(
             (input_embdings.shape[0], cfg["hidden_size"]), dtype=input_embdings.dtype, device=input_embdings.device
         )
-        collapsed = hc_head(
+        return hc_head(
             x=input_embdings,
             fn=layer_weight.hc_head_fn_.weight,
             scale=layer_weight.hc_head_scale_.weight,
@@ -56,6 +48,13 @@ class DeepseekV4DSparkPostLayerInfer(Qwen3DSparkPostLayerInfer):
             out=out,
         )
 
+    def token_forward(
+        self,
+        input_embdings: torch.Tensor,
+        infer_state,
+        layer_weight: DeepseekV4DSparkPreAndPostLayerWeight,
+    ):
+        collapsed = self._mix_hc_streams(input_embdings, layer_weight)
         last_input, token_num = self._slice_get_last_input(collapsed, infer_state)
         num_reqs = token_num // self.block_size_
         block_hidden = last_input.reshape(num_reqs, self.block_size_, -1)

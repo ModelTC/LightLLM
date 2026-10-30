@@ -26,6 +26,11 @@ class Quantcfg:
         self.start_args_expert_dtype = expert_dtype
         self.config_expert_dtype = network_config.get("expert_dtype", None)
         self.model_type = network_config.get("model_type", None)
+        if self.model_type == "deepseek_v41":
+            if self.config_expert_dtype == "fp4":
+                self.config_expert_dtype = "mxfp4"
+            if self.start_args_expert_dtype == "fp4":
+                self.start_args_expert_dtype = "mxfp4"
         # Parse quant_cfg first so model config only fills missing per-layer fused_moe entries;
         # an explicit startup argument is applied afterward and overrides every layer.
         self._parse_custom_cfg(custom_cfg_path)
@@ -89,6 +94,8 @@ class Quantcfg:
     def _mapping_quant_method(self):
         if self.hf_quantization_method == "fp8":
             block_size = self.hf_quantization_config.get("weight_block_size", None)
+            if block_size == [32, 32]:
+                self.quant_type = "fp8w8a8-b32-triton"
             if block_size == [128, 128]:
                 from lightllm.common.quantization.deepgemm import HAS_DEEPGEMM
 

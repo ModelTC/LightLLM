@@ -55,6 +55,8 @@ class StartArgs:
                 "qwen",
                 "deepseekv31",
                 "deepseekv32",
+                "deepseekv4",
+                "deepseekv41",
                 "glm47",
                 "kimi_k2",
                 "qwen3_coder",
@@ -195,7 +197,7 @@ class StartArgs:
         default="gpu_counter", metadata={"choices": ["cpu_counter", "pin_mem_counter", "gpu_counter"]}
     )
     enable_ep_moe: bool = field(default=False)
-    ep_moe_backend: str = field(default="auto", metadata={"choices": ["auto", "triton"]})
+    ep_moe_backend: str = field(default="auto", metadata={"choices": ["auto", "triton", "deepep_v2"]})
     disable_ep_balance_monitor: bool = field(default=False)
     enable_prefill_eplb: bool = field(default=False)
     eplb_num_redundant_experts_per_rank: int = field(default=2)

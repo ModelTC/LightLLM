@@ -7,7 +7,6 @@ from typing import List
 
 @triton.jit
 def grouped_launch(pid, m, n, block_m: tl.constexpr, block_n: tl.constexpr, group_m: tl.constexpr):
-
     grid_m = tl.cdiv(m, block_m)
     grid_n = tl.cdiv(n, block_n)
 
@@ -32,7 +31,7 @@ def _block_scaled_block_gemm(
     N,
     K,
     group_n,
-    group_k,
+    group_k: tl.constexpr,
     stride_am,
     stride_ak,
     stride_bk,
@@ -71,7 +70,8 @@ def _block_scaled_block_gemm(
         offs_ks = k * BLOCK_K // group_k
         a_s = tl.load(Ascale_ptrs + offs_ks * stride_Ascale_k)
         b_s = tl.load(Bscale_ptrs + offs_ks * stride_Bscale_k)
-        acc += tl.dot(a, b) * a_s[:, None] * b_s[None, :]
+        # Hopper needs at least 32 for native FP8 WGMMA; zero promotes operands to FP16.
+        acc += tl.dot(a, b, max_num_imprecise_acc=32 if group_k == 32 else None) * a_s[:, None] * b_s[None, :]
         a_ptrs += BLOCK_K * stride_ak
         b_ptrs += BLOCK_K * stride_bk
 
@@ -164,6 +164,8 @@ def w8a8_block_fp8_matmul(
             "num_warps": 4,
             "num_stages": 3,
         }
+    # A dot tile must not cross a K block with a different quantization scale.
+    run_config = {**run_config, "BLOCK_K": min(run_config["BLOCK_K"], block_k)}
     grid = (triton.cdiv(M, run_config["BLOCK_M"]) * triton.cdiv(N, run_config["BLOCK_N"]),)
     _block_scaled_block_gemm[grid](
         A,

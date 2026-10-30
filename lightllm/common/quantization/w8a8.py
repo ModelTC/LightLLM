@@ -419,6 +419,7 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
         self.block_size = 128
+        self.activation_quant_eps = 1e-10
         self.weight_scale_suffix = "weight_scale_inv"
         self.has_weight_scale = True
         self.has_weight_zero_point = False
@@ -427,7 +428,13 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         from lightllm.common.basemodel.triton_kernel.quantization.fp8w8a8_block_quant_kernel import weight_quant
 
         device = output.weight.device
-        weight, scale = weight_quant(weight.cuda(device), self.block_size)
+        weight, scale = weight_quant(
+            weight.cuda(device),
+            self.block_size,
+            use_ue8m0_scales=bool(
+                self.hf_quantization_config and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
+            ),
+        )
         output.weight.copy_(weight)
         output.weight_scale.copy_(scale)
         return
@@ -447,7 +454,14 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
         if input_scale is None:
             qinput_tensor, input_scale = per_token_group_quant_fp8(
-                input_tensor, self.block_size, dtype=qweight.dtype, alloc_func=alloc_func
+                input_tensor,
+                self.block_size,
+                eps=self.activation_quant_eps,
+                dtype=qweight.dtype,
+                alloc_func=alloc_func,
+                use_ue8m0_scales=bool(
+                    self.hf_quantization_config and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
+                ),
             )
         if out is None:
             out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
@@ -531,3 +545,16 @@ class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
     @property
     def method_name(self):
         return "fp8w8a8-b128-triton"
+
+
+@QUANTMETHODS.register("fp8w8a8-b32-triton", platform="cuda")
+class FP8w8a8B32TritonQuantizationMethod(FP8w8a8B128TritonQuantizationMethod):
+    def __init__(self):
+        super().__init__()
+        self.block_size = 32
+        self.activation_quant_eps = 1e-4
+        self.weight_scale_suffix = "scale"
+
+    @property
+    def method_name(self):
+        return "fp8w8a8-b32-triton"

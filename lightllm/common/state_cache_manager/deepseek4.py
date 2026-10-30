@@ -21,6 +21,10 @@ class DeepseekV4CacheConfig:
     rope_head_dim: int
     indexer_head_dim: int
     sliding_window: int
+    kv_source_layer_ids: tuple[int, ...] | None = None
+    indexer_layer_ids: tuple[int, ...] | None = None
+    short_compress_ratio: int = 4
+    long_compress_ratio: int = 128
 
     # Packed FP8 KV format shared by Flash and Pro.
     quant_group_dim = 64
@@ -28,19 +32,33 @@ class DeepseekV4CacheConfig:
     # 每个 SWA 物理页的 token 数，用于 KV/scale 打包和 ring 容量对齐。
     swa_page_token_num = 128
     compressed_kv_token_alignment = DSV4_COMPRESSED_KV_TOKEN_ALIGNMENT
-    short_compress_ratio = 4
-    long_compress_ratio = 128
 
     def __post_init__(self):
         self.compress_rates = tuple(self.compress_rates)
         self.layer_num = len(self.compress_rates)
-        c4_layers = [layer for layer, rate in enumerate(self.compress_rates) if rate == self.short_compress_ratio]
-        c128_layers = [layer for layer, rate in enumerate(self.compress_rates) if rate == self.long_compress_ratio]
+        if self.kv_source_layer_ids is None:
+            self.kv_source_layer_ids = tuple(layer for layer, rate in enumerate(self.compress_rates) if rate)
+        if self.indexer_layer_ids is None:
+            self.indexer_layer_ids = tuple(
+                layer for layer in self.kv_source_layer_ids if self.compress_rates[layer] == self.short_compress_ratio
+            )
+        c4_layers = [
+            layer for layer in self.kv_source_layer_ids if self.compress_rates[layer] == self.short_compress_ratio
+        ]
+        c128_layers = [
+            layer for layer in self.kv_source_layer_ids if self.compress_rates[layer] == self.long_compress_ratio
+        ]
         self.layer_to_c4_idx = {layer: slot for slot, layer in enumerate(c4_layers)}
         self.layer_to_c128_idx = {layer: slot for slot, layer in enumerate(c128_layers)}
         self.n_c4, self.n_c128 = len(self.layer_to_c4_idx), len(self.layer_to_c128_idx)
-        compressed_kv_layers = [layer for layer, rate in enumerate(self.compress_rates) if rate]
-        self.layer_to_compressed_kv_idx = {layer: slot for slot, layer in enumerate(compressed_kv_layers)}
+        self.layer_to_kv_source = {
+            layer: max(source for source in self.kv_source_layer_ids if source <= layer)
+            for layer, rate in enumerate(self.compress_rates)
+            if rate
+        }
+        self.layer_to_compressed_kv_idx = {
+            layer: self.kv_source_layer_ids.index(source) for layer, source in self.layer_to_kv_source.items()
+        }
         self.kv_data_bytes = self.head_dim + self.rope_head_dim
         self.kv_scale_bytes = (
             triton.cdiv((self.head_dim - self.rope_head_dim) // self.quant_group_dim, self.scale_alignment_bytes)
@@ -55,6 +73,15 @@ class DeepseekV4CacheConfig:
     def from_model_config(cls, config, args):
         from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 
+        options = {}
+        if config.get("model_type") == "deepseek_v41":
+            config = {**config.get("text_config", {}), **config}
+            options = dict(
+                kv_source_layer_ids=tuple(config["kv_source_layer_ids"]),
+                indexer_layer_ids=tuple(config["kv_source_layer_ids"]),
+                short_compress_ratio=2,
+                long_compress_ratio=1,
+            )
         layer_num = config["num_hidden_layers"]
         compress_rates = list(config["compress_ratios"])
         if args.mtp_mode is not None:
@@ -67,6 +94,7 @@ class DeepseekV4CacheConfig:
             rope_head_dim=config["qk_rope_head_dim"],
             indexer_head_dim=config["index_head_dim"],
             sliding_window=config["sliding_window"],
+            **options,
         )
 
     def get_packed_kv_bytes(self, token_count):
@@ -77,12 +105,11 @@ class DeepseekV4CacheConfig:
         # 整块按 KV 数据行对齐，同时能均分到 token 槽位。
         block_bytes_alignment = math.lcm(block_token_num, self.kv_data_bytes)
         slot_bytes_list = []
-        for ratio in self.compress_rates:
-            if ratio == 0:
-                continue
+        for layer in self.kv_source_layer_ids:
+            ratio = self.compress_rates[layer]
             compressed_token_num = block_token_num // ratio
             block_bytes = self.get_packed_kv_bytes(compressed_token_num)
-            if ratio == self.short_compress_ratio:
+            if layer in self.indexer_layer_ids:
                 block_bytes += compressed_token_num * self.indexer_bytes
             block_bytes = triton.cdiv(block_bytes, block_bytes_alignment) * block_bytes_alignment
             slot_bytes_list.append(block_bytes // block_token_num)
@@ -92,10 +119,12 @@ class DeepseekV4CacheConfig:
         return (self.layer_num, self.sliding_window, self.kv_bytes)
 
     def get_c4_state_shape(self):
-        return (self.n_c4, self.short_compress_ratio, 4 * self.head_dim)
+        checkpoint_layers = self.n_c4 if self.short_compress_ratio == 4 else 0
+        return (checkpoint_layers, self.short_compress_ratio, 4 * self.head_dim)
 
     def get_indexer_state_shape(self):
-        return (self.n_c4, self.short_compress_ratio, 4 * self.indexer_head_dim)
+        checkpoint_layers = self.n_c4 if self.short_compress_ratio == 4 else 0
+        return (checkpoint_layers, self.short_compress_ratio, 4 * self.indexer_head_dim)
 
     def get_runtime_state_shapes(self, mtp_step):
         """每个请求的完整 ring；P/D 使用相同布局，可直接复制槽位。"""

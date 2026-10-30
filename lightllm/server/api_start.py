@@ -567,7 +567,7 @@ def pd_master_start(args: StartArgs):
     if args.run_mode != "pd_master":
         return
 
-    if args.enable_cpu_cache and get_model_type(args.model_dir) == "deepseek_v4":
+    if args.enable_cpu_cache and get_model_type(args.model_dir) in ("deepseek_v4", "deepseek_v41"):
         raise ValueError("DeepSeek-V4 CPU cache does not support pd_master")
 
     auto_set_max_req_total_len(args)

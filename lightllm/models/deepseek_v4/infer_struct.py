@@ -9,10 +9,12 @@ from .workspace import C4_PREFILL_LOGITS_BUDGET_BYTES
 
 
 @dataclasses.dataclass
-class C4IndexerMetadata:
-    """Shared paged scorer inputs for the C4 layers of one forward."""
+class PagedIndexerMetadata:
+    """Paged scorer inputs shared by layers with the same compression ratio."""
 
+    compress_ratio: int
     row_page_table: torch.Tensor
+    logits_page_table: torch.Tensor
     valid_lengths: torch.Tensor
     context_lengths: torch.Tensor
     rows_per_chunk: int
@@ -53,10 +55,10 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # The first C4 layer builds metadata and later layers reuse it within this forward.
         # During CUDA Graph capture its tensor producers become graph nodes. Replay updates
         # those captured buffers from staged inputs; copy_for_cuda_graph skips this container.
-        self.c4_indexer_metadata: C4IndexerMetadata | None = None
+        self.indexer_metadata: PagedIndexerMetadata | None = None
 
     def init_some_extra_state(self, model):
-        self.c4_indexer_metadata = None  # Rebuild for each eager forward or graph capture.
+        self.indexer_metadata = None  # Rebuild for each eager forward or graph capture.
         self.dsv4_c4_indices = None
         self.dsv4_c4_lengths = None
         self.dsv4_workspace = model.dsv4_workspace
@@ -91,18 +93,19 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         # Replay copies C128 indices into the captured state, so their widths must match.
         if not self.is_prefill and model.graph is not None and model.graph.can_run(self.batch_size, max_kv_seq_len):
             max_kv_seq_len = model.graph.graph_max_len_in_batch
-        c128_entries = max(1, max_kv_seq_len // long_ratio)
-        c128_cap = ((c128_entries + 63) // 64) * 64
-        self.dsv4_c128_indices = torch.empty((pos.numel(), c128_cap), dtype=torch.int32, device=pos.device)
-        self.dsv4_c128_lengths = torch.empty_like(pos, dtype=torch.int32)
-        build_compressed_kv_indices(
-            self.dsv4_sparse_req_idx,
-            self.position_ids,
-            self.req_manager.req_to_token_indexs,
-            long_ratio,
-            self.dsv4_c128_indices,
-            self.dsv4_c128_lengths,
-        )
+        if long_ratio == 128:
+            c128_entries = max(1, max_kv_seq_len // long_ratio)
+            c128_cap = ((c128_entries + 63) // 64) * 64
+            self.dsv4_c128_indices = torch.empty((pos.numel(), c128_cap), dtype=torch.int32, device=pos.device)
+            self.dsv4_c128_lengths = torch.empty_like(pos, dtype=torch.int32)
+            build_compressed_kv_indices(
+                self.dsv4_sparse_req_idx,
+                self.position_ids,
+                self.req_manager.req_to_token_indexs,
+                long_ratio,
+                self.dsv4_c128_indices,
+                self.dsv4_c128_lengths,
+            )
 
     def _init_swa_metadata(self, model):
         """Build the sliding-window metadata once for this forward."""
@@ -112,7 +115,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         )
 
         pos = self.position_ids
-        has_vision = model.has_vision
+        has_vision = model.has_bidirectional_image_attention
         swa_width = self.req_manager.cache_config.sliding_window
         if has_vision and self.is_prefill:
             swa_width += model.config["vision_max_n_token"]
@@ -163,39 +166,59 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             )
             self.dsv4_c4_lengths = torch.empty_like(self.position_ids, dtype=torch.int32)
 
-    def get_c4_indexer_metadata(self, c4_cap):
-        """Build layer-independent scorer inputs once, on the first C4 layer."""
-        if self.c4_indexer_metadata is not None:
-            return self.c4_indexer_metadata
+    def get_indexer_metadata(self, layer_index, capacity, *, dense_prefill=False):
+        """Build causal page tables and schedulers once per compression layout."""
+        config = self.req_manager.cache_config
+        ratio = config.compress_rates[layer_index]
+        if self.indexer_metadata is not None and self.indexer_metadata.compress_ratio == ratio:
+            return self.indexer_metadata
         import deep_gemm
-        from .triton_kernel.build_c4_indexer_page_table import build_c4_indexer_page_table
+        from .triton_kernel.build_indexer_page_table import build_indexer_page_table
+        from .triton_kernel.cache_io import INDEXER_PAGE_SIZE, get_indexer_k_buffer
 
-        valid_len = ((self.position_ids + 1) // 4).to(torch.int32)
+        valid_len = ((self.position_ids + 1) // ratio).to(torch.int32)
+        valid_len.masked_fill_(self.dsv4_sparse_req_idx == self.req_manager.HOLD_REQUEST_ID, 0)
         ctx_lens = valid_len.clamp_min(1).view(-1, 1)
-        torch.clamp(valid_len, min=1, max=self.dsv4_c4_indices.shape[1], out=self.dsv4_c4_lengths)
-        page_table = build_c4_indexer_page_table(
+        if ratio == 4:
+            torch.clamp(valid_len, min=1, max=self.dsv4_c4_indices.shape[1], out=self.dsv4_c4_lengths)
+        page_table = build_indexer_page_table(
             self.dsv4_sparse_req_idx,
             valid_len,
-            c4_cap,
+            capacity,
             self.req_manager.req_to_token_indexs,
             self.req_manager.HOLD_REQUEST_ID,
+            compress_ratio=ratio,
         )
-        page_size = self.req_manager.cache_config.compressed_kv_token_alignment // 4
+        logits_page_table = page_table
+        entries = config.compressed_kv_token_alignment // ratio
+        if entries > INDEXER_PAGE_SIZE:
+            packed = get_indexer_k_buffer(self.mem_manager, layer_index)
+            slabs = entries // INDEXER_PAGE_SIZE
+            logits_page_table = (page_table // slabs) * (packed.stride(0) // config.indexer_head_dim) + (
+                page_table % slabs
+            ) * (INDEXER_PAGE_SIZE * config.indexer_bytes // config.indexer_head_dim)
         rows_per_chunk = max(1, self.position_ids.numel())
         if self.is_prefill:
-            # DeepGEMM rounds the logits width to a multiple of 256.
-            aligned_c4_cap = ((c4_cap + 255) // 256) * 256
-            rows_per_chunk = max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_c4_cap * 4))
+            aligned_capacity = ((capacity + 255) // 256) * 256
+            rows_per_chunk = max(1, C4_PREFILL_LOGITS_BUDGET_BYTES // (aligned_capacity * 4))
         num_sms = deep_gemm.get_num_sms()
-        schedulers = tuple(
-            deep_gemm.get_paged_mqa_logits_metadata(ctx_lens[start : start + rows_per_chunk], page_size, num_sms)
-            for start in range(0, self.position_ids.numel(), rows_per_chunk)
+        schedulers = (
+            ()
+            if dense_prefill
+            else tuple(
+                deep_gemm.get_paged_mqa_logits_metadata(
+                    ctx_lens[start : start + rows_per_chunk], INDEXER_PAGE_SIZE, num_sms
+                )
+                for start in range(0, self.position_ids.numel(), rows_per_chunk)
+            )
         )
-        self.c4_indexer_metadata = C4IndexerMetadata(
+        self.indexer_metadata = PagedIndexerMetadata(
+            compress_ratio=ratio,
             row_page_table=page_table,
+            logits_page_table=logits_page_table,
             valid_lengths=valid_len,
             context_lengths=ctx_lens,
             rows_per_chunk=rows_per_chunk,
             schedulers=schedulers,
         )
-        return self.c4_indexer_metadata
+        return self.indexer_metadata

@@ -339,12 +339,14 @@ class MXFP4MoEQuantizationMethod(QuantizationMethod):
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
     ) -> Tuple[WeightPack, List[WeightPack]]:
-        out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
+        out_dims = [(n + 127) // 128 * 128 for n in out_dims]
+        in_dim = (in_dim + 127) // 128 * 128
+        out_dim = sum(out_dims)
         assert in_dim % self.block_size == 0, "MXFP4 scale dimension must be divisible by block_size"
         expert_prefix = (num_experts,) if num_experts > 1 else ()
         # CPU 暂存区: load_hf_weights 灌入原始预打包 MXFP4,finalize 时 repack 进 CUDA 终态。
-        weight = torch.empty(expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8, device="cpu")
-        weight_scale = torch.empty(
+        weight = torch.zeros(expert_prefix + (out_dim, in_dim // 2), dtype=torch.int8, device="cpu")
+        weight_scale = torch.ones(
             expert_prefix + (out_dim, in_dim // self.block_size), dtype=torch.float8_e8m0fnu, device="cpu"
         )
         mm_param = WeightPack(weight=weight, weight_scale=weight_scale)
@@ -363,6 +365,16 @@ class MXFP4MoEQuantizationMethod(QuantizationMethod):
         )
         return mm_param, mm_param_list
 
+    def load_weight(self, weight, pack):
+        n, k = weight.shape[-2:]
+        pack.weight[..., :n, :k].copy_(weight)
+        pack.load_ok[0] = True
+
+    def load_weight_scale(self, scale, pack):
+        n, k = scale.shape[-2:]
+        pack.weight_scale[..., :n, :k].copy_(scale)
+        pack.load_ok[1] = True
+
     def finalize_moe_weight(self, moe_weight):
         try:
             from vllm.model_executor.layers.quantization.utils.marlin_utils_fp4 import (
@@ -374,7 +386,7 @@ class MXFP4MoEQuantizationMethod(QuantizationMethod):
         class _MXFP4Layer:
             pass
 
-        device = torch.device("cuda", moe_weight.device_id_)
+        device = moe_weight.w13.marlin_weight.device
         layer = _MXFP4Layer()
         layer.params_dtype = moe_weight.data_type_
         w13 = moe_weight.w13.weight.view(torch.uint8).to(device=device, non_blocking=True).contiguous()

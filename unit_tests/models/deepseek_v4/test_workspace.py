@@ -25,6 +25,7 @@ def test_draft_initialization_preserves_captured_prefill_buffer(monkeypatch, dra
     main = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
     main.batch_max_tokens, main.tp_world_size_, main.data_type = 8, 1, torch.bfloat16
     main.config = {"head_dim": 512, "block_size": 3, "dspark_noise_token_id": 1}
+    main.moe_shared_stream = None
     main.layers_infer = [SimpleNamespace(compress_ratio=0)]
     main.dsv4_workspace = DeepseekV4Workspace(main)
     for name in (

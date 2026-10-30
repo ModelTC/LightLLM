@@ -17,6 +17,9 @@ from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_so
 
 
 class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
+    q_head_norm = True
+    kv_bf16_rounding = False
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -57,6 +60,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
         self.dsv4_prefill_aux_stream = None
+        self.moe_shared_stream = None
 
     def _hc_attn_in(self, input_embdings, layer_weight: DeepseekV4TransformerLayerWeight):
         """Run attention pre + norm. Later layers also finish the previous FFN post.
@@ -349,6 +353,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             swa_kv_buffer=swa,
             swa_page_token_num=req_manager.cache_config.swa_page_token_num,
             req_to_swa=req_manager.req_to_swa[self.layer_num_],
+            bf16_rounding=self.kv_bf16_rounding,
         )
 
     def _get_qkv(
@@ -366,12 +371,21 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         qa = layer_weight.q_norm_(qkv[:, : -self.head_dim_], eps=self.eps_)
         q_in = layer_weight.wq_b_.mm(qa).view(T, self.tp_q_head_num_, self.head_dim_)
 
-        if infer_state.is_prefill:
+        if self.tp_q_head_num_ == self.flashmla_q_head_num_:
+            q = q_in
+        elif infer_state.is_prefill:
             q = infer_state.dsv4_workspace.get_flashmla_prefill_q(T)
         else:
             q = self.alloc_tensor((T, self.flashmla_q_head_num_, self.head_dim_), dtype=q_in.dtype, device=q_in.device)
             q[:, self.tp_q_head_num_ :, :].zero_()
-        fused_q_norm_rope(q_in, q[:, : self.tp_q_head_num_, :], self.eps_, self.freqs_cis, infer_state.position_ids)
+        fused_q_norm_rope(
+            q_in,
+            q[:, : self.tp_q_head_num_, :],
+            self.eps_,
+            self.freqs_cis,
+            infer_state.position_ids,
+            apply_norm=self.q_head_norm,
+        )
         self._norm_rope_and_cache_kv(qkv[:, -self.head_dim_ :], infer_state, layer_weight)
         return q, qa, input
 
@@ -531,10 +545,18 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     # ------------------------------------------------------------------ moe
-    def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
+    def _ffn_tp(
+        self,
+        input,
+        infer_state: DeepseekV4InferStateInfo,
+        layer_weight: DeepseekV4TransformerLayerWeight,
+        use_custom_tensor_manager=True,
+    ):
         input = input.view(-1, self.embed_dim_)
-        gate_up = layer_weight.gate_up_proj.mm(input)
-        return layer_weight.down_proj.mm_swiglu(gate_up, limit=self.swiglu_limit)
+        gate_up = layer_weight.gate_up_proj.mm(input, use_custom_tensor_mananger=use_custom_tensor_manager)
+        return layer_weight.down_proj.mm_swiglu(
+            gate_up, limit=self.swiglu_limit, use_custom_tensor_mananger=use_custom_tensor_manager
+        )
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)
@@ -542,6 +564,21 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
 
         topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
         if not infer_state.is_prefill and layer_weight.experts.fuse_moe_impl.supports_decode_shared_expert_overlap:
+            if self.moe_shared_stream is not None:
+                main_stream = torch.cuda.current_stream()
+                self.moe_shared_stream.wait_stream(main_stream)
+                with torch.cuda.stream(self.moe_shared_stream):
+                    x.record_stream(self.moe_shared_stream)
+                    shared = self._ffn_tp(x, infer_state, layer_weight, use_custom_tensor_manager=False)
+
+                def shared_expert():
+                    main_stream.wait_stream(self.moe_shared_stream)
+                    shared.record_stream(main_stream)
+                    return shared
+
+            else:
+                shared_expert = lambda: self._ffn_tp(x, infer_state, layer_weight)
+
             out = layer_weight.experts.experts_with_topk(
                 input_tensor=x,
                 topk_weights=topk_weights,
@@ -550,7 +587,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                 infer_state=infer_state,
                 clamp_limit=self.swiglu_limit,
                 alloc_tensor_func=self.alloc_tensor,
-                shared_expert_func=lambda: self._ffn_tp(x, infer_state, layer_weight),
+                shared_expert_func=shared_expert,
             )
             return out if self.enable_ep_moe else self._tpsp_reduce(input=out, infer_state=infer_state)
 

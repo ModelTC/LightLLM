@@ -58,6 +58,7 @@ torch.backends.cudnn.enabled = True
 
 class TpPartBaseModel:
     is_mtp_draft_model = False
+    token_lookback_depth = 0
 
     # weight class
     pre_and_post_weight_class = None
@@ -532,7 +533,7 @@ class TpPartBaseModel:
         if new_model_output.logits_token_ids is not None:
             new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
         new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
-            origin_handle_token_num=origin_handle_token_num
+            origin_handle_token_num=origin_handle_token_num, origin_batch_size=origin_batch_size
         )
         # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
         # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。
@@ -646,7 +647,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -716,7 +716,6 @@ class TpPartBaseModel:
         input_ids = infer_state.input_ids
         cuda_input_ids = input_ids
         input_embs = self.pre_infer.token_forward(cuda_input_ids, infer_state, self.pre_post_weight)
-        infer_state.mtp_draft_input_hiddens = None
         input_embs = self.pre_infer._tpsp_sp_split(input=input_embs, infer_state=infer_state)
 
         for i in range(self.layers_num):

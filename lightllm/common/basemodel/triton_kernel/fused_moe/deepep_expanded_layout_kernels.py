@@ -4,6 +4,108 @@ import triton.language as tl
 
 
 @triton.jit
+def _ep_expanded_to_masked_kernel(
+    X,
+    S,
+    PSUM,
+    Y,
+    YS,
+    COUNTS,
+    S0: tl.constexpr,
+    S1: tl.constexpr,
+    M: tl.constexpr,
+    H: tl.constexpr,
+    ALIGN: tl.constexpr,
+    BLOCK: tl.constexpr,
+    WORKERS: tl.constexpr,
+):
+    expert, worker = tl.program_id(0), tl.program_id(1)
+    previous = tl.load(PSUM + expert - 1, expert > 0, 0)
+    start = tl.cdiv(previous, ALIGN) * ALIGN
+    count = tl.load(PSUM + expert) - start
+    if worker == 0:
+        tl.store(COUNTS + expert, count)
+    columns = tl.arange(0, BLOCK)
+    scale_columns = tl.arange(0, triton.next_power_of_2(H // 128))
+    for row in tl.range(worker, count, WORKERS):
+        source = (start + row).to(tl.int64)
+        destination = (expert * M + row).to(tl.int64)
+        value = tl.load(X + source * H + columns, columns < H)
+        tl.store(Y + destination * H + columns, value, columns < H)
+        scale = tl.load(S + source * S0 + scale_columns * S1, scale_columns < H // 128)
+        tl.store(YS + expert * M * (H // 128) + scale_columns * M + row, scale, scale_columns < H // 128)
+
+
+def ep_expanded_to_masked(recv_x, psum, max_m, expert_alignment=128, alloc_func=torch.empty):
+    """Copy only real expanded rows into the existing masked-GEMM layout."""
+    x, scales = recv_x
+    experts, hidden = psum.numel(), x.shape[1]
+    output = alloc_func((experts, max_m, hidden), dtype=x.dtype, device=x.device)
+    output_scales = alloc_func((experts, hidden // 128, max_m), dtype=scales.dtype, device=x.device).transpose(1, 2)
+    counts = alloc_func((experts,), dtype=torch.int32, device=x.device)
+    workers = min(max_m, 32)
+    _ep_expanded_to_masked_kernel[(experts, workers)](
+        x,
+        scales,
+        psum,
+        output,
+        output_scales,
+        counts,
+        *scales.stride(),
+        max_m,
+        hidden,
+        expert_alignment,
+        triton.next_power_of_2(hidden),
+        workers,
+    )
+    return (output, output_scales), counts
+
+
+@triton.jit
+def _ep_masked_to_expanded_kernel(
+    X,
+    PSUM,
+    W,
+    Y,
+    M: tl.constexpr,
+    H: tl.constexpr,
+    ALIGN: tl.constexpr,
+    BLOCK: tl.constexpr,
+    WORKERS: tl.constexpr,
+):
+    expert, worker = tl.program_id(0), tl.program_id(1)
+    previous = tl.load(PSUM + expert - 1, expert > 0, 0)
+    start = tl.cdiv(previous, ALIGN) * ALIGN
+    count = tl.load(PSUM + expert) - start
+    columns = tl.arange(0, BLOCK)
+    for row in tl.range(worker, count, WORKERS):
+        source = (expert * M + row).to(tl.int64)
+        destination = (start + row).to(tl.int64)
+        value = tl.load(X + source * H + columns, columns < H).to(tl.float32)
+        weight = tl.load(W + destination)
+        tl.store(Y + destination * H + columns, value * weight, columns < H)
+
+
+def ep_masked_to_expanded(output, psum, weights, expert_alignment=128, alloc_func=torch.empty):
+    """Restore expanded order and apply each expert's router weight once."""
+    experts, max_m, hidden = output.shape
+    expanded = alloc_func((weights.numel(), hidden), dtype=output.dtype, device=output.device)
+    workers = min(max_m, 32)
+    _ep_masked_to_expanded_kernel[(experts, workers)](
+        output,
+        psum,
+        weights,
+        expanded,
+        max_m,
+        hidden,
+        expert_alignment,
+        triton.next_power_of_2(hidden),
+        workers,
+    )
+    return expanded
+
+
+@triton.jit
 def _ep_build_m_indices_kernel(
     num_unaligned_recv_tokens_per_expert,
     m_indices,

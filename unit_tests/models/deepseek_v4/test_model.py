@@ -266,6 +266,7 @@ def test_output_projection_matches_bf16_reference(monkeypatch, tp_size, rank):
     layer = DeepseekV4TransformerLayerWeight.__new__(DeepseekV4TransformerLayerWeight)
     BaseLayerWeight.__init__(layer)
     layer.prefix, layer.data_type_ = "layers.0", torch.bfloat16
+    layer.network_config_ = {}
     layer.hidden, layer.n_heads, layer.head_dim = 128, 8, 64
     layer.q_lora_rank, layer.o_lora_rank, layer.o_groups = 128, 128, 2
     layer.get_quant_method = lambda name: None
