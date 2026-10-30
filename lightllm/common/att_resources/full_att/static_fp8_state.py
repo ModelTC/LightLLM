@@ -13,6 +13,7 @@ from lightllm.utils.log_utils import init_logger
 from ..types import AxisSlice, TransferRegion
 from .base_state import FullAttentionConfig, FullAttentionState
 from .static_fp8_transfer import transfer_static_fp8_pages
+from .dp_transfer import copy_gqa_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.att_resources.types import StateTransferLayout
@@ -292,15 +293,14 @@ class StaticFP8FullAttentionState(FullAttentionState):
         )
         assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        # TODO：改用 Triton kernel 按源/目标 token 索引直接复制，融合字段搬运，去掉中间 gather 存储；
-        # 跨设备时源存储需可通过 peer/IPC 访问，并遵循调用方的 stream/event 依赖。
-        # 同一 TP 分片复制完整 token；调用方提供各自设备上的 CUDA 索引，目标索引须为 int64。
-        src_k = remote_dp_full_att_state.k_storage.index_select(dim=1, index=src_token_indices)
-        dst_k = src_k.to(device=self.k_storage.device, non_blocking=True)
-        self.k_storage.index_copy_(dim=1, index=dst_token_indices, source=dst_k)
-        src_v = remote_dp_full_att_state.v_storage.index_select(dim=1, index=src_token_indices)
-        dst_v = src_v.to(device=self.v_storage.device, non_blocking=True)
-        self.v_storage.index_copy_(dim=1, index=dst_token_indices, source=dst_v)
+        copy_gqa_tokens(
+            src_k_storage=remote_dp_full_att_state.k_storage,
+            src_v_storage=remote_dp_full_att_state.v_storage,
+            dst_k_storage=self.k_storage,
+            dst_v_storage=self.v_storage,
+            src_token_indices=src_token_indices,
+            dst_token_indices=dst_token_indices,
+        )
 
     # ========================================================================
     # 五、PD 分离传输

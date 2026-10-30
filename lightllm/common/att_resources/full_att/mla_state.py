@@ -12,6 +12,7 @@ from ..utils import dtype_name
 from ..types import AxisSlice, TransferRegion
 from .base_state import FullAttentionConfig, FullAttentionState
 from .mla_transfer import transfer_mla_pages
+from .dp_transfer import copy_mla_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.att_resources.types import StateTransferLayout
@@ -183,12 +184,12 @@ class MLAFullAttentionState(FullAttentionState):
         )
         assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        # TODO：改用 Triton kernel 按源/目标 token 索引直接复制，融合字段搬运，去掉中间 gather 存储；
-        # 跨设备时源存储需可通过 peer/IPC 访问，并遵循调用方的 stream/event 依赖。
-        # 同一 TP 分片复制完整 token；调用方提供各自设备上的 CUDA 索引，目标索引须为 int64。
-        src_kv = remote_dp_full_att_state.storage.index_select(dim=1, index=src_token_indices)
-        dst_kv = src_kv.to(device=self.storage.device, non_blocking=True)
-        self.storage.index_copy_(dim=1, index=dst_token_indices, source=dst_kv)
+        copy_mla_tokens(
+            src_storage=remote_dp_full_att_state.storage,
+            dst_storage=self.storage,
+            src_token_indices=src_token_indices,
+            dst_token_indices=dst_token_indices,
+        )
 
     # ========================================================================
     # 五、PD 分离传输

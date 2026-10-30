@@ -205,7 +205,8 @@ class FullAttentionState(ABC):
     ) -> None:
         """复制其他 DP 同一 TP 分片的完整 token 数据，包含量化参数及 indexer 字段。
 
-        源、目标索引须已位于各自存储的 CUDA 设备；目标索引为 int64，接口不转换设备或 dtype。
+        源、目标索引须已位于各自存储的 CUDA 设备，可为 int32/int64；接口不转换设备或 dtype。
+        调用方保证 peer/IPC 可访问、源数据就绪、目标索引唯一，且源目标数据区域不重叠。
         """
         raise NotImplementedError()
 
