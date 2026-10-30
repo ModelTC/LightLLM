@@ -313,11 +313,10 @@ def test_missing_linear_decode_backend_arg_defaults_to_triton(auto_linear_backen
 
 def test_gdn_decode_backend_uses_priority_list(monkeypatch, auto_linear_backend_args):
     validate_calls = []
-    optimized_backend = type("OptimizedLinearDecodeAttBackend", (), {})
     monkeypatch.setattr(
         linear_create_utils,
         "linear_decode_att_backend_classes",
-        {"optimized": optimized_backend, "triton": TritonLinearAttBackend},
+        {"optimized": "linear.flashqla:FlashQlaLinearAttBackend", "triton": "linear.triton:TritonLinearAttBackend"},
     )
     monkeypatch.setattr(
         linear_create_utils,
@@ -329,7 +328,7 @@ def test_gdn_decode_backend_uses_priority_list(monkeypatch, auto_linear_backend_
         index=1, priority_list=("optimized", "triton")
     )
 
-    assert backend_class is optimized_backend
+    assert backend_class is FlashQlaLinearAttBackend
     assert validate_calls == ["optimized"]
 
 
@@ -343,12 +342,10 @@ def test_gdn_prefill_backend_falls_back_when_flashqla_validation_fails(monkeypat
 
 def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_backend_args):
     validate_calls = []
-    flashqla2_backend = type("FlashQla2LinearAttBackend", (), {})
-    flashqla3_backend = type("FlashQla3LinearAttBackend", (), {})
     monkeypatch.setattr(
         linear_create_utils,
         "linear_prefill_att_backend_classes",
-        {"flashqla2": flashqla2_backend, "flashqla3": flashqla3_backend},
+        {"flashqla2": "linear.triton:TritonLinearAttBackend", "flashqla3": "linear.flashqla:FlashQlaLinearAttBackend"},
     )
     monkeypatch.setattr(
         linear_create_utils,
@@ -360,5 +357,5 @@ def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_
         index=1, priority_list=("flashqla2", "flashqla3")
     )
 
-    assert backend_class is flashqla3_backend
+    assert backend_class is FlashQlaLinearAttBackend
     assert validate_calls == ["flashqla2", "flashqla3"]
