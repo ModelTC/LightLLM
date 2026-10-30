@@ -450,8 +450,8 @@ def test_responses_passes_supported_chat_parameters():
 @pytest.mark.parametrize("effort", ["none", "minimal", "low", "medium", "high", "xhigh", "max"])
 def test_responses_reasoning_effort_matches_chat(effort):
     request = ChatCompletionRequest(**_responses_to_chat_request({"input": "hi", "reasoning": {"effort": effort}}))
-    assert request.reasoning_effort == effort
-    assert request.chat_template_kwargs["enable_thinking"] == (effort != "none")
+    assert request.reasoning_effort == ("high" if effort == "none" else effort)
+    assert request.chat_template_kwargs["enable_thinking"] is True
 
 
 def test_distinct_assistant_phases_survive_chat_validation():

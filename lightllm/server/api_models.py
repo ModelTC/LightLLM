@@ -244,6 +244,12 @@ class ChatCompletionRequest(BaseModel):
     # Class variables to store loaded default values
     _loaded_defaults: ClassVar[Dict[str, Any]] = {}
 
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def map_none_reasoning_effort_to_high(cls, value):
+        """Map the explicit none effort to high before resolving thinking flags."""
+        return "high" if value == "none" else value
+
     @classmethod
     def load_generation_cfg(cls, weight_dir: str):
         """Load default values from model generation config."""
