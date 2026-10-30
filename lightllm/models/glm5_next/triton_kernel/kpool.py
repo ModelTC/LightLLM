@@ -219,7 +219,7 @@ def get_pool_ranges(lengths, cu_q_lens, max_q_len, max_pools):
     return starts, ends, pool_lengths
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["POOLS"])
 def _gather_pools(
     Packed,
     ReqTable,
@@ -230,25 +230,33 @@ def _gather_pools(
     PACKED_STRIDE: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
     POOLS,
+    BLOCK_POOLS: tl.constexpr,
 ):
-    pool, batch = tl.program_id(0), tl.program_id(1)
+    # Move multiple independent pools per CTA instead of launching one CTA for
+    # each 128-byte key. This is a byte-preserving gather, including FP32 scales.
+    batch = tl.program_id(1)
+    pool = tl.program_id(0) * BLOCK_POOLS + tl.arange(0, BLOCK_POOLS)
     length = tl.load(SeqLen + batch)
     req = tl.load(ReqIdx + batch)
-    valid = pool < length // 4
+    valid = (pool < POOLS) & (pool < length // 4)
     loc = tl.load(ReqTable + req * REQ_STRIDE + pool * 4 + 3, valid, 0).to(tl.int64)
     cols = tl.arange(0, 128)
-    packed = tl.load(Packed + loc * PACKED_STRIDE + cols, valid, 0)
+    packed = tl.load(Packed + loc[:, None] * PACKED_STRIDE + cols[None, :], valid[:, None], 0)
     scale = tl.load((Packed + loc * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)), valid, 1.0)
     row = batch.to(tl.int64) * POOLS + pool
-    tl.store(K + row * 128 + cols, packed.to(tl.float8e4nv, bitcast=True))
-    tl.store(Scale + row, scale)
+    tl.store(K + row[:, None] * 128 + cols[None, :], packed.to(tl.float8e4nv, bitcast=True), (pool < POOLS)[:, None])
+    tl.store(Scale + row, scale, pool < POOLS)
 
 
 def gather_pools(packed_buffer, req_table, req_idx, seq_len, max_pools):
-    keys = torch.empty((req_idx.numel() * max_pools, 128), device=packed_buffer.device, dtype=torch.float8_e4m3fn)
+    keys = torch.empty(
+        (req_idx.numel() * max_pools, 128),
+        device=packed_buffer.device,
+        dtype=torch.float8_e4m3fn,
+    )
     scales = torch.empty((keys.shape[0],), device=keys.device, dtype=torch.float32)
     # Long contexts can exceed grid Y's 65535-block limit; put pools on X.
-    _gather_pools[(max_pools, req_idx.numel())](
+    _gather_pools[(triton.cdiv(max_pools, 32), req_idx.numel())](
         packed_buffer,
         req_table,
         req_idx,
@@ -258,56 +266,96 @@ def gather_pools(packed_buffer, req_table, req_idx, seq_len, max_pools):
         packed_buffer.stride(0),
         req_table.stride(0),
         max_pools,
+        BLOCK_POOLS=32,
         num_warps=4,
     )
     return keys, scales
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["MAX_PAGES"])
 def _gather_paged_pools(
     Packed,
     ReqTable,
     ReqIdx,
     PoolLengths,
     Pages,
+    BlockTable,
     PACKED_STRIDE: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
-    MAX_PAGES: tl.constexpr,
+    MAX_PAGES,
+    BATCH: tl.constexpr,
+    REUSE_GROUP: tl.constexpr,
 ):
     batch = tl.program_id(1)
     req = tl.load(ReqIdx + batch)
     length = tl.load(PoolLengths + batch)
+    # MTP verification commonly has four adjacent queries for the same request.
+    # Share their packed keys, while DeepGEMM still receives each row's original
+    # causal length. Test IDs on device on every replay: arbitrary layouts,
+    # dynamic verification, HOLD rows and recycled slots remain valid.
+    owner = batch
+    if REUSE_GROUP > 1:
+        group_start = batch // REUSE_GROUP * REUSE_GROUP
+        members = group_start + tl.arange(0, REUSE_GROUP)
+        requests = tl.load(ReqIdx + members, members < BATCH, -1)
+        lengths = tl.load(PoolLengths + members, members < BATCH, 0)
+        same_request = (
+            (group_start + REUSE_GROUP <= BATCH)
+            & (tl.min(requests, 0) == tl.max(requests, 0))
+            & (tl.max(lengths, 0) >= 4096)
+        )
+        owner = tl.where(same_request, group_start, batch)
+        length = tl.where(same_request, tl.max(lengths, 0), length)
     rows = tl.arange(0, 64)
     cols = tl.arange(0, 128)
     # A fixed grid is replayable at 1M; the GPU length bounds the work.
-    for page in range(tl.program_id(0), tl.cdiv(length, 64), tl.num_programs(0)):
-        pools = page * 64 + rows
-        valid = pools < length
-        locs = tl.load(ReqTable + req * REQ_STRIDE + pools * 4 + 3, valid, 0).to(tl.int64)
-        keys = tl.load(Packed + locs[:, None] * PACKED_STRIDE + cols[None, :], valid[:, None], 0)
-        scales = tl.load((Packed + locs * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)), valid, 1.0)
-        dest = Pages + (batch.to(tl.int64) * MAX_PAGES + page) * (64 * 132)
-        # DeepGEMM stores 64 FP8 keys followed by their 64 FP32 scales.
-        tl.store(dest + rows[:, None] * 128 + cols[None, :], keys)
-        tl.store((dest + 64 * 128).to(tl.pointer_type(tl.float32)) + rows, scales)
+    for page in range(tl.program_id(0), tl.cdiv(tl.maximum(length, 1), 64), tl.num_programs(0)):
+        if batch != owner:
+            tl.store(BlockTable + batch * MAX_PAGES + page, owner * MAX_PAGES + page)
+        else:
+            pools = page * 64 + rows
+            valid = pools < length
+            locs = tl.load(ReqTable + req * REQ_STRIDE + pools * 4 + 3, valid, 0).to(tl.int64)
+            keys = tl.load(Packed + locs[:, None] * PACKED_STRIDE + cols[None, :], valid[:, None], 0)
+            scales = tl.load(
+                (Packed + locs * PACKED_STRIDE + 128).to(tl.pointer_type(tl.float32)),
+                valid,
+                1.0,
+            )
+            dest = Pages + (batch.to(tl.int64) * MAX_PAGES + page) * (64 * 132)
+            # DeepGEMM stores 64 FP8 keys followed by their 64 FP32 scales.
+            tl.store(dest + rows[:, None] * 128 + cols[None, :], keys)
+            tl.store((dest + 64 * 128).to(tl.pointer_type(tl.float32)) + rows, scales)
 
 
-def gather_paged_pools(packed_buffer, req_table, req_idx, pool_lengths, max_pools):
-    """Pack valid pools into DeepGEMM pages; unused pages remain unread."""
+def gather_paged_pools(packed_buffer, req_table, req_idx, pool_lengths, max_pools, reuse_group=4):
+    """Pack valid pools; adjacent rows with the same slot can share their keys.
+
+    Capacity stays at the original per-row upper bound so graph capture never
+    assumes a particular request layout. Reuse affects only bytes copied.
+    """
+    if reuse_group not in (1, 2, 4, 8):
+        raise ValueError("reuse_group must be 1, 2, 4 or 8")
     batch = req_idx.numel()
     max_pages = triton.cdiv(max_pools, 64)
     pages = torch.empty((batch * max_pages, 64, 1, 132), device=packed_buffer.device, dtype=torch.uint8)
     block_table = torch.arange(batch * max_pages, device=pages.device, dtype=torch.int32).view(batch, max_pages)
-    blocks = min(max_pages, triton.cdiv(get_device_sm_count() * 4, batch))
+    # Reused rows only update the page table. Keep enough CTAs for the rows
+    # actually copying keys, rather than leaving most SMs with no memory work.
+    active_groups = max(1, triton.cdiv(batch, reuse_group)) if max_pools >= 4096 else batch
+    blocks = min(max_pages, triton.cdiv(get_device_sm_count() * 4, active_groups))
     _gather_paged_pools[(blocks, batch)](
         packed_buffer,
         req_table,
         req_idx,
         pool_lengths,
         pages,
+        block_table,
         packed_buffer.stride(0),
         req_table.stride(0),
         max_pages,
+        BATCH=batch,
+        REUSE_GROUP=reuse_group if batch >= reuse_group else 1,
         num_warps=4,
     )
     return pages, block_table
