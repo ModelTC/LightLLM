@@ -1634,7 +1634,7 @@ BaseModel 提供三个默认返回空列表的 `classmethod` 扩展点，具体�
 
 需要保留的跨模型阶段边界是：全部模型完成权重加载及 State 准备后才规划和分配共享容量。State 资源在创建完成后通过缓存查询取得；分配完成后的 attention backend 初始化、warmup、padded-request 和图初始化按单模型顺序执行，不要求全部模型先 warmup 再统一捕获图。其他调用方先通过 `get_req_manager_max_seq_len()` 汇总需求、创建共享请求管理器并调用 `bind_req_manager()`，再按相同顺序复用 `prepare_att_resources()` 和 `init_runtime()`，共享分配和就绪标志仍由调用方协调。
 
-单一 KV 方案的 `_create_full_att_states()` 可复用 `basemodel_utils.create_full_attention_definition(...)`，将返回的单个定义包装为列表；不存在 full 层时返回空列表。该 helper 不访问管理器，也不构成独立启动阶段。bounded 模型工厂直接调用对应算法 create，不再先生成 meta State 再重建实际 State。GLM main/draft 的 tail 工厂仅从自身配置读取 K-pool 参数，不依赖 main 的 `linear_config`。
+`_create_full_att_states()` 由具体模型直接构造 `FullAttentionConfig` 并调用 `create_gqa_state()` 或 `create_mla_state()`，返回 State 列表；不存在 full 层时返回空列表。模型自行决定 head 数、维度、精度、参与层及共享分组，同族相同方案可以继承工厂。bounded/tail 工厂同样直接调用算法 create；GLM main/draft 分别选择 tail 的参与层并读取自己的 K-pool 配置，不依赖其他工厂的副作用。
 
 `AttResourceManager.initialize_resources()` 由基类提供通用实现，在显式完成创建标记及静态标定绑定后，保留两个阶段：估算内存并直接计算完整页容量、调用 `initialize_storage()` 初始化实际存储。PD 模式在容量规划阶段按需构建 meta State 的 PD 布局，得到传输 buffer 的预留大小。`token_capacity` 为指定的 token 容量，传入 `None` 时使用 `mem_fraction` 评估可用显存并协调各 TP rank 的容量；其余页大小及传输选项读取 `args`。该方法只操作管理器内部资源，不接收模型列表，也不遍历模型回填容量。调用方负责共享管理器检查、KV 内存分区和后续各模型的 `init_runtime()`；模型进入 `_check_mem_size()` 时再从 allocator 取得最终容量。CPU 布局构建使用相同的模型编号和独立 State 定义，保留每个 draft 的全局布局；容量统计通过共享管理器完成。
 
@@ -1661,9 +1661,11 @@ State config 保存未切分的全局 head 数、当前 `tp_rank` / `tp_world_si
 
 full-attention 的 `replicated=True` 表示每个 rank 保存全部 head，例如复制的 MLA latent；否则按 head 均匀切分，全局 head 数小于 TP 时按组复制。KDA/GDN 的 K、V head 分别应用切分或分组复制规则。布局 helper 根据全局数量和本地数量计算 head 起点及副本写入者。只改变 config 的 TP 坐标即可重新计算目标分片，无需依赖来源 manager 的额外映射；实际数据迁移仍通过传输接口完成。
 
-`basemodel_utils.py` 提供 `get_resource_config(model_config, *, model_class=None)` 和 `get_full_attention_options(config, args, *, model_class=None)`，统一处理字段别名、text config 和默认 KV 维度。它们是普通工具函数，BaseModel 不再声明对应的 `_resource_config`、`_full_attention_options` 方法；具体模型仅在存在专有规则时提供可选 hook，并调用工具函数取得默认配置。传入 `model_class` 时，工具函数选择该模型的专有实现，否则使用通用逻辑。
+`basemodel_utils.py` 仅保留 `get_resource_config(model_config, *, model_class=None)`，处理字段别名、text config 和模型专有的配置转换。原生 MTP、DFlash 等模型可通过 `_resource_config` 将原始配置转为自己的有效层配置；该工具不选择 attention 算法、不构造 State，也不通过 options 字典分派布局。
 
-同一文件中的 `create_full_attention_definition(model_class, ...)` 根据配置直接调用算法级 `create_gqa_state` / `create_mla_state`，供模型 full 工厂复用。CPU 服务读取 main 和各 draft 自己的配置，直接调用模型类的 full/bounded 工厂，不构造模型实例或运行推理初始化。返回的 State 列表统一注册到临时管理器，再由 `get_cpu_transfer_layouts()` 聚合联合页。CPU 页可包含同一模型的多个 full/bounded State；静态标定不参与布局计算，CPU 服务无需打开标定文件。原生 MTP、DFlash 等配置转换由对应模型实现。`att_resource_config.py` 仅保留 CPU 服务布局构建；标定加载由管理器集中组织，具体格式解释由静态 FP8 State 完成。
+GQA、MLA、packed MLA 的选择以及全局逻辑层分组直接写在模型的 `_create_full_att_states()` 中。普通模型按 `model_logical_layer_ids` 创建独立层，Qwen/GLM 选择混合模型的 full 层，Gemma4 根据共享关系将多个逻辑层放入同一物理分组。各模型不再提供 `_full_attention_options`。算法级 `create_gqa_state()` / `create_mla_state()` 继续负责量化版本、存储布局及算法专有的 TP 副本规则。
+
+CPU 服务读取 main 和各 draft 自己的配置，直接调用模型类的 full/bounded 工厂，不构造模型实例。返回的 State 列表注册到临时管理器，再由 `get_cpu_transfer_layouts()` 聚合联合页。CPU 页可以包含同一模型的多个 State；静态标定不参与布局计算。无 attention 的 draft 由模型准备流程和 CPU 布局调用方跳过。`att_resource_config.py` 仅保留 CPU 服务布局构建；标定加载由管理器组织，具体格式由静态 FP8 State 解释。
 
 资源容量确定后，buffer 地址及已绑定视图保持稳定。初始化 helper 不持有推理请求映射，也不引入请求级生命周期接口。后续模型扩展通过准备自己的 State 和实现所需 backend 完成；不需要将 draft 限定为 full attention。
 

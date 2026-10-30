@@ -72,14 +72,26 @@ class Glm5NextMTPModel(TpPartBaseModel):
         cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
-        """按当前模型的方案创建 full-attention 定义，不分配 KV 容量或注册管理器。"""
-        from lightllm.common.basemodel.basemodel_utils import create_full_attention_definition
+        """原生 GLM draft 的自有层采用 NoPE packed MLA，与 main 分别持有存储。"""
+        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        state = create_full_attention_definition(
-            model_class=cls, model_config=model_config, args=args,
-            model_logical_layer_ids=model_logical_layer_ids, tp_rank=tp_rank, tp_world_size=tp_world_size,
+        config = get_resource_config(model_config, model_class=cls)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_mla_state(
+            config=FullAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=1,
+                head_dim=config["kv_lora_rank"],
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, packed=True, page_size=args.page_size, device="meta",
         )
-        return [] if state is None else [state]
+        return [state]
 
     @classmethod
     def _create_att_tail_states(
@@ -87,14 +99,25 @@ class Glm5NextMTPModel(TpPartBaseModel):
         model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
         tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
     ) -> list["AttentionTailState"]:
-        """按本模型的 full-attention 层创建 K-pool tail，不依赖其他创建接口的副作用。"""
-        from lightllm.models.glm5_next.att_resource_config import create_model_att_tail_states
+        """直接选择本模型需要 K-pool tail 的层，不依赖 full State 创建过程。"""
+        from lightllm.common.att_resources.att_tail import create_kpool_state, KPoolStateConfig
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        return create_model_att_tail_states(
-            model_class=cls, model_config=model_config, args=args,
-            model_logical_layer_ids=model_logical_layer_ids, request_capacity=request_capacity,
-            tp_rank=tp_rank, tp_world_size=tp_world_size, device=device,
+        config = get_resource_config(model_config, model_class=cls)
+        logical_layer_ids = model_logical_layer_ids
+        if not logical_layer_ids:
+            return []
+        assert args.linear_att_hash_page_size % config["index_kpool"] == 0, "GLM cache pages must align to index_kpool"
+        state = create_kpool_state(
+            config=KPoolStateConfig(
+                logical_layer_ids=logical_layer_ids,
+                pool_size=config["index_kpool"], head_dim=config["index_head_dim"],
+                dtype=get_torch_dtype(args.data_type), tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            request_capacity=request_capacity, mtp_step=args.mtp_step, device=device,
         )
+        return [state]
 
     @classmethod
     def _resource_config(cls, model_config):
@@ -103,10 +126,6 @@ class Glm5NextMTPModel(TpPartBaseModel):
         config = get_resource_config(model_config)
         config.update(num_hidden_layers=1, n_layer=1)
         return config
-
-    @classmethod
-    def _full_attention_options(cls, config, args):
-        return dict(heads=1, dim=config["kv_lora_rank"], logical_layer_groups=((0,),), packed=True)
 
     def _init_att_backend(self):
         backend_class = (

@@ -10,7 +10,6 @@ from torch.utils._pytree import tree_leaves
 from lightllm.common.att_resources import AttResourceManager
 from lightllm.common.att_resources.full_att import FullAttentionConfig
 from lightllm.common.basemodel.attention.base_att import BaseAttBackend
-from lightllm.common.basemodel.basemodel_utils import create_full_attention_definition
 from lightllm.models.gemma4.model import Gemma4TpPartModel
 from unit_tests.common.att_resources.model_helpers import (
     full_state_test_buffers,
@@ -69,8 +68,8 @@ def test_model_local_shared_groups_preserve_global_logical_layer_ids(pd_args: "E
         head_dim=128, global_head_dim=128, num_kv_shared_layers=2,
         layer_types=["sliding_attention", "full_attention"] * 3,
     )
-    state = create_full_attention_definition(
-        model_class=Gemma4TpPartModel, model_config=config, args=pd_args,
+    (state,) = Gemma4TpPartModel._create_full_att_states(
+        model_config=config, args=pd_args,
         model_logical_layer_ids=(10, 11, 12, 13, 14, 15),
     )
     # 共享消费者 14/15 分别使用最后一个同类型生产层 12/13，保持四份物理层存储。

@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import os
 import json
 import torch
@@ -14,6 +15,12 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.common.build_utils import repair_config
 from transformers import AutoConfig
 from lightllm.utils.log_utils import init_logger
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.att_resources.full_att import FullAttentionState
+
 
 logger = init_logger(__name__)
 
@@ -137,12 +144,29 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         self._init_to_get_rotary()
 
     @classmethod
-    def _full_attention_options(cls, config, args):
-        from lightllm.common.basemodel.basemodel_utils import get_full_attention_options
+    def _create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """Gemma3 使用固定 256 维 BF16 KV，不随权重精度改变。"""
+        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
 
-        options = get_full_attention_options(config, args)
-        options.update(dim=256, dtype=torch.bfloat16)
-        return options
+        config = get_resource_config(model_config, model_class=cls)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=FullAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
+                head_dim=256,
+                dtype=torch.bfloat16,
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+        )
+        return [state]
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

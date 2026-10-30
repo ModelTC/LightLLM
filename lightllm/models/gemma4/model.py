@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import os
 import json
 import torch
@@ -15,6 +16,12 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
+
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.att_resources.full_att import FullAttentionState
 
 
 class Gemma4TpPartModel(LlamaTpPartModel):
@@ -80,43 +87,50 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         return
 
     @classmethod
-    def _full_attention_options(cls, config, args):
-        from lightllm.common.basemodel.basemodel_utils import get_full_attention_options
+    def _create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """按 Gemma4 的 attention 宽度和共享关系创建物理 KV 层。"""
+        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        # Uniform per-layer KV cache layout. The per-layer cache slot must fit
-        # whichever layer type has the largest per-token K/V width: sliding
-        # (num_key_value_heads * head_dim) or full
-        # (num_global_kv * global_head_dim). Keep cache_slot_dim = head_dim
-        # and pick cache_slot_num = max-width / head_dim. For 31B this
-        # collapses to num_key_value_heads; for E4B the full-attn shape wins
-        # (2*512 > 2*256), so it uses 4 storage slots of 256 dims.
-        # Gemma4TransformerLayerInfer.__init__ computes the same value and
-        # uses it to pack/unpack K/V at write/read time.
+        config = get_resource_config(model_config, model_class=cls)
+        # 每层的 KV 槽位须容纳 sliding/full 两类 attention 的最大宽度。
         head_dim = config["head_dim"]
         num_global_kv = config.get("num_global_key_value_heads") or config["num_key_value_heads"]
         sliding_total = config["num_key_value_heads"] * head_dim
         full_total = num_global_kv * config["global_head_dim"]
         per_token_k_width = max(sliding_total, full_total)
-        if per_token_k_width % head_dim:
-            raise ValueError("Gemma4 KV width must contain complete storage heads")
-        options = get_full_attention_options(config, args)
-        options.update(heads=per_token_k_width // head_dim, dim=head_dim)
-        shared_logical_layer_count = config.get("num_kv_shared_layers") or 0
-        if shared_logical_layer_count:
-            # 后部共享层读取同类型的最后一个非共享层；仅生产层占一份物理 KV。
-            # 由模型配置生成分组，GPU State 和 CPU cache 布局使用完全相同的层顺序。
-            storage_layer_count = config["num_hidden_layers"] - shared_logical_layer_count
-            assert 0 < storage_layer_count < config["num_hidden_layers"], "invalid KV-shared layer count"
-            logical_layer_groups = [[logical_layer_id] for logical_layer_id in range(storage_layer_count)]
-            for logical_layer_id in range(storage_layer_count, config["num_hidden_layers"]):
-                for source_logical_layer_id in range(storage_layer_count - 1, -1, -1):
-                    if config["layer_types"][source_logical_layer_id] == config["layer_types"][logical_layer_id]:
-                        logical_layer_groups[source_logical_layer_id].append(logical_layer_id)
-                        break
-                else:
-                    raise AssertionError("KV-shared layer requires an earlier producer of the same attention type")
-            options["logical_layer_groups"] = tuple(tuple(logical_layer_group) for logical_layer_group in logical_layer_groups)
-        return options
+        assert per_token_k_width % head_dim == 0, "Gemma4 KV width must contain complete storage heads"
+
+        shared_layer_count = config.get("num_kv_shared_layers") or 0
+        storage_layer_count = len(model_logical_layer_ids) - shared_layer_count
+        assert 0 <= shared_layer_count < len(model_logical_layer_ids), "invalid KV-shared layer count"
+        layer_groups = [[layer_id] for layer_id in model_logical_layer_ids[:storage_layer_count]]
+        # 后部共享层读取同类型的最后一个生产层，只增加逻辑映射，不增加物理存储行。
+        for local_layer in range(storage_layer_count, len(model_logical_layer_ids)):
+            for source_layer in range(storage_layer_count - 1, -1, -1):
+                if config["layer_types"][source_layer] == config["layer_types"][local_layer]:
+                    layer_groups[source_layer].append(model_logical_layer_ids[local_layer])
+                    break
+            else:
+                raise AssertionError("KV-shared layer requires an earlier producer of the same attention type")
+        logical_layer_groups = tuple(tuple(group) for group in layer_groups)
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=FullAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=per_token_k_width // head_dim,
+                head_dim=head_dim,
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+        )
+        return [state]
 
     def _init_att_backend(self):
         # Gemma-4 has per-layer heterogeneous attention: sliding layers use

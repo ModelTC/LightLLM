@@ -1,7 +1,14 @@
+from typing import TYPE_CHECKING
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
+
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.att_resources.full_att import FullAttentionState
 
 
 class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
@@ -13,10 +20,30 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
     transformer_layer_infer_class = Deepseek3_2TransformerLayerInfer
 
     @classmethod
-    def _full_attention_options(cls, config, args):
-        options = super()._full_attention_options(config, args)
-        options["packed"] = True
-        return options
+    def _create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """DeepSeek V3.2 使用包含 indexer 字段的 packed MLA，编码由 MLA 创建入口选择。"""
+        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+        config = get_resource_config(model_config, model_class=cls)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_mla_state(
+            config=FullAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=1,
+                head_dim=config["kv_lora_rank"] + config["qk_rope_head_dim"],
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, packed=True, page_size=args.page_size, device="meta",
+        )
+        return [state]
 
     def _init_att_backend(self):
         self.prefill_att_backend = get_nsa_prefill_att_backend_class(index=0)(model=self)

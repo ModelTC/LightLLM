@@ -22,7 +22,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     time. The KV cache layout is uniform (sliding shape: num_kv_heads=16,
     head_dim=256); full-attention layers pack their (4, 512) tensor into the
     first 8 heads of the 16-head slot at cache-write time, then reshape on
-    read. See Gemma4TpPartModel._full_attention_options for context.
+    read. See Gemma4TpPartModel._create_full_att_states for context.
     """
 
     def __init__(self, layer_num, network_config):

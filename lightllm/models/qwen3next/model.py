@@ -95,23 +95,28 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
-        """按当前模型的方案创建 full-attention 定义，不分配 KV 容量或注册管理器。"""
-        from lightllm.common.basemodel.basemodel_utils import create_full_attention_definition
+        """按 Qwen 混合层周期选择 full-attention 层，保留全局逻辑层号。"""
+        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        state = create_full_attention_definition(
-            model_class=cls, model_config=model_config, args=args,
-            model_logical_layer_ids=model_logical_layer_ids, tp_rank=tp_rank, tp_world_size=tp_world_size,
-        )
-        return [] if state is None else [state]
-
-    @classmethod
-    def _full_attention_options(cls, config, args):
-        if args.llm_kv_type not in ("None", "fp8kv_sph", "fp8kv_spt"):
-            raise ValueError(f"Qwen3Next does not support llm_kv_type={args.llm_kv_type}")
+        config = get_resource_config(model_config, model_class=cls)
+        assert args.llm_kv_type in ("None", "fp8kv_sph", "fp8kv_spt"), "unsupported Qwen3Next KV encoding"
         cfg = Qwen3NextResourceConfig.from_model_config(config, args, include_draft=False)
-        return dict(
-            heads=cfg.full_att_all_num_kv_heads, dim=cfg.full_att_head_dim, logical_layer_groups=tuple((logical_layer_id,) for logical_layer_id in cfg.get_full_att_logical_layer_ids())
+        logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_logical_layer_ids())
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=FullAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=cfg.full_att_all_num_kv_heads,
+                head_dim=cfg.full_att_head_dim,
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
         )
+        return [state]
 
     def _init_att_backend1(self):
         role = self.att_resource_role

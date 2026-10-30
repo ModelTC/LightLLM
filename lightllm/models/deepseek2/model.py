@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import torch
 from typing import final
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
@@ -10,6 +11,12 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class, get_mla_prefill_att_backend_class
 
 logger = init_logger(__name__)
+
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.att_resources.full_att import FullAttentionState
 
 
 class Deepseek2TpPartModel(LlamaTpPartModel):
@@ -57,12 +64,30 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         return super()._verify_params()
 
     @classmethod
-    def _full_attention_options(cls, config, args):
-        from lightllm.common.basemodel.basemodel_utils import get_full_attention_options
+    def _create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """DeepSeek MLA 保存 latent 与 RoPE，TP 副本规则由 MLA 创建入口处理。"""
+        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        options = get_full_attention_options(config, args)
-        options.update(heads=1, dim=config["kv_lora_rank"] + config["qk_rope_head_dim"], mla=True)
-        return options
+        config = get_resource_config(model_config, model_class=cls)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_mla_state(
+            config=FullAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=1,
+                head_dim=config["kv_lora_rank"] + config["qk_rope_head_dim"],
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+        )
+        return [state]
 
     def _init_to_get_yarn_rotary(self):
         from lightllm.models.llama.yarn_rotary_utils import find_correction_range, linear_ramp_mask, get_deepseek_mscale

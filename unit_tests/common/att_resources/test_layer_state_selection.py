@@ -30,7 +30,7 @@ def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
         ), device="meta",
     )
     monkeypatch.setattr(
-        "lightllm.common.basemodel.basemodel_utils.create_full_attention_definition", lambda *args, **kwargs: state,
+        LlamaTpPartModel, "_create_full_att_states", classmethod(lambda cls, **kwargs: [state]),
     )
 
     model.prepare_att_resources()

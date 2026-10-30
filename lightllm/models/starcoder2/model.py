@@ -37,14 +37,26 @@ class Starcoder2TpPartModel(TpPartBaseModel):
         cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
-        """按当前模型的方案创建 full-attention 定义，不分配 KV 容量或注册管理器。"""
-        from lightllm.common.basemodel.basemodel_utils import create_full_attention_definition
+        """按本模型的全局逻辑层创建 GQA 布局，量化存储由算法入口选择。"""
+        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.basemodel.basemodel_utils import get_resource_config
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        state = create_full_attention_definition(
-            model_class=cls, model_config=model_config, args=args,
-            model_logical_layer_ids=model_logical_layer_ids, tp_rank=tp_rank, tp_world_size=tp_world_size,
+        config = get_resource_config(model_config, model_class=cls)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=FullAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
+                head_dim=config.get("head_dim", config["hidden_size"] // config["num_attention_heads"]),
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
         )
-        return [] if state is None else [state]
+        return [state]
 
     def _init_config(self):
         super()._init_config()
