@@ -3,6 +3,7 @@ import rpyc
 import threading
 from typing import Dict, List, Tuple, Deque, Optional, Union
 from lightllm.server.multimodal_params import ImageItem
+from lightllm.server.visualserver.rpc_payload import pack_image_items
 from .model_rpc import VisualModelRpcServer
 
 
@@ -32,5 +33,6 @@ class VisualModelRpcClient:
         return
 
     async def run_task(self, images: List[ImageItem], ref_event_list: List[threading.Event]):
-        ans = self._run_task(images, ref_event_list)
+        """Serialize images before dispatching them to the model RPC worker."""
+        ans = self._run_task(pack_image_items(images), ref_event_list)
         return await ans

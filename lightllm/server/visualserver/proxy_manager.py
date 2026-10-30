@@ -27,7 +27,8 @@ from lightllm.utils.shm_port_args import get_shm_port_args
 from rpyc.utils.classic import obtain
 from lightllm.server.embed_cache.utils import read_shm, get_shm_name_data
 from .manager import VisualManager
-from .objs import VIT_Obj
+from .objs import VIT_Obj, visual_only_rpyc_config
+from .rpc_payload import RemoteEvent, pack_image_items
 
 logger = init_logger(__name__)
 
@@ -119,6 +120,7 @@ class ProxyVisualManager(VisualManager):
             return self.id_to_rpyc_conn[id]
 
     def run_task(self, conn: rpyc.Connection, images: List[ImageItem]):
+        """Copy image data into the visual RPC payload and await inference completion."""
         event = threading.Event()
         # 避免修改原始的 image 对象，主要是为了避免在后续的流程中出现问题，因为后续的流程可能会对 image 对象进行访问，
         # 尤其是一些 cache 的逻辑，如果直接修改了原始的 image 对象，可能会导致一些不可预期的问题。
@@ -129,7 +131,7 @@ class ProxyVisualManager(VisualManager):
         if self.args.detail_log:
             start = time.time()
             logger.info(f"Start to remote infer images {[image.md5 for image in images]}")
-        conn.root.remote_infer_images(images, event)
+        conn.root.remote_infer_images(pack_image_items(images), RemoteEvent(event))
         event.wait(timeout=600)
         if self.args.detail_log:
             logger.info(
@@ -139,6 +141,7 @@ class ProxyVisualManager(VisualManager):
         return
 
     async def loop_to_connect_remote_visual_server(self):
+        """Refresh registered visual servers and maintain their RPC connections."""
         counter = 0
         error_counter = 0
         while True:
@@ -166,9 +169,7 @@ class ProxyVisualManager(VisualManager):
                             if node_id not in self.id_to_rpyc_conn:
 
                                 def _connect():
-                                    from .objs import rpyc_config
-
-                                    conn = rpyc.connect(vit_obj.host_ip, vit_obj.port, config=rpyc_config)
+                                    conn = rpyc.connect(vit_obj.host_ip, vit_obj.port, config=visual_only_rpyc_config)
                                     conn._channel.stream.sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
                                     conn._bg_thread = rpyc.BgServingThread(conn, sleep_interval=0.001)
                                     logger.info(
