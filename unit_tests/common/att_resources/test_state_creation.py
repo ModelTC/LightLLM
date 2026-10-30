@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
+
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
 from collections.abc import Callable
@@ -38,7 +40,6 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
     q_scales = torch.ones((2, 2), dtype=torch.float32) if kv_type == "fp8kv_sph" else None
     state = create_gqa_state(
         config=config, kv_type=kv_type, page_size=4, device="meta", group_size=16,
-        scales=scales, q_scales=q_scales, calibration_id="test-calibration",
     )
     assert state.get_state_type() == expected_type
     assert state.resource_id is None
@@ -48,8 +49,11 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
     assert state.config.head_dim == config.head_dim and config.dtype == torch.bfloat16
     assert state.capacity == 0 and read_kv_storage(state) is None
     if kv_type.startswith("fp8"):
-        assert state.scales is scales and not state.scales.is_meta
-        assert state.q_scales is q_scales
+        assert state.scales is None and state.q_scales is None
+        bind_test_fp8_calibration(state=state, scales=scales, q_scales=q_scales)
+        assert torch.equal(state.scales, scales)
+        if q_scales is not None:
+            assert torch.equal(state.q_scales, q_scales)
     state.device = torch.device("cpu")
     state.initialize_storage(8)
     assert state.k_storage.shape == state.v_storage.shape == (2, 12, 2, width)

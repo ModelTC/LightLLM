@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
+
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
 
 from typing import TYPE_CHECKING
@@ -121,9 +123,12 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
     state = StaticFP8FullAttentionState(
         layout_config=StaticFP8AttentionConfig(
             logical_layer_groups=((5,),), global_head_num=head_num, head_dim=128, dtype=torch.bfloat16,
-            scale_mode=scale_mode, calibration_id="split-storage",
+            scale_mode=scale_mode,
         ),
-        page_size=4, device="cuda", scales=scales,
+        page_size=4, device="cuda",
+    )
+    bind_test_fp8_calibration(
+        state=state, scales=scales,
         q_scales=torch.ones((1, head_num), dtype=torch.float32, device="cuda") if scale_mode == "per_head" else None,
     )
     state.initialize_storage(8)

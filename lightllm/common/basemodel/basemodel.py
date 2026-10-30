@@ -8,12 +8,13 @@ import json
 import torch
 import torch.nn.functional as F
 import triton
-from typing import final, List
+from typing import final, List, TYPE_CHECKING
 from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.req_manager import ReqManager
+from lightllm.common.att_resources import AttResourceManager
 from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
@@ -45,6 +46,13 @@ from lightllm.utils.torch_memory_saver_utils import (
 )
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.att_resources.full_att import FullAttentionState
+    from lightllm.common.att_resources.bounded_att import BoundedAttentionState
+    from lightllm.common.att_resources.att_tail import AttentionTailState
 
 logger = init_logger(__name__)
 
@@ -136,14 +144,37 @@ class TpPartBaseModel:
         self.req_manager = req_manager
 
     def prepare_att_resources(self) -> None:
-        """Prepare this model's attention States from its own configuration."""
+        """main 创建共享管理器，draft 引用同一实例，再准备当前模型自己的 State。"""
         assert getattr(self, "att_resource_manager", None) is None, "resources already initialized"
         if self.is_mtp_draft_model:
             self.att_resource_manager = self.main_model.att_resource_manager
             assert not self.att_resource_manager._states_created, "State creation is already finished"
             assert self.max_req_num + 1 == self.att_resource_manager._request_capacity, "models must share the request domain"
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            self._init_att_resource_manager()
+            if not self.is_mtp_draft_model:
+                self.att_resource_manager = AttResourceManager(request_capacity=self.max_req_num + 1)
+            # 无 attention 的 draft 只共享管理器，不创建自身 State。
+            if self.is_mtp_draft_model and self.args.mtp_mode in ("vanilla_no_att", "eagle_no_att"):
+                return
+
+            # 当前模型拥有的全局逻辑层 ID，按模型内部层顺序排列；各工厂自行选择参与层及共享分组。
+            logical_layer_ids = tuple(layer.layer_num_ for layer in self.layers_infer)
+            full_states = self._create_full_att_states(
+                model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
+                tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
+            )
+            bounded_states = self._create_bounded_att_states(
+                model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
+                request_capacity=self.max_req_num + 1, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
+                device="cuda",
+            )
+            tail_states = self._create_att_tail_states(
+                model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
+                request_capacity=self.max_req_num + 1, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
+                device="cuda",
+            )
+            for state in (*full_states, *bounded_states, *tail_states):
+                self.att_resource_manager.set_att_state(self.att_resource_role, state)
 
     def init_runtime(self) -> None:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
@@ -221,9 +252,41 @@ class TpPartBaseModel:
         [weight.verify_load() for weight in self.trans_layers_weight]
         return
 
-    def _init_att_resource_manager(self) -> None:
-        """Prepare all owned attention States using model-specific configuration."""
-        raise NotImplementedError
+    @classmethod
+    def _create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """返回本模型的 full-attention 定义列表；默认没有此类资源，不分配 KV 容量。
+
+        model_logical_layer_ids 是当前模型拥有的全局逻辑层 ID，按模型内部层顺序排列；
+        具体模型自行选择参与层并定义 logical_layer_groups，不要求使用全部层。
+        """
+        return []
+
+    @classmethod
+    def _create_bounded_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
+        tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
+    ) -> list["BoundedAttentionState"]:
+        """返回本模型的 bounded 运行态列表；meta 用于布局查询，大小页后续分配。
+
+        model_logical_layer_ids 描述当前模型拥有的全部全局逻辑层，具体模型自行选择参与层。
+        """
+        return []
+
+    @classmethod
+    def _create_att_tail_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
+        tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
+    ) -> list["AttentionTailState"]:
+        """返回本模型的 tail 运行态列表；默认没有此类资源。
+
+        model_logical_layer_ids 描述当前模型拥有的全部全局逻辑层，具体模型自行选择参与层。
+        """
+        return []
 
     def _check_mem_size(self):
         self.max_total_token_num = self.att_resource_manager.full_att_allocator.size

@@ -1,15 +1,15 @@
 from __future__ import annotations
 
+from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
+
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
 
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
-from unit_tests.common.att_resources.model_helpers import rebuild_full_state
 
 from typing import TYPE_CHECKING
-from dataclasses import replace
 from math import prod
 
 import pytest
@@ -44,10 +44,14 @@ def make_quant_state(kind: str, device: str | torch.device | int):
     if kind.startswith("fp8_"):
         per_head = kind == "fp8_head"
         config = StaticFP8AttentionConfig(
-            ((1,), (3,)), 2, 16, torch.uint8, scale_mode="per_head" if per_head else "per_tensor", calibration_id="test"
+            ((1,), (3,)), 2, 16, torch.uint8, scale_mode="per_head" if per_head else "per_tensor"
         )
         scales = torch.arange(1, 9 if per_head else 5, dtype=torch.float32, device=device).reshape(2, -1) / 16
-        prepared_full_state = StaticFP8FullAttentionState(config, page_size=4, device=device, scales=scales)
+        prepared_full_state = StaticFP8FullAttentionState(config, page_size=4, device=device)
+        bind_test_fp8_calibration(
+            state=prepared_full_state, scales=scales,
+            q_scales=torch.ones((2, config.head_num), dtype=torch.float32) if per_head else None,
+        )
         prepared_full_state.initialize_storage(8)
         return prepared_full_state
     fp8 = kind == "packed_fp8"
@@ -208,26 +212,16 @@ def test_cuda_compute_write_preserves_unrelated_fields(kind: str):
     assert not read_kv_storage(state)[1].any()
 
 
-def test_fp8_calibration_mismatch_fails():
-    src = make_quant_state("fp8_head", "cpu")
-    dst = rebuild_full_state(src, config=replace(src.config, calibration_id="other"))
-    with pytest.raises(AssertionError, match="calibration"):
-        dst.copy_tokens_from_other_dp(
-            src_token_indices=torch.tensor([0], dtype=torch.long),
-            dst_token_indices=torch.tensor([1], dtype=torch.long),
-            remote_dp_full_att_state=src,
-        )
-
-
 @pytest.mark.parametrize("kind", ["fp8_tensor", "fp8_head"])
 def test_deferred_storage_preserves_real_fp8_calibration(kind: str):
     source = make_quant_state(kind, "cpu")
     state = StaticFP8FullAttentionState(
         source.config, page_size=source.page_size, device="meta",
-        scales=source.scales, q_scales=source.q_scales,
     )
+    assert state.scales is None and state.q_scales is None
+    bind_test_fp8_calibration(state=state, scales=source.scales, q_scales=source.q_scales)
     assert read_kv_storage(state) is None and not state.scales.is_meta
-    assert state.scales is source.scales
+    assert torch.equal(state.scales, source.scales)
     state.device = torch.device("cpu")
     state.initialize_storage(source.capacity)
     assert torch.equal(state.scales, source.scales)

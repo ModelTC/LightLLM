@@ -85,6 +85,8 @@ def test_auto_profile_fits_actual_gpu_storage_and_pd_pages(
     model.tp_rank_, model.tp_world_size_ = 0, 1
     model.max_total_token_num, model.max_req_num, model.mem_fraction = None, 1, 1.0
     prepare_model_states(model)
+    model.att_resource_manager.finish_state_creation()
+    model.att_resource_manager.load_full_att_calibration(args=args)
     model.att_resource_manager.initialize_resources(
         args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
     )

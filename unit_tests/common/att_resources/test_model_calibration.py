@@ -1,4 +1,4 @@
-"""Model-owned calibration slices must not depend on State initialization order."""
+"""统一标定阶段不依赖 State 注册顺序，不在布局定义阶段加载参数。"""
 
 from __future__ import annotations
 
@@ -13,9 +13,6 @@ import pytest
 import torch
 
 from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.full_att import FullAttentionState
-from unit_tests.common.att_resources.model_helpers import owned_states
-from lightllm.common.basemodel.basemodel_utils import init_model_full_attention
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
@@ -23,10 +20,11 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 
 if TYPE_CHECKING:
     from pathlib import Path
+    from easydict import EasyDict
 
 
 @pytest.mark.parametrize("encoding", ["fp8kv_sph", "fp8kv_spt"])
-def test_calibration_slices_follow_model_configs_before_other_states_exist(tmp_path: Path, encoding: str):
+def test_calibration_binds_all_model_states_after_creation(tmp_path: Path, encoding: str):
     config = dict(
         architectures=["Qwen3NextForCausalLM"],
         num_hidden_layers=8,
@@ -97,13 +95,26 @@ def test_calibration_slices_follow_model_configs_before_other_states_exist(tmp_p
         models.append(model)
         layer_start += layer_count
 
-    # Prepare KV definitions in reverse: no preceding model has a manager or State yet.
+    # 反向创建、注册，标定仍按 main 和 draft 的数值顺序绑定。
+    manager = AttResourceManager(request_capacity=1)
     for index in reversed(range(len(models))):
         model = models[index]
-        assert all(not hasattr(previous, "att_resource_manager") for previous in models[:index])
-        model.att_resource_manager = AttResourceManager(request_capacity=1)
-        init_model_full_attention(model)
-        states = owned_states(model.att_resource_manager.__dict__, FullAttentionState)
+        model.att_resource_manager = manager
+        states = []
+        if not (model.is_mtp_draft_model and model.args.mtp_mode in ("vanilla_no_att", "eagle_no_att")):
+            states = model._create_full_att_states(
+                model_config=model.config, args=model.args,
+                model_logical_layer_ids=tuple(layer.layer_num_ for layer in model.layers_infer),
+                tp_rank=model.tp_rank_, tp_world_size=model.tp_world_size_,
+            )
+        for state in states:
+            assert state.resource_id is None
+            assert state.scales is None and state.q_scales is None
+            manager.set_att_state(model.att_resource_role, state)
+    manager.finish_state_creation()
+    manager.load_full_att_calibration(args=args)
+    for index, model in enumerate(models):
+        states = manager.get_full_attention_states(model.att_resource_role)
         state = states[0] if states else None
         expected_layers, (start, end) = definitions[index][-2:]
         if not expected_layers:
@@ -114,3 +125,106 @@ def test_calibration_slices_follow_model_configs_before_other_states_exist(tmp_p
         assert torch.equal(state.scales[:, 0], scales[start:end])
         if encoding == "fp8kv_sph":
             assert torch.equal(state.q_scales[:, 0], scales[start:end] * 2)
+
+
+@pytest.mark.parametrize("tp_world_size", [1, 4])
+def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tp_world_size: int,
+):
+    from builtins import open as original_open
+    from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+
+    # 第 0 行属于普通精度的共享层；其余行分别属于 main、draft2、draft10 的 FP8 State。
+    scales = torch.arange(1, 17, dtype=torch.float32).reshape(4, 4)
+    q_scales = scales[:, :2] + 20
+    calibration_path = tmp_path / "calibration.json"
+    calibration_path.write_text(json.dumps(dict(
+        num_layers=4, num_head=2, quant_type="per_head", scales_shape=[4, 4], scales=scales.tolist(),
+        q_calibration=dict(num_head=2, scales_shape=[4, 2], scales=q_scales.tolist()),
+    )))
+    args = StartArgs(kv_quant_calibration_config_path=str(calibration_path))
+    reads = []
+
+    def count_open(file: str, *args: object, **kwargs: object):
+        if file == str(calibration_path):
+            reads.append(file)
+        return original_open(file, *args, **kwargs)
+
+    monkeypatch.setattr("builtins.open", count_open)
+    for tp_rank in range(tp_world_size):
+        manager = AttResourceManager(request_capacity=1)
+        expected = []
+        # 特意打乱角色及同角色 State 的注册顺序。
+        for role, groups, row, encoding in (
+            ("draft10", ((5,),), 3, "fp8kv_sph"),
+            ("main", ((2, 3),), 1, "fp8kv_sph"),
+            ("draft2", ((4,),), 2, "fp8kv_sph"),
+            ("main", ((0, 1),), 0, "None"),
+        ):
+            state = create_gqa_state(
+                config=FullAttentionConfig(
+                    logical_layer_groups=groups, global_head_num=4, head_dim=16, dtype=torch.bfloat16,
+                    tp_rank=tp_rank, tp_world_size=tp_world_size,
+                ), kv_type=encoding, device="meta",
+            )
+            manager.set_att_state(role, state)
+            if encoding != "None":
+                expected.append((state, row))
+        with pytest.raises(AssertionError, match="State creation"):
+            manager.load_full_att_calibration(args=args)
+        manager.finish_state_creation()
+        manager.load_full_att_calibration(args=args)
+        heads = 4 // tp_world_size
+        local_heads = slice(tp_rank * heads, (tp_rank + 1) * heads)
+        for state, row in expected:
+            expected_k = scales[row:row + 1, :2].repeat_interleave(2, dim=-1)[:, local_heads]
+            expected_v = scales[row:row + 1, 2:].repeat_interleave(2, dim=-1)[:, local_heads]
+            expected_q = q_scales[row:row + 1].repeat_interleave(2, dim=-1)[:, local_heads]
+            assert torch.equal(state.scales, torch.cat((expected_k, expected_v), dim=-1))
+            assert torch.equal(state.q_scales, expected_q)
+            assert state.k_storage is None
+    assert len(reads) == tp_world_size  # 每个管理器只读取一次，不随 State 数量增加。
+
+
+@pytest.mark.parametrize("encoding", ["fp8kv_spt", "fp8kv_sph"])
+def test_cpu_layout_does_not_require_calibration_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cpu_args: EasyDict, encoding: str,
+):
+    from lightllm.utils.att_resource_config import build_cpu_cache_layouts
+
+    config = dict(model_type="llama", num_attention_heads=2, hidden_size=32, num_hidden_layers=2)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    cpu_args.model_dir = str(tmp_path)
+    cpu_args.llm_kv_type = encoding
+    cpu_args.data_type = "bfloat16"
+    cpu_args.kv_quant_calibration_config_path = str(tmp_path / "does-not-exist.json")
+    monkeypatch.setattr("lightllm.utils.llm_utils.get_llm_model_class", lambda: LlamaTpPartModel)
+    layouts = build_cpu_cache_layouts()
+    assert len(layouts) == 1
+    (layout,) = layouts.values()
+    assert layout.byte_end > layout.byte_start
+    assert {region.field for region in layout.regions} == {"k", "v"}
+
+
+@pytest.mark.parametrize("encoding", ["fp8kv_spt", "fp8kv_sph"])
+def test_deferred_calibration_keeps_unit_scale_policy(encoding: str):
+    from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+
+    state = create_gqa_state(
+        config=FullAttentionConfig(
+            logical_layer_groups=((0, 1), (2,)), global_head_num=2, head_dim=16, dtype=torch.bfloat16,
+        ), kv_type=encoding, device="cpu",
+    )
+    manager = AttResourceManager(request_capacity=1)
+    manager.set_att_state("main", state)
+    manager.finish_state_creation()
+    with pytest.raises(AssertionError, match="calibration must be bound"):
+        state.initialize_storage(4)
+    if encoding == "fp8kv_sph":
+        with pytest.raises(AssertionError, match="requires a calibration file"):
+            manager.load_full_att_calibration(args=StartArgs())
+    else:
+        manager.load_full_att_calibration(args=StartArgs())
+        assert torch.equal(state.scales, torch.ones((2, 2)))
+        state.initialize_storage(4)
+        assert state.k_storage.shape[0] == 2

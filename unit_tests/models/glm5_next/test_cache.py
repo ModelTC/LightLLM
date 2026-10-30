@@ -1,3 +1,4 @@
+from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 import dataclasses
 from types import SimpleNamespace
 
@@ -11,7 +12,6 @@ from lightllm.common.att_resources.full_att import (
     PackedMLAAttentionConfig,
 )
 from lightllm.common.req_manager import ReqManager
-from lightllm.models.glm5_next.att_resource_manager import Glm5NextAttResourceManager
 from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, set_unique_server_name
@@ -96,13 +96,13 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(monkeypatch, small_page, t
     )
     full.initialize_storage(16)
     req = ReqManager(3, 16)
-    resources = Glm5NextAttResourceManager(config, 4, mtp_step)
     from unit_tests.common.att_resources.model_helpers import create_full_attention_roles
 
     main_full, draft_full = create_full_attention_roles(full, config.all_layer_num)
-    resources.bind_storage(
-        main_full,
-        FullAttKVAllocator(full.capacity, full.page_size),
+    resources = build_hybrid_resources(
+        config=config, request_capacity=4, mtp_step=mtp_step,
+        full_state=main_full,
+        full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
         draft_full_state=draft_full,
         big_page_capacity=4,
         small_page_capacity=2,

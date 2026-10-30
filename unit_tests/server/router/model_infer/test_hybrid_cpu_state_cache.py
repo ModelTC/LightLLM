@@ -1,3 +1,4 @@
+from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 import dataclasses
 import json
 from types import SimpleNamespace
@@ -12,7 +13,6 @@ from lightllm.common.att_resources.full_att import (
     FullAttentionConfig,
 )
 from lightllm.common.req_manager import ReqManager
-from lightllm.models.qwen3next.att_resource_manager import Qwen3NextAttResourceManager
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.router.model_infer.infer_batch import InferReq
@@ -72,10 +72,10 @@ def linear_cache(monkeypatch, tmp_path, request):
     )
     full.initialize_storage(384)
     requests = ReqManager(2, 512)
-    resources = Qwen3NextAttResourceManager(config, 3, 0)
-    resources.bind_storage(
-        full,
-        FullAttKVAllocator(full.capacity, full.page_size),
+    resources = build_hybrid_resources(
+        config=config, request_capacity=3, mtp_step=0,
+        full_state=full,
+        full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
         big_page_capacity=5,
         small_page_capacity=2,
     )

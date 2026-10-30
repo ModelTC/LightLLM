@@ -35,7 +35,7 @@ logger = init_logger(__name__)
 class AttResourceManager:
     """管理模型组合的注意力资源，提供缓存复用及 CPU/DP/PD 传输所需的聚合操作。
 
-    默认通过聚合查询操作各类 State；模型子类仅在资源创建或操作有差异时扩展。
+    通过聚合查询操作各类 State；模型通过三类创建接口决定资源组合，main/draft 共享本管理器。
     未支持的传输路径必须明确报错。
     """
 
@@ -112,6 +112,52 @@ class AttResourceManager:
         )
         return matches[0]
 
+    def load_full_att_calibration(self, args: StartArgs | EasyDict) -> None:
+        """全部 main/draft State 就绪后统一读取静态标定，并交给具体 State 绑定。
+
+        文件沿用物理行顺序：main、draft0..draft35；同角色有多个 State 时按最小逻辑层号
+        排序，State 内保留 logical_layer_groups 顺序。非静态 FP8 的 full State 同样占用
+        对应物理行区间，共享逻辑层只占一行；CPU 布局创建不需要调用本流程。
+        """
+        import json
+        from .full_att.static_fp8_state import StaticFP8FullAttentionState
+
+        full_states = self.get_full_attention_states()
+        calibration_states = [state for state in full_states if isinstance(state, StaticFP8FullAttentionState)]
+        if not calibration_states:
+            return
+
+        # 阶段一：只读取一次文件；无文件时由 per_tensor State 绑定单位 scale。
+        calibration = None
+        path = args.kv_quant_calibration_config_path
+        if path is not None:
+            with open(path) as file:
+                calibration = json.load(file)
+            if any(state.config.scale_mode == "per_tensor" for state in calibration_states):
+                from lightllm.utils.config_utils import get_model_architectures
+
+                assert calibration["architectures"] == get_model_architectures(args.model_dir), (
+                    "calibration architecture does not match the model"
+                )
+
+        # 阶段二：显式使用模型角色顺序，避免注册先后及 draft10 的字符串排序影响标定行。
+        storage_layer_start = 0
+        for role in MODEL_ROLES:
+            states = sorted(
+                self.get_full_attention_states(role),
+                key=lambda state: (
+                    min(layer for group in state.config.logical_layer_groups for layer in group), state.resource_id,
+                ),
+            )
+            for state in states:
+                if isinstance(state, StaticFP8FullAttentionState):
+                    state.bind_calibration(
+                        calibration=calibration,
+                        storage_layer_start=storage_layer_start,
+                    )
+                storage_layer_start += len(state.config.logical_layer_groups)
+        logger.info("Full-attention calibration bound: states=%d, source=%s", len(calibration_states), path or "unit scales")
+
     def initialize_resources(
         self,
         args: StartArgs | EasyDict,
@@ -123,14 +169,12 @@ class AttResourceManager:
         """全部模型完成资源准备后，规划共享容量并初始化缓存存储。
 
         调用前，所有模型的权重和绑定请求容量的运行态已创建，full-attention
-        仅持有 meta 定义，大小页池尚未分配。调用方在本方法返回后，
+        已完成创建标记和所需的静态标定绑定，大小页池尚未分配。调用方在本方法返回后，
         依次执行各模型的运行时初始化，由模型读取 allocator 中的最终容量。
         """
-        # 阶段一：标记全部 State 对象创建完成，后续通过聚合接口访问。
-        # main、draft0、draft1 等模型已分别将自己的 State 添加到当前管理器。
-        self.finish_state_creation()
+        assert self._states_created, "State creation must finish before resource initialization"
 
-        # 阶段二：规划共享 token 容量，并向下对齐到完整 KV 页。
+        # 阶段一：规划共享 token 容量，并向下对齐到完整 KV 页。
         # 未指定容量时，根据剩余显存评估；固定运行态的显存已经在前面占用。
         # PD 模式还需为传输 buffer 预留空间，布局按全部 full-attention State 计算。
         assert self.get_full_attention_states(), "the shared token index domain requires a full-attention State"
@@ -164,7 +208,7 @@ class AttResourceManager:
         token_capacity = token_capacity // args.page_size * args.page_size
         assert token_capacity > 0, "attention capacity must contain at least one complete page"
 
-        # 阶段三：管理器为已创建的 State 分配实际存储与共享 allocator。
+        # 阶段二：管理器为已创建的 State 分配实际存储与共享 allocator。
         # State 对象保持不变，查询缓存继续引用相同对象；固定运行态不重复分配。
         big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
         self.initialize_storage(

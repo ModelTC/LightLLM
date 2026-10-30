@@ -1290,6 +1290,8 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         manager: AttResourceManager = model.att_resource_manager
         assert all(item.att_resource_manager is manager for item in models), "models must share one resource manager"
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            manager.finish_state_creation()
+            manager.load_full_att_calibration(args=model.args)
             manager.initialize_resources(
                 model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
             )

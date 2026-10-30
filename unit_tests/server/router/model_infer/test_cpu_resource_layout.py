@@ -175,6 +175,8 @@ def make_runtime(
             draft.tp_world_size_, draft.tp_rank_ = tp, rank
             prepare_model_states(draft, logical_layer_ids=(config["num_hidden_layers"] + step,))
             drafts.append(draft)
+        model.att_resource_manager.finish_state_creation()
+        model.att_resource_manager.load_full_att_calibration(args=args)
         model.att_resource_manager.initialize_resources(
             args, token_capacity=model.max_total_token_num, mem_fraction=args.mem_fraction
         )

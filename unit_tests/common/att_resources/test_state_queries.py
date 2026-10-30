@@ -52,6 +52,7 @@ def test_created_state_queries_keep_the_same_objects_through_storage_initializat
     monkeypatch.setattr(
         "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
+    manager.finish_state_creation()
     manager.initialize_resources(args, token_capacity=8, mem_fraction=1.0, device="cpu")
     assert manager.get_full_attention_states() is cached[0]
     for role, meta in zip(("main", "draft0"), definitions):

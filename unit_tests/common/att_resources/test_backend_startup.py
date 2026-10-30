@@ -126,6 +126,17 @@ def test_backend_allocates_all_roles_before_warmup(
     checked = []
     mapping = SimpleNamespace(bind_hold_page=lambda indices: None)
     request_allocations = []
+    manager_creations = []
+    from lightllm.common.att_resources import AttResourceManager
+
+    def create_empty_manager(request_capacity: int):
+        manager = AttResourceManager(request_capacity=request_capacity)
+        assert not manager._states_created
+        assert not any(name.endswith("_state") for name in manager.__dict__)
+        manager_creations.append(request_capacity)
+        return manager
+
+    monkeypatch.setattr("lightllm.common.basemodel.basemodel.AttResourceManager", create_empty_manager)
 
     def create_req_manager(max_request_num: int, max_sequence_length: int):
         assert len(models) == 1 + draft_count
@@ -250,6 +261,8 @@ def test_backend_allocates_all_roles_before_warmup(
                 assert all(other.att_resource_manager is models[0].att_resource_manager for other in models[: index + 1])
                 assert all(not hasattr(other, "att_resource_manager") for other in models[index + 1 :])
             main = models[0]
+            main.att_resource_manager.finish_state_creation()
+            main.att_resource_manager.load_full_att_calibration(args=args)
             main.att_resource_manager.initialize_resources(
                 args, token_capacity=main.max_total_token_num, mem_fraction=main.mem_fraction
             )
@@ -263,6 +276,7 @@ def test_backend_allocates_all_roles_before_warmup(
 
     start_runtime()
     assert request_allocations == [(2, 32)]
+    assert manager_creations == [models[0].max_req_num + 1]
     assert captured == {id(model) for model in models}
     assert checked == [models[0]]
     assert ready == ([True] if via_backend else [])

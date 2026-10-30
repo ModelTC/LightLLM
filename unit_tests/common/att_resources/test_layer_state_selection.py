@@ -13,16 +13,17 @@ from unit_tests.common.att_resources.test_bounded_state import make_state
 from unit_tests.common.att_resources.test_tail_state import make_tail
 from unit_tests.common.att_resources.test_capacity import definition
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.basemodel_utils import init_model_full_attention
+from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.layer_infer.transformer_layer_infer import TransformerLayerInfer
 
 
 def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
-    model = TpPartBaseModel.__new__(TpPartBaseModel)
+    model = LlamaTpPartModel.__new__(LlamaTpPartModel)
     model.args, model.config = SimpleNamespace(), {}
     model.tp_rank_, model.tp_world_size_ = 0, 1
     model.layers_infer = [SimpleNamespace(layer_num_=0, indexer=SimpleNamespace())]
-    model.att_resource_manager = AttResourceManager(request_capacity=1)
+    model.max_req_num = 0
+    model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     state = GQAFullAttentionState(
         layout_config=FullAttentionConfig(
             logical_layer_groups=((0,),), global_head_num=1, head_dim=128, dtype=torch.bfloat16,
@@ -32,7 +33,7 @@ def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
         "lightllm.common.basemodel.basemodel_utils.create_full_attention_definition", lambda *args, **kwargs: state,
     )
 
-    init_model_full_attention(model)
+    model.prepare_att_resources()
 
     assert model.att_resource_manager.main_gqa_bf16_state is state
     assert not hasattr(model.layers_infer[0], "full_att_state_name")
@@ -40,7 +41,7 @@ def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.mark.parametrize("role", ["main", "draft0"])
-def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str) -> None:
+def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str, monkeypatch: pytest.MonkeyPatch) -> None:
     manager = AttResourceManager(request_capacity=1)
     for model_role in ("main", "draft0"):
         for dtype, groups in ((torch.bfloat16, ((0, 2),)), (torch.float16, ((3,),))):
@@ -55,7 +56,9 @@ def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str) ->
     model.max_req_num = 0
     model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     model.main_model = SimpleNamespace(att_resource_manager=manager)
-    model._init_att_resource_manager = lambda: setattr(model, "att_resource_manager", manager)
+    monkeypatch.setattr("lightllm.common.basemodel.basemodel.AttResourceManager", lambda request_capacity: manager)
+    model.config, model.args = {}, SimpleNamespace(mtp_mode=None)
+    model.tp_rank_, model.tp_world_size_ = 0, 1
     model.layers_infer = []
     for logical_layer_id in range(4):
         layer = TransformerLayerInfer.__new__(TransformerLayerInfer)

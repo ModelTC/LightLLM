@@ -131,6 +131,8 @@ def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPa
     for item in models:
         item.bind_req_manager(req_manager=req_manager)
     assert all(item.req_manager is req_manager for item in models)
+    model.att_resource_manager.finish_state_creation()
+    model.att_resource_manager.load_full_att_calibration(args=args)
     model.att_resource_manager.initialize_resources(
         args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
     )
@@ -142,8 +144,9 @@ def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPa
     assert resources.full_att_allocator.size == full_state.capacity == 32
     assert not hasattr(model, "mem_manager")
     assert not hasattr(model, "full_att_state")
+    full_interval = 4 if glm else model.config["full_attention_interval"]
     assert full_state.config.logical_layer_groups == tuple(
-        (layer,) for layer in model.linear_config.get_full_att_logical_layer_ids() if layer < model.config["num_hidden_layers"]
+        (layer,) for layer in range(full_interval - 1, model.config["num_hidden_layers"], full_interval)
     )
     assert observed == [main_linear_state(resources).conv_state.data_ptr()]
     assert resources.bounded_att_big_page_allocator.size == 6

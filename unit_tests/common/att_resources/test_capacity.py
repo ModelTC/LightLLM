@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
+
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
@@ -47,12 +49,17 @@ def definition(kind: str):
         )
     if kind.startswith("static"):
         heads = 2 if kind == "static_head" else 1
-        return StaticFP8FullAttentionState(
+        state = StaticFP8FullAttentionState(
             StaticFP8AttentionConfig(
-                **vars(config), scale_mode="per_head" if heads == 2 else "per_tensor", calibration_id="test"
+                **vars(config), scale_mode="per_head" if heads == 2 else "per_tensor"
             ),
-             page_size=4, device="meta", scales=torch.ones((2, heads * 2), dtype=torch.float32), q_scales=torch.ones((2, 2), dtype=torch.float32) if heads == 2 else None,
+            page_size=4, device="meta",
         )
+        bind_test_fp8_calibration(
+            state=state, scales=torch.ones((2, heads * 2), dtype=torch.float32),
+            q_scales=torch.ones((2, 2), dtype=torch.float32) if heads == 2 else None,
+        )
+        return state
     if kind.startswith("packed"):
         fp8 = kind == "packed_fp8"
         kv_dim = 512 if kind == "packed_glm" else 576
@@ -123,6 +130,7 @@ def test_budget_matches_token_stores_including_hold_and_padding(
         resources = AttResourceManager(request_capacity=1)
         resources.set_att_state("main", rebuild_full_state(template, config=template.config))
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (budget + reserve, budget + reserve))
+        resources.finish_state_creation()
         if expected is None:
             with pytest.raises(MemoryError, match="HOLD"):
                 resources.initialize_resources(args, token_capacity=None, mem_fraction=1.0, device="cpu")

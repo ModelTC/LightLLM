@@ -1,5 +1,5 @@
 import torch
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import triton
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.qwen3next.layer_weights.transformer_layer_weight import (
@@ -11,9 +11,13 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 )
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.att_resources.full_att import FullAttentionState
+    from lightllm.common.att_resources.bounded_att import BoundedAttentionState
 
 logger = init_logger(__name__)
 
@@ -36,15 +40,22 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super().__init__(kvargs)
 
     @classmethod
-    def create_bounded_attention_definition(cls, model_config, args, *, model_logical_layer_ids, tp_rank=0, tp_world_size=1):
+    def _create_bounded_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
+        tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
+    ) -> list["BoundedAttentionState"]:
+        """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
         from lightllm.common.att_resources.bounded_att import create_gdn_state, ConvSSMStateConfig
         from lightllm.common.basemodel.basemodel_utils import get_resource_config
 
         config = get_resource_config(model_config, model_class=cls)
+        assert config["num_attention_heads"] % tp_world_size == 0
+        assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
         cfg = Qwen3NextResourceConfig.from_model_config(config, args, include_draft=False)
         logical_layer_ids = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
         if not logical_layer_ids:
-            return None
+            return []
         state = create_gdn_state(
             config=ConvSSMStateConfig(
                 logical_layer_ids=logical_layer_ids,
@@ -58,9 +69,9 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
             ),
-            request_capacity=1, device="meta",
+            request_capacity=request_capacity, mtp_step=args.mtp_step, device=device,
         )
-        return state
+        return [state]
 
     def _init_triton(self):
         def _triton_allocator(size: int, alignment: int, stream: Optional[int]) -> torch.Tensor:
@@ -79,22 +90,19 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         super()._init_config()
         self.num_kv_heads = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
 
-    def _init_att_resource_manager(self):
-        from .att_resource_manager import Qwen3NextAttResourceManager
-        from lightllm.common.basemodel.basemodel_utils import init_model_full_attention, init_model_bounded_attention
+    @classmethod
+    def _create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """按当前模型的方案创建 full-attention 定义，不分配 KV 容量或注册管理器。"""
+        from lightllm.common.basemodel.basemodel_utils import create_full_attention_definition
 
-        assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        start_args: StartArgs = get_env_start_args()
-        self.linear_config = Qwen3NextResourceConfig.from_model_config(self.config, start_args, include_draft=False)
-
-        if start_args.mtp_step and start_args.enable_prefill_decode_mixed:
-            raise ValueError("MTP linear attention does not support mixed prefill/decode")
-        if not self.is_mtp_draft_model:
-            self.att_resource_manager = Qwen3NextAttResourceManager(
-                self.linear_config, self.max_req_num + 1, start_args.mtp_step, tp_rank=self.tp_rank_, logical_layer_ids=()
-            )
-        init_model_bounded_attention(self)
-        init_model_full_attention(self)
+        state = create_full_attention_definition(
+            model_class=cls, model_config=model_config, args=args,
+            model_logical_layer_ids=model_logical_layer_ids, tp_rank=tp_rank, tp_world_size=tp_world_size,
+        )
+        return [] if state is None else [state]
 
     @classmethod
     def _full_attention_options(cls, config, args):

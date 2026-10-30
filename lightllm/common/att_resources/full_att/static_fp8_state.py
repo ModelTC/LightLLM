@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, List
+from collections.abc import Mapping
 from dataclasses import dataclass
 from math import prod
 
@@ -25,15 +26,11 @@ class StaticFP8AttentionConfig(FullAttentionConfig):
     # per_tensor：每层 K/V 各一个固定 scale；per_head：每层、每个本地 K/V head 各一个。
     # 标定参数不随 token 增长，也不作为动态 KV 字段写入 CPU/PD 页。
     scale_mode: str = "per_tensor"
-    # 标定数据的身份标记，用于 DP 复制时检查编码是否兼容；实际 scale Tensor 由 State 持有。
-    calibration_id: str = ""
 
     def __post_init__(self) -> None:
-        """创建配置时校验通用 TP 约束、标定方式及身份。"""
+        """创建配置时校验通用 TP 约束及标定方式。"""
         super().__post_init__()
-        assert self.scale_mode in ("per_tensor", "per_head") and self.calibration_id, (
-            "static FP8 requires a scale mode and calibration identity"
-        )
+        assert self.scale_mode in ("per_tensor", "per_head"), "invalid static FP8 scale mode"
 
 
 class StaticFP8FullAttentionState(FullAttentionState):
@@ -50,24 +47,10 @@ class StaticFP8FullAttentionState(FullAttentionState):
         page_size: int = 1,
         *,
         device: str | torch.device = "cuda",
-        scales: torch.Tensor,
-        q_scales: torch.Tensor | None = None,
     ) -> None:
-        """按静态 FP8 配置准备 KV 存储，并保留传入的标定参数。"""
-        # 标定 Tensor 由 State 持有，在接收构造参数时校验，不重复放入 config。
-        heads = 1 if layout_config.scale_mode == "per_tensor" else layout_config.head_num
-        assert scales is not None and scales.shape == (len(layout_config.logical_layer_groups), 2 * heads), (
-            "calibration scales do not match KV layers and heads"
-        )
-        assert scales.dtype == torch.float32 and bool((torch.isfinite(input=scales) & (scales > 0)).all()), (
-            "calibration scales must be finite positive float32 values"
-        )
-        if q_scales is not None:
-            assert q_scales.shape == (len(layout_config.logical_layer_groups), layout_config.head_num) and (
-                q_scales.dtype == torch.float32
-            ), "Q calibration does not match layers and heads"
-        self.scales = scales
-        self.q_scales = q_scales
+        """只准备静态 FP8 布局；标定参数由后续 bind_calibration 统一绑定。"""
+        self.scales: torch.Tensor | None = None
+        self.q_scales: torch.Tensor | None = None
         self.cpu_scales = None  # 实际存储初始化时准备计算 backend 使用的 CPU 标定值。
         self.config = layout_config
         self.resource_id: str | None = None  # 由 manager 绑定模型角色时设置。
@@ -84,17 +67,85 @@ class StaticFP8FullAttentionState(FullAttentionState):
         self.v_storage: torch.Tensor | None = None
         self.storage_dtype = torch.uint8
 
+    def bind_calibration(
+        self,
+        calibration: Mapping[str, object] | None,
+        *,
+        storage_layer_start: int,
+    ) -> None:
+        """在分配 KV 前绑定标定表中本 State 的物理层区间，并切出当前 TP 的 head。
+
+        行起点由管理器按 main、draft0..draft35 的完整 State 集合确定，不是逻辑层号。
+        同组逻辑层共用一行；State 内的行顺序与 logical_layer_groups 的物理层顺序一致。
+        无文件时仅 per_tensor 可使用单位 scale；per_head 必须包含 K/V 和 Q 标定。
+        """
+        assert self.k_storage is None and self.scales is None, "calibration must be bound once before storage allocation"
+        config = self.config
+        storage_layer_count = len(config.logical_layer_groups)
+        if calibration is None:
+            assert config.scale_mode == "per_tensor", "per-head FP8 requires a calibration file with Q scales"
+            scales = torch.ones(size=(storage_layer_count, 2), dtype=torch.float32)
+            q_scales = None
+        else:
+            # 阶段一：检查文件编码和物理行覆盖范围。
+            calibrated_layer_count = calibration["num_layers"]
+            storage_layer_end = storage_layer_start + storage_layer_count
+            assert 0 <= storage_layer_start < storage_layer_end <= calibrated_layer_count, (
+                "calibration does not cover this State's physical layers"
+            )
+            assert calibration.get("quant_type", config.scale_mode) == config.scale_mode, (
+                "calibration quantization mode does not match the State"
+            )
+            limits = torch.finfo(torch.float8_e4m3fn)
+            assert calibration.get("qmin", limits.min) == limits.min and calibration.get("qmax", limits.max) == limits.max, (
+                "calibration range does not match float8_e4m3fn"
+            )
+
+            def scale_tensor(values: Mapping[str, object], shape: tuple[int, ...]) -> torch.Tensor:
+                tensor = torch.tensor(data=values["scales"], dtype=torch.float32)
+                assert tuple(values["scales_shape"]) == tensor.shape == shape, "invalid calibration scale shape"
+                assert bool((torch.isfinite(tensor) & (tensor > 0)).all()), "calibration scales must be finite and positive"
+                return tensor[storage_layer_start:storage_layer_end]
+
+            def shard(tensor: torch.Tensor, calibrated_heads: int) -> torch.Tensor:
+                heads = config.head_num
+                assert calibrated_heads > 0 and (heads * config.tp_world_size) % calibrated_heads == 0, (
+                    "calibration heads do not cover the model's KV heads"
+                )
+                expanded = tensor.repeat_interleave(repeats=heads * config.tp_world_size // calibrated_heads, dim=-1)
+                return expanded[:, config.tp_rank * heads : (config.tp_rank + 1) * heads].contiguous()
+
+            # 阶段二：先按物理层取行，再分别切分 K、V、Q 的 head；标定 Tensor 暂留 CPU。
+            if config.scale_mode == "per_head":
+                calibrated_heads = calibration["num_head"]
+                all_scales = scale_tensor(calibration, (calibrated_layer_count, 2 * calibrated_heads))
+                k, v = all_scales.split(split_size=calibrated_heads, dim=-1)
+                scales = torch.cat(tensors=(shard(k, calibrated_heads), shard(v, calibrated_heads)), dim=-1)
+                q_config = calibration.get("q_calibration")
+                assert q_config, "per-head FP8 requires Q calibration"
+                q_scales = shard(
+                    scale_tensor(q_config, (calibrated_layer_count, q_config["num_head"])), q_config["num_head"],
+                )
+            else:
+                scales = scale_tensor(calibration, (calibrated_layer_count, 2))
+                q_scales = None
+
+        # 阶段三：绑定标定数值；后续 initialize_storage 将其迁移到实际设备。
+        self.scales = scales
+        self.q_scales = q_scales
+
     def get_state_type(self) -> str:
         """返回包含 per-tensor 或 per-head 标定方式的 FP8 方案标记。"""
         return "gqa_fp8_static_" + self.config.scale_mode
 
     def initialize_storage(self, token_capacity: int) -> None:
         """绑定 KV 与真实标定参数，并预备 FlashInfer 使用的 CPU scale。"""
+        assert self.scales is not None, "static FP8 calibration must be bound before allocation"
         self.capacity = token_capacity
         shape = self._storage_shape()
         self.k_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
         self.v_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
-        # meta 准备阶段保留真实标定值，实际分配时再迁移到 KV 所在设备。
+        # 统一标定阶段保留 CPU 数值，实际分配时再迁移到 KV 所在设备。
         if self.k_storage.device.type != "meta":
             self.scales = self.scales.to(device=self.k_storage.device)
             if self.q_scales is not None:
@@ -235,14 +286,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
         dst_token_indices: torch.Tensor,
         remote_dp_full_att_state: StaticFP8FullAttentionState,
     ) -> None:
-        """先校验标定方式与标定身份，再复制兼容的 FP8 KV 编码。"""
-        assert (
-            remote_dp_full_att_state.config.scale_mode,
-            remote_dp_full_att_state.config.calibration_id,
-        ) == (
-            self.config.scale_mode,
-            self.config.calibration_id,
-        ), "incompatible static FP8 calibration"
+        """复制相同配置的 FP8 KV 编码；各 DP 使用相同的静态标定参数。"""
         assert type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config, (
             "DP copy requires the same encoding and equivalent TP state configurations"
         )

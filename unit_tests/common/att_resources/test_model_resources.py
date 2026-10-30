@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
@@ -21,8 +22,6 @@ from lightllm.common.att_resources.full_att import (
 from lightllm.common.att_resources.full_att import PackedMLAFullAttentionState, PackedMLAAttentionConfig
 from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
 from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
-from lightllm.models.qwen3next.att_resource_manager import Qwen3NextAttResourceManager
-from lightllm.models.glm5_next.att_resource_manager import Glm5NextAttResourceManager
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -58,8 +57,6 @@ def make_resources(glm: bool, tp: int, rank: int, mtp: int, *, draft_layers: int
         all_layer_num=4,
         draft_full_att_kv_layer_num=draft_layers,
     )
-    manager_cls = Glm5NextAttResourceManager if glm else Qwen3NextAttResourceManager
-    resources = manager_cls(config, 3, mtp, tp_rank=rank)
     if glm:
         full = PackedMLAFullAttentionState(
             PackedMLAAttentionConfig(
@@ -77,9 +74,10 @@ def make_resources(glm: bool, tp: int, rank: int, mtp: int, *, draft_layers: int
         )
         full.initialize_storage(16)
     main, draft = create_full_attention_roles(full, 4)
-    resources.bind_storage(
-        main,
-        FullAttKVAllocator(16, 4),
+    resources = build_hybrid_resources(
+        config=config, request_capacity=3, mtp_step=mtp, tp_rank=rank,
+        full_state=main,
+        full_allocator=FullAttKVAllocator(16, 4),
         draft_full_state=draft,
         big_page_capacity=4,
         small_page_capacity=2,
@@ -95,22 +93,22 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(glm: bool, tp: i
     targets = [make_resources(glm, tp, rank, mtp) for rank in range(tp)]
     expected = []
     for rank, (resources, full) in enumerate(sources):
-        cfg = resources.cache_config
+        cfg = main_linear_state(resources).config
         for storage_buffer in full_state_test_buffers(full).values():
             storage_buffer.fill_(1 if glm else rank // max(1, tp // 2) + 1)
         state = main_linear_state(resources)
         local_start = 0
         for local_heads, global_heads in (
-            (cfg.num_linear_k_heads, cfg.global_linear_k_heads),
-            (cfg.num_linear_k_heads, cfg.global_linear_k_heads),
-            (cfg.num_linear_v_heads, cfg.global_linear_v_heads),
+            (cfg.num_k_heads, cfg.global_k_heads),
+            (cfg.num_k_heads, cfg.global_k_heads),
+            (cfg.num_v_heads, cfg.global_v_heads),
         ):
             start = rank * local_heads // max(1, tp * local_heads // global_heads)
             for h in range(local_heads):
                 state.conv_state[:, 0, local_start + h * 8 : local_start + (h + 1) * 8].fill_(start + h + 3)
             local_start += local_heads * 8
-        for h in range(cfg.num_linear_v_heads):
-            state.ssm_state[:, : mtp + 1, h].fill_(rank * cfg.num_linear_v_heads + h + 7)
+        for h in range(cfg.num_v_heads):
+            state.ssm_state[:, : mtp + 1, h].fill_(rank * cfg.num_v_heads + h + 7)
         slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
         resources.save_bounded_att_pages([0], page_kind="big", slot_ids=[slot])
         torch.cuda.synchronize()

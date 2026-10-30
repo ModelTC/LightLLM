@@ -118,6 +118,7 @@ def test_model_and_cpu_service_use_identical_storage_geometry(
         model.max_total_token_num, model.max_req_num = 19, 1
         prepare_model_states(model)
         resources = model.att_resource_manager
+        resources.finish_state_creation()
         resources.initialize_resources(args, token_capacity=model.max_total_token_num, mem_fraction=args.mem_fraction)
         (state,) = resources.get_full_attention_states("main")
         assert state.config.head_num == local_heads and state.config.head_dim == dim
@@ -172,7 +173,51 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
     template = rebuild_full_state(state, config=state.config, token_capacity=0, device="meta")
     resources = AttResourceManager(request_capacity=1)
     resources.set_att_state("main", rebuild_full_state(template, config=template.config))
+    resources.finish_state_creation()
     resources.initialize_resources(args, token_capacity=None, mem_fraction=0.75, device="cpu")
     assert resources.full_att_allocator.size == 28
     assert resources.get_pd_page_bytes() == reference.get_pd_page_bytes()
     assert observed_devices == [torch.device("cuda", 3)]
+
+
+def test_cpu_layout_uses_all_model_factory_states(
+    args: StartArgs | EasyDict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+):
+    """同一模型返回多种方案和共享层时，CPU 页采用实际 State 列表。"""
+    from lightllm.common.att_resources.full_att import FullAttentionState, GQAFullAttentionState
+
+    class MixedStorageModel(LlamaTpPartModel):
+        @classmethod
+        def _create_full_att_states(
+            cls, model_config: dict[str, object], args: StartArgs | EasyDict, *,
+            model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+        ) -> list[FullAttentionState]:
+            (template,) = super()._create_full_att_states(
+                model_config=model_config, args=args, model_logical_layer_ids=model_logical_layer_ids,
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            )
+            return [
+                GQAFullAttentionState(
+                    layout_config=dataclasses.replace(
+                        template.config, logical_layer_groups=(model_logical_layer_ids[:2],), dtype=torch.bfloat16,
+                    ), page_size=args.page_size, device="meta",
+                ),
+                GQAFullAttentionState(
+                    layout_config=dataclasses.replace(
+                        template.config, logical_layer_groups=(model_logical_layer_ids[2:],), dtype=torch.float16,
+                    ), page_size=args.page_size, device="meta",
+                ),
+            ]
+
+    config = dict(model_type="llama", num_attention_heads=8, hidden_size=128, num_hidden_layers=3)
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    monkeypatch.setattr("lightllm.utils.llm_utils.get_llm_model_class", lambda: MixedStorageModel)
+    cpu_layouts = build_cpu_cache_layouts()
+    model = MixedStorageModel.__new__(MixedStorageModel)
+    model.config, model.args = config, args
+    model.tp_rank_, model.tp_world_size_, model.max_req_num = 0, 1, 1
+    prepare_model_states(model)
+    model.att_resource_manager.finish_state_creation()
+    runtime_layouts = model.att_resource_manager.get_cpu_transfer_layouts()
+    assert set(cpu_layouts) == set(runtime_layouts) == {"main_gqa_bf16_state", "main_gqa_fp16_state"}
+    assert cpu_layouts == runtime_layouts

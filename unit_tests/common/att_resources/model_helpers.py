@@ -16,9 +16,38 @@ from lightllm.common.att_resources.full_att import (
 
 
 if TYPE_CHECKING:
+    from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
+    from lightllm.common.att_resources.allocators import FullAttKVAllocator
     from collections.abc import Mapping, Sequence
     from lightllm.common.att_resources.att_resource_manager import AttResourceManager
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
+
+
+def bind_test_fp8_calibration(
+    state: StaticFP8FullAttentionState,
+    scales: torch.Tensor,
+    q_scales: torch.Tensor | None = None,
+) -> None:
+    """将测试的本地期望值展开为标定文件格式，再通过生产绑定入口初始化。
+
+    每个 TP 分片放置相同测试值；这样重建任意 rank 都能保留原测试的本地 scale。
+    真实的非重复全局 head 切片由 test_model_calibration 单独覆盖。
+    """
+    config = state.config
+    calibration = {"num_layers": len(config.logical_layer_groups), "quant_type": config.scale_mode}
+    if config.scale_mode == "per_head":
+        heads = config.head_num
+        k, v = scales.split(heads, dim=-1)
+        scales = torch.cat((k.repeat(1, config.tp_world_size), v.repeat(1, config.tp_world_size)), dim=-1)
+        assert q_scales is not None
+        q_scales = q_scales.repeat(1, config.tp_world_size)
+        calibration["num_head"] = heads * config.tp_world_size
+        calibration["q_calibration"] = {
+            "num_head": q_scales.shape[1], "scales_shape": list(q_scales.shape), "scales": q_scales.tolist(),
+        }
+    calibration["scales_shape"] = list(scales.shape)
+    calibration["scales"] = scales.tolist()
+    state.bind_calibration(calibration=calibration, storage_layer_start=0)
 
 
 def rebuild_full_state(
@@ -39,6 +68,9 @@ def rebuild_full_state(
     if isinstance(template, StaticFP8FullAttentionState):
         prepared_full_state = type(template)(
             config, page_size=page_size, device=device,
+        )
+        bind_test_fp8_calibration(
+            state=prepared_full_state,
             scales=template.scales if scales is None else scales,
             q_scales=template.q_scales if q_scales is None else q_scales,
         )
@@ -151,3 +183,70 @@ def full_state_test_fields(
         name: TensorField(tensor=tensor, axes=("layer", "token", "head", "group") if name.endswith("_scale") else axes)
         for name, tensor in buffers.items()
     }
+
+
+def build_hybrid_resources(
+    config: Qwen3NextResourceConfig,
+    request_capacity: int,
+    mtp_step: int,
+    full_state: FullAttentionState,
+    full_allocator: FullAttKVAllocator,
+    *,
+    big_page_capacity: int,
+    small_page_capacity: int,
+    draft_full_state: FullAttentionState | None = None,
+    tp_rank: int = 0,
+) -> AttResourceManager:
+    """测试按既定几何参数组装通用管理器，不依赖旧模型管理器的构造/绑定流程。"""
+    from lightllm.common.att_resources import AttResourceManager
+    from lightllm.common.att_resources.allocators import StatePageAllocator
+    from lightllm.common.att_resources.bounded_att import ConvSSMStateConfig, create_gdn_state, create_kda_state
+    from lightllm.common.att_resources.att_tail import KPoolStateConfig, create_kpool_state
+    from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
+
+    manager = AttResourceManager(request_capacity=request_capacity)
+    glm = isinstance(config, Glm5NextResourceConfig)
+    create_state = create_kda_state if glm else create_gdn_state
+    bounded_state = create_state(
+        config=ConvSSMStateConfig(
+            logical_layer_ids=tuple(
+                layer for layer in range(config.all_layer_num) if (layer + 1) % config.full_attention_interval
+            ),
+            global_k_heads=config.global_linear_k_heads,
+            global_v_heads=config.global_linear_v_heads,
+            key_dim=config.head_linear_k_dim,
+            value_dim=config.head_linear_v_dim,
+            conv_width=config.conv_kernel_size - 1,
+            conv_dtype=config.conv_state_dtype,
+            ssm_dtype=config.ssm_state_dtype,
+            tp_rank=tp_rank,
+            tp_world_size=config.tp_world_size,
+        ),
+        request_capacity=request_capacity, mtp_step=mtp_step, device="cuda",
+    )
+    bounded_state.initialize_page_pools(
+        big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity, pin_memory=True,
+    )
+    manager.set_att_state("main", bounded_state)
+    for role, state in (("main", full_state), ("draft0", draft_full_state)):
+        if state is None:
+            continue
+        manager.set_att_state(role, state)
+        if glm:
+            tail = create_kpool_state(
+                config=KPoolStateConfig(
+                    logical_layer_ids=tuple(layer for group in state.config.logical_layer_groups for layer in group),
+                    pool_size=config.index_kpool, head_dim=config.index_head_dim, dtype=config.full_att_dtype,
+                    tp_rank=tp_rank, tp_world_size=config.tp_world_size,
+                ),
+                request_capacity=request_capacity, mtp_step=mtp_step, device="cuda",
+            )
+            manager.set_att_state(role, tail)
+    manager.full_att_allocator = full_allocator
+    manager.bounded_att_big_page_allocator = StatePageAllocator(big_page_capacity, reserved_slots=2)
+    manager.bounded_att_small_page_allocator = StatePageAllocator(small_page_capacity) if small_page_capacity else None
+    manager.bounded_att_cpu_load_big_page_slot = big_page_capacity - 2
+    manager.bounded_att_cpu_offload_big_page_slot = big_page_capacity - 1
+    manager.cpu_tail_restore = glm
+    manager.finish_state_creation()
+    return manager

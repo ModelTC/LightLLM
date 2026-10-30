@@ -1,3 +1,4 @@
+from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 import dataclasses
@@ -14,7 +15,6 @@ from lightllm.common.att_resources.full_att import (
     PackedMLAAttentionConfig,
 )
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
-from lightllm.models.glm5_next.att_resource_manager import Glm5NextAttResourceManager
 from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -84,11 +84,11 @@ def make_mems(monkeypatch, request):
                  page_size=args.page_size,
             )
             full.initialize_storage(32)
-            resources = Glm5NextAttResourceManager(config, 4, local_mtp_step, tp_rank=rank)
             main, draft = create_full_attention_roles(full, config.all_layer_num)
-            resources.bind_storage(
-                main,
-                FullAttKVAllocator(full.capacity, full.page_size),
+            resources = build_hybrid_resources(
+                config=config, request_capacity=4, mtp_step=local_mtp_step, tp_rank=rank,
+                full_state=main,
+                full_allocator=FullAttKVAllocator(full.capacity, full.page_size),
                 draft_full_state=draft,
                 big_page_capacity=6,
                 small_page_capacity=2,
