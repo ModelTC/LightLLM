@@ -137,8 +137,9 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     context = InferenceContext()
     context.is_hybrid_att_model = True
     context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
-    context.radix_cache = SimpleNamespace(
-        _release_pages=lambda kind, slots: (freed_small_pages if kind == "small" else freed_big_pages).extend(slots),
+    context.att_resource_manager = SimpleNamespace(
+        bounded_att_small_page_allocator=SimpleNamespace(free=freed_small_pages.extend),
+        bounded_att_big_page_allocator=SimpleNamespace(free=freed_big_pages.extend),
     )
     req = SimpleNamespace(
         req_idx=0,
@@ -182,7 +183,9 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
 
     resources = SimpleNamespace(
         get_cpu_transfer_layouts=lambda: {},
-        read_req_from_cpu=lambda buffer, pages, tokens, **kwargs: loaded_indexes.extend(tokens.tolist()),
+        read_req_from_cpu=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded_indexes.extend(
+            token_indices.tolist()
+        ),
     )
     backend = SimpleNamespace(
         is_master_in_dp=False,

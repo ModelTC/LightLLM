@@ -661,6 +661,7 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: context.args)
     context.radix_cache = tree
+    context.att_resource_manager = tree.att_resource_manager
     context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(100, 132).view(1, -1))
     req = InferReq.__new__(InferReq)
     req.req_idx = req.cur_output_len = 0
