@@ -489,3 +489,35 @@ def test_dp_overlap_decode_delegates_empty_layout(monkeypatch):
         "forward_wait",
         "pre_post",
     ]
+
+
+@pytest.mark.parametrize("mode", ["dspark", "vanilla_no_att"])
+@pytest.mark.parametrize("max_len_check_env", [None, "1", ""])
+def test_draft_loading_restores_target_max_len_check(monkeypatch, mode, max_len_check_env):
+    import os
+    from lightllm.server.router.model_infer.mode_backend import base_backend
+
+    if max_len_check_env is None:
+        monkeypatch.delenv("DISABLE_CHECK_MAX_LEN_INFER", raising=False)
+    else:
+        monkeypatch.setenv("DISABLE_CHECK_MAX_LEN_INFER", max_len_check_env)
+
+    class Draft:
+        def __init__(self, args):
+            assert os.environ["DISABLE_CHECK_MAX_LEN_INFER"] == "1"
+            self.previous = args["mtp_previous_draft_models"]
+            assert args["max_total_token_num"] == 41
+
+    monkeypatch.setattr(base_backend.PretrainedConfig, "get_config_dict", lambda _: ({}, {}))
+    monkeypatch.setattr(base_backend, "get_draft_model_class", lambda **_: Draft)
+    backend = ModeBackend.__new__(ModeBackend)
+    backend.args = SimpleNamespace(mtp_mode=mode, mtp_step=2, mtp_draft_model_dir=["draft0", "draft1"])
+    backend.model = SimpleNamespace(mem_manager=SimpleNamespace(size=41))
+    backend.disable_chunked_prefill = False
+    backend.logger = SimpleNamespace(info=lambda _: None)
+    backend.init_mtp_draft_model(dict(load_way="HF", graph_max_batch_size=2, mem_fraction=0.75))
+
+    assert os.environ.get("DISABLE_CHECK_MAX_LEN_INFER") == max_len_check_env
+    assert len(backend.draft_models) == (2 if mode == "vanilla_no_att" else 1)
+    for index, draft in enumerate(backend.draft_models):
+        assert draft.previous == backend.draft_models[:index]

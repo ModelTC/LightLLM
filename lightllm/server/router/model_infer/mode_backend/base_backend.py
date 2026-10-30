@@ -265,6 +265,10 @@ class ModeBackend:
         # 策略可能读取模型、缓存管理器和 rank 等全局调度状态，因此在 backend 完成初始化后再创建。
         self.prefill_queue_strategy = create_prefill_queue_strategy(self)
 
+        if self.args.mtp_mode is not None:
+            # Draft weights and graphs must coexist with the target's prefill peak.
+            self.model._check_max_len_infer()
+
         # 启动infer_loop_thread, 启动两个线程进行推理，对于具备双batch推理折叠得场景
         # 可以降低 cpu overhead，大幅提升gpu得使用率。
         self.infer_loop_thread = threading.Thread(target=self.infer_loop, daemon=True)
@@ -317,6 +321,7 @@ class ModeBackend:
         spec_mode = self.args.mtp_mode
         is_chained_draft = spec_mode in ("vanilla_with_att", "vanilla_no_att")
 
+        max_len_check_env = os.environ.get("DISABLE_CHECK_MAX_LEN_INFER")
         os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
 
         draft_model_count = self.max_draft_step if is_chained_draft else 1
@@ -357,6 +362,10 @@ class ModeBackend:
             self.draft_models.append(draft_model)
 
             self.logger.info(f"loaded speculative draft model class {self.draft_models[i].__class__}")
+        if max_len_check_env is None:
+            del os.environ["DISABLE_CHECK_MAX_LEN_INFER"]
+        else:
+            os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = max_len_check_env
         return
 
     def _async_copy_next_token_infos_to_pin_mem(
