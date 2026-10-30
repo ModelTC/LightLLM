@@ -125,6 +125,15 @@ def test_backend_allocates_all_roles_before_warmup(
     models, warmed, padded, captured, prefill_captured, ready = [], set(), set(), set(), set(), []
     checked = []
     mapping = SimpleNamespace(bind_hold_page=lambda indices: None)
+    request_allocations = []
+
+    def create_req_manager(max_request_num: int, max_sequence_length: int):
+        assert len(models) == 1 + draft_count
+        assert all(not hasattr(item, "req_manager") for item in models)
+        request_allocations.append((max_request_num, max_sequence_length))
+        return mapping
+
+    monkeypatch.setattr("lightllm.common.req_manager.ReqManager", create_req_manager)
 
     def mark_backends(model: TpPartBaseModel):
         # 第一个模型初始化 backend 前，全部 State 已创建完成，可通过缓存查询取得资源。
@@ -145,6 +154,7 @@ def test_backend_allocates_all_roles_before_warmup(
 
     def warmup(model: TpPartBaseModel):
         assert model.backends_bound
+        assert all(item.req_manager is mapping for item in models)
         assert all(item.att_resource_manager is models[0].att_resource_manager for item in models)
         assert model.att_resource_manager.full_att_allocator.size == 32
         assert all(item.max_total_token_num == 32 for item in models[: models.index(model) + 1])
@@ -171,11 +181,10 @@ def test_backend_allocates_all_roles_before_warmup(
         model.is_mtp_draft_model = bool(index)
         model.args, model.config = args, draft_config.copy() if index else config.copy()
         model.max_req_num, model.max_total_token_num, model.mem_fraction = 2, None, 0.9
-        model.max_seq_length, model.batch_max_tokens = 32, 16
+        model.max_seq_length, model.batch_max_tokens = (32 if index else 24), 16
         model.tp_world_size_, model.tp_rank_ = 1, 0
         model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(offset, offset + model.config["n_layer"])]
         offset += len(model.layers_infer)
-        model.req_manager = mapping
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
         if index:
             model.main_model, model.mtp_previous_draft_models = models[0], models[1:].copy()
@@ -190,6 +199,7 @@ def test_backend_allocates_all_roles_before_warmup(
         models.append(model)
 
     def memory_info(device: str | torch.device | int):
+        assert all(item.req_manager is mapping for item in models)
         manager = models[0].att_resource_manager
         states = manager.get_full_attention_states()
         assert all(read_kv_storage(state) is None for state in states)
@@ -228,6 +238,13 @@ def test_backend_allocates_all_roles_before_warmup(
                     dict(args=args, world_size=1, load_way="HF", weight_dir=str(tmp_path), max_total_token_num=None)
                 )
         else:
+            assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"
+            req_manager = create_req_manager(
+                max_request_num=models[0].max_req_num,
+                max_sequence_length=max(item.get_req_manager_max_seq_len() for item in models),
+            )
+            for item in models:
+                item.bind_req_manager(req_manager=req_manager)
             for index, item in enumerate(models):
                 item.prepare_att_resources()
                 assert all(other.att_resource_manager is models[0].att_resource_manager for other in models[: index + 1])
@@ -245,6 +262,7 @@ def test_backend_allocates_all_roles_before_warmup(
                 }
 
     start_runtime()
+    assert request_allocations == [(2, 32)]
     assert captured == {id(model) for model in models}
     assert checked == [models[0]]
     assert ready == ([True] if via_backend else [])

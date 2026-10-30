@@ -59,9 +59,6 @@ class Glm5NextMTPModel(TpPartBaseModel):
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
     def _init_att_resource_manager(self):
         from lightllm.models.glm5_next.att_resource_manager import init_model_att_tail
         from lightllm.common.basemodel.basemodel_utils import init_model_full_attention

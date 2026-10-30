@@ -108,8 +108,6 @@ class TpPartBaseModel:
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
         with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
             self._init_weights()
-        with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
@@ -128,6 +126,14 @@ class TpPartBaseModel:
         draft_index = len(self.mtp_previous_draft_models)
         assert draft_index < MAX_DRAFT_MODELS, "at most 36 draft models are supported"
         return f"draft{draft_index}"
+
+    def get_req_manager_max_seq_len(self) -> int:
+        """返回请求到 token 索引映射所需的长度容量，不表示模型支持的最大上下文长度。"""
+        return max(0, self.batch_max_tokens or 0, self.max_seq_length or 0)
+
+    def bind_req_manager(self, req_manager: ReqManager) -> None:
+        """绑定启动流程创建的共享请求管理器；main/draft 共用请求槽位和 token 索引映射。"""
+        self.req_manager = req_manager
 
     def prepare_att_resources(self) -> None:
         """Prepare this model's attention States from its own configuration."""
@@ -238,20 +244,6 @@ class TpPartBaseModel:
                 f"Try set --max_req_total_len a smaller value < {self.max_total_token_num}."
             )
 
-        return
-
-    def _init_req_manager(self):
-        if self.is_mtp_draft_model:
-            self.req_manager = self.main_model.req_manager
-            return
-        create_max_seq_len = 0
-
-        if self.batch_max_tokens is not None:
-            create_max_seq_len = max(create_max_seq_len, self.batch_max_tokens)
-        if self.max_seq_length is not None:
-            create_max_seq_len = max(create_max_seq_len, self.max_seq_length)
-
-        self.req_manager = ReqManager(self.max_req_num, create_max_seq_len)
         return
 
     def _init_infer_layer(self, start_layer_index=0):

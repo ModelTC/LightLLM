@@ -404,7 +404,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         draft._init_weights()
         draft._init_infer_layer()
         draft._init_some_value()
-        draft._init_req_manager()
+        draft.bind_req_manager(req_manager=main.req_manager)
         draft.max_req_num = main.max_req_num
         assert main.config["mhc"] and not draft.config["mhc"]
         assert draft.config["layer_types"] is not main.config["layer_types"]

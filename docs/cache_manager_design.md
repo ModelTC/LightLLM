@@ -1603,23 +1603,25 @@ P/D 使用相同的模型及 main/draft 资源集合，但允许不同的 `mtp_s
 
 ### 7.1 初始化与绑定
 
-BaseModel 提供只操作当前模型的公共阶段接口；main 调用自己的接口，各 draft 调用各自的接口，模型方法不接收其他模型或组织跨模型循环。`ModeBackend.init_model()` 直接组织 main/draft 构造、资源准备、共享分配和各模型运行时初始化，并在全部初始化成功后发布就绪标志。benchmark 和资源验证脚本在各自调用点展开相同流程，不另设跨模型运行时启动封装。模型构造保留配置、权重、请求管理器和计算层的准备。
+BaseModel 提供只操作当前模型的公共阶段接口；main 调用自己的接口，各 draft 调用各自的接口，模型方法不接收其他模型或组织跨模型循环。`ModeBackend.init_model()` 直接组织 main/draft 构造、共享请求管理器创建与绑定、资源准备、共享分配和各模型运行时初始化，并在全部初始化成功后发布就绪标志。benchmark 和资源验证脚本在各自调用点展开相同流程，不另设跨模型运行时启动封装。模型构造保留配置、权重和计算层的准备，不创建或读取请求管理器。
 
 | 单模型公共接口 | 封装的内部操作 |
 | --- | --- |
+| `get_req_manager_max_seq_len()` | 返回请求映射所需长度容量，取本模型 `batch_max_tokens`、`max_seq_length` 与 0 的最大值；未配置的值按 0 处理，不表示模型最大上下文能力 |
+| `bind_req_manager(req_manager)` | 绑定调用方创建的共享实例，不判断 main/draft，也不通过 `main_model` 获取资源 |
 | `prepare_att_resources()` | 在本模型 KV 内存分区内调用 `_init_att_resource_manager` 准备并注册自身全部 State |
 | `init_runtime()` | 绑定本模型 HOLD 页、检查容量、初始化 attention backend 和 hidden collector，完成 kernel 调优、padded-request 和 decode/prefill CUDA Graph 初始化；main 在自身图初始化后执行最大长度检查 |
 
-1. 构造 main model，再构造所有 draft model。各模型加载自己的权重，准备配置和计算层，此时不创建 attention State。ReqManager 仍由 main/draft 共用，其构造不依赖 attention 资源已经初始化。
+1. 构造 main model，再构造所有 draft model。各模型加载自己的权重，准备配置和计算层，此时不创建 attention State。随后 backend 检查各模型的 `max_req_num` 一致，取所有模型 `get_req_manager_max_seq_len()` 的最大值，在主模型的 `MemoryTag.KV_CACHE` 分区中创建唯一 `ReqManager`，逐模型调用 `bind_req_manager()`。main/draft 共用请求槽位与逻辑 token 到物理索引的映射，模型不再提供 `_init_req_manager()` 私有初始化或子类共享覆盖。
 2. backend 按 main、各 draft 的顺序分别调用 `prepare_att_resources()`。main 的资源 hook 创建唯一管理器；各 draft 的准备入口直接引用 main 的管理器，其资源 hook 通过 `set_att_state` 只添加本模型的 State。每个模型一次准备所需的 full-attention meta State、GDN/KDA 固定运行态和 indexer tail，各 State 的 config 保存容量规划与传输所需的完整布局信息。静态 FP8 标定偏移由模型侧配置 helper 计算：main 从 0 开始，draft 累加 main 及前序 draft 的实际 full-attention 层数；混合模型排除 bounded-attention 层，原生 MTP 使用自己的层定义，无 attention 的 draft 不占标定行。公共准备接口及资源 hook 均不接收标定偏移，也不返回层数。draft 可以拥有自己的 linear attention，不从 main 的 State 结构推导。main 和 draft 分别确定 KV head 数、head dimension、编码和层号，不提前在 main buffer 中预留 draft 层，也不在 Model 上保存 State 引用。
-3. backend 检查 main 和所有 draft 使用相同请求容量且引用同一个管理器，随后调用 `manager.initialize_resources(args, token_capacity=main.max_total_token_num, mem_fraction=main.mem_fraction)`。管理器先标记 State 创建完成；每个模型的成员已经直接保存在共享实例中，无需合并管理器或 State。不同 draft 即使方案相同，也可拥有不同的配置、存储和游标。
+3. backend 检查 main 和所有 draft 引用同一个 attention 资源管理器，随后调用 `manager.initialize_resources(args, token_capacity=main.max_total_token_num, mem_fraction=main.mem_fraction)`。管理器先标记 State 创建完成；每个模型的成员已经直接保存在共享实例中，无需合并管理器或 State。不同 draft 即使方案相同，也可拥有不同的配置、存储和游标。
 4. `finish_state_creation()` 完成后，通过管理器接口计算容量并初始化实际存储。FullAttentionState 原地分配 buffer；不同 State 可以具有不同物理布局，但共享 allocator 的索引域及容量；同一分配域只创建一个 allocator。实际存储分配完成后再配置 CPU/PD 布局。
 5. 各 Model 继续使用同一个共享管理器。backend 按 main、各 draft 的顺序逐个调用 `init_runtime()`，其中 `_check_mem_size()` 从 `full_att_allocator.size` 更新当前模型的 `max_total_token_num` 并检查容量，随后完成 backend 绑定、warmup、padded-request 和图初始化，再初始化下一个模型。main 在自己的 `init_runtime()` 末尾执行最大长度检查；draft 不执行该检查。每次调用只操作当前模型，计算上下文和 attention backend 按本模型角色访问 State；MTP 游标仍由具体 State 持有。
 6. 全部模型的 `init_runtime()` 成功返回后，backend 清理临时显存并发布就绪标志，再建立 radix cache、共享存储导出及缓存/传输服务。初始化失败直接向调用方传播，不发布就绪标志；重复启动在修改现有资源前断言失败。
 
-BaseModel 保留 `_init_att_resource_manager()` 等现有私有扩展点，由单模型公共阶段接口调用，构造函数不调用运行时初始化。main 在资源 hook 中选择具体管理器，各模型分别在自己的 hook 中准备所需 attention State，子类可以继承适用的模型族实现。原生 MTP 如需复用 main 的资源配置，也在自身资源准备阶段读取；ReqManager 初始化只处理请求映射共享。
+BaseModel 保留 `_init_att_resource_manager()` 等现有私有扩展点，由单模型公共阶段接口调用，构造函数不调用运行时初始化。main 在资源 hook 中选择具体管理器，各模型分别在自己的 hook 中准备所需 attention State，子类可以继承适用的模型族实现。原生 MTP 如需复用 main 的资源配置，也在自身资源准备阶段读取；ReqManager 的创建与共享关系由 backend 组织，模型只提供容量需求和公共绑定接口。
 
-需要保留的跨模型阶段边界是：全部模型完成权重加载及 State 准备后才规划和分配共享容量。State 资源在创建完成后通过缓存查询取得；分配完成后的 attention backend 初始化、warmup、padded-request 和图初始化按单模型顺序执行，不要求全部模型先 warmup 再统一捕获图。其他调用方可按相同顺序复用 `prepare_att_resources()` 和 `init_runtime()`，共享分配和就绪标志仍由调用方协调。
+需要保留的跨模型阶段边界是：全部模型完成权重加载及 State 准备后才规划和分配共享容量。State 资源在创建完成后通过缓存查询取得；分配完成后的 attention backend 初始化、warmup、padded-request 和图初始化按单模型顺序执行，不要求全部模型先 warmup 再统一捕获图。其他调用方先通过 `get_req_manager_max_seq_len()` 汇总需求、创建共享请求管理器并调用 `bind_req_manager()`，再按相同顺序复用 `prepare_att_resources()` 和 `init_runtime()`，共享分配和就绪标志仍由调用方协调。
 
 单一 KV 方案的模型可在资源初始化入口内部复用 `basemodel_utils.init_model_full_attention(...)`：读取当前模型配置和计算层，通过 `get_model_calibration_storage_layer_start(model)` 解析标定起点，创建 meta State，再通过 `set_att_state(model.att_resource_role, state)` 绑定到共享管理器。该 helper 仅用于复用模型侧的构建逻辑，不作为独立启动阶段；管理器基类不提供单类 State 的准备接口。head 信息直接读取 State config；meta 定义不能通过绑定 buffer 视图改名，否则会妨碍后续实际存储分配。存在多种 KV 方案的模型应在自己的 hook 中组织各定义及其标定行映射。模型和 helper 不读取 main 或其他 draft 管理器来推导偏移。
 

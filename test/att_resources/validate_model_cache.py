@@ -293,13 +293,20 @@ def main():
         from lightllm.utils.envs_utils import set_model_init_status
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
         from lightllm.common.att_resources import AttResourceManager
+        from lightllm.common.req_manager import ReqManager
 
         models = (model, *draft_models)
         assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"
+        assert all(item.max_req_num == model.max_req_num for item in models), "models must share the request domain"
+        # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
+        max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
+        with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            req_manager = ReqManager(max_request_num=model.max_req_num, max_sequence_length=max_seq_len)
+        for item in models:
+            item.bind_req_manager(req_manager=req_manager)
         for item in models:
             item.prepare_att_resources()
         manager: AttResourceManager = model.att_resource_manager
-        assert all(item.max_req_num == model.max_req_num for item in models), "models must share the request domain"
         assert all(item.att_resource_manager is manager for item in models), "models must share one resource manager"
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.initialize_resources(

@@ -46,9 +46,6 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.block_size = int(self.config["block_size"])
         self.mask_token_id = int(self.config["mask_token_id"])
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
     def _init_att_backend(self):
         super()._init_att_backend()
         # FA3 is currently the only backend that supports non-causal block decode.

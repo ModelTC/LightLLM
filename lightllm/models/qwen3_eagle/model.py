@@ -46,9 +46,6 @@ class Qwen3EagleModel(LlamaTpPartModel):
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
     def _init_weights(self, start_layer_index=None):
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, quant_cfg=self.quant_cfg

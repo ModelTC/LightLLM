@@ -108,7 +108,6 @@ def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPa
         return resources.get_full_att_token_bytes() * (32 + args.page_size) + reserve, 0
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", check_runtime_before_profile)
-    model._init_req_manager()
     prepare_model_states(model)
     drafts = []
     if mtp:
@@ -119,11 +118,19 @@ def test_real_model_resource_hooks_and_shared_draft(monkeypatch: pytest.MonkeyPa
         draft.tp_rank_, draft.tp_world_size_ = 0, 1
         draft.max_req_num, draft.max_total_token_num = model.max_req_num, None
         draft.config = dict(model.config, num_hidden_layers=1, n_layer=1, full_attention_interval=1)
-        draft._init_req_manager()
+        draft.max_seq_length, draft.batch_max_tokens = model.max_seq_length, model.batch_max_tokens
         prepare_model_states(draft, logical_layer_ids=(4,))
         assert draft.att_resource_manager is model.att_resource_manager
         assert read_kv_storage(owned_states(draft.att_resource_manager.__dict__, FullAttentionState)[0]) is None
         drafts.append(draft)
+    models = (model, *drafts)
+    req_manager = ReqManager(
+        max_request_num=model.max_req_num,
+        max_sequence_length=max(item.get_req_manager_max_seq_len() for item in models),
+    )
+    for item in models:
+        item.bind_req_manager(req_manager=req_manager)
+    assert all(item.req_manager is req_manager for item in models)
     model.att_resource_manager.initialize_resources(
         args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
     )

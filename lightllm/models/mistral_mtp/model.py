@@ -41,10 +41,6 @@ class MistralMTPModel(MistralTpPartModel):
         self._sin_cached = self.main_model._sin_cached
         return
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-        return
-
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
         self.config["n_layer"] = 1

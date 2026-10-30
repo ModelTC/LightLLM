@@ -37,10 +37,6 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
         config.update(full_attention_interval=1, num_hidden_layers=1, n_layer=1)
         return config
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-        return
-
     def _init_config(self):
         super()._init_config()
         # MTP draft model: reuses the main model's config, but overrides the following:
