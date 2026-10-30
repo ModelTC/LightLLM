@@ -6,7 +6,7 @@ import dataclasses
 from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
+from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 
 if TYPE_CHECKING:
     from easydict import EasyDict

@@ -16,7 +16,7 @@ from lightllm.common.req_manager import ReqManager
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.router.model_infer.infer_batch import InferReq
-from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
+from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.envs_utils import get_env_start_args, get_unique_server_name

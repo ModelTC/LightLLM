@@ -20,8 +20,8 @@ from lightllm.common.att_resources.full_att import (
     FullAttentionConfig,
 )
 from lightllm.common.att_resources.full_att import PackedMLAFullAttentionState, PackedMLAAttentionConfig
-from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
-from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
+from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
+from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args
 

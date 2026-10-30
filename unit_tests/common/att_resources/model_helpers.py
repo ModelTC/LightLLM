@@ -16,7 +16,7 @@ from lightllm.common.att_resources.full_att import (
 
 
 if TYPE_CHECKING:
-    from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
+    from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
     from lightllm.common.att_resources.allocators import FullAttKVAllocator
     from collections.abc import Mapping, Sequence
     from lightllm.common.att_resources.att_resource_manager import AttResourceManager
@@ -202,7 +202,7 @@ def build_hybrid_resources(
     from lightllm.common.att_resources.allocators import StatePageAllocator
     from lightllm.common.att_resources.bounded_att import ConvSSMStateConfig, create_gdn_state, create_kda_state
     from lightllm.common.att_resources.att_tail import KPoolStateConfig, create_kpool_state
-    from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
+    from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 
     manager = AttResourceManager(request_capacity=request_capacity)
     glm = isinstance(config, Glm5NextResourceConfig)

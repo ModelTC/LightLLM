@@ -99,7 +99,7 @@ def _validate_flashqla():
     from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import (
         chunk_gated_delta_rule as fla_chunk_gated_delta_rule,
     )
-    from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
+    from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 
     linear_config = Qwen3NextResourceConfig.load_from_args()
     num_k_heads = linear_config.num_linear_k_heads

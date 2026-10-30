@@ -11,7 +11,7 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 )
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
-from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
+from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 
 if TYPE_CHECKING:
     from easydict import EasyDict

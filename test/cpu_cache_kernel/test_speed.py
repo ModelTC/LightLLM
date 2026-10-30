@@ -16,7 +16,7 @@ from lightllm.common.att_resources.full_att import (
     GQAFullAttentionState,
     FullAttentionConfig,
 )
-from lightllm.models.qwen3next.att_resource_config import Qwen3NextResourceConfig
+from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.common.att_resources import AttResourceManager
 from lightllm.common.att_resources.allocators import StatePageAllocator
 from lightllm.common.att_resources.bounded_att import create_gdn_state, ConvSSMStateConfig

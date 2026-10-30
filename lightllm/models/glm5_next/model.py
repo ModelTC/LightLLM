@@ -9,7 +9,7 @@ from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.models.glm5_next.att_resource_config import Glm5NextResourceConfig
+from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer

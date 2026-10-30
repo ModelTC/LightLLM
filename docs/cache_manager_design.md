@@ -326,7 +326,7 @@ lightllm/common/
 
 lightllm/models/<model>/
 ├── model.py                              # 三类 State 创建接口，决定本模型的资源组合
-└── att_resource_config.py                # 模型配置与可复用的 State 创建工具
+└── config.py                             # 模型专有配置与派生参数
 
 lightllm/utils/
 └── cpu_cache_layout.py                   # build_cpu_cache_layouts：构建 CPU cache 联合页布局
@@ -346,7 +346,7 @@ CPU 服务通过模型配置与 meta device 上的 State 描述生成页格式�
 
 无需模型特有初始化的场景直接使用 `AttResourceManager`，main 和各 draft 通过自身的准备流程向同一个管理器添加 State。它可以同时管理 full attention、bounded attention 和 indexer tail，不按 main 的 attention 类型再分一层管理器。构造函数只接收 `request_capacity`；各模型通过 `set_att_state` 绑定已创建的 State，allocator 在后续容量与存储初始化流程中设置。
 
-模型特有的 State 组合由 `model.py` 中三类创建接口确定，复用工具放在现有的 `att_resource_config.py`。Qwen3Next 创建 GDN，GLM 创建 KDA 和 K-pool tail；main/draft 分别返回各自的 State。所有模型共用 `AttResourceManager` 的聚合数据操作，不再保留 Qwen3Next/GLM 专用管理器及旧 `bind_storage()` 流程。
+模型特有的 State 组合由 `model.py` 中三类创建接口确定，模型专有配置及派生参数放在各自的 `config.py`。Qwen3Next 创建 GDN，GLM 创建 KDA 和 K-pool tail；main/draft 分别返回各自的 State。所有模型共用 `AttResourceManager` 的聚合数据操作，不再保留 Qwen3Next/GLM 专用管理器及旧 `bind_storage()` 流程。
 
 token 复制、bounded 运行态重置、大小页保存/恢复、MTP 提交及 tail 重置直接在 `AttResourceManager` 中遍历对应 State，不再增加仅转发调用的 helper。CPU/DP/PD 传输组织也直接在 `AttResourceManager` 的现有接口中实现，通过聚合查询选择参与 State；不再通过独立 helper 转发 State 集合及 allocator，模型子类仍可按特有需求覆盖操作。显式成员决定 State 归属，不另外维护 `_full_states`、`_bounded_states`、`_tail_states` 或 `_states` 注册表，也不按 `id(state)` 静默去重。基类允许在对象创建完成后缓存从这些成员派生的查询结果，缓存不参与资源装配。传输按 resource_id 匹配时可构建临时映射，它不决定模型的资源组织方式。
 
