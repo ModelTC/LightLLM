@@ -14,7 +14,6 @@ import torch
 
 from lightllm.common.att_resources import AttResourceManager
 from lightllm.common.att_resources.allocators import FullAttKVAllocator
-from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_template import TransformerLayerInferTpl
 from lightllm.common.basemodel.triton_kernel.kv_copy.prefill_compact_kv_flashmla_fp8 import (
@@ -70,7 +69,7 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
             actual = actual.view(torch.float8_e4m3fn).float() * state.scales[1][None, :, None]
             # Backends index fixed scales by physical row, even when model layer
             # IDs are sparse or include appended draft layers.
-            assert BaseAttBackend._find_storage_layer_index(None, k, v, state) == 1
+            assert state.get_storage_layer_index(logical_layer_id=8) == 1
             assert state.cpu_scales.shape == (2, 4)
         assert torch.equal(actual, kv)
 

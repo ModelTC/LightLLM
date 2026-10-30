@@ -10,7 +10,6 @@ from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
-    from lightllm.common.att_resources.full_att import FullAttentionState
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -76,16 +75,6 @@ class BaseAttBackend:
         is_parallel_block_draft = self.model.is_mtp_draft_model and args.mtp_mode in ("dspark", "dflash", "dflash2")
         return not is_parallel_block_draft
 
-    def _find_storage_layer_index(
-        self, k: torch.Tensor, v: torch.Tensor, state: "FullAttentionState"
-    ) -> int:
-        # 标定参数按物理层排列；每组只检查一个代表逻辑层，避免共享层重复计数。
-        for storage_layer_index, logical_layer_group in enumerate(state.config.logical_layer_groups):
-            layer_k, layer_v = state.get_layer_view(logical_layer_id=logical_layer_group[0])
-            if k.data_ptr() == layer_k.data_ptr() and v.data_ptr() == layer_v.data_ptr():
-                return storage_layer_index
-        raise AssertionError("K/V views do not belong to the same State layer")
-
 
 @dataclass
 class AttControl:
@@ -114,6 +103,8 @@ class AttControl:
     linear_att_prefill_dict: Dict = None
     linear_att_decode: bool = False
     linear_att_decode_dict: Dict = None
+    # 静态 FP8 标定按此逻辑层号查询 State 的物理行；其他后端可不使用。
+    logical_layer_id: Optional[int] = None
 
 
 @dataclass

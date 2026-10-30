@@ -9,7 +9,6 @@ from torch.utils._pytree import tree_leaves
 
 from lightllm.common.att_resources import AttResourceManager
 from lightllm.common.att_resources.full_att import FullAttentionConfig
-from lightllm.common.basemodel.attention.base_att import BaseAttBackend
 from lightllm.models.gemma4.model import Gemma4TpPartModel
 from unit_tests.common.att_resources.model_helpers import (
     full_state_test_buffers,
@@ -50,9 +49,7 @@ def test_shared_layers_use_two_physical_stores(kind: str, pd_args: "EasyDict") -
     assert views[2] == views[3]
     assert views[0] != views[2]
 
-    if kind in ("gqa", "static_head", "static_tensor"):
-        k, v = state.get_layer_view(logical_layer_id=11)
-        assert BaseAttBackend._find_storage_layer_index(None, k, v, state) == 1
+    assert [state.get_storage_layer_index(logical_layer_id=layer) for layer in (0, 4, 8, 11)] == [0, 0, 1, 1]
 
 
 @pytest.mark.parametrize("groups", [((),), ((0,), (0,)), ((0, 0),), (0, 4)])

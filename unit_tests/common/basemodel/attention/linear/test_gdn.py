@@ -6,6 +6,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.att_resources.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
@@ -74,7 +76,8 @@ def test_decode_state_initializes_normal_layout():
     assert state.b_num_accepted_tokens is None
 
 
-def test_decode_state_initializes_fixed_mtp_layout():
+@pytest.mark.parametrize("role", ["main", "draft0"])
+def test_decode_state_initializes_fixed_mtp_layout(role: str):
     b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     state, infer_state = _create_decode_state(
@@ -82,6 +85,7 @@ def test_decode_state_initializes_fixed_mtp_layout():
         dynamic_layout=False,
         b_req_idx=b_req_idx,
         req_to_mtp_state_index=req_to_mtp_state_index,
+        role=role,
     )
 
     state.init_state()
@@ -95,7 +99,8 @@ def test_decode_state_initializes_fixed_mtp_layout():
     )
 
 
-def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
+@pytest.mark.parametrize("role", ["main", "draft0"])
+def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
     b_req_idx = torch.tensor([2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     expected_cu_q_seq_len = torch.tensor([0, 2, 5, 5, 5, 5], dtype=torch.int32)
@@ -113,6 +118,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
         dynamic_layout=True,
         b_req_idx=b_req_idx,
         req_to_mtp_state_index=req_to_mtp_state_index,
+        role=role,
     )
 
     state.init_state()
@@ -338,7 +344,7 @@ def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_
     assert validate_calls == ["flashqla2", "flashqla3"]
 
 
-def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None):
+def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None, role="main"):
     model = SimpleNamespace(
         is_mtp_draft_model=False,
         mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
@@ -350,10 +356,23 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
     infer_state.req_manager = SimpleNamespace(
         HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
     )
+    infer_state.att_resource_role = role
+    if req_to_mtp_state_index is not None:
+        request_capacity = req_to_mtp_state_index.numel()
+        resources = AttResourceManager(request_capacity=request_capacity)
+        config = ConvSSMStateConfig(
+            logical_layer_ids=(3,), global_k_heads=1, global_v_heads=1,
+            key_dim=2, value_dim=2, conv_width=2, conv_dtype=torch.float32, ssm_dtype=torch.float32,
+        )
+        for model_role in ("main", "draft0"):
+            linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
+            linear.mtp_state_index = req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
+            resources.set_att_state(model_role, linear)
+        resources.finish_state_creation()
+        infer_state.att_resource_manager = resources
     state = gdn.LinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,
-            linear_state=SimpleNamespace(mtp_state_index=req_to_mtp_state_index),
             uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
         ),
         _infer_state_weak_ref=weakref.ref(infer_state),

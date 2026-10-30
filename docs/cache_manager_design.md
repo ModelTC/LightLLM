@@ -450,6 +450,8 @@ logical_layer_groups = (
 
 层命名统一使用 `logical_` 和 `storage_` 区分含义：`logical_layer_groups` 描述共享分组，`logical_layer_id` 是推理层传入的逻辑层号，`storage_layer_index` 是 Tensor layer 轴上的物理下标。State 的 `_logical_to_storage_layer` 保存两者的对应关系。KDA/GDN 和 K-pool 当前仍是一对一存储，配置使用 `logical_layer_ids`；三类 State 的 `get_layer_view(logical_layer_id=...)` 使用相同参数语义。FP8 标定的 `storage_layer_count`、`storage_layer_start` 表示物理行数和偏移，不能传逻辑层号。Tensor 轴标签 `"layer"` 保留，表示存储层轴。
 
+静态 FP8 的 FA3/FlashInfer 后端通过 `AttControl.logical_layer_id` 接收当前逻辑层号，再由 State 的 `get_storage_layer_index()` 查询标定行，不通过 KV 指针反查层号。该接口属于 `FullAttentionState` 的公共契约，所有具体实现按自己的层映射返回物理行；层视图和 KV 写入也使用此接口。
+
 State 根据分组展开逻辑层到物理下标的映射。上述配置的 `get_layer_view(logical_layer_id=0)` 与 `get_layer_view(logical_layer_id=4)` 返回同一份存储视图；`logical_layer_id=8` 返回另一份。分配、单 token 字节数、CPU/PD 布局和静态量化标定行数均按 `len(logical_layer_groups)` 计算，不按组内逻辑层总数计算，不重复保存物理层数或另一份配置映射。
 
 同组逻辑层共享该 State 的全部配套字段，必须使用兼容的布局和参数。分组只表达数据共享关系，不指定写入者或执行顺序；模型负责跳过共享消费者的 KV 写入，避免覆盖生产层数据。普通模型每个逻辑层单独一组；Gemma4 将后部共享层加入同类型的最后一个非共享层所在组。推理层按自己的逻辑层号访问，CPU 服务与模型使用同一套配置构建物理分组。DP/CPU/PD 传输按相同的物理层顺序搬运，main/draft 仍各自拥有独立 State。
@@ -511,6 +513,8 @@ class FullAttentionState:
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
     # ========================================================================
     def has_logical_layer(self, logical_layer_id: int) -> bool: ...
+
+    def get_storage_layer_index(self, logical_layer_id: int) -> int: ...
 
     def get_layer_view(self, logical_layer_id: int) -> ViewT:
         ...
@@ -1441,6 +1445,8 @@ CPU 页读写的 `cpu_page_indices`、写出的 `slot_ids` 与读回的 `big_pag
 | `commit_bounded_att_state(req_indices, accepted_steps)` | 在验证完成后选择各请求已接受的运行态，允许通过游标实现；不承担采样、KV 回收或请求长度更新 |
 
 `accepted_steps` 为逐请求接受的、已经执行过 forward 的输入步数，包含本轮基准输入步，不是“接受的 draft token 数”或新采样输出数。取值范围为 `[1, 本轮实际验证宽度]`；KDA/GDN 的原生索引为 `accepted_steps - 1`。实现不应把不存在的零步回滚当作有效操作。未启用 MTP 时，合法的一步提交可为无数据移动的操作。
+
+GDN/KDA Backend 不保存 State 引用。prefill/decode 按角色、算法和逻辑层号调用管理器的 `get_att_state()`；MTP decode 的 `init_state()` 在需要游标时局部获取当前角色唯一的对应算法 State，将 `mtp_state_index` 显式传给 fixed/dynamic 初始化函数。此初始化仍要求每个角色只有一个对应算法 State，不假定多个 State 共用游标。
 
 KDA 的提交可以只更新 `mtp_state_index`，下一轮 kernel 根据该游标选择输入状态。当前 DP/PD 不会发生在 MTP 提交后，源状态游标为 0，直接读取 Conv 的 `[:W]` 窗口和 SSM 的 `req_idx*(S+1)` 基准槽位。导入时写到目标的基准位置，并将游标设为 0。实现中以 TODO 标明：若以后支持 MTP 提交后传输，需要按已接受索引 j 选择 Conv 的 `[j:j+W]` 窗口和 SSM 的 `req_idx*(S+1)+j` 槽位。
 

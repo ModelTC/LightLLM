@@ -4,58 +4,6 @@ import triton
 import triton.language as tl
 
 
-@torch.no_grad()
-def destindex_copy_kv_flashmla_fp8(
-    KV_nope: torch.Tensor,
-    KV_rope: torch.Tensor,
-    DestLoc: torch.Tensor,
-    O_nope: torch.Tensor,
-    O_scale: torch.Tensor,
-    O_rope: torch.Tensor,
-):
-    seq_len = DestLoc.shape[0]
-    kv_nope_head_dim = KV_nope.shape[2]
-    kv_rope_head_dim = KV_rope.shape[2]
-
-    assert kv_nope_head_dim == 512, f"Expected kv_nope_head_dim=512, got {kv_nope_head_dim}"
-    assert kv_rope_head_dim == 64, f"Expected kv_rope_head_dim=64, got {kv_rope_head_dim}"
-    assert O_nope.shape[2] == 512
-    assert O_scale.shape[2] == 4
-    assert O_rope.shape[2] == 64
-
-    _fwd_kernel_destindex_copy_kv_flashmla_fp8[(seq_len,)](
-        KV_nope,
-        KV_rope,
-        DestLoc,
-        O_nope,
-        O_scale,
-        O_rope,
-        KV_nope.stride(0),
-        KV_nope.stride(1),
-        KV_nope.stride(2),
-        KV_rope.stride(0),
-        KV_rope.stride(1),
-        KV_rope.stride(2),
-        O_nope.stride(0),
-        O_nope.stride(1),
-        O_nope.stride(2),
-        O_scale.stride(0),
-        O_scale.stride(1),
-        O_scale.stride(2),
-        O_rope.stride(0),
-        O_rope.stride(1),
-        O_rope.stride(2),
-        FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,
-        FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
-        BLOCK_DMODEL_NOPE=512,
-        BLOCK_DMODEL_ROPE=64,
-        GROUP_SIZE=128,
-        num_warps=4,
-        num_stages=1,
-    )
-    return
-
-
 @triton.jit
 def _quant_scale(max_nope: tl.tensor, fp8_max: float):
     return tl.exp2(tl.ceil(tl.log2(tl.maximum(max_nope / fp8_max, 1e-4))))
@@ -124,4 +72,56 @@ def _fwd_kernel_destindex_copy_kv_flashmla_fp8(
 
         o_scale_ptrs = O_scale + dest_index * stride_o_scale_bs + tile_idx * stride_o_scale_d
         tl.store(o_scale_ptrs, kv_scale.to(tl.float32))
+    return
+
+
+@torch.no_grad()
+def destindex_copy_kv_flashmla_fp8(
+    KV_nope: torch.Tensor,
+    KV_rope: torch.Tensor,
+    DestLoc: torch.Tensor,
+    O_nope: torch.Tensor,
+    O_scale: torch.Tensor,
+    O_rope: torch.Tensor,
+):
+    seq_len = DestLoc.shape[0]
+    kv_nope_head_dim = KV_nope.shape[2]
+    kv_rope_head_dim = KV_rope.shape[2]
+
+    assert kv_nope_head_dim == 512, f"Expected kv_nope_head_dim=512, got {kv_nope_head_dim}"
+    assert kv_rope_head_dim == 64, f"Expected kv_rope_head_dim=64, got {kv_rope_head_dim}"
+    assert O_nope.shape[2] == 512
+    assert O_scale.shape[2] == 4
+    assert O_rope.shape[2] == 64
+
+    _fwd_kernel_destindex_copy_kv_flashmla_fp8[(seq_len,)](
+        KV_nope,
+        KV_rope,
+        DestLoc,
+        O_nope,
+        O_scale,
+        O_rope,
+        KV_nope.stride(0),
+        KV_nope.stride(1),
+        KV_nope.stride(2),
+        KV_rope.stride(0),
+        KV_rope.stride(1),
+        KV_rope.stride(2),
+        O_nope.stride(0),
+        O_nope.stride(1),
+        O_nope.stride(2),
+        O_scale.stride(0),
+        O_scale.stride(1),
+        O_scale.stride(2),
+        O_rope.stride(0),
+        O_rope.stride(1),
+        O_rope.stride(2),
+        FP8_MIN=torch.finfo(torch.float8_e4m3fn).min,
+        FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
+        BLOCK_DMODEL_NOPE=512,
+        BLOCK_DMODEL_ROPE=64,
+        GROUP_SIZE=128,
+        num_warps=4,
+        num_stages=1,
+    )
     return

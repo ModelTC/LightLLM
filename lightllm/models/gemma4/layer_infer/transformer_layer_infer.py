@@ -179,8 +179,8 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _att_control(self):
         if self.is_sliding and self.sliding_window_ > 0:
             w = self.sliding_window_ - 1
-            return AttControl(use_sliding_window=True, sliding_window=(w, 0))
-        return AttControl(use_sliding_window=False, sliding_window=(-1, -1))
+            return AttControl(use_sliding_window=True, sliding_window=(w, 0), logical_layer_id=self.layer_num_)
+        return AttControl(use_sliding_window=False, sliding_window=(-1, -1), logical_layer_id=self.layer_num_)
 
     def _get_layer_kv(self, infer_state: InferStateInfo):
         # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。

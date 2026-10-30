@@ -135,6 +135,11 @@ class FullAttentionState(ABC):
         ...
 
     @abstractmethod
+    def get_storage_layer_index(self, logical_layer_id: int) -> int:
+        """按逻辑层号查询存储及配套字段的物理行；共享逻辑层返回同一下标。"""
+        ...
+
+    @abstractmethod
     def get_layer_view(self, logical_layer_id: int) -> Any:
         """按逻辑层号返回存储视图；同组逻辑层返回同一物理层的数据，具体字段由该布局定义。"""
         raise NotImplementedError()

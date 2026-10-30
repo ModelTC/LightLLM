@@ -38,11 +38,6 @@ if TYPE_CHECKING:
 class KDALinearAttBackend(BaseAttBackend):
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
-        role = model.att_resource_role
-        (self.linear_state,) = (
-            state for state in model.att_resource_manager.get_bounded_attention_states(role)
-            if isinstance(state, KDAState)
-        )
         config = model.config["linear_attn_config"]
         self.num_heads = config["num_heads"]
         self.head_dim = config["head_dim"]
@@ -89,7 +84,11 @@ class KDAPrefillAttState(BasePrefillAttState):
         raw_beta = params["raw_beta"]
         backend: KDALinearAttBackend = self.backend
 
-        conv_states, ssm_states = self.backend.linear_state.get_layer_view(logical_layer_id=layer_num)
+        state = self.infer_state.att_resource_manager.get_att_state(
+            model_name=self.infer_state.att_resource_role, att_type="kda",
+            logical_layer_id=layer_num, state_class=KDAState,
+        )
+        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
         mixed_qkv = causal_conv1d_fn(
             mixed_qkv.transpose(0, 1),
@@ -140,16 +139,26 @@ class KDADecodeAttState(BaseDecodeAttState):
         mtp_step = self.backend.mtp_step
         if mtp_step == 0:
             self._init_normal_decode_state()
-        elif self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(mtp_step + 1)
+            return
+
+        # MTP 元数据按模型初始化，沿用每个角色只有一个 KDA State 的约束。
+        # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
+        (state,) = (
+            state for state in self.infer_state.att_resource_manager.get_bounded_attention_states(
+                self.infer_state.att_resource_role
+            )
+            if isinstance(state, KDAState)
+        )
+        if self.backend.uses_dynamic_spec_verify_layout():
+            self._init_dynamic_mtp_decode_state(mtp_step + 1, req_to_mtp_state_index=state.mtp_state_index)
         else:
-            self._init_fixed_mtp_decode_state(mtp_step)
+            self._init_fixed_mtp_decode_state(mtp_step, req_to_mtp_state_index=state.mtp_state_index)
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx
 
-    def _init_dynamic_mtp_decode_state(self, mtp_size: int):
+    def _init_dynamic_mtp_decode_state(self, mtp_size: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
         (
             self.b1_mtp_cu_q_seq_len,
             self.b_conv_buffer_idx,
@@ -157,12 +166,12 @@ class KDADecodeAttState(BaseDecodeAttState):
         ) = build_dynamic_mtp_linear_att_state_params(
             b_req_idx=self.infer_state.b_req_idx,
             b_mtp_index=self.infer_state.b_mtp_index,
-            req_to_mtp_state_index=self.backend.linear_state.mtp_state_index,
+            req_to_mtp_state_index=req_to_mtp_state_index,
             hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
         )
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
-    def _init_fixed_mtp_decode_state(self, mtp_step: int):
+    def _init_fixed_mtp_decode_state(self, mtp_step: int, *, req_to_mtp_state_index: torch.Tensor) -> None:
         mtp_size = mtp_step + 1
         batch_size = self.infer_state.batch_size
         assert batch_size % mtp_size == 0, (
@@ -179,7 +188,7 @@ class KDADecodeAttState(BaseDecodeAttState):
             device=self.infer_state.b_req_idx.device,
         )
         self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
-        self.b_num_accepted_tokens = self.backend.linear_state.mtp_state_index[self.b_conv_buffer_idx] + 1
+        self.b_num_accepted_tokens = req_to_mtp_state_index[self.b_conv_buffer_idx] + 1
         self._init_mtp_ssm_buffer_idx(mtp_size)
 
     def _init_mtp_ssm_buffer_idx(self, mtp_size: int):
@@ -210,7 +219,11 @@ class KDADecodeAttState(BaseDecodeAttState):
         raw_beta = params["raw_beta"]
         backend: KDALinearAttBackend = self.backend
 
-        conv_states, ssm_states = self.backend.linear_state.get_layer_view(logical_layer_id=layer_num)
+        state = self.infer_state.att_resource_manager.get_att_state(
+            model_name=self.infer_state.att_resource_role, att_type="kda",
+            logical_layer_id=layer_num, state_class=KDAState,
+        )
+        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=self.b_conv_buffer_idx)
         conv_update = causal_conv1d_update
         if backend.mtp_step > 0:

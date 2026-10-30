@@ -72,10 +72,12 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             k=k,
             v=v,
             alloc_func=alloc_func,
+            logical_layer_id=att_control.logical_layer_id,
         )
 
     def _fp8_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
+        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty,
+        *, logical_layer_id: int,
     ) -> torch.Tensor:
         self.backend: Fp8Fa3AttBackend = self.backend  # for typing
 
@@ -89,7 +91,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             self.infer_state.att_resource_manager,
             f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
         )
-        storage_layer_index = self.backend._find_storage_layer_index(k=cache_k, v=cache_v, state=state)
+        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
         static_q_scales = state.q_scales[storage_layer_index]
         q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales)
         q_scale = static_q_scales.view(1, k_head_num).expand(self.infer_state.b_seq_len.shape[0], k_head_num)
@@ -162,6 +164,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             k=k,
             v=v,
             alloc_func=alloc_func,
+            logical_layer_id=att_control.logical_layer_id,
         )
 
     def _fp8_decode_att(
@@ -170,6 +173,8 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         k: torch.Tensor,
         v: torch.Tensor,
         alloc_func=torch.empty,
+        *,
+        logical_layer_id: int,
     ):
         k_head_num = k.shape[1]
         k_head_dim = k.shape[2]
@@ -181,7 +186,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             self.infer_state.att_resource_manager,
             f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
         )
-        storage_layer_index = self.backend._find_storage_layer_index(k=cache_k, v=cache_v, state=state)
+        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
 
         q_head_num = q.shape[1]
         att_batch_size = self.b_att_seq_len.shape[0]

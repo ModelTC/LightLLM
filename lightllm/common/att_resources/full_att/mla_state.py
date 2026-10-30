@@ -76,14 +76,18 @@ class MLAFullAttentionState(FullAttentionState):
         """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
         return logical_layer_id in self._logical_to_storage_layer
 
+    def get_storage_layer_index(self, logical_layer_id: int) -> int:
+        """按逻辑层号查询存储及配套字段的物理行；共享逻辑层返回同一下标。"""
+        return self._logical_to_storage_layer[logical_layer_id]
+
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """按逻辑层号返回压缩 latent 视图，不拆分为 GQA 的 K/V head。"""
-        return self.storage[self._logical_to_storage_layer[logical_layer_id]]
+        return self.storage[self.get_storage_layer_index(logical_layer_id=logical_layer_id)]
 
     def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """通过 CUDA 算子将形状匹配的 MLA latent 数据写入指定物理 token 位置。"""
         assert token_indices.is_cuda, "token indices must reside on CUDA"
-        storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
+        storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
         if not len(token_indices):
             return
         assert self.storage.is_cuda, "KV writes require CUDA storage"

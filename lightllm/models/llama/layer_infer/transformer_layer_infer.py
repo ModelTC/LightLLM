@@ -1,4 +1,5 @@
 from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.basemodel.attention import AttControl
 import torch
 import triton
 import torch.distributed as dist
@@ -57,6 +58,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             q=_q,
             k=_k,
             v=_v,
+            att_control=AttControl(logical_layer_id=self.layer_num_),
             alloc_func=self.alloc_tensor,
         )
         o_tensor = o_tensor.view(q.shape)
@@ -76,7 +78,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         )
         _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(q=_q, k=_k, v=_v, alloc_func=self.alloc_tensor)
+        o_tensor = infer_state.decode_att_state.decode_att(
+            q=_q, k=_k, v=_v, att_control=AttControl(logical_layer_id=self.layer_num_), alloc_func=self.alloc_tensor,
+        )
         return o_tensor.view(q.shape)
 
     def _att_norm(

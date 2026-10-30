@@ -33,6 +33,7 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
             k=k,
             v=v,
             att_control=AttControl(
+                logical_layer_id=self.layer_num_,
                 use_sliding_window=use_sliding_window,
                 sliding_window=(window, window) if use_sliding_window else (-1, -1),
             ),
