@@ -117,9 +117,10 @@ def test_prefill_kv_move_manager_routes_abort_to_target_device():
     target_queue = queue.Queue()
     manager = PrefillKVMoveManager.__new__(PrefillKVMoveManager)
     manager.info_queue = _SequenceQueue(abort_req)
+    manager._trans_process_locks = [threading.Lock(), threading.Lock()]
     manager.kv_trans_processes = [
-        SimpleNamespace(task_in_queue=queue.Queue()),
-        SimpleNamespace(task_in_queue=target_queue),
+        SimpleNamespace(task_in_queue=queue.Queue(), is_trans_process_health=lambda: True),
+        SimpleNamespace(task_in_queue=target_queue, is_trans_process_health=lambda: True),
     ]
 
     with pytest.raises(_StopLoop):
