@@ -10,8 +10,8 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 
-from lightllm.common.att_resources.full_att import StaticFP8FullAttentionState
-from lightllm.common.att_resources.types import StateTransferLayout
+from lightllm.common.attention_state.full_att import StaticFP8FullAttentionState
+from lightllm.common.attention_state.types import StateTransferLayout
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers, full_state_test_fields, rebuild_full_state
 from unit_tests.common.att_resources.test_capacity import definition
 
@@ -72,7 +72,7 @@ def test_full_att_pages_copy_all_fields_with_bounded_grid(
             shape=(region.shape[1], region.shape[0], *region.shape[2:]),
         ) for region in reversed(regions))
     layout = StateTransferLayout(
-        resource_id=source.resource_id,
+        state_name=source.state_name,
         tokens_per_page=page_tokens,
         byte_start=0,
         byte_end=max(region.byte_end for region in regions),
@@ -127,13 +127,13 @@ def test_full_att_pages_copy_all_fields_with_bounded_grid(
                     layout=layout,
                 )
             else:
-                source.write_to_pd_buffer(
+                source.write_to_pd_page(
                     token_indices=src_ids,
                     pd_page_buffers=page_view,
                     pd_page_index=3,
                     layout=layout,
                 )
-                target.read_from_pd_buffer(
+                target.read_from_pd_page(
                     pd_page_buffers=page_view,
                     token_indices=dst_ids,
                     pd_page_index=3,
@@ -185,7 +185,7 @@ def test_all_full_att_schemes_transfer_through_peer_ipc(
             expected_fields[name].tensor.copy_(other=field.tensor[:, 1:2])
         regions = state.get_pd_transfer_regions()
         layouts.append(StateTransferLayout(
-            resource_id=state.resource_id,
+            state_name=state.state_name,
             tokens_per_page=4,
             byte_start=0,
             byte_end=max(region.byte_end for region in regions),
@@ -233,13 +233,13 @@ def _peer_transfer_worker(
             target_ids = torch.tensor(data=[5], dtype=torch.int64, device="cuda:0")
             for state, layout in zip(states, layouts):
                 pages = torch.empty(size=(2, layout.byte_end), dtype=torch.uint8, device="cuda:0")
-                state.write_to_pd_buffer(
+                state.write_to_pd_page(
                     token_indices=source_ids,
                     pd_page_buffers=pages,
                     pd_page_index=1,
                     layout=layout,
                 )
-                state.read_from_pd_buffer(
+                state.read_from_pd_page(
                     pd_page_buffers=pages,
                     token_indices=target_ids,
                     pd_page_index=1,
@@ -276,7 +276,7 @@ def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
         buffer.view(torch.uint8).random_(0, 256)
     regions = state.get_cpu_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=5,
         byte_start=0,
         byte_end=max(region.byte_end for region in regions),
@@ -315,7 +315,7 @@ def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
             cpu_page_buffers=pages[:, 16:-16],
             cpu_page_indices=page_indices,
             layout=layout,
-            cpu_page_readies=readies,
+            cpu_page_ready_flags=readies,
         )
     torch.cuda.synchronize()
     # 整页比较同时覆盖 KV、量化 scale、packed indexer 字段及前后 padding。

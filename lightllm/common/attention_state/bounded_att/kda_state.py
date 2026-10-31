@@ -8,7 +8,7 @@ import torch
 from lightllm.utils.log_utils import init_logger
 
 from ..utils import dtype_name
-from ..types import AxisSlice, StateTransferLayout, TensorField, TransferRegion
+from ..types import AxisMapping, StateTransferLayout, TensorField, TransferRegion
 from .base_state import BoundedAttentionState
 from .conv_ssm_types import ConvSSMStateConfig
 from .kda_pages_pool import KDAPagesPool
@@ -16,7 +16,7 @@ from .transfer_utils import bounded_att_buffer_copies
 from .copy_kernel import copy_bounded_att_tensors
 
 if TYPE_CHECKING:
-    from lightllm.common.att_resources.types import PageKind
+    from lightllm.common.attention_state.types import PageKind
 
 
 logger = init_logger(__name__)
@@ -42,7 +42,7 @@ class KDAState(BoundedAttentionState):
         """按请求容量创建 Conv/SSM 运行态和 MTP 游标；大小页池延后初始化。"""
         assert isinstance(config, ConvSSMStateConfig), "config must be ConvSSMStateConfig"
         self.config = config
-        self.resource_id: str | None = None  # 由 AttResourceManager.set_att_state() 绑定时设置。
+        self.state_name: str | None = None  # 由 AttentionStateManager.register_state() 绑定时设置。
         self.request_capacity = request_capacity  # 包含预留的 HOLD 请求槽位。
         self.mtp_step = mtp_step
         self._logical_to_storage_layer = {
@@ -125,39 +125,39 @@ class KDAState(BoundedAttentionState):
             if self.mtp_state_index is not None:
                 self.mtp_state_index[req_idx].fill_(0)
 
-    def save_bounded_att_pages(
+    def save_bounded_att_runtime_to_pages(
         self,
         req_indices: List[int],
         state_token_lens: List[int],
         page_kind: PageKind,
-        slot_ids: List[int],
+        page_slot_ids: List[int],
     ) -> None:
         """保存各请求指定绝对 token 长度处的基准状态；Conv/SSM 不依赖长度定位。"""
-        assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
-        assert len(req_indices) == len(state_token_lens) == len(slot_ids), "request, length and page counts differ"
+        assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "request and slot indices must be lists"
+        assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
         # TODO：大小页仅在 prefill 阶段保存，mtp_state_index 始终为 0，可直接复制基准状态。
         # 若以后支持 decode/MTP 后保存，需要按已接受游标选择 Conv 窗口和 SSM 槽位。
         conv_copies, ssm_copies = [], []
-        for req_idx, slot_id in zip(req_indices, slot_ids):
+        for req_idx, slot_id in zip(req_indices, page_slot_ids):
             conv_copies.append((self.conv_state[:, req_idx, :, : self.config.conv_width], pool.conv_state[slot_id]))
             ssm_copies.append((self.ssm_state[:, req_idx * (self.mtp_step + 1)], pool.ssm_state[slot_id]))
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
 
-    def restore_bounded_att_pages(
+    def restore_bounded_att_runtime_from_pages(
         self,
         req_indices: List[int],
         state_token_lens: List[int],
         page_kind: PageKind,
-        slot_ids: List[int],
+        page_slot_ids: List[int],
     ) -> None:
         """恢复各请求指定绝对 token 长度处的基准状态并归零游标；Conv/SSM 不依赖长度定位。"""
-        assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
-        assert len(req_indices) == len(state_token_lens) == len(slot_ids), "request, length and page counts differ"
+        assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "request and slot indices must be lists"
+        assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
         conv_copies, ssm_copies = [], []
-        for req_idx, slot_id in zip(req_indices, slot_ids):
+        for req_idx, slot_id in zip(req_indices, page_slot_ids):
             conv_copies.append((pool.conv_state[slot_id], self.conv_state[:, req_idx, :, : self.config.conv_width]))
             ssm_copies.append((pool.ssm_state[slot_id], self.ssm_state[:, req_idx * (self.mtp_step + 1)]))
         copy_bounded_att_tensors(copies=conv_copies)
@@ -183,34 +183,34 @@ class KDAState(BoundedAttentionState):
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回已接受 Conv/SSM 快照的字段区间与切片，供 CPU 页布局和容量计算使用。
 
-        region.shape 描述 CPU 页中的全局字段；axis_slices 将本地页池的 TP 分片映射到该字段。
+        region.shape 描述 CPU 页中的全局字段；axis_mappings 将本地页池的 TP 分片映射到该字段。
         起止位置相对本 State，由管理器平移到 CPU 联合页；不包含 MTP 候选区或游标。
         """
         return self._get_transfer_regions()
 
-    def write_page_state_to_cpu(
+    def write_state_pages_to_cpu(
         self,
         page_kind: PageKind,
-        slot_ids: List[int],
+        page_slot_ids: List[int],
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
         layout: StateTransferLayout,
-        cpu_page_readies: list[bool] | None = None,
+        cpu_page_ready_flags: list[bool] | None = None,
     ) -> None:
         """将指定页池槽位的快照写入 CPU 页。"""
-        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
+        assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
         pool = self._pool(page_kind)
-        assert isinstance(slot_ids, list), "slot indices must be a list"
+        assert isinstance(page_slot_ids, list), "slot indices must be a list"
         assert isinstance(cpu_page_indices, list), "CPU page indices must be a list"
-        assert len(slot_ids) == len(cpu_page_indices), "CPU page and slot counts differ"
-        if cpu_page_readies is not None:
-            assert len(cpu_page_readies) == len(cpu_page_indices), "CPU page and ready counts differ"
+        assert len(page_slot_ids) == len(cpu_page_indices), "CPU page and slot counts differ"
+        if cpu_page_ready_flags is not None:
+            assert len(cpu_page_ready_flags) == len(cpu_page_indices), "CPU page and ready counts differ"
         page_fields, page_indices = [], []
-        for index, (slot, page) in enumerate(zip(slot_ids, cpu_page_indices)):
+        for index, (slot, page) in enumerate(zip(page_slot_ids, cpu_page_indices)):
             # ready 页不参与复制；同一传输区域的所有页面组成一个同形状批次。
-            if cpu_page_readies is not None and cpu_page_readies[index]:
+            if cpu_page_ready_flags is not None and cpu_page_ready_flags[index]:
                 continue
             page_fields.append(self._fields(pool.conv_state[slot], pool.ssm_state[slot]))
             page_indices.append(page)
@@ -223,15 +223,15 @@ class KDAState(BoundedAttentionState):
         ):
             copy_bounded_att_tensors(copies=copies)
 
-    def read_page_state_from_cpu(
+    def read_state_pages_from_cpu(
         self,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
         big_page_slot_ids: List[int],
         layout: StateTransferLayout,
     ) -> None:
-        """读入指定大页槽位；请求运行态另行通过 restore_bounded_att_pages 恢复。"""
-        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
+        """读入指定大页槽位；请求运行态另行通过 restore_bounded_att_runtime_from_pages 恢复。"""
+        assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
         pool = self.big_pages_pool
@@ -241,7 +241,7 @@ class KDAState(BoundedAttentionState):
         # 本地目标：选定大页槽位的 Conv/SSM 快照，保留本 TP rank 的分片形状。
         pool_page_fields = [self._fields(pool.conv_state[slot], pool.ssm_state[slot]) for slot in big_page_slot_ids]
         # 外部来源：layout.regions 描述 CPU 全局字段和 TP 范围；write=False 将其读入本地页池。
-        # 窗口保持快照顺序；请求 ring 的位置由后续 restore_bounded_att_pages 按长度恢复。
+        # 窗口保持快照顺序；请求 ring 的位置由后续 restore_bounded_att_runtime_from_pages 按长度恢复。
         for copies in bounded_att_buffer_copies(
             page_fields=pool_page_fields,
             page_buffers=cpu_page_buffers,
@@ -255,7 +255,7 @@ class KDAState(BoundedAttentionState):
     # 四、DP 迁移：大页快照与基准运行态
     # ========================================================================
 
-    def copy_big_page_state_from_other_dp(
+    def copy_big_pages_from_dp(
         self,
         src_page_ids: List[int],
         dst_page_ids: List[int],
@@ -279,7 +279,7 @@ class KDAState(BoundedAttentionState):
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
 
-    def copy_run_time_state_from_other_dp(
+    def copy_runtime_state_from_dp(
         self,
         src_req_indices: List[int],
         dst_req_indices: List[int],
@@ -318,7 +318,7 @@ class KDAState(BoundedAttentionState):
         """返回 PD 传输字段与切片，交由管理器安排其在联合页中的位置。"""
         return self._get_transfer_regions()
 
-    def write_to_pd_buffer(
+    def write_to_pd_page(
         self,
         req_idx: int,
         pd_page_buffers: torch.Tensor,
@@ -327,7 +327,7 @@ class KDAState(BoundedAttentionState):
         layout: StateTransferLayout,
     ) -> None:
         """写出 state_token_len 处的 prefill 基准状态；Conv/SSM 不依赖长度，源 MTP 游标须为 0。"""
-        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
+        assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         fields = self._runtime_fields(req_idx)
         for copies in bounded_att_buffer_copies(
@@ -339,7 +339,7 @@ class KDAState(BoundedAttentionState):
         ):
             copy_bounded_att_tensors(copies=copies)
 
-    def read_from_pd_buffer(
+    def read_from_pd_page(
         self,
         pd_page_buffers: torch.Tensor,
         req_idx: int,
@@ -348,7 +348,7 @@ class KDAState(BoundedAttentionState):
         layout: StateTransferLayout,
     ) -> None:
         """恢复 state_token_len 处的基准状态并规范化控制信息；Conv/SSM 不依赖长度定位。"""
-        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
+        assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
         fields = self._runtime_fields(req_idx)
         for copies in bounded_att_buffer_copies(
@@ -377,7 +377,7 @@ class KDAState(BoundedAttentionState):
         regions = []
         logger.debug(
             "%s building transfer regions: TP=%d/%d, Conv shape=%s",
-            self.resource_id,
+            self.state_name,
             config.tp_rank,
             config.tp_world_size,
             conv_shape,
@@ -404,17 +404,17 @@ class KDAState(BoundedAttentionState):
                 dtype=config.conv_dtype,
                 axes=("layer", "channel", "window"),
                 shape=conv_shape,
-                axis_slices=(
-                    AxisSlice(
+                axis_mappings=(
+                    AxisMapping(
                         axis="channel",
-                        src_start=local_channel_start,
-                        dst_start=target_channel_start,
+                        local_start=local_channel_start,
+                        external_start=target_channel_start,
                         length=local_channel_count,
                     ),
-                    AxisSlice(
+                    AxisMapping(
                         axis="window",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=config.conv_width,
                     ),
                 ),
@@ -423,7 +423,7 @@ class KDAState(BoundedAttentionState):
             regions.append(conv_region)
             logger.debug(
                 "%s Conv %s: local_channel_start=%d, global_channel_start=%d, channels=%d, replicas=%d, write_enabled=%s",
-                self.resource_id,
+                self.state_name,
                 name,
                 local_channel_start,
                 target_channel_start,
@@ -448,23 +448,23 @@ class KDAState(BoundedAttentionState):
             dtype=config.ssm_dtype,
             axes=("layer", "head", "key_dim", "value_dim"),
             shape=ssm_shape,
-            axis_slices=(
-                AxisSlice(
+            axis_mappings=(
+                AxisMapping(
                     axis="head",
-                    src_start=0,
-                    dst_start=head_start,
+                    local_start=0,
+                    external_start=head_start,
                     length=config.num_v_heads,
                 ),
-                AxisSlice(
+                AxisMapping(
                     axis="key_dim",
-                    src_start=0,
-                    dst_start=0,
+                    local_start=0,
+                    external_start=0,
                     length=config.key_dim,
                 ),
-                AxisSlice(
+                AxisMapping(
                     axis="value_dim",
-                    src_start=0,
-                    dst_start=0,
+                    local_start=0,
+                    external_start=0,
                     length=config.value_dim,
                 ),
             ),
@@ -473,7 +473,7 @@ class KDAState(BoundedAttentionState):
         regions.append(ssm_region)
         logger.debug(
             "%s transfer regions built: SSM head_start=%d, heads=%d, write_enabled=%s, SSM bytes=[%d, %d)",
-            self.resource_id,
+            self.state_name,
             head_start,
             config.num_v_heads,
             write_enabled,
@@ -486,7 +486,7 @@ class KDAState(BoundedAttentionState):
         """根据大小页类型取得已启用的页池，不访问 allocator。"""
         assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
         pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
-        assert pool is not None, f"{page_kind} pages are disabled for {self.resource_id}"
+        assert pool is not None, f"{page_kind} pages are disabled for {self.state_name}"
         return pool
 
     def _runtime_fields(self, req: int):

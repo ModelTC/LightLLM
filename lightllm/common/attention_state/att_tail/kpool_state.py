@@ -6,12 +6,12 @@ from dataclasses import dataclass
 import torch
 
 from ..utils import dtype_name
-from ..types import AxisSlice, TransferRegion
+from ..types import AxisMapping, TransferRegion
 from .base_state import AttentionTailState
 from .kpool_transfer import transfer_kpool_pages
 
 if TYPE_CHECKING:
-    from lightllm.common.att_resources.types import StateTransferLayout
+    from lightllm.common.attention_state.types import StateTransferLayout
 
 
 @dataclass(frozen=True)
@@ -60,7 +60,7 @@ class KPoolAttentionTailState(AttentionTailState):
         self.config = config
         self.request_capacity = request_capacity  # 包含预留的 HOLD 请求槽位。
         self.mtp_step = mtp_step  # ring 额外保留的 MTP 历史槽位数。
-        self.resource_id: str | None = None  # 由 manager 绑定模型角色时设置。
+        self.state_name: str | None = None  # 由 manager 绑定模型角色时设置。
         self._logical_to_storage_layer = {
             logical_layer_id: storage_layer_index
             for storage_layer_index, logical_layer_id in enumerate(config.logical_layer_ids)
@@ -116,18 +116,18 @@ class KPoolAttentionTailState(AttentionTailState):
             dtype=config.dtype,
             axes=("layer", "window", "channel"),
             shape=(len(config.logical_layer_ids), window_size, channels),
-            axis_slices=(
-                AxisSlice(
+            axis_mappings=(
+                AxisMapping(
                     axis="window",
-                    src_start=0,
-                    dst_start=0,
+                    local_start=0,
+                    external_start=0,
                     length=window_size,
-                    src_circular=True,
+                    local_circular=True,
                 ),
-                AxisSlice(
+                AxisMapping(
                     axis="channel",
-                    src_start=0,
-                    dst_start=0,
+                    local_start=0,
+                    external_start=0,
                     length=channels,
                 ),
             ),
@@ -135,7 +135,7 @@ class KPoolAttentionTailState(AttentionTailState):
         )
         return (tail_region,)
 
-    def write_to_pd_buffer(
+    def write_to_pd_page(
         self,
         req_idx: int,
         pd_page_buffers: torch.Tensor,
@@ -144,7 +144,7 @@ class KPoolAttentionTailState(AttentionTailState):
         layout: StateTransferLayout,
     ) -> None:
         """将 prefill 末尾的逻辑窗口写入 PD 页；state_token_len 为已执行的前缀长度。"""
-        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
+        assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         transfer_kpool_pages(
             tail=self.tail_buffer[:, req_idx],
             page_buffers=pd_page_buffers,
@@ -154,7 +154,7 @@ class KPoolAttentionTailState(AttentionTailState):
             write=True,
         )
 
-    def read_from_pd_buffer(
+    def read_from_pd_page(
         self,
         pd_page_buffers: torch.Tensor,
         req_idx: int,
@@ -163,7 +163,7 @@ class KPoolAttentionTailState(AttentionTailState):
         layout: StateTransferLayout,
     ) -> None:
         """按前缀长度将逻辑窗口放回本地 ring，保留窗口外槽位，允许两端 MTP 步数不同。"""
-        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
+        assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         transfer_kpool_pages(
             tail=self.tail_buffer[:, req_idx],
             page_buffers=pd_page_buffers,

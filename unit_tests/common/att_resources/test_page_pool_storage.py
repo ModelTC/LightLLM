@@ -7,8 +7,8 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from lightllm.common.att_resources.bounded_att import ConvSSMStateConfig, GDNPagesPool, KDAPagesPool
-from lightllm.common.att_resources.bounded_att import utils
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNPagesPool, KDAPagesPool
+from lightllm.common.attention_state.bounded_att import utils
 
 if TYPE_CHECKING:
     from easydict import EasyDict

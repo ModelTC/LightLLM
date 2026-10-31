@@ -13,13 +13,13 @@ import json
 import pytest
 import torch
 
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from unit_tests.common.att_resources.model_helpers import create_full_attention_roles
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
     FullAttentionConfig,
 )
-from lightllm.common.att_resources.full_att import PackedMLAFullAttentionState, PackedMLAAttentionConfig
+from lightllm.common.attention_state.full_att import PackedMLAFullAttentionState, PackedMLAAttentionConfig
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -68,7 +68,7 @@ def make_resources(
             ),
              page_size=4,
         )
-        full.initialize_storage(16)
+        full.allocate_storage(16)
     else:
         full = GQAFullAttentionState(
             FullAttentionConfig(
@@ -81,7 +81,7 @@ def make_resources(
             ),
              page_size=4,
         )
-        full.initialize_storage(16)
+        full.allocate_storage(16)
     main, draft = create_full_attention_roles(full, 4)
     resources = build_hybrid_resources(
         config=config,
@@ -137,11 +137,11 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
         for h in range(cfg.num_v_heads):
             state.ssm_state[:, : mtp + 1, h].fill_(rank * cfg.num_v_heads + h + 7)
         slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
-        resources.save_bounded_att_pages(
+        resources.save_bounded_att_runtime_to_pages(
             req_indices=[0],
             state_token_lens=[8],
             page_kind="big",
-            slot_ids=[slot],
+            page_slot_ids=[slot],
         )
         torch.cuda.synchronize()
         expected.append((state.big_pages_pool.conv_state[slot].clone(), state.big_pages_pool.ssm_state[slot].clone()))
@@ -152,7 +152,7 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
             token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
             cpu_page_buffers=buffer,
             cpu_page_indices=[1],
-            layouts=resources.get_cpu_transfer_layouts(),
+            layouts=resources.get_cpu_page_layouts(),
             big_page_slot_ids=[0],
         )
     torch.cuda.synchronize()
@@ -170,7 +170,7 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
                 device="cuda",
             ),
             state_token_len=8,
-            layouts=resources.get_cpu_transfer_layouts(),
+            layouts=resources.get_cpu_page_layouts(),
             big_page_slot_ids=[slot],
             req_idx=1,
         )
@@ -199,5 +199,5 @@ def test_cpu_layout_query_does_not_require_cpu_cache_enabled(monkeypatch: pytest
         rank=0,
         mtp=0,
     )
-    assert all(layout.tokens_per_page == 8 for layout in resources.get_cpu_transfer_layouts().values())
+    assert all(layout.tokens_per_page == 8 for layout in resources.get_cpu_page_layouts().values())
     get_env_start_args.cache_clear()

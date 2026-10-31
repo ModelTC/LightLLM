@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.attention_state import AttentionStateManager
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -17,8 +17,8 @@ from unit_tests.common.basemodel.test_overlap_utils import _make_decode_input, _
 
 
 def draft_model(mode: str):
-    resources = AttResourceManager(request_capacity=3)
-    resources.set_att_state("main", definition("gqa"))
+    resources = AttentionStateManager(request_capacity=3)
+    resources.register_state("main", definition("gqa"))
     draft = LlamaTpPartModel.__new__(LlamaTpPartModel)
     draft.is_mtp_draft_model = True
     draft.args = StartArgs(mtp_mode=mode, data_type="bfloat16")
@@ -34,7 +34,7 @@ def draft_model(mode: str):
     main = LlamaTpPartModel.__new__(LlamaTpPartModel)
     main.args, main.config = draft.args, dict(draft.config, num_hidden_layers=2)
     main.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(2)]
-    main.att_resource_manager = resources
+    main.att_state_manager = resources
     draft.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     draft.main_model, draft.mtp_previous_draft_models = main, []
     return draft, resources
@@ -44,11 +44,11 @@ def draft_model(mode: str):
 @pytest.mark.parametrize("prefill", [False, True])
 def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.MonkeyPatch, mode: str, prefill: bool):
     draft, resources = draft_model(mode)
-    draft.prepare_att_resources()
-    resources.finish_state_creation()
+    draft.prepare_attention_states()
+    resources.finish_state_registration()
     draft._init_att_backend()
     draft._init_att_backend1()
-    assert draft.att_resource_manager is resources
+    assert draft.att_state_manager is resources
     assert not hasattr(draft, "full_att_state")
     assert not resources.get_full_attention_states("draft0")
     assert not any(name.startswith("draft0_") and name.endswith("_state") for name in vars(resources))
@@ -62,7 +62,7 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     model_input = _make_prefill_input([10, 11], req_idx=0, is_decode_req=False) if prefill else _make_decode_input()
     state = draft._create_inferstate(model_input)
     assert not hasattr(state, "full_att_state")
-    assert state.att_resource_manager is resources
+    assert state.att_state_manager is resources
     assert state.is_draft_model
     assert state.prefill_att_state is None and state.decode_att_state is None
     assert state.req_manager is draft.req_manager
@@ -71,11 +71,11 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
 @pytest.mark.parametrize("mode", ["vanilla_with_att", "eagle_with_att"])
 def test_attention_draft_prepares_its_own_state_before_shared_allocation(mode: str):
     draft, resources = draft_model(mode)
-    draft.prepare_att_resources()
-    assert draft.att_resource_manager is resources
-    resources.finish_state_creation()
+    draft.prepare_attention_states()
+    assert draft.att_state_manager is resources
+    resources.finish_state_registration()
     (state,) = resources.get_full_attention_states("draft0")
     assert not hasattr(draft, "full_att_state")
-    assert state.resource_id == "draft0_gqa_bf16_state"
+    assert state.state_name == "draft0_gqa_bf16_state"
     assert state.config.logical_layer_groups == ((2,),)
     assert read_kv_storage(state) is None

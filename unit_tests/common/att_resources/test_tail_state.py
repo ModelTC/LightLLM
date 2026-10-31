@@ -3,9 +3,9 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lightllm.common.att_resources.att_tail import KPoolAttentionTailState, KPoolStateConfig
-from lightllm.common.att_resources.types import (
-    AxisSlice, StateTransferLayout, TransferRegion,
+from lightllm.common.attention_state.att_tail import KPoolAttentionTailState, KPoolStateConfig
+from lightllm.common.attention_state.types import (
+    AxisMapping, StateTransferLayout, TransferRegion,
 )
 
 
@@ -27,7 +27,7 @@ def tail_layout(state: KPoolAttentionTailState):
     shape = (2, state.config.pool_size, 4)
     nbytes = shape[0] * shape[1] * shape[2] * 4
     return StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=None,
         byte_start=0,
         byte_end=nbytes + 16,
@@ -39,18 +39,18 @@ def tail_layout(state: KPoolAttentionTailState):
                 dtype=torch.float32,
                 axes=("layer", "window", "channel"),
                 shape=shape,
-                axis_slices=(
-                    AxisSlice(
+                axis_mappings=(
+                    AxisMapping(
                         axis="window",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=shape[1],
-                        src_circular=True,
+                        local_circular=True,
                     ),
-                    AxisSlice(
+                    AxisMapping(
                         axis="channel",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=4,
                     ),
                 ),
@@ -93,14 +93,14 @@ def test_pd_logical_window_restores_different_mtp_rings(
         dtype=torch.uint8,
         device=device,
     )
-    source.write_to_pd_buffer(
+    source.write_to_pd_page(
         req_idx=1,
         pd_page_buffers=pages,
         pd_page_index=1,
         state_token_len=length,
         layout=layout,
     )
-    target.read_from_pd_buffer(
+    target.read_from_pd_page(
         pd_page_buffers=pages,
         req_idx=2,
         pd_page_index=1,

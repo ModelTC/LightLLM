@@ -8,8 +8,8 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 
-from lightllm.common.att_resources.full_att import FullAttentionConfig, GQAFullAttentionState
-from lightllm.common.att_resources.types import StateTransferLayout
+from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFullAttentionState
+from lightllm.common.attention_state.types import StateTransferLayout
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -45,7 +45,7 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
         device="cuda",
     )
     for state in (source, target):
-        state.initialize_storage(token_capacity=8)
+        state.allocate_storage(token_capacity=8)
     for tensor in (source.k_storage, source.v_storage):
         tensor.view(torch.uint8).random_(0, 256)
     for tensor in (target.k_storage, target.v_storage):
@@ -63,7 +63,7 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
                 shape=tuple(region.shape[region.axes.index(axis)] for axis in axes),
             ))
         layouts.append(StateTransferLayout(
-            resource_id=state.resource_id,
+            state_name=state.state_name,
             tokens_per_page=4,
             byte_start=16,
             byte_end=max(region.byte_end for region in regions),
@@ -91,13 +91,13 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
         patch.setattr(torch.Tensor, "index_copy_", reject_gather)
         patch.setattr(torch.Tensor, "tolist", reject_gather)
         with torch.cuda.stream(stream):
-            source.write_to_pd_buffer(
+            source.write_to_pd_page(
                 token_indices=src_ids,
                 pd_page_buffers=page_view,
                 pd_page_index=1,
                 layout=layout,
             )
-            target.read_from_pd_buffer(
+            target.read_from_pd_page(
                 pd_page_buffers=page_view,
                 token_indices=dst_ids,
                 pd_page_index=1,
@@ -117,7 +117,7 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
 
     # 反向验证分片写出：rank 1 只修改全局 heads [2, 4)，rank 0 区域保持原始字节。
     pages.fill_(91)
-    target.write_to_pd_buffer(
+    target.write_to_pd_page(
         token_indices=dst_ids,
         pd_page_buffers=page_view,
         pd_page_index=2,
@@ -148,12 +148,12 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
         page_size=4,
         device="cuda",
     )
-    state.initialize_storage(token_capacity=8)
+    state.allocate_storage(token_capacity=8)
     state.k_storage.fill_(19)
     state.v_storage.fill_(19)
     regions = state.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=4,
         byte_start=0,
         byte_end=max(region.byte_end for region in regions),
@@ -164,13 +164,13 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
         pages[1, region.byte_start:region.byte_end].view(region.dtype).fill_(value)
     snapshot = pages.clone()
     ids = torch.tensor(data=[5, 1], dtype=torch.int32, device="cuda")
-    state.write_to_pd_buffer(
+    state.write_to_pd_page(
         token_indices=ids,
         pd_page_buffers=pages,
         pd_page_index=1,
         layout=layout,
     )
-    state.read_from_pd_buffer(
+    state.read_from_pd_page(
         pd_page_buffers=pages,
         token_indices=ids,
         pd_page_index=1,
@@ -203,7 +203,7 @@ def test_gqa_pd_direct_copy_through_peer_ipc(pd_args: EasyDict, monkeypatch: pyt
         page_size=4,
         device="cuda:1",
     )
-    state.initialize_storage(token_capacity=8)
+    state.allocate_storage(token_capacity=8)
     state.k_storage.zero_()
     state.v_storage.zero_()
     state.k_storage[:, 1].fill_(3)
@@ -211,7 +211,7 @@ def test_gqa_pd_direct_copy_through_peer_ipc(pd_args: EasyDict, monkeypatch: pyt
     torch.cuda.synchronize(device=1)
     regions = state.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=4,
         byte_start=0,
         byte_end=max(region.byte_end for region in regions),
@@ -250,13 +250,13 @@ def _peer_pd_worker(connection: Connection, payload: bytes, layout: StateTransfe
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            state.write_to_pd_buffer(
+            state.write_to_pd_page(
                 token_indices=torch.tensor(data=[1], dtype=torch.int32, device="cuda:0"),
                 pd_page_buffers=pages,
                 pd_page_index=1,
                 layout=layout,
             )
-            state.read_from_pd_buffer(
+            state.read_from_pd_page(
                 pd_page_buffers=pages,
                 token_indices=torch.tensor(data=[5], dtype=torch.int64, device="cuda:0"),
                 pd_page_index=1,

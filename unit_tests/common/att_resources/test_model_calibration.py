@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.attention_state import AttentionStateManager
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
 from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
@@ -96,10 +96,10 @@ def test_calibration_binds_all_model_states_after_creation(tmp_path: Path, encod
         layer_start += layer_count
 
     # 反向创建、注册，标定仍按 main 和 draft 的数值顺序绑定。
-    manager = AttResourceManager(request_capacity=1)
+    manager = AttentionStateManager(request_capacity=1)
     for index in reversed(range(len(models))):
         model = models[index]
-        model.att_resource_manager = manager
+        model.att_state_manager = manager
         states = []
         if not (model.is_mtp_draft_model and model.args.mtp_mode in ("vanilla_no_att", "eagle_no_att")):
             states = model.create_full_att_states(
@@ -110,13 +110,13 @@ def test_calibration_binds_all_model_states_after_creation(tmp_path: Path, encod
                 tp_world_size=model.tp_world_size_,
             )
         for state in states:
-            assert state.resource_id is None
+            assert state.state_name is None
             assert state.scales is None and state.q_scales is None
-            manager.set_att_state(model.att_resource_role, state)
-    manager.finish_state_creation()
+            manager.register_state(model.att_state_role, state)
+    manager.finish_state_registration()
     manager.load_full_att_calibration(args=args)
     for index, model in enumerate(models):
-        states = manager.get_full_attention_states(model.att_resource_role)
+        states = manager.get_full_attention_states(model.att_state_role)
         state = states[0] if states else None
         expected_layers, (start, end) = definitions[index][-2:]
         if not expected_layers:
@@ -134,7 +134,7 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tp_world_size: int,
 ):
     from builtins import open as original_open
-    from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+    from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
 
     # 第 0 行属于普通精度的共享层；其余行分别属于 main、draft2、draft10 的 FP8 State。
     scales = torch.arange(1, 17, dtype=torch.float32).reshape(4, 4)
@@ -158,7 +158,7 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
 
     monkeypatch.setattr("builtins.open", count_open)
     for tp_rank in range(tp_world_size):
-        manager = AttResourceManager(request_capacity=1)
+        manager = AttentionStateManager(request_capacity=1)
         expected = []
         # 特意打乱角色及同角色 State 的注册顺序。
         for role, groups, row, encoding in (
@@ -177,12 +177,12 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
                     tp_world_size=tp_world_size,
                 ), kv_type=encoding, device="meta",
             )
-            manager.set_att_state(role, state)
+            manager.register_state(role, state)
             if encoding != "None":
                 expected.append((state, row))
-        with pytest.raises(AssertionError, match="State creation"):
+        with pytest.raises(AssertionError, match="State registration"):
             manager.load_full_att_calibration(args=args)
-        manager.finish_state_creation()
+        manager.finish_state_registration()
         manager.load_full_att_calibration(args=args)
         heads = 4 // tp_world_size
         local_heads = slice(tp_rank * heads, (tp_rank + 1) * heads)
@@ -226,7 +226,7 @@ def test_cpu_layout_does_not_require_calibration_file(
 
 @pytest.mark.parametrize("encoding", ["fp8kv_spt", "fp8kv_sph"])
 def test_deferred_calibration_keeps_unit_scale_policy(encoding: str):
-    from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+    from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
 
     state = create_gqa_state(
         config=FullAttentionConfig(
@@ -236,16 +236,16 @@ def test_deferred_calibration_keeps_unit_scale_policy(encoding: str):
             dtype=torch.bfloat16,
         ), kv_type=encoding, device="cpu",
     )
-    manager = AttResourceManager(request_capacity=1)
-    manager.set_att_state("main", state)
-    manager.finish_state_creation()
+    manager = AttentionStateManager(request_capacity=1)
+    manager.register_state("main", state)
+    manager.finish_state_registration()
     with pytest.raises(AssertionError, match="calibration must be bound"):
-        state.initialize_storage(4)
+        state.allocate_storage(4)
     if encoding == "fp8kv_sph":
-        with pytest.raises(AssertionError, match="requires a calibration file"):
+        with pytest.raises(AssertionError, match="requires a KV calibration file"):
             manager.load_full_att_calibration(args=StartArgs())
     else:
         manager.load_full_att_calibration(args=StartArgs())
         assert torch.equal(state.scales, torch.ones((2, 2)))
-        state.initialize_storage(4)
+        state.allocate_storage(4)
         assert state.k_storage.shape[0] == 2

@@ -19,7 +19,7 @@ from lightllm.utils.log_utils import init_logger
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 logger = init_logger(__name__)
@@ -149,7 +149,7 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """Gemma3 使用固定 256 维 BF16 KV，不随权重精度改变。"""
-        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
 
         config = cls.normalize_model_config(model_config)
         logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)

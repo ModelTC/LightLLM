@@ -5,9 +5,9 @@ from dataclasses import replace
 import pytest
 import torch
 
-from lightllm.common.att_resources.att_tail import KPoolAttentionTailState, KPoolStateConfig
-from lightllm.common.att_resources.att_tail import kpool_transfer
-from lightllm.common.att_resources.types import AxisSlice, StateTransferLayout
+from lightllm.common.attention_state.att_tail import KPoolAttentionTailState, KPoolStateConfig
+from lightllm.common.attention_state.att_tail import kpool_transfer
+from lightllm.common.attention_state.types import AxisMapping, StateTransferLayout
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -57,7 +57,7 @@ def test_kpool_single_launch_preserves_bits_and_other_slots(
         byte_end=byte_start + region.byte_end,
     )
     layout = StateTransferLayout(
-        resource_id=source.resource_id,
+        state_name=source.state_name,
         tokens_per_page=None,
         byte_start=byte_start,
         byte_end=region.byte_end,
@@ -90,14 +90,14 @@ def test_kpool_single_launch_preserves_bits_and_other_slots(
         for method in ("copy_", "fill_", "zero_", "index_select", "index_copy_", "roll"):
             patch.setattr(torch.Tensor, method, reject_copy)
         with torch.cuda.stream(stream):
-            source.write_to_pd_buffer(
+            source.write_to_pd_page(
                 req_idx=1,
                 pd_page_buffers=pages,
                 pd_page_index=1,
                 state_token_len=11,
                 layout=layout,
             )
-            target.read_from_pd_buffer(
+            target.read_from_pd_page(
                 pd_page_buffers=pages,
                 req_idx=2,
                 pd_page_index=1,
@@ -117,11 +117,11 @@ def test_kpool_single_launch_preserves_bits_and_other_slots(
     assert (pages[1, :byte_start] == 253).all() and (pages[1, layout.byte_end:] == 253).all()
 
 
-@pytest.mark.parametrize("src_circular", [False, True])
-@pytest.mark.parametrize("dst_circular", [False, True])
+@pytest.mark.parametrize("local_circular", [False, True])
+@pytest.mark.parametrize("external_circular", [False, True])
 def test_kpool_runtime_axis_overrides_are_bidirectional(
-    src_circular: bool,
-    dst_circular: bool,
+    local_circular: bool,
+    external_circular: bool,
 ) -> None:
     config = KPoolStateConfig(
         logical_layer_ids=(0, 2),
@@ -139,20 +139,20 @@ def test_kpool_runtime_axis_overrides_are_bidirectional(
     original = state.tail_buffer[:, 1].clone()
     regions = state.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=None,
         byte_start=0,
         byte_end=regions[0].byte_end,
         regions=regions,
     )
     pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
-    window = AxisSlice(
+    window = AxisMapping(
         axis="window",
-        src_start=5 if src_circular else 1,
-        dst_start=3 if dst_circular else 0,
+        local_start=5 if local_circular else 1,
+        external_start=3 if external_circular else 0,
         length=4,
-        src_circular=src_circular,
-        dst_circular=dst_circular,
+        local_circular=local_circular,
+        external_circular=external_circular,
     )
     kpool_transfer.transfer_kpool_pages(
         tail=state.tail_buffer[:, 1],
@@ -161,14 +161,14 @@ def test_kpool_runtime_axis_overrides_are_bidirectional(
         state_token_len=11,
         layout=layout,
         write=True,
-        axis_slice_overrides=(window,),
+        axis_mapping_overrides=(window,),
         grid_num=1,
     )
     external = pages[0].view(config.dtype).view(2, 4, 256)
     for index in range(4):
         assert torch.equal(
-            external[:, (window.dst_start + index) % 4].view(torch.uint8),
-            original[:, (window.src_start + index) % 7].view(torch.uint8),
+            external[:, (window.external_start + index) % 4].view(torch.uint8),
+            original[:, (window.local_start + index) % 7].view(torch.uint8),
         )
     state.tail_buffer[:, 1].fill_(37)
     kpool_transfer.transfer_kpool_pages(
@@ -178,15 +178,15 @@ def test_kpool_runtime_axis_overrides_are_bidirectional(
         state_token_len=11,
         layout=layout,
         write=False,
-        axis_slice_overrides=(window,),
+        axis_mapping_overrides=(window,),
         grid_num=1,
     )
     expected = torch.full_like(original, 37)
     for index in range(4):
-        slot = (window.src_start + index) % 7
+        slot = (window.local_start + index) % 7
         expected[:, slot] = original[:, slot]
     assert torch.equal(state.tail_buffer[:, 1].view(torch.uint8), expected.view(torch.uint8))
-    assert layout.regions[0].axis_slices[0].src_start == 0
+    assert layout.regions[0].axis_mappings[0].local_start == 0
 
 
 def test_kpool_tp_replica_skips_writes_but_restores_tail() -> None:
@@ -206,7 +206,7 @@ def test_kpool_tp_replica_skips_writes_but_restores_tail() -> None:
     )
     regions = state.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=None,
         byte_start=0,
         byte_end=regions[0].byte_end,
@@ -214,7 +214,7 @@ def test_kpool_tp_replica_skips_writes_but_restores_tail() -> None:
     )
     pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     pages.view(torch.bfloat16).fill_(13)
-    state.write_to_pd_buffer(
+    state.write_to_pd_page(
         req_idx=1,
         pd_page_buffers=pages,
         pd_page_index=0,
@@ -222,7 +222,7 @@ def test_kpool_tp_replica_skips_writes_but_restores_tail() -> None:
         layout=layout,
     )
     assert (pages.view(torch.bfloat16) == 13).all()
-    state.read_from_pd_buffer(
+    state.read_from_pd_page(
         pd_page_buffers=pages,
         req_idx=1,
         pd_page_index=0,
@@ -250,7 +250,7 @@ def test_kpool_window_positions_do_not_create_kernel_variants() -> None:
     )
     regions = state.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=None,
         byte_start=0,
         byte_end=regions[0].byte_end,
@@ -260,14 +260,14 @@ def test_kpool_window_positions_do_not_create_kernel_variants() -> None:
     kernel = kpool_transfer._transfer_kpool_pages
     cache_size = None
     for length in (*range(30), (1 << 33) + 7):
-        state.write_to_pd_buffer(
+        state.write_to_pd_page(
             req_idx=1,
             pd_page_buffers=pages,
             pd_page_index=0,
             state_token_len=length,
             layout=layout,
         )
-        state.read_from_pd_buffer(
+        state.read_from_pd_page(
             pd_page_buffers=pages,
             req_idx=0,
             pd_page_index=0,
@@ -305,7 +305,7 @@ def test_kpool_large_window_with_one_program(length: int) -> None:
     target.tail_buffer.fill_(37)
     regions = source.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=source.resource_id,
+        state_name=source.state_name,
         tokens_per_page=None,
         byte_start=0,
         byte_end=regions[0].byte_end,

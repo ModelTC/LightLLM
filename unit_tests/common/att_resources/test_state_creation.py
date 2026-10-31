@@ -9,15 +9,15 @@ from collections.abc import Callable
 import pytest
 import torch
 
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state.full_att import (
     FullAttentionConfig, FullAttentionState, GQAFullAttentionState, GroupQuantizedFullAttentionState,
     StaticFP8FullAttentionState, MLAFullAttentionState, PackedMLAFullAttentionState,
     create_gqa_state, create_mla_state,
 )
-from lightllm.common.att_resources.bounded_att import (
+from lightllm.common.attention_state.bounded_att import (
     BoundedAttentionState, ConvSSMStateConfig, create_gdn_state, create_kda_state,
 )
-from lightllm.common.att_resources.att_tail import KPoolStateConfig, create_kpool_state
+from lightllm.common.attention_state.att_tail import KPoolStateConfig, create_kpool_state
 
 
 @pytest.mark.parametrize(
@@ -54,7 +54,7 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
         group_size=16,
     )
     assert state.get_state_type() == expected_type
-    assert state.resource_id is None
+    assert state.state_name is None
     assert state.config.logical_layer_groups == ((3,), (7,))
     assert state.config.global_head_num == 8 and state.config.head_num == 2
     assert state.config.tp_rank == 2 and state.config.tp_world_size == 4
@@ -67,7 +67,7 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
         if q_scales is not None:
             assert torch.equal(state.q_scales, q_scales)
     state.device = torch.device("cpu")
-    state.initialize_storage(8)
+    state.allocate_storage(8)
     assert state.k_storage.shape == state.v_storage.shape == (2, 12, 2, width)
     assert state.k_storage.untyped_storage().data_ptr() != state.v_storage.untyped_storage().data_ptr()
     assert state.k_storage.dtype == state.v_storage.dtype == storage_dtype
@@ -112,7 +112,7 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
     assert state.config.head_dim == row_width and config.head_dim == kv_dim
     assert state.capacity == 0 and read_kv_storage(state) is None
     state.device = torch.device("cpu")
-    state.initialize_storage(8)
+    state.allocate_storage(8)
     assert read_kv_storage(state).shape == (2, 12, 1, row_width)
     if packed:
         assert state.config.kv_dim == kv_dim
@@ -137,7 +137,7 @@ def test_bounded_creation_allocates_runtime_but_defers_pools(create_state: Calla
         mtp_step=2,
         device="cpu",
     )
-    assert state.config is config and state.resource_id is None
+    assert state.config is config and state.state_name is None
     assert state.conv_state.shape == (2, 3, 48, 5)
     assert state.ssm_state.shape == (2, 9, 2, 8, 8)
     assert state.mtp_state_index.shape == (3,)
@@ -157,7 +157,7 @@ def test_kpool_creation_preserves_pool_and_mtp_dimensions():
         mtp_step=2,
         device="cpu",
     )
-    assert state.config is config and state.resource_id is None
+    assert state.config is config and state.state_name is None
     assert state.tail_buffer.shape == (2, 3, 6, 256)
     assert state.get_state_type() == "kpool_c4_bf16"
 

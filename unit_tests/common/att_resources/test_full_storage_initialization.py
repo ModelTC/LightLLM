@@ -16,7 +16,7 @@ from unit_tests.common.att_resources.model_helpers import prepare_model_states
 import pytest
 import torch
 
-from lightllm.common.att_resources.full_att import PackedMLAFullAttentionState
+from lightllm.common.attention_state.full_att import PackedMLAFullAttentionState
 from lightllm.utils.envs_utils import get_env_start_args
 from unit_tests.common.att_resources.test_capacity import allocated_bytes
 from unit_tests.server.router.model_infer.test_cpu_resource_layout import CASES, make_runtime, runtime
@@ -103,14 +103,14 @@ def test_auto_profile_fits_actual_gpu_storage_and_pd_pages(
     model.tp_rank_, model.tp_world_size_ = 0, 1
     model.max_total_token_num, model.max_req_num, model.mem_fraction = None, 1, 1.0
     prepare_model_states(model)
-    model.att_resource_manager.finish_state_creation()
-    model.att_resource_manager.load_full_att_calibration(args=args)
-    model.att_resource_manager.initialize_resources(
+    model.att_state_manager.finish_state_registration()
+    model.att_state_manager.load_full_att_calibration(args=args)
+    model.att_state_manager.initialize_storage(
         args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
     )
-    (state,) = model.att_resource_manager.get_full_attention_states("main")
+    (state,) = model.att_state_manager.get_full_attention_states("main")
     assert not hasattr(model, "full_att_state")
     assert state.capacity == 16
     assert allocated_bytes(state) == storage_bytes
     if mode == "prefill":
-        assert model.att_resource_manager.get_pd_page_bytes() == reference.get_pd_page_bytes()
+        assert model.att_state_manager.get_pd_page_bytes() == reference.get_pd_page_bytes()

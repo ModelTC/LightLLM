@@ -3,19 +3,19 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.attention_state import AttentionStateManager
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
-    from lightllm.common.att_resources.types import StateTransferLayout
+    from lightllm.common.attention_state.types import StateTransferLayout
 
 
 def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
     """使用启动流程相同的 meta State 定义，由管理器统一生成 CPU 服务页布局。"""
     from transformers.configuration_utils import PretrainedConfig
     from lightllm.models import get_draft_model_class
-    from lightllm.common.att_resources.utils import MAX_DRAFT_MODELS
+    from lightllm.common.attention_state.utils import MAX_DRAFT_MODELS
     from lightllm.utils.llm_utils import get_llm_model_class
 
     # 阶段一：读取 main 和启用 attention 的 draft 配置，不构造实际模型。
@@ -31,7 +31,7 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
             models.append((f"draft{index}", get_draft_model_class(config, args.mtp_mode), config))
 
     # 阶段二：复用模型定义入口创建 meta State，并累计逻辑层号；CPU 页不包含静态标定参数。
-    manager = AttResourceManager(request_capacity=0)  # 只描述 meta 布局，不分配请求或缓存存储。
+    manager = AttentionStateManager(request_capacity=0)  # 只描述 meta 布局，不分配请求或缓存存储。
     logical_layer_start = 0
     for role, model_class, config in models:
         config = model_class.normalize_model_config(config)
@@ -49,13 +49,13 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
         )
         # tail 不占 CPU 页；无需创建 tail，也不需要实际模型或临时 CUDA 运行态。
         for state in (*full_states, *bounded_states):
-            manager.set_att_state(role, state)
+            manager.register_state(role, state)
         logical_layer_start += count
 
     # 阶段三：确认混合模型的页边界一致，由管理器聚合 CPU 联合页布局。
-    manager.finish_state_creation()
+    manager.finish_state_registration()
     if manager.get_bounded_attention_states():
         assert (
             args.cpu_cache_token_page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         ), "hybrid CPU pages must match the large state-page token boundary"
-    return manager.get_cpu_transfer_layouts()
+    return manager.get_cpu_page_layouts()

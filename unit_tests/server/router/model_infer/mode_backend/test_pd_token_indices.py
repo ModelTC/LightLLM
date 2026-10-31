@@ -94,7 +94,7 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
         device == "cpu" and not pinned and non_blocking and stream == module.copy_cuda_stream
         for device, pinned, non_blocking, stream in uploads
     )
-    assert all(kwargs["write_to_pd_buffer"] is prefill for kwargs, _ in copies)
+    assert all(kwargs["write_to_pd_page"] is prefill for kwargs, _ in copies)
     assert all(indices is None or indices.is_cuda and indices.dtype == torch.long for _, indices in copies)
 
 

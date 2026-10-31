@@ -1,4 +1,4 @@
-from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.basemodel.attention import AttControl
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash2.triton_kernel import grouped_dynamic_conv
@@ -14,9 +14,9 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         self.sliding_window_ = int(network_config.get("sliding_window", 0) or 0)
 
     def _token_attention_kernel(self, q, infer_state, layer_weight):
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="gqa",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )
@@ -42,9 +42,9 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="gqa",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )

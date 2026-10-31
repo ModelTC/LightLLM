@@ -13,7 +13,7 @@ from lightllm.utils.envs_utils import get_env_start_args
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 class MistralTpPartModel(TpPartBaseModel):
@@ -39,7 +39,7 @@ class MistralTpPartModel(TpPartBaseModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """按本模型的全局逻辑层创建 GQA 布局，量化存储由算法入口选择。"""
-        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)

@@ -568,7 +568,7 @@ class StaticBenchmarkExecutor:
             req_id = int(req_id)
             max_target_len_by_req[req_id] = max(max_target_len_by_req.get(req_id, 0), int(target_len))
 
-        allocator = self.model.att_resource_manager.full_att_allocator
+        allocator = self.model.att_state_manager.full_att_allocator
         page_size = allocator.page_size
         for req_id, target_len in max_target_len_by_req.items():
             new_hold_kv_len = align_up(target_len, page_size)
@@ -729,7 +729,7 @@ class StaticBenchmarkExecutor:
         return torch.tensor(req_indexes, dtype=torch.int32, device="cpu")
 
     def _reset_model_cache(self):
-        self.model.att_resource_manager.full_att_allocator.free_all()
+        self.model.att_state_manager.full_att_allocator.free_all()
         self.model.req_manager.free_all()
         self._hold_kv_len_by_req.clear()
         torch.cuda.synchronize()
@@ -1273,11 +1273,11 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         draft_models = init_mtp_draft_models(args, model_kvargs, model)
         from lightllm.utils.envs_utils import set_model_init_status
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
-        from lightllm.common.att_resources import AttResourceManager
+        from lightllm.common.attention_state import AttentionStateManager
         from lightllm.common.req_manager import ReqManager
 
         models = (model, *draft_models)
-        assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"
+        assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
         assert all(item.max_req_num == model.max_req_num for item in models), "models must share the request domain"
         # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
         max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
@@ -1286,21 +1286,21 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         for item in models:
             item.bind_req_manager(req_manager=req_manager)
         for item in models:
-            item.prepare_att_resources()
-        manager: AttResourceManager = model.att_resource_manager
-        assert all(item.att_resource_manager is manager for item in models), "models must share one resource manager"
+            item.prepare_attention_states()
+        manager: AttentionStateManager = model.att_state_manager
+        assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            manager.finish_state_creation()
+            manager.finish_state_registration()
             manager.load_full_att_calibration(args=model.args)
-            manager.initialize_resources(
+            manager.initialize_storage(
                 model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
             )
         for item in models:
             item.init_runtime()
         torch.cuda.empty_cache()
         set_model_init_status(True)
-        cases = resolve_batch_max_prefill_cases(args, cases, model.att_resource_manager.full_att_allocator.size)
-        cases = resolve_profile_decode_cases(args, cases, model.att_resource_manager.full_att_allocator.size)
+        cases = resolve_batch_max_prefill_cases(args, cases, model.att_state_manager.full_att_allocator.size)
+        cases = resolve_profile_decode_cases(args, cases, model.att_state_manager.full_att_allocator.size)
         if defer_cudagraph:
             init_deferred_cudagraph(args, cases, model_kvargs, model)
             for draft in draft_models:

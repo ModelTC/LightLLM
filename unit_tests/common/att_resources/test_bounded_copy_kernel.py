@@ -4,8 +4,8 @@ import pytest
 import torch
 import triton.language as tl
 
-from lightllm.common.att_resources.bounded_att.copy_kernel import copy_bounded_att_tensors
-from lightllm.common.att_resources.bounded_att.utils import register_page_pool_tensor
+from lightllm.common.attention_state.bounded_att.copy_kernel import copy_bounded_att_tensors
+from lightllm.common.attention_state.bounded_att.utils import register_page_pool_tensor
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -88,7 +88,7 @@ def test_exact_float_bit_patterns(float_dtype: torch.dtype, int_dtype: torch.dty
 
 
 def test_one_kernel_for_same_dimension_batch(monkeypatch: pytest.MonkeyPatch) -> None:
-    from lightllm.common.att_resources.bounded_att import copy_kernel
+    from lightllm.common.attention_state.bounded_att import copy_kernel
 
     actual_kernel = copy_kernel._copy_bounded_att_1d
     launches = []
@@ -136,7 +136,7 @@ def test_same_shape_batch_uses_one_kernel(
     num_stages: int,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lightllm.common.att_resources.bounded_att import copy_kernel
+    from lightllm.common.attention_state.bounded_att import copy_kernel
 
     launches = []
     kernel_name = f"_copy_bounded_att_{ndim}d"
@@ -172,7 +172,7 @@ def test_same_shape_batch_uses_one_kernel(
 
 @pytest.mark.parametrize("layout", ["ssm", "conv_mtp", "dense", "width4", "middle_unaligned", "prefix", "singletons", "wide_singleton", "wide_singleton_prefix", "all_singletons"])
 def test_transfer_views_preserve_gaps_and_alignment(layout: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    from lightllm.common.att_resources.bounded_att import copy_kernel
+    from lightllm.common.attention_state.bounded_att import copy_kernel
 
     launches = []
 

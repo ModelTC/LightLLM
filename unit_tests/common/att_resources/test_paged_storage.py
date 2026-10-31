@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 
 
 def test_kv_cache_allocation_requires_complete_pages():

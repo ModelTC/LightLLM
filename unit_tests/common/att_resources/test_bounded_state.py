@@ -6,20 +6,20 @@ from dataclasses import replace
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.bounded_att import (
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.bounded_att import (
     GDNPagesPool,
     GDNState,
     KDAPagesPool,
     KDAState,
     ConvSSMStateConfig,
 )
-from lightllm.common.att_resources.types import (
-    AxisSlice, StateTransferLayout, TransferRegion,
+from lightllm.common.attention_state.types import (
+    AxisMapping, StateTransferLayout, TransferRegion,
 )
 
 if TYPE_CHECKING:
-    from lightllm.common.att_resources.types import PageKind
+    from lightllm.common.attention_state.types import PageKind
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for aggregated copies")
@@ -46,8 +46,8 @@ def make_state(
         mtp_step=mtp_step,
         device=device,
     )
-    manager = AttResourceManager(request_capacity=3)
-    manager.set_att_state("main", state)
+    manager = AttentionStateManager(request_capacity=3)
+    manager.register_state("main", state)
     state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
     return state
 
@@ -60,7 +60,7 @@ def page_layout(state: KDAState | GDNState):
     ssm_bytes = len(cfg.logical_layer_ids) * cfg.num_v_heads * cfg.key_dim * cfg.value_dim * 4
     end = 16 + conv_bytes + ssm_bytes
     return StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=None,
         byte_start=0,
         byte_end=end,
@@ -72,17 +72,17 @@ def page_layout(state: KDAState | GDNState):
                 dtype=torch.float32,
                 axes=("channel", "layer", "window"),
                 shape=conv_shape,
-                axis_slices=(
-                    AxisSlice(
+                axis_mappings=(
+                    AxisMapping(
                         axis="channel",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=cfg.conv_channels,
                     ),
-                    AxisSlice(
+                    AxisMapping(
                         axis="window",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=cfg.conv_width,
                     ),
                 ),
@@ -94,23 +94,23 @@ def page_layout(state: KDAState | GDNState):
                 dtype=torch.float32,
                 axes=("layer", "head", "key_dim", "value_dim"),
                 shape=ssm_shape,
-                axis_slices=(
-                    AxisSlice(
+                axis_mappings=(
+                    AxisMapping(
                         axis="head",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=cfg.num_v_heads,
                     ),
-                    AxisSlice(
+                    AxisMapping(
                         axis="key_dim",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=cfg.key_dim,
                     ),
-                    AxisSlice(
+                    AxisMapping(
                         axis="value_dim",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=cfg.value_dim,
                     ),
                 ),
@@ -146,7 +146,7 @@ def test_prefill_state_is_saved_and_restored(
         mtp_step=2,
         device=device,
     )
-    assert state.resource_id is None and not hasattr(config, "resource_id")
+    assert state.state_name is None and not hasattr(config, "state_name")
     assert state.big_pages_pool is None and state.small_pages_pool is None
     conv, ssm = state.get_layer_view(3)
     assert conv.data_ptr() == state.conv_state[1].data_ptr()
@@ -164,11 +164,11 @@ def test_prefill_state_is_saved_and_restored(
     assert type(state.small_pages_pool) is pool_cls
     assert state.big_pages_pool is not state.small_pages_pool
     assert state.mtp_state_index.tolist() == [0, 0, 1]
-    state.save_bounded_att_pages(
+    state.save_bounded_att_runtime_to_pages(
         req_indices=[0],
         state_token_lens=[8],
         page_kind=page_kind,
-        slot_ids=[1],
+        page_slot_ids=[1],
     )
     if device == "cuda":
         torch.cuda.synchronize()
@@ -177,11 +177,11 @@ def test_prefill_state_is_saved_and_restored(
     assert torch.equal(pool.conv_state[1, ..., 1], torch.full_like(pool.conv_state[1, ..., 1], 11))
     assert (pool.ssm_state[1] == 20).all()
     state.mtp_state_index[1] = 2
-    state.restore_bounded_att_pages(
+    state.restore_bounded_att_runtime_from_pages(
         req_indices=[1],
         state_token_lens=[8],
         page_kind=page_kind,
-        slot_ids=[1],
+        page_slot_ids=[1],
     )
     assert state.mtp_state_index[1].item() == 0
     assert torch.equal(state.conv_state[:, 1, :, :2].cpu(), pool.conv_state[1])
@@ -210,19 +210,19 @@ def test_gdn_dimensions_and_page_restore():
     state.conv_state[:, 0, :, :2].copy_(conv)
     state.ssm_state[:, 0].copy_(ssm)
     for page_kind in ("big", "small"):
-        state.save_bounded_att_pages(
+        state.save_bounded_att_runtime_to_pages(
             req_indices=[0],
             state_token_lens=[8],
             page_kind=page_kind,
-            slot_ids=[0],
+            page_slot_ids=[0],
         )
     state.reset_bounded_att_state([0])
     for req, page_kind in enumerate(("big", "small"), start=1):
-        state.restore_bounded_att_pages(
+        state.restore_bounded_att_runtime_from_pages(
             req_indices=[req],
             state_token_lens=[8],
             page_kind=page_kind,
-            slot_ids=[0],
+            page_slot_ids=[0],
         )
         assert torch.equal(state.conv_state[:, req, :, :2].cpu(), conv)
         assert torch.equal(state.ssm_state[:, req * 3].cpu(), ssm)
@@ -235,11 +235,11 @@ def test_reset_requests_preserves_pages(cls: type[KDAState] | type[GDNState]):
     state = make_state(cls, device="cuda")
     state.conv_state[:, 0].fill_(7)
     state.ssm_state[:, 0:3].fill_(11)
-    state.save_bounded_att_pages(
+    state.save_bounded_att_runtime_to_pages(
         req_indices=[0],
         state_token_lens=[6],
         page_kind="small",
-        slot_ids=[0],
+        page_slot_ids=[0],
     )
     # 推进候选区和游标后，重置应清零全部运行态，同时保留已保存的页快照。
     state.conv_state[:, 0, :, 2:4].fill_(19)
@@ -259,17 +259,17 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
     source = make_state(cls, device="cuda")
     source.conv_state[:, 0].fill_(13)
     source.ssm_state[:, 0].fill_(29)
-    source.save_bounded_att_pages(
+    source.save_bounded_att_runtime_to_pages(
         req_indices=[0],
         state_token_lens=[8],
         page_kind="big",
-        slot_ids=[0],
+        page_slot_ids=[0],
     )
     layout = page_layout(source)
     buffer = torch.full((3, layout.byte_end), 255, dtype=torch.uint8, pin_memory=True)
-    source.write_page_state_to_cpu(
+    source.write_state_pages_to_cpu(
         page_kind="big",
-        slot_ids=[0],
+        page_slot_ids=[0],
         cpu_page_buffers=buffer,
         cpu_page_indices=[2],
         layout=layout,
@@ -277,30 +277,30 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
     torch.cuda.synchronize()
     assert (buffer[:2] == 255).all() and (buffer[2, :16] == 255).all()
     target = make_state(cls, device="cuda")
-    target.read_page_state_from_cpu(
+    target.read_state_pages_from_cpu(
         cpu_page_buffers=buffer,
         cpu_page_indices=[2],
         big_page_slot_ids=[1],
         layout=layout,
     )
-    target.restore_bounded_att_pages(
+    target.restore_bounded_att_runtime_from_pages(
         req_indices=[2],
         state_token_lens=[8],
         page_kind="big",
-        slot_ids=[1],
+        page_slot_ids=[1],
     )
     assert (target.conv_state[:, 2, :, :2] == 13).all()
     assert (target.ssm_state[:, 6] == 29).all()
     # 页池只保存快照数据；前缀关联由调用方维护，读回的快照可以再次写出。
-    target.read_page_state_from_cpu(
+    target.read_state_pages_from_cpu(
         cpu_page_buffers=buffer,
         cpu_page_indices=[2],
         big_page_slot_ids=[0],
         layout=layout,
     )
-    target.write_page_state_to_cpu(
+    target.write_state_pages_to_cpu(
         page_kind="big",
-        slot_ids=[0],
+        page_slot_ids=[0],
         cpu_page_buffers=buffer,
         cpu_page_indices=[0],
         layout=layout,
@@ -331,7 +331,7 @@ def test_pd_roundtrip_uses_baseline_state_and_page_relative_offset(
         device=device,
     )
     page = allocation[1]
-    source.write_to_pd_buffer(
+    source.write_to_pd_page(
         req_idx=0,
         pd_page_buffers=allocation,
         pd_page_index=1,
@@ -339,7 +339,7 @@ def test_pd_roundtrip_uses_baseline_state_and_page_relative_offset(
         layout=layout,
     )
     target = make_state(cls, device=device, mtp_step=1)
-    target.read_from_pd_buffer(
+    target.read_from_pd_page(
         pd_page_buffers=allocation,
         req_idx=2,
         pd_page_index=1,
@@ -374,7 +374,7 @@ def test_dp_runtime_copy_preserves_pages_and_other_requests(cls, device, src_mtp
     src_conv = source.conv_state.clone()
     src_ssm = source.ssm_state.clone()
 
-    target.copy_run_time_state_from_other_dp(
+    target.copy_runtime_state_from_dp(
         src_req_indices=[2, 0], dst_req_indices=[0, 1], remote_dp_bounded_state=source,
     )
 
@@ -411,7 +411,7 @@ def test_dp_big_page_copy_preserves_runtime_and_other_pages(cls):
     src_conv = source.big_pages_pool.conv_state.clone()
     src_ssm = source.big_pages_pool.ssm_state.clone()
 
-    target.copy_big_page_state_from_other_dp(
+    target.copy_big_pages_from_dp(
         src_page_ids=[2, 0], dst_page_ids=[0, 1], remote_dp_bounded_state=source,
     )
 

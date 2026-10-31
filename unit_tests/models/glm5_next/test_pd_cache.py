@@ -7,10 +7,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from unit_tests.common.att_resources.model_helpers import create_full_attention_roles
 
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state.full_att import (
     PackedMLAFullAttentionState,
     PackedMLAAttentionConfig,
 )
@@ -80,7 +80,7 @@ def make_mems(monkeypatch, request):
                 ),
                  page_size=args.page_size,
             )
-            full.initialize_storage(32)
+            full.allocate_storage(32)
             main, draft = create_full_attention_roles(full, config.all_layer_num)
             resources = build_hybrid_resources(
                 config=config,
@@ -191,7 +191,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
     source_buffer = allocate_transfer_buffer(source_resources[0], 1, device="cuda")
     dest_buffer = allocate_transfer_buffer(dest_resources[0], 1, device="cuda")
     assert source_buffer.shape == dest_buffer.shape
-    assert source_resources[0].get_pd_bounded_att_or_tail_transfer_layouts().keys() == dest_resources[0].get_pd_bounded_att_or_tail_transfer_layouts().keys()
+    assert source_resources[0].get_pd_runtime_page_layouts().keys() == dest_resources[0].get_pd_runtime_page_layouts().keys()
     for kind in ("kv", "att_state"):
         copy_page(
             node_att_managers=source_resources,
@@ -203,7 +203,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
             task_kind=kind,
             req_idx=src_req,
             state_token_len=length,
-            write_to_pd_buffer=True,
+            write_to_pd_page=True,
         )
         dest_buffer.copy_(source_buffer)
         copy_page(
@@ -216,7 +216,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
             task_kind=kind,
             req_idx=dst_req,
             state_token_len=length,
-            write_to_pd_buffer=False,
+            write_to_pd_page=False,
         )
     torch.cuda.synchronize()
 
@@ -284,9 +284,9 @@ def test_pd_kv_and_runtime_state_roundtrip(
 def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch, caplog):
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 8)
     mem = make_mems(1)[0]
-    full_bytes = max(layout.byte_end for layout in mem.resources.get_pd_full_att_transfer_layouts().values())
+    full_bytes = max(layout.byte_end for layout in mem.resources.get_pd_token_page_layouts().values())
     runtime_bytes = max(
-        layout.byte_end for layout in mem.resources.get_pd_bounded_att_or_tail_transfer_layouts().values()
+        layout.byte_end for layout in mem.resources.get_pd_runtime_page_layouts().values()
     )
     assert runtime_bytes > full_bytes
     assert mem.resources.get_pd_page_bytes() == runtime_bytes
@@ -297,8 +297,8 @@ def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch,
 @pytest.mark.parametrize("prefix", [1, 3, 4, 5, 11, 12])
 def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step, prefix):
     """真实 prefill 导出后，在不同大小的 ring 上验证、拒绝回退并再次验证。"""
-    from lightllm.common.att_resources.att_tail import KPoolStateConfig, create_kpool_state
-    from lightllm.common.att_resources.types import StateTransferLayout
+    from lightllm.common.attention_state.att_tail import KPoolStateConfig, create_kpool_state
+    from lightllm.common.attention_state.types import StateTransferLayout
 
     torch.manual_seed(53)
     config = KPoolStateConfig(
@@ -361,14 +361,14 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
     regions = source.get_pd_transfer_regions()
     assert regions == target.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=source.resource_id,
+        state_name=source.state_name,
         tokens_per_page=None,
         byte_start=0,
         byte_end=regions[-1].byte_end,
         regions=regions,
     )
     pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
-    source.write_to_pd_buffer(
+    source.write_to_pd_page(
         req_idx=0,
         pd_page_buffers=pages,
         pd_page_index=0,
@@ -376,7 +376,7 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
         layout=layout,
     )
     target.tail_buffer.fill_(17)
-    target.read_from_pd_buffer(
+    target.read_from_pd_page(
         pd_page_buffers=pages,
         req_idx=0,
         pd_page_index=0,

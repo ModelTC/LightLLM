@@ -29,8 +29,8 @@ from lightllm.models.gemma4.model import Gemma4TpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from unit_tests.common.att_resources.test_quantized_full_state import KINDS, make_quant_state
 
 if TYPE_CHECKING:
@@ -123,20 +123,20 @@ def test_model_and_cpu_service_use_identical_storage_geometry(
         model.tp_rank_, model.tp_world_size_ = rank, args.tp
         model.max_total_token_num, model.max_req_num = 19, 1
         prepare_model_states(model)
-        resources = model.att_resource_manager
-        resources.finish_state_creation()
-        resources.initialize_resources(args, token_capacity=model.max_total_token_num, mem_fraction=args.mem_fraction)
+        resources = model.att_state_manager
+        resources.finish_state_registration()
+        resources.initialize_storage(args, token_capacity=model.max_total_token_num, mem_fraction=args.mem_fraction)
         (state,) = resources.get_full_attention_states("main")
         assert state.config.head_num == local_heads and state.config.head_dim == dim
         storage_layers = 2 - (config.get("num_kv_shared_layers") or 0)
         assert state.k_storage.shape == state.v_storage.shape == (storage_layers, 20, local_heads, dim)
         if storage_layers == 1:
             assert state.config.logical_layer_groups == ((0, 1),)
-            assert resources.get_att_state("main", "gqa", 0) is resources.get_att_state("main", "gqa", 1)
+            assert resources.get_state("main", "gqa", 0) is resources.get_state("main", "gqa", 1)
             assert state.get_layer_view(logical_layer_id=0)[0].data_ptr() == state.get_layer_view(logical_layer_id=1)[0].data_ptr()
         assert read_kv_storage(state).dtype == (torch.bfloat16 if model_cls is Gemma3TpPartModel else torch.float16)
         assert resources.full_att_allocator.size == 16
-        layout = resources.get_cpu_transfer_layouts()[state.resource_id]
+        layout = resources.get_cpu_page_layouts()[state.state_name]
         assert (layout.byte_start, layout.byte_end) == (service_layout.byte_start, service_layout.byte_end)
         # 按物理层数计算传输页；共享消费者不重复增加 KV 或传输容量。
         expected_pd_bytes = storage_layers * args.pd_kv_page_size * 2 * global_heads * dim * read_kv_storage(state).element_size()
@@ -153,10 +153,10 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
     pd_args: EasyDict,
 ):
     state = make_quant_state(kind, "cpu")
-    reference = AttResourceManager(request_capacity=1)
-    reference.set_att_state("main", state)
+    reference = AttentionStateManager(request_capacity=1)
+    reference.register_state("main", state)
     reference.full_att_allocator = FullAttKVAllocator(state.capacity, state.page_size, pin_memory=False)
-    reference.finish_state_creation()
+    reference.finish_state_registration()
     args = StartArgs(
         page_size=4,
         run_mode="prefill",
@@ -177,9 +177,9 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory_info)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-    monkeypatch.setattr("lightllm.common.att_resources.att_resource_manager.get_current_device_id", lambda: 3)
+    monkeypatch.setattr("lightllm.common.attention_state.manager.get_current_device_id", lambda: 3)
     monkeypatch.setattr(
-        "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
+        "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
     template = rebuild_full_state(
         template=state,
@@ -187,10 +187,10 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
         token_capacity=0,
         device="meta",
     )
-    resources = AttResourceManager(request_capacity=1)
-    resources.set_att_state("main", rebuild_full_state(template, config=template.config))
-    resources.finish_state_creation()
-    resources.initialize_resources(
+    resources = AttentionStateManager(request_capacity=1)
+    resources.register_state("main", rebuild_full_state(template, config=template.config))
+    resources.finish_state_registration()
+    resources.initialize_storage(
         args=args,
         token_capacity=None,
         mem_fraction=0.75,
@@ -205,7 +205,7 @@ def test_cpu_layout_uses_all_model_factory_states(
     args: StartArgs | EasyDict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ):
     """同一模型返回多种方案和共享层时，CPU 页采用实际 State 列表。"""
-    from lightllm.common.att_resources.full_att import FullAttentionState, GQAFullAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState, GQAFullAttentionState
 
     class MixedStorageModel(LlamaTpPartModel):
         @classmethod
@@ -250,7 +250,7 @@ def test_cpu_layout_uses_all_model_factory_states(
     model.config, model.args = config, args
     model.tp_rank_, model.tp_world_size_, model.max_req_num = 0, 1, 1
     prepare_model_states(model)
-    model.att_resource_manager.finish_state_creation()
-    runtime_layouts = model.att_resource_manager.get_cpu_transfer_layouts()
+    model.att_state_manager.finish_state_registration()
+    runtime_layouts = model.att_state_manager.get_cpu_page_layouts()
     assert set(cpu_layouts) == set(runtime_layouts) == {"main_gqa_bf16_state", "main_gqa_fp16_state"}
     assert cpu_layouts == runtime_layouts

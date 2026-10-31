@@ -184,13 +184,13 @@ def make_runtime(
             draft.tp_world_size_, draft.tp_rank_ = tp, rank
             prepare_model_states(draft, logical_layer_ids=(config["num_hidden_layers"] + step,))
             drafts.append(draft)
-        model.att_resource_manager.finish_state_creation()
-        model.att_resource_manager.load_full_att_calibration(args=args)
-        model.att_resource_manager.initialize_resources(
+        model.att_state_manager.finish_state_registration()
+        model.att_state_manager.load_full_att_calibration(args=args)
+        model.att_state_manager.initialize_storage(
             args, token_capacity=model.max_total_token_num, mem_fraction=args.mem_fraction
         )
         assert not hasattr(model, "mem_manager")
-        managers.append(model.att_resource_manager)
+        managers.append(model.att_state_manager)
     return meta, managers
 
 
@@ -222,8 +222,8 @@ def test_cpu_service_describes_main_and_draft_as_distinct_resources(
             layer for group in draft.config.logical_layer_groups for layer in group
         )
         assert main.capacity == draft.capacity == resources.full_att_allocator.size
-        assert {main.resource_id, draft.resource_id} <= resources.get_cpu_transfer_layouts().keys()
-        layout_end = max(layout.byte_end for layout in resources.get_cpu_transfer_layouts().values())
+        assert {main.state_name, draft.state_name} <= resources.get_cpu_page_layouts().keys()
+        layout_end = max(layout.byte_end for layout in resources.get_cpu_page_layouts().values())
         assert (layout_end + 15) // 16 * 16 == meta.page_bytes
         assert resources.get_cpu_page_bytes() == meta.page_bytes
 
@@ -251,7 +251,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
     # No byte-size formulas duplicated in the test: check the service's actual
     # meta-device descriptors against every real model's layout.
     for resources in managers:
-        layout = next(iter(resources.get_cpu_transfer_layouts().values()))
+        layout = next(iter(resources.get_cpu_page_layouts().values()))
         assert 0 <= layout.byte_start < layout.byte_end <= meta.page_bytes
         assert meta.page_bytes == resources.get_cpu_page_bytes()
     meta.page_num = 3
@@ -269,11 +269,11 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
             linear.conv_state.fill_(3)
             linear.ssm_state.fill_(5)
             slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
-            resources.save_bounded_att_pages(
+            resources.save_bounded_att_runtime_to_pages(
                 req_indices=[0],
                 state_token_lens=[8],
                 page_kind="big",
-                slot_ids=[slot],
+                page_slot_ids=[slot],
             )
             kwargs = dict(big_page_slot_ids=[slot])
         torch.cuda.synchronize()
@@ -288,7 +288,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
             token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
             cpu_page_buffers=buffer,
             cpu_page_indices=[2],
-            layouts=resources.get_cpu_transfer_layouts(),
+            layouts=resources.get_cpu_page_layouts(),
             **kwargs,
         )
     torch.cuda.synchronize()
@@ -313,7 +313,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
                 device="cuda",
             ),
             state_token_len=8,
-            layouts=resources.get_cpu_transfer_layouts(),
+            layouts=resources.get_cpu_page_layouts(),
             **kwargs,
         )
         if resources.bounded_att_big_page_allocator is not None:
@@ -357,7 +357,7 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
     write_to_cpu = resources.write_req_to_cpu
 
     def capture_write(*args: object, **kwargs: object) -> None:
-        write_batches.append((kwargs["cpu_page_indices"], kwargs["cpu_page_readies"]))
+        write_batches.append((kwargs["cpu_page_indices"], kwargs["cpu_page_ready_flags"]))
         write_to_cpu(*args, **kwargs)
 
     monkeypatch.setattr(resources, "write_req_to_cpu", capture_write)
@@ -399,7 +399,7 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
             is_hybrid_att_model=hybrid,
             dp_world_size=1,
             model=SimpleNamespace(
-                att_resource_manager=resources,
+                att_state_manager=resources,
                 req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(16, device="cuda").view(1, -1)),
             ),
         )
@@ -441,7 +441,7 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
         cpu_page_indices=[pages[1]],
         token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
         state_token_len=8,
-        layouts=resources.get_cpu_transfer_layouts(),
+        layouts=resources.get_cpu_page_layouts(),
         **kwargs,
     )
     for field in full_state_test_fields(full, full_state_test_buffers(full)).values():
@@ -481,7 +481,7 @@ def test_disk_preserves_resource_pages(
         token_indices=torch.arange(16, dtype=torch.long, device="cuda"),
         cpu_page_buffers=client.cpu_kv_cache_tensor,
         cpu_page_indices=pages,
-        layouts=resources.get_cpu_transfer_layouts(),
+        layouts=resources.get_cpu_page_layouts(),
     )
     torch.cuda.synchronize()
     expected = client.cpu_kv_cache_tensor.clone()
@@ -501,6 +501,6 @@ def test_disk_preserves_resource_pages(
         cpu_page_buffers=client.cpu_kv_cache_tensor,
         cpu_page_indices=pages,
         token_indices=torch.arange(16, dtype=torch.long, device="cuda"),
-        layouts=resources.get_cpu_transfer_layouts(),
+        layouts=resources.get_cpu_page_layouts(),
     )
     assert any((tmp_path / "disk").glob("cache_file*"))

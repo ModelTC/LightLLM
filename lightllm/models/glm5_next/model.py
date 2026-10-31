@@ -20,9 +20,9 @@ from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeig
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
-    from lightllm.common.att_resources.bounded_att import BoundedAttentionState
-    from lightllm.common.att_resources.att_tail import AttentionTailState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+    from lightllm.common.attention_state.att_tail import AttentionTailState
 
 
 class Glm5NextTpPartModel(TpPartBaseModel):
@@ -45,7 +45,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         device: str = "meta",
     ) -> list["BoundedAttentionState"]:
         """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
-        from lightllm.common.att_resources.bounded_att import create_kda_state, ConvSSMStateConfig
+        from lightllm.common.attention_state.bounded_att import create_kda_state, ConvSSMStateConfig
 
         config = cls.normalize_model_config(model_config)
         assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
@@ -116,7 +116,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """GLM full-attention 层采用 NoPE packed MLA，并保存压缩 indexer 字段。"""
-        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -153,7 +153,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         device: str = "meta",
     ) -> list["AttentionTailState"]:
         """直接选择本模型需要 K-pool tail 的层，不依赖 full State 创建过程。"""
-        from lightllm.common.att_resources.att_tail import create_kpool_state, KPoolStateConfig
+        from lightllm.common.attention_state.att_tail import create_kpool_state, KPoolStateConfig
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)

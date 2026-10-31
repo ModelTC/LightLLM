@@ -8,21 +8,21 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.bounded_att import GDNState
-from lightllm.common.att_resources.allocators import StatePageAllocator
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.bounded_att import GDNState
+from lightllm.common.attention_state.allocators import StatePageAllocator
 from lightllm.server.router.model_infer.mtp_speculative.utils import verify_mtp_tokens
 from unit_tests.common.att_resources.test_bounded_state import make_state
 
 
 def make_manager(device: str | torch.device | int):
-    manager = AttResourceManager(request_capacity=3)
-    manager.set_att_state("main", make_state(device=device))
-    manager.set_att_state("main", make_state(GDNState, device=device))
-    manager.set_att_state("draft0", make_state(GDNState, device=device))
+    manager = AttentionStateManager(request_capacity=3)
+    manager.register_state("main", make_state(device=device))
+    manager.register_state("main", make_state(GDNState, device=device))
+    manager.register_state("draft0", make_state(GDNState, device=device))
     manager.bounded_att_big_page_allocator = StatePageAllocator(3)
     manager.bounded_att_small_page_allocator = StatePageAllocator(2)
-    manager.finish_state_creation()
+    manager.finish_state_registration()
     return manager
 
 
@@ -55,8 +55,8 @@ def test_commit_selects_state_for_one_role():
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_commit_without_recurrent_state_and_invalid_role():
-    manager = AttResourceManager(request_capacity=3)
-    manager.finish_state_creation()
+    manager = AttentionStateManager(request_capacity=3)
+    manager.finish_state_registration()
     manager.commit_bounded_att_state(
         torch.tensor([0], dtype=torch.int32, device="cuda"),
         torch.tensor([3], dtype=torch.int32, device="cuda"),
@@ -81,7 +81,7 @@ def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[i
     manager = make_manager("cuda")
     backend = SimpleNamespace(
         model=SimpleNamespace(
-            att_resource_manager=manager,
+            att_state_manager=manager,
             req_manager=SimpleNamespace(
                 req_sampling_params_manager=SimpleNamespace(
                     req_to_next_token_ids=torch.tensor([[-1, 10, 11]] * 3, device="cuda")

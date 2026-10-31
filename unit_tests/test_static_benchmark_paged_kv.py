@@ -39,7 +39,7 @@ def make_executor(page_size: int = 4):
     req_manager = SimpleNamespace(
         req_to_token_indexs=torch.full((4, 32), -1, dtype=torch.int32),
     )
-    model = SimpleNamespace(att_resource_manager=SimpleNamespace(full_att_allocator=allocator), req_manager=req_manager)
+    model = SimpleNamespace(att_state_manager=SimpleNamespace(full_att_allocator=allocator), req_manager=req_manager)
     args = SimpleNamespace(mtp_mode=None, mtp_step=0)
     executor = StaticBenchmarkExecutor(args=args, model=model, draft_models=[], token_source=None)
     return executor, allocator, req_manager

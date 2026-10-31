@@ -5,9 +5,9 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 
-from lightllm.common.att_resources.full_att import FullAttentionConfig, GQAFullAttentionState
-from lightllm.common.att_resources.full_att.gqa_transfer import transfer_gqa_pages
-from lightllm.common.att_resources.types import StateTransferLayout
+from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFullAttentionState
+from lightllm.common.attention_state.full_att.gqa_transfer import transfer_gqa_pages
+from lightllm.common.attention_state.types import StateTransferLayout
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -26,15 +26,15 @@ def test_gqa_grid_stride_covers_all_tokens(grid_num: int, page_device: str, pd_a
     )
     source = GQAFullAttentionState(layout_config=config, page_size=32, device="cuda")
     target = GQAFullAttentionState(layout_config=config, page_size=32, device="cuda")
-    source.initialize_storage(token_capacity=128)
-    target.initialize_storage(token_capacity=128)
+    source.allocate_storage(token_capacity=128)
+    target.allocate_storage(token_capacity=128)
     for tensor in (source.k_storage, source.v_storage):
         tensor.view(torch.uint8).random_(0, 256)
     for tensor in (target.k_storage, target.v_storage):
         tensor.view(torch.uint8).fill_(173)
     regions = source.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=source.resource_id,
+        state_name=source.state_name,
         tokens_per_page=32,
         byte_start=0,
         byte_end=max(region.byte_end for region in regions),
@@ -107,7 +107,7 @@ def test_wide_transfer_preserves_unaligned_pages_and_strided_fields(
     pd_args: "EasyDict",
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from lightllm.common.att_resources.full_att import gqa_transfer
+    from lightllm.common.attention_state.full_att import gqa_transfer
 
     pd_args.pd_kv_page_size = 2
     config = FullAttentionConfig(
@@ -118,8 +118,8 @@ def test_wide_transfer_preserves_unaligned_pages_and_strided_fields(
     )
     source = GQAFullAttentionState(layout_config=config, page_size=2, device="cuda")
     target = GQAFullAttentionState(layout_config=config, page_size=2, device="cuda")
-    source.initialize_storage(token_capacity=8)
-    target.initialize_storage(token_capacity=8)
+    source.allocate_storage(token_capacity=8)
+    target.allocate_storage(token_capacity=8)
     for name in ("k_storage", "v_storage"):
         storage = getattr(source, name)
         if dim_stride != 1:
@@ -129,7 +129,7 @@ def test_wide_transfer_preserves_unaligned_pages_and_strided_fields(
         getattr(target, name).view(torch.uint8).fill_(173)
     regions = source.get_pd_transfer_regions()
     layout = StateTransferLayout(
-        resource_id=source.resource_id,
+        state_name=source.state_name,
         tokens_per_page=2,
         byte_start=0,
         byte_end=max(region.byte_end for region in regions),

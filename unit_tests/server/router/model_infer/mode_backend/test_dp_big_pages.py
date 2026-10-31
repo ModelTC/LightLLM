@@ -8,7 +8,7 @@ import pytest
 import torch
 
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process  # noqa: F401
-from lightllm.common.att_resources.allocators import StatePageAllocator
+from lightllm.common.attention_state.allocators import StatePageAllocator
 from lightllm.server.router.model_infer.mode_backend.dp_backend import dp_shared_kv_trans
 
 
@@ -89,8 +89,8 @@ def test_build_reserves_only_new_big_pages_before_kv(
     task, = tasks
     assert task.dst_req is req and task.src_req_idx == 1
     assert task.src_dp_rank == 1
-    assert task.src_token_indexes.tolist() == list(range(40, 32 + src_kv_len))
-    assert len(task.dst_token_indexes) == src_kv_len - 8
+    assert task.src_token_indices.tolist() == list(range(40, 32 + src_kv_len))
+    assert len(task.dst_token_indices) == src_kv_len - 8
     assert allocations == [((src_kv_len + 3) // 4) * 4 - 8]
     assert req.cur_kv_len == 8 and req.hybrid_len_to_big_page_id == {8: 77}
     if src_kv_len == 26:
@@ -128,15 +128,15 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
     barriers = []
     manager = SimpleNamespace(
         bounded_att_big_page_allocator=SimpleNamespace(alloc=allocate_pages),
-        copy_from_other_dp=copy_resources,
+        copy_from_dp=copy_resources,
     )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = SimpleNamespace(
         is_hybrid_att_model=hybrid,
         is_master_in_dp=True,
         node_nccl_group="node",
-        model=SimpleNamespace(att_resource_manager=manager),
-        dp_att_resource_managers={},
+        model=SimpleNamespace(att_state_manager=manager),
+        dp_att_state_managers={},
         dp_req_to_token_indices={},
         _alloc_req_kv_mem=allocate_tokens,
     )
@@ -198,7 +198,7 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
         dp_world_size=2,
         rank_in_dp=1,
         node_nccl_group=None,
-        model=SimpleNamespace(att_resource_manager=SimpleNamespace(bounded_att_big_page_allocator=allocator)),
+        model=SimpleNamespace(att_state_manager=SimpleNamespace(bounded_att_big_page_allocator=allocator)),
         dp_req_to_token_indices={1: torch.arange(64, dtype=torch.int32).reshape(2, 32)},
         _alloc_req_kv_mem=allocate,
     )

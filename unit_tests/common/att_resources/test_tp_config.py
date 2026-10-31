@@ -15,9 +15,9 @@ from dataclasses import replace
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.bounded_att import ConvSSMStateConfig, GDNState
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
+from lightllm.common.attention_state.full_att import (
     FullAttentionConfig,
     GQAFullAttentionState,
     MLAFullAttentionState,
@@ -26,15 +26,15 @@ from lightllm.common.att_resources.full_att import (
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from easydict import EasyDict
-    from lightllm.common.att_resources.bounded_att.base_state import BoundedAttentionState
-    from lightllm.common.att_resources.full_att.base_state import FullAttentionState
+    from lightllm.common.attention_state.bounded_att.base_state import BoundedAttentionState
+    from lightllm.common.attention_state.full_att.base_state import FullAttentionState
 
 
 def cpu_layout(state: FullAttentionState | BoundedAttentionState):
-    manager = AttResourceManager(request_capacity=1)
-    manager.set_att_state("main", state)
-    manager.finish_state_creation()
-    return manager.get_cpu_transfer_layouts()[state.resource_id]
+    manager = AttentionStateManager(request_capacity=1)
+    manager.register_state("main", state)
+    manager.finish_state_registration()
+    return manager.get_cpu_page_layouts()[state.state_name]
 
 
 @pytest.mark.parametrize(
@@ -65,7 +65,7 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
         replicated=replicated,
     )
     reference = state_cls(config, page_size=4, device="cuda")
-    reference.initialize_storage(4)
+    reference.allocate_storage(4)
     for storage_buffer in full_state_test_buffers(reference).values():
         storage_buffer.copy_(torch.arange(storage_buffer.numel()).reshape(storage_buffer.shape))
     fields = {name: field.tensor for name, field in full_state_test_fields(reference, full_state_test_buffers(reference)).items()}
@@ -77,7 +77,7 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
     assert "head_num" not in vars(restored_config)
     for rank, (start, end) in enumerate(source_ranges):
         source = state_cls(replace(config, tp_rank=rank, tp_world_size=len(source_ranges)), page_size=4, device="cuda")
-        source.initialize_storage(4)
+        source.allocate_storage(4)
         layout = cpu_layout(source)
         assert layout.byte_end == reference_layout.byte_end
         for name, field in full_state_test_fields(source, full_state_test_buffers(source)).items():
@@ -91,7 +91,7 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
 
     for rank, (start, end) in enumerate(target_ranges):
         target = state_cls(replace(restored_config, tp_rank=rank, tp_world_size=len(target_ranges)), page_size=4, device="cuda")
-        target.initialize_storage(4)
+        target.allocate_storage(4)
         layout = cpu_layout(target)
         assert layout.byte_end == reference_layout.byte_end
         target.read_from_cpu(
@@ -175,10 +175,10 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
         )
     else:
         other = rebuild_full_state(source, config=other_config)
-    manager = AttResourceManager(request_capacity=1)
-    manager.set_att_state("draft0", source)
-    manager.set_att_state("draft1", other)
-    manager.finish_state_creation()
+    manager = AttentionStateManager(request_capacity=1)
+    manager.register_state("draft0", source)
+    manager.register_state("draft1", other)
+    manager.finish_state_registration()
     query = manager.get_bounded_attention_states if bounded else manager.get_full_attention_states
     assert query("draft0") == (source,)
     assert query("draft1") == (other,)
@@ -192,14 +192,14 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
         assert page_bytes == page_tokens * 192
     assert manager.get_pd_page_bytes() == page_bytes
     getter = (
-        manager.get_pd_bounded_att_or_tail_transfer_layouts if bounded else manager.get_pd_full_att_transfer_layouts
+        manager.get_pd_runtime_page_layouts if bounded else manager.get_pd_token_page_layouts
     )
     layouts = getter()
     assert getter() is layouts
-    assert set(layouts) == {source.resource_id, other.resource_id}
+    assert set(layouts) == {source.state_name, other.state_name}
     assert all(layout.tokens_per_page == (None if bounded else page_tokens) for layout in layouts.values())
     unused_getter = (
-        manager.get_pd_full_att_transfer_layouts if bounded else manager.get_pd_bounded_att_or_tail_transfer_layouts
+        manager.get_pd_token_page_layouts if bounded else manager.get_pd_runtime_page_layouts
     )
     assert unused_getter() == {}
     assert manager.get_pd_page_bytes() == page_bytes

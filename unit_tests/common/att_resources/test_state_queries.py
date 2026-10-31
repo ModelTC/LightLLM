@@ -13,9 +13,9 @@ from functools import partial
 import pytest
 from easydict import EasyDict
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
-from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
+from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.server.core.objs.start_args_type import StartArgs
 from unit_tests.common.att_resources.manager_fixtures import MainDraftTestResourceManager
 from unit_tests.common.att_resources.test_capacity import definition
@@ -24,36 +24,36 @@ from unit_tests.common.att_resources.test_capacity import definition
 def test_created_state_queries_keep_the_same_objects_through_storage_initialization(monkeypatch: pytest.MonkeyPatch):
     args = StartArgs(page_size=4)
     definitions = []
-    manager = AttResourceManager(request_capacity=1)
+    manager = AttentionStateManager(request_capacity=1)
     for role, kind in (("main", "gqa"), ("draft0", "int8")):
-        manager.set_att_state(role, definition(kind))
+        manager.register_state(role, definition(kind))
         definitions.append(next(
             state for state in vars(manager).values()
-            if isinstance(state, FullAttentionState) and state.resource_id.startswith(role + "_")
+            if isinstance(state, FullAttentionState) and state.state_name.startswith(role + "_")
         ))
         for query in (
             manager.get_full_attention_states, manager.get_bounded_attention_states, manager.get_attention_tail_states,
         ):
-            with pytest.raises(AssertionError, match="State creation"):
+            with pytest.raises(AssertionError, match="State registration"):
                 query()
         assert manager._get_states.cache_info().currsize == 0
 
     cached = []
-    initialize_storage = AttResourceManager.initialize_storage
+    allocate_storage = AttentionStateManager.allocate_storage
 
-    def check_created_before_allocation(manager: AttResourceManager, *args: object, **kwargs: object):
+    def check_created_before_allocation(manager: AttentionStateManager, *args: object, **kwargs: object):
         states = manager.get_full_attention_states()
         assert all(read_kv_storage(state) is None for state in states)
         assert manager.full_att_allocator is None
         cached.append(states)
-        initialize_storage(manager, *args, **kwargs)
+        allocate_storage(manager, *args, **kwargs)
 
-    monkeypatch.setattr(AttResourceManager, "initialize_storage", check_created_before_allocation)
+    monkeypatch.setattr(AttentionStateManager, "allocate_storage", check_created_before_allocation)
     monkeypatch.setattr(
-        "lightllm.common.att_resources.att_resource_manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
+        "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
-    manager.finish_state_creation()
-    manager.initialize_resources(
+    manager.finish_state_registration()
+    manager.initialize_storage(
         args=args,
         token_capacity=8,
         mem_fraction=1.0,
@@ -90,10 +90,10 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
 
 
 def test_finished_state_creation_allows_unallocated_storage():
-    manager = AttResourceManager(request_capacity=1)
-    manager.set_att_state("main", definition("gqa"))
+    manager = AttentionStateManager(request_capacity=1)
+    manager.register_state("main", definition("gqa"))
     manager.full_att_allocator = FullAttKVAllocator(0, 4, pin_memory=False)
-    manager.finish_state_creation()
+    manager.finish_state_registration()
     assert read_kv_storage(manager.get_full_attention_states()[0]) is None
 
 
@@ -109,7 +109,7 @@ def test_ipc_copy_preserves_owner_storage_and_shares_runtime_tensors():
         assert getattr(source, name) is not None
         assert getattr(exported, name) is None
     for state, (big_pool, small_pool) in zip(source_states, owner_pools):
-        copied = getattr(exported, state.resource_id)
+        copied = getattr(exported, state.state_name)
         assert copied is not state
         assert copied.conv_state is state.conv_state
         assert copied.ssm_state is state.ssm_state
@@ -121,10 +121,10 @@ def test_ipc_copy_preserves_owner_storage_and_shares_runtime_tensors():
         assert big_pool.size == source.bounded_att_big_page_allocator.size
         assert small_pool.size == source.bounded_att_small_page_allocator.size
     assert exported.get_bounded_attention_states() == tuple(
-        getattr(exported, state.resource_id) for state in source_states
+        getattr(exported, state.state_name) for state in source_states
     )
     for state in (*source.get_full_attention_states(), *source.get_attention_tail_states()):
-        assert getattr(exported, state.resource_id) is state
+        assert getattr(exported, state.state_name) is state
 
 
 
@@ -134,7 +134,7 @@ def test_pd_and_dp_export_have_distinct_pool_ownership(cpu_args: EasyDict, share
     source = MainDraftTestResourceManager()
     pd_copy = source.create_pd_ipc_copy()
     for state in source.get_bounded_attention_states():
-        exported = getattr(pd_copy, state.resource_id)
+        exported = getattr(pd_copy, state.state_name)
         assert exported.big_pages_pool is None and exported.small_pages_pool is None
         assert state.big_pages_pool is not None and state.small_pages_pool is not None
     if not share_pools:
@@ -146,7 +146,7 @@ def test_pd_and_dp_export_have_distinct_pool_ownership(cpu_args: EasyDict, share
         assert getattr(dp_copy, name) is None
         assert getattr(source, name) is not None
     for state in source.get_bounded_attention_states():
-        exported = getattr(dp_copy, state.resource_id)
+        exported = getattr(dp_copy, state.state_name)
         assert exported.big_pages_pool is state.big_pages_pool
         assert exported.small_pages_pool is state.small_pages_pool
         assert exported.conv_state is state.conv_state
@@ -158,7 +158,7 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
     source.get_bounded_attention_states()
     source.get_attention_tail_states()
     imported = pickle.loads(pickle.dumps(source.create_pd_ipc_copy()))
-    assert imported._states_created
+    assert imported._state_registration_finished
     assert imported.full_att_allocator is None
     assert imported.bounded_att_big_page_allocator is None
     assert imported.bounded_att_small_page_allocator is None
@@ -167,7 +167,7 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
         imported.get_full_attention_states, imported.get_bounded_attention_states, imported.get_attention_tail_states,
     ):
         for state in query():
-            name = state.resource_id
+            name = state.state_name
             assert state is getattr(imported, name) and state is not getattr(source, name)
     assert imported._get_states.cache_info().misses == misses + 3
 
@@ -182,6 +182,6 @@ def test_clearing_query_cache_releases_manager_and_states():
     del manager
     gc.collect()
     assert manager_ref() is not None and state_ref() is not None
-    AttResourceManager._get_states.cache_clear()
+    AttentionStateManager._get_states.cache_clear()
     gc.collect()
     assert manager_ref() is None and state_ref() is None

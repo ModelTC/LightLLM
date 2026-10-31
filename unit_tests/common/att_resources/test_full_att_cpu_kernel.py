@@ -10,7 +10,7 @@ import torch
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
 from unit_tests.common.att_resources.test_state_identity import allocated_state
 from unit_tests.common.att_resources.test_quantized_full_state import transfer_layout
-from lightllm.common.att_resources.types import AxisSlice
+from lightllm.common.attention_state.types import AxisMapping
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -107,15 +107,15 @@ def test_direct_cpu_pages_only_update_selected_head_slice_and_skip_replica_write
     regions = []
     for region in layout.regions:
         slices = tuple(
-            AxisSlice(
+            AxisMapping(
                 axis="head",
-                src_start=1,
-                dst_start=0,
+                local_start=1,
+                external_start=0,
                 length=1,
             ) if item.axis == "head" else item
-            for item in region.axis_slices
+            for item in region.axis_mappings
         )
-        regions.append(replace(region, axis_slices=slices))
+        regions.append(replace(region, axis_mappings=slices))
     layout = replace(layout, regions=tuple(regions))
     pages = torch.zeros((1, layout.byte_end), dtype=torch.uint8, pin_memory=True)
     ids = torch.tensor([1, 5], dtype=torch.int64, device="cuda")
@@ -275,7 +275,7 @@ def test_full_state_interfaces_reject_cpu_token_indices(kind: str) -> None:
         with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
             state.copy_full_att_tokens(src, dst)
         with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
-            state.copy_tokens_from_other_dp(src, dst, state)
+            state.copy_tokens_from_dp(src, dst, state)
     with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
         state.write_to_cpu(
             token_indices=cpu_ids,
@@ -291,14 +291,14 @@ def test_full_state_interfaces_reject_cpu_token_indices(kind: str) -> None:
             layout=layout,
         )
     with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
-        state.write_to_pd_buffer(
+        state.write_to_pd_page(
             token_indices=cpu_ids,
             pd_page_buffers=pd_pages,
             pd_page_index=0,
             layout=layout,
         )
     with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
-        state.read_from_pd_buffer(
+        state.read_from_pd_page(
             pd_page_buffers=pd_pages,
             token_indices=cpu_ids,
             pd_page_index=0,

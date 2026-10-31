@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 from abc import ABC, abstractmethod
 
-from lightllm.common.att_resources.types import (
+from lightllm.common.attention_state.types import (
     StateTransferLayout,
     TransferRegion,
 )
@@ -25,7 +25,7 @@ class AttentionTailState(ABC):
 
         返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att/att_tail 类别前缀，
         也不带 main/draftN 角色或最终的 _state；类别由 Python State 类型表达。
-        管理器统一生成 resource_id = f"{model_name}_{get_state_type()}_state"，与成员名完全一致。
+        管理器统一生成 state_name = f"{model_role}_{get_state_type()}_state"，与成员名完全一致。
         同角色下不同算法、精度或量化方案必须使用不同标记，同方案的全部逻辑层放在同一实例。
         层号、容量、设备、TP rank 和请求信息不进入名称；完整布局仍由 config 描述。
         注册后返回值保持稳定，实际分配与 CPU/DP/PD 传输均使用相同标记。
@@ -68,7 +68,7 @@ class AttentionTailState(ABC):
         ...
 
     @abstractmethod
-    def write_to_pd_buffer(
+    def write_to_pd_page(
         self,
         req_idx: int,
         pd_page_buffers: torch.Tensor,
@@ -80,7 +80,7 @@ class AttentionTailState(ABC):
         ...
 
     @abstractmethod
-    def read_from_pd_buffer(
+    def read_from_pd_page(
         self,
         pd_page_buffers: torch.Tensor,
         req_idx: int,

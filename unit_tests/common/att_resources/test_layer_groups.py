@@ -7,8 +7,8 @@ import pytest
 import torch
 from torch.utils._pytree import tree_leaves
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.full_att import FullAttentionConfig
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.full_att import FullAttentionConfig
 from lightllm.models.gemma4.model import Gemma4TpPartModel
 from unit_tests.common.att_resources.model_helpers import (
     full_state_test_buffers,
@@ -117,9 +117,9 @@ def test_shared_layers_transfer_each_physical_layer_once(
         buffer.zero_()
     managers = []
     for state in (source, target):
-        manager = AttResourceManager(request_capacity=1)
-        manager.set_att_state(model_name="main", state=state)
-        manager.finish_state_creation()
+        manager = AttentionStateManager(request_capacity=1)
+        manager.register_state(model_role="main", state=state)
+        manager.finish_state_registration()
         managers.append(manager)
     src_ids = torch.tensor([0, 3, 6], dtype=torch.int32, device="cuda")
     dst_ids = torch.tensor([1, 4, 7], dtype=torch.int32, device="cuda")
@@ -129,29 +129,29 @@ def test_shared_layers_transfer_each_physical_layer_once(
             token_indices=src_ids,
             cpu_page_buffers=pages,
             cpu_page_indices=[1],
-            layouts=managers[0].get_cpu_transfer_layouts(),
+            layouts=managers[0].get_cpu_page_layouts(),
         )
         managers[1].read_req_from_cpu(
             cpu_page_buffers=pages,
             cpu_page_indices=[1],
             token_indices=dst_ids,
-            layouts=managers[1].get_cpu_transfer_layouts(),
+            layouts=managers[1].get_cpu_page_layouts(),
         )
     else:
         pages = torch.zeros((2, managers[0].get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
-        managers[0].write_to_pd_buffer(
+        managers[0].write_to_pd_page(
             pd_page_buffers=pages,
             pd_page_index=1,
             kind="kv",
             token_indices=src_ids,
-            layouts=managers[0].get_pd_full_att_transfer_layouts(),
+            layouts=managers[0].get_pd_token_page_layouts(),
         )
-        managers[1].read_from_pd_buffer(
+        managers[1].read_from_pd_page(
             pd_page_buffers=pages,
             pd_page_index=1,
             kind="kv",
             token_indices=dst_ids,
-            layouts=managers[1].get_pd_full_att_transfer_layouts(),
+            layouts=managers[1].get_pd_token_page_layouts(),
         )
     torch.cuda.synchronize()
     source_fields = full_state_test_fields(source, source_buffers)

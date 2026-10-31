@@ -14,11 +14,11 @@ from lightllm.utils.shm_utils import create_or_link_shm, get_service_shm_name
 
 if TYPE_CHECKING:
     import torch
-    from lightllm.common.att_resources.att_resource_manager import AttResourceManager
+    from lightllm.common.attention_state.manager import AttentionStateManager
 
 
 def publish_att_resources(
-    resources: AttResourceManager,
+    resources: AttentionStateManager,
     request_mapping: torch.Tensor,
     kind: Literal["pd", "dp"],
     reader_count: int,
@@ -56,7 +56,7 @@ def publish_att_resources(
 
 def load_att_resources(
     rank_in_node: int, kind: Literal["pd", "dp"],
-) -> tuple[AttResourceManager, torch.Tensor]:
+) -> tuple[AttentionStateManager, torch.Tensor]:
     """读取指定用途的资源；DP 接收方随后通过 manager 统一注册共享页池。"""
     assert kind in ("pd", "dp"), f"unknown IPC storage kind {kind}"
     with FileLock(f"/tmp/{get_service_shm_name(f'rank_storage_{kind}_lock')}"):

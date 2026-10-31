@@ -12,14 +12,14 @@ from dataclasses import replace
 import pytest
 import torch
 
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state.full_att import (
     FullAttentionState,
     GQAFullAttentionState,
     MLAFullAttentionState,
     FullAttentionConfig,
 )
-from lightllm.common.att_resources.types import (
-    AxisSlice, StateTransferLayout, TransferRegion,
+from lightllm.common.attention_state.types import (
+    AxisMapping, StateTransferLayout, TransferRegion,
 )
 
 
@@ -30,7 +30,7 @@ def full_state(cls: type[FullAttentionState] = GQAFullAttentionState, device: st
         head_dim=4,
         dtype=torch.float32,
     ), page_size=4, device=device)
-    prepared_full_state.initialize_storage(12)
+    prepared_full_state.allocate_storage(12)
     return prepared_full_state
 
 
@@ -46,17 +46,17 @@ def layout_for(state: FullAttentionState):
                 dtype=torch.float32,
                 axes=("token", "layer", "head", "dim"),
                 shape=(4, 2, 1, 4),
-                axis_slices=(
-                    AxisSlice(
+                axis_mappings=(
+                    AxisMapping(
                         axis="head",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=1,
                     ),
-                    AxisSlice(
+                    AxisMapping(
                         axis="dim",
-                        src_start=0,
-                        dst_start=0,
+                        local_start=0,
+                        external_start=0,
                         length=4,
                     ),
                 ),
@@ -64,7 +64,7 @@ def layout_for(state: FullAttentionState):
         )
         offset += 128
     return StateTransferLayout(
-        resource_id=state.resource_id,
+        state_name=state.state_name,
         tokens_per_page=4,
         byte_start=0,
         byte_end=offset + 16,
@@ -119,21 +119,21 @@ def test_full_attention_write_copy_and_pd(
     )
     if device == "cpu":
         with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            state.write_to_pd_buffer(
+            state.write_to_pd_page(
                 token_indices=ids,
                 pd_page_buffers=pages,
                 pd_page_index=1,
                 layout=layout,
             )
         with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            state.read_from_pd_buffer(
+            state.read_from_pd_page(
                 pd_page_buffers=pages,
                 token_indices=ids,
                 pd_page_index=1,
                 layout=layout,
             )
         return
-    state.write_to_pd_buffer(
+    state.write_to_pd_page(
         token_indices=ids,
         pd_page_buffers=pages,
         pd_page_index=1,
@@ -142,7 +142,7 @@ def test_full_attention_write_copy_and_pd(
     target = full_state(cls, device)
     for storage_buffer in full_state_test_buffers(target).values():
         storage_buffer.zero_()
-    target.read_from_pd_buffer(
+    target.read_from_pd_page(
         pd_page_buffers=pages,
         token_indices=torch.tensor([5, 6], dtype=torch.long, device=device),
         pd_page_index=1,
@@ -210,7 +210,7 @@ def test_invalid_late_region_shape_cannot_partially_write_pd_page():
         device="cuda",
     )
     with pytest.raises(RuntimeError, match="shape"):
-        state.write_to_pd_buffer(
+        state.write_to_pd_page(
             token_indices=torch.tensor([0], dtype=torch.long, device="cuda"),
             pd_page_buffers=buffer.unsqueeze(0),
             pd_page_index=0,
@@ -230,21 +230,21 @@ def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int)
         dtype=torch.float32,
     )
     source = GQAFullAttentionState(config, page_size=4, device=device)
-    source.initialize_storage(12)
+    source.allocate_storage(12)
     target = GQAFullAttentionState(config, page_size=4, device=device)
-    target.initialize_storage(12)
+    target.allocate_storage(12)
     for storage_buffer in full_state_test_buffers(source).values():
         storage_buffer.copy_(torch.arange(storage_buffer.numel(), device=device).reshape_as(storage_buffer))
     for storage_buffer in full_state_test_buffers(target).values():
         storage_buffer.fill_(-1)
     if device == "cpu":
         with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
-            target.copy_tokens_from_other_dp(
+            target.copy_tokens_from_dp(
                 src_token_indices=torch.tensor([2, 0]), dst_token_indices=torch.tensor([6, 7]),
                 remote_dp_full_att_state=source,
             )
         return
-    target.copy_tokens_from_other_dp(
+    target.copy_tokens_from_dp(
         src_token_indices=torch.tensor([2, 0], dtype=torch.long, device=device),
         dst_token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
         remote_dp_full_att_state=source,
@@ -257,11 +257,11 @@ def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int)
     single_layer_source = GQAFullAttentionState(
         replace(config, logical_layer_groups=config.logical_layer_groups[:1]), page_size=4, device=device
     )
-    single_layer_source.initialize_storage(12)
+    single_layer_source.allocate_storage(12)
     for storage_buffer in full_state_test_buffers(single_layer_source).values():
         storage_buffer.fill_(9)
     with pytest.raises(AssertionError, match="equivalent TP state configurations"):
-        target.copy_tokens_from_other_dp(
+        target.copy_tokens_from_dp(
             src_token_indices=torch.tensor([2, 0], dtype=torch.long, device=device),
             dst_token_indices=torch.tensor([8, 9], dtype=torch.long, device=device),
             remote_dp_full_att_state=single_layer_source,

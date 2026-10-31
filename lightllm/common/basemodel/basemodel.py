@@ -14,7 +14,7 @@ from tqdm import tqdm
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
     select_kv_index_from_req,
     select_kv_index_from_req_prefill,
@@ -49,9 +49,9 @@ from .attention import BaseAttBackend
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
-    from lightllm.common.att_resources.bounded_att import BoundedAttentionState
-    from lightllm.common.att_resources.att_tail import AttentionTailState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+    from lightllm.common.attention_state.att_tail import AttentionTailState
 
 logger = init_logger(__name__)
 
@@ -124,9 +124,9 @@ class TpPartBaseModel:
         return
 
     @property
-    def att_resource_role(self) -> str:
+    def att_state_role(self) -> str:
         """当前模型的资源前缀；每个 draft 独立拥有 State。"""
-        from lightllm.common.att_resources.utils import MAX_DRAFT_MODELS
+        from lightllm.common.attention_state.utils import MAX_DRAFT_MODELS
 
         if not self.is_mtp_draft_model:
             return "main"
@@ -142,16 +142,16 @@ class TpPartBaseModel:
         """绑定启动流程创建的共享请求管理器；main/draft 共用请求槽位和 token 索引映射。"""
         self.req_manager = req_manager
 
-    def prepare_att_resources(self) -> None:
+    def prepare_attention_states(self) -> None:
         """main 创建共享管理器，draft 引用同一实例，再准备当前模型自己的 State。"""
-        assert getattr(self, "att_resource_manager", None) is None, "resources already initialized"
+        assert getattr(self, "att_state_manager", None) is None, "resources already initialized"
         if self.is_mtp_draft_model:
-            self.att_resource_manager = self.main_model.att_resource_manager
-            assert not self.att_resource_manager._states_created, "State creation is already finished"
-            assert self.max_req_num + 1 == self.att_resource_manager._request_capacity, "models must share the request domain"
+            self.att_state_manager = self.main_model.att_state_manager
+            assert not self.att_state_manager._state_registration_finished, "State registration is already finished"
+            assert self.max_req_num + 1 == self.att_state_manager._request_capacity, "models must share the request domain"
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             if not self.is_mtp_draft_model:
-                self.att_resource_manager = AttResourceManager(request_capacity=self.max_req_num + 1)
+                self.att_state_manager = AttentionStateManager(request_capacity=self.max_req_num + 1)
             # 无 attention 的 draft 只共享管理器，不创建自身 State。
             if self.is_mtp_draft_model and self.args.mtp_mode in ("vanilla_no_att", "eagle_no_att"):
                 return
@@ -173,16 +173,16 @@ class TpPartBaseModel:
                 device="cuda",
             )
             for state in (*full_states, *bounded_states, *tail_states):
-                self.att_resource_manager.set_att_state(self.att_resource_role, state)
+                self.att_state_manager.register_state(self.att_state_role, state)
 
     def init_runtime(self) -> None:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
-        self.req_manager.bind_hold_page(self.att_resource_manager.full_att_allocator.hold_token_indices)
+        self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
         self._init_att_backend()
         self._init_att_backend1()
         self._init_hidden_collector()
-        role = self.att_resource_role
+        role = self.att_state_role
         logger.info(
             f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
             f"{type(self.decode_att_backend).__name__}"
@@ -295,7 +295,7 @@ class TpPartBaseModel:
         return []
 
     def _check_mem_size(self):
-        self.max_total_token_num = self.att_resource_manager.full_att_allocator.size
+        self.max_total_token_num = self.att_state_manager.full_att_allocator.size
 
         assert (
             self.max_total_token_num > self.batch_max_tokens
@@ -335,8 +335,8 @@ class TpPartBaseModel:
         return
 
     def _init_att_backend(self):
-        role = self.att_resource_role
-        if not self.att_resource_manager.get_full_attention_states(role):
+        role = self.att_state_role
+        if not self.att_state_manager.get_full_attention_states(role):
             # FFN-only and linear-only models do not need a full-attention backend.
             self.prefill_att_backend = self.decode_att_backend = None
             return
@@ -432,7 +432,7 @@ class TpPartBaseModel:
         infer_state.input_ids = model_input.input_ids
         infer_state.is_prefill = model_input.is_prefill
         infer_state.is_draft_model = self.is_mtp_draft_model
-        infer_state.att_resource_role = self.att_resource_role
+        infer_state.att_state_role = self.att_state_role
         infer_state.return_all_prompt_logics = self.return_all_prompt_logics
         infer_state.batch_size = model_input.batch_size
         infer_state.total_token_num = model_input.total_token_num
@@ -456,7 +456,7 @@ class TpPartBaseModel:
         infer_state.multimodal_params = model_input.multimodal_params
 
         infer_state.req_manager = self.req_manager
-        infer_state.att_resource_manager = self.att_resource_manager
+        infer_state.att_state_manager = self.att_state_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
         infer_state.microbatch_index = microbatch_index
@@ -1077,9 +1077,9 @@ class TpPartBaseModel:
             logger.info("begin check max_len infer")
             dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
             b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-            page_size = self.att_resource_manager.full_att_allocator.page_size
+            page_size = self.att_state_manager.full_att_allocator.page_size
             alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-            mem_indexes = self.att_resource_manager.full_att_allocator.alloc(alloc_token_num).cuda()
+            mem_indexes = self.att_state_manager.full_att_allocator.alloc(alloc_token_num).cuda()
             self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
             b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
             b_seq_len[:] = self.batch_max_tokens
@@ -1113,7 +1113,7 @@ class TpPartBaseModel:
             torch.argmax(prob_out, dim=1, keepdim=True)
             prob_out = None
             self.req_manager.free_all()
-            self.att_resource_manager.full_att_allocator.free_all()
+            self.att_state_manager.full_att_allocator.free_all()
             logger.info(f"check max_len {self.batch_max_tokens} infer ok")
         except (RuntimeError, torch.OutOfMemoryError) as e:
             logger.exception(str(e))
@@ -1158,9 +1158,9 @@ class TpPartBaseModel:
                     0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
                 )
                 b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-                page_size = self.att_resource_manager.full_att_allocator.page_size
+                page_size = self.att_state_manager.full_att_allocator.page_size
                 alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-                mem_indexes = self.att_resource_manager.full_att_allocator.alloc(alloc_token_num).cuda()
+                mem_indexes = self.att_state_manager.full_att_allocator.alloc(alloc_token_num).cuda()
                 self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
                 b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
                 b_seq_len[:] = input_len
@@ -1194,14 +1194,14 @@ class TpPartBaseModel:
                 )
                 del model_output
                 self.req_manager.free_all()
-                self.att_resource_manager.full_att_allocator.free_all()
+                self.att_state_manager.full_att_allocator.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()
             except Exception as e:
                 logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
                 logger.exception(str(e))
                 self.req_manager.free_all()
-                self.att_resource_manager.full_att_allocator.free_all()
+                self.att_state_manager.full_att_allocator.free_all()
                 gc.collect()
                 torch.cuda.empty_cache()
         self.layers_num = layer_num_bak

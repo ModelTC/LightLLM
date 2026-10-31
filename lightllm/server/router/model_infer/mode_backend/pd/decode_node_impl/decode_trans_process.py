@@ -8,7 +8,7 @@ import queue
 import pickle
 from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.attention_state import AttentionStateManager
 from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
 from lightllm.server.pd_io_struct import (
@@ -87,7 +87,7 @@ def _init_env(
 
         # 从共享内存读取所有 rank 的 attention 资源
         node_world_size = args.tp // args.nnodes
-        resource_managers: List[AttResourceManager] = [
+        resource_managers: List[AttentionStateManager] = [
             load_att_resources(rank, kind="pd")[0] for rank in range(node_world_size)
         ]
 
@@ -121,7 +121,7 @@ class _DecodeTransModule:
         device_id: int,
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
-        resource_managers: List[AttResourceManager],
+        resource_managers: List[AttentionStateManager],
         up_status_in_queue: Optional[mp.SimpleQueue],
     ):
         self.args = args
@@ -177,7 +177,7 @@ class _DecodeTransModule:
                 copy_page(
                     node_att_managers=self.resource_managers,
                     pd_page_buffers=self.kv_move_buffer,
-                    write_to_pd_buffer=False,
+                    write_to_pd_page=False,
                     token_indices=token_indices,
                     pd_page_index=0,
                     dp_rank_in_node=dp_index,
@@ -410,7 +410,7 @@ class _DecodeTransModule:
                 copy_page(
                     node_att_managers=self.resource_managers,
                     pd_page_buffers=self.kv_move_buffer,
-                    write_to_pd_buffer=False,
+                    write_to_pd_page=False,
                     token_indices=token_indices,
                     pd_page_index=trans_task.dst_page_index,
                     dp_rank_in_node=trans_task.decode_dp_index,

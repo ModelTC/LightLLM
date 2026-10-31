@@ -34,7 +34,7 @@ class MultiLevelKvCacheModule(object):
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
-        resources = self.backend.model.att_resource_manager
+        resources = self.backend.model.att_state_manager
         meta = self.cpu_cache_client.kv_cache_tensor_meta
         if meta.page_bytes != resources.get_cpu_page_bytes():
             raise ValueError("CPU cache service and model resource page sizes differ")
@@ -147,7 +147,7 @@ class MultiLevelKvCacheModule(object):
         """
         if not cpu_page_indices:
             return
-        resources = self.backend.model.att_resource_manager
+        resources = self.backend.model.att_state_manager
         req_manager = self.backend.model.req_manager
         need_token_num = page_lengths[-1] - req.cur_kv_len
 
@@ -181,7 +181,7 @@ class MultiLevelKvCacheModule(object):
             cpu_page_buffers=self.cpu_cache_client.cpu_kv_cache_tensor,
             cpu_page_indices=cpu_page_indices,
             token_indices=token_indices,
-            layouts=resources.get_cpu_transfer_layouts(),
+            layouts=resources.get_cpu_page_layouts(),
             big_page_slot_ids=big_page_slot_ids,
             req_idx=req.req_idx if self.backend.is_hybrid_att_model else None,
             state_token_len=page_lengths[-1],
@@ -321,7 +321,7 @@ class MultiLevelKvCacheModule(object):
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
             # 阶段三：只查找实际分配的 CPU 页所需快照；完整大页必须存在，不做缺失回退。
-            resources = self.backend.model.att_resource_manager
+            resources = self.backend.model.att_state_manager
             big_page_slot_ids, small_page_slot_ids = None, None
             if self.backend.is_hybrid_att_model:
                 page_tokens = self.args.cpu_cache_token_page_size
@@ -343,8 +343,8 @@ class MultiLevelKvCacheModule(object):
                 token_indices=token_indexes,
                 cpu_page_buffers=self.cpu_cache_client.cpu_kv_cache_tensor,
                 cpu_page_indices=page_list,
-                layouts=resources.get_cpu_transfer_layouts(),
-                cpu_page_readies=ready_list,
+                layouts=resources.get_cpu_page_layouts(),
+                cpu_page_ready_flags=ready_list,
                 big_page_slot_ids=big_page_slot_ids,
                 small_page_slot_ids=small_page_slot_ids,
             )

@@ -144,8 +144,8 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
     assert req.hold_kv_len == 12
     assert len(tasks) == 1
     assert tasks[0].src_dp_rank == 1
-    assert tasks[0].dst_token_indexes.tolist() == list(range(4, 10))
-    assert len(tasks[0].src_token_indexes) == 6
+    assert tasks[0].dst_token_indices.tolist() == list(range(4, 10))
+    assert len(tasks[0].src_token_indices) == 6
 
 
 @pytest.mark.parametrize(
@@ -192,7 +192,7 @@ def test_dp_imports_only_matching_tp_shards(
         node_world_size=node_size,
         rank_in_node=rank_in_node,
         model=SimpleNamespace(
-            att_resource_manager=local_manager,
+            att_state_manager=local_manager,
             req_manager=SimpleNamespace(req_to_token_indexs=tables[rank_in_node]),
         ),
     )
@@ -205,10 +205,10 @@ def test_dp_imports_only_matching_tp_shards(
 
     remote_ranks = [rank for rank in expected_ranks if rank != rank_in_node]
     assert imported_ranks == registered_ranks == remote_ranks
-    assert list(backend.dp_att_resource_managers) == list(range(len(expected_ranks)))
+    assert list(backend.dp_att_state_managers) == list(range(len(expected_ranks)))
     assert list(backend.dp_req_to_token_indices) == list(range(len(expected_ranks)))
     for dp_rank, rank in enumerate(expected_ranks):
-        assert backend.dp_att_resource_managers[dp_rank] is managers[rank]
+        assert backend.dp_att_state_managers[dp_rank] is managers[rank]
         assert backend.dp_req_to_token_indices[dp_rank] is tables[rank]
 
 

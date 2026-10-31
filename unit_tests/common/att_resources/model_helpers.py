@@ -8,8 +8,8 @@ from dataclasses import replace
 from types import SimpleNamespace
 
 import torch
-from lightllm.common.att_resources.types import TensorField
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state.types import TensorField
+from lightllm.common.attention_state.full_att import (
     FullAttentionState, FullAttentionConfig, StaticFP8FullAttentionState,
     GQAFullAttentionState, GroupQuantizedFullAttentionState, MLAFullAttentionState, PackedMLAFullAttentionState,
 )
@@ -17,9 +17,9 @@ from lightllm.common.att_resources.full_att import (
 
 if TYPE_CHECKING:
     from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
-    from lightllm.common.att_resources.allocators import FullAttKVAllocator
+    from lightllm.common.attention_state.allocators import FullAttKVAllocator
     from collections.abc import Mapping, Sequence
-    from lightllm.common.att_resources.att_resource_manager import AttResourceManager
+    from lightllm.common.attention_state.manager import AttentionStateManager
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
 
 
@@ -73,12 +73,12 @@ def rebuild_full_state(
             scales=template.scales if scales is None else scales,
             q_scales=template.q_scales if q_scales is None else q_scales,
         )
-        prepared_full_state.initialize_storage(token_capacity)
+        prepared_full_state.allocate_storage(token_capacity)
         return prepared_full_state
     prepared_full_state = type(template)(
         config, page_size=page_size, device=device,
     )
-    prepared_full_state.initialize_storage(token_capacity)
+    prepared_full_state.allocate_storage(token_capacity)
     return prepared_full_state
 
 
@@ -87,12 +87,12 @@ def owned_states(attributes: Mapping[str, object], state_class: type | tuple[typ
     return tuple(
         sorted(
             (state for state in attributes.values() if isinstance(state, state_class)),
-            key=lambda state: state.resource_id,
+            key=lambda state: state.state_name,
         )
     )
 
 
-def main_linear_state(resources: AttResourceManager):
+def main_linear_state(resources: AttentionStateManager):
     (state,) = resources.get_bounded_attention_states("main")
     return state
 
@@ -104,7 +104,7 @@ def prepare_model_states(model: TpPartBaseModel, logical_layer_ids: Sequence[int
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in logical_layer_ids]
     if not hasattr(model, "torch_memory_saver"):
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
-    model.prepare_att_resources()
+    model.prepare_attention_states()
 
 
 def create_full_attention_roles(
@@ -196,15 +196,15 @@ def build_hybrid_resources(
     small_page_capacity: int,
     draft_full_state: FullAttentionState | None = None,
     tp_rank: int = 0,
-) -> AttResourceManager:
+) -> AttentionStateManager:
     """测试按既定几何参数组装通用管理器，不依赖旧模型管理器的构造/绑定流程。"""
-    from lightllm.common.att_resources import AttResourceManager
-    from lightllm.common.att_resources.allocators import StatePageAllocator
-    from lightllm.common.att_resources.bounded_att import ConvSSMStateConfig, create_gdn_state, create_kda_state
-    from lightllm.common.att_resources.att_tail import KPoolStateConfig, create_kpool_state
+    from lightllm.common.attention_state import AttentionStateManager
+    from lightllm.common.attention_state.allocators import StatePageAllocator
+    from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, create_gdn_state, create_kda_state
+    from lightllm.common.attention_state.att_tail import KPoolStateConfig, create_kpool_state
     from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 
-    manager = AttResourceManager(request_capacity=request_capacity)
+    manager = AttentionStateManager(request_capacity=request_capacity)
     glm = isinstance(config, Glm5NextResourceConfig)
     create_state = create_kda_state if glm else create_gdn_state
     bounded_state = create_state(
@@ -229,11 +229,11 @@ def build_hybrid_resources(
     bounded_state.initialize_page_pools(
         big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity, pin_memory=True,
     )
-    manager.set_att_state("main", bounded_state)
+    manager.register_state("main", bounded_state)
     for role, state in (("main", full_state), ("draft0", draft_full_state)):
         if state is None:
             continue
-        manager.set_att_state(role, state)
+        manager.register_state(role, state)
         if glm:
             tail = create_kpool_state(
                 config=KPoolStateConfig(
@@ -248,12 +248,12 @@ def build_hybrid_resources(
                 mtp_step=mtp_step,
                 device="cuda",
             )
-            manager.set_att_state(role, tail)
+            manager.register_state(role, tail)
     manager.full_att_allocator = full_allocator
     manager.bounded_att_big_page_allocator = StatePageAllocator(big_page_capacity, reserved_slots=2)
     manager.bounded_att_small_page_allocator = StatePageAllocator(small_page_capacity) if small_page_capacity else None
     manager.bounded_att_cpu_load_big_page_slot = big_page_capacity - 2
     manager.bounded_att_cpu_offload_big_page_slot = big_page_capacity - 1
     manager.cpu_tail_restore = glm
-    manager.finish_state_creation()
+    manager.finish_state_registration()
     return manager

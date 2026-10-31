@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.attention_state.full_att import FullAttentionState
 
 import torch
 
@@ -161,9 +161,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             layer_weight=layer_weight,
         )
         del infer_state.get_topk_indices_params
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="mla",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="mla",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )
@@ -248,9 +248,9 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
         del infer_state.get_topk_indices_params
         q_rope = q_nope[..., :0]
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="mla",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="mla",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )

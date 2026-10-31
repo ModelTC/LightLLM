@@ -8,7 +8,7 @@ from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_clas
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
@@ -25,7 +25,7 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """DeepSeek V3.2 使用包含 indexer 字段的 packed MLA，编码由 MLA 创建入口选择。"""
-        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)

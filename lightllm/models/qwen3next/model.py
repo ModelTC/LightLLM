@@ -16,8 +16,8 @@ from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
-    from lightllm.common.att_resources.bounded_att import BoundedAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.common.attention_state.bounded_att import BoundedAttentionState
 
 logger = init_logger(__name__)
 
@@ -51,7 +51,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         device: str = "meta",
     ) -> list["BoundedAttentionState"]:
         """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
-        from lightllm.common.att_resources.bounded_att import create_gdn_state, ConvSSMStateConfig
+        from lightllm.common.attention_state.bounded_att import create_gdn_state, ConvSSMStateConfig
 
         config = cls.normalize_model_config(model_config)
         assert config["num_attention_heads"] % tp_world_size == 0
@@ -106,7 +106,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """按 Qwen 混合层周期选择 full-attention 层，保留全局逻辑层号。"""
-        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -131,8 +131,8 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         return [state]
 
     def _init_att_backend1(self):
-        role = self.att_resource_role
-        if not self.att_resource_manager.get_bounded_attention_states(role):
+        role = self.att_state_role
+        if not self.att_state_manager.get_bounded_attention_states(role):
             self.prefill_att_backend1 = None
             self.decode_att_backend1 = None
             return

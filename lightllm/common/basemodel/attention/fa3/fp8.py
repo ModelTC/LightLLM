@@ -43,8 +43,8 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         super().init_state()
         batch_size = self.infer_state.batch_size
         state = getattr(
-            self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
+            self.infer_state.att_state_manager,
+            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_head_state",
         )
 
         offline_scales: torch.Tensor = state.scales
@@ -99,8 +99,8 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             size=(-1, 1, k_head_num, k_head_dim),
         ).view(torch.float8_e4m3fn)
         state = getattr(
-            self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
+            self.infer_state.att_state_manager,
+            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_head_state",
         )
         storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
         q = q.reshape(q.shape[0], k_head_num, -1)
@@ -144,8 +144,8 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         self.backend: Fp8Fa3AttBackend = self.backend
 
         state = getattr(
-            self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
+            self.infer_state.att_state_manager,
+            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_head_state",
         )
         super().init_state()
 
@@ -206,8 +206,8 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         ).view(torch.float8_e4m3fn)
 
         state = getattr(
-            self.infer_state.att_resource_manager,
-            f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
+            self.infer_state.att_state_manager,
+            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_head_state",
         )
         storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
 

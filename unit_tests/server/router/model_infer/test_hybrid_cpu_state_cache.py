@@ -6,9 +6,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
     FullAttentionConfig,
 )
@@ -71,7 +71,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         ),
          page_size=args.page_size,
     )
-    full.initialize_storage(384)
+    full.allocate_storage(384)
     requests = ReqManager(2, 512)
     resources = build_hybrid_resources(
         config=config,
@@ -82,7 +82,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         big_page_capacity=5,
         small_page_capacity=2,
     )
-    monkeypatch.setattr(g_infer_context, "att_resource_manager", resources)
+    monkeypatch.setattr(g_infer_context, "att_state_manager", resources)
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(g_infer_context, "req_manager", requests)
     monkeypatch.setattr(
@@ -172,7 +172,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
         is_master_in_dp=True,
         is_hybrid_att_model=True,
         dp_world_size=1,
-        model=SimpleNamespace(req_manager=requests, att_resource_manager=resources),
+        model=SimpleNamespace(req_manager=requests, att_state_manager=resources),
     )
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
     task = module.write_req_to_cpu(req, torch.cuda.Stream())
@@ -201,7 +201,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         _alloc_req_kv_mem=allocate,
-        model=SimpleNamespace(req_manager=requests, att_resource_manager=resources),
+        model=SimpleNamespace(req_manager=requests, att_state_manager=resources),
         is_hybrid_att_model=True,
     )
     module.init_sync_group = None
@@ -228,7 +228,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
         rank_in_node=103,
         hash_page_size=64,
         big_page_num=2,
-        att_resource_manager=resources,
+        att_state_manager=resources,
     )
     cache_len = max(req.hybrid_len_to_big_page_id)
     tree.insert(
@@ -305,7 +305,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         is_master_in_dp=True,
         is_hybrid_att_model=True,
         dp_world_size=1,
-        model=SimpleNamespace(att_resource_manager=resources, req_manager=requests),
+        model=SimpleNamespace(att_state_manager=resources, req_manager=requests),
     )
     module.cpu_cache_client = SimpleNamespace(
         lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),

@@ -588,11 +588,11 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         get_layer_view=lambda logical_layer_id: SimpleNamespace(indexer_k=storage.view(torch.uint8)[:, :, -132:]),
     )
     infer = SimpleNamespace(
-        att_resource_role="main",
-        att_resource_manager=SimpleNamespace(
-            get_att_state=lambda att_type, **kwargs: (
+        att_state_role="main",
+        att_state_manager=SimpleNamespace(
+            get_state=lambda state_type_filter, **kwargs: (
                 SimpleNamespace(get_layer_view=lambda logical_layer_id: tail)
-                if "kpool" in att_type else full_att_state
+                if "kpool" in state_type_filter else full_att_state
             ),
         ),
         is_draft_model=False,

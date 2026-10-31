@@ -4,7 +4,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ..types import AxisSlice, StateTransferLayout
+from ..types import AxisMapping, StateTransferLayout
 
 
 # ========================================================================
@@ -19,14 +19,14 @@ def transfer_kpool_pages(
     state_token_len: int,
     layout: StateTransferLayout,
     write: bool,
-    axis_slice_overrides: tuple[AxisSlice, ...] = (),
+    axis_mapping_overrides: tuple[AxisMapping, ...] = (),
     grid_num: int = 24,
 ) -> None:
     """在当前 CUDA stream 交换一个请求的 tail 和选定 PD 页，不创建中间 Tensor。
 
     本地 tail 为 [layer, ring_slot, channel]，ring 容量为 pool_size + 本地 mtp_step；
     外部页保存最近 pool_size 个逻辑位置，按时间顺序排列。P/D 的 ring 容量可以不同。
-    窗口起点由 state_token_len 推导；axis_slice_overrides 可覆盖本次 window 映射，
+    窗口起点由 state_token_len 推导；axis_mapping_overrides 可覆盖本次 window 映射，
     其余轴沿用缓存布局。K-pool 只支持 window 环形寻址，channel 保持完整、同序对应。
     两个方向都只遍历逻辑窗口，短前缀对应的窗口内位置补零；
     本地窗口之外的 MTP 槽位保持原值，不在传输时清理。
@@ -48,34 +48,34 @@ def transfer_kpool_pages(
     channel_count = tail.shape[2]
 
     # 阶段二：确定本次窗口。显式覆盖的起点直接使用；否则从 prefill 长度推导。
-    # 只计算整数位置，不修改 layout，也不创建新的 AxisSlice 对象。
-    layout_slices = {item.axis: item for item in region.axis_slices}
-    slice_overrides = {item.axis: item for item in axis_slice_overrides}
-    window_slice = slice_overrides.get("window", layout_slices["window"])
-    channel_slice = slice_overrides.get("channel", layout_slices["channel"])
-    window_size = window_slice.length
-    local_window_start = window_slice.src_start
-    external_window_start = window_slice.dst_start
+    # 只计算整数位置，不修改 layout，也不创建新的 AxisMapping 对象。
+    layout_mappings = {item.axis: item for item in region.axis_mappings}
+    mapping_overrides = {item.axis: item for item in axis_mapping_overrides}
+    window_mapping = mapping_overrides.get("window", layout_mappings["window"])
+    channel_mapping = mapping_overrides.get("channel", layout_mappings["channel"])
+    window_size = window_mapping.length
+    local_window_start = window_mapping.local_start
+    external_window_start = window_mapping.external_start
 
-    if window_slice.src_circular:
-        if "window" not in slice_overrides:
+    if window_mapping.local_circular:
+        if "window" not in mapping_overrides:
             # 外部 window[i] 对应绝对位置 state_token_len - window_size + i。
             local_window_start += state_token_len - window_size
         local_window_start %= local_ring_size
-    if window_slice.dst_circular:
+    if window_mapping.external_circular:
         external_window_start %= external_ring_size
     invalid_prefix = max(window_size - state_token_len, 0)
 
     # 定制 kernel 完整处理 key/gate；窗口不能重复覆盖或越过线性存储边界。
     assert (
-        channel_slice.src_start == channel_slice.dst_start == 0
-        and channel_slice.length == channel_count
-        and not channel_slice.src_circular and not channel_slice.dst_circular
+        channel_mapping.local_start == channel_mapping.external_start == 0
+        and channel_mapping.length == channel_count
+        and not channel_mapping.local_circular and not channel_mapping.external_circular
     ), "K-pool transfers require the complete channel axis"
     assert (
         0 < window_size <= min(local_ring_size, external_ring_size)
-        and (window_slice.src_circular or 0 <= local_window_start <= local_ring_size - window_size)
-        and (window_slice.dst_circular or 0 <= external_window_start <= external_ring_size - window_size)
+        and (window_mapping.local_circular or 0 <= local_window_start <= local_ring_size - window_size)
+        and (window_mapping.external_circular or 0 <= external_window_start <= external_ring_size - window_size)
     ), "window exceeds storage capacity"
 
     # 阶段三：只扩大连续 channel 的搬运单位，layer/window 维度和环形语义保持不变。
@@ -127,8 +127,8 @@ def transfer_kpool_pages(
         WINDOW_SIZE=window_size,
         CHANNELS=local_tail.shape[2],
         ELEMENT_BYTES=local_tail.element_size(),
-        SRC_CIRCULAR=window_slice.src_circular,
-        DST_CIRCULAR=window_slice.dst_circular,
+        LOCAL_CIRCULAR=window_mapping.local_circular,
+        EXTERNAL_CIRCULAR=window_mapping.external_circular,
         WRITE=write,
         BLOCK_ELEMENTS=block_elements,
         num_warps=4,
@@ -155,8 +155,8 @@ def _transfer_kpool_pages(
     WINDOW_SIZE: tl.constexpr,
     CHANNELS: tl.constexpr,
     ELEMENT_BYTES: tl.constexpr,
-    SRC_CIRCULAR: tl.constexpr,
-    DST_CIRCULAR: tl.constexpr,
+    LOCAL_CIRCULAR: tl.constexpr,
+    EXTERNAL_CIRCULAR: tl.constexpr,
     WRITE: tl.constexpr,
     BLOCK_ELEMENTS: tl.constexpr,
 ):
@@ -185,10 +185,10 @@ def _transfer_kpool_pages(
         window = element // CHANNELS % WINDOW_SIZE
         layer = element // (CHANNELS * WINDOW_SIZE)
         local_slot = local_window_start + window
-        if SRC_CIRCULAR:
+        if LOCAL_CIRCULAR:
             local_slot %= LOCAL_RING_SIZE
         external_slot = external_window_start + window
-        if DST_CIRCULAR:
+        if EXTERNAL_CIRCULAR:
             external_slot %= EXTERNAL_RING_SIZE
         has_history = (window >= invalid_prefix) & (window < WINDOW_SIZE)
 

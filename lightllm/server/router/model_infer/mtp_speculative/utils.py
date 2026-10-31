@@ -32,7 +32,7 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    backend.model.att_resource_manager.commit_bounded_att_state(
+    backend.model.att_state_manager.commit_bounded_att_state(
         b_req_idx[b_req_mtp_start_loc], accept_lengths, role="main"
     )
     return accept_lengths, accepted_index

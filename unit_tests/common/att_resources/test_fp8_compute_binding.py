@@ -14,9 +14,9 @@ import weakref
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
-from lightllm.common.basemodel.attention.base_att import BaseAttBackend
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
+from lightllm.common.basemodel.attention.base_att import AttControl, BaseAttBackend
 from lightllm.common.basemodel.attention.fa3 import fp8 as fa3
 from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer
 from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -52,9 +52,9 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
             scales=scales,
             q_scales=q_scales,
         ))
-    manager = AttResourceManager(request_capacity=2)
-    manager.set_att_state("main", states[0])
-    manager.set_att_state("draft0", states[1])
+    manager = AttentionStateManager(request_capacity=2)
+    manager.register_state("main", states[0])
+    manager.register_state("draft0", states[1])
     manager.full_att_allocator = FullAttKVAllocator(8, 4, pin_memory=False)
     # Another encoding in the same role must not supply the FP8 calibration.
     plain = definition("gqa")
@@ -64,14 +64,14 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
         token_capacity=8,
         device="cuda",
     )
-    manager.set_att_state(role, plain)
-    manager.finish_state_creation()
+    manager.register_state(role, plain)
+    manager.finish_state_registration()
     selected = getattr(manager, f"{role}_{template.get_state_type()}_state")
     k, v = selected.get_layer_view(8)
     infer = InferStateInfo()
-    infer.att_resource_manager = manager
+    infer.att_state_manager = manager
     infer.is_draft_model = role == "draft0"
-    infer.att_resource_role = role
+    infer.att_state_role = role
     infer.batch_size, infer.max_q_seq_len = 2, 1
     infer.b_seq_len = torch.ones(2, dtype=torch.int32, device="cuda")
     backend = object.__new__(BaseAttBackend)
@@ -111,6 +111,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
             q=q,
             k=k,
             v=v,
+            att_control=AttControl(logical_layer_id=8),
             alloc_func=allocate,
         )
     else:
@@ -118,6 +119,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
             q=q,
             k=k,
             v=v,
+            att_control=AttControl(logical_layer_id=8),
             alloc_func=allocate,
         )
     if kind == "static_head":
@@ -134,7 +136,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
 @pytest.mark.parametrize("head_num", [1, 3])
 @pytest.mark.parametrize("scale_mode", ["per_tensor", "per_head"])
 def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_num: int, scale_mode: str):
-    from lightllm.common.att_resources.full_att import StaticFP8AttentionConfig, StaticFP8FullAttentionState
+    from lightllm.common.attention_state.full_att import StaticFP8AttentionConfig, StaticFP8FullAttentionState
     from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
 
     scale_count = 2 if scale_mode == "per_tensor" else 2 * head_num
@@ -158,7 +160,7 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
         state=state, scales=scales,
         q_scales=torch.ones((1, head_num), dtype=torch.float32, device="cuda") if scale_mode == "per_head" else None,
     )
-    state.initialize_storage(8)
+    state.allocate_storage(8)
     state.k_storage.zero_()
     state.v_storage.zero_()
     indices = torch.tensor([1, 6], dtype=torch.int32, device="cuda")

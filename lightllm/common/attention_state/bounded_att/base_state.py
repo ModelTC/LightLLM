@@ -8,7 +8,7 @@ from typing import List
 
 import torch
 
-from lightllm.common.att_resources.types import (
+from lightllm.common.attention_state.types import (
     StateTransferLayout,
     PageKind,
     TransferRegion,
@@ -28,7 +28,7 @@ class BoundedAttentionState(ABC):
 
         返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att/att_tail 类别前缀，
         也不带 main/draftN 角色或最终的 _state；类别由 Python State 类型表达。
-        管理器统一生成 resource_id = f"{model_name}_{get_state_type()}_state"，与成员名完全一致。
+        管理器统一生成 state_name = f"{model_role}_{get_state_type()}_state"，与成员名完全一致。
         同角色下不同算法、精度或量化方案必须使用不同标记，同方案的全部逻辑层放在同一实例。
         层号、容量、设备、TP rank 和请求信息不进入名称；完整布局仍由 config 描述。
         注册后返回值保持稳定，实际分配与 CPU/DP/PD 传输均使用相同标记。
@@ -71,12 +71,12 @@ class BoundedAttentionState(ABC):
         ...
 
     @abstractmethod
-    def save_bounded_att_pages(
+    def save_bounded_att_runtime_to_pages(
         self,
         req_indices: List[int],
         state_token_lens: List[int],
         page_kind: PageKind,
-        slot_ids: List[int],
+        page_slot_ids: List[int],
     ) -> None:
         """按各请求已执行的绝对 token 长度保存基准运行态，三个列表逐项对应。
 
@@ -86,16 +86,16 @@ class BoundedAttentionState(ABC):
         ...
 
     @abstractmethod
-    def restore_bounded_att_pages(
+    def restore_bounded_att_runtime_from_pages(
         self,
         req_indices: List[int],
         state_token_lens: List[int],
         page_kind: PageKind,
-        slot_ids: List[int],
+        page_slot_ids: List[int],
     ) -> None:
         """将页快照恢复到对应请求的绝对 token 长度，保留源快照数据。
 
-        req_indices、state_token_lens、slot_ids 逐项对应；长度用于恢复 ring 位置等控制信息，
+        req_indices、state_token_lens、page_slot_ids 逐项对应；长度用于恢复 ring 位置等控制信息，
         不表示本批搬运的 token 数，调用方保证与所选快照的前缀一致。
         """
         ...
@@ -123,27 +123,27 @@ class BoundedAttentionState(ABC):
         ...
 
     @abstractmethod
-    def write_page_state_to_cpu(
+    def write_state_pages_to_cpu(
         self,
         page_kind: PageKind,
-        slot_ids: List[int],
+        page_slot_ids: List[int],
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
         layout: StateTransferLayout,
-        cpu_page_readies: list[bool] | None = None,
+        cpu_page_ready_flags: list[bool] | None = None,
     ) -> None:
-        """将指定页池槽位的快照写入 CPU 页；跳过 cpu_page_readies 中为 True 的页面。"""
+        """将指定页池槽位的快照写入 CPU 页；跳过 cpu_page_ready_flags 中为 True 的页面。"""
         ...
 
     @abstractmethod
-    def read_page_state_from_cpu(
+    def read_state_pages_from_cpu(
         self,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
         big_page_slot_ids: List[int],
         layout: StateTransferLayout,
     ) -> None:
-        """读入指定大页槽位；请求运行态另行通过 restore_bounded_att_pages 恢复。"""
+        """读入指定大页槽位；请求运行态另行通过 restore_bounded_att_runtime_from_pages 恢复。"""
         ...
 
     # ========================================================================
@@ -151,7 +151,7 @@ class BoundedAttentionState(ABC):
     # ========================================================================
 
     @abstractmethod
-    def copy_big_page_state_from_other_dp(
+    def copy_big_pages_from_dp(
         self,
         src_page_ids: List[int],
         dst_page_ids: List[int],
@@ -161,7 +161,7 @@ class BoundedAttentionState(ABC):
         ...
 
     @abstractmethod
-    def copy_run_time_state_from_other_dp(
+    def copy_runtime_state_from_dp(
         self,
         src_req_indices: List[int],
         dst_req_indices: List[int],
@@ -183,7 +183,7 @@ class BoundedAttentionState(ABC):
         ...
 
     @abstractmethod
-    def write_to_pd_buffer(
+    def write_to_pd_page(
         self,
         req_idx: int,
         pd_page_buffers: torch.Tensor,
@@ -198,7 +198,7 @@ class BoundedAttentionState(ABC):
         ...
 
     @abstractmethod
-    def read_from_pd_buffer(
+    def read_from_pd_page(
         self,
         pd_page_buffers: torch.Tensor,
         req_idx: int,

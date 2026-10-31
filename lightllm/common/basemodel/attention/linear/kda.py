@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from lightllm.common.att_resources.bounded_att import KDAState
+from lightllm.common.attention_state.bounded_att import KDAState
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
@@ -84,8 +84,8 @@ class KDAPrefillAttState(BasePrefillAttState):
         raw_beta = params["raw_beta"]
         backend: KDALinearAttBackend = self.backend
 
-        state = self.infer_state.att_resource_manager.get_att_state(
-            model_name=self.infer_state.att_resource_role, att_type="kda",
+        state = self.infer_state.att_state_manager.get_state(
+            model_role=self.infer_state.att_state_role, state_type_filter="kda",
             logical_layer_id=layer_num, state_class=KDAState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
@@ -144,8 +144,8 @@ class KDADecodeAttState(BaseDecodeAttState):
         # MTP 元数据按模型初始化，沿用每个角色只有一个 KDA State 的约束。
         # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
         (state,) = (
-            state for state in self.infer_state.att_resource_manager.get_bounded_attention_states(
-                self.infer_state.att_resource_role
+            state for state in self.infer_state.att_state_manager.get_bounded_attention_states(
+                self.infer_state.att_state_role
             )
             if isinstance(state, KDAState)
         )
@@ -219,8 +219,8 @@ class KDADecodeAttState(BaseDecodeAttState):
         raw_beta = params["raw_beta"]
         backend: KDALinearAttBackend = self.backend
 
-        state = self.infer_state.att_resource_manager.get_att_state(
-            model_name=self.infer_state.att_resource_role, att_type="kda",
+        state = self.infer_state.att_state_manager.get_state(
+            model_role=self.infer_state.att_state_role, state_type_filter="kda",
             logical_layer_id=layer_num, state_class=KDAState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)

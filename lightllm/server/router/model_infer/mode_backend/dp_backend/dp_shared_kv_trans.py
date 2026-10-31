@@ -108,14 +108,14 @@ class DPKVSharedMoudle:
                             req_index, src_dp_rank, first_page:end_page
                         ].tolist()
                         assert all(page_id >= 0 for page_id in src_big_page_ids), "DP source is missing prefix big pages"
-                        allocator = self.backend.model.att_resource_manager.bounded_att_big_page_allocator
+                        allocator = self.backend.model.att_state_manager.bounded_att_big_page_allocator
                         dst_big_page_ids = allocator.alloc(len(src_big_page_ids))
                         assert dst_big_page_ids is not None, "DP fetch big page allocation must succeed"
-                dst_token_indexes = self.backend._alloc_req_kv_mem(req, alloc_token_num)
-                assert dst_token_indexes is not None
+                dst_token_indices = self.backend._alloc_req_kv_mem(req, alloc_token_num)
+                assert dst_token_indices is not None
                 # 只搬运有效 KV；页尾预留槽位已写入请求表，不参与本次传输。
-                dst_token_indexes = dst_token_indexes[:trans_size]
-                src_token_indexes = self.backend.dp_req_to_token_indices[src_dp_rank][
+                dst_token_indices = dst_token_indices[:trans_size]
+                src_token_indices = self.backend.dp_req_to_token_indices[src_dp_rank][
                     src_req_idx, req.cur_kv_len:target_kv_len
                 ]
                 trans_tasks.append(
@@ -123,8 +123,8 @@ class DPKVSharedMoudle:
                         dst_req=req,
                         src_dp_rank=src_dp_rank,
                         src_req_idx=src_req_idx,
-                        src_token_indexes=src_token_indexes,
-                        dst_token_indexes=dst_token_indexes,
+                        src_token_indices=src_token_indices,
+                        dst_token_indices=dst_token_indices,
                         src_big_page_ids=src_big_page_ids,
                         dst_big_page_ids=dst_big_page_ids,
                     )
@@ -133,15 +133,15 @@ class DPKVSharedMoudle:
         return trans_tasks
 
     def kv_trans(self, trans_tasks: List["TransTask"]) -> None:
-        target = self.backend.model.att_resource_manager
+        target = self.backend.model.att_state_manager
         for task in trans_tasks:
-            source = self.backend.dp_att_resource_managers[task.src_dp_rank]
+            source = self.backend.dp_att_state_managers[task.src_dp_rank]
             # 源索引来自远端 CUDA 请求表；allocator 返回 CPU 索引，在此一次性准备目标 CUDA int64 索引。
-            dst_token_indexes = task.dst_token_indexes.to(device="cuda", dtype=torch.long, non_blocking=True)
-            target.copy_from_other_dp(
+            dst_token_indices = task.dst_token_indices.to(device="cuda", dtype=torch.long, non_blocking=True)
+            target.copy_from_dp(
                 remote_att_manager=source,
-                src_token_indexes=task.src_token_indexes,
-                dst_token_indexes=dst_token_indexes,
+                src_token_indices=task.src_token_indices,
+                dst_token_indices=dst_token_indices,
                 src_big_page_ids=task.src_big_page_ids,
                 dst_big_page_ids=task.dst_big_page_ids,
                 src_req_idx=task.src_req_idx,
@@ -159,7 +159,7 @@ class DPKVSharedMoudle:
                 for page_offset, page_id in enumerate(task.dst_big_page_ids):
                     token_len = first_page_end + page_offset * self.big_page_tokens
                     req.hybrid_len_to_big_page_id[token_len] = page_id
-            req.cur_kv_len += len(task.dst_token_indexes)
+            req.cur_kv_len += len(task.dst_token_indices)
             assert req.cur_kv_len <= req.hold_kv_len
             if self.backend.is_master_in_dp:
                 req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -170,7 +170,7 @@ class TransTask:
     dst_req: InferReq  # 本 DP 接收前缀的请求，持有目标请求槽位和新分配的资源。
     src_dp_rank: int  # 来源 DP 在当前节点内的编号。
     src_req_idx: int  # 远端请求槽位，用于复制 prefill 基准运行态。
-    src_token_indexes: torch.Tensor  # 来源 CUDA 请求表中的有效 KV 索引。
-    dst_token_indexes: torch.Tensor  # allocator 返回的目标 CPU 索引，提交时统一转为 CUDA int64。
+    src_token_indices: torch.Tensor  # 来源 CUDA 请求表中的有效 KV 索引。
+    dst_token_indices: torch.Tensor  # allocator 返回的目标 CPU 索引，提交时统一转为 CUDA int64。
     src_big_page_ids: List[int]  # 按前缀长度递增排列的源大页槽位。
     dst_big_page_ids: List[int]  # 与源列表一一配对的新分配目标大页槽位。

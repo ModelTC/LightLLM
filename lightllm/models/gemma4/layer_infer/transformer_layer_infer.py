@@ -1,4 +1,4 @@
-from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.attention_state.full_att import FullAttentionState
 import math
 import torch
 import torch.nn as nn
@@ -184,9 +184,9 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
 
     def _get_layer_kv(self, infer_state: InferStateInfo):
         # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="gqa",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )

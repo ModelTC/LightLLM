@@ -39,7 +39,7 @@ def test_bounded_reset_preserves_tail_and_cache_miss_resets_all(monkeypatch):
     from unit_tests.common.att_resources.test_manager_helpers import composition, init_source
 
     monkeypatch.setattr(
-        "lightllm.common.att_resources.bounded_att.utils.get_env_start_args",
+        "lightllm.common.attention_state.bounded_att.utils.get_env_start_args",
         lambda: SimpleNamespace(enable_dp_prompt_cache_fetch=False),
     )
     resources = composition(device="cuda")
@@ -47,18 +47,18 @@ def test_bounded_reset_preserves_tail_and_cache_miss_resets_all(monkeypatch):
     tail = resources.main_kpool_c4_fp32_state
     resources.reset_bounded_att_state([1])
     assert (tail.tail_buffer[:, 1] == 9).all()
-    resources.restore_bounded_att_pages(
+    resources.restore_bounded_att_runtime_from_pages(
         req_indices=[1],
         state_token_lens=[8],
         page_kind="big",
-        slot_ids=[slots[-1]],
+        page_slot_ids=[slots[-1]],
     )
     for state in resources.get_bounded_attention_states():
         state.mtp_state_index.fill_(2)
 
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(g_infer_context, "radix_cache", None)
-    monkeypatch.setattr(g_infer_context, "att_resource_manager", resources)
+    monkeypatch.setattr(g_infer_context, "att_state_manager", resources)
     req = InferReq.__new__(InferReq)
     req.args = SimpleNamespace(
         linear_att_hash_page_size=4,
@@ -136,10 +136,10 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     context.args = req.args
     context.is_hybrid_att_model = True
     context.radix_cache = SimpleNamespace(free_one_small_page_buffer=lambda: None)
-    context.att_resource_manager = SimpleNamespace(
+    context.att_state_manager = SimpleNamespace(
         bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: [next(slots)]),
         bounded_att_small_page_allocator=SimpleNamespace(alloc=lambda count: [7]),
-        save_bounded_att_pages=lambda req_indices, state_token_lens, page_kind, slot_ids: (
+        save_bounded_att_runtime_to_pages=lambda req_indices, state_token_lens, page_kind, page_slot_ids: (
             big_snapshots if page_kind == "big" else small_snapshots
         ).extend(state_token_lens),
     )
@@ -333,8 +333,8 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=table),
-            att_resource_manager=SimpleNamespace(
-                get_cpu_transfer_layouts=lambda: {},
+            att_state_manager=SimpleNamespace(
+                get_cpu_page_layouts=lambda: {},
                 bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: list(range(count))),
                 read_req_from_cpu=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded.append(
                     req.hold_kv_len

@@ -116,7 +116,7 @@ class HybridAttPagedRadixCache:
         rank_in_node: int,
         hash_page_size: int,
         big_page_num: int,
-        att_resource_manager,
+        att_state_manager,
     ):
         assert hash_page_size >= 1, "hash_page_size must be >= 1"
         assert big_page_num >= 1, "big_page_num must be >= 1"
@@ -126,7 +126,7 @@ class HybridAttPagedRadixCache:
         self.big_page_tokens = hash_page_size * big_page_num
         self.total_token_num = total_token_num
 
-        self.att_resource_manager = att_resource_manager
+        self.att_state_manager = att_state_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
@@ -146,14 +146,14 @@ class HybridAttPagedRadixCache:
         self.tree_total_tokens_num = SharedArray(f"tree_total_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.tree_total_tokens_num.arr[0] = 0
 
-    def _release_pages(self, page_kind, slot_ids):
-        resources = self.att_resource_manager
+    def _release_pages(self, page_kind, page_slot_ids):
+        resources = self.att_state_manager
         allocator = (
             resources.bounded_att_big_page_allocator
             if page_kind == "big"
             else resources.bounded_att_small_page_allocator
         )
-        allocator.free(slot_ids)
+        allocator.free(page_slot_ids)
 
     def _discard_node(self, node: HybridAttPagedTreeNode):
         if node.is_leaf():
@@ -305,7 +305,7 @@ class HybridAttPagedRadixCache:
                             self._add_node(child)
                         else:
                             # 节点已有 checkpoint，释放本次重复申请的槽位。
-                            self._release_pages("small", slot_ids=[block_state_idxs[0]])
+                            self._release_pages("small", page_slot_ids=[block_state_idxs[0]])
 
                     sub_prefix_len, ans_node = self._insert_helper(
                         child,
@@ -587,8 +587,8 @@ class HybridAttPagedRadixCache:
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
-        if need_token_num > self.att_resource_manager.full_att_allocator.can_use_mem_size:
-            need_evict_token_num = need_token_num - self.att_resource_manager.full_att_allocator.can_use_mem_size
+        if need_token_num > self.att_state_manager.full_att_allocator.can_use_mem_size:
+            need_evict_token_num = need_token_num - self.att_state_manager.full_att_allocator.can_use_mem_size
             release_mems = []
             small_page_buffer_ids = []
 
@@ -599,14 +599,14 @@ class HybridAttPagedRadixCache:
 
             self._evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
-            self.att_resource_manager.full_att_allocator.free(mem_index)
+            self.att_state_manager.full_att_allocator.free(mem_index)
             small_page_buffer_ids = [idx for idx in small_page_buffer_ids if idx is not None]
             if len(small_page_buffer_ids) > 0:
                 self._release_pages("small", small_page_buffer_ids)
         return
 
     def free_one_small_page_buffer(self):
-        allocator = self.att_resource_manager.bounded_att_small_page_allocator
+        allocator = self.att_state_manager.bounded_att_small_page_allocator
         if allocator is None:
             return
         if allocator.free_count > 0:
@@ -618,7 +618,7 @@ class HybridAttPagedRadixCache:
         self._discard_node(node)
 
         assert node.small_page_buffer_idx is not None
-        self._release_pages("small", slot_ids=[node.small_page_buffer_idx])
+        self._release_pages("small", page_slot_ids=[node.small_page_buffer_idx])
         node.small_page_buffer_idx = None
 
         self._add_node(node)

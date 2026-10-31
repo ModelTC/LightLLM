@@ -23,7 +23,7 @@ def bounded_att_buffer_copies(
     page_fields 与 page_indices 一一对应，调用方已排除 ready 页。
     CPU 路径的 page_fields 来自本地大小页池，PD 路径来自请求运行态；均为本地 TP 分片。
     layout.regions 描述外部页中的全局字段，以及本地 TP 分片在该字段中的位置。
-    axis_slices 的 src_start 固定指本地，dst_start 固定指外部页，读回时也不交换含义。
+    axis_mappings 的 local_start 固定指本地，external_start 固定指外部页，读回时也不交换含义。
     CPU 页和大小页快照的窗口均按逻辑时间排列，此处只处理普通轴切片，不展开或恢复 ring。
     Conv 的 Q/K/V 切片与 SSM 分别成批，不将不同字段或不同 TP 切片混入同一次拷贝。
     page_buffers 的第一维为物理页；这里只创建视图，由调用方逐批提交 Triton 算子。
@@ -49,10 +49,10 @@ def bounded_att_buffer_copies(
             # 例如 rank 1 的本地 head[0:4] 对应外部页 head[4:8]，写出和读回使用相同映射。
             local_slices = [slice(None)] * local_tensor.ndim
             external_slices = [slice(None)] * external_tensor.ndim
-            for axis_slice in region.axis_slices:
-                axis = local_field.axes.index(axis_slice.axis)
-                local_slices[axis] = slice(axis_slice.src_start, axis_slice.src_start + axis_slice.length)
-                external_slices[axis] = slice(axis_slice.dst_start, axis_slice.dst_start + axis_slice.length)
+            for axis_mapping in region.axis_mappings:
+                axis = local_field.axes.index(axis_mapping.axis)
+                local_slices[axis] = slice(axis_mapping.local_start, axis_mapping.local_start + axis_mapping.length)
+                external_slices[axis] = slice(axis_mapping.external_start, axis_mapping.external_start + axis_mapping.length)
             local_view = local_tensor[tuple(local_slices)]
             external_view = external_tensor[tuple(external_slices)]
             assert local_view.shape == external_view.shape, "local and external copy views must have the same shape"

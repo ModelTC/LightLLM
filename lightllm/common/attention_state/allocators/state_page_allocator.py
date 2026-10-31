@@ -29,11 +29,11 @@ class StatePageAllocator:
             self._allocated[slot] = 1
         return slots
 
-    def free(self, slot_ids: List[int]) -> None:
-        assert isinstance(slot_ids, list), "slot indices must be a list"
-        assert len(set(slot_ids)) == len(slot_ids), "cannot free duplicate slots"
-        assert all(0 <= slot < self.capacity for slot in slot_ids), "slot outside the allocatable domain"
-        assert all(self._allocated[slot] for slot in slot_ids), "cannot free an unallocated slot"
-        for slot in slot_ids:
+    def free(self, page_slot_ids: List[int]) -> None:
+        assert isinstance(page_slot_ids, list), "slot indices must be a list"
+        assert len(set(page_slot_ids)) == len(page_slot_ids), "cannot free duplicate slots"
+        assert all(0 <= slot < self.capacity for slot in page_slot_ids), "slot outside the allocatable domain"
+        assert all(self._allocated[slot] for slot in page_slot_ids), "cannot free an unallocated slot"
+        for slot in page_slot_ids:
             self._allocated[slot] = 0
-        self._free.extend(slot_ids)
+        self._free.extend(page_slot_ids)

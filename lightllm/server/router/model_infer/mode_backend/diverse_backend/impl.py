@@ -182,7 +182,7 @@ class DiversehBackend(ChunkedPrefillBackend):
         prefix_len, new_shared_kv_node = self.radix_cache.insert(key, value)
         old_prefix_len = 0 if master_req.shared_kv_node is None else master_req.shared_kv_node.node_prefix_total_len
         assert old_prefix_len <= master_req.cur_kv_len
-        self.model.att_resource_manager.full_att_allocator.free(
+        self.model.att_state_manager.full_att_allocator.free(
             self.model.req_manager.req_to_token_indexs[master_req.req_idx][old_prefix_len:prefix_len]
         )
 

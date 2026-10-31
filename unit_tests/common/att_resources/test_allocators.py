@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 import torch
 
-from lightllm.common.att_resources.allocators import StatePageAllocator, FullAttKVAllocator
+from lightllm.common.attention_state.allocators import StatePageAllocator, FullAttKVAllocator
 
 
 def test_slot_allocation_domains_and_reserved_storage():

@@ -1,4 +1,4 @@
-from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from typing import Tuple
 from lightllm.common.basemodel import TransformerLayerInferTpl
@@ -29,9 +29,9 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         layer_weight: BloomTransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="gqa",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )
@@ -50,9 +50,9 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     def _token_attention_kernel(
         self, q: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
     ) -> torch.Tensor:
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="gqa",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )

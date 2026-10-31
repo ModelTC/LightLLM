@@ -30,8 +30,8 @@ from unit_tests.common.att_resources.test_model_resources import make_resources
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
-    from lightllm.common.att_resources.att_resource_manager import AttResourceManager
-    from lightllm.common.att_resources.full_att.packed_mla_state import PackedMLAFullAttentionState
+    from lightllm.common.attention_state.manager import AttentionStateManager
+    from lightllm.common.attention_state.full_att.packed_mla_state import PackedMLAFullAttentionState
     from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclKVTransporter
     from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
     from multiprocessing.connection import Connection
@@ -129,7 +129,7 @@ def _task(peer: PDAgentMetadata, kind: str):
 
 
 def _snapshot(
-    resources: AttResourceManager,
+    resources: AttentionStateManager,
     full: PackedMLAFullAttentionState,
     indices: Sequence[int] | torch.Tensor,
     req_idx: int,
@@ -222,7 +222,7 @@ def _worker(connection: Connection, backend: str, sender: bool):
                         task_kind=kind,
                         req_idx=1,
                         state_token_len=task.end_kv_index,
-                        write_to_pd_buffer=True,
+                        write_to_pd_page=True,
                     )
                 # The production sender publishes a page only after its copy event completes.
                 copy_stream.synchronize()
@@ -273,7 +273,7 @@ def _worker(connection: Connection, backend: str, sender: bool):
                         task_kind=kind,
                         req_idx=2,
                         state_token_len=request.end_kv_index,
-                        write_to_pd_buffer=False,
+                        write_to_pd_page=False,
                     )
                 copy_stream.synchronize()
             expected = _snapshot(

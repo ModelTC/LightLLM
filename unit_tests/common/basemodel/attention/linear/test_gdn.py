@@ -6,8 +6,8 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.bounded_att import ConvSSMStateConfig, GDNState
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
@@ -357,10 +357,10 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
     infer_state.req_manager = SimpleNamespace(
         HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
     )
-    infer_state.att_resource_role = role
+    infer_state.att_state_role = role
     if req_to_mtp_state_index is not None:
         request_capacity = req_to_mtp_state_index.numel()
-        resources = AttResourceManager(request_capacity=request_capacity)
+        resources = AttentionStateManager(request_capacity=request_capacity)
         config = ConvSSMStateConfig(
             logical_layer_ids=(3,), global_k_heads=1, global_v_heads=1,
             key_dim=2, value_dim=2, conv_width=2, conv_dtype=torch.float32, ssm_dtype=torch.float32,
@@ -368,9 +368,9 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
         for model_role in ("main", "draft0"):
             linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
             linear.mtp_state_index = req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
-            resources.set_att_state(model_role, linear)
-        resources.finish_state_creation()
-        infer_state.att_resource_manager = resources
+            resources.register_state(model_role, linear)
+        resources.finish_state_registration()
+        infer_state.att_state_manager = resources
     state = gdn.LinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,

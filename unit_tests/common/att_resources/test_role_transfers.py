@@ -47,17 +47,17 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
     main_linear_state(source).ssm_state.fill_(5)
     page = torch.empty(source.get_pd_page_bytes(), dtype=torch.uint8, device="cuda")
     for kind, getter in (
-        ("kv", "get_pd_full_att_transfer_layouts"),
-        ("att_state", "get_pd_bounded_att_or_tail_transfer_layouts"),
+        ("kv", "get_pd_token_page_layouts"),
+        ("att_state", "get_pd_runtime_page_layouts"),
     ):
-        source.write_to_pd_buffer(
+        source.write_to_pd_page(
             pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
             layouts=getattr(source, getter)(),
             **({"token_indices": torch.tensor([0, 1], dtype=torch.long, device="cuda")} if kind == "kv" else {"req_idx": 0, "state_token_len": 8}),
         )
-        target.read_from_pd_buffer(
+        target.read_from_pd_page(
             pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
@@ -72,10 +72,10 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
 
     with monkeypatch.context() as patch:
         patch.setattr(torch.Tensor, "tolist", reject_host_list)
-        target.copy_from_other_dp(
+        target.copy_from_dp(
             remote_att_manager=source,
-            src_token_indexes=src_indices,
-            dst_token_indexes=dst_indices,
+            src_token_indices=src_indices,
+            dst_token_indices=dst_indices,
             src_big_page_ids=[],
             dst_big_page_ids=[],
             src_req_idx=0,
@@ -95,11 +95,11 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             assert not tail[:, 2].any()  # DP fetch resets the aligned prefix.
 
     slot = source.bounded_att_big_page_allocator.alloc(1)[0]
-    source.save_bounded_att_pages(
+    source.save_bounded_att_runtime_to_pages(
         req_indices=[0],
         state_token_lens=[8],
         page_kind="big",
-        slot_ids=[slot],
+        page_slot_ids=[slot],
     )
     torch.cuda.synchronize()
     cpu = torch.empty((1, source.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
@@ -107,7 +107,7 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
         token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
         cpu_page_buffers=cpu,
         cpu_page_indices=[0],
-        layouts=source.get_cpu_transfer_layouts(),
+        layouts=source.get_cpu_page_layouts(),
         big_page_slot_ids=[slot],
     )
     torch.cuda.synchronize()
@@ -122,7 +122,7 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             device="cuda",
         ),
         state_token_len=8,
-        layouts=target.get_cpu_transfer_layouts(),
+        layouts=target.get_cpu_page_layouts(),
         big_page_slot_ids=[dst_slot],
         req_idx=1,
     )

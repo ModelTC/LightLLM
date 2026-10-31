@@ -14,8 +14,8 @@ from .layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerW
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
-    from lightllm.common.att_resources.att_tail import AttentionTailState
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.common.attention_state.att_tail import AttentionTailState
 
 
 class Glm5NextMTPModel(TpPartBaseModel):
@@ -81,7 +81,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """原生 GLM draft 的自有层采用 NoPE packed MLA，与 main 分别持有存储。"""
-        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -116,7 +116,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
         device: str = "meta",
     ) -> list["AttentionTailState"]:
         """直接选择本模型需要 K-pool tail 的层，不依赖 full State 创建过程。"""
-        from lightllm.common.att_resources.att_tail import create_kpool_state, KPoolStateConfig
+        from lightllm.common.attention_state.att_tail import create_kpool_state, KPoolStateConfig
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)

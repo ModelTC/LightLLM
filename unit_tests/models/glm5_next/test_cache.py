@@ -5,9 +5,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state.full_att import (
     PackedMLAFullAttentionState,
     PackedMLAAttentionConfig,
 )
@@ -96,7 +96,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
         ),
          page_size=args.page_size,
     )
-    full.initialize_storage(16)
+    full.allocate_storage(16)
     req = ReqManager(3, 16)
     from unit_tests.common.att_resources.model_helpers import create_full_attention_roles
 
@@ -143,22 +143,22 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     linear.ssm_state[:, 0].normal_()
     conv = linear.conv_state[:, 0, ..., :3].clone()
     ssm = linear.ssm_state[:, 0].clone()
-    resources.save_bounded_att_pages(
+    resources.save_bounded_att_runtime_to_pages(
         req_indices=[0],
         state_token_lens=[8],
         page_kind=kind,
-        slot_ids=[slot],
+        page_slot_ids=[slot],
     )
     torch.cuda.synchronize()
     linear.conv_state[:, 0].zero_()
     linear.ssm_state[:, 0].zero_()
     tail.tail_buffer.normal_()
     unchanged = tail.tail_buffer[:, [0, 1, 3]].clone()
-    resources.restore_bounded_att_pages(
+    resources.restore_bounded_att_runtime_from_pages(
         req_indices=[2],
         state_token_lens=[8],
         page_kind=kind,
-        slot_ids=[slot],
+        page_slot_ids=[slot],
     )
     resources.reset_attention_tail_state([2])
     torch.cuda.synchronize()

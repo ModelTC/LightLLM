@@ -7,7 +7,7 @@ import weakref
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
+from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.attention.fa3 import fp8 as fa3_fp8
 from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer_fp8
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
@@ -38,12 +38,12 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     state.scales[0].fill_(2)
     state.scales[1].fill_(5)
     expected_scale = 2 if storage_layer_index == 0 else 5
-    manager = AttResourceManager(request_capacity=1)
-    manager.set_att_state(role, state)
-    manager.finish_state_creation()
+    manager = AttentionStateManager(request_capacity=1)
+    manager.register_state(role, state)
+    manager.finish_state_registration()
     infer = LlamaInferStateInfo()
-    infer.att_resource_manager = manager
-    infer.att_resource_role = role
+    infer.att_state_manager = manager
+    infer.att_state_role = role
     infer.b_seq_len = torch.tensor([1], dtype=torch.int32)
     infer.max_q_seq_len = 1
     calls = []

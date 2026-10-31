@@ -16,7 +16,7 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 class Deepseek2TpPartModel(LlamaTpPartModel):
@@ -69,7 +69,7 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """DeepSeek MLA 保存 latent 与 RoPE，TP 副本规则由 MLA 创建入口处理。"""
-        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)

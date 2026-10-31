@@ -1,4 +1,4 @@
-from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from typing import Any
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo
@@ -100,9 +100,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             },
         )
 
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="mla",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="mla",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )
@@ -148,9 +148,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
             },
         )
 
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="mla",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="mla",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )
@@ -209,9 +209,9 @@ class NsaInfer:
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="mla",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="mla",
             logical_layer_id=self.layer_idx_,
             state_class=FullAttentionState,
         )

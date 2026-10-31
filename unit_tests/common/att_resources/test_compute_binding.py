@@ -12,8 +12,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_template import TransformerLayerInferTpl
 from lightllm.common.basemodel.triton_kernel.kv_copy.prefill_compact_kv_flashmla_fp8 import (
@@ -38,15 +38,15 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
     )
     for storage_buffer in full_state_test_buffers(state).values():
         storage_buffer.zero_()
-    manager = AttResourceManager(request_capacity=2)
-    manager.set_att_state(role, state)
+    manager = AttentionStateManager(request_capacity=2)
+    manager.register_state(role, state)
     manager.full_att_allocator = FullAttKVAllocator(state.capacity, state.page_size, pin_memory=False)
-    manager.finish_state_creation()
+    manager.finish_state_registration()
     state = getattr(manager, f"{role}_{template.get_state_type()}_state")
     infer = InferStateInfo()
-    infer.att_resource_manager = manager
+    infer.att_state_manager = manager
     infer.is_draft_model = role == "draft0"
-    infer.att_resource_role = role
+    infer.att_state_role = role
     infer.mem_index = torch.tensor([1, 5], dtype=torch.int32, device="cuda")
     heads = 1 if kind == "packed_glm" else 2 * state.config.head_num
     dim = state.config.kv_dim if kind == "packed_glm" else state.config.head_dim

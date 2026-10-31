@@ -4,8 +4,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
-from lightllm.common.att_resources.allocators import full_att_kv_allocator
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
+from lightllm.common.attention_state.allocators import full_att_kv_allocator
 
 
 pytestmark = pytest.mark.usefixtures("kv_allocator_environment")

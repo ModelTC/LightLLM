@@ -27,7 +27,7 @@ from lightllm.utils.log_utils import init_logger, log_time_ready
 from lightllm.utils.profiler import ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
-from lightllm.common.att_resources.allocators import KVCapacityReader
+from lightllm.common.attention_state.allocators import KVCapacityReader
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name

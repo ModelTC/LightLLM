@@ -1,6 +1,6 @@
 """注意力存储字段与传输位置的只读描述，不执行数据搬运。
 
-TensorField 描述本地 Tensor；AxisSlice 描述某个轴的源、目标范围。
+TensorField 描述本地 Tensor；AxisMapping 描述某个轴的本地、外部范围。
 TransferRegion / StateTransferLayout 用于 State 与 CPU/PD 页之间的搬运；
 DP 在对应 TP 分片间直接复制，不需要字段映射类型。
 
@@ -27,8 +27,8 @@ import torch
 # "big" 对应 big_pages_pool 与 bounded_att_big_page_allocator；
 # "small" 对应 small_pages_pool 与 bounded_att_small_page_allocator。
 # 两个域中的同一个 slot_id 指向不同状态页。调用方先在对应 allocator 分配槽位，
-# 再将类别传给 save_bounded_att_pages / restore_bounded_att_pages 等操作，例如：
-# manager.save_bounded_att_pages(req_indices=[0], state_token_lens=[256], page_kind="big", slot_ids=[3])
+# 再将类别传给 save_bounded_att_runtime_to_pages / restore_bounded_att_runtime_from_pages 等操作，例如：
+# manager.save_bounded_att_runtime_to_pages(req_indices=[0], state_token_lens=[256], page_kind="big", page_slot_ids=[3])
 # 上例假定请求槽位 0 的已接受长度为 256，且大页槽位 3 已由调用方分配。
 PageKind = Literal["big", "small"]
 
@@ -65,36 +65,36 @@ class TensorField:
 
 
 @dataclass(frozen=True)
-class AxisSlice:
+class AxisMapping:
     """某一轴上的逻辑连续范围映射，起点与长度均以元素为单位。
 
     TransferRegion 中的方向固定为本地 State 到外部页，读取时反向应用。
     环形轴按对应 Tensor 的实际轴长度取模，不要求两侧容量相同。
 
     示例：本地 head[0:2] 写到全局传输区域 head[2:4]，读回时反向复制。
-        >>> head_slice = AxisSlice(axis="head", src_start=0, dst_start=2, length=2)
-        >>> assert head_slice.dst_start + head_slice.length == 4
+        >>> head_mapping = AxisMapping(axis="head", local_start=0, external_start=2, length=2)
+        >>> assert head_mapping.external_start + head_mapping.length == 4
 
     环形示例：本地 window 容量为 4，从槽位 3 起搬运 4 个位置到线性外部页。
     本地位置依次为 [3, 0, 1, 2]，外部位置依次为 [0, 1, 2, 3]。
-        >>> window_slice = AxisSlice(
-        ...     axis="window", src_start=3, dst_start=0, length=4, src_circular=True,
+        >>> window_mapping = AxisMapping(
+        ...     axis="window", local_start=3, external_start=0, length=4, local_circular=True,
         ... )
-        >>> assert window_slice.src_circular and not window_slice.dst_circular
+        >>> assert window_mapping.local_circular and not window_mapping.external_circular
     """
 
-    # 要切片的轴名，必须同时存在于源、目标字段中，例如 head、channel、dim。
-    # layer 固定完整复制，token 由本次传输数量控制，这两个轴不放入 AxisSlice。
+    # 要映射的轴名，必须同时存在于本地和外部字段中，例如 head、channel、dim。
+    # layer 固定完整复制，token 由本次传输数量控制，这两个轴不放入 AxisMapping。
     axis: str
 
-    # 源轴的起始元素索引，包含该位置且必须非负。
-    # TransferRegion 中本地字段的位置。
-    src_start: int
+    # 本地 State 轴的起始元素索引，包含该位置且必须非负。
+    # 写出时从此处读取，读回时向此处写入。
+    local_start: int
 
-    # 目标轴的起始元素索引，包含该位置且必须非负。
-    # TransferRegion 中外部页区域的位置。
+    # 外部页轴的起始元素索引，包含该位置且必须非负。
+    # 写出时向此处写入，读回时从此处读取。
     # 用于将本地 TP 分片放到全局 head/channel 的对应位置。
-    dst_start: int
+    external_start: int
 
     # 搬运的元素数量，必须为正；普通轴使用半开区间 [start, start + length)。
     # 环形轴对 start + i 取模，length 不得超过该侧 Tensor 的轴容量，避免重复覆盖。
@@ -103,11 +103,11 @@ class AxisSlice:
 
     # 本地 State 的该轴采用环形寻址；容量取自本地 Tensor，而不是外部 region.shape。
     # 例如 tail/SWA 的 window 轴。读回时仍作用于本地侧，不随实际搬运方向交换含义。
-    src_circular: bool = False
+    local_circular: bool = False
 
     # 外部区域的该轴采用环形寻址；容量取自外部 Tensor 的对应轴。
     # 常规 CPU/PD 页按逻辑顺序线性保存，使用默认 False。
-    dst_circular: bool = False
+    external_circular: bool = False
 
 
 # ========================================================================
@@ -120,7 +120,7 @@ class TransferRegion:
     """描述 State 内一个字段与 CPU/PD 外部页区域之间的拷贝映射。
 
     由 StateTransferLayout.regions 组织，同一字段可以对应多个区域映射。
-    区域的 shape 覆盖外部完整数据，axis_slices 选择当前 rank 的子范围。
+    区域的 shape 覆盖外部完整数据，axis_mappings 选择当前 rank 的子范围。
     本地和外部区域的层数必须一致，并按相同存储顺序完整复制。
 
     示例：外部 K 区域有 4 个全局 heads，head_dim=128，当前 rank 持有后 2 个 heads。
@@ -131,9 +131,9 @@ class TransferRegion:
         ...     dtype=torch.float16,
         ...     axes=("layer", "token", "head", "dim"),
         ...     shape=(2, 8, 4, 128),
-        ...     axis_slices=(
-        ...         AxisSlice(axis="head", src_start=0, dst_start=2, length=2),
-        ...         AxisSlice(axis="dim", src_start=0, dst_start=0, length=128),
+        ...     axis_mappings=(
+        ...         AxisMapping(axis="head", local_start=0, external_start=2, length=2),
+        ...         AxisMapping(axis="dim", local_start=0, external_start=0, length=128),
         ...     ),
         ...     write_enabled=True,
         ... )
@@ -169,10 +169,10 @@ class TransferRegion:
 
     # 描述本地字段到外部区域的轴范围，每个非 layer/token 轴必须恰好出现一次。
     # 无分片的轴也显式填写完整范围，例如 dim: 0 -> 0、length=head_dim。
-    # 读回时交换源、目标起点；同一组切片应用于全部层和本次有效 token。
+    # 两个方向共用同一组本地/外部起点，仅反转数据流向；映射应用于全部层和本次有效 token。
     # 环形寻址由支持它的具体 State 搬运实现处理；请求窗口起点通过本次调用的
-    # axis_slice_overrides 覆盖，不回写缓存布局，起点也不作为 kernel 的编译期常量。
-    axis_slices: tuple[AxisSlice, ...]
+    # axis_mapping_overrides 覆盖，不回写缓存布局，起点也不作为 kernel 的编译期常量。
+    axis_mappings: tuple[AxisMapping, ...]
 
     # 当前 TP rank 是否负责向外部区域写入；False 不影响从该区域读回。
     # KV head 有 TP 副本时，每组只选一个 rank 写入；复制的 indexer tail 只由 rank 0 写。
@@ -184,8 +184,8 @@ class TransferRegion:
 class StateTransferLayout:
     """描述一个 State 的 CPU/PD 传输布局，按字段组织 TransferRegion。
 
-    每个 layout 通过 resource_id 绑定一个 State；regions 描述该 State 各字段
-    与外部页之间的映射，具体轴范围由各 region 的 AxisSlice 描述。
+    每个 layout 通过 state_name 绑定一个 State；regions 描述该 State 各字段
+    与外部页之间的映射，具体轴范围由各 region 的 AxisMapping 描述。
     byte_start / byte_end 记录本 State 在联合页中的完整预留区间，包含自身对齐空间。
     CPU/PD 根据页集合的行选择物理页；PD 通过显式 pd_page_index 指定目标页。
     实际页容量由 manager 统一计算，可以大于当前 State 的终点。
@@ -195,13 +195,13 @@ class StateTransferLayout:
         >>> k_region = TransferRegion(
         ...     field="k", byte_start=16384, byte_end=32768, dtype=torch.float16,
         ...     axes=("layer", "token", "head", "dim"), shape=(2, 8, 4, 128),
-        ...     axis_slices=(
-        ...         AxisSlice(axis="head", src_start=0, dst_start=2, length=2),
-        ...         AxisSlice(axis="dim", src_start=0, dst_start=0, length=128),
+        ...     axis_mappings=(
+        ...         AxisMapping(axis="head", local_start=0, external_start=2, length=2),
+        ...         AxisMapping(axis="dim", local_start=0, external_start=0, length=128),
         ...     ),
         ... )
         >>> layout = StateTransferLayout(
-        ...     resource_id="main_gqa_fp16_state",
+        ...     state_name="main_gqa_fp16_state",
         ...     tokens_per_page=8,
         ...     byte_start=16384, byte_end=49152,
         ...     regions=(k_region, replace(k_region, field="v", byte_start=32768, byte_end=49152)),
@@ -209,9 +209,9 @@ class StateTransferLayout:
         >>> assert layout.regions[1].byte_end == layout.byte_end == 49152
     """
 
-    # 当前 State 的规范身份，与管理器成员名、state.resource_id 一致。
+    # 当前 State 的规范身份，与管理器成员名、state.state_name 一致。
     # 用于从联合页布局字典中选择对应资源，区分 main/draft 及不同存储方案。
-    resource_id: str
+    state_name: str
 
     # 整张外部页可容纳的 token 数，不是本次实际传输数量；含 KV 的页使用正整数。
     # CPU/PD 分别使用各自的全局页配置，页容量不随本次传输长度改变。

@@ -247,10 +247,10 @@ def test_case9():
 
 
 def test_flush_cache_requires_released_references_and_returns_allocator_pages():
-    from lightllm.common.att_resources.allocators import FullAttKVAllocator
+    from lightllm.common.attention_state.allocators import FullAttKVAllocator
 
     allocator = FullAttKVAllocator(100, pin_memory=False)
-    tree = RadixCache(100, 0, att_resource_manager=SimpleNamespace(full_att_allocator=allocator))
+    tree = RadixCache(100, 0, att_state_manager=SimpleNamespace(full_att_allocator=allocator))
     values = allocator.alloc(5)
     key = torch.arange(5)
     tree.insert(key[:3], values[:3])
@@ -273,24 +273,24 @@ def test_hybrid_flush_releases_shared_kv_and_state_slots(monkeypatch):
     from unit_tests.common.att_resources.test_manager_helpers import composition
 
     monkeypatch.setattr(
-        "lightllm.common.att_resources.bounded_att.utils.get_env_start_args",
+        "lightllm.common.attention_state.bounded_att.utils.get_env_start_args",
         lambda: SimpleNamespace(enable_dp_prompt_cache_fetch=False),
     )
     resources = composition(device="cuda", with_tail=False)
     allocator = resources.full_att_allocator
     big = resources.bounded_att_big_page_allocator.alloc(1)[0]
     small = resources.bounded_att_small_page_allocator.alloc(1)[0]
-    resources.save_bounded_att_pages(
+    resources.save_bounded_att_runtime_to_pages(
         req_indices=[0],
         state_token_lens=[8],
         page_kind="big",
-        slot_ids=[big],
+        page_slot_ids=[big],
     )
-    resources.save_bounded_att_pages(
+    resources.save_bounded_att_runtime_to_pages(
         req_indices=[1],
         state_token_lens=[12],
         page_kind="small",
-        slot_ids=[small],
+        page_slot_ids=[small],
     )
     values = allocator.alloc(12)
     tree = HybridAttPagedRadixCache(12, 106, 4, 2, resources)
@@ -346,7 +346,7 @@ def test_page_size_must_match_allocator():
     mem_manager = SimpleNamespace(page_size=8)
 
     with pytest.raises(ValueError, match="must match allocator page_size 8"):
-        RadixCache(100, 100, att_resource_manager=SimpleNamespace(full_att_allocator=mem_manager), page_size=4)
+        RadixCache(100, 100, att_state_manager=SimpleNamespace(full_att_allocator=mem_manager), page_size=4)
 
 
 @pytest.mark.parametrize("update_refs", [False, True])
@@ -463,7 +463,7 @@ def test_hybrid_match_refs_only_valid_prefix_after_tail_state_eviction():
         rank_in_node=101,
         hash_page_size=4,
         big_page_num=2,
-        att_resource_manager=hybrid_resources(freed_small=freed_state_ids),
+        att_state_manager=hybrid_resources(freed_small=freed_state_ids),
     )
     key = torch.arange(12, dtype=torch.int64)
     values = torch.arange(100, 112, dtype=torch.int64)
@@ -503,7 +503,7 @@ def hybrid_tree():
         rank_in_node=102,
         hash_page_size=4,
         big_page_num=2,
-        att_resource_manager=hybrid_resources(freed_big=freed_big_states),
+        att_state_manager=hybrid_resources(freed_big=freed_big_states),
     )
     return tree, freed_big_states
 
@@ -569,7 +569,7 @@ def test_hybrid_match_falls_back_along_matched_branch(monkeypatch, small_state_v
         rank_in_node=104,
         hash_page_size=64,
         big_page_num=4,
-        att_resource_manager=hybrid_resources(freed_big=freed_big_states),
+        att_state_manager=hybrid_resources(freed_big=freed_big_states),
     )
     # The older request leaves a small-page state at 384, before the image.
     old_values = torch.arange(1000, 1384)
@@ -676,7 +676,7 @@ def test_hybrid_request_release_frees_or_transfers_image_page_slots(
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: context.args)
     context.radix_cache = tree
-    context.att_resource_manager = tree.att_resource_manager
+    context.att_state_manager = tree.att_state_manager
     context.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(100, 132).view(1, -1))
     req = InferReq.__new__(InferReq)
     req.req_idx = req.cur_output_len = 0

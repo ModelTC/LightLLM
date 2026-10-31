@@ -149,11 +149,11 @@ class ModeBackend:
             self.init_mtp_draft_model(model_kvargs)
         from lightllm.utils.envs_utils import set_model_init_status
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
-        from lightllm.common.att_resources import AttResourceManager
+        from lightllm.common.attention_state import AttentionStateManager
         from lightllm.common.req_manager import ReqManager
 
         models = (self.model, *self.draft_models)
-        assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"
+        assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
         assert all(item.max_req_num == self.model.max_req_num for item in models), "models must share the request domain"
         # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
         max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
@@ -162,13 +162,13 @@ class ModeBackend:
         for item in models:
             item.bind_req_manager(req_manager=req_manager)
         for item in models:
-            item.prepare_att_resources()
-        manager: AttResourceManager = self.model.att_resource_manager
-        assert all(item.att_resource_manager is manager for item in models), "models must share one resource manager"
+            item.prepare_attention_states()
+        manager: AttentionStateManager = self.model.att_state_manager
+        assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
         with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            manager.finish_state_creation()
+            manager.finish_state_registration()
             manager.load_full_att_calibration(args=self.model.args)
-            manager.initialize_resources(
+            manager.initialize_storage(
                 self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
             )
         for item in models:
@@ -176,24 +176,24 @@ class ModeBackend:
         torch.cuda.empty_cache()
         set_model_init_status(True)
         set_random_seed(2147483647)
-        self.is_hybrid_att_model = bool(self.model.att_resource_manager.get_bounded_attention_states())
+        self.is_hybrid_att_model = bool(self.model.att_state_manager.get_bounded_attention_states())
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
             if self.is_hybrid_att_model:
                 self.radix_cache = HybridAttPagedRadixCache(
-                    total_token_num=self.model.att_resource_manager.full_att_allocator.size,
+                    total_token_num=self.model.att_state_manager.full_att_allocator.size,
                     rank_in_node=self.rank_in_node,
                     hash_page_size=self.args.linear_att_hash_page_size,
                     big_page_num=self.args.linear_att_page_block_num,
-                    att_resource_manager=self.model.att_resource_manager,
+                    att_state_manager=self.model.att_state_manager,
                 )
             else:
                 self.radix_cache = RadixCache(
-                    total_token_num=self.model.att_resource_manager.full_att_allocator.size,
+                    total_token_num=self.model.att_state_manager.full_att_allocator.size,
                     rank_in_node=self.rank_in_node,
-                    att_resource_manager=self.model.att_resource_manager,
+                    att_state_manager=self.model.att_state_manager,
                     page_size=self.args.page_size,
                 )
 
@@ -240,12 +240,12 @@ class ModeBackend:
             # PD 和 DP 使用独立导出，避免 PD 读者收到大小页池或 DP 读者丢失页池。
             if self.args.run_mode in ("prefill", "decode"):
                 publish_att_resources(
-                    self.model.att_resource_manager, self.model.req_manager.req_to_token_indexs,
+                    self.model.att_state_manager, self.model.req_manager.req_to_token_indexs,
                     kind="pd", reader_count=self.node_world_size,
                 )
             if self.args.enable_dp_prompt_cache_fetch:
                 publish_att_resources(
-                    self.model.att_resource_manager, self.model.req_manager.req_to_token_indexs,
+                    self.model.att_state_manager, self.model.req_manager.req_to_token_indexs,
                     kind="dp", reader_count=self.dp_size_in_node - 1,
                 )
             dist.barrier(group=self.node_nccl_group)
@@ -254,7 +254,7 @@ class ModeBackend:
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
         if self.is_master_in_dp:
             # Capture 只保存 allocator 管理的真实 KV 槽位，HOLD 页对应的 padding 写入由 kernel 过滤。
-            kv_cache_size = self.model.att_resource_manager.full_att_allocator.size
+            kv_cache_size = self.model.att_state_manager.full_att_allocator.size
             if self.args.enable_prompt_logprobs:
                 mgr = PromptLogprobsCaptureManager.get_instance()
                 if mgr is not None:
@@ -310,24 +310,24 @@ class ModeBackend:
         )
 
         # 每个 DP 只保留对应 TP 分片，统一以节点内 DP rank 索引。
-        self.dp_att_resource_managers = {}
+        self.dp_att_state_managers = {}
         self.dp_req_to_token_indices = {}
         # 取节点内的 TP 起点，兼容单个 TP 组跨节点、rank_in_dp 超过本节点 rank 范围的情况。
         for dp_rank, rank_idx in enumerate(
             range(self.rank_in_node % self.dp_world_size, self.node_world_size, self.dp_world_size)
         ):
             if rank_idx != self.rank_in_node:
-                att_resource_manager, req_to_token_indices = load_att_resources(rank_idx, kind="dp")
-                att_resource_manager.register_page_pools_pin_memory()
+                att_state_manager, req_to_token_indices = load_att_resources(rank_idx, kind="dp")
+                att_state_manager.register_page_pools_pin_memory()
             else:
-                att_resource_manager = self.model.att_resource_manager
+                att_state_manager = self.model.att_state_manager
                 req_to_token_indices = self.model.req_manager.req_to_token_indexs
-            self.dp_att_resource_managers[dp_rank] = att_resource_manager
+            self.dp_att_state_managers[dp_rank] = att_state_manager
             self.dp_req_to_token_indices[dp_rank] = req_to_token_indices
         return
 
     def get_max_total_token_num(self):
-        return self.model.att_resource_manager.full_att_allocator.size
+        return self.model.att_state_manager.full_att_allocator.size
 
     def infer_loop(self):
         raise NotImplementedError()
@@ -345,7 +345,7 @@ class ModeBackend:
         is_chained_draft = spec_mode in ("vanilla_with_att", "vanilla_no_att")
 
         draft_model_count = self.max_draft_step if is_chained_draft else 1
-        from lightllm.common.att_resources.utils import MAX_DRAFT_MODELS
+        from lightllm.common.attention_state.utils import MAX_DRAFT_MODELS
 
         assert 0 < draft_model_count <= MAX_DRAFT_MODELS, "at most 36 draft models are supported"
         draft_model_dirs = self.args.mtp_draft_model_dir
@@ -666,7 +666,7 @@ class ModeBackend:
 
         old_hold_kv_len = req_obj.hold_kv_len
         new_hold_kv_len = old_hold_kv_len + alloc_token_num
-        mem_indexes = g_infer_context.att_resource_manager.full_att_allocator.alloc(alloc_token_num)
+        mem_indexes = g_infer_context.att_state_manager.full_att_allocator.alloc(alloc_token_num)
         # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
         g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
             mem_indexes, non_blocking=no_blcoking_copy

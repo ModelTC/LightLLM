@@ -1,4 +1,4 @@
-from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer, LlamaInferStateInfo
@@ -73,9 +73,9 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             window_size = (-1, -1)
             use_sliding_window = False
 
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="gqa",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )
@@ -106,9 +106,9 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             window_size = (-1, -1)
             use_sliding_window = False
 
-        state = infer_state.att_resource_manager.get_att_state(
-            model_name=infer_state.att_resource_role,
-            att_type="gqa",
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
             logical_layer_id=self.layer_num_,
             state_class=FullAttentionState,
         )

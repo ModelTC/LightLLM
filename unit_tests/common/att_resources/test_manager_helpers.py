@@ -10,11 +10,11 @@ from dataclasses import replace
 import pytest
 import torch
 
-from lightllm.common.att_resources.allocators import FullAttKVAllocator, StatePageAllocator
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.types import PageKind, StateTransferLayout
+from lightllm.common.attention_state.allocators import FullAttKVAllocator, StatePageAllocator
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.types import PageKind, StateTransferLayout
 from unit_tests.common.att_resources.manager_fixtures import MainDraftTestResourceManager
-from lightllm.common.att_resources.att_tail import KPoolAttentionTailState
+from lightllm.common.attention_state.att_tail import KPoolAttentionTailState
 from unit_tests.common.att_resources.test_full_state import full_state, layout_for
 from unit_tests.common.att_resources.test_bounded_state import page_layout
 from unit_tests.common.att_resources.test_tail_state import make_tail, tail_layout
@@ -27,7 +27,7 @@ def composition(device: str | torch.device | int = "cpu", with_tail: bool = True
     return MainDraftTestResourceManager(device, with_tail=with_tail, tail_pool_size=tail_pool_size)
 
 
-def layouts_for(manager: AttResourceManager, kind: str = "cpu"):
+def layouts_for(manager: AttentionStateManager, kind: str = "cpu"):
     layouts = []
     if kind != "att_state":
         layouts += [layout_for(state) for state in (manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)]
@@ -39,7 +39,7 @@ def layouts_for(manager: AttResourceManager, kind: str = "cpu"):
     result = {}
     for layout in layouts:
         state_end = offset + layout.byte_end
-        result[layout.resource_id] = replace(
+        result[layout.state_name] = replace(
             layout,
             byte_start=offset + layout.byte_start,
             byte_end=state_end,
@@ -52,7 +52,7 @@ def layouts_for(manager: AttResourceManager, kind: str = "cpu"):
     return result
 
 
-def init_source(manager: AttResourceManager):
+def init_source(manager: AttentionStateManager):
     for i, state in enumerate((manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)):
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.copy_(
@@ -67,11 +67,11 @@ def init_source(manager: AttResourceManager):
         state.tail_buffer[:, 0].fill_(3)
         state.tail_buffer[:, 1].fill_(9)
     slots = manager.bounded_att_big_page_allocator.alloc(2)
-    manager.save_bounded_att_pages(
+    manager.save_bounded_att_runtime_to_pages(
         req_indices=[0, 1],
         state_token_lens=[4, 8],
         page_kind="big",
-        slot_ids=slots,
+        page_slot_ids=slots,
     )
     if manager.main_kda_conv_fp32_ssm_fp32_state.conv_state.is_cuda:
         torch.cuda.synchronize()
@@ -82,11 +82,11 @@ def init_source(manager: AttResourceManager):
 def test_shared_slots_save_restore_and_propagate_failure(monkeypatch: pytest.MonkeyPatch):
     manager = composition(device="cuda")
     slots = init_source(manager)
-    manager.restore_bounded_att_pages(
+    manager.restore_bounded_att_runtime_from_pages(
         req_indices=[2],
         state_token_lens=[4],
         page_kind="big",
-        slot_ids=[slots[0]],
+        page_slot_ids=[slots[0]],
     )
     for i, state in enumerate((manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)):
         assert (state.conv_state[:, 2, :, :2] == 11 + i).all()
@@ -95,13 +95,13 @@ def test_shared_slots_save_restore_and_propagate_failure(monkeypatch: pytest.Mon
     def fail(*args: object, **kwargs: object):
         raise RuntimeError("simulated copy failure")
 
-    monkeypatch.setattr(manager.draft0_gdn_conv_fp32_ssm_fp32_state, "save_bounded_att_pages", fail)
+    monkeypatch.setattr(manager.draft0_gdn_conv_fp32_ssm_fp32_state, "save_bounded_att_runtime_to_pages", fail)
     with pytest.raises(RuntimeError):
-        manager.save_bounded_att_pages(
+        manager.save_bounded_att_runtime_to_pages(
             req_indices=[0, 1],
             state_token_lens=[4, 8],
             page_kind="big",
-            slot_ids=slots,
+            page_slot_ids=slots,
         )
     assert manager.bounded_att_big_page_allocator.free_count == 1
     manager.bounded_att_big_page_allocator.free(slots)
@@ -109,26 +109,26 @@ def test_shared_slots_save_restore_and_propagate_failure(monkeypatch: pytest.Mon
 
 
 def test_disabled_domains():
-    manager = AttResourceManager(request_capacity=3)
-    manager.set_att_state("main", full_state())
+    manager = AttentionStateManager(request_capacity=3)
+    manager.register_state("main", full_state())
     manager.full_att_allocator = FullAttKVAllocator(12, page_size=4, pin_memory=False)
-    manager.finish_state_creation()
+    manager.finish_state_registration()
     manager.reset_bounded_att_state([0])
     manager.reset_attention_tail_state([0])
     with pytest.raises(AssertionError, match="disabled"):
-        manager.save_bounded_att_pages(
+        manager.save_bounded_att_runtime_to_pages(
             req_indices=[0],
             state_token_lens=[4],
             page_kind="big",
-            slot_ids=[0],
+            page_slot_ids=[0],
         )
-    empty_manager = AttResourceManager(request_capacity=3)
-    empty_manager.finish_state_creation()
+    empty_manager = AttentionStateManager(request_capacity=3)
+    empty_manager.finish_state_registration()
     with pytest.raises(AssertionError, match="no full-attention"):
         empty_manager.copy_full_att_tokens(torch.tensor([0], dtype=torch.long), torch.tensor([1], dtype=torch.long))
 
 
-@pytest.mark.parametrize("operation", ["save_bounded_att_pages", "restore_bounded_att_pages"])
+@pytest.mark.parametrize("operation", ["save_bounded_att_runtime_to_pages", "restore_bounded_att_runtime_from_pages"])
 def test_page_operations_forward_each_request_length(operation: str, monkeypatch: pytest.MonkeyPatch):
     manager = composition(with_tail=False)
     calls = []
@@ -137,9 +137,9 @@ def test_page_operations_forward_each_request_length(operation: str, monkeypatch
         req_indices: list[int],
         state_token_lens: list[int],
         page_kind: PageKind,
-        slot_ids: list[int],
+        page_slot_ids: list[int],
     ) -> None:
-        calls.append((req_indices, state_token_lens, page_kind, slot_ids))
+        calls.append((req_indices, state_token_lens, page_kind, page_slot_ids))
 
     for state in manager.get_bounded_attention_states():
         monkeypatch.setattr(state, operation, record_lengths)
@@ -147,7 +147,7 @@ def test_page_operations_forward_each_request_length(operation: str, monkeypatch
         req_indices=[0, 2],
         state_token_lens=[17, 29],
         page_kind="big",
-        slot_ids=[0, 1],
+        page_slot_ids=[0, 1],
     )
     assert calls == [([0, 2], [17, 29], "big", [0, 1])] * len(manager.get_bounded_attention_states())
 
@@ -160,18 +160,18 @@ def test_cpu_restore_forwards_absolute_length_for_partial_prefix(monkeypatch: py
     for state in manager.get_full_attention_states():
         monkeypatch.setattr(state, "read_from_cpu", lambda **kwargs: None)
     for state in manager.get_bounded_attention_states():
-        monkeypatch.setattr(state, "read_page_state_from_cpu", lambda **kwargs: None)
+        monkeypatch.setattr(state, "read_state_pages_from_cpu", lambda **kwargs: None)
     restored = []
 
     def record_restore(
         req_indices: list[int],
         state_token_lens: list[int],
         page_kind: PageKind,
-        slot_ids: list[int],
+        page_slot_ids: list[int],
     ) -> None:
-        restored.append((req_indices, state_token_lens, page_kind, slot_ids))
+        restored.append((req_indices, state_token_lens, page_kind, page_slot_ids))
 
-    monkeypatch.setattr(manager, "restore_bounded_att_pages", record_restore)
+    monkeypatch.setattr(manager, "restore_bounded_att_runtime_from_pages", record_restore)
     # 只加载绝对位置 [64, 70)，本批长度 6；恢复位置必须是 70，且末尾碎页使用 LOAD。
     manager.read_req_from_cpu(
         cpu_page_buffers=torch.empty((2, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8),
@@ -185,7 +185,7 @@ def test_cpu_restore_forwards_absolute_length_for_partial_prefix(monkeypatch: py
     assert restored == [([1], [70], "big", [2])]
 
 
-@pytest.mark.parametrize("operation", ["write_to_pd_buffer", "read_from_pd_buffer"])
+@pytest.mark.parametrize("operation", ["write_to_pd_page", "read_from_pd_page"])
 def test_pd_bounded_only_forwards_prefix_length(operation: str, monkeypatch: pytest.MonkeyPatch):
     manager = composition(with_tail=False)
     layouts = layouts_for(manager, kind="att_state")
@@ -224,10 +224,10 @@ def test_reset_tail_clears_all_tail_states_and_preserves_linear():
     )
     first.tail_buffer.fill_(5)
     second.tail_buffer.fill_(7)
-    tail_manager = AttResourceManager(request_capacity=3)
-    tail_manager.set_att_state("main", first)
-    tail_manager.set_att_state("main", second)
-    tail_manager.finish_state_creation()
+    tail_manager = AttentionStateManager(request_capacity=3)
+    tail_manager.register_state("main", first)
+    tail_manager.register_state("main", second)
+    tail_manager.finish_state_registration()
     tail_manager.reset_attention_tail_state([0, 1])
     assert not first.tail_buffer[:, :2].any() and not second.tail_buffer[:, :2].any()
     assert (first.tail_buffer[:, 2] == 5).all() and (second.tail_buffer[:, 2] == 7).all()
@@ -275,7 +275,7 @@ def test_cpu_all_linear_pages_and_tail_reset_at_final_boundary(device: str | tor
         torch.cuda.synchronize()
     tail = getattr(target, f"main_{target.att_tail_type}_state")
     tail.tail_buffer.fill_(37)
-    assert tail.resource_id not in layouts
+    assert tail.state_name not in layouts
     target_slots = target.bounded_att_big_page_allocator.alloc(2)
     target.read_req_from_cpu(
         cpu_page_buffers=pages,
@@ -321,11 +321,11 @@ def test_cpu_restore_owns_partial_slot_and_restores_final_runtime(token_count: i
     small_slots = []
     if token_count % 4:
         small_slots = source.bounded_att_small_page_allocator.alloc(1)
-        source.save_bounded_att_pages(
+        source.save_bounded_att_runtime_to_pages(
             req_indices=[page_count - 1],
             state_token_lens=[token_count],
             page_kind="small",
-            slot_ids=small_slots,
+            page_slot_ids=small_slots,
         )
         torch.cuda.synchronize()
     source.write_req_to_cpu(
@@ -417,14 +417,14 @@ def test_pd_composition_and_dp_copy_keep_resource_identity(device: str | torch.d
         page = torch.empty(max(layout.byte_end for layout in layouts.values()), dtype=torch.uint8, device=device)
         src_args = {"token_indices": torch.tensor([0, 2], dtype=torch.long, device=device)} if kind == "kv" else {"req_idx": 1, "state_token_len": 8}
         dst_args = {"token_indices": torch.tensor([5, 7], dtype=torch.long, device=device)} if kind == "kv" else {"req_idx": 2, "state_token_len": 8}
-        source.write_to_pd_buffer(
+        source.write_to_pd_page(
             pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
             layouts=layouts,
             **src_args,
         )
-        target.read_from_pd_buffer(
+        target.read_from_pd_page(
             pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
@@ -433,10 +433,10 @@ def test_pd_composition_and_dp_copy_keep_resource_identity(device: str | torch.d
         )
     dp_tail = dp_target.get_attention_tail_states()[0]
     dp_tail.tail_buffer.fill_(19)
-    dp_target.copy_from_other_dp(
+    dp_target.copy_from_dp(
         remote_att_manager=source,
-        src_token_indexes=torch.tensor([0, 2], dtype=torch.int32, device=device),
-        dst_token_indexes=torch.tensor([5, 7], dtype=torch.long, device=device),
+        src_token_indices=torch.tensor([0, 2], dtype=torch.int32, device=device),
+        dst_token_indices=torch.tensor([5, 7], dtype=torch.long, device=device),
         src_big_page_ids=[],
         dst_big_page_ids=[],
         src_req_idx=1,
@@ -469,10 +469,10 @@ def test_dp_copy_resets_only_selected_tail_requests(pd_args: EasyDict):
     tails = target.get_attention_tail_states()
     for state in tails:
         state.tail_buffer.fill_(19)
-    target.copy_from_other_dp(
+    target.copy_from_dp(
         remote_att_manager=source,
-        src_token_indexes=torch.empty(0, dtype=torch.long),
-        dst_token_indexes=torch.empty(0, dtype=torch.long),
+        src_token_indices=torch.empty(0, dtype=torch.long),
+        dst_token_indices=torch.empty(0, dtype=torch.long),
         src_big_page_ids=[],
         dst_big_page_ids=[],
         src_req_idx=1,
@@ -507,10 +507,10 @@ def test_dp_copy_includes_selected_runtime_and_main_draft_pages(copy_tokens: boo
     for state in target.get_attention_tail_states():
         state.tail_buffer.fill_(51)
 
-    target.copy_from_other_dp(
+    target.copy_from_dp(
         remote_att_manager=source,
-        src_token_indexes=torch.tensor([0, 2] if copy_tokens else [], dtype=torch.long, device=device),
-        dst_token_indexes=torch.tensor([5, 7] if copy_tokens else [], dtype=torch.long, device=device),
+        src_token_indices=torch.tensor([0, 2] if copy_tokens else [], dtype=torch.long, device=device),
+        dst_token_indices=torch.tensor([5, 7] if copy_tokens else [], dtype=torch.long, device=device),
         src_big_page_ids=[2, 0] if copy_pages else [],
         dst_big_page_ids=[0, 1] if copy_pages else [],
         src_req_idx=1,
@@ -518,7 +518,7 @@ def test_dp_copy_includes_selected_runtime_and_main_draft_pages(copy_tokens: boo
     )
 
     for state in target.get_full_attention_states():
-        src_state = getattr(source, state.resource_id)
+        src_state = getattr(source, state.state_name)
         values = read_kv_storage(state)
         if copy_tokens:
             assert torch.equal(values[:, [5, 7]], read_kv_storage(src_state)[:, [0, 2]])
@@ -526,7 +526,7 @@ def test_dp_copy_includes_selected_runtime_and_main_draft_pages(copy_tokens: boo
             assert (values == -1).all()
         assert (values[:, :5] == -1).all()
     for state in target.get_bounded_attention_states():
-        src_pool = getattr(source, state.resource_id).big_pages_pool
+        src_pool = getattr(source, state.state_name).big_pages_pool
         dst_pool = state.big_pages_pool
         if copy_pages:
             for src_page, dst_page in ((2, 0), (0, 1)):
@@ -537,7 +537,7 @@ def test_dp_copy_includes_selected_runtime_and_main_draft_pages(copy_tokens: boo
         assert (dst_pool.conv_state[2] == -1).all() and (dst_pool.ssm_state[2] == -2).all()
         assert (state.small_pages_pool.conv_state == 31).all()
         assert (state.small_pages_pool.ssm_state == 32).all()
-        source_state = getattr(source, state.resource_id)
+        source_state = getattr(source, state.state_name)
         assert torch.equal(
             state.conv_state[:, 2, :, :state.config.conv_width],
             source_state.conv_state[:, 1, :, :source_state.config.conv_width],
@@ -562,11 +562,11 @@ def test_cpu_ready_joint_pages_preserve_full_and_bounded_fields(readies: list[bo
     source = composition("cuda", with_tail=False)
     big_slots = init_source(source)
     small_slots = source.bounded_att_small_page_allocator.alloc(1)
-    source.save_bounded_att_pages(
+    source.save_bounded_att_runtime_to_pages(
         req_indices=[1],
         state_token_lens=[6],
         page_kind="small",
-        slot_ids=small_slots,
+        page_slot_ids=small_slots,
     )
     torch.cuda.synchronize()
     layouts = layouts_for(source)
@@ -600,7 +600,7 @@ def test_cpu_ready_joint_pages_preserve_full_and_bounded_fields(readies: list[bo
         cpu_page_buffers=pages,
         cpu_page_indices=page_ids,
         layouts=layouts,
-        cpu_page_readies=readies,
+        cpu_page_ready_flags=readies,
         big_page_slot_ids=masked_big_slots,
         small_page_slot_ids=masked_small_slots,
     )

@@ -127,16 +127,16 @@ def test_backend_allocates_all_roles_before_warmup(
     mapping = SimpleNamespace(bind_hold_page=lambda indices: None)
     request_allocations = []
     manager_creations = []
-    from lightllm.common.att_resources import AttResourceManager
+    from lightllm.common.attention_state import AttentionStateManager
 
     def create_empty_manager(request_capacity: int):
-        manager = AttResourceManager(request_capacity=request_capacity)
-        assert not manager._states_created
+        manager = AttentionStateManager(request_capacity=request_capacity)
+        assert not manager._state_registration_finished
         assert not any(name.endswith("_state") for name in manager.__dict__)
         manager_creations.append(request_capacity)
         return manager
 
-    monkeypatch.setattr("lightllm.common.basemodel.basemodel.AttResourceManager", create_empty_manager)
+    monkeypatch.setattr("lightllm.common.basemodel.basemodel.AttentionStateManager", create_empty_manager)
 
     def create_req_manager(max_request_num: int, max_sequence_length: int):
         assert len(models) == 1 + draft_count
@@ -149,13 +149,13 @@ def test_backend_allocates_all_roles_before_warmup(
     def mark_backends(model: TpPartBaseModel):
         # 第一个模型初始化 backend 前，全部 State 已创建完成，可通过缓存查询取得资源。
         for item in models:
-            for state in item.att_resource_manager.get_full_attention_states(item.att_resource_role):
+            for state in item.att_state_manager.get_full_attention_states(item.att_state_role):
                 logical_layer_ids = {layer_id for group in state.config.logical_layer_groups for layer_id in group}
                 for layer in item.layers_infer:
                     if layer.layer_num_ in logical_layer_ids:
-                        assert item.att_resource_manager.get_att_state(
-                            model_name=item.att_resource_role,
-                            att_type="",
+                        assert item.att_state_manager.get_state(
+                            model_role=item.att_state_role,
+                            state_type_filter="",
                             logical_layer_id=layer.layer_num_,
                             state_class=type(state),
                         ) is state
@@ -166,8 +166,8 @@ def test_backend_allocates_all_roles_before_warmup(
     def warmup(model: TpPartBaseModel):
         assert model.backends_bound
         assert all(item.req_manager is mapping for item in models)
-        assert all(item.att_resource_manager is models[0].att_resource_manager for item in models)
-        assert model.att_resource_manager.full_att_allocator.size == 32
+        assert all(item.att_state_manager is models[0].att_state_manager for item in models)
+        assert model.att_state_manager.full_att_allocator.size == 32
         assert all(item.max_total_token_num == 32 for item in models[: models.index(model) + 1])
         assert all(item.max_total_token_num is None for item in models[models.index(model) + 1 :])
         assert captured == prefill_captured == {id(item) for item in models[: models.index(model)]}
@@ -211,7 +211,7 @@ def test_backend_allocates_all_roles_before_warmup(
 
     def memory_info(device: str | torch.device | int):
         assert all(item.req_manager is mapping for item in models)
-        manager = models[0].att_resource_manager
+        manager = models[0].att_state_manager
         states = manager.get_full_attention_states()
         assert all(read_kv_storage(state) is None for state in states)
         assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.conv_state.is_cuda
@@ -222,7 +222,7 @@ def test_backend_allocates_all_roles_before_warmup(
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory_info)
     monkeypatch.setattr("lightllm.utils.envs_utils.set_model_init_status", ready.append)
-    assert all(not hasattr(item, "att_resource_manager") for item in models)
+    assert all(not hasattr(item, "att_state_manager") for item in models)
 
     class RuntimeReady(Exception):
         """Stop after model readiness, before unrelated queue and thread setup."""
@@ -255,7 +255,7 @@ def test_backend_allocates_all_roles_before_warmup(
                     )
                 )
         else:
-            assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"
+            assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
             req_manager = create_req_manager(
                 max_request_num=models[0].max_req_num,
                 max_sequence_length=max(item.get_req_manager_max_seq_len() for item in models),
@@ -263,13 +263,13 @@ def test_backend_allocates_all_roles_before_warmup(
             for item in models:
                 item.bind_req_manager(req_manager=req_manager)
             for index, item in enumerate(models):
-                item.prepare_att_resources()
-                assert all(other.att_resource_manager is models[0].att_resource_manager for other in models[: index + 1])
-                assert all(not hasattr(other, "att_resource_manager") for other in models[index + 1 :])
+                item.prepare_attention_states()
+                assert all(other.att_state_manager is models[0].att_state_manager for other in models[: index + 1])
+                assert all(not hasattr(other, "att_state_manager") for other in models[index + 1 :])
             main = models[0]
-            main.att_resource_manager.finish_state_creation()
-            main.att_resource_manager.load_full_att_calibration(args=args)
-            main.att_resource_manager.initialize_resources(
+            main.att_state_manager.finish_state_registration()
+            main.att_state_manager.load_full_att_calibration(args=args)
+            main.att_state_manager.initialize_storage(
                 args, token_capacity=main.max_total_token_num, mem_fraction=main.mem_fraction
             )
             assert all(item.max_total_token_num is None for item in models)
@@ -286,7 +286,7 @@ def test_backend_allocates_all_roles_before_warmup(
     assert captured == {id(model) for model in models}
     assert checked == [models[0]]
     assert ready == ([True] if via_backend else [])
-    manager = models[0].att_resource_manager
+    manager = models[0].att_state_manager
     assert len(manager.get_bounded_attention_states()) == draft_count + int(main_linear)
     assert all(not hasattr(model, "mtp_state_cursors") for model in models)
     assert all(not hasattr(model, "full_att_state") for model in models)
@@ -331,9 +331,9 @@ def test_backend_allocates_all_roles_before_warmup(
 
     layouts = build_cpu_cache_layouts()
     assert (max(layout.byte_end for layout in layouts.values()) + 15) // 16 * 16 == manager.get_cpu_page_bytes()
-    assert layouts.keys() == manager.get_cpu_transfer_layouts().keys()
-    for resource_id, layout in layouts.items():
-        runtime_layout = manager.get_cpu_transfer_layouts()[resource_id]
+    assert layouts.keys() == manager.get_cpu_page_layouts().keys()
+    for state_name, layout in layouts.items():
+        runtime_layout = manager.get_cpu_page_layouts()[state_name]
         assert [(r.field, r.byte_start, r.byte_end, r.dtype, r.axes, r.shape) for r in layout.regions] == [
             (r.field, r.byte_start, r.byte_end, r.dtype, r.axes, r.shape) for r in runtime_layout.regions
         ]
@@ -341,25 +341,25 @@ def test_backend_allocates_all_roles_before_warmup(
     for i, state in enumerate(manager.get_bounded_attention_states()):
         state.conv_state.fill_(i + 3)
         state.ssm_state.fill_(i + 7)
-    manager.save_bounded_att_pages(
+    manager.save_bounded_att_runtime_to_pages(
         req_indices=[0],
         state_token_lens=[4],
         page_kind="big",
-        slot_ids=[slot],
+        page_slot_ids=[slot],
     )
     manager.reset_bounded_att_state([0])
     assert all(not state.conv_state[:, 0].any() for state in manager.get_bounded_attention_states())
-    manager.restore_bounded_att_pages(
+    manager.restore_bounded_att_runtime_from_pages(
         req_indices=[0],
         state_token_lens=[4],
         page_kind="big",
-        slot_ids=[slot],
+        page_slot_ids=[slot],
     )
     for i, state in enumerate(manager.get_bounded_attention_states()):
         assert (state.conv_state[:, 0, :, : state.config.conv_width] == i + 3).all()
         assert (state.ssm_state[:, 0] == i + 7).all()
     with pytest.raises(AssertionError, match="resources already initialized"):
         start_runtime()
-    assert all(item.att_resource_manager is manager for item in models)
+    assert all(item.att_state_manager is manager for item in models)
     get_env_start_args.cache_clear()
     get_added_mtp_kv_layer_num.cache_clear()

@@ -128,9 +128,9 @@ class TpPartBaseModel:
 | def _init_some_value(self):  | 初始化推理框架会使用的一些成员变量的值                       |
 | def _init_custom(self):      | 一些模型自己的个性化初始化，比如 llama 初始化自己的Rotary值  |
 
-全部 main/draft 模型构造完成后，`ModeBackend.init_model` 先调用各模型的 `prepare_att_resources()` 准备自身 State；随后管理器依次完成 `finish_state_creation()`、`load_full_att_calibration(args)` 和共享资源分配。随后按 main、各 draft 的顺序逐个调用 `init_runtime()`，每次完整执行本模型的 HOLD 页和 backend 绑定、warmup、padded-request 与 CUDA Graph 初始化；main 还在该方法末尾执行最大长度检查。全部模型完成后发布就绪标志。仅保留资源准备和运行时初始化两个单模型公共入口，均不接收 draft 列表。
+全部 main/draft 模型构造完成后，`ModeBackend.init_model` 先调用各模型的 `prepare_attention_states()` 准备自身 State；随后管理器依次完成 `finish_state_registration()`、`load_full_att_calibration(args)` 和共享资源分配。随后按 main、各 draft 的顺序逐个调用 `init_runtime()`，每次完整执行本模型的 HOLD 页和 backend 绑定、warmup、padded-request 与 CUDA Graph 初始化；main 还在该方法末尾执行最大长度检查。全部模型完成后发布就绪标志。仅保留资源准备和运行时初始化两个单模型公共入口，均不接收 draft 列表。
 
-公共 `prepare_att_resources()` 为 main 创建空管理器，draft 引用 main 的实例。三个 State 创建接口均为 `classmethod`，显式接收模型配置、逻辑层号及 TP 信息；bounded/tail 接收请求容量和设备；full 工厂只创建布局，不计算标定起点或读取标定文件。接口仅返回对象列表，不注册管理器，也不依赖模型实例。CPU cache 直接复用 full/bounded 工厂生成 meta 定义，无需加载标定。公共流程统一注册；无 attention 的 draft 不创建 State。
+公共 `prepare_attention_states()` 为 main 创建空管理器，draft 引用 main 的实例。三个 State 创建接口均为 `classmethod`，显式接收模型配置、逻辑层号及 TP 信息；bounded/tail 接收请求容量和设备；full 工厂只创建布局，不计算标定起点或读取标定文件。接口仅返回对象列表，不注册管理器，也不依赖模型实例。CPU cache 直接复用 full/bounded 工厂生成 meta 定义，无需加载标定。公共流程统一注册；无 attention 的 draft 不创建 State。
 
 ## 2. 添加 bloom 模型的示例说明
 

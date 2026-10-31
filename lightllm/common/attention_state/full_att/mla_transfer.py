@@ -90,12 +90,12 @@ def transfer_mla_pages(
         external = external.permute(0, *(region.axes.index(axis) + 1 for axis in axes))
         local_slices = [slice(None)] * 4
         external_slices = [slice(None)] * 5
-        for axis_slice in region.axis_slices:
-            # src_start/dst_start 固定表示本地/外部起点，不随读写方向改变。
+        for axis_mapping in region.axis_mappings:
+            # local_start/external_start 固定表示本地/外部起点，不随读写方向改变。
             # 例：本地 heads [0, 2) 对应外部 heads [4, 6)，切片保留两侧真实 stride。
-            axis = axes.index(axis_slice.axis)
-            local_slices[axis] = slice(axis_slice.src_start, axis_slice.src_start + axis_slice.length)
-            external_slices[axis + 1] = slice(axis_slice.dst_start, axis_slice.dst_start + axis_slice.length)
+            axis = axes.index(axis_mapping.axis)
+            local_slices[axis] = slice(axis_mapping.local_start, axis_mapping.local_start + axis_mapping.length)
+            external_slices[axis + 1] = slice(axis_mapping.external_start, axis_mapping.external_start + axis_mapping.length)
         local = local[tuple(local_slices)]
         external = external[tuple(external_slices)]
         # token 轴不比较：local 是 GPU 槽位容量，external 是单页容量。

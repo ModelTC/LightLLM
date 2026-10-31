@@ -16,8 +16,8 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from lightllm.server.router.model_infer import shared_att_resources_utils
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
 from unit_tests.common.att_resources.test_model_resources import make_resources
@@ -42,10 +42,10 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
     src, dst = make_quant_state(kind, device), make_quant_state(kind, device)
     managers = []
     for state in (src, dst):
-        manager = AttResourceManager(request_capacity=2)
-        manager.set_att_state("main", state)
+        manager = AttentionStateManager(request_capacity=2)
+        manager.register_state("main", state)
         manager.full_att_allocator = FullAttKVAllocator(8, 4, pin_memory=False)
-        manager.finish_state_creation()
+        manager.finish_state_registration()
         managers.append(manager)
     src, dst = [manager.get_full_attention_states("main")[0] for manager in managers]
     for i, field in enumerate(full_state_test_fields(src, full_state_test_buffers(src)).values()):
@@ -70,7 +70,7 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
                 dp_rank_in_node=0,
                 tp_world_size=1,
                 token_indices=source_indices,
-                write_to_pd_buffer=True,
+                write_to_pd_page=True,
             )
     else:
         copy_page(
@@ -80,7 +80,7 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
             dp_rank_in_node=0,
             tp_world_size=1,
             token_indices=source_indices,
-            write_to_pd_buffer=True,
+            write_to_pd_page=True,
         )
         copy_page(
             node_att_managers=[managers[1]],
@@ -89,7 +89,7 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
             dp_rank_in_node=0,
             tp_world_size=1,
             token_indices=pd_indices,
-            write_to_pd_buffer=False,
+            write_to_pd_page=False,
         )
         assert_token_fields_equal(
             source=src,
@@ -105,14 +105,14 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
                 token_indices=source_indices,
                 cpu_page_buffers=cpu_pages,
                 cpu_page_indices=[0],
-                layouts=managers[0].get_cpu_transfer_layouts(),
+                layouts=managers[0].get_cpu_page_layouts(),
             )
     else:
         managers[0].write_req_to_cpu(
             token_indices=source_indices,
             cpu_page_buffers=cpu_pages,
             cpu_page_indices=[0],
-            layouts=managers[0].get_cpu_transfer_layouts(),
+            layouts=managers[0].get_cpu_page_layouts(),
         )
         if device == "cuda":
             torch.cuda.synchronize()
@@ -120,7 +120,7 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
             cpu_page_buffers=cpu_pages,
             cpu_page_indices=[0],
             token_indices=cpu_indices,
-            layouts=managers[1].get_cpu_transfer_layouts(),
+            layouts=managers[1].get_cpu_page_layouts(),
         )
         assert_token_fields_equal(
             source=src,
@@ -131,20 +131,20 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
 
     if device == "cpu":
         with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
-            managers[1].copy_from_other_dp(
+            managers[1].copy_from_dp(
                 remote_att_manager=managers[0],
-                src_token_indexes=source_indices,
-                dst_token_indexes=dp_indices,
+                src_token_indices=source_indices,
+                dst_token_indices=dp_indices,
                 src_big_page_ids=[],
                 dst_big_page_ids=[],
                 src_req_idx=0,
                 dst_req_idx=0,
             )
         return
-    managers[1].copy_from_other_dp(
+    managers[1].copy_from_dp(
         remote_att_manager=managers[0],
-        src_token_indexes=source_indices,
-        dst_token_indexes=dp_indices,
+        src_token_indices=source_indices,
+        dst_token_indices=dp_indices,
         src_big_page_ids=[],
         dst_big_page_ids=[],
         src_req_idx=0,
@@ -224,8 +224,8 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
         dst_req=req,
         src_dp_rank=1,
         src_req_idx=1,
-        src_token_indexes=torch.tensor([0, 1, 2, 3], dtype=torch.int32, device=f"cuda:{source_device}"),
-        dst_token_indexes=torch.tensor([8, 9, 10, 11]),
+        src_token_indices=torch.tensor([0, 1, 2, 3], dtype=torch.int32, device=f"cuda:{source_device}"),
+        dst_token_indices=torch.tensor([8, 9, 10, 11]),
         src_big_page_ids=src_big_page_ids,
         dst_big_page_ids=dst_big_page_ids,
     )
@@ -241,8 +241,8 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
     monkeypatch.setattr(module.dist, "barrier", barrier)
     worker = module.DPKVSharedMoudle.__new__(module.DPKVSharedMoudle)
     worker.backend = SimpleNamespace(
-        model=SimpleNamespace(att_resource_manager=target),
-        dp_att_resource_managers={1: source},
+        model=SimpleNamespace(att_state_manager=target),
+        dp_att_state_managers={1: source},
         is_hybrid_att_model=True,
         is_master_in_dp=False,
         node_nccl_group="node",
@@ -325,11 +325,11 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
                 pool.ssm_state.zero_()
     slot = resources.bounded_att_big_page_allocator.alloc(1)
     with torch.cuda.device(source_device):
-        resources.save_bounded_att_pages(
+        resources.save_bounded_att_runtime_to_pages(
             req_indices=[0],
             state_token_lens=[8],
             page_kind="big",
-            slot_ids=slot,
+            page_slot_ids=slot,
         )
     mapping = torch.zeros((3, 16), dtype=torch.int32, device=f"cuda:{source_device}")
     mapping[1, 0] = 7
@@ -420,7 +420,7 @@ def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, targe
             task_kind=kind,
             req_idx=1,
             state_token_len=8,
-            write_to_pd_buffer=True,
+            write_to_pd_page=True,
         )
         copy_page(
             node_att_managers=[m for m, _ in target],
@@ -432,7 +432,7 @@ def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, targe
             task_kind=kind,
             req_idx=2,
             state_token_len=8,
-            write_to_pd_buffer=False,
+            write_to_pd_page=False,
         )
     for rank, (manager, full) in enumerate(target):
         for field_index, field in enumerate(full_state_test_fields(full, full_state_test_buffers(full)).values()):
@@ -460,7 +460,7 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
         torch.cuda.set_device(0)
         for kind in ipc_kinds:
             resources, mapping = shared_att_resources_utils.load_att_resources(0, kind=kind)
-            assert resources._states_created
+            assert resources._state_registration_finished
             assert resources.full_att_allocator is None
             assert resources.bounded_att_big_page_allocator is None
             assert resources.bounded_att_small_page_allocator is None
@@ -496,5 +496,5 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
     except BaseException:
         connection.send(traceback.format_exc())
     finally:
-        AttResourceManager._get_states.cache_clear()
+        AttentionStateManager._get_states.cache_clear()
         connection.close()

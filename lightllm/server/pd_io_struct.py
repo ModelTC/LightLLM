@@ -194,7 +194,7 @@ class PDChunckedTransTask:
     # att_state: 混合注意力模型的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
     # start_kv_index == end_kv_index 标记 prefill 状态对应的 token 位置，mem_indexes 为空。
     # tail PD 读写用该位置在固定逻辑窗口与本地 MTP ring 之间转换，不另存长度字段。
-    # 通过本地 req_idx 定位运行态 buffer，具体打包和恢复由模型 AttResourceManager 负责。
+    # 通过本地 req_idx 定位运行态 buffer，具体打包和恢复由模型 AttentionStateManager 负责。
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None

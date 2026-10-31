@@ -11,15 +11,15 @@ import time
 
 import torch
 
-from lightllm.common.att_resources.allocators import FullAttKVAllocator
-from lightllm.common.att_resources.full_att import (
+from lightllm.common.attention_state.allocators import FullAttKVAllocator
+from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
     FullAttentionConfig,
 )
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
-from lightllm.common.att_resources import AttResourceManager
-from lightllm.common.att_resources.allocators import StatePageAllocator
-from lightllm.common.att_resources.bounded_att import create_gdn_state, ConvSSMStateConfig
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.allocators import StatePageAllocator
+from lightllm.common.attention_state.bounded_att import create_gdn_state, ConvSSMStateConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import set_env_start_args
 
@@ -59,8 +59,8 @@ def main():
             tp_world_size=8,
         ),
     )
-    full.initialize_storage(tokens)
-    resources = AttResourceManager(request_capacity=1)
+    full.allocate_storage(tokens)
+    resources = AttentionStateManager(request_capacity=1)
     bounded_state = create_gdn_state(
         config=ConvSSMStateConfig(
             logical_layer_ids=tuple(layer for layer in range(cfg.all_layer_num) if (layer + 1) % cfg.full_attention_interval),
@@ -79,27 +79,27 @@ def main():
         device="cuda",
     )
     bounded_state.initialize_page_pools(big_page_capacity=args.pages + 2, small_page_capacity=0)
-    resources.set_att_state("main", full)
-    resources.set_att_state("main", bounded_state)
+    resources.register_state("main", full)
+    resources.register_state("main", bounded_state)
     resources.full_att_allocator = FullAttKVAllocator(tokens)
     resources.bounded_att_big_page_allocator = StatePageAllocator(args.pages + 2, reserved_slots=2)
     resources.bounded_att_cpu_load_big_page_slot = args.pages
     resources.bounded_att_cpu_offload_big_page_slot = args.pages + 1
-    resources.finish_state_creation()
+    resources.finish_state_registration()
     pages = list(range(args.pages))
     slots = resources.bounded_att_big_page_allocator.alloc(args.pages)
     cpu_page_buffers = torch.zeros((args.pages, resources.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
     # Populate every TP region through the production API before measuring restores.
     full.k_storage.zero_()
     full.v_storage.zero_()
-    resources.save_bounded_att_pages([0] * args.pages, page_kind="big", slot_ids=slots)
+    resources.save_bounded_att_runtime_to_pages([0] * args.pages, page_kind="big", page_slot_ids=slots)
     torch.cuda.synchronize()
     token_indices = torch.arange(tokens, dtype=torch.int64, device="cuda")
     resources.write_req_to_cpu(
         token_indices=token_indices,
         cpu_page_buffers=cpu_page_buffers,
         cpu_page_indices=pages,
-        layouts=resources.get_cpu_transfer_layouts(),
+        layouts=resources.get_cpu_page_layouts(),
         big_page_slot_ids=slots,
     )
     torch.cuda.synchronize()
@@ -109,7 +109,7 @@ def main():
             cpu_page_buffers=cpu_page_buffers,
             cpu_page_indices=pages,
             token_indices=token_indices,
-            layouts=resources.get_cpu_transfer_layouts(),
+            layouts=resources.get_cpu_page_layouts(),
             big_page_slot_ids=slots,
             req_idx=0,
         )

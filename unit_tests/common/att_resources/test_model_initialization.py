@@ -3,7 +3,7 @@ from __future__ import annotations
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
 from unit_tests.common.att_resources.model_helpers import main_linear_state, prepare_model_states
-from lightllm.common.att_resources.full_att import FullAttentionState
+from lightllm.common.attention_state.full_att import FullAttentionState
 from unit_tests.common.att_resources.model_helpers import owned_states
 import dataclasses
 
@@ -98,7 +98,7 @@ def test_real_model_resource_hooks_and_shared_draft(
     observed = []
 
     def check_runtime_before_profile(device: str | torch.device | int):
-        resources = model.att_resource_manager
+        resources = model.att_state_manager
         states = resources.get_full_attention_states()
         assert main_linear_state(resources).conv_state.is_cuda
         assert main_linear_state(resources).big_pages_pool is None
@@ -130,8 +130,8 @@ def test_real_model_resource_hooks_and_shared_draft(
         )
         draft.max_seq_length, draft.batch_max_tokens = model.max_seq_length, model.batch_max_tokens
         prepare_model_states(draft, logical_layer_ids=(4,))
-        assert draft.att_resource_manager is model.att_resource_manager
-        assert read_kv_storage(owned_states(draft.att_resource_manager.__dict__, FullAttentionState)[0]) is None
+        assert draft.att_state_manager is model.att_state_manager
+        assert read_kv_storage(owned_states(draft.att_state_manager.__dict__, FullAttentionState)[0]) is None
         drafts.append(draft)
     models = (model, *drafts)
     req_manager = ReqManager(
@@ -141,13 +141,13 @@ def test_real_model_resource_hooks_and_shared_draft(
     for item in models:
         item.bind_req_manager(req_manager=req_manager)
     assert all(item.req_manager is req_manager for item in models)
-    model.att_resource_manager.finish_state_creation()
-    model.att_resource_manager.load_full_att_calibration(args=args)
-    model.att_resource_manager.initialize_resources(
+    model.att_state_manager.finish_state_registration()
+    model.att_state_manager.load_full_att_calibration(args=args)
+    model.att_state_manager.initialize_storage(
         args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
     )
-    model.req_manager.bind_hold_page(model.att_resource_manager.full_att_allocator.hold_token_indices)
-    resources = model.att_resource_manager
+    model.req_manager.bind_hold_page(model.att_state_manager.full_att_allocator.hold_token_indices)
+    resources = model.att_state_manager
     (full_state,) = resources.get_full_attention_states("main")
     assert type(model.req_manager) is ReqManager
     assert not hasattr(model.req_manager, "req_to_ssm_state")
@@ -164,13 +164,13 @@ def test_real_model_resource_hooks_and_shared_draft(
     assert not hasattr(model, "mtp_state_cursors")
     assert (main_linear_state(resources).mtp_state_index is not None) == bool(mtp)
     if mode == "prefill":
-        assert resources.get_pd_full_att_transfer_layouts()
-        assert resources.get_pd_bounded_att_or_tail_transfer_layouts()
+        assert resources.get_pd_token_page_layouts()
+        assert resources.get_pd_runtime_page_layouts()
     if mtp:
         draft = drafts[0]
         assert draft.req_manager is model.req_manager
-        assert draft.att_resource_manager is resources
-        assert draft.att_resource_manager.full_att_allocator is resources.full_att_allocator
+        assert draft.att_state_manager is resources
+        assert draft.att_state_manager.full_att_allocator is resources.full_att_allocator
         assert not hasattr(draft, "full_att_state")
         (draft_state,) = resources.get_full_attention_states("draft0")
         assert draft_state is not full_state

@@ -58,10 +58,10 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
         draft_models=draft_models,
         token_source=TokenSource(args),
     )
-    resources = model.att_resource_manager
+    resources = model.att_state_manager
     (full_state,) = resources.get_full_attention_states("main")
     for draft in draft_models:
-        assert draft.att_resource_manager is resources
+        assert draft.att_state_manager is resources
         assert not hasattr(draft, "full_att_state")
         (draft_state,) = resources.get_full_attention_states("draft0")
         assert draft_state is not full_state
@@ -96,7 +96,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 first_next_ids=executor._argmax_ids(output.logits),
             )
         if hybrid:
-            resources.save_bounded_att_pages(source_req.tolist(), page_kind="big", slot_ids=[source_slots[page]])
+            resources.save_bounded_att_runtime_to_pages(source_req.tolist(), page_kind="big", page_slot_ids=[source_slots[page]])
     torch.cuda.synchronize()
     next_token = output.logits.argmax(dim=-1).cpu()
     source_indices = model.req_manager.req_to_token_indexs[int(source_req[0]), :prefix_len].clone()
@@ -106,18 +106,18 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
         token_indices=source_indices,
         cpu_page_buffers=cpu,
         cpu_page_indices=pages,
-        layouts=resources.get_cpu_transfer_layouts(),
+        layouts=resources.get_cpu_page_layouts(),
         page_kind="big" if hybrid else None,
-        slot_ids=source_slots,
+        page_slot_ids=source_slots,
     )
     # Host-side checkpoint repacking consumes the CPU page on the next call.
     torch.cuda.synchronize()
-    full_att_layouts = resources.get_pd_full_att_transfer_layouts()
-    runtime_layouts = resources.get_pd_bounded_att_or_tail_transfer_layouts()
+    full_att_layouts = resources.get_pd_token_page_layouts()
+    runtime_layouts = resources.get_pd_runtime_page_layouts()
     pd = {"kv": torch.empty((1, resources.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")}
     if runtime_layouts:
         pd["att_state"] = torch.empty((1, resources.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
-    resources.write_to_pd_buffer(
+    resources.write_to_pd_page(
         pd_page_buffers=pd["kv"],
         pd_page_index=0,
         kind="kv",
@@ -125,7 +125,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
         token_indices=source_indices,
     )
     if "att_state" in pd:
-        resources.write_to_pd_buffer(
+        resources.write_to_pd_page(
             pd_page_buffers=pd["att_state"],
             pd_page_index=0,
             kind="att_state",
@@ -145,7 +145,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
         if kind == "gpu_pages":
             resources.copy_full_att_tokens(source_indices, indices)
             if hybrid:
-                resources.restore_bounded_att_pages(request.tolist(), page_kind="big", slot_ids=[source_slots[-1]])
+                resources.restore_bounded_att_runtime_from_pages(request.tolist(), page_kind="big", page_slot_ids=[source_slots[-1]])
             resources.reset_attention_tail_state(request.tolist())
         elif kind == "cpu_pages":
             slots = big.alloc(len(pages)) if hybrid else None
@@ -155,12 +155,12 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 cpu_page_buffers=cpu,
                 cpu_page_indices=pages,
                 token_indices=indices,
-                layouts=resources.get_cpu_transfer_layouts(),
+                layouts=resources.get_cpu_page_layouts(),
                 big_page_slot_ids=slots,
                 req_idx=int(request[0]) if getattr(resources, "cpu_tail_restore", False) else None,
             )
             if hybrid:
-                resources.restore_bounded_att_pages(request.tolist(), page_kind="big", slot_ids=[slots[-1]])
+                resources.restore_bounded_att_runtime_from_pages(request.tolist(), page_kind="big", page_slot_ids=[slots[-1]])
         elif kind == "dp_copy":
             resources.copy_from_dp(
                 resources,
@@ -171,7 +171,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 dst_req_indices=request.tolist() if hybrid else None,
             )
         else:
-            resources.read_from_pd_buffer(
+            resources.read_from_pd_page(
                 pd_page_buffers=pd["kv"],
                 pd_page_index=0,
                 kind="kv",
@@ -179,7 +179,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 token_indices=indices,
             )
             if "att_state" in pd:
-                resources.read_from_pd_buffer(
+                resources.read_from_pd_page(
                     pd_page_buffers=pd["att_state"],
                     pd_page_index=0,
                     kind="att_state",
@@ -312,11 +312,11 @@ def main():
         draft_models = init_mtp_draft_models(args, kvargs, model)
         from lightllm.utils.envs_utils import set_model_init_status
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
-        from lightllm.common.att_resources import AttResourceManager
+        from lightllm.common.attention_state import AttentionStateManager
         from lightllm.common.req_manager import ReqManager
 
         models = (model, *draft_models)
-        assert all(getattr(item, "att_resource_manager", None) is None for item in models), "resources already initialized"
+        assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
         assert all(item.max_req_num == model.max_req_num for item in models), "models must share the request domain"
         # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
         max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
@@ -325,13 +325,13 @@ def main():
         for item in models:
             item.bind_req_manager(req_manager=req_manager)
         for item in models:
-            item.prepare_att_resources()
-        manager: AttResourceManager = model.att_resource_manager
-        assert all(item.att_resource_manager is manager for item in models), "models must share one resource manager"
+            item.prepare_attention_states()
+        manager: AttentionStateManager = model.att_state_manager
+        assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            manager.finish_state_creation()
+            manager.finish_state_registration()
             manager.load_full_att_calibration(args=model.args)
-            manager.initialize_resources(
+            manager.initialize_storage(
                 model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
             )
         for item in models:

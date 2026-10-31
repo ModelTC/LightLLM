@@ -21,7 +21,7 @@ logger = init_logger(__name__)
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
-    from lightllm.common.att_resources.full_att import FullAttentionState
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 class Gemma4TpPartModel(LlamaTpPartModel):
@@ -96,7 +96,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """按 Gemma4 的 attention 宽度和共享关系创建物理 KV 层。"""
-        from lightllm.common.att_resources.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
