@@ -8,7 +8,7 @@ import torch
 
 from lightllm.models.registry import ModelRegistry
 from lightllm.models.sensenova_loop.config import get_loop_layer_indices, get_loop_layer_types
-from lightllm.common.state_cache_manager.linear_att import LinearAttCacheConfig
+from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
@@ -35,10 +35,13 @@ def _config(layers=32, start=4, end=28, count=3):
 def test_cache_slots_follow_execution_depth_including_unaligned_loop(monkeypatch, start, end, count):
     config = _config(start=start, end=end, count=count)
     args = StartArgs(model_dir="unused", tp=4, dp=1, data_type="bfloat16", mtp_mode="eagle_with_att", mtp_step=3)
-    monkeypatch.setattr("lightllm.common.state_cache_manager.linear_att.get_env_start_args", lambda: args)
-    monkeypatch.setattr("lightllm.common.state_cache_manager.linear_att.get_added_mtp_kv_layer_num", lambda: 1)
+    monkeypatch.setattr("lightllm.models.qwen3next.config.get_env_start_args", lambda: args)
     monkeypatch.setattr("transformers.configuration_utils.PretrainedConfig.get_config_dict", lambda _: (config, {}))
-    cache = LinearAttCacheConfig.load_from_args()
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+    normalized = SenseNovaLoopTpPartModel.normalize_model_config(config)
+    cache = Qwen3NextResourceConfig.from_model_config(normalized, args)
+    full_layers = cache.get_full_att_layer_indices()
+    linear_layers = tuple(i for i in range(cache.all_layer_num) if i not in full_layers)
     indices = get_loop_layer_indices(config["loop_settings"], 32)
     kinds = get_loop_layer_types(config["loop_settings"], config["text_config"])
     assert len(kinds) == 32 + (end - start) * (count - 1)
@@ -46,18 +49,18 @@ def test_cache_slots_follow_execution_depth_including_unaligned_loop(monkeypatch
     slots = {}
     for execution, (physical, kind) in enumerate(zip(indices, kinds)):
         if kind == "full_attention":
-            slot = cache.get_full_att_kv_layer_index(execution)
+            slot = full_layers.index(execution)
             assert slot == full
             full += 1
         else:
-            slot = cache.get_linear_state_layer_index(execution)
+            slot = linear_layers.index(execution)
             assert slot == linear
             linear += 1
         assert slot not in slots.setdefault(physical, set())
         slots[physical].add(slot)
-    assert cache.get_main_model_full_att_layer_num() == full
-    assert cache.linear_layer_num == linear
-    assert cache.get_full_att_kv_layer_index(len(indices)) == full  # Independent MTP draft.
+    assert len(full_layers) == full
+    assert len(linear_layers) == linear
+    assert len(set(full_layers) | set(linear_layers)) == len(indices)
     if (start, end, count) == (4, 28, 3):
         assert (cache.all_layer_num, full, linear) == (80, 20, 60)
     if (start, end, count) == (4, 28, 2):
@@ -122,7 +125,7 @@ def test_mhc_registry_and_embedded_mtp_reuse_existing_qwen_draft(tmp_path, strea
     draft.weight_dir_, draft.finetune_config, draft.tp_world_size_ = str(tmp_path), None, 4
     draft._init_config()
     assert draft.config["n_layer"] == draft.config["full_attention_interval"] == 1
-    assert draft.config["layer_types"] == config["text_config"]["layer_types"]
+    assert draft.config["layer_types"] == ["full_attention"]
 
 
 def test_loop_tokenizer_loads_without_hf_loop_autoconfig(tmp_path):
@@ -158,21 +161,23 @@ def test_model_and_worker_use_the_same_loop_cache_layout(monkeypatch, custom_lay
     if custom_layout:
         config["text_config"]["layer_types"] = ["full_attention", "linear_attention"] * 16
     original = deepcopy(config)
-    args = StartArgs(tp=4, dp=1, data_type="bfloat16")
-    monkeypatch.setattr("lightllm.common.state_cache_manager.linear_att.get_added_mtp_kv_layer_num", lambda: 1)
-    monkeypatch.setattr("lightllm.common.state_cache_manager.linear_att.get_env_start_args", lambda: args)
+    args = StartArgs(tp=4, dp=1, data_type="bfloat16", linear_att_hash_page_size=256)
+    monkeypatch.setattr("lightllm.models.qwen3next.config.get_env_start_args", lambda: args)
     monkeypatch.setattr("transformers.configuration_utils.PretrainedConfig.get_config_dict", lambda _: (config, {}))
-    monkeypatch.setattr(
-        "lightllm.models.qwen3next.model.ReqManagerForMamba",
-        lambda *args, linear_config: SimpleNamespace(linear_config=linear_config),
+    config["text_config"]["num_attention_heads"] = 16
+    original = deepcopy(config)
+    normalized = SenseNovaLoopTpPartModel.normalize_model_config(config)
+    raw_cache = Qwen3NextResourceConfig.from_model_config(normalized, args)
+    logical_ids = tuple(range(normalized["num_hidden_layers"]))
+    full, = SenseNovaLoopTpPartModel.create_full_att_states(
+        model_config=normalized, args=args, model_logical_layer_ids=logical_ids,
     )
-    raw_cache = LinearAttCacheConfig.load_from_args()
-    model = object.__new__(SenseNovaLoopTpPartModel)
-    model.args = args
-    model.max_req_num, model.batch_max_tokens, model.max_seq_length = 2, 8, 16
-    model._init_req_manager()
-    assert dataclasses.asdict(raw_cache) == dataclasses.asdict(model.linear_config)
-    assert model.req_manager.linear_config is model.linear_config
+    bounded, = SenseNovaLoopTpPartModel.create_bounded_att_states(
+        model_config=normalized, args=args, model_logical_layer_ids=logical_ids,
+    )
+    full_layers = raw_cache.get_full_att_layer_indices()
+    assert full.config.logical_layer_groups == tuple((i,) for i in full_layers)
+    assert bounded.config.logical_layer_ids == tuple(i for i in logical_ids if i not in full_layers)
     assert config == original
 
 

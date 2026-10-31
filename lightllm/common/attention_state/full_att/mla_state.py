@@ -1,29 +1,25 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import TYPE_CHECKING, List
 from math import prod
 
 import torch
 
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.log_utils import init_logger
 
-from ..utils import dtype_name
+from ..utils import deepcopy_result, dtype_name
 from ..types import AxisMapping, TransferRegion
 from .base_state import FullAttentionConfig, FullAttentionState
-from .mla_transfer import transfer_mla_pages
-from .dp_transfer import copy_mla_tokens
+from .packed_transfer import transfer_packed_pages
+from .dp_transfer import copy_packed_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
 
 
-logger = init_logger(name=__name__)
-
-
 class MLAFullAttentionState(FullAttentionState):
     """存储复制到各 TP rank 的 MLA 压缩 latent，使用单个 KV 字段。"""
-
 
     # ========================================================================
     # 一、资源定义与初始化
@@ -37,7 +33,6 @@ class MLAFullAttentionState(FullAttentionState):
     ) -> None:
         """按 MLA 布局配置准备压缩 KV 存储。"""
         self.config = layout_config
-        self.storage_dtype = layout_config.dtype  # 实际 KV 编码类型；量化子类显式设置，区别于 scale 精度。
         self.state_name: str | None = None  # 由 manager 绑定模型角色时设置。
         # 外层下标是物理层位置；组内多个逻辑层映射到同一份 KV/量化字段存储。
         self._logical_to_storage_layer = {
@@ -57,15 +52,23 @@ class MLAFullAttentionState(FullAttentionState):
     def allocate_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
         self.capacity = token_capacity
-        shape = self._storage_shape()
-        self.storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
+        self.storage = torch.empty(
+            size=(
+                len(self.config.logical_layer_groups),
+                token_capacity + self.page_size,
+                self.config.head_num,
+                self.config.head_dim,
+            ),
+            dtype=self.config.dtype,
+            device=self.device,
+        )
 
     def get_token_bytes(self) -> int:
-        """由配置计算当前 TP rank 的单 token 开销，包含 packed 行 padding，无需分配存储。"""
+        """由配置计算当前 TP rank 的单 token latent 字节数，无需分配存储。"""
         config = self.config
         return (
             len(config.logical_layer_groups) * config.head_num * config.head_dim
-            * self.storage_dtype.itemsize
+            * config.dtype.itemsize
         )
 
     # ========================================================================
@@ -122,6 +125,8 @@ class MLAFullAttentionState(FullAttentionState):
     # 三、CPU Cache 数据交换
     # ========================================================================
 
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小返回字段区间与 TP 切片，作为 CPU 页容量计算依据。
 
@@ -140,7 +145,7 @@ class MLAFullAttentionState(FullAttentionState):
     ) -> None:
         """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
         assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_mla_pages(
+        transfer_packed_pages(
             kv_storage=self.storage,
             token_indices=token_indices,
             page_buffers=cpu_page_buffers,
@@ -159,7 +164,7 @@ class MLAFullAttentionState(FullAttentionState):
     ) -> None:
         """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
         assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_mla_pages(
+        transfer_packed_pages(
             kv_storage=self.storage,
             token_indices=token_indices,
             page_buffers=cpu_page_buffers,
@@ -184,7 +189,7 @@ class MLAFullAttentionState(FullAttentionState):
         )
         assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        copy_mla_tokens(
+        copy_packed_tokens(
             src_storage=remote_dp_full_att_state.storage,
             dst_storage=self.storage,
             src_token_indices=src_token_indices,
@@ -209,7 +214,7 @@ class MLAFullAttentionState(FullAttentionState):
     ) -> None:
         """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
         assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_mla_pages(
+        transfer_packed_pages(
             kv_storage=self.storage,
             token_indices=token_indices,
             page_buffers=pd_page_buffers,
@@ -227,7 +232,7 @@ class MLAFullAttentionState(FullAttentionState):
     ) -> None:
         """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
         assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_mla_pages(
+        transfer_packed_pages(
             kv_storage=self.storage,
             token_indices=token_indices,
             page_buffers=pd_page_buffers,
@@ -241,88 +246,25 @@ class MLAFullAttentionState(FullAttentionState):
     # ========================================================================
 
     def _get_transfer_regions(self, page_tokens: int) -> tuple[TransferRegion, ...]:
-        """依次排列 KV、动态量化等字段，描述全局页形状和本地 TP 分片。"""
+        """描述唯一的 MLA latent 字段，外部页保存全局 heads，副本只由首 rank 写出。"""
         config = self.config
-        byte_offset = 0
-        regions = []
-        logger.debug(
-            "%s building transfer regions: TP=%d/%d, tokens_per_page=%d",
-            self.state_name,
-            config.tp_rank,
-            config.tp_world_size,
-            page_tokens,
-        )
-        # 阶段一：按本方案固定字段计算形状和 dtype，不分配 meta 存储。
-        field_specs = (("kv", self.storage_dtype, config.head_dim, "dim"),)
-        for field_name, field_dtype, field_width, last_axis in field_specs:
-            axes = ("layer", "token", "head", last_axis)
-            local_shape = (len(config.logical_layer_groups), page_tokens, config.head_num, field_width)
-            global_shape = list(local_shape)
-            global_shape[axes.index("token")] = page_tokens
-            head_axis = axes.index("head")
-            # field 已按 K/V 拆开：这里读取的是单个字段的本地 head 数，不是合并 buffer 的 2H。
-            local_head_count = global_shape[head_axis]
-            # 外部页保存该字段未做 TP 切分的完整 heads，TP 副本只占一份区域。
-            # K/V 各生成一个 region 并分别累加字节数，因此这里不能再乘 2；动态 scale 同理。
-            # 例如全局 H=8、TP=2：本地 k/v 各 4 heads，外部 k/v 区域各 8 heads。
-            global_shape[head_axis] = config.global_head_num
-
-            # 阶段二：确定本地 heads 的全局起点；同组副本只有首 rank 写出，所有副本都可读回。
-            # replica_count 表示同一份 head 分片被多少个 ranks 复制：纯切分时为 1，全复制时为 TP。
-            replica_count = config.tp_world_size * local_head_count // config.global_head_num
-            # 将组内 rank 换算为去重后的分片编号，再定位当前字段在全局 head 轴上的起点。
-            head_start = config.tp_rank // replica_count * local_head_count
-            # 副本共享同一外部区域，只让组内第一个 rank 写出，避免重复写入；读取不受此标记限制。
-            write_enabled = config.tp_rank % replica_count == 0
-            axis_mappings = tuple(
-                AxisMapping(
-                    axis=axis,
-                    local_start=0,
-                    external_start=head_start if axis == "head" else 0,
-                    length=dimension,
-                )
-                for axis, dimension in zip(axes, local_shape)
-                if axis not in ("layer", "token")
-            )
-
-            # 阶段三：按字段 dtype 对齐起点，记录本字段区间，再推进下一个字段的字节偏移。
-            element_bytes = field_dtype.itemsize
-            byte_offset = (byte_offset + element_bytes - 1) // element_bytes * element_bytes
-            field_region = TransferRegion(
-                field=field_name,
-                byte_start=byte_offset,
-                byte_end=byte_offset + prod(global_shape) * element_bytes,
-                dtype=field_dtype,
-                axes=axes,
-                shape=tuple(global_shape),
-                axis_mappings=axis_mappings,
-                write_enabled=write_enabled,
-            )
-            regions.append(field_region)
-            byte_offset = field_region.byte_end
-            logger.debug(
-                "%s field %s: head_start=%d, heads=%d, replicas=%d, write_enabled=%s, bytes=[%d, %d)",
-                self.state_name,
-                field_name,
-                head_start,
-                local_head_count,
-                replica_count,
-                write_enabled,
-                field_region.byte_start,
-                field_region.byte_end,
-            )
-        logger.debug(
-            "%s transfer regions built: fields=%d, total_bytes=%d",
-            self.state_name,
-            len(regions),
-            byte_offset,
-        )
-        return tuple(regions)
-
-    def _storage_shape(self) -> tuple[int, ...]:
+        shape = (len(config.logical_layer_groups), page_tokens, config.global_head_num, config.head_dim)
+        # 本地分片可在多个 rank 复制；先去掉副本编号，再定位外部页的 head 起点。
+        local_head_count = config.head_num
+        replica_count = config.tp_world_size * local_head_count // config.global_head_num
+        head_start = config.tp_rank // replica_count * local_head_count
         return (
-            len(self.config.logical_layer_groups),
-            self.capacity + self.page_size,
-            self.config.head_num,
-            self.config.head_dim,
+            TransferRegion(
+                field="kv",
+                byte_start=0,
+                byte_end=prod(shape) * config.dtype.itemsize,
+                dtype=config.dtype,
+                axes=("layer", "token", "head", "dim"),
+                shape=shape,
+                axis_mappings=(
+                    AxisMapping(axis="head", local_start=0, external_start=head_start, length=local_head_count),
+                    AxisMapping(axis="dim", local_start=0, external_start=0, length=config.head_dim),
+                ),
+                write_enabled=config.tp_rank % replica_count == 0,
+            ),
         )

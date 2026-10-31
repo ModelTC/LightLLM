@@ -201,3 +201,26 @@ def test_max_copy_dtype_keeps_strided_last_axis() -> None:
     destination = torch.empty(size=(16,), dtype=torch.float32)
     copies = [(source, destination)]
     assert view_max_copy_dtype(copies=copies) is copies
+def test_deepcopy_result_protects_cached_values_and_keeps_cache_controls() -> None:
+    from functools import lru_cache
+    from lightllm.common.attention_state.utils import deepcopy_result
+
+    calls = 0
+
+    @deepcopy_result
+    @lru_cache(maxsize=None)
+    def describe() -> dict[str, list[int]]:
+        nonlocal calls
+        calls += 1
+        return {"shape": [2, 128]}
+
+    first = describe()
+    first["shape"].append(4)
+    second = describe()
+    assert second == {"shape": [2, 128]}
+    assert first is not second and first["shape"] is not second["shape"]
+    assert calls == 1 and describe.cache_info().hits == 1
+    assert describe.cache_parameters() == {"maxsize": None, "typed": False}
+    describe.cache_clear()
+    assert describe.cache_info().currsize == 0
+    assert describe() == second and calls == 2

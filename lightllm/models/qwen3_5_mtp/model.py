@@ -33,7 +33,7 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
         """原生 MTP 只包含一个 full-attention 层，与 main 共用 checkpoint。"""
         config = super().normalize_model_config(model_config)
-        config.update(full_attention_interval=1, num_hidden_layers=1, n_layer=1)
+        config.update(full_attention_interval=1, num_hidden_layers=1, n_layer=1, layer_types=["full_attention"])
         return config
 
     def _init_some_value(self):

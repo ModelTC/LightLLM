@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
 from math import prod
@@ -9,11 +10,11 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-from ..utils import dtype_name
+from ..utils import deepcopy_result, dtype_name
 from ..types import AxisMapping, TransferRegion
 from .base_state import FullAttentionConfig, FullAttentionState
 from .packed_mla_transfer import transfer_packed_mla_pages
-from .dp_transfer import copy_mla_tokens
+from .dp_transfer import copy_packed_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -195,6 +196,8 @@ class PackedMLAFullAttentionState(FullAttentionState):
     # 三、CPU Cache 数据交换
     # ========================================================================
 
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小返回字段区间与 TP 切片，作为 CPU 页容量计算依据。
 
@@ -272,7 +275,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
         )
         assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        copy_mla_tokens(
+        copy_packed_tokens(
             src_storage=remote_dp_full_att_state.storage,
             dst_storage=self.storage,
             src_token_indices=src_token_indices,

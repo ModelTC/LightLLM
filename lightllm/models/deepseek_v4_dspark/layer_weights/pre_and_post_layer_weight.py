@@ -24,8 +24,8 @@ class DeepseekV4DSparkPreAndPostLayerWeight(PreAndPostLayerWeight):
         hc_mult = network_config["hc_mult"]
         markov_rank = network_config["dspark_markov_rank"]
         target_hidden_size = hidden * len(network_config["dspark_target_layer_ids"])
-        first_layer_idx = network_config["n_layer"]
-        last_stage = network_config["dspark_layer_num"] - 1
+        first_layer_idx = network_config["draft_layer_start_id"]
+        last_stage = network_config["n_layer"] - 1
         last_prefix = f"mtp.{last_stage}"
 
         # Replaced with the already-loaded target weights by the model.

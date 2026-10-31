@@ -17,6 +17,16 @@ def allocator_environment(kv_allocator_environment: None, monkeypatch: pytest.Mo
         monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(asdict(StartArgs())))
     get_env_start_args.cache_clear()
     yield
+    # 方法缓存以 State 实例为 key；测试会反复创建实例和替换参数，结束后释放缓存引用。
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+
+    state_classes = [FullAttentionState, BoundedAttentionState]
+    for state_class in state_classes:
+        state_classes.extend(state_class.__subclasses__())
+        getter = state_class.get_cpu_transfer_regions
+        if hasattr(getter, "cache_clear"):
+            getter.cache_clear()
     get_env_start_args.cache_clear()
 
 

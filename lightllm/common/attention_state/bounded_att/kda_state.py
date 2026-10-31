@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import TYPE_CHECKING, List
 from math import prod
 
@@ -7,7 +8,7 @@ import torch
 
 from lightllm.utils.log_utils import init_logger
 
-from ..utils import dtype_name
+from ..utils import deepcopy_result, dtype_name
 from ..types import AxisMapping, StateTransferLayout, TensorField, TransferRegion
 from .base_state import BoundedAttentionState
 from .conv_ssm_types import ConvSSMStateConfig
@@ -180,6 +181,8 @@ class KDAState(BoundedAttentionState):
     # 三、CPU Cache 数据交换
     # ========================================================================
 
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回已接受 Conv/SSM 快照的字段区间与切片，供 CPU 页布局和容量计算使用。
 

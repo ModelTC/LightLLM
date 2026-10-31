@@ -2,12 +2,16 @@
 
 from __future__ import annotations
 
+from functools import lru_cache
+
+
 from typing import Any
 from abc import ABC, abstractmethod
 from typing import List
 
 import torch
 
+from ..utils import deepcopy_result
 from lightllm.common.attention_state.types import (
     StateTransferLayout,
     PageKind,
@@ -114,11 +118,16 @@ class BoundedAttentionState(ABC):
     # ========================================================================
 
     @abstractmethod
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回一份 CPU 快照的字段区间、全局形状与 TP 切片。
 
         byte_start / byte_end 相对本 State 起点，字段间的必要 padding 由区间间隔体现；
         参与 CPU 页时，管理器按字段最大终点计算占用，不乘页内 token 数。
+        在合法缓存边界无需保留历史的 State 返回空元组，不占用 CPU 页面。
+        具体实现使用 lru_cache 缓存，外层 deepcopy_result 每次返回独立副本。
+        管理器分配后统一清理，子类覆盖时须保留缓存和副本语义。
         """
         ...
 

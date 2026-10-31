@@ -28,7 +28,7 @@ def transfer_gqa_pages(
 ) -> None:
     """直接搬运 K/V；CPU 传入页列表，PD 传入 [pd_page_index]，同步由调用方负责。
 
-    外部页为 pinned/注册 CPU 内存或当前设备的 CUDA PD buffer。
+    外部页为 pinned/注册 CPU 内存或 CUDA PD buffer；跨卡指针由调用方提前建立 peer/IPC 映射。
     单页和多页统一通过页索引 Tensor 定位，共用布局和拷贝 kernel。
     grid_num 控制每个字段发射的 program 数，默认 24；kernel 跳步循环覆盖全部搬运单元。
     num_warps 控制每个 program 的 warp 数，num_stages 控制循环级流水深度。
@@ -39,8 +39,6 @@ def transfer_gqa_pages(
     assert isinstance(page_indices, list), "page indices must be a list"
     if page_buffers.device.type == "cpu":
         assert page_buffers.is_pinned(), "CPU pages must be pinned or registered"
-    else:
-        assert page_buffers.device == k_storage.device, "CUDA pages must reside on the State device"
     page_tokens = layout.tokens_per_page
     assert page_tokens is not None and page_tokens > 0, "KV transfers require a positive token capacity"
     assert token_indices.is_cuda, "token indices must reside on CUDA"
@@ -59,7 +57,7 @@ def transfer_gqa_pages(
     # page_ids[j] 是第 j 个逻辑页对应的外部物理页 ID，允许不连续、不递增。
     # CPU/PD、单页/多页统一通过 pinned 索引异步提交到 GPU，临时显存只与页数有关。
     page_ids = torch.tensor(data=page_indices, dtype=torch.int64, pin_memory=True).to(
-        device=k_storage.device,
+        device=torch.cuda.current_device(),
         non_blocking=True,
     )
 
@@ -68,7 +66,7 @@ def transfer_gqa_pages(
     page_readies_tensor = None
     if write and page_readies is not None:
         page_readies_tensor = torch.tensor(data=page_readies, dtype=torch.bool, pin_memory=True).to(
-            device=k_storage.device,
+            device=torch.cuda.current_device(),
             non_blocking=True,
         )
 

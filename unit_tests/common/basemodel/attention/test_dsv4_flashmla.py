@@ -63,21 +63,9 @@ def _case(heads, ratio):
     tokens = 5
     model = type("TestModel", (), {})()
     model.config = {"num_attention_heads": heads, "compress_ratios": [0, 4, 128]}
-    from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
-
-    model.req_manager = SimpleNamespace(
-        cache_config=DeepseekV4CacheConfig.from_model_config(
-            dict(
-                num_hidden_layers=3,
-                compress_ratios=[0, 4, 128],
-                head_dim=512,
-                qk_rope_head_dim=64,
-                index_head_dim=128,
-                sliding_window=128,
-            ),
-            SimpleNamespace(mtp_mode=None),
-        )
-    )
+    model.config.update(head_dim=512, qk_rope_head_dim=64, index_head_dim=128, sliding_window=128)
+    model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(3)]
+    model.tp_rank_ = 0
     model.tp_world_size_ = 1
     backend = attention.DeepseekV4FlashMlaFp8SparseAttBackend(model=model)
     q = torch.randn((tokens, backend.padded_q_head_num, 512), dtype=torch.bfloat16, device="cuda") * 0.1

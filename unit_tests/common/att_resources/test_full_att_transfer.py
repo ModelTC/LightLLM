@@ -25,7 +25,7 @@ SCHEMES = {
     "int8": "group_quantized",
     "static_head": "static_fp8",
     "static_tensor": "static_fp8",
-    "mla": "mla",
+    "mla": "packed",
     "packed": "packed_mla",
     "packed_fp8": "packed_mla",
     "packed_glm": "packed_mla",

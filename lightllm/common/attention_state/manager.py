@@ -265,6 +265,8 @@ class AttentionStateManager:
 
         self.cpu_tail_restore = bool(self.get_attention_tail_states())
         # 存储分配可能改变 State 的物理页规格，清除准备阶段的布局及其派生 CPU/PD 页大小缓存。
+        for state in (*full_states, *bounded_states):
+            state.get_cpu_transfer_regions.cache_clear()
         self.get_cpu_page_layouts.cache_clear()
         self.get_cpu_page_bytes.cache_clear()
         self.get_pd_token_page_layouts.cache_clear()
@@ -292,10 +294,9 @@ class AttentionStateManager:
         for state in self.get_bounded_attention_states():
             for pool in (state.big_pages_pool, state.small_pages_pool):
                 if pool is not None:
-                    assert (
-                        pool.conv_state.device.type == "cpu" and pool.conv_state.is_shared()
-                        and pool.ssm_state.device.type == "cpu" and pool.ssm_state.is_shared()
-                    ), "DP IPC requires shared CPU page pools"
+                    for tensor in vars(pool).values():
+                        if isinstance(tensor, torch.Tensor):
+                            assert tensor.device.type == "cpu" and tensor.is_shared(), "DP IPC requires shared CPU page pools"
         ipc_copy = copy(self)
         ipc_copy.full_att_allocator = None
         ipc_copy.bounded_att_big_page_allocator = None
@@ -484,6 +485,9 @@ class AttentionStateManager:
                 replace(region, byte_start=offset + region.byte_start, byte_end=offset + region.byte_end)
                 for region in state.get_cpu_transfer_regions()
             )
+            # 无跨步重叠的压缩器在组边界不需要快照，不占用 CPU 页。
+            if not regions:
+                continue
             # 以实际字段终点确定 State 占用，保留内部 padding，并对齐下一个 State 的起点。
             state_end = (max(region.byte_end for region in regions) + 7) // 8 * 8
             layouts[state.state_name] = StateTransferLayout(
@@ -542,7 +546,12 @@ class AttentionStateManager:
 
         # 阶段二：分别从大小页池取快照，写入对应 CPU 页面，不修改请求运行态。
         for state in bounded_states:
-            layout = layouts[state.state_name]
+            layout = layouts.get(state.state_name)
+            if layout is None:
+                # 部分 bounded 状态在缓存边界没有需保留的历史（如 W128/S128 压缩器），不写入 CPU cache。
+                # 仅允许未声明 CPU 传输区域的 State 跳过，避免必要快照因布局遗漏而丢失。
+                assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
+                continue
             if big_page_slot_ids:
                 state.write_state_pages_to_cpu(
                     page_kind="big",
@@ -585,8 +594,9 @@ class AttentionStateManager:
             assert req_idx is not None and cpu_page_indices, "state recovery requires a target request and prefix pages"
         if bounded_states:
             assert state_token_len is not None, "bounded state recovery requires its absolute prefix length"
+            # CPU 页的 token 数与 bounded 大页边界在启动时统一，直接读取全局配置。
+            page_tokens = get_env_start_args().cpu_cache_token_page_size
             # token 索引只用于判断本批末页是否完整，不读取 GPU 上的索引值。
-            page_tokens = layouts[bounded_states[0].state_name].tokens_per_page
             has_partial_page = token_indices.numel() % page_tokens != 0
             assert isinstance(big_page_slot_ids, list), "slot indices must be a list"
             assert len(big_page_slot_ids) + int(has_partial_page) == len(cpu_page_indices), "slots must cover complete CPU pages only"
@@ -606,6 +616,11 @@ class AttentionStateManager:
 
         # 阶段二：完整页和末尾碎页统一读入大页池，碎页使用追加的 LOAD 槽位。
         for state in bounded_states:
+            if state.state_name not in layouts:
+                # 无跨步历史的 bounded 状态不占 CPU 页，因此无需读回快照；运行态恢复仍在下一阶段处理。
+                # 有 CPU 传输区域的 State 必须具备布局，不能静默跳过。
+                assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
+                continue
             state.read_state_pages_from_cpu(
                 cpu_page_buffers=cpu_page_buffers,
                 cpu_page_indices=cpu_page_indices,

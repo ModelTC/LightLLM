@@ -91,28 +91,18 @@ def test_disabled_cpu_cache_keeps_page_size_unset(startup_args):
     assert startup_args.cpu_cache_token_page_size is None
 
 
-def test_other_memory_manager_selection_uses_default(monkeypatch):
-    from types import SimpleNamespace
-    import lightllm.models as models
-    from lightllm.common.kv_cache_mem_manager import MemoryManager
-    from lightllm.common.kv_cache_mem_manager import mem_utils
+def test_default_attention_factory_uses_gqa():
+    import torch
+    from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFullAttentionState, create_gqa_state
 
-    for name in ("DeepseekV4TpPartModel", "Deepseek3_2TpPartModel", "Deepseek2TpPartModel"):
-        monkeypatch.setitem(models.__dict__, name, type(name, (), {}))
-    monkeypatch.setattr(mem_utils, "get_llm_model_class", lambda: type("Llama", (), {}))
-    monkeypatch.setattr(
-        mem_utils, "get_env_start_args", lambda: SimpleNamespace(model_dir="unused", llm_kv_type="None")
-    )
-    mem_utils.select_mem_manager_class.cache_clear()
-    try:
-        assert mem_utils.select_mem_manager_class() is MemoryManager
-    finally:
-        mem_utils.select_mem_manager_class.cache_clear()
+    state = create_gqa_state(config=FullAttentionConfig(
+        logical_layer_groups=((0,),), global_head_num=4, head_dim=128, dtype=torch.bfloat16,
+    ), device="meta")
+    assert isinstance(state, GQAFullAttentionState)
 
 
 def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_type(startup_args, monkeypatch, tmp_path):
-    from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-    from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
+    from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
     from lightllm.utils.envs_utils import get_env_start_args, get_added_mtp_kv_layer_num, get_llm_data_type
     from lightllm.utils.llm_utils import get_llm_model_class
     from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
@@ -143,18 +133,21 @@ def test_dsv4_cpu_cache_factory_resolves_packed_layout_without_overriding_kv_typ
         get_added_mtp_kv_layer_num,
         get_llm_data_type,
         get_llm_model_class,
-        select_mem_manager_class,
         calcu_cpu_cache_meta,
     )
     for function in cached_functions:
         function.cache_clear()
     try:
-        assert select_mem_manager_class() is DeepseekV4MemoryManager
+        layouts = build_cpu_cache_layouts()
+        assert any("compressed_c4" in name for name in layouts)
+        assert any("compressed_c128" in name for name in layouts)
+        assert any("swa_w128_fp8" in name for name in layouts)
+        assert any("compressor_kv_w8_s4" in name for name in layouts)
+        assert not any("compressor_kv_w128" in name for name in layouts)
         meta = calcu_cpu_cache_meta()
         assert meta.page_num > 0
-        assert meta.token_page_size == meta.layer_num == meta.num_heads == 1
         assert args.cpu_cache_token_page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
-        assert meta.calcu_one_page_size() == meta.head_dim
+        assert meta.page_bytes == max(layout.byte_end for layout in layouts.values())
         assert get_env_start_args().llm_kv_type == "None"
     finally:
         for function in cached_functions:

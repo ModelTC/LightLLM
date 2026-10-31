@@ -23,6 +23,14 @@ if TYPE_CHECKING:
     from easydict import EasyDict
 
 
+@pytest.fixture(autouse=True)
+def manager_cpu_page_args(allocator_environment: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    """本模块手工构造的 CPU 联合页使用 4-token 规格，启动参数须与布局一致。"""
+    from lightllm.utils.envs_utils import get_env_start_args
+
+    monkeypatch.setattr(get_env_start_args(), "cpu_cache_token_page_size", 4)
+
+
 def composition(device: str | torch.device | int = "cpu", with_tail: bool = True, tail_pool_size: int = 4):
     return MainDraftTestResourceManager(device, with_tail=with_tail, tail_pool_size=tail_pool_size)
 

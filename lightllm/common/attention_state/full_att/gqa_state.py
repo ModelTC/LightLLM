@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from functools import lru_cache
 from typing import TYPE_CHECKING, List
 from math import prod
 
@@ -8,7 +9,7 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
-from ..utils import dtype_name
+from ..utils import deepcopy_result, dtype_name
 from ..types import AxisMapping, TransferRegion
 from .base_state import FullAttentionConfig, FullAttentionState
 from .gqa_transfer import transfer_gqa_pages
@@ -144,6 +145,8 @@ class GQAFullAttentionState(FullAttentionState):
     # 三、CPU Cache 数据交换
     # ========================================================================
 
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小返回字段区间与 TP 切片，作为 CPU 页容量计算依据。
 

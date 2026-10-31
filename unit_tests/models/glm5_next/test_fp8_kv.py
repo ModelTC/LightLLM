@@ -21,7 +21,7 @@ from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
     fp8_sparse_direct_decode,
 )
 from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
-from lightllm.models.glm5_next.triton_kernel.destindex_copy_kv_flashmla_fp8 import destindex_copy_kv_flashmla_fp8
+from lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
 from lightllm.models.glm5_next.triton_kernel import context_flashattention_nopad_fp8 as fp8_prefill
 from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
     _build_prefill_row_table_kernel,
@@ -115,7 +115,7 @@ def test_fp8_scatter_quantization_and_gather_prefill(index_dtype, source_d_strid
     source[1].mul_(1e-5)
     mem_index = torch.randperm(31, device="cuda")[:11].to(index_dtype)
     packed_kv = torch.full((31, 1, 720), 71, device="cuda", dtype=torch.uint8)
-    destindex_copy_kv_flashmla_fp8(source, mem_index, packed_kv)
+    write_fp8_e8m0_packed_kv(source, mem_index, packed_kv)
     groups = source[..., :448].float().reshape(11, 1, 7, 64)
     scales = torch.exp2(torch.ceil(torch.log2((groups.abs().amax(-1) / 448).clamp_min(1e-4))))
     values = (groups / scales.unsqueeze(-1)).to(torch.float8_e4m3fn)
@@ -130,7 +130,7 @@ def test_fp8_scatter_quantization_and_gather_prefill(index_dtype, source_d_strid
     assert (packed_kv[unused] == 71).all()
 
     # The packer is graph-safe for both source layouts and mutable destination mapping.
-    graph, _ = _capture_cuda_graph(lambda: destindex_copy_kv_flashmla_fp8(source, mem_index, packed_kv))
+    graph, _ = _capture_cuda_graph(lambda: write_fp8_e8m0_packed_kv(source, mem_index, packed_kv))
     graph.replay()
     assert torch.equal(packed_kv[mem_index, :, :448], values.view(torch.uint8).reshape(11, 1, 448))
     source.add_(0.125)
@@ -173,7 +173,7 @@ def test_fp8_nope_decode_and_cuda_graph(num_heads):
     packed_kv = torch.zeros(4096, 1, 720, device="cuda", dtype=torch.uint8)
     source = torch.randn(4096, 1, 512, device="cuda", dtype=torch.bfloat16)
     mem_index = torch.arange(4096, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem_index, packed_kv)
+    write_fp8_e8m0_packed_kv(source, mem_index, packed_kv)
     q = torch.randn(num_heads, 9, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     # Includes a HOLD row, short tails, and three consecutive MTP positions.
     lengths = torch.tensor([0, 1, 3, 127, 128, 511, 2048, 2049, 2051], device="cuda", dtype=torch.int32)
@@ -201,7 +201,7 @@ def test_fp8_nope_decode_and_cuda_graph(num_heads):
     check(out)
     q.normal_()
     source.normal_()
-    destindex_copy_kv_flashmla_fp8(source, mem_index, packed_kv)
+    write_fp8_e8m0_packed_kv(source, mem_index, packed_kv)
     lengths.copy_(lengths.roll(1))
     indices.random_(0, 4096)
     indices.masked_fill_(lanes[None, :] >= lengths[:, None], -1)
@@ -226,7 +226,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
     source = torch.randn(2 * seq_len, 1, 512, device="cuda", dtype=torch.bfloat16)
     prefill_kv = source[prefill_rows].clone().add_(0.25)
     packed_kv = torch.zeros(64, 1, 720, device="cuda", dtype=torch.uint8)
-    destindex_copy_kv_flashmla_fp8(source, ragged_mem_index, packed_kv)
+    write_fp8_e8m0_packed_kv(source, ragged_mem_index, packed_kv)
     q = torch.randn(num_heads, 6, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     kv_start_offsets = torch.tensor([0] * 3 + [seq_len] * 3, device="cuda", dtype=torch.int32)
     topk_indices = torch.full((6, 128), -1, device="cuda", dtype=torch.int32)
@@ -274,7 +274,7 @@ def test_fp8_nope_batched_prefill_and_graph(monkeypatch, cached, num_heads, chun
     ragged_mem_index.copy_(ragged_mem_index.roll(1))
     prefill_mem_index.copy_(ragged_mem_index[prefill_rows])
     topk_indices.copy_(topk_indices.roll(1, dims=1))
-    destindex_copy_kv_flashmla_fp8(source, ragged_mem_index, packed_kv)
+    write_fp8_e8m0_packed_kv(source, ragged_mem_index, packed_kv)
     graph.replay()
     check(out)
 
@@ -291,7 +291,7 @@ def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softm
     prefill_mem_index = ragged_mem_index[prefill_rows].long()
     prefill_kv = torch.randn(9, 1, 1024, device="cuda", dtype=torch.bfloat16)[..., :512]
     packed_kv = torch.zeros(2048, 1, 720, device="cuda", dtype=torch.uint8)
-    destindex_copy_kv_flashmla_fp8(source, ragged_mem_index, packed_kv)
+    write_fp8_e8m0_packed_kv(source, ragged_mem_index, packed_kv)
     q = torch.randn(num_heads, 9, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     lengths = torch.tensor([0, 1, 3, 127, 128, 511, 2048, 2049, 2051], device="cuda")
     topk_indices = torch.randint(num_tokens, (9, 2176), device="cuda", dtype=torch.int32)
@@ -335,7 +335,7 @@ def test_fp8_chunked_prefill_sparse_rows_and_graph(monkeypatch, num_heads, softm
     prefill_kv.normal_()
     ragged_mem_index.copy_(ragged_mem_index.roll(1))
     prefill_mem_index.copy_(ragged_mem_index[prefill_rows])
-    destindex_copy_kv_flashmla_fp8(source, ragged_mem_index, packed_kv)
+    write_fp8_e8m0_packed_kv(source, ragged_mem_index, packed_kv)
     topk_indices.copy_(topk_indices.roll(1, dims=1))
     graph.replay()
     check(output)
@@ -369,7 +369,7 @@ def test_fp8_h64_largeq_native_prefill_permuted_ragged_graph(monkeypatch, num_q)
     ragged_n = 65536
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    destindex_copy_kv_flashmla_fp8(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
+    write_fp8_e8m0_packed_kv(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
     ragged = torch.randperm(capacity, device="cuda", dtype=torch.int32)[:ragged_n]
     q = torch.randn(num_q, 64, 512, device="cuda", dtype=torch.bfloat16)
     starts = torch.where(
@@ -437,7 +437,7 @@ def test_fp8_h8_largeq_prefill_keeps_flashattention_path(monkeypatch):
     num_q = 16
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    destindex_copy_kv_flashmla_fp8(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
+    write_fp8_e8m0_packed_kv(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
     q = torch.randn(num_q, 8, 512, device="cuda", dtype=torch.bfloat16)
     ragged = torch.randperm(capacity, device="cuda", dtype=torch.int32)
     starts = torch.full((num_q,), 1024, device="cuda", dtype=torch.int32)
@@ -477,7 +477,7 @@ def test_fp8_direct_smallq_prefill_dispatch_strided_holes_and_current(num_q, num
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
     q = torch.randn(num_heads, num_q, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     # Requests deliberately have different spans; starts are not fixed-stride.
@@ -515,7 +515,7 @@ def test_fp8_direct_smallq_prefill_dispatch_strided_holes_and_current(num_q, num
     prefill_kv.normal_()
     ragged.copy_(ragged.roll(1))
     prefill_mem.copy_(ragged[current_rows])
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     topk.copy_(topk.roll(1, dims=1))
     graph.replay()
     check(output)
@@ -531,7 +531,7 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
     q = torch.randn(64, 1, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1).contiguous()
     starts = torch.zeros(1, device="cuda", dtype=torch.int32)
@@ -587,7 +587,7 @@ def test_fp8_h64_direct_smallq_state_workspace_reuse_and_fresh_state():
     q.normal_()
     source.normal_()
     prefill_kv.normal_()
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     torch.testing.assert_close(run().float(), expected(), atol=0.012, rtol=0.015)
     assert {name: tensor.data_ptr() for name, tensor in cache["direct"].items()} == pointers
 
@@ -600,7 +600,7 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     ragged = torch.arange(capacity, device="cuda", dtype=torch.int32)
     q = torch.randn(64, num_q, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     starts = torch.arange(num_q, device="cuda", dtype=torch.int32) * 4096
@@ -657,7 +657,7 @@ def test_fp8_h64_selected_prefill_state_workspace_reuse(num_q):
     assert fresh_workspace["compact"].data_ptr() == workspace["compact"].data_ptr()
 
     source.normal_()
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     prefill_kv.normal_()
     q.normal_()
     eager = run()
@@ -683,7 +683,7 @@ def test_fp8_h64_b1_decode_uses_native_eager_and_direct_graph():
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     q = torch.randn(64, 1, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     indices = torch.full((1, 2176), -1, device="cuda", dtype=torch.int32)
     indices[:, :2049] = torch.randint(0, capacity, (1, 2049), device="cuda", dtype=torch.int32)
@@ -751,7 +751,7 @@ def test_fp8_decode_infer_state_graph_qpad_and_mutation(num_heads):
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     q = torch.randn(num_heads, batch, 1024, device="cuda", dtype=torch.bfloat16)[..., ::2].transpose(0, 1)
     indices = torch.full((batch, 2176), -1, device="cuda", dtype=torch.int32)
     indices[:, :2049] = torch.randint(0, capacity, (batch, 2049), device="cuda", dtype=torch.int32)
@@ -808,7 +808,7 @@ def test_fp8_sparse_direct_decode_actual_entry_edges_and_graph(monkeypatch, batc
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     q = torch.randn(8, batch, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     indices = torch.full((batch, 2176), -1, device="cuda", dtype=torch.int32)
     counts = [2051] if batch == 1 else [0, 2048, 2049, 2050, 2051, 1985, 2051, 2051]
@@ -896,7 +896,7 @@ def test_fp8_sparse_direct_decode_general_graph_factory_entry(monkeypatch, num_h
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     # BMM-style B/H stride: (512, batch * 512, 1).
     q = torch.randn(num_heads, batch, 512, device="cuda", dtype=torch.bfloat16).transpose(0, 1)
     assert q.stride() == (512, batch * 512, 1)
@@ -979,7 +979,7 @@ def test_fp8_sparse_direct_decode_unknown_bound_fallback_and_strided_q(monkeypat
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     q = torch.randn(1, 8, 512, device="cuda", dtype=torch.bfloat16)
     late = torch.full((1, 2176), -1, device="cuda", dtype=torch.int32)
     late[:, 2175] = 17
@@ -1024,7 +1024,7 @@ def test_fp8_sparse_direct_decode_strided_inputs_and_packed_row_padding(monkeypa
     capacity = 4096
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
-    destindex_copy_kv_flashmla_fp8(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
+    write_fp8_e8m0_packed_kv(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
     q = torch.randn(num_heads, batch, 1024, device="cuda", dtype=torch.bfloat16)[..., ::2].transpose(0, 1)
     indices = torch.full((batch, 1, 4352), -1, device="cuda", dtype=index_dtype)[..., ::2]
     indices[..., :2051] = torch.randint(0, capacity, (batch, 1, 2051), device="cuda", dtype=index_dtype)
@@ -1103,7 +1103,7 @@ def test_fp8_sparse_direct_decode_offsets_beyond_int32(strided_input):
     topk[..., :7] = torch.randint(0, capacity, (batch, 1, 7), device="cuda", dtype=topk.dtype)
     packed = torch.empty(capacity, 1, 720, device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
-    destindex_copy_kv_flashmla_fp8(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
+    write_fp8_e8m0_packed_kv(source, torch.arange(capacity, device="cuda", dtype=torch.int32), packed)
     assert can_use_fp8_sparse_direct_decode(q, packed, topk, 512, 2051, is_cuda_graph_capture=True)
     actual = fp8_sparse_direct_decode(q, packed, topk, 0.0625)
     expected = _torch_sparse_attention(q, _dequantize_kv_cache(packed), topk[:, 0])
@@ -1119,7 +1119,7 @@ def test_fp8_sparse_direct_decode_large_workload_retains_native_graph(monkeypatc
     torch.manual_seed(53700 + num_heads + batch)
     packed = torch.empty(4096, 1, 720, device="cuda", dtype=torch.uint8)
     source = torch.randn(4096, 1, 512, device="cuda", dtype=torch.bfloat16)
-    destindex_copy_kv_flashmla_fp8(source, torch.arange(4096, device="cuda", dtype=torch.int32), packed)
+    write_fp8_e8m0_packed_kv(source, torch.arange(4096, device="cuda", dtype=torch.int32), packed)
     q = torch.randn(batch, num_heads, 512, device="cuda", dtype=torch.bfloat16)
     topk = torch.full((batch, 1, 2176), -1, device="cuda", dtype=torch.int32)
     topk[..., :2051] = torch.randint(0, 4096, (batch, 1, 2051), device="cuda", dtype=torch.int32)
@@ -1155,7 +1155,7 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
     packed = torch.empty((capacity, 1, 720), device="cuda", dtype=torch.uint8)
     source = torch.randn(capacity, 1, 512, device="cuda", dtype=torch.bfloat16)
     mem = torch.arange(capacity, device="cuda", dtype=torch.int32)
-    destindex_copy_kv_flashmla_fp8(source, mem, packed)
+    write_fp8_e8m0_packed_kv(source, mem, packed)
     ragged = torch.randperm(capacity, device="cuda", dtype=torch.int32)
     starts = torch.arange(num_q, device="cuda", dtype=torch.int32) * 2048
     current_local = torch.full((num_q,), 2048, device="cuda", dtype=torch.int32)
@@ -1275,3 +1275,42 @@ def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypat
         )
         assert state._nsa_prefill_att(torch.empty((1, heads, 512), dtype=torch.bfloat16), kv, control).shape[1] == heads
     assert not queries
+
+
+def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
+    from lightllm.common.attention_state import AttentionStateManager
+    from lightllm.common.attention_state.full_att import FullAttentionConfig, create_mla_state
+
+    args = SimpleNamespace(cpu_cache_token_page_size=4, pd_kv_page_size=4)
+    monkeypatch.setattr("lightllm.common.attention_state.manager.get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla_state.get_env_start_args", lambda: args)
+    config = FullAttentionConfig(logical_layer_groups=((3,),), global_head_num=1, head_dim=512,
+                                dtype=torch.bfloat16, replicated=True)
+    state = create_mla_state(
+        config=config, kv_type="fp8kv_dsa", packed=True, fp8_format="group64_e8m0", page_size=4,
+    )
+    state.allocate_storage(token_capacity=16)
+    state.storage.zero_()
+    manager = AttentionStateManager(request_capacity=1)
+    manager.register_state("main", state)
+    manager.finish_state_registration()
+    indices = torch.arange(4, dtype=torch.int64, device="cuda")
+    kv = torch.randn((4, 1, 512), dtype=torch.bfloat16, device="cuda")
+    state.write_full_att_kv(logical_layer_id=3, token_indices=indices, kv=kv)
+    expected = torch.zeros((4, 1, 584), dtype=torch.uint8, device="cuda")
+    write_fp8_e8m0_packed_kv(kv, indices, expected)
+    torch.testing.assert_close(state.get_layer_view(logical_layer_id=3).kv[:4], expected, rtol=0, atol=0)
+    state.get_layer_view(logical_layer_id=3).indexer_k[:4].random_(0, 256)
+    cpu_layout = manager.get_cpu_page_layouts()[state.state_name]
+    cpu_pages = torch.empty((1, manager.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    state.write_to_cpu(token_indices=indices, cpu_page_buffers=cpu_pages, cpu_page_indices=[0], layout=cpu_layout)
+    state.read_from_cpu(cpu_page_buffers=cpu_pages, cpu_page_indices=[0], token_indices=indices + 4, layout=cpu_layout)
+    pd_layout = manager.get_pd_token_page_layouts()[state.state_name]
+    pd_pages = torch.empty((1, manager.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
+    state.write_to_pd_page(token_indices=indices, pd_page_buffers=pd_pages, pd_page_index=0, layout=pd_layout)
+    state.read_from_pd_page(pd_page_buffers=pd_pages, token_indices=indices + 8, pd_page_index=0, layout=pd_layout)
+    torch.cuda.synchronize()
+    for begin in (4, 8):
+        actual = state.get_layer_view(logical_layer_id=3)
+        torch.testing.assert_close(actual.kv[begin:begin + 4], actual.kv[:4], rtol=0, atol=0)
+        torch.testing.assert_close(actual.indexer_k[begin:begin + 4], actual.indexer_k[:4], rtol=0, atol=0)

@@ -46,7 +46,10 @@ def test_full_state_prepares_layout_before_capacity_allocation(kind: str, pd_arg
     assert state.capacity == 8 and read_kv_storage(state).shape[1] == 8 + state.page_size
     assert not read_kv_storage(state).is_meta
     assert state.get_token_bytes() == token_bytes
-    assert state.get_cpu_transfer_regions() == cpu_regions
+    current_cpu_regions = state.get_cpu_transfer_regions()
+    assert current_cpu_regions == cpu_regions
+    assert current_cpu_regions is not cpu_regions
+    assert current_cpu_regions[0] is not cpu_regions[0]
     assert state.get_pd_transfer_regions() == pd_regions
     actual_bytes = sum(buffer.numel() * buffer.element_size() for buffer in full_state_test_buffers(state).values())
     assert actual_bytes == token_bytes * (8 + state.page_size)

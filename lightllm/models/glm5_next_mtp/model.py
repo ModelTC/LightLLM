@@ -99,6 +99,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
             ),
             kv_type=args.llm_kv_type,
             packed=True,
+            fp8_format="group64_e8m0",
             page_size=args.page_size,
             device="meta",
         )

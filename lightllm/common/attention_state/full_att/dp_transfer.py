@@ -45,13 +45,16 @@ def copy_group_quantized_tokens(
     )
 
 
-def copy_mla_tokens(
+def copy_packed_tokens(
     src_storage: torch.Tensor,
     dst_storage: torch.Tensor,
     src_token_indices: torch.Tensor,
     dst_token_indices: torch.Tensor,
 ) -> None:
-    """复制 MLA 完整行；packed 方案同时保留 RoPE、scale、indexer 和行 padding。"""
+    """复制单字段存储的完整 token 槽位，包含编码数据、scale、indexer 和 padding。
+
+    压缩历史等方案的完整块约束由具体 State 在调用前检查，本函数不识别压缩比例。
+    """
     _copy_token_storages(
         src_storages=(src_storage,),
         dst_storages=(dst_storage,),

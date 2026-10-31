@@ -42,6 +42,8 @@ class Qwen3NextResourceConfig:
     full_attention_interval: int
     # 当前模型总层数，包含线性与 full-attention 两类层，不合并其他模型的层。
     all_layer_num: int
+    # 显式执行层类型，支持 Loop 等非周期排列；为空时沿用周期配置。
+    layer_types: tuple[str, ...] = ()
 
     def get_full_att_layer_indices(self) -> tuple[int, ...]:
         """返回当前模型内部的 full-attention 层序号，不包含其他模型的层。
@@ -49,6 +51,8 @@ class Qwen3NextResourceConfig:
         调用方通过 model_logical_layer_ids[index] 转换为实际逻辑层 ID；
         物理存储层映射由 State 管理，draft 使用自身配置独立创建 State。
         """
+        if self.layer_types:
+            return tuple(index for index, kind in enumerate(self.layer_types) if kind != "linear_attention")
         return tuple(range(self.full_attention_interval - 1, self.all_layer_num, self.full_attention_interval))
 
     @classmethod
@@ -85,4 +89,5 @@ class Qwen3NextResourceConfig:
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
             full_attention_interval=llm_config["full_attention_interval"],
             all_layer_num=n_layer,
+            layer_types=tuple(llm_config.get("layer_types", ())),
         )

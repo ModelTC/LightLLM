@@ -1,4 +1,4 @@
-"""MLA 的统一 CPU/PD 页传输：按 token 和页索引直接交换 latent 与外部页。"""
+"""单字段 packed 存储的 CPU/PD 页传输，供 MLA 和压缩历史等方案复用。"""
 
 import torch
 import triton
@@ -13,7 +13,7 @@ from ..utils import merge_contiguous_tail_dims, view_max_copy_dtype
 # ========================================================================
 
 
-def transfer_mla_pages(
+def transfer_packed_pages(
     kv_storage: torch.Tensor,
     token_indices: torch.Tensor,
     page_buffers: torch.Tensor,
@@ -25,9 +25,9 @@ def transfer_mla_pages(
     num_warps: int = 8,
     num_stages: int = 1,
 ) -> None:
-    """直接搬运 latent；CPU 传入页列表，PD 传入 [pd_page_index]，同步由调用方负责。
+    """直接搬运 packed 存储；CPU 传入页列表，PD 传入 [pd_page_index]，同步由调用方负责。
 
-    外部页为 pinned/注册 CPU 内存或当前设备的 CUDA PD buffer。
+    外部页为 pinned/注册 CPU 内存或 CUDA PD buffer；跨卡指针由调用方提前建立 peer/IPC 映射。
     单页和多页统一通过页索引 Tensor 定位，共用布局和拷贝 kernel。
     grid_num 控制每个字段发射的 program 数，默认 24；kernel 跳步循环覆盖全部搬运单元。
     num_warps 控制每个 program 的 warp 数，num_stages 控制循环级流水深度。
@@ -38,8 +38,6 @@ def transfer_mla_pages(
     assert isinstance(page_indices, list), "page indices must be a list"
     if page_buffers.device.type == "cpu":
         assert page_buffers.is_pinned(), "CPU pages must be pinned or registered"
-    else:
-        assert page_buffers.device == kv_storage.device, "CUDA pages must reside on the State device"
     page_tokens = layout.tokens_per_page
     assert page_tokens is not None and page_tokens > 0, "KV transfers require a positive token capacity"
     assert token_indices.is_cuda, "token indices must reside on CUDA"
@@ -52,13 +50,13 @@ def transfer_mla_pages(
     if token_count == 0:
         return
 
-    # 阶段一：准备索引，不预选或复制 latent。
+    # 阶段一：准备索引，不预选或复制 payload。
     # token_indices[i] 是第 i 个 token 的 GPU 物理槽位，直接使用传入的 dtype 和 stride。
     # 跨 GPU 的 KV 由传输进程通过现有 IPC peer 映射导入当前设备，kernel 沿当前流访问。
     # page_ids[j] 是第 j 个逻辑页对应的外部物理页 ID，允许不连续、不递增。
     # CPU/PD、单页/多页统一通过 pinned 索引异步提交到 GPU，临时显存只与页数有关。
     page_ids = torch.tensor(data=page_indices, dtype=torch.int64, pin_memory=True).to(
-        device=kv_storage.device,
+        device=torch.cuda.current_device(),
         non_blocking=True,
     )
 
@@ -67,7 +65,7 @@ def transfer_mla_pages(
     page_readies_tensor = None
     if write and page_readies is not None:
         page_readies_tensor = torch.tensor(data=page_readies, dtype=torch.bool, pin_memory=True).to(
-            device=kv_storage.device,
+            device=torch.cuda.current_device(),
             non_blocking=True,
         )
 
@@ -120,7 +118,7 @@ def transfer_mla_pages(
         )[0]
         local, external = view_max_copy_dtype(copies=[(local, external)])[0]
         elements = local.shape[0] * token_count * local.shape[2] * local.shape[3]
-        _copy_mla_pages[(grid_num,)](
+        _copy_packed_pages[(grid_num,)](
             LOCAL=local,
             EXTERNAL=external,
             TOKEN_IDS=token_indices,
@@ -149,7 +147,7 @@ def transfer_mla_pages(
 
 
 @triton.jit
-def _copy_mla_pages(
+def _copy_packed_pages(
     # 数据指针：一次处理一个字段；调用方已应用 TP 切片，两侧 dtype 相同。
     LOCAL,  # GPU 视图：[layer, token_slot, head, dim]。
     EXTERNAL,  # CPU/PD 外部页视图：[page, layer, page_token, head, field_width]。

@@ -120,7 +120,6 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
-        assert args.llm_kv_type == "None", "GLM K-pool requires unquantized KV"
         cfg = Glm5NextResourceConfig.from_model_config(config, args)
         logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
         if not logical_layer_groups:
@@ -136,6 +135,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
             ),
             kv_type=args.llm_kv_type,
             packed=True,
+            fp8_format="group64_e8m0",
             page_size=args.page_size,
             device="meta",
         )
@@ -178,7 +178,10 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         return [state]
 
     def _init_att_backend(self):
-        self.prefill_att_backend = Glm5NextSparseAttBackend(model=self)
+        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+
+        backend_class = Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
+        self.prefill_att_backend = backend_class(model=self)
         self.decode_att_backend = self.prefill_att_backend
 
     def _init_att_backend1(self):

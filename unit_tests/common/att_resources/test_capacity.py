@@ -12,13 +12,14 @@ from unit_tests.common.att_resources.model_helpers import rebuild_full_state
 
 from typing import TYPE_CHECKING
 from dataclasses import replace
-from functools import partial
+from functools import lru_cache, partial
 from math import prod
 
 import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.utils import deepcopy_result
 from lightllm.common.attention_state.allocators import StatePageAllocator, FullAttKVAllocator
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
 from lightllm.common.attention_state.att_tail import KPoolAttentionTailState, KPoolStateConfig
@@ -694,6 +695,8 @@ def test_cpu_page_bytes_derive_from_cached_transfer_layouts(
 
 def test_cpu_bounded_capacity_includes_state_field_padding(cpu_args: EasyDict):
     class PaddedGDNState(GDNState):
+        @deepcopy_result
+        @lru_cache(maxsize=None)
         def get_cpu_transfer_regions(self):
             return tuple(
                 replace(region, byte_start=region.byte_start + 64, byte_end=region.byte_end + 64)
@@ -922,6 +925,8 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     class ReversedCpuRegionsState(GQAFullAttentionState):
+        @deepcopy_result
+        @lru_cache(maxsize=None)
         def get_cpu_transfer_regions(self):
             regions = super().get_cpu_transfer_regions()
             # 本实现的 CPU 页先保存 V 再保存 K，PD 仍沿用 K/V 顺序。

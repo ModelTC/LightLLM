@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from functools import lru_cache
+
+
 from typing import List
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -7,6 +10,7 @@ from typing import Any
 
 import torch
 
+from ..utils import deepcopy_result
 from lightllm.common.attention_state.types import (
     StateTransferLayout,
     TransferRegion,
@@ -98,21 +102,12 @@ class FullAttentionState(ABC):
         - GQA 分组量化：gqa_int{4|8}_group{分组大小}_{scale精度}_scale。
         - GQA 静态 FP8：gqa_fp8_static_{per_tensor|per_head}。
         - MLA 浮点：mla_{精度}；KV/indexer 联合存储：mla_packed_{精度}。
-        - MLA packed FP8：mla_packed_fp8_group{分组大小}，当前内核固定为 group128。
+        - MLA packed FP8：mla_packed_fp8_group128，或 mla_packed_fp8_group64_e8m0。
+        - 序列压缩历史：compressed_c{压缩比例}_fp8_group64_e8m0。
         例如 gqa_int8_group128_bf16_scale 对应 main_gqa_int8_group128_bf16_scale_state。
         新量化实现必须区分影响方案选择的位宽、分组、scale 方式及精度，不编码标定数值。
         """
         ...
-
-    @abstractmethod
-    def __init__(
-        self,
-        layout_config: FullAttentionConfig,
-        page_size: int = 1,
-        device: str | torch.device = "cuda",
-    ) -> None:
-        """只准备 State 配置，不分配 KV 或 HOLD 页；存储由后续统一容量初始化。"""
-        raise NotImplementedError()
 
     @abstractmethod
     def allocate_storage(self, token_capacity: int) -> None:
@@ -145,7 +140,10 @@ class FullAttentionState(ABC):
 
     @abstractmethod
     def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: Any) -> None:
-        """向已分配位置写入一层 KV，并完成该布局要求的编码、量化和关联参数更新。"""
+        """向已分配位置写入一层 KV，并完成该布局要求的编码、量化和关联参数更新。
+
+        融合压缩等专用写入路径可直接使用计算视图，不调用本接口。
+        """
         raise NotImplementedError()
 
     @abstractmethod
@@ -160,12 +158,17 @@ class FullAttentionState(ABC):
     # ========================================================================
 
     @abstractmethod
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 cpu_cache_token_page_size 返回 CPU 字段、全局形状和 TP 切片。
 
         byte_start / byte_end 相对本 State 起点，字段间的必要 padding 由区间间隔体现；
         管理器按字段最大终点计算该 State 的 CPU 页占用。
         本次有效 token 数由读写流程处理，不改变布局。
+        具体实现使用 lru_cache 缓存，外层 deepcopy_result 每次返回独立副本。
+        首次查询后配置与全局 CPU 页规格保持不变。
+        管理器实际分配存储后统一清除缓存，以兼容物理页规格变化；子类覆盖时须保留缓存能力。
         """
         ...
 

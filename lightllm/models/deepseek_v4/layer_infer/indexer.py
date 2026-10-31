@@ -18,7 +18,9 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
 
     def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int):
         self.layer_idx_ = layer_idx
-        self.compress_ratio = network_config["compress_ratios"][layer_idx]
+        ratios = network_config["compress_ratios"]
+        # 额外的 MTP 执行层只使用 SWA，checkpoint 可只记录一个共享的 MTP 权重层。
+        self.compress_ratio = ratios[layer_idx] if layer_idx < len(ratios) else 0
         self.index_topk = network_config["index_topk"]
         self.index_head_dim = network_config["index_head_dim"]
         self.index_n_heads = network_config["index_n_heads"]
@@ -64,7 +66,6 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         if use_custom_tensor_manager:
             hadamard_out = self.alloc_tensor(scratch.shape, scratch.dtype, device=scratch.device)
         scratch = hadamard_transform(scratch, scale=self.index_head_dim ** -0.5, out=hadamard_out)
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
         from lightllm.models.deepseek_v4.triton_kernel.destindex_copy_indexer_k import (
             destindex_copy_indexer_k,
         )
@@ -73,8 +74,8 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             scratch,
             infer_state.mem_index.reshape(-1),
             infer_state.position_ids,
-            get_indexer_k_buffer(infer_state.mem_manager, self.layer_idx_),
-            infer_state.mem_manager.cache_config.compressed_kv_token_alignment // self.compress_ratio,
+            infer_state.get_compressed_kv_view(logical_layer_id=self.layer_idx_).indexer_k,
+            infer_state.get_compressed_kv_state(logical_layer_id=self.layer_idx_).config.block_token_size // self.compress_ratio,
         )
 
     def build_metadata(
@@ -170,11 +171,9 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             return slots.unsqueeze(1), lengths
 
         paged_meta = infer_state.get_c4_indexer_metadata(c4_cap)
-        mem_manager = infer_state.mem_manager
-        page_size = mem_manager.cache_config.compressed_kv_token_alignment // self.compress_ratio
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_indexer_k_buffer
+        page_size = infer_state.get_compressed_kv_state(logical_layer_id=self.layer_idx_).config.block_token_size // self.compress_ratio
 
-        packed = get_indexer_k_buffer(mem_manager, self.layer_idx_)
+        packed = infer_state.get_compressed_kv_view(logical_layer_id=self.layer_idx_).indexer_k
         indexer_k_cache = packed.view(
             packed.shape[0],
             page_size,

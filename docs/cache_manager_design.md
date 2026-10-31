@@ -322,8 +322,12 @@ lightllm/common/
 │   │   ├── static_fp8_transfer.py               # FP8 K/V 原始编码的定制传输
 │   │   ├── create_mla_state.py          # MLA 统一创建入口：选择普通、packed 或 packed FP8
 │   │   ├── mla_state.py                 # MLAFullAttentionState：压缩 latent 存储
-│   │   ├── mla_transfer.py                      # latent KV 的定制传输
-│   │   ├── packed_mla_state.py          # PackedMLAFullAttentionState：含 indexer key/scale 的 packed 布局
+│   │   ├── create_compressed_att_state.py # 序列压缩历史 KV 的独立创建入口
+│   │   ├── compressed_att_state.py   # 独立配置及 V4 C4/C128 packed 压缩块存储
+│   │   ├── packed_transfer.py                   # 单字段 packed KV 的定制传输
+│   │   ├── packed_mla_state.py          # 普通精度或 group128/FP32-scale packed MLA
+│   │   ├── fp8_e8m0_packed_mla_state.py # 独立 FP8E8M0PackedMLAConfig / State：group64/E8M0 编码
+│   │   ├── fp8_e8m0_packed_mla_write.py # group64/E8M0 定制量化写入，不依赖具体模型
 │   │   └── packed_mla_transfer.py   # packed KV、RoPE 与 indexer 字段的定制传输
 │   ├── bounded_att/
 │   │   ├── __init__.py
@@ -332,6 +336,13 @@ lightllm/common/
 │   │   ├── transfer_utils.py            # bounded_att_buffer_copies：生成快照字段的复制视图
 │   │   ├── copy_kernel.py               # copy_bounded_att_tensors：聚合多页、多字段的 Triton 拷贝
 │   │   ├── conv_ssm_types.py            # KDA/GDN 的 Conv/SSM 布局配置
+│   │   ├── create_sliding_window_state.py # 按 SWA 算法命名的创建入口，当前返回 FP8/E8M0 实现
+│   │   ├── fp8_e8m0_swa_state.py       # FP8E8M0SlidingWindowConfig / State：仅管理近期 KV
+│   │   ├── create_window_compressor_state.py # 窗口压缩器原子运行态创建入口
+│   │   ├── window_compressor_state.py # WindowCompressorStateConfig / State：候选与 gate
+│   │   ├── window_pages_pool.py          # WindowPagesPool：单一窗口的时间有序快照
+│   │   ├── fp8_e8m0_swa_transfer.py     # FP8/E8M0 packed SWA 的 GPU 窗口搬运
+│   │   ├── window_compressor_transfer.py           # 候选/gate ring 与时间有序快照的 GPU 搬运
 │   │   ├── create_kda_state.py          # KDA 统一创建入口
 │   │   ├── kda_state.py                 # KDAState：Conv / SSM / MTP 与页操作
 │   │   ├── kda_pages_pool.py            # KDAPagesPool：KDA Conv 历史和方阵递推快照
@@ -399,14 +410,32 @@ token 复制、bounded 运行态重置、大小页保存/恢复、MTP 提交及 
 | 逻辑类型 | 创建入口 | 参数决定的实现 |
 | --- | --- | --- |
 | GQA（含 MHA/MQA） | `full_att.create_gqa_state(config, *, kv_type, page_size, device, ...)` | 普通浮点、INT4/INT8 分组量化、per-tensor/per-head 静态 FP8 |
-| MLA | `full_att.create_mla_state(config, *, kv_type, packed, page_size, device, ...)` | 普通 MLA、带 indexer 的 packed MLA、packed FP8 MLA |
+| MLA | `full_att.create_mla_state(config, kv_type, packed, page_size, device, fp8_format, ...)` | 普通 MLA、packed MLA、group128/FP32 或 group64/E8M0 packed FP8 MLA |
+| 序列压缩 attention | `full_att.create_compressed_att_state(config, page_size, device)` | FP8/E8M0 packed 压缩 KV 与可选 indexer；V4 CSA/C4、HCA/C128 由模型分别配置 |
 | KDA | `bounded_att.create_kda_state(config, request_capacity, mtp_step=0, *, device)` | KDA Conv/SSM 运行态 |
 | GDN | `bounded_att.create_gdn_state(config, request_capacity, mtp_step=0, *, device)` | GDN Conv/SSM 运行态 |
+| SWA | `bounded_att.create_sliding_window_state(config, request_capacity, mtp_step, device)` | 近期原始 KV 窗口，当前采用 FP8/E8M0 packed 编码 |
+| 窗口压缩器 | `bounded_att.create_window_compressor_state(config, request_capacity, mtp_step, device)` | 按窗口长度和产出步长管理候选/gate，KV 和 indexer 分别创建实例 |
 | K-pool | `att_tail.create_kpool_state(config, request_capacity, mtp_step=0, *, device)` | 带池化尾部窗口及 MTP 历史槽位的 K-pool State |
 
-每个算法的创建入口独立放在 `create_gqa_state.py`、`create_mla_state.py`、`create_kda_state.py`、`create_gdn_state.py` 和 `create_kpool_state.py`，通过各分类包导出。一个算法的普通精度与量化实现共用同一 create 入口，由参数选择具体 State；State 实现文件不负责选择其他实现。不增加工厂类或注册表。入口不读取请求信息，不绑定角色，不创建 allocator；返回对象后由模型调用 `register_state`。
+每个算法的创建入口独立放在对应的 `create_*.py` 中，通过各分类包导出，包括 GQA、MLA、压缩历史、KDA、GDN、SWA、窗口压缩器和 K-pool。一个算法的普通精度与量化实现共用同一 create 入口，由参数选择具体 State；State 实现文件不负责选择其他实现。不增加工厂类或注册表。入口不读取请求信息，不绑定角色，不创建 allocator；返回对象后由模型调用 `register_state`。
 
 GQA/MLA 的 `config` 使用逻辑 `FullAttentionConfig`。GQA 的 `kv_type` 使用现有编码名 `"None"`、`"int4kv"`、`"int8kv"`、`"fp8kv_spt"`、`"fp8kv_sph"`；`group_size` 仅对 INT4/INT8 生效。静态 FP8 构造函数和创建入口不接收标定参数，`scales`、`q_scales` 初始均为 `None`；全部 State 就绪后，统一加载流程只能通过 `bind_calibration()` 初始化标定。各 DP 使用相同的标定配置，不额外生成或校验标定内容指纹。MLA 的 `config.head_dim` 始终传逻辑 latent 维度，`packed=True` 时由入口计算包含 indexer、scale 和对齐的物理行宽；`"fp8kv_dsa"` 仅用于 packed MLA。
+
+MLA 的 packed FP8 编码由 `fp8_format` 显式指定：默认 `"group128_fp32"` 使用原有
+`PackedMLAFullAttentionState`；`"group64_e8m0"` 使用独立的 `FP8E8M0PackedMLAState`，
+其配置为 `FP8E8M0PackedMLAConfig`。创建入口不通过 `head_dim == 512` 等维度条件推断格式。
+GLM main/draft 在各自的模型工厂中传入 `fp8_format="group64_e8m0"`；未量化时仍返回普通 packed State。
+
+`FP8E8M0PackedMLAState` 固定使用 448 维 FP8、64 维 BF16 和七个 E8M0 scale（补齐为八字节），
+KV 共 584 字节，随后保存 indexer key 及一个 FP32 scale；最后 64 维保留 BF16 不代表使用 RoPE。
+配置独立定义，不继承 `FullAttentionConfig`；只记录逻辑层分组、indexer 维度和 TP 坐标。
+固定 latent 维度、单 head、副本规则和 uint8 编码由实现确定，不作为重复输入。
+`token_bytes` 是含 16 字节对齐 padding 的物理行宽，`payload_bytes` 是不含行尾 padding 的有效字节数。
+例如 indexer 维度为 128 时，GPU 行宽为 720 字节，CPU/PD 每个 token 只传 716 字节。
+State 将连续的 KV/scale/indexer 字节作为一个传输区域，复用 `transfer_packed_pages` 的索引拷贝 kernel；
+同卡 token 复制与 DP 迁移仍复制完整物理行。原 packed State 及其传输实现无需识别 E8M0 编码。
+定制量化写入放在 `fp8_e8m0_packed_mla_write.py`，State 不依赖 GLM 模型目录中的实现。
 
 各模型的三类 State 工厂负责构造配置并调用对应算法入口；`lightllm/utils/cpu_cache_layout.py` 复用模型工厂创建 meta State，生成 CPU cache 联合页布局，不加载标定。full-attention 的实际存储由管理器后续统一分配；GPU 启动时 bounded 和 tail 按请求容量直接创建运行态，大小页池另行初始化。GPU 启动与 CPU cache 元数据使用同一套算法创建逻辑。
 
@@ -480,7 +509,7 @@ CPU load/offload 尾页的两个暂存槽位 ID 由管理器统一保留，排�
 
 #### 逻辑层与物理存储层
 
-`FullAttentionConfig.logical_layer_groups: tuple[tuple[int, ...], ...]` 是 full-attention 层映射的唯一配置来源。外层每项代表一份物理层存储，顺序对应 K/V、scale 和 packed indexer 等 Tensor 的 layer 轴；内层列出共享这份存储的逻辑层号。每组必须非空，同一个逻辑层不能重复出现，层号不要求连续。
+具体 State 配置中的 `logical_layer_groups: tuple[tuple[int, ...], ...]` 是 full-attention 层映射的唯一配置来源。GQA/MLA 使用 `FullAttentionConfig` 及其具体配置，序列压缩历史使用独立的 `CompressedAttentionConfig`，不要求所有配置继承同一基类。外层每项代表一份物理层存储，顺序对应 K/V、scale 和 packed indexer 等 Tensor 的 layer 轴；内层列出共享这份存储的逻辑层号。每组必须非空，同一个逻辑层不能重复出现，层号不要求连续。
 
 ```python
 logical_layer_groups = (
@@ -518,7 +547,9 @@ FullAttentionState
 ├── GroupQuantizedFullAttentionState  # INT4 / INT8 等
 ├── StaticFP8FullAttentionState
 ├── MLAFullAttentionState
-└── PackedMLAFullAttentionState  # 附带 indexer 数据的 packed 布局
+├── PackedMLAFullAttentionState  # 普通精度与 group128/FP32-scale 的 packed 布局
+├── FP8E8M0PackedMLAState  # 独立 group64/E8M0 packed MLA，供 GLM main/draft 使用
+└── CompressedAttentionState  # V4 的 C4/C128 压缩块
 ```
 
 所有具体 full-attention State 必须直接继承 `FullAttentionState`，具体实现之间禁止继承，也不通过调用其他具体 State 的方法复用行为。每种方案在自己的文件中完整实现配置初始化、容量计算、层视图、写入、token 复制以及 CPU/DP/PD 操作，防止某个方案的修改隐式改变其他方案。公共复用限于明确的工具函数和底层 kernel，不引入带具体存储行为的中间基类。`FullAttentionConfig` 与抽象接口共同定义在 `full_att/base_state.py`，量化和 packed 专属配置可扩展该配置；配置结构的继承不代表 State 实现的继承。
@@ -530,20 +561,13 @@ FullAttentionState
 #### 必须提供的公共接口
 
 ```python
-# ViewT / WriteT 为具体布局定义的类型，下面是公共签名草案。
+# ViewT 为具体布局定义的类型，下面是公共签名草案；构造参数由各具体 State 定义。
 class FullAttentionState:
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
     @abstractmethod
     def get_state_type(self) -> str: ...
-
-    def __init__(
-        self, layout_config: FullAttentionConfig,
-        page_size: int = 1, *,
-        device: str | torch.device = "cuda",
-    ) -> None:
-        ...
 
     def allocate_storage(self, token_capacity: int) -> None:
         ...
@@ -561,7 +585,8 @@ class FullAttentionState:
     def get_layer_view(self, logical_layer_id: int) -> ViewT:
         ...
 
-    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: WriteT) -> None:
+    @abstractmethod
+    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: Any) -> None:
         ...
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
@@ -625,7 +650,7 @@ class FullAttentionState:
 | `get_token_bytes()` | 返回当前 TP rank 单个 token 的完整存储字节数，包含动态量化参数和 packed 行 padding；不包含静态标定参数。管理器按模型组合汇总后直接乘容量或 page size |
 | `contains_logical_layer(logical_layer_id)` | 判断指定逻辑层是否属于当前 State 的层映射，不依赖实际存储分配，共享层同样返回 True |
 | `get_layer_view(logical_layer_id)` | 返回该逻辑层供匹配 backend 使用的具体视图，包含计算所需 Tensor 和参数。视图引用底层存储，不触发 KV 搬运；没有对应 full-attention 存储的层明确报错 |
-| `write_full_att_kv(logical_layer_id, token_indices, kv)` | 将输入 KV 写入已分配物理位置，完成该布局需要的编码、量化及关联 scale 更新。输入类型与格式由具体布局明确，不能把浮点 KV、已量化数据和 packed 字节隐式混用 |
+| `write_full_att_kv(logical_layer_id, token_indices, kv)` | 将 KV 写入已分配位置，完成该方案要求的编码及关联参数更新；融合压缩路径不调用本接口，具体实现显式拒绝误调用 |
 | `copy_full_att_tokens(src_indices, dst_indices)` | 在同一 State 内复制所有所辖存储层的对应 token 数据，覆盖全部随 token 变化的字段；保持存储表示，不重新量化。只操作本 State 负责的区域，遵守该布局声明的复制粒度与对齐条件 |
 
 容量、device、层映射及布局标识应从同一份稳定配置和描述中取得，避免多处维护互相矛盾的副本。配置相同且只改变容量时，容量计算和真实 buffer 创建应覆盖相同的数据组成。共享底层内存按实际分配去重记账。
@@ -670,19 +695,24 @@ manager 将 State 内区间平移为页内区间：CPU/PD 均按对应传输字�
 
 带 indexer 的 packed 布局中，attention 与 indexer 可以分别读取 buffer 的不同区域。因此不能用 attention 的读取视图代替完整复制范围。类似地，静态 FP8 的物理存储 dtype 和计算时解释的 dtype 可以不同，视图必须明确相应参数。
 
-`write_full_att_kv` 更新其输入所描述的 KV 及关联字段；indexer 池化等专用 kernel 可以通过专用视图写入另一区域。管理器与执行流程在相关写入都满足同步条件后才允许复用或发布。融合写入路径可以直接使用预先绑定的布局视图，同时遵守相同的数据表示与完整性约定。
+`write_full_att_kv` 保留为 `FullAttentionState` 的抽象接口，各具体 State 实现该方法。
+压缩历史等复杂布局通过自己的计算视图或定制接口完成融合写入，不调用普通 KV 写入接口；
+其实现显式抛出 `NotImplementedError`，避免误调用时静默丢失写入。
+indexer 池化等专用 kernel 可以通过专用视图写入另一区域。
+管理器与执行流程在相关写入都满足同步条件后才允许复用或发布。
 
 #### 基类与子类的分工
 
-| 部分 | 基类可复用逻辑 | 子类必须负责的内容 |
+| 部分 | 基类约定 | 具体 State 负责的内容 |
 | --- | --- | --- |
-| 初始化 | 生命周期、配置与映射校验、稳定视图管理 | `_create_storage(...)`：实际 Tensor/区域和完整描述 |
-| 层访问 | 逻辑层到存储层的映射、视图缓存 | `_make_layer_view(storage_layer_id)`：该布局的计算视图 |
-| 写入 | 参数契约、层映射和公共调用入口 | `_write_full_att_kv(...)`：编码/量化/写入 kernel 及输入格式校验 |
-| 完整复制 | 索引操作契约、公共调用入口 | `_copy_full_att_tokens(...)`：布局正确的复制，或显式复用与其描述兼容的公共工具 |
-| 传输 | 定义 CPU/DP/PD 直接读写接口，未支持的操作显式报错 | 覆盖所支持的读写方法，直接使用自身 storage 调用相应 kernel |
+| 初始化 | `allocate_storage`、`get_token_bytes` | 强类型构造配置、层映射和实际 Tensor 分配 |
+| 层访问 | `contains_logical_layer`、`get_storage_layer_index`、`get_layer_view` | 自身布局的层映射和计算视图 |
+| 写入 | `write_full_att_kv` | 实现普通写入；融合压缩路径使用定制方法或视图，普通入口显式拒绝误调用 |
+| 完整复制 | `copy_full_att_tokens` 的索引与完整性契约 | 直接实现布局正确的复制，或调用兼容的公共 kernel |
+| 传输 | CPU/DP/PD 直接读写契约 | 直接使用自身 storage 和具体 kernel，不从其他具体 State 继承行为 |
 
-受保护方法名为候选。一个子类可以复用满足其布局要求的 kernel；通用复制工具只有在理解 token 维、stride、数据区域和别名关系时才适用。复杂 packed 布局应由专用实现处理，公共层不尝试仅凭 Tensor shape 推导复制语义。
+具体 State 可以复用满足其布局要求的 kernel；基类不规定构造参数或内部受保护方法。
+通用复制工具只有在理解 token 维、stride、数据区域和别名关系时才适用。复杂 packed 布局由具体 State 保证复制粒度与字段完整性。
 
 #### 索引、异步执行与生命周期
 
@@ -1242,7 +1272,7 @@ DP 副本之间使用相同的 State 成员名。`copy_from_dp` 接收远端 man
 
 full-attention 使用 `copy_tokens_from_dp(src_token_indices, dst_token_indices, remote_dp_full_att_state)` 指定源对象和配对索引；bounded State 分别通过 `copy_big_pages_from_dp` 与 `copy_runtime_state_from_dp` 指定源对象和配对索引，不接收字段映射。full-attention DP 的源、目标 token 索引必须是位于各自存储设备上的 CUDA Tensor；源、目标索引均支持 int32/int64。manager 和 State 直接使用传入索引，不进行设备迁移、dtype 转换或 Python list 转换；bounded 请求索引仍为 `list[int]`。布局及编码兼容检查使用断言。full-attention 所有 token 索引入口（KV 写入、本地 token 复制、CPU/PD 页读写及 DP 复制）都只接受 CUDA Tensor，由调用方准备好索引；State 不迁移设备、不转换 dtype，也不调用 `contiguous()` 创建副本。CPU cache 页面仍在主机内存，token 索引仍须位于 CUDA。PD 网络任务中的 `mem_indexes` 仍以列表序列化，由传输进程在调用 `copy_page` 前显式创建设备上的整数 Tensor。State 的四个公开页读写接口将显式存储成员交给本方案的 `transfer_*_pages`；CPU 传入页索引列表，PD 传入包含指定页索引的列表，不再保留 `_buffer_io()`。CPU/PD/DP 显式访问各实现的存储成员：GQA/静态 FP8 使用 `k_storage`、`v_storage`，分组量化同时操作 `k_scales`、`v_scales`，MLA 使用 `storage`；本地变量和页切片逐项列出，具体 State 不提供统一枚举存储 buffer 的接口。完整 token 复制同样直接对各存储成员调用搬运算子。所有 full-attention CPU/PD 共用 kernel 和本地 token 复制 kernel 均按输入索引的 stride 寻址，直接支持非连续 CUDA 索引，保留 int32/int64 类型；DP fetch 的源索引直接取自远端 CUDA 请求表，目标 allocator 返回 CPU int32 索引，因此由 DP 调用方在进入 manager 前一次性准备当前设备的 CUDA int64 索引，供全部 State 共用；State 仅断言索引为 CUDA Tensor，不重复转换。页布局由对应 State 生成，调用方保证读回目标索引唯一；搬运时仅保留页大小和页数等必要检查，不逐次重建字段集合或回读索引去重。
 
-full-attention DP 的 `dp_transfer.py` 提供显式存储入口：`copy_gqa_tokens` 接收 K/V，供 GQA 和静态 FP8 使用；`copy_group_quantized_tokens` 另接收 K/V 动态 scale；`copy_mla_tokens` 接收完整 latent/packed 存储。三种入口共用四维 token 布局的 Triton kernel，一次 launch 搬运当前 State 的全部字段；编译时展开 Tensor tuple 为指针参数，不创建或上传指针表。按两端 token 索引及各自真实 stride 直接寻址，无 `index_select`、跨设备 payload `.to()` 或 `index_copy_` 中间存储。每个字段独立选择对齐的整数搬运宽度，支持两端不同 token 容量、非连续索引和存储视图；默认 grid=24、BLOCK=4096、warps=8、stages=1，通过跳步循环覆盖全部元素，地址计算使用 int64。静态 FP8 标定参数不搬运；packed MLA 按原 DP 语义复制完整行，包括 padding，区别于 CPU/PD 的有效字段页格式。调用方保证目标索引唯一、源目标区域不重叠，并负责远端 peer/IPC 映射、源数据就绪及存储生命周期；算子在目标设备当前流执行，不在内部建立 peer 映射或同步。
+full-attention DP 的 `dp_transfer.py` 提供显式存储入口：`copy_gqa_tokens` 接收 K/V，供 GQA 和静态 FP8 使用；`copy_group_quantized_tokens` 另接收 K/V 动态 scale；`copy_packed_tokens` 接收完整 latent/packed 存储。三种入口共用四维 token 布局的 Triton kernel，一次 launch 搬运当前 State 的全部字段；编译时展开 Tensor tuple 为指针参数，不创建或上传指针表。按两端 token 索引及各自真实 stride 直接寻址，无 `index_select`、跨设备 payload `.to()` 或 `index_copy_` 中间存储。每个字段独立选择对齐的整数搬运宽度，支持两端不同 token 容量、非连续索引和存储视图；默认 grid=24、BLOCK=4096、warps=8、stages=1，通过跳步循环覆盖全部元素，地址计算使用 int64。静态 FP8 标定参数不搬运；packed MLA 按原 DP 语义复制完整行，包括 padding，区别于 CPU/PD 的有效字段页格式。调用方保证目标索引唯一、源目标区域不重叠，并负责远端 peer/IPC 映射、源数据就绪及存储生命周期；算子在目标设备当前流执行，不在内部建立 peer 映射或同步。
 
 DP 拷贝在两张 H200 上对照旧 gather → `.to()` → scatter 路径测量：16 层、1025 个乱序 token，源/目标容量为 2048/3072；GQA/INT4/INT8 使用 8 个 KV head、head_dim=128。每种方案和方向预热后连续调用 20 次，三轮取中位数，计时包含 Python 入口及末尾设备同步，不含分配、初始化和编译；重复使用同一组存储，未测试与推理并发。
 
@@ -1778,6 +1808,13 @@ P/D 传输进程为每次 KV 任务创建普通 CPU token 索引 Tensor，在 `c
 
 CPU 使用相同的依赖方向：`get_cpu_page_bytes()` → `get_cpu_page_layouts()` → 各 State 的 `get_cpu_transfer_regions()`。布局 getter 读取全局 `cpu_cache_token_page_size`，在管理器内部直接展开聚合：依次取得 full-attention 和 bounded 的字段区间，平移为页内位置，以 `max(region.byte_end)` 向上对齐到 8 字节作为当前 State 的终点。页大小查询再取 `max(layout.byte_end)` 并按 16 字节对齐。字段之间的 dtype 对齐及 State 实现要求的内部 padding 均计入容量；未参与传输的 GPU packed 行 padding、静态标定参数不占 CPU 页。bounded 每页只保存一份快照，不乘页内 token 数，也不包含 MTP 候选区、游标或其他页池槽位。Attention tail 不参与 CPU 联合页，读回时按最终前缀边界重置；快照接口仅用于 PD。
 
+各具体 State 的 `get_cpu_transfer_regions()` 使用 `@lru_cache(maxsize=None)` 缓存不可变区域元组，
+并在其外层添加 `@deepcopy_result`，每次先取得缓存结果、再返回深拷贝，调用方不持有缓存原对象。
+装饰器保留 `cache_clear`、`cache_info` 和 `cache_parameters`，管理器仍可清理缓存。
+无需 CPU 快照时返回空元组。首次查询后 State 配置及全局 CPU 页 token 数保持不变；
+当前各实现的区域不依赖存储容量或设备；为兼容定制布局受实际物理页规格影响的情况，
+管理器完成存储分配后仍统一清除 State 与聚合布局缓存。子类覆盖此 getter 时须保留缓存能力。
+
 State 的全局存储字节数查询继续描述存储开销，不用于推导 CPU/PD 传输容量。CPU 联合页不预留页头、长度或版本字段。布局及其派生页大小均按需缓存，实际存储分配后一起清理，避免继续使用 meta 准备阶段的布局尺寸。
 
 State config 保存未切分的全局 head 数、当前 `tp_rank` / `tp_world_size` 及具体分布规则，本地数量使用只读属性计算，不保存第二份可独立修改的数值。CPU/PD 全局页和 DP 运行态映射直接读取对应 State 的 config，管理器不维护 `_full_head_counts`、`_bounded_head_counts`。每个 draft 的 State 独立保存完整 config，本地形状相同也不意味着全局布局相同，容量规划和传输均读取各自配置。
@@ -1792,6 +1829,8 @@ full-attention 的 `replicated=True` 表示每个 rank 保存全部 head，例�
 模型类统一暴露 `normalize_model_config(model_config)`：不创建实例、不加载权重或初始化 CUDA，返回新的有效配置，重复调用保持结果不变。模型启动读取配置后、CPU 服务创建 meta State 前，以及各模型 State 工厂，都使用这个入口。DFlash 的嵌套覆盖、原生 MTP 的自有层数等差异由子类实现，不再保留 `_resource_config` 这条单独的转换路径。`basemodel_utils.py` 只处理通用 text_config 展开和字段别名，不反射调用模型方法，也不选择 attention 算法。
 
 DFlash 先合并 `dflash_config`，再同步 `num_hidden_layers` / `n_layer` 等别名，避免运行时与 CPU 页布局使用不同层数。GLM 原生 MTP 的有效层数描述 draft 自身；`mtp_checkpoint_layer_start` 单独保留 checkpoint 中接在 main 层后的权重起点，用于 transformer 和 pre/post 权重加载，重复规范化不会改变这个起点。
+
+V4 同样用 `num_hidden_layers` / `n_layer` 表示当前模型自有层数，DSpark 不另存一份层数，也不重复覆盖运行时的 `layers_num`。DSpark 的 `draft_layer_start_id` 表示整体执行序列中的 draft 起始逻辑层号；`stage_id` 由当前逻辑层号减去该起点得到，权重前缀使用 `mtp.{stage_id}`。普通 V4 MTP 的 `draft_weight_layer_id` 则用于权重构造和量化配置索引，各 draft 实例的执行逻辑层号仍由启动流程独立确定。两种起点语义分开命名，重复规范化不改变已记录的值。V4 模型组合配置统一使用 `compress_ratios` 表示逐层压缩倍率。
 
 ```mermaid
 flowchart LR
@@ -1880,6 +1919,79 @@ GPU→CPU 保存状态页完成后，才能在 CPU 上重排或复制这些快�
 CPU load/offload 的尾页暂存槽位由管理器保留和协调，参与的大页 pool 分别提供存储。各参与方的暂存数据消费完成后，后续请求才能复用该槽位。磁盘存储使用 CPU 页格式；main/draft 异构组合需定义各自资源段的位置、字段形状及 TP 切片。
 
 DP fetch 同时恢复缓存前缀需要的历史 KV 和 bounded 运行态，并在对齐边界重置目标 tail。只有当前运行态、缺少历史 checkpoint 的请求，不能据此发布未经保存的历史状态。传输能力由资源布局显式声明，不支持的组合在初始化阶段拒绝。
+
+### 8.1 DeepSeek V4：压缩 KV 与有界窗口
+
+V4 沿用共享 `AttentionStateManager`，不引入专用 ReqManager 或 MemoryManager。各模型通过
+`create_full_att_states` / `create_bounded_att_states` 创建自己的定义，注册完成后统一分配容量。
+main 与 draft0..draft35 使用相同 token 分配域，但分别持有存储；SWA prefill workspace 也按模型角色区分。
+
+模型组合配置保留在 `models/deepseek_v4/config.py`，不放入原子 State 目录。
+组合配置的 `create_swa_config()` / `create_compressed_config()` 负责选择参与层及算法参数，
+State 创建、backend 和提前预留 workspace 共用这些配置入口。编码字节数、packed 页布局及
+`get_attention_view()` 均由对应原子配置实现，backend 不再维护一套物理格式计算。
+SWA 使用独立的 `FP8E8M0SlidingWindowConfig`，只记录逻辑层、近期窗口、KV 编码与 TP 信息。
+压缩器使用独立的 `WindowCompressorStateConfig`，明确记录 `window_size`、`compress_stride`、
+`candidate_dim`、`target`、精度和 TP 信息；没有 C4/C128 层列表或 SWA 字段。
+`window_size` 是每次聚合覆盖的原始 token 数，`compress_stride` 是每隔多少原始 token 产出一条，
+大小页需保留的跨步历史由 `overlap_tokens = window_size - compress_stride` 推导，不额外存储重复配置。
+
+| V4 创建的运行态实例 | 窗口 / 产出步长 | 每 token 候选宽度 | 大小页快照窗口 | PD 窗口 |
+| --- | --- | --- | --- | --- |
+| SWA | 配置的 sliding window / 每 token 更新 | packed KV 字节 | 完整 sliding window | 完整 sliding window |
+| CSA KV compressor | W8 / S4 | `2 * head_dim`，gate 另占同宽 | 上一组 4 个位置 | 8 个位置 |
+| CSA indexer compressor | W8 / S4 | `2 * index_head_dim`，gate 另占同宽 | 上一组 4 个位置 | 8 个位置 |
+| HCA KV compressor | W128 / S128 | `head_dim`，gate 另占同宽 | 组边界无跨步历史，不占页池和 CPU 页 | 128 个位置 |
+
+规范名称包含用途、窗口、步长及精度，例如 `main_compressor_kv_w8_s4_fp32_state`、
+`main_compressor_indexer_w8_s4_fp32_state`、`main_compressor_kv_w128_s128_fp32_state`，
+SWA 为 `main_swa_w128_fp8_group64_e8m0_state`。同一个压缩器实现也可以保存 W12/S4 等其他窗口，
+压缩计算仍由对应模型算子负责，不在 State 中根据窗口或比例猜测算法。
+
+各 State 分别拥有自己的大小页池，共享同一组 slot ID 和 allocator；不保留 V4 聚合 State 或联合 pool。
+无快照的压缩器返回空 CPU regions，manager 不为其分配联合页区域，但保存/恢复仍校验已完成产出步长。
+缺少其他参与 State 的 CPU layout 仍会显式失败。标准 V4 MTP draft 只创建 SWA State。
+
+| 组件 | 归属 | 数据与索引 |
+| --- | --- | --- |
+| `CompressedAttentionState` | full-attention | 分别保存 C4/C128 层的压缩 KV；C4 同块保存 indexer key/scale，外部索引仍以原始 token 为单位 |
+| `FP8E8M0SlidingWindowState` | bounded-attention | 只保存近期原始 KV 的 SWA ring；不依赖压缩器或 V4 模型配置 |
+| `WindowCompressorState` | bounded-attention | 每实例只保存一种窗口/步长/用途的候选与 gate；不保存压缩历史或 SWA |
+| `WindowPagesPool` | bounded 大小页池 | 每个参与 State 各自保存单一窗口快照；共享 manager 的槽位分配域，不维护请求或 radix 引用 |
+| `ReqManager` | 请求管理 | 只保存请求槽位和逻辑 token 到物理 token 的映射 |
+
+压缩历史通过独立的 `create_compressed_att_state()` 创建，不经过 MLA 创建入口。
+`CompressedAttentionConfig` 是独立的原子布局定义，不继承 `FullAttentionConfig`，也不持有
+`DSV4AttentionConfig`。它直接保存逻辑层分组 `logical_layer_groups`、压缩比例 `compress_ratio`、
+KV/RoPE 维度 `kv_dim` / `rope_dim`、每块覆盖的原始 token 数 `block_token_size`、可选
+`indexer_dim` 和当前 TP 信息。`indexer_dim=0` 表示不保存 indexer，不根据压缩比例推断。
+V4 模型负责将自己的组合配置转换为这些字段；State 不读取 SWA 窗口、全模型层列表或压缩器配置。
+当前实现固定使用一个完整复制的共享 KV head，使用 uint8 保存 FP8/BF16/scale 的原始编码，
+不再要求调用方传入 `global_head_num=1`、`replicated=True`、`dtype=torch.uint8` 等固定参数。
+配置的 `token_slot_bytes` 按压缩比例推导每个原始 token 槽位摊销的物理字节数，包含 indexer 和 padding，
+不借用 `head_dim` 表示字节数。State 的名称为 `compressed_c{压缩比例}_fp8_group64_e8m0`，
+例如 `main_compressed_c4_fp8_group64_e8m0_state`。CSA/HCA 描述计算与历史选择流程，
+不作为存储类的固定身份；同一实现按原子字段分别承载它们的压缩历史。
+它保存已完成的序列压缩结果，不保存 SWA 或 compressor 运行态；State 仍直接继承 `FullAttentionState`，
+CPU/DP/PD 继续复用适用于该 packed 字节布局的索引传输 kernel，不改变物理格式。
+
+压缩 KV 以 256 个原始 token 为一个物理块，块内数据与 scale 分区存放；C4 还包含 indexer。
+PD 的最后一个碎页必须携带整个已分配压缩块，避免遗漏有效 token 对应的 scale/indexer。
+CPU 页面、KV 分配页和前缀边界须遵守相应的压缩块对齐约束。
+
+大小页保存/恢复接收绝对 `state_token_lens`，由 State 将请求 ring 与时间有序快照相互转换。
+CPU 读回仍先写入大页池，再恢复请求运行态；最后一个碎页使用管理器的 LOAD 暂存槽位。
+C128 在缓存边界已经关闭当前压缩组，无重叠历史需要保存；V4 的状态页边界因此必须是 128 的倍数。
+C4 保存上一组的四个位置，供下一组重叠压缩使用。运行态与大小页之间直接调用 V4 kernel，
+不使用外部 `TransferRegion`；仅 CPU/PD 联合页使用 region 描述字段与 TP 写入权限。
+
+PD 运行态采用与本地 MTP 容量无关的逻辑窗口：SWA 为配置窗口，C4/indexer 为八个位置，
+C128 为 128 个位置。收发两端根据传入的绝对前缀长度各自计算 ring 位置，因此允许不同的 MTP 配置。
+SWA、压缩 KV 和 compressor 在 TP 内完整复制，仅 rank 0 写出共享外部区域，各 rank 可读回。
+V4 的这些窗口需要真实快照，不归入仅能在页边界清零的 `AttentionTailState`。
+
+checkpoint 中的权重层号与 draft 自有逻辑层数分别记录；多个复用相同 MTP 权重的 draft 仍注册独立 State。
+模型和 backend 根据逻辑层查询 State 视图，不在 ReqManager 中附加 ring，不在 backend 中保存运行态副本。
 
 ## 9. 待细化的设计问题
 
