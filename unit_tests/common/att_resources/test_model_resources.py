@@ -17,7 +17,7 @@ from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from unit_tests.common.att_resources.model_helpers import create_full_attention_roles
 from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
-    FullAttentionConfig,
+    GQAAttentionConfig,
 )
 from lightllm.common.attention_state.full_att import PackedMLAFullAttentionState, PackedMLAAttentionConfig
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
@@ -59,19 +59,17 @@ def make_resources(
         full = PackedMLAFullAttentionState(
             PackedMLAAttentionConfig(
                 logical_layer_groups=tuple((layer,) for layer in (3, *range(4, 4 + draft_layers))),
-                global_head_num=1,
-                head_dim=584,
                 dtype=torch.bfloat16,
                 tp_rank=rank,
                 tp_world_size=tp,
-                kv_dim=512,
+                latent_dim=512,
             ),
              page_size=4,
         )
         full.allocate_storage(16)
     else:
         full = GQAFullAttentionState(
-            FullAttentionConfig(
+            GQAAttentionConfig(
                 logical_layer_groups=tuple((layer,) for layer in (1, 3, *range(4, 4 + draft_layers))),
                 global_head_num=2,
                 head_dim=16,

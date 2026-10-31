@@ -10,7 +10,7 @@ from lightllm.common.attention_state.allocators import FullAttKVAllocator
 
 from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
-    FullAttentionConfig,
+    GQAAttentionConfig,
 )
 from lightllm.common.req_manager import ReqManager
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import MultiLevelKvCacheModule
@@ -60,10 +60,12 @@ def linear_cache(monkeypatch, tmp_path, request):
         conv_kernel_size=3,
         conv_state_dtype=torch.bfloat16,
         ssm_state_dtype=torch.float32,
+        full_attention_interval=2,
+        all_layer_num=2,
         layer_types=("linear_attention", "full_attention"),
     )
     full = GQAFullAttentionState(
-        FullAttentionConfig(
+        GQAAttentionConfig(
             logical_layer_groups=tuple((layer,) for layer in config.get_full_att_layer_indices()),
             global_head_num=1,
             head_dim=8,

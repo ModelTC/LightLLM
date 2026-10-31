@@ -134,7 +134,7 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tp_world_size: int,
 ):
     from builtins import open as original_open
-    from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
+    from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
 
     # 第 0 行属于普通精度的共享层；其余行分别属于 main、draft2、draft10 的 FP8 State。
     scales = torch.arange(1, 17, dtype=torch.float32).reshape(4, 4)
@@ -168,7 +168,7 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
             ("main", ((0, 1),), 0, "None"),
         ):
             state = create_gqa_state(
-                config=FullAttentionConfig(
+                config=GQAAttentionConfig(
                     logical_layer_groups=groups,
                     global_head_num=4,
                     head_dim=16,
@@ -226,10 +226,10 @@ def test_cpu_layout_does_not_require_calibration_file(
 
 @pytest.mark.parametrize("encoding", ["fp8kv_spt", "fp8kv_sph"])
 def test_deferred_calibration_keeps_unit_scale_policy(encoding: str):
-    from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
+    from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
 
     state = create_gqa_state(
-        config=FullAttentionConfig(
+        config=GQAAttentionConfig(
             logical_layer_groups=((0, 1), (2,)),
             global_head_num=2,
             head_dim=16,

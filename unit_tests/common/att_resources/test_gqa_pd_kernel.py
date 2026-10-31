@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 
-from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFullAttentionState
+from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState
 from lightllm.common.attention_state.types import StateTransferLayout
 
 if TYPE_CHECKING:
@@ -30,7 +30,7 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
     pd_args.pd_kv_page_size = 4
     # P 保存完整 heads，D 只恢复 rank 1 的一半 heads；两侧外部页格式相同。
     source = GQAFullAttentionState(
-        layout_config=FullAttentionConfig(
+        layout_config=GQAAttentionConfig(
             logical_layer_groups=((2,), (5,)),
             global_head_num=4,
             head_dim=128,
@@ -137,7 +137,7 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
     pd_args.pd_kv_page_size = 4
     # MQA 的 KV head 在 TP ranks 间复制，非首 rank 禁止写出但仍能读回。
     state = GQAFullAttentionState(
-        layout_config=FullAttentionConfig(
+        layout_config=GQAAttentionConfig(
             logical_layer_groups=((0,), (2,)),
             global_head_num=1,
             head_dim=128,
@@ -194,7 +194,7 @@ def test_gqa_pd_direct_copy_through_peer_ipc(pd_args: EasyDict, monkeypatch: pyt
         pytest.skip("CUDA peer access required")
     pd_args.pd_kv_page_size = 4
     state = GQAFullAttentionState(
-        layout_config=FullAttentionConfig(
+        layout_config=GQAAttentionConfig(
             logical_layer_groups=((0,), (2,)),
             global_head_num=2,
             head_dim=128,

@@ -11,7 +11,7 @@ from unit_tests.common.att_resources.model_helpers import full_state_test_buffer
 from unit_tests.common.att_resources.test_state_identity import allocated_state
 from unit_tests.common.att_resources.test_quantized_full_state import transfer_layout
 from lightllm.common.attention_state.types import AxisMapping
-from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFullAttentionState
+from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -19,7 +19,7 @@ from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFul
 def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from lightllm.common.attention_state.full_att import gqa_transfer
 
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((0,), (1,)),
         global_head_num=4,
         head_dim=1,

@@ -14,7 +14,7 @@ from lightllm.utils.log_utils import init_logger
 
 from ..utils import deepcopy_result
 from ..types import AxisMapping, TransferRegion
-from .base_state import FullAttentionConfig, FullAttentionState
+from .base_state import FullAttentionState
 from .static_fp8_transfer import transfer_static_fp8_pages
 from .dp_transfer import copy_gqa_tokens
 
@@ -26,14 +26,44 @@ logger = init_logger(name=__name__)
 
 
 @dataclass(frozen=True)
-class StaticFP8AttentionConfig(FullAttentionConfig):
-    # per_tensor：每层 K/V 各一个固定 scale；per_head：每层、每个本地 K/V head 各一个。
-    # 标定参数不随 token 增长，也不作为动态 KV 字段写入 CPU/PD 页。
+class StaticFP8AttentionConfig:
+    """静态 FP8 GQA 的逻辑布局；KV 固定为 FP8 编码，标定 Tensor 由后续流程绑定。"""
+
+    # 外层顺序对应物理存储层，组内逻辑层共享该方案的全部字段；各组非空，逻辑层不能重复。
+    # 例如 ((0, 4), (8,)) 分配两层，逻辑层 0/4 共用第一层的全部字段。
+    # 分组不决定执行顺序或写入者；模型须让共享消费者跳过写入，避免覆盖生产层数据。
+    logical_layer_groups: tuple[tuple[int, ...], ...]
+    # TP 切分前单份 K 或 V 的 head 数，不将 K/V 相加，也不是 query head 数。
+    global_head_num: int
+    # 每个 K/V head 编码前的特征维度，量化位宽不改变此逻辑维度。
+    head_dim: int
+    # 所属模型 TP 组内的 rank，不是全局 rank 或 DP rank。
+    tp_rank: int = 0
+    # 所属模型 TP 组大小，用于确定分片或副本的访问关系。
+    tp_world_size: int = 1
+    # True 时各 rank 保存全部 heads；False 时切分，heads 少于 ranks 时相邻 ranks 复制同一 head。
+    replicated: bool = False
+    # 每层 K/V 各一个 scale，或每个本地 K/V head 各一个；不占用逐 token 页空间。
     scale_mode: str = "per_tensor"
 
+    @property
+    def head_num(self) -> int:
+        """当前 TP rank 保存的单份 K 或 V 的 head 数。"""
+        return self.global_head_num if self.replicated else max(1, self.global_head_num // self.tp_world_size)
+
     def __post_init__(self) -> None:
-        """创建配置时校验通用 TP 约束及标定方式。"""
-        super().__post_init__()
+        assert isinstance(self.logical_layer_groups, tuple) and all(
+            isinstance(group, tuple) and group for group in self.logical_layer_groups
+        ), "layer groups must be a tuple of nonempty tuples"
+        layers = [layer for group in self.logical_layer_groups for layer in group]
+        assert all(isinstance(layer, int) and layer >= 0 for layer in layers), "logical layer IDs must be nonnegative integers"
+        assert len(layers) == len(set(layers)), "a logical layer must belong to exactly one storage group"
+        assert self.global_head_num > 0 and self.head_dim > 0 and 0 <= self.tp_rank < self.tp_world_size
+        assert (
+            self.replicated
+            or self.global_head_num % self.tp_world_size == 0
+            or self.tp_world_size % self.global_head_num == 0
+        ), "KV heads require complete TP shards or replicas"
         assert self.scale_mode in ("per_tensor", "per_head"), "invalid static FP8 scale mode"
 
 

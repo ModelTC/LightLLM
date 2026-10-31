@@ -10,7 +10,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.full_att import (
-    FullAttentionConfig, FullAttentionState, GQAFullAttentionState, GroupQuantizedFullAttentionState,
+    GQAAttentionConfig, MLAAttentionConfig, FullAttentionState, GQAFullAttentionState, GroupQuantizedFullAttentionState,
     StaticFP8FullAttentionState, MLAFullAttentionState, PackedMLAFullAttentionState,
     create_gqa_state, create_mla_state,
 )
@@ -36,7 +36,7 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
     storage_dtype: torch.dtype,
     width: int,
 ):
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((3,), (7,)),
         global_head_num=8,
         head_dim=128,
@@ -66,6 +66,11 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
         assert torch.equal(state.scales, scales)
         if q_scales is not None:
             assert torch.equal(state.q_scales, q_scales)
+    assert type(state.config).__bases__ == (object,)
+    if kv_type in ("int4kv", "int8kv"):
+        assert state.config.scale_dtype == config.dtype
+    elif kv_type.startswith("fp8"):
+        assert not hasattr(state.config, "dtype")
     state.device = torch.device("cpu")
     state.allocate_storage(8)
     assert state.k_storage.shape == state.v_storage.shape == (2, 12, 2, width)
@@ -92,10 +97,9 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
     row_width: int,
     expected_type: str,
 ):
-    config = FullAttentionConfig(
+    config = MLAAttentionConfig(
         logical_layer_groups=((2,), (6,)),
-        global_head_num=1,
-        head_dim=kv_dim,
+        latent_dim=kv_dim,
         dtype=torch.bfloat16,
         tp_rank=1,
         tp_world_size=4,
@@ -108,14 +112,21 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
         device="meta",
     )
     assert state.get_state_type() == expected_type
-    assert state.config.replicated and not config.replicated
-    assert state.config.head_dim == row_width and config.head_dim == kv_dim
+    assert state.config.latent_dim == config.latent_dim == kv_dim
+    assert state.config.dtype == (torch.float8_e4m3fn if kv_type == "fp8kv_dsa" else config.dtype)
+    assert not hasattr(state.config, "storage_dtype")
+    assert not hasattr(state.config, "replicated")
     assert state.capacity == 0 and read_kv_storage(state) is None
+    assert type(state.config).__bases__ == (object,)
+    assert not hasattr(state.config, "head_num") and not hasattr(state.config, "global_head_num")
     state.device = torch.device("cpu")
     state.allocate_storage(8)
     assert read_kv_storage(state).shape == (2, 12, 1, row_width)
+    assert read_kv_storage(state).dtype == (torch.uint8 if kv_type == "fp8kv_dsa" else config.dtype)
     if packed:
-        assert state.config.kv_dim == kv_dim
+        # 保持旧算子读取的物理布局：FP8 indexer 紧接 KV，浮点格式保留中间的对齐间隙。
+        expected_indexer_offset = 656 if kv_type == "fp8kv_dsa" else kv_dim * 2 + 12
+        assert state.config.indexer_offset == expected_indexer_offset
         assert state.get_layer_view(2).indexer_k.shape[0] == 12
 
 
@@ -163,7 +174,7 @@ def test_kpool_creation_preserves_pool_and_mtp_dimensions():
 
 
 def test_create_rejects_encoding_from_another_logical_family():
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((0,),),
         global_head_num=1,
         head_dim=576,
@@ -171,6 +182,9 @@ def test_create_rejects_encoding_from_another_logical_family():
     )
     with pytest.raises(AssertionError, match="unsupported GQA encoding"):
         create_gqa_state(config=config, kv_type="fp8kv_dsa", device="meta")
+    config = MLAAttentionConfig(
+        logical_layer_groups=((0,),), latent_dim=576, dtype=torch.bfloat16,
+    )
     with pytest.raises(AssertionError, match="unsupported packed MLA encoding"):
         create_mla_state(
             config=config,

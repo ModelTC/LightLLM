@@ -81,7 +81,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """原生 GLM draft 的自有层采用 NoPE packed MLA，与 main 分别持有存储。"""
-        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.attention_state.full_att import MLAAttentionConfig, create_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -89,10 +89,9 @@ class Glm5NextMTPModel(TpPartBaseModel):
         if not logical_layer_groups:
             return []
         state = create_mla_state(
-            config=FullAttentionConfig(
+            config=MLAAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
-                global_head_num=1,
-                head_dim=config["kv_lora_rank"],
+                latent_dim=config["kv_lora_rank"],
                 dtype=get_torch_dtype(args.data_type),
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,

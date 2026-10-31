@@ -9,6 +9,8 @@ from unit_tests.common.att_resources.model_helpers import read_kv_storage
 from typing import TYPE_CHECKING
 from unit_tests.common.att_resources.model_helpers import main_linear_state
 from types import SimpleNamespace
+from contextlib import nullcontext
+import pickle
 import traceback
 import uuid
 
@@ -453,6 +455,51 @@ def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, targe
         for head in range(cfg.num_v_heads):
             assert (main_linear_state(manager).ssm_state[:, 6, head] == 30 + start + head).all()
         assert main_linear_state(manager).mtp_state_index[2] == 0
+
+
+@pytest.mark.parametrize("kind", ["pd", "dp"])
+def test_ipc_readers_accept_different_pickle_lengths(kind: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    """各读者独立导出；模拟 IPC 计数变化引起的长度差异，并验证补齐后仍可逐份读取。"""
+    resources = SimpleNamespace(
+        create_pd_ipc_copy=lambda: {"kind": "pd"},
+        create_dp_ipc_copy=lambda: {"kind": "dp"},
+    )
+    mapping = [[0, 1, 2]]
+    payloads = []
+    storage = {}
+
+    def serialize(value: tuple[object, object]) -> memoryview:
+        payload = pickle.dumps(value) + b"\0" * (3 * len(payloads))
+        payloads.append(payload)
+        return memoryview(payload)
+
+    def shared_memory(name: str, expected_size: int, force_mode: str) -> SimpleNamespace:
+        if force_mode == "create":
+            storage[name] = SimpleNamespace(buf=bytearray(expected_size), close=lambda: None)
+        return storage[name]
+
+    monkeypatch.setattr(shared_att_resources_utils, "kv_trans_use_p2p", lambda: False)
+    monkeypatch.setattr(shared_att_resources_utils, "get_current_rank_in_node", lambda: 0)
+    monkeypatch.setattr(shared_att_resources_utils, "get_service_shm_name", lambda name: name)
+    monkeypatch.setattr(shared_att_resources_utils, "FileLock", lambda path: nullcontext())
+    monkeypatch.setattr(shared_att_resources_utils, "create_or_link_shm", shared_memory)
+    monkeypatch.setattr(shared_att_resources_utils.ForkingPickler, "dumps", serialize)
+
+    shared_att_resources_utils.publish_att_resources(
+        resources=resources, request_mapping=mapping, kind=kind, reader_count=3,
+    )
+    assert len(payloads) == 3 and len({len(payload) for payload in payloads}) == 3
+    buffer = storage[f"rank_storage_{kind}_0"].buf
+    slot_bytes = int.from_bytes(buffer[4:8], "little")
+    assert slot_bytes == max(len(payload) for payload in payloads)
+    for index, payload in enumerate(payloads):
+        assert buffer[8 + index * slot_bytes : 8 + (index + 1) * slot_bytes] == payload.ljust(slot_bytes, b"\0")
+    for _ in payloads:
+        imported_resources, imported_mapping = shared_att_resources_utils.load_att_resources(rank_in_node=0, kind=kind)
+        assert imported_resources == {"kind": kind}
+        assert imported_mapping == mapping
+    with pytest.raises(RuntimeError, match="exhausted"):
+        shared_att_resources_utils.load_att_resources(rank_in_node=0, kind=kind)
 
 
 def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:

@@ -49,7 +49,7 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
     infer.att_state_role = role
     infer.mem_index = torch.tensor([1, 5], dtype=torch.int32, device="cuda")
     heads = 1 if kind == "packed_glm" else 2 * state.config.head_num
-    dim = state.config.kv_dim if kind == "packed_glm" else state.config.head_dim
+    dim = state.config.latent_dim if kind == "packed_glm" else state.config.head_dim
     kv = torch.full(
         size=(2, heads, dim),
         fill_value=0.5,

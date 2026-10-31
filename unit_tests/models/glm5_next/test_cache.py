@@ -88,11 +88,9 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     full = PackedMLAFullAttentionState(
         PackedMLAAttentionConfig(
             logical_layer_groups=tuple((layer,) for layer in full_layer_ids),
-            global_head_num=1,
-            head_dim=584,
             dtype=torch.bfloat16,
             tp_world_size=tp_world_size,
-            kv_dim=512,
+            latent_dim=512,
         ),
          page_size=args.page_size,
     )

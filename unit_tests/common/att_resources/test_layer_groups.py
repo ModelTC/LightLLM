@@ -8,7 +8,6 @@ import torch
 from torch.utils._pytree import tree_leaves
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.full_att import FullAttentionConfig
 from lightllm.models.gemma4.model import Gemma4TpPartModel
 from unit_tests.common.att_resources.model_helpers import (
     full_state_test_buffers,
@@ -57,15 +56,11 @@ def test_shared_layers_use_two_physical_stores(kind: str, pd_args: "EasyDict") -
     assert [state.get_storage_layer_index(logical_layer_id=layer) for layer in (0, 4, 8, 11)] == [0, 0, 1, 1]
 
 
+@pytest.mark.parametrize("kind", SCHEMES)
 @pytest.mark.parametrize("groups", [((),), ((0,), (0,)), ((0, 0),), (0, 4)])
-def test_invalid_layer_groups_are_rejected(groups: tuple) -> None:
+def test_invalid_layer_groups_are_rejected(kind: str, groups: tuple) -> None:
     with pytest.raises(AssertionError):
-        FullAttentionConfig(
-            logical_layer_groups=groups,
-            global_head_num=1,
-            head_dim=128,
-            dtype=torch.bfloat16,
-        )
+        replace(definition(kind).config, logical_layer_groups=groups)
 
 
 def test_model_local_shared_groups_preserve_global_logical_layer_ids(pd_args: "EasyDict") -> None:

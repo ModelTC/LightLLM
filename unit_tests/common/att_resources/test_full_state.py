@@ -16,7 +16,8 @@ from lightllm.common.attention_state.full_att import (
     FullAttentionState,
     GQAFullAttentionState,
     MLAFullAttentionState,
-    FullAttentionConfig,
+    GQAAttentionConfig,
+    MLAAttentionConfig,
 )
 from lightllm.common.attention_state.types import (
     AxisMapping, StateTransferLayout, TransferRegion,
@@ -24,12 +25,15 @@ from lightllm.common.attention_state.types import (
 
 
 def full_state(cls: type[FullAttentionState] = GQAFullAttentionState, device: str | torch.device | int = "cpu"):
-    prepared_full_state = cls(FullAttentionConfig(
-        logical_layer_groups=((2,), (5,)),
-        global_head_num=1,
-        head_dim=4,
-        dtype=torch.float32,
-    ), page_size=4, device=device)
+    if cls is MLAFullAttentionState:
+        config = MLAAttentionConfig(
+            logical_layer_groups=((2,), (5,)), latent_dim=4, dtype=torch.float32,
+        )
+    else:
+        config = GQAAttentionConfig(
+            logical_layer_groups=((2,), (5,)), global_head_num=1, head_dim=4, dtype=torch.float32,
+        )
+    prepared_full_state = cls(config, page_size=4, device=device)
     prepared_full_state.allocate_storage(12)
     return prepared_full_state
 
@@ -223,7 +227,7 @@ def test_invalid_late_region_shape_cannot_partially_write_pd_page():
 def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((1,), (3,), (5,), (7,), (9,), (11,)),
         global_head_num=1,
         head_dim=4,

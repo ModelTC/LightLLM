@@ -3,6 +3,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import TYPE_CHECKING, List
 from math import prod
+from dataclasses import dataclass
 
 import torch
 
@@ -10,12 +11,39 @@ from lightllm.utils.envs_utils import get_env_start_args
 
 from ..utils import deepcopy_result, dtype_name
 from ..types import AxisMapping, TransferRegion
-from .base_state import FullAttentionConfig, FullAttentionState
+from .base_state import FullAttentionState
 from .packed_transfer import transfer_packed_pages
 from .dp_transfer import copy_packed_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
+
+
+@dataclass(frozen=True)
+class MLAAttentionConfig:
+    """普通 MLA 的独立 latent 布局；单份 latent 固定在各 TP rank 完整复制。"""
+
+    # 外层顺序对应物理存储层，组内逻辑层共享该方案的全部字段；各组非空，逻辑层不能重复。
+    # 例如 ((0, 4), (8,)) 分配两层，逻辑层 0/4 共用第一层的全部字段。
+    # 分组不决定执行顺序或写入者；模型须让共享消费者跳过写入，避免覆盖生产层数据。
+    logical_layer_groups: tuple[tuple[int, ...], ...]
+    # 编码前的完整 latent 宽度，包含模型需要的 RoPE 部分，不含 indexer 或 padding。
+    latent_dim: int
+    # 未量化 latent 的浮点精度，也作为 MLA 工厂选择 packed 编码前的原始精度。
+    dtype: torch.dtype
+    # 所属模型 TP 组内的 rank；各 rank 保存相同 latent，仅 rank 0 写出共享外部页。
+    tp_rank: int = 0
+    # 保存完整 latent 副本的 TP rank 数，不改变 latent 的维度或物理行宽。
+    tp_world_size: int = 1
+
+    def __post_init__(self) -> None:
+        assert isinstance(self.logical_layer_groups, tuple) and all(
+            isinstance(group, tuple) and group for group in self.logical_layer_groups
+        ), "layer groups must be a tuple of nonempty tuples"
+        layers = [layer for group in self.logical_layer_groups for layer in group]
+        assert all(isinstance(layer, int) and layer >= 0 for layer in layers), "logical layer IDs must be nonnegative integers"
+        assert len(layers) == len(set(layers)), "a logical layer must belong to exactly one storage group"
+        assert self.latent_dim > 0 and 0 <= self.tp_rank < self.tp_world_size
 
 
 class MLAFullAttentionState(FullAttentionState):
@@ -27,7 +55,7 @@ class MLAFullAttentionState(FullAttentionState):
 
     def __init__(
         self,
-        layout_config: FullAttentionConfig,
+        layout_config: MLAAttentionConfig,
         page_size: int = 1,
         device: str | torch.device = "cuda",
     ) -> None:
@@ -56,8 +84,8 @@ class MLAFullAttentionState(FullAttentionState):
             size=(
                 len(self.config.logical_layer_groups),
                 token_capacity + self.page_size,
-                self.config.head_num,
-                self.config.head_dim,
+                1,
+                self.config.latent_dim,
             ),
             dtype=self.config.dtype,
             device=self.device,
@@ -66,10 +94,7 @@ class MLAFullAttentionState(FullAttentionState):
     def get_token_bytes(self) -> int:
         """由配置计算当前 TP rank 的单 token latent 字节数，无需分配存储。"""
         config = self.config
-        return (
-            len(config.logical_layer_groups) * config.head_num * config.head_dim
-            * config.dtype.itemsize
-        )
+        return len(config.logical_layer_groups) * config.latent_dim * config.dtype.itemsize
 
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
@@ -246,13 +271,9 @@ class MLAFullAttentionState(FullAttentionState):
     # ========================================================================
 
     def _get_transfer_regions(self, page_tokens: int) -> tuple[TransferRegion, ...]:
-        """描述唯一的 MLA latent 字段，外部页保存全局 heads，副本只由首 rank 写出。"""
+        """各 rank 复制同一 latent，仅 rank 0 写出共享外部页，所有 rank 均可读回。"""
         config = self.config
-        shape = (len(config.logical_layer_groups), page_tokens, config.global_head_num, config.head_dim)
-        # 本地分片可在多个 rank 复制；先去掉副本编号，再定位外部页的 head 起点。
-        local_head_count = config.head_num
-        replica_count = config.tp_world_size * local_head_count // config.global_head_num
-        head_start = config.tp_rank // replica_count * local_head_count
+        shape = (len(config.logical_layer_groups), page_tokens, 1, config.latent_dim)
         return (
             TransferRegion(
                 field="kv",
@@ -262,9 +283,9 @@ class MLAFullAttentionState(FullAttentionState):
                 axes=("layer", "token", "head", "dim"),
                 shape=shape,
                 axis_mappings=(
-                    AxisMapping(axis="head", local_start=0, external_start=head_start, length=local_head_count),
-                    AxisMapping(axis="dim", local_start=0, external_start=0, length=config.head_dim),
+                    AxisMapping(axis="head", local_start=0, external_start=0, length=1),
+                    AxisMapping(axis="dim", local_start=0, external_start=0, length=config.latent_dim),
                 ),
-                write_enabled=config.tp_rank % replica_count == 0,
+                write_enabled=config.tp_rank == 0,
             ),
         )

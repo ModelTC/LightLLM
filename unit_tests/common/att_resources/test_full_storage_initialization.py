@@ -16,7 +16,7 @@ from unit_tests.common.att_resources.model_helpers import prepare_model_states
 import pytest
 import torch
 
-from lightllm.common.attention_state.full_att import PackedMLAFullAttentionState
+from lightllm.common.attention_state.full_att import MLAFullAttentionState, PackedMLAFullAttentionState
 from lightllm.utils.envs_utils import get_env_start_args
 from unit_tests.common.att_resources.test_capacity import allocated_bytes
 from unit_tests.server.router.model_infer.test_cpu_resource_layout import CASES, make_runtime, runtime
@@ -51,9 +51,10 @@ def test_model_storage_write_and_copy_preserve_all_fields(
     for storage_buffer in full_state_test_buffers(state).values():
         storage_buffer.zero_()
     ids = torch.tensor([0, 4], dtype=torch.int32, device="cuda")
-    dim = config.kv_dim if isinstance(state, PackedMLAFullAttentionState) else config.head_dim
+    is_mla = isinstance(state, (MLAFullAttentionState, PackedMLAFullAttentionState))
+    dim = config.latent_dim if is_mla else config.head_dim
     kv = torch.randn(
-        size=(2, (1 if "kv" in full_state_test_buffers(state) else 2) * config.head_num, dim),
+        size=(2, 1 if is_mla else 2 * config.head_num, dim),
         device="cuda",
         dtype=torch.bfloat16,
     )

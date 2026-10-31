@@ -12,7 +12,7 @@ from lightllm.utils.log_utils import init_logger
 
 from ..utils import deepcopy_result, dtype_name
 from ..types import AxisMapping, TransferRegion
-from .base_state import FullAttentionConfig, FullAttentionState
+from .base_state import FullAttentionState
 from .group_quantized_transfer import transfer_group_quantized_pages
 from .dp_transfer import copy_group_quantized_tokens
 
@@ -24,20 +24,52 @@ logger = init_logger(name=__name__)
 
 
 @dataclass(frozen=True)
-class GroupQuantizedAttentionConfig(FullAttentionConfig):
-    # 每个 KV 元素的量化位数，仅支持 4/8；INT4 将两个编码值打包到一个字节。
+class GroupQuantizedAttentionConfig:
+    """INT4/INT8 GQA 的独立布局；KV 编码为整数，动态 scale 使用单独精度。"""
+
+    # 外层顺序对应物理存储层，组内逻辑层共享该方案的全部字段；各组非空，逻辑层不能重复。
+    # 例如 ((0, 4), (8,)) 分配两层，逻辑层 0/4 共用第一层的全部字段。
+    # 分组不决定执行顺序或写入者；模型须让共享消费者跳过写入，避免覆盖生产层数据。
+    logical_layer_groups: tuple[tuple[int, ...], ...]
+    # TP 切分前单份 K 或 V 的 head 数，不将 K/V 相加，也不是 query head 数。
+    global_head_num: int
+    # 每个 K/V head 编码前的特征维度，量化位宽不改变此逻辑维度。
+    head_dim: int
+    # 每个 token、每组 K/V 量化 scale 的浮点精度，不是 KV 编码类型。
+    scale_dtype: torch.dtype
+    # 所属模型 TP 组内的 rank，不是全局 rank 或 DP rank。
+    tp_rank: int = 0
+    # 所属模型 TP 组大小，用于确定分片或副本的访问关系。
+    tp_world_size: int = 1
+    # True 时各 rank 保存全部 heads；False 时切分，heads 少于 ranks 时相邻 ranks 复制同一 head。
+    replicated: bool = False
+    # KV 量化位数；INT4 将两个编码值打包进一个字节。
     bits: int = 8
-    # 沿每个 head 的 dim 轴分组，每个 token、每组共用一个动态 scale；须整除 head_dim。
-    # K/V 分别保存 scale，精度由继承的 dtype 指定。
+    # 沿 head_dim 分组，每组共用一个动态 scale；必须为二次幂且整除 head_dim。
     group_size: int = 8
 
+    @property
+    def head_num(self) -> int:
+        """当前 TP rank 保存的单份 K 或 V 的 head 数。"""
+        return self.global_head_num if self.replicated else max(1, self.global_head_num // self.tp_world_size)
+
     def __post_init__(self) -> None:
-        """创建配置时校验通用 TP 约束及量化分组要求。"""
-        super().__post_init__()
+        assert isinstance(self.logical_layer_groups, tuple) and all(
+            isinstance(group, tuple) and group for group in self.logical_layer_groups
+        ), "layer groups must be a tuple of nonempty tuples"
+        layers = [layer for group in self.logical_layer_groups for layer in group]
+        assert all(isinstance(layer, int) and layer >= 0 for layer in layers), "logical layer IDs must be nonnegative integers"
+        assert len(layers) == len(set(layers)), "a logical layer must belong to exactly one storage group"
+        assert self.global_head_num > 0 and self.head_dim > 0 and 0 <= self.tp_rank < self.tp_world_size
+        assert (
+            self.replicated
+            or self.global_head_num % self.tp_world_size == 0
+            or self.tp_world_size % self.global_head_num == 0
+        ), "KV heads require complete TP shards or replicas"
         assert self.bits in (4, 8) and self.group_size >= 2 and not (
             self.group_size & (self.group_size - 1)
         ), "INT4/INT8 quantization requires a power-of-two group size"
-        assert self.head_dim % self.group_size == 0 and self.dtype in (
+        assert self.head_dim % self.group_size == 0 and self.scale_dtype in (
             torch.float16, torch.bfloat16, torch.float32
         ), "group scales require a floating dtype and complete groups"
 
@@ -76,7 +108,7 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
 
     def get_state_type(self) -> str:
         """返回量化位数、分组大小及 scale 精度对应的存储方案标记。"""
-        return f"gqa_int{self.config.bits}_group{self.config.group_size}_{dtype_name(dtype=self.config.dtype)}_scale"
+        return f"gqa_int{self.config.bits}_group{self.config.group_size}_{dtype_name(dtype=self.config.scale_dtype)}_scale"
 
     def allocate_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配独立的量化 KV 与配套动态 scale。"""
@@ -88,14 +120,14 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
             len(self.config.logical_layer_groups), token_capacity + self.page_size,
             self.config.head_num, self.config.head_dim // self.config.group_size,
         )
-        self.k_scales = torch.empty(size=shape, dtype=self.config.dtype, device=self.device)
-        self.v_scales = torch.empty(size=shape, dtype=self.config.dtype, device=self.device)
+        self.k_scales = torch.empty(size=shape, dtype=self.config.scale_dtype, device=self.device)
+        self.v_scales = torch.empty(size=shape, dtype=self.config.scale_dtype, device=self.device)
 
     def get_token_bytes(self) -> int:
         """累计量化 KV 编码与逐 token 分组 scale 的开销，无需分配存储。"""
         config = self.config
         head_bytes = config.head_dim * config.bits // 8
-        head_bytes += config.head_dim // config.group_size * config.dtype.itemsize
+        head_bytes += config.head_dim // config.group_size * config.scale_dtype.itemsize
         return len(config.logical_layer_groups) * 2 * config.head_num * head_bytes
 
     # ========================================================================
@@ -354,8 +386,8 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         field_specs = (
             ("k", torch.int8, config.head_dim * config.bits // 8, "dim"),
             ("v", torch.int8, config.head_dim * config.bits // 8, "dim"),
-            ("k_scale", config.dtype, config.head_dim // config.group_size, "group"),
-            ("v_scale", config.dtype, config.head_dim // config.group_size, "group"),
+            ("k_scale", config.scale_dtype, config.head_dim // config.group_size, "group"),
+            ("v_scale", config.scale_dtype, config.head_dim // config.group_size, "group"),
         )
         for field_name, field_dtype, field_width, last_axis in field_specs:
             axes = ("layer", "token", "head", last_axis)

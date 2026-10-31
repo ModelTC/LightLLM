@@ -39,7 +39,7 @@ class MistralTpPartModel(TpPartBaseModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """按本模型的全局逻辑层创建 GQA 布局，量化存储由算法入口选择。"""
-        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -47,7 +47,7 @@ class MistralTpPartModel(TpPartBaseModel):
         if not logical_layer_groups:
             return []
         state = create_gqa_state(
-            config=FullAttentionConfig(
+            config=GQAAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
                 global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
                 head_dim=config.get("head_dim", config["hidden_size"] // config["num_attention_heads"]),

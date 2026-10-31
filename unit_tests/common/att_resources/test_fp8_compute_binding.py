@@ -151,7 +151,6 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
             logical_layer_groups=((5,),),
             global_head_num=head_num,
             head_dim=128,
-            dtype=torch.bfloat16,
             scale_mode=scale_mode,
         ),
         page_size=4, device="cuda",

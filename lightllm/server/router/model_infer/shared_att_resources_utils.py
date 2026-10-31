@@ -39,18 +39,17 @@ def publish_att_resources(
     else:
         ipc_resources = resources.create_dp_ipc_copy()
     with FileLock(f"/tmp/{get_service_shm_name(f'rank_storage_{kind}_lock')}"):
-        # Each importer consumes its own CUDA IPC reference counters.
+        # 每个读者独立序列化 CUDA IPC 引用；计数偏移变化可能使各份 pickle 长度不同。
         payloads = [ForkingPickler.dumps((ipc_resources, request_mapping)).tobytes() for _ in range(count)]
-        size = len(payloads[0])
-        if any(len(payload) != size for payload in payloads):
-            raise RuntimeError("rank storage exports have inconsistent sizes")
+        size = max(len(payload) for payload in payloads)
         shm = create_or_link_shm(
             name=f"rank_storage_{kind}_{get_current_rank_in_node()}", expected_size=8 + count * size, force_mode="create"
         )
         shm.buf[:4] = count.to_bytes(4, "little")
         shm.buf[4:8] = size.to_bytes(4, "little")
         for index, payload in enumerate(payloads):
-            shm.buf[8 + index * size : 8 + (index + 1) * size] = payload
+            # 每个读者占用等长槽位；pickle.loads 会忽略完整对象之后的补零。
+            shm.buf[8 + index * size : 8 + (index + 1) * size] = payload.ljust(size, b"\0")
         shm.close()
 
 

@@ -1,11 +1,8 @@
 from __future__ import annotations
 
 from functools import lru_cache
-
-
 from typing import List
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any
 
 import torch
@@ -15,63 +12,6 @@ from lightllm.common.attention_state.types import (
     StateTransferLayout,
     TransferRegion,
 )
-
-
-@dataclass(frozen=True)
-class FullAttentionConfig:
-    # 物理存储层与逻辑推理层的对应关系，外层顺序就是所有 Tensor 的 layer 轴顺序。
-    # 每个非空内层元组列出共享同一份存储的逻辑层号；层号可以不连续，但不能重复出现。
-    # 例如 ((0, 4), (8,)) 只分配两层：逻辑层 0/4 使用 storage[0]，逻辑层 8 使用 storage[1]。
-    # 不共享时写成 ((0,), (4,), (8,))，此时分配三层；容量和传输按 len(logical_layer_groups) 计算。
-    # 组内共享该方案的全部字段（KV、scale、indexer 等），因此布局及配套参数必须兼容。
-    # 分组不决定执行顺序或写入者：模型负责让共享消费者跳过 KV 写入，避免覆盖生产层数据。
-    logical_layer_groups: tuple[tuple[int, ...], ...]
-    # TP 切分前的 KV head 数：GQA 的 K/V 各有这么多个，不把二者相加，也不计 TP 副本。
-    # 不是 query head 数；例如全局 8 个 KV head，实际有 8 个 K head 和 8 个 V head。
-    # MLA 的压缩 latent 作为一个 KV 字段存储，通常设为 1，并在各 TP rank 复制。
-    global_head_num: int
-    # GQA 中每个 K/V head 的原始向量维度；INT4 的实际编码宽度由具体 State 换算。
-    # 普通 MLA 中为 latent 宽度；packed MLA 中为整行元素数，包含 indexer、scale 和 padding。
-    head_dim: int
-    # 具体方案使用的数据类型：普通 GQA/MLA 为 KV 精度，分组 INT4/INT8 为 scale 精度。
-    # 静态 FP8 和 FP8 packed MLA 使用 uint8 承载编码字节，实际字段类型由 State 解释。
-    dtype: torch.dtype
-    # 当前 State 所属模型的 TP 组内 rank，不是全局进程 rank 或 DP rank。
-    tp_rank: int = 0
-    # 当前模型 TP 组大小，用于计算本地 head 数以及传输时的全局 head 范围。
-    tp_world_size: int = 1
-    # True：每个 rank 都保存全部全局 heads，例如 MLA latent。
-    # False：heads 足够时均匀切分；heads 少于 TP rank 数时，每组相邻 ranks 复制一个 head。
-    # 例如 global_head_num=2、TP=8 时，rank 0..3 保存 head 0，rank 4..7 保存 head 1。
-    replicated: bool = False
-
-    @property
-    def head_num(self) -> int:
-        """当前 TP rank 实际存储的 KV head 数。"""
-        # 仍是单份 K 或 V 的 head 数；GQA 的 K/V 独立分配，各自的 head 轴大小均为 head_num。
-        return self.global_head_num if self.replicated else max(1, self.global_head_num // self.tp_world_size)
-
-    def __post_init__(self) -> None:
-        # 只保留这一份分组配置；层号映射在 State 构造时展开，不另存逻辑/物理层数。
-        assert isinstance(self.logical_layer_groups, tuple) and all(
-            isinstance(logical_layer_group, tuple) and logical_layer_group
-            for logical_layer_group in self.logical_layer_groups
-        ), "layer groups must be a tuple of nonempty tuples"
-        logical_layer_ids = [
-            logical_layer_id
-            for logical_layer_group in self.logical_layer_groups
-            for logical_layer_id in logical_layer_group
-        ]
-        assert all(isinstance(logical_layer_id, int) and logical_layer_id >= 0 for logical_layer_id in logical_layer_ids), (
-            "logical layer IDs must be nonnegative integers"
-        )
-        assert len(logical_layer_ids) == len(set(logical_layer_ids)), "a logical layer must belong to exactly one storage group"
-        assert self.global_head_num > 0 and 0 <= self.tp_rank < self.tp_world_size
-        assert (
-            self.replicated
-            or self.global_head_num % self.tp_world_size == 0
-            or self.tp_world_size % self.global_head_num == 0
-        ), "KV heads require complete TP shards or replicas"
 
 
 class FullAttentionState(ABC):

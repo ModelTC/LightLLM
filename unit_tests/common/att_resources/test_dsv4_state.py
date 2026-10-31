@@ -98,10 +98,10 @@ def test_compressed_meta_geometry() -> None:
 
 
 def test_compressed_factory_uses_independent_config() -> None:
-    from lightllm.common.attention_state.full_att import FullAttentionConfig, create_compressed_att_state
+    from lightllm.common.attention_state.full_att import create_compressed_att_state
 
     definition = make_full(ratio=4)
-    assert not isinstance(definition.config, FullAttentionConfig)
+    assert type(definition.config).__bases__ == (object,)
     state = create_compressed_att_state(config=definition.config, page_size=256, device="meta")
     assert isinstance(state, CompressedAttentionState)
     assert state.storage is None and state.get_token_bytes() == 180

@@ -12,7 +12,7 @@ import torch
 from lightllm.common.attention_state.full_att import (
     FP8E8M0PackedMLAConfig,
     FP8E8M0PackedMLAState,
-    FullAttentionConfig,
+    MLAAttentionConfig,
     FullAttentionState,
     PackedMLAFullAttentionState,
     create_mla_state,
@@ -26,10 +26,9 @@ if TYPE_CHECKING:
 
 def make_state(device: str = "meta", capacity: int = 16, tp_rank: int = 0) -> FP8E8M0PackedMLAState:
     state = create_mla_state(
-        config=FullAttentionConfig(
+        config=MLAAttentionConfig(
             logical_layer_groups=((0, 4), (8,)),
-            global_head_num=1,
-            head_dim=512,
+            latent_dim=512,
             dtype=torch.bfloat16,
             tp_rank=tp_rank,
             tp_world_size=2,
@@ -51,7 +50,7 @@ def test_factory_selects_independent_encoding_and_meta_geometry(pd_args: EasyDic
     assert FP8E8M0PackedMLAState.__bases__ == (FullAttentionState,)
     assert not isinstance(state, PackedMLAFullAttentionState)
     assert isinstance(state.config, FP8E8M0PackedMLAConfig)
-    assert not isinstance(state.config, FullAttentionConfig)
+    assert type(state.config).__bases__ == (object,)
     assert not hasattr(state.config, "head_dim")
     assert state.get_state_type() == "mla_packed_fp8_group64_e8m0"
     assert state.storage.shape == (2, 20, 1, 720) and state.storage.is_meta
@@ -65,8 +64,8 @@ def test_factory_selects_independent_encoding_and_meta_geometry(pd_args: EasyDic
     # 默认仍是原来的 group128/FP32 编码，不能再通过 512 维自动猜测 GLM 格式。
     with pytest.raises(AssertionError, match="FP8 MLA kernel requires"):
         create_mla_state(
-            config=FullAttentionConfig(
-                logical_layer_groups=((0,),), global_head_num=1, head_dim=512, dtype=torch.bfloat16
+            config=MLAAttentionConfig(
+                logical_layer_groups=((0,),), latent_dim=512, dtype=torch.bfloat16
             ),
             kv_type="fp8kv_dsa",
             packed=True,
@@ -74,8 +73,8 @@ def test_factory_selects_independent_encoding_and_meta_geometry(pd_args: EasyDic
         )
     with pytest.raises(AssertionError, match="512-dimensional"):
         create_mla_state(
-            config=FullAttentionConfig(
-                logical_layer_groups=((0,),), global_head_num=1, head_dim=576, dtype=torch.bfloat16
+            config=MLAAttentionConfig(
+                logical_layer_groups=((0,),), latent_dim=576, dtype=torch.bfloat16
             ),
             kv_type="fp8kv_dsa",
             packed=True,

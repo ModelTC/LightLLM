@@ -6,14 +6,13 @@ from typing import Literal
 
 import torch
 
-from .base_state import FullAttentionConfig
-from .gqa_state import GQAFullAttentionState
+from .gqa_state import GQAAttentionConfig, GQAFullAttentionState
 from .group_quantized_state import GroupQuantizedAttentionConfig, GroupQuantizedFullAttentionState
 from .static_fp8_state import StaticFP8AttentionConfig, StaticFP8FullAttentionState
 
 
 def create_gqa_state(
-    config: FullAttentionConfig,
+    config: GQAAttentionConfig,
     kv_type: Literal["None", "int4kv", "int8kv", "fp8kv_spt", "fp8kv_sph"] = "None",
     page_size: int = 1,
     device: str | torch.device = "cuda",
@@ -32,7 +31,7 @@ def create_gqa_state(
             logical_layer_groups=config.logical_layer_groups,
             global_head_num=config.global_head_num,
             head_dim=config.head_dim,
-            dtype=config.dtype,
+            scale_dtype=config.dtype,
             tp_rank=config.tp_rank,
             tp_world_size=config.tp_world_size,
             replicated=config.replicated,
@@ -45,7 +44,6 @@ def create_gqa_state(
         logical_layer_groups=config.logical_layer_groups,
         global_head_num=config.global_head_num,
         head_dim=config.head_dim,
-        dtype=torch.uint8,
         tp_rank=config.tp_rank,
         tp_world_size=config.tp_world_size,
         replicated=config.replicated,

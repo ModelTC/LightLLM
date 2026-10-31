@@ -1,15 +1,16 @@
 from .create_mla_state import create_mla_state
 from .create_gqa_state import create_gqa_state
-from .base_state import FullAttentionConfig, FullAttentionState
-from .gqa_state import GQAFullAttentionState
-from .mla_state import MLAFullAttentionState
+from .base_state import FullAttentionState
+from .gqa_state import GQAAttentionConfig, GQAFullAttentionState
+from .mla_state import MLAAttentionConfig, MLAFullAttentionState
 
 __all__ = [
     "create_gqa_state",
     "create_mla_state",
     "FullAttentionState",
     "GQAFullAttentionState",
-    "FullAttentionConfig",
+    "GQAAttentionConfig",
+    "MLAAttentionConfig",
     "MLAFullAttentionState",
 ]
 

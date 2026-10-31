@@ -96,7 +96,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """按 Gemma4 的 attention 宽度和共享关系创建物理 KV 层。"""
-        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -124,7 +124,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         if not logical_layer_groups:
             return []
         state = create_gqa_state(
-            config=FullAttentionConfig(
+            config=GQAAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
                 global_head_num=per_token_k_width // head_dim,
                 head_dim=head_dim,

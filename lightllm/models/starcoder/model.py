@@ -35,7 +35,7 @@ class StarcoderTpPartModel(TpPartBaseModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """StarCoder 的单份 KV 在各 TP rank 复制，逻辑层由本模型直接定义。"""
-        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -43,7 +43,7 @@ class StarcoderTpPartModel(TpPartBaseModel):
         if not logical_layer_groups:
             return []
         state = create_gqa_state(
-            config=FullAttentionConfig(
+            config=GQAAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
                 global_head_num=1,
                 head_dim=config["hidden_size"] // config["num_attention_heads"],

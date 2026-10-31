@@ -7,7 +7,7 @@ from dataclasses import replace
 from functools import lru_cache
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.allocators import StatePageAllocator, FullAttKVAllocator
-from lightllm.common.attention_state.full_att import MLAFullAttentionState
+from lightllm.common.attention_state.full_att import MLAAttentionConfig, MLAFullAttentionState
 from lightllm.common.attention_state.bounded_att import GDNState
 from lightllm.common.attention_state.att_tail import KPoolAttentionTailState
 from unit_tests.common.att_resources.test_full_state import full_state
@@ -32,7 +32,11 @@ class MainDraftTestResourceManager(AttentionStateManager):
         self.register_state("draft0", draft_state)
         self.register_state("main", full_state(device=device))
         prepared_full_state = MLAFullAttentionState(
-            self.main_gqa_fp32_state.config,
+            layout_config=MLAAttentionConfig(
+                logical_layer_groups=self.main_gqa_fp32_state.config.logical_layer_groups,
+                latent_dim=self.main_gqa_fp32_state.config.head_dim,
+                dtype=self.main_gqa_fp32_state.config.dtype,
+            ),
             page_size=self.main_gqa_fp32_state.page_size, device=device,
         )
         prepared_full_state.allocate_storage(self.main_gqa_fp32_state.capacity)

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING
 import pytest
 import torch
 
-from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFullAttentionState
+from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState
 from lightllm.common.attention_state.full_att.gqa_transfer import transfer_gqa_pages
 from lightllm.common.attention_state.types import StateTransferLayout
 
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 @pytest.mark.parametrize("page_device", ["cpu", "cuda"])
 def test_gqa_grid_stride_covers_all_tokens(grid_num: int, page_device: str, pd_args: "EasyDict") -> None:
     pd_args.pd_kv_page_size = 32
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((0,), (2,), (4,)),
         global_head_num=3,
         head_dim=128,
@@ -110,7 +110,7 @@ def test_wide_transfer_preserves_unaligned_pages_and_strided_fields(
     from lightllm.common.attention_state.full_att import gqa_transfer
 
     pd_args.pd_kv_page_size = 2
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((0,), (2,)),
         global_head_num=2,
         head_dim=128,

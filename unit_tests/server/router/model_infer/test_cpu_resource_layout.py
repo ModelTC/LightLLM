@@ -123,6 +123,8 @@ def make_runtime(
             num_hidden_layers=1,
             n_layer=1,
             full_attention_interval=1,
+            # draft 只有一个自有层，不能沿用 main 的多层类型列表。
+            layer_types=["deepseek_sparse_attention"] if kind == "glm" else ["full_attention"],
         )
         draft_dir = tmp_path / "draft"
         draft_dir.mkdir()
@@ -179,6 +181,7 @@ def make_runtime(
                 num_hidden_layers=1,
                 n_layer=1,
                 full_attention_interval=1,
+                layer_types=["deepseek_sparse_attention"] if kind == "glm" else ["full_attention"],
             )
             draft.max_total_token_num, draft.max_req_num = 16, 1
             draft.tp_world_size_, draft.tp_rank_ = tp, rank

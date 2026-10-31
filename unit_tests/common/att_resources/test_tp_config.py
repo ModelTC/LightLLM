@@ -18,7 +18,8 @@ import torch
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.attention_state.full_att import (
-    FullAttentionConfig,
+    GQAAttentionConfig,
+    MLAAttentionConfig,
     GQAFullAttentionState,
     MLAFullAttentionState,
 )
@@ -57,13 +58,18 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
     cpu_args.cpu_cache_token_page_size = 4
-    config = FullAttentionConfig(
-        logical_layer_groups=((0,),),
-        global_head_num=heads,
-        head_dim=4,
-        dtype=torch.float32,
-        replicated=replicated,
-    )
+    if state_cls is MLAFullAttentionState:
+        config = MLAAttentionConfig(
+            logical_layer_groups=((0,),), latent_dim=4, dtype=torch.float32,
+        )
+    else:
+        config = GQAAttentionConfig(
+            logical_layer_groups=((0,),),
+            global_head_num=heads,
+            head_dim=4,
+            dtype=torch.float32,
+            replicated=replicated,
+        )
     reference = state_cls(config, page_size=4, device="cuda")
     reference.allocate_storage(4)
     for storage_buffer in full_state_test_buffers(reference).values():
@@ -157,7 +163,7 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
         source = GDNState(config, request_capacity=1, device="meta")
         other_config = replace(config, logical_layer_ids=(1,), global_k_heads=4)
     else:
-        config = FullAttentionConfig(
+        config = GQAAttentionConfig(
             logical_layer_groups=((0,),),
             global_head_num=2,
             head_dim=4,

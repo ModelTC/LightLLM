@@ -27,13 +27,14 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.attention_state.full_att import (
     FullAttentionState,
     GQAFullAttentionState,
-    FullAttentionConfig,
+    GQAAttentionConfig,
+    MLAAttentionConfig,
+    create_gqa_state,
+    create_mla_state,
     GroupQuantizedAttentionConfig,
     GroupQuantizedFullAttentionState,
     MLAFullAttentionState,
-    PackedMLAAttentionConfig,
     PackedMLAFullAttentionState,
-    StaticFP8AttentionConfig,
     StaticFP8FullAttentionState,
 )
 
@@ -42,45 +43,40 @@ if TYPE_CHECKING:
 
 
 def definition(kind: str):
-    config = FullAttentionConfig(
-        logical_layer_groups=((0,), (2,)),
-        global_head_num=2,
-        head_dim=16,
-        dtype=torch.bfloat16,
-    )
-    if kind in ("int4", "int8"):
-        return GroupQuantizedFullAttentionState(
-            GroupQuantizedAttentionConfig(**vars(config), bits=4 if kind == "int4" else 8),
-             page_size=4, device="meta",
+    if kind == "mla" or kind.startswith("packed"):
+        return create_mla_state(
+            config=MLAAttentionConfig(
+                logical_layer_groups=((0,), (2,)),
+                latent_dim=512 if kind == "packed_glm" else 576,
+                dtype=torch.bfloat16,
+            ),
+            kv_type="fp8kv_dsa" if kind == "packed_fp8" else "None",
+            packed=kind.startswith("packed"),
+            page_size=4,
+            device="meta",
         )
+    kv_type = {
+        "int4": "int4kv", "int8": "int8kv",
+        "static_head": "fp8kv_sph", "static_tensor": "fp8kv_spt",
+    }.get(kind, "None")
+    state = create_gqa_state(
+        config=GQAAttentionConfig(
+            logical_layer_groups=((0,), (2,)),
+            global_head_num=2,
+            head_dim=16,
+            dtype=torch.bfloat16,
+        ),
+        kv_type=kv_type,
+        page_size=4,
+        device="meta",
+    )
     if kind.startswith("static"):
         heads = 2 if kind == "static_head" else 1
-        state = StaticFP8FullAttentionState(
-            StaticFP8AttentionConfig(
-                **vars(config), scale_mode="per_head" if heads == 2 else "per_tensor"
-            ),
-            page_size=4, device="meta",
-        )
         bind_test_fp8_calibration(
             state=state, scales=torch.ones((2, heads * 2), dtype=torch.float32),
             q_scales=torch.ones((2, 2), dtype=torch.float32) if heads == 2 else None,
         )
-        return state
-    if kind.startswith("packed"):
-        fp8 = kind == "packed_fp8"
-        kv_dim = 512 if kind == "packed_glm" else 576
-        config = replace(
-            config,
-            global_head_num=1,
-            head_dim=800 if fp8 else kv_dim + 72,
-            dtype=torch.uint8 if fp8 else config.dtype,
-        )
-        return PackedMLAFullAttentionState(
-            PackedMLAAttentionConfig(**vars(config), kv_dim=kv_dim, fp8_nope_dim=512 if fp8 else 0), page_size=4, device="meta"
-        )
-    if kind == "mla":
-        return MLAFullAttentionState(replace(config, global_head_num=1, head_dim=576), page_size=4, device="meta")
-    return GQAFullAttentionState(config, page_size=4, device="meta")
+    return state
 
 
 def allocated_bytes(state: FullAttentionState, token_only: bool = False):
@@ -294,12 +290,14 @@ def test_pd_layout_reserves_aligned_storage_for_mixed_token_formats(
         (GQAFullAttentionState, "main", 3, torch.bfloat16),
         (GQAFullAttentionState, "main", 1, torch.float32),
     ):
-        config = FullAttentionConfig(
-            logical_layer_groups=((0,),),
-            global_head_num=1,
-            head_dim=dim,
-            dtype=dtype,
-        )
+        if state_cls is MLAFullAttentionState:
+            config = MLAAttentionConfig(
+                logical_layer_groups=((0,),), latent_dim=dim, dtype=dtype,
+            )
+        else:
+            config = GQAAttentionConfig(
+                logical_layer_groups=((0,),), global_head_num=1, head_dim=dim, dtype=dtype,
+            )
         manager.register_state(role, state_cls(config, page_size=1, device="meta"))
     manager.finish_state_registration()
     # 无页头；三个 State 的 3-token 区域分别由 6/36/24 字节对齐到 8/40/24。
@@ -369,7 +367,7 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
         logical_layer_groups=((0,),),
         global_head_num=1,
         head_dim=128,
-        dtype=torch.float32,
+        scale_dtype=torch.float32,
         bits=8,
         group_size=128,
     )
@@ -464,7 +462,7 @@ def test_pd_runtime_capacity_includes_field_padding(
     manager = AttentionStateManager(request_capacity=1)
     if full_page_tokens is not None:
         pd_args.pd_kv_page_size = full_page_tokens
-        config = FullAttentionConfig(
+        config = GQAAttentionConfig(
             logical_layer_groups=((0,),),
             global_head_num=1,
             head_dim=1,
@@ -551,7 +549,7 @@ def test_page_bytes_refresh_with_storage_dependent_layout(
 
     pd_args.pd_kv_page_size = pd_args.cpu_cache_token_page_size = 3
     manager = AttentionStateManager(request_capacity=1)
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((0,),),
         global_head_num=1,
         head_dim=3,
@@ -583,7 +581,7 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
     pd_args: EasyDict,
 ):
     manager = AttentionStateManager(request_capacity=1)
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((0,),),
         global_head_num=1,
         head_dim=1,
@@ -866,7 +864,7 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     pd_args.pd_kv_page_size = 3
     pd_args.cpu_cache_token_page_size = 3
     manager = AttentionStateManager(request_capacity=1)
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((0,),),
         global_head_num=1,
         head_dim=3,
@@ -935,7 +933,7 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
             )
 
     pd_args.cpu_cache_token_page_size = pd_args.pd_kv_page_size = 4
-    config = FullAttentionConfig(
+    config = GQAAttentionConfig(
         logical_layer_groups=((0,),),
         global_head_num=1,
         head_dim=2,

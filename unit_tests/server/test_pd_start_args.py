@@ -93,9 +93,9 @@ def test_disabled_cpu_cache_keeps_page_size_unset(startup_args):
 
 def test_default_attention_factory_uses_gqa():
     import torch
-    from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFullAttentionState, create_gqa_state
+    from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState, create_gqa_state
 
-    state = create_gqa_state(config=FullAttentionConfig(
+    state = create_gqa_state(config=GQAAttentionConfig(
         logical_layer_groups=((0,),), global_head_num=4, head_dim=128, dtype=torch.bfloat16,
     ), device="meta")
     assert isinstance(state, GQAFullAttentionState)

@@ -14,7 +14,7 @@ import torch
 from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
-    FullAttentionConfig,
+    GQAAttentionConfig,
 )
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.common.attention_state import AttentionStateManager
@@ -50,7 +50,7 @@ def main():
     )
     tokens = args.tokens_per_page * args.pages
     full = GQAFullAttentionState(
-        FullAttentionConfig(
+        GQAAttentionConfig(
             logical_layer_groups=tuple((layer,) for layer in tuple(range(12))),
             global_head_num=1,
             head_dim=256,

@@ -25,7 +25,7 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """DeepSeek V3.2 使用包含 indexer 字段的 packed MLA，编码由 MLA 创建入口选择。"""
-        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_mla_state
+        from lightllm.common.attention_state.full_att import MLAAttentionConfig, create_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -33,10 +33,9 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
         if not logical_layer_groups:
             return []
         state = create_mla_state(
-            config=FullAttentionConfig(
+            config=MLAAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
-                global_head_num=1,
-                head_dim=config["kv_lora_rank"] + config["qk_rope_head_dim"],
+                latent_dim=config["kv_lora_rank"] + config["qk_rope_head_dim"],
                 dtype=get_torch_dtype(args.data_type),
                 tp_rank=tp_rank, tp_world_size=tp_world_size,
             ),

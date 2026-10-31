@@ -47,7 +47,7 @@ class Gemma_2bTpPartModel(LlamaTpPartModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """Gemma 2B 保留复制 KV 的布局及本模型定义的 head 维度。"""
-        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -55,7 +55,7 @@ class Gemma_2bTpPartModel(LlamaTpPartModel):
         if not logical_layer_groups:
             return []
         state = create_gqa_state(
-            config=FullAttentionConfig(
+            config=GQAAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
                 global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
                 head_dim=config["hidden_size"] // config["num_attention_heads"],

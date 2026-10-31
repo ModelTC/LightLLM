@@ -107,7 +107,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """按 Qwen 混合层周期选择 full-attention 层，保留全局逻辑层号。"""
-        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -117,7 +117,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         if not logical_layer_groups:
             return []
         state = create_gqa_state(
-            config=FullAttentionConfig(
+            config=GQAAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
                 global_head_num=cfg.full_att_all_num_kv_heads,
                 head_dim=cfg.full_att_head_dim,

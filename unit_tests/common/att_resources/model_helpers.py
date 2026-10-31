@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import torch
 from lightllm.common.attention_state.types import TensorField
 from lightllm.common.attention_state.full_att import (
-    FullAttentionState, FullAttentionConfig, StaticFP8FullAttentionState,
+    FullAttentionState, GQAAttentionConfig, MLAAttentionConfig,
+    GroupQuantizedAttentionConfig, StaticFP8AttentionConfig, PackedMLAAttentionConfig,
+    CompressedAttentionConfig, FP8E8M0PackedMLAConfig, StaticFP8FullAttentionState,
     GQAFullAttentionState, GroupQuantizedFullAttentionState, MLAFullAttentionState, PackedMLAFullAttentionState,
 )
 
@@ -52,7 +54,11 @@ def bind_test_fp8_calibration(
 
 def rebuild_full_state(
     template: FullAttentionState,
-    config: FullAttentionConfig | None = None,
+    config: (
+        GQAAttentionConfig | MLAAttentionConfig | GroupQuantizedAttentionConfig
+        | StaticFP8AttentionConfig | PackedMLAAttentionConfig
+        | CompressedAttentionConfig | FP8E8M0PackedMLAConfig | None
+    ) = None,
     token_capacity: int | None = None,
     page_size: int | None = None,
     device: str | torch.device | None = None,
@@ -167,15 +173,15 @@ def full_state_test_fields(
     if isinstance(state, PackedMLAFullAttentionState):
         storage = buffers["kv"]
         raw = storage.view(torch.uint8)
-        if state.config.fp8_nope_dim:
+        if state.config.dtype == torch.float8_e4m3fn:
             fields = {
                 "kv_nope": TensorField(tensor=raw[..., :512], axes=axes),
                 "kv_scale": TensorField(tensor=raw[..., 512:528].view(torch.float32), axes=("layer", "token", "head", "group")),
                 "kv_rope": TensorField(tensor=raw[..., 528:656].view(torch.bfloat16), axes=axes),
             }
         else:
-            fields = {"kv": TensorField(tensor=storage[..., :state.config.kv_dim], axes=axes)}
-        start = state.indexer_offset
+            fields = {"kv": TensorField(tensor=storage[..., :state.config.latent_dim], axes=axes)}
+        start = state.config.indexer_offset
         end = start + state.config.indexer_dim
         fields["indexer_k"] = TensorField(tensor=raw[..., start:end], axes=axes)
         fields["indexer_scale"] = TensorField(tensor=raw[..., end:end + 4].view(torch.float32), axes=("layer", "token", "head", "scale"))

@@ -7,7 +7,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.full_att import FullAttentionConfig, FullAttentionState, GQAFullAttentionState
+from lightllm.common.attention_state.full_att import GQAAttentionConfig, FullAttentionState, GQAFullAttentionState
 from lightllm.common.attention_state.bounded_att import KDAState, GDNState
 from unit_tests.common.att_resources.test_bounded_state import make_state
 from unit_tests.common.att_resources.test_tail_state import make_tail
@@ -25,7 +25,7 @@ def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
     model.max_req_num = 0
     model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     state = GQAFullAttentionState(
-        layout_config=FullAttentionConfig(
+        layout_config=GQAAttentionConfig(
             logical_layer_groups=((0,),),
             global_head_num=1,
             head_dim=128,
@@ -49,7 +49,7 @@ def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str, mo
     for model_role in ("main", "draft0"):
         for dtype, groups in ((torch.bfloat16, ((0, 2),)), (torch.float16, ((3,),))):
             manager.register_state(model_role, GQAFullAttentionState(
-                layout_config=FullAttentionConfig(
+                layout_config=GQAAttentionConfig(
                     logical_layer_groups=groups,
                     global_head_num=1,
                     head_dim=128,

@@ -149,14 +149,14 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """Gemma3 使用固定 256 维 BF16 KV，不随权重精度改变。"""
-        from lightllm.common.attention_state.full_att import FullAttentionConfig, create_gqa_state
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
 
         config = cls.normalize_model_config(model_config)
         logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
         if not logical_layer_groups:
             return []
         state = create_gqa_state(
-            config=FullAttentionConfig(
+            config=GQAAttentionConfig(
                 logical_layer_groups=logical_layer_groups,
                 global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
                 head_dim=256,

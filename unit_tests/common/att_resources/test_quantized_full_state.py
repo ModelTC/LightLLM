@@ -41,7 +41,7 @@ def make_quant_state(kind: str, device: str | torch.device | int):
             logical_layer_groups=((1,), (3,)),
             global_head_num=2,
             head_dim=16,
-            dtype=torch.float16,
+            scale_dtype=torch.float16,
             bits=int(kind[-1]),
         )
         prepared_full_state = GroupQuantizedFullAttentionState(config, page_size=4, device=device)
@@ -53,7 +53,6 @@ def make_quant_state(kind: str, device: str | torch.device | int):
             logical_layer_groups=((1,), (3,)),
             global_head_num=2,
             head_dim=16,
-            dtype=torch.uint8,
             scale_mode="per_head" if per_head else "per_tensor",
         )
         scales = torch.arange(
@@ -71,10 +70,9 @@ def make_quant_state(kind: str, device: str | torch.device | int):
         return prepared_full_state
     fp8 = kind == "packed_fp8"
     config = PackedMLAAttentionConfig(
+        latent_dim=576,
         logical_layer_groups=((1,), (3,)),
-        global_head_num=1,
-        head_dim=800 if fp8 else 648,
-        dtype=torch.uint8 if fp8 else torch.bfloat16,
+        dtype=torch.float8_e4m3fn if fp8 else torch.bfloat16,
         fp8_nope_dim=512 if fp8 else 0,
     )
     prepared_full_state = PackedMLAFullAttentionState(config, page_size=4, device=device)
@@ -261,7 +259,7 @@ def test_cuda_compute_write_preserves_unrelated_fields(kind: str):
         storage_buffer.zero_()
     if isinstance(state, PackedMLAFullAttentionState):
         state.get_layer_view(1).indexer_k.fill_(29)
-    dims = state.config.kv_dim if isinstance(state, PackedMLAFullAttentionState) else state.config.head_dim
+    dims = state.config.latent_dim if isinstance(state, PackedMLAFullAttentionState) else state.config.head_dim
     heads = 1 if isinstance(state, PackedMLAFullAttentionState) else 2 * state.config.head_num
     kv = torch.randn((2, heads, dims), dtype=torch.bfloat16, device="cuda")
     ids = torch.tensor([1, 6], dtype=torch.int32, device="cuda")
@@ -289,7 +287,7 @@ def test_cuda_compute_write_preserves_unrelated_fields(kind: str):
     else:
         view = state.get_layer_view(1)
         assert (view.indexer_k == 29).all()
-        if not state.config.fp8_nope_dim:
+        if state.config.dtype != torch.float8_e4m3fn:
             assert torch.equal(view.kv[ids], kv)
         else:
             fields = full_state_test_fields(state)

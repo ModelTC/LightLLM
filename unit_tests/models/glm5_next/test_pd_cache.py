@@ -71,12 +71,10 @@ def make_mems(monkeypatch, request):
             full = PackedMLAFullAttentionState(
                 PackedMLAAttentionConfig(
                     logical_layer_groups=tuple((layer,) for layer in full_layer_ids),
-                    global_head_num=1,
-                    head_dim=584,
                     dtype=torch.bfloat16,
                     tp_rank=rank,
                     tp_world_size=tp,
-                    kv_dim=512,
+                    latent_dim=512,
                 ),
                  page_size=args.page_size,
             )
