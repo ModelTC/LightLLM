@@ -34,7 +34,7 @@ def test_chunk_ids_and_lengths_use_the_same_complete_boundaries(hybrid, spans):
 
 @pytest.mark.usefixtures("kv_allocator_environment")
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
-def test_bounded_reset_preserves_tail_and_cache_miss_resets_all(monkeypatch):
+def test_bounded_cache_miss_resets_runtime_and_preserves_pages(monkeypatch):
     from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
     from unit_tests.common.att_resources.test_manager_helpers import composition, init_source
 
@@ -44,9 +44,7 @@ def test_bounded_reset_preserves_tail_and_cache_miss_resets_all(monkeypatch):
     )
     resources = composition(device="cuda")
     slots = init_source(resources)
-    tail = resources.main_kpool_c4_fp32_state
     resources.reset_bounded_att_state([1])
-    assert (tail.tail_buffer[:, 1] == 9).all()
     resources.restore_bounded_att_runtime_from_pages(
         req_indices=[1],
         state_token_lens=[8],
@@ -83,8 +81,6 @@ def test_bounded_reset_preserves_tail_and_cache_miss_resets_all(monkeypatch):
         expected_conv, expected_ssm = (23, 47) if state is resources.main_kda_conv_fp32_ssm_fp32_state else (24, 48)
         assert (pool.conv_state[slots[-1]] == expected_conv).all()
         assert (pool.ssm_state[slots[-1]] == expected_ssm).all()
-    assert not tail.tail_buffer[:, 1].any()
-    assert (tail.tail_buffer[:, 0] == 3).all()
     assert resources.bounded_att_big_page_allocator.free_count == 1
     assert req.cur_kv_len == req.hold_kv_len == req.shm_req.shm_cur_kv_len == 0
 

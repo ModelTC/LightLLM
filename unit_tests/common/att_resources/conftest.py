@@ -24,9 +24,9 @@ def allocator_environment(kv_allocator_environment: None, monkeypatch: pytest.Mo
     state_classes = [FullAttentionState, BoundedAttentionState]
     for state_class in state_classes:
         state_classes.extend(state_class.__subclasses__())
-        getter = state_class.get_cpu_transfer_regions
-        if hasattr(getter, "cache_clear"):
-            getter.cache_clear()
+        for getter in (state_class.get_cpu_transfer_regions, state_class.get_pd_transfer_regions):
+            if hasattr(getter, "cache_clear"):
+                getter.cache_clear()
     get_env_start_args.cache_clear()
 
 

@@ -308,6 +308,8 @@ class PackedMLAFullAttentionState(FullAttentionState):
     # 五、PD 分离传输
     # ========================================================================
 
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 PD 页大小返回字段与切片，交由管理器安排其在联合页中的位置。"""
         page_tokens = get_env_start_args().pd_kv_page_size

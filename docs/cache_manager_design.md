@@ -4,7 +4,7 @@
 
 ## 1. 设计约定
 
-统一在 `lightllm/common/attention_state/` 下组织可复用的资源实现，由 `AttentionStateManager` 提供资源初始化、内部状态页聚合操作及 CPU/DP/PD 数据传输的默认实现。所有模型直接使用该类，资源组合由模型的三类 State 工厂决定。radix cache、CPU cache 和传输调用方依赖模型持有的管理器，资源层不反向依赖这些调用方。
+统一在 `lightllm/common/attention_state/` 下组织可复用的资源实现，由 `AttentionStateManager` 提供资源初始化、内部状态页聚合操作及 CPU/DP/PD 数据传输的默认实现。所有模型直接使用该类，资源组合由模型的两类 State 工厂决定。radix cache、CPU cache 和传输调用方依赖模型持有的管理器，资源层不反向依赖这些调用方。
 
 公共层约定三种 allocator 入口，具体实例按模型组合和启用的功能初始化：
 
@@ -17,10 +17,10 @@ class AttentionStateManager:
 
 这三个入口表示资源管理器对分配域的管理责任，聚合操作与传输接口见第 6.2 节。具体初始化必须保证所需 allocator 已创建或绑定，无需的 allocator 为 `None`。例如纯 full-attention 模型只初始化 `full_att_allocator`；启用 bounded 状态页的组合再按配置初始化大小页 allocator。GPU 运行态的存在本身不要求启用页池。
 
-- 基类不声明固定的 `main_full_att`、`draft_full_att`、`main_linear_att`、`draft_linear_att`、`main_att_tail`、`draft_att_tail` 成员。具体模型按需组织资源组合与实现类型，拥有的 State 成员统一遵守第 3.5 节的角色、类型和存储方案命名。
-- `full_att`、`bounded_att`、`att_tail` 作为可复用实现的目录分类。full attention 保存历史 KV；bounded attention 由 `BoundedAttentionState` 抽象基类约定操作，当前包含 `KDAState`、`GDNState`，以后可加入 sliding-window 等有界状态，各自定义运行态与可选页池；attention tail 保存索引、池化、压缩等模块在增量计算中需要跨步骤保留的尾部数据及控制信息；具体实现决定恢复边界和快照要求。
+- 基类不声明固定的 `main_full_att`、`draft_full_att`、`main_linear_att`、`draft_linear_att` 成员。具体模型按需组织资源组合与实现类型，拥有的 State 成员统一遵守第 3.5 节的角色、类型和存储方案命名。
+- `full_att` 保存全局历史 KV；`bounded_att` 管理绑定请求的有界运行态，包括 KDA/GDN、SWA，以及用于 KV 压缩和 K-pool 索引池化的窗口候选/gate。各 State 决定自身的快照需求和恢复边界。
 - main/draft 可以采用不同方案；同一共享分配域的参与方使用同一个 allocator 实例，遵守统一的索引和回收约定。资源对象持有 buffer 和布局信息；管理器创建或绑定共享 allocator，调用方直接使用对应 allocator 分配与归还索引。
-- `AttentionStateManager` 提供运行态清零、清零指定请求的 tail、token 复制、状态页的聚合保存、恢复和数据传输操作；缓存功能流程决定匹配、引用、发布与淘汰时机，推理流程决定请求执行阶段。
+- `AttentionStateManager` 提供运行态清零、token 复制、状态页的聚合保存、恢复和数据传输操作；缓存功能流程决定匹配、引用、发布与淘汰时机，推理流程决定请求执行阶段。
 - `req_to_token_indexs` 和请求槽位仍由 `ReqManager` 持有。资源管理器接收显式传入的物理索引、请求槽位及恢复长度，提供资源操作接口。
 - 内部调用契约使用 `assert`，例如页类型、物理索引范围、Tensor 形状及共享分配域的一致性；用户配置、外部页面内容及格式兼容性继续显式校验，资源不足等运行失败保留相应异常。GPU 上的 MTP 状态选择保留异步断言，避免引入主机同步。
 - 内部 attention 资源的暴露方式作为接口设计问题单独讨论。当前建议按调用方区分统一资源操作、模型推理视图和 State 直接传输操作，详见第 6 节。
@@ -46,7 +46,7 @@ class AttentionStateManager:
 管理器的 `write_req_to_cpu` / `read_req_from_cpu` 保留原名；绝对状态长度仍统一使用
 `state_token_len` / `state_token_lens`，不改为 prefix 命名。`AxisMapping` 的
 `local_start` / `external_start` 和 `local_circular` / `external_circular` 始终表示本地与外部两侧，
-读回时仅反转数据方向；映射集合统一命名为 `axis_mappings`，单次覆盖为 `axis_mapping_overrides`。
+读回时仅反转数据方向；映射集合统一命名为 `axis_mappings`，请求窗口起点由 State 根据本次绝对前缀长度确定。
 
 新增 Python 文件、类和接口按 **公共函数在前、私有辅助函数在后** 排列。已有基础流程文件以保留功能、减少 review 差异为优先，保留原有函数相对顺序，不为满足分组规范整体重排。
 
@@ -64,12 +64,12 @@ class AttentionStateManager:
 
 State 的基类与具体实现同样使用中文大块分隔注释，依次组织基础定义、该类资源的数据操作、CPU Cache、DP、PD、私有辅助实现。KDA/GDN 直接继承 `BoundedAttentionState`；所有具体 full-attention State 直接继承 `FullAttentionState`。具体 State 之间不继承实现，分别在自己的文件中按上述分块组织完整操作。
 
-- 分类数据操作统一带 `full_att`、`bounded_att` 或 `att_tail` 标识，例如 `write_full_att_kv`、`copy_full_att_tokens`、`reset_bounded_att_state`、`save_bounded_att_runtime_to_pages`、`reset_attention_tail_state`。管理器与 State 的同类操作同名，区别在于聚合多个 State 或只操作自身存储。
+- 分类数据操作统一带 `full_att` 或 `bounded_att` 标识，例如 `write_full_att_kv`、`copy_full_att_tokens`、`reset_bounded_att_state`、`save_bounded_att_runtime_to_pages`。管理器与 State 的同类操作同名，区别在于聚合多个 State 或只操作自身存储。
 - `get_layer_view` 用于计算访问，CPU/DP/PD 保持按传输方向命名。State 不增加仅用于统一名字的转发方法。
 - 所有 attention 配置字段必须提供中文注释，说明业务含义、单位或对应 Tensor 轴、全局/TP 本地范围，以及适用方案和默认值的特殊语义；派生属性还需说明计算关系。资源身份只保存在 State，不放入 config。
 - 已知的调用参数使用显式 `key=value`，如 `size=...`、`dtype=...`、`device=...`、`pin_memory=...`；不先组装 `options` 字典再通过 `**options` 传入。
 - 资源身份、布局范围和分配域选择等必要检查直接在使用处展开，不再包装成只有断言、布尔判断或转发循环的小函数。同一操作已校验的槽位继续复用，避免逐页、逐 State 重复校验分配器。
-- 每个公共接口使用中文 docstring 说明操作对象、索引含义和数据范围；在有差异时明确量化参数、前缀长度、MTP 游标及完整 tail 的处理。私有实现使用独立分块，关键布局或状态转换另加说明。
+- 每个公共接口使用中文 docstring 说明操作对象、索引含义和数据范围；在有差异时明确量化参数、前缀长度、MTP 游标及完整逻辑窗口的处理。私有实现使用独立分块，关键布局或状态转换另加说明。
 - bounded 运行态重置、大小页保存与恢复、MTP 提交和运行态复制集中排列。pool 只保存快照 buffer；前缀与槽位的关联、页面发布和引用生命周期由调用流程管理。
 
 ## 2. 整体结构与职责边界
@@ -86,8 +86,7 @@ flowchart TD
     Concrete --> Alloc[按需初始化或绑定的共享 allocator]
     Concrete --> Internal[模型自行组织的内部资源]
     Internal --> Full[full attention 实现]
-    Internal --> Bounded[bounded attention：KDAState / GDNState 等]
-    Internal --> Indexer[attention tail 实现]
+    Internal --> Bounded[bounded attention：KDA/GDN、SWA、窗口压缩器]
     Concrete -->|绑定具体视图| Forward[模型与 attention backend]
     Transport[DP/PD 调度] -->|调用具体资源操作| Concrete
 ```
@@ -150,9 +149,8 @@ KDAState                         # 一种具体 attention 状态实现
 GDNState                         # 独立定义 GDN 状态、布局和快照操作
 └── 按其实现组织 Conv / SSM / MTP 状态及可选大小页 pool
 
-AttentionTailState                 # 抽象操作契约，不固定内部存储
-└── KPoolAttentionTailState         # GLM K-pool 的具体状态
-    └── tail_buffer              # 原始 key/gate ring，按层、请求组织
+WindowCompressorState             # bounded 窗口候选与 gate，供 V4 压缩和 GLM K-pool 使用
+└── buffer                        # 同 dtype 的 candidate|gate 拼接 Tensor
 ```
 
 同一共享分配域中的 allocator 只初始化一次，由 main/draft 共用的唯一 `AttentionStateManager` 管理生命周期。调用方解除相关引用后，向对应 allocator 单次归还索引，不因模型数增加而重复分配或释放。
@@ -167,7 +165,7 @@ AttentionTailState                 # 抽象操作契约，不固定内部存储
 | KV、量化 scale、packed indexer buffer 与层映射 | `AttentionStateManager` 组织的 full-attention 资源 | 按统一容量建立存储，使用共享索引访问各自数据 |
 | KDA/GDN 的 Conv/SSM、MTP 游标 | `AttentionStateManager`持有的 `KDAState` / `GDNState` | 使用共同请求槽位域，由各算法状态对象分别维护 |
 | 大小页 checkpoint buffer | 各具体状态对象中启用的 pool | 使用共同分配的槽位 ID 保存数据；不持有独立空闲列表或长度记录 |
-| indexer 原始尾部窗口 | `AttentionStateManager` 组织的 indexer 资源 | 使用共同请求槽位域，各自维护所需 tail 布局 |
+| indexer 原始尾部窗口 | `AttentionStateManager` 组织的 indexer 资源 | 使用共同请求槽位域，各自维护所需窗口布局 |
 | 请求槽位 | `ReqManager` | 请求创建时分配，完成时回收，暂停时保留 |
 | 前缀缓存索引与引用记录 | radix cache 功能 | 维护前缀节点及引用；通过管理器保存、恢复关联资源数据，解除引用后直接归还 allocator |
 
@@ -197,7 +195,7 @@ main/draft 选择各自需要的具体状态对象，例如 main 使用 `KDAStat
 
 共享 checkpoint 需要约定共同的恢复边界和 token 位置语义，并确保参与实现都能捕获该位置的状态。MTP 推测中的临时状态需先按执行流程选出对应位置的状态，再保存快照。共享索引不要求 main/draft 每一步同步执行；回收时须等所有参与方结束使用，槽位只归还一次。
 
-linear 运行态与两侧 indexer tail 均由 `ReqManager` 提供的 `req_idx` 定位。indexer tail 不单独分配 checkpoint 槽位；其状态布局和恢复规则由各自实现描述。
+linear 运行态与两侧索引池化窗口均由 `ReqManager` 提供的 `req_idx` 定位。索引池化窗口不单独分配 checkpoint 槽位；其状态布局和恢复规则由各自实现描述。
 
 ### 3.3 分配状态与数据状态分离
 
@@ -205,7 +203,7 @@ allocator 是索引分配的唯一事实来源，资源对象持有存储和布�
 
 同一 linear checkpoint 可以包含 main/draft 多个状态资源的快照。槽位分配状态由共享 allocator 维护，数据内容和有效长度由各侧 pool 分别维护。
 
-对于使用 K-pool 的实现，已完成池化的压缩 key/scale 保留在对应 full-attention 资源的 packed 存储中，indexer tail 资源管理增量计算需要的原始短窗口；二者的组合关系由`AttentionStateManager`维护。
+对于使用 K-pool 的实现，已完成池化的压缩 key/scale 保留在对应 full-attention 资源的 packed 存储中，索引池化窗口资源管理增量计算需要的原始短窗口；二者的组合关系由`AttentionStateManager`维护。
 
 ### 3.4 按具体 attention 实现定义状态
 
@@ -243,11 +241,11 @@ State 直接持有按层组织的 Tensor，不额外设置通用状态管理对�
 
 ### 3.5 State 成员命名、资源身份与唯一性
 
-`AttentionStateManager(request_capacity)` 只记录共享请求容量，三个 allocator 初始为 `None`，State 由各模型创建后通过 `register_state(model_role, state)` 绑定。`model_role` 为 `main` 或 `draft0` 到 `draft35`；接口根据 `state.get_state_type()` 生成规范成员名，并设置 `state.state_name`。各具体 full-attention 配置、KDA/GDN 的 `ConvSSMStateConfig` 和 `KPoolStateConfig` 均不保存资源身份，绑定时保留原配置对象；这些 State 未绑定时的 `state_name` 为 `None`，资源名称只保存在 State 上。管理器持有传入的原对象，不复制 Tensor、不重建 State、不创建额外的 buffer 视图，meta State 和已分配运行态均可绑定。每个角色的同一方案只能绑定一次，同一个 State 对象不能分配给多个角色；`finish_state_registration()` 后不再添加 State。allocator 仍由后续容量与存储初始化流程设置。
+`AttentionStateManager(request_capacity)` 只记录共享请求容量，三个 allocator 初始为 `None`，State 由各模型创建后通过 `register_state(model_role, state)` 绑定。`model_role` 为 `main` 或 `draft0` 到 `draft35`；接口根据 `state.get_state_type()` 生成规范成员名，并设置 `state.state_name`。各具体 full-attention 配置、KDA/GDN 的 `ConvSSMStateConfig` 和 `WindowCompressorStateConfig` 均不保存资源身份，绑定时保留原配置对象；这些 State 未绑定时的 `state_name` 为 `None`，资源名称只保存在 State 上。管理器持有传入的原对象，不复制 Tensor、不重建 State、不创建额外的 buffer 视图，meta State 和已分配运行态均可绑定。每个角色的同一方案只能绑定一次，同一个 State 对象不能分配给多个角色；`finish_state_registration()` 后不再添加 State。allocator 仍由后续容量与存储初始化流程设置。
 
-管理器成员名与 `state.state_name` 完全一致，统一使用 `{model_role}_{算法及存储方案}_state`。模型角色为 `main` 或 `draft0` 到 `draft35`，最多 36 个 draft。资源类别由 `FullAttentionState`、`BoundedAttentionState`、`AttentionTailState` 类型表达，名称中不再重复 `full_att`、`bounded_att`、`att_tail`。
+管理器成员名与 `state.state_name` 完全一致，统一使用 `{model_role}_{算法及存储方案}_state`。模型角色为 `main` 或 `draft0` 到 `draft35`，最多 36 个 draft。资源类别由 `FullAttentionState`、`BoundedAttentionState` 类型表达，名称中不再重复 `full_att`、`bounded_att`。
 
-三类 State 都必须实现 `get_state_type()`，只返回中间的算法及方案标记，使用小写 snake_case。方案标记区分量化位宽、group size、scale 方式/精度，KDA/GDN 分别标注 Conv 和 SSM 精度，K-pool 标注压缩比例与存储精度。层号、容量、设备、TP rank 和请求信息不进入名称。
+两类 State 都必须实现 `get_state_type()`，只返回中间的算法及方案标记，使用小写 snake_case。方案标记区分量化位宽、group size、scale 方式/精度，KDA/GDN 分别标注 Conv 和 SSM 精度，K-pool 标注压缩比例与存储精度。层号、容量、设备、TP rank 和请求信息不进入名称。
 
 同一角色、同一标记只能注册一个 State，包含该方案的全部逻辑层；不同存储方案可以共存，通过算法字符串、层归属及可选的 State 类别筛选。名字用于资源定位，不能替代完整布局兼容性检查。标记注册后保持稳定，meta 定义、实际存储和 CPU/DP/PD 进程使用相同名称，不提供旧名称别名。
 
@@ -259,9 +257,9 @@ State 直接持有按层组织的 Tensor，不额外设置通用状态管理对�
 | MLA BF16 | `draft0_mla_bf16_state` |
 | 带 indexer 字段的 packed MLA FP8 | `main_mla_packed_fp8_group128_state` |
 | KDA / GDN | `main_kda_conv_bf16_ssm_fp32_state` / `draft0_gdn_conv_bf16_ssm_fp32_state` |
-| K-pool C4 indexer tail | `main_kpool_c4_bf16_state` |
+| K-pool W4/S4 索引池化窗口 | `main_compressor_indexer_w4_s4_bf16_state` |
 
-普通 KV 使用 `gqa`，涵盖 MHA/GQA/MQA；MLA 使用 `mla`。`packed` 区分 KV 与 indexer 联合存储，FP8 packed MLA 还标注量化 group size。KDA/GDN 使用 `conv_*_ssm_*` 明确两类状态的精度；K-pool 使用 `kpool_cN_*` 标明压缩比例与存储精度。完整 shape、标定方式等仍保存在 State 配置中。
+普通 KV 使用 `gqa`，涵盖 MHA/GQA/MQA；MLA 使用 `mla`。`packed` 区分 KV 与 indexer 联合存储，FP8 packed MLA 还标注量化 group size。KDA/GDN 使用 `conv_*_ssm_*` 明确两类状态的精度；窗口压缩器使用 `compressor_{target}_wW_sS_*` 标明用途、窗口、步长与存储精度。完整 shape、标定方式等仍保存在 State 配置中。
 
 以启用 draft 的 GLM BF16 配置为例，管理器的 State 成员是：
 
@@ -272,9 +270,9 @@ AttentionStateManager
 ├── bounded_att_small_page_allocator
 ├── main_mla_packed_bf16_state
 ├── main_kda_conv_bf16_ssm_fp32_state
-├── main_kpool_c4_bf16_state
+├── main_compressor_indexer_w4_s4_bf16_state
 ├── draft0_mla_packed_bf16_state
-└── draft0_kpool_c4_bf16_state
+└── draft0_compressor_indexer_w4_s4_bf16_state
 ```
 
 当前 GLM draft 不使用 KDA，因此不创建 `draft0_kda_conv_bf16_ssm_fp32_state`。Qwen 的线性状态为 `main_gdn_conv_bf16_ssm_fp32_state`；Full Attention 按实际配置创建 `main_gqa_bf16_state` 等成员。MLA 与普通 KV 都可使用同一个 `full_att_allocator` 分配域。
@@ -293,7 +291,7 @@ main/draft 必须拥有不同逻辑 State，不能将覆盖两侧层的同一个
 
 ## 4. 目录设计
 
-目录按资源管理、allocator 与具体 State 组织，传输能力由具体实现类提供。管理器使用 `manager.py`，三类公共 State 契约使用各自目录下的 `base_state.py`；allocator 和 pool 文件按对应类名命名，具体 State 实现使用算法或布局名加 `_state.py`。Triton/CUDA 计算 kernel 位于对应计算模块，由 State 方法调用。
+目录按资源管理、allocator 与具体 State 组织，传输能力由具体实现类提供。管理器使用 `manager.py`，两类公共 State 契约使用各自目录下的 `base_state.py`；allocator 和 pool 文件按对应类名命名，具体 State 实现使用算法或布局名加 `_state.py`。Triton/CUDA 计算 kernel 位于对应计算模块，由 State 方法调用。
 
 ```text
 lightllm/common/
@@ -340,7 +338,7 @@ lightllm/common/
 │   │   ├── fp8_e8m0_swa_state.py       # FP8E8M0SlidingWindowConfig / State：仅管理近期 KV
 │   │   ├── create_window_compressor_state.py # 窗口压缩器原子运行态创建入口
 │   │   ├── window_compressor_state.py # WindowCompressorStateConfig / State：候选与 gate
-│   │   ├── window_pages_pool.py          # WindowPagesPool：单一窗口的时间有序快照
+│   │   ├── window_pages_pool.py          # SWA 与压缩器的时间有序窗口快照池
 │   │   ├── fp8_e8m0_swa_transfer.py     # FP8/E8M0 packed SWA 的 GPU 窗口搬运
 │   │   ├── window_compressor_transfer.py           # 候选/gate ring 与时间有序快照的 GPU 搬运
 │   │   ├── create_kda_state.py          # KDA 统一创建入口
@@ -349,27 +347,21 @@ lightllm/common/
 │   │   ├── create_gdn_state.py          # GDN 统一创建入口
 │   │   ├── gdn_state.py                 # GDNState：独立算法状态与页操作
 │   │   └── gdn_pages_pool.py            # GDNPagesPool：支持不同 K/V head 数和维度的快照
-│   └── att_tail/
-│       ├── __init__.py
-│       ├── base_state.py                # AttentionTailState：尾部状态抽象操作契约
-│       ├── kpool_transfer.py            # transfer_kpool_pages：单次 kernel 双向搬运环形逻辑窗口
-│       ├── create_kpool_state.py        # K-pool 统一创建入口
-│       └── kpool_state.py               # KPoolAttentionTailState：原生 ring 与恢复规则
 └── req_manager/                          # 请求槽位、KV 索引映射、采样与生命周期
 
 lightllm/models/<model>/
-├── model.py                              # 三类 State 创建接口，决定本模型的资源组合
+├── model.py                              # 两类 State 创建接口，决定本模型的资源组合
 └── config.py                             # 模型专有配置与派生参数
 
 lightllm/utils/
 └── cpu_cache_layout.py                   # build_cpu_cache_layouts：构建 CPU cache 联合页布局
 ```
 
-`allocators/` 与三类 State 目录平级。`full_att_kv_allocator.py` 提供 full-attention 的 KV 分配器，对外使用 token 数量和索引，内部遵守整页分配约束；`state_page_allocator.py` 提供 bounded-attention 的状态槽位分配器，管理器按需创建大小页两个独立实例。后者的分配能力不限定为 linear attention，使用它也不要求继承 `BoundedAttentionState`。
+`allocators/` 与两类 State 目录平级。`full_att_kv_allocator.py` 提供 full-attention 的 KV 分配器，对外使用 token 数量和索引，内部遵守整页分配约束；`state_page_allocator.py` 提供 bounded-attention 的状态槽位分配器，管理器按需创建大小页两个独立实例。后者的分配能力不限定为 linear attention，使用它也不要求继承 `BoundedAttentionState`。
 
-`full_att/base_state.py` 只定义 `FullAttentionState` 行为接口，各具体配置与对应 State 放在同一文件中；`bounded_att/base_state.py`、`att_tail/base_state.py` 分别定义另外两类公共接口；布局或算法差异由对应的 `*_state.py` 实现。full-attention 的 storage 属于具体 State 的内部实现，可与该 State 放在同一文件中；确有复用需要时再拆为内部存储工具，不设置另一套独立的 storage 公共继承体系。
+`full_att/base_state.py` 只定义 `FullAttentionState` 行为接口，各具体配置与对应 State 放在同一文件中；`bounded_att/base_state.py` 定义有界运行态的公共接口；布局或算法差异由对应的 `*_state.py` 实现。full-attention 的 storage 属于具体 State 的内部实现，可与该 State 放在同一文件中；确有复用需要时再拆为内部存储工具，不设置另一套独立的 storage 公共继承体系。
 
-`KDAState` 使用 `KDAPagesPool`，`GDNState` 使用 `GDNPagesPool`；每个 State 的 `big_pages_pool` 与 `small_pages_pool` 是对应 pool 类型的独立实例。两个 State 的 `initialize_page_pools()` 分别直接创建 `KDAPagesPool` 和 `GDNPagesPool`；管理器确定共享槽位容量后调用该公共方法，不直接构造某种通用 pool。State 页接口与管理器统一使用 `save_bounded_att_runtime_to_pages`、`restore_bounded_att_runtime_from_pages` 等名称，pool 不持有 allocator。`KPoolAttentionTailState` 管理请求运行态，不创建独立大小页 pool。
+`KDAState` 使用 `KDAPagesPool`，`GDNState` 使用 `GDNPagesPool`；每个 State 的 `big_pages_pool` 与 `small_pages_pool` 是对应 pool 类型的独立实例。两个 State 的 `initialize_page_pools()` 分别直接创建 `KDAPagesPool` 和 `GDNPagesPool`；管理器确定共享槽位容量后调用该公共方法，不直接构造某种通用 pool。State 页接口与管理器统一使用 `save_bounded_att_runtime_to_pages`、`restore_bounded_att_runtime_from_pages` 等名称，pool 不持有 allocator。K-pool 使用 W4/S4 的 `WindowCompressorState`，在整组边界无重叠历史，不创建大小页 pool。
 
 `ConvSSMStateConfig` 描述 KDA/GDN 共享的 Conv/SSM 布局，不作为所有 bounded attention 的配置契约。KDA/GDN 构造函数的 `config` 明确标注为 `ConvSSMStateConfig`，入口通过 `assert isinstance(config, ConvSSMStateConfig)` 约束类型；配置只描述层、head、维度、dtype 和 TP，不包含 `state_name`。其余构造参数为 `request_capacity`、`mtp_step` 和 `device`；State 只保存一份请求容量和 MTP 步数，设备从 Tensor 获取。大小页池初始为 `None`，容量确定后通过 `initialize_page_pools(big_page_capacity, small_page_capacity, *, device="cpu", pin_memory=True)` 创建，容量保存在 pool 中。大小页恢复直接访问 Conv/SSM 基准存储切片，不为恢复操作构造字段字典或 `TensorField`。`get_layer_view(logical_layer_id)` 直接返回 `(conv_state, ssm_state)` 两个 Tensor 引用，MTP 游标与步数从 State 读取，不另外包装视图对象。`BoundedAttentionState` 不声明抽象构造函数，仅约定操作；构造参数由具体 State 和算法 create 入口明确标注，KDA/GDN 分别实现运行态、大小页、MTP 与传输方法，不再设置中间实现基类；新的算法可以定义自己的配置、层视图和页池。管理器统一使用 `get_bounded_attention_states(role=None)` 枚举参与对象；模型通过 `create_bounded_att_states(..., device="meta")` 返回 CPU 布局定义。KDA/GDN 在各自 State 中构建 CPU/PD 传输区域；其他 bounded 布局分别实现 `get_cpu_transfer_regions()` 和 `get_pd_transfer_regions()`，管理器使用同一组接口。
 
@@ -393,15 +385,15 @@ KDA/GDN 的大小页保存与恢复、CPU cache 读写、DP 大页与运行态�
 CPU 页池和 CPU cache 页必须是当前进程已 pinned/registered 的存储；两端均为 CPU 时也由 GPU kernel 访问 mapped host memory。所有视图直接使用 `tensor.data_ptr()`，调用方保证该地址对当前 GPU 可访问；跨 GPU 访问依赖调用方已有的 peer/IPC 映射，拷贝入口不建立设备访问关系。所有操作在当前 CUDA stream 排队，调用方负责生产流依赖、存储及页面引用生命周期，以及 CPU 读取/复用前的完成事件；拷贝入口不查询主机映射、不调用 `record_stream()`，也不再依赖 CPU→CPU `copy_` 的同步语义。
 
 
-`FullAttentionState`、`BoundedAttentionState` 的具体子类直接实现 CPU、DP、PD 读写；`AttentionTailState` 实现 PD 快照读写，CPU/DP 缓存前缀恢复时按对齐边界重置；IPC 导出前由管理器统一创建浅拷贝并排除进程私有资源，State 不设置额外的序列化钩子。各具体 State 通过 `get_cpu_transfer_regions()` / `get_pd_transfer_regions()` 选择传输字段、形状及 TP 切片；字段字节对齐、区间计算和 `TransferRegion` 构造直接在 State 内展开，不再通过 `region()` 包装。各具体 full-attention State 对应的 `*_transfer.py` 由 Triton 直接按 token 和页索引搬运 KV 及配套量化字段，每个字段一次 launch 覆盖全部页，不创建 gather/scatter 中间 KV。CPU 页必须是 pinned 或已通过 `cudaHostRegister` 注册的内存；调用方在 stream/event 完成后才能读取或复用页面。每种 full-attention 方案的 CPU/PD 路径共用本方案的 `transfer_*_pages` 入口和 kernel，直接按 token 和页索引读写外部页。两条路径均兼容不足整页的有效 token；`bounded_att/transfer_utils.py` 复制完整状态快照，不接收 token 数量；`att_tail/kpool_transfer.py` 接收本地 ring 和 prefill 前缀长度，单次 Triton launch 搬运最近 `pool_size` 个逻辑位置；两个方向均只处理逻辑窗口，并将短前缀对应的窗口内位置补零。bounded-attention 和 tail 的共用传输函数使用 `page_buffers` 和必传的 `page_index`，不带 CPU/PD 前缀；页存储必须至少为二维，第一维表示页，统一通过 `page_buffers[page_index]` 取页。PD State 与 manager 读写入口统一接收 `pd_page_buffers` 和必填的 `pd_page_index`，将页集合与真实页索引直接传给共用搬运函数；不接受单页 Tensor，也不在入口添加页维度。CPU 专属读写接口仍使用 `cpu_page_buffers` 和 `cpu_page_indices`。Full attention 的各方案 CPU/PD 共用入口直接提交 Triton kernel；bounded attention 的复制视图按字段或传输区域收集为同形状批次，提交专用 kernel；K-pool tail 直接提交本方案的环形窗口 kernel，全部层的 key/gate 窗口搬运在一次 launch 中完成。取页和外部字段视图在三类函数中直接展开：先选择页，再按字节起止位置切片并解释为字段 dtype/shape，不额外逐区域断言边界、对齐或轴定义。`utils.view_max_copy_dtype` 先按末轴 `size * element_size` 是否能被 8、4、2 整除，直接选择对应的候选 tuple：8/4/2、4/2 或仅 2 字节；例如行宽 12 字节只尝试 INT32、INT16，不尝试 INT64。使用各 State 正常分配的存储，不额外遍历或检查数据指针；任一侧末轴 stride 不为 1，或元素已占至少 8 字节时直接返回原视图，先用首对 Tensor 的外层 stride 和 Storage 偏移排除必然失败的候选，其余切片的偏移继续交给 `view(dtype)` 校验，仅捕获创建视图的 `RuntimeError` 后整批退回较窄 dtype，不复制数据。该函数由 bounded 聚合拷贝、full-attention CPU/PD、DP token 拷贝及 K-pool 共用；每个同布局批次统一选择 dtype，不同字段仍按各自编码处理。五种 full-attention 的 CPU/PD 页传输和 DP token 复制，在 TP 切片后先调用 `merge_contiguous_tail_dims(start_dim=-2, keepdim=True)`，只合并两侧均连续的 head/width；合并后的 head 轴保留为 1，继续使用原有四维/五维 kernel，再选择最大搬运 dtype。任一侧存在 head 间隙时沿用原布局。layer/token/page 等独立寻址轴及两侧各自容量保持不变；K-pool 的尾部只有 channel 一维，window 仍独立，不再跨 window 合并。full-attention 在各方案的 `*_transfer.py` 中直接应用 TP 切片，kernel 按索引长度裁剪有效 token；bounded-attention 在本地 `transfer_utils.py` 直接展开字段定位、轴对齐和本地/外部 TP 切片，不再通过 `_copy_pair` 跳转。tail 使用固定 `pool_size` 的逻辑窗口，按传入的前缀长度把逻辑位置映射到本地 ring 槽位；短前缀在外部窗口前部补零，读回时保留逻辑窗口之外的本地 MTP 槽位。full-attention 和 bounded 路径检查实际复制视图的 shape 一致；tail 检查 layer/channel 相同，window 按两侧各自容量作环形映射。读回时反向执行同一组轴映射，保留本地和外部的固定角色。full-attention DP 直接复制同一 TP 分片的显式存储，原根目录 `transfer_utils.py` 的字段映射复制已无调用方并删除。State 的 KV 写入与量化方法直接调用相应计算模块中的 kernel。具体方案标记统一由 `get_state_type()` 返回，不再保留无读取方的 `layout_name`。这些聚合操作由 `AttentionStateManager` 提供默认实现，统一组织多资源读写、CPU 联合页、调用方传入的长度和位置映射；模型子类仅覆盖存在差异的部分。网络通信、任务队列与完成通知由 server 层管理。
+`FullAttentionState`、`BoundedAttentionState` 的具体子类直接实现 CPU、DP、PD 读写；无重叠的窗口 State 在 CPU 对齐边界不需要快照；IPC 导出前由管理器统一创建浅拷贝并排除进程私有资源，State 不设置额外的序列化钩子。各具体 State 通过 `get_cpu_transfer_regions()` / `get_pd_transfer_regions()` 选择传输字段、形状及 TP 切片；字段字节对齐、区间计算和 `TransferRegion` 构造直接在 State 内展开，不再通过 `region()` 包装。各具体 full-attention State 对应的 `*_transfer.py` 由 Triton 直接按 token 和页索引搬运 KV 及配套量化字段，每个字段一次 launch 覆盖全部页，不创建 gather/scatter 中间 KV。CPU 页必须是 pinned 或已通过 `cudaHostRegister` 注册的内存；调用方在 stream/event 完成后才能读取或复用页面。每种 full-attention 方案的 CPU/PD 路径共用本方案的 `transfer_*_pages` 入口和 kernel，直接按 token 和页索引读写外部页。两条路径均兼容不足整页的有效 token；`bounded_att/transfer_utils.py` 复制完整状态快照，不接收 token 数量；`bounded_att/window_compressor_transfer.py` 接收本地 ring 和 prefill 前缀长度，单次 Triton launch 搬运外部快照所需的逻辑窗口；两个方向均只处理逻辑窗口，并将短前缀对应的窗口内位置补零。bounded-attention 的传输函数使用 `page_buffers` 和必传的 `page_index`，不带 CPU/PD 前缀；页存储必须至少为二维，第一维表示页，统一通过 `page_buffers[page_index]` 取页。PD State 与 manager 读写入口统一接收 `pd_page_buffers` 和必填的 `pd_page_index`，将页集合与真实页索引直接传给共用搬运函数；不接受单页 Tensor，也不在入口添加页维度。CPU 专属读写接口仍使用 `cpu_page_buffers` 和 `cpu_page_indices`。Full attention 的各方案 CPU/PD 共用入口直接提交 Triton kernel；bounded attention 的复制视图按字段或传输区域收集为同形状批次，提交专用 kernel；窗口压缩器直接提交环形窗口 kernel，全部层的 key/gate 窗口搬运在一次 launch 中完成。取页和外部字段视图在各方案中直接展开：先选择页，再按字节起止位置切片并解释为字段 dtype/shape，不额外逐区域断言边界、对齐或轴定义。`utils.view_max_copy_dtype` 先按末轴 `size * element_size` 是否能被 8、4、2 整除，直接选择对应的候选 tuple：8/4/2、4/2 或仅 2 字节；例如行宽 12 字节只尝试 INT32、INT16，不尝试 INT64。使用各 State 正常分配的存储，不额外遍历或检查数据指针；任一侧末轴 stride 不为 1，或元素已占至少 8 字节时直接返回原视图，先用首对 Tensor 的外层 stride 和 Storage 偏移排除必然失败的候选，其余切片的偏移继续交给 `view(dtype)` 校验，仅捕获创建视图的 `RuntimeError` 后整批退回较窄 dtype，不复制数据。该函数由 bounded 聚合拷贝、full-attention CPU/PD、DP token 拷贝及 K-pool 共用；每个同布局批次统一选择 dtype，不同字段仍按各自编码处理。五种 full-attention 的 CPU/PD 页传输和 DP token 复制，在 TP 切片后先调用 `merge_contiguous_tail_dims(start_dim=-2, keepdim=True)`，只合并两侧均连续的 head/width；合并后的 head 轴保留为 1，继续使用原有四维/五维 kernel，再选择最大搬运 dtype。任一侧存在 head 间隙时沿用原布局。layer/token/page 等独立寻址轴及两侧各自容量保持不变；K-pool 的尾部只有 channel 一维，window 仍独立，不再跨 window 合并。full-attention 在各方案的 `*_transfer.py` 中直接应用 TP 切片，kernel 按索引长度裁剪有效 token；bounded-attention 在本地 `transfer_utils.py` 直接展开字段定位、轴对齐和本地/外部 TP 切片，不再通过 `_copy_pair` 跳转。压缩器使用固定 `window_size` 的逻辑窗口，按传入的前缀长度把逻辑位置映射到本地 ring 槽位；短前缀在外部窗口前部补零，读回时保留逻辑窗口之外的本地 MTP 槽位。full-attention 和 bounded 路径检查实际复制视图的 shape 一致；窗口搬运检查 layer/channel 相同，window 按两侧各自容量作环形映射。读回时反向执行同一组轴映射，保留本地和外部的固定角色。full-attention DP 直接复制同一 TP 分片的显式存储，原根目录 `transfer_utils.py` 的字段映射复制已无调用方并删除。State 的 KV 写入与量化方法直接调用相应计算模块中的 kernel。具体方案标记统一由 `get_state_type()` 返回，不再保留无读取方的 `layout_name`。这些聚合操作由 `AttentionStateManager` 提供默认实现，统一组织多资源读写、CPU 联合页、调用方传入的长度和位置映射；模型子类仅覆盖存在差异的部分。网络通信、任务队列与完成通知由 server 层管理。
 
 CPU 服务通过模型配置与 meta device 上的 State 描述生成页格式，无需分配 GPU 存储。服务端将 main/draft 的 meta State 装配到管理器并标记创建完成，复用 `AttentionStateManager.get_cpu_page_layouts()`，与推理端使用同一条布局聚合路径。该接口直接遍历 full-attention、bounded State，调用各自的 `get_cpu_transfer_regions()`，同时平移字段区间的起点和终点；每个 State 的最大字段终点按 8 字节对齐后作为下一 State 的起点。CPU 页容量由全部布局的最大 `byte_end` 按 16 字节对齐得到，TP 副本不重复占用外部页；启动绑定时核对页字节数。
 
-无需模型特有初始化的场景直接使用 `AttentionStateManager`，main 和各 draft 通过自身的准备流程向同一个管理器添加 State。它可以同时管理 full attention、bounded attention 和 indexer tail，不按 main 的 attention 类型再分一层管理器。构造函数只接收 `request_capacity`；各模型通过 `register_state` 绑定已创建的 State，allocator 在后续容量与存储初始化流程中设置。
+无需模型特有初始化的场景直接使用 `AttentionStateManager`，main 和各 draft 通过自身的准备流程向同一个管理器添加 State。它可以同时管理 full attention 与 bounded attention（包括压缩窗口），不按 main 的 attention 类型再分一层管理器。构造函数只接收 `request_capacity`；各模型通过 `register_state` 绑定已创建的 State，allocator 在后续容量与存储初始化流程中设置。
 
-模型特有的 State 组合由 `model.py` 中三类创建接口确定，模型专有配置及派生参数放在各自的 `config.py`。Qwen3Next 创建 GDN，GLM 创建 KDA 和 K-pool tail；main/draft 分别返回各自的 State。所有模型共用 `AttentionStateManager` 的聚合数据操作，不再保留 Qwen3Next/GLM 专用管理器及旧 `bind_storage()` 流程。
+模型特有的 State 组合由 `model.py` 中两类创建接口确定，模型专有配置及派生参数放在各自的 `config.py`。Qwen3Next 创建 GDN，GLM 创建 KDA 和 K-pool 窗口；main/draft 分别返回各自的 State。所有模型共用 `AttentionStateManager` 的聚合数据操作，不再保留 Qwen3Next/GLM 专用管理器及旧 `bind_storage()` 流程。
 
-token 复制、bounded 运行态重置、大小页保存/恢复、MTP 提交及 tail 重置直接在 `AttentionStateManager` 中遍历对应 State，不再增加仅转发调用的 helper。CPU/DP/PD 传输组织也直接在 `AttentionStateManager` 的现有接口中实现，通过聚合查询选择参与 State；不再通过独立 helper 转发 State 集合及 allocator，模型子类仍可按特有需求覆盖操作。显式成员决定 State 归属，不另外维护 `_full_states`、`_bounded_states`、`_tail_states` 或 `_states` 注册表，也不按 `id(state)` 静默去重。基类允许在对象创建完成后缓存从这些成员派生的查询结果，缓存不参与资源装配。传输按 state_name 匹配时可构建临时映射，它不决定模型的资源组织方式。
+token 复制、bounded 运行态重置、大小页保存/恢复、MTP 提交直接在 `AttentionStateManager` 中遍历对应 State，不再增加仅转发调用的 helper。CPU/DP/PD 传输组织也直接在 `AttentionStateManager` 的现有接口中实现，通过聚合查询选择参与 State；不再通过独立 helper 转发 State 集合及 allocator，模型子类仍可按特有需求覆盖操作。显式成员决定 State 归属，不另外维护 `_full_states`、`_bounded_states` 或 `_states` 注册表，也不按 `id(state)` 静默去重。基类允许在对象创建完成后缓存从这些成员派生的查询结果，缓存不参与资源装配。传输按 state_name 匹配时可构建临时映射，它不决定模型的资源组织方式。
 
 #### 按逻辑算法创建 State
 
@@ -415,10 +407,9 @@ token 复制、bounded 运行态重置、大小页保存/恢复、MTP 提交及 
 | KDA | `bounded_att.create_kda_state(config, request_capacity, mtp_step=0, *, device)` | KDA Conv/SSM 运行态 |
 | GDN | `bounded_att.create_gdn_state(config, request_capacity, mtp_step=0, *, device)` | GDN Conv/SSM 运行态 |
 | SWA | `bounded_att.create_sliding_window_state(config, request_capacity, mtp_step, device)` | 近期原始 KV 窗口，当前采用 FP8/E8M0 packed 编码 |
-| 窗口压缩器 | `bounded_att.create_window_compressor_state(config, request_capacity, mtp_step, device)` | 按窗口长度和产出步长管理候选/gate，KV 和 indexer 分别创建实例 |
-| K-pool | `att_tail.create_kpool_state(config, request_capacity, mtp_step=0, *, device)` | 带池化尾部窗口及 MTP 历史槽位的 K-pool State |
+| 窗口压缩器 | `bounded_att.create_window_compressor_state(config, request_capacity, mtp_step, device)` | 按窗口长度和产出步长管理候选/gate，KV 与索引 key 池化分别创建实例 |
 
-每个算法的创建入口独立放在对应的 `create_*.py` 中，通过各分类包导出，包括 GQA、MLA、压缩历史、KDA、GDN、SWA、窗口压缩器和 K-pool。一个算法的普通精度与量化实现共用同一 create 入口，由参数选择具体 State；State 实现文件不负责选择其他实现。不增加工厂类或注册表。入口不读取请求信息，不绑定角色，不创建 allocator；返回对象后由模型调用 `register_state`。
+每个算法的创建入口独立放在对应的 `create_*.py` 中，通过各分类包导出，包括 GQA、MLA、压缩历史、KDA、GDN、SWA、窗口压缩器。K-pool 复用窗口压缩器入口。一个算法的普通精度与量化实现共用同一 create 入口，由参数选择具体 State；State 实现文件不负责选择其他实现。不增加工厂类或注册表。入口不读取请求信息，不绑定角色，不创建 allocator；返回对象后由模型调用 `register_state`。
 
 GQA/MLA 的创建入口分别接收 `GQAAttentionConfig`、`MLAAttentionConfig`，每种具体 State 使用独立配置，不继承通用配置。GQA 的 `kv_type` 使用现有编码名 `"None"`、`"int4kv"`、`"int8kv"`、`"fp8kv_spt"`、`"fp8kv_sph"`；`group_size` 仅对 INT4/INT8 生效。静态 FP8 构造函数和创建入口不接收标定参数，`scales`、`q_scales` 初始均为 `None`；全部 State 就绪后，统一加载流程只能通过 `bind_calibration()` 初始化标定。各 DP 使用相同的标定配置，不额外生成或校验标定内容指纹。MLA 的 `config.latent_dim` 始终传逻辑 latent 维度，`packed=True` 时由 packed 配置推导包含 indexer、scale 和对齐的物理行宽；`"fp8kv_dsa"` 仅用于 packed MLA。
 
@@ -437,7 +428,7 @@ State 将连续的 KV/scale/indexer 字节作为一个传输区域，复用 `tra
 同卡 token 复制与 DP 迁移仍复制完整物理行。原 packed State 及其传输实现无需识别 E8M0 编码。
 定制量化写入放在 `fp8_e8m0_packed_mla_write.py`，State 不依赖 GLM 模型目录中的实现。
 
-各模型的三类 State 工厂负责构造配置并调用对应算法入口；`lightllm/utils/cpu_cache_layout.py` 复用模型工厂创建 meta State，生成 CPU cache 联合页布局，不加载标定。full-attention 的实际存储由管理器后续统一分配；GPU 启动时 bounded 和 tail 按请求容量直接创建运行态，大小页池另行初始化。GPU 启动与 CPU cache 元数据使用同一套算法创建逻辑。
+各模型的两类 State 工厂负责构造配置并调用对应算法入口；`lightllm/utils/cpu_cache_layout.py` 复用模型工厂创建 meta State，生成 CPU cache 联合页布局，不加载标定。full-attention 的实际存储由管理器后续统一分配；GPU 启动时 bounded 按请求容量直接创建运行态，大小页池另行初始化。GPU 启动与 CPU cache 元数据使用同一套算法创建逻辑。
 
 ```python
 state = create_gqa_state(
@@ -448,11 +439,11 @@ manager.register_state("main", state)
 # 全部 State 准备完成后，由 manager 统一规划容量并分配存储。
 ```
 
-根目录的公共帮助代码收敛到 `utils.py`，该文件负责 State 角色与精度命名及传输视图的尾维合并、整批最大搬运 dtype 选择，测试专用角色视图和成员筛选帮助函数放入测试辅助文件；full-attention 的 CPU/PD 页复制放在各方案的 `*_transfer.py` 中，bounded/tail 的页复制放在各自目录的 `transfer_utils.py` 中；CPU/DP/PD 传输及 State 聚合循环直接放在 manager 中。共享资源初始化由 `AttentionStateManager.initialize_storage()` 统一组织。各文件用中文大分块注释区分职责，公共函数在前、私有辅助在后；索引直接使用调用方提供的有效值，仅在需要列表的操作处展开 Tensor 转换，不再集中重复校验索引类型、范围和唯一性。共用的 Conv/SSM 布局配置放在 `conv_ssm_types.py`，由 `bounded_att` 包统一导出；该文件不包含 State 操作实现。具体 State、具体页池与公共数据类型保持各自的定义边界。
+根目录的公共帮助代码收敛到 `utils.py`，该文件负责 State 角色与精度命名及传输视图的尾维合并、整批最大搬运 dtype 选择，测试专用角色视图和成员筛选帮助函数放入测试辅助文件；full-attention 的 CPU/PD 页复制放在各方案的 `*_transfer.py` 中，bounded 的页复制放在各自目录的 `transfer_utils.py` 中；CPU/DP/PD 传输及 State 聚合循环直接放在 manager 中。共享资源初始化由 `AttentionStateManager.initialize_storage()` 统一组织。各文件用中文大分块注释区分职责，公共函数在前、私有辅助在后；索引直接使用调用方提供的有效值，仅在需要列表的操作处展开 Tensor 转换，不再集中重复校验索引类型、范围和唯一性。共用的 Conv/SSM 布局配置放在 `conv_ssm_types.py`，由 `bounded_att` 包统一导出；该文件不包含 State 操作实现。具体 State、具体页池与公共数据类型保持各自的定义边界。
 
-管理器聚合调用全部参与 State：CPU 页包含全部参与 linear State，全部页面读回后清零目标 tail；IPC 导出不携带 allocator 所有权。调用方在全部数据操作完成后发布页面，失败时不发布。radix 和 CPU cache 通过`AttentionStateManager`操作资源数据，缓存策略与请求执行流程按各自职责组织。公共资源包不反向导入模型实现；模型初始化负责选择和装配。
+管理器聚合调用全部参与 State：CPU 页包含全部参与 linear State，全部页面读回后恢复目标压缩窗口；IPC 导出不携带 allocator 所有权。调用方在全部数据操作完成后发布页面，失败时不发布。radix 和 CPU cache 通过`AttentionStateManager`操作资源数据，缓存策略与请求执行流程按各自职责组织。公共资源包不反向导入模型实现；模型初始化负责选择和装配。
 
-`types.py` 仅放跨资源使用的纯数据类型，包括 `TensorField`、`AxisMapping`、`TransferRegion`、`StateTransferLayout` 和 `PageKind`。各 State 的内部类型放在对应实现文件中，字段格式和状态选择由该实现解释。资源目录不引入统一插件注册机制，也不要求三类 State 继承同一个大接口。
+`types.py` 仅放跨资源使用的纯数据类型，包括 `TensorField`、`AxisMapping`、`TransferRegion`、`StateTransferLayout` 和 `PageKind`。各 State 的内部类型放在对应实现文件中，字段格式和状态选择由该实现解释。资源目录不引入统一插件注册机制，也不要求两类 State 继承同一个大接口。
 
 ## 5. allocator 与状态页 pool
 
@@ -470,7 +461,7 @@ allocator 入口的存在只能说明该分配域已启用，具体恢复边界�
 
 大小页均启用时，使用同一种 allocator 类的两个独立实例，每个实例供参与模型对应类别的 pool 共用。同一模型的单个快照保存该实现所需的完整状态，例如 Conv/SSM；main/draft 的快照布局和大小可以不同。“大页/小页”指 token 边界和缓存策略，不表示快照按 token 数分成不同大小。
 
-`FullAttKVAllocator` 的申请量和返回索引均以 token 表示，分配和回收须满足整页约束；`StatePageAllocator` 返回状态页槽位 ID。GPU 运行态和 indexer tail 使用请求槽位，不使用上述状态页分配器。
+`FullAttKVAllocator` 的申请量和返回索引均以 token 表示，分配和回收须满足整页约束；`StatePageAllocator` 返回状态页槽位 ID。GPU 运行态（包括压缩窗口）使用请求槽位，不使用上述状态页分配器。
 
 HOLD 页位于普通 KV 分配域之后，由 full-attention 存储预留。初始化流程将 allocator 的 `hold_token_indices` 显式交给 `ReqManager.bind_hold_page` 建立 padding 请求映射；ReqManager 不持有 allocator，也不负责释放 KV。`FullAttKVAllocator` 构造时直接创建 `shared_can_use_token_num: SharedInt` 并发布初始容量，在 `alloc`、`free` 和 `free_all` 中直接更新。对应的 `KVCapacityReader` 定义在同一文件中，router 按本地 DP 分组读取共享计数；Reader 不重置计数。读写双方使用同一服务前缀与 `rank_in_node` 命名，因此构造 allocator 前须完成服务名和 rank 初始化，无需外部绑定或容量回调。
 
@@ -495,7 +486,7 @@ CPU load/offload 尾页的两个暂存槽位 ID 由管理器统一保留，排�
 
 前缀长度与大小页槽位的关联由请求及缓存流程维护。`big_pages_pool` 和 `small_pages_pool` 仅保存算法快照，不重复持有长度数组或页有效性标记。
 
-大小页保存/恢复和 bounded 运行态复制只接收索引与布局，不接收前缀长度。`reset_attention_tail_state(req_indices)` 只清零指定请求的 tail，manager 的 CPU/DP 操作不传递专用于重置的长度。PD tail 读写单独接收 `state_token_len`，用于把 prefill 末尾的逻辑位置映射到两端各自的 ring；该值来自 PD 任务的 `end_kv_index`，不保存到 State 或传输页内。
+缓存恢复由各 bounded State 根据绝对前缀长度处理：有重叠窗口恢复快照，无重叠窗口在对齐边界重置；无需额外的分类恢复接口。
 
 调用方只能发布已完成全部参与 State 保存的页面，并通过 stream/event 保证异步操作顺序。尚未捕获的中间边界不能发布为可复用快照；失败时不发布对应页面，等待已提交操作结束后再回收槽位。前缀身份、引用与就绪状态均由调用流程管理。
 
@@ -519,7 +510,7 @@ logical_layer_groups = (
 # 不共享时使用 ((0,), (4,), (8,))，对应三份物理层存储。
 ```
 
-层命名统一使用 `logical_` 和 `storage_` 区分含义：`logical_layer_groups` 描述共享分组，`logical_layer_id` 是推理层传入的逻辑层号，`storage_layer_index` 是 Tensor layer 轴上的物理下标。State 的 `_logical_to_storage_layer` 保存两者的对应关系。KDA/GDN 和 K-pool 当前仍是一对一存储，配置使用 `logical_layer_ids`；三类 State 的 `get_layer_view(logical_layer_id=...)` 使用相同参数语义。FP8 标定的 `storage_layer_count`、`storage_layer_start` 表示物理行数和偏移，不能传逻辑层号。Tensor 轴标签 `"layer"` 保留，表示存储层轴。
+层命名统一使用 `logical_` 和 `storage_` 区分含义：`logical_layer_groups` 描述共享分组，`logical_layer_id` 是推理层传入的逻辑层号，`storage_layer_index` 是 Tensor layer 轴上的物理下标。State 的 `_logical_to_storage_layer` 保存两者的对应关系。KDA/GDN 和 K-pool 当前仍是一对一存储，配置使用 `logical_layer_ids`；两类 State 的 `get_layer_view(logical_layer_id=...)` 使用相同参数语义。FP8 标定的 `storage_layer_count`、`storage_layer_start` 表示物理行数和偏移，不能传逻辑层号。Tensor 轴标签 `"layer"` 保留，表示存储层轴。
 
 静态 FP8 的 FA3/FlashInfer 后端通过 `AttControl.logical_layer_id` 接收当前逻辑层号，再由 State 的 `get_storage_layer_index()` 查询标定行，不通过 KV 指针反查层号。该接口属于 `FullAttentionState` 的公共契约，所有具体实现按自己的层映射返回物理行；层视图和 KV 写入也使用此接口。
 
@@ -529,13 +520,13 @@ State 根据分组展开逻辑层到物理下标的映射。上述配置的 `get
 
 #### State 层归属与模型装配
 
-三类 State 均提供 `contains_logical_layer(logical_layer_id) -> bool`，通过自身的逻辑层映射判断归属，不要求存储已分配。full-attention 的共享消费者和生产层都属于同一个 State；调用方不展开 `logical_layer_groups`，也不选择物理层。
+两类 State 均提供 `contains_logical_layer(logical_layer_id) -> bool`，通过自身的逻辑层映射判断归属，不要求存储已分配。full-attention 的共享消费者和生产层都属于同一个 State；调用方不展开 `logical_layer_groups`，也不选择物理层。
 
-`AttentionStateManager.get_state(model_role, state_type_filter, logical_layer_id, *, state_class=None)` 通过三部分选择资源：`model_role` 按完整角色前缀匹配，避免 `draft1` 匹配 `draft10`；`state_type_filter` 在 `get_state_type()` 返回值中做字符串包含匹配，如 `gqa`、`gqa_int8`、`mla_packed`、`kpool_c4`；`contains_logical_layer()` 判断层归属。可用 `state_class` 进一步限定资源类别；通用推理模板传 `state_type_filter=""`，仅通过角色、逻辑层和类别选择。最终必须恰好匹配一个 State，不存在或多个匹配均断言失败。
+`AttentionStateManager.get_state(model_role, state_type_filter, logical_layer_id, *, state_class=None)` 通过三部分选择资源：`model_role` 按完整角色前缀匹配，避免 `draft1` 匹配 `draft10`；`state_type_filter` 在 `get_state_type()` 返回值中做字符串包含匹配，如 `gqa`、`gqa_int8`、`mla_packed`、`compressor_indexer_w4_s4`；`contains_logical_layer()` 判断层归属。可用 `state_class` 进一步限定资源类别；通用推理模板传 `state_type_filter=""`，仅通过角色、逻辑层和类别选择。最终必须恰好匹配一个 State，不存在或多个匹配均断言失败。
 
-该单对象查询使用 `lru_cache(maxsize=None)`，要求 `_state_registration_finished=True`，与聚合查询一样只能在全部 main/draft State 创建完成后调用。实际存储可以尚未分配，后续原地初始化不改变缓存中的 State 对象。三类模型工厂只返回 State 列表，`prepare_attention_states()` 统一注册，不查询或绑定推理层资源。完成全部 State 创建和统一分配后，推理层直接调用 `get_state()`；首次按角色、逻辑层号和资源类别匹配，后续相同参数命中缓存。无需单独的 State 绑定阶段。
+该单对象查询使用 `lru_cache(maxsize=None)`，要求 `_state_registration_finished=True`，与聚合查询一样只能在全部 main/draft State 创建完成后调用。实际存储可以尚未分配，后续原地初始化不改变缓存中的 State 对象。两类模型工厂只返回 State 列表，`prepare_attention_states()` 统一注册，不查询或绑定推理层资源。完成全部 State 创建和统一分配后，推理层直接调用 `get_state()`；首次按角色、逻辑层号和资源类别匹配，后续相同参数命中缓存。无需单独的 State 绑定阶段。
 
-推理层与 indexer 都不保存 `full_att_state_name`，也不提供 `bind_full_attention_state()`。两者通过推理上下文的模型角色、自身逻辑层号及 `FullAttentionState` 类别取得同一资源；同层 tail 不会被误选。共享消费者是否写入 KV 仍由具体模型的推理层控制。
+推理层与 indexer 都不保存 `full_att_state_name`，也不提供 `bind_full_attention_state()`。两者通过推理上下文的模型角色、自身逻辑层号及 `FullAttentionState` 类别取得同一资源；同层窗口 State 不会被误选。共享消费者是否写入 KV 仍由具体模型的推理层控制。
 
 #### 继承与内部 storage 的关系
 
@@ -657,7 +648,7 @@ class FullAttentionState:
 
 #### 存储字段与 State 元数据
 
-三类 State 不提供完整存储枚举接口，各实现显式确定参与传输的固定字段。Full attention 的布局直接根据配置计算形状、dtype 和字节区间；PD/DP 调用处显式列出实际字段：GQA 为 K/V，MLA 为 latent，分组量化增加动态 scale，packed MLA 包含对应的 KV、scale、RoPE 与 indexer 字段。静态标定参数独立保留，不加入 token 传输字段。KDA/GDN 直接从配置描述 Conv/SSM，K-pool 直接描述完整 tail ring。
+两类 State 不提供完整存储枚举接口，各实现显式确定参与传输的固定字段。Full attention 的布局直接根据配置计算形状、dtype 和字节区间；PD/DP 调用处显式列出实际字段：GQA 为 K/V，MLA 为 latent，分组量化增加动态 scale，packed MLA 包含对应的 KV、scale、RoPE 与 indexer 字段。静态标定参数独立保留，不加入 token 传输字段。KDA/GDN 直接从配置描述 Conv/SSM，K-pool 直接描述完整压缩器 ring。
 
 `TensorField` 仅作为内部搬运数据描述，仅保留 `tensor`、`axes`，字段名称由所在字典的 key 提供；Tensor 自身提供 dtype、shape、stride、device 和底层存储视图。运行态、MTP 游标及大小页池由具体 State 直接持有，不额外导出一份完整字段列表。
 
@@ -667,15 +658,19 @@ CPU/PD 的字段选择由 State 显式定义，公共区域接口如下：
 | --- | --- | --- |
 | `FullAttentionState` | `get_cpu_transfer_regions()` | `get_pd_transfer_regions()` |
 | `BoundedAttentionState` | `get_cpu_transfer_regions()` | `get_pd_transfer_regions()` |
-| `AttentionTailState` | 无；CPU 缓存恢复通过边界重置 | `get_pd_transfer_regions()` |
 
-所有接口返回 `tuple[TransferRegion, ...]`，可以基于 meta State 调用，不分配传输 buffer。State 决定哪些字段参与传输、字段区域的 dtype/shape、TP 切片和共享页的副本写入者；每份描述以 `byte_start` / `byte_end` 记录左闭右开的字节区间，两个位置均从该 State 的区域起点计算。三类 State 的 CPU/PD 区域接口统一无参数。full-attention 从全局启动参数读取 `cpu_cache_token_page_size` 或 `pd_kv_page_size`，按固定页容量展开形状与字段偏移；全局 head 数与本地 TP 切片均由自身 config 推导。bounded/indexer 每次描述一份运行态。
+两类 State 的 CPU/PD 区域接口统一使用内层 `@lru_cache(maxsize=None)`、外层
+`@deepcopy_result`：缓存首次构建的字段描述，每次查询返回独立副本，包含区域内的轴映射。
+首次查询后配置与全局页规格保持不变；实际存储分配完成后，管理器清除各 State 的两类区域缓存，
+再清除管理器的派生布局和页大小缓存。子类覆盖区域接口时也须保留这两个装饰器。
+
+所有接口返回 `tuple[TransferRegion, ...]`，可以基于 meta State 调用，不分配传输 buffer。State 决定哪些字段参与传输、字段区域的 dtype/shape、TP 切片和共享页的副本写入者；每份描述以 `byte_start` / `byte_end` 记录左闭右开的字节区间，两个位置均从该 State 的区域起点计算。两类 State 的 CPU/PD 区域接口统一无参数。full-attention 从全局启动参数读取 `cpu_cache_token_page_size` 或 `pd_kv_page_size`，按固定页容量展开形状与字段偏移；全局 head 数与本地 TP 切片均由自身 config 推导。bounded（包括压缩窗口） 每次描述一份运行态。
 
 本次有效 token 数属于读写流程，不参与布局生成。CPU cache 使用固定的全局 CPU 页布局；State 的传输接口在不足整页时仍使用相同的字段形状和偏移，只搬运有效 token。缓存页的保存边界和发布条件由外层流程控制。
 
 GQA、MLA 及各量化方案只导出 KV、动态 scale 和随 token 保存的 indexer 字段，不传静态标定参数或 packed padding。KDA/GDN 只导出有效 Conv 窗口和一份已接受 SSM，不传 MTP 候选区、游标或整个大小页池。K-pool 导出完整原生 key/gate ring。CPU 与 PD 可以在具体子类中分别覆盖；当前字段布局相同的实现共用自己的私有构建方法。
 
-manager 将 State 内区间平移为页内区间：CPU/PD 均按对应传输字段的实际最大结束位置安排后续资源，并通过布局终点计算整页大小；manager 不解析 Conv/SSM/K-pool 的内部结构。CPU 服务复用相同 State 接口；当前 CPU 联合页仍只包含 full/bounded，tail 按恢复边界重置。DP 映射只包含 full/bounded attention，调用它们无参数的 PD 区域接口，只取字段名和本地轴切片，不使用区域的页形状与字节偏移；本次复制的 token/request 数量由调用参数决定。
+manager 将 State 内区间平移为页内区间：CPU/PD 均按对应传输字段的实际最大结束位置安排后续资源，并通过布局终点计算整页大小；manager 不解析 Conv/SSM/K-pool 的内部结构。CPU 服务复用相同 State 接口；当前 CPU 联合页包含 full/bounded 中需要保存的字段，无重叠窗口不占 CPU 页。DP 映射只包含 full/bounded attention，调用它们无参数的 PD 区域接口，只取字段名和本地轴切片，不使用区域的页形状与字节偏移；本次复制的 token/request 数量由调用参数决定。
 
 资源身份使用 `state.state_name`；层映射、容量和 TP 分片事实继续由 State 的 config、capacity、page_size 及计算接口维护。CPU/DP/PD 由抽象接口约定并由具体 State 实现，管理器直接调用对应方法，不再维护额外的传输能力集合。信息保留在其所属对象，传输布局仅描述当前路径所需字段。
 
@@ -761,14 +756,13 @@ State 在后续 `allocate_storage()` 中自行分配数据 buffer：GQA 与静�
 | 接口 | 语义 |
 | --- | --- |
 | `AttentionStateManager(request_capacity)` | 仅接收共享请求容量，初始化空资源管理器；State 与 allocator 在后续流程中设置 |
-| `register_state(model_role, state)` | 将已创建的 full/bounded/indexer State 原对象绑定为规范成员，同步 State 与 config 身份；只允许在创建完成前调用 |
+| `register_state(model_role, state)` | 将已创建的 full/bounded State 原对象绑定为规范成员，同步 state_name 与管理器成员名；只允许在创建完成前调用 |
 | `finish_state_registration()` | 全部 main/draft State 对象装配完成后，先断言未重复标记创建完成，再设置 `_state_registration_finished = True`；允许 full-attention 存储仍为 `None`，只能调用一次 |
 | `load_full_att_calibration(args)` | 在 `finish_state_registration()` 后、存储分配前加载静态 FP8 标定；文件只读一次，逐 State 绑定物理层区间及 TP 参数；没有静态 FP8 State 时直接返回 |
 | `initialize_storage(args, *, token_capacity, mem_fraction, device="cuda")` | 共享资源初始化入口：在完成创建标记和标定绑定后，确定容量并分配存储；PD 模式在容量规划时按需构建 meta 布局。不接收或修改模型对象，返回 `None` |
 | `get_state(model_role, state_type_filter, logical_layer_id, *, state_class=None)` | 全部 State 创建完成后按模型角色、方案子串、逻辑层及可选资源类别选择唯一 State；断言 `_state_registration_finished` 并使用 `lru_cache` 缓存 |
 | `get_full_attention_states(role=None)` | 返回指定角色或全部 `FullAttentionState` 的 tuple |
 | `get_bounded_attention_states(role=None)` | 返回指定角色或全部 `BoundedAttentionState` 的 tuple |
-| `get_attention_tail_states(role=None)` | 返回指定角色或全部 `AttentionTailState` 的 tuple |
 | `get_full_att_token_bytes()` | 返回当前 TP rank 全部 full-attention State 的单 token 存储字节数，包含动态 scale 和行 padding |
 | `get_cpu_page_bytes()` | 依赖 `get_cpu_page_layouts()`，取全部 State 的最大 `byte_end` 并按 16 字节对齐；包含字段间及 State 间的必要 padding，页内不保存格式指纹、长度或版本 |
 | `get_cpu_page_layouts()` | 按全局 `cpu_cache_token_page_size` 生成 CPU 联合页中各 State 的字段偏移和 TP 映射，使用 `lru_cache` 缓存 |
@@ -784,11 +778,11 @@ State 在后续 `allocate_storage()` 中自行分配数据 buffer：GQA 与静�
 
 State 装配期间由管理器内部遍历 `__dict__`，公共聚合查询及 `get_state` 均会断言失败，避免缓存不完整的 main/draft 集合；模型准备阶段只创建和注册 State，不查询推理资源。装配完成后先调用 `finish_state_registration()`，再通过聚合查询接口进行容量计算和存储初始化；此时查询可以返回 meta State。创建完成标记表示对象及组合关系稳定，不表示实际 buffer 已经分配。
 
-容量确定后，管理器先统一设置 State 的页大小和实际设备，再调用各 FullAttentionState 的 `allocate_storage(token_capacity)` 原地分配其 KV 和配套参数，保持 State 对象身份不变；bounded/indexer 的固定运行态保留，通过 `initialize_page_pools()` 只补齐 bounded 大小页。因此创建完成后建立的 tuple 缓存始终引用同一组对象，不需要清除缓存或替换成员。实际存储分配前取得的 Tensor/层视图不用于后续计算；计算 backend 在实际存储就绪后建立视图。
+容量确定后，管理器先统一设置 State 的页大小和实际设备，再调用各 FullAttentionState 的 `allocate_storage(token_capacity)` 原地分配其 KV 和配套参数，保持 State 对象身份不变；bounded（包括压缩窗口） 的固定运行态保留，通过 `initialize_page_pools()` 只补齐 bounded 大小页。因此创建完成后建立的 tuple 缓存始终引用同一组对象，不需要清除缓存或替换成员。实际存储分配前取得的 Tensor/层视图不用于后续计算；计算 backend 在实际存储就绪后建立视图。
 
 实际存储分配完成后执行 warmup。CPU 布局由第一次容量查询或读写时按需生成；PD 容量规划会通过 `get_pd_page_bytes()` 在 meta State 上提前生成 PD 布局，不分配实际传输 buffer。PD 页的 token 容量由全局 `get_env_start_args().pd_kv_page_size` 唯一确定，两个 PD 布局 getter 均不接收页 token 数，按 manager 实例缓存并直接返回 `Mapping[str, StateTransferLayout]`，没有对应资源时返回空字典。
 
-PD 的依赖方向为：`get_pd_page_bytes()` 分别查询两个独立的布局 getter。full-attention 和 bounded/indexer 各自生成偏移及本类布局所需大小，互不查询，也不调用 `get_pd_page_bytes()`。实际块大小取两类布局占用的最大值，统一在 `get_pd_page_bytes()` 完成。State 提供包含内部字段 padding 的相对偏移，manager 按字段的实际最大结束位置确定下一个 State 的起点，不再用裸存储字节数预留 PD 区域。PD 收发流程按 `kv` / `att_state` 任务选择布局。
+PD 的依赖方向为：`get_pd_page_bytes()` 分别查询两个独立的布局 getter。full-attention 和 bounded（包括压缩窗口） 各自生成偏移及本类布局所需大小，互不查询，也不调用 `get_pd_page_bytes()`。实际块大小取两类布局占用的最大值，统一在 `get_pd_page_bytes()` 完成。State 提供包含内部字段 padding 的相对偏移，manager 按字段的实际最大结束位置确定下一个 State 的起点，不再用裸存储字节数预留 PD 区域。PD 收发流程按 `kv` / `att_state` 任务选择布局。
 
 CPU getter 从全局启动参数读取 `cpu_cache_token_page_size`，同样按 manager 实例缓存。不保存独立的 `cpu_page_bytes`、`pd_page_bytes`、`cpu_transfer_layouts`、`pd_transfer_layouts` 或 `cpu_page_tokens` 成员。存储分配可能改变 State 的物理页规格，因此分配完成后同时清除布局及派生 CPU/PD 页大小缓存。初始化时的异常直接向上传播，初始化失败即终止该流程；不增加属性拦截或回滚逻辑。
 
@@ -805,20 +799,19 @@ IPC 发布按用途调用 `create_pd_ipc_copy()` 或 `create_dp_ipc_copy()`，�
 | 操作 | 接口 | 聚合语义 |
 | --- | --- | --- |
 | full-attention token 复制 | `copy_full_att_tokens(src_indices, dst_indices)` | 聚合复制所有参与 FullAttentionState 的对应物理 token 数据，覆盖各自完整存储字段 |
-| bounded 空前缀清零 | `reset_bounded_att_state(req_indices)` | 将指定槽位的全部参与 bounded 运行态及控制信息恢复到长度 0，保留 KV、tail 和状态页 |
+| bounded 空前缀清零 | `reset_bounded_att_state(req_indices)` | 将指定槽位的全部参与 bounded 运行态及控制信息恢复到长度 0，保留 KV 和状态页 |
 | bounded 状态页保存 | `save_bounded_att_runtime_to_pages(...)` | 按 state_token_lens 保存全部参与 bounded State 的同类 pool、同一组槽位 |
 | bounded 状态页恢复 | `restore_bounded_att_runtime_from_pages(...)` | 按 state_token_lens 将选定快照恢复到对应请求运行态及 ring 位置 |
 | bounded 验证后提交 | `commit_bounded_att_state(req_indices, accepted_steps, *, role)` | 将指定角色的接受步数分发给参与 bounded State；由 State 选择已接受运行态，不暴露游标 Tensor |
-| attention tail 初始化与无快照恢复 | `reset_attention_tail_state(req_indices)` | 清零指定请求在全部参与 tail 中的状态；调用方保证空前缀或可重置的缓存边界，保留其他状态 |
 | CPU 写出 / 读回 | `write_req_to_cpu(...)` / `read_req_from_cpu(...)` | 组合 KV 和状态页，按调用参数提供的长度读写各 State 在外部页中的区域 |
-| DP 复制 | `copy_from_dp(remote_att_manager, src_token_indices, dst_token_indices, src_big_page_ids, dst_big_page_ids, src_req_idx, dst_req_idx)` | 直接遍历同名 State，复制 token、大页快照及指定请求的 prefill 基准运行态，清零目标 tail；不分配资源 |
+| DP 复制 | `copy_from_dp(remote_att_manager, src_token_indices, dst_token_indices, src_big_page_ids, dst_big_page_ids, src_req_idx, dst_req_idx)` | 直接遍历同名 State，复制 token、大页快照及指定请求的 prefill 基准运行态，复制目标窗口运行态；不分配资源 |
 | PD 写出 / 读回 | `write_to_pd_page(...)` / `read_from_pd_page(...)` | 组合对应 State 的数据，按指定 KV 或运行态范围打包、还原 |
 
 #### 必须实现的聚合接口
 
-基类源码使用醒目的分隔线划分八个大块：基础管理、Full attention、Bounded attention、Indexer tail、CPU Cache 数据交换、DP 迁移、PD 分离传输、私有辅助实现。Bounded attention 分块依次放置运行态重置、大小页保存与恢复、MTP 提交接口。各块内保留接口的具体说明，接口顺序保持 public 在前、private 在后。
+基类源码划分七个大块：基础管理、Full attention、Bounded attention、CPU Cache 数据交换、DP 迁移、PD 分离传输、私有辅助实现。Bounded attention 分块依次放置运行态重置、大小页保存与恢复、MTP 提交接口。各块内保留接口的具体说明，接口顺序保持 public 在前、private 在后。
 
-管理器的分类操作使用 `full_att`、`bounded_att`、`att_tail` 标明作用范围；CPU/DP/PD 接口继续表示跨资源传输。具体 State 的分类操作与管理器使用相同命名；State 只操作自身数据，管理器负责聚合参与对象。
+管理器的分类操作使用 `full_att`、`bounded_att` 标明作用范围；CPU/DP/PD 接口继续表示跨资源传输。具体 State 的分类操作与管理器使用相同命名；State 只操作自身数据，管理器负责聚合参与对象。
 
 以下仅展示接口签名，实际方法在基类中提供聚合实现。
 
@@ -837,7 +830,7 @@ class AttentionStateManager:
     def __init__(self, request_capacity: int): ...
 
     def register_state(
-        self, model_role: str, state: FullAttentionState | BoundedAttentionState | AttentionTailState,
+        self, model_role: str, state: FullAttentionState | BoundedAttentionState,
     ) -> None: ...
 
     # ========================================================================
@@ -877,9 +870,7 @@ class AttentionStateManager:
     ) -> None: ...
 
     # ========================================================================
-    # Indexer tail：空前缀初始化与无快照恢复
     # ========================================================================
-    def reset_attention_tail_state(self, req_indices: list[int]) -> None: ...
 
     # 基类使用 lru_cache 缓存布局，存储初始化后清除缓存。
     def get_cpu_page_layouts(self) -> Mapping[str, StateTransferLayout]: ...
@@ -894,7 +885,7 @@ class AttentionStateManager:
         small_page_slot_ids: List[int] | None = None,
     ) -> None: ...
 
-    # 一次读取同一前缀的有序页面；全部页面读回后清零 req_idx 的 tail。
+    # 一次读取同一前缀的有序页面；全部页面读回后从末页恢复请求运行态。
     def read_req_from_cpu(
         self, cpu_page_buffers, cpu_page_indices, token_indices,
         *, layouts: Mapping[str, StateTransferLayout],
@@ -930,7 +921,7 @@ class AttentionStateManager:
     ) -> None: ...
 ```
 
-以上方法均有基类默认实现，直接按已创建的 State 聚合执行。子类仅实现模型特有部分。未支持的 CPU/DP/PD 路径须明确报错，启用相应功能时检查参与 State 的完整支持能力。未启用某种页分配域时，保存和恢复该域明确报错；纯 full-attention 模型无需创建大小页 pool，其 `reset_bounded_att_state` 可以为空操作；没有 indexer tail 的组合，其 `reset_attention_tail_state` 也可以为空操作。
+缓存恢复由各 bounded State 根据绝对前缀长度处理：有重叠窗口恢复快照，无重叠窗口在对齐边界重置；无需额外的分类恢复接口。
 
 `page_kind="big"` 对应 `bounded_att_big_page_allocator` 和参与 State 的 `big_pages_pool`；`"small"` 对应小页 allocator 与 `small_pages_pool`。两者是独立分配域，即使槽位数字相同，也不是同一份资源。
 
@@ -943,11 +934,10 @@ class AttentionStateManager:
 `reset_bounded_att_state(req_indices: List[int])` 用于从前缀长度 0 开始计算时初始化 bounded 运行态。`req_indices` 仅接受 Python 整数列表，不支持 `torch.Tensor`；实现直接使用列表，不做类型转换。调用方已通过 ReqManager 取得请求槽位，并确认这些槽位此前的计算和传输使用结束；管理器只按传入索引初始化 bounded 数据，不查询缓存命中情况或请求对象。
 
 - 对全部参与的 KDA/GDN 等状态调用 `reset_bounded_att_state(req_indices)`，将 Conv/SSM 恢复到零初值，并重置 MTP 游标及影响后续读取的候选信息。未来算法按自身契约恢复空前缀初态。
-- 不修改 AttentionTailState。没有缓存命中时，调用方另行调用 `reset_attention_tail_state(req_indices)`，完成 tail 的空前缀初始化。
 - full-attention 没有需要清零的空前缀递推状态；该操作不遍历或清空历史 KV，不更改请求映射，也不失效大小页快照或归还索引。纯 full-attention 管理器合法地不做数据操作。
 - 目标请求槽位须唯一且在有效范围内，main/draft 所需运行态全部初始化后才可使用。重复执行在没有并发访问时具有相同结果；方法返回仍遵守 stream 完成约定。
 
-这是长度 0 的数据初始化接口，不接收非零前缀长度。命中非零前缀时使用 `restore_bounded_att_runtime_from_pages` 或 CPU/DP/PD 读回；没有 tail 快照时在保证可重置边界后通过 `reset_attention_tail_state` 清零 tail；不能在 bounded 运行态恢复后调用此方法，否则会清除已经恢复的 bounded 数据。
+缓存恢复由各 bounded State 根据绝对前缀长度处理：有重叠窗口恢复快照，无重叠窗口在对齐边界重置；无需额外的分类恢复接口。
 
 #### 验证后运行态提交
 
@@ -957,25 +947,12 @@ main/draft 共享管理器，因此必须显式指定 `role="main"` 或具体 dr
 
 `mtp_state_index` 及其他提交控制信息只由具体 State 持有。BaseModel 不维护 `mtp_state_cursors` 或其他游标引用集合，验证流程也不直接读写游标。State 自行决定通过游标选择、数据搬移或其他方式提交；计算 backend 可通过 State 或层视图读取所需信息。
 
-#### 无 tail 快照时清零尾部状态
-
-`reset_attention_tail_state(req_indices)` 清零指定请求的 tail，用于空前缀初始化或可重置的缓存前缀恢复。请求槽位使用 `list[int]`，目标唯一且已分配；接口不接收前缀长度，不读取请求映射或缓存节点。
-
-管理器依次调用各 AttentionTailState 的 `reset_attention_tail_state(req_indices)`。K-pool 直接清零指定请求的完整 ring，不在 reset 中重复检查长度。模型初始化与缓存流程保证恢复边界对齐：缓存页大小必须是各参与 tail 池化步长的整数倍，main/draft 使用不同方案时分别满足各自约束。异常直接透传，不保证跨 State 或整个 CPU/DP 恢复流程的原子性。
-
-该操作只重置 tail 及其必要控制信息，保留已恢复的 Conv/SSM、MTP 游标、KV 和大小页快照。没有 tail 的管理器合法地不做数据操作。调用方保证此前使用已结束，并在相关数据操作完成后继续计算；这不是运行中 MTP 回退的替代操作。
-
-前缀页命中时，调用方恢复 KV 和 bounded 页后，调用本接口清零未保存的 tail。PD 已传入完整 tail 时直接使用该快照，不再重置。DP fetch 只迁移可恢复的缓存前缀，由管理器在目标端清零 tail；边界选择属于缓存流程。
-
-这里的“最后一页”按本次命中前缀的逻辑顺序确定，与 CPU 物理页编号大小无关。全部页面先恢复 KV 和 linear 页数据，再由末页恢复 linear 运行态；中间长度无需逐个重置 tail，只有最终恢复长度需要满足 tail 的可重置边界。批量恢复多个请求时，调用方按请求分别调用，各自选择对应前缀的末页。
-
 #### full-attention 的聚合 token 复制
 
 `copy_full_att_tokens(src_indices, dst_indices)` 的两个索引均为存储设备上的一维 CUDA 整数 Tensor；直接使用输入 dtype 和 stride，不转换设备、类型或连续布局。源和目标位置不重叠。该接口在本管理器持有的 full-attention 存储内部执行位置复制。参与集合在初始化时按共享 token 索引域确定，可以包含 main/draft 的不同布局，也可以包含同一模型的多个 FullAttentionState。管理器将同一组物理索引交给各参与 State 的 `copy_full_att_tokens`；每个 State 在自己的存储中从源位置复制到目标位置，不在不同模型之间互拷数据。
 
 - 复制覆盖全部参与存储层的 KV、动态 scale 和 packed indexer key/scale 等随 token 变化的数据，保持各自存储表示；共享物理区域的别名按所有权去重。
 - 源和目标为逐项对应的一维整数索引 Tensor，长度相等、目标唯一，且满足各布局的复制粒度与对齐要求；基础契约要求源目标不重叠。源数据须已就绪并保持有效，目标物理位置须已分配且允许写入。
-- 只搬运 full-attention token 数据，不分配或回收索引、不修改 ReqManager 映射，也不复制 linear 运行态、大小页快照或 AttentionTailState 的原始 tail。
 - 调用前校验全部参与 State 的参数和能力；无 full-attention 参与者时明确报错。方法在当前 stream 提交并返回 None，全部参与复制完成前不能消费目标数据；中途失败时目标视为未就绪。
 
 例如 main 和 draft 各有一个 FullAttentionState，复制物理位置 `[10, 11]` 到 `[20, 21]` 时，一次管理器调用会分别搬运 main 和 draft 各自的对应数据。共享的是位置变换，不要求两者具有相同存储布局。
@@ -997,7 +974,7 @@ bounded_att_big_page_allocator 分配一次 slot_id = 17
 
 调用方通过已发布的槽位引用选择可复用页面；发布引用前须保证全部参与 State 已保存对应前缀的状态；回收前解除相关引用，重新分配后先写入再发布。`restore_bounded_att_runtime_from_pages` 和 CPU 写出直接使用指定槽位的数据，不另查页池长度记录。应参与的 State 缺少 pool 属于初始化配置错误，不能跳过该 State。
 
-full-attention 历史 KV 和没有独立 pool 的 AttentionTailState 不属于这组状态页操作。需要同时恢复这些数据的调用方，使用相应资源操作，并保证历史 KV、bounded 快照和 tail 对应同一前缀且均已就绪。
+full-attention 历史 KV 和没有独立 pool 的 WindowCompressorState 不属于这组状态页操作。需要同时恢复这些数据的调用方，使用相应资源操作，并保证历史 KV、bounded 快照和窗口历史 对应同一前缀且均已就绪。
 
 #### 保存与直接归还槽位的完整性
 
@@ -1016,7 +993,7 @@ GPU 数据操作遵守当前 stream 的依赖约定。调用方通过 stream/eve
 
 `layouts` 是按完整 `state_name`（包含 main/draft 角色）索引的 `StateTransferLayout` 映射，用于 CPU/PD 外部页。DP 不构造字段映射：manager 直接遍历本地 State，通过同名成员取得远端 State，将对应 token、页或请求索引交给具体实现。DP 不再维护映射缓存，也不通过 helper 转发。
 
-CPU/PD 的映射集合必须覆盖所选页格式的全部参与资源；不能通过遗漏某个布局静默丢弃必需状态。CPU 读写由管理器按 full-attention、bounded 状态页、末页运行态恢复及 tail 重置分阶段组织，高频读写路径不记录流程日志；buffer 与字段搬运约束交给 State，管理器检查恢复所需的目标请求、非空前缀及完整页槽位数量。异步搬运的完成仍由调用方的 stream/event 保证。DP 一次调用可以只覆盖一个来源的分片，完整迁移要求全部调用的覆盖范围合起来满足资源恢复要求。源目标语义、字段范围、别名、TP 副本写入者与已有数据的就绪条件均需在写入前校验。
+CPU/PD 的映射集合必须覆盖所选页格式的全部参与资源；不能通过遗漏某个布局静默丢弃必需状态。CPU 读写由管理器按 full-attention、bounded 状态页及末页运行态恢复分阶段组织，高频读写路径不记录流程日志；buffer 与字段搬运约束交给 State，管理器检查恢复所需的目标请求、非空前缀及完整页槽位数量。异步搬运的完成仍由调用方的 stream/event 保证。DP 一次调用可以只覆盖一个来源的分片，完整迁移要求全部调用的覆盖范围合起来满足资源恢复要求。源目标语义、字段范围、别名、TP 副本写入者与已有数据的就绪条件均需在写入前校验。
 
 **CPU 联合页**
 
@@ -1026,30 +1003,27 @@ CPU/PD 的映射集合必须覆盖所选页格式的全部参与资源；不能�
 - 格式包含 linear 页时，管理器写出接口分别接收 `big_page_slot_ids` 与 `small_page_slot_ids`；`cpu_page_indices` 前段对应大页、后段对应小页，每段与槽位列表一一对应。未参与的页池传 None 或空列表。full-attention KV 按完整页面列表写出一次，各 bounded State 再分别从大小页池写出快照；读回接口固定写入大页池，不接收 `page_kind`。管理器的 `big_page_slot_ids: List[int]` 只包含完整 CPU 页对应的普通大页槽位，不包含末尾碎页的临时槽位；没有 linear 页时为 None。槽位参数仅接受 Python 列表，不接受 Tensor。快照搬运不需要逐页长度数组。
 - `cpu_page_ready_flags: List[bool] | None` 是本批 CPU 页的跳过写入标记，顺序与 `cpu_page_indices` 一致；True 保留整张联合页，None 表示全部写出。缓存层保留完整 token/page 序列并一次调用资源管理器，不逐页发起传输，也不通过过滤页 ID 改变 token 映射。资源层不查询或发布 ready 状态，全部 ready 时直接返回。
 - FullAttentionState 将 ready 标记传给各自 CPU/PD 共用的传输入口；CPU 写出按 State 构造一次 GPU bool Tensor，全部字段复用。在 kernel 内按逻辑页屏蔽源 KV/量化字段读取和目标写入；若当前 block 没有待写元素，直接跳过后续索引读取、地址计算和数据搬运。跨页 block 混有 ready 与未就绪元素时保留逐元素 mask。PD 与读回不传标记、不分配此 Tensor，也不执行 ready 归约判断。bounded State 接收对应大小页段的 ready 列表，在取快照和构造复制视图前跳过 ready 页。
-- CPU 页不保存 tail 数据，写出接口不接收请求索引；布局只包含 full-attention 与 bounded-attention。
+- CPU 写出只读取大小页快照，不接收请求索引；无重叠的窗口 State 返回空区域，不占联合页。
 - `read_req_from_cpu` 一次处理同一前缀的有序页面，将全部 KV 写到给定物理位置，将各页 linear 快照写入对应 pool 槽位。管理器根据 `token_indices.numel()` 和布局的页 token 数判断是否存在末尾碎页，将其完整 linear 快照写入预留 LOAD 大页；完整页写入 `big_page_slot_ids` 指定的大页槽位。读回后直接使用最后一页恢复 `req_idx` 的 linear 运行态，不修改调用方的槽位列表。仅含碎页时传 `big_page_slot_ids=[]`；只传状态的格式使用空 token 索引，按传入的普通槽位恢复。
-- 存在 bounded 或 tail 时，调用方提供单个目标 `req_idx`；管理器在全部页面读回后调用 `reset_attention_tail_state([req_idx])`。调用方保证最终前缀处于可重置边界。仅有 full-attention 时，`req_idx=None`。
-- 恢复终点必须对齐 tail 的可重置边界。最后一页可以仅使用大页的一部分，但仍须落在允许恢复的小页边界；不能恢复需要真实 tail 快照的非对齐位置。
+- 恢复终点须满足各 State 的快照边界；窗口压缩器要求完成一个 compress_stride，最后一页可以是大页的一部分。
 - 任一资源读入失败时异常直接透传，已写入的数据不得作为就绪数据使用。写出失败时不得发布不完整联合页。
 
-例如恢复三个 CPU 页，终点长度依次为 `[P, 2P, 3P]`：全部 KV 和 linear 快照读回后，只对最终长度 `3P` 重置 tail，不逐页重置。管理器在重置 tail 前已将最后一页的 linear 快照恢复为运行态，调用方不再额外调用恢复接口。
+例如恢复三个 CPU 页，终点长度依次为 `[P, 2P, 3P]`：先读回各页 KV 和状态快照，再从最后一个大页槽位恢复请求在 `3P` 的运行态。无重叠窗口在该边界无需历史快照，后续计算使用新输入；调用方不再额外恢复一次。
 
 **DP 直接复制**
 
-当前 DP fetch 的来源是 radix cache 命中的前缀。缓存页大小须为每个 tail 池化步长的整数倍；GLM 启动时检查 `linear_att_hash_page_size % index_kpool == 0`。管理器复制 KV 与 bounded 运行态后清零目标 tail，不额外接收前缀长度。tail 不参与 DP 映射，也不读取源 tail；PD 的结束位置可能未对齐，仍传输完整快照。
+DP fetch 的来源是 radix cache 命中的前缀。缓存页大小须对齐压缩窗口的产出步长；GLM 启动时检查 `linear_att_hash_page_size % index_kpool == 0`。manager 接收远端管理器、CUDA token 索引、源/目标大页 ID 及源/目标请求索引，按同名 State 依次复制 token、大页快照与请求运行态。窗口 State 和其他 bounded State 使用同一流程，不再另设窗口重置阶段。
 
-`src_manager` 明确来源 DP/TP 存储实例，也可以是传输进程中已绑定共享存储的管理器。源和目标 token 索引等长、逐项对应；`src_req_indices`、`dst_req_indices` 仅接受 `List[int]`，成对提供且数量相等，用来迁移 prefill 基准 bounded 运行态；KDA/GDN 源游标必须为 0。有 tail 时直接清零目标请求的 tail，不传递额外长度。token 索引与请求槽位是不同的寻址维度，无需等长；前缀对应关系及可重置边界由调用方保证。
-
-只复制 KV 时，运行态三项均为 None；只复制运行态时，两个 token 索引序列均为空；提供运行态参数时须包含所需 bounded 映射，或存在需要重置的 tail。一个目标分片需要多个来源时，调用方按来源分批调用，`AttentionStateManager` 将各项 mapping 交给对应 State。每次只写所声明区域，不清零其他批次已恢复的数据；全部必需区域及控制信息就绪后才可继续计算。DP 不自动生成历史大小页快照。
+KDA/GDN 的源游标须为 0；窗口 State 的两端配置和 MTP 容量须相同。复制操作不创建历史快照，调用方负责前缀对应关系、合法缓存边界、源数据就绪及引用有效期。不需要复制 token 或大页时传入空 Tensor 或空列表；指定请求的运行态仍会复制。
 
 **PD 页读写**
 
 | `kind` | 必需参数 | 处理对象 |
 | --- | --- | --- |
 | `"kv"` | `token_indices`；`req_idx=None` | 按单页容量读写全部参与 full-attention 的 KV、scale 和 packed 字段 |
-| `"att_state"` | `req_idx`；有 tail 时还需 `state_token_len`；`token_indices=None` | 读写 prefill 基准 bounded 状态与固定 tail 逻辑窗口，不经过大小页 pool |
+| `"att_state"` | `req_idx`；`state_token_len`；`token_indices=None` | 读写 prefill 基准 bounded 状态（包括固定压缩窗口），不经过大小页 pool |
 
-PD 参数按上述两种组合校验，不允许混用；`req_idx=0` 是有效槽位，不能当成缺失参数。`pd_page_buffers` 第一维是页维度，调用方必须传入 `pd_page_index`；资源层先选 `pd_page_buffers[pd_page_index]`，再应用 layout 中相对该页的区域偏移，各偏移只应用一次。连接参数兼容性由 PD master 校验，资源层不再逐页读写布局指纹、长度或版本字段。传输任务通过 `end_kv_index` 管理请求进度；`att_state` 任务的该值作为 `state_token_len` 传给 manager，再转交 bounded 和 tail State，用于各自的窗口定位及恢复。full-attention 的 token 传输接口保持不变；页内只保存状态数据。无运行态资源的管理器不接受 `att_state` 任务。
+PD 参数按上述两种组合校验，不允许混用；`req_idx=0` 是有效槽位，不能当成缺失参数。`pd_page_buffers` 第一维是页维度，调用方必须传入 `pd_page_index`；资源层先选 `pd_page_buffers[pd_page_index]`，再应用 layout 中相对该页的区域偏移，各偏移只应用一次。连接参数兼容性由 PD master 校验，资源层不再逐页读写布局指纹、长度或版本字段。传输任务通过 `end_kv_index` 管理请求进度；`att_state` 任务的该值作为 `state_token_len` 传给 manager，再转交各 bounded State，用于各自的窗口定位及恢复。full-attention 的 token 传输接口保持不变；页内只保存状态数据。无运行态资源的管理器不接受 `att_state` 任务。
 
 CPU/DP/PD 方法均返回 None，只执行对应数据操作，不申请索引或修改请求映射。GPU 操作在调用方 stream 提交，内部使用其他 stream 时须合并完成依赖；返回不代表全部数据已可用。传输调度负责网络收发和完成事件，CPU 同步读 pinned 数据前还须确认之前的 GPU 写入已完成。
 
@@ -1063,11 +1037,11 @@ CPU cache、DP、PD 通过直接数据接口操作同一组内部资源，`Atten
 
 Model 和 InferStateInfo 通过 `att_state_manager` 访问资源，不额外保存 full-attention State 别名。执行 KV 写入或读取层视图时，直接访问管理器上的具体成员，例如 `main_gqa_bf16_state`、`draft0_mla_packed_bf16_state`。InferStateInfo 的 `att_state_role` 指定当前模型的资源前缀；`is_draft_model` 仍用于推理流程判断。
 
-视图结构由模型和 backend 的实际需求决定。例如普通 full-attention 层需要 KV 视图，KDA/GDN backend 从对应状态对象获取自身所需视图，GLM indexer 需要 packed KV 与 tail 的关联视图。一个模型可以按层绑定多个不同视图；main/draft 的视图类型也可以不同。
+视图结构由模型和 backend 的实际需求决定。例如普通 full-attention 层需要 KV 视图，KDA/GDN backend 从对应状态对象获取自身所需视图，GLM indexer 需要 packed KV 与池化窗口的关联视图。一个模型可以按层绑定多个不同视图；main/draft 的视图类型也可以不同。
 
 普通 KV 层可支持多种存储精度。推理层使用 `get_state(model_role=infer_state.att_state_role, state_type_filter="gqa", logical_layer_id=self.layer_num_, state_class=FullAttentionState)` 取得资源。MLA 推理层和 GLM indexer 使用 `state_type_filter="mla"`，indexer 使用自己的 `layer_idx`。通用写入模板使用空字符串和 `FullAttentionState` 类型，不推断算法。匹配结果由管理器缓存，推理层和 indexer 不保存重复成员名，也不需要模型启动时逐层绑定。不同精度的 State 由逻辑层归属区分。
 
-Gemma4 共享 KV 层按自己的逻辑层号查询 State 并取得视图，由 State 将共享消费者映射到源物理层。FP8 FA3 和 FlashInfer 分别直接访问对应角色的 per-head 和 per-tensor State 成员获取标定参数；GLM indexer 按自身压缩比例访问对应角色的 tail 成员。物理层索引在具体 State 内确定。同一角色的不同量化方案可以分别覆盖不同层；复杂模型仍需选择支持各层方案的计算 backend。
+Gemma4 共享 KV 层按自己的逻辑层号查询 State 并取得视图，由 State 将共享消费者映射到源物理层。FP8 FA3 和 FlashInfer 分别直接访问对应角色的 per-head 和 per-tensor State 成员获取标定参数；GLM indexer 按窗口和步长访问对应角色的 WindowCompressorState。物理层索引在具体 State 内确定。同一角色的不同量化方案可以分别覆盖不同层；复杂模型仍需选择支持各层方案的计算 backend。
 
 成员访问只读取 Python 属性，不复制 buffer，也不执行 GPU→CPU 同步。KV 写入直接调用该 State 的方法，packed KV/indexer 通过其层视图访问。DFlash 的特殊 KV 写入上下文同样设置管理器和 draft 标记。需要主机标量的 backend 在 State 初始化时准备标定镜像，避免 forward 中逐层执行 GPU→CPU 同步。
 
@@ -1083,7 +1057,7 @@ Gemma4 共享 KV 层按自己的逻辑层号查询 State 并取得视图，由 S
 
 #### 位置映射的范围
 
-传输需要分别描述逻辑层到物理层的映射、组合页中的资源区域、各字段的 TP 分片与副本关系，以及本次操作的 token/page 索引。KV、scale、Conv、SSM 和 tail 可以使用不同的 dtype、stride、对齐和轴划分，不能统一简化为一个 `offset` 或一个全局 `tp_rank`。
+传输需要分别描述逻辑层到物理层的映射、组合页中的资源区域、各字段的 TP 分片与副本关系，以及本次操作的 token/page 索引。KV、scale、Conv、SSM 和窗口 可以使用不同的 dtype、stride、对齐和轴划分，不能统一简化为一个 `offset` 或一个全局 `tp_rank`。
 
 #### 信息由谁维护
 
@@ -1091,7 +1065,7 @@ Gemma4 共享 KV 层按自己的逻辑层号查询 State 并取得视图，由 S
 | --- | --- | --- |
 | 本地存储布局与分片事实 | 具体 State 的配置、存储参数及内部 Tensor | 物理层映射、Tensor stride、packed 字段偏移、字段的全局 head 范围、TP 副本关系 |
 | 传输字段及本地 TP 切片 | 具体 State 的 `get_cpu_transfer_regions()` / `get_pd_transfer_regions()` | 字段选择、全局形状、State 内字段的起止区间和各 rank 的读写切片 |
-| 组合页布局及资源间分区 | 模型专属 `AttentionStateManager` 根据参与资源和 CPU/PD 格式组织，结合传输端确认的格式生成 | main_gqa_bf16_state、draft0_mla_fp8_state、Conv、SSM、tail 各区域的起止位置、对齐和整页容量 |
+| 组合页布局及资源间分区 | 模型专属 `AttentionStateManager` 根据参与资源和 CPU/PD 格式组织，结合传输端确认的格式生成 | main_gqa_bf16_state、draft0_mla_fp8_state、Conv、SSM、窗口各区域的起止位置、对齐和整页容量 |
 | 某个 State 到外部页、或两个 State 之间的位置映射 | 管理器在传输初始化时生成并缓存；具体 State 校验是否支持 | `StateTransferLayout`；按资源与 CPU/PD 路径分别保存 |
 | 本次实际位置和长度 | 请求流程/传输调度显式传入 | 已分配的 token 索引、CPU 页 ID、所选 PD 页、有效 token 数 |
 
@@ -1268,7 +1242,7 @@ DP 请求共享信息分为两个数组，均按请求在当前批次中的位�
 
 目标 DP 只复制从本地已有 KV 长度到来源 KV 长度之间新增的完整大页，不重复复制已有前缀页。先申请目标大页再申请 KV；目标大页分配必须成功，通过断言检查。复制完成后，将目标页按前缀长度登记到 `req.hybrid_len_to_big_page_id`，后续 radix 插入和释放沿用请求的现有归属管理。未跨越新大页边界时，大页列表为空。
 
-DP 副本之间使用相同的 State 成员名。`copy_from_dp` 接收远端 manager、源/目标 token 索引、源/目标大页 ID，以及单个源/目标请求索引 `src_req_idx` / `dst_req_idx`，直接遍历本地 full/bounded State，通过 `getattr(remote_att_manager, state.state_name)` 定位远端同名 State。不需要复制 token 或大页时传空 Tensor 或空列表；指定请求的运行态仍会复制。manager 将单个请求索引包装为列表，调用各 bounded State 的 `copy_runtime_state_from_dp`，再清零目标 tail。调用方保证源 MTP 游标为 0、前缀处于 tail 可重置边界，以及源页就绪、引用有效。当前 DP fetch 从独立的大页共享数组读取新增前缀对应的页 ID，在同一次调用中完成 token、大页和运行态复制。
+DP 副本之间使用相同的 State 成员名。`copy_from_dp` 接收远端 manager、源/目标 token 索引、源/目标大页 ID，以及单个源/目标请求索引 `src_req_idx` / `dst_req_idx`，直接遍历本地 full/bounded State，通过 `getattr(remote_att_manager, state.state_name)` 定位远端同名 State。不需要复制 token 或大页时传空 Tensor 或空列表；指定请求的运行态仍会复制。manager 将单个请求索引包装为列表，调用各 bounded State 的 `copy_runtime_state_from_dp`。调用方保证源 MTP 游标为 0、前缀满足各 State 的缓存边界，以及源页就绪、引用有效。当前 DP fetch 从独立的大页共享数组读取新增前缀对应的页 ID，在同一次调用中完成 token、大页和运行态复制。
 
 full-attention 使用 `copy_tokens_from_dp(src_token_indices, dst_token_indices, remote_dp_full_att_state)` 指定源对象和配对索引；bounded State 分别通过 `copy_big_pages_from_dp` 与 `copy_runtime_state_from_dp` 指定源对象和配对索引，不接收字段映射。full-attention DP 的源、目标 token 索引必须是位于各自存储设备上的 CUDA Tensor；源、目标索引均支持 int32/int64。manager 和 State 直接使用传入索引，不进行设备迁移、dtype 转换或 Python list 转换；bounded 请求索引仍为 `list[int]`。布局及编码兼容检查使用断言。full-attention 所有 token 索引入口（KV 写入、本地 token 复制、CPU/PD 页读写及 DP 复制）都只接受 CUDA Tensor，由调用方准备好索引；State 不迁移设备、不转换 dtype，也不调用 `contiguous()` 创建副本。CPU cache 页面仍在主机内存，token 索引仍须位于 CUDA。PD 网络任务中的 `mem_indexes` 仍以列表序列化，由传输进程在调用 `copy_page` 前显式创建设备上的整数 Tensor。State 的四个公开页读写接口将显式存储成员交给本方案的 `transfer_*_pages`；CPU 传入页索引列表，PD 传入包含指定页索引的列表，不再保留 `_buffer_io()`。CPU/PD/DP 显式访问各实现的存储成员：GQA/静态 FP8 使用 `k_storage`、`v_storage`，分组量化同时操作 `k_scales`、`v_scales`，MLA 使用 `storage`；本地变量和页切片逐项列出，具体 State 不提供统一枚举存储 buffer 的接口。完整 token 复制同样直接对各存储成员调用搬运算子。所有 full-attention CPU/PD 共用 kernel 和本地 token 复制 kernel 均按输入索引的 stride 寻址，直接支持非连续 CUDA 索引，保留 int32/int64 类型；DP fetch 的源索引直接取自远端 CUDA 请求表，目标 allocator 返回 CPU int32 索引，因此由 DP 调用方在进入 manager 前一次性准备当前设备的 CUDA int64 索引，供全部 State 共用；State 仅断言索引为 CUDA Tensor，不重复转换。页布局由对应 State 生成，调用方保证读回目标索引唯一；搬运时仅保留页大小和页数等必要检查，不逐次重建字段集合或回读索引去重。
 
@@ -1328,7 +1302,7 @@ byte 32768  : draft0_mla_fp8_state 的数据区域，按 draft 自身格式定�
 
 如果 draft 使用 TP 副本形式的 MLA，draft 区域由选定的 P 端副本写一次，D 端各副本读取该区域。它不沿用 main 的 head 偏移公式。main 与 draft 即使共享 token allocator，也分别取得自己的区域映射。
 
-CPU 组合页包含 full-attention 和状态快照，实际 KV token 数由索引数量确定、格式由外层描述；PD 使用 `kv` 与 `att_state` 两类任务，各自拥有布局，不强制把 KV、Conv、SSM 和 tail 放进同一页。采用按 TP rank 分块的格式时，必须明确其 TP 配置约束；跨 TP 配置恢复需要相应格式和转换能力。
+CPU 组合页包含 full-attention 和状态快照，实际 KV token 数由索引数量确定、格式由外层描述；PD 使用 `kv` 与 `att_state` 两类任务，各自拥有布局，不强制把 KV、Conv、SSM 和窗口 放进同一页。采用按 TP rank 分块的格式时，必须明确其 TP 配置约束；跨 TP 配置恢复需要相应格式和转换能力。
 
 #### 初始化与提交时的校验
 
@@ -1410,7 +1384,7 @@ d_state.read_from_pd_page(
 # 所有目标资源/分片恢复完成后允许 decode。
 ```
 
-调度层负责网络、同步和生命周期。方法返回不等于数据已经就绪，发送页在网络发送完成前不能复用，源槽位在读取完成前不能释放。KDA/GDN 状态的统一操作见 6.7 节，indexer tail 的操作见 6.8 节；它们共用适用的位置描述，不继承 `FullAttentionState`。
+调度层负责网络、同步和生命周期。方法返回不等于数据已经就绪，发送页在网络发送完成前不能复用，源槽位在读取完成前不能释放。KDA/GDN 状态的统一操作见 6.7 节，窗口压缩器的操作见 6.8 节；它们共用适用的位置描述，不继承 `FullAttentionState`。
 
 ### 6.7 BoundedAttentionState：有界状态的统一操作接口
 
@@ -1562,11 +1536,11 @@ class BoundedAttentionState(ABC):
     ) -> None: ...
 ```
 
-bounded State 使用 `write_state_pages_to_cpu` / `read_state_pages_from_cpu` 表达页快照的写出与读回，区别于请求运行态操作；资源管理器通过 `write_req_to_cpu` / `read_req_from_cpu` 操作显式传入的 token 索引和状态页槽位，不接收 `InferReq`。`MultiLevelKvCacheModule` 提供接收 `InferReq` 的 `write_req_to_cpu` / `read_req_from_cpu`：负责查找 radix/请求持有的页、分配目标资源、跳过 ready 页和登记请求页引用；资源层负责跨 State 搬运、末页运行态恢复及 tail 重置。CPU 读回含 bounded State 时，调用方还须传入 `state_token_len`，取最后一个 CPU 页的逻辑终点；即使本批仅加载前缀末段，也不能用 `token_indices.numel()` 替代。无需独立的 hybrid CPU cache helper 文件。State 写出接口保留 `page_kind` 和 `page_slot_ids`，由管理器按来源页池分别调用；管理器对外通过两类槽位列表表达来源。
+bounded State 使用 `write_state_pages_to_cpu` / `read_state_pages_from_cpu` 表达页快照的写出与读回，区别于请求运行态操作；资源管理器通过 `write_req_to_cpu` / `read_req_from_cpu` 操作显式传入的 token 索引和状态页槽位，不接收 `InferReq`。`MultiLevelKvCacheModule` 提供接收 `InferReq` 的 `write_req_to_cpu` / `read_req_from_cpu`：负责查找 radix/请求持有的页、分配目标资源、跳过 ready 页和登记请求页引用；资源层负责跨 State 搬运、末页运行态恢复。CPU 读回含 bounded State 时，调用方还须传入 `state_token_len`，取最后一个 CPU 页的逻辑终点；即使本批仅加载前缀末段，也不能用 `token_indices.numel()` 替代。无需独立的 hybrid CPU cache helper 文件。State 写出接口保留 `page_kind` 和 `page_slot_ids`，由管理器按来源页池分别调用；管理器对外通过两类槽位列表表达来源。
 
 CPU 页读写的 `cpu_page_indices`、写出的 `page_slot_ids` 与读回的 `big_page_slot_ids`，以及大小页保存和恢复的 `req_indices`、`state_token_lens`、`page_slot_ids` 均仅接受 `List[int]`，单请求也传长度为 1 的列表；实现只断言 list 类型，不进行 Tensor 或其他序列转换。`state_token_lens` 表示各快照已经执行到的绝对 token 长度，不包含新采样但尚未执行的 token，也不是本批搬运的 token 数。调用方保证长度与选定快照一致；页池不新增长度记录。KDA/GDN 的 Conv/SSM 布局不依赖长度定位，保留此参数供 ring 等实现使用。
 
-PD 状态页按单请求处理，bounded 和 tail 的读写均接收 `state_token_len: int`，取自同一 PD 任务的 `end_kv_index`。管理器透传该值，页内不新增长度元数据。`req_indices` 是 ReqManager 已分配的请求槽位，`page_slot_ids` 是调用方从共享 allocator 已分配的状态页槽位；两种索引不能混用，`page_kind` 决定使用哪个 pool。DP 运行态复制的 `src_req_indices`、`dst_req_indices` 和大页复制的 `src_page_ids`、`dst_page_ids` 同样仅接受 `List[int]`，实现不进行类型转换。manager 的 `copy_from_dp` 统一聚合 token、大页和请求运行态复制；manager 接收单个 `src_req_idx` / `dst_req_idx`，向 State 传入长度为 1 的列表，不隐式创建历史快照。
+PD 状态页按单请求处理，全部 bounded State 的读写均接收 `state_token_len: int`，取自同一 PD 任务的 `end_kv_index`。管理器透传该值，页内不新增长度元数据。`req_indices` 是 ReqManager 已分配的请求槽位，`page_slot_ids` 是调用方从共享 allocator 已分配的状态页槽位；两种索引不能混用，`page_kind` 决定使用哪个 pool。DP 运行态复制的 `src_req_indices`、`dst_req_indices` 和大页复制的 `src_page_ids`、`dst_page_ids` 同样仅接受 `List[int]`，实现不进行类型转换。manager 的 `copy_from_dp` 统一聚合 token、大页和请求运行态复制；manager 接收单个 `src_req_idx` / `dst_req_idx`，向 State 传入长度为 1 的列表，不隐式创建历史快照。
 
 #### 运行态与推理访问
 
@@ -1625,7 +1599,7 @@ CPU/PD 位置描述使用 `StateTransferLayout`；bounded DP 接口不需要字�
 
 #### 依赖、同步与使用示例
 
-资源方法接收请求槽位、状态页槽位、绝对前缀长度和明确的资源引用，不读取 `InferReq`、ReqManager 映射或全局 infer context。KDAState 不持有 AttentionTailState；`AttentionStateManager`单独协调 tail 在恢复边界上的重置或迁移。
+资源方法接收请求槽位、状态页槽位、绝对前缀长度和明确的资源引用，不读取 `InferReq`、ReqManager 映射或全局 infer context。KDAState 不持有 WindowCompressorState；管理器统一遍历 bounded State，各实现分别处理自身快照和运行态迁移。
 
 GPU 操作在调用方当前 stream 上提交，返回 None；CPU 同步复制在返回前完成。方法若直接由 CPU 读取 pinned buffer，调用方须先确认此前 GPU 写入已经完成，不能仅靠 GPU stream 排队保证 CPU 可见。其余异步路径遵守事件依赖，释放请求/槽位前保持相关引用有效。正常执行不替换已有 buffer 地址。
 
@@ -1647,7 +1621,7 @@ state.restore_bounded_att_runtime_from_pages(
     page_kind="big",
     page_slot_ids=page_slot_ids,
 )
-# target 请求在相关 KV、linear、tail 均就绪后继续执行。
+# target 请求在相关 KV、linear、窗口 均就绪后继续执行。
 
 # 验证 forward 完成后，将接受步数按请求提交。
 state.commit_bounded_att_state(req_indices, accepted_steps)
@@ -1656,102 +1630,40 @@ state.commit_bounded_att_state(req_indices, accepted_steps)
 
 各具体实现必须满足数据完整性、接受位置选择和跨布局复制约束。
 
-### 6.8 AttentionTailState：原始尾部窗口的操作接口
+### 6.8 WindowCompressorState：窗口候选与 gate
 
-`AttentionTailState(ABC)` 约束注意力相关模块的尾部运行态操作，具体实现负责自身窗口、位置规则和搬运 kernel。例如 `KPoolAttentionTailState` 定义 GLM K-pool 的尾部布局。通用分类使用 `att_tail`，具体类及 `kpool_c4_bf16` 等资源标记保留算法信息。该分类不包含算子临时 workspace、完整递推状态或随历史增长的索引 key cache；对齐后可重置是 K-pool 的具体规则，不作为所有 tail 实现的共同假设。它不继承 `FullAttentionState` 或 `BoundedAttentionState`，也不持有 allocator、请求 KV 索引表或独立大小页 pool。
+K-pool 与 V4 的压缩器共用 `bounded_att/WindowCompressorState`，具体池化、归一化、
+RoPE 和量化仍由各模型自己的计算算子完成。资源层只负责窗口存储、快照及传输。
+模型通过 `create_bounded_att_states()` 返回窗口 State，与 KDA/GDN、SWA 使用同一管理流程。
 
-#### KPoolAttentionTailState 布局与状态边界
+| 场景 | window_size | compress_stride | candidate_dim | 缓存边界历史 |
+| --- | ---: | ---: | --- | --- |
+| GLM K-pool | 4 | 4 | indexer key 的 head_dim | 无重叠，无需快照 |
+| V4 CSA KV / indexer | 8 | 4 | 输出向量维度的两倍 | 保存最近 4 个位置 |
+| V4 HCA KV | 128 | 128 | 输出向量维度 | 无重叠，无需快照 |
 
-设本实例层数为 `L`、请求容量为 `N`（包含 HOLD）、池化步长为 `P`、MTP 额外容量为 `S`、index head 维度为 `D`，原生 ring 布局为 `[L, N, P+S, 2*D]`，末维分别存 raw key 与 gate score。GLM K-pool 示例取 `P=4`、`D=128`，具体实现须声明其 kernel 支持的配置范围。
+`candidate_dim` 不包含 gate；候选和 gate 具有相同形状和存储精度，由同一个 `dtype`
+描述。GLM K-pool 随模型精度配置（通常 BF16），V4 使用 FP32。运行态保持一个 Tensor，形状为
+`[layer, request, window_size + mtp_step, 2 * candidate_dim]`，末轴前半为候选、后半为 gate。
+`get_layer_view(logical_layer_id)` 返回该层的拼接视图，计算算子的输入方式保持不变。
+`target="kv"` 表示 attention KV 候选，`target="indexer"` 表示索引 key 候选，
+仅区分 State 成员名，不选择模型算法。例如 K-pool 使用 `compressor_indexer_w4_s4_bf16`。
 
-计算先用此前 tail 和本轮 raw 输入完成跨 chunk 池化，再更新 tail。绝对位置 `t` 写入 `t % (P+S)`。完成池化的压缩 key/scale 写入 full-attention packed buffer，由 `FullAttentionState` 管理；tail 保留增量计算所需的原始数据。
+大小页保存和恢复必须对齐 `compress_stride`。有重叠时，通过 `WindowPagesPool` 保存
+时间有序的重叠历史，CPU 页搬运同一份拼接字段；无重叠时不分配页池、不占 CPU 页，
+整组缓存边界后的计算只依赖新输入。空前缀仍通过 `reset_bounded_att_state()` 初始化，
+候选清零，gate 设为负无穷。DP 运行态复制使用相同配置和 MTP 容量的物理 ring。
 
-PD 只传输 prefill 结束时最近 `P` 个逻辑位置，不传输完整 `P+S` 物理 ring。CPU cache 与 DP fetch 恢复对齐的缓存前缀，直接重置目标 tail。D 端仍按本地 `P+S` 分配 ring，保留后续 MTP 验证、拒绝回退和 draft 回访所需的候选历史。PD 逻辑窗口仅用于 prefill 状态交接，不用于迁移已经执行 MTP 的运行态；前缀恢复的可重置边界由模型配置和缓存流程保证。
+管理器只为声明了 CPU 快照区域的 bounded State 调用 `initialize_page_pools()`。
+窗口 State 在返回布局前断言小页 token 数可被 `compress_stride` 整除；大页由整数个小页组成，
+因此也满足此边界。配置了 CPU 页 token 数时，同样检查该页边界，即使窗口没有快照区域也不能跳过。
+共享槽位 allocator 继续供缓存引用和其他 State 使用；不需要快照的 State 不分配对应的页池 Tensor。
 
-#### 必须实现的接口
-
-构造函数直接接收配置、请求容量 `request_capacity`、MTP 步数 `mtp_step` 和分配设备 `device`，不再使用 `TailStorageSpec`。请求容量包含 HOLD 槽位；容量与 MTP 步数各在 State 上保存一份，设备从 `tail_buffer.device` 获取。K-pool 在构造阶段分配完整的 `pool_size + mtp_step` ring，不依赖后续 KV token 容量规划。
-
-基类接口仅包含类型标记、层访问、边界重置及 PD 区域/读写；构造参数由各具体 State 和算法 create 入口定义，不要求统一使用 KPoolStateConfig。CPU cache 不保存 tail，CPU/DP 前缀恢复统一调用重置接口；tail 不提供 CPU 读写或 DP 复制接口。
-
-```python
-from abc import ABC, abstractmethod
-from typing import Any
-
-
-class AttentionTailState(ABC):
-    # ========================================================================
-    # 一、资源定义与初始化
-    # ========================================================================
-    @abstractmethod
-    def get_state_type(self) -> str: ...
-
-    # ========================================================================
-    # 二、Attention tail：计算视图与无快照重置
-    # ========================================================================
-    @abstractmethod
-    def contains_logical_layer(self, logical_layer_id: int) -> bool: ...
-
-    def get_layer_view(self, logical_layer_id: int) -> Any: ...
-
-    @abstractmethod
-    def reset_attention_tail_state(self, req_indices: list[int]) -> None: ...
-
-    # ========================================================================
-    # 三、PD 分离传输
-    # ========================================================================
-    @abstractmethod
-    def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]: ...
-
-    @abstractmethod
-    def write_to_pd_page(
-        self, req_idx, pd_page_buffers, *, pd_page_index: int, state_token_len: int, layout: StateTransferLayout,
-    ) -> None: ...
-
-    @abstractmethod
-    def read_from_pd_page(
-        self, pd_page_buffers, req_idx, *, pd_page_index: int, state_token_len: int, layout: StateTransferLayout,
-    ) -> None: ...
-```
-
-重置接口只接收请求索引列表并清零对应 tail，不接收前缀长度。PD 按单请求和显式 `pd_page_index` 搬运固定逻辑窗口，`state_token_len` 表示该 State 已完成 prefill 的前缀长度。请求槽位由 ReqManager 分配，State 不保存请求长度表。
-
-#### 容量、访问与恢复
-
-| 接口 | 语义 |
-| --- | --- |
-| 初始化 | 创建或绑定 tail 存储、层映射及配置，覆盖请求槽位域与 HOLD；不分配请求号、KV 索引或 page 槽位 |
-| `contains_logical_layer(logical_layer_id)` | 判断指定逻辑层是否属于当前 State 的层映射，不依赖实际存储分配，共享层同样返回 True |
-| `get_layer_view(logical_layer_id)` | 返回该层计算直接使用的存储引用及必要布局信息。K-pool 可以直接返回 `[N, P+S, 2*D]` Tensor；逻辑层到本地物理层由子类映射，非所属层报错 |
-| `reset_attention_tail_state(req_indices)` | 清零指定请求的 tail，适用于新请求或可重置的缓存前缀；K-pool 清零完整 ring，其他实现清零对应数据与控制信息。模型配置和缓存流程负责保证边界，接口不接收长度 |
-
-`get_layer_view` 供计算 backend 直接使用；池化与写 tail 仍在模型 kernel 中完成，不增加通用的 `append_token` 或 attention forward 包装。执行顺序必须满足“先池化、再更新 tail”。
-
-`reset_attention_tail_state` 是新请求/前缀恢复入口，不是 MTP 回滚入口。即使已接受长度恰好对齐 P，运行中的 draft 重访仍可能需要 ring 内历史，不能用该条件代替 MTP 状态处理。模型初始化与缓存流程分别保证 main/draft 的恢复条件；调用方还需确认对应 full-attention、linear 等资源全部恢复到约定位置。
-
-#### PD：传输 prefill 逻辑窗口并适配本地 ring
-
-| 接口 | 数据路径及约束 |
-| --- | --- |
-| `write_to_pd_page(...)` | 按 `state_token_len` 提取指定请求的逻辑窗口 → `pd_page_index` 指定的 PD 状态页区域，使用 layout 的资源偏移与 TP 写入规则 |
-| `read_from_pd_page(...)` | 已接收的逻辑窗口 → 按 `state_token_len` 和本地 ring 容量映射到目标槽位；窗口外的 MTP 槽位保持原值，调用方建立接收完成依赖 |
-
-这些方法传输 tail 自身的 prefill 逻辑窗口，不承担历史 KV、池化 key/scale、bounded 状态或 MTP proposal 的迁移。发送端取最近 `P` 个位置并按时间顺序排列；接收端同样按逻辑窗口遍历，单次 kernel 恢复窗口数据及短前缀补零，窗口之外的 MTP 槽位与其他请求保持不变。后续 MTP 候选历史由 D 端执行过程中产生。
-
-`StateTransferLayout` 描述外部页位置与切片。K-pool region 的轴为 `("layer", "window", "channel")`，形状为 `[layers, P, 2*head_dim]`，与本地 `mtp_step` 无关。`window` 按时间顺序对应 `[state_token_len-P, state_token_len)`；短前缀中小于 0 的位置在发送和恢复时均补零，窗口外槽位保持原值。独立状态页的 `tokens_per_page=None`，该窗口不是 full-attention 的页内 token 轴。
-
-K-pool 的 `window` 切片设置 `local_circular=True`。`kpool_transfer.py` 从 `state_token_len` 计算本次本地窗口起点；可通过 `axis_mapping_overrides` 覆盖本次轴映射，不修改缓存的 layout。窗口起点及短前缀的无效位置数量作为运行时参数传入定制 Triton kernel，不随请求位置编译新变体。写出和读回各一次 launch，处理量均为 `layers * pool_size * channels`，不遍历窗口之外的 MTP 槽位；连续 channel 在对齐允许时使用最大 8 字节整数视图搬运，保留原始位模式。
-
-P/D 使用相同的模型及 main/draft 资源集合，但允许不同的 `mtp_step`。位置 `pos` 在 P 端从 `pos % (P+S_p)` 读取，在 D 端写入 `pos % (P+S_d)`；不能直接截取 ring 的前 P 个物理槽位。模型算法、池化步长、层顺序、字段精度和逻辑维度仍须兼容。现有 main/draft prefill 保持相同的序列位置，因此可共用任务的 `end_kv_index`；位置变化不影响缓存的布局描述。
-
-例如 `P=4`、`S_p=0`、`S_d=2`、前缀长度 11，外部窗口保存位置 `[7,8,9,10]`；P 端读取槽位 `[3,0,1,2]`，D 端恢复到 `[1,2,3,4]`。D 端其余 ring 槽位保持原值。PD 块仍使用 KV 页确定的固定容量，减少 tail 有效区域和本地复制量不代表网络整页传输字节数同步减少。
-
-长度、前缀身份和格式来自保存/传输控制元数据，不能从原始 tail 字节反推。调用层负责核对元数据并维持 main/draft 的一致恢复点；State 负责布局和数据操作。所有 GPU 操作遵循当前 stream，返回不表示完成；源请求与目标页在读写完成前不能复用。
-
-#### 与 linear 页接口和 MTP 提交的区别
-
-- 不提供 `save_bounded_att_runtime_to_pages`、`restore_bounded_att_runtime_from_pages`：tail 没有独立大小页 pool。CPU/DP 缓存前缀在对齐边界通过 reset 恢复；非对齐的 PD 交接使用 prefill 逻辑窗口。
-- 不要求 `commit_bounded_att_state`：K-pool 没有类似 KDA 的 SSM 选择游标，按绝对位置访问 ring，MTP 拒绝后由执行流程选择后续位置。增加空的提交方法不能替代窗口容量与重访范围的正确性；未来出现确实需要提交控制状态的实现时，再扩展对应契约。
+PD 在任意前缀长度导出完整 `window_size` 逻辑窗口，例如 K-pool 的长度 6 前缀仍需
+携带未完成池化组的原始 key/gate。P/D 的 MTP 容量不必相同：搬运按绝对前缀长度映射
+到各自的 ring，不传输或清理逻辑窗口外的候选槽位。环形搬运 kernel 位于
+`bounded_att/window_compressor_transfer.py`，一次 launch 搬运全部层的候选与 gate。
+MTP 回退依赖保留的历史和绝对位置，不调用缓存恢复入口。
 
 ## 7. 资源初始化与调用约定
 
@@ -1763,34 +1675,32 @@ BaseModel 提供只操作当前模型的公共阶段接口；main 调用自己�
 | --- | --- |
 | `get_req_manager_max_seq_len()` | 返回请求映射所需长度容量，取本模型 `batch_max_tokens`、`max_seq_length` 与 0 的最大值；未配置的值按 0 处理，不表示模型最大上下文能力 |
 | `bind_req_manager(req_manager)` | 绑定调用方创建的共享实例，不判断 main/draft，也不通过 `main_model` 获取资源 |
-| `prepare_attention_states()` | main 直接创建空的 `AttentionStateManager`，draft 引用 main 的实例；在 KV 内存分区内调用三类 State 工厂并统一注册返回的列表 |
+| `prepare_attention_states()` | main 直接创建空的 `AttentionStateManager`，draft 引用 main 的实例；在 KV 内存分区内调用两类 State 工厂并统一注册返回的列表 |
 | `init_runtime()` | 绑定本模型 HOLD 页、检查容量、初始化 attention backend 和 hidden collector，完成 kernel 调优、padded-request 和 decode/prefill CUDA Graph 初始化；main 在自身图初始化后执行最大长度检查 |
 
 1. 构造 main model，再构造所有 draft model。各模型加载自己的权重，准备配置和计算层，此时不创建 attention State。随后 backend 检查各模型的 `max_req_num` 一致，取所有模型 `get_req_manager_max_seq_len()` 的最大值，在主模型的 `MemoryTag.KV_CACHE` 分区中创建唯一 `ReqManager`，逐模型调用 `bind_req_manager()`。main/draft 共用请求槽位与逻辑 token 到物理索引的映射，模型不再提供 `_init_req_manager()` 私有初始化或子类共享覆盖。
-2. backend 按 main、各 draft 的顺序分别调用 `prepare_attention_states()`。公共准备流程为 main 创建唯一管理器；各 draft 的准备入口直接引用 main 的管理器，公共流程调用其 `create_full_att_states()`、`create_bounded_att_states()`、`create_att_tail_states()`，再通过 `register_state` 注册返回的全部 State。每个模型一次准备所需的 full-attention meta State、GDN/KDA 固定运行态和 indexer tail，各 State 的 config 保存容量规划与传输所需的完整布局信息。此阶段只准备布局，不读取静态标定文件；模型工厂不再接收或计算标定偏移。draft 可以拥有自己的 linear attention，不从 main 的 State 结构推导。main 和 draft 分别确定 KV head 数、head dimension、编码和层号，不提前在 main buffer 中预留 draft 层，也不在 Model 上保存 State 引用。
 3. backend 检查 main 和所有 draft 引用同一个管理器，显式调用 `finish_state_registration()`，随后在 KV 内存分区中调用 `load_full_att_calibration(args)`。文件只读一次，管理器按 main、draft0..draft35 顺序累计全部 full State 的物理层数；同角色多 State 按最小逻辑层号排列，同起点时按规范成员名排序。每个 State 内保留 `logical_layer_groups` 的物理层顺序，同组共享逻辑层只占一行，bounded 层和无 attention 的 draft 不占行。现有标定文件仍按物理行组织，没有将逻辑层号直接当文件行号。
 4. 静态 FP8 State 的 `bind_calibration(calibration, *, storage_layer_start)` 负责解析自身标定区间、校验编码和数值、切分本地 TP head，并绑定 K/V、Q 参数。仅此具体实现提供该接口，其他 State 无需空实现。无文件时 per-tensor 使用单位 scale；per-head 必须有 K/V 标定，Q 标定可选：有 Q 标定时使用静态量化，未提供时按本次请求的 Q 分组动态量化，prefill/decode 使用同一规则。随后 backend 调用 `initialize_storage(args, token_capacity=main.max_total_token_num, mem_fraction=main.mem_fraction)` 规划容量并分配存储；原地分配不改变 State 对象身份，所有 full State 共享 allocator 索引域。静态 FP8 在尚未绑定标定时禁止分配实际存储。
 5. 各 Model 继续使用同一个共享管理器。backend 按 main、各 draft 的顺序逐个调用 `init_runtime()`，其中 `_check_mem_size()` 从 `full_att_allocator.size` 更新当前模型的 `max_total_token_num` 并检查容量，随后完成 backend 绑定、warmup、padded-request 和图初始化，再初始化下一个模型。main 在自己的 `init_runtime()` 末尾执行最大长度检查；draft 不执行该检查。每次调用只操作当前模型，计算上下文和 attention backend 按本模型角色访问 State；MTP 游标仍由具体 State 持有。
 6. 全部模型的 `init_runtime()` 成功返回后，backend 清理临时显存并发布就绪标志，再建立 radix cache、共享存储导出及缓存/传输服务。初始化失败直接向调用方传播，不发布就绪标志；重复启动在修改现有资源前断言失败。
 
-BaseModel 提供三个默认返回空列表的 `classmethod` 扩展点，具体模型只覆盖自己支持的类别。创建接口不读取模型实例、管理器或其他创建接口的临时属性，也不注册 State、不设置 `state_name`。
+BaseModel 提供两个默认返回空列表的 `classmethod` 扩展点，具体模型只覆盖自己支持的类别。创建接口不读取模型实例、管理器或其他创建接口的临时属性，也不注册 State、不设置 `state_name`。
 
 | 创建接口 | 返回值与职责 |
 | --- | --- |
 | `create_full_att_states(...)` | 返回 `list[FullAttentionState]`；只准备布局，不加载静态标定或分配 KV 容量；可返回多种量化或存储方案 |
 | `create_bounded_att_states(...)` | 返回 `list[BoundedAttentionState]`；按请求容量创建运行态，大小页延后分配；CPU 查询使用 `device="meta"` |
-| `create_att_tail_states(...)` | 返回 `list[AttentionTailState]`；按请求容量创建本模型 tail，CPU 联合页不调用此接口 |
 
 `model_logical_layer_ids` 表示当前模型拥有的全局逻辑层 ID，按模型内部层顺序排列；main/draft 保留现有全局编号机制。具体模型自行选择各类 State 的参与层和共享分组，该参数不代表物理存储层数，也不要求每个 State 使用全部层。
 
 `Qwen3NextResourceConfig` 及其 GLM 配置只描述当前模型，保留 `from_model_config()`、`load_from_args()` 和 `get_full_att_layer_indices()` 三个入口。层查询返回模型内部序号，由模型工厂转换为实际逻辑层 ID；不追加 draft 层，不计算物理层映射、Conv/SSM 存储形状或字节数。配置只保存全局 head 数，本地 TP 分片由 State 或后端校验调用方计算。full-attention 维度保存原始特征宽度，GLM 的 indexer 字段和 packed padding 由具体 State 的创建入口处理。
 
-三个接口均为公共类方法，供模型启动和外部 CPU cache 布局构建调用；子类只覆盖自己支持的资源类型，基类默认返回空列表。接口显式接收模型配置、启动参数、逻辑层号和 TP 信息；bounded/tail 接口另收请求容量和设备，full 工厂不接收标定起点。`prepare_attention_states()` 为 main 直接创建空的 `AttentionStateManager`，draft 引用同一实例；随后用真实请求容量和 CUDA 设备调用模型工厂，并统一按模型角色注册所有返回对象。无 attention 的 draft 仅共享管理器，不创建自身资源。所有模型统一使用 `AttentionStateManager`，模型差异由三类 State 工厂及具体 State 实现表达。ReqManager 的创建与共享关系仍由 backend 组织。
+两个接口均为公共类方法，供模型启动和外部 CPU cache 布局构建调用；子类只覆盖自己支持的资源类型，基类默认返回空列表。接口显式接收模型配置、启动参数、逻辑层号和 TP 信息；bounded 接口另收请求容量和设备，full 工厂不接收标定起点。`prepare_attention_states()` 为 main 直接创建空的 `AttentionStateManager`，draft 引用同一实例；随后用真实请求容量和 CUDA 设备调用模型工厂，并统一按模型角色注册所有返回对象。无 attention 的 draft 仅共享管理器，不创建自身资源。所有模型统一使用 `AttentionStateManager`，模型差异由两类 State 工厂及具体 State 实现表达。ReqManager 的创建与共享关系仍由 backend 组织。
 
 
 需要保留的跨模型阶段边界是：全部模型完成权重加载及 State 准备后才规划和分配共享容量。State 资源在创建完成后通过缓存查询取得；分配完成后的 attention backend 初始化、warmup、padded-request 和图初始化按单模型顺序执行，不要求全部模型先 warmup 再统一捕获图。其他调用方先通过 `get_req_manager_max_seq_len()` 汇总需求、创建共享请求管理器并调用 `bind_req_manager()`，再按相同顺序复用 `prepare_attention_states()` 和 `init_runtime()`，共享分配和就绪标志仍由调用方协调。
 
-`create_full_att_states()` 由具体模型直接构造 `GQAAttentionConfig` 或 `MLAAttentionConfig` 并调用 `create_gqa_state()` 或 `create_mla_state()`，返回 State 列表；不存在 full 层时返回空列表。模型自行决定 head 数、维度、精度、参与层及共享分组，同族相同方案可以继承工厂。bounded/tail 工厂同样直接调用算法 create；GLM main/draft 分别选择 tail 的参与层并读取自己的 K-pool 配置，不依赖其他工厂的副作用。
+`create_full_att_states()` 由具体模型直接构造 `GQAAttentionConfig` 或 `MLAAttentionConfig` 并调用 `create_gqa_state()` 或 `create_mla_state()`，返回 State 列表；不存在 full 层时返回空列表。模型自行决定 head 数、维度、精度、参与层及共享分组，同族相同方案可以继承工厂。bounded 工厂同样直接调用算法 create；GLM main/draft 分别选择池化窗口的参与层并读取自己的 K-pool 配置，不依赖其他工厂的副作用。
 
 `AttentionStateManager.initialize_storage()` 由基类提供通用实现，在显式完成创建标记及静态标定绑定后，保留两个阶段：估算内存并直接计算完整页容量、调用 `allocate_storage()` 初始化实际存储。PD 模式在容量规划阶段按需构建 meta State 的 PD 布局，得到传输 buffer 的预留大小。`token_capacity` 为指定的 token 容量，传入 `None` 时使用 `mem_fraction` 评估可用显存并协调各 TP rank 的容量；其余页大小及传输选项读取 `args`。该方法只操作管理器内部资源，不接收模型列表，也不遍历模型回填容量。调用方负责共享管理器检查、KV 内存分区和后续各模型的 `init_runtime()`；模型进入 `_check_mem_size()` 时再从 allocator 取得最终容量。CPU 布局构建使用相同的模型编号和独立 State 定义，保留每个 draft 的全局布局；容量统计通过共享管理器完成。
 
@@ -1800,13 +1710,13 @@ BaseModel 提供三个默认返回空列表的 `classmethod` 扩展点，具体�
 
 PD 容量规划使用 `manager.get_pd_page_bytes() * page_count` 计算预留空间，依赖方向是先布局、后页大小。FullAttentionState 的 `get_pd_transfer_regions()` 根据全局 `pd_kv_page_size` 返回实际字段区域，包含各 field 的 dtype 对齐及实现要求的内部 padding。manager 同时平移字段区间的起点与终点，以 `max(region.byte_end)` 确定当前 State 的数据结束位置，向上对齐到 8 字节后记录为 layout 的 `byte_end`，并作为下一个 State 的 `byte_start`。所有 State 排列完成后，`max(layout.byte_end)` 就是 KV 页大小。GPU packed 行中未被任何传输字段覆盖的 padding 不进入 PD 页。
 
-bounded/indexer 的运行态布局使用同一规则：按字段的实际最大结束位置确定 State 占用，不另外维护纯数据字节数估算，也不累加多个映射共用的同一区域。它始终返回各运行态 State 自身的起止区间，不依赖 full-attention 布局，运行态总占用取 `max(layout.byte_end)`。`get_pd_page_bytes()` 返回 KV 页与完整运行态页占用的最大值；没有参与资源时返回 0。有 KV 且 KV 页小于运行态页时记录英文 warning，自动扩大实际传输页，保持 `pd_kv_page_size` 的 token 数和两类布局偏移不变，不再因两类页大小关系而中止初始化。PD 调用方按这个返回值分配和选取实际传输页，再以该页起点执行对应任务的布局；例如运行态布局为 80 字节、KV 页为 128 字节时，实际传输块为 128 字节，运行态仅操作自己的 80 字节范围。
+bounded（包括压缩窗口） 的运行态布局使用同一规则：按字段的实际最大结束位置确定 State 占用，不另外维护纯数据字节数估算，也不累加多个映射共用的同一区域。它始终返回各运行态 State 自身的起止区间，不依赖 full-attention 布局，运行态总占用取 `max(layout.byte_end)`。`get_pd_page_bytes()` 返回 KV 页与完整运行态页占用的最大值；没有参与资源时返回 0。有 KV 且 KV 页小于运行态页时记录英文 warning，自动扩大实际传输页，保持 `pd_kv_page_size` 的 token 数和两类布局偏移不变，不再因两类页大小关系而中止初始化。PD 调用方按这个返回值分配和选取实际传输页，再以该页起点执行对应任务的布局；例如运行态布局为 80 字节、KV 页为 128 字节时，实际传输块为 128 字节，运行态仅操作自己的 80 字节范围。
 
 PD master 负责校验连接参数，长度通过传输任务的 `end_kv_index` 传递；资源层不附加 PD 页布局指纹及长度、版本字段。两个布局 getter 与页大小查询均使用 `lru_cache`，存储初始化后一起清除缓存。
 
 P/D 传输进程为每次 KV 任务创建普通 CPU token 索引 Tensor，在 `copy_cuda_stream` 中调用 `cuda(non_blocking=True)` 上传，后续 State 拷贝沿用同一流；预热使用相同路径。不预分配或保留 pinned 索引页缓冲，普通 CPU 内存也不保证 H2D 全程异步。`att_state` 任务按请求槽位搬运，不创建或上传 token 索引。
 
-CPU 使用相同的依赖方向：`get_cpu_page_bytes()` → `get_cpu_page_layouts()` → 各 State 的 `get_cpu_transfer_regions()`。布局 getter 读取全局 `cpu_cache_token_page_size`，在管理器内部直接展开聚合：依次取得 full-attention 和 bounded 的字段区间，平移为页内位置，以 `max(region.byte_end)` 向上对齐到 8 字节作为当前 State 的终点。页大小查询再取 `max(layout.byte_end)` 并按 16 字节对齐。字段之间的 dtype 对齐及 State 实现要求的内部 padding 均计入容量；未参与传输的 GPU packed 行 padding、静态标定参数不占 CPU 页。bounded 每页只保存一份快照，不乘页内 token 数，也不包含 MTP 候选区、游标或其他页池槽位。Attention tail 不参与 CPU 联合页，读回时按最终前缀边界重置；快照接口仅用于 PD。
+CPU 使用相同的依赖方向：`get_cpu_page_bytes()` → `get_cpu_page_layouts()` → 各 State 的 `get_cpu_transfer_regions()`。布局 getter 读取全局 `cpu_cache_token_page_size`，在管理器内部直接展开聚合：依次取得 full-attention 和 bounded 的字段区间，平移为页内位置，以 `max(region.byte_end)` 向上对齐到 8 字节作为当前 State 的终点。页大小查询再取 `max(layout.byte_end)` 并按 16 字节对齐。字段之间的 dtype 对齐及 State 实现要求的内部 padding 均计入容量；未参与传输的 GPU packed 行 padding、静态标定参数不占 CPU 页。bounded 每页只保存一份快照，不乘页内 token 数，也不包含 MTP 候选区、游标或其他页池槽位。无重叠窗口不参与 CPU 联合页；有重叠窗口保存必要历史，PD 则传输完整窗口。
 
 各具体 State 的 `get_cpu_transfer_regions()` 使用 `@lru_cache(maxsize=None)` 缓存不可变区域元组，
 并在其外层添加 `@deepcopy_result`，每次先取得缓存结果、再返回深拷贝，调用方不持有缓存原对象。
@@ -1855,13 +1765,13 @@ CPU 服务读取 main 和各 draft 自己的配置，直接调用模型类的 fu
 
 ### 7.2 缓存保存与恢复
 
-没有任何可恢复缓存、从长度 0 开始时，调用方在获得请求槽位后调用 `reset_bounded_att_state(req_indices)` 和 `reset_attention_tail_state(req_indices)`，分别初始化 bounded 与 tail 运行态。全部初始化完成后再开始计算。命中非零前缀时使用对应恢复路径；完整恢复前不得读取目标状态。
+没有任何可恢复缓存、从长度 0 开始时，调用方在获得请求槽位后调用 `reset_bounded_att_state(req_indices)`，初始化全部 bounded 运行态（包括窗口压缩器）。全部初始化完成后再开始计算。命中非零前缀时使用对应恢复路径；完整恢复前不得读取目标状态。
 
 调用方直接使用指定大小页域的 allocator 取得槽位，在状态仍可捕获时调用管理器的 `save_bounded_att_runtime_to_pages`。`AttentionStateManager` 将同一组槽位传给全部参与 State 保存；调用方确认数据就绪后，可以把 `(page_kind, slot_id, state_token_len)` 关联到 radix 节点，也可以用于其他缓存操作。
 
-radix 沿用原有判断：大页节点具有状态，小页节点通过 `small_page_buffer_idx is not None` 判断是否可恢复；图片边界仍通过 `clamp_mm_cache_len` 独立检查。匹配得到节点引用后，调用方直接调用 `restore_bounded_att_runtime_from_pages` 恢复全部参与 State。KV 索引由调用方交给 ReqManager 绑定；没有 tail 快照时，调用方使用管理器的 `reset_attention_tail_state(req_indices)` 清零 tail，保留已恢复的 linear 状态。调用方还需确认历史 KV、tail 和 bounded 快照均对应恢复前缀，并保证数据就绪。
+缓存恢复由各 bounded State 根据绝对前缀长度处理：有重叠窗口恢复快照，无重叠窗口在对齐边界重置；无需额外的分类恢复接口。
 
-使用 K-pool 的 tail 在完整池化边界上通过 `reset_attention_tail_state` 重置；非对齐恢复需要原始 tail 数据。CPU 读回后，管理器在最终前缀数据恢复后调用 `reset_attention_tail_state`，不读取 tail 快照。DP fetch 在对齐的缓存前缀上重置 tail；PD 按第 6.8 节传输固定逻辑窗口并重排到本地 ring。前缀恢复的清零规则不用于 MTP 回退。
+缓存恢复由各 bounded State 根据绝对前缀长度处理：有重叠窗口恢复快照，无重叠窗口在对齐边界重置；无需额外的分类恢复接口。
 
 MTP 接受位置由模型执行流程选择，供后续计算使用；当前大小页保存和 DP/PD 导出发生在 prefill 基准状态阶段。KDA/GDN 只保存实际捕获的状态；跨越但未保存的中间位置不可作为有效页，也不能发布为 CPU 缓存页；执行流程需在待缓存页边界安排真实状态捕获。管理器的数据操作不承担一次 forward 的提交或请求长度更新。
 
@@ -1890,7 +1800,6 @@ CPU cache 的请求入口位于 `MultiLevelKvCacheModule`，不再单设混合�
 
 - full-attention 资源直接提供 CPU、DP、PD 读写方法，覆盖 KV、scale 或 packed 数据；请求流程从 `ReqManager` 获取请求映射，向 State 方法显式传入源、目标索引。
 - `KDAState`、`GDNState` 实现 `BoundedAttentionState` 的直接传输方法：CPU 路径读写 checkpoint，DP/PD 路径迁移 prefill 基准请求状态；管理器组织参与对象及位置映射。
-- `AttentionTailState` 提供层访问、按请求清零及 PD 直接读写方法，详见 6.8 节；CPU cache 和 DP fetch 通过重置恢复对齐前缀的 tail。GLM K-pool indexer 在 TP ranks 间为副本，其他实现自行描述其布局。
 - 各具体 State 实现自身 GPU 存储句柄与布局元数据的导出、导入和绑定；模型专属 `AttentionStateManager` 按角色及资源身份组织所需 State，并实现组合传输流程。传输进程使用这些具体实现，CPU pinned checkpoint pool 和 allocator 留在推理进程。main/draft 共享索引时，仍需逐项检查资源身份和格式兼容性。
 
 跨进程导入的管理器持有借用的运行态存储和索引容量描述，不持有 allocator 或 CPU 状态池。请求映射由 server 层作为 ReqManager 所有的独立存储导出，不能附加到资源管理器。CUDA IPC 句柄按实际读取进程数发布，每个读取者消费独立引用；原进程在全部读取者结束使用前保持存储存活。
@@ -1902,15 +1811,15 @@ PD 任务分为 `kv` 和 `att_state` 两类；涉及 main/draft 时按模型角�
 | 任务 | 组成 | 处理方式 |
 | --- | --- | --- |
 | `kv` | full-attention 历史 KV，包含布局所需的 packed indexer 数据 | 按 token 页复制 |
-| `att_state` | linear Conv/SSM + 可选 indexer tail | 模型专属 `AttentionStateManager` 按请求恢复位置调用对应 State 方法 |
+| `att_state` | Conv/SSM、SWA 和窗口压缩器运行态 | 模型专属 `AttentionStateManager` 按请求恢复位置调用对应 State 方法 |
 
-P 端在 prefill 完成时发送状态页。linear state 按全局 head 布局打包，indexer tail 从来源 TP 组取一份；D 端按目标 TP 布局恢复 linear state，并将 tail 写入目标 TP 各 rank 的本地请求槽位。
+P 端在 prefill 完成时发送状态页。linear state 按全局 head 布局打包，索引池化窗口 从来源 TP 组取一份；D 端按目标 TP 布局恢复 linear state，并将窗口写入目标 TP 各 rank 的本地请求槽位。
 
-模型专属 `AttentionStateManager` 实现状态页的布局组织和容量校验，调用 linear State 与 indexer tail State 的直接传输方法。各具体 State 负责自身区域的读写和边界校验，PD 调度负责任务队列、网络传输与完成通知。收到所有 KV/state 数据并完成 GPU 写入后，请求才能继续 decode。
+模型专属 `AttentionStateManager` 实现状态页的布局组织和容量校验，调用 linear State 与 窗口压缩器 State 的直接传输方法。各具体 State 负责自身区域的读写和边界校验，PD 调度负责任务队列、网络传输与完成通知。收到所有 KV/state 数据并完成 GPU 写入后，请求才能继续 decode。
 
-网络层只接收固定容量的字节页，不按 KV 的 head 数或 dtype 推断组合布局。两端在创建传输句柄前核对页容量，PD master 在连接时校验任务类别、资源身份、算法与编码、层映射和全局字段形状；页内不附加格式指纹、长度或版本。布局使用全局字段描述以支持不同 TP 大小，tail 布局只描述固定逻辑窗口，不包含本地 MTP 候选容量。运行态的前缀长度由传输任务提供。
+网络层只接收固定容量的字节页，不按 KV 的 head 数或 dtype 推断组合布局。两端在创建传输句柄前核对页容量，PD master 在连接时校验任务类别、资源身份、算法与编码、层映射和全局字段形状；页内不附加格式指纹、长度或版本。布局使用全局字段描述以支持不同 TP 大小，窗口布局只描述固定逻辑窗口，不包含本地 MTP 候选容量。运行态的前缀长度由传输任务提供。
 
-P/D 使用相同模型和 main/draft 资源集合，允许不同 TP 与 `mtp_step`。full-attention 传输有效 KV 和量化字段；bounded 状态按 6.7 节传输 prefill 基准 Conv/SSM，恢复到本地基准位置并将游标归零；tail 按 6.8 节传输固定逻辑窗口并按本地 ring 容量重排。MTP 候选容量不进入 PD 字段形状，单个 task 仍使用既有的前缀位置描述。
+P/D 使用相同模型和 main/draft 资源集合，允许不同 TP 与 `mtp_step`。full-attention 传输有效 KV 和量化字段；bounded 状态按 6.7 节传输 prefill 基准 Conv/SSM，恢复到本地基准位置并将游标归零；窗口压缩器按 6.8 节传输固定逻辑窗口并按本地 ring 容量重排。MTP 候选容量不进入 PD 字段形状，单个 task 仍使用既有的前缀位置描述。
 
 ### 8.3 CPU/Disk 与 DP fetch
 
@@ -1918,11 +1827,11 @@ CPU 联合页使用字节存储，从偏移 0 开始按具体 State 的字段布
 
 GPU→CPU 保存状态页完成后，才能在 CPU 上重排或复制这些快照；主机侧读取必须等待保存完成，不能只向另一个 CUDA stream 排入依赖。CPU 页的 ready 发布仍由调用流程在全部参与资源与 TP 分片传输完成后执行。
 
-模型专属 `AttentionStateManager` 实现 CPU 联合页的布局与读写组织，调用所需 main/draft State 的 CPU 方法，组合 full-attention KV 和 linear 页；按调用方提供的槽位写出或读回快照，pool 和 CPU buffer 均不保存长度副本。CPU 缓存调度提供外部页和任务生命周期；每个已发布 CPU 页都具备该模型组合所需的有效 linear 状态。一次读回处理同一前缀的页面，并通过 `reset_attention_tail_state` 清零目标 tail；恢复终点必须满足具体 tail 的可重置边界。
+缓存恢复由各 bounded State 根据绝对前缀长度处理：有重叠窗口恢复快照，无重叠窗口在对齐边界重置；无需额外的分类恢复接口。
 
 CPU load/offload 的尾页暂存槽位由管理器保留和协调，参与的大页 pool 分别提供存储。各参与方的暂存数据消费完成后，后续请求才能复用该槽位。磁盘存储使用 CPU 页格式；main/draft 异构组合需定义各自资源段的位置、字段形状及 TP 切片。
 
-DP fetch 同时恢复缓存前缀需要的历史 KV 和 bounded 运行态，并在对齐边界重置目标 tail。只有当前运行态、缺少历史 checkpoint 的请求，不能据此发布未经保存的历史状态。传输能力由资源布局显式声明，不支持的组合在初始化阶段拒绝。
+DP fetch 同时恢复缓存前缀需要的历史 KV 和 bounded 运行态，并按各 State 的规则恢复窗口历史。只有当前运行态、缺少历史 checkpoint 的请求，不能据此发布未经保存的历史状态。传输能力由资源布局显式声明，不支持的组合在初始化阶段拒绝。
 
 ### 8.1 DeepSeek V4：压缩 KV 与有界窗口
 
@@ -1936,7 +1845,7 @@ State 创建、backend 和提前预留 workspace 共用这些配置入口。编�
 `get_attention_view()` 均由对应原子配置实现，backend 不再维护一套物理格式计算。
 SWA 使用独立的 `FP8E8M0SlidingWindowConfig`，只记录逻辑层、近期窗口、KV 编码与 TP 信息。
 压缩器使用独立的 `WindowCompressorStateConfig`，明确记录 `window_size`、`compress_stride`、
-`candidate_dim`、`target`、精度和 TP 信息；没有 C4/C128 层列表或 SWA 字段。
+`candidate_dim`、`target`、`dtype` 和 TP 信息；没有 C4/C128 层列表或 SWA 字段。
 `window_size` 是每次聚合覆盖的原始 token 数，`compress_stride` 是每隔多少原始 token 产出一条，
 大小页需保留的跨步历史由 `overlap_tokens = window_size - compress_stride` 推导，不额外存储重复配置。
 
@@ -1992,7 +1901,7 @@ C4 保存上一组的四个位置，供下一组重叠压缩使用。运行态�
 PD 运行态采用与本地 MTP 容量无关的逻辑窗口：SWA 为配置窗口，C4/indexer 为八个位置，
 C128 为 128 个位置。收发两端根据传入的绝对前缀长度各自计算 ring 位置，因此允许不同的 MTP 配置。
 SWA、压缩 KV 和 compressor 在 TP 内完整复制，仅 rank 0 写出共享外部区域，各 rank 可读回。
-V4 的这些窗口需要真实快照，不归入仅能在页边界清零的 `AttentionTailState`。
+窗口是否需要真实快照由重叠历史决定，GLM K-pool 和 V4 压缩器使用相同的 bounded State 接口。
 
 checkpoint 中的权重层号与 draft 自有逻辑层数分别记录；多个复用相同 MTP 权重的 draft 仍注册独立 State。
 模型和 backend 根据逻辑层查询 State 视图，不在 ReqManager 中附加 ring，不在 backend 中保存运行态副本。
@@ -2002,15 +1911,14 @@ checkpoint 中的权重层号与 draft 自有逻辑层数分别记录；多个�
 | 问题 | 设计约定 | 待确定内容 |
 | --- | --- | --- |
 | main/draft 管理器装配 | 模型组合实现自己的管理器；各角色和具体方案拥有唯一 State，同一分配域共享唯一 allocator 实例 | 新模型的 main/draft 装配时序及独立存储分配；调用方覆盖全部参与资源的引用解除及单次归还责任 |
-| AttentionStateManager 聚合接口 | 按 6.2 节提供 full-attention token 复制、空前缀清零、清零指定请求的 tail、大小页聚合操作及完整 CPU/DP/PD 接口；radix 是调用方 | 各模型参与集合、跨实例共享域装配、分阶段捕获及索引/元数据的具体承载类型 |
+| AttentionStateManager 聚合接口 | 按 6.2 节提供 full-attention token 复制、空前缀清零、大小页聚合操作及完整 CPU/DP/PD 接口；radix 是调用方 | 各模型参与集合、跨实例共享域装配、分阶段捕获及索引/元数据的具体承载类型 |
 | 内部 attention 资源的暴露 | 具体模型在初始化阶段绑定 State 或层视图，不要求统一模型视图获取接口 | 各模型/backend 的具体绑定方式与按层访问结构 |
 | FullAttentionState 接口与继承 | 必需语义：容量计算、初始化、层视图、KV 写入、完整 token 复制及固定字段传输布局；CPU/DP/PD 由子类按支持路径直接实现读写方法 | 新布局的 TensorField 覆盖范围、StateTransferLayout 映射约束及具体搬运实现 |
 | BoundedAttentionState 接口与继承 | KDAState、GDNState 实现统一抽象操作；已接受运行态、checkpoint 和传输分别定义，allocator 仍归管理器 | 按 6.7 节细化各子类的描述字段和 kernel，核对 MTP 状态选择、跨 TP/CPU 格式兼容性 |
-| AttentionTailState 接口与继承 | 按 6.8 节实现层访问、按请求清零及 PD 传输；prefill 逻辑窗口迁移，无独立页 pool | 各子类的恢复规则及跨 ring 布局转换能力 |
 | allocator 能力描述 | 公共入口按需初始化，不需要的 allocator 为 None | 恢复边界和传输能力使用哪些最小描述，避免重复配置导致不一致 |
 | checkpoint 引用形式 | 调用方维护大小页类别、共享槽位 ID、前缀长度及参与模型资源；各侧 pool 只保存快照数据 | 引用对象或参数组合的具体类型，以及参与资源集合的表达 |
 | 配置类型拆分 | main/draft 分别产生实现和布局参数，共享 allocator 接收统一容量与索引配置 | 各类 State 的配置字段、跨资源共享字段与校验责任 |
-| PD tail 的协议布局 | 固定 P 个逻辑位置，按任务前缀长度映射两端 ring；兼容不同 MTP 步数 | 保持相同模型资源集合与 prefill 状态交接约束 |
-| CPU 缓存页的组合方式 | 每页包含全部有效 linear 状态；管理器组织读写，并在全部页面恢复后清零目标 tail | 不同 main/draft 实现的资源段布局及恢复边界兼容 |
+| PD 窗口压缩器的布局 | 固定 P 个逻辑位置，按任务前缀长度映射两端 ring；兼容不同 MTP 步数 | 保持相同模型资源集合与 prefill 状态交接约束 |
+| CPU 缓存页的组合方式 | 每页包含全部有效 linear 状态；管理器组织读写，并在全部页面恢复后从末页恢复请求运行态 | 不同 main/draft 实现的资源段布局及恢复边界兼容 |
 
 以上待细化事项须遵守本文的资源归属、共享分配域和恢复语义约定。

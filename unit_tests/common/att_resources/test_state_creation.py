@@ -17,7 +17,7 @@ from lightllm.common.attention_state.full_att import (
 from lightllm.common.attention_state.bounded_att import (
     BoundedAttentionState, ConvSSMStateConfig, create_gdn_state, create_kda_state,
 )
-from lightllm.common.attention_state.att_tail import KPoolStateConfig, create_kpool_state
+from lightllm.common.attention_state.bounded_att import WindowCompressorStateConfig, create_window_compressor_state
 
 
 @pytest.mark.parametrize(
@@ -156,21 +156,21 @@ def test_bounded_creation_allocates_runtime_but_defers_pools(create_state: Calla
 
 
 def test_kpool_creation_preserves_pool_and_mtp_dimensions():
-    config = KPoolStateConfig(
+    config = WindowCompressorStateConfig(
         logical_layer_ids=(3, 7),
-        pool_size=4,
-        head_dim=128,
+        window_size=4, compress_stride=4, target="indexer",
+        candidate_dim=128,
         dtype=torch.bfloat16,
     )
-    state = create_kpool_state(
+    state = create_window_compressor_state(
         config=config,
         request_capacity=3,
         mtp_step=2,
         device="cpu",
     )
     assert state.config is config and state.state_name is None
-    assert state.tail_buffer.shape == (2, 3, 6, 256)
-    assert state.get_state_type() == "kpool_c4_bf16"
+    assert state.buffer.shape == (2, 3, 6, 256)
+    assert state.get_state_type() == "compressor_indexer_w4_s4_bf16"
 
 
 def test_create_rejects_encoding_from_another_logical_family():

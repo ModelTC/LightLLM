@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from unit_tests.common.att_resources.model_helpers import window_states, linear_states
+
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
@@ -202,8 +204,8 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
     main_linear_state(source).conv_state[:, 1, ..., :2].fill_(13)
     main_linear_state(source).ssm_state[:, 3].fill_(17)
     if glm:
-        source.main_kpool_c4_bf16_state.tail_buffer[:, 1].fill_(23)
-        target.main_kpool_c4_bf16_state.tail_buffer[:, 2].fill_(29)
+        source.main_compressor_indexer_w4_s4_bf16_state.buffer[:, 1].fill_(23)
+        target.main_compressor_indexer_w4_s4_bf16_state.buffer[:, 2].fill_(29)
     torch.cuda.synchronize(source_device)
     # 同时验证运行态与指定大页复制，保留其他页及小页快照。
     for pool in (main_linear_state(target).big_pages_pool, main_linear_state(target).small_pages_pool):
@@ -276,9 +278,12 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
     assert (main_linear_state(target).small_pages_pool.conv_state == 41).all()
     assert (main_linear_state(target).small_pages_pool.ssm_state == 43).all()
     if glm:
-        assert not target.main_kpool_c4_bf16_state.tail_buffer[:, 2].any()
-        assert (source.main_kpool_c4_bf16_state.tail_buffer[:, 1] == 23).all()
-        assert not target.main_kpool_c4_bf16_state.tail_buffer[:, :2].any()
+        assert torch.equal(
+            target.main_compressor_indexer_w4_s4_bf16_state.buffer[:, 2].cpu(),
+            source.main_compressor_indexer_w4_s4_bf16_state.buffer[:, 1].cpu(),
+        )
+        assert (source.main_compressor_indexer_w4_s4_bf16_state.buffer[:, 1] == 23).all()
+        assert not target.main_compressor_indexer_w4_s4_bf16_state.buffer[:, :2].any()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -319,8 +324,8 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
     for storage_buffer in full_state_test_buffers(full).values():
         storage_buffer[:, 4].zero_()
     main_linear_state(resources).conv_state.fill_(11)
-    resources.main_kpool_c4_bf16_state.tail_buffer.fill_(7)
-    for state in resources.get_bounded_attention_states():
+    resources.main_compressor_indexer_w4_s4_bf16_state.buffer.fill_(7)
+    for state in linear_states(resources):
         for pool in (state.big_pages_pool, state.small_pages_pool):
             if pool is not None:
                 pool.conv_state.zero_()
@@ -353,7 +358,9 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
         error = parent.recv()
         assert error is None, error
         assert (read_kv_storage(full)[:, 4] == 9).all()
-        assert not resources.main_kpool_c4_bf16_state.tail_buffer[:, 1].any()
+        window = resources.main_compressor_indexer_w4_s4_bf16_state
+        assert not window.buffer[:, 1, :, :window.config.candidate_dim].any()
+        assert torch.isneginf(window.buffer[:, 1, :, window.config.candidate_dim:]).all()
         assert (main_linear_state(resources).conv_state == 11).all()
         assert (main_linear_state(resources).big_pages_pool.conv_state[slot[0]] == 11).all()
         assert not main_linear_state(resources).big_pages_pool.ssm_state[slot[0]].any()
@@ -512,12 +519,12 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
             assert resources.bounded_att_big_page_allocator is None
             assert resources.bounded_att_small_page_allocator is None
             if kind == "dp":
-                for state in resources.get_bounded_attention_states():
+                for state in linear_states(resources):
                     assert state.big_pages_pool.conv_state.is_shared()
                     assert not state.big_pages_pool.conv_state.is_pinned()
                 resources.register_page_pools_pin_memory()
                 resources.register_page_pools_pin_memory()
-            for state in resources.get_bounded_attention_states():
+            for state in linear_states(resources):
                 for pool in (state.big_pages_pool, state.small_pages_pool):
                     if kind == "dp":
                         assert pool is not None
@@ -532,7 +539,8 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
             assert not hasattr(resources, "req_to_token_indexs")
             assert mapping[1, 0].item() == 7
             resources.copy_full_att_tokens(torch.tensor([0], dtype=torch.long, device="cuda"), torch.tensor([4], dtype=torch.long, device="cuda"))
-            resources.reset_attention_tail_state([1])
+            for window in window_states(resources):
+                window.reset_bounded_att_state([1])
             torch.cuda.synchronize()
             # 一类通道耗尽不会影响另一类通道的读取计数。
             with pytest.raises(RuntimeError, match="exhausted"):

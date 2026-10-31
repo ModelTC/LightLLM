@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
     from lightllm.common.attention_state.full_att import FullAttentionState
-    from lightllm.common.attention_state.att_tail import AttentionTailState
+    from lightllm.common.attention_state.bounded_att import BoundedAttentionState
 
 
 class Glm5NextMTPModel(TpPartBaseModel):
@@ -105,7 +105,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
         return [state]
 
     @classmethod
-    def create_att_tail_states(
+    def create_bounded_att_states(
         cls,
         model_config: dict[str, object],
         args: "StartArgs | EasyDict",
@@ -114,9 +114,9 @@ class Glm5NextMTPModel(TpPartBaseModel):
         tp_rank: int = 0,
         tp_world_size: int = 1,
         device: str = "meta",
-    ) -> list["AttentionTailState"]:
-        """直接选择本模型需要 K-pool tail 的层，不依赖 full State 创建过程。"""
-        from lightllm.common.attention_state.att_tail import create_kpool_state, KPoolStateConfig
+    ) -> list["BoundedAttentionState"]:
+        """直接选择本模型的 K-pool 窗口层，不依赖 full State 创建过程。"""
+        from lightllm.common.attention_state.bounded_att import create_window_compressor_state, WindowCompressorStateConfig
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -124,11 +124,13 @@ class Glm5NextMTPModel(TpPartBaseModel):
         if not logical_layer_ids:
             return []
         assert args.linear_att_hash_page_size % config["index_kpool"] == 0, "GLM cache pages must align to index_kpool"
-        state = create_kpool_state(
-            config=KPoolStateConfig(
+        state = create_window_compressor_state(
+            config=WindowCompressorStateConfig(
                 logical_layer_ids=logical_layer_ids,
-                pool_size=config["index_kpool"],
-                head_dim=config["index_head_dim"],
+                window_size=config["index_kpool"],
+                compress_stride=config["index_kpool"],
+                candidate_dim=config["index_head_dim"],
+                target="indexer",
                 dtype=get_torch_dtype(args.data_type),
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,

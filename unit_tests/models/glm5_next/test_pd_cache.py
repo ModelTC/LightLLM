@@ -1,4 +1,4 @@
-from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
+from unit_tests.common.att_resources.model_helpers import window_states, build_hybrid_resources
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 import dataclasses
@@ -96,8 +96,8 @@ def make_mems(monkeypatch, request):
                     full=main,
                     full_states=tuple(state for state in (main, draft) if state is not None),
                     linear=resources.main_kda_conv_bf16_ssm_fp32_state,
-                    tail=resources.main_kpool_c4_bf16_state,
-                    tails=resources.get_attention_tail_states(),
+                    tail=resources.main_compressor_indexer_w4_s4_bf16_state,
+                    tails=window_states(resources),
                     resources=resources,
                 )
             )
@@ -160,7 +160,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
         offset = 0
         for state in mem.tails:
             end = offset + len(state.config.logical_layer_ids)
-            state.tail_buffer[:, src_req].copy_(tail[offset:end])
+            state.buffer[:, src_req].copy_(tail[offset:end])
             offset = end
 
     untouched = []
@@ -171,15 +171,15 @@ def test_pd_kv_and_runtime_state_roundtrip(
         mem.linear.conv_state.normal_()
         mem.linear.ssm_state.normal_()
         for state in mem.tails:
-            state.tail_buffer.normal_()
-        original_tails.append(torch.cat([state.tail_buffer[:, dst_req] for state in mem.tails]).clone())
+            state.buffer.normal_()
+        original_tails.append(torch.cat([state.buffer[:, dst_req] for state in mem.tails]).clone())
         untouched.append(
             [
                 x[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
                 for x, stride in (
                     (mem.linear.conv_state, 1),
                     (mem.linear.ssm_state, dst_mtp_size),
-                    *((state.tail_buffer, 1) for state in mem.tails),
+                    *((state.buffer, 1) for state in mem.tails),
                 )
             ]
         )
@@ -230,7 +230,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
                 )
         assert torch.equal(mem.linear.conv_state[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3))
         assert torch.equal(mem.linear.ssm_state[:, dst_req * dst_mtp_size], ssm[:, heads])
-        restored_tail = torch.cat([state.tail_buffer[:, dst_req] for state in mem.tails])
+        restored_tail = torch.cat([state.buffer[:, dst_req] for state in mem.tails])
         expected_tail = original_tails[rank].clone()
         for position in range(length - 4, length):
             expected_tail[:, position % (4 + decode_mtp_step)] = tail[:, position % tail.shape[1]]
@@ -241,7 +241,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
             (
                 (mem.linear.conv_state, 1),
                 (mem.linear.ssm_state, dst_mtp_size),
-                *((state.tail_buffer, 1) for state in mem.tails),
+                *((state.buffer, 1) for state in mem.tails),
             ),
             untouched[rank],
         ):
@@ -264,7 +264,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
         all_indexes = indexes + new_indexes
         compress_pools(
             raw=raw,
-            tail=mem.tail.tail_buffer[0],
+            tail=mem.tail.buffer[0],
             packed_buffer=mem.full.get_layer_view(3).indexer_k,
             ape=ape,
             lengths=tensor(range(length + 1, length + count + 1)),
@@ -295,23 +295,25 @@ def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch,
 @pytest.mark.parametrize("prefix", [1, 3, 4, 5, 11, 12])
 def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step, prefix):
     """真实 prefill 导出后，在不同大小的 ring 上验证、拒绝回退并再次验证。"""
-    from lightllm.common.attention_state.att_tail import KPoolStateConfig, create_kpool_state
+    from lightllm.common.attention_state.bounded_att import WindowCompressorStateConfig, create_window_compressor_state
     from lightllm.common.attention_state.types import StateTransferLayout
 
     torch.manual_seed(53)
-    config = KPoolStateConfig(
+    config = WindowCompressorStateConfig(
         logical_layer_ids=(0,),
-        pool_size=4,
-        head_dim=128,
+        window_size=4,
+        compress_stride=4,
+        candidate_dim=128,
+        target="indexer",
         dtype=torch.bfloat16,
     )
-    source = create_kpool_state(
+    source = create_window_compressor_state(
         config=config,
         request_capacity=2,
         mtp_step=source_step,
         device="cuda",
     )
-    target = create_kpool_state(
+    target = create_window_compressor_state(
         config=config,
         request_capacity=2,
         mtp_step=target_step,
@@ -373,7 +375,7 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
         state_token_len=prefix,
         layout=layout,
     )
-    target.tail_buffer.fill_(17)
+    target.buffer.fill_(17)
     target.read_from_pd_page(
         pd_page_buffers=pages,
         req_idx=0,
@@ -381,7 +383,7 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
         state_token_len=prefix,
         layout=layout,
     )
-    assert (target.tail_buffer[:, 1] == 17).all()
+    assert (target.buffer[:, 1] == 17).all()
     width = target_step + 1
     # 第一次验证后回访已接受位置；新增候选历史必须由 D 的本地 ring 正确保留。
     for start, count in [(prefix, width), (prefix + 1, 1), (prefix + 2, 1), (prefix + 1, width)]:

@@ -683,7 +683,6 @@ class InferReq:
             page_kind=page_kind,
             page_slot_ids=[slot],
         )
-        resources.reset_attention_tail_state([self.req_idx])
 
     def _hybrid_match_radix_cache(self):
         assert (
@@ -800,7 +799,6 @@ class InferReq:
         if self.cur_kv_len == 0:
             # 说明没有任何命中
             g_infer_context.att_state_manager.reset_bounded_att_state([self.req_idx])
-            g_infer_context.att_state_manager.reset_attention_tail_state([self.req_idx])
         return
 
     def is_master_req(self):

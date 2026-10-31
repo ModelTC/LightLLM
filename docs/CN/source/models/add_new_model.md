@@ -124,7 +124,7 @@ class TpPartBaseModel:
 | ---------------------------- | ------------------------------------------------------------ |
 | def _init_config(self)：     | 读取初始化模型的 config.json,  并进行一些 key 名的同名合法化操作 |
 | def _verify_params(self)：   | 校验参数                                                     |
-| `create_full_att_states(...)` / `create_bounded_att_states(...)` / `create_att_tail_states(...)` | 创建并返回当前模型的 full / bounded / tail State 列表；默认返回空列表，公共流程统一注册 |
+| `create_full_att_states(...)` / `create_bounded_att_states(...)` | 创建并返回当前模型的 full / bounded State 列表；默认返回空列表，公共流程统一注册 |
 | def _init_some_value(self):  | 初始化推理框架会使用的一些成员变量的值                       |
 | def _init_custom(self):      | 一些模型自己的个性化初始化，比如 llama 初始化自己的Rotary值  |
 

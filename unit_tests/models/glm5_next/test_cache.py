@@ -111,7 +111,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     )
     full = main_full
     linear = resources.main_kda_conv_bf16_ssm_fp32_state
-    tail = resources.main_kpool_c4_bf16_state
+    tail = resources.main_compressor_indexer_w4_s4_bf16_state
     assert not hasattr(req, "req_to_conv_state")
     att_kv = full.get_layer_view(3).kv
     assert att_kv.shape == (17, 1, 512)
@@ -130,13 +130,12 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     assert torch.equal(index_bytes, expected_index_bytes)
     assert tail.get_layer_view(3).shape == (4, 4 + mtp_step, 256)
     if mtp_step:
-        assert resources.draft0_kpool_c4_bf16_state.get_layer_view(4).shape == (4, 4 + mtp_step, 256)
+        assert resources.draft0_compressor_indexer_w4_s4_bf16_state.get_layer_view(4).shape == (4, 4 + mtp_step, 256)
         assert draft_full.get_layer_view(4).kv.shape == att_kv.shape
     kind = "small" if small_page else "big"
     allocator = resources.bounded_att_small_page_allocator if small_page else resources.bounded_att_big_page_allocator
     slot = allocator.alloc(1)[0]
     resources.reset_bounded_att_state([0])
-    resources.reset_attention_tail_state([0])
     linear.conv_state[:, 0].normal_()
     linear.ssm_state[:, 0].normal_()
     conv = linear.conv_state[:, 0, ..., :3].clone()
@@ -150,31 +149,25 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     torch.cuda.synchronize()
     linear.conv_state[:, 0].zero_()
     linear.ssm_state[:, 0].zero_()
-    tail.tail_buffer.normal_()
-    unchanged = tail.tail_buffer[:, [0, 1, 3]].clone()
+    tail.buffer.normal_()
+    unchanged = tail.buffer.clone()
     resources.restore_bounded_att_runtime_from_pages(
         req_indices=[2],
         state_token_lens=[8],
         page_kind=kind,
         page_slot_ids=[slot],
     )
-    resources.reset_attention_tail_state([2])
     torch.cuda.synchronize()
     assert torch.equal(linear.conv_state[:, 2, ..., :3], conv)
     assert torch.equal(linear.ssm_state[:, 2 * (mtp_step + 1)], ssm)
-    # Both page sizes are aligned to complete pools. Restoring a prefix must
-    # discard stale tail values from a previously allocated request slot.
-    assert not tail.tail_buffer[:, 2].any()
-    assert torch.equal(tail.tail_buffer[:, [0, 1, 3]], unchanged)
-    tail.tail_buffer[:, 2].normal_()
-    preserved_tail = tail.tail_buffer.clone()
+    # 整组边界不依赖旧窗口，恢复大小页无需改动无重叠窗口。
+    assert torch.equal(tail.buffer, unchanged)
     resources.reset_bounded_att_state([2])
     assert not linear.conv_state[:, 2].any()
     assert not linear.ssm_state[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
-    assert torch.equal(tail.tail_buffer, preserved_tail)
-    resources.reset_attention_tail_state([2])
-    assert not tail.tail_buffer[:, 2].any()
-    assert torch.equal(tail.tail_buffer[:, [0, 1, 3]], unchanged)
+    assert not tail.buffer[:, 2, :, :tail.config.candidate_dim].any()
+    assert torch.isneginf(tail.buffer[:, 2, :, tail.config.candidate_dim:]).all()
+    assert torch.equal(tail.buffer[:, [0, 1, 3]], unchanged[:, [0, 1, 3]])
     # KV moves carry MLA latents and pooled FP8 bytes; raw keys/gates only
     # belong to live requests. Bytewise equality checks FP8 scale integrity.
     packed_bytes = full.storage.view(torch.uint8)

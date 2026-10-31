@@ -156,7 +156,7 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
     torch.cuda.synchronize()
     for rank, (resources, full) in enumerate(targets):
         if glm:
-            resources.main_kpool_c4_bf16_state.tail_buffer.fill_(13)
+            resources.main_compressor_indexer_w4_s4_bf16_state.buffer.fill_(13)
         slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
         resources.read_req_from_cpu(
             cpu_page_buffers=buffer,
@@ -182,8 +182,9 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
                 dst_fields[name].tensor[:, 8:16].contiguous().view(torch.uint8),
             )
         if glm:
-            assert not resources.main_kpool_c4_bf16_state.tail_buffer[:, 1].any()
-            assert (resources.main_kpool_c4_bf16_state.tail_buffer[:, [0, 2]] == 13).all()
+            # 无重叠窗口在组边界不依赖旧历史，CPU 恢复无需修改其数据。
+            assert (resources.main_compressor_indexer_w4_s4_bf16_state.buffer[:, 1] == 13).all()
+            assert (resources.main_compressor_indexer_w4_s4_bf16_state.buffer[:, [0, 2]] == 13).all()
     assert not buffer[0].any()
 
 

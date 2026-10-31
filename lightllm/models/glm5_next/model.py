@@ -22,7 +22,6 @@ if TYPE_CHECKING:
     from lightllm.server.core.objs.start_args_type import StartArgs
     from lightllm.common.attention_state.full_att import FullAttentionState
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
-    from lightllm.common.attention_state.att_tail import AttentionTailState
 
 
 class Glm5NextTpPartModel(TpPartBaseModel):
@@ -44,33 +43,57 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         tp_world_size: int = 1,
         device: str = "meta",
     ) -> list["BoundedAttentionState"]:
-        """创建当前模型的 bounded 运行态；CPU 布局查询传入 meta 设备。"""
-        from lightllm.common.attention_state.bounded_att import create_kda_state, ConvSSMStateConfig
+        """分别创建 KDA 运行态和索引 key 的无重叠池化窗口，不分配大小页。"""
+        from lightllm.common.attention_state.bounded_att import (
+            ConvSSMStateConfig,
+            WindowCompressorStateConfig,
+            create_kda_state,
+            create_window_compressor_state,
+        )
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
         assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
         cfg = Glm5NextResourceConfig.from_model_config(config, args)
-        logical_layer_ids = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
-        if not logical_layer_ids:
-            return []
-        state = create_kda_state(
-            config=ConvSSMStateConfig(
-                logical_layer_ids=logical_layer_ids,
-                global_k_heads=cfg.global_linear_k_heads,
-                global_v_heads=cfg.global_linear_v_heads,
-                key_dim=cfg.head_linear_k_dim,
-                value_dim=cfg.head_linear_v_dim,
-                conv_width=cfg.conv_kernel_size - 1,
-                conv_dtype=cfg.conv_state_dtype,
-                ssm_dtype=cfg.ssm_state_dtype,
-                tp_rank=tp_rank,
-                tp_world_size=tp_world_size,
-            ),
-            request_capacity=request_capacity,
-            mtp_step=args.mtp_step,
-            device=device,
-        )
-        return [state]
+        states = []
+        linear_layers = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
+        if linear_layers:
+            states.append(create_kda_state(
+                config=ConvSSMStateConfig(
+                    logical_layer_ids=linear_layers,
+                    global_k_heads=cfg.global_linear_k_heads,
+                    global_v_heads=cfg.global_linear_v_heads,
+                    key_dim=cfg.head_linear_k_dim,
+                    value_dim=cfg.head_linear_v_dim,
+                    conv_width=cfg.conv_kernel_size - 1,
+                    conv_dtype=cfg.conv_state_dtype,
+                    ssm_dtype=cfg.ssm_state_dtype,
+                    tp_rank=tp_rank,
+                    tp_world_size=tp_world_size,
+                ),
+                request_capacity=request_capacity,
+                mtp_step=args.mtp_step,
+                device=device,
+            ))
+        full_layers = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_layer_indices())
+        if full_layers:
+            assert args.linear_att_hash_page_size % config["index_kpool"] == 0, "GLM cache pages must align to index_kpool"
+            states.append(create_window_compressor_state(
+                config=WindowCompressorStateConfig(
+                    logical_layer_ids=full_layers,
+                    window_size=config["index_kpool"],
+                    compress_stride=config["index_kpool"],
+                    candidate_dim=config["index_head_dim"],
+                    target="indexer",
+                    dtype=get_torch_dtype(args.data_type),
+                    tp_rank=tp_rank,
+                    tp_world_size=tp_world_size,
+                ),
+                request_capacity=request_capacity,
+                mtp_step=args.mtp_step,
+                device=device,
+            ))
+        return states
 
     @classmethod
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
@@ -137,42 +160,6 @@ class Glm5NextTpPartModel(TpPartBaseModel):
             fp8_format="group64_e8m0",
             page_size=args.page_size,
             device="meta",
-        )
-        return [state]
-
-    @classmethod
-    def create_att_tail_states(
-        cls,
-        model_config: dict[str, object],
-        args: "StartArgs | EasyDict",
-        model_logical_layer_ids: tuple[int, ...],
-        request_capacity: int = 1,
-        tp_rank: int = 0,
-        tp_world_size: int = 1,
-        device: str = "meta",
-    ) -> list["AttentionTailState"]:
-        """直接选择本模型需要 K-pool tail 的层，不依赖 full State 创建过程。"""
-        from lightllm.common.attention_state.att_tail import create_kpool_state, KPoolStateConfig
-        from lightllm.utils.torch_dtype_utils import get_torch_dtype
-
-        config = cls.normalize_model_config(model_config)
-        cfg = Glm5NextResourceConfig.from_model_config(config, args)
-        logical_layer_ids = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_layer_indices())
-        if not logical_layer_ids:
-            return []
-        assert args.linear_att_hash_page_size % config["index_kpool"] == 0, "GLM cache pages must align to index_kpool"
-        state = create_kpool_state(
-            config=KPoolStateConfig(
-                logical_layer_ids=logical_layer_ids,
-                pool_size=config["index_kpool"],
-                head_dim=config["index_head_dim"],
-                dtype=get_torch_dtype(args.data_type),
-                tp_rank=tp_rank,
-                tp_world_size=tp_world_size,
-            ),
-            request_capacity=request_capacity,
-            mtp_step=args.mtp_step,
-            device=device,
         )
         return [state]
 

@@ -170,12 +170,12 @@ class TransferRegion:
     # 描述本地字段到外部区域的轴范围，每个非 layer/token 轴必须恰好出现一次。
     # 无分片的轴也显式填写完整范围，例如 dim: 0 -> 0、length=head_dim。
     # 两个方向共用同一组本地/外部起点，仅反转数据流向；映射应用于全部层和本次有效 token。
-    # 环形寻址由支持它的具体 State 搬运实现处理；请求窗口起点通过本次调用的
-    # axis_mapping_overrides 覆盖，不回写缓存布局，起点也不作为 kernel 的编译期常量。
+    # 环形寻址由支持它的具体 State 搬运实现处理；请求窗口起点根据本次绝对前缀长度计算，
+    # 不回写缓存布局，也不作为 kernel 的编译期常量。
     axis_mappings: tuple[AxisMapping, ...]
 
     # 当前 TP rank 是否负责向外部区域写入；False 不影响从该区域读回。
-    # KV head 有 TP 副本时，每组只选一个 rank 写入；复制的 indexer tail 只由 rank 0 写。
+    # KV head 有 TP 副本时，每组只选一个 rank 写入；复制的压缩窗口只由 rank 0 写。
     # 标记属于 region，因为同一 State 内各字段的 TP 分片/复制规则可能不同。
     write_enabled: bool = True
 

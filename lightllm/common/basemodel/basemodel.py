@@ -51,7 +51,6 @@ if TYPE_CHECKING:
     from lightllm.server.core.objs.start_args_type import StartArgs
     from lightllm.common.attention_state.full_att import FullAttentionState
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
-    from lightllm.common.attention_state.att_tail import AttentionTailState
 
 logger = init_logger(__name__)
 
@@ -167,12 +166,7 @@ class TpPartBaseModel:
                 request_capacity=self.max_req_num + 1, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
                 device="cuda",
             )
-            tail_states = self.create_att_tail_states(
-                model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
-                request_capacity=self.max_req_num + 1, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
-                device="cuda",
-            )
-            for state in (*full_states, *bounded_states, *tail_states):
+            for state in (*full_states, *bounded_states):
                 self.att_state_manager.register_state(self.att_state_role, state)
 
     def init_runtime(self) -> None:
@@ -277,18 +271,6 @@ class TpPartBaseModel:
         tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
     ) -> list["BoundedAttentionState"]:
         """返回本模型的 bounded 运行态列表；meta 用于布局查询，大小页后续分配。
-
-        model_logical_layer_ids 描述当前模型拥有的全部全局逻辑层，具体模型自行选择参与层。
-        """
-        return []
-
-    @classmethod
-    def create_att_tail_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
-        tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
-    ) -> list["AttentionTailState"]:
-        """返回本模型的 tail 运行态列表；默认没有此类资源。
 
         model_logical_layer_ids 描述当前模型拥有的全部全局逻辑层，具体模型自行选择参与层。
         """

@@ -225,6 +225,8 @@ class FP8E8M0PackedMLAState(FullAttentionState):
     # 五、PD 分离：传输固定的完整 token 编码
     # ========================================================================
 
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回固定 FP8/E8M0 格式的 PD 页描述，由管理器安排联合页偏移。"""
         return self._get_transfer_regions(page_tokens=get_env_start_args().pd_kv_page_size)

@@ -27,6 +27,34 @@ if TYPE_CHECKING:
 KINDS = ["gqa", "int4", "int8", "static_head", "static_tensor", "mla", "packed", "packed_fp8", "packed_glm"]
 
 
+@pytest.mark.parametrize("kind", [*KINDS, "compressed", "kda", "gdn", "swa", "compressor"])
+def test_pd_region_cache_returns_independent_snapshots(kind: str, pd_args: EasyDict) -> None:
+    from lightllm.common.attention_state.bounded_att import GDNState, KDAState
+    from unit_tests.common.att_resources.test_bounded_state import make_state
+    from unit_tests.common.att_resources.test_dsv4_state import make_atomic_state, make_full
+
+    pd_args.pd_kv_page_size = 256
+    if kind in KINDS:
+        state = definition(kind)
+    elif kind == "compressed":
+        state = make_full(ratio=4)
+    elif kind in ("kda", "gdn"):
+        state = make_state(cls=KDAState if kind == "kda" else GDNState, device="meta")
+    else:
+        state = make_atomic_state("swa" if kind == "swa" else "kv_w8")
+
+    getter = state.get_pd_transfer_regions
+    before = getter.cache_info()
+    first, second = getter(), getter()
+    after = getter.cache_info()
+    assert after.misses == before.misses + 1 and after.hits == before.hits + 1
+    assert first == second and first is not second
+    for first_region, second_region in zip(first, second):
+        assert first_region is not second_region
+        for first_mapping, second_mapping in zip(first_region.axis_mappings, second_region.axis_mappings):
+            assert first_mapping is not second_mapping
+
+
 @pytest.mark.parametrize("kind", KINDS)
 def test_full_state_prepares_layout_before_capacity_allocation(kind: str, pd_args: EasyDict):
     from inspect import signature
@@ -91,7 +119,7 @@ def test_custom_state_type_controls_registered_resource_name():
 @pytest.mark.parametrize("model_name", ["main", "draft1"])
 def test_register_state_preserves_object_and_storage(kind: str, model_name: str):
     from unit_tests.common.att_resources.test_bounded_state import make_state
-    from unit_tests.common.att_resources.test_tail_state import make_tail
+    from unit_tests.common.att_resources.test_window_compressor_state import make_window
 
     if kind == "full_meta":
         state = definition("gqa")
@@ -104,8 +132,8 @@ def test_register_state_preserves_object_and_storage(kind: str, model_name: str)
         storage = state.conv_state
         pool = state.big_pages_pool
     else:
-        state = make_tail()
-        storage = state.tail_buffer
+        state = make_window()
+        storage = state.buffer
     config = state.config
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state(model_name, state)
@@ -118,7 +146,7 @@ def test_register_state_preserves_object_and_storage(kind: str, model_name: str)
     elif kind == "bounded":
         assert state.conv_state is storage and state.big_pages_pool is pool
     else:
-        assert state.tail_buffer is storage
+        assert state.buffer is storage
     other_role = "draft0" if model_name == "main" else "main"
     with pytest.raises(AssertionError, match="multiple model roles"):
         manager.register_state(other_role, state)

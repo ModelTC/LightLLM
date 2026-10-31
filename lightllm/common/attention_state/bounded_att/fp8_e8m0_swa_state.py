@@ -281,6 +281,8 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     # 五、PD：按绝对前缀展开完整逻辑窗口，兼容不同 MTP 容量
     # ========================================================================
 
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回完整逻辑窗口，不包含本地 MTP 候选区。"""
         return self._get_transfer_regions()

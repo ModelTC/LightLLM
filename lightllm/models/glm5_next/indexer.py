@@ -41,7 +41,7 @@ class Glm5NextNsaInfer:
         role = infer_state.att_state_role
         tail = infer_state.att_state_manager.get_state(
             model_role=role,
-            state_type_filter=f"kpool_c{self.pool_size}",
+            state_type_filter=f"compressor_indexer_w{self.pool_size}_s{self.pool_size}",
             logical_layer_id=self.layer_idx,
         ).get_layer_view(logical_layer_id=self.layer_idx)
         state = infer_state.att_state_manager.get_state(

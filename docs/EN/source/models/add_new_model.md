@@ -124,7 +124,7 @@ Commonly used interfaces that need to be inherited and implemented
 | ---------------------------- | ------------------------------------------------------------ |
 | def _init_config(self)：     | Read the config.json for initializing the model and perform some key name legalization operations |
 | def _verify_params(self)：   | Validate parameters                                           |
-| `create_full_att_states(...)` / `create_bounded_att_states(...)` / `create_att_tail_states(...)` | Return this model's full / bounded / tail State lists; defaults return empty lists and the shared startup stage registers the results |
+| `create_full_att_states(...)` / `create_bounded_att_states(...)` | Return this model's full / bounded State lists; defaults return empty lists and the shared startup stage registers the results |
 | def _init_some_value(self):  | Initialize values of some member variables that the inference framework will use |
 | def _init_custom(self):      | Some personalized initialization of the model itself, such as llama initializing its own Rotary values |
 

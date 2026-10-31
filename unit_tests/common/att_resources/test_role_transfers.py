@@ -17,7 +17,7 @@ if TYPE_CHECKING:
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("glm", [False, True])
-def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
+def test_main_and_draft_transfers_copy_pd_and_dp_windows(
     glm: bool, pd_args: EasyDict, monkeypatch: pytest.MonkeyPatch,
 ):
     pd_args.pd_kv_page_size = 128
@@ -41,8 +41,8 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             if "token" in field.axes:
                 field.tensor.fill_(11 + index)
         if glm:
-            getattr(source, f"{role}_kpool_c4_bf16_state").tail_buffer[:, 0].fill_(7 + index)
-            getattr(target, f"{role}_kpool_c4_bf16_state").tail_buffer[:, 2].fill_(19)
+            getattr(source, f"{role}_compressor_indexer_w4_s4_bf16_state").buffer[:, 0].fill_(7 + index)
+            getattr(target, f"{role}_compressor_indexer_w4_s4_bf16_state").buffer[:, 2].fill_(19)
     main_linear_state(source).conv_state.fill_(3)
     main_linear_state(source).ssm_state.fill_(5)
     page = torch.empty(source.get_pd_page_bytes(), dtype=torch.uint8, device="cuda")
@@ -87,12 +87,12 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             if "token" in field.axes:
                 assert (field.tensor[:, 8:12] == 11 + index).all()
         if glm:
-            tail = getattr(target, f"{role}_kpool_c4_bf16_state").tail_buffer
+            tail = getattr(target, f"{role}_compressor_indexer_w4_s4_bf16_state").buffer
             expected_tail = torch.zeros_like(tail[:, 1])
             for position in range(4, 8):
                 expected_tail[:, position % tail.shape[2]].fill_(7 + index)
             assert torch.equal(tail[:, 1], expected_tail)  # PD restores only the prefill logical window.
-            assert not tail[:, 2].any()  # DP fetch resets the aligned prefix.
+            assert (tail[:, 2] == 7 + index).all()  # DP 直接复制相同 MTP 容量的 ring。
 
     slot = source.bounded_att_big_page_allocator.alloc(1)[0]
     source.save_bounded_att_runtime_to_pages(
@@ -132,5 +132,8 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             if "token" in field.axes:
                 assert (field.tensor[:, 8:16] == 11 + index).all()
         if glm:
-            assert not getattr(target, f"{role}_kpool_c4_bf16_state").tail_buffer[:, 1].any()
-            assert not getattr(target, f"{role}_kpool_c4_bf16_state").tail_buffer[:, 2].any()
+            # CPU 组边界恢复不修改无重叠窗口，保留先前 PD/DP 的数据。
+            tail = getattr(target, f"{role}_compressor_indexer_w4_s4_bf16_state").buffer
+            for position in range(4, 8):
+                assert (tail[:, 1, position % tail.shape[2]] == 7 + index).all()
+            assert (tail[:, 2] == 7 + index).all()

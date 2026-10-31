@@ -592,7 +592,7 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         att_state_manager=SimpleNamespace(
             get_state=lambda state_type_filter, **kwargs: (
                 SimpleNamespace(get_layer_view=lambda logical_layer_id: tail)
-                if "kpool" in state_type_filter else full_att_state
+                if "compressor_indexer" in state_type_filter else full_att_state
             ),
         ),
         is_draft_model=False,
@@ -624,11 +624,11 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     assert full[-1, :2049].unique().numel() == 2049
     assert (full[-1, :2049] < tokens).all()
     # Restore an aligned prefix using only token KV, then decode across the
-    # next pool boundary. The runtime tail starts empty, as on a page restore.
+    # next pool boundary. Stale window data is irrelevant at a complete group boundary.
     prefix = 2060
     storage = storage.clone()
     storage[ragged[prefix:].long()] = 0
-    tail.zero_()
+    tail.fill_(19)
     infer.is_prefill = False
     infer.b1_cu_q_seq_len[1] = 1
     infer.max_q_seq_len = 1

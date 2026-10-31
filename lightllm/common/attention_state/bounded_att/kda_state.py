@@ -317,6 +317,8 @@ class KDAState(BoundedAttentionState):
     # 五、PD 分离传输
     # ========================================================================
 
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回 PD 传输字段与切片，交由管理器安排其在联合页中的位置。"""
         return self._get_transfer_regions()

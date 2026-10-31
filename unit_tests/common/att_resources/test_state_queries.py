@@ -32,7 +32,7 @@ def test_created_state_queries_keep_the_same_objects_through_storage_initializat
             if isinstance(state, FullAttentionState) and state.state_name.startswith(role + "_")
         ))
         for query in (
-            manager.get_full_attention_states, manager.get_bounded_attention_states, manager.get_attention_tail_states,
+            manager.get_full_attention_states, manager.get_bounded_attention_states,
         ):
             with pytest.raises(AssertionError, match="State registration"):
                 query()
@@ -68,15 +68,14 @@ def test_created_state_queries_keep_the_same_objects_through_storage_initializat
 
 def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
     manager = MainDraftTestResourceManager()
-    queries = (manager.get_full_attention_states, manager.get_bounded_attention_states, manager.get_attention_tail_states)
+    queries = (manager.get_full_attention_states, manager.get_bounded_attention_states)
     results = {(query.__name__, role): query(role) for query in queries for role in (None, "main", "draft0")}
-    assert manager._get_states.cache_info().currsize == 9
+    assert manager._get_states.cache_info().currsize == 6
     assert manager.get_full_attention_states() == (
         manager.draft0_mla_fp32_state, manager.main_gqa_fp32_state,
     )
     assert manager.get_bounded_attention_states("main") == (manager.main_kda_conv_fp32_ssm_fp32_state,)
     assert manager.get_bounded_attention_states("draft0") == (manager.draft0_gdn_conv_fp32_ssm_fp32_state,)
-    assert manager.get_attention_tail_states("draft0") == ()
 
     hits = manager._get_states.cache_info().hits
     for query in queries:
@@ -84,7 +83,7 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
             assert query(role) is results[(query.__name__, role)]
         with pytest.raises(AssertionError, match="unknown model role"):
             query("target")
-    assert manager._get_states.cache_info().hits == hits + 9
+    assert manager._get_states.cache_info().hits == hits + 6
     manager.main_kda_conv_fp32_ssm_fp32_state.conv_state.fill_(7)
     assert (manager.get_bounded_attention_states("main")[0].conv_state == 7).all()
 
@@ -123,7 +122,7 @@ def test_ipc_copy_preserves_owner_storage_and_shares_runtime_tensors():
     assert exported.get_bounded_attention_states() == tuple(
         getattr(exported, state.state_name) for state in source_states
     )
-    for state in (*source.get_full_attention_states(), *source.get_attention_tail_states()):
+    for state in source.get_full_attention_states():
         assert getattr(exported, state.state_name) is state
 
 
@@ -156,7 +155,6 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
     source = MainDraftTestResourceManager()
     source.get_full_attention_states()
     source.get_bounded_attention_states()
-    source.get_attention_tail_states()
     imported = pickle.loads(pickle.dumps(source.create_pd_ipc_copy()))
     assert imported._state_registration_finished
     assert imported.full_att_allocator is None
@@ -164,19 +162,18 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
     assert imported.bounded_att_small_page_allocator is None
     misses = source._get_states.cache_info().misses
     for query in (
-        imported.get_full_attention_states, imported.get_bounded_attention_states, imported.get_attention_tail_states,
+        imported.get_full_attention_states, imported.get_bounded_attention_states,
     ):
         for state in query():
             name = state.state_name
             assert state is getattr(imported, name) and state is not getattr(source, name)
-    assert imported._get_states.cache_info().misses == misses + 3
+    assert imported._get_states.cache_info().misses == misses + 2
 
 
 def test_clearing_query_cache_releases_manager_and_states():
     manager = MainDraftTestResourceManager()
     manager.get_full_attention_states()
     manager.get_bounded_attention_states()
-    manager.get_attention_tail_states()
     manager_ref = weakref.ref(manager)
     state_ref = weakref.ref(manager.main_kda_conv_fp32_ssm_fp32_state)
     del manager

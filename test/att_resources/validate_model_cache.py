@@ -78,7 +78,6 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
     allocated_slots = list(source_slots) if hybrid else []
     source_req = executor._alloc_req_indexes(1)
     resources.reset_bounded_att_state(source_req.tolist())
-    resources.reset_attention_tail_state(source_req.tolist())
     tokens = np.random.default_rng(42).integers(
         low=100,
         high=10000,
@@ -107,8 +106,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
         cpu_page_buffers=cpu,
         cpu_page_indices=pages,
         layouts=resources.get_cpu_page_layouts(),
-        page_kind="big" if hybrid else None,
-        page_slot_ids=source_slots,
+        big_page_slot_ids=source_slots if hybrid else None,
     )
     # Host-side checkpoint repacking consumes the CPU page on the next call.
     torch.cuda.synchronize()
@@ -138,15 +136,16 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
     for kind in ("gpu_pages", "cpu_pages", "dp_copy", "pd_buffer"):
         request = executor._alloc_req_indexes(1)
         resources.reset_bounded_att_state(request.tolist())
-        resources.reset_attention_tail_state(request.tolist())
         executor._ensure_req_kv_capacity(request, torch.tensor([prefix_len], dtype=torch.int32))
         indices = model.req_manager.req_to_token_indexs[int(request[0]), :prefix_len].clone()
         assert not set(indices.tolist()) & set(source_indices.tolist())
         if kind == "gpu_pages":
             resources.copy_full_att_tokens(source_indices, indices)
             if hybrid:
-                resources.restore_bounded_att_runtime_from_pages(request.tolist(), page_kind="big", page_slot_ids=[source_slots[-1]])
-            resources.reset_attention_tail_state(request.tolist())
+                resources.restore_bounded_att_runtime_from_pages(
+                    req_indices=request.tolist(), state_token_lens=[prefix_len],
+                    page_kind="big", page_slot_ids=[source_slots[-1]],
+                )
         elif kind == "cpu_pages":
             slots = big.alloc(len(pages)) if hybrid else None
             if hybrid:
@@ -157,18 +156,18 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 token_indices=indices,
                 layouts=resources.get_cpu_page_layouts(),
                 big_page_slot_ids=slots,
-                req_idx=int(request[0]) if getattr(resources, "cpu_tail_restore", False) else None,
+                req_idx=int(request[0]) if hybrid else None,
+                state_token_len=prefix_len if hybrid else None,
             )
-            if hybrid:
-                resources.restore_bounded_att_runtime_from_pages(request.tolist(), page_kind="big", page_slot_ids=[slots[-1]])
         elif kind == "dp_copy":
             resources.copy_from_dp(
-                resources,
-                source_indices,
-                indices,
-                mappings=resources.dp_copy_mappings(resources),
-                src_req_indices=source_req.tolist() if hybrid else None,
-                dst_req_indices=request.tolist() if hybrid else None,
+                remote_att_manager=resources,
+                src_token_indices=source_indices,
+                dst_token_indices=indices,
+                src_big_page_ids=[],
+                dst_big_page_ids=[],
+                src_req_idx=int(source_req[0]),
+                dst_req_idx=int(request[0]),
             )
         else:
             resources.read_from_pd_page(

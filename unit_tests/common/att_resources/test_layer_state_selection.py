@@ -10,7 +10,7 @@ from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, FullAttentionState, GQAFullAttentionState
 from lightllm.common.attention_state.bounded_att import KDAState, GDNState
 from unit_tests.common.att_resources.test_bounded_state import make_state
-from unit_tests.common.att_resources.test_tail_state import make_tail
+from unit_tests.common.att_resources.test_window_compressor_state import make_window
 from unit_tests.common.att_resources.test_capacity import definition
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -148,7 +148,7 @@ def test_mla_selection_excludes_same_layer_tail() -> None:
     from dataclasses import replace
 
     manager = AttentionStateManager(request_capacity=3)
-    tail = make_tail()
+    tail = make_window()
     template = definition("mla")
     state = type(template)(
         layout_config=replace(template.config, logical_layer_groups=((3, 7),)), device="meta",
@@ -159,7 +159,7 @@ def test_mla_selection_excludes_same_layer_tail() -> None:
     assert tail.contains_logical_layer(3) and tail.contains_logical_layer(7)
     assert not tail.contains_logical_layer(0)
     assert manager.get_state("main", "mla", 7) is state
-    assert manager.get_state("main", "kpool", 7) is tail
+    assert manager.get_state("main", "compressor", 7) is tail
     assert manager.get_state(
         model_role="main",
         state_type_filter="",
@@ -180,15 +180,15 @@ def test_query_matches_complete_model_role(role: str) -> None:
     assert manager.get_state(role, "gqa", 0).state_name == f"{role}_gqa_bf16_state"
 
 
-@pytest.mark.parametrize("algorithm", ["kda", "gdn", "kpool"])
+@pytest.mark.parametrize("algorithm", ["kda", "gdn", "compressor"])
 def test_precision_variants_have_distinct_names_and_can_coexist(algorithm: str) -> None:
     from dataclasses import replace
 
     manager = AttentionStateManager(request_capacity=3)
-    template = make_tail() if algorithm == "kpool" else make_state(cls=KDAState if algorithm == "kda" else GDNState)
+    template = make_window() if algorithm == "compressor" else make_state(cls=KDAState if algorithm == "kda" else GDNState)
     states = []
     for dtype in (torch.bfloat16, torch.float32):
-        config = replace(template.config, **({"dtype": dtype} if algorithm == "kpool" else {"conv_dtype": dtype}))
+        config = replace(template.config, **({"dtype": dtype} if algorithm == "compressor" else {"conv_dtype": dtype}))
         state = type(template)(config=config, request_capacity=3, device="cpu")
         manager.register_state("main", state)
         states.append(state)

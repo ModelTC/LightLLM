@@ -22,7 +22,7 @@ from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.utils import deepcopy_result
 from lightllm.common.attention_state.allocators import StatePageAllocator, FullAttKVAllocator
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
-from lightllm.common.attention_state.att_tail import KPoolAttentionTailState, KPoolStateConfig
+from lightllm.common.attention_state.bounded_att import WindowCompressorState, WindowCompressorStateConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.common.attention_state.full_att import (
     FullAttentionState,
@@ -212,11 +212,11 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
         conv_dtype=torch.bfloat16,
         ssm_dtype=torch.float32,
     )
-    tail = KPoolAttentionTailState(
-        config=KPoolStateConfig(
+    tail = WindowCompressorState(
+        config=WindowCompressorStateConfig(
             logical_layer_ids=(1,),
-            pool_size=4,
-            head_dim=3,
+            window_size=4, compress_stride=4, target="indexer",
+            candidate_dim=3,
             dtype=torch.bfloat16,
         ),
         request_capacity=3,
@@ -232,7 +232,7 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     conv = reference.conv_state[:, 0, :, : config.conv_width]
     ssm = reference.ssm_state[:, 0]
     bounded_bytes = conv.numel() * conv.element_size() + ssm.numel() * ssm.element_size()
-    tail_bytes = len(tail.config.logical_layer_ids) * tail.config.pool_size * 2 * tail.config.head_dim * tail.config.dtype.itemsize
+    tail_bytes = len(tail.config.logical_layer_ids) * tail.config.window_size * 2 * tail.config.candidate_dim * tail.config.dtype.itemsize
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state("main", reference)
     manager.register_state("main", tail)
@@ -241,10 +241,10 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     assert manager.get_pd_page_bytes() == (bounded_bytes + 7) // 8 * 8 + (tail_bytes + 7) // 8 * 8
     reference.conv_state.fill_(2)
     reference.ssm_state.fill_(3)
-    tail.tail_buffer.fill_(4)
+    tail.buffer.fill_(4)
     pages = torch.zeros((2, manager.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
     layouts = manager.get_pd_runtime_page_layouts()
-    assert {region.field for layout in layouts.values() for region in layout.regions} == {"conv", "ssm", "tail"}
+    assert {region.field for layout in layouts.values() for region in layout.regions} == {"conv", "ssm", "compressor"}
     manager.write_to_pd_page(
         pd_page_buffers=pages,
         pd_page_index=1,
@@ -255,7 +255,7 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     )
     reference.conv_state.zero_()
     reference.ssm_state.zero_()
-    tail.tail_buffer.zero_()
+    tail.buffer.zero_()
     manager.read_from_pd_page(
         pd_page_buffers=pages,
         pd_page_index=1,
@@ -266,10 +266,10 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     )
     assert (reference.conv_state[:, 0, :, : config.conv_width] == 2).all()
     assert (reference.ssm_state[:, 0] == 3).all()
-    expected_tail = torch.zeros_like(tail.tail_buffer[:, 0])
+    expected_tail = torch.zeros_like(tail.buffer[:, 0])
     for position in range(4, 8):
-        expected_tail[:, position % tail.tail_buffer.shape[2]].fill_(4)
-    assert torch.equal(tail.tail_buffer[:, 0], expected_tail)
+        expected_tail[:, position % tail.buffer.shape[2]].fill_(4)
+    assert torch.equal(tail.buffer[:, 0], expected_tail)
     assert not pages[0].any()
     for state in (reference, tail):
         monkeypatch.setattr(
@@ -453,6 +453,8 @@ def test_pd_runtime_capacity_includes_field_padding(
     full_page_tokens: int,
 ):
     class PaddedGDNState(GDNState):
+        @deepcopy_result
+        @lru_cache(maxsize=None)
         def get_pd_transfer_regions(self):
             return tuple(
                 replace(region, byte_start=region.byte_start + 64, byte_end=region.byte_end + 64) if region.field == "ssm" else region
@@ -603,11 +605,11 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
         state = cls(config, request_capacity=1, device="meta")
         manager.register_state(role, state)
     if with_tail:
-        state = KPoolAttentionTailState(
-            config=KPoolStateConfig(
+        state = WindowCompressorState(
+            config=WindowCompressorStateConfig(
                 logical_layer_ids=(0,),
-                pool_size=4,
-                head_dim=1,
+                window_size=4, compress_stride=4, target="indexer",
+                candidate_dim=1,
                 dtype=torch.float32,
             ),
             request_capacity=1,

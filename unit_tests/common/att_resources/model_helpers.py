@@ -9,6 +9,7 @@ from types import SimpleNamespace
 
 import torch
 from lightllm.common.attention_state.types import TensorField
+from lightllm.common.attention_state.bounded_att import GDNState, KDAState, WindowCompressorState
 from lightllm.common.attention_state.full_att import (
     FullAttentionState, GQAAttentionConfig, MLAAttentionConfig,
     GroupQuantizedAttentionConfig, StaticFP8AttentionConfig, PackedMLAAttentionConfig,
@@ -99,7 +100,7 @@ def owned_states(attributes: Mapping[str, object], state_class: type | tuple[typ
 
 
 def main_linear_state(resources: AttentionStateManager):
-    (state,) = resources.get_bounded_attention_states("main")
+    (state,) = (state for state in resources.get_bounded_attention_states("main") if hasattr(state, "conv_state"))
     return state
 
 
@@ -207,7 +208,7 @@ def build_hybrid_resources(
     from lightllm.common.attention_state import AttentionStateManager
     from lightllm.common.attention_state.allocators import StatePageAllocator
     from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, create_gdn_state, create_kda_state
-    from lightllm.common.attention_state.att_tail import KPoolStateConfig, create_kpool_state
+    from lightllm.common.attention_state.bounded_att import WindowCompressorStateConfig, create_window_compressor_state
     from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 
     manager = AttentionStateManager(request_capacity=request_capacity)
@@ -241,12 +242,14 @@ def build_hybrid_resources(
             continue
         manager.register_state(role, state)
         if glm:
-            tail = create_kpool_state(
-                config=KPoolStateConfig(
+            window = create_window_compressor_state(
+                config=WindowCompressorStateConfig(
                     logical_layer_ids=tuple(layer for group in state.config.logical_layer_groups for layer in group),
-                    pool_size=config.index_kpool,
-                    head_dim=config.index_head_dim,
-                    dtype=state.config.dtype,
+                    window_size=config.index_kpool,
+                    compress_stride=config.index_kpool,
+                    candidate_dim=config.index_head_dim,
+                    target="indexer",
+                    dtype=config.conv_state_dtype,
                     tp_rank=tp_rank,
                     tp_world_size=config.tp_world_size,
                 ),
@@ -254,12 +257,25 @@ def build_hybrid_resources(
                 mtp_step=mtp_step,
                 device="cuda",
             )
-            manager.register_state(role, tail)
+            manager.register_state(role, window)
     manager.full_att_allocator = full_allocator
     manager.bounded_att_big_page_allocator = StatePageAllocator(big_page_capacity, reserved_slots=2)
     manager.bounded_att_small_page_allocator = StatePageAllocator(small_page_capacity) if small_page_capacity else None
     manager.bounded_att_cpu_load_big_page_slot = big_page_capacity - 2
     manager.bounded_att_cpu_offload_big_page_slot = big_page_capacity - 1
-    manager.cpu_tail_restore = glm
     manager.finish_state_registration()
     return manager
+
+
+def window_states(
+    manager: AttentionStateManager,
+    role: str | None = None,
+) -> tuple[WindowCompressorState, ...]:
+    return tuple(state for state in manager.get_bounded_attention_states(role) if isinstance(state, WindowCompressorState))
+
+
+def linear_states(
+    manager: AttentionStateManager,
+    role: str | None = None,
+) -> tuple[GDNState | KDAState, ...]:
+    return tuple(state for state in manager.get_bounded_attention_states(role) if isinstance(state, (GDNState, KDAState)))

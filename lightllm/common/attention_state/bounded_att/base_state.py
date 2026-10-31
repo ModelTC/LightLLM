@@ -30,7 +30,7 @@ class BoundedAttentionState(ABC):
     def get_state_type(self) -> str:
         """返回算法与存储方案标记，用于生成资源成员名。
 
-        返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att/att_tail 类别前缀，
+        返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att 类别前缀，
         也不带 main/draftN 角色或最终的 _state；类别由 Python State 类型表达。
         管理器统一生成 state_name = f"{model_role}_{get_state_type()}_state"，与成员名完全一致。
         同角色下不同算法、精度或量化方案必须使用不同标记，同方案的全部逻辑层放在同一实例。
@@ -187,8 +187,14 @@ class BoundedAttentionState(ABC):
     # ========================================================================
 
     @abstractmethod
+    @deepcopy_result
+    @lru_cache(maxsize=None)
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
-        """返回 PD 需要的字段、全局形状和 TP 切片，区域偏移相对本 State 起点。"""
+        """返回 PD 需要的字段、全局形状和 TP 切片，区域偏移相对本 State 起点。
+
+        内层 lru_cache 缓存区域定义，外层 deepcopy_result 每次返回独立副本。
+        管理器分配存储后统一清理，子类覆盖时须保留缓存和副本语义。
+        """
         ...
 
     @abstractmethod

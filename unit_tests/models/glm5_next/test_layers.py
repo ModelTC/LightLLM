@@ -424,7 +424,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     main.prepare_attention_states()
     assert main.att_state_manager.main_kda_conv_bf16_ssm_fp32_state.conv_state.is_cuda
-    assert main.att_state_manager.main_kpool_c4_bf16_state.tail_buffer.is_cuda
+    assert main.att_state_manager.main_compressor_indexer_w4_s4_bf16_state.buffer.is_cuda
     for step, draft in enumerate(drafts):
         draft.prepare_attention_states()
         assert draft.att_state_manager is main.att_state_manager
@@ -436,7 +436,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         assert state.config.logical_layer_groups == ((4 + step,),)
         assert state.state_name == f"draft{step}_mla_packed_bf16_state"
         assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
-        assert getattr(draft.att_state_manager, f"draft{step}_kpool_c4_bf16_state").tail_buffer.is_cuda
+        assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_cuda
 
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):

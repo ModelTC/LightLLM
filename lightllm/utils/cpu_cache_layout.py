@@ -47,7 +47,7 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
             request_capacity=1,
             device="meta",
         )
-        # tail 不占 CPU 页；无需创建 tail，也不需要实际模型或临时 CUDA 运行态。
+        # 无重叠的池化窗口自行返回空 CPU 区域；这里只创建 meta State，不初始化 CUDA。
         for state in (*full_states, *bounded_states):
             manager.register_state(role, state)
         logical_layer_start += count

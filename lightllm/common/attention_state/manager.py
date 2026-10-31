@@ -21,7 +21,6 @@ from lightllm.utils.log_utils import init_logger
 from .allocators import StatePageAllocator, FullAttKVAllocator
 from .full_att import FullAttentionState
 from .bounded_att import BoundedAttentionState
-from .att_tail import AttentionTailState
 from .utils import MODEL_ROLES
 
 if TYPE_CHECKING:
@@ -35,7 +34,7 @@ logger = init_logger(__name__)
 class AttentionStateManager:
     """管理模型组合的注意力资源，提供缓存复用及 CPU/DP/PD 传输所需的聚合操作。
 
-    通过聚合查询操作各类 State；模型通过三类创建接口决定资源组合，main/draft 共享本管理器。
+    通过聚合查询操作各类 State；模型通过两类创建接口决定资源组合，main/draft 共享本管理器。
     未支持的传输路径必须明确报错。
     """
 
@@ -55,10 +54,9 @@ class AttentionStateManager:
         self.bounded_att_big_page_allocator = None
         self.bounded_att_small_page_allocator = None
         self._request_capacity = request_capacity
-        self.cpu_tail_restore = False
 
     def register_state(
-        self, model_role: str, state: FullAttentionState | BoundedAttentionState | AttentionTailState
+        self, model_role: str, state: FullAttentionState | BoundedAttentionState
     ) -> None:
         """按模型角色和具体方案注册 State，保留原对象及其存储。
 
@@ -84,8 +82,8 @@ class AttentionStateManager:
         model_role: str,
         state_type_filter: str,
         logical_layer_id: int,
-        state_class: type[FullAttentionState | BoundedAttentionState | AttentionTailState] | None = None,
-    ) -> FullAttentionState | BoundedAttentionState | AttentionTailState:
+        state_class: type[FullAttentionState | BoundedAttentionState] | None = None,
+    ) -> FullAttentionState | BoundedAttentionState:
         """按模型角色、算法/方案字符串和逻辑层选择唯一 State，缓存查询结果。
 
         model_role 为 main 或 draft0..draft35，按完整角色前缀匹配，避免 draft1 匹配 draft10。
@@ -100,7 +98,7 @@ class AttentionStateManager:
             state
             for name, state in self.__dict__.items()
             if name.startswith(model_role + "_")
-            and isinstance(state, (FullAttentionState, BoundedAttentionState, AttentionTailState))
+            and isinstance(state, (FullAttentionState, BoundedAttentionState))
             and state_type_filter in state.get_state_type()
             and (state_class is None or isinstance(state, state_class))
             and state.contains_logical_layer(logical_layer_id)
@@ -233,7 +231,7 @@ class AttentionStateManager:
     ) -> None:
         """在 State 对象创建完成后分配 full-attention 存储、共享 allocator 和 bounded 大小页。
 
-        请求容量对应的 bounded/indexer 运行态已由各模型创建，这里仅补齐缓存存储。
+        请求容量对应的 bounded 运行态（包括压缩窗口）已由各模型创建，这里仅补齐缓存存储。
         """
         assert self._state_registration_finished, "State registration must finish before storage initialization"
         assert self.full_att_allocator is None, "resources already initialized"
@@ -256,6 +254,10 @@ class AttentionStateManager:
                 StatePageAllocator(small_page_capacity) if small_page_capacity else None
             )
             for state in bounded_states:
+                # 无快照区域的 State 在合法缓存边界无需历史，不为它分配大小页 Tensor。
+                # 共享槽位 allocator 仍供其他 State 和缓存流程使用，不随单个 State 重复创建。
+                if not state.get_cpu_transfer_regions():
+                    continue
                 state.initialize_page_pools(
                     big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity,
                     pin_memory=torch.device(device).type == "cuda",
@@ -263,10 +265,10 @@ class AttentionStateManager:
             self.bounded_att_cpu_load_big_page_slot = big_page_capacity - 2
             self.bounded_att_cpu_offload_big_page_slot = big_page_capacity - 1
 
-        self.cpu_tail_restore = bool(self.get_attention_tail_states())
-        # 存储分配可能改变 State 的物理页规格，清除准备阶段的布局及其派生 CPU/PD 页大小缓存。
+        # 存储分配可能改变物理页规格，清除 State 的 CPU/PD 区域和管理器的派生布局缓存。
         for state in (*full_states, *bounded_states):
             state.get_cpu_transfer_regions.cache_clear()
+            state.get_pd_transfer_regions.cache_clear()
         self.get_cpu_page_layouts.cache_clear()
         self.get_cpu_page_bytes.cache_clear()
         self.get_pd_token_page_layouts.cache_clear()
@@ -323,10 +325,6 @@ class AttentionStateManager:
         """返回全部或指定角色的 bounded-attention State。"""
         return self._get_states(BoundedAttentionState, role)
 
-    def get_attention_tail_states(self, role: str | None = None) -> tuple[AttentionTailState, ...]:
-        """返回全部或指定角色的 attention-tail State。"""
-        return self._get_states(AttentionTailState, role)
-
     def get_full_att_token_bytes(self) -> int:
         """累计当前 TP rank 全部 full-attention State 的单 token 存储字节数。"""
         total = 0
@@ -382,7 +380,7 @@ class AttentionStateManager:
 
     # 空前缀初始化：只处理 bounded attention；无此类 State 时可为空操作。
     def reset_bounded_att_state(self, req_indices: List[int]) -> None:
-        """将指定槽位的 bounded 运行态及控制信息恢复到长度 0，保留 KV、tail 和状态页。"""
+        """将指定槽位的 bounded 运行态及控制信息恢复到长度 0，保留 KV 和状态页。"""
         for state in self.get_bounded_attention_states():
             state.reset_bounded_att_state(req_indices)
 
@@ -447,23 +445,7 @@ class AttentionStateManager:
             state.commit_bounded_att_state(req_indices, accepted_steps)
 
     # ========================================================================
-    # 四、Attention tail：空前缀初始化与无快照恢复
-    # ========================================================================
-
-    # 没有 tail 快照时使用；长度 0 用于空前缀初始化，没有 tail 的模型可为空操作。
-    def reset_attention_tail_state(
-        self,
-        req_indices: list[int],
-    ) -> None:
-        """依次清零指定请求的 tail，恢复边界由模型配置和缓存调用流程保证。
-
-        保留已恢复的 KV 和 bounded 运行态，不提供跨 State 的原子性保证。
-        """
-        for state in self.get_attention_tail_states():
-            state.reset_attention_tail_state(req_indices)
-
-    # ========================================================================
-    # 五、CPU Cache 数据交换
+    # 四、CPU Cache 数据交换
     # ========================================================================
 
     @lru_cache(maxsize=None)
@@ -478,7 +460,7 @@ class AttentionStateManager:
         assert states, "a CPU page requires participating storage"
 
         # 按 full-attention、bounded 顺序组织全部角色；各类 State 内部按资源名排序。
-        # Indexer tail 沿用前缀边界重置，不加入当前 CPU 联合页。
+        # 无重叠窗口在缓存组边界无需快照，由 State 返回空 CPU 区域。
         layouts, offset = {}, 0
         for state in states:
             regions = tuple(
@@ -585,12 +567,11 @@ class AttentionStateManager:
 
         big_page_slot_ids 只包含完整 CPU 页对应的普通槽位；末尾碎页使用内部预留的 LOAD 大页。
         存在 bounded 时须提供 state_token_len，即恢复后的绝对前缀长度，不是本批 token 数。
-        存在 bounded 或 tail 时必须提供 req_idx；调用方保证最终前缀位于 tail 可重置边界。
+        存在 bounded 时必须提供 req_idx；最终前缀须满足各 State 的快照或重置边界。
         """
         full_states = self.get_full_attention_states()
         bounded_states = self.get_bounded_attention_states()
-        tail_states = self.get_attention_tail_states()
-        if bounded_states or tail_states:
+        if bounded_states:
             assert req_idx is not None and cpu_page_indices, "state recovery requires a target request and prefix pages"
         if bounded_states:
             assert state_token_len is not None, "bounded state recovery requires its absolute prefix length"
@@ -637,12 +618,8 @@ class AttentionStateManager:
                 page_slot_ids=[load_big_page_slot_ids[-1]],
             )
 
-        # 阶段四：清零目标请求的 tail；调用方保证前缀终点满足重置边界。
-        for state in tail_states:
-            state.reset_attention_tail_state([req_idx])
-
     # ========================================================================
-    # 六、DP 迁移
+    # 五、DP 迁移
     # ========================================================================
 
     def copy_from_dp(
@@ -659,7 +636,7 @@ class AttentionStateManager:
 
         token 索引由调用方准备在源、目标各自的 CUDA 设备上，目标索引为 int64。
         不需要复制 token 或大页时传空 Tensor 或空列表；请求运行态仍按请求索引复制。
-        调用方保证源 MTP 游标为 0、目标前缀位于 tail 可重置边界，以及源页就绪和引用有效。
+        调用方保证源 MTP 游标为 0、目标前缀满足各 State 的缓存边界，以及源页就绪和引用有效。
         """
         assert type(remote_att_manager) is type(self), "DP replicas must use the same model resource manager"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
@@ -678,17 +655,16 @@ class AttentionStateManager:
                     dst_page_ids=dst_big_page_ids,
                     remote_dp_bounded_state=getattr(remote_att_manager, state.state_name),
                 )
-        # 运行态不由大页复制隐式恢复；按指定请求复制基准位置，随后重置目标 tail。
+        # 运行态由具体 State 复制或按合法缓存边界重置，不由大页复制隐式恢复。
         for state in self.get_bounded_attention_states():
             state.copy_runtime_state_from_dp(
                 src_req_indices=[src_req_idx],
                 dst_req_indices=[dst_req_idx],
                 remote_dp_bounded_state=getattr(remote_att_manager, state.state_name),
             )
-        self.reset_attention_tail_state([dst_req_idx])
 
     # ========================================================================
-    # 七、PD 分离传输
+    # 六、PD 分离传输
     # ========================================================================
 
     @lru_cache(maxsize=None)
@@ -724,7 +700,7 @@ class AttentionStateManager:
         每个 State 保存一份运行态，tokens_per_page 为 None；无 State 时返回空字典。
         """
         layouts, offset = {}, 0
-        for state in (*self.get_bounded_attention_states(), *self.get_attention_tail_states()):
+        for state in self.get_bounded_attention_states():
             regions = tuple(
                 replace(region, byte_start=offset + region.byte_start, byte_end=offset + region.byte_end)
                 for region in state.get_pd_transfer_regions()
@@ -740,7 +716,7 @@ class AttentionStateManager:
             offset = state_end
         return layouts
 
-    # PD 分离：kind="kv" 传输 token 数据，kind="att_state" 传输 bounded 运行态及 tail。
+    # PD 分离：kind="kv" 传输 token 数据，kind="att_state" 传输 bounded 运行态。
     # pd_page_buffers 第一维为页，pd_page_index 选择物理页；网络收发与同步由传输流程组织。
     def write_to_pd_page(
         self,
@@ -766,23 +742,12 @@ class AttentionStateManager:
                     )
 
             case "att_state":
-                # 前缀长度由 PD 任务提供，bounded/tail 据此定位各自的运行态窗口。
+                # 前缀长度由 PD 任务提供，各 State 据此定位自己的运行态窗口。
                 assert req_idx is not None, "state PD pages require a request index"
-                tail_states = self.get_attention_tail_states()
                 assert state_token_len is not None and state_token_len >= 0, "PD state requires its prefill prefix length"
 
                 # 阶段一：写出 bounded 的 prefill 基准运行态。
                 for state in self.get_bounded_attention_states():
-                    state.write_to_pd_page(
-                        req_idx=req_idx,
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        state_token_len=state_token_len,
-                        layout=layouts[state.state_name],
-                    )
-
-                # 阶段二：按前缀长度写出 tail 逻辑窗口，适配两端各自的 MTP ring。
-                for state in tail_states:
                     state.write_to_pd_page(
                         req_idx=req_idx,
                         pd_page_buffers=pd_page_buffers,
@@ -818,9 +783,8 @@ class AttentionStateManager:
                     )
 
             case "att_state":
-                # 前缀长度由 PD 任务提供，bounded/tail 据此定位各自的运行态窗口。
+                # 前缀长度由 PD 任务提供，各 State 据此定位自己的运行态窗口。
                 assert req_idx is not None, "state PD pages require a request index"
-                tail_states = self.get_attention_tail_states()
                 assert state_token_len is not None and state_token_len >= 0, "PD state requires its prefill prefix length"
 
                 # 阶段一：恢复 bounded 的 prefill 基准运行态。
@@ -833,28 +797,18 @@ class AttentionStateManager:
                         layout=layouts[state.state_name],
                     )
 
-                # 阶段二：按前缀长度恢复 tail 逻辑窗口，适配两端各自的 MTP ring。
-                for state in tail_states:
-                    state.read_from_pd_page(
-                        pd_page_buffers=pd_page_buffers,
-                        req_idx=req_idx,
-                        pd_page_index=pd_page_index,
-                        state_token_len=state_token_len,
-                        layout=layouts[state.state_name],
-                    )
-
             case _:
                 raise AssertionError(f"unknown PD page kind {kind}")
 
     # ========================================================================
-    # 八、私有辅助实现
+    # 七、私有辅助实现
     # ========================================================================
 
     # 私有实现：缓存创建完成后的成员集合，模型逐层计算直接访问具体 State 成员。
     @lru_cache(maxsize=None)
     def _get_states(
         self,
-        state_class: type[FullAttentionState] | type[BoundedAttentionState] | type[AttentionTailState],
+        state_class: type[FullAttentionState] | type[BoundedAttentionState],
         role: str | None,
     ):
         """按 State 类型和模型角色遍历规范成员，只缓存对象引用。"""
