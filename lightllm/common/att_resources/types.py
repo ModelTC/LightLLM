@@ -66,13 +66,21 @@ class TensorField:
 
 @dataclass(frozen=True)
 class AxisSlice:
-    """某一轴上的连续范围映射，起点与长度均以元素为单位。
+    """某一轴上的逻辑连续范围映射，起点与长度均以元素为单位。
 
     TransferRegion 中的方向固定为本地 State 到外部页，读取时反向应用。
+    环形轴按对应 Tensor 的实际轴长度取模，不要求两侧容量相同。
 
     示例：本地 head[0:2] 写到全局传输区域 head[2:4]，读回时反向复制。
         >>> head_slice = AxisSlice(axis="head", src_start=0, dst_start=2, length=2)
         >>> assert head_slice.dst_start + head_slice.length == 4
+
+    环形示例：本地 window 容量为 4，从槽位 3 起搬运 4 个位置到线性外部页。
+    本地位置依次为 [3, 0, 1, 2]，外部位置依次为 [0, 1, 2, 3]。
+        >>> window_slice = AxisSlice(
+        ...     axis="window", src_start=3, dst_start=0, length=4, src_circular=True,
+        ... )
+        >>> assert window_slice.src_circular and not window_slice.dst_circular
     """
 
     # 要切片的轴名，必须同时存在于源、目标字段中，例如 head、channel、dim。
@@ -88,9 +96,18 @@ class AxisSlice:
     # 用于将本地 TP 分片放到全局 head/channel 的对应位置。
     dst_start: int
 
-    # 搬运的元素数量，必须为正；源和目标的半开区间均为 [start, start + length)。
+    # 搬运的元素数量，必须为正；普通轴使用半开区间 [start, start + length)。
+    # 环形轴对 start + i 取模，length 不得超过该侧 Tensor 的轴容量，避免重复覆盖。
     # 它是该轴上的长度，不是字节数，也不是整个 Tensor 的元素总数。
     length: int
+
+    # 本地 State 的该轴采用环形寻址；容量取自本地 Tensor，而不是外部 region.shape。
+    # 例如 tail/SWA 的 window 轴。读回时仍作用于本地侧，不随实际搬运方向交换含义。
+    src_circular: bool = False
+
+    # 外部区域的该轴采用环形寻址；容量取自外部 Tensor 的对应轴。
+    # 常规 CPU/PD 页按逻辑顺序线性保存，使用默认 False。
+    dst_circular: bool = False
 
 
 # ========================================================================
@@ -153,6 +170,8 @@ class TransferRegion:
     # 描述本地字段到外部区域的轴范围，每个非 layer/token 轴必须恰好出现一次。
     # 无分片的轴也显式填写完整范围，例如 dim: 0 -> 0、length=head_dim。
     # 读回时交换源、目标起点；同一组切片应用于全部层和本次有效 token。
+    # 环形寻址由支持它的具体 State 搬运实现处理；请求窗口起点通过本次调用的
+    # axis_slice_overrides 覆盖，不回写缓存布局，起点也不作为 kernel 的编译期常量。
     axis_slices: tuple[AxisSlice, ...]
 
     # 当前 TP rank 是否负责向外部区域写入；False 不影响从该区域读回。

@@ -8,7 +8,7 @@ import torch
 from ..utils import dtype_name
 from ..types import AxisSlice, TransferRegion
 from .base_state import AttentionTailState
-from .transfer_utils import att_tail_buffer_copies
+from .kpool_transfer import transfer_kpool_pages
 
 if TYPE_CHECKING:
     from lightllm.common.att_resources.types import StateTransferLayout
@@ -100,7 +100,6 @@ class KPoolAttentionTailState(AttentionTailState):
         assert isinstance(req_indices, list), "request indices must be a list"
         for req_idx in req_indices:
             self.tail_buffer[:, req_idx].fill_(0)
-
     # ========================================================================
     # 三、PD 分离传输
     # ========================================================================
@@ -123,6 +122,7 @@ class KPoolAttentionTailState(AttentionTailState):
                     src_start=0,
                     dst_start=0,
                     length=window_size,
+                    src_circular=True,
                 ),
                 AxisSlice(
                     axis="channel",
@@ -144,16 +144,15 @@ class KPoolAttentionTailState(AttentionTailState):
         layout: StateTransferLayout,
     ) -> None:
         """将 prefill 末尾的逻辑窗口写入 PD 页；state_token_len 为已执行的前缀长度。"""
-        copies = self._pd_buffer_copies(
-            pd_page_buffers=pd_page_buffers,
-            pd_page_index=pd_page_index,
-            req_idx=req_idx,
+        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
+        transfer_kpool_pages(
+            tail=self.tail_buffer[:, req_idx],
+            page_buffers=pd_page_buffers,
+            page_index=pd_page_index,
             state_token_len=state_token_len,
             layout=layout,
             write=True,
         )
-        for src_tensor, dst_tensor in copies:
-            dst_tensor.copy_(src_tensor, non_blocking=True)
 
     def read_from_pd_buffer(
         self,
@@ -163,74 +162,13 @@ class KPoolAttentionTailState(AttentionTailState):
         state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """按前缀长度将逻辑窗口放回本地 ring，清零其余候选历史，允许两端 MTP 步数不同。"""
-        # TODO：PD 恢复可按目标 ring 槽位一次写入有效历史或零，融合清零和逐窗口复制；
-        # 避免同一 kernel 内先清零再恢复造成竞争，同时清除窗口外的旧候选历史。
-        copies = self._pd_buffer_copies(
-            pd_page_buffers=pd_page_buffers,
-            pd_page_index=pd_page_index,
-            req_idx=req_idx,
+        """按前缀长度将逻辑窗口放回本地 ring，保留窗口外槽位，允许两端 MTP 步数不同。"""
+        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
+        transfer_kpool_pages(
+            tail=self.tail_buffer[:, req_idx],
+            page_buffers=pd_page_buffers,
+            page_index=pd_page_index,
             state_token_len=state_token_len,
             layout=layout,
             write=False,
-        )
-        self.tail_buffer[:, req_idx].fill_(0)
-        for src_tensor, dst_tensor in copies:
-            dst_tensor.copy_(src_tensor, non_blocking=True)
-
-    # ========================================================================
-    # 四、私有辅助实现
-    # ========================================================================
-
-    def _pd_buffer_copies(
-        self,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        req_idx: int,
-        state_token_len: int,
-        layout: StateTransferLayout,
-        write: bool,
-    ) -> list[tuple[torch.Tensor, torch.Tensor]]:
-        """为 PD prefill 交接生成复制视图，允许 P/D 使用不同的 MTP 步数。
-
-        为什么不能直接复制物理 ring：
-        - 本地 ring 的容量为 P+S，其中 P=pool_size，S=本地 mtp_step；绝对位置 pos
-          存在 pos % (P+S) 槽位。P/D 的 S 不同时，形状和同一位置对应的物理槽位都不同。
-        - 即使 P 端没有执行 MTP decode，prefill 算子也按实际 ring 容量取模写入，
-          最近 P 个位置不一定落在 ring 的前 P 个槽位，因此不能直接截取 [:P] 传输。
-        - 外部页固定保存最近 P 个逻辑位置，按时间顺序排列，形状为 [layers, P, 2*head_dim]。
-          这样 PD 布局不依赖两端的 S；D 端的额外候选历史由后续 MTP 执行产生。
-
-        位置和复制方向：
-        - state_token_len=L 是该 State 已执行完 prefill 的 token 数，不是最后一个 token
-          的下标，也不包含刚采样但尚未执行的输出 token；来自 PD 任务的 end_kv_index。
-        - 外部 window[i] 对应绝对位置 pos=L-P+i。write=True 从本地 ring 的
-          pos % (P+S) 读取并写入 window[i]；write=False 按相同规则恢复到本地 ring。
-        - 例如 P=4、L=11，窗口保存位置 [7,8,9,10]。S_p=0 时从槽位 [3,0,1,2]
-          写出，S_d=2 时恢复到槽位 [1,2,3,4]；直接复制同名物理槽位会恢复错误历史。
-        - L<P 时，窗口前部对应负位置：写出时补零，读回时忽略。L=0 时没有有效历史。
-          TP 副本只由 rank 0 写出，读回时每个 rank 都恢复自己的完整窗口。
-
-        调用前提与副作用：
-        - 双方具有相同模型及 main/draft 资源集合，池化步长、层顺序和字段表示兼容；
-          本接口只用于 prefill 终点交接，不用于迁移已经执行 MTP 后的候选或回退历史。
-        - req_idx 是本进程的请求槽位；pd_page_index 选择页集合中的物理页。
-          region 的字节区间已相对整页，不再额外叠加 layout.byte_start。
-        - 返回有效位置的 (源 Tensor 视图, 目标 Tensor 视图)，由读写入口提交 copy_；
-          短前缀写出时，底层 helper 会立即提交外部窗口无效位置的清零。
-        - 本方法不清零目标 ring。read_from_pd_buffer 取得全部视图后先清零该请求的
-          本地 ring，再执行有效位置复制，避免保留旧请求或旧 MTP 候选历史。
-          所有 GPU 操作遵循当前 stream，调用方负责完成依赖及源、目标存储的生命周期。
-        """
-        assert layout.resource_id == self.resource_id, "transfer layout does not describe this resource"
-        assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
-        assert state_token_len >= 0, "PD tail requires a nonnegative prefix length"
-        # helper 按 L 和本地 ring 实际容量逐位置取视图，不创建索引 Tensor 或读取 GPU 游标。
-        return att_tail_buffer_copies(
-            tail=self.tail_buffer[:, req_idx],
-            page_buffers=pd_page_buffers,
-            layout=layout,
-            page_index=pd_page_index,
-            state_token_len=state_token_len,
-            write=write,
         )

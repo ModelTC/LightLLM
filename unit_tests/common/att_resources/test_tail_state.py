@@ -45,6 +45,7 @@ def tail_layout(state: KPoolAttentionTailState):
                         src_start=0,
                         dst_start=0,
                         length=shape[1],
+                        src_circular=True,
                     ),
                     AxisSlice(
                         axis="channel",
@@ -66,7 +67,8 @@ def test_tail_reset_clears_selected_requests_only():
     assert (state.tail_buffer[:, 2] == 17).all()
 
 
-@pytest.mark.parametrize("device", ["cpu", "cuda"])
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("device", ["cuda"])
 @pytest.mark.parametrize("source_step,target_step", [(0, 0), (0, 5), (2, 0), (1, 3)])
 @pytest.mark.parametrize("length", [0, 1, 3, 4, 5, 11, 12])
 def test_pd_logical_window_restores_different_mtp_rings(
@@ -105,9 +107,13 @@ def test_pd_logical_window_restores_different_mtp_rings(
         state_token_len=length,
         layout=layout,
     )
-    expected = torch.zeros_like(target.tail_buffer[:, 2])
-    for position in range(max(0, length - 4), length):
-        expected[:, position % (4 + target_step)] = source.tail_buffer[:, 1, position % (4 + source_step)]
+    expected = torch.full_like(target.tail_buffer[:, 2], 37)
+    for position in range(length - 4, length):
+        slot = position % (4 + target_step)
+        if position < 0:
+            expected[:, slot].zero_()
+        else:
+            expected[:, slot] = source.tail_buffer[:, 1, position % (4 + source_step)]
     assert torch.equal(target.tail_buffer[:, 2], expected)
     assert (target.tail_buffer[:, :2] == 37).all()
     assert torch.equal(source.tail_buffer, original)

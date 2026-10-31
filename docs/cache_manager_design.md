@@ -323,7 +323,7 @@ lightllm/common/
 │   └── att_tail/
 │       ├── __init__.py
 │       ├── base_state.py                # AttentionTailState：尾部状态抽象操作契约
-│       ├── transfer_utils.py            # att_tail_buffer_copies：本地 ring 与固定逻辑窗口之间搬运
+│       ├── kpool_transfer.py            # transfer_kpool_pages：单次 kernel 双向搬运环形逻辑窗口
 │       ├── create_kpool_state.py        # K-pool 统一创建入口
 │       └── kpool_state.py               # KPoolAttentionTailState：原生 ring 与恢复规则
 └── req_manager/                          # 请求槽位、KV 索引映射、采样与生命周期
@@ -364,7 +364,7 @@ KDA/GDN 的大小页保存与恢复、CPU cache 读写、DP 大页与运行态�
 CPU 页池和 CPU cache 页必须是当前进程已 pinned/registered 的存储；两端均为 CPU 时也由 GPU kernel 访问 mapped host memory。所有视图直接使用 `tensor.data_ptr()`，调用方保证该地址对当前 GPU 可访问；跨 GPU 访问依赖调用方已有的 peer/IPC 映射，拷贝入口不建立设备访问关系。所有操作在当前 CUDA stream 排队，调用方负责生产流依赖、存储及页面引用生命周期，以及 CPU 读取/复用前的完成事件；拷贝入口不查询主机映射、不调用 `record_stream()`，也不再依赖 CPU→CPU `copy_` 的同步语义。
 
 
-`FullAttentionState`、`BoundedAttentionState` 的具体子类直接实现 CPU、DP、PD 读写；`AttentionTailState` 实现 PD 快照读写，CPU/DP 缓存前缀恢复时按对齐边界重置；IPC 导出前由管理器统一创建浅拷贝并排除进程私有资源，State 不设置额外的序列化钩子。各具体 State 通过 `get_cpu_transfer_regions()` / `get_pd_transfer_regions()` 选择传输字段、形状及 TP 切片；字段字节对齐、区间计算和 `TransferRegion` 构造直接在 State 内展开，不再通过 `region()` 包装。各具体 full-attention State 对应的 `*_transfer.py` 由 Triton 直接按 token 和页索引搬运 KV 及配套量化字段，每个字段一次 launch 覆盖全部页，不创建 gather/scatter 中间 KV。CPU 页必须是 pinned 或已通过 `cudaHostRegister` 注册的内存；调用方在 stream/event 完成后才能读取或复用页面。每种 full-attention 方案的 CPU/PD 路径共用本方案的 `transfer_*_pages` 入口和 kernel，直接按 token 和页索引读写外部页。两条路径均兼容不足整页的有效 token；`bounded_att/transfer_utils.py` 复制完整状态快照，不接收 token 数量；`att_tail/transfer_utils.py` 接收本地 ring 和 prefill 前缀长度，按逻辑时间顺序搬运最近 `pool_size` 个位置；短前缀的不存在位置在写出时补零。bounded-attention 和 tail 的共用传输函数使用 `page_buffers` 和必传的 `page_index`，不带 CPU/PD 前缀；页存储必须至少为二维，第一维表示页，统一通过 `page_buffers[page_index]` 取页。PD State 与 manager 读写入口统一接收 `pd_page_buffers` 和必填的 `pd_page_index`，将页集合与真实页索引直接传给共用搬运函数；不接受单页 Tensor，也不在入口添加页维度。CPU 专属读写接口仍使用 `cpu_page_buffers` 和 `cpu_page_indices`。Full attention 的各方案 CPU/PD 共用入口直接提交 Triton kernel；bounded attention 的复制视图按字段或传输区域收集为同形状批次，提交专用 kernel；tail 的复制视图由 State 在调用处遍历执行 `dst.copy_(src, non_blocking=True)`，不再包装仅转发循环的搬运函数。取页和外部字段视图在三类函数中直接展开：先选择页，再按字节起止位置切片并解释为字段 dtype/shape，不额外逐区域断言边界、对齐或轴定义。full-attention 在各方案的 `*_transfer.py` 中直接应用 TP 切片，kernel 按索引长度裁剪有效 token；bounded-attention 在本地 `transfer_utils.py` 特化 `_copy_pair`，仅处理状态轴切片。tail 使用固定 `pool_size` 的逻辑窗口，按传入的前缀长度把逻辑位置映射到本地 ring 槽位；短前缀在外部窗口前部补零，读回时清零其余本地候选历史。三类路径都在提交前断言实际复制视图的 shape 一致。读回时交换本地和外部视图，不重新构造反向轴映射。full-attention DP 直接复制同一 TP 分片的显式存储，原根目录 `transfer_utils.py` 的字段映射复制已无调用方并删除。State 的 KV 写入与量化方法直接调用相应计算模块中的 kernel。具体方案标记统一由 `get_state_type()` 返回，不再保留无读取方的 `layout_name`。这些聚合操作由 `AttResourceManager` 提供默认实现，统一组织多资源读写、CPU 联合页、调用方传入的长度和位置映射；模型子类仅覆盖存在差异的部分。网络通信、任务队列与完成通知由 server 层管理。
+`FullAttentionState`、`BoundedAttentionState` 的具体子类直接实现 CPU、DP、PD 读写；`AttentionTailState` 实现 PD 快照读写，CPU/DP 缓存前缀恢复时按对齐边界重置；IPC 导出前由管理器统一创建浅拷贝并排除进程私有资源，State 不设置额外的序列化钩子。各具体 State 通过 `get_cpu_transfer_regions()` / `get_pd_transfer_regions()` 选择传输字段、形状及 TP 切片；字段字节对齐、区间计算和 `TransferRegion` 构造直接在 State 内展开，不再通过 `region()` 包装。各具体 full-attention State 对应的 `*_transfer.py` 由 Triton 直接按 token 和页索引搬运 KV 及配套量化字段，每个字段一次 launch 覆盖全部页，不创建 gather/scatter 中间 KV。CPU 页必须是 pinned 或已通过 `cudaHostRegister` 注册的内存；调用方在 stream/event 完成后才能读取或复用页面。每种 full-attention 方案的 CPU/PD 路径共用本方案的 `transfer_*_pages` 入口和 kernel，直接按 token 和页索引读写外部页。两条路径均兼容不足整页的有效 token；`bounded_att/transfer_utils.py` 复制完整状态快照，不接收 token 数量；`att_tail/kpool_transfer.py` 接收本地 ring 和 prefill 前缀长度，单次 Triton launch 搬运最近 `pool_size` 个逻辑位置；两个方向均只处理逻辑窗口，并将短前缀对应的窗口内位置补零。bounded-attention 和 tail 的共用传输函数使用 `page_buffers` 和必传的 `page_index`，不带 CPU/PD 前缀；页存储必须至少为二维，第一维表示页，统一通过 `page_buffers[page_index]` 取页。PD State 与 manager 读写入口统一接收 `pd_page_buffers` 和必填的 `pd_page_index`，将页集合与真实页索引直接传给共用搬运函数；不接受单页 Tensor，也不在入口添加页维度。CPU 专属读写接口仍使用 `cpu_page_buffers` 和 `cpu_page_indices`。Full attention 的各方案 CPU/PD 共用入口直接提交 Triton kernel；bounded attention 的复制视图按字段或传输区域收集为同形状批次，提交专用 kernel；K-pool tail 直接提交本方案的环形窗口 kernel，全部层的 key/gate 窗口搬运在一次 launch 中完成。取页和外部字段视图在三类函数中直接展开：先选择页，再按字节起止位置切片并解释为字段 dtype/shape，不额外逐区域断言边界、对齐或轴定义。full-attention 在各方案的 `*_transfer.py` 中直接应用 TP 切片，kernel 按索引长度裁剪有效 token；bounded-attention 在本地 `transfer_utils.py` 特化 `_copy_pair`，仅处理状态轴切片。tail 使用固定 `pool_size` 的逻辑窗口，按传入的前缀长度把逻辑位置映射到本地 ring 槽位；短前缀在外部窗口前部补零，读回时保留逻辑窗口之外的本地 MTP 槽位。full-attention 和 bounded 路径检查实际复制视图的 shape 一致；tail 检查 layer/channel 相同，window 按两侧各自容量作环形映射。读回时反向执行同一组轴映射，保留本地和外部的固定角色。full-attention DP 直接复制同一 TP 分片的显式存储，原根目录 `transfer_utils.py` 的字段映射复制已无调用方并删除。State 的 KV 写入与量化方法直接调用相应计算模块中的 kernel。具体方案标记统一由 `get_state_type()` 返回，不再保留无读取方的 `layout_name`。这些聚合操作由 `AttResourceManager` 提供默认实现，统一组织多资源读写、CPU 联合页、调用方传入的长度和位置映射；模型子类仅覆盖存在差异的部分。网络通信、任务队列与完成通知由 server 层管理。
 
 CPU 服务通过模型配置与 meta device 上的 State 描述生成页格式，无需分配 GPU 存储。服务端将 main/draft 的 meta State 装配到管理器并标记创建完成，复用 `AttResourceManager.get_cpu_transfer_layouts()`，与推理端使用同一条布局聚合路径。该接口直接遍历 full-attention、bounded State，调用各自的 `get_cpu_transfer_regions()`，同时平移字段区间的起点和终点；每个 State 的最大字段终点按 8 字节对齐后作为下一 State 的起点。CPU 页容量由全部布局的最大 `byte_end` 按 16 字节对齐得到，TP 副本不重复占用外部页；启动绑定时核对页字节数。
 
@@ -1073,7 +1073,7 @@ CPU buffer 使用 `(page_num, page_bytes)` 的二维页池，通过 `cpu_page_bu
 | `regions` | 本 State 参与传输的物理字段或片段列表，同一字段可分为多个映射项 |
 | 每项的 `field`、`dtype`、`axes`、`shape` | 标识 State 中的字段及外部页区域；axes 命名各维度，shape 用元素数量；外部区域采用连续布局，stride 由 shape 和 dtype 推导 |
 | 每项的 `byte_start`、`byte_end` | 字段的左闭右开字节区间，组合后相对整页；长度等于 `prod(shape) * dtype.itemsize`，不包含字段间的对齐空隙，必须位于所属 State 区间内 |
-| 每项的 `axis_slices` | `tuple[AxisSlice, ...]`，通过 `axis`、`src_start`、`dst_start`、`length` 描述轴名、源起点、目标起点和元素数量；一个 region 内同一轴只出现一次，同轴不连续范围拆成多个 region |
+| 每项的 `axis_slices` | `tuple[AxisSlice, ...]`，通过 `axis`、`src_start`、`dst_start`、`length` 描述轴名、源起点、目标起点和元素数量；一个 region 内同一轴只出现一次，src_circular/dst_circular 描述两侧环形寻址；普通非连续范围拆成多个 region |
 | 每项的 `write_enabled` | 指定 TP 副本是否负责写入该区域，避免多个副本重复写入；恢复时各目标副本均可读取 |
 
 以下冻结数据类只描述传输位置，不包含搬运方法：
@@ -1089,6 +1089,8 @@ class AxisSlice:
     src_start: int
     dst_start: int
     length: int
+    src_circular: bool = False
+    dst_circular: bool = False
 
 
 @dataclass(frozen=True)
@@ -1118,7 +1120,7 @@ class StateTransferLayout:
 
 层维度统一完整、同序复制，搬运前检查源目标层数一致。逻辑层到物理存储位置的映射由 State 自身维护，例如逻辑层 `[3, 7]` 紧凑存为 `[0, 1]`，外部页沿用相同层顺序。CPU/PD 区域和 DP State 复制均不提供层子集选择或层重排参数。
 
-token 轴由本次索引向量驱动，外部页内从槽位 0 开始，不放进 `axis_slices`。其余搬运轴通过 `AxisSlice` 指定范围，同一组切片应用于全部层；不同 TP rank 的 head/channel 差异由这些切片表达，不改变层顺序。使用多个连续片段表达同一轴的非连续范围。
+token 轴由本次索引向量驱动，外部页内从槽位 0 开始，不放进 `axis_slices`。其余搬运轴通过 `AxisSlice` 指定范围，同一组切片应用于全部层；不同 TP rank 的 head/channel 差异由这些切片表达，不改变层顺序。普通非连续范围使用多个连续片段表达；环形轴使用 `src_circular` / `dst_circular`，按两侧 Tensor 的实际轴容量对 `start + i` 取模。标记始终按本地 State → 外部页解释，读回时反向执行；搬运长度不超过各环形轴容量。
 
 `shape` 表达该外部字段区域的完整范围，而 `axis_slices` 表达当前 State 实际访问的子范围；两者不能混淆。State 区域接口返回的起点、终点均相对本 State 起点；管理器组合时同时平移两个位置：
 
@@ -1647,15 +1649,17 @@ class AttentionTailState(ABC):
 | 接口 | 数据路径及约束 |
 | --- | --- |
 | `write_to_pd_buffer(...)` | 按 `state_token_len` 提取指定请求的逻辑窗口 → `pd_page_index` 指定的 PD 状态页区域，使用 layout 的资源偏移与 TP 写入规则 |
-| `read_from_pd_buffer(...)` | 已接收的逻辑窗口 → 按 `state_token_len` 和本地 ring 容量映射到目标槽位；清零该请求的其余候选历史，调用方建立接收完成依赖 |
+| `read_from_pd_buffer(...)` | 已接收的逻辑窗口 → 按 `state_token_len` 和本地 ring 容量映射到目标槽位；窗口外的 MTP 槽位保持原值，调用方建立接收完成依赖 |
 
-这些方法传输 tail 自身的 prefill 逻辑窗口，不承担历史 KV、池化 key/scale、bounded 状态或 MTP proposal 的迁移。发送端取最近 `P` 个位置并按时间顺序排列；接收端先清零该请求的本地 ring，再把有效位置放回对应物理槽位，其他请求保持不变。后续 MTP 候选历史由 D 端执行过程中产生。
+这些方法传输 tail 自身的 prefill 逻辑窗口，不承担历史 KV、池化 key/scale、bounded 状态或 MTP proposal 的迁移。发送端取最近 `P` 个位置并按时间顺序排列；接收端同样按逻辑窗口遍历，单次 kernel 恢复窗口数据及短前缀补零，窗口之外的 MTP 槽位与其他请求保持不变。后续 MTP 候选历史由 D 端执行过程中产生。
 
-`StateTransferLayout` 描述外部页位置与切片。K-pool region 的轴为 `("layer", "window", "channel")`，形状为 `[layers, P, 2*head_dim]`，与本地 `mtp_step` 无关。`window` 按时间顺序对应 `[state_token_len-P, state_token_len)`；短前缀中小于 0 的位置在发送时补零，接收时忽略。独立状态页的 `tokens_per_page=None`，该窗口不是 full-attention 的页内 token 轴。
+`StateTransferLayout` 描述外部页位置与切片。K-pool region 的轴为 `("layer", "window", "channel")`，形状为 `[layers, P, 2*head_dim]`，与本地 `mtp_step` 无关。`window` 按时间顺序对应 `[state_token_len-P, state_token_len)`；短前缀中小于 0 的位置在发送和恢复时均补零，窗口外槽位保持原值。独立状态页的 `tokens_per_page=None`，该窗口不是 full-attention 的页内 token 轴。
+
+K-pool 的 `window` 切片设置 `src_circular=True`。`kpool_transfer.py` 从 `state_token_len` 计算本次本地窗口起点；可通过 `axis_slice_overrides` 覆盖本次轴映射，不修改缓存的 layout。窗口起点及短前缀的无效位置数量作为运行时参数传入定制 Triton kernel，不随请求位置编译新变体。写出和读回各一次 launch，处理量均为 `layers * pool_size * channels`，不遍历窗口之外的 MTP 槽位；连续 channel 在对齐允许时使用最大 8 字节整数视图搬运，保留原始位模式。
 
 P/D 使用相同的模型及 main/draft 资源集合，但允许不同的 `mtp_step`。位置 `pos` 在 P 端从 `pos % (P+S_p)` 读取，在 D 端写入 `pos % (P+S_d)`；不能直接截取 ring 的前 P 个物理槽位。模型算法、池化步长、层顺序、字段精度和逻辑维度仍须兼容。现有 main/draft prefill 保持相同的序列位置，因此可共用任务的 `end_kv_index`；位置变化不影响缓存的布局描述。
 
-例如 `P=4`、`S_p=0`、`S_d=2`、前缀长度 11，外部窗口保存位置 `[7,8,9,10]`；P 端读取槽位 `[3,0,1,2]`，D 端恢复到 `[1,2,3,4]`。D 端其余 ring 槽位清零。PD 块仍使用 KV 页确定的固定容量，减少 tail 有效区域和本地复制量不代表网络整页传输字节数同步减少。
+例如 `P=4`、`S_p=0`、`S_d=2`、前缀长度 11，外部窗口保存位置 `[7,8,9,10]`；P 端读取槽位 `[3,0,1,2]`，D 端恢复到 `[1,2,3,4]`。D 端其余 ring 槽位保持原值。PD 块仍使用 KV 页确定的固定容量，减少 tail 有效区域和本地复制量不代表网络整页传输字节数同步减少。
 
 长度、前缀身份和格式来自保存/传输控制元数据，不能从原始 tail 字节反推。调用层负责核对元数据并维持 main/draft 的一致恢复点；State 负责布局和数据操作。所有 GPU 操作遵循当前 stream，返回不表示完成；源请求与目标页在读写完成前不能复用。
 

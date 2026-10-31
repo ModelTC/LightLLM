@@ -166,6 +166,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
             offset = end
 
     untouched = []
+    original_tails = []
     for mem in dest:
         for state in mem.full_states:
             state.storage.zero_()
@@ -173,6 +174,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
         mem.linear.ssm_state.normal_()
         for state in mem.tails:
             state.tail_buffer.normal_()
+        original_tails.append(torch.cat([state.tail_buffer[:, dst_req] for state in mem.tails]).clone())
         untouched.append(
             [
                 x[:, torch.tensor([0, 1, 3], device="cuda") * stride].clone()
@@ -231,7 +233,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
         assert torch.equal(mem.linear.conv_state[:, dst_req, ..., :3], conv[:, :, heads].reshape(6, -1, 3))
         assert torch.equal(mem.linear.ssm_state[:, dst_req * dst_mtp_size], ssm[:, heads])
         restored_tail = torch.cat([state.tail_buffer[:, dst_req] for state in mem.tails])
-        expected_tail = torch.zeros_like(restored_tail)
+        expected_tail = original_tails[rank].clone()
         for position in range(length - 4, length):
             expected_tail[:, position % (4 + decode_mtp_step)] = tail[:, position % tail.shape[1]]
         assert torch.equal(restored_tail, expected_tail)
