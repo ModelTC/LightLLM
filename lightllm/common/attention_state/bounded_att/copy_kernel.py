@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from ..utils import merge_contiguous_tail_dims, view_max_copy_dtype
+
 
 # ========================================================================
 # 一、聚合入口：只上传指针表，shape/stride 作为常量
@@ -31,10 +33,19 @@ def copy_bounded_att_tensors(
     if not copies:
         return
     assert grid_num > 0, "copy grid must be positive"
+    # 每批使用相同 shape/dtype 和同侧 stride；只核对首尾，保留两侧的布局差异。
+    source, destination = copies[0]
+    last_source, last_destination = copies[-1]
+    assert source.shape == destination.shape == last_source.shape == last_destination.shape, "copy shapes must match"
+    assert source.dtype == destination.dtype == last_source.dtype == last_destination.dtype, "copy dtypes must match"
+    assert 1 <= source.ndim <= 6, "copy tensors must have one to six dimensions"
+    assert source.numel() > 0, "copy tensors must be nonempty"
+    assert source.stride() == last_source.stride(), "source strides must match across the batch"
+    assert destination.stride() == last_destination.stride(), "destination strides must match across the batch"
     # 阶段一：只合并两端共同连续的尾部维度，保留前面的布局。
-    copies = _view_min_dimensions(copies=copies)
+    copies = merge_contiguous_tail_dims(copies=copies)
     # 阶段二：按整批地址和行布局选择最宽的搬运单元，不转换数值。
-    copies = _view_max_dtype(copies=copies)
+    copies = view_max_copy_dtype(copies=copies)
     # 阶段三：上传两张指针表，按最终视图维数发射聚合拷贝算子。
     _launch_copy_kernel(
         copies=copies,
@@ -45,81 +56,8 @@ def copy_bounded_att_tensors(
 
 
 # ========================================================================
-# 二、视图整理与算子发射：降维 → 扩大搬运单元 → kernel
+# 二、聚合算子发射：上传指针与共享布局
 # ========================================================================
-
-
-def _view_min_dimensions(
-    copies: list[tuple[torch.Tensor, torch.Tensor]],
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """按首对布局合并连续尾维，遇到任一侧不连续就停止。"""
-    # 每批复制使用同一种 shape；由调用方分别收集 Conv、SSM 或同一传输区域。
-    source, destination = copies[0]
-    last_source, last_destination = copies[-1]
-    # 整批布局由调用方保证一致，只检查首尾两对 Tensor。
-    assert source.shape == destination.shape == last_source.shape == last_destination.shape, "copy shapes must match"
-    assert source.dtype == destination.dtype == last_source.dtype == last_destination.dtype, "copy dtypes must match"
-    ndim = source.ndim
-    assert 1 <= ndim <= 6, "copy tensors must have one to six dimensions"
-    assert source.numel() > 0, "copy tensors must be nonempty"
-    shape = tuple(source.shape)
-    # 同一侧所有视图共用 stride；只核对首尾，源和目标之间允许不同布局。
-    src_stride = source.stride()
-    dst_stride = destination.stride()
-    assert src_stride == last_source.stride(), "source strides must match across the batch"
-    assert dst_stride == last_destination.stride(), "destination strides must match across the batch"
-    # 从最后一维向前扩展连续区间；任一侧有间隙就停止，不再处理前面的轴。
-    # 例如 (2, 3, 4, 5) 的末轴带 padding 时保持原形状，不额外合并前面的 (2, 3, 4)。
-    first_tail_axis = ndim - 1
-    tail_elements = shape[-1]
-    while first_tail_axis > 0:
-        outer_axis = first_tail_axis - 1
-        if (
-            src_stride[outer_axis] != src_stride[first_tail_axis] * shape[first_tail_axis]
-            or dst_stride[outer_axis] != dst_stride[first_tail_axis] * shape[first_tail_axis]
-        ):
-            break
-        tail_elements *= shape[outer_axis]
-        first_tail_axis = outer_axis
-    if first_tail_axis == ndim - 1:
-        return copies
-    transfer_shape = shape[:first_tail_axis] + (tail_elements,)
-    return [(source.view(transfer_shape), destination.view(transfer_shape)) for source, destination in copies]
-
-
-def _view_max_dtype(
-    copies: list[tuple[torch.Tensor, torch.Tensor]],
-) -> list[tuple[torch.Tensor, torch.Tensor]]:
-    """将整批 view 为最大可用整数宽度，保留原始位模式和存储间隙。"""
-    source, destination = copies[0]
-    if source.stride(-1) != 1 or destination.stride(-1) != 1:
-        return copies
-
-    # 每个切片的起点可能不同；地址和 storage_offset 都须支持相同的宽类型 view。
-    # 累计低位即可检查整批对齐，不能仅检查首尾，否则会漏掉中间错位的视图。
-    pointer_alignment_bits = 0
-    offset_alignment_bits = 0
-    for src_tensor, dst_tensor in copies:
-        pointer_alignment_bits |= src_tensor.data_ptr() | dst_tensor.data_ptr()
-        offset_alignment_bits |= src_tensor.storage_offset() | dst_tensor.storage_offset()
-
-    # 最内维连续时，将相邻元素作为一个更宽的整数搬运；优先 8 字节，其次 4/2 字节。
-    # 行宽、外层 stride、storage_offset 及整批地址都须对齐，避免跨行 padding 或错位读取。
-    element_bytes = source.element_size()
-    for transfer_bytes, transfer_dtype in ((8, torch.int64), (4, torch.int32), (2, torch.int16)):
-        if transfer_bytes <= element_bytes:
-            break
-        elements_per_unit = transfer_bytes // element_bytes
-        if (
-            pointer_alignment_bits % transfer_bytes != 0
-            or source.shape[-1] % elements_per_unit != 0
-            or offset_alignment_bits % elements_per_unit != 0
-            or any(stride % elements_per_unit for stride in source.stride()[:-1])
-            or any(stride % elements_per_unit for stride in destination.stride()[:-1])
-        ):
-            continue
-        return [(src.view(transfer_dtype), dst.view(transfer_dtype)) for src, dst in copies]
-    return copies
 
 
 def _launch_copy_kernel(

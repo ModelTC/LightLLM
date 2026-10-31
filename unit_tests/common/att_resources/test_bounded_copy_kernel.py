@@ -217,7 +217,8 @@ def test_transfer_views_preserve_gaps_and_alignment(layout: str, monkeypatch: py
             shape = (1, 2, 1, 3, 1, 7)
             target_shape = (1, 2, 1, 3, 1, 9)
             width = 5
-            expected_launch = (6, (1, 2, 1, 3, 1, 5), tl.uint32)
+            # 尾部单元素轴可并入 width；前面的 padding 边界仍然保留。
+            expected_launch = (5, (1, 2, 1, 3, 5), tl.uint32)
         elif layout == "wide_singleton_prefix":
             # dtype 扩宽只改变末轴长度，前后的单元素轴均保持不变。
             shape = (1, 3, 4)

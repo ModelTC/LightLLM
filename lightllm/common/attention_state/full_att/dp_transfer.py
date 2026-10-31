@@ -4,6 +4,8 @@ import torch
 import triton
 import triton.language as tl
 
+from ..utils import merge_contiguous_tail_dims, view_max_copy_dtype
+
 
 def copy_gqa_tokens(
     src_k_storage: torch.Tensor,
@@ -73,28 +75,17 @@ def _copy_token_storages(
     if token_count == 0:
         return
 
-    # 阶段一：只构造整数 view。字段仍为 [layer, token_slot, head, width]；
-    # 各字段可有不同 dtype/宽度，两侧 token 容量和实际 stride 也可以不同。
-    # 连续末轴优先按 8/4/2 字节搬运，保留 FP8、NaN、动态 scale 等原始位模式。
+    # 阶段一：先合并两侧连续的 head/width，保留各自 layer/token 容量和 stride。
+    # head 轴保留为 1，沿用四维 token kernel；不连续时保持原布局。
+    # 再按 8/4/2 字节搬运，保留 FP8、NaN、动态 scale 等原始位模式。
     sources, destinations = [], []
     for source, destination in zip(src_storages, dst_storages):
-        if source.stride(-1) == destination.stride(-1) == 1:
-            element_bytes = source.element_size()
-            for unit_bytes, unit_dtype in ((8, torch.int64), (4, torch.int32), (2, torch.int16)):
-                if unit_bytes <= element_bytes:
-                    break
-                ratio = unit_bytes // element_bytes
-                if (
-                    source.shape[-1] % ratio
-                    or source.data_ptr() % unit_bytes or destination.data_ptr() % unit_bytes
-                    or source.storage_offset() % ratio or destination.storage_offset() % ratio
-                    or any(stride % ratio for stride in source.stride()[:-1])
-                    or any(stride % ratio for stride in destination.stride()[:-1])
-                ):
-                    continue
-                source = source.view(unit_dtype)
-                destination = destination.view(unit_dtype)
-                break
+        source, destination = merge_contiguous_tail_dims(
+            copies=[(source, destination)],
+            start_dim=-2,
+            keepdim=True,
+        )[0]
+        source, destination = view_max_copy_dtype(copies=[(source, destination)])[0]
         sources.append(source)
         destinations.append(destination)
 

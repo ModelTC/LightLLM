@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from ..types import StateTransferLayout
+from ..utils import merge_contiguous_tail_dims, view_max_copy_dtype
 
 
 # ========================================================================
@@ -117,28 +118,14 @@ def transfer_static_fp8_pages(
     # TODO：当前 CPU/PD 已直接按索引搬运，可进一步将 FP8 K/V 的逐字段 launch 融合，
     # 共用 token/page 索引；保留各字段 dtype、stride、TP 切片、write_enabled 和页内 padding。
     for local, external in copy_views:
-        # 连续字段按最大 8 字节整数 view 搬运，减少索引计算和访存指令；不做数值转换。
-        # token/head/page 轴各有寻址语义，保持维数，只改变最内轴的搬运单位。
-        # 行宽、两端起点及外层 stride 都须对齐；packed 字段或 TP 切片不满足时保留原宽度。
-        if local.stride(-1) == external.stride(-1) == 1:
-            element_bytes = local.element_size()
-            for transfer_bytes, transfer_dtype in ((8, torch.int64), (4, torch.int32), (2, torch.int16)):
-                if transfer_bytes <= element_bytes:
-                    break
-                elements_per_unit = transfer_bytes // element_bytes
-                if (
-                    local.shape[-1] % elements_per_unit != 0
-                    or local.data_ptr() % transfer_bytes != 0
-                    or external.data_ptr() % transfer_bytes != 0
-                    or local.storage_offset() % elements_per_unit != 0
-                    or external.storage_offset() % elements_per_unit != 0
-                    or any(stride % elements_per_unit for stride in local.stride()[:-1])
-                    or any(stride % elements_per_unit for stride in external.stride()[:-1])
-                ):
-                    continue
-                local = local.view(transfer_dtype)
-                external = external.view(transfer_dtype)
-                break
+        # 先合并连续的 head/width，保留 layer/token/page；不能合并时沿用原视图。
+        # head 轴保留为 1，继续使用原来的四维/五维 kernel 接口，再选择最大搬运 dtype。
+        local, external = merge_contiguous_tail_dims(
+            copies=[(local, external)],
+            start_dim=-2,
+            keepdim=True,
+        )[0]
+        local, external = view_max_copy_dtype(copies=[(local, external)])[0]
         elements = local.shape[0] * token_count * local.shape[2] * local.shape[3]
         _copy_static_fp8_pages[(grid_num,)](
             LOCAL=local,

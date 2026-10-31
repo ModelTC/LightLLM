@@ -20,6 +20,42 @@ SCHEMES = ("gqa", "int4", "int8", "static_head", "static_tensor", "mla", "packed
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_dp_narrow_head_fields_merge_before_copy(monkeypatch: pytest.MonkeyPatch) -> None:
+    from lightllm.common.attention_state.full_att import dp_transfer
+
+    source = torch.empty(size=(2, 17, 4, 1), dtype=torch.bfloat16, device="cuda")
+    target = torch.empty(size=(2, 23, 4, 1), dtype=torch.bfloat16, device="cuda")
+    source.view(torch.uint8).random_(0, 256)
+    target.view(torch.uint8).fill_(173)
+    src_ids = torch.tensor([12, 0, 12], dtype=torch.int32, device="cuda")
+    dst_ids = torch.tensor([19, 1, 6], dtype=torch.int64, device="cuda")
+    expected = target.clone()
+    expected[:, dst_ids] = source[:, src_ids]
+    kernel = dp_transfer._copy_indexed_token_storages
+    launches = []
+
+    class CaptureLaunch:
+        def __getitem__(self, grid: tuple[int]):
+            def launch(**kwargs):
+                launches.append((kwargs["SHAPES"], kwargs["ELEMENT_BYTES"]))
+                return kernel[grid](**kwargs)
+            return launch
+
+    monkeypatch.setattr(dp_transfer, "_copy_indexed_token_storages", CaptureLaunch())
+    copy_gqa_tokens(
+        src_k_storage=source,
+        src_v_storage=source,
+        dst_k_storage=target,
+        dst_v_storage=torch.empty_like(target),
+        src_token_indices=src_ids,
+        dst_token_indices=dst_ids,
+    )
+    torch.cuda.synchronize()
+    assert launches == [(((2, 1, 1), (2, 1, 1)), (8, 8))]
+    assert torch.equal(target.view(torch.uint8), expected.view(torch.uint8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("kind", SCHEMES)
 @pytest.mark.parametrize("source_device", [0, 1])
 @pytest.mark.parametrize("token_count", [0, 1, 513])

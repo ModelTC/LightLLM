@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 
 from ..types import AxisMapping, StateTransferLayout
+from ..utils import view_max_copy_dtype
 
 
 # ========================================================================
@@ -80,33 +81,7 @@ def transfer_kpool_pages(
 
     # 阶段三：只扩大连续 channel 的搬运单位，layer/window 维度和环形语义保持不变。
     # 例如 BF16 的 [layers, ring_size, 256] 按 INT64 搬运时变为 [layers, ring_size, 64]。
-    local_tail = tail
-    if local_tail.stride(-1) == external_tail.stride(-1) == 1:
-        element_bytes = local_tail.element_size()
-        for unit_bytes, unit_dtype in ((8, torch.int64), (4, torch.int32), (2, torch.int16)):
-            if unit_bytes <= element_bytes:
-                break
-            elements_per_unit = unit_bytes // element_bytes
-            # 每个 channel 行都必须能完整分组，不能跨 window 拼接搬运单元。
-            if channel_count % elements_per_unit != 0:
-                continue
-            # Tensor 起点和 storage_offset 都须满足宽类型 view 的对齐要求。
-            if (
-                local_tail.data_ptr() % unit_bytes != 0
-                or external_tail.data_ptr() % unit_bytes != 0
-                or local_tail.storage_offset() % elements_per_unit != 0
-                or external_tail.storage_offset() % elements_per_unit != 0
-            ):
-                continue
-            # layer/window 的步长必须能换算为新类型的整数元素数。
-            if (
-                any(stride % elements_per_unit != 0 for stride in local_tail.stride()[:-1])
-                or any(stride % elements_per_unit != 0 for stride in external_tail.stride()[:-1])
-            ):
-                continue
-            local_tail = local_tail.view(unit_dtype)
-            external_tail = external_tail.view(unit_dtype)
-            break
+    local_tail, external_tail = view_max_copy_dtype(copies=[(tail, external_tail)])[0]
 
     # 阶段四：正反方向都只处理逻辑窗口，窗口外的 MTP 槽位不参与读写。
     # grid_num 是发射上限，大窗口由 kernel 的跳步循环处理。

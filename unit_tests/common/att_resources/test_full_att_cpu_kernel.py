@@ -11,6 +11,87 @@ from unit_tests.common.att_resources.model_helpers import full_state_test_buffer
 from unit_tests.common.att_resources.test_state_identity import allocated_state
 from unit_tests.common.att_resources.test_quantized_full_state import transfer_layout
 from lightllm.common.attention_state.types import AxisMapping
+from lightllm.common.attention_state.full_att import FullAttentionConfig, GQAFullAttentionState
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("page_device", ["cpu", "cuda"])
+def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    from lightllm.common.attention_state.full_att import gqa_transfer
+
+    config = FullAttentionConfig(
+        logical_layer_groups=((0,), (1,)),
+        global_head_num=4,
+        head_dim=1,
+        dtype=torch.bfloat16,
+    )
+    source = GQAFullAttentionState(layout_config=config, page_size=4, device="cuda")
+    target = GQAFullAttentionState(layout_config=config, page_size=4, device="cuda")
+    source.allocate_storage(token_capacity=8)
+    target.allocate_storage(token_capacity=12)
+    src_ids = torch.tensor([5, 1, 7], dtype=torch.int32, device="cuda")
+    dst_ids = torch.tensor([9, 0, 6], dtype=torch.int64, device="cuda")
+    expected = []
+    for src_tensor, dst_tensor in ((source.k_storage, target.k_storage), (source.v_storage, target.v_storage)):
+        src_tensor.view(torch.uint8).random_(0, 256)
+        dst_tensor.view(torch.uint8).fill_(173)
+        snapshot = dst_tensor.clone()
+        snapshot[:, dst_ids] = src_tensor[:, src_ids]
+        expected.append(snapshot)
+
+    layout = transfer_layout(source)
+    pages = torch.full(
+        size=(2, layout.byte_end + 32),
+        fill_value=91,
+        dtype=torch.uint8,
+        device=page_device,
+        pin_memory=page_device == "cpu",
+    )
+    page_view = pages[:, 16:-16]
+    launches = []
+    kernel = gqa_transfer._copy_gqa_pages
+
+    class CaptureLaunch:
+        def __getitem__(self, grid: tuple[int]):
+            def launch(**kwargs):
+                launches.append((kwargs["HEADS"], kwargs["WIDTH"], kwargs["ELEMENT_BYTES"]))
+                return kernel[grid](**kwargs)
+            return launch
+
+    monkeypatch.setattr(gqa_transfer, "_copy_gqa_pages", CaptureLaunch())
+    if page_device == "cpu":
+        source.write_to_cpu(
+            token_indices=src_ids,
+            cpu_page_buffers=page_view,
+            cpu_page_indices=[1],
+            layout=layout,
+        )
+        target.read_from_cpu(
+            cpu_page_buffers=page_view,
+            cpu_page_indices=[1],
+            token_indices=dst_ids,
+            layout=layout,
+        )
+    else:
+        source.write_to_pd_page(
+            token_indices=src_ids,
+            pd_page_buffers=page_view,
+            pd_page_index=1,
+            layout=layout,
+        )
+        target.read_from_pd_page(
+            pd_page_buffers=page_view,
+            token_indices=dst_ids,
+            pd_page_index=1,
+            layout=layout,
+        )
+    torch.cuda.synchronize()
+    # 单个 BF16 head 只有 2 字节；合并 4 个 head 后才能按 INT64 搬运。
+    assert launches == [(1, 1, 8)] * 4
+    for actual, reference in zip((target.k_storage, target.v_storage), expected):
+        assert torch.equal(actual.view(torch.uint8), reference.view(torch.uint8))
+    assert (pages[0] == 91).all()
+    assert (pages[:, :16] == 91).all() and (pages[:, -16:] == 91).all()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
