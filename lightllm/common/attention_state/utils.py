@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
-
 import torch
-from torch._prims import _collapse_view_helper
 
 MAX_DRAFT_MODELS = 36
 MODEL_ROLES = ("main", *(f"draft{i}" for i in range(MAX_DRAFT_MODELS)))
@@ -31,7 +28,7 @@ def merge_contiguous_tail_dims(
 ) -> list[tuple[torch.Tensor, torch.Tensor]]:
     """合并批次两侧共同连续的尾部维度，只创建 view，不复制数据或改变 dtype。
 
-    调用方保证同一侧的 shape/stride 相同，两侧待合并的尾部 shape 相同；
+    调用方保证批次及 Tensor 非空，同一侧的 shape/stride 相同，两侧待合并的尾部 shape 相同；
     前缀维度的数量和容量可以不同，例如 GPU token 存储与外部页集合。
     根据首对 Tensor 确定共同的合并范围，再为整批分别创建两侧形状的视图。
     从末轴向前尝试，遇到任一侧无法合并就停止，不单独整理前面的维度。
@@ -41,57 +38,55 @@ def merge_contiguous_tail_dims(
     支持负数，例如 start_dim=-2 对齐两侧最后两维，不要求两侧前缀维数一致。
     keepdim=True 将被合并的前面各轴保留为 1，元素数集中到末轴，供固定维数的
     token/page kernel 使用；默认 False 直接减少维数，供 bounded 聚合 kernel 使用。
-    长度为 1 的轴是否可以合并由 PyTorch 根据布局判断。
-    通过版本断言限制为已验证的 PyTorch 2.11.x，end 包含在合并区间内。
-    helper 对带 padding 的单元素轴可能过于宽松，因此最终以 view 是否成功为准；
-    只捕获创建视图的 RuntimeError，退回较小的合并范围，不使用可能复制数据的 reshape。
+    直接按 shape/stride 判断连续性，长度为 1 的轴不约束 stride。
+    只依赖公开 Tensor 接口，确定形状后一次性创建 view，不使用可能复制数据的 reshape。
     """
-    _check_collapse_view_version(torch_version=torch.__version__)
     source, destination = copies[0]
-    assert -source.ndim <= start_dim < source.ndim, "invalid tail merge boundary"
+    source_shape, destination_shape = source.shape, destination.shape
+    source_strides, destination_strides = source.stride(), destination.stride()
+    ndim = len(source_shape)
+    assert -ndim <= start_dim < ndim, "invalid tail merge boundary"
     if start_dim < 0:
-        start_dim += source.ndim
-    tail_dims = source.ndim - start_dim
-    assert destination.ndim >= tail_dims and source.shape[start_dim:] == destination.shape[-tail_dims:], (
+        start_dim += ndim
+    tail_dims = ndim - start_dim
+    assert len(destination_shape) >= tail_dims and source_shape[start_dim:] == destination_shape[-tail_dims:], (
         "copy tail shapes must match"
     )
-    transfer_shapes = []
-    last_dim = source.ndim - 1
-    for first_dim in range(last_dim - 1, start_dim - 1, -1):
-        # 按距末轴的距离对齐区间；两侧独立保留 layer/token/page 等前缀。
-        merge_dims = source.ndim - first_dim
-        destination_first_dim = destination.ndim - merge_dims
-        source_shape, _ = _collapse_view_helper(
-            a=source,
-            start=first_dim,
-            end=last_dim,
-            must_be_valid=None,
-        )
-        if source_shape is None:
-            break
-        destination_shape, _ = _collapse_view_helper(
-            a=destination,
-            start=destination_first_dim,
-            end=destination.ndim - 1,
-            must_be_valid=None,
-        )
-        if destination_shape is None:
-            break
-        if keepdim:
-            singleton_axes = (1,) * (merge_dims - 1)
-            source_shape = source.shape[:first_dim] + singleton_axes + (source_shape[-1],)
-            destination_shape = destination.shape[:destination_first_dim] + singleton_axes + (destination_shape[-1],)
-        if source_shape != source.shape or destination_shape != destination.shape:
-            transfer_shapes.append((source_shape, destination_shape))
 
-    # 优先采用合并范围最大的形状。普通布局只创建一次整批视图；
-    # helper 误判时逐步缩小合并范围，保留跨轴的存储间隙。
-    for source_shape, destination_shape in reversed(transfer_shapes):
-        try:
-            return [(src.view(source_shape), dst.view(destination_shape)) for src, dst in copies]
-        except RuntimeError:
-            continue
-    return copies
+    # 阶段一：从末轴向前检查；两侧的前缀容量和轴数独立，按距末轴的距离对齐。
+    first_tail_dim = ndim - 1
+    tail_elements = source_shape[-1]
+    source_tail_stride, destination_tail_stride = source_strides[-1], destination_strides[-1]
+    prefix_dim_difference = len(destination_shape) - ndim
+    for source_axis in range(ndim - 2, start_dim - 1, -1):
+        destination_axis = source_axis + prefix_dim_difference
+        axis_size = source_shape[source_axis]
+        if axis_size != 1:
+            if tail_elements == 1:
+                # 内侧只有一个元素，其 stride 不影响寻址；以当前非单元素轴为准。
+                source_tail_stride = source_strides[source_axis]
+                destination_tail_stride = destination_strides[destination_axis]
+            elif (
+                source_strides[source_axis] != tail_elements * source_tail_stride
+                or destination_strides[destination_axis] != tail_elements * destination_tail_stride
+            ):
+                break
+        # 当前轴长度为 1 时忽略其 stride，但保留已累计的连续区间和元素步长。
+        tail_elements *= axis_size
+        first_tail_dim = source_axis
+
+    if first_tail_dim == ndim - 1:
+        return copies
+
+    # 阶段二：整批复用普通 tuple 形状，减少 view 的参数解析开销。
+    # keepdim 保留固定维数 kernel 所需的单元素轴。
+    merge_dims = ndim - first_tail_dim
+    tail_shape = (1,) * (merge_dims - 1) + (tail_elements,) if keepdim else (tail_elements,)
+    source_transfer_shape = tuple(source_shape[:-merge_dims]) + tail_shape
+    destination_transfer_shape = tuple(destination_shape[:-merge_dims]) + tail_shape
+    if source_transfer_shape == source_shape and destination_transfer_shape == destination_shape:
+        return copies
+    return [(src.view(source_transfer_shape), dst.view(destination_transfer_shape)) for src, dst in copies]
 
 
 # ========================================================================
@@ -147,20 +142,3 @@ def view_max_copy_dtype(
         except RuntimeError:
             continue
     return copies
-
-
-# ========================================================================
-# 四、内部依赖约束
-# ========================================================================
-
-
-@lru_cache(maxsize=1)
-def _check_collapse_view_version(torch_version: str) -> None:
-    """仅允许已验证的 PyTorch 版本使用内部维度合并接口，正常进程只校验一次。"""
-    # _collapse_view_helper 不是稳定公共 API：历史版本的 end 开闭区间及
-    # must_be_valid 参数不同，单元素轴的处理也曾变化。升级后须先核对签名、
-    # 区间语义并通过 padding/环形边界回归，再修改此版本范围。
-    assert torch_version.startswith("2.11."), (
-        f"tail dimension merging supports PyTorch 2.11.x, got {torch_version}; "
-        "revalidate _collapse_view_helper before updating the supported version"
-    )

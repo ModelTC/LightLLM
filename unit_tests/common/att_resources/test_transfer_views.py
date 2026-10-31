@@ -98,22 +98,36 @@ def test_merge_tail_keeps_head_padding(gap_side: str) -> None:
     assert merge_contiguous_tail_dims(copies=copies, start_dim=-2, keepdim=True) is copies
 
 
-@pytest.mark.parametrize("torch_version", ["2.9.0", "2.10.0", "2.12.0", "3.0.0"])
-def test_merge_tail_rejects_unverified_torch_version(torch_version: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    source = torch.empty(size=(2, 4))
-    destination = torch.empty_like(source)
-    monkeypatch.setattr(torch, "__version__", torch_version)
-    with pytest.raises(AssertionError, match="supports PyTorch 2.11.x"):
-        merge_contiguous_tail_dims(copies=[(source, destination)])
-
-
-@pytest.mark.parametrize("torch_version", ["2.11.0+cu130", "2.11.1"])
-def test_merge_tail_accepts_supported_torch_version(torch_version: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    source = torch.empty(size=(2, 4))
-    destination = torch.empty_like(source)
-    monkeypatch.setattr(torch, "__version__", torch_version)
-    source_view, destination_view = merge_contiguous_tail_dims(copies=[(source, destination)])[0]
-    assert source_view.shape == destination_view.shape == (8,)
+@pytest.mark.parametrize(
+    "shape, source_strides, destination_strides, flat_shape, kept_shape",
+    [
+        ((2, 1, 8), (10, 255, 1), (12, 7, 1), (2, 8), (2, 1, 8)),
+        ((2, 3, 1), (30, 2, 71), (11, 1, 59), (2, 3), (2, 1, 3)),
+        ((2, 1, 3, 1), (30, 500, 2, 99), (16, 1, 1, 32), (2, 3), (2, 1, 1, 3)),
+        ((2, 1, 1), (7, 100, 300), (11, 90, 20), (2,), (1, 1, 2)),
+    ],
+)
+@pytest.mark.parametrize("keepdim", [False, True])
+def test_merge_tail_singleton_axes_preserve_addressing(
+    shape: tuple[int, ...],
+    source_strides: tuple[int, ...],
+    destination_strides: tuple[int, ...],
+    flat_shape: tuple[int, ...],
+    kept_shape: tuple[int, ...],
+    keepdim: bool,
+) -> None:
+    source_size = 1 + sum((size - 1) * stride for size, stride in zip(shape, source_strides))
+    destination_size = 1 + sum((size - 1) * stride for size, stride in zip(shape, destination_strides))
+    source = torch.arange(source_size).as_strided(size=shape, stride=source_strides)
+    destination = torch.arange(destination_size).as_strided(size=shape, stride=destination_strides)
+    source_view, destination_view = merge_contiguous_tail_dims(
+        copies=[(source, destination)], keepdim=keepdim,
+    )[0]
+    assert source_view.shape == destination_view.shape == (kept_shape if keepdim else flat_shape)
+    assert source_view.data_ptr() == source.data_ptr()
+    assert destination_view.data_ptr() == destination.data_ptr()
+    assert torch.equal(source_view.flatten(), source.flatten())
+    assert torch.equal(destination_view.flatten(), destination.flatten())
 
 
 @pytest.mark.parametrize(
