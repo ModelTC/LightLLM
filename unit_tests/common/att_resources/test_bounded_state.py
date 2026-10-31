@@ -164,7 +164,12 @@ def test_prefill_state_is_saved_and_restored(
     assert type(state.small_pages_pool) is pool_cls
     assert state.big_pages_pool is not state.small_pages_pool
     assert state.mtp_state_index.tolist() == [0, 0, 1]
-    state.save_bounded_att_pages([0], page_kind=page_kind, slot_ids=[1])
+    state.save_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[8],
+        page_kind=page_kind,
+        slot_ids=[1],
+    )
     if device == "cuda":
         torch.cuda.synchronize()
     pool = state.big_pages_pool if page_kind == "big" else state.small_pages_pool
@@ -172,7 +177,12 @@ def test_prefill_state_is_saved_and_restored(
     assert torch.equal(pool.conv_state[1, ..., 1], torch.full_like(pool.conv_state[1, ..., 1], 11))
     assert (pool.ssm_state[1] == 20).all()
     state.mtp_state_index[1] = 2
-    state.restore_bounded_att_pages([1], page_kind=page_kind, slot_ids=[1])
+    state.restore_bounded_att_pages(
+        req_indices=[1],
+        state_token_lens=[8],
+        page_kind=page_kind,
+        slot_ids=[1],
+    )
     assert state.mtp_state_index[1].item() == 0
     assert torch.equal(state.conv_state[:, 1, :, :2].cpu(), pool.conv_state[1])
     assert torch.equal(state.ssm_state[:, 3].cpu(), pool.ssm_state[1])
@@ -200,10 +210,20 @@ def test_gdn_dimensions_and_page_restore():
     state.conv_state[:, 0, :, :2].copy_(conv)
     state.ssm_state[:, 0].copy_(ssm)
     for page_kind in ("big", "small"):
-        state.save_bounded_att_pages([0], page_kind=page_kind, slot_ids=[0])
+        state.save_bounded_att_pages(
+            req_indices=[0],
+            state_token_lens=[8],
+            page_kind=page_kind,
+            slot_ids=[0],
+        )
     state.reset_bounded_att_state([0])
     for req, page_kind in enumerate(("big", "small"), start=1):
-        state.restore_bounded_att_pages([req], page_kind=page_kind, slot_ids=[0])
+        state.restore_bounded_att_pages(
+            req_indices=[req],
+            state_token_lens=[8],
+            page_kind=page_kind,
+            slot_ids=[0],
+        )
         assert torch.equal(state.conv_state[:, req, :, :2].cpu(), conv)
         assert torch.equal(state.ssm_state[:, req * 3].cpu(), ssm)
     with pytest.raises(AssertionError, match="equal Q/K/V"):
@@ -215,7 +235,12 @@ def test_reset_requests_preserves_pages(cls: type[KDAState] | type[GDNState]):
     state = make_state(cls, device="cuda")
     state.conv_state[:, 0].fill_(7)
     state.ssm_state[:, 0:3].fill_(11)
-    state.save_bounded_att_pages([0], page_kind="small", slot_ids=[0])
+    state.save_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[6],
+        page_kind="small",
+        slot_ids=[0],
+    )
     # 推进候选区和游标后，重置应清零全部运行态，同时保留已保存的页快照。
     state.conv_state[:, 0, :, 2:4].fill_(19)
     state.ssm_state[:, 2].fill_(23)
@@ -234,7 +259,12 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
     source = make_state(cls, device="cuda")
     source.conv_state[:, 0].fill_(13)
     source.ssm_state[:, 0].fill_(29)
-    source.save_bounded_att_pages([0], page_kind="big", slot_ids=[0])
+    source.save_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[8],
+        page_kind="big",
+        slot_ids=[0],
+    )
     layout = page_layout(source)
     buffer = torch.full((3, layout.byte_end), 255, dtype=torch.uint8, pin_memory=True)
     source.write_page_state_to_cpu(
@@ -253,7 +283,12 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
         big_page_slot_ids=[1],
         layout=layout,
     )
-    target.restore_bounded_att_pages([2], page_kind="big", slot_ids=[1])
+    target.restore_bounded_att_pages(
+        req_indices=[2],
+        state_token_lens=[8],
+        page_kind="big",
+        slot_ids=[1],
+    )
     assert (target.conv_state[:, 2, :, :2] == 13).all()
     assert (target.ssm_state[:, 6] == 29).all()
     # 页池只保存快照数据；前缀关联由调用方维护，读回的快照可以再次写出。
@@ -300,6 +335,7 @@ def test_pd_roundtrip_uses_baseline_state_and_page_relative_offset(
         req_idx=0,
         pd_page_buffers=allocation,
         pd_page_index=1,
+        state_token_len=8,
         layout=layout,
     )
     target = make_state(cls, device=device, mtp_step=1)
@@ -307,6 +343,7 @@ def test_pd_roundtrip_uses_baseline_state_and_page_relative_offset(
         pd_page_buffers=allocation,
         req_idx=2,
         pd_page_index=1,
+        state_token_len=8,
         layout=layout,
     )
     assert (target.conv_state[:, 2, :, :2] == 23).all()

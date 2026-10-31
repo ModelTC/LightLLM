@@ -139,8 +139,8 @@ def test_bounded_state_layer_ownership(state_class: type[KDAState] | type[GDNSta
     manager = AttResourceManager(request_capacity=3)
     manager.set_att_state("main", state)
     manager.finish_state_creation()
-    assert state.has_logical_layer(1) and state.has_logical_layer(3)
-    assert not state.has_logical_layer(0)
+    assert state.contains_logical_layer(1) and state.contains_logical_layer(3)
+    assert not state.contains_logical_layer(0)
     assert manager.get_att_state("main", state.get_state_type(), 3) is state
 
 
@@ -156,8 +156,8 @@ def test_mla_selection_excludes_same_layer_tail() -> None:
     manager.set_att_state("main", state)
     manager.set_att_state("main", tail)
     manager.finish_state_creation()
-    assert tail.has_logical_layer(3) and tail.has_logical_layer(7)
-    assert not tail.has_logical_layer(0)
+    assert tail.contains_logical_layer(3) and tail.contains_logical_layer(7)
+    assert not tail.contains_logical_layer(0)
     assert manager.get_att_state("main", "mla", 7) is state
     assert manager.get_att_state("main", "kpool", 7) is tail
     assert manager.get_att_state(

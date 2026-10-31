@@ -56,8 +56,8 @@ class BoundedAttentionState(ABC):
     # ========================================================================
 
     @abstractmethod
-    def has_logical_layer(self, logical_layer_id: int) -> bool:
-        """判断当前 State 是否服务该逻辑层；仅查询层映射，不依赖存储分配。"""
+    def contains_logical_layer(self, logical_layer_id: int) -> bool:
+        """判断指定逻辑层是否属于当前 State 的层映射，不依赖存储分配。"""
         ...
 
     @abstractmethod
@@ -71,13 +71,33 @@ class BoundedAttentionState(ABC):
         ...
 
     @abstractmethod
-    def save_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
-        """将 prefill 完成后的基准运行态保存到指定页槽位，前缀关联由调用方维护。"""
+    def save_bounded_att_pages(
+        self,
+        req_indices: List[int],
+        state_token_lens: List[int],
+        page_kind: PageKind,
+        slot_ids: List[int],
+    ) -> None:
+        """按各请求已执行的绝对 token 长度保存基准运行态，三个列表逐项对应。
+
+        长度不包含尚未执行的采样 token；ring 状态据此确定窗口和槽位位置。
+        前缀与页槽位的关联仍由调用方维护，不要求页池保存长度元数据。
+        """
         ...
 
     @abstractmethod
-    def restore_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
-        """从调用方选定的页槽位恢复运行态和控制信息，保留源快照数据。"""
+    def restore_bounded_att_pages(
+        self,
+        req_indices: List[int],
+        state_token_lens: List[int],
+        page_kind: PageKind,
+        slot_ids: List[int],
+    ) -> None:
+        """将页快照恢复到对应请求的绝对 token 长度，保留源快照数据。
+
+        req_indices、state_token_lens、slot_ids 逐项对应；长度用于恢复 ring 位置等控制信息，
+        不表示本批搬运的 token 数，调用方保证与所选快照的前缀一致。
+        """
         ...
 
     @abstractmethod
@@ -168,9 +188,10 @@ class BoundedAttentionState(ABC):
         req_idx: int,
         pd_page_buffers: torch.Tensor,
         pd_page_index: int,
+        state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """将指定槽位的 prefill 基准运行态写入 PD 页。
+        """将指定槽位在 state_token_len 绝对长度处的 prefill 基准运行态写入 PD 页。
 
         调用方保证源状态尚未执行 MTP 提交；KDA/GDN 的源游标必须为 0。
         """
@@ -182,7 +203,8 @@ class BoundedAttentionState(ABC):
         pd_page_buffers: torch.Tensor,
         req_idx: int,
         pd_page_index: int,
+        state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """将 PD 页恢复到指定请求槽位并规范化控制信息，不写入大小页池。"""
+        """按 state_token_len 恢复请求运行态及 ring 位置等控制信息，不写入大小页池。"""
         ...

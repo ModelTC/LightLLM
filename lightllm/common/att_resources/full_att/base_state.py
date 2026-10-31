@@ -129,8 +129,8 @@ class FullAttentionState(ABC):
     # ========================================================================
 
     @abstractmethod
-    def has_logical_layer(self, logical_layer_id: int) -> bool:
-        """判断当前 State 是否服务该逻辑层；仅查询层映射，不依赖存储分配。"""
+    def contains_logical_layer(self, logical_layer_id: int) -> bool:
+        """判断指定逻辑层是否属于当前 State 的层映射，不依赖存储分配。"""
         ...
 
     @abstractmethod

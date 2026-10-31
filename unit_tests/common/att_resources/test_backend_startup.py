@@ -341,10 +341,20 @@ def test_backend_allocates_all_roles_before_warmup(
     for i, state in enumerate(manager.get_bounded_attention_states()):
         state.conv_state.fill_(i + 3)
         state.ssm_state.fill_(i + 7)
-    manager.save_bounded_att_pages([0], page_kind="big", slot_ids=[slot])
+    manager.save_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[4],
+        page_kind="big",
+        slot_ids=[slot],
+    )
     manager.reset_bounded_att_state([0])
     assert all(not state.conv_state[:, 0].any() for state in manager.get_bounded_attention_states())
-    manager.restore_bounded_att_pages([0], page_kind="big", slot_ids=[slot])
+    manager.restore_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[4],
+        page_kind="big",
+        slot_ids=[slot],
+    )
     for i, state in enumerate(manager.get_bounded_attention_states()):
         assert (state.conv_state[:, 0, :, : state.config.conv_width] == i + 3).all()
         assert (state.ssm_state[:, 0] == i + 7).all()

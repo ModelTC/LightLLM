@@ -448,7 +448,8 @@ class InferenceContext:
         if any(buffer_id != -1 for buffer_id in big_page_buffer_ids):
             selected = [(req, slot) for req, slot in zip(reqs, big_page_buffer_ids) if slot != -1]
             self.att_resource_manager.save_bounded_att_pages(
-                [req.req_idx for req, _ in selected],
+                req_indices=[req.req_idx for req, _ in selected],
+                state_token_lens=[req.get_chuncked_input_token_len() for req, _ in selected],
                 page_kind="big",
                 slot_ids=[slot for _, slot in selected],
             )
@@ -468,7 +469,8 @@ class InferenceContext:
                     if req.tail_small_page_buffer_id is not None:
                         dst_buffer_idx = req.tail_small_page_buffer_id
                         self.att_resource_manager.save_bounded_att_pages(
-                            [req.req_idx],
+                            req_indices=[req.req_idx],
+                            state_token_lens=[req.hybrid_cache_len],
                             page_kind="small",
                             slot_ids=[dst_buffer_idx],
                         )
@@ -675,7 +677,12 @@ class InferReq:
     def _restore_attention_page(self, node, page_kind):
         resources = g_infer_context.att_resource_manager
         slot = node.big_page_buffer_idx if page_kind == "big" else node.small_page_buffer_idx
-        resources.restore_bounded_att_pages([self.req_idx], page_kind=page_kind, slot_ids=[slot])
+        resources.restore_bounded_att_pages(
+            req_indices=[self.req_idx],
+            state_token_lens=[node.node_prefix_total_len],
+            page_kind=page_kind,
+            slot_ids=[slot],
+        )
         resources.reset_attention_tail_state([self.req_idx])
 
     def _hybrid_match_radix_cache(self):

@@ -268,15 +268,30 @@ def test_flush_cache_requires_released_references_and_returns_allocator_pages():
     assert tree.root_node.ref_counter == 1
 
 
-def test_hybrid_flush_releases_shared_kv_and_state_slots():
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
+def test_hybrid_flush_releases_shared_kv_and_state_slots(monkeypatch):
     from unit_tests.common.att_resources.test_manager_helpers import composition
 
-    resources = composition(with_tail=False)
+    monkeypatch.setattr(
+        "lightllm.common.att_resources.bounded_att.utils.get_env_start_args",
+        lambda: SimpleNamespace(enable_dp_prompt_cache_fetch=False),
+    )
+    resources = composition(device="cuda", with_tail=False)
     allocator = resources.full_att_allocator
     big = resources.bounded_att_big_page_allocator.alloc(1)[0]
     small = resources.bounded_att_small_page_allocator.alloc(1)[0]
-    resources.save_bounded_att_pages([0], page_kind="big", slot_ids=[big])
-    resources.save_bounded_att_pages([1], page_kind="small", slot_ids=[small])
+    resources.save_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[8],
+        page_kind="big",
+        slot_ids=[big],
+    )
+    resources.save_bounded_att_pages(
+        req_indices=[1],
+        state_token_lens=[12],
+        page_kind="small",
+        slot_ids=[small],
+    )
     values = allocator.alloc(12)
     tree = HybridAttPagedRadixCache(12, 106, 4, 2, resources)
     tree.insert(

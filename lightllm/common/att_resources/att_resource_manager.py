@@ -103,7 +103,7 @@ class AttResourceManager:
             and isinstance(state, (FullAttentionState, BoundedAttentionState, AttentionTailState))
             and att_type in state.get_state_type()
             and (state_class is None or isinstance(state, state_class))
-            and state.has_logical_layer(logical_layer_id)
+            and state.contains_logical_layer(logical_layer_id)
         ]
         assert len(matches) == 1, (
             f"expected exactly one attention State: {model_name=}, {att_type=}, {logical_layer_id=}, "
@@ -387,28 +387,50 @@ class AttResourceManager:
 
     # Bounded attention 状态页：供 radix/CPU cache 复用；未启用对应页池时操作报错。
     # 调用方提供已分配的大小页槽位；发布前完成保存，解除引用并结束使用后直接归还 allocator。
-    def save_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
-        """将 prefill 运行态保存到全部参与 State 的同类页池、同一组槽位。"""
+    def save_bounded_att_pages(
+        self,
+        req_indices: List[int],
+        state_token_lens: List[int],
+        page_kind: PageKind,
+        slot_ids: List[int],
+    ) -> None:
+        """按各请求已执行的绝对 token 长度保存全部 bounded State；三个列表逐项对应。"""
         bounded_states = self.get_bounded_attention_states()
         assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
         assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
         allocator = self.bounded_att_big_page_allocator if page_kind == "big" else self.bounded_att_small_page_allocator
         assert allocator is not None, f"{page_kind} pages are disabled"
-        assert len(slot_ids) == len(req_indices), "one slot is required per request"
+        assert len(slot_ids) == len(req_indices) == len(state_token_lens), "one length and slot are required per request"
         for state in bounded_states:
-            state.save_bounded_att_pages(req_indices, page_kind=page_kind, slot_ids=slot_ids)
+            state.save_bounded_att_pages(
+                req_indices=req_indices,
+                state_token_lens=state_token_lens,
+                page_kind=page_kind,
+                slot_ids=slot_ids,
+            )
 
-    def restore_bounded_att_pages(self, req_indices: List[int], page_kind: PageKind, slot_ids: List[int]) -> None:
-        """将调用方选定的页快照恢复到对应请求槽位的运行态。"""
+    def restore_bounded_att_pages(
+        self,
+        req_indices: List[int],
+        state_token_lens: List[int],
+        page_kind: PageKind,
+        slot_ids: List[int],
+    ) -> None:
+        """按各快照对应的绝对 token 长度恢复运行态及 ring 位置等控制信息。"""
         bounded_states = self.get_bounded_attention_states()
         assert isinstance(req_indices, list) and isinstance(slot_ids, list), "request and slot indices must be lists"
         assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
         allocator = self.bounded_att_big_page_allocator if page_kind == "big" else self.bounded_att_small_page_allocator
         assert allocator is not None, f"{page_kind} pages are disabled"
-        assert len(slot_ids) == len(req_indices), "one slot is required per request"
+        assert len(slot_ids) == len(req_indices) == len(state_token_lens), "one length and slot are required per request"
         assert not slot_ids or bounded_states, "state restore requires participating bounded states"
         for state in bounded_states:
-            state.restore_bounded_att_pages(req_indices, page_kind=page_kind, slot_ids=slot_ids)
+            state.restore_bounded_att_pages(
+                req_indices=req_indices,
+                state_token_lens=state_token_lens,
+                page_kind=page_kind,
+                slot_ids=slot_ids,
+            )
 
     # MTP 推测解码：只提交指定角色的已接受运行态，由具体 State 管理候选区和游标。
     def commit_bounded_att_state(
@@ -548,10 +570,12 @@ class AttResourceManager:
         layouts: Mapping[str, StateTransferLayout],
         big_page_slot_ids: List[int] | None = None,
         req_idx: int | None = None,
+        state_token_len: int | None = None,
     ) -> None:
         """读回单个请求本次指定的有序前缀页面，并从末页恢复 req_idx 的 bounded 运行态。
 
         big_page_slot_ids 只包含完整 CPU 页对应的普通槽位；末尾碎页使用内部预留的 LOAD 大页。
+        存在 bounded 时须提供 state_token_len，即恢复后的绝对前缀长度，不是本批 token 数。
         存在 bounded 或 tail 时必须提供 req_idx；调用方保证最终前缀位于 tail 可重置边界。
         """
         full_states = self.get_full_attention_states()
@@ -560,6 +584,7 @@ class AttResourceManager:
         if bounded_states or tail_states:
             assert req_idx is not None and cpu_page_indices, "state recovery requires a target request and prefix pages"
         if bounded_states:
+            assert state_token_len is not None, "bounded state recovery requires its absolute prefix length"
             # token 索引只用于判断本批末页是否完整，不读取 GPU 上的索引值。
             page_tokens = layouts[bounded_states[0].resource_id].tokens_per_page
             has_partial_page = token_indices.numel() % page_tokens != 0
@@ -590,7 +615,12 @@ class AttResourceManager:
 
         # 阶段三：从末页恢复请求运行态；纯碎页也走 LOAD 槽位。
         if bounded_states:
-            self.restore_bounded_att_pages([req_idx], page_kind="big", slot_ids=[load_big_page_slot_ids[-1]])
+            self.restore_bounded_att_pages(
+                req_indices=[req_idx],
+                state_token_lens=[state_token_len],
+                page_kind="big",
+                slot_ids=[load_big_page_slot_ids[-1]],
+            )
 
         # 阶段四：清零目标请求的 tail；调用方保证前缀终点满足重置边界。
         for state in tail_states:
@@ -707,7 +737,7 @@ class AttResourceManager:
         req_idx: int | None = None,
         state_token_len: int | None = None,
     ) -> None:
-        """按任务布局写出 PD 页；含 tail 时传入 prefill 前缀长度 state_token_len。"""
+        """按任务布局写出 PD 页；att_state 必须传入已执行的绝对前缀长度 state_token_len。"""
         match kind:
             case "kv":
                 # KV 页只写出 full-attention 数据；各 State 负责自身布局与容量约束。
@@ -721,11 +751,10 @@ class AttResourceManager:
                     )
 
             case "att_state":
-                # 提交搬运前确认请求位置；tail 额外使用前缀长度定位逻辑窗口。
+                # 前缀长度由 PD 任务提供，bounded/tail 据此定位各自的运行态窗口。
                 assert req_idx is not None, "state PD pages require a request index"
                 tail_states = self.get_attention_tail_states()
-                if tail_states:
-                    assert state_token_len is not None and state_token_len >= 0, "PD tail requires its prefill prefix length"
+                assert state_token_len is not None and state_token_len >= 0, "PD state requires its prefill prefix length"
 
                 # 阶段一：写出 bounded 的 prefill 基准运行态。
                 for state in self.get_bounded_attention_states():
@@ -733,6 +762,7 @@ class AttResourceManager:
                         req_idx=req_idx,
                         pd_page_buffers=pd_page_buffers,
                         pd_page_index=pd_page_index,
+                        state_token_len=state_token_len,
                         layout=layouts[state.resource_id],
                     )
 
@@ -759,7 +789,7 @@ class AttResourceManager:
         req_idx: int | None = None,
         state_token_len: int | None = None,
     ) -> None:
-        """按布局恢复 PD 页；含 tail 时使用 state_token_len 适配本地 MTP ring。"""
+        """按布局恢复 PD 页；att_state 使用绝对前缀长度 state_token_len 恢复运行态位置。"""
         match kind:
             case "kv":
                 # KV 页只恢复 full-attention 数据；各 State 负责自身布局与容量约束。
@@ -773,11 +803,10 @@ class AttResourceManager:
                     )
 
             case "att_state":
-                # 提交搬运前确认请求位置；tail 额外使用前缀长度定位逻辑窗口。
+                # 前缀长度由 PD 任务提供，bounded/tail 据此定位各自的运行态窗口。
                 assert req_idx is not None, "state PD pages require a request index"
                 tail_states = self.get_attention_tail_states()
-                if tail_states:
-                    assert state_token_len is not None and state_token_len >= 0, "PD tail requires its prefill prefix length"
+                assert state_token_len is not None and state_token_len >= 0, "PD state requires its prefill prefix length"
 
                 # 阶段一：恢复 bounded 的 prefill 基准运行态。
                 for state in self.get_bounded_attention_states():
@@ -785,6 +814,7 @@ class AttResourceManager:
                         pd_page_buffers=pd_page_buffers,
                         req_idx=req_idx,
                         pd_page_index=pd_page_index,
+                        state_token_len=state_token_len,
                         layout=layouts[state.resource_id],
                     )
 

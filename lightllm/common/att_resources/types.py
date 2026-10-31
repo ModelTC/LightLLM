@@ -28,8 +28,8 @@ import torch
 # "small" 对应 small_pages_pool 与 bounded_att_small_page_allocator。
 # 两个域中的同一个 slot_id 指向不同状态页。调用方先在对应 allocator 分配槽位，
 # 再将类别传给 save_bounded_att_pages / restore_bounded_att_pages 等操作，例如：
-# manager.save_bounded_att_pages([0], page_kind="big", slot_ids=[3])
-# 上例假定请求槽位 0 的已接受长度为 128，且大页槽位 3 已由调用方分配。
+# manager.save_bounded_att_pages(req_indices=[0], state_token_lens=[256], page_kind="big", slot_ids=[3])
+# 上例假定请求槽位 0 的已接受长度为 256，且大页槽位 3 已由调用方分配。
 PageKind = Literal["big", "small"]
 
 

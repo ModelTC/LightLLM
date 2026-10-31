@@ -325,7 +325,12 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
                 pool.ssm_state.zero_()
     slot = resources.bounded_att_big_page_allocator.alloc(1)
     with torch.cuda.device(source_device):
-        resources.save_bounded_att_pages([0], page_kind="big", slot_ids=slot)
+        resources.save_bounded_att_pages(
+            req_indices=[0],
+            state_token_lens=[8],
+            page_kind="big",
+            slot_ids=slot,
+        )
     mapping = torch.zeros((3, 16), dtype=torch.int32, device=f"cuda:{source_device}")
     mapping[1, 0] = 7
     torch.cuda.synchronize(source_device)
@@ -414,6 +419,7 @@ def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, targe
             token_indices=torch.tensor([0, 3], dtype=torch.long, device="cuda"),
             task_kind=kind,
             req_idx=1,
+            state_token_len=8,
             write_to_pd_buffer=True,
         )
         copy_page(
@@ -425,6 +431,7 @@ def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, targe
             token_indices=torch.tensor([4, 7], dtype=torch.long, device="cuda"),
             task_kind=kind,
             req_idx=2,
+            state_token_len=8,
             write_to_pd_buffer=False,
         )
     for rank, (manager, full) in enumerate(target):

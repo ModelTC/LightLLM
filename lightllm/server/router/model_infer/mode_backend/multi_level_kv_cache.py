@@ -184,6 +184,7 @@ class MultiLevelKvCacheModule(object):
             layouts=resources.get_cpu_transfer_layouts(),
             big_page_slot_ids=big_page_slot_ids,
             req_idx=req.req_idx if self.backend.is_hybrid_att_model else None,
+            state_token_len=page_lengths[-1],
         )
         if big_page_slot_ids is not None:
             req.hybrid_len_to_big_page_id.update(zip(complete_page_lengths, big_page_slot_ids))

@@ -33,16 +33,26 @@ def test_chunk_ids_and_lengths_use_the_same_complete_boundaries(hybrid, spans):
 
 
 @pytest.mark.usefixtures("kv_allocator_environment")
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for bounded transfers")
 def test_bounded_reset_preserves_tail_and_cache_miss_resets_all(monkeypatch):
     from lightllm.server.router.model_infer.infer_batch import InferReq, g_infer_context
     from unit_tests.common.att_resources.test_manager_helpers import composition, init_source
 
-    resources = composition()
+    monkeypatch.setattr(
+        "lightllm.common.att_resources.bounded_att.utils.get_env_start_args",
+        lambda: SimpleNamespace(enable_dp_prompt_cache_fetch=False),
+    )
+    resources = composition(device="cuda")
     slots = init_source(resources)
     tail = resources.main_kpool_c4_fp32_state
     resources.reset_bounded_att_state([1])
     assert (tail.tail_buffer[:, 1] == 9).all()
-    resources.restore_bounded_att_pages([1], page_kind="big", slot_ids=[slots[-1]])
+    resources.restore_bounded_att_pages(
+        req_indices=[1],
+        state_token_lens=[8],
+        page_kind="big",
+        slot_ids=[slots[-1]],
+    )
     for state in resources.get_bounded_attention_states():
         state.mtp_state_index.fill_(2)
 
@@ -129,9 +139,9 @@ def test_hybrid_chunks_save_state_only_at_original_boundaries(
     context.att_resource_manager = SimpleNamespace(
         bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: [next(slots)]),
         bounded_att_small_page_allocator=SimpleNamespace(alloc=lambda count: [7]),
-        save_bounded_att_pages=lambda reqs, page_kind, slot_ids: (
+        save_bounded_att_pages=lambda req_indices, state_token_lens, page_kind, slot_ids: (
             big_snapshots if page_kind == "big" else small_snapshots
-        ).append(req.get_chuncked_input_token_len()),
+        ).extend(state_token_lens),
     )
 
     while req.cur_kv_len < req.get_cur_total_len():

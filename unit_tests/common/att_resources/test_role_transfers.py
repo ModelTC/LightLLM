@@ -95,7 +95,12 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             assert not tail[:, 2].any()  # DP fetch resets the aligned prefix.
 
     slot = source.bounded_att_big_page_allocator.alloc(1)[0]
-    source.save_bounded_att_pages([0], page_kind="big", slot_ids=[slot])
+    source.save_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[8],
+        page_kind="big",
+        slot_ids=[slot],
+    )
     torch.cuda.synchronize()
     cpu = torch.empty((1, source.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
     source.write_req_to_cpu(
@@ -116,6 +121,7 @@ def test_main_and_draft_transfers_copy_pd_tails_and_reset_dp_tails(
             dtype=torch.long,
             device="cuda",
         ),
+        state_token_len=8,
         layouts=target.get_cpu_transfer_layouts(),
         big_page_slot_ids=[dst_slot],
         req_idx=1,

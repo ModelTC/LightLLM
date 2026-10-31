@@ -143,13 +143,23 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     linear.ssm_state[:, 0].normal_()
     conv = linear.conv_state[:, 0, ..., :3].clone()
     ssm = linear.ssm_state[:, 0].clone()
-    resources.save_bounded_att_pages([0], page_kind=kind, slot_ids=[slot])
+    resources.save_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[8],
+        page_kind=kind,
+        slot_ids=[slot],
+    )
     torch.cuda.synchronize()
     linear.conv_state[:, 0].zero_()
     linear.ssm_state[:, 0].zero_()
     tail.tail_buffer.normal_()
     unchanged = tail.tail_buffer[:, [0, 1, 3]].clone()
-    resources.restore_bounded_att_pages([2], page_kind=kind, slot_ids=[slot])
+    resources.restore_bounded_att_pages(
+        req_indices=[2],
+        state_token_lens=[8],
+        page_kind=kind,
+        slot_ids=[slot],
+    )
     resources.reset_attention_tail_state([2])
     torch.cuda.synchronize()
     assert torch.equal(linear.conv_state[:, 2, ..., :3], conv)

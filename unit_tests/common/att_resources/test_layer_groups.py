@@ -34,8 +34,8 @@ def test_shared_layers_use_two_physical_stores(kind: str, pd_args: "EasyDict") -
         token_capacity=8,
         device="cpu",
     )
-    assert all(state.has_logical_layer(logical_layer_id) for logical_layer_id in (0, 4, 8, 11))
-    assert not state.has_logical_layer(1)
+    assert all(state.contains_logical_layer(logical_layer_id) for logical_layer_id in (0, 4, 8, 11))
+    assert not state.contains_logical_layer(1)
     assert all(buffer.shape[0] == 2 for buffer in full_state_test_buffers(state).values())
     assert state.get_token_bytes() == template.get_token_bytes()
     assert allocated_bytes(state, token_only=True) == state.get_token_bytes() * (8 + state.page_size)

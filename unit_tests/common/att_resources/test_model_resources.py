@@ -137,7 +137,12 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
         for h in range(cfg.num_v_heads):
             state.ssm_state[:, : mtp + 1, h].fill_(rank * cfg.num_v_heads + h + 7)
         slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
-        resources.save_bounded_att_pages([0], page_kind="big", slot_ids=[slot])
+        resources.save_bounded_att_pages(
+            req_indices=[0],
+            state_token_lens=[8],
+            page_kind="big",
+            slot_ids=[slot],
+        )
         torch.cuda.synchronize()
         expected.append((state.big_pages_pool.conv_state[slot].clone(), state.big_pages_pool.ssm_state[slot].clone()))
     size = sources[0][0].get_cpu_page_bytes()
@@ -164,6 +169,7 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
                 dtype=torch.long,
                 device="cuda",
             ),
+            state_token_len=8,
             layouts=resources.get_cpu_transfer_layouts(),
             big_page_slot_ids=[slot],
             req_idx=1,

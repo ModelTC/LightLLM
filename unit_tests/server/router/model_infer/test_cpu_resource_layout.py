@@ -269,7 +269,12 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
             linear.conv_state.fill_(3)
             linear.ssm_state.fill_(5)
             slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
-            resources.save_bounded_att_pages([0], page_kind="big", slot_ids=[slot])
+            resources.save_bounded_att_pages(
+                req_indices=[0],
+                state_token_lens=[8],
+                page_kind="big",
+                slot_ids=[slot],
+            )
             kwargs = dict(big_page_slot_ids=[slot])
         torch.cuda.synchronize()
         expected.append(
@@ -307,6 +312,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
                 dtype=torch.long,
                 device="cuda",
             ),
+            state_token_len=8,
             layouts=resources.get_cpu_transfer_layouts(),
             **kwargs,
         )
@@ -434,6 +440,7 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
         cpu_page_buffers=client.cpu_kv_cache_tensor,
         cpu_page_indices=[pages[1]],
         token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
+        state_token_len=8,
         layouts=resources.get_cpu_transfer_layouts(),
         **kwargs,
     )

@@ -821,7 +821,12 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
         state.conv_state.fill_(i + 3)
         state.ssm_state.fill_(i + 7)
     source_slots = manager.bounded_att_big_page_allocator.alloc(1)
-    manager.save_bounded_att_pages([0], page_kind="big", slot_ids=source_slots)
+    manager.save_bounded_att_pages(
+        req_indices=[0],
+        state_token_lens=[8],
+        page_kind="big",
+        slot_ids=source_slots,
+    )
     pages = torch.full((2, manager.get_cpu_page_bytes()), 87, dtype=torch.uint8, pin_memory=True)
     manager.write_req_to_cpu(
         token_indices=torch.tensor([], dtype=torch.long),
@@ -839,6 +844,7 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
         cpu_page_buffers=pages,
         cpu_page_indices=[1],
         token_indices=torch.tensor([], dtype=torch.long),
+        state_token_len=8,
         layouts=layouts,
         big_page_slot_ids=target_slots,
         req_idx=0,

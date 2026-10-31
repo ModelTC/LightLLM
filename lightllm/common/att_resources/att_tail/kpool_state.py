@@ -84,8 +84,8 @@ class KPoolAttentionTailState(AttentionTailState):
     # 二、Attention tail：计算视图与无快照重置
     # ========================================================================
 
-    def has_logical_layer(self, logical_layer_id: int) -> bool:
-        """查询逻辑层归属；共享同一物理层的逻辑层均返回 True。"""
+    def contains_logical_layer(self, logical_layer_id: int) -> bool:
+        """判断指定逻辑层是否属于当前 State 的层映射，共享层同样返回 True。"""
         return logical_layer_id in self._logical_to_storage_layer
 
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
