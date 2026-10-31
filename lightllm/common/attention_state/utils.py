@@ -108,7 +108,8 @@ def view_max_copy_dtype(
     两侧的外层 shape/stride 可以不同。依次尝试 8/4/2 字节宽度，整批统一选择一种 dtype；
     不能扩大时返回原列表。只改变末轴的元素数，保留其余轴及存储间隙。
     本函数不合并维度；有需要时先调用 merge_contiguous_tail_dims。
-    先用末轴字节数缩小候选范围，再由 view 校验外层 stride 和 Storage 偏移；
+    先用末轴字节数、首对 Tensor 的外层 stride 和 Storage 偏移过滤候选；
+    同一侧的 stride 由整批共用，其余切片的 Storage 偏移继续由 view 校验。
     只捕获创建视图的 RuntimeError，任一视图失败就整批退回较窄的 dtype。
     """
     source, destination = copies[0]
@@ -126,10 +127,21 @@ def view_max_copy_dtype(
     else:
         return copies
 
-    # 只尝试扩宽；布局是否兼容直接由 view 判断，任一项失败就整批回退。
+    # 首对布局即可排除必然失败的候选，避免 MTP Conv 等带间隙切片反复抛异常。
+    # 这些值以原 dtype 的元素数计量，扩宽后必须仍能表示为整数 stride/offset。
+    strides_and_offsets = (
+        *source.stride()[:-1],
+        *destination.stride()[:-1],
+        source.storage_offset(),
+        destination.storage_offset(),
+    )
     for transfer_bytes, transfer_dtype in copy_dtypes:
         if transfer_bytes <= element_bytes:
             break
+        elements_per_unit = transfer_bytes // element_bytes
+        if any(value % elements_per_unit for value in strides_and_offsets):
+            continue
+        # 批次中其他切片的起点可能不同；保留 view 的整批校验和较窄类型回退。
         try:
             return [(src.view(transfer_dtype), dst.view(transfer_dtype)) for src, dst in copies]
         except RuntimeError:
