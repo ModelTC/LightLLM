@@ -1,17 +1,14 @@
 import json
 import os
+from typing import TYPE_CHECKING
 
 import torch
 import triton
 
-from lightllm.common.build_utils import repair_config
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.attention.linear.kda import KDALinearAttBackend
 from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparseAttBackend
-from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
-from lightllm.common.kv_cache_mem_manager import Glm5NextMemManager, FP8Glm5NextMemManager
-from lightllm.common.req_manager import Glm5NextReqManager
-from lightllm.common.state_cache_manager import Glm5NextCacheConfig
+from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
@@ -20,34 +17,101 @@ from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeig
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 
 
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.attention_state.full_att import FullAttentionState
+    from lightllm.common.attention_state.bounded_att import BoundedAttentionState
+
+
 class Glm5NextTpPartModel(TpPartBaseModel):
+    is_hybrid_att_model = True
     pre_and_post_weight_class = Glm5NextPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
     pre_layer_infer_class = Glm5NextPreLayerInfer
     post_layer_infer_class = LlamaPostLayerInfer
     transformer_layer_infer_class = Glm5NextTransformerLayerInfer
 
+    @classmethod
+    def create_bounded_att_states(
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        model_logical_layer_ids: tuple[int, ...],
+        request_capacity: int = 1,
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+        device: str = "meta",
+    ) -> list["BoundedAttentionState"]:
+        """分别创建 KDA 运行态和索引 key 的无重叠池化窗口，不分配大小页。"""
+        from lightllm.common.attention_state.bounded_att import (
+            ConvSSMStateConfig,
+            WindowCompressorStateConfig,
+            create_kda_state,
+            create_window_compressor_state,
+        )
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+        config = cls.normalize_model_config(model_config)
+        assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
+        cfg = Glm5NextResourceConfig.from_model_config(config, args)
+        states = []
+        linear_layers = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
+        if linear_layers:
+            states.append(create_kda_state(
+                config=ConvSSMStateConfig(
+                    logical_layer_ids=linear_layers,
+                    global_k_heads=cfg.global_linear_k_heads,
+                    global_v_heads=cfg.global_linear_v_heads,
+                    key_dim=cfg.head_linear_k_dim,
+                    value_dim=cfg.head_linear_v_dim,
+                    conv_width=cfg.conv_kernel_size - 1,
+                    conv_dtype=cfg.conv_state_dtype,
+                    ssm_dtype=cfg.ssm_state_dtype,
+                    tp_rank=tp_rank,
+                    tp_world_size=tp_world_size,
+                ),
+                request_capacity=request_capacity,
+                mtp_step=args.mtp_step,
+                device=device,
+            ))
+        full_layers = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_layer_indices())
+        if full_layers:
+            assert args.linear_att_hash_page_size % config["index_kpool"] == 0, "GLM cache pages must align to index_kpool"
+            states.append(create_window_compressor_state(
+                config=WindowCompressorStateConfig(
+                    logical_layer_ids=full_layers,
+                    window_size=config["index_kpool"],
+                    compress_stride=config["index_kpool"],
+                    candidate_dim=config["index_head_dim"],
+                    target="indexer",
+                    dtype=get_torch_dtype(args.data_type),
+                    tp_rank=tp_rank,
+                    tp_world_size=tp_world_size,
+                ),
+                request_capacity=request_capacity,
+                mtp_step=args.mtp_step,
+                device=device,
+            ))
+        return states
+
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """保留外层量化配置，并统一 GLM 文本配置的别名及 autotune 层数。"""
+        config = super().normalize_model_config(model_config)
+        if "quantization_config" in model_config:
+            config["quantization_config"] = dict(model_config["quantization_config"])
+        config["autotune_layer_num"] = 4
+        return config
+
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json")) as f:
-            outer_config = json.load(f)
-        self.config = dict(outer_config.get("text_config", outer_config))
-        if "quantization_config" in outer_config:
-            self.config["quantization_config"] = dict(outer_config["quantization_config"])
-        self.config["autotune_layer_num"] = 4
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
+            self.config = self.normalize_model_config(json.load(f))
 
     def _verify_params(self):
         super()._verify_params()
         assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
         assert not self.args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
-        if self.args.llm_kv_type not in ("None", "fp8kv_dsa"):
-            raise ValueError("GLM-5.3 Flash supports only --llm_kv_type None or fp8kv_dsa")
-        if self.args.llm_kv_type == "fp8kv_dsa" and (
-            self.config["kv_lora_rank"] != 512 or self.data_type != torch.bfloat16
-        ):
-            raise ValueError("GLM-5.3 Flash fp8kv_dsa requires kv_lora_rank=512 and --data_type bfloat16")
 
     def autotune_layers(self):
         return 4
@@ -65,31 +129,44 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         self.v_head_dim = self.config.get("v_head_dim", self.qk_nope_head_dim)
         self.head_dim_ = self.kv_lora_rank + self.qk_rope_head_dim
 
-    def _init_req_manager(self):
-        self.linear_config = Glm5NextCacheConfig.from_model_config(self.config, self.args)
-        self.req_manager = Glm5NextReqManager(
-            self.max_req_num,
-            max(self.batch_max_tokens or 0, self.max_seq_length or 0),
-            None,
-            linear_config=self.linear_config,
-        )
+    @classmethod
+    def create_full_att_states(
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """GLM full-attention 层采用 NoPE packed MLA，并保存压缩 indexer 字段。"""
+        from lightllm.common.attention_state.full_att import MLAAttentionConfig, create_mla_state
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-    def _init_mem_manager(self):
-        mem_manager_class = FP8Glm5NextMemManager if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextMemManager
-        self.mem_manager = mem_manager_class(
-            size=self.max_total_token_num,
-            dtype=self.linear_config.full_att_dtype,
-            num_kv_heads=1,
-            head_dim=self.linear_config.full_att_head_dim,
-            full_att_layer_num=self.linear_config.get_full_att_kv_layer_num_with_draft_model(),
-            linear_config=self.linear_config,
-            mem_fraction=self.mem_fraction,
+        config = cls.normalize_model_config(model_config)
+        cfg = Glm5NextResourceConfig.from_model_config(config, args)
+        logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
+        if not logical_layer_groups:
+            return []
+        state = create_mla_state(
+            config=MLAAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                latent_dim=cfg.full_att_head_dim,
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type,
+            packed=True,
+            fp8_format="group64_e8m0",
+            page_size=args.page_size,
+            device="meta",
         )
+        return [state]
 
     def _init_att_backend(self):
-        backend_class = (
-            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
-        )
+        from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
+
+        backend_class = Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
         self.prefill_att_backend = backend_class(model=self)
         self.decode_att_backend = self.prefill_att_backend
 

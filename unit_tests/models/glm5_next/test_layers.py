@@ -61,7 +61,7 @@ def config():
         "index_head_dim": 128,
         "index_topk": 2048,
         "index_kpool": 4,
-        "linear_attn_config": {"num_heads": 4, "head_dim": 128, "short_conv_kernel_size": 4},
+        "linear_attn_config": {"num_heads": 4, "head_dim": 128, "short_conv_kernel_size": 4, "kda_layers": [0, 1, 2]},
         "layer_types": ["linear_attention"] * 3 + ["deepseek_sparse_attention"],
         "mhc": False,
         "n_routed_experts": 4,
@@ -170,7 +170,12 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     layer.indexer = SimpleNamespace(_get_indices=lambda **kwargs: (indices, indices))
     state = InferStateInfo()
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
-    state.mem_manager = SimpleNamespace(get_att_input_params=lambda layer_index: kv)
+    state.att_state_role = "main"
+    state.att_state_manager = SimpleNamespace(
+        get_state=lambda **kwargs: SimpleNamespace(
+            get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv)
+        )
+    )
     state.prefill_att_state = Glm5NextSparsePrefillState()
     state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
     state.max_q_seq_len = 1
@@ -375,21 +380,23 @@ def test_glm_rejects_tpsp(config, tp_world_size):
         model._verify_params()
 
 
-def test_native_drafts_share_caches_but_keep_config_and_layer_indices(config):
+def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     main = object.__new__(Glm5NextTpPartModel)
     main.config = dict(config, mhc=True)
     main.tp_world_size_ = 1
-    main.args, main.load_way = StartArgs(), "HF"
+    main.args, main.load_way = StartArgs(data_type="bfloat16", mtp_mode="vanilla_with_att", mtp_step=2), "HF"
     main._verify_params()
     main._init_some_value()
-    main.layers_infer = [object() for _ in range(config["num_hidden_layers"])]
+    main.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(config["num_hidden_layers"])]
     main.pre_post_weight = SimpleNamespace(wte_weight_=object(), lm_head_weight_=object(), final_norm_weight_=object())
-    main.req_manager, main.mem_manager, main.linear_config = object(), object(), object()
+    main.req_manager = object()
+    main.max_req_num, main.tp_rank_ = 0, 0
     drafts = []
     for step in range(2):
         draft = object.__new__(Glm5NextMTPModel)
         draft.main_model, draft.mtp_previous_draft_models = main, list(drafts)
-        draft.tp_world_size_, draft.data_type = 1, torch.bfloat16
+        draft.tp_world_size_, draft.tp_rank_, draft.data_type = 1, 0, torch.bfloat16
+        draft.args = main.args
         draft.load_way = "HF"
         draft._init_config()
         draft._verify_params()
@@ -397,9 +404,8 @@ def test_native_drafts_share_caches_but_keep_config_and_layer_indices(config):
         draft._init_weights()
         draft._init_infer_layer()
         draft._init_some_value()
-        draft._init_req_manager()
-        draft._init_mem_manager()
-        draft._init_att_backend1()
+        draft.bind_req_manager(req_manager=main.req_manager)
+        draft.max_req_num = main.max_req_num
         assert main.config["mhc"] and not draft.config["mhc"]
         assert draft.config["layer_types"] is not main.config["layer_types"]
         assert draft.layers_num == 1 and draft.head_dim_ == 512
@@ -408,9 +414,29 @@ def test_native_drafts_share_caches_but_keep_config_and_layer_indices(config):
         assert draft.pre_post_weight.wte_weight_ is main.pre_post_weight.wte_weight_
         assert draft.pre_post_weight.lm_head_weight_ is main.pre_post_weight.lm_head_weight_
         assert draft.pre_post_weight.main_norm_weight_ is main.pre_post_weight.final_norm_weight_
-        assert draft.req_manager is main.req_manager and draft.mem_manager is main.mem_manager
-        assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
+        assert draft.req_manager is main.req_manager
         drafts.append(draft)
+
+    assert all(not hasattr(model, "att_state_manager") for model in (main, *drafts))
+    assert all(not hasattr(model, "linear_config") for model in (main, *drafts))
+    from contextlib import nullcontext
+    for model in (main, *drafts):
+        model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
+    main.prepare_attention_states()
+    assert main.att_state_manager.main_kda_conv_bf16_ssm_fp32_state.conv_state.is_cuda
+    assert main.att_state_manager.main_compressor_indexer_w4_s4_bf16_state.buffer.is_cuda
+    for step, draft in enumerate(drafts):
+        draft.prepare_attention_states()
+        assert draft.att_state_manager is main.att_state_manager
+        draft._init_att_backend1()
+        state = getattr(draft.att_state_manager, f"draft{step}_mla_packed_bf16_state")
+        assert state is not main.att_state_manager.main_mla_packed_bf16_state
+        assert not hasattr(draft, "full_att_state")
+        assert state.storage is None
+        assert state.config.logical_layer_groups == ((4 + step,),)
+        assert state.state_name == f"draft{step}_mla_packed_bf16_state"
+        assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
+        assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_cuda
 
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):

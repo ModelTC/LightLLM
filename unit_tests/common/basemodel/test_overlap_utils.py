@@ -8,68 +8,6 @@ from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
 
-def _empty_multimodal_params(batch_size: int):
-    return [{"images": [], "audios": []} for _ in range(batch_size)]
-
-
-def _make_prefill_input(input_ids: list[int], req_idx: int, is_decode_req: bool) -> ModelInput:
-    token_num = len(input_ids)
-    return ModelInput(
-        batch_size=1,
-        total_token_num=token_num,
-        max_q_seq_len=token_num,
-        max_kv_seq_len=token_num,
-        max_cache_len=0,
-        input_ids=torch.tensor(input_ids, dtype=torch.int64),
-        b_req_idx=torch.tensor([req_idx], dtype=torch.int32),
-        b_mtp_index=torch.zeros(1, dtype=torch.int32),
-        b_seq_len=torch.tensor([token_num], dtype=torch.int32),
-        b_is_decode_req=torch.tensor([is_decode_req]),
-        b_ready_cache_len=torch.zeros(1, dtype=torch.int32),
-        b_prefill_start_loc=torch.zeros(1, dtype=torch.int32),
-        is_prefill=True,
-        b_prefill_has_output_cpu=[True],
-        multimodal_params=_empty_multimodal_params(1),
-    )
-
-
-def _make_decode_input() -> ModelInput:
-    batch_size = 6
-    return ModelInput(
-        batch_size=batch_size,
-        total_token_num=39,
-        max_q_seq_len=1,
-        max_kv_seq_len=9,
-        input_ids=torch.arange(batch_size, dtype=torch.int64),
-        b_req_idx=torch.tensor([10, 11, 12, 12, 12, 12], dtype=torch.int32),
-        b_mtp_index=torch.tensor([0, 0, 0, 1, 2, 3], dtype=torch.int32),
-        b_seq_len=torch.tensor([4, 5, 6, 7, 8, 9], dtype=torch.int32),
-        b_position_delta=torch.arange(batch_size, dtype=torch.int32),
-        b_shared_seq_len=torch.arange(10, 16, dtype=torch.int32),
-        b_shared_radix_node_id=torch.arange(20, 26, dtype=torch.int64),
-        is_prefill=False,
-        multimodal_params=_empty_multimodal_params(batch_size),
-    )
-
-
-def _make_empty_decode_input() -> ModelInput:
-    return ModelInput(
-        batch_size=0,
-        total_token_num=0,
-        max_q_seq_len=1,
-        max_kv_seq_len=0,
-        input_ids=torch.empty((0,), dtype=torch.int64),
-        b_req_idx=torch.empty((0,), dtype=torch.int32),
-        b_mtp_index=torch.empty((0,), dtype=torch.int32),
-        b_seq_len=torch.empty((0,), dtype=torch.int32),
-        b_position_delta=torch.empty((0,), dtype=torch.int32),
-        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
-        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
-        is_prefill=False,
-        multimodal_params=[],
-    )
-
-
 def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
     model_input0 = _make_prefill_input([10, 11], req_idx=20, is_decode_req=False)
     model_input1 = _make_prefill_input([12], req_idx=21, is_decode_req=True)
@@ -130,7 +68,12 @@ def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch
 
     def fake_gather(**kwargs):
         events.append("gather")
-        return torch.arange(40, 46, dtype=torch.int64, device="cuda")
+        return torch.arange(
+            start=40,
+            end=46,
+            dtype=torch.int64,
+            device="cuda",
+        )
 
     monkeypatch.setattr(basemodel, "gather_token", fake_gather)
 
@@ -184,7 +127,6 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
     model.graph = None
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
-    model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(77,), page_size=1)
     infer_batch_sizes = []
 
     def fake_create_inferstate(model_input, microbatch_index):
@@ -207,3 +149,65 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     assert infer_batch_sizes == [2, 2]
     assert output0.logits.shape == (1, 1)
     assert output1.logits.shape == (0, 1)
+
+
+def _empty_multimodal_params(batch_size: int):
+    return [{"images": [], "audios": []} for _ in range(batch_size)]
+
+
+def _make_prefill_input(input_ids: list[int], req_idx: int, is_decode_req: bool) -> ModelInput:
+    token_num = len(input_ids)
+    return ModelInput(
+        batch_size=1,
+        total_token_num=token_num,
+        max_q_seq_len=token_num,
+        max_kv_seq_len=token_num,
+        max_cache_len=0,
+        input_ids=torch.tensor(input_ids, dtype=torch.int64),
+        b_req_idx=torch.tensor([req_idx], dtype=torch.int32),
+        b_mtp_index=torch.zeros(1, dtype=torch.int32),
+        b_seq_len=torch.tensor([token_num], dtype=torch.int32),
+        b_is_decode_req=torch.tensor([is_decode_req]),
+        b_ready_cache_len=torch.zeros(1, dtype=torch.int32),
+        b_prefill_start_loc=torch.zeros(1, dtype=torch.int32),
+        is_prefill=True,
+        b_prefill_has_output_cpu=[True],
+        multimodal_params=_empty_multimodal_params(1),
+    )
+
+
+def _make_decode_input() -> ModelInput:
+    batch_size = 6
+    return ModelInput(
+        batch_size=batch_size,
+        total_token_num=39,
+        max_q_seq_len=1,
+        max_kv_seq_len=9,
+        input_ids=torch.arange(batch_size, dtype=torch.int64),
+        b_req_idx=torch.tensor([10, 11, 12, 12, 12, 12], dtype=torch.int32),
+        b_mtp_index=torch.tensor([0, 0, 0, 1, 2, 3], dtype=torch.int32),
+        b_seq_len=torch.tensor([4, 5, 6, 7, 8, 9], dtype=torch.int32),
+        b_position_delta=torch.arange(batch_size, dtype=torch.int32),
+        b_shared_seq_len=torch.arange(10, 16, dtype=torch.int32),
+        b_shared_radix_node_id=torch.arange(20, 26, dtype=torch.int64),
+        is_prefill=False,
+        multimodal_params=_empty_multimodal_params(batch_size),
+    )
+
+
+def _make_empty_decode_input() -> ModelInput:
+    return ModelInput(
+        batch_size=0,
+        total_token_num=0,
+        max_q_seq_len=1,
+        max_kv_seq_len=0,
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        b_mtp_index=torch.empty((0,), dtype=torch.int32),
+        b_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_position_delta=torch.empty((0,), dtype=torch.int32),
+        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
+        is_prefill=False,
+        multimodal_params=[],
+    )

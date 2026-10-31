@@ -2,6 +2,8 @@ import weakref
 import pytest
 import torch
 
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, KDAState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
@@ -124,7 +126,8 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
-def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
+@pytest.mark.parametrize("role", ["main", "draft0"])
+def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     from types import SimpleNamespace
 
     from lightllm.common.basemodel.attention.base_att import AttControl
@@ -191,14 +194,26 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic):
         uses_dynamic_spec_verify_layout=lambda: dynamic,
         split_qkv=lambda x: x.split(hidden, -1),
     )
-    manager = SimpleNamespace(
-        req_to_mtp_state_index=accepted_offsets, HOLD_REQUEST_ID=3, get_mamba_cache=lambda layer: (conv, ssm)
+    resources = AttentionStateManager(request_capacity=4)
+    config = ConvSSMStateConfig(
+        logical_layer_ids=(0,), global_k_heads=heads, global_v_heads=heads,
+        key_dim=dim, value_dim=dim, conv_width=3, conv_dtype=conv.dtype, ssm_dtype=ssm.dtype,
     )
+    for model_role in ("main", "draft0"):
+        linear = KDAState(config, request_capacity=4, mtp_step=2, device="meta")
+        linear.mtp_state_index = accepted_offsets if model_role == role else torch.zeros_like(accepted_offsets)
+        if model_role == role:
+            linear.conv_state, linear.ssm_state = conv.unsqueeze(0), ssm.unsqueeze(0)
+        resources.register_state(model_role, linear)
+    resources.finish_state_registration()
+    manager = SimpleNamespace(HOLD_REQUEST_ID=3)
     infer = InferStateInfo()
     infer.batch_size = tokens
     infer.b_req_idx = torch.tensor(request_rows, device="cuda", dtype=torch.int32)
     infer.b_mtp_index = torch.tensor(offsets, device="cuda", dtype=torch.int32)
     infer.req_manager = manager
+    infer.att_state_manager = resources
+    infer.att_state_role = role
     weight = SimpleNamespace(
         get_merged_kda_conv_weight=lambda: conv_weight,
         linear_A_log=SimpleNamespace(weight=a),

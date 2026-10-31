@@ -69,12 +69,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-        # o_tensor = alloc_func(q.shape, q.dtype, device=q.device)
-        # batch_size = self.infer_state.b_seq_len.shape[0]
-
-        assert k.untyped_storage().data_ptr() == v.untyped_storage().data_ptr()
-        assert k_scale.untyped_storage().data_ptr() == v_scale.untyped_storage().data_ptr()
-
+        # 反量化内核分别使用 K/V 及 scale 的指针和 stride，兼容共享或独立存储。
         total_token_num = self.infer_state.total_token_num
         k_dequant = alloc_func((total_token_num, k.shape[1], k.shape[2]), dtype=q.dtype, device=q.device)
         v_dequant = alloc_func((total_token_num, v.shape[1], v.shape[2]), dtype=q.dtype, device=q.device)

@@ -1,9 +1,13 @@
 import dataclasses
+from typing import Literal
 
 import torch
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.common.req_manager import DeepseekV4ReqManager
-from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
+from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, WindowCompressorState
+from lightllm.common.attention_state.full_att.compressed_att_state import (
+    CompressedAttentionState,
+    CompressedAttentionLayerView,
+)
 
 C4_PREFILL_LOGITS_BUDGET_BYTES = 512 * 1024 * 1024
 
@@ -23,11 +27,39 @@ class DeepseekV4InferStateInfo(InferStateInfo):
     """Per-forward inputs, derived indices and attention metadata.
 
     Indices and metadata are built for this batch and reused by its layers.
-    Request-owned SWA and compressor rings remain in the request manager.
+    SWA and compressor rings are owned by the model's bounded State.
     """
 
-    req_manager: DeepseekV4ReqManager
-    mem_manager: DeepseekV4MemoryManager
+    @property
+    def swa_state(self) -> FP8E8M0SlidingWindowState:
+        return self.att_state_manager.get_state(
+            model_role=self.att_state_role,
+            state_type_filter="swa_",
+            logical_layer_id=self.first_logical_layer_id,
+            state_class=FP8E8M0SlidingWindowState,
+        )
+
+    def get_compressor_state(
+        self, logical_layer_id: int, target: Literal["kv", "indexer"] = "kv"
+    ) -> WindowCompressorState:
+        """按当前层和用途选择独立的窗口压缩器。"""
+        return self.att_state_manager.get_state(
+            model_role=self.att_state_role,
+            state_type_filter=f"compressor_{target}_",
+            logical_layer_id=logical_layer_id,
+            state_class=WindowCompressorState,
+        )
+
+    def get_compressed_kv_state(self, logical_layer_id: int) -> CompressedAttentionState:
+        return self.att_state_manager.get_state(
+            model_role=self.att_state_role,
+            state_type_filter="compressed",
+            logical_layer_id=logical_layer_id,
+            state_class=CompressedAttentionState,
+        )
+
+    def get_compressed_kv_view(self, logical_layer_id: int) -> CompressedAttentionLayerView:
+        return self.get_compressed_kv_state(logical_layer_id).get_layer_view(logical_layer_id)
 
     def __init__(self):
         super().__init__()
@@ -56,9 +88,21 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.c4_indexer_metadata: C4IndexerMetadata | None = None
 
     def init_some_extra_state(self, model):
+        self.first_logical_layer_id = model.layers_infer[0].layer_num_
+        self.first_c4_logical_layer_id = None
+        has_c128_layer = False
+        ratios = model.config["compress_ratios"]
+        for layer in model.layers_infer:
+            compress_ratio = ratios[layer.layer_num_] if layer.layer_num_ < len(ratios) else 0
+            if compress_ratio == 4 and self.first_c4_logical_layer_id is None:
+                self.first_c4_logical_layer_id = layer.layer_num_
+            if compress_ratio == 128:
+                has_c128_layer = True
         self.c4_indexer_metadata = None  # Rebuild for each eager forward or graph capture.
         self.dsv4_c4_indices = None
         self.dsv4_c4_lengths = None
+        self.dsv4_c128_indices = None
+        self.dsv4_c128_lengths = None
         super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
         if self.is_prefill:
             self.prefill_att_state.prepare_swa_workspace(self)
@@ -84,14 +128,18 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_workspace = model.dsv4_workspace
         self._init_swa_metadata(model)
 
+        # 当前模型没有 C128 层时，不分配或构建这组索引；draft 只检查自身拥有的层。
+        if not has_c128_layer:
+            return
+
         from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices
 
-        long_ratio = self.req_manager.cache_config.long_compress_ratio
+        c128_compress_ratio = 128
         max_kv_seq_len = self.max_kv_seq_len
         # Replay copies C128 indices into the captured state, so their widths must match.
         if not self.is_prefill and model.graph is not None and model.graph.can_run(self.batch_size, max_kv_seq_len):
             max_kv_seq_len = model.graph.graph_max_len_in_batch
-        c128_entries = max(1, max_kv_seq_len // long_ratio)
+        c128_entries = max(1, max_kv_seq_len // c128_compress_ratio)
         c128_cap = ((c128_entries + 63) // 64) * 64
         self.dsv4_c128_indices = torch.empty((pos.numel(), c128_cap), dtype=torch.int32, device=pos.device)
         self.dsv4_c128_lengths = torch.empty_like(pos, dtype=torch.int32)
@@ -99,7 +147,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             self.dsv4_sparse_req_idx,
             self.position_ids,
             self.req_manager.req_to_token_indexs,
-            long_ratio,
+            c128_compress_ratio,
             self.dsv4_c128_indices,
             self.dsv4_c128_lengths,
         )
@@ -113,7 +161,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
 
         pos = self.position_ids
         has_vision = model.has_vision
-        swa_width = self.req_manager.cache_config.sliding_window
+        swa_width = self.swa_state.config.window_size
         if has_vision and self.is_prefill:
             swa_width += model.config["vision_max_n_token"]
         self.dsv4_swa_indices = torch.empty((pos.numel(), swa_width), dtype=torch.int32, device=pos.device)
@@ -141,11 +189,11 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         build_swa_indices(
             token_req_idx=self.dsv4_sparse_req_idx,
             position_ids=self.position_ids,
-            req_manager=self.req_manager,
+            swa_state=self.swa_state,
             swa_indices=self.dsv4_swa_indices,
             swa_lengths=self.dsv4_swa_lengths,
             swa_write_slots=self.dsv4_swa_write_slots,
-            sliding_window=self.req_manager.cache_config.sliding_window,
+            sliding_window=self.swa_state.config.window_size,
             image_left=self.dsv4_image_left,
             image_right=self.dsv4_image_right,
             prefill_state=self.prefill_att_state if self.is_prefill else None,
@@ -180,7 +228,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             self.req_manager.req_to_token_indexs,
             self.req_manager.HOLD_REQUEST_ID,
         )
-        page_size = self.req_manager.cache_config.compressed_kv_token_alignment // 4
+        page_size = self.get_compressed_kv_state(self.first_c4_logical_layer_id).config.block_token_size // 4
         rows_per_chunk = max(1, self.position_ids.numel())
         if self.is_prefill:
             # DeepGEMM rounds the logits width to a multiple of 256.

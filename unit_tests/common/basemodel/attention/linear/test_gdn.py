@@ -6,13 +6,15 @@ from types import ModuleType, SimpleNamespace
 import pytest
 import torch
 
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 import lightllm.common.basemodel.attention.linear.gdn as gdn
 import lightllm.common.basemodel.attention.create_linear_utils as linear_create_utils
 import lightllm.common.basemodel.triton_kernel.linear_att.fla.ops as fla_ops
 from lightllm.common.basemodel.attention.linear.flashqla import FlashQlaLinearAttBackend
 from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
-from lightllm.common.state_cache_manager import LinearAttCacheConfig
+from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.server.api_cli import make_argument_parser
 import lightllm.utils.backend_validator as backend_validator
 
@@ -62,29 +64,6 @@ def test_prefill_casts_final_state_to_cache_dtype(monkeypatch, cache_dtype):
     assert torch.equal(ssm_states, final_state.to(cache_dtype))
 
 
-def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None):
-    model = SimpleNamespace(
-        is_mtp_draft_model=False,
-        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
-    )
-    infer_state = InferStateInfo()
-    infer_state.batch_size = b_req_idx.shape[0]
-    infer_state.b_req_idx = b_req_idx
-    infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
-    infer_state.req_manager = SimpleNamespace(
-        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
-        req_to_mtp_state_index=req_to_mtp_state_index,
-    )
-    state = gdn.LinearAttDecodeAttState(
-        backend=SimpleNamespace(
-            model=model,
-            uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
-        ),
-        _infer_state_weak_ref=weakref.ref(infer_state),
-    )
-    return state, infer_state
-
-
 def test_decode_state_initializes_normal_layout():
     b_req_idx = torch.tensor([2, 4], dtype=torch.int32)
     state, infer_state = _create_decode_state(draft_step=0, dynamic_layout=False, b_req_idx=b_req_idx)
@@ -97,7 +76,8 @@ def test_decode_state_initializes_normal_layout():
     assert state.b_num_accepted_tokens is None
 
 
-def test_decode_state_initializes_fixed_mtp_layout():
+@pytest.mark.parametrize("role", ["main", "draft0"])
+def test_decode_state_initializes_fixed_mtp_layout(role: str):
     b_req_idx = torch.tensor([2, 2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     state, infer_state = _create_decode_state(
@@ -105,6 +85,7 @@ def test_decode_state_initializes_fixed_mtp_layout():
         dynamic_layout=False,
         b_req_idx=b_req_idx,
         req_to_mtp_state_index=req_to_mtp_state_index,
+        role=role,
     )
 
     state.init_state()
@@ -118,7 +99,8 @@ def test_decode_state_initializes_fixed_mtp_layout():
     )
 
 
-def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
+@pytest.mark.parametrize("role", ["main", "draft0"])
+def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch, role: str):
     b_req_idx = torch.tensor([2, 2, 4, 4, 4], dtype=torch.int32)
     req_to_mtp_state_index = torch.tensor([0, 0, 1, 0, 2, 0], dtype=torch.int32)
     expected_cu_q_seq_len = torch.tensor([0, 2, 5, 5, 5, 5], dtype=torch.int32)
@@ -136,6 +118,7 @@ def test_decode_state_initializes_dynamic_mtp_layout(monkeypatch):
         dynamic_layout=True,
         b_req_idx=b_req_idx,
         req_to_mtp_state_index=req_to_mtp_state_index,
+        role=role,
     )
 
     state.init_state()
@@ -196,8 +179,9 @@ def test_missing_linear_backend_arg_uses_auto_selection(monkeypatch, auto_linear
 
 def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     linear_config = SimpleNamespace(
-        num_linear_k_heads=2,
-        num_linear_v_heads=4,
+        tp_world_size=2,
+        global_linear_k_heads=4,
+        global_linear_v_heads=8,
         head_linear_k_dim=8,
         head_linear_v_dim=16,
         conv_state_dtype=torch.bfloat16,
@@ -205,7 +189,7 @@ def test_flashqla_validation_loads_linear_cache_config(monkeypatch):
     )
     load_calls = []
     monkeypatch.setattr(
-        LinearAttCacheConfig,
+        Qwen3NextResourceConfig,
         "load_from_args",
         staticmethod(lambda: load_calls.append(True) or linear_config),
     )
@@ -359,3 +343,39 @@ def test_gdn_prefill_backend_tries_candidates_in_order(monkeypatch, auto_linear_
 
     assert backend_class is FlashQlaLinearAttBackend
     assert validate_calls == ["flashqla2", "flashqla3"]
+
+
+def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_state_index=None, role="main"):
+    model = SimpleNamespace(
+        is_mtp_draft_model=False,
+        mtp_manager=SimpleNamespace(get_decode_draft_step=lambda _: draft_step),
+    )
+    infer_state = InferStateInfo()
+    infer_state.batch_size = b_req_idx.shape[0]
+    infer_state.b_req_idx = b_req_idx
+    infer_state.b_mtp_index = torch.zeros_like(b_req_idx)
+    infer_state.req_manager = SimpleNamespace(
+        HOLD_REQUEST_ID=req_to_mtp_state_index.shape[0] - 1 if req_to_mtp_state_index is not None else -1,
+    )
+    infer_state.att_state_role = role
+    if req_to_mtp_state_index is not None:
+        request_capacity = req_to_mtp_state_index.numel()
+        resources = AttentionStateManager(request_capacity=request_capacity)
+        config = ConvSSMStateConfig(
+            logical_layer_ids=(3,), global_k_heads=1, global_v_heads=1,
+            key_dim=2, value_dim=2, conv_width=2, conv_dtype=torch.float32, ssm_dtype=torch.float32,
+        )
+        for model_role in ("main", "draft0"):
+            linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
+            linear.mtp_state_index = req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
+            resources.register_state(model_role, linear)
+        resources.finish_state_registration()
+        infer_state.att_state_manager = resources
+    state = gdn.LinearAttDecodeAttState(
+        backend=SimpleNamespace(
+            model=model,
+            uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
+        ),
+        _infer_state_weak_ref=weakref.ref(infer_state),
+    )
+    return state, infer_state

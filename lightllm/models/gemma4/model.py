@@ -1,8 +1,8 @@
+from typing import TYPE_CHECKING
 import os
 import json
 import torch
 from lightllm.common.basemodel.attention.triton.fp import TritonAttBackend
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
 from lightllm.common.build_utils import repair_config
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
@@ -11,11 +11,17 @@ from lightllm.models.gemma4.layer_infer.post_layer_infer import Gemma4PostLayerI
 from lightllm.models.gemma4.layer_infer.transformer_layer_infer import Gemma4TransformerLayerInfer
 from lightllm.models.gemma4.layer_weights.pre_and_post_layer_weight import Gemma4PreAndPostLayerWeight
 from lightllm.models.gemma4.layer_weights.transformer_layer_weight import Gemma4TransformerLayerWeight
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num, get_env_start_args
+from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
 logger = init_logger(__name__)
+
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 class Gemma4TpPartModel(LlamaTpPartModel):
@@ -31,7 +37,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
     def __init__(self, kvargs):
         # head_dim_ is used by the default _init_to_get_rotary which we
         # override; still set it to the sliding-layer head_dim for consistency
-        # with the mem manager and any generic helpers.
+        # with the full-attention storage and any generic helpers.
         self.head_dim_ = 256
         super().__init__(kvargs)
         return
@@ -80,31 +86,57 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         )
         return
 
-    def _init_mem_manager(self):
-        # Uniform per-layer KV cache layout. The per-layer cache slot must fit
-        # whichever layer type has the largest per-token K/V width: sliding
-        # (num_key_value_heads * head_dim) or full
-        # (num_global_kv * global_head_dim). Keep cache_slot_dim = head_dim
-        # and pick cache_slot_num = max-width / head_dim. For 31B this
-        # collapses to num_key_value_heads; for E4B the full-attn shape wins
-        # (2*512 > 2*256), so it uses 4 storage slots of 256 dims.
-        # Gemma4TransformerLayerInfer.__init__ computes the same value and
-        # uses it to pack/unpack K/V at write/read time.
-        head_dim = self.config["head_dim"]
-        num_global_kv = self.config.get("num_global_key_value_heads") or self.config["num_key_value_heads"]
-        sliding_total = self.config["num_key_value_heads"] * self.config["head_dim"]
-        full_total = num_global_kv * self.config["global_head_dim"]
+    @classmethod
+    def create_full_att_states(
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """按 Gemma4 的 attention 宽度和共享关系创建物理 KV 层。"""
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+        config = cls.normalize_model_config(model_config)
+        # 每层的 KV 槽位须容纳 sliding/full 两类 attention 的最大宽度。
+        head_dim = config["head_dim"]
+        num_global_kv = config.get("num_global_key_value_heads") or config["num_key_value_heads"]
+        sliding_total = config["num_key_value_heads"] * head_dim
+        full_total = num_global_kv * config["global_head_dim"]
         per_token_k_width = max(sliding_total, full_total)
-        head_num_per_rank = (per_token_k_width // head_dim) // self.tp_world_size_
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=head_num_per_rank,
-            head_dim=head_dim,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
+        assert per_token_k_width % head_dim == 0, "Gemma4 KV width must contain complete storage heads"
+
+        shared_layer_count = config.get("num_kv_shared_layers") or 0
+        storage_layer_count = len(model_logical_layer_ids) - shared_layer_count
+        assert 0 <= shared_layer_count < len(model_logical_layer_ids), "invalid KV-shared layer count"
+        layer_groups = [[layer_id] for layer_id in model_logical_layer_ids[:storage_layer_count]]
+        # 后部共享层读取同类型的最后一个生产层，只增加逻辑映射，不增加物理存储行。
+        for local_layer in range(storage_layer_count, len(model_logical_layer_ids)):
+            for source_layer in range(storage_layer_count - 1, -1, -1):
+                if config["layer_types"][source_layer] == config["layer_types"][local_layer]:
+                    layer_groups[source_layer].append(model_logical_layer_ids[local_layer])
+                    break
+            else:
+                raise AssertionError("KV-shared layer requires an earlier producer of the same attention type")
+        logical_layer_groups = tuple(tuple(group) for group in layer_groups)
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=GQAAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=per_token_k_width // head_dim,
+                head_dim=head_dim,
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type,
+            page_size=args.page_size,
+            device="meta",
         )
-        return
+        return [state]
 
     def _init_att_backend(self):
         # Gemma-4 has per-layer heterogeneous attention: sliding layers use
@@ -178,7 +210,12 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         sliding_partial = sliding_params.get("partial_rotary_factor", 1.0)
         sliding_rot_dim = int(sliding_head_dim * sliding_partial)
         inv_freq_sliding = 1.0 / (
-            sliding_theta ** (torch.arange(0, sliding_rot_dim, 2, dtype=torch.float32) / sliding_rot_dim)
+            sliding_theta ** (torch.arange(
+                start=0,
+                end=sliding_rot_dim,
+                step=2,
+                dtype=torch.float32,
+            ) / sliding_rot_dim)
         )
         freqs_s = torch.outer(t, inv_freq_sliding)
         self._cos_cached_sliding = torch.cos(freqs_s).to(self.data_type).cuda()
@@ -198,7 +235,12 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         if rope_type == "proportional":
             rope_angles = int(full_partial * full_head_dim // 2)
             inv_freq_rot = 1.0 / (
-                full_theta ** (torch.arange(0, 2 * rope_angles, 2, dtype=torch.float32) / full_head_dim)
+                full_theta ** (torch.arange(
+                    start=0,
+                    end=2 * rope_angles,
+                    step=2,
+                    dtype=torch.float32,
+                ) / full_head_dim)
             )
             nope_angles = full_head_dim // 2 - rope_angles
             if nope_angles > 0:
@@ -207,7 +249,12 @@ class Gemma4TpPartModel(LlamaTpPartModel):
                 inv_freq_full = inv_freq_rot
         else:
             full_rot_dim = int(full_head_dim * full_partial)
-            inv_freq_full = 1.0 / (full_theta ** (torch.arange(0, full_rot_dim, 2, dtype=torch.float32) / full_rot_dim))
+            inv_freq_full = 1.0 / (full_theta ** (torch.arange(
+                start=0,
+                end=full_rot_dim,
+                step=2,
+                dtype=torch.float32,
+            ) / full_rot_dim))
 
         freqs_f = torch.outer(t, inv_freq_full)
         self._cos_cached_full = torch.cos(freqs_f).to(self.data_type).cuda()

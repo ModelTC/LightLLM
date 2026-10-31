@@ -109,7 +109,7 @@ class TpPartBaseModel:
         self._verify_must()
         self._verify_params()
         self._init_weights()
-        self._init_mem_manager()
+        self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
@@ -124,9 +124,13 @@ Commonly used interfaces that need to be inherited and implemented
 | ---------------------------- | ------------------------------------------------------------ |
 | def _init_config(self)：     | Read the config.json for initializing the model and perform some key name legalization operations |
 | def _verify_params(self)：   | Validate parameters                                           |
-| def _init_mem_manager(self): | Initialize the mem manager object used by token attention    |
+| `create_full_att_states(...)` / `create_bounded_att_states(...)` | Return this model's full / bounded State lists; defaults return empty lists and the shared startup stage registers the results |
 | def _init_some_value(self):  | Initialize values of some member variables that the inference framework will use |
 | def _init_custom(self):      | Some personalized initialization of the model itself, such as llama initializing its own Rotary values |
+
+After all main/draft models are constructed, `ModeBackend.init_model` calls each model's `prepare_attention_states()`, then calls `finish_state_registration()`, `load_full_att_calibration(args)` and shared resource allocation in order. It next calls `init_runtime()` sequentially on the main model and each draft. Each call completes that model's HOLD-page and backend binding, warmup, padded-request setup and CUDA Graph initialization; the main model also checks maximum-length inference at the end of its call. Readiness is published after every model succeeds. Resource preparation and runtime initialization are the only two public startup entry points; both operate on one model and take no draft-model list.
+
+The public `prepare_attention_states()` stage creates an empty manager for main and shares it with drafts. The three State factories are classmethods accepting model configuration, logical layer IDs and TP coordinates; bounded/tail also accept request capacity and device. Full factories only define layouts and do not calculate calibration offsets or read calibration files. Factories only return lists and do not register resources or depend on model instances. CPU cache reuses the full/bounded factories to create meta definitions without loading calibration. The shared stage registers all returned States; attention-free drafts create none.
 
 ## 2. Example of Adding Bloom Model
 
@@ -320,9 +324,6 @@ class BloomPreLayerInfer(PreLayerInferTpl):
         self.vob_end_id_ = tp_vocab_size_ * (self.tp_rank_ + 1)
         return
     
-    def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
-        return layernorm_forward(input, layer_weight.pre_norm_weight_, layer_weight.pre_norm_bias_, eps=self.eps_)
-
     def context_forward(self, input_ids, infer_state: InferStateInfo, layer_weight: BloomPreAndPostLayerWeight):
         total_token_num = infer_state.total_token_num
         input_ids = input_ids[0:total_token_num]
@@ -347,6 +348,9 @@ class BloomPreLayerInfer(PreLayerInferTpl):
             dist.all_reduce(input_embdings, op=dist.ReduceOp.SUM, async_op=False)
         input_embdings = self._norm(input_embdings, infer_state, layer_weight)
         return input_embdings
+
+    def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
+        return layernorm_forward(input, layer_weight.pre_norm_weight_, layer_weight.pre_norm_bias_, eps=self.eps_)
 ~~~
 
 ***transformer_layer_infer.py***
@@ -417,9 +421,10 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     
     def _token_attention_kernel(self, q, infer_state:InferStateInfo, layer_weight: BloomTransformerLayerWeight)->torch.Tensor:
         o_tensor = torch.empty_like(q)
+        k_cache, v_cache = infer_state.full_att_state.get_layer_view(self.layer_num_)
         token_attention_fwd(q.view(-1, self.tp_q_head_num_, self.head_dim_),
-                            infer_state.mem_manager.kv_buffer[self.layer_num_][:, 0: self.tp_k_head_num_, :],
-                            infer_state.mem_manager.kv_buffer[self.layer_num_][:, self.tp_k_head_num_: self.tp_k_head_num_+ self.tp_v_head_num_, :],
+                            k_cache,
+                            v_cache,
                             o_tensor.view(-1, self.tp_q_head_num_, self.head_dim_),
                             layer_weight.tp_alibi,
                             infer_state.b_loc,
@@ -471,9 +476,6 @@ class BloomPostLayerInfer(PostLayerInferTpl):
         self.embed_dim_ = network_config["n_embed"]
         return
     
-    def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
-        return layernorm_forward(input, layer_weight.final_norm_weight_, layer_weight.final_norm_bias_, eps=self.eps_)
-
     def soft_max(self, data):
         return torch.softmax(data.permute(1, 0).float(), dim=-1)
 
@@ -508,6 +510,9 @@ class BloomPostLayerInfer(PostLayerInferTpl):
             ans_logics = gather_data.permute(1, 0).float()
             gather_data = None
             return ans_logics
+
+    def _norm(self, input, infer_state, layer_weight : BloomPreAndPostLayerWeight) -> torch.Tensor:
+        return layernorm_forward(input, layer_weight.final_norm_weight_, layer_weight.final_norm_bias_, eps=self.eps_)
 ~~~
 
 ### （3） Add implementation model class

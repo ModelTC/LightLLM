@@ -30,7 +30,9 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.hc_mult = network_config["hc_mult"]
         self.sinkhorn_iters = network_config["hc_sinkhorn_iters"]
         self.hc_eps = network_config["hc_eps"]
-        self.compress_ratio = network_config["compress_ratios"][layer_num]
+        ratios = network_config["compress_ratios"]
+        # 额外的 MTP 执行层只使用 SWA，checkpoint 可只记录一个共享的 MTP 权重层。
+        self.compress_ratio = ratios[layer_num] if layer_num < len(ratios) else 0
         self.is_hash = layer_num < network_config["num_hash_layers"]
         self.has_vision = network_config.get("vision_n_layers", 0) > 0
         self.vocab_size = network_config["vocab_size"]
@@ -334,7 +336,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
     def _norm_rope_and_cache_kv(self, kv, infer_state, layer_weight):
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
 
-        req_manager = infer_state.req_manager
+        state = infer_state.swa_state
         att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
         swa, _ = att_state.backend.get_att_input_params(infer_state, self.layer_num_)
         # 一次完成 RMSNorm、RoPE、FP8 打包和 SWA 写入。
@@ -347,8 +349,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             swa_write_slots=infer_state.dsv4_swa_write_slots,
             swa_runtime_write_slots=infer_state.dsv4_swa_runtime_write_slots,
             swa_kv_buffer=swa,
-            swa_page_token_num=req_manager.cache_config.swa_page_token_num,
-            req_to_swa=req_manager.req_to_swa[self.layer_num_],
+            swa_page_token_num=state.config.page_token_size,
+            req_to_swa=state.get_layer_view(logical_layer_id=self.layer_num_),
         )
 
     def _get_qkv(

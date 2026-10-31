@@ -56,7 +56,7 @@ class NcclKVTransporter:
         assert args.run_mode in ["prefill", "decode"], args.run_mode
         self.is_prefill_node = args.run_mode == "prefill"
         self.capture_telemetry = False
-        self.num_pages, self.page_size, self.num_layers, self.kv_head_num, self.head_dims = kv_move_buffer.shape
+        self.num_pages = kv_move_buffer.shape[0]
 
         self.host_ip = host_ip or get_hostname_ip()
         assert self.host_ip is not None, "can not get host ip for NcclKVTransporter"
@@ -91,11 +91,8 @@ class NcclKVTransporter:
         return pickle.dumps(
             {
                 "num_pages": self.num_pages,
-                "page_size": self.page_size,
-                "num_layers": self.num_layers,
-                "kv_head_num": self.kv_head_num,
-                "head_dims": self.head_dims,
-                "dtype": str(self.kv_move_buffer.dtype),
+                # PD buffer 固定为二维 uint8，页长度就是单页字节数。
+                "page_bytes": self.kv_move_buffer.shape[1],
             }
         )
 
@@ -114,6 +111,8 @@ class NcclKVTransporter:
             metadata.agent_name == remote_agent.agent_name
         ), f"Peer name {metadata.agent_name} does not match remote name {remote_agent.agent_name}"
 
+        page = pickle.loads(remote_agent.page_reg_desc)
+        assert page["page_bytes"] == self.kv_move_buffer.shape[1], "PD peers must use the same page byte capacity"
         self.remote_agents[remote_agent.agent_name] = remote_agent
         logger.info(f"Added NCCL remote agent {remote_agent.agent_name} at {metadata.host_ip}:{metadata.control_port}")
         return
@@ -434,6 +433,7 @@ class _NcclControlChannel:
     def _start_server(self, host_ip: str, port_min: int, port_max: int) -> tuple[ThreadedServer, int]:
         last_error = None
         for cur_port in range(port_min, port_max + 1):
+            server = None
             try:
                 server = ThreadedServer(
                     _NcclControlService(self),
@@ -446,14 +446,23 @@ class _NcclControlChannel:
                         "allow_setattr": True,
                     },
                 )
+                # RPyC 构造时只 bind；启用 SO_REUSEADDR 后，并发进程可能都绑定同一端口成功。
+                # 在当前线程先 listen，让端口冲突进入下面的重试；否则后台线程启动失败时，
+                # 外层已经返回该端口，无法捕获异常并切换到下一个端口。
+                server.listener.listen(server.backlog)
                 threading.Thread(target=server.start, daemon=True).start()
                 logger.info(f"NCCL RPyC control channel listen on {host_ip}:{cur_port}")
                 return server, cur_port
             except OSError as e:
+                # 构造失败时 server 尚未赋值；已构造但 listen 失败时，关闭 socket 后再重试。
+                if server is not None:
+                    server.close()
                 last_error = e
                 if e.errno == errno.EADDRINUSE:
+                    # 当前端口已被占用，或并发启动时被其他进程抢先监听，继续尝试下一个端口。
                     logger.info(f"NCCL RPyC control port {host_ip}:{cur_port} is in use, try next port")
                 else:
+                    # 其他 socket 错误保留告警；整个端口范围都失败后，携带最后一个异常向上抛出。
                     logger.warning(f"Create NCCL RPyC control channel on {host_ip}:{cur_port} failed: {e}")
         raise RuntimeError(f"can not allocate NCCL control port in [{port_min}, {port_max}]") from last_error
 

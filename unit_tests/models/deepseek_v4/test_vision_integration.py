@@ -204,7 +204,7 @@ def test_swa_index_adds_bidirectional_image_visibility():
         HOLD_SWA_SLOT=256,
     )
     requests = SimpleNamespace(
-        cache_config=SimpleNamespace(swa_page_token_num=128),
+        config=SimpleNamespace(page_token_size=128),
         swa_capacity_tokens=128,
         HOLD_SWA_SLOT=128,
         HOLD_REQUEST_ID=1,
@@ -276,11 +276,13 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
     module.args = SimpleNamespace(page_size=256)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
+        is_hybrid_att_model=False,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=table),
-            mem_manager=SimpleNamespace(
-                operator=SimpleNamespace(load_cpu_cache_to_gpu=lambda **kwargs: loaded.append(req.cur_kv_len))
+            att_state_manager=SimpleNamespace(
+                get_cpu_page_layouts=lambda: {},
+                read_req_from_cpu=lambda **kwargs: loaded.append(req.cur_kv_len + kwargs["token_indices"].numel()),
             ),
         ),
     )
@@ -288,6 +290,7 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
         lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
         deref_pages=lambda page_list: released.extend(page_list),
     )
+    module.cpu_cache_client.cpu_kv_cache_tensor = torch.empty((1, 1))
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 8192)

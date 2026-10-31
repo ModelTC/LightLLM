@@ -111,7 +111,7 @@ class PDDecodeNode(ChunkedPrefillBackend):
                         .detach()
                         .cpu()
                     )
-                    self.model.mem_manager.free(mem_indexes)
+                    self.model.att_state_manager.full_att_allocator.free(mem_indexes)
                     req_obj.cur_kv_len = old_prefix_len
                     req_obj.hold_kv_len = old_prefix_len
                     if self.is_master_in_dp:

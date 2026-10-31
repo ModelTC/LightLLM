@@ -1,9 +1,8 @@
+from typing import TYPE_CHECKING
 import os
 import json
 import torch
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.models.gemma3.infer_struct import Gemma3InferStateInfo
 from lightllm.models.gemma3.layer_infer.post_layer_infer import Gemma3PostLayerInfer
 from lightllm.models.gemma3.layer_infer.pre_layer_infer import Gemma3PreLayerInfer
@@ -16,6 +15,12 @@ from lightllm.server.core.objs import SamplingParams
 from lightllm.common.build_utils import repair_config
 from transformers import AutoConfig
 from lightllm.utils.log_utils import init_logger
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.attention_state.full_att import FullAttentionState
+
 
 logger = init_logger(__name__)
 
@@ -138,16 +143,29 @@ class Gemma3TpPartModel(LlamaTpPartModel):
         self.head_dim_ = 256
         self._init_to_get_rotary()
 
-    def _init_mem_manager(self):
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=torch.bfloat16,
-            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
-            head_dim=256,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
+    @classmethod
+    def create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """Gemma3 使用固定 256 维 BF16 KV，不随权重精度改变。"""
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
+
+        config = cls.normalize_model_config(model_config)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=GQAAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
+                head_dim=256,
+                dtype=torch.bfloat16,
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
         )
-        return
+        return [state]
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

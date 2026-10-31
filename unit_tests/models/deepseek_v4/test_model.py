@@ -61,7 +61,7 @@ def test_unsupported_parallel_layouts_fail_before_inference(monkeypatch, balance
 
 def test_memory_check_rejects_sequence_larger_than_full_token_pool():
     model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
-    model.mem_manager = SimpleNamespace(size=60416)
+    model.att_state_manager = SimpleNamespace(full_att_allocator=SimpleNamespace(size=60416))
     model.batch_max_tokens = 8192
     model.max_seq_length = 262169
     model.args = SimpleNamespace(performance_mode=None)
@@ -72,7 +72,7 @@ def test_memory_check_rejects_sequence_larger_than_full_token_pool():
 
 def test_memory_check_still_requires_one_prefill_batch():
     model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
-    model.mem_manager = SimpleNamespace(size=8192)
+    model.att_state_manager = SimpleNamespace(full_att_allocator=SimpleNamespace(size=8192))
     model.batch_max_tokens = 8192
     model.max_seq_length = 262169
     model.args = SimpleNamespace(performance_mode=None)

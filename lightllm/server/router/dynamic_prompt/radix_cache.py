@@ -110,18 +110,17 @@ def match(t1: torch.Tensor, t2: torch.Tensor) -> int:
 
 
 class RadixCache:
-    def __init__(self, total_token_num, rank_in_node, mem_manager=None, page_size: int = 1):
-        from lightllm.common.kv_cache_mem_manager import MemoryManager
-
+    def __init__(self, total_token_num, rank_in_node, att_state_manager=None, page_size: int = 1):
         self.total_token_num = total_token_num
-        self.mem_manager: MemoryManager = mem_manager
+        self.att_state_manager = att_state_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
         if page_size < 1:
             raise ValueError(f"page_size must be >= 1, got {page_size}")
-        if mem_manager is not None and page_size != mem_manager.page_size:
+        allocator = None if att_state_manager is None else att_state_manager.full_att_allocator
+        if allocator is not None and page_size != allocator.page_size:
             raise ValueError(
-                f"RadixCache page_size {page_size} must match mem_manager page_size {mem_manager.page_size}"
+                f"RadixCache page_size {page_size} must match allocator page_size {allocator.page_size}"
             )
         self.page_size = page_size
 
@@ -546,9 +545,9 @@ class RadixCache:
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
-        assert self.mem_manager is not None
-        if need_token_num > self.mem_manager.allocator.can_use_mem_size:
-            need_evict_token_num = need_token_num - self.mem_manager.allocator.can_use_mem_size
+        allocator = self.att_state_manager.full_att_allocator
+        if need_token_num > allocator.can_use_mem_size:
+            need_evict_token_num = need_token_num - allocator.can_use_mem_size
             release_mems = []
 
             def release_mem(mem_index):
@@ -557,7 +556,7 @@ class RadixCache:
 
             self.evict(need_evict_token_num, release_mem)
             mem_index = torch.concat(release_mems)
-            self.mem_manager.free(mem_index)
+            allocator.free(mem_index)
         return
 
 

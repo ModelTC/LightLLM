@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.full_att import FullAttentionState
 import math
 import torch
 import torch.nn as nn
@@ -21,7 +22,7 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     time. The KV cache layout is uniform (sliding shape: num_kv_heads=16,
     head_dim=256); full-attention layers pack their (4, 512) tensor into the
     first 8 heads of the 16-head slot at cache-write time, then reshape on
-    read. See Gemma4TpPartModel._init_mem_manager for context.
+    read. See Gemma4TpPartModel.create_full_att_states for context.
     """
 
     def __init__(self, layer_num, network_config):
@@ -84,17 +85,6 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
         kv_shared_count = network_config.get("num_kv_shared_layers") or 0
         total_layers = network_config["num_hidden_layers"]
         self.is_kv_shared_ = kv_shared_count > 0 and layer_num >= total_layers - kv_shared_count
-        self.kv_share_target_layer_ = None
-        if self.is_kv_shared_:
-            cutoff = total_layers - kv_shared_count
-            for j in range(cutoff - 1, -1, -1):
-                if network_config["layer_types"][j] == layer_type:
-                    self.kv_share_target_layer_ = j
-                    break
-            assert self.kv_share_target_layer_ is not None, (
-                f"layer {layer_num} ({layer_type}) is KV-shared but no earlier non-shared "
-                f"layer of the same type found below cutoff={cutoff}"
-            )
 
         # Always 1.0: NoPE dims for full-attn layers are zero-padded into
         # cos/sin (cos=1, sin=0 → identity), so the kernel walks the whole
@@ -189,13 +179,18 @@ class Gemma4TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _att_control(self):
         if self.is_sliding and self.sliding_window_ > 0:
             w = self.sliding_window_ - 1
-            return AttControl(use_sliding_window=True, sliding_window=(w, 0))
-        return AttControl(use_sliding_window=False, sliding_window=(-1, -1))
+            return AttControl(use_sliding_window=True, sliding_window=(w, 0), logical_layer_id=self.layer_num_)
+        return AttControl(use_sliding_window=False, sliding_window=(-1, -1), logical_layer_id=self.layer_num_)
 
     def _get_layer_kv(self, infer_state: InferStateInfo):
-        # KV-shared layers read from the target layer's cache slot.
-        layer_idx = self.kv_share_target_layer_ if self.is_kv_shared_ else self.layer_num_
-        _k_raw, _v_raw = infer_state.mem_manager.get_att_input_params(layer_index=layer_idx)
+        # 直接用当前逻辑层号访问；共享层由 State 的 logical_layer_groups 映射到生产层的物理 KV。
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        _k_raw, _v_raw = state.get_layer_view(logical_layer_id=self.layer_num_)
         # _k_raw / _v_raw shape (S, cache_slot_num, cache_slot_dim). Use .view
         # (not .reshape) so any non-contiguous layout from a future mem_manager
         # backend fails loudly instead of silently copying — slice + view is

@@ -53,14 +53,11 @@ def _build_dspark_swa_indices_kernel(
 def build_dspark_swa_indices(
     token_req_idx: torch.Tensor,
     position_ids: torch.Tensor,
-    req_manager,
+    swa_state,
     swa_indices: torch.Tensor,
     swa_lengths: torch.Tensor,
     swa_write_slots: torch.Tensor,
-    sliding_window: int,
     block_size: int,
-    hold_req_id: int,
-    hold_swa_slot: int,
 ):
     """Build ``history SWA + complete draft block`` indices for every DSpark query row."""
 
@@ -76,10 +73,10 @@ def build_dspark_swa_indices(
         swa_indices.stride(0),
         swa_lengths,
         swa_write_slots,
-        SWA_CAPACITY_TOKENS=req_manager.swa_capacity_tokens,
-        HOLD_REQUEST_ID=hold_req_id,
-        HOLD_SWA_SLOT=hold_swa_slot,
-        SLIDING_WINDOW=sliding_window,
+        SWA_CAPACITY_TOKENS=swa_state.swa_capacity_tokens,
+        HOLD_REQUEST_ID=swa_state.HOLD_REQUEST_ID,
+        HOLD_SWA_SLOT=swa_state.HOLD_SWA_SLOT,
+        SLIDING_WINDOW=swa_state.config.window_size,
         BLOCK_SIZE=block_size,
         WIDTH=width,
         BLOCK_W=triton.next_power_of_2(width),

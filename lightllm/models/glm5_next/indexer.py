@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 import triton
 
@@ -16,10 +17,11 @@ class Glm5NextNsaInfer:
         self.heads = network_config["index_n_heads"]
         self.dim = network_config["index_head_dim"]
         self.eps = network_config["rms_norm_eps"]
+        self.pool_size = network_config["index_kpool"]
 
     def select_topk_indices(self, logits, lengths, indices):
         """Select row-relative indices, with valid entries before -1 padding."""
-        if HAS_VLLM:
+        if HAS_VLLM and hasattr(vllm_ops, "top_k_per_row_decode"):
             # next_n=1 treats each query as an independent row, including prefill.
             # The decode entry splits long rows before merging their candidates.
             # Tested with vLLM 0.22.1; persistent_topk can drop candidates (#51782).
@@ -36,8 +38,19 @@ class Glm5NextNsaInfer:
         k = layer_weight.k_norm_(layer_weight.wk_proj_.mm(hidden_states), eps=self.eps)
         gate = layer_weight.index_kpool_compress_gate.mm(hidden_states)
         raw = torch.cat((k, gate), -1)
-        tail = infer_state.req_manager.get_indexer_tail_buffer(self.layer_idx)
-        packed_buffer = infer_state.mem_manager.get_indexer_k_buffer(self.layer_idx)
+        role = infer_state.att_state_role
+        tail = infer_state.att_state_manager.get_state(
+            model_role=role,
+            state_type_filter=f"compressor_indexer_w{self.pool_size}_s{self.pool_size}",
+            logical_layer_id=self.layer_idx,
+        ).get_layer_view(logical_layer_id=self.layer_idx)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="mla",
+            logical_layer_id=self.layer_idx,
+            state_class=FullAttentionState,
+        )
+        packed_buffer = state.get_layer_view(logical_layer_id=self.layer_idx).indexer_k
         compress_pools(
             raw=raw,
             tail=tail,

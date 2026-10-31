@@ -1,10 +1,10 @@
+from __future__ import annotations
+
 import os
+from typing import TYPE_CHECKING
 
 import torch
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.common.req_manager import DeepseekV4ReqManager
-from lightllm.common.kv_cache_mem_manager import DeepseekV4MemoryManager
-from lightllm.common.state_cache_manager.deepseek4 import DeepseekV4CacheConfig
 from lightllm.models.deepseek_v4.layer_weights.pre_and_post_layer_weight import (
     DeepseekV4PreAndPostLayerWeight,
 )
@@ -37,6 +37,12 @@ from lightllm.utils.envs_utils import get_env_start_args, get_redundancy_expert_
 from lightllm.utils.log_utils import init_logger
 from lightllm.distributed.communication_op import dist_group_manager
 
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.attention_state.full_att.base_state import FullAttentionState
+    from lightllm.common.attention_state.bounded_att.base_state import BoundedAttentionState
+
 logger = init_logger(__name__)
 
 
@@ -61,8 +67,7 @@ class DeepseekV4LayerHiddenCollector(LayerHiddenCollector):
 
 
 class DeepseekV4TpPartModel(LlamaTpPartModel):
-    req_manager: DeepseekV4ReqManager
-    mem_manager: DeepseekV4MemoryManager
+    is_hybrid_att_model = True
     has_vision = False
 
     pre_and_post_weight_class = DeepseekV4PreAndPostLayerWeight
@@ -90,30 +95,110 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                 raise ValueError("DeepSeek-V4 preselected MoE routing does not yet support redundant experts")
         return
 
-    def _init_req_manager(self):
-        cache_config = DeepseekV4CacheConfig.from_model_config(self.config, self.args)
-        self.req_manager = DeepseekV4ReqManager(
-            self.max_req_num,
-            self.max_seq_length,
-            None,
-            cache_config,
-            mtp_step=self.args.mtp_step,
-        )
+    @classmethod
+    def create_full_att_states(
+        cls,
+        model_config: dict[str, object],
+        args: StartArgs | EasyDict,
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+    ) -> list[FullAttentionState]:
+        """分别创建 C4/C128 定义；逻辑索引保留原始 token 域，不提前分配存储。"""
+        from lightllm.common.attention_state.full_att.create_compressed_att_state import create_compressed_att_state
+        from .config import create_attention_config
 
-    def _init_mem_manager(self):
-        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
-        cache_config = self.req_manager.cache_config
-        self.mem_manager = DeepseekV4MemoryManager(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=1,
-            head_dim=cache_config.head_dim,
-            layer_num=cache_config.layer_num,
-            mem_fraction=self.mem_fraction,
-            cache_config=cache_config,
+        assert args.llm_kv_type in ("None", "fp8kv_dsa"), f"unsupported V4 KV encoding: {args.llm_kv_type}"
+        config = create_attention_config(
+            model_config=model_config,
+            model_logical_layer_ids=model_logical_layer_ids,
+            tp_rank=tp_rank,
+            tp_world_size=tp_world_size,
         )
-        self.req_manager.bind_mem_manager(self.mem_manager)
-        return
+        states = []
+        for ratio in (4, 128):
+            if ratio not in config.compress_ratios:
+                continue
+            states.append(create_compressed_att_state(
+                config=config.create_compressed_config(compress_ratio=ratio),
+                page_size=args.page_size,
+                device="meta",
+            ))
+        return states
+
+    @classmethod
+    def create_bounded_att_states(
+        cls,
+        model_config: dict[str, object],
+        args: StartArgs | EasyDict,
+        model_logical_layer_ids: tuple[int, ...],
+        request_capacity: int = 1,
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+        device: str = "meta",
+    ) -> list[BoundedAttentionState]:
+        """创建本模型的 SWA/compressor 请求运行态，大小页容量由管理器后续确定。"""
+        from lightllm.common.attention_state.bounded_att import (
+            WindowCompressorStateConfig,
+            create_window_compressor_state,
+            create_sliding_window_state,
+        )
+        from .config import create_attention_config
+
+        config = create_attention_config(
+            model_config=model_config,
+            model_logical_layer_ids=model_logical_layer_ids,
+            tp_rank=tp_rank,
+            tp_world_size=tp_world_size,
+        )
+        states = [create_sliding_window_state(
+            config=config.create_swa_config(),
+            request_capacity=request_capacity,
+            mtp_step=args.mtp_step,
+            device=device,
+        )]
+        # 模型决定窗口组合：CSA 使用 W8/S4，HCA 使用 W128/S128；State 本身不识别 C4/C128。
+        for ratio, window_size in ((4, 8), (128, 128)):
+            layers = tuple(
+                layer for layer, compress_ratio in zip(model_logical_layer_ids, config.compress_ratios)
+                if compress_ratio == ratio
+            )
+            if not layers:
+                continue
+            targets = (
+                (("kv", config.head_dim), ("indexer", config.indexer_head_dim))
+                if ratio == 4 else (("kv", config.head_dim),)
+            )
+            for target, head_dim in targets:
+                states.append(create_window_compressor_state(
+                    config=WindowCompressorStateConfig(
+                        logical_layer_ids=layers,
+                        window_size=window_size,
+                        compress_stride=ratio,
+                        candidate_dim=head_dim * (2 if window_size > ratio else 1),
+                        target=target,
+                        tp_rank=tp_rank,
+                        tp_world_size=tp_world_size,
+                    ),
+                    request_capacity=request_capacity,
+                    mtp_step=args.mtp_step,
+                    device=device,
+                ))
+        return states
+
+    def prepare_attention_states(self) -> None:
+        super().prepare_attention_states()
+        # 在统一容量规划前预留长 prefill 的 SWA 临时区，避免 KV 分配挤占计算所需空间。
+        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
+
+    def _init_quant(self):
+        if not self.is_mtp_draft_model:
+            return super()._init_quant()
+        from lightllm.common.quantization import Quantcfg
+
+        # 权重量化按 checkpoint 层号查询；draft 的资源层数仍只描述自身。
+        config = dict(self.config, n_layer=len(self.config["compress_ratios"]))
+        self.quant_cfg = Quantcfg(config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
 
     def _init_att_backend(self):
         args = get_env_start_args()

@@ -18,7 +18,9 @@ class CompressorInfer(BaseLayerInfer):
         self.layer_idx_ = layer_idx
         self.tp_world_size_ = tp_world_size
         self.is_in_indexer = is_in_indexer
-        self.compress_ratio = network_config["compress_ratios"][layer_idx]
+        ratios = network_config["compress_ratios"]
+        # 额外的 MTP 执行层只使用 SWA，checkpoint 可只记录一个共享的 MTP 权重层。
+        self.compress_ratio = ratios[layer_idx] if layer_idx < len(ratios) else 0
         self.head_dim = network_config["index_head_dim" if is_in_indexer else "head_dim"]
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.eps = network_config["rms_norm_eps"]
@@ -92,35 +94,25 @@ def fused_compress(
     is_in_indexer: bool = False,
     out_buffer: torch.Tensor = None,
 ):
-    mem_manager = infer_state.mem_manager
-    req_manager = infer_state.req_manager
+    state = infer_state.get_compressor_state(logical_layer_id=layer_idx, target="indexer" if is_in_indexer else "kv")
+    req_to_compressor_state = state.get_layer_view(logical_layer_id=layer_idx)
     compressed_kv_slots = torch.where(
         (infer_state.position_ids + 1) % compress_ratio == 0,
         infer_state.mem_index.reshape(-1) // compress_ratio,
         -1,
     )
     if is_in_indexer:
-        req_to_compressor_state = req_manager.req_to_c4_indexer_state[
-            req_manager.cache_config.layer_to_c4_idx[layer_idx]
-        ]
         if out_buffer is None:
             out_buffer = torch.empty(
-                (infer_state.mem_index.numel(), req_manager.cache_config.indexer_head_dim),
+                (infer_state.mem_index.numel(), head_dim),
                 dtype=torch.bfloat16,
                 device=infer_state.mem_index.device,
             )
         out_page_size = 1
     else:
-        if compress_ratio == 4:
-            req_to_compressor_state = req_manager.req_to_c4_state[req_manager.cache_config.layer_to_c4_idx[layer_idx]]
-        else:
-            req_to_compressor_state = req_manager.req_to_c128_state[
-                req_manager.cache_config.layer_to_c128_idx[layer_idx]
-            ]
-        out_page_size = req_manager.cache_config.compressed_kv_token_alignment // compress_ratio
-        from lightllm.models.deepseek_v4.triton_kernel.cache_io import get_compressed_kv_buffer
-
-        out_buffer = get_compressed_kv_buffer(mem_manager, layer_idx)
+        compressed = infer_state.get_compressed_kv_state(logical_layer_id=layer_idx)
+        out_page_size = compressed.config.block_token_size // compress_ratio
+        out_buffer = compressed.get_layer_view(logical_layer_id=layer_idx).kv
 
     if kv_score.shape[0] == 0:
         return out_buffer
@@ -160,7 +152,7 @@ def fused_compress(
         CANDIDATE_DIM=candidate_dim,
         STATE_DIM=state_dim,
         COMPRESS_RATIO=compress_ratio,
-        WINDOW_SIZE=compress_ratio * (2 if is_c4 else 1),
+        WINDOW_SIZE=state.config.window_size,
         IS_C4=is_c4,
         IS_PREFILL=infer_state.is_prefill,
         STATE_CAPACITY_TOKENS=state_capacity_tokens,

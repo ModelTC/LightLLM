@@ -14,9 +14,8 @@ class DeepseekV4DSparkTransformerLayerInfer(DeepseekV4TransformerLayerInfer):
 
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
-        final_layer = network_config["n_layer"] + network_config["dspark_layer_num"] - 1
-        self.stage_id = layer_num - network_config["n_layer"]
-        self.is_last_layer = layer_num == final_layer
+        self.stage_id = layer_num - network_config["draft_layer_start_id"]
+        self.is_last_layer = self.stage_id == network_config["n_layer"] - 1
 
     def context_forward(
         self,

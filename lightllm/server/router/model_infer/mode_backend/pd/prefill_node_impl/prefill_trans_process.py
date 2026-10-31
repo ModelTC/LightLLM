@@ -8,7 +8,9 @@ import queue
 import pickle
 from typing import List, Dict, Optional, Union
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
+from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
@@ -58,20 +60,20 @@ def _init_env(
         graceful_registry(inspect.currentframe().f_code.co_name)
         task_out_queue.put("proc_start")
 
-        # 从共享内存读取所有rank的mem_manager
+        # 从共享内存读取所有 rank 的 attention 资源
         node_world_size = args.tp // args.nnodes
-        mem_managers: List[MemoryManager] = [
-            MemoryManager.loads_from_shm(rank_in_node=rank) for rank in range(node_world_size)
+        resource_managers: List[AttentionStateManager] = [
+            load_att_resources(rank, kind="pd")[0] for rank in range(node_world_size)
         ]
 
-        task_out_queue.put("get_mem_managers_ok")
+        task_out_queue.put("get_resources_ok")
 
         manager = _PrefillTransModule(
             args=args,
             device_id=device_id,
             task_in_queue=task_in_queue,
             task_out_queue=task_out_queue,
-            mem_managers=mem_managers,
+            resource_managers=resource_managers,
         )
         assert manager is not None
         task_out_queue.put("module_ready")
@@ -93,19 +95,19 @@ class _PrefillTransModule:
         device_id: int,
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
-        mem_managers: List[MemoryManager],
+        resource_managers: List[AttentionStateManager],
     ) -> None:
         self.args = args
         self.dp_world_size = self.args.tp // self.args.dp
         self.device_id = device_id
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
-        self.mem_managers = mem_managers
+        self.resource_managers = resource_managers
 
-        cur_mem_manager: MemoryManager = self.mem_managers[device_id]
-        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
-            page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
+        kv_move_buffer = allocate_transfer_buffer(
+            self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
         )
+        self.kv_move_buffer = kv_move_buffer
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -145,13 +147,16 @@ class _PrefillTransModule:
     def _warmup(self):
         for dp_index in range(self.args.dp // self.args.nnodes):
             with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.write_mem_to_page_kv_move_buffer(
-                    mem_indexes=[0],
-                    page_index=0,
-                    dp_index=dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
+                cpu_token_indices = torch.tensor([0], dtype=torch.long, device="cpu")
+                token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
+                copy_page(
+                    node_att_managers=self.resource_managers,
+                    pd_page_buffers=self.kv_move_buffer,
+                    write_to_pd_page=True,
+                    token_indices=token_indices,
+                    pd_page_index=0,
+                    dp_rank_in_node=dp_index,
+                    tp_world_size=self.dp_world_size,
                 )
                 torch.cuda.current_stream().synchronize()
         return
@@ -203,15 +208,23 @@ class _PrefillTransModule:
 
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.write_mem_to_page_kv_move_buffer(
-                    trans_task.mem_indexes,
-                    page_index=trans_task.src_page_index,
-                    dp_index=trans_task.prefill_dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
-                    page_kind=trans_task.page_kind,
+                # 只有 KV 页使用 token 索引；att_state 直接按请求槽位搬运运行态。
+                token_indices = None
+                if trans_task.page_kind == "kv":
+                    cpu_token_indices = torch.tensor(trans_task.mem_indexes, dtype=torch.long, device="cpu")
+                    # 索引上传和后续页拷贝使用同一流，保证执行顺序。
+                    token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
+                copy_page(
+                    node_att_managers=self.resource_managers,
+                    pd_page_buffers=self.kv_move_buffer,
+                    write_to_pd_page=True,
+                    token_indices=token_indices,
+                    pd_page_index=trans_task.src_page_index,
+                    dp_rank_in_node=trans_task.prefill_dp_index,
+                    tp_world_size=self.dp_world_size,
+                    task_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
+                    state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
                 )
                 sync_event = torch.cuda.Event()
                 sync_event.record()

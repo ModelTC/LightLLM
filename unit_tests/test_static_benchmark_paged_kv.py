@@ -20,7 +20,7 @@ from static_benchmark import (
 )
 
 
-class FakeMemManager:
+class FakeKVAllocator:
     def __init__(self, page_size: int):
         self.page_size = page_size
         self.next_index = 0
@@ -35,15 +35,14 @@ class FakeMemManager:
 
 
 def make_executor(page_size: int = 4):
-    mem_manager = FakeMemManager(page_size=page_size)
+    allocator = FakeKVAllocator(page_size=page_size)
     req_manager = SimpleNamespace(
-        mem_manager=mem_manager,
         req_to_token_indexs=torch.full((4, 32), -1, dtype=torch.int32),
     )
-    model = SimpleNamespace(mem_manager=mem_manager, req_manager=req_manager)
+    model = SimpleNamespace(att_state_manager=SimpleNamespace(full_att_allocator=allocator), req_manager=req_manager)
     args = SimpleNamespace(mtp_mode=None, mtp_step=0)
     executor = StaticBenchmarkExecutor(args=args, model=model, draft_models=[], token_source=None)
-    return executor, mem_manager, req_manager
+    return executor, allocator, req_manager
 
 
 def assert_complete_physical_pages(indexes: torch.Tensor, page_size: int):
@@ -53,7 +52,7 @@ def assert_complete_physical_pages(indexes: torch.Tensor, page_size: int):
 
 
 def test_prefill_allocates_and_reuses_complete_pages_per_request():
-    executor, mem_manager, req_manager = make_executor(page_size=4)
+    executor, allocator, req_manager = make_executor(page_size=4)
     req_idx = torch.tensor([0, 1], dtype=torch.int32)
 
     model_input = executor._make_prefill_input(
@@ -62,7 +61,7 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
         ready_cache_len=0,
     )
 
-    assert mem_manager.alloc_sizes == [4, 4]
+    assert allocator.alloc_sizes == [4, 4]
     assert model_input.b_is_decode_req.tolist() == [False, False]
     assert executor._hold_kv_len_by_req == {0: 4, 1: 4}
     assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :4], page_size=4)
@@ -77,7 +76,7 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
         input_ids=torch.tensor([1, 2], dtype=torch.int64),
         max_kv_seq_len=4,
     )
-    assert mem_manager.alloc_sizes == [4, 4]
+    assert allocator.alloc_sizes == [4, 4]
 
     # 跨过页边界后，每个请求分别追加一整页。
     executor._make_decode_input(
@@ -88,14 +87,14 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
         input_ids=torch.tensor([3, 4], dtype=torch.int64),
         max_kv_seq_len=5,
     )
-    assert mem_manager.alloc_sizes == [4, 4, 4, 4]
+    assert allocator.alloc_sizes == [4, 4, 4, 4]
     assert executor._hold_kv_len_by_req == {0: 8, 1: 8}
     assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :8], page_size=4)
     assert_complete_physical_pages(req_manager.req_to_token_indexs[1, :8], page_size=4)
 
 
 def test_mtp_expanded_rows_allocate_once_per_request():
-    executor, mem_manager, req_manager = make_executor(page_size=4)
+    executor, allocator, req_manager = make_executor(page_size=4)
     executor.args.mtp_mode = "eagle_with_att"
     executor.args.mtp_step = 3
 
@@ -110,7 +109,7 @@ def test_mtp_expanded_rows_allocate_once_per_request():
     )
 
     assert model_input.batch_size == 4
-    assert mem_manager.alloc_sizes == [8, 8]
+    assert allocator.alloc_sizes == [8, 8]
     assert executor._hold_kv_len_by_req == {0: 8, 1: 8}
     assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :8], page_size=4)
     assert_complete_physical_pages(req_manager.req_to_token_indexs[1, :8], page_size=4)

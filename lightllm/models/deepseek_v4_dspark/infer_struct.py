@@ -19,7 +19,7 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
             return super()._init_swa_metadata(model)
 
         pos = self.position_ids
-        swa_width = ((self.req_manager.cache_config.sliding_window + model.block_size + 127) // 128) * 128
+        swa_width = ((self.swa_state.config.window_size + model.block_size + 127) // 128) * 128
         self.dsv4_swa_indices = torch.empty((pos.numel(), swa_width), dtype=torch.int32, device=pos.device)
         self.dsv4_swa_lengths = torch.empty_like(pos, dtype=torch.int32)
         self.dsv4_swa_write_slots = torch.empty_like(pos, dtype=torch.int32)
@@ -27,12 +27,9 @@ class DeepseekV4DSparkInferStateInfo(DeepseekV4InferStateInfo):
         build_dspark_swa_indices(
             token_req_idx=self.dsv4_sparse_req_idx,
             position_ids=self.position_ids,
-            req_manager=self.req_manager,
+            swa_state=self.swa_state,
             swa_indices=self.dsv4_swa_indices,
             swa_lengths=self.dsv4_swa_lengths,
             swa_write_slots=self.dsv4_swa_write_slots,
-            sliding_window=model.config["sliding_window"],
             block_size=model.block_size,
-            hold_req_id=self.req_manager.HOLD_REQUEST_ID,
-            hold_swa_slot=self.req_manager.HOLD_SWA_SLOT,
         )

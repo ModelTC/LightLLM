@@ -1,7 +1,6 @@
 """SenseNova Loop: shared checkpoint weights and independent execution caches."""
 
 from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
-from lightllm.utils.config_utils import get_config_json
 from .config import get_loop_layer_indices, get_loop_layer_types
 from .layer_infer.transformer_layer_infer import SenseNovaLoopTransformerLayerInfer
 from .layer_weights.transformer_layer_weight import SenseNovaLoopTransformerLayerWeight
@@ -13,20 +12,26 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
     transformer_weight_class = SenseNovaLoopTransformerLayerWeight
     transformer_layer_infer_class = SenseNovaLoopTransformerLayerInfer
 
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        config = super().normalize_model_config(model_config)
+        if "loop_physical_indices" not in config:
+            settings = model_config["loop_settings"]
+            indices = get_loop_layer_indices(settings, config["num_hidden_layers"])
+            config.update(
+                layer_types=get_loop_layer_types(settings, config),
+                n_layer=len(indices),
+                num_hidden_layers=len(indices),
+                loop_physical_indices=indices,
+            )
+        if model_config.get("mhc") is not None:
+            config["mhc"] = model_config["mhc"]
+        return config
+
     def _init_config(self):
         super()._init_config()
-        model_config = get_config_json(self.weight_dir_)
-        settings = model_config["loop_settings"]
-        self.num_physical_layers = self.config["n_layer"]
-        self.loop_layer_indices = get_loop_layer_indices(settings, self.num_physical_layers)
-        self.config.update(
-            layer_types=get_loop_layer_types(settings, self.config),
-            n_layer=len(self.loop_layer_indices),
-            num_hidden_layers=len(self.loop_layer_indices),
-            loop_physical_indices=self.loop_layer_indices,
-        )
-        if model_config.get("mhc") is not None:
-            self.config["mhc"] = model_config["mhc"]
+        self.loop_layer_indices = self.config["loop_physical_indices"]
+        self.num_physical_layers = max(self.loop_layer_indices) + 1
 
     def _init_weights(self, start_layer_index=0):
         # Allocate and preprocess each checkpoint layer once, then alias weights.

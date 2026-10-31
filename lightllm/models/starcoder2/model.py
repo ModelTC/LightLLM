@@ -1,3 +1,4 @@
+from typing import TYPE_CHECKING
 import torch
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.starcoder2.layer_weights.pre_and_post_layer_weight import Starcoder2PreAndPostLayerWeight
@@ -7,9 +8,13 @@ from lightllm.models.starcoder2.layer_infer.transformer_layer_infer import Starc
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
 
 from lightllm.common.build_utils import repair_config
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.common.basemodel import TpPartBaseModel
+
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 class Starcoder2TpPartModel(TpPartBaseModel):
@@ -27,6 +32,31 @@ class Starcoder2TpPartModel(TpPartBaseModel):
         super().__init__(kvargs)
         return
 
+    @classmethod
+    def create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """按本模型的全局逻辑层创建 GQA 布局，量化存储由算法入口选择。"""
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+        config = cls.normalize_model_config(model_config)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=GQAAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
+                head_dim=config.get("head_dim", config["hidden_size"] // config["num_attention_heads"]),
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+        )
+        return [state]
+
     def _init_config(self):
         super()._init_config()
         repair_config(self.config, same_names=["norm_epsilon", "rms_norm_eps", "layer_norm_epsilon"])
@@ -43,17 +73,6 @@ class Starcoder2TpPartModel(TpPartBaseModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
-        return
-
-    def _init_mem_manager(self):
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
-            head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
         return
 
     def _init_some_value(self):

@@ -1,13 +1,18 @@
+from typing import TYPE_CHECKING
 from lightllm.models.starcoder.layer_infer.transformer_layer_infer import StarcoderTransformerLayerInfer
 from lightllm.models.starcoder.layer_infer.pre_layer_infer import StarcoderPreLayerInfer
 from lightllm.models.starcoder.layer_weights.transformer_layer_weight import StarcoderTransformerLayerWeight
 from lightllm.models.starcoder.layer_weights.pre_and_post_layer_weight import StarcoderPreAndPostLayerWeight
 from lightllm.models.bloom.layer_infer.post_layer_infer import BloomPostLayerInfer
 from lightllm.common.build_utils import repair_config
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel import InferStateInfo
+
+
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
 
 class StarcoderTpPartModel(TpPartBaseModel):
@@ -24,6 +29,32 @@ class StarcoderTpPartModel(TpPartBaseModel):
     def __init__(self, kvargs):
         super().__init__(kvargs)
 
+    @classmethod
+    def create_full_att_states(
+        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
+        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """StarCoder 的单份 KV 在各 TP rank 复制，逻辑层由本模型直接定义。"""
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+        config = cls.normalize_model_config(model_config)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=GQAAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=1,
+                head_dim=config["hidden_size"] // config["num_attention_heads"],
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank, tp_world_size=tp_world_size,
+                replicated=True,
+            ),
+            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+        )
+        return [state]
+
     def _init_config(self):
         super()._init_config()
         # rename key
@@ -38,17 +69,6 @@ class StarcoderTpPartModel(TpPartBaseModel):
 
     def _verify_params(self):
         assert self.load_way == "HF", "StarCoder only support HF format to load Now!"
-
-    def _init_mem_manager(self):
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=self.config["num_key_value_heads"],
-            head_dim=self.config["hidden_size"] // self.config["num_attention_heads"],
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
-        return
 
     def _init_some_value(self):
         super()._init_some_value()
