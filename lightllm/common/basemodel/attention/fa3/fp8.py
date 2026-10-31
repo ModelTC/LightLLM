@@ -3,7 +3,10 @@ import weakref
 import torch
 from ..base_att import AttControl
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
-from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import q_per_head_static_fp8_quant
+from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import (
+    q_per_head_fp8_quant,
+    q_per_head_static_fp8_quant,
+)
 from lightllm.utils.log_utils import init_logger
 from .fp import Fa3AttBackend, Fa3PrefillAttState, Fa3DecodeAttState
 
@@ -100,9 +103,18 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             f"{self.infer_state.att_resource_role}_gqa_fp8_static_per_head_state",
         )
         storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        static_q_scales = state.q_scales[storage_layer_index]
-        q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales)
-        q_scale = static_q_scales.view(1, k_head_num).expand(self.infer_state.b_seq_len.shape[0], k_head_num)
+        q = q.reshape(q.shape[0], k_head_num, -1)
+        if state.q_scales is None:
+            # 旧标定文件仅包含 K/V；按本次请求的 Q 长度动态计算每个 KV head 的 scale。
+            q, q_scale = q_per_head_fp8_quant(
+                q=q,
+                seq_lens=self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1],
+                b1_start_loc=self.cu_seqlens_q,
+            )
+        else:
+            static_q_scales = state.q_scales[storage_layer_index]
+            q = q_per_head_static_fp8_quant(q=q, scales=static_q_scales)
+            q_scale = static_q_scales.view(1, k_head_num).expand(self.infer_state.b_seq_len.shape[0], k_head_num)
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, q_head_dim),
             k_cache=cache_k,
@@ -201,9 +213,18 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
 
         q_head_num = q.shape[1]
         att_batch_size = self.b_att_seq_len.shape[0]
-        static_q_scales = state.q_scales
-        q = q_per_head_static_fp8_quant(q.reshape(q.shape[0], k_head_num, -1), static_q_scales[storage_layer_index])
-        q_scale = static_q_scales[storage_layer_index].view(1, k_head_num).expand(att_batch_size, k_head_num)
+        q = q.reshape(q.shape[0], k_head_num, -1)
+        if state.q_scales is None:
+            # 使用 FA3 的实际 Q 分组，兼容普通 decode、MTP 多 token 及零长度填充组。
+            q, q_scale = q_per_head_fp8_quant(
+                q=q,
+                seq_lens=self.cu_seqlens_q[1:] - self.cu_seqlens_q[:-1],
+                b1_start_loc=self.cu_seqlens_q,
+            )
+        else:
+            static_q_scales = state.q_scales[storage_layer_index]
+            q = q_per_head_static_fp8_quant(q=q, scales=static_q_scales)
+            q_scale = static_q_scales.view(1, k_head_num).expand(att_batch_size, k_head_num)
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, k_head_dim),
             k_cache=cache_k,

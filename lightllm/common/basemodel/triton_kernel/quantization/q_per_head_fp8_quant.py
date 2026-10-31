@@ -82,7 +82,8 @@ def q_per_head_fp8_quant(q, seq_lens, b1_start_loc, scale_out=None, token_batch_
     if scale_out is None:
         scale_out = torch.empty((B, H), dtype=torch.float32, device=q.device)
     if token_batch_ids is None:
-        token_batch_ids = torch.repeat_interleave(torch.arange(B, device=q.device), seq_lens)
+        # 输出 token 数已知，避免读取 GPU 上的长度总和，允许在 CUDA Graph 中调用。
+        token_batch_ids = torch.repeat_interleave(torch.arange(B, device=q.device), seq_lens, output_size=T)
 
     _per_head_max_reduce_kernel[(B, H)](
         q,

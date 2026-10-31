@@ -212,7 +212,7 @@ class NsaInfer:
         state = infer_state.att_resource_manager.get_att_state(
             model_name=infer_state.att_resource_role,
             att_type="mla",
-            logical_layer_id=self.layer_num_,
+            logical_layer_id=self.layer_idx_,
             state_class=FullAttentionState,
         )
         destindex_copy_indexer_ks(

@@ -76,13 +76,14 @@ class StaticFP8FullAttentionState(FullAttentionState):
 
         行起点由管理器按 main、draft0..draft35 的完整 State 集合确定，不是逻辑层号。
         同组逻辑层共用一行；State 内的行顺序与 logical_layer_groups 的物理层顺序一致。
-        无文件时仅 per_tensor 可使用单位 scale；per_head 必须包含 K/V 和 Q 标定。
+        无文件时仅 per_tensor 可使用单位 scale；per_head 必须有 K/V 标定，Q 标定可选。
+        未提供 Q 标定时由 attention backend 动态量化 Q。
         """
         assert self.k_storage is None and self.scales is None, "calibration must be bound once before storage allocation"
         config = self.config
         storage_layer_count = len(config.logical_layer_groups)
         if calibration is None:
-            assert config.scale_mode == "per_tensor", "per-head FP8 requires a calibration file with Q scales"
+            assert config.scale_mode == "per_tensor", "per-head FP8 requires a KV calibration file"
             scales = torch.ones(size=(storage_layer_count, 2), dtype=torch.float32)
             q_scales = None
         else:
@@ -121,10 +122,11 @@ class StaticFP8FullAttentionState(FullAttentionState):
                 k, v = all_scales.split(split_size=calibrated_heads, dim=-1)
                 scales = torch.cat(tensors=(shard(k, calibrated_heads), shard(v, calibrated_heads)), dim=-1)
                 q_config = calibration.get("q_calibration")
-                assert q_config, "per-head FP8 requires Q calibration"
-                q_scales = shard(
-                    scale_tensor(q_config, (calibrated_layer_count, q_config["num_head"])), q_config["num_head"],
-                )
+                q_scales = None
+                if q_config is not None:
+                    q_scales = shard(
+                        scale_tensor(q_config, (calibrated_layer_count, q_config["num_head"])), q_config["num_head"],
+                    )
             else:
                 scales = scale_tensor(calibration, (calibrated_layer_count, 2))
                 q_scales = None
