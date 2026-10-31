@@ -165,8 +165,10 @@ class LinearAttCacheManager(StateCacheManager):
         size: int,
         linear_config: LinearAttCacheConfig,
         keep_num: int = 0,  # 用于记录需要保留的缓存数量，用于支持含有 linear_att 的如qwen3.5 模型的cpu cache的碎页处理。
+        shm_name: str = None,
+        shm_create: bool = False,
     ):
-        super().__init__(size, keep_num)
+        super().__init__(size, keep_num, shm_name, shm_create)
         self.linear_config = linear_config
         # init the layer cache
         self.conv_state_cache = LayerCache(
@@ -176,6 +178,8 @@ class LinearAttCacheManager(StateCacheManager):
             layer_num=self.linear_config.linear_layer_num,
             device="cpu",
             size_first=True,
+            shm_name=None if shm_name is None else shm_name + "_conv",
+            shm_create=shm_create,
         )
         self.ssm_state_cache = LayerCache(
             size=self.size,
@@ -184,15 +188,10 @@ class LinearAttCacheManager(StateCacheManager):
             layer_num=self.linear_config.linear_layer_num,
             device="cpu",
             size_first=True,
+            shm_name=None if shm_name is None else shm_name + "_ssm",
+            shm_create=shm_create,
         )
-        self.clear_to_init_state()
         return
 
     def get_state_cache(self, buffer_idx: int):
         return self.conv_state_cache.buffer[buffer_idx, ...], self.ssm_state_cache.buffer[buffer_idx, ...]
-
-    def clear_to_init_state(self):
-        self.conv_state_cache.buffer.zero_()
-        self.ssm_state_cache.buffer.zero_()
-        super().clear_to_init_state()
-        return

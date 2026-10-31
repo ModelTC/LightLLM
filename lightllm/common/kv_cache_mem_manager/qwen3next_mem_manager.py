@@ -3,6 +3,7 @@ import triton
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager.mem_manager import MemoryManager
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.utils.dist_utils import get_dp_rank_in_node
 from lightllm.common.state_cache_manager import LinearAttCacheConfig, LinearAttCacheManager
 from .fp8_static_per_head_quant_mem_manager import FP8StaticPerHeadQuantMemManager
 from .fp8_static_per_tensor_quant_mem_manager import FP8StaticPerTensorQuantMemManager
@@ -45,20 +46,24 @@ class Qwen3NextMemManager(MemoryManager):
         return
 
     def _init_linear_att_buffers(self):
-        big_page_token_num = (
-            get_env_start_args().linear_att_page_block_num * get_env_start_args().linear_att_hash_page_size
-        )
+        args = get_env_start_args()
+        big_page_token_num = args.linear_att_page_block_num * args.linear_att_hash_page_size
         # 申请大页可能需要对应的资源, 多申请了两个linear att的状态，理论上这个状态
         # 永远不会被 alloc 申请到，只会在 cpu cache中，用于过渡和存储碎页情况下的
         # cpu cache 的页面拷贝。
-        self.big_page_buffers = LinearAttCacheManager(
-            size=triton.cdiv(self.size, big_page_token_num) + 2,
+        dp_size_in_node = max(1, args.dp // args.nnodes)
+        per_dp_keep_num = 2
+        self.big_page_buffers = LinearAttCacheManager.create_dp_shared(
+            name="dp_big_checkpoints",
+            size=triton.cdiv(self.size, big_page_token_num) + per_dp_keep_num,
             linear_config=self.linear_config,
-            keep_num=2,
+            keep_num=per_dp_keep_num,
         )
-
-        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 2
-        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.big_page_buffers.size - 1
+        dp_rank_in_node = get_dp_rank_in_node() if dp_size_in_node > 1 else 0
+        self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID = (
+            self.big_page_buffers.size - self.big_page_buffers.keep_num + dp_rank_in_node * per_dp_keep_num
+        )
+        self.CPU_CACHE_BIG_PAGE_OFFLOAD_TEMP_BUFFER_ID = self.CPU_CACHE_BIG_PAGE_LOAD_TEMP_BUFFER_ID + 1
         return
 
     def _free_buffers(self):

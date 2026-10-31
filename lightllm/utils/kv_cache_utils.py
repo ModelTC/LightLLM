@@ -2,6 +2,7 @@ import torch
 import ctypes
 import dataclasses
 import os
+import math
 import xxhash
 import threading
 import concurrent.futures
@@ -239,9 +240,11 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
 
 
 @lru_cache(maxsize=None)
-def register_shm_ptr_to_pin(shm_ptr: int, size: int) -> int:
-    """Synchronously cudaHostRegister the given [shm_ptr, shm_ptr+size)."""
+def register_shm_ptr_to_pin(shm_ptr: int, size: int, registration_alignment: int = 1) -> int:
+    """Register page-aligned segments without splitting a caller's copy unit."""
     chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
+    alignment = math.lcm(registration_alignment, os.sysconf("SC_PAGE_SIZE"))
+    chunk_bytes = max(alignment, chunk_bytes // alignment * alignment)
     tasks: list[tuple[int, int]] = []
     offset = 0
     while offset < size:
