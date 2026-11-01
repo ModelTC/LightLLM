@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.models.deepseek_v4.config import DSV4AttentionConfig
-from lightllm.common.attention_state.full_att.compressed_att_state import (
+from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
     CompressedAttentionConfig,
     CompressedAttentionState,
 )

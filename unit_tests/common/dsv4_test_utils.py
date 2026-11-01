@@ -17,7 +17,7 @@ from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, WindowCompressorState
 from lightllm.common.attention_state.bounded_att.window_pages_pool import WindowPagesPool
 from lightllm.common.attention_state.bounded_att.utils import create_page_pool_tensor
-from lightllm.common.attention_state.full_att.compressed_att_state import (
+from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
     CompressedAttentionConfig,
     CompressedAttentionState,
 )

@@ -105,7 +105,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         tp_world_size: int = 1,
     ) -> list[FullAttentionState]:
         """分别创建 C4/C128 定义；逻辑索引保留原始 token 域，不提前分配存储。"""
-        from lightllm.common.attention_state.full_att.create_compressed_att_state import create_compressed_att_state
+        from lightllm.common.attention_state.full_att.compressed_att.create_compressed_att_state import create_compressed_att_state
         from .config import create_attention_config
 
         assert args.llm_kv_type in ("None", "fp8kv_dsa"), f"unsupported V4 KV encoding: {args.llm_kv_type}"

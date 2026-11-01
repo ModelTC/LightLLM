@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState
-from lightllm.common.attention_state.full_att.gqa_transfer import transfer_gqa_pages
+from lightllm.common.attention_state.full_att.gqa.gqa_transfer import transfer_gqa_pages
 from lightllm.common.attention_state.types import StateTransferLayout
 
 if TYPE_CHECKING:

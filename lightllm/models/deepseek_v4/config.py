@@ -4,8 +4,8 @@
 from dataclasses import dataclass
 from typing import ClassVar
 
-from lightllm.common.attention_state.bounded_att.fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig
-from lightllm.common.attention_state.full_att.compressed_att_state import CompressedAttentionConfig
+from lightllm.common.attention_state.bounded_att.sliding_window.fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig
+from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import CompressedAttentionConfig
 
 
 @dataclass(frozen=True)

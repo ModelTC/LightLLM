@@ -4,7 +4,7 @@ from typing import Literal
 import torch
 from lightllm.common.basemodel import InferStateInfo
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, WindowCompressorState
-from lightllm.common.attention_state.full_att.compressed_att_state import (
+from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
     CompressedAttentionState,
     CompressedAttentionLayerView,
 )

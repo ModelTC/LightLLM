@@ -31,7 +31,7 @@ from unit_tests.common.att_resources.test_model_resources import make_resources
 if TYPE_CHECKING:
     from collections.abc import Sequence
     from lightllm.common.attention_state.manager import AttentionStateManager
-    from lightllm.common.attention_state.full_att.packed_mla_state import PackedMLAFullAttentionState
+    from lightllm.common.attention_state.full_att.packed_mla.packed_mla_state import PackedMLAFullAttentionState
     from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclKVTransporter
     from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
     from multiprocessing.connection import Connection

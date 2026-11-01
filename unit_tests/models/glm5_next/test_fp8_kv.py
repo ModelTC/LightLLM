@@ -21,7 +21,7 @@ from lightllm.models.glm5_next.triton_kernel.fp8_sparse_decode import (
     fp8_sparse_direct_decode,
 )
 from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
-from lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
+from lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
 from lightllm.models.glm5_next.triton_kernel import context_flashattention_nopad_fp8 as fp8_prefill
 from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
     _build_prefill_row_table_kernel,
@@ -1283,7 +1283,7 @@ def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
 
     args = SimpleNamespace(cpu_cache_token_page_size=4, pd_kv_page_size=4)
     monkeypatch.setattr("lightllm.common.attention_state.manager.get_env_start_args", lambda: args)
-    monkeypatch.setattr("lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla_state.get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla.fp8_e8m0_packed_mla_state.get_env_start_args", lambda: args)
     config = PackedMLALogicalConfig(
         logical_layer_groups=((3,),), latent_dim=512, format="packed_group64_e8m0",
     )

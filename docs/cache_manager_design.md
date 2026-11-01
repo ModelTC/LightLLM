@@ -310,23 +310,17 @@ lightllm/common/
 │   ├── full_att/
 │   │   ├── __init__.py
 │   │   ├── base_state.py                # FullAttentionState：抽象行为接口
-│   │   ├── create_gqa_state.py          # GQA 统一创建入口：选择普通精度、INT4/INT8 或静态 FP8
-│   │   ├── gqa_state.py                 # GQAFullAttentionState：兼容 MHA / GQA / MQA
-│   │   ├── gqa_transfer.py             # GQA CPU/PD 共用的 K/V 页传输入口与 kernel
+│   │   ├── gqa/                         # GQA 配置、State、创建入口和传输实现
+│   │   │   ├── create_gqa_state.py
+│   │   │   ├── gqa_state.py
+│   │   │   └── gqa_transfer.py
 │   │   ├── dp_transfer.py              # 各 full-attention 方案的直接索引 DP 聚合复制
-│   │   ├── group_quantized_state.py     # GroupQuantizedFullAttentionState：INT4 / INT8 等
-│   │   ├── group_quantized_transfer.py          # INT4/INT8 KV 与动态 scale 的定制传输
-│   │   ├── static_fp8_state.py          # StaticFP8FullAttentionState
-│   │   ├── static_fp8_transfer.py               # FP8 K/V 原始编码的定制传输
-│   │   ├── create_mla_state.py          # MLA 统一创建入口：选择普通、packed 或 packed FP8
-│   │   ├── mla_state.py                 # MLAFullAttentionState：压缩 latent 存储
-│   │   ├── create_compressed_att_state.py # 序列压缩历史 KV 的独立创建入口
-│   │   ├── compressed_att_state.py   # 独立配置及 V4 C4/C128 packed 压缩块存储
-│   │   ├── packed_transfer.py                   # 单字段 packed KV 的定制传输
-│   │   ├── packed_mla_state.py          # 普通精度或 group128/FP32-scale packed MLA
-│   │   ├── fp8_e8m0_packed_mla_state.py # 独立 FP8E8M0PackedMLAConfig / State：group64/E8M0 编码
-│   │   ├── fp8_e8m0_packed_mla_write.py # group64/E8M0 定制量化写入，不依赖具体模型
-│   │   └── packed_mla_transfer.py   # packed KV、RoPE 与 indexer 字段的定制传输
+│   │   ├── group_quantized/             # INT4/INT8 配置、State 和动态 scale 传输
+│   │   ├── static_fp8/                  # 静态 FP8 配置、State 和传输
+│   │   ├── mla/                         # 普通 MLA latent 配置、State 和创建入口
+│   │   ├── compressed_att/              # V4 C4/C128 压缩块配置、State 和创建入口
+│   │   ├── packed_mla/                  # packed MLA 配置、State、创建入口和传输
+│   │   └── fp8_e8m0_packed_mla/         # group64/E8M0 packed MLA 配置、State 和写入 kernel
 │   ├── bounded_att/
 │   │   ├── __init__.py
 │   │   ├── base_state.py                # BoundedAttentionState：有界状态的抽象操作契约
@@ -334,32 +328,16 @@ lightllm/common/
 │   │   ├── transfer_utils.py            # bounded_att_buffer_copies：生成快照字段的复制视图
 │   │   ├── copy_kernel.py               # copy_bounded_att_tensors：聚合多页、多字段的 Triton 拷贝
 │   │   ├── conv_ssm_types.py            # KDA/GDN 的 Conv/SSM 布局配置
-│   │   ├── create_sliding_window_state.py # 按 SWA 算法命名的创建入口，当前返回 FP8/E8M0 实现
-│   │   ├── fp8_e8m0_swa_state.py       # FP8E8M0SlidingWindowConfig / State：仅管理近期 KV
-│   │   ├── create_window_compressor_state.py # 窗口压缩器原子运行态创建入口
-│   │   ├── window_compressor_state.py # WindowCompressorStateConfig / State：候选与 gate
-│   │   ├── window_pages_pool.py          # SWA 与压缩器的时间有序窗口快照池
-│   │   ├── fp8_e8m0_swa_transfer.py     # FP8/E8M0 packed SWA 的 GPU 窗口搬运
-│   │   ├── window_compressor_transfer.py           # 候选/gate ring 与时间有序快照的 GPU 搬运
-│   │   ├── create_kda_state.py          # KDA 统一创建入口
-│   │   ├── kda_state.py                 # KDAState：Conv / SSM / MTP 与页操作
-│   │   ├── kda_pages_pool.py            # KDAPagesPool：KDA Conv 历史和方阵递推快照
-│   │   ├── create_gdn_state.py          # GDN 统一创建入口
-│   │   ├── gdn_state.py                 # GDNState：独立算法状态与页操作
-│   │   └── gdn_pages_pool.py            # GDNPagesPool：支持不同 K/V head 数和维度的快照
-└── req_manager/                          # 请求槽位、KV 索引映射、采样与生命周期
-
-lightllm/models/<model>/
-├── model.py                              # 两类 State 创建接口，决定本模型的资源组合
-└── config.py                             # 模型专有配置与派生参数
-
-lightllm/utils/
-└── cpu_cache_layout.py                   # build_cpu_cache_layouts：构建 CPU cache 联合页布局
+│   │   ├── gdn/                         # GDN 配置、State、页池和创建入口
+│   │   ├── kda/                         # KDA 配置、State、页池和创建入口
+│   │   ├── sliding_window/              # SWA 配置、State、创建入口和传输
+│   │   ├── window_compressor/           # 窗口压缩器配置、State、创建入口和传输
+│   │   └── window_pages_pool.py         # SWA 与压缩器共用的时间有序窗口快照池
 ```
 
 `allocators/` 与两类 State 目录平级。`full_att_kv_allocator.py` 提供 full-attention 的 KV 分配器，对外使用 token 数量和索引，内部遵守整页分配约束；`state_page_allocator.py` 提供 bounded-attention 的状态槽位分配器，管理器按需创建大小页两个独立实例。后者的分配能力不限定为 linear attention，使用它也不要求继承 `BoundedAttentionState`。
 
-`full_att/base_state.py` 只定义 `FullAttentionState` 行为接口，各具体配置与对应 State 放在同一文件中；`bounded_att/base_state.py` 定义有界运行态的公共接口；布局或算法差异由对应的 `*_state.py` 实现。full-attention 的 storage 属于具体 State 的内部实现，可与该 State 放在同一文件中；确有复用需要时再拆为内部存储工具，不设置另一套独立的 storage 公共继承体系。
+`full_att/base_state.py` 只定义 `FullAttentionState` 行为接口；每种 full-attention 子 State 使用独立目录，目录内放置配置、State、创建入口及专用传输实现。`bounded_att/base_state.py` 定义有界运行态的公共接口；每种 bounded 子 State 同样使用独立目录，公共的页池工具和聚合 kernel 留在分类目录根部。布局或算法差异由各子目录自己的 `*_state.py` 实现，不设置另一套独立的 storage 公共继承体系。
 
 `KDAState` 使用 `KDAPagesPool`，`GDNState` 使用 `GDNPagesPool`；每个 State 的 `big_pages_pool` 与 `small_pages_pool` 是对应 pool 类型的独立实例。两个 State 的 `initialize_page_pools()` 分别直接创建 `KDAPagesPool` 和 `GDNPagesPool`；管理器确定共享槽位容量后调用该公共方法，不直接构造某种通用 pool。State 页接口与管理器统一使用 `save_bounded_att_runtime_to_pages`、`restore_bounded_att_runtime_from_pages` 等名称，pool 不持有 allocator。K-pool 使用 W4/S4 的 `WindowCompressorState`，在整组边界无重叠历史，不创建大小页 pool。
 
@@ -385,7 +363,7 @@ KDA/GDN 的大小页保存与恢复、CPU cache 读写、DP 大页与运行态�
 CPU 页池和 CPU cache 页必须是当前进程已 pinned/registered 的存储；两端均为 CPU 时也由 GPU kernel 访问 mapped host memory。所有视图直接使用 `tensor.data_ptr()`，调用方保证该地址对当前 GPU 可访问；跨 GPU 访问依赖调用方已有的 peer/IPC 映射，拷贝入口不建立设备访问关系。所有操作在当前 CUDA stream 排队，调用方负责生产流依赖、存储及页面引用生命周期，以及 CPU 读取/复用前的完成事件；拷贝入口不查询主机映射、不调用 `record_stream()`，也不再依赖 CPU→CPU `copy_` 的同步语义。
 
 
-`FullAttentionState`、`BoundedAttentionState` 的具体子类直接实现 CPU、DP、PD 读写；无重叠的窗口 State 在 CPU 对齐边界不需要快照；IPC 导出前由管理器统一创建浅拷贝并排除进程私有资源，State 不设置额外的序列化钩子。各具体 State 通过 `get_cpu_transfer_regions()` / `get_pd_transfer_regions()` 选择传输字段、形状及 TP 切片；字段字节对齐、区间计算和 `TransferRegion` 构造直接在 State 内展开，不再通过 `region()` 包装。各具体 full-attention State 对应的 `*_transfer.py` 由 Triton 直接按 token 和页索引搬运 KV 及配套量化字段，每个字段一次 launch 覆盖全部页，不创建 gather/scatter 中间 KV。CPU 页必须是 pinned 或已通过 `cudaHostRegister` 注册的内存；调用方在 stream/event 完成后才能读取或复用页面。每种 full-attention 方案的 CPU/PD 路径共用本方案的 `transfer_*_pages` 入口和 kernel，直接按 token 和页索引读写外部页。两条路径均兼容不足整页的有效 token；`bounded_att/transfer_utils.py` 复制完整状态快照，不接收 token 数量；`bounded_att/window_compressor_transfer.py` 接收本地 ring 和 prefill 前缀长度，单次 Triton launch 搬运外部快照所需的逻辑窗口；两个方向均只处理逻辑窗口，并将短前缀对应的窗口内位置补零。bounded-attention 的传输函数使用 `page_buffers` 和必传的 `page_index`，不带 CPU/PD 前缀；页存储必须至少为二维，第一维表示页，统一通过 `page_buffers[page_index]` 取页。PD State 与 manager 读写入口统一接收 `pd_page_buffers` 和必填的 `pd_page_index`，将页集合与真实页索引直接传给共用搬运函数；不接受单页 Tensor，也不在入口添加页维度。CPU 专属读写接口仍使用 `cpu_page_buffers` 和 `cpu_page_indices`。Full attention 的各方案 CPU/PD 共用入口直接提交 Triton kernel；bounded attention 的复制视图按字段或传输区域收集为同形状批次，提交专用 kernel；窗口压缩器直接提交环形窗口 kernel，全部层的 key/gate 窗口搬运在一次 launch 中完成。取页和外部字段视图在各方案中直接展开：先选择页，再按字节起止位置切片并解释为字段 dtype/shape，不额外逐区域断言边界、对齐或轴定义。`utils.view_max_copy_dtype` 先按末轴 `size * element_size` 是否能被 8、4、2 整除，直接选择对应的候选 tuple：8/4/2、4/2 或仅 2 字节；例如行宽 12 字节只尝试 INT32、INT16，不尝试 INT64。使用各 State 正常分配的存储，不额外遍历或检查数据指针；任一侧末轴 stride 不为 1，或元素已占至少 8 字节时直接返回原视图，先用首对 Tensor 的外层 stride 和 Storage 偏移排除必然失败的候选，其余切片的偏移继续交给 `view(dtype)` 校验，仅捕获创建视图的 `RuntimeError` 后整批退回较窄 dtype，不复制数据。该函数由 bounded 聚合拷贝、full-attention CPU/PD、DP token 拷贝及 K-pool 共用；每个同布局批次统一选择 dtype，不同字段仍按各自编码处理。五种 full-attention 的 CPU/PD 页传输和 DP token 复制，在 TP 切片后先调用 `merge_contiguous_tail_dims(start_dim=-2, keepdim=True)`，只合并两侧均连续的 head/width；合并后的 head 轴保留为 1，继续使用原有四维/五维 kernel，再选择最大搬运 dtype。任一侧存在 head 间隙时沿用原布局。layer/token/page 等独立寻址轴及两侧各自容量保持不变；K-pool 的尾部只有 channel 一维，window 仍独立，不再跨 window 合并。full-attention 在各方案的 `*_transfer.py` 中直接应用 TP 切片，kernel 按索引长度裁剪有效 token；bounded-attention 在本地 `transfer_utils.py` 直接展开字段定位、轴对齐和本地/外部 TP 切片，不再通过 `_copy_pair` 跳转。压缩器使用固定 `window_size` 的逻辑窗口，按传入的前缀长度把逻辑位置映射到本地 ring 槽位；短前缀在外部窗口前部补零，读回时保留逻辑窗口之外的本地 MTP 槽位。full-attention 和 bounded 路径检查实际复制视图的 shape 一致；窗口搬运检查 layer/channel 相同，window 按两侧各自容量作环形映射。读回时反向执行同一组轴映射，保留本地和外部的固定角色。full-attention DP 直接复制同一 TP 分片的显式存储，原根目录 `transfer_utils.py` 的字段映射复制已无调用方并删除。State 的 KV 写入与量化方法直接调用相应计算模块中的 kernel。具体方案标记统一由 `get_state_type()` 返回，不再保留无读取方的 `layout_name`。这些聚合操作由 `AttentionStateManager` 提供默认实现，统一组织多资源读写、CPU 联合页、调用方传入的长度和位置映射；模型子类仅覆盖存在差异的部分。网络通信、任务队列与完成通知由 server 层管理。
+`FullAttentionState`、`BoundedAttentionState` 的具体子类直接实现 CPU、DP、PD 读写；无重叠的窗口 State 在 CPU 对齐边界不需要快照；IPC 导出前由管理器统一创建浅拷贝并排除进程私有资源，State 不设置额外的序列化钩子。各具体 State 通过 `get_cpu_transfer_regions()` / `get_pd_transfer_regions()` 选择传输字段、形状及 TP 切片；字段字节对齐、区间计算和 `TransferRegion` 构造直接在 State 内展开，不再通过 `region()` 包装。各具体 full-attention State 对应的 `*_transfer.py` 由 Triton 直接按 token 和页索引搬运 KV 及配套量化字段，每个字段一次 launch 覆盖全部页，不创建 gather/scatter 中间 KV。CPU 页必须是 pinned 或已通过 `cudaHostRegister` 注册的内存；调用方在 stream/event 完成后才能读取或复用页面。每种 full-attention 方案的 CPU/PD 路径共用本方案的 `transfer_*_pages` 入口和 kernel，直接按 token 和页索引读写外部页。两条路径均兼容不足整页的有效 token；`bounded_att/transfer_utils.py` 复制完整状态快照，不接收 token 数量；`bounded_att/window_compressor/window_compressor_transfer.py` 接收本地 ring 和 prefill 前缀长度，单次 Triton launch 搬运外部快照所需的逻辑窗口；两个方向均只处理逻辑窗口，并将短前缀对应的窗口内位置补零。bounded-attention 的传输函数使用 `page_buffers` 和必传的 `page_index`，不带 CPU/PD 前缀；页存储必须至少为二维，第一维表示页，统一通过 `page_buffers[page_index]` 取页。PD State 与 manager 读写入口统一接收 `pd_page_buffers` 和必填的 `pd_page_index`，将页集合与真实页索引直接传给共用搬运函数；不接受单页 Tensor，也不在入口添加页维度。CPU 专属读写接口仍使用 `cpu_page_buffers` 和 `cpu_page_indices`。Full attention 的各方案 CPU/PD 共用入口直接提交 Triton kernel；bounded attention 的复制视图按字段或传输区域收集为同形状批次，提交专用 kernel；窗口压缩器直接提交环形窗口 kernel，全部层的 key/gate 窗口搬运在一次 launch 中完成。取页和外部字段视图在各方案中直接展开：先选择页，再按字节起止位置切片并解释为字段 dtype/shape，不额外逐区域断言边界、对齐或轴定义。`utils.view_max_copy_dtype` 先按末轴 `size * element_size` 是否能被 8、4、2 整除，直接选择对应的候选 tuple：8/4/2、4/2 或仅 2 字节；例如行宽 12 字节只尝试 INT32、INT16，不尝试 INT64。使用各 State 正常分配的存储，不额外遍历或检查数据指针；任一侧末轴 stride 不为 1，或元素已占至少 8 字节时直接返回原视图，先用首对 Tensor 的外层 stride 和 Storage 偏移排除必然失败的候选，其余切片的偏移继续交给 `view(dtype)` 校验，仅捕获创建视图的 `RuntimeError` 后整批退回较窄 dtype，不复制数据。该函数由 bounded 聚合拷贝、full-attention CPU/PD、DP token 拷贝及 K-pool 共用；每个同布局批次统一选择 dtype，不同字段仍按各自编码处理。五种 full-attention 的 CPU/PD 页传输和 DP token 复制，在 TP 切片后先调用 `merge_contiguous_tail_dims(start_dim=-2, keepdim=True)`，只合并两侧均连续的 head/width；合并后的 head 轴保留为 1，继续使用原有四维/五维 kernel，再选择最大搬运 dtype。任一侧存在 head 间隙时沿用原布局。layer/token/page 等独立寻址轴及两侧各自容量保持不变；K-pool 的尾部只有 channel 一维，window 仍独立，不再跨 window 合并。full-attention 在各方案的 `*_transfer.py` 中直接应用 TP 切片，kernel 按索引长度裁剪有效 token；bounded-attention 在本地 `transfer_utils.py` 直接展开字段定位、轴对齐和本地/外部 TP 切片，不再通过 `_copy_pair` 跳转。压缩器使用固定 `window_size` 的逻辑窗口，按传入的前缀长度把逻辑位置映射到本地 ring 槽位；短前缀在外部窗口前部补零，读回时保留逻辑窗口之外的本地 MTP 槽位。full-attention 和 bounded 路径检查实际复制视图的 shape 一致；窗口搬运检查 layer/channel 相同，window 按两侧各自容量作环形映射。读回时反向执行同一组轴映射，保留本地和外部的固定角色。full-attention DP 直接复制同一 TP 分片的显式存储，原根目录 `transfer_utils.py` 的字段映射复制已无调用方并删除。State 的 KV 写入与量化方法直接调用相应计算模块中的 kernel。具体方案标记统一由 `get_state_type()` 返回，不再保留无读取方的 `layout_name`。这些聚合操作由 `AttentionStateManager` 提供默认实现，统一组织多资源读写、CPU 联合页、调用方传入的长度和位置映射；模型子类仅覆盖存在差异的部分。网络通信、任务队列与完成通知由 server 层管理。
 
 CPU 服务通过模型配置与 meta device 上的 State 描述生成页格式，无需分配 GPU 存储。服务端将 main/draft 的 meta State 装配到管理器并标记创建完成，复用 `AttentionStateManager.get_cpu_page_layouts()`，与推理端使用同一条布局聚合路径。该接口直接遍历 full-attention、bounded State，调用各自的 `get_cpu_transfer_regions()`，同时平移字段区间的起点和终点；每个 State 的最大字段终点按 8 字节对齐后作为下一 State 的起点。CPU 页容量由全部布局的最大 `byte_end` 按 16 字节对齐得到，TP 副本不重复占用外部页；启动绑定时核对页字节数。
 
@@ -545,7 +523,7 @@ FullAttentionState
 
 所有具体 full-attention State 必须直接继承 `FullAttentionState`，具体实现之间禁止继承，也不通过调用其他具体 State 的方法复用行为。每种方案在自己的文件中完整实现配置初始化、容量计算、层视图、写入、token 复制以及 CPU/DP/PD 操作，防止某个方案的修改隐式改变其他方案。公共复用限于明确的工具函数和底层 kernel，不引入带具体存储行为的中间基类。配置也不建立继承关系：普通 GQA 使用 `GQAAttentionConfig`；分组量化使用 `GroupQuantizedAttentionConfig`，以 `scale_dtype` 明确 scale 精度；静态 FP8 使用 `StaticFP8AttentionConfig`，不要求调用方传入固定的物理 dtype。普通 MLA 使用 `MLAConfig`，packed MLA 使用带 indexer 的 `PackedMLALogicalConfig`；工厂再转换为具体 State 的物理配置。具体 packed 配置使用 `kv_encoding` 显式选择 `fp16`、`bf16` 或 `fp8_group128`，`dtype` 由编码提供只读 property。FP8 行的 uint8 承载类型只在存储分配函数中确定，不提供 `storage_dtype` 配置或属性；物理行宽及 indexer 偏移由编码推导。MLA 固定单份 latent 并在 TP rank 间复制，不提供 GQA 的 head 数或 `replicated` 开关。
 
-`gqa_state.py` 中的 `GQAFullAttentionState` 使用广义 GQA 命名。设 TP 切分前的 Query 头数为 `H_q`、KV 头数为 `H_kv`，每个 KV 头对应一组 `H_q / H_kv` 个 Query 头，要求 `H_q` 能被 `H_kv` 整除。MHA 是 `H_kv == H_q`、每组一个 Query 头的特例；MQA 是 `H_kv == 1`、全部 Query 头共享同一组 KV 的特例；中间情况为多组 Query 分别共享 KV。
+`full_att/gqa/gqa_state.py` 中的 `GQAFullAttentionState` 使用广义 GQA 命名。设 TP 切分前的 Query 头数为 `H_q`、KV 头数为 `H_kv`，每个 KV 头对应一组 `H_q / H_kv` 个 Query 头，要求 `H_q` 能被 `H_kv` 整除。MHA 是 `H_kv == H_q`、每组一个 Query 头的特例；MQA 是 `H_kv == 1`、全部 Query 头共享同一组 KV 的特例；中间情况为多组 Query 分别共享 KV。
 
 该 State 只保存 KV，`config.head_num` 表示当前 TP rank 切分或复制后持有的 KV 头数。K 和 V 各自独立分配一个 `[layer, token_slot, local_kv_heads, head_dim]` buffer，不再保存 `heads_per_kv`。写入接口的输入仍按 K heads、V heads 前后排列，State 将两部分分别写入各自存储；计算 backend 直接取得 K/V 视图。Query 头到 KV 头的分组关系由 attention backend 处理，因此三者共用同一套 State 接口与存储实现。
 
@@ -1666,7 +1644,7 @@ RoPE 和量化仍由各模型自己的计算算子完成。资源层只负责窗
 PD 在任意前缀长度导出完整 `window_size` 逻辑窗口，例如 K-pool 的长度 6 前缀仍需
 携带未完成池化组的原始 key/gate。P/D 的 MTP 容量不必相同：搬运按绝对前缀长度映射
 到各自的 ring，不传输或清理逻辑窗口外的候选槽位。环形搬运 kernel 位于
-`bounded_att/window_compressor_transfer.py`，一次 launch 搬运全部层的候选与 gate。
+`bounded_att/window_compressor/window_compressor_transfer.py`，一次 launch 搬运全部层的候选与 gate。
 MTP 回退依赖保留的历史和绝对位置，不调用缓存恢复入口。
 
 ## 7. 资源初始化与调用约定

@@ -112,7 +112,7 @@ def test_glm_main_and_draft_explicitly_select_encoding(draft: bool, kv_type: str
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_fixed_quantizer_preserves_indexer_and_other_rows() -> None:
-    from lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
+    from lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
 
     state = make_state(device="cuda")
     state.storage.fill_(173)
