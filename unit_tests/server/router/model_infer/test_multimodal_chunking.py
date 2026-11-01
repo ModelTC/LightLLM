@@ -4,6 +4,41 @@ import pytest
 import torch
 
 
+@pytest.mark.parametrize(
+    "input_len,checkpoint,spans,expected_ends",
+    [
+        (483, 256, [(100, 380)], [483]),
+        (1000, 768, [(450, 600), (700, 900)], [1000]),
+        (483, 256, [], [256, 483]),
+        (300, 256, [(0, 256)], [256, 300]),
+        (483, 256, [(256, 450)], [256, 483]),
+        (2500, 2304, [(2200, 2400)], [2048, 2500]),
+    ],
+)
+def test_hybrid_chunk_skips_terminal_checkpoint_inside_mm(input_len, checkpoint, spans, expected_ends):
+    from lightllm.server.router.model_infer.infer_batch import InferReq
+
+    req = InferReq.__new__(InferReq)
+    req.args = SimpleNamespace(
+        chunked_prefill_size=8192,
+        linear_att_hash_page_size=256,
+        linear_att_page_block_num=8,
+    )
+    req.cur_kv_len = req.cur_output_len = 0
+    req.mm_input_spans = spans
+    req.hybrid_cache_len = checkpoint
+    req.shm_req = SimpleNamespace(input_len=input_len, shm_prompt_ids=SimpleNamespace(arr=list(range(input_len))))
+    ends = []
+    while req.cur_kv_len < input_len:
+        end = req.get_chuncked_input_token_len_for_hybrid_att()
+        assert req.get_chuncked_input_token_ids_for_hybrid_att() == list(range(end))
+        assert end > req.cur_kv_len
+        ends.append(end)
+        req.cur_kv_len = end
+    assert ends == expected_ends
+    assert req.hybrid_cache_len == checkpoint
+
+
 @pytest.mark.parametrize("hybrid", [False, True])
 @pytest.mark.parametrize("spans", [[], [(450, 600)], [(100, 800)], [(0, 384), (384, 768)]])
 def test_chunk_ids_and_lengths_use_the_same_complete_boundaries(hybrid, spans):
@@ -270,6 +305,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     module.args = SimpleNamespace(page_size=256)
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
+        is_deepseek_v4=False,
         _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=table),

@@ -45,6 +45,30 @@ def make_kernel(tmp_path, monkeypatch, name, kernel_type=None, warmup_all_exist_
     return kernel, calls, benchmarks, cache_dir / "configs.json"
 
 
+def test_missing_config_is_checked_once_and_can_still_be_tuned(tmp_path, monkeypatch):
+    kernel, calls, benchmarks, cache_file = make_kernel(tmp_path, monkeypatch, "missing_config")
+    exists = autotuner_module.os.path.exists
+    checks = []
+
+    def count_exists(path):
+        if str(path) == str(cache_file):
+            checks.append(path)
+        return exists(path)
+
+    monkeypatch.setattr(autotuner_module.os.path, "exists", count_exists)
+    for _ in range(16):
+        assert kernel(8) is None
+    assert calls == [(8, None)] * 16
+    assert benchmarks == []
+    assert len(checks) == 1
+
+    with Autotuner.autotune_warmup():
+        assert kernel(8) == {"block": 2}
+    assert len(benchmarks) == 2
+    assert json.loads(cache_file.read_text()) == {"8": {"block": 2}}
+    assert kernel(8) == {"block": 2}
+
+
 @pytest.mark.parametrize("repeat_override,retry_override", [(None, None), (8, 2)])
 def test_short_kernel_benchmark_sampling_options(monkeypatch, repeat_override, retry_override):
     calls, replays = [], []

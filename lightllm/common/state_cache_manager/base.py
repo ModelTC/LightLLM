@@ -53,7 +53,7 @@ class StateCacheManager(ABC):
         dist.barrier(group=group)
         if dp_rank != 0:
             pool = cls(**pool_args, shm_create=False)
-        # AtomicShmLock initializes its shared word on attach; all owners attach before use.
+        # All owners finish attaching before using the shared pool.
         dist.barrier(group=group)
         return pool
 
