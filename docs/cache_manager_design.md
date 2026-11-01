@@ -402,7 +402,7 @@ token 复制、bounded 运行态重置、大小页保存/恢复、MTP 提交直�
 | 逻辑类型 | 创建入口 | 参数决定的实现 |
 | --- | --- | --- |
 | GQA（含 MHA/MQA） | `full_att.create_gqa_state(config, *, kv_type, page_size, device, ...)` | 普通浮点、INT4/INT8 分组量化、per-tensor/per-head 静态 FP8 |
-| MLA | `full_att.create_mla_state(config, kv_type, packed, page_size, device, fp8_format, ...)` | 普通 MLA、packed MLA、group128/FP32 或 group64/E8M0 packed FP8 MLA |
+| MLA | `full_att.create_mla_state(config, page_size, device)` / `create_packed_mla_state(config, page_size, device)` | 普通 latent MLA 与带 indexer 的 packed MLA 分开创建 |
 | 序列压缩 attention | `full_att.create_compressed_att_state(config, page_size, device)` | FP8/E8M0 packed 压缩 KV 与可选 indexer；V4 CSA/C4、HCA/C128 由模型分别配置 |
 | KDA | `bounded_att.create_kda_state(config, request_capacity, mtp_step=0, *, device)` | KDA Conv/SSM 运行态 |
 | GDN | `bounded_att.create_gdn_state(config, request_capacity, mtp_step=0, *, device)` | GDN Conv/SSM 运行态 |
@@ -411,7 +411,7 @@ token 复制、bounded 运行态重置、大小页保存/恢复、MTP 提交直�
 
 每个算法的创建入口独立放在对应的 `create_*.py` 中，通过各分类包导出，包括 GQA、MLA、压缩历史、KDA、GDN、SWA、窗口压缩器。K-pool 复用窗口压缩器入口。一个算法的普通精度与量化实现共用同一 create 入口，由参数选择具体 State；State 实现文件不负责选择其他实现。不增加工厂类或注册表。入口不读取请求信息，不绑定角色，不创建 allocator；返回对象后由模型调用 `register_state`。
 
-GQA/MLA 的创建入口分别接收 `GQAAttentionConfig`、`MLAAttentionConfig`，每种具体 State 使用独立配置，不继承通用配置。GQA 的 `kv_type` 使用现有编码名 `"None"`、`"int4kv"`、`"int8kv"`、`"fp8kv_spt"`、`"fp8kv_sph"`；`group_size` 仅对 INT4/INT8 生效。静态 FP8 构造函数和创建入口不接收标定参数，`scales`、`q_scales` 初始均为 `None`；全部 State 就绪后，统一加载流程只能通过 `bind_calibration()` 初始化标定。各 DP 使用相同的标定配置，不额外生成或校验标定内容指纹。MLA 的 `config.latent_dim` 始终传逻辑 latent 维度，`packed=True` 时由 packed 配置推导包含 indexer、scale 和对齐的物理行宽；`"fp8kv_dsa"` 仅用于 packed MLA。
+GQA/MLA 的创建入口分别接收 `GQAAttentionConfig`、`MLAConfig` 或 `PackedMLALogicalConfig`，每种具体 State 使用独立配置，不继承通用配置。GQA 的 `kv_type` 使用现有编码名 `"None"`、`"int4kv"`、`"int8kv"`、`"fp8kv_spt"`、`"fp8kv_sph"`；`group_size` 仅对 INT4/INT8 生效。静态 FP8 构造函数和创建入口不接收标定参数，`scales`、`q_scales` 初始均为 `None`；全部 State 就绪后，统一加载流程只能通过 `bind_calibration()` 初始化标定。各 DP 使用相同的标定配置，不额外生成或校验标定内容指纹。普通 MLA 只描述 latent；packed MLA 只描述带 indexer 的逻辑 format，工厂内部再转换为具体物理布局。
 
 MLA 的 packed FP8 编码由 `fp8_format` 显式指定：默认 `"group128_fp32"` 使用原有
 `PackedMLAFullAttentionState`；`"group64_e8m0"` 使用独立的 `FP8E8M0PackedMLAState`，
@@ -543,7 +543,7 @@ FullAttentionState
 └── CompressedAttentionState  # V4 的 C4/C128 压缩块
 ```
 
-所有具体 full-attention State 必须直接继承 `FullAttentionState`，具体实现之间禁止继承，也不通过调用其他具体 State 的方法复用行为。每种方案在自己的文件中完整实现配置初始化、容量计算、层视图、写入、token 复制以及 CPU/DP/PD 操作，防止某个方案的修改隐式改变其他方案。公共复用限于明确的工具函数和底层 kernel，不引入带具体存储行为的中间基类。配置也不建立继承关系：普通 GQA 使用 `GQAAttentionConfig`；分组量化使用 `GroupQuantizedAttentionConfig`，以 `scale_dtype` 明确 scale 精度；静态 FP8 使用 `StaticFP8AttentionConfig`，不要求调用方传入固定的物理 dtype。普通 MLA 使用 `MLAAttentionConfig`；packed MLA 使用 `PackedMLAAttentionConfig`，以 `latent_dim` 表达逻辑宽度，`dtype` 直接记录 FP16、BF16 或 `torch.float8_e4m3fn` 编码。FP8 行的 uint8 承载类型只在存储分配函数中确定，不提供 `storage_dtype` 配置或属性；物理行宽及 indexer 偏移由编码推导。MLA 固定单份 latent 并在 TP rank 间复制，不提供 GQA 的 head 数或 `replicated` 开关。
+所有具体 full-attention State 必须直接继承 `FullAttentionState`，具体实现之间禁止继承，也不通过调用其他具体 State 的方法复用行为。每种方案在自己的文件中完整实现配置初始化、容量计算、层视图、写入、token 复制以及 CPU/DP/PD 操作，防止某个方案的修改隐式改变其他方案。公共复用限于明确的工具函数和底层 kernel，不引入带具体存储行为的中间基类。配置也不建立继承关系：普通 GQA 使用 `GQAAttentionConfig`；分组量化使用 `GroupQuantizedAttentionConfig`，以 `scale_dtype` 明确 scale 精度；静态 FP8 使用 `StaticFP8AttentionConfig`，不要求调用方传入固定的物理 dtype。普通 MLA 使用 `MLAConfig`，packed MLA 使用带 indexer 的 `PackedMLALogicalConfig`；工厂再转换为具体 State 的物理配置。具体 packed 配置使用 `kv_encoding` 显式选择 `fp16`、`bf16` 或 `fp8_group128`，`dtype` 由编码提供只读 property。FP8 行的 uint8 承载类型只在存储分配函数中确定，不提供 `storage_dtype` 配置或属性；物理行宽及 indexer 偏移由编码推导。MLA 固定单份 latent 并在 TP rank 间复制，不提供 GQA 的 head 数或 `replicated` 开关。
 
 `gqa_state.py` 中的 `GQAFullAttentionState` 使用广义 GQA 命名。设 TP 切分前的 Query 头数为 `H_q`、KV 头数为 `H_kv`，每个 KV 头对应一组 `H_q / H_kv` 个 Query 头，要求 `H_q` 能被 `H_kv` 整除。MHA 是 `H_kv == H_q`、每组一个 Query 头的特例；MQA 是 `H_kv == 1`、全部 Query 头共享同一组 KV 的特例；中间情况为多组 Query 分别共享 KV。
 
@@ -1704,7 +1704,7 @@ BaseModel 提供两个默认返回空列表的 `classmethod` 扩展点，具体�
 
 需要保留的跨模型阶段边界是：全部模型完成权重加载及 State 准备后才规划和分配共享容量。State 资源在创建完成后通过缓存查询取得；分配完成后的 attention backend 初始化、warmup、padded-request 和图初始化按单模型顺序执行，不要求全部模型先 warmup 再统一捕获图。其他调用方先通过 `get_req_manager_max_seq_len()` 汇总需求、创建共享请求管理器并调用 `bind_req_manager()`，再按相同顺序复用 `prepare_attention_states()` 和 `init_runtime()`，共享分配和就绪标志仍由调用方协调。
 
-`create_full_att_states()` 由具体模型直接构造 `GQAAttentionConfig` 或 `MLAAttentionConfig` 并调用 `create_gqa_state()` 或 `create_mla_state()`，返回 State 列表；不存在 full 层时返回空列表。模型自行决定 head 数、维度、精度、参与层及共享分组，同族相同方案可以继承工厂。bounded 工厂同样直接调用算法 create；GLM main/draft 分别选择池化窗口的参与层并读取自己的 K-pool 配置，不依赖其他工厂的副作用。
+`create_full_att_states()` 由具体模型直接构造 `GQAAttentionConfig`、`MLAConfig` 或 `PackedMLALogicalConfig`，并调用对应的 `create_gqa_state()`、`create_mla_state()` 或 `create_packed_mla_state()`，返回 State 列表；不存在 full 层时返回空列表。模型自行决定 head 数、维度、精度、参与层及共享分组，同族相同方案可以继承工厂。bounded 工厂同样直接调用算法 create；GLM main/draft 分别选择池化窗口的参与层并读取自己的 K-pool 配置，不依赖其他工厂的副作用。
 
 `AttentionStateManager.initialize_storage()` 由基类提供通用实现，在显式完成创建标记及静态标定绑定后，保留两个阶段：估算内存并直接计算完整页容量、调用 `allocate_storage()` 初始化实际存储。PD 模式在容量规划阶段按需构建 meta State 的 PD 布局，得到传输 buffer 的预留大小。`token_capacity` 为指定的 token 容量，传入 `None` 时使用 `mem_fraction` 评估可用显存并协调各 TP rank 的容量；其余页大小及传输选项读取 `args`。该方法只操作管理器内部资源，不接收模型列表，也不遍历模型回填容量。调用方负责共享管理器检查、KV 内存分区和后续各模型的 `init_runtime()`；模型进入 `_check_mem_size()` 时再从 allocator 取得最终容量。CPU 布局构建使用相同的模型编号和独立 State 定义，保留每个 draft 的全局布局；容量统计通过共享管理器完成。
 
@@ -1738,8 +1738,9 @@ State config 保存未切分的全局 head 数、当前 `tp_rank` / `tp_world_si
 | `GQAAttentionConfig` | 逻辑层分组、全局 KV head 数、`head_dim`、KV 浮点 `dtype`、TP 坐标与 `replicated` | `head_num` 返回当前 rank 的单份 K 或 V 的 head 数 |
 | `GroupQuantizedAttentionConfig` | GQA 几何与 TP 信息、`bits`、`group_size`、动态 `scale_dtype` | `head_num`；KV 编码固定为 INT4/INT8，scale 精度独立描述 |
 | `StaticFP8AttentionConfig` | GQA 几何与 TP 信息、`scale_mode`，不传物理 dtype 或标定 Tensor | `head_num`；FP8 编码固定，标定通过独立流程绑定 |
-| `MLAAttentionConfig` | 逻辑层分组、`latent_dim`、浮点 `dtype` 和 TP 坐标 | 固定复制单份 latent，无 head 数配置 |
-| `PackedMLAAttentionConfig` | 逻辑层分组、`latent_dim`、KV 编码 `dtype`（FP16/BF16/FP8）、indexer 与编码参数、TP 坐标 | `kv_bytes`、`token_bytes`、`indexer_offset` 从编码推导；FP8 行使用内部 uint8 buffer 承载混合字段，不另设 `storage_dtype` 属性 |
+| `MLAConfig` | 普通 MLA 的逻辑层分组、`latent_dim`、未压缩 latent 的 `latent_dtype` 和 TP 坐标 | `create_mla_state()` 只创建普通 latent State |
+| `PackedMLALogicalConfig` | 带 indexer 的逻辑层分组、`latent_dim`、packed `format`、indexer 宽度和 TP 坐标 | `create_packed_mla_state()` 再转换为具体物理布局；浮点精度由 `format` 决定 |
+| `PackedMLAAttentionConfig` | 持有 `PackedMLALogicalConfig`，只保留量化分组等物理布局参数 | `kv_bytes`、`token_bytes`、`indexer_offset` 从逻辑格式、NoPE/RoPE 宽度和 scale 数量推导；FP8 行使用内部 uint8 buffer 承载混合字段，不另设 `storage_dtype` 属性 |
 | `ConvSSMStateConfig` | 层、`global_k_heads`、`global_v_heads`、TP 坐标及 Conv/SSM 维度/dtype 信息；不保存资源身份 | `num_k_heads`、`num_v_heads` 分别返回本地 head 数，`conv_channels` 返回本地卷积通道数 |
 
 GQA 的 `replicated=True` 表示每个 rank 保存全部 head；MLA 固定复制单份 latent，不设置该参数。GQA 的 `replicated=False` 时按 head 均匀切分，全局 head 数小于 TP 时按组复制。KDA/GDN 的 K、V head 分别应用切分或分组复制规则。布局 helper 根据全局数量和本地数量计算 head 起点及副本写入者。只改变 config 的 TP 坐标即可重新计算目标分片，无需依赖来源 manager 的额外映射；实际数据迁移仍通过传输接口完成。
@@ -1761,7 +1762,7 @@ flowchart LR
 ```
 
 
-GQA、MLA、packed MLA 的选择以及全局逻辑层分组直接写在模型的 `create_full_att_states()` 中。普通模型按 `model_logical_layer_ids` 创建独立层，Qwen/GLM 选择混合模型的 full 层，Gemma4 根据共享关系将多个逻辑层放入同一物理分组。各模型不再提供 `_full_attention_options`。算法级 `create_gqa_state()` / `create_mla_state()` 继续负责量化版本、存储布局及算法专有的 TP 副本规则。
+GQA、MLA、packed MLA 的选择以及全局逻辑层分组直接写在模型的 `create_full_att_states()` 中。普通模型按 `model_logical_layer_ids` 创建独立层，Qwen/GLM 选择混合模型的 full 层，Gemma4 根据共享关系将多个逻辑层放入同一物理分组。各模型不再提供 `_full_attention_options`。算法级 `create_gqa_state()`、`create_mla_state()` 和 `create_packed_mla_state()` 分别负责具体存储布局及算法专有的 TP 副本规则。
 
 CPU 服务读取 main 和各 draft 自己的配置，直接调用模型类的 full/bounded 工厂，不构造模型实例。返回的 State 列表注册到临时管理器，再由 `get_cpu_page_layouts()` 聚合联合页。CPU 页可以包含同一模型的多个 State；静态标定不参与布局计算。无 attention 的 draft 由模型准备流程和 CPU 布局调用方跳过。`lightllm/utils/cpu_cache_layout.py` 负责 CPU 服务布局构建；标定加载由管理器组织，具体格式由静态 FP8 State 解释。
 

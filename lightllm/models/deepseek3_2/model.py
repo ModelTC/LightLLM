@@ -1,4 +1,5 @@
 from typing import TYPE_CHECKING
+import torch
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
@@ -25,21 +26,22 @@ class Deepseek3_2TpPartModel(Deepseek2TpPartModel):
         model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """DeepSeek V3.2 使用包含 indexer 字段的 packed MLA，编码由 MLA 创建入口选择。"""
-        from lightllm.common.attention_state.full_att import MLAAttentionConfig, create_mla_state
+        from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
         logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
         if not logical_layer_groups:
             return []
-        state = create_mla_state(
-            config=MLAAttentionConfig(
+        state = create_packed_mla_state(
+            config=PackedMLALogicalConfig(
                 logical_layer_groups=logical_layer_groups,
                 latent_dim=config["kv_lora_rank"] + config["qk_rope_head_dim"],
-                dtype=get_torch_dtype(args.data_type),
                 tp_rank=tp_rank, tp_world_size=tp_world_size,
+                format="packed_group128_fp8" if args.llm_kv_type == "fp8kv_dsa" else "packed_bf16",
+                indexer_dim=config.get("indexer_dim", 128),
             ),
-            kv_type=args.llm_kv_type, packed=True, page_size=args.page_size, device="meta",
+            page_size=args.page_size, device="meta",
         )
         return [state]
 

@@ -1,16 +1,18 @@
 from .create_mla_state import create_mla_state
+from .create_packed_mla_state import create_packed_mla_state
 from .create_gqa_state import create_gqa_state
 from .base_state import FullAttentionState
 from .gqa_state import GQAAttentionConfig, GQAFullAttentionState
-from .mla_state import MLAAttentionConfig, MLAFullAttentionState
+from .mla_state import MLAConfig, MLAFullAttentionState
 
 __all__ = [
     "create_gqa_state",
     "create_mla_state",
+    "create_packed_mla_state",
     "FullAttentionState",
     "GQAFullAttentionState",
     "GQAAttentionConfig",
-    "MLAAttentionConfig",
+    "MLAConfig",
     "MLAFullAttentionState",
 ]
 
@@ -19,7 +21,12 @@ from .group_quantized_state import (
     GroupQuantizedAttentionConfig,
 )
 from .static_fp8_state import StaticFP8FullAttentionState, StaticFP8AttentionConfig
-from .packed_mla_state import PackedMLAFullAttentionState, PackedMLAAttentionConfig, PackedMLALayerView
+from .packed_mla_state import (
+    PackedMLAFullAttentionState,
+    PackedMLAAttentionConfig,
+    PackedMLALogicalConfig,
+    PackedMLALayerView,
+)
 
 __all__ += [
     "GroupQuantizedFullAttentionState",
@@ -28,6 +35,7 @@ __all__ += [
     "StaticFP8AttentionConfig",
     "PackedMLAFullAttentionState",
     "PackedMLAAttentionConfig",
+    "PackedMLALogicalConfig",
     "PackedMLALayerView",
 ]
 

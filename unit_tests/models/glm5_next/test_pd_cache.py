@@ -12,7 +12,7 @@ from unit_tests.common.att_resources.model_helpers import create_full_attention_
 
 from lightllm.common.attention_state.full_att import (
     PackedMLAFullAttentionState,
-    PackedMLAAttentionConfig,
+    PackedMLAAttentionConfig, PackedMLALogicalConfig,
 )
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
@@ -70,11 +70,13 @@ def make_mems(monkeypatch, request):
             monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", str(tp))
             full = PackedMLAFullAttentionState(
                 PackedMLAAttentionConfig(
-                    logical_layer_groups=tuple((layer,) for layer in full_layer_ids),
-                    dtype=torch.bfloat16,
-                    tp_rank=rank,
-                    tp_world_size=tp,
-                    latent_dim=512,
+                    logical_config=PackedMLALogicalConfig(
+                        logical_layer_groups=tuple((layer,) for layer in full_layer_ids),
+                        format="packed_bf16",
+                        tp_rank=rank,
+                        tp_world_size=tp,
+                        latent_dim=512,
+                    )
                 ),
                  page_size=args.page_size,
             )

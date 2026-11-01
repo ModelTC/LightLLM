@@ -12,10 +12,10 @@ import torch
 from lightllm.common.attention_state.full_att import (
     FP8E8M0PackedMLAConfig,
     FP8E8M0PackedMLAState,
-    MLAAttentionConfig,
+    PackedMLALogicalConfig,
     FullAttentionState,
     PackedMLAFullAttentionState,
-    create_mla_state,
+    create_packed_mla_state,
 )
 from lightllm.common.attention_state.types import StateTransferLayout
 
@@ -25,19 +25,16 @@ if TYPE_CHECKING:
 
 
 def make_state(device: str = "meta", capacity: int = 16, tp_rank: int = 0) -> FP8E8M0PackedMLAState:
-    state = create_mla_state(
-        config=MLAAttentionConfig(
+    state = create_packed_mla_state(
+        config=PackedMLALogicalConfig(
             logical_layer_groups=((0, 4), (8,)),
             latent_dim=512,
-            dtype=torch.bfloat16,
+            format="packed_group64_e8m0",
             tp_rank=tp_rank,
             tp_world_size=2,
         ),
-        kv_type="fp8kv_dsa",
-        packed=True,
         page_size=4,
         device=device,
-        fp8_format="group64_e8m0",
     )
     state.allocate_storage(token_capacity=capacity)
     return state
@@ -62,23 +59,20 @@ def test_factory_selects_independent_encoding_and_meta_geometry(pd_args: EasyDic
     assert region.shape == (2, 4, 1, 716) and region.byte_end == 2 * 4 * 716
 
     # 默认仍是原来的 group128/FP32 编码，不能再通过 512 维自动猜测 GLM 格式。
-    with pytest.raises(AssertionError, match="FP8 MLA kernel requires"):
-        create_mla_state(
-            config=MLAAttentionConfig(
-                logical_layer_groups=((0,),), latent_dim=512, dtype=torch.bfloat16
+    with pytest.raises(AssertionError, match="latent 576"):
+        create_packed_mla_state(
+            config=PackedMLALogicalConfig(
+                logical_layer_groups=((0,),), latent_dim=512,
+                format="packed_group128_fp8",
             ),
-            kv_type="fp8kv_dsa",
-            packed=True,
             device="meta",
         )
     with pytest.raises(AssertionError, match="512-dimensional"):
-        create_mla_state(
-            config=MLAAttentionConfig(
-                logical_layer_groups=((0,),), latent_dim=576, dtype=torch.bfloat16
+        create_packed_mla_state(
+            config=PackedMLALogicalConfig(
+                logical_layer_groups=((0,),), latent_dim=576,
+                format="packed_group64_e8m0",
             ),
-            kv_type="fp8kv_dsa",
-            packed=True,
-            fp8_format="group64_e8m0",
             device="meta",
         )
 

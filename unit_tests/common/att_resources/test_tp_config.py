@@ -19,7 +19,7 @@ from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
 from lightllm.common.attention_state.full_att import (
     GQAAttentionConfig,
-    MLAAttentionConfig,
+    MLAConfig,
     GQAFullAttentionState,
     MLAFullAttentionState,
 )
@@ -59,8 +59,8 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
         pytest.skip("CUDA required")
     cpu_args.cpu_cache_token_page_size = 4
     if state_cls is MLAFullAttentionState:
-        config = MLAAttentionConfig(
-            logical_layer_groups=((0,),), latent_dim=4, dtype=torch.float32,
+        config = MLAConfig(
+            logical_layer_groups=((0,),), latent_dim=4, latent_dtype=torch.float32,
         )
     else:
         config = GQAAttentionConfig(

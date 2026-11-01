@@ -145,7 +145,7 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """GLM full-attention 层采用 NoPE packed MLA，并保存压缩 indexer 字段。"""
-        from lightllm.common.attention_state.full_att import MLAAttentionConfig, create_mla_state
+        from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
@@ -153,17 +153,16 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
         if not logical_layer_groups:
             return []
-        state = create_mla_state(
-            config=MLAAttentionConfig(
+        state = create_packed_mla_state(
+            config=PackedMLALogicalConfig(
                 logical_layer_groups=logical_layer_groups,
                 latent_dim=cfg.full_att_head_dim,
-                dtype=get_torch_dtype(args.data_type),
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
+                format="packed_group64_e8m0" if args.llm_kv_type == "fp8kv_dsa" else (
+                    "packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16"
+                ),
             ),
-            kv_type=args.llm_kv_type,
-            packed=True,
-            fp8_format="group64_e8m0",
             page_size=args.page_size,
             device="meta",
         )

@@ -10,9 +10,9 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.full_att import (
-    GQAAttentionConfig, MLAAttentionConfig, FullAttentionState, GQAFullAttentionState, GroupQuantizedFullAttentionState,
+    GQAAttentionConfig, MLAConfig, FullAttentionState, GQAFullAttentionState, GroupQuantizedFullAttentionState,
     StaticFP8FullAttentionState, MLAFullAttentionState, PackedMLAFullAttentionState,
-    create_gqa_state, create_mla_state,
+    PackedMLALogicalConfig, create_gqa_state, create_mla_state, create_packed_mla_state,
 )
 from lightllm.common.attention_state.bounded_att import (
     BoundedAttentionState, ConvSSMStateConfig, create_gdn_state, create_kda_state,
@@ -97,23 +97,28 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
     row_width: int,
     expected_type: str,
 ):
-    config = MLAAttentionConfig(
-        logical_layer_groups=((2,), (6,)),
-        latent_dim=kv_dim,
-        dtype=torch.bfloat16,
-        tp_rank=1,
-        tp_world_size=4,
-    )
-    state = create_mla_state(
-        config=config,
-        packed=packed,
-        kv_type=kv_type,
-        page_size=4,
-        device="meta",
-    )
+    if packed:
+        config = PackedMLALogicalConfig(
+            logical_layer_groups=((2,), (6,)),
+            latent_dim=kv_dim,
+            format=("packed_group128_fp8" if kv_type == "fp8kv_dsa" else "packed_bf16"),
+            tp_rank=1,
+            tp_world_size=4,
+        )
+        state = create_packed_mla_state(config=config, page_size=4, device="meta")
+    else:
+        config = MLAConfig(
+            logical_layer_groups=((2,), (6,)), latent_dim=kv_dim, latent_dtype=torch.bfloat16,
+            tp_rank=1, tp_world_size=4,
+        )
+        state = create_mla_state(config=config, page_size=4, device="meta")
     assert state.get_state_type() == expected_type
     assert state.config.latent_dim == config.latent_dim == kv_dim
-    assert state.config.dtype == (torch.float8_e4m3fn if kv_type == "fp8kv_dsa" else config.dtype)
+    expected_dtype = torch.float8_e4m3fn if kv_type == "fp8kv_dsa" else torch.bfloat16
+    if packed:
+        assert state.config.dtype == expected_dtype
+    else:
+        assert state.config.latent_dtype == expected_dtype
     assert not hasattr(state.config, "storage_dtype")
     assert not hasattr(state.config, "replicated")
     assert state.capacity == 0 and read_kv_storage(state) is None
@@ -122,7 +127,7 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
     state.device = torch.device("cpu")
     state.allocate_storage(8)
     assert read_kv_storage(state).shape == (2, 12, 1, row_width)
-    assert read_kv_storage(state).dtype == (torch.uint8 if kv_type == "fp8kv_dsa" else config.dtype)
+    assert read_kv_storage(state).dtype == (torch.uint8 if kv_type == "fp8kv_dsa" else torch.bfloat16)
     if packed:
         # 保持旧算子读取的物理布局：FP8 indexer 紧接 KV，浮点格式保留中间的对齐间隙。
         expected_indexer_offset = 656 if kv_type == "fp8kv_dsa" else kv_dim * 2 + 12
@@ -182,18 +187,16 @@ def test_create_rejects_encoding_from_another_logical_family():
     )
     with pytest.raises(AssertionError, match="unsupported GQA encoding"):
         create_gqa_state(config=config, kv_type="fp8kv_dsa", device="meta")
-    config = MLAAttentionConfig(
-        logical_layer_groups=((0,),), latent_dim=576, dtype=torch.bfloat16,
+    packed_config = PackedMLALogicalConfig(
+        logical_layer_groups=((0,),), latent_dim=576, format="packed_group128_fp8",
     )
-    with pytest.raises(AssertionError, match="unsupported packed MLA encoding"):
-        create_mla_state(
-            config=config,
-            packed=True,
-            kv_type="int4kv",
+    with pytest.raises(AssertionError, match="normal MLA creation"):
+        create_mla_state(config=packed_config, device="meta")
+    with pytest.raises(AssertionError, match="packed MLA creation"):
+        create_packed_mla_state(
+            config=MLAConfig(logical_layer_groups=((0,),), latent_dim=576, latent_dtype=torch.bfloat16),
             device="meta",
         )
-    with pytest.raises(AssertionError, match="unsupported MLA encoding"):
-        create_mla_state(config=config, kv_type="fp8kv_dsa", device="meta")
 
 
 @pytest.mark.parametrize(

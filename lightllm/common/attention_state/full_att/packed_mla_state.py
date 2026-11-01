@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import TYPE_CHECKING, List
+from typing import TYPE_CHECKING, List, Literal
 from dataclasses import dataclass
 from math import prod
 
@@ -24,33 +24,92 @@ logger = init_logger(name=__name__)
 
 
 @dataclass(frozen=True)
-class PackedMLAAttentionConfig:
-    """group128/FP32 scale 或浮点 packed MLA，固定单份 latent 并在各 TP rank 复制。"""
+class PackedMLALogicalConfig:
+    """带 indexer 的 packed MLA 逻辑配置；不描述实际字节布局。"""
 
-    # 外层顺序对应物理存储层，组内逻辑层共享该方案的全部字段；各组非空，逻辑层不能重复。
-    # 例如 ((0, 4), (8,)) 分配两层，逻辑层 0/4 共用第一层的全部字段。
-    # 分组不决定执行顺序或写入者；模型须让共享消费者跳过写入，避免覆盖生产层数据。
     logical_layer_groups: tuple[tuple[int, ...], ...]
-    # 完整逻辑 latent 宽度，不含 indexer、scale 和物理 padding；FP8 为 576。
+    # 编码前的完整 latent 宽度；具体分块、scale 和 padding 由工厂转换。
     latent_dim: int
-    # KV 编码精度：FP16、BF16 或 float8_e4m3fn；FP8 仅量化非 RoPE 部分。
-    # packed FP8 的底层 buffer 使用 uint8 承载 KV、FP32 scale 和 BF16 RoPE，不作为配置输入。
-    dtype: torch.dtype
-    # indexer key 的 FP8 维度，另保存一个 FP32 scale，不计入此维度。
+    # packed MLA 的逻辑格式；所有选项都包含 indexer。
+    format: Literal["packed_fp16", "packed_bf16", "packed_group128_fp8", "packed_group64_e8m0"]
+    # indexer key 的逻辑宽度。
     indexer_dim: int = 128
-    # 0 为未量化；512 表示前 512 维按 group128 编码，其余 64 维以 BF16 保存。
-    fp8_nope_dim: int = 0
-    # FP8 非 RoPE 特征的量化分组宽度，当前编码固定为 128。
-    quant_group_size: int = 128
-    # 所属模型 TP 组内的 rank；各 rank 保存相同 latent，仅 rank 0 写出共享外部页。
+    # latent 中保留原始 RoPE 精度的宽度；NoPE 宽度由 latent_dim - rope_dim 得到。
+    rope_dim: int = 64
     tp_rank: int = 0
-    # 保存完整 latent 副本的 TP rank 数，不改变 latent 的维度或物理行宽。
     tp_world_size: int = 1
+
+    def __post_init__(self) -> None:
+        assert self.logical_layer_groups and all(self.logical_layer_groups)
+        layers = [layer for group in self.logical_layer_groups for layer in group]
+        assert len(layers) == len(set(layers)), "logical layers cannot repeat across storage groups"
+        assert (
+            self.latent_dim > 0
+            and 0 <= self.rope_dim <= self.latent_dim
+            and self.indexer_dim > 0
+            and 0 <= self.tp_rank < self.tp_world_size
+        )
+        assert self.format in (
+            "packed_fp16", "packed_bf16", "packed_group128_fp8", "packed_group64_e8m0"
+        ), "unknown packed MLA logical format"
+
+
+@dataclass(frozen=True)
+class PackedMLAAttentionConfig:
+    """由 packed 逻辑配置解析出的物理布局，不重复保存逻辑字段。"""
+
+    logical_config: PackedMLALogicalConfig
+    quant_group_size: int = 128
+
+    @property
+    def logical_layer_groups(self):
+        return self.logical_config.logical_layer_groups
+
+    @property
+    def latent_dim(self):
+        return self.logical_config.latent_dim
+
+    @property
+    def kv_encoding(self):
+        return {
+            "packed_fp16": "fp16",
+            "packed_bf16": "bf16",
+            "packed_group128_fp8": "fp8_group128",
+        }[self.logical_config.format]
+
+    @property
+    def indexer_dim(self):
+        return self.logical_config.indexer_dim
+
+    @property
+    def tp_rank(self):
+        return self.logical_config.tp_rank
+
+    @property
+    def tp_world_size(self):
+        return self.logical_config.tp_world_size
+
+    @property
+    def rope_dim(self):
+        return self.logical_config.rope_dim
+
+    @property
+    def dtype(self) -> torch.dtype:
+        """返回编码对应的逻辑存储 dtype；FP8 的物理承载仍由 State 内部使用 uint8。"""
+        if self.kv_encoding == "fp16":
+            return torch.float16
+        if self.kv_encoding == "bf16":
+            return torch.bfloat16
+        return torch.float8_e4m3fn
 
     @property
     def kv_bytes(self) -> int:
-        """单行 KV 区域字节数，FP8 包含 512 字节数据、16 字节 scales 和 64 维 BF16。"""
-        return 656 if self.dtype == torch.float8_e4m3fn else self.latent_dim * self.dtype.itemsize
+        """按逻辑 NoPE/RoPE 宽度和 scale 数量计算单行 KV 字节数。"""
+        if self.kv_encoding == "fp8_group128":
+            nope_dim = self.latent_dim - self.rope_dim
+            scale_count = nope_dim // self.quant_group_size
+            return nope_dim + scale_count * torch.float32.itemsize + self.rope_dim * torch.bfloat16.itemsize
+        return self.latent_dim * self.dtype.itemsize
 
     @property
     def token_bytes(self) -> int:
@@ -60,24 +119,19 @@ class PackedMLAAttentionConfig:
     @property
     def indexer_offset(self) -> int:
         """保持既有格式：FP8 紧接 KV，浮点格式将对齐间隙放在 KV 与 indexer 之间。"""
-        return self.kv_bytes if self.dtype == torch.float8_e4m3fn else self.token_bytes - self.indexer_dim - 4
+        return self.kv_bytes if self.kv_encoding == "fp8_group128" else self.token_bytes - self.indexer_dim - 4
 
     def __post_init__(self) -> None:
-        assert isinstance(self.logical_layer_groups, tuple) and all(
-            isinstance(group, tuple) and group for group in self.logical_layer_groups
-        ), "layer groups must be a tuple of nonempty tuples"
-        layers = [layer for group in self.logical_layer_groups for layer in group]
-        assert all(isinstance(layer, int) and layer >= 0 for layer in layers), "logical layer IDs must be nonnegative integers"
-        assert len(layers) == len(set(layers)), "a logical layer must belong to exactly one storage group"
-        assert self.latent_dim > 0 and self.indexer_dim > 0 and 0 <= self.tp_rank < self.tp_world_size
-        if self.dtype == torch.float8_e4m3fn:
-            assert (self.fp8_nope_dim, self.latent_dim, self.quant_group_size) == (512, 576, 128), (
-                "FP8 MLA kernel requires 512 latent dimensions, 64 RoPE dimensions and groups of 128"
-            )
+        assert self.kv_encoding in ("fp16", "bf16", "fp8_group128"), "unknown packed MLA KV encoding"
+        if self.kv_encoding == "fp8_group128":
+            assert (
+                self.dtype == torch.float8_e4m3fn
+                and self.rope_dim == 64
+                and self.latent_dim == 576
+                and self.quant_group_size == 128
+            ), "group128 packed MLA requires latent 576, rope 64 and group size 128"
         else:
-            assert self.dtype in (torch.float16, torch.bfloat16) and self.fp8_nope_dim == 0, (
-                "unquantized packed MLA requires FP16 or BF16 without FP8 dimensions"
-            )
+            assert self.kv_encoding in ("fp16", "bf16")
 
 
 @dataclass(frozen=True)
@@ -118,7 +172,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
         """返回 packed MLA 编码方案标记，区分 FP8 与原始精度。"""
         encoding = (
             f"fp8_group{self.config.quant_group_size}"
-            if self.config.dtype == torch.float8_e4m3fn else dtype_name(dtype=self.config.dtype)
+            if self.config.kv_encoding == "fp8_group128" else dtype_name(dtype=self.config.dtype)
         )
         return "mla_packed_" + encoding
 
@@ -126,7 +180,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
         self.capacity = token_capacity
         # FP8 行混合保存多种字段，用字节 buffer 承载，字段视图再解释各自的 dtype。
-        storage_dtype = torch.uint8 if self.config.dtype == torch.float8_e4m3fn else self.config.dtype
+        storage_dtype = torch.uint8 if self.config.kv_encoding == "fp8_group128" else self.config.dtype
         self.storage = torch.empty(
             size=(
                 len(self.config.logical_layer_groups),
@@ -160,7 +214,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
         raw = row.view(torch.uint8)
         kv = (
             raw[..., : self.config.kv_bytes]
-            if self.config.dtype == torch.float8_e4m3fn else row[..., : self.config.latent_dim]
+            if self.config.kv_encoding == "fp8_group128" else row[..., : self.config.latent_dim]
         )
         indexer = raw[..., self.config.indexer_offset : self.config.indexer_offset + self.config.indexer_dim + 4]
         return PackedMLALayerView(kv=kv, indexer_k=indexer)
@@ -172,19 +226,24 @@ class PackedMLAFullAttentionState(FullAttentionState):
         if not len(token_indices):
             return
         assert self.storage.is_cuda, "KV writes require CUDA storage"
-        if self.config.dtype == torch.float8_e4m3fn:
+        if self.config.kv_encoding == "fp8_group128":
             from lightllm.common.basemodel.triton_kernel.kv_copy.destindex_copy_kv_flashmla_fp8 import (
                 destindex_copy_kv_flashmla_fp8,
             )
 
             raw = self.storage[storage_layer_index]
+            nope_dim = self.config.latent_dim - self.config.rope_dim
+            scale_bytes = nope_dim // self.config.quant_group_size * torch.float32.itemsize
+            rope_start = nope_dim + scale_bytes
             destindex_copy_kv_flashmla_fp8(
-                KV_nope=kv[..., :512],
-                KV_rope=kv[..., 512:],
+                KV_nope=kv[..., :nope_dim],
+                KV_rope=kv[..., nope_dim:],
                 DestLoc=token_indices,
-                O_nope=raw[..., :512].view(torch.float8_e4m3fn),
-                O_scale=raw[..., 512:528].view(torch.float32),
-                O_rope=raw[..., 528:656].view(torch.bfloat16),
+                O_nope=raw[..., :nope_dim].view(torch.float8_e4m3fn),
+                O_scale=raw[..., nope_dim:rope_start].view(torch.float32),
+                O_rope=raw[..., rope_start : rope_start + self.config.rope_dim * torch.bfloat16.itemsize].view(
+                    torch.bfloat16
+                ),
             )
         else:
             from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
@@ -284,11 +343,11 @@ class PackedMLAFullAttentionState(FullAttentionState):
     ) -> None:
         """校验 MLA 编码与区域尺寸，再复制完整 KV 和 indexer 数据。"""
         assert (
-            remote_dp_full_att_state.config.fp8_nope_dim,
+            remote_dp_full_att_state.config.kv_encoding,
             remote_dp_full_att_state.config.latent_dim,
             remote_dp_full_att_state.config.indexer_dim,
         ) == (
-            self.config.fp8_nope_dim,
+            self.config.kv_encoding,
             self.config.latent_dim,
             self.config.indexer_dim,
         ), "incompatible packed MLA format"
@@ -374,7 +433,7 @@ class PackedMLAFullAttentionState(FullAttentionState):
             page_tokens,
         )
         # 阶段一：按本方案固定字段计算形状和 dtype，不分配 meta 存储。
-        if config.dtype == torch.float8_e4m3fn:
+        if config.kv_encoding == "fp8_group128":
             field_specs = [
                 ("kv_nope", torch.uint8, 512, "dim"),
                 ("kv_scale", torch.float32, 4, "group"),

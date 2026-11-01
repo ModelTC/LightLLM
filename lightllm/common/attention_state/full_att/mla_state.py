@@ -20,8 +20,8 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class MLAAttentionConfig:
-    """普通 MLA 的独立 latent 布局；单份 latent 固定在各 TP rank 完整复制。"""
+class MLAConfig:
+    """普通 latent MLA 的逻辑配置，不包含 indexer 或 packed 物理字段。"""
 
     # 外层顺序对应物理存储层，组内逻辑层共享该方案的全部字段；各组非空，逻辑层不能重复。
     # 例如 ((0, 4), (8,)) 分配两层，逻辑层 0/4 共用第一层的全部字段。
@@ -29,8 +29,8 @@ class MLAAttentionConfig:
     logical_layer_groups: tuple[tuple[int, ...], ...]
     # 编码前的完整 latent 宽度，包含模型需要的 RoPE 部分，不含 indexer 或 padding。
     latent_dim: int
-    # 未量化 latent 的浮点精度，也作为 MLA 工厂选择 packed 编码前的原始精度。
-    dtype: torch.dtype
+    # 未压缩 latent 在运行态和存储中的浮点精度。
+    latent_dtype: torch.dtype
     # 所属模型 TP 组内的 rank；各 rank 保存相同 latent，仅 rank 0 写出共享外部页。
     tp_rank: int = 0
     # 保存完整 latent 副本的 TP rank 数，不改变 latent 的维度或物理行宽。
@@ -55,7 +55,7 @@ class MLAFullAttentionState(FullAttentionState):
 
     def __init__(
         self,
-        layout_config: MLAAttentionConfig,
+        layout_config: MLAConfig,
         page_size: int = 1,
         device: str | torch.device = "cuda",
     ) -> None:
@@ -75,7 +75,7 @@ class MLAFullAttentionState(FullAttentionState):
 
     def get_state_type(self) -> str:
         """返回 MLA 压缩 KV 精度对应的存储方案标记。"""
-        return "mla_" + dtype_name(dtype=self.config.dtype)
+        return "mla_" + dtype_name(dtype=self.config.latent_dtype)
 
     def allocate_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
@@ -87,14 +87,14 @@ class MLAFullAttentionState(FullAttentionState):
                 1,
                 self.config.latent_dim,
             ),
-            dtype=self.config.dtype,
+            dtype=self.config.latent_dtype,
             device=self.device,
         )
 
     def get_token_bytes(self) -> int:
         """由配置计算当前 TP rank 的单 token latent 字节数，无需分配存储。"""
         config = self.config
-        return len(config.logical_layer_groups) * config.latent_dim * config.dtype.itemsize
+        return len(config.logical_layer_groups) * config.latent_dim * config.latent_dtype.itemsize
 
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
@@ -280,8 +280,8 @@ class MLAFullAttentionState(FullAttentionState):
             TransferRegion(
                 field="kv",
                 byte_start=0,
-                byte_end=prod(shape) * config.dtype.itemsize,
-                dtype=config.dtype,
+                byte_end=prod(shape) * config.latent_dtype.itemsize,
+                dtype=config.latent_dtype,
                 axes=("layer", "token", "head", "dim"),
                 shape=shape,
                 axis_mappings=(

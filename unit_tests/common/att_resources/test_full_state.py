@@ -17,7 +17,7 @@ from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
     MLAFullAttentionState,
     GQAAttentionConfig,
-    MLAAttentionConfig,
+    MLAConfig,
 )
 from lightllm.common.attention_state.types import (
     AxisMapping, StateTransferLayout, TransferRegion,
@@ -26,8 +26,8 @@ from lightllm.common.attention_state.types import (
 
 def full_state(cls: type[FullAttentionState] = GQAFullAttentionState, device: str | torch.device | int = "cpu"):
     if cls is MLAFullAttentionState:
-        config = MLAAttentionConfig(
-            logical_layer_groups=((2,), (5,)), latent_dim=4, dtype=torch.float32,
+        config = MLAConfig(
+            logical_layer_groups=((2,), (5,)), latent_dim=4, latent_dtype=torch.float32,
         )
     else:
         config = GQAAttentionConfig(

@@ -9,7 +9,7 @@ from lightllm.common.attention_state.allocators import FullAttKVAllocator
 
 from lightllm.common.attention_state.full_att import (
     PackedMLAFullAttentionState,
-    PackedMLAAttentionConfig,
+    PackedMLAAttentionConfig, PackedMLALogicalConfig,
 )
 from lightllm.common.req_manager import ReqManager
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
@@ -87,10 +87,12 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
         full_layer_ids += (config.all_layer_num,)
     full = PackedMLAFullAttentionState(
         PackedMLAAttentionConfig(
-            logical_layer_groups=tuple((layer,) for layer in full_layer_ids),
-            dtype=torch.bfloat16,
-            tp_world_size=tp_world_size,
-            latent_dim=512,
+            logical_config=PackedMLALogicalConfig(
+                logical_layer_groups=tuple((layer,) for layer in full_layer_ids),
+                format="packed_bf16",
+                tp_world_size=tp_world_size,
+                latent_dim=512,
+            )
         ),
          page_size=args.page_size,
     )

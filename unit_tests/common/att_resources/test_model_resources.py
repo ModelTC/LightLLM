@@ -19,7 +19,7 @@ from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
     GQAAttentionConfig,
 )
-from lightllm.common.attention_state.full_att import PackedMLAFullAttentionState, PackedMLAAttentionConfig
+from lightllm.common.attention_state.full_att import PackedMLAFullAttentionState, PackedMLAAttentionConfig, PackedMLALogicalConfig
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -58,11 +58,13 @@ def make_resources(
     if glm:
         full = PackedMLAFullAttentionState(
             PackedMLAAttentionConfig(
-                logical_layer_groups=tuple((layer,) for layer in (3, *range(4, 4 + draft_layers))),
-                dtype=torch.bfloat16,
-                tp_rank=rank,
-                tp_world_size=tp,
-                latent_dim=512,
+                logical_config=PackedMLALogicalConfig(
+                    logical_layer_groups=tuple((layer,) for layer in (3, *range(4, 4 + draft_layers))),
+                    format="packed_bf16",
+                    tp_rank=rank,
+                    tp_world_size=tp,
+                    latent_dim=512,
+                )
             ),
              page_size=4,
         )

@@ -28,7 +28,7 @@ from lightllm.common.attention_state.full_att import (
     FullAttentionState,
     GQAFullAttentionState,
     GQAAttentionConfig,
-    MLAAttentionConfig,
+    MLAConfig,
     create_gqa_state,
     create_mla_state,
     GroupQuantizedAttentionConfig,
@@ -43,15 +43,21 @@ if TYPE_CHECKING:
 
 
 def definition(kind: str):
-    if kind == "mla" or kind.startswith("packed"):
+    if kind == "mla":
         return create_mla_state(
-            config=MLAAttentionConfig(
+            config=MLAConfig(logical_layer_groups=((0,), (2,)), latent_dim=576, latent_dtype=torch.bfloat16),
+            page_size=4,
+            device="meta",
+        )
+    if kind.startswith("packed"):
+        from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
+
+        return create_packed_mla_state(
+            config=PackedMLALogicalConfig(
                 logical_layer_groups=((0,), (2,)),
                 latent_dim=512 if kind == "packed_glm" else 576,
-                dtype=torch.bfloat16,
+                format="packed_group128_fp8" if kind == "packed_fp8" else "packed_bf16",
             ),
-            kv_type="fp8kv_dsa" if kind == "packed_fp8" else "None",
-            packed=kind.startswith("packed"),
             page_size=4,
             device="meta",
         )
@@ -291,8 +297,8 @@ def test_pd_layout_reserves_aligned_storage_for_mixed_token_formats(
         (GQAFullAttentionState, "main", 1, torch.float32),
     ):
         if state_cls is MLAFullAttentionState:
-            config = MLAAttentionConfig(
-                logical_layer_groups=((0,),), latent_dim=dim, dtype=dtype,
+            config = MLAConfig(
+                logical_layer_groups=((0,),), latent_dim=dim, latent_dtype=dtype,
             )
         else:
             config = GQAAttentionConfig(
@@ -642,7 +648,17 @@ def test_cpu_page_bytes_derive_from_cached_transfer_layouts(
 ):
     cpu_args.cpu_cache_token_page_size = page_tokens
     template = definition(kind)
-    config = replace(template.config, tp_world_size=tp_world_size, tp_rank=tp_world_size - 1)
+    if hasattr(template.config, "logical_config"):
+        config = replace(
+            template.config,
+            logical_config=replace(
+                template.config.logical_config,
+                tp_world_size=tp_world_size,
+                tp_rank=tp_world_size - 1,
+            ),
+        )
+    else:
+        config = replace(template.config, tp_world_size=tp_world_size, tp_rank=tp_world_size - 1)
     scales = torch.ones((len(config.logical_layer_groups), 2 * config.head_num)) if kind == "static_head" else None
     q_scales = torch.ones((len(config.logical_layer_groups), config.head_num)) if kind == "static_head" else None
     manager = AttentionStateManager(request_capacity=3)

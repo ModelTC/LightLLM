@@ -1279,17 +1279,15 @@ def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypat
 
 def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
     from lightllm.common.attention_state import AttentionStateManager
-    from lightllm.common.attention_state.full_att import MLAAttentionConfig, create_mla_state
+    from lightllm.common.attention_state.full_att import PackedMLALogicalConfig, create_packed_mla_state
 
     args = SimpleNamespace(cpu_cache_token_page_size=4, pd_kv_page_size=4)
     monkeypatch.setattr("lightllm.common.attention_state.manager.get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla_state.get_env_start_args", lambda: args)
-    config = MLAAttentionConfig(
-        logical_layer_groups=((3,),), latent_dim=512, dtype=torch.bfloat16,
+    config = PackedMLALogicalConfig(
+        logical_layer_groups=((3,),), latent_dim=512, format="packed_group64_e8m0",
     )
-    state = create_mla_state(
-        config=config, kv_type="fp8kv_dsa", packed=True, fp8_format="group64_e8m0", page_size=4,
-    )
+    state = create_packed_mla_state(config=config, page_size=4)
     state.allocate_storage(token_capacity=16)
     state.storage.zero_()
     manager = AttentionStateManager(request_capacity=1)

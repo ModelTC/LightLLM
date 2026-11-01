@@ -81,7 +81,8 @@ def test_model_local_shared_groups_preserve_global_logical_layer_ids(pd_args: "E
     )
     # 共享消费者 14/15 分别使用最后一个同类型生产层 12/13，保持四份物理层存储。
     assert state.config.logical_layer_groups == ((10,), (11,), (12, 14), (13, 15))
-    assert state.get_token_bytes() == 4 * 2 * 2 * 128 * state.config.dtype.itemsize
+    latent_dtype = state.config.latent_dtype if hasattr(state.config, "latent_dtype") else state.config.dtype
+    assert state.get_token_bytes() == 4 * 2 * 2 * 128 * latent_dtype.itemsize
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

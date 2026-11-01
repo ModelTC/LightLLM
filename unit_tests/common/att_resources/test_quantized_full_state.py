@@ -20,7 +20,7 @@ from lightllm.common.attention_state.full_att import (
     GroupQuantizedFullAttentionState,
     StaticFP8AttentionConfig,
     StaticFP8FullAttentionState,
-    PackedMLAAttentionConfig,
+    PackedMLAAttentionConfig, PackedMLALogicalConfig,
     PackedMLAFullAttentionState,
 )
 from lightllm.common.attention_state.types import (
@@ -70,10 +70,11 @@ def make_quant_state(kind: str, device: str | torch.device | int):
         return prepared_full_state
     fp8 = kind == "packed_fp8"
     config = PackedMLAAttentionConfig(
-        latent_dim=576,
-        logical_layer_groups=((1,), (3,)),
-        dtype=torch.float8_e4m3fn if fp8 else torch.bfloat16,
-        fp8_nope_dim=512 if fp8 else 0,
+        logical_config=PackedMLALogicalConfig(
+            latent_dim=576,
+            logical_layer_groups=((1,), (3,)),
+            format="packed_group128_fp8" if fp8 else "packed_bf16",
+        )
     )
     prepared_full_state = PackedMLAFullAttentionState(config, page_size=4, device=device)
     prepared_full_state.allocate_storage(8)

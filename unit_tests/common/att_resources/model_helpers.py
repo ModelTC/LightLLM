@@ -11,7 +11,7 @@ import torch
 from lightllm.common.attention_state.types import TensorField
 from lightllm.common.attention_state.bounded_att import GDNState, KDAState, WindowCompressorState
 from lightllm.common.attention_state.full_att import (
-    FullAttentionState, GQAAttentionConfig, MLAAttentionConfig,
+    FullAttentionState, GQAAttentionConfig, MLAConfig,
     GroupQuantizedAttentionConfig, StaticFP8AttentionConfig, PackedMLAAttentionConfig,
     CompressedAttentionConfig, FP8E8M0PackedMLAConfig, StaticFP8FullAttentionState,
     GQAFullAttentionState, GroupQuantizedFullAttentionState, MLAFullAttentionState, PackedMLAFullAttentionState,
@@ -56,7 +56,7 @@ def bind_test_fp8_calibration(
 def rebuild_full_state(
     template: FullAttentionState,
     config: (
-        GQAAttentionConfig | MLAAttentionConfig | GroupQuantizedAttentionConfig
+        GQAAttentionConfig | MLAConfig | GroupQuantizedAttentionConfig
         | StaticFP8AttentionConfig | PackedMLAAttentionConfig
         | CompressedAttentionConfig | FP8E8M0PackedMLAConfig | None
     ) = None,
