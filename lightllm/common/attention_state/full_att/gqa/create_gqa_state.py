@@ -7,8 +7,8 @@ from typing import Literal
 import torch
 
 from .gqa_state import GQAAttentionConfig, GQAFullAttentionState
-from ..group_quantized.group_quantized_state import GroupQuantizedAttentionConfig, GroupQuantizedFullAttentionState
-from ..static_fp8.static_fp8_state import StaticFP8AttentionConfig, StaticFP8FullAttentionState
+from .group_quantized_state import GroupQuantizedAttentionConfig, GroupQuantizedFullAttentionState
+from .static_fp8_state import StaticFP8AttentionConfig, StaticFP8FullAttentionState
 
 
 def create_gqa_state(

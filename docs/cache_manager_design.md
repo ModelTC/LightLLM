@@ -310,17 +310,18 @@ lightllm/common/
 │   ├── full_att/
 │   │   ├── __init__.py
 │   │   ├── base_state.py                # FullAttentionState：抽象行为接口
-│   │   ├── gqa/                         # GQA 配置、State、创建入口和传输实现
+│   │   ├── gqa/                         # GQA 及其量化变体的配置、State、创建入口和传输实现
 │   │   │   ├── create_gqa_state.py
 │   │   │   ├── gqa_state.py
+│   │   │   ├── group_quantized_state.py
+│   │   │   ├── group_quantized_transfer.py
+│   │   │   ├── static_fp8_state.py
+│   │   │   ├── static_fp8_transfer.py
 │   │   │   └── gqa_transfer.py
 │   │   ├── dp_transfer.py              # 各 full-attention 方案的直接索引 DP 聚合复制
-│   │   ├── group_quantized/             # INT4/INT8 配置、State 和动态 scale 传输
-│   │   ├── static_fp8/                  # 静态 FP8 配置、State 和传输
 │   │   ├── mla/                         # 普通 MLA latent 配置、State 和创建入口
 │   │   ├── compressed_att/              # V4 C4/C128 压缩块配置、State 和创建入口
-│   │   ├── packed_mla/                  # packed MLA 配置、State、创建入口和传输
-│   │   └── fp8_e8m0_packed_mla/         # group64/E8M0 packed MLA 配置、State 和写入 kernel
+│   │   └── packed_mla/                  # packed MLA 及其 FP8/E8M0 变体的配置、State、创建入口和传输
 │   ├── bounded_att/
 │   │   ├── __init__.py
 │   │   ├── base_state.py                # BoundedAttentionState：有界状态的抽象操作契约

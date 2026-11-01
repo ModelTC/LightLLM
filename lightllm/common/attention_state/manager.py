@@ -117,7 +117,7 @@ class AttentionStateManager:
         对应物理行区间，共享逻辑层只占一行；CPU 布局创建不需要调用本流程。
         """
         import json
-        from .full_att.static_fp8.static_fp8_state import StaticFP8FullAttentionState
+        from .full_att.gqa.static_fp8_state import StaticFP8FullAttentionState
 
         full_states = self.get_full_attention_states()
         calibration_states = [state for state in full_states if isinstance(state, StaticFP8FullAttentionState)]

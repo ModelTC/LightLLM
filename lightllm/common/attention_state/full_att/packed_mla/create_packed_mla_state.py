@@ -6,7 +6,7 @@ import torch
 
 from ..base_state import FullAttentionState
 from .packed_mla_state import PackedMLAAttentionConfig, PackedMLALogicalConfig, PackedMLAFullAttentionState
-from ..fp8_e8m0_packed_mla.fp8_e8m0_packed_mla_state import FP8E8M0PackedMLAConfig, FP8E8M0PackedMLAState
+from .fp8_e8m0_packed_mla_state import FP8E8M0PackedMLAConfig, FP8E8M0PackedMLAState
 
 
 def create_packed_mla_state(

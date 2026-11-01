@@ -125,7 +125,7 @@ class FP8E8M0PackedMLAState(FullAttentionState):
         kv: torch.Tensor,
     ) -> None:
         """使用固定 group64/E8M0 算子量化并写入 KV，保留 indexer 和行尾 padding。"""
-        from lightllm.common.attention_state.full_att.fp8_e8m0_packed_mla.fp8_e8m0_packed_mla_write import (
+        from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import (
             write_fp8_e8m0_packed_kv,
         )
 
