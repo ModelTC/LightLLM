@@ -13,7 +13,7 @@ class AtomicShmLock:
         self.dest_size = 4
         self.shm = create_or_link_shm(self.lock_name, self.dest_size)
 
-        self.shm.buf.cast("i")[0] = 0
+        # New shared memory is zero-filled; attaching must preserve a held lock.
         return
 
     def __enter__(self):

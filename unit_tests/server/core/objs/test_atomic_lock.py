@@ -1,6 +1,7 @@
 import pytest
 import time
 from multiprocessing import Process
+from types import SimpleNamespace
 from lightllm.utils.log_utils import init_logger
 from lightllm.server.core.objs.atomic_lock import AtomicShmLock
 
@@ -23,6 +24,22 @@ def test_lock_acquisition(setup_shared_memory):
         assert lock.shm.buf.cast("i")[0] == 1  # Lock should be acquired
 
     assert lock.shm.buf.cast("i")[0] == 0  # Lock should be released
+
+
+def test_attaching_does_not_unlock_existing_owner(monkeypatch):
+    buffer = memoryview(bytearray(4))
+    monkeypatch.setattr(
+        "lightllm.server.core.objs.atomic_lock.create_or_link_shm",
+        lambda name, size: SimpleNamespace(buf=buffer),
+    )
+    owner = AtomicShmLock("shared_lock")
+    owner.__enter__()
+    attached = AtomicShmLock("shared_lock")
+    assert attached.shm.buf.cast("i")[0] == 1
+    owner.__exit__(None, None, None)
+    with attached:
+        assert buffer.cast("i")[0] == 1
+    assert buffer.cast("i")[0] == 0
 
 
 def test_multiple_processes_locking():
