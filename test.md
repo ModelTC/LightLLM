@@ -102,3 +102,37 @@ MTP平均token/step来自每轮完成请求的Prometheus直方图sum/count差值
 三轮矩阵结束后运行同一8-shot全量runner：**1212/1319=91.8878%**，invalid=0、truncated=1、124568输出token，38.564s。MTP接受89929/176880=50.8418%，3.54209 committed tokens/step。配置、数据hash、逐题预测和计数保存在`standalone/gsm8k_final/`。首轮90.6748%与历史90.8264%一起保留；单轮91.8878%不证明迁移提高了准确率，也不与官方不同评测配置的成绩直接等同。38.56s仍高于历史28.03s；预热、请求批形状与浮点归约未隔离，不称纯代码加速。
 
 全部测试后两台各31长期进程/16GPU进程，FD最大374/347、上限1048576，fatal为空、cgroup oom/oom_kill=0，详见`service/audit_final_after_all_node*.json`。保留正在运行的双机DPEP16服务：.17.62/.17.55的18941端口，生产源码d06ec314f。**四机PD未启动，按用户要求等待通知**；只有模板、相关缓存/PD回归，未把它们表述成四机实测通过。
+
+## 2026-10-30：独立 EIP 的 LLM Bench 20% 回放
+
+用户要求避开正在使用的 `10.210.6.10:10418`。确认 H100-msw 的旧8020代理无活跃连接且健康请求失败后，备份旧配置，将 `10.210.6.10:11046 → H100-msw:8020` 转发到本轮 `.17.62/.17.55:18941`，HTTP leastconn，后端健康检查。原10066代理PID3077179和配置SHA256 `9c5c88ca4e155ac0582574f44bbd50a700b1904f195bc2641575bb4ade559f42` 均未改变；8019未修改。当前拓扑仍为双机DPEP16独立服务，不是四机PD。
+
+公网health、模型列表与真实42推理均HTTP200；平台inference preflight成功、929ms（只作功能预检）。两台启动前审计分别31长期进程/16GPU进程，FD最大374/347，上限1048576，cgroup oom/oom_kill=0，fatal为空；未重启模型服务或更改包/启动参数。
+
+复制源任务 `73cbd186-218e-4531-b480-543b6cb2dd83`，保留原数据集 `80d718de-af61-468b-b06c-97adb0fe0c01`、session_ratio=20、factor=1、50ms调度、prompt cache与clear_cache_before_run=false；目标模型为DeepSeek-V4.1-Flash-FP8，新seed `PVbmo`。首个6位seed被平台422拒绝、未创建任务，改为平台要求的5位seed后仅成功创建一个任务，不使用force，不修改源任务或10418上的在跑任务。
+
+任务名 `v41-ds4-DP16-20p-PVbmo-1030-163658`；ID `0a8db498-b4f9-4d15-88ac-2a7fb8c48d3b`。报告：http://10.9.66.47:5174/spaces/default/env/default/reports?region=intranet-node&taskId=0a8db498-b4f9-4d15-88ac-2a7fb8c48d3b 。HTTP201初始为pending，待确认运行及递增进度；不把创建成功表述成压测完成。
+
+本轮配置、预检、创建响应与进度采样归档在H100-msw的 `/mnt/vqa/wanzihao/dsv41_port_support_ds4_20261030/llm_bench_11046/0a8db498-b4f9-4d15-88ac-2a7fb8c48d3b/`；同级保留代理配置、旧配置备份与身份记录。
+
+已确认running且进度1→2→31/70646递增，最新完成31条、成功31条；公网health200。初期metric-series已有TTFT/TPOT样本，但样本很少且处于启动回放阶段，不作为最终延迟或吞吐结论。运行初期两节点FD最大930/910、上限1048576，未发现新增fatal或cgroup OOM。后续正常压测按每小时一次监测，不在期间运行profiler或额外推理。
+
+## 2026-11-01：压测结束与当前入口失联检查
+
+用户要求复查服务。当前EIP11046返回503；H100-msw的8020代理仍监听，但到.17.62/.17.55的8090和18941均无法连接，SSH报No route to host，无法进入节点复查当前进程、显存或cgroup。两份持久化服务日志最后均为2026-10-31 18:39:38 UTC（北京时间11-01 02:39:38）的health200，随后停止更新；不能仅据此断言容器被销毁或OOM。扫描已有完整日志，无Traceback、CUDA OOM、CUDA error、NCCL/NVSHMEM fatal或missing-WRITE-task；HTTP记录分别400=34/36、500=0。日志里仍有共享内存重名Warning，需要与逐请求失败记录区分。
+
+任务0a8db498已completed：70646/70646，69029成功、1617失败，成功率97.7111%，dropped=0、unsent=0；UTC 10-30 22:00:03结束（北京时间10-31 06:00），实际历时47890.576秒=13.303小时，明显超过计划7199秒。报告聚合TTFT平均5164.4ms/p50 2679.1ms/p99 24655.2ms，TPOT平均464.476ms/p50 359.561ms/p99 2875.249ms，仅记录平台原值，尚未按失败类型/长尾请求核验，不作为正常稳态加速结论。此次节点失联发生在最后一次已知health200之后，晚于压测结束，不能用当前失联解释全部1617条历史失败；失败明细尚未完成归因。检查未重启服务、改动代理或占用其他机器。
+
+## 2026-11-01：同步最新 support_ds4
+
+从origin重新fetch，最新 `support_ds4=38fce3351cc258539f2705eca4f4c77bddc1a153`，相对移植基线6dc33df85新增1个提交。已通过merge提交 `a042cf54b` 合入 `support_ds4_v41`，未修改原support_ds4工作区的未提交内容；本轮未push、未重启服务或改动部署参数。
+
+- 自动调优：删除移植版本对空cached_configs的重复处理，生产autotuner完整采用上游 `_missing_config_keys` 实现；保留移植时已有的level0/1/2参数化回归，不添加第二份同用途测试。DSpark顺序执行的target/draft图内存池共享不受影响。
+- 多模态prefill：合入图片块内不再为hybrid checkpoint额外切分的修复，两条计算输入长度/输入IDs的路径保持一致；保留V4.1的Engram lookback生命周期。
+- 共享锁：attach不再清零可能被持有的锁字；共享cache构造的barrier及所有权继续沿用上游。V4.1 FP8、CED共享KV、Engram、vision、DSpark及draft加载后target峰值复检均保留。
+
+本机H200 GPU7，使用已有测试镜像fdf6df4b8331（Python3.10/Torch2.11cu130），独立容器、私有shm，不安装或替换任何依赖。上游autotuner/atomic-lock/multimodal三模块104 passed；backend及请求预处理36 passed/2 skipped（CPU容器未开放GPU，跳过两项GPU用例）；V4.1模型、checkpoint视觉参考、parser、DeepEP V2契约、DSpark、CUDA Graph生命周期、MTP manager和ViT FA3 GPU回归283 passed。共423 passed、2 skipped；merge提交black/flake8 hooks及git diff --check通过。
+
+GPU首轮273 passed/2 failed，失败均为测试将源码挂成只读，而autotuner需在源码下创建NVIDIA_H200缓存目录。只为测试增加独立可写缓存挂载后完整重跑283项全部通过；没有为此修改生产代码、测试断言或包。首轮与复测原始日志均保留在 `/mnt/vqa/wanzihao/v41_update_20261101/`：upstream_cpu.log、backend_cpu.log、v41_gpu.log、block32_repro.log、v41_gpu_writable_cache.log。
+
+迁移状态：文本/FP8、CED/Engram、vision和DSpark已有完整权重旧版本及本轮GPU小模型验证；此前DPEP16 GSM8K为1212/1319=91.8878%、MTP接收50.8418%。这些是同步前整机成绩，本次合并未重跑完整权重、GSM8K或压力测试，不能据此宣称本轮加速。历史20%回放97.7111%成功率和13.303小时长尾尚未完成失败归因；四机PD依用户要求仍待安排，prefill CUDA Graph、微批overlap及cross-DP cache fetch仍不支持。原两台DPEP16节点已失联，本轮没有把代码合并描述成服务恢复或四机验收通过。
