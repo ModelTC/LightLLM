@@ -1052,7 +1052,8 @@ class TpPartBaseModel:
             return
 
         # 做一次 同步
-        torch.distributed.barrier()
+        # DP/TP 混合启动时显式指定当前卡，避免 NCCL 根据全局 rank 猜错 barrier 设备。
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
 
         # 模拟最大长度进行 prefill，观察是否出现 OOM
         try:
@@ -1119,7 +1120,7 @@ class TpPartBaseModel:
     @post_empty_cache
     def _autotune_warmup(self):
         Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
-        torch.distributed.barrier()
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
 
         warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
 
@@ -1187,7 +1188,7 @@ class TpPartBaseModel:
                 gc.collect()
                 torch.cuda.empty_cache()
         self.layers_num = layer_num_bak
-        torch.distributed.barrier()
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
         Autotuner.end_autotune_warmup()
 
     @final
@@ -1197,7 +1198,7 @@ class TpPartBaseModel:
         对 padded 所使用的req 进行初始化， 目前有非常多的地方需要使用，所以将其初始化固定为固定流程
         """
         # 做一次 同步
-        torch.distributed.barrier()
+        torch.distributed.barrier(device_ids=[torch.cuda.current_device()])
 
         # prefill init padding req.
         prefill_input_len = 1
