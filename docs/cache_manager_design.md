@@ -1027,6 +1027,8 @@ PD 参数按上述两种组合校验，不允许混用；`req_idx=0` 是有效�
 
 CPU/DP/PD 方法均返回 None，只执行对应数据操作，不申请索引或修改请求映射。GPU 操作在调用方 stream 提交，内部使用其他 stream 时须合并完成依赖；返回不代表全部数据已可用。传输调度负责网络收发和完成事件，CPU 同步读 pinned 数据前还须确认之前的 GPU 写入已完成。
 
+NCCL 接收线程在 recv 后记录本地 Xfer 的 event，Decode 在读取 PD 页前调用 event.synchronize()，不增加反向确认传输。该同步要求 record 已经提交；未记录的 event 会直接返回，P 的 done 通知本身不能保证 D 的接收线程已执行 record。当前最小实现不额外协调这两个主机线程的提交顺序。
+
 #### 调用方与资源实现的边界
 
 radix 负责前缀匹配、节点引用及淘汰时机，只把页类别、槽位 ID 和长度关联到自己的节点；保存和恢复状态页时调用上述通用接口，前缀与槽位的对应关系由 radix 调用流程保证；槽位分配与归还直接调用管理器持有的相应 allocator。管理器不生成 radix 节点数据、不返回前缀匹配结果，也不改变请求到 KV 的映射。
@@ -1152,6 +1154,8 @@ class StateTransferLayout:
 层维度统一完整、同序复制，搬运前检查源目标层数一致。逻辑层到物理存储位置的映射由 State 自身维护，例如逻辑层 `[3, 7]` 紧凑存为 `[0, 1]`，外部页沿用相同层顺序。CPU/PD 区域和 DP State 复制均不提供层子集选择或层重排参数。
 
 token 轴由本次索引向量驱动，外部页内从槽位 0 开始，不放进 `axis_mappings`。其余搬运轴通过 `AxisMapping` 指定范围，同一组切片应用于全部层；不同 TP rank 的 head/channel 差异由这些切片表达，不改变层顺序。普通非连续范围使用多个连续片段表达；环形轴使用 `local_circular` / `external_circular`，按两侧 Tensor 的实际轴容量对 `start + i` 取模。标记始终按本地 State → 外部页解释，读回时反向执行；搬运长度不超过各环形轴容量。
+
+环形标记只描述寻址约定，必须由具体 State 的专用 kernel 实现；普通 full/bounded 的 TP 切片路径不支持将这两个标记设为 True。当前窗口压缩器通过 `state_token_len` 和两侧窗口容量直接完成环形搬运，不读取 `AxisMapping` 的环形标记。
 
 `shape` 表达该外部字段区域的完整范围，而 `axis_mappings` 表达当前 State 实际访问的子范围；两者不能混淆。State 区域接口返回的起点、终点均相对本 State 起点；管理器组合时同时平移两个位置：
 
@@ -1838,6 +1842,8 @@ DP fetch 同时恢复缓存前缀需要的历史 KV 和 bounded 运行态，并�
 V4 沿用共享 `AttentionStateManager`，不引入专用 ReqManager 或 MemoryManager。各模型通过
 `create_full_att_states` / `create_bounded_att_states` 创建自己的定义，注册完成后统一分配容量。
 main 与 draft0..draft35 使用相同 token 分配域，但分别持有存储；SWA prefill workspace 也按模型角色区分。
+P/D 的 decode 节点仍需在初始化时对 HOLD 请求执行一次 prefill，因此保留每层一个 SWA HOLD 页；
+其普通 prefill workspace 容量为 0，不分配长输入临时区，实际请求的前缀由 prefill 节点传入。
 
 模型组合配置保留在 `models/deepseek_v4/config.py`，不放入原子 State 目录。
 组合配置的 `create_swa_config()` / `create_compressed_config()` 负责选择参与层及算法参数，

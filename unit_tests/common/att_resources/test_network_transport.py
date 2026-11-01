@@ -261,6 +261,8 @@ def _worker(connection: Connection, backend: str, sender: bool):
                     key=request.get_key(),
                 )
                 assert done.get_key() == request.get_key()
+                if backend == "nccl":
+                    request.xfer_handle.event.synchronize()
                 # Match production: unpack on a separate stream after the done notification.
                 with torch.cuda.stream(copy_stream):
                     copy_page(

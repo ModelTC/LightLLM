@@ -109,7 +109,6 @@ class TpPartBaseModel:
         self._verify_must()
         self._verify_params()
         self._init_weights()
-        self._init_req_manager()
         self._init_infer_layer()
         self._init_some_value()
         self._init_custom()
@@ -128,9 +127,9 @@ Commonly used interfaces that need to be inherited and implemented
 | def _init_some_value(self):  | Initialize values of some member variables that the inference framework will use |
 | def _init_custom(self):      | Some personalized initialization of the model itself, such as llama initializing its own Rotary values |
 
-After all main/draft models are constructed, `ModeBackend.init_model` calls each model's `prepare_attention_states()`, then calls `finish_state_registration()`, `load_full_att_calibration(args)` and shared resource allocation in order. It next calls `init_runtime()` sequentially on the main model and each draft. Each call completes that model's HOLD-page and backend binding, warmup, padded-request setup and CUDA Graph initialization; the main model also checks maximum-length inference at the end of its call. Readiness is published after every model succeeds. Resource preparation and runtime initialization are the only two public startup entry points; both operate on one model and take no draft-model list.
+After all main/draft models are constructed, `ModeBackend.init_model` creates one `ReqManager` using the largest `get_req_manager_max_seq_len()` returned by the models, binds it to every model through `bind_req_manager()`, then calls each model's `prepare_attention_states()`, then calls `finish_state_registration()`, `load_full_att_calibration(args)` and shared resource allocation in order. It next calls `init_runtime()` sequentially on the main model and each draft. Each call completes that model's HOLD-page and backend binding, warmup, padded-request setup and CUDA Graph initialization; the main model also checks maximum-length inference at the end of its call. Readiness is published after every model succeeds. Resource preparation and runtime initialization each use a single-model entry point; neither takes a draft-model list.
 
-The public `prepare_attention_states()` stage creates an empty manager for main and shares it with drafts. The three State factories are classmethods accepting model configuration, logical layer IDs and TP coordinates; bounded/tail also accept request capacity and device. Full factories only define layouts and do not calculate calibration offsets or read calibration files. Factories only return lists and do not register resources or depend on model instances. CPU cache reuses the full/bounded factories to create meta definitions without loading calibration. The shared stage registers all returned States; attention-free drafts create none.
+The public `prepare_attention_states()` stage creates an empty manager for main and shares it with drafts. The two State factories are classmethods accepting model configuration, logical layer IDs and TP coordinates; bounded factories also accept request capacity and device. Full factories only define layouts and do not calculate calibration offsets or read calibration files. Factories only return lists and do not register resources or depend on model instances. CPU cache reuses the full/bounded factories to create meta definitions without loading calibration. The shared stage registers all returned States; attention-free drafts create none.
 
 ## 2. Example of Adding Bloom Model
 

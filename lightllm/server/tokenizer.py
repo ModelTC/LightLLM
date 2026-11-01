@@ -55,8 +55,17 @@ def get_tokenizer(
     model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     model_type = model_cfg.get("model_type", "")
     if model_type == "deepseek_v32":
-        # Register the custom config before AutoTokenizer tries to resolve it.
+        # Register the custom config for HuggingFace metadata loading.
         from ..models import deepseek3_2  # noqa: F401
+        from ..models.deepseek3_2.tokenizer import DeepSeekV32Tokenizer
+
+        if tokenizer_mode == "slow":
+            raise ValueError("DeepSeek-V3.2 requires a fast tokenizer loaded from tokenizer.json")
+        # checkpoint 声明 LlamaTokenizerFast，但实际使用 ByteLevel；部分 Transformers
+        # 版本会按 Llama 类重建 SentencePiece 规则，丢失空格和换行，故直接保留 JSON 中的规则。
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
+        logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
+        return DeepSeekV32Tokenizer(tokenizer)
     if model_type == "deepseek_v4":
         from ..models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
 
@@ -80,17 +89,6 @@ def get_tokenizer(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead."
         )
-
-    # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
-    # a Python-based apply_chat_template that uses encoding_dsv32.py.
-    if model_type == "deepseek_v32":
-        from ..models.deepseek3_2.tokenizer import DeepSeekV32Tokenizer
-
-        hf_tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs
-        )
-        logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
-        return DeepSeekV32Tokenizer(hf_tokenizer)
 
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.tarsier2.model import Tarsier2Tokenizer

@@ -70,6 +70,8 @@ class AxisMapping:
 
     TransferRegion 中的方向固定为本地 State 到外部页，读取时反向应用。
     环形轴按对应 Tensor 的实际轴长度取模，不要求两侧容量相同。
+    环形标记只是布局描述，须由具体 State 的专用 kernel 实现；普通 TP 切片路径不支持取模。
+    当前窗口压缩器直接按 state_token_len 搬运 ring，不依赖这两个标记。
 
     示例：本地 head[0:2] 写到全局传输区域 head[2:4]，读回时反向复制。
         >>> head_mapping = AxisMapping(axis="head", local_start=0, external_start=2, length=2)

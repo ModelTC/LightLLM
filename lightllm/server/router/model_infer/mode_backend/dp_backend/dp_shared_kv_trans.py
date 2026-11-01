@@ -78,22 +78,22 @@ class DPKVSharedMoudle:
 
         trans_tasks: List[TransTask] = []
         available_lens = self.shared_req_infos.arr[0 : len(reqs), :, self._KV_LEN_INDEX]
-        rank_max_radix_cache_lens = np.max(available_lens, axis=1)
+        max_available_kv_lens = np.max(available_lens, axis=1)
         # 为本 DP 负责的请求选择可用前缀最长的来源。
-        for req_index, req, max_req_radix_cache_len, req_dp_rank in zip(
+        for req_index, req, max_available_kv_len, req_dp_rank in zip(
             list(range(len(reqs))),
             reqs,
-            rank_max_radix_cache_lens,
+            max_available_kv_lens,
             req_dp_ranks,
         ):
             # 当前请求是本 dp_rank 负责的
-            is_current_dp_handle = req_dp_rank == self.dp_rank_in_node
+            is_local_dp_request = req_dp_rank == self.dp_rank_in_node
             # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
-            trans_size = min(max_req_radix_cache_len, req.get_cur_total_len() - 1) - req.cur_kv_len
+            trans_size = min(max_available_kv_len, req.get_cur_total_len() - 1) - req.cur_kv_len
             target_kv_len = req.cur_kv_len + trans_size
             alloc_token_num = req._kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
 
-            if is_current_dp_handle and trans_size > 0 and alloc_token_num <= g_infer_context.get_can_alloc_token_num():
+            if is_local_dp_request and trans_size > 0 and alloc_token_num <= g_infer_context.get_can_alloc_token_num():
                 assert req.hold_kv_len == req.cur_kv_len
                 src_dp_rank = int(available_lens[req_index].argmax())
                 src_info = self.shared_req_infos.arr[req_index, src_dp_rank]

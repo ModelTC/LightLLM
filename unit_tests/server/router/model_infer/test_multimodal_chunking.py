@@ -255,14 +255,15 @@ def test_mm_chunking_keeps_the_original_state_cache_position(monkeypatch, disabl
     req.multimodal_params = SimpleNamespace(
         to_dict=lambda: {
             "images": [
-                {"start_idx": 450, "token_num": 150},
-                {"start_idx": 700, "token_num": 200},
+                {"start_idx": 450, "token_id": 450, "token_num": 150},
+                {"start_idx": 700, "token_id": 700, "token_num": 200},
             ],
             "audios": [],
         }
     )
     req._init_all_state()
     assert req.hybrid_cache_len == 768
+    assert req.mm_input_spans == ([(450, 600), (700, 900)] if disable_chunked_mm_input else [])
 
 
 @pytest.mark.parametrize("hybrid", [False, True])

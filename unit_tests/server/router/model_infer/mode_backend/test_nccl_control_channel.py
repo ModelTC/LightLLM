@@ -4,6 +4,8 @@ from typing import TYPE_CHECKING
 import concurrent.futures
 import socket
 import threading
+from types import SimpleNamespace
+from unittest.mock import Mock
 
 import rpyc
 
@@ -11,6 +13,37 @@ from lightllm.server.router.model_infer.mode_backend.pd import nccl_kv_transport
 
 if TYPE_CHECKING:
     import pytest
+
+
+def test_page_events_are_recorded_after_send_and_receive(monkeypatch: pytest.MonkeyPatch):
+    page_buffers = module.torch.empty(size=(2, 8), dtype=module.torch.uint8, device="cpu")
+    transporter = SimpleNamespace(kv_move_buffer=page_buffers, args=SimpleNamespace(pd_detail_log=False))
+    peer = module._NcclPeer(transporter, "remote")
+    stream = object()
+    operations = []
+    comm = SimpleNamespace(
+        send=Mock(side_effect=lambda tensor, dst, stream: operations.append(("send", tensor.numel(), dst, stream))),
+        recv=Mock(side_effect=lambda tensor, src, stream: operations.append(("recv", tensor.numel(), src, stream))),
+    )
+    monkeypatch.setattr(peer, "_ensure_comm", lambda is_server: comm)
+    monkeypatch.setattr(peer, "_get_stream", lambda: stream)
+    event = Mock()
+    event.record.side_effect = lambda stream: operations.append(("record", stream))
+    monkeypatch.setattr(module.torch.cuda, "Event", lambda: event)
+    task = SimpleNamespace(src_page_index=1, dst_page_index=0)
+
+    handle = peer.send_page(task)
+    assert operations == [("send", 8, 1, stream), ("record", stream)]
+    assert handle.event is event
+
+    operations.clear()
+    receive_queue = Mock()
+    monkeypatch.setattr(peer, "_get_recv_queue", lambda: receive_queue)
+    peer.start_recv(task)
+    queued_task = receive_queue.put.call_args.args[0]
+    assert queued_task.xfer_handle is task.xfer_handle
+    peer._recv_page(queued_task)
+    assert operations == [("recv", 8, 0, stream), ("record", stream)]
 
 
 def test_concurrent_control_channels_retry_port_before_publishing_metadata(monkeypatch: pytest.MonkeyPatch):

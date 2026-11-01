@@ -95,7 +95,12 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 first_next_ids=executor._argmax_ids(output.logits),
             )
         if hybrid:
-            resources.save_bounded_att_runtime_to_pages(source_req.tolist(), page_kind="big", page_slot_ids=[source_slots[page]])
+            resources.save_bounded_att_runtime_to_pages(
+                req_indices=source_req.tolist(),
+                state_token_lens=[length],
+                page_kind="big",
+                page_slot_ids=[source_slots[page]],
+            )
     torch.cuda.synchronize()
     next_token = output.logits.argmax(dim=-1).cpu()
     source_indices = model.req_manager.req_to_token_indexs[int(source_req[0]), :prefix_len].clone()
@@ -218,9 +223,14 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 output = draft.forward(batch)
                 logits.append(output.logits.clone())
             if draft_models and hybrid:
-                (
-                    resources.main_kda_conv_bf16_ssm_fp32_state if hasattr(resources, "main_kda_conv_bf16_ssm_fp32_state") else resources.main_gdn_conv_bf16_ssm_fp32_state
-                ).commit_bounded_att_state(request, [accepted_width])
+                cuda_req_indices = request.cuda(non_blocking=True)
+                accepted_steps = torch.full_like(cuda_req_indices, accepted_width, dtype=torch.int32)
+                for item in (model, *draft_models):
+                    resources.commit_bounded_att_state(
+                        req_indices=cuda_req_indices,
+                        accepted_steps=accepted_steps,
+                        role=item.att_state_role,
+                    )
             return logits
 
         reference = decode(source_req)

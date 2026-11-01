@@ -410,14 +410,14 @@ class _PrefillTransModule:
                     try:
                         self.transporter.send_write_done_task_to_decode_node(completed_task)
                     except BaseException as e:
-                        logger.exception(f"send WRITE done nixl notify failed: {completed_task.to_str()}")
-                        completed_task.error_info = f"send WRITE done nixl notify failed: {str(e)}"
+                        logger.exception(f"send WRITE done PD notify failed: {completed_task.to_str()}")
+                        completed_task.error_info = f"send WRITE done PD notify failed: {str(e)}"
                         self.failed_queue.put(completed_task)
                         continue
 
                     if self.args.pd_detail_log:
                         logger.debug(
-                            f"send WRITE done nixl notify "
+                            f"send WRITE done PD notify "
                             f"request_id={completed_task.request_id} "
                             f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
                             f"src_page={completed_task.src_page_index} dst_page={completed_task.dst_page_index}"

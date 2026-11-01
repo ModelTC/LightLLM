@@ -255,8 +255,7 @@ class MultiLevelKvCacheModule(object):
         producer = torch.cuda.current_stream()
         # 阶段一：等待当前生产流已提交的数据写入，不阻塞主机线程。
         cpu_kv_cache_stream.wait_stream(producer)
-        # TODO：将 bounded CPU→CPU 快照搬运改为当前流上的 kernel。
-        # 现有主机 copy 不受 wait_stream 约束，kernel 落地前源快照仍须预先就绪。
+        # bounded CPU→CPU 快照也通过当前搬运流上的 Triton kernel 复制，遵循相同流依赖。
         with torch.cuda.stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()

@@ -308,6 +308,10 @@ class _NcclPeer:
         return _NcclXferHandle(peer_name=self.peer_name, event=event)
 
     def start_recv(self, trans_task: PDChunckedTransTask):
+        trans_task.xfer_handle = _NcclXferHandle(
+            peer_name=self.peer_name,
+            event=torch.cuda.Event(),
+        )
         self._get_recv_queue().put(copy.copy(trans_task))
         return
 
@@ -355,6 +359,7 @@ class _NcclPeer:
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
+            trans_task.xfer_handle.event.record(stream)
             if self.transporter.args.pd_detail_log:
                 logger.debug(
                     f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"

@@ -39,8 +39,6 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
     @classmethod
     def get_swa_prefill_workspace(cls, model):
         """由 backend 复用计算临时区；模型在 KV 容量评估前调用，以计入实际显存占用。"""
-        if model.args.run_mode == "decode":
-            return None, 0
         from lightllm.models.deepseek_v4.config import create_attention_config
 
         config = create_attention_config(
@@ -57,6 +55,10 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             )
             * page_token_num
         )
+        if model.args.run_mode == "decode":
+            # D 节点初始化仍会对 HOLD 请求执行一次 prefill；只保留末尾的 HOLD 页，
+            # 不为普通请求预留长 prefill 临时区，实际请求的前缀由 P 节点传入。
+            capacity = 0
         regions = 1 + int(model.args.enable_prefill_microbatch_overlap)
         # 每个 microbatch 使用独立临时区；最后一页留给 HOLD 请求。
         token_num = regions * capacity + page_token_num

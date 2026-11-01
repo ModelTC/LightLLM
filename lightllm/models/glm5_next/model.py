@@ -112,6 +112,12 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         super()._verify_params()
         assert self.config["qk_rope_head_dim"] == 0, "GLM-5.3 Flash uses NoPE attention"
         assert not self.args.enable_tpsp_mix_mode, "GLM-5.3 Flash does not support TP/SP mixed mode"
+        if self.args.llm_kv_type not in ("None", "fp8kv_dsa"):
+            raise ValueError("GLM-5.3 Flash supports only unquantized KV or dynamic fp8kv_dsa")
+        if self.args.llm_kv_type == "fp8kv_dsa":
+            # group64/E8M0 编码与稀疏 attention 算子要求 BF16 输入和固定的 512 维 latent。
+            if self.data_type != torch.bfloat16 or self.config["kv_lora_rank"] != 512:
+                raise ValueError("GLM-5.3 Flash FP8 KV requires BF16 computation and kv_lora_rank=512")
 
     def autotune_layers(self):
         return 4

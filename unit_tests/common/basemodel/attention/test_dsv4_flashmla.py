@@ -45,6 +45,40 @@ assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.module
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("run_mode", ["normal", "prefill", "decode"])
+def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.MonkeyPatch, run_mode: str) -> None:
+    backend_class = attention.DeepseekV4FlashMlaFp8SparseAttBackend
+    model = SimpleNamespace(
+        args=SimpleNamespace(run_mode=run_mode, enable_prefill_microbatch_overlap=False),
+        config=dict(
+            compress_ratios=[0, 4, 128],
+            head_dim=512,
+            qk_rope_head_dim=64,
+            index_head_dim=128,
+            sliding_window=128,
+        ),
+        layers_infer=[SimpleNamespace(layer_num_=layer) for layer in range(3)],
+        tp_rank_=0,
+        tp_world_size_=4,
+        batch_max_tokens=4096,
+        max_req_num=8,
+        att_state_role="main",
+    )
+    monkeypatch.setattr(
+        backend_class, "get_gpu_workspace_buffer",
+        lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype),
+    )
+    workspace, capacity = backend_class.get_swa_prefill_workspace(model=model)
+    # D 节点仍执行 HOLD 请求的单 token prefill，但无需保留普通请求的长 prefill 临时区。
+    assert workspace is not None
+    if run_mode == "decode":
+        assert capacity == 0
+        assert workspace.shape == (3, 128, 585)
+    else:
+        assert capacity >= model.batch_max_tokens
+        assert workspace.shape == (3, capacity + 128, 585)
+
+
 def _pool(page_size, pages):
     stride = ((page_size * 584 + 575) // 576) * 576
     buffer = torch.zeros((pages, stride), dtype=torch.uint8, device="cuda")
@@ -266,11 +300,12 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         packed_kv = (packed_kv[0], extra)
         params["extra_indices"].copy_(indices)
 
+    monkeypatch.setattr(backend, "get_att_input_params", lambda infer_state, logical_layer_id: packed_kv)
+
     def new_request(length):
         infer_state = DeepseekV4InferStateInfo()
         infer_state.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         infer_state.hidden_collector = NoopHiddenCollector()
-        infer_state.req_manager = SimpleNamespace(get_att_input_params=lambda layer_index: packed_kv)
         infer_state.attn_params = dict(params, swa_lengths=torch.full_like(params["swa_lengths"], length))
         if ratio:
             infer_state.attn_params["extra_lengths"] = torch.full_like(params["extra_lengths"], length)

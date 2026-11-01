@@ -7,6 +7,29 @@ from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
 
 
+@pytest.mark.parametrize("capture", [False, True], ids=["eager", "capture"])
+@pytest.mark.parametrize("draft", [False, True], ids=["main", "dspark"])
+def test_pre_layer_decode_uses_current_graph_flag(monkeypatch: pytest.MonkeyPatch, capture: bool, draft: bool) -> None:
+    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+    from lightllm.models.deepseek_v4.layer_infer import pre_layer_infer
+    from lightllm.models.deepseek_v4_dspark.layer_infer.pre_layer_infer import DeepseekV4DSparkPreLayerInfer
+
+    layer_class = DeepseekV4DSparkPreLayerInfer if draft else pre_layer_infer.DeepseekV4PreLayerInfer
+    layer = layer_class.__new__(layer_class)
+    layer.hc_mult = 4
+    state = DeepseekV4InferStateInfo()
+    state.is_cuda_graph_capture = capture
+    hidden = torch.ones((1, 8))
+    state.mtp_draft_input_hiddens = hidden
+    monkeypatch.setattr(pre_layer_infer.LlamaMultimodalPreLayerInfer, "token_forward", lambda *args: hidden)
+    monkeypatch.setattr(pre_layer_infer, "hc_expand", lambda embeddings, streams: embeddings.repeat(1, streams))
+
+    output = layer.token_forward(input_ids=None, infer_state=state, layer_weight=None)
+    assert output.shape == (1, 32)
+    # 捕获时保留输入引用供后续回放使用；普通 decode 可以释放不再使用的 draft 特征。
+    assert state.mtp_draft_input_hiddens is (hidden if capture else None)
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_rotary_cache_keeps_unscaled_swa_and_yarn_compression():
     model = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
