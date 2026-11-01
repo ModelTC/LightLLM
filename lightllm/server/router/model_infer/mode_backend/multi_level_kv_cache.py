@@ -252,17 +252,14 @@ class MultiLevelKvCacheModule(object):
         """选择请求可缓存的前缀，分配 CPU 页并提交写出，返回待确认完成的任务。"""
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
-        producer = torch.cuda.current_stream()
-        # 阶段一：等待当前生产流已提交的数据写入，不阻塞主机线程。
-        cpu_kv_cache_stream.wait_stream(producer)
-        # bounded CPU→CPU 快照也通过当前搬运流上的 Triton kernel 复制，遵循相同流依赖。
+        # KV 和 bounded 快照均在搬运流上复制，由后续完成事件统一确认就绪。
         with torch.cuda.stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
             assert len(token_hash_list) == len(page_len_list)
 
-            # 阶段二：确定本次可写出范围，申请 CPU 页。
+            # 阶段一：确定本次可写出范围，申请 CPU 页。
             if self.backend.is_master_in_dp:
 
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
@@ -319,7 +316,7 @@ class MultiLevelKvCacheModule(object):
             assert req.cur_kv_len >= move_token_num
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
-            # 阶段三：只查找实际分配的 CPU 页所需快照；完整大页必须存在，不做缺失回退。
+            # 阶段二：只查找实际分配的 CPU 页所需快照；完整大页必须存在，不做缺失回退。
             resources = self.backend.model.att_state_manager
             big_page_slot_ids, small_page_slot_ids = None, None
             if self.backend.is_hybrid_att_model:
