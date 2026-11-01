@@ -243,10 +243,12 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
         dspark_markov_rank=4,
     )
     args = SimpleNamespace(
-        llm_kv_type="None", page_size=256, mtp_step=3, mtp_mode="vanilla_with_att", run_mode="decode"
+        llm_kv_type="None", page_size=256, mtp_step=3, mtp_mode="vanilla_with_att", run_mode="decode",
+        enable_prefill_microbatch_overlap=False,
     )
     main = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)
     main.config, main.args, main.max_req_num, main.tp_rank_, main.tp_world_size_ = config, args, 2, 0, 1
+    main.batch_max_tokens = 2048
     main.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(3)]
     main.torch_memory_saver = SimpleNamespace(region=lambda **kwargs: nullcontext())
     main.prepare_attention_states()
@@ -258,6 +260,7 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
         draft.config = cls.normalize_model_config(config)
         assert draft.config == cls.normalize_model_config(draft.config)
         draft.args, draft.max_req_num, draft.tp_rank_, draft.tp_world_size_ = args, 2, 0, 1
+        draft.batch_max_tokens = main.batch_max_tokens
         draft.torch_memory_saver = main.torch_memory_saver
         first_layer = 3 + sum(len(model.layers_infer) for model in drafts)
         draft.layers_infer = [

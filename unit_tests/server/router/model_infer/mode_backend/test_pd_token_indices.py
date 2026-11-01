@@ -69,6 +69,7 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
             decode_dp_index=0,
             req_idx=1,
             end_kv_index=7,
+            xfer_handle=None,
         )
         for page, kind, indices in [(0, "kv", [5, 1, 7]), (1, "kv", [2]), (0, "att_state", None)]
     ]
