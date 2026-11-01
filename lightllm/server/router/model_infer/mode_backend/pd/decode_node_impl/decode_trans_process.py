@@ -398,13 +398,21 @@ class _DecodeTransModule:
         while True:
             trans_task: PDChunckedTransTask = self.ready_page_task_queue.get()
             if trans_task.xfer_handle is not None:
-                # P 的 done 只表示其发送流已完成，不能替代 D 本地接收流的完成确认。
-                # 后续会在独立的 copy_cuda_stream 上读取 PD 页；这里先等待 recv 后记录的
-                # event，避免搬运流在接收尚未完成时读到旧数据或只写入一部分的页面。
-                # 前提：接收线程已提交 event.record(stream)；未记录的 event 会直接返回，
-                # 此处 synchronize 不会等待未来的 record，也不解决两个主机线程的提交竞态。
-                # NIXL 接收端没有本地 Xfer，沿用其远端 WRITE 完成通知流程，不进入此分支。
-                trans_task.xfer_handle.event.synchronize()
+                # 只有 NCCL 接收端会创建本地 Xfer 句柄；NIXL 的远端 WRITE 完成通知
+                # 已代表其写入完成，不经过这里的本地 CUDA event 轮询。
+                # P 的 done 不代表 D 本地接收已完成；统一轮询传输状态，
+                # 直到接收 event 完成后，独立搬运流才读取 PD 页。
+                while True:
+                    status = self.transporter.check_task_status(trans_task=trans_task)
+                    if status == "PROC":
+                        time.sleep(0.001)
+                        continue
+                    if status != "DONE":
+                        trans_task.error_info = trans_task.xfer_handle.error_info
+                        self.failed_queue.put(trans_task)
+                    break
+                if status != "DONE":
+                    continue
             copy_start_event = torch.cuda.Event(enable_timing=True)
             copy_end_event = torch.cuda.Event(enable_timing=True)
             with torch.cuda.stream(stream=self.copy_cuda_stream):

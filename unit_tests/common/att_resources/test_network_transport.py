@@ -262,7 +262,11 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 )
                 assert done.get_key() == request.get_key()
                 if backend == "nccl":
-                    request.xfer_handle.event.synchronize()
+                    deadline = time.monotonic() + 60
+                    while transporter.check_task_status(request) == "PROC":
+                        assert time.monotonic() < deadline, "PD receive timed out"
+                        time.sleep(0.002)
+                    assert transporter.check_task_status(request) == "DONE"
                 # Match production: unpack on a separate stream after the done notification.
                 with torch.cuda.stream(copy_stream):
                     copy_page(

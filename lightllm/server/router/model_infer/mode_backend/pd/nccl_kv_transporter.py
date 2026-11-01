@@ -264,16 +264,37 @@ class NcclKVTransporter:
 @dataclass
 class _NcclXferHandle:
     peer_name: str
-    event: torch.cuda.Event
+    mode: str
+    finish_cuda_event: Optional[torch.cuda.Event] = None
     status: str = "PROC"
     error_info: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        assert self.mode in ("send", "recv"), f"invalid NCCL handle mode: {self.mode}"
 
     def check_status(self) -> str:
         if self.status != "PROC":
             return self.status
+        if self.mode == "send":
+            return self._check_send_status()
+        return self._check_recv_status()
 
+    def _check_send_status(self) -> str:
+        if self.finish_cuda_event is None:
+            return "PROC"
         try:
-            if self.event.query():
+            if self.finish_cuda_event.query():
+                self.status = "DONE"
+        except BaseException as e:
+            self.status = "ERR"
+            self.error_info = str(e)
+        return self.status
+
+    def _check_recv_status(self) -> str:
+        if self.finish_cuda_event is None:
+            return "PROC"
+        try:
+            if self.finish_cuda_event.query():
                 self.status = "DONE"
         except BaseException as e:
             self.status = "ERR"
@@ -297,21 +318,22 @@ class _NcclPeer:
         stream = self._get_stream()
 
         comm.send(page_tensor, dst=1, stream=stream)
-        event = torch.cuda.Event()
-        event.record(stream)
+        send_finish_cuda_event = torch.cuda.Event()
+        send_finish_cuda_event.record(stream)
 
         if self.transporter.args.pd_detail_log:
             logger.debug(
                 f"NCCL send page posted request_id={trans_task.request_id} "
                 f"src_page={trans_task.src_page_index} dst_agent={self.peer_name}"
             )
-        return _NcclXferHandle(peer_name=self.peer_name, event=event)
+        return _NcclXferHandle(
+            peer_name=self.peer_name,
+            mode="send",
+            finish_cuda_event=send_finish_cuda_event,
+        )
 
     def start_recv(self, trans_task: PDChunckedTransTask):
-        trans_task.xfer_handle = _NcclXferHandle(
-            peer_name=self.peer_name,
-            event=torch.cuda.Event(),
-        )
+        trans_task.xfer_handle = _NcclXferHandle(peer_name=self.peer_name, mode="recv")
         self._get_recv_queue().put(copy.copy(trans_task))
         return
 
@@ -359,12 +381,17 @@ class _NcclPeer:
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
-            trans_task.xfer_handle.event.record(stream)
+            finish_cuda_event = torch.cuda.Event()
+            finish_cuda_event.record(stream)
+            # 必须在 record 返回后才发布；CUDA event 自身不会等待未来的 record。
+            trans_task.xfer_handle.finish_cuda_event = finish_cuda_event
             if self.transporter.args.pd_detail_log:
                 logger.debug(
                     f"NCCL recv page done request_id={trans_task.request_id} " f"dst_page={trans_task.dst_page_index}"
                 )
         except BaseException as e:
+            trans_task.xfer_handle.status = "ERR"
+            trans_task.xfer_handle.error_info = str(e)
             trans_task.error_info = str(e)
             logger.exception(str(e))
             self._drop_comm()

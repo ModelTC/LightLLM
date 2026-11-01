@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
 import concurrent.futures
 import socket
 import threading
@@ -8,11 +7,9 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import rpyc
+import pytest
 
 from lightllm.server.router.model_infer.mode_backend.pd import nccl_kv_transporter as module
-
-if TYPE_CHECKING:
-    import pytest
 
 
 def test_page_events_are_recorded_after_send_and_receive(monkeypatch: pytest.MonkeyPatch):
@@ -34,7 +31,10 @@ def test_page_events_are_recorded_after_send_and_receive(monkeypatch: pytest.Mon
 
     handle = peer.send_page(task)
     assert operations == [("send", 8, 1, stream), ("record", stream)]
-    assert handle.event is event
+    assert handle.mode == "send"
+    assert handle.finish_cuda_event is event
+    event.query.return_value = True
+    assert handle.check_status() == "DONE"
 
     operations.clear()
     receive_queue = Mock()
@@ -42,8 +42,69 @@ def test_page_events_are_recorded_after_send_and_receive(monkeypatch: pytest.Mon
     peer.start_recv(task)
     queued_task = receive_queue.put.call_args.args[0]
     assert queued_task.xfer_handle is task.xfer_handle
+    assert task.xfer_handle.mode == "recv"
+    assert task.xfer_handle.finish_cuda_event is None
     peer._recv_page(queued_task)
     assert operations == [("recv", 8, 0, stream), ("record", stream)]
+    assert task.xfer_handle.finish_cuda_event is event
+    assert task.xfer_handle.check_status() == "DONE"
+    assert event.query.call_count == 2
+
+
+def test_receive_waits_for_record_to_return(monkeypatch: pytest.MonkeyPatch):
+    record_started = threading.Event()
+    finish_record = threading.Event()
+    event = Mock()
+
+    def record(stream: object) -> None:
+        record_started.set()
+        assert finish_record.wait(timeout=5)
+
+    event.record.side_effect = record
+    monkeypatch.setattr(module.torch.cuda, "Event", lambda: event)
+    transporter = SimpleNamespace(
+        kv_move_buffer=module.torch.empty(size=(1, 8), dtype=module.torch.uint8),
+        args=SimpleNamespace(pd_detail_log=False),
+    )
+    peer = module._NcclPeer(transporter, "remote")
+    monkeypatch.setattr(peer, "_ensure_comm", lambda is_server: SimpleNamespace(recv=Mock()))
+    monkeypatch.setattr(peer, "_get_stream", object)
+    handle = module._NcclXferHandle(peer_name="remote", mode="recv")
+    task = SimpleNamespace(dst_page_index=0, xfer_handle=handle)
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+        receive = executor.submit(peer._recv_page, task)
+        try:
+            assert record_started.wait(timeout=5)
+            assert handle.check_status() == "PROC"
+            assert handle.finish_cuda_event is None
+            event.query.assert_not_called()
+        finally:
+            finish_record.set()
+        receive.result(timeout=5)
+        assert handle.check_status() == "DONE"
+    assert handle.finish_cuda_event is event
+    event.query.assert_called_once()
+
+
+def test_receive_submission_failure_wakes_waiter(monkeypatch: pytest.MonkeyPatch):
+    transporter = SimpleNamespace(
+        kv_move_buffer=module.torch.empty(size=(1, 8), dtype=module.torch.uint8),
+        send_error_info_to_prefill_node=Mock(),
+    )
+    peer = module._NcclPeer(transporter, "remote")
+    comm = SimpleNamespace(recv=Mock(side_effect=RuntimeError("recv failed")))
+    monkeypatch.setattr(peer, "_ensure_comm", lambda is_server: comm)
+    monkeypatch.setattr(peer, "_get_stream", object)
+    monkeypatch.setattr(peer, "_drop_comm", Mock())
+    handle = module._NcclXferHandle(peer_name="remote", mode="recv")
+    task = SimpleNamespace(dst_page_index=0, xfer_handle=handle)
+
+    peer._recv_page(task)
+
+    assert handle.check_status() == "ERR"
+    assert handle.error_info == "recv failed"
+    transporter.send_error_info_to_prefill_node.assert_called_once_with(task)
 
 
 def test_concurrent_control_channels_retry_port_before_publishing_metadata(monkeypatch: pytest.MonkeyPatch):

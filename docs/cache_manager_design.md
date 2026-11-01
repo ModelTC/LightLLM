@@ -1027,7 +1027,7 @@ PD 参数按上述两种组合校验，不允许混用；`req_idx=0` 是有效�
 
 CPU/DP/PD 方法均返回 None，只执行对应数据操作，不申请索引或修改请求映射。GPU 操作在调用方 stream 提交，内部使用其他 stream 时须合并完成依赖；返回不代表全部数据已可用。传输调度负责网络收发和完成事件，CPU 同步读 pinned 数据前还须确认之前的 GPU 写入已完成。
 
-NCCL 接收线程在 recv 后记录本地 Xfer 的 event，Decode 在读取 PD 页前调用 event.synchronize()，不增加反向确认传输。该同步要求 record 已经提交；未记录的 event 会直接返回，P 的 done 通知本身不能保证 D 的接收线程已执行 record。当前最小实现不额外协调这两个主机线程的提交顺序。
+NCCL Xfer 用 mode 区分 send/recv 句柄，二者共用 finish_cuda_event。接收线程在 recv 后创建并记录 event，record 返回后才发布；在此之前 recv 句柄的 check_status() 保持 PROC，避免未记录的 CUDA event 被误判为完成。Decode 与 NIXL 统一轮询 check_task_status()，直到状态为 DONE 后才读取 PD 页。接收提交失败时返回 ERR，由读页线程转入已有失败队列，不读取无效页面。
 
 #### 调用方与资源实现的边界
 

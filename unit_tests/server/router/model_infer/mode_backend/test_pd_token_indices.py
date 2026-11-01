@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import Mock
+from queue import Queue
 
 import pytest
 import torch
@@ -101,3 +102,23 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
 
 class _StopLoop(Exception):
     pass
+
+
+def test_failed_receive_is_not_read_or_copied(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = decode_trans_process._DecodeTransModule.__new__(decode_trans_process._DecodeTransModule)
+    module.device_id = 0
+    module.failed_queue = Queue()
+    handle = SimpleNamespace(check_status=Mock(return_value="ERR"), error_info="recv failed")
+    task = SimpleNamespace(xfer_handle=handle)
+    module.transporter = SimpleNamespace(check_task_status=Mock(return_value="ERR"))
+    module.ready_page_task_queue = SimpleNamespace(get=Mock(side_effect=[task, _StopLoop()]))
+    monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
+    copy = Mock()
+    monkeypatch.setattr(decode_trans_process, "copy_page", copy)
+
+    with pytest.raises(_StopLoop):
+        module.read_page_to_mems_loop()
+
+    assert module.failed_queue.get_nowait() is task
+    assert task.error_info == "recv failed"
+    copy.assert_not_called()
