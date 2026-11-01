@@ -129,7 +129,16 @@ def create_full_attention_roles(
         if start == end:
             states.append(None)
             continue
-        config = replace(template.config, logical_layer_groups=layers[start:end])
+        if isinstance(template.config, PackedMLAAttentionConfig):
+            config = replace(
+                template.config,
+                logical_config=replace(
+                    template.config.logical_config,
+                    logical_layer_groups=layers[start:end],
+                ),
+            )
+        else:
+            config = replace(template.config, logical_layer_groups=layers[start:end])
         if isinstance(template, StaticFP8FullAttentionState):
             state = rebuild_full_state(
                 template=template,
