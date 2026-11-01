@@ -53,22 +53,24 @@ def _prepare_swa_prefill_workspace_kernel(
     b_req_idx,
     b_ready_cache_len,
     b_seq_len,
-    BATCH: tl.constexpr,
+    batch_size,
     SLIDING_WINDOW: tl.constexpr,
     SWA_PAGE_TOKEN_NUM: tl.constexpr,
     HOLD_REQUEST_ID: tl.constexpr,
-    SWA_WORKSPACE_BASE: tl.constexpr,
+    swa_workspace_base,
     BLOCK: tl.constexpr,
 ):
     batch = tl.arange(0, BLOCK)
-    valid = batch < BATCH
+    valid = batch < batch_size
     req_idx = tl.load(b_req_idx + batch, valid, HOLD_REQUEST_ID)
     ready = tl.load(b_ready_cache_len + batch, valid, 0)
     end = tl.load(b_seq_len + batch, valid, 0)
     first = tl.maximum(0, ready - SLIDING_WINDOW + 1) // SWA_PAGE_TOKEN_NUM * SWA_PAGE_TOKEN_NUM
     length = tl.cdiv(end - first, SWA_PAGE_TOKEN_NUM) * SWA_PAGE_TOKEN_NUM
     tokens = tl.where((req_idx != HOLD_REQUEST_ID) & valid, length, 0)
-    workspace = SWA_WORKSPACE_BASE + tl.cumsum(tokens) - tokens
+    # 请求数和 workspace 起点随每个 prefill microbatch 变化，保持为运行时参数，
+    # 避免按 batch 大小或 microbatch 索引重复编译同一份布局 kernel。
+    workspace = swa_workspace_base + tl.cumsum(tokens) - tokens
     tl.store(prefill_token_ranges + req_idx * 2, ready, valid)
     tl.store(prefill_token_ranges + req_idx * 2 + 1, end, valid)
     tl.store(swa_prefill_workspace_offsets + req_idx, workspace, valid)
@@ -119,11 +121,11 @@ def prepare_swa_prefill_workspace(swa_state, prefill_state, b_req_idx, b_ready_c
         b_req_idx,
         b_ready_cache_len,
         b_seq_len,
-        BATCH=b_req_idx.numel(),
+        batch_size=b_req_idx.numel(),
         SLIDING_WINDOW=config.window_size,
         SWA_PAGE_TOKEN_NUM=config.page_token_size,
         HOLD_REQUEST_ID=swa_state.HOLD_REQUEST_ID,
-        SWA_WORKSPACE_BASE=workspace_base,
+        swa_workspace_base=workspace_base,
         BLOCK=triton.next_power_of_2(b_req_idx.numel()),
         num_warps=4,
     )
