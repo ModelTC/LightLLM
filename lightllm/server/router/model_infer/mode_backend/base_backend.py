@@ -1,3 +1,4 @@
+from lightllm.common.attention_compute.calibration import load_full_att_calibration
 import numpy as np
 import torch
 import time
@@ -167,7 +168,7 @@ class ModeBackend:
         assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
         with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
-            manager.load_full_att_calibration(args=self.model.args)
+            load_full_att_calibration(manager, args=self.model.args)
             manager.initialize_storage(
                 self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
             )

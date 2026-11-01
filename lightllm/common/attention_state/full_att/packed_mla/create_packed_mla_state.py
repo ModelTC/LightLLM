@@ -17,9 +17,7 @@ def create_packed_mla_state(
     """Create a packed MLA State; packed formats always include an indexer field."""
     assert type(config) is PackedMLALogicalConfig, "packed MLA creation requires PackedMLALogicalConfig"
     if config.format == "packed_group64_e8m0":
-        assert config.latent_dim == FP8E8M0PackedMLAConfig.LATENT_DIM, (
-            "FP8/E8M0 MLA requires a 512-dimensional latent"
-        )
+        assert config.latent_dim == FP8E8M0PackedMLAConfig.LATENT_DIM, "FP8/E8M0 MLA requires a 512-dimensional latent"
         return FP8E8M0PackedMLAState(
             layout_config=FP8E8M0PackedMLAConfig(
                 logical_layer_groups=config.logical_layer_groups,

@@ -16,23 +16,27 @@ class GDNPagesPool:
         config: ConvSSMStateConfig,
         device: str | torch.device | int = "cpu",
         pin_memory: bool = True,
+        snapshot_fields=None,
     ) -> None:
         assert size >= 0, "pool size must be nonnegative"
         self.size = size
         device = torch.device(device)
         pin_memory = pin_memory and device.type == "cpu"
-        self.conv_state = create_page_pool_tensor(
-            size=(size, len(config.logical_layer_ids), config.conv_channels, config.conv_width),
-            dtype=config.conv_dtype,
-            device=device,
-            pin_memory=pin_memory,
-        )
-        self.ssm_state = create_page_pool_tensor(
-            size=(size, len(config.logical_layer_ids), config.num_v_heads, config.key_dim, config.value_dim),
-            dtype=config.ssm_dtype,
-            device=device,
-            pin_memory=pin_memory,
-        )
+        if snapshot_fields is None:
+            from ..formats import conv_ssm_spec
+
+            snapshot_fields = conv_ssm_spec(config, request_capacity=0, mtp_step=0, algorithm="gdn").snapshot_fields
+        for field in snapshot_fields:
+            setattr(
+                self,
+                field.attribute,
+                create_page_pool_tensor(
+                    size=(size, *field.shape),
+                    dtype=field.dtype,
+                    device=device,
+                    pin_memory=pin_memory,
+                ),
+            )
 
     # ========================================================================
     # 跨进程映射：在接收进程的当前 GPU 上注册共享页池

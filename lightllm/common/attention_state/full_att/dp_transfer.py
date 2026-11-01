@@ -16,7 +16,7 @@ def copy_gqa_tokens(
     dst_token_indices: torch.Tensor,
 ) -> None:
     """融合 GQA/静态 FP8 的 K/V 复制；静态标定参数不参与搬运。"""
-    _copy_token_storages(
+    copy_token_storages(
         src_storages=(src_k_storage, src_v_storage),
         dst_storages=(dst_k_storage, dst_v_storage),
         src_token_indices=src_token_indices,
@@ -37,7 +37,7 @@ def copy_group_quantized_tokens(
     dst_token_indices: torch.Tensor,
 ) -> None:
     """融合 INT4/INT8 的 K/V payload 和动态 scale，分别保留字段 dtype。"""
-    _copy_token_storages(
+    copy_token_storages(
         src_storages=(src_k_storage, src_v_storage, src_k_scales, src_v_scales),
         dst_storages=(dst_k_storage, dst_v_storage, dst_k_scales, dst_v_scales),
         src_token_indices=src_token_indices,
@@ -55,7 +55,7 @@ def copy_packed_tokens(
 
     压缩历史等方案的完整块约束由具体 State 在调用前检查，本函数不识别压缩比例。
     """
-    _copy_token_storages(
+    copy_token_storages(
         src_storages=(src_storage,),
         dst_storages=(dst_storage,),
         src_token_indices=src_token_indices,
@@ -63,7 +63,7 @@ def copy_packed_tokens(
     )
 
 
-def _copy_token_storages(
+def copy_token_storages(
     src_storages: tuple[torch.Tensor, ...],
     dst_storages: tuple[torch.Tensor, ...],
     src_token_indices: torch.Tensor,

@@ -79,14 +79,6 @@ class FullAttentionState(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: Any) -> None:
-        """向已分配位置写入一层 KV，并完成该布局要求的编码、量化和关联参数更新。
-
-        融合压缩等专用写入路径可直接使用计算视图，不调用本接口。
-        """
-        raise NotImplementedError()
-
-    @abstractmethod
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制全部所辖层的完整 token 数据，包含动态 scale、indexer 字段，保持原存储表示。
 

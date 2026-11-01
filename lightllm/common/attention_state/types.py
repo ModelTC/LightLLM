@@ -15,6 +15,7 @@ PageKind 使用示例，选择 bounded attention 大页池：
 """
 
 from dataclasses import dataclass
+from enum import Enum
 from typing import Literal
 
 import torch
@@ -36,6 +37,32 @@ PageKind = Literal["big", "small"]
 # ========================================================================
 # 二、本地存储字段与轴范围
 # ========================================================================
+
+
+class FieldName(str, Enum):
+    """内置计算语义的字段标识；字符串值保持线上名字，通用搬运仍允许扩展字段。"""
+
+    K = "k"
+    V = "v"
+    K_SCALE = "k_scale"
+    V_SCALE = "v_scale"
+    KV = "kv"
+    KV_DATA = "kv_data"
+    KV_NOPE = "kv_nope"
+    KV_SCALE = "kv_scale"
+    KV_ROPE = "kv_rope"
+    INDEXER = "indexer"
+    INDEXER_K = "indexer_k"
+    INDEXER_SCALE = "indexer_scale"
+    CONV = "conv"
+    SSM = "ssm"
+    CONV_STATE = "conv_state"
+    SSM_STATE = "ssm_state"
+    MTP_STATE_INDEX = "mtp_state_index"
+    SWA = "swa"
+    SWA_BUFFER = "swa_buffer"
+    COMPRESSOR = "compressor"
+    BUFFER = "buffer"
 
 
 @dataclass(frozen=True)
