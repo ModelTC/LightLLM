@@ -7,7 +7,7 @@ import pytest
 import torch
 import torch.multiprocessing as mp
 
-from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNPagesPool, KDAPagesPool
+from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, ConvSSMPagesPool
 from lightllm.common.attention_state.bounded_att import utils
 
 if TYPE_CHECKING:
@@ -15,12 +15,10 @@ if TYPE_CHECKING:
     from multiprocessing.queues import Queue
 
 
-@pytest.mark.parametrize("pool_cls", [KDAPagesPool, GDNPagesPool])
 @pytest.mark.parametrize("dp_fetch", [False, True])
 @pytest.mark.parametrize("pin_memory", [False, True])
 def test_page_pool_allocation_strategy(
     cpu_args: EasyDict,
-    pool_cls: type[KDAPagesPool] | type[GDNPagesPool],
     dp_fetch: bool,
     pin_memory: bool,
 ) -> None:
@@ -37,7 +35,7 @@ def test_page_pool_allocation_strategy(
         conv_dtype=torch.bfloat16,
         ssm_dtype=torch.float32,
     )
-    pool = pool_cls(size=2, config=config, pin_memory=pin_memory)
+    pool = ConvSSMPagesPool(size=2, config=config, pin_memory=pin_memory)
     assert pool.conv_state.shape == (2, 2, 12, 3)
     assert pool.ssm_state.shape == (2, 2, 1, 4, 4)
     assert pool.conv_state.dtype == torch.bfloat16
@@ -99,10 +97,8 @@ def test_empty_shared_pool_skips_cuda_registration(
 
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="two CUDA devices required")
-@pytest.mark.parametrize("pool_cls", [KDAPagesPool, GDNPagesPool])
 def test_pinned_page_pool_survives_queue_on_another_gpu(
     cpu_args: EasyDict,
-    pool_cls: type[KDAPagesPool] | type[GDNPagesPool],
 ) -> None:
     cpu_args.enable_dp_prompt_cache_fetch = True
     torch.cuda.set_device(0)
@@ -116,7 +112,7 @@ def test_pinned_page_pool_survives_queue_on_another_gpu(
         conv_dtype=torch.float32,
         ssm_dtype=torch.float32,
     )
-    pool = pool_cls(size=2, config=config)
+    pool = ConvSSMPagesPool(size=2, config=config)
     tensors = (pool.conv_state, pool.ssm_state)
     pointers = [tensor.data_ptr() for tensor in tensors]
     for tensor in tensors:

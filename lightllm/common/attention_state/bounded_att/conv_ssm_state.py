@@ -26,7 +26,6 @@ logger = init_logger(__name__)
 class ConvSSMState(BoundedAttentionState):
     """GDN/KDA 共用的 Conv 历史、SSM 和 MTP 游标。"""
 
-    page_pool_class: type[ConvSSMPagesPool]
     big_pages_pool: ConvSSMPagesPool | None
     small_pages_pool: ConvSSMPagesPool | None
 
@@ -83,7 +82,7 @@ class ConvSSMState(BoundedAttentionState):
         assert self.big_pages_pool is None and self.small_pages_pool is None, "page pools already initialized"
         assert big_page_capacity >= 0 and small_page_capacity >= 0, "page capacities must be nonnegative"
         self.big_pages_pool = (
-            self.page_pool_class(
+            ConvSSMPagesPool(
                 size=big_page_capacity,
                 config=self.config,
                 device=device,
@@ -93,7 +92,7 @@ class ConvSSMState(BoundedAttentionState):
             else None
         )
         self.small_pages_pool = (
-            self.page_pool_class(
+            ConvSSMPagesPool(
                 size=small_page_capacity,
                 config=self.config,
                 device=device,

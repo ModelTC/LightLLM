@@ -8,9 +8,8 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.bounded_att import (
-    GDNPagesPool,
+    ConvSSMPagesPool,
     GDNState,
-    KDAPagesPool,
     KDAState,
     ConvSSMStateConfig,
 )
@@ -127,12 +126,11 @@ def page_layout(state: KDAState | GDNState):
     )
 
 
-@pytest.mark.parametrize("cls,pool_cls", [(KDAState, KDAPagesPool), (GDNState, GDNPagesPool)])
+@pytest.mark.parametrize("cls", [KDAState, GDNState])
 @pytest.mark.parametrize("device", ["cuda"])
 @pytest.mark.parametrize("page_kind", ["big", "small"])
 def test_prefill_state_is_saved_and_restored(
     cls: type[KDAState] | type[GDNState],
-    pool_cls: type[KDAPagesPool] | type[GDNPagesPool],
     device: str | torch.device | int,
     page_kind: PageKind,
 ):
@@ -168,8 +166,8 @@ def test_prefill_state_is_saved_and_restored(
     state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device == "cuda")
     assert conv.data_ptr() == state.conv_state[1].data_ptr()
     assert ssm.data_ptr() == state.ssm_state[1].data_ptr()
-    assert type(state.big_pages_pool) is pool_cls
-    assert type(state.small_pages_pool) is pool_cls
+    assert type(state.big_pages_pool) is ConvSSMPagesPool
+    assert type(state.small_pages_pool) is ConvSSMPagesPool
     assert state.big_pages_pool is not state.small_pages_pool
     assert state.mtp_state_index.tolist() == [0, 0, 1]
     state.save_bounded_att_runtime_to_pages(
@@ -235,7 +233,7 @@ def test_gdn_dimensions_and_page_restore():
         assert torch.equal(state.conv_state[:, req, :, :2].cpu(), conv)
         assert torch.equal(state.ssm_state[:, req * 3].cpu(), ssm)
     with pytest.raises(AssertionError, match="equal Q/K/V"):
-        KDAPagesPool(2, config, pin_memory=False)
+        KDAState(config, request_capacity=3, device="cpu")
 
 
 @pytest.mark.parametrize("cls", [KDAState, GDNState])
