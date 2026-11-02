@@ -59,6 +59,7 @@ def test_rejected_registration_does_not_remove_an_existing_connection(monkeypatc
         (None, "Bearer test-pd-secret"),
         ("", "Bearer "),
         ("   ", "Bearer    "),
+        ("caf\u00e9", "Bearer caf\u00e9"),
     ],
 )
 def test_registration_authentication_precedes_accept_and_frames(monkeypatch, token, header):

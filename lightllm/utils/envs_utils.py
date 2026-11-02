@@ -13,8 +13,9 @@ logger = init_logger(__name__)
 
 def get_pd_register_token() -> str:
     token = os.getenv("LIGHTLLM_PD_REGISTER_TOKEN")
-    if not token or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
-        raise ValueError("LIGHTLLM_PD_REGISTER_TOKEN must be a nonempty bearer token")
+    # uvicorn encodes WebSocket headers as ASCII, so any other token fails the handshake.
+    if not token or not token.isascii() or any(char.isspace() or ord(char) < 32 or ord(char) == 127 for char in token):
+        raise ValueError("LIGHTLLM_PD_REGISTER_TOKEN must be a nonempty ASCII bearer token")
     return token
 
 

@@ -137,7 +137,7 @@ PD registration security
 ~~~~~~~~~~~~~~~~~~~~~~~~
 
 Every PD Master and Prefill/Decode process must receive the same nonempty
-``LIGHTLLM_PD_REGISTER_TOKEN`` through its environment. Provision a high-entropy secret through
+``LIGHTLLM_PD_REGISTER_TOKEN`` through its environment. Provision a high-entropy ASCII secret through
 your deployment's secret manager; do not put it in command-line arguments, ``StartArgs``, or
 registration JSON. P/D connections send it in the ``Authorization: Bearer <token>`` header on
 every connection and retry. Missing, empty, or invalid tokens are rejected before the Master
