@@ -1,3 +1,5 @@
+import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -21,6 +23,54 @@ def test_dsv4_cache_fetch_only_reserves_local_request_slots(monkeypatch, model_t
     assert get_running_max_req_size_per_dp(args) == 32
 
 
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41", "llama"])
+@pytest.mark.parametrize("diverse_mode", [False, True])
+def test_router_passes_request_capacity_to_model_workers(tmp_path, monkeypatch, model_type, diverse_mode):
+    from lightllm.server.router import manager
+
+    (tmp_path / "config.json").write_text(json.dumps({"model_type": model_type}))
+    args = StartArgs(
+        model_dir=str(tmp_path),
+        run_mode="prefill",
+        running_max_req_size=256,
+        tp=16,
+        dp=16,
+        nnodes=2,
+        max_req_total_len=262144,
+        enable_dp_prompt_cache_fetch=True,
+        diverse_mode=diverse_mode,
+    )
+    args.per_dp_running_max_req_size = 32
+    capacities = []
+
+    class StopInit(Exception):
+        pass
+
+    async def init_model(kvargs):
+        capacities.append(kvargs["max_req_num"])
+        raise StopInit
+
+    async def start_model_process(**kwargs):
+        return SimpleNamespace(init_model=init_model)
+
+    monkeypatch.setattr(manager, "start_model_process", start_model_process)
+    monkeypatch.setattr(manager.mp, "Queue", lambda: None)
+    monkeypatch.setattr(manager, "get_shm_port_args", lambda: SimpleNamespace(nccl_port=12345))
+    router = manager.RouterManager.__new__(manager.RouterManager)
+    router.args = args
+    router.world_size = args.tp
+    router.nnodes = args.nnodes
+    router.node_rank = 0
+    router.dp_size = args.dp
+    router.model_weightdir = args.model_dir
+    router.load_way = "HF"
+    router.max_total_token_num = 1024
+    with pytest.raises(StopInit):
+        asyncio.run(router.wait_to_model_ready())
+    expected = 32 if model_type in ("deepseek_v4", "deepseek_v41") and not diverse_mode else 256
+    assert capacities == [expected] * 8
+
+
 @pytest.mark.parametrize(
     "global_capacity,dp,nnodes,expected",
     [(32, 8, 1, 4), (33, 8, 1, 5), (4, 8, 1, 1), (32, 8, 2, 8), (32, 1, 2, 32), (32, 1, 1, 32)],
@@ -34,16 +84,16 @@ def test_hybrid_capacity_uses_local_dp_count(monkeypatch, global_capacity, dp, n
     assert ShmReqManager.get_max_req_num(None) == global_capacity
 
 
-@pytest.mark.parametrize("mode", ["full_attention", "diverse", "cache_fetch"])
-def test_modes_requiring_existing_capacity_keep_global_default(monkeypatch, mode):
-    monkeypatch.setattr("lightllm.utils.config_utils.is_hybrid_att_model", lambda _: mode != "full_attention")
+@pytest.mark.parametrize("mode,expected", [("full_attention", 4), ("diverse", 32), ("cache_fetch", 32)])
+def test_request_capacity_preserves_full_attention_and_global_modes(monkeypatch, mode, expected):
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: "llama")
     args = StartArgs(
         running_max_req_size=32,
         dp=8,
         diverse_mode=mode == "diverse",
         enable_dp_prompt_cache_fetch=mode == "cache_fetch",
     )
-    assert get_running_max_req_size_per_dp(args) == 32
+    assert get_running_max_req_size_per_dp(args) == expected
 
 
 @pytest.mark.parametrize("capacity", [0, -1])
@@ -64,6 +114,7 @@ def _make_dp_queue(monkeypatch, balancer):
         router_token_ratio=0.85,
         dp_balancer=balancer,
     )
+    args.per_dp_running_max_req_size = get_running_max_req_size_per_dp(args)
     router = SimpleNamespace(
         router_statics=SimpleNamespace(ema_req_out_len=16),
         get_used_tokens=lambda dp: 0,

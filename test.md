@@ -264,3 +264,12 @@ P launcher 增加 --enable_dp_prompt_cache_fetch（同节点DP之间），D laun
 P/D 的 --mtp_step 暂保持5。P prefill仅用target hidden做draft KV-only commit，不会因为step5额外生成5个草稿；但当前DeepseekV4AttStatePageHelper按物理顺序整块传输SWA/compressor ring。get_runtime_state_shapes中C2 ring长度为4+mtp_step，P1会有5槽、D5为9槽，直接混用会造成恢复布局和物理索引不一致。要允许P1/D5，应先支持逻辑位置重排的状态传输或解耦统一传输容量，不能仅修改launcher数字。
 
 bash -n及git diff --check通过；本条仅为命令配置更新，未重启/部署服务，未声称动态调度性能或P1/D5多机已验收。既有节点配置、DeepEP隔离路径及旧文档的未提交修改保留，本次commit只包含两个新增参数及对应说明。
+
+
+### 2026-11-02：修复 V4.1 DP fetch 请求槽位重复分配
+
+router.wait_to_model_ready 原先单独判断 model_type != deepseek_v4，漏掉 deepseek_v41；双机DPEP16、running_max_req_size=256时，开启DP fetch会给每个P rank传256个GPU请求槽位，而调度器使用32个。改为复用现有 get_running_max_req_size_per_dp，不再在router维护第二套模型例外。没有增加配置、fallback或管理器。
+
+新增测试实际调用router初始化路径并截取8个worker的init_model参数，覆盖V4/V4.1/其他模型及diverse模式。修复前仅V4.1正常模式失败（256 != 32），其余5例通过；修复后整个请求容量文件24例通过。同步修正同文件既有测试fixture：显式初始化队列所需的per_dp容量，并按现有函数的语义检查普通full-attention容量。此时尚未部署修复，不把KV容量恢复量作为实测结论。
+
+记录：/mnt/vqa/wanzihao/v41_pd_restart_20261102_122400/bugfix_20261102_133822/ 下 router_capacity_before.log、router_capacity_after.log。
