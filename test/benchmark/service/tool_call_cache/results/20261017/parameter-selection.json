@@ -1,0 +1,23 @@
+{
+  "recorded_utc": "2026-10-17T10:42:44.857570+00:00",
+  "status": "selected_on_validation_before_heldout",
+  "applies_to": "Qwen3-4B, 32768-token KV capacity, context scale0.05, wait scale0.1",
+  "source_revision": "3d7ec737bc382eacc667ea40de3d7d50a6a3958e",
+  "retention_seconds": 3,
+  "max_fraction": 0.5,
+  "rationale": "The 30-second window did not improve validation cache pressure outcomes. Prefer the shorter bounded window. Three-seed results remain variable and do not establish stable production speedup.",
+  "validation_phases": [
+    "validation-short-v5",
+    "validation-long-v5"
+  ],
+  "all_validation_pairs": 18,
+  "heldout_case_file_sha256": "432541baf73ca109a29a74885294af70a226d3a4b7818386120ceb4a4299a5be",
+  "validation_summary_sha256": "c057f1b5463593e41a13c0df371768dde72b9cc430b20bee6a8c41494203e947",
+  "verified_raw_input_output_and_generated_token_parity": true,
+  "limitations": [
+    "Fixed GPU assignment; held-out hardware crossover remains required.",
+    "Short echo/OK outputs; context and wait scaling approximate sanitized public traces.",
+    "Short-window validation predates continuous GPU monitoring. Manual checks found no shared experiment GPUs; unrelated GPU4 activity appeared during ordinary-only validation."
+  ],
+  "raw_logs": "Retained in experiment stores; omitted from public artifacts."
+}

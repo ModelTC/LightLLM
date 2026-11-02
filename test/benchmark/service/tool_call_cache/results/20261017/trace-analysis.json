@@ -1,0 +1,84 @@
+{
+  "source": {
+    "repository": "cachewise-project/cachewise-coding-traces",
+    "revision": "181c435a090d328d00bbbee4c8eeb27d32f3abd2"
+  },
+  "sessions": 94,
+  "sessions_with_main_thread_rounds": 81,
+  "rounds": 11135,
+  "missing_original_finish_reason": 10865,
+  "input_tokens": {
+    "n": 11135,
+    "mean": 86413.41499775482,
+    "p50": 81954,
+    "p90": 141906,
+    "p95": 153451,
+    "p99": 179245
+  },
+  "groups": {
+    "tool_content_observed": {
+      "rounds": 10285,
+      "no_observed_followup": 18,
+      "overlapping_followup_excluded": 3,
+      "next_first_chunk_gap_s": {
+        "n": 10264,
+        "mean": 90.94955426721673,
+        "p50": 5.072999954223633,
+        "p90": 30.368000030517578,
+        "p95": 62.59100008010864,
+        "p99": 246.885999917984
+      },
+      "next_input_ready_gap_s": {
+        "n": 10261,
+        "mean": 83.8561141209323,
+        "p50": 0.0839998722076416,
+        "p90": 21.115000009536743,
+        "p95": 52.62100005149841,
+        "p99": 224.8659999370575
+      },
+      "fraction_within_s_given_observed_followup": {
+        "1": 0.16494544037412315,
+        "5": 0.4886983632112237,
+        "10": 0.7727007014809041,
+        "30": 0.8990646921278254,
+        "60": 0.9478760717069369,
+        "300": 0.9919134840218239
+      }
+    },
+    "no_tool_content_observed": {
+      "rounds": 850,
+      "no_observed_followup": 63,
+      "overlapping_followup_excluded": 0,
+      "next_first_chunk_gap_s": {
+        "n": 787,
+        "mean": 3008.765293521227,
+        "p50": 40.45300006866455,
+        "p90": 220.34400010108948,
+        "p95": 435.10399985313416,
+        "p99": 39751.75500011444
+      },
+      "next_input_ready_gap_s": {
+        "n": 769,
+        "mean": 3049.2474772403084,
+        "p50": 31.91100001335144,
+        "p90": 201.73099994659424,
+        "p95": 382.22000002861023,
+        "p99": 39742.21099996567
+      },
+      "fraction_within_s_given_observed_followup": {
+        "1": 0.16518424396442186,
+        "5": 0.17662007623888182,
+        "10": 0.204574332909784,
+        "30": 0.39390088945362134,
+        "60": 0.6226175349428208,
+        "300": 0.9224904701397713
+      }
+    }
+  },
+  "limitations": [
+    "Tool-content labels are inferred independently of original API finish reasons.",
+    "Final observations are censored; missing followup does not prove no future request.",
+    "Input readiness and first response chunk include orchestration and server latency; exact HTTP arrivals are unavailable.",
+    "Public text is redacted, so token identity cannot be reconstructed exactly."
+  ]
+}

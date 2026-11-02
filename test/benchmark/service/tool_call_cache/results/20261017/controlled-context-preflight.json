@@ -1,0 +1,91 @@
+{
+  "scope": "CPU tokenization only; GPU access disabled, no inference",
+  "transformers_version": "4.57.1",
+  "results": [
+    {
+      "model": "Qwen3-4B",
+      "seed": 42,
+      "prefix_words": 1024,
+      "prompt_tokens": 5277,
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "model": "Qwen3-4B",
+      "seed": 43,
+      "prefix_words": 1024,
+      "prompt_tokens": 5277,
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "model": "Qwen3-4B",
+      "seed": 44,
+      "prefix_words": 1024,
+      "prompt_tokens": 5277,
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "model": "Qwen3-4B",
+      "seed": 42,
+      "prefix_words": 3000,
+      "prompt_tokens": 15157,
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "model": "Qwen3-4B",
+      "seed": 43,
+      "prefix_words": 3000,
+      "prompt_tokens": 15157,
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "model": "Qwen3-4B",
+      "seed": 44,
+      "prefix_words": 3000,
+      "prompt_tokens": 15157,
+      "tokenizer_sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"
+    },
+    {
+      "model": "Qwen3.5-27B",
+      "seed": 42,
+      "prefix_words": 10000,
+      "prompt_tokens": 50276,
+      "tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+    },
+    {
+      "model": "Qwen3.5-27B",
+      "seed": 43,
+      "prefix_words": 10000,
+      "prompt_tokens": 50276,
+      "tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+    },
+    {
+      "model": "Qwen3.5-27B",
+      "seed": 44,
+      "prefix_words": 10000,
+      "prompt_tokens": 50276,
+      "tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+    },
+    {
+      "model": "Qwen3.5-27B",
+      "seed": 42,
+      "prefix_words": 15000,
+      "prompt_tokens": 75276,
+      "tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+    },
+    {
+      "model": "Qwen3.5-27B",
+      "seed": 43,
+      "prefix_words": 15000,
+      "prompt_tokens": 75276,
+      "tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+    },
+    {
+      "model": "Qwen3.5-27B",
+      "seed": 44,
+      "prefix_words": 15000,
+      "prompt_tokens": 75276,
+      "tokenizer_sha256": "5f9e4d4901a92b997e463c1f46055088b6cca5ca61a6522d1b9f64c4bb81cb42"
+    }
+  ],
+  "interpretation": "Construction-only CPU preflight with checksum-verified actual tokenizers. Initial15000-number hybrid input exceeds65536 request limit. Use10000 numbers to exceed32768 retention budget while fitting the request; actual server usage remains independently checked in the controlled probe. No inference-performance result or heldout-based tuning."
+}

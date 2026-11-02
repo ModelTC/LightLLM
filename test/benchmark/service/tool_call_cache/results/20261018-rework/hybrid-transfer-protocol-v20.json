@@ -1,0 +1,190 @@
+{
+  "scope": "Prespecified before independent TraceLab performance; model-specific transfer assessment, not production traffic replay",
+  "source_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
+  "harness_revision": "b491a8807239a3cfdc091613b79d23cd403b44cd",
+  "replay_sha256": "431867c105905499b344f7596b60ae7b262af4e4307206bc10650241210f6f2a",
+  "dataset": {
+    "validation": "CacheWise pinned181c435a090d328d00bbbee4c8eeb27d32f3abd2",
+    "heldout": "TraceLab public sanitizedv0.0.1 metadata",
+    "heldout_sha256": "668427a4e71717cb93596269d9c63f65cb62cae8e317d099f8b50e734f679690"
+  },
+  "model": "Qwen3.5-27B BF16",
+  "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+  "tp": 2,
+  "cache_tokens": 131072,
+  "max_req_tokens": 65536,
+  "batch_tokens": 8192,
+  "max_running_requests": 32,
+  "linear_att_page_block_num": 16,
+  "expected_hash_page_size": 512,
+  "linear_state_dtype": "float32; preserve actual existing configuration, no precision shortcuts",
+  "tool_call_parser": "qwen3_coder",
+  "retention_seconds_initial": 3,
+  "fraction": 0.5,
+  "validation_cases": [
+    {
+      "name": "pressure-c24",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 48000,
+        "compaction_identity": "fresh",
+        "sessions": 24,
+        "split": "validation",
+        "context_scale": 0.32,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "agent50-c16-fast",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 48000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "validation",
+        "context_scale": 0.32,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent50",
+        "min_tool_wait": 0.25,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "ordinary-c8",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 48000,
+        "compaction_identity": "fresh",
+        "sessions": 8,
+        "split": "validation",
+        "context_scale": 0.2,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "mix": "ordinary",
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "realwait-trace-c16",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 48000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "validation",
+        "context_scale": 0.32,
+        "wait_scale": 1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    }
+  ],
+  "heldout_cases": [
+    {
+      "name": "pressure-c24",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 48000,
+        "compaction_identity": "fresh",
+        "sessions": 24,
+        "split": "test",
+        "context_scale": 1.0,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "agent50-c16-fast",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 48000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "test",
+        "context_scale": 1.0,
+        "wait_scale": 0,
+        "max_wait": 0.25,
+        "mix": "agent50",
+        "min_tool_wait": 0.25,
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "ordinary-c8",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 48000,
+        "compaction_identity": "fresh",
+        "sessions": 8,
+        "split": "test",
+        "context_scale": 1.0,
+        "wait_scale": 0.1,
+        "max_wait": 5,
+        "mix": "ordinary",
+        "ordinary_output": "json-string"
+      }
+    },
+    {
+      "name": "realwait-trace-c16",
+      "options": {
+        "turns": 8,
+        "max_prompt_tokens": 48000,
+        "compaction_identity": "fresh",
+        "sessions": 16,
+        "split": "test",
+        "context_scale": 1.0,
+        "wait_scale": 1,
+        "max_wait": 5,
+        "ordinary_output": "json-string"
+      }
+    }
+  ],
+  "context_scaling_rule": "Multiply normal token capacity, prompt cap and source context scale by4 to preserve relative KV pressure; each policy within a comparison remains identical. Synthetic lengths and waits/caps are reported.",
+  "heldout_seeds": [
+    42,
+    43,
+    44
+  ],
+  "assignments": [
+    {
+      "candidate_gpus": [
+        0,
+        1
+      ],
+      "off_gpus": [
+        4,
+        5
+      ],
+      "reverse_order": false
+    },
+    {
+      "candidate_gpus": [
+        4,
+        5
+      ],
+      "off_gpus": [
+        0,
+        1
+      ],
+      "reverse_order": true
+    }
+  ],
+  "heldout_pairs": 24,
+  "freeze_rule": "Finish all4 CacheWise validation cases before model-specific freeze. Default3s. Compare30s only on CacheWise if actual timing/counters identify expiry before otherwise reusable fast continuations; preserve all3s outcomes and document any choice before any hybrid TraceLab test. Never tune on independent test performance.",
+  "kernel_guard": "Persist existing tilelang-v10 cache. All starts/warmups precede timing. Reject and preserve a whole phase containing logged timed TileLang compilation; warm missing kernels outside timing before repeating complete phase.",
+  "functional_checks": "Real echo tool/result loops, actual resumable state checkpoints under pressure, stable input boundary, per-rank numeric idle coverage/hint consistency when feasible; stronger cached-prefix retrieval smoke desirable. Controlled probe times are diagnostic, never production speed claims.",
+  "limits": "Shared host CPU/I/O, isolated selected GPUs, no original raw text or finish reasons in metadata, 3seeds provide limited descriptive bootstrap uncertainty, all regressions/cohorts retained.",
+  "scheduling": "FIFO-feasible heads first, cached backfill only for blocked head",
+  "benchmark_repair": {
+    "previous_attempt": "v17 independent phase stopped after six matching pairs and one failed pair; full phase excluded",
+    "reason": "v17 punctuation drift; v18 constrained long ordinary output exceeded heuristic budget before any independent inference; full incomplete phases excluded",
+    "policy_unchanged_since_before_original_independent_inference": true,
+    "strict_pair_checks_unchanged": true,
+    "ordinary_output": "json-string exact enum schema, actual tokenizer plus literal byte/EOS budget; both short and shaped replies",
+    "revalidation": "Repeat all fixed validation cases before complete independent rerun; no case/seed/parameter selection using independent performance"
+  }
+}

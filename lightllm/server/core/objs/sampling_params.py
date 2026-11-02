@@ -284,6 +284,34 @@ class NodeUUId(ctypes.Structure):
         return (self.node_id_high << 64) | self.node_id_low
 
 
+class ToolCallCacheMarkers(ctypes.Structure):
+    """Compact advisory metadata, independent of generation stop sequences."""
+
+    MAX_MARKERS = 4
+    MAX_LENGTH = 32
+    _pack_ = 4
+    _fields_ = [
+        ("token_ids", (ctypes.c_int * MAX_LENGTH) * MAX_MARKERS),
+        ("lengths", ctypes.c_int * MAX_MARKERS),
+        ("size", ctypes.c_int),
+        ("prompt_tail_tokens", ctypes.c_int),
+    ]
+
+    def initialize(self, markers, prompt_tail_tokens=0):
+        if type(prompt_tail_tokens) is not int or not 0 <= prompt_tail_tokens <= 2048:
+            raise ValueError("tool-call cache prompt tail must be an integer between 0 and 2048")
+        self.prompt_tail_tokens = prompt_tail_tokens
+        assert len(markers) <= self.MAX_MARKERS, "Too many tool-call cache markers"
+        self.size = len(markers)
+        for index, marker in enumerate(markers):
+            self.lengths[index] = _check_and_store_int_token_ids(
+                self.token_ids[index], marker, self.MAX_LENGTH, "tool-call cache marker"
+            )
+
+    def to_list(self):
+        return [list(self.token_ids[i][: self.lengths[i]]) for i in range(self.size)]
+
+
 class SamplingParams(ctypes.Structure):
     _pack_ = 4
     _fields_ = [
@@ -340,6 +368,7 @@ class SamplingParams(ctypes.Structure):
         ),  # whether to add spaces between special tokens when decoding
         ("print_eos_token", ctypes.c_bool),  # eos_id will be always ignored except the value is set to True
         ("disable_prompt_cache", ctypes.c_bool),  # whether to disable prompt cache
+        ("tool_call_cache_markers", ToolCallCacheMarkers),
         ("seed", ctypes.c_int64),  # random seed
         # -1 disables prompt logprobs; K >= 0 returns only the top-K prompt tokens.
         ("prompt_logprobs", ctypes.c_int),
@@ -381,6 +410,9 @@ class SamplingParams(ctypes.Structure):
 
         self.skip_special_tokens = kwargs.get("skip_special_tokens", SKIP_SPECIAL_TOKENS)
         self.disable_prompt_cache = kwargs.get("disable_prompt_cache", False)
+        self.tool_call_cache_markers.initialize(
+            kwargs.get("tool_call_cache_markers", []), kwargs.get("tool_call_cache_prompt_tail_tokens", 0)
+        )
 
         self.add_special_tokens = kwargs.get("add_special_tokens", True)
         self.add_spaces_between_special_tokens = kwargs.get("add_spaces_between_special_tokens", True)
@@ -565,6 +597,8 @@ class SamplingParams(ctypes.Structure):
             "add_spaces_between_special_tokens": self.add_spaces_between_special_tokens,
             "print_eos_token": self.print_eos_token,
             "disable_prompt_cache": self.disable_prompt_cache,
+            "tool_call_cache_markers": self.tool_call_cache_markers.to_list(),
+            "tool_call_cache_prompt_tail_tokens": self.tool_call_cache_markers.prompt_tail_tokens,
             "seed": self.seed,
             "prompt_logprobs": self.prompt_logprobs,
         }

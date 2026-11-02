@@ -1,0 +1,102 @@
+{
+  "source": "TraceLab public sanitized v0.0.1 normalized longest valid contiguous segment per source session",
+  "normalized_sha256": "668427a4e71717cb93596269d9c63f65cb62cae8e317d099f8b50e734f679690",
+  "normalized_rounds": 348158,
+  "missing_original_finish_reason": 348158,
+  "groups": {
+    "observed_tool": {
+      "rounds": 311811,
+      "session_count": 3746,
+      "no_observed_followup": 560,
+      "overlap_excluded": 0,
+      "next_first_chunk_gap_s": {
+        "distribution": {
+          "n": 311251,
+          "mean": 39.72108964798694,
+          "p50": 5.95799994468689,
+          "p90": 32.71199989318848,
+          "p95": 62.61199998855591,
+          "p99": 244.64100003242493
+        },
+        "fraction_within_seconds_given_observed_value": {
+          "1": 0.01475979193641145,
+          "3": 0.18827570031903512,
+          "5": 0.4274588676020318,
+          "10": 0.7035318762028073,
+          "30": 0.8860051855255083,
+          "60": 0.9470331019016807,
+          "300": 0.9916176976138229
+        }
+      },
+      "next_input_ready_gap_s": {
+        "distribution": {
+          "n": 311225,
+          "mean": 31.923037709123456,
+          "p50": 0.2239999771118164,
+          "p90": 14.92900013923645,
+          "p95": 38.17300009727478,
+          "p99": 234.27099990844727
+        },
+        "fraction_within_seconds_given_observed_value": {
+          "1": 0.6241143866977267,
+          "3": 0.7683958550887622,
+          "5": 0.8015198007872119,
+          "10": 0.8782006586874448,
+          "30": 0.9232516668005463,
+          "60": 0.9592513454895976,
+          "300": 0.9920668326773234
+        }
+      }
+    },
+    "no_observed_tool": {
+      "rounds": 36347,
+      "session_count": 3910,
+      "no_observed_followup": 3704,
+      "overlap_excluded": 0,
+      "next_first_chunk_gap_s": {
+        "distribution": {
+          "n": 32643,
+          "mean": 3110.75591572331,
+          "p50": 149.02900004386902,
+          "p90": 1574.292000055313,
+          "p95": 3599.0119998455048,
+          "p99": 55092.37199997902
+        },
+        "fraction_within_seconds_given_observed_value": {
+          "1": 0.002297582942744233,
+          "3": 0.01096712924669914,
+          "5": 0.023925497043776615,
+          "10": 0.06338265478050424,
+          "30": 0.18356155990564593,
+          "60": 0.30410807830162667,
+          "300": 0.6911435836167019
+        }
+      },
+      "next_input_ready_gap_s": {
+        "distribution": {
+          "n": 31602,
+          "mean": 3123.4046386928394,
+          "p50": 130.59299993515015,
+          "p90": 1528.8559999465942,
+          "p95": 3590.2110002040863,
+          "p99": 55759.638999938965
+        },
+        "fraction_within_seconds_given_observed_value": {
+          "1": 0.03490285424973103,
+          "3": 0.0461996076197709,
+          "5": 0.06164166824884501,
+          "10": 0.10325295867350168,
+          "30": 0.23153597873552306,
+          "60": 0.35111701791025884,
+          "300": 0.7044174419340548
+        }
+      }
+    }
+  },
+  "limits": [
+    "Tool presence is advisory, not original finish_reason.",
+    "Final rounds and normalization segment boundaries are censored; no followup is not proof of abandonment.",
+    "Fractions condition on observed valid followup/readiness; readiness and first chunk are distinct bounds, not actual HTTP arrival.",
+    "No causal benefit or KV token identity follows from these metadata. Policy was frozen before independent model inference and remains unchanged."
+  ]
+}

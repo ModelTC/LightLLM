@@ -1,0 +1,18 @@
+{
+  "package": "xgrammar",
+  "version": "0.2.8",
+  "source_image_id": "sha256:0fe61dd702cb9e87b78faec3c2ece65a42e1552187c58e43cbe60c83bbe5ca73",
+  "method": "Copy installed package and dist-info from existing cached image; no image built or published",
+  "verified_RECORD_sha256_entries": 43,
+  "download_attempts": "Remote PyPI and local mirror downloads failed with read timeouts; no measured study restarted.",
+  "additional_package": {
+    "name": "apache-tvm-ffi",
+    "version": "0.1.11",
+    "verified_RECORD_sha256_entries": 229,
+    "unused_console_scripts_not_copied": [
+      "../../../bin/tvm-ffi-config",
+      "../../../bin/tvm-ffi-stubgen"
+    ]
+  },
+  "compatibility": "Both required packages import successfully in pinned base image with matching Torch2.11.0+cu130; initial xgrammar-only probe correctly rejected FFI0.1.9."
+}

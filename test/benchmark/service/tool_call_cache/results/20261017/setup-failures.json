@@ -1,0 +1,152 @@
+{
+  "scope": "Setup/protocol failures are retained in experiment stores and excluded from performance estimates. No request contents or raw logs are published.",
+  "runs": [
+    {
+      "phase": "warmup-v2",
+      "kind": "client prompt construction",
+      "resolution": "Put reference padding in a separate user message; preserve the failed warmup."
+    },
+    {
+      "phase": "hybrid-v4-smoke",
+      "kind": "parser configuration",
+      "resolution": "Use qwen3_coder for Qwen3.5 XML tool calls; subsequent 27B TP2 smokes passed."
+    },
+    {
+      "phase": "validation-outputs-v5",
+      "kind": "ordinary finish-state classification",
+      "requests_in_failed_control_trial": 16,
+      "length_terminations": 1,
+      "resolution": "Classify both stop and length as ordinary. Preserve the failed phase; repeat the complete prototype under v6 and require exact paired outcomes and generated-token counts."
+    },
+    {
+      "phase": "validation-hybrid-long-v6",
+      "kind": "hardware thermal-frequency asymmetry",
+      "observed_gpu6_temperature_c": 86,
+      "observed_gpu6_sm_clock_mhz": 345,
+      "other_experiment_gpu_sm_clock_mhz": 1980,
+      "resolution": "Quarantine the entire timing phase and its excluded warmup; reject it in report generation. Avoid GPUs2/6 for recovered studies and require zero thermal-event counter increases on every selected GPU."
+    },
+    {
+      "phase": "warmup-normal-short-v8",
+      "kind": "upstream request timing telemetry moved from info to debug",
+      "paired_requests": 96,
+      "input_output_finish_token_mismatches": 0,
+      "resolution": "Keep the excluded warmup and its failure. Both end-to-end tool/stream/schema smokes passed. Before any final-source measured trial, configure the same explicit debug log level on candidate, control and unchanged baseline; archive the setting and include instrumentation cost in interpretation."
+    },
+    {
+      "phase": "v9 pre-validation structured-output helper invocation",
+      "kind": "orchestration helper path renamed without staging a matching file",
+      "measured_validation_or_heldout_trials_started": 0,
+      "resolution": "Preserve the terminal driver and failed invocation records. Correct the helper path and resume on the same healthy services with unchanged source/runtime/scenarios. Both JSON-schema checks and the subsequent matched96-request warmup passed, including request-correlated TTFT/cache verification."
+    },
+    {
+      "phase": "normal-long-v9 service startup before any long-window warmup",
+      "kind": "requested TCP port failed upstream strict bind validation after retiring prior candidate",
+      "preserved_complete_short_window_pairs": 9,
+      "resolution": "Confirmed launcher exited with address-in-use error and later verified port bindability; no other process stopped. Add an untimed bounded prelaunch bindability wait, tested with an occupied socket and its subsequent release. Resume only the unstarted long-window stage; preserve completed short-window results and failed launcher records."
+    },
+    {
+      "phase": "planned hybrid partial-checkpoint context, before any execution",
+      "kind": "CPU tokenizer preflight caught an invalid context-length estimate",
+      "initial_numeric_words": 15000,
+      "initial_prompt_tokens": 75276,
+      "request_limit_tokens": 65536,
+      "corrected_numeric_words": 10000,
+      "corrected_cpu_prompt_tokens": 50276,
+      "retained_checkpoint_target_tokens": 32768,
+      "resolution": "Correct only the unstarted construction parameter; preserve budget, churn, source, seeds and comparison gates. No measured hybrid trial discarded or retuned. Independently check actual server input bounds during the controlled probe."
+    },
+    {
+      "phase": "hybrid validation v9, before any hybrid parameter selection or heldout execution",
+      "kind": "representative warmup missed runtime TileLang specializations",
+      "completed_short_pairs": 9,
+      "short_pairs_with_measured_compilation": 2,
+      "compiler_events_per_affected_pair": 2,
+      "observed_compiler_duration_seconds": [
+        13,
+        14
+      ],
+      "affected_policies": [
+        "control trace-c8 seed42",
+        "candidate trace-c16 seed43"
+      ],
+      "resolution": "Preserve and quarantine both v9 hybrid validation phases. Stop only the owned selection controller; allow the current phase to finish as excluded diagnostics. Persist completed trusted TileLang kernel cache from the pinned image, restart full unchanged hybrid matrix with per-pair logged-compilation rejection plus independent archived-log audit before selecting parameters. Do not pool cold attempts or use their positive/negative timing differences as cache benefits. Normal-model results unchanged.",
+      "completed_long_pairs": 9,
+      "long_pairs_with_measured_compilation": 1,
+      "selected_complete_kernel_cache_entries": 10,
+      "recorded_kernel_source_entries": 20
+    },
+    {
+      "phase": "v10 orchestration before any formal v10 replay",
+      "kind": "quarantine gate also rejected excluded diagnostic as a cache-seeding prerequisite",
+      "resolution": "Retain the failed controller source/output. Read only the diagnostic complete status and require its invalidity marker for cache extraction; retain quarantine rejection for formal data. Resumed controller seeded10 complete entries from20 recorded sources, verified both service cache mounts and started full unchanged matrix. No formal v10 trial had started."
+    },
+    {
+      "phase": "hybrid primary v10 control startup before heldout",
+      "kind": "intermittent CUDA invalid argument during CPU pinned big-page SSM allocation",
+      "failed_uninstrumented_startups": 2,
+      "failed_launch_blocking_startups": 1,
+      "actual_allocation_shape": [
+        18,
+        48,
+        24,
+        128,
+        128
+      ],
+      "actual_dtype": "float32",
+      "actual_allocation_bytes": 1358954496,
+      "source_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "gpu_group": [
+        4,
+        5
+      ],
+      "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+      "completed_validation_pairs_preserved": 18,
+      "heldout_pairs_started_before_failures": 0,
+      "independent_fp32_probe_bytes": 4831838208,
+      "independent_probe_devices_passed": 2,
+      "instrumented_actual_allocation_ranks_passed": 2,
+      "resolution": "Preserve failed startup logs and experiment records privately. Synchronous CUDA reproduced the same failing allocation; subsequent diagnostic-only allocation tracing succeeded at the same shape on both ranks. A larger independent FP32 probe also succeeded, so no universal allocation-size limit or confirmed root cause is claimed. Stop only owned failed/diagnostic containers and retry the original uninstrumented configuration; require health and warmup before any heldout trial. Diagnostic services never contribute performance data. No cache capacity, state precision, source, seed, scenario, frozen parameter or GPU assignment changed."
+    },
+    {
+      "phase": "hybrid primary v10 continuation orchestration before heldout",
+      "kind": "readiness probe raced Docker container creation",
+      "measured_trials_started": 0,
+      "resolution": "Preserve failed invocation. Readiness now permits the owned live launcher to create its container and fails promptly on actual model-worker startup traceback. This changes orchestration only; all formal comparison gates remain."
+    },
+    {
+      "phase": "controlled hybrid v10 startup after complete heldout",
+      "kind": "CPU pinned big-page SSM allocation again returned CUDA invalid argument before inference",
+      "failed_uninstrumented_startups": 2,
+      "source_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+      "physical_gpu_indices": [
+        4,
+        5
+      ],
+      "state_dtype": "float32",
+      "pinned_ssm_shape": [
+        18,
+        48,
+        24,
+        128,
+        128
+      ],
+      "pinned_ssm_bytes": 1358954496,
+      "heldout_paired_trials_preserved": 54,
+      "controlled_trials_started_before_failures": 0,
+      "isolated_diagnostic_modes": [
+        "plain_model_sized_gpu_occupancy",
+        "nccl_flashinfer_model_sized_gpu_occupancy"
+      ],
+      "diagnostic_ranks_per_mode": 2,
+      "diagnostic_gpu_bytes_per_rank": 36507222016,
+      "diagnostic_pinned_ssm_bytes_per_rank": 1358954496,
+      "diagnostic_allocation_and_copy_verified": true,
+      "unchanged_configuration_recovery_health_passed": true,
+      "resolution": "Preserve both terminal startup records and raw logs privately. Both isolated allocation paths succeeded on both ranks, including real NCCL/FlashInfer communication, so the full startup trigger remains unconfirmed. Stop only verified failed own services, retain the healthy control, and resume only the three unstarted controlled probes at identical source/image, FP32 state, cache capacity, GPU group, TTL120 and fraction0.25. The post-diagnostic original configuration passed health. No diagnostic service contributes performance results; all54 completed heldout comparisons remain unchanged.",
+      "controlled_paired_trials_completed_after_unchanged_recovery": 3,
+      "final_controlled_monitor_violations": 0
+    }
+  ]
+}

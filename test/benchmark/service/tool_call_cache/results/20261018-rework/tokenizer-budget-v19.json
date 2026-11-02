@@ -1,0 +1,35 @@
+{
+  "status": "passed",
+  "scope": "Untimed actual tokenizer output-budget proof, not performance or generation correctness",
+  "replay_sha256": "431867c105905499b344f7596b60ae7b262af4e4307206bc10650241210f6f2a",
+  "models": [
+    {
+      "model": "Qwen3-4B",
+      "checked_targets": 513,
+      "max_literal_tokens": 915,
+      "max_new_budget": 947,
+      "old_budget_too_short_targets": 275,
+      "prompt_cap_plus_guard_and_budget_below_request_limit": true,
+      "max_target_case": {
+        "target": 512,
+        "literal_tokens": 915,
+        "old_budget": 640,
+        "new_budget": 947
+      }
+    },
+    {
+      "model": "Qwen3.5-27B",
+      "checked_targets": 513,
+      "max_literal_tokens": 915,
+      "max_new_budget": 947,
+      "old_budget_too_short_targets": 275,
+      "prompt_cap_plus_guard_and_budget_below_request_limit": true,
+      "max_target_case": {
+        "target": 512,
+        "literal_tokens": 915,
+        "old_budget": 640,
+        "new_budget": 947
+      }
+    }
+  ]
+}

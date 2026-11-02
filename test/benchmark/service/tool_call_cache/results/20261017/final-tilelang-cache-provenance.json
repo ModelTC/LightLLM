@@ -1,0 +1,228 @@
+{
+  "scope": "Completed TileLang kernels from the same pinned image and runtime overlay; no image build.",
+  "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+  "tilelang_version": "0.1.9",
+  "selected_entries": 10,
+  "sources": [
+    {
+      "policy": "candidate",
+      "key": "3f0690cc248db13d8035097509615dcd1c675fbe35faca8bf759cf15d7f1d741",
+      "sha256": {
+        "device_kernel.cu": "2692e62d564e4ed509b5803bae4b77a17cc99707661684f0dfba0358ceeb1cf9",
+        "executable.so": "e846e6afeb64f62fe102432b35c15b28d9ca2a1f4e050a39c7d42d980b7f269d",
+        "host_kernel.cu": "e7edb23244ba061541e0a0be741a8a4e4298106c2e7a9baccb51cc99a1a73c05",
+        "params.pkl": "270d86f580661140efd25656c4a968403053a6f72223c399d9191255ffa15e05"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "5ddbfd7d31b5f7c640af56c56f5c403a739b7db7472315a9d9c6024a226ae9b9",
+      "sha256": {
+        "device_kernel.cu": "ed69e88de2cb9db6557f5bc90a9f4616998c8c2a0bdcc555bc315d178dcc676c",
+        "executable.so": "5f59af481a9c29007e5e9a00aa9c4a09d165613af0a682300a1df23f7fd19909",
+        "host_kernel.cu": "72fd440038ab4b8c5a88288cc1b8a3fa5e88b8cd4b290deb8cf68a019b039cef",
+        "params.pkl": "499af9d7037b95e5febfc943e1a25814321d843abc9b3672598c76873d8fe19f"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "62829f09574bc60f67ed8b5de1206c0ec187b0145645d6e3d04a136edf3c6541",
+      "sha256": {
+        "device_kernel.cu": "2d7c04815a7773b4bc529d9f5eebcb1ac1278919d5f8fddc1f81294c841f96b5",
+        "executable.so": "849343768aa2b09e1c35bccd29eb47be07416bc2a49e9eb847610a579134297d",
+        "host_kernel.cu": "b0299e9370fb8910bf35062e0604456a65351783288dc27fa625b96f866bc8e9",
+        "params.pkl": "fab477b1d82af13f27ea4dad393973b6dc7c10dee45ae07f51e83dbad19f2960"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "71ae5e760e5a02c9d440f3f2084a3b25a8e8a6fc6f7e2e1abda51541c3a12829",
+      "sha256": {
+        "device_kernel.cu": "a573deccf3758bdb3e17e812ce2e53a227b52f4029000ddb807a2000382cffa1",
+        "executable.so": "897cfe2590958099eaf10514832666b23bd5fb825266ff4e1aad3b195b38649c",
+        "host_kernel.cu": "c9aeb720215680c99b83f789cf7cef809a5fcde41d1094604c37ae1cd02b29d0",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "88bc155d7606ecf2b38b7610a7a0145a3c237215bdafb47ae5483096bf7a217d",
+      "sha256": {
+        "device_kernel.cu": "bf403bec8132db9f9abc7c9af92d250a5b8e6d13f766dec09d21876e864da974",
+        "executable.so": "5d119f7d981d002e05a69c4a4aed8822f920f1a2151e421a64203eb1194f2f3a",
+        "host_kernel.cu": "3fe4e03e8cba7ed180e47b7c1844c6912a1beec2d867f7f8764d9d9ef87da1c8",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "894c2d7f4c0d7b2fa9b45e648df01947297837ec38c455c4779c345314594f60",
+      "sha256": {
+        "device_kernel.cu": "4c027bbe66a7362ac18311c5c51a0355137dd725a10213e3ada3197c4d6f335c",
+        "executable.so": "37acffe4f3f8f84ba0cd5ae15a3c35f036eddf02b5ec4f3c74936920e8f178e1",
+        "host_kernel.cu": "af60fc6ae6476f6adb5d6a956cfaf9f3d0f5609f40c95935432015b59bdba1c3",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "971291c5a13dd3c7cc95129e90aae502f57dcb80c259e541b0429f6c11631895",
+      "sha256": {
+        "device_kernel.cu": "40311be26a547c4ad8fdfc3695e88de8e899544d4a587d008161bb06b7cc2747",
+        "executable.so": "a1802c6dc12c1bea37d9ae6061668c2e34176a13016b2558e26344e0628d7762",
+        "host_kernel.cu": "c404d6656f72205dce42cda9c5e48fc3dad2dc2e74fa46760891f261ac3b3df2",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "b3902127fc9774d07463890b2d21f7845e5e99886a0bb860b55e728f8812aae0",
+      "sha256": {
+        "device_kernel.cu": "b2bb79b856a73dc3e3a4c7d8f4988d31b84a810fa8d1923fe331fb6419b6740d",
+        "executable.so": "0809964644c5d1bd80622c14024c187254bcd042a13c37686e03ea52578123a6",
+        "host_kernel.cu": "ed2600f4b83f1bd9d5630c022b553216967316f844d320ab8c18b407504802b4",
+        "params.pkl": "87cdbcdebf6256b59b61b5f479e654dc95c22f548ddc53304bcaafbd85e00df7"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "c7925fc12742010508aab5c35d1bf8331525b985025e647535470aad771f12c0",
+      "sha256": {
+        "device_kernel.cu": "f2683e501b2e1c13711aa9530b073ab7bd5fb44b2865170710f96e477eb616bb",
+        "executable.so": "889eb4c8baaef25eaeae14e42ed8f677b4ade6d3cf4e182cd088ebd629b06022",
+        "host_kernel.cu": "85f739b9d3f78edd0710ad478b2d32cbcf54f609fbbf7da318247305617d9759",
+        "params.pkl": "13b254712c8c182e6f26de9239ec9227b1fbcc9c65a2c597329973bae42c0fe2"
+      },
+      "selected": true
+    },
+    {
+      "policy": "candidate",
+      "key": "fd8903f39537b06fd3db125fdd12c26fedeb718b58cc875d30c8b304015748c4",
+      "sha256": {
+        "device_kernel.cu": "3f067009bea32fa8933927a74374079a85cdd04519ad62703160aba6e565af79",
+        "executable.so": "644aae9aeaa3c85dd144471ebe007a11fc1bb465be7345bbefd4d8b9774bac93",
+        "host_kernel.cu": "3f1bc11f5b42e39fae4f7a64b9bd63b7a3ecf5d41c25b45ccabdc1428a160f46",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": true
+    },
+    {
+      "policy": "control",
+      "key": "3f0690cc248db13d8035097509615dcd1c675fbe35faca8bf759cf15d7f1d741",
+      "sha256": {
+        "device_kernel.cu": "2692e62d564e4ed509b5803bae4b77a17cc99707661684f0dfba0358ceeb1cf9",
+        "executable.so": "209ccc0270537d2d9e4fbd7c17ff198003555ea7f7d1dceae4f045ff600c99c8",
+        "host_kernel.cu": "e7edb23244ba061541e0a0be741a8a4e4298106c2e7a9baccb51cc99a1a73c05",
+        "params.pkl": "270d86f580661140efd25656c4a968403053a6f72223c399d9191255ffa15e05"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "5ddbfd7d31b5f7c640af56c56f5c403a739b7db7472315a9d9c6024a226ae9b9",
+      "sha256": {
+        "device_kernel.cu": "ed69e88de2cb9db6557f5bc90a9f4616998c8c2a0bdcc555bc315d178dcc676c",
+        "executable.so": "db5ec61f166eb17825e59ed73a274f5d634b0a5d5038cf86e2fff92d537c7af6",
+        "host_kernel.cu": "72fd440038ab4b8c5a88288cc1b8a3fa5e88b8cd4b290deb8cf68a019b039cef",
+        "params.pkl": "499af9d7037b95e5febfc943e1a25814321d843abc9b3672598c76873d8fe19f"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "62829f09574bc60f67ed8b5de1206c0ec187b0145645d6e3d04a136edf3c6541",
+      "sha256": {
+        "device_kernel.cu": "2d7c04815a7773b4bc529d9f5eebcb1ac1278919d5f8fddc1f81294c841f96b5",
+        "executable.so": "c229fc43f9378d6eacb2b8eea6bed9d06d6cf9dd475eec279e6ad6368678b5aa",
+        "host_kernel.cu": "b0299e9370fb8910bf35062e0604456a65351783288dc27fa625b96f866bc8e9",
+        "params.pkl": "fab477b1d82af13f27ea4dad393973b6dc7c10dee45ae07f51e83dbad19f2960"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "71ae5e760e5a02c9d440f3f2084a3b25a8e8a6fc6f7e2e1abda51541c3a12829",
+      "sha256": {
+        "device_kernel.cu": "a573deccf3758bdb3e17e812ce2e53a227b52f4029000ddb807a2000382cffa1",
+        "executable.so": "e3c7aef981ec04c1ccee0014378dff436398340ee44510211e3a6deed5768f8f",
+        "host_kernel.cu": "c9aeb720215680c99b83f789cf7cef809a5fcde41d1094604c37ae1cd02b29d0",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "88bc155d7606ecf2b38b7610a7a0145a3c237215bdafb47ae5483096bf7a217d",
+      "sha256": {
+        "device_kernel.cu": "bf403bec8132db9f9abc7c9af92d250a5b8e6d13f766dec09d21876e864da974",
+        "executable.so": "c5fdeea53ed5cf337940fcaef31b6c44ea0b54c375417a1689f62091b97adcc4",
+        "host_kernel.cu": "8422cc38c0d6951d83a3faca9147d855a6e2010af00ca6d5b830f7022a91ec30",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "894c2d7f4c0d7b2fa9b45e648df01947297837ec38c455c4779c345314594f60",
+      "sha256": {
+        "device_kernel.cu": "4c027bbe66a7362ac18311c5c51a0355137dd725a10213e3ada3197c4d6f335c",
+        "executable.so": "18b4aac1b0a641f768ad400e2e839ce60cf96204905a51dd9fcc447037a4513e",
+        "host_kernel.cu": "af60fc6ae6476f6adb5d6a956cfaf9f3d0f5609f40c95935432015b59bdba1c3",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "971291c5a13dd3c7cc95129e90aae502f57dcb80c259e541b0429f6c11631895",
+      "sha256": {
+        "device_kernel.cu": "40311be26a547c4ad8fdfc3695e88de8e899544d4a587d008161bb06b7cc2747",
+        "executable.so": "8e0f50450d36bf4516bc00a53bd62cece6ce9faa5325f1b338df24ccb67196b7",
+        "host_kernel.cu": "399631a27ddce395569da9d3fe414e57463eb52fd9162428104f4935eed9451e",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "b3902127fc9774d07463890b2d21f7845e5e99886a0bb860b55e728f8812aae0",
+      "sha256": {
+        "device_kernel.cu": "b2bb79b856a73dc3e3a4c7d8f4988d31b84a810fa8d1923fe331fb6419b6740d",
+        "executable.so": "6226d3ddb01e21dd3c12aae4bd61991aeb441868ba7255882b64b67a8ab96113",
+        "host_kernel.cu": "ed2600f4b83f1bd9d5630c022b553216967316f844d320ab8c18b407504802b4",
+        "params.pkl": "87cdbcdebf6256b59b61b5f479e654dc95c22f548ddc53304bcaafbd85e00df7"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "c7925fc12742010508aab5c35d1bf8331525b985025e647535470aad771f12c0",
+      "sha256": {
+        "device_kernel.cu": "f2683e501b2e1c13711aa9530b073ab7bd5fb44b2865170710f96e477eb616bb",
+        "executable.so": "95f62ac12f72ddbad41ac058e94efef00fe94988a37028972bdd97e3625c92f3",
+        "host_kernel.cu": "85f739b9d3f78edd0710ad478b2d32cbcf54f609fbbf7da318247305617d9759",
+        "params.pkl": "13b254712c8c182e6f26de9239ec9227b1fbcc9c65a2c597329973bae42c0fe2"
+      },
+      "selected": false
+    },
+    {
+      "policy": "control",
+      "key": "fd8903f39537b06fd3db125fdd12c26fedeb718b58cc875d30c8b304015748c4",
+      "sha256": {
+        "device_kernel.cu": "0ae6ee138f1a82adc061f7de6fa03f6e3989d72b68e08f4c399242bad0174a7a",
+        "executable.so": "41745ef5c773de2184870ea657538494e515b8f5b2cc5cc2f11c361cb72b13ac",
+        "host_kernel.cu": "3f1bc11f5b42e39fae4f7a64b9bd63b7a3ecf5d41c25b45ccabdc1428a160f46",
+        "params.pkl": "9b296b4d6a265453e8b30fc9d11b530be9bade3b634cb51a5f35bdce8535fdf5"
+      },
+      "selected": false
+    }
+  ]
+}

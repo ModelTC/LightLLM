@@ -1,0 +1,313 @@
+{
+  "method": "Paired ratios; 95% descriptive bootstrap intervals clustered by workload seed; 10000 resamples.",
+  "limitations": "Few seeds give limited uncertainty estimates. Request counts are not independent repetitions.",
+  "artifact_scope": "Aggregate and per-trial performance metrics; no request/response contents or raw logs.",
+  "groups": [
+    {
+      "candidate_revision": "3d7ec737bc382eacc667ea40de3d7d50a6a3958e",
+      "control_revision": "3d7ec737bc382eacc667ea40de3d7d50a6a3958e",
+      "cache_tokens": 32768,
+      "retention_seconds": 3.0,
+      "fraction": 0.5,
+      "case": "variable-output-ordinary",
+      "pairs": 1,
+      "independent_seeds": 1,
+      "metrics": {
+        "wall_speedup": {
+          "geomean": 1.0067202195523681,
+          "ci95": null
+        },
+        "mean_request_speedup": {
+          "geomean": 1.0086380414956952,
+          "ci95": null
+        },
+        "p95_request_speedup": {
+          "geomean": 0.9914731002830721,
+          "ci95": null
+        },
+        "cache_hit_gain_pp": {
+          "mean": 0.0,
+          "ci95": null
+        },
+        "prefill_reduction_percent": {
+          "mean": 0.0,
+          "ci95": null
+        },
+        "mean_ttft_speedup": {
+          "geomean": 0.9453359319383337,
+          "ci95": null
+        },
+        "p95_ttft_speedup": {
+          "geomean": 0.5882941625860868,
+          "ci95": null
+        },
+        "mean_session_speedup": {
+          "geomean": 1.0077413730566023,
+          "ci95": null
+        }
+      },
+      "workload_sha256": "c8c83565fbab794c4da8277c53de1415734782efe8ba0c9c814ca19f20de4e82",
+      "model": "Qwen3-4B",
+      "workload": {
+        "harness_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+        "cache_isolation": "expire preferences, then independent capacity flood",
+        "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "service_configuration": {
+          "tp": 1,
+          "max_req_tokens": 16384,
+          "batch_tokens": 8192,
+          "max_requests": 32,
+          "disable_cudagraph": false
+        },
+        "backend_flags": {
+          "--tool_call_parser": "qwen25",
+          "--linear_att_page_block_num": null,
+          "--llm_prefill_att_backend": "triton",
+          "--llm_decode_att_backend": null
+        },
+        "options": {
+          "sessions": 4,
+          "turns": 4,
+          "split": "validation",
+          "mix": "ordinary",
+          "context_scale": 0.05,
+          "output_scale": 0.5,
+          "max_output_target": 256,
+          "wait_scale": 0.01,
+          "max_wait": 0.5
+        }
+      }
+    },
+    {
+      "candidate_revision": "3d7ec737bc382eacc667ea40de3d7d50a6a3958e",
+      "control_revision": "3d7ec737bc382eacc667ea40de3d7d50a6a3958e",
+      "cache_tokens": 32768,
+      "retention_seconds": 3.0,
+      "fraction": 0.5,
+      "case": "variable-output-tools",
+      "pairs": 1,
+      "independent_seeds": 1,
+      "metrics": {
+        "wall_speedup": {
+          "geomean": 1.0119910727577826,
+          "ci95": null
+        },
+        "mean_request_speedup": {
+          "geomean": 1.0123381032404106,
+          "ci95": null
+        },
+        "p95_request_speedup": {
+          "geomean": 1.0120584171757756,
+          "ci95": null
+        },
+        "cache_hit_gain_pp": {
+          "mean": 0.0,
+          "ci95": null
+        },
+        "prefill_reduction_percent": {
+          "mean": 0.0,
+          "ci95": null
+        },
+        "mean_ttft_speedup": {
+          "geomean": 1.049388510522146,
+          "ci95": null
+        },
+        "p95_ttft_speedup": {
+          "geomean": 1.0184815932617473,
+          "ci95": null
+        },
+        "mean_session_speedup": {
+          "geomean": 1.0089626536918692,
+          "ci95": null
+        }
+      },
+      "workload_sha256": "95402c21628a398c2322603a33b2bd1b26373b39f5db9467c61cf39be6355dd9",
+      "model": "Qwen3-4B",
+      "workload": {
+        "harness_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+        "cache_isolation": "expire preferences, then independent capacity flood",
+        "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "service_configuration": {
+          "tp": 1,
+          "max_req_tokens": 16384,
+          "batch_tokens": 8192,
+          "max_requests": 32,
+          "disable_cudagraph": false
+        },
+        "backend_flags": {
+          "--tool_call_parser": "qwen25",
+          "--linear_att_page_block_num": null,
+          "--llm_prefill_att_backend": "triton",
+          "--llm_decode_att_backend": null
+        },
+        "options": {
+          "sessions": 4,
+          "turns": 4,
+          "split": "validation",
+          "mix": "all-tools",
+          "context_scale": 0.05,
+          "output_scale": 0.5,
+          "max_output_target": 256,
+          "wait_scale": 0.01,
+          "max_wait": 0.5
+        }
+      }
+    }
+  ],
+  "trials": [
+    {
+      "phase": "validation-outputs-v6",
+      "case": "variable-output-ordinary",
+      "repeat": 0,
+      "order": [
+        "control",
+        "candidate"
+      ],
+      "mismatch_count": 0,
+      "seed": 42,
+      "candidate": {
+        "wall_seconds": 2.721906131133437,
+        "started_sessions": 4,
+        "completed_sessions": 4,
+        "abandoned_sessions": 0,
+        "sessions_per_second": 1.469558393012748,
+        "session_seconds": {
+          "mean": 1.4026503474451602,
+          "p50": 1.2312734676524997,
+          "p95": 1.596484706737101
+        },
+        "requests": 16,
+        "prompt_tokens": 56333,
+        "cached_tokens": 41312,
+        "cache_hit_ratio": 0.7333534517955728,
+        "prefilled_tokens": 15021,
+        "output_tokens": 642,
+        "request_seconds": {
+          "mean": 0.2777140940306708,
+          "p50": 0.06455414369702339,
+          "p95": 0.8841874301433563
+        },
+        "wait_capped_requests": 1,
+        "output_target_capped_requests": 1,
+        "finish_reason_counts": {
+          "stop": 15,
+          "length": 1
+        },
+        "server_ttft_ms": {
+          "mean": 76.61014795303345,
+          "p95": 169.14796829223633
+        }
+      },
+      "control": {
+        "wall_seconds": 2.7401979379355907,
+        "started_sessions": 4,
+        "completed_sessions": 4,
+        "abandoned_sessions": 0,
+        "sessions_per_second": 1.4597485621836204,
+        "session_seconds": {
+          "mean": 1.4135087870527059,
+          "p50": 1.2141781402751803,
+          "p95": 1.594226392917335
+        },
+        "requests": 16,
+        "prompt_tokens": 56333,
+        "cached_tokens": 41312,
+        "cache_hit_ratio": 0.7333534517955728,
+        "prefilled_tokens": 15021,
+        "output_tokens": 642,
+        "request_seconds": {
+          "mean": 0.2801129998988472,
+          "p50": 0.06292239483445883,
+          "p95": 0.8766480525955558
+        },
+        "wait_capped_requests": 1,
+        "output_target_capped_requests": 1,
+        "finish_reason_counts": {
+          "stop": 15,
+          "length": 1
+        },
+        "server_ttft_ms": {
+          "mean": 72.4223256111145,
+          "p95": 99.50876235961914
+        }
+      }
+    },
+    {
+      "phase": "validation-outputs-v6",
+      "case": "variable-output-tools",
+      "repeat": 0,
+      "order": [
+        "control",
+        "candidate"
+      ],
+      "mismatch_count": 0,
+      "seed": 42,
+      "candidate": {
+        "wall_seconds": 2.8999177208170295,
+        "started_sessions": 4,
+        "completed_sessions": 4,
+        "abandoned_sessions": 0,
+        "sessions_per_second": 1.3793494799131856,
+        "session_seconds": {
+          "mean": 1.6002835435792804,
+          "p50": 1.551660100929439,
+          "p95": 1.714346880093217
+        },
+        "requests": 16,
+        "prompt_tokens": 56727,
+        "cached_tokens": 41473,
+        "cache_hit_ratio": 0.7310980661766002,
+        "prefilled_tokens": 15254,
+        "output_tokens": 806,
+        "request_seconds": {
+          "mean": 0.3261622758000158,
+          "p50": 0.15205587726086378,
+          "p95": 0.7304263636469841
+        },
+        "wait_capped_requests": 1,
+        "output_target_capped_requests": 1,
+        "finish_reason_counts": {
+          "tool_calls": 16
+        },
+        "server_ttft_ms": {
+          "mean": 71.6242790222168,
+          "p95": 109.88497734069824
+        }
+      },
+      "control": {
+        "wall_seconds": 2.9346908451989293,
+        "started_sessions": 4,
+        "completed_sessions": 4,
+        "abandoned_sessions": 0,
+        "sessions_per_second": 1.3630055808242583,
+        "session_seconds": {
+          "mean": 1.6146263307891786,
+          "p50": 1.5597052620723844,
+          "p95": 1.7206691522151232
+        },
+        "requests": 16,
+        "prompt_tokens": 56727,
+        "cached_tokens": 41473,
+        "cache_hit_ratio": 0.7310980661766002,
+        "prefilled_tokens": 15254,
+        "output_tokens": 806,
+        "request_seconds": {
+          "mean": 0.33018649963196367,
+          "p50": 0.1469665104523301,
+          "p95": 0.7392341494560242
+        },
+        "wait_capped_requests": 1,
+        "output_target_capped_requests": 1,
+        "finish_reason_counts": {
+          "tool_calls": 16
+        },
+        "server_ttft_ms": {
+          "mean": 75.16169548034668,
+          "p95": 111.91582679748535
+        }
+      }
+    }
+  ]
+}

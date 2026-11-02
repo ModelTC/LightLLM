@@ -1,0 +1,975 @@
+{
+  "method": "Paired ratios; 95% descriptive bootstrap intervals clustered by workload seed; 10000 resamples.",
+  "limitations": "Few seeds give limited uncertainty estimates. Request counts are not independent repetitions.",
+  "artifact_scope": "Aggregate and per-trial performance metrics; no request/response contents or raw logs.",
+  "groups": [
+    {
+      "candidate_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "control_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "cache_tokens": 32768,
+      "retention_seconds": 3.0,
+      "fraction": 0.5,
+      "case": "ordinary-c8",
+      "pairs": 3,
+      "independent_seeds": 3,
+      "metrics": {
+        "wall_speedup": {
+          "geomean": 1.008634349057679,
+          "ci95": [
+            1.002525876334953,
+            1.0146551528937873
+          ]
+        },
+        "mean_request_speedup": {
+          "geomean": 1.039198661600722,
+          "ci95": [
+            0.9698247222123676,
+            1.0812523829161433
+          ]
+        },
+        "p95_request_speedup": {
+          "geomean": 1.0192883722551118,
+          "ci95": [
+            0.9581080907366899,
+            1.077384393199116
+          ]
+        },
+        "cache_hit_gain_pp": {
+          "mean": -0.060380253526030415,
+          "ci95": [
+            -0.18114076057809125,
+            0.0
+          ]
+        },
+        "prefill_reduction_percent": {
+          "mean": -0.5279831045406524,
+          "ci95": [
+            -1.5839493136219573,
+            0.0
+          ]
+        },
+        "mean_ttft_speedup": {
+          "geomean": 1.003526711771344,
+          "ci95": [
+            0.9688306989898311,
+            1.0409969414474527
+          ]
+        },
+        "p95_ttft_speedup": {
+          "geomean": 0.9920193262985151,
+          "ci95": [
+            0.95775624250249,
+            1.0390229353744502
+          ]
+        },
+        "mean_session_speedup": {
+          "geomean": 1.0046863807338524,
+          "ci95": [
+            0.9956462580405983,
+            1.0093761531646372
+          ]
+        }
+      },
+      "workload_sha256": "601f872db325a8feb151e27b7311935064073a984dd66b35c768f86b1975d467",
+      "model": "Qwen3-4B",
+      "workload": {
+        "harness_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+        "cache_isolation": "expire preferences, then independent capacity flood",
+        "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "service_configuration": {
+          "tp": 1,
+          "max_req_tokens": 16384,
+          "batch_tokens": 8192,
+          "max_requests": 32,
+          "disable_cudagraph": false,
+          "log_level": "debug"
+        },
+        "backend_flags": {
+          "--tool_call_parser": "qwen25",
+          "--linear_att_page_block_num": null,
+          "--llm_prefill_att_backend": "triton",
+          "--llm_decode_att_backend": null,
+          "--prefill_queue_strategy": "default",
+          "--output_constraint_mode": "xgrammar"
+        },
+        "options": {
+          "sessions": 8,
+          "turns": 10,
+          "split": "validation",
+          "mix": "ordinary",
+          "context_scale": 0.05,
+          "wait_scale": 0.1,
+          "max_wait": 5
+        },
+        "python_dependency_manifest_sha256": "94248b6261377c25095a3f2945425a3d2c8f7344a8c28f1b4974383299d99325"
+      }
+    },
+    {
+      "candidate_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "control_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "cache_tokens": 32768,
+      "retention_seconds": 3.0,
+      "fraction": 0.5,
+      "case": "trace-c16",
+      "pairs": 3,
+      "independent_seeds": 3,
+      "metrics": {
+        "wall_speedup": {
+          "geomean": 1.0238735224990099,
+          "ci95": [
+            1.005089733382091,
+            1.0389259343977162
+          ]
+        },
+        "mean_request_speedup": {
+          "geomean": 1.0125326052691734,
+          "ci95": [
+            0.9307547287969732,
+            1.0741614872318022
+          ]
+        },
+        "p95_request_speedup": {
+          "geomean": 0.9840039250267083,
+          "ci95": [
+            0.9407270719929983,
+            1.0653951139387055
+          ]
+        },
+        "cache_hit_gain_pp": {
+          "mean": 0.28963850355873494,
+          "ci95": [
+            -3.362741815415715,
+            3.050465302540295
+          ]
+        },
+        "prefill_reduction_percent": {
+          "mean": -0.10253017421644921,
+          "ci95": [
+            -10.317828413550977,
+            7.520526318104059
+          ]
+        },
+        "mean_ttft_speedup": {
+          "geomean": 1.018298854345956,
+          "ci95": [
+            0.9294829490312713,
+            1.0661933981390277
+          ]
+        },
+        "p95_ttft_speedup": {
+          "geomean": 0.9909187051728593,
+          "ci95": [
+            0.9044174063901693,
+            1.0408775388024014
+          ]
+        },
+        "mean_session_speedup": {
+          "geomean": 1.007125519062969,
+          "ci95": [
+            0.976161239491115,
+            1.0330837578917538
+          ]
+        }
+      },
+      "workload_sha256": "253d3604c4ce548c57c6ea4b2e496a26226852b9b3cc38e2b2ff93670013dbfc",
+      "model": "Qwen3-4B",
+      "workload": {
+        "harness_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+        "cache_isolation": "expire preferences, then independent capacity flood",
+        "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "service_configuration": {
+          "tp": 1,
+          "max_req_tokens": 16384,
+          "batch_tokens": 8192,
+          "max_requests": 32,
+          "disable_cudagraph": false,
+          "log_level": "debug"
+        },
+        "backend_flags": {
+          "--tool_call_parser": "qwen25",
+          "--linear_att_page_block_num": null,
+          "--llm_prefill_att_backend": "triton",
+          "--llm_decode_att_backend": null,
+          "--prefill_queue_strategy": "default",
+          "--output_constraint_mode": "xgrammar"
+        },
+        "options": {
+          "sessions": 16,
+          "turns": 10,
+          "split": "validation",
+          "context_scale": 0.05,
+          "wait_scale": 0.1,
+          "max_wait": 5
+        },
+        "python_dependency_manifest_sha256": "94248b6261377c25095a3f2945425a3d2c8f7344a8c28f1b4974383299d99325"
+      }
+    },
+    {
+      "candidate_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "control_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "cache_tokens": 32768,
+      "retention_seconds": 3.0,
+      "fraction": 0.5,
+      "case": "trace-c8",
+      "pairs": 3,
+      "independent_seeds": 3,
+      "metrics": {
+        "wall_speedup": {
+          "geomean": 1.007408244728596,
+          "ci95": [
+            1.004945275221959,
+            1.0101506951645585
+          ]
+        },
+        "mean_request_speedup": {
+          "geomean": 1.0033523591281959,
+          "ci95": [
+            0.9431084928391006,
+            1.0365114409899583
+          ]
+        },
+        "p95_request_speedup": {
+          "geomean": 0.9660697935410889,
+          "ci95": [
+            0.8965283568535654,
+            1.0128144235180618
+          ]
+        },
+        "cache_hit_gain_pp": {
+          "mean": -0.4976133386046966,
+          "ci95": [
+            -1.4928400158140898,
+            0.0
+          ]
+        },
+        "prefill_reduction_percent": {
+          "mean": -2.0385269320432573,
+          "ci95": [
+            -6.1155807961297715,
+            0.0
+          ]
+        },
+        "mean_ttft_speedup": {
+          "geomean": 1.0226150465288482,
+          "ci95": [
+            0.9024868025490285,
+            1.1009785100156977
+          ]
+        },
+        "p95_ttft_speedup": {
+          "geomean": 1.0674412987352477,
+          "ci95": [
+            0.9122356020357978,
+            1.3023540979548616
+          ]
+        },
+        "mean_session_speedup": {
+          "geomean": 1.001649150951301,
+          "ci95": [
+            0.990642811368846,
+            1.0092844494731041
+          ]
+        }
+      },
+      "workload_sha256": "a22e23b9d29f3ae5ec99c62d43ad5e0a5822f80e8896da94d317fe26ca0c2f22",
+      "model": "Qwen3-4B",
+      "workload": {
+        "harness_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+        "cache_isolation": "expire preferences, then independent capacity flood",
+        "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "service_configuration": {
+          "tp": 1,
+          "max_req_tokens": 16384,
+          "batch_tokens": 8192,
+          "max_requests": 32,
+          "disable_cudagraph": false,
+          "log_level": "debug"
+        },
+        "backend_flags": {
+          "--tool_call_parser": "qwen25",
+          "--linear_att_page_block_num": null,
+          "--llm_prefill_att_backend": "triton",
+          "--llm_decode_att_backend": null,
+          "--prefill_queue_strategy": "default",
+          "--output_constraint_mode": "xgrammar"
+        },
+        "options": {
+          "sessions": 8,
+          "turns": 10,
+          "split": "validation",
+          "context_scale": 0.05,
+          "wait_scale": 0.1,
+          "max_wait": 5
+        },
+        "python_dependency_manifest_sha256": "94248b6261377c25095a3f2945425a3d2c8f7344a8c28f1b4974383299d99325"
+      }
+    },
+    {
+      "candidate_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "control_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "cache_tokens": 32768,
+      "retention_seconds": 30.0,
+      "fraction": 0.5,
+      "case": "ordinary-c8",
+      "pairs": 3,
+      "independent_seeds": 3,
+      "metrics": {
+        "wall_speedup": {
+          "geomean": 1.0002898786696877,
+          "ci95": [
+            0.9943491404326047,
+            1.0070985693696768
+          ]
+        },
+        "mean_request_speedup": {
+          "geomean": 1.009867941401786,
+          "ci95": [
+            0.9508792044176844,
+            1.1030233592061078
+          ]
+        },
+        "p95_request_speedup": {
+          "geomean": 0.9480298845937614,
+          "ci95": [
+            0.844659728795988,
+            1.046782636916086
+          ]
+        },
+        "cache_hit_gain_pp": {
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "prefill_reduction_percent": {
+          "mean": 0.0,
+          "ci95": [
+            0.0,
+            0.0
+          ]
+        },
+        "mean_ttft_speedup": {
+          "geomean": 0.9824566352497656,
+          "ci95": [
+            0.9533803466575476,
+            1.0378388883269978
+          ]
+        },
+        "p95_ttft_speedup": {
+          "geomean": 0.983851721260645,
+          "ci95": [
+            0.9455795354514244,
+            1.0510097308768775
+          ]
+        },
+        "mean_session_speedup": {
+          "geomean": 1.0014933528965755,
+          "ci95": [
+            0.9934743150317662,
+            1.0128842855680182
+          ]
+        }
+      },
+      "workload_sha256": "601f872db325a8feb151e27b7311935064073a984dd66b35c768f86b1975d467",
+      "model": "Qwen3-4B",
+      "workload": {
+        "harness_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+        "cache_isolation": "expire preferences, then independent capacity flood",
+        "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "service_configuration": {
+          "tp": 1,
+          "max_req_tokens": 16384,
+          "batch_tokens": 8192,
+          "max_requests": 32,
+          "disable_cudagraph": false,
+          "log_level": "debug"
+        },
+        "backend_flags": {
+          "--tool_call_parser": "qwen25",
+          "--linear_att_page_block_num": null,
+          "--llm_prefill_att_backend": "triton",
+          "--llm_decode_att_backend": null,
+          "--prefill_queue_strategy": "default",
+          "--output_constraint_mode": "xgrammar"
+        },
+        "options": {
+          "sessions": 8,
+          "turns": 10,
+          "split": "validation",
+          "mix": "ordinary",
+          "context_scale": 0.05,
+          "wait_scale": 0.1,
+          "max_wait": 5
+        },
+        "python_dependency_manifest_sha256": "94248b6261377c25095a3f2945425a3d2c8f7344a8c28f1b4974383299d99325"
+      }
+    },
+    {
+      "candidate_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "control_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "cache_tokens": 32768,
+      "retention_seconds": 30.0,
+      "fraction": 0.5,
+      "case": "trace-c16",
+      "pairs": 3,
+      "independent_seeds": 3,
+      "metrics": {
+        "wall_speedup": {
+          "geomean": 1.0077992646394995,
+          "ci95": [
+            0.9988427985521039,
+            1.024289922463049
+          ]
+        },
+        "mean_request_speedup": {
+          "geomean": 1.0739656456097724,
+          "ci95": [
+            1.0314063011825503,
+            1.1238414156915488
+          ]
+        },
+        "p95_request_speedup": {
+          "geomean": 1.0432548763033047,
+          "ci95": [
+            1.0241427096254705,
+            1.065073992224292
+          ]
+        },
+        "cache_hit_gain_pp": {
+          "mean": 4.294937272442027,
+          "ci95": [
+            0.47214353163361755,
+            7.934276268525231
+          ]
+        },
+        "prefill_reduction_percent": {
+          "mean": 10.223311582260497,
+          "ci95": [
+            1.0223257911749273,
+            18.042942313591993
+          ]
+        },
+        "mean_ttft_speedup": {
+          "geomean": 1.0677785718703354,
+          "ci95": [
+            0.9492393390348688,
+            1.1693934519559213
+          ]
+        },
+        "p95_ttft_speedup": {
+          "geomean": 0.9864072574809769,
+          "ci95": [
+            0.9327678616995229,
+            1.0315539434224306
+          ]
+        },
+        "mean_session_speedup": {
+          "geomean": 1.0286230746225582,
+          "ci95": [
+            1.0120655358348785,
+            1.045177640216814
+          ]
+        }
+      },
+      "workload_sha256": "253d3604c4ce548c57c6ea4b2e496a26226852b9b3cc38e2b2ff93670013dbfc",
+      "model": "Qwen3-4B",
+      "workload": {
+        "harness_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+        "cache_isolation": "expire preferences, then independent capacity flood",
+        "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "service_configuration": {
+          "tp": 1,
+          "max_req_tokens": 16384,
+          "batch_tokens": 8192,
+          "max_requests": 32,
+          "disable_cudagraph": false,
+          "log_level": "debug"
+        },
+        "backend_flags": {
+          "--tool_call_parser": "qwen25",
+          "--linear_att_page_block_num": null,
+          "--llm_prefill_att_backend": "triton",
+          "--llm_decode_att_backend": null,
+          "--prefill_queue_strategy": "default",
+          "--output_constraint_mode": "xgrammar"
+        },
+        "options": {
+          "sessions": 16,
+          "turns": 10,
+          "split": "validation",
+          "context_scale": 0.05,
+          "wait_scale": 0.1,
+          "max_wait": 5
+        },
+        "python_dependency_manifest_sha256": "94248b6261377c25095a3f2945425a3d2c8f7344a8c28f1b4974383299d99325"
+      }
+    },
+    {
+      "candidate_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "control_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+      "cache_tokens": 32768,
+      "retention_seconds": 30.0,
+      "fraction": 0.5,
+      "case": "trace-c8",
+      "pairs": 3,
+      "independent_seeds": 3,
+      "metrics": {
+        "wall_speedup": {
+          "geomean": 0.9982860541595989,
+          "ci95": [
+            0.9854347127960308,
+            1.0100494051772058
+          ]
+        },
+        "mean_request_speedup": {
+          "geomean": 0.9967266057474753,
+          "ci95": [
+            0.9789504757362771,
+            1.0073596900739186
+          ]
+        },
+        "p95_request_speedup": {
+          "geomean": 1.0585545120997089,
+          "ci95": [
+            0.9622122011705294,
+            1.2216628010021497
+          ]
+        },
+        "cache_hit_gain_pp": {
+          "mean": 0.6275877650510483,
+          "ci95": [
+            0.0,
+            1.4928400158141009
+          ]
+        },
+        "prefill_reduction_percent": {
+          "mean": 3.1770029097887544,
+          "ci95": [
+            0.0,
+            6.106397278111475
+          ]
+        },
+        "mean_ttft_speedup": {
+          "geomean": 0.9972725055707626,
+          "ci95": [
+            0.9922376136583815,
+            1.0017873455056967
+          ]
+        },
+        "p95_ttft_speedup": {
+          "geomean": 1.0614335189093471,
+          "ci95": [
+            0.9582553562832555,
+            1.17450990058601
+          ]
+        },
+        "mean_session_speedup": {
+          "geomean": 0.9987926329865701,
+          "ci95": [
+            0.9944249373497936,
+            1.00155805949639
+          ]
+        }
+      },
+      "workload_sha256": "a22e23b9d29f3ae5ec99c62d43ad5e0a5822f80e8896da94d317fe26ca0c2f22",
+      "model": "Qwen3-4B",
+      "workload": {
+        "harness_sha256": "cb22d2286e897c42fdb75f693b494bc13711e6f7c81d406a0a8b2d2c21a1b577",
+        "cache_isolation": "expire preferences, then independent capacity flood",
+        "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "service_configuration": {
+          "tp": 1,
+          "max_req_tokens": 16384,
+          "batch_tokens": 8192,
+          "max_requests": 32,
+          "disable_cudagraph": false,
+          "log_level": "debug"
+        },
+        "backend_flags": {
+          "--tool_call_parser": "qwen25",
+          "--linear_att_page_block_num": null,
+          "--llm_prefill_att_backend": "triton",
+          "--llm_decode_att_backend": null,
+          "--prefill_queue_strategy": "default",
+          "--output_constraint_mode": "xgrammar"
+        },
+        "options": {
+          "sessions": 8,
+          "turns": 10,
+          "split": "validation",
+          "context_scale": 0.05,
+          "wait_scale": 0.1,
+          "max_wait": 5
+        },
+        "python_dependency_manifest_sha256": "94248b6261377c25095a3f2945425a3d2c8f7344a8c28f1b4974383299d99325"
+      }
+    }
+  ],
+  "scope": "Final-source Qwen3-4B validation only; fixed candidateGPU0/controlGPU1, three seeds, no hardware crossover. Both3s/30s windows shown. Used only for prespecified parameter selection before any final-source heldout trial; not final test evidence. Absolute latencies include identical debug telemetry on both services.",
+  "runtime_dependency_manifests": {
+    "94248b6261377c25095a3f2945425a3d2c8f7344a8c28f1b4974383299d99325": {
+      "apache_tvm_ffi-0.1.11.dist-info/INSTALLER": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508",
+      "apache_tvm_ffi-0.1.11.dist-info/METADATA": "02e62464dd5cf4940b20a295e139959fc09125c4810afead8b48d6bb8d273a1e",
+      "apache_tvm_ffi-0.1.11.dist-info/RECORD": "d5a18af95e83942e4d3ec00031ede5b2e3fde040c17618181c8c785b3d58be5d",
+      "apache_tvm_ffi-0.1.11.dist-info/WHEEL": "373c27aaa389e7904fb53008ecc85ec6b0a6b00964e229bb7ba3eb98d84e42a9",
+      "apache_tvm_ffi-0.1.11.dist-info/entry_points.txt": "218a5e175ae1465820f97c0c040cce78003f4c624f039de7a03d4348e239cc07",
+      "apache_tvm_ffi-0.1.11.dist-info/licenses/LICENSE": "bb354d8b94589ad8817f2dff029d39a1133d217407f73679d0b0311c980e511f",
+      "apache_tvm_ffi-0.1.11.dist-info/licenses/NOTICE": "5181189219b74687e08884d813b8f98c874d0e4ba84eb7afc4bb350d22502c24",
+      "overlay-provenance.json": "af81451a2ac94e3af5075e2e77a1e2ef90918f5cdb6edc4105399f9644a7ba78",
+      "tvm_ffi/.gitignore": "701e69f50d3563f06a6d0bc020cf84b999dc822a89dedfca1c776061966ec42a",
+      "tvm_ffi/3rdparty/dlpack/include/dlpack/dlpack.h": "62052bef24bd69bb7b52e95428f9e99bd7951783850c36c5f2a41e71fd63c2fc",
+      "tvm_ffi/3rdparty/libbacktrace/Isaac.Newton-Opticks.txt": "d4a9ac22462b35e7821a4f2706c211093da678620a8f9997989ee7cf8d507bbd",
+      "tvm_ffi/3rdparty/libbacktrace/LICENSE": "ef8a9b3247488f8901ca60de9b17b745d7bd67e5ec1e622f80d62364572200d8",
+      "tvm_ffi/3rdparty/libbacktrace/Makefile.am": "91b27e99c9c5540bb6646509faaad0eba6103964862baf774565bbfd52eb9178",
+      "tvm_ffi/3rdparty/libbacktrace/Makefile.in": "087627a77f8843f66fa7233eb2de014fceb18c1cd22d4eb6fd689d18a6648c5b",
+      "tvm_ffi/3rdparty/libbacktrace/README.md": "2d8d758b74a0e6deed01dbc3e97fdaa460f046ecc87a1f9e97071bf3ce300984",
+      "tvm_ffi/3rdparty/libbacktrace/aclocal.m4": "4ced8f9f06af1ea63d41bddf2ca7bf7aba3276e3ae96ad9bae0d2801d1e5f6b7",
+      "tvm_ffi/3rdparty/libbacktrace/alloc.c": "40fa7aaa389370da6d8533855198a48b5ce8c457dac708f3fa59f07356b9d765",
+      "tvm_ffi/3rdparty/libbacktrace/allocfail.c": "c98c880a89f17a06931cb2dbb4993bc11411e3c8ddcaadfd44062101952f0b37",
+      "tvm_ffi/3rdparty/libbacktrace/allocfail.sh": "08d334bba15253ab70e823a7a8fc1dcae19f94ef903a970095e1f3612dc71f68",
+      "tvm_ffi/3rdparty/libbacktrace/atomic.c": "8d62c6408ed5f5fa0891b22b3b0eddde52cc6282bdde0aa8ff7a6aab20d92bdb",
+      "tvm_ffi/3rdparty/libbacktrace/backtrace-supported.h.in": "cb17b6860aa68cb66ebe6a5e3378f14e36abb5a14c6bba3171d4b60866be9e47",
+      "tvm_ffi/3rdparty/libbacktrace/backtrace.c": "3e9f9ee28fc150b913bdca1a6e1d7fab83b3b1797c399bc39da006e56f080c2c",
+      "tvm_ffi/3rdparty/libbacktrace/backtrace.h": "d2ac7d5c6910c011f860d04a04a4a6a6fbea2882f23878f1f5f6721831a28acd",
+      "tvm_ffi/3rdparty/libbacktrace/btest.c": "1c2194dabcfa22f8241612926d4adf244966e05db913d9b98f83c73e72de1497",
+      "tvm_ffi/3rdparty/libbacktrace/compile": "2dd0914838c05c6094e2d2348607f5d8fcdce7dafed37d19344adcc4aaca7a5b",
+      "tvm_ffi/3rdparty/libbacktrace/config/enable.m4": "6d99e0306be2f7101dbaa6cb21ccc870e907f98f3d01958597f1f76b44065984",
+      "tvm_ffi/3rdparty/libbacktrace/config/lead-dot.m4": "c1b02810fe08debd1fba018ae1007a3f95c329e6c6c87d636ede51911b61806d",
+      "tvm_ffi/3rdparty/libbacktrace/config/libtool.m4": "9856249a67677bc4555e1035e2b52bdf53f962ac07ce1e978a772c632bc78de6",
+      "tvm_ffi/3rdparty/libbacktrace/config/ltoptions.m4": "214e24410efc76fa5f6f73c949ef6b81bf00ead1bc71862f9ec1578ff6aaedcd",
+      "tvm_ffi/3rdparty/libbacktrace/config/ltsugar.m4": "e8bfa437be7af72bf41b86e7e714bc8b8545046c339f80cfb5e69681bc97f90d",
+      "tvm_ffi/3rdparty/libbacktrace/config/ltversion.m4": "a7f4bcbc1dbb5e825929298678597f4d6f8f58483834264d84d9993645aea7e4",
+      "tvm_ffi/3rdparty/libbacktrace/config/lt~obsolete.m4": "2b6632aa3faa4e11c383560d505a37d001859f4c62b01edf03176c4907876b04",
+      "tvm_ffi/3rdparty/libbacktrace/config/multi.m4": "537b58af1589e7ba46ae953c25a7141a37b404c28188b4afa3ac533058646a8f",
+      "tvm_ffi/3rdparty/libbacktrace/config/override.m4": "f394613eebfe460b80922b98f7a824c1a2501b6bfb401b3634b3dbfd6fdcd124",
+      "tvm_ffi/3rdparty/libbacktrace/config/unwind_ipinfo.m4": "86eb2594d5a422199b374a88bafcb2feff334c37d2ac3de9b35bf923b3ee7256",
+      "tvm_ffi/3rdparty/libbacktrace/config/warnings.m4": "510f48e6f491fdcbf7112d3a1180f675a07d159ed7cd852af838e415bdf89d41",
+      "tvm_ffi/3rdparty/libbacktrace/config.guess": "7d1e3c79b86de601c3a0457855ab854dffd15163f53c91edac54a7be2e9c931b",
+      "tvm_ffi/3rdparty/libbacktrace/config.h.in": "566c3ff2b407b69fa437431ea358c7023af6590dd621265e3e6d870b6ae6700c",
+      "tvm_ffi/3rdparty/libbacktrace/config.sub": "71b8d73e46e0c31b1dc91ba5306f5ef0af009273b3bb283f31d8dad69666fa9e",
+      "tvm_ffi/3rdparty/libbacktrace/configure": "a0b54e6bb2f3a1e8f141c2a4848b742e4f67611dcb0388a86ce242b5e37c7d68",
+      "tvm_ffi/3rdparty/libbacktrace/configure.ac": "9520bb5b398cb599e802a4bc9f9bf3251802537bd44097b906d3df957003e1ac",
+      "tvm_ffi/3rdparty/libbacktrace/dwarf.c": "439170986c4ed3e0ee609011645c2b181e94b88b2d5ae35d4334956994fd2bd7",
+      "tvm_ffi/3rdparty/libbacktrace/edtest.c": "732b0a1e23e41212a468ab5d273e790081beb4d0e458641d9669f88a952a2bd3",
+      "tvm_ffi/3rdparty/libbacktrace/edtest2.c": "0bb1c382faeb9829a352613eb77ef9d3a99676a08ca8cd59f86971e8b9fc27aa",
+      "tvm_ffi/3rdparty/libbacktrace/elf.c": "5acab1e8823335c82e84877f502f887f61eae8b6f63ca74c714992a602213f13",
+      "tvm_ffi/3rdparty/libbacktrace/fileline.c": "639d8d581e93eaf18e1578e3b287b7f945260f001bb3c23eef48b250744b3bef",
+      "tvm_ffi/3rdparty/libbacktrace/filenames.h": "8d2c2d284c3f071a8b418c2ce71e42e48b48caa0c4485b7319a4afe82b236c36",
+      "tvm_ffi/3rdparty/libbacktrace/filetype.awk": "0fbccc188059c4b769d281dc7dbdba43956913317f0aeb64c823c1811278e1f1",
+      "tvm_ffi/3rdparty/libbacktrace/install-debuginfo-for-buildid.sh.in": "c89aa66b6d2067a675cdc680924f10e5c2c611f0e11f9e3b8d87addea79fb045",
+      "tvm_ffi/3rdparty/libbacktrace/install-sh": "d7c113e5484fce8b48f9a34a7a91e385ec279247d415b0b7d749bd56ad8ee8a2",
+      "tvm_ffi/3rdparty/libbacktrace/instrumented_alloc.c": "87cd6395c5161bec253cba42d814b4e5438a91b9bb293a14ece23ba8466f93c3",
+      "tvm_ffi/3rdparty/libbacktrace/internal.h": "0ccc73f08659683269cd5db058f5629a7b62c8bffc45f2fee5919d053aa18d8e",
+      "tvm_ffi/3rdparty/libbacktrace/ltmain.sh": "534395fb3426702fc2f3eec94f031edcb02712a6a1430bd7161eb903d492bc12",
+      "tvm_ffi/3rdparty/libbacktrace/macho.c": "7e5b72ee26d404477c172a2511213074d8ef82f8d01a66c196289ec20fae76c2",
+      "tvm_ffi/3rdparty/libbacktrace/missing": "b1a337b731bbb58846d31ca2f5143c293a455fa41b481e236e89a9016d96b034",
+      "tvm_ffi/3rdparty/libbacktrace/mmap.c": "c6f638ca5629e0aebe63f578f9e3659b8fa22ebb2f0be20bf15f3bc5ef007055",
+      "tvm_ffi/3rdparty/libbacktrace/mmapio.c": "ebfa5fa59c292124510d6555d17f0872709b70c0ee0c6034e50d27aeb216cfe5",
+      "tvm_ffi/3rdparty/libbacktrace/move-if-change": "689762b92d23003926ba729acf98b9a109abf46de0698c09ddfa0d20490d8af5",
+      "tvm_ffi/3rdparty/libbacktrace/mtest.c": "403be04a960c0c861404e7e1602866c028e8e2eae50c1b36b81290da05c85fa2",
+      "tvm_ffi/3rdparty/libbacktrace/nounwind.c": "c188891f00b1fa568698512ee76e199c74ee81a4a6daf592413b10c20d8b6b0f",
+      "tvm_ffi/3rdparty/libbacktrace/pecoff.c": "43bf474a5eebc984641838e38a8e74d7f4f95236cba6f3936c86b7d84147013d",
+      "tvm_ffi/3rdparty/libbacktrace/posix.c": "23d84b2eee48b645defc6e81b3a5b8dda1b1a7fe661f85591d93b21cdc8eb54e",
+      "tvm_ffi/3rdparty/libbacktrace/print.c": "3fb9dfe3a7e5c34026e271f0e95f657726502c895b54e79c78cddbfada926790",
+      "tvm_ffi/3rdparty/libbacktrace/read.c": "6903cbbe0f9f11a1d60fb89c0e8db5ae1bd31d721c857646d1efbe8b29c425dd",
+      "tvm_ffi/3rdparty/libbacktrace/simple.c": "95bca9ca4fea480e131bb3869d950a36a9b41b1fa673b75438f19150cc6bbaeb",
+      "tvm_ffi/3rdparty/libbacktrace/sort.c": "e372764bcf6a906daf82a4090530e42952d687b6aff9beebd51347224d901ce3",
+      "tvm_ffi/3rdparty/libbacktrace/state.c": "e88f2985847c9514a5d61b6dce0d062dc90be57a50a151f9da73cfd601ea8b0b",
+      "tvm_ffi/3rdparty/libbacktrace/stest.c": "b5b8d380237b244610127569a5755c78034f9a911ac22b056ae79f9bd7d4deec",
+      "tvm_ffi/3rdparty/libbacktrace/test-driver": "06dc38fdcd3064975a9025d4372c3cab37505055ef343313934b8e5a705ebc3d",
+      "tvm_ffi/3rdparty/libbacktrace/test_format.c": "7d59dee7a45a5bf28532f0303a3f5bf4e0082d1c9a6286c036fe0a387c8e706c",
+      "tvm_ffi/3rdparty/libbacktrace/testlib.c": "df3819b03cb0773f8298e01d91e453dc5922d6f8a282d08c63d0768bdc253a22",
+      "tvm_ffi/3rdparty/libbacktrace/testlib.h": "e1c7714f3aba0900df66e913b52d617530a08074b413d3f6b0f01b25b957b543",
+      "tvm_ffi/3rdparty/libbacktrace/ttest.c": "df428a9cbfa314b32607a5b9ba02deeca994b7f5523280aaf6f5682edb600025",
+      "tvm_ffi/3rdparty/libbacktrace/unittest.c": "74136e820ef980220af5eef80dd0536ee6f54c1a7a6d678b0dcef3669705268d",
+      "tvm_ffi/3rdparty/libbacktrace/unknown.c": "7b57e16d0d4e64f81b7276d48e00089641f56b10b0793b5447c3d5961ff13724",
+      "tvm_ffi/3rdparty/libbacktrace/xcoff.c": "ff30acc0050487b4af76695e5662794792fb7b9d72e5d0bd41521f0b0c2e673f",
+      "tvm_ffi/3rdparty/libbacktrace/xztest.c": "5301fa31d53c24ba8391104597c3b1eaaa973f86974d184e5e52b732f2a67e29",
+      "tvm_ffi/3rdparty/libbacktrace/zstdtest.c": "415fb8ac60bdccc3f18daadd0e30b4eb112459fdcf012d5a54f26d04ff17e671",
+      "tvm_ffi/3rdparty/libbacktrace/ztest.c": "618a6cc4f9e33d450acb6e108563923e192a6b49916392ff0cca4794aa68f4fc",
+      "tvm_ffi/CMakeLists.txt": "fba140b24d17fce4bc220c8f690b2e78744b270be324ae1835c457c913617abb",
+      "tvm_ffi/__init__.py": "bdb390cbf41acf57ef4a21f27b868dc2f607f0009c302922e67a7da7e118cf15",
+      "tvm_ffi/__pycache__/__init__.cpython-310.pyc": "5e05a868cc4d060a169b7b15d8486add08eadab33ba9b33611638ba81c4dcd64",
+      "tvm_ffi/__pycache__/_convert.cpython-310.pyc": "904d04176e42af3254b0541df9dce3708a1be6903f6ddd1554fe2b59a272f563",
+      "tvm_ffi/__pycache__/_dtype.cpython-310.pyc": "627bd28c31b79488fe3341ffb9444bf58095f5e1fdb7672e84c611269e3e7e4b",
+      "tvm_ffi/__pycache__/_dunder.cpython-310.pyc": "caf04f59ed2a4fd244543fcbd94383f99205e9e1877e765906dded73f5b9eca6",
+      "tvm_ffi/__pycache__/_ffi_api.cpython-310.pyc": "7f4d6babf1e5ac00cd35fdcd0d8495879273637f4dd960fa3678dfbf2fe9360b",
+      "tvm_ffi/__pycache__/_optional_torch_c_dlpack.cpython-310.pyc": "ba09436911f0e199cf1b9e01e26b98a8be449cebefa77daeeb61beff3529a7c7",
+      "tvm_ffi/__pycache__/_tensor.cpython-310.pyc": "ff5cd758b02c5b3614b3898ea5c16b86fa681c7c3569928d629abcaeb7ae3fe0",
+      "tvm_ffi/__pycache__/_version.cpython-310.pyc": "d947274dfbe981f3316c09061cb222828b04f3f0d47f422e9184671af12c679c",
+      "tvm_ffi/__pycache__/access_path.cpython-310.pyc": "9b122367fb136237bfa51b52dc3561d4cc112d806fc508f8fa99d63f4cd7ac38",
+      "tvm_ffi/__pycache__/config.cpython-310.pyc": "b831d52cb1932cc9b735c23f7a61216fe7a8a98bd1bdfdd65da4b59a328569b1",
+      "tvm_ffi/__pycache__/container.cpython-310.pyc": "e75ee28147e4b5eaddd0459879c920581a6a64612115d542cad9a41ee6f853d8",
+      "tvm_ffi/__pycache__/error.cpython-310.pyc": "6ab8283d24c394f8d258ccaebae98c1460e59915499d0b29dd343de9f1810562",
+      "tvm_ffi/__pycache__/libinfo.cpython-310.pyc": "17d7d65622db6fe368b10b8d38b28854c993e8491242861cf1dc2ed588e0ec16",
+      "tvm_ffi/__pycache__/module.cpython-310.pyc": "96ccc08aeda54af79c1d66855c48214553b594a85716efeb13e67274272ad67e",
+      "tvm_ffi/__pycache__/registry.cpython-310.pyc": "801f974cd41adc1bd378a23c3976aecc1e743faeec9f2c489fbaa6bfcdcce89a",
+      "tvm_ffi/__pycache__/serialization.cpython-310.pyc": "78ff9e5e9e2ec3ec1def826565eac1026ea2193115007faed3bb64df39aa32d8",
+      "tvm_ffi/__pycache__/stream.cpython-310.pyc": "d34a83a117408a3419ef09234c22eaf0935daa827a957426660b6facab04e1a7",
+      "tvm_ffi/__pycache__/structural.cpython-310.pyc": "30d602148980b944f77db985b9a30c16c45c0e38215b7fb4ecd58376e98af3ad",
+      "tvm_ffi/_convert.py": "df6d4dcaf7ff26a942a6af6df9f59e9f9f5e992d9bde719e4c401ba996905664",
+      "tvm_ffi/_dtype.py": "3699a928496b66769f8026220f2d55c2158df6763cb852e442db580628cfe897",
+      "tvm_ffi/_dunder.py": "08497766e3619d32b0395368878ddea1c4503b64018ee2b1ccf177a49195ae38",
+      "tvm_ffi/_ffi_api.py": "5265b89839c4090d371a6db0feb99a69ddedaa52dea3b5f8c7b1735128c5a6b5",
+      "tvm_ffi/_optional_torch_c_dlpack.py": "71fa7ff562ab5cb6a714200f31b5caa3d0a1c9cf949fd21c6a2a830580c60a18",
+      "tvm_ffi/_tensor.py": "e42f060374251466017761a1d41cca24d6532290044ad12a4649cfa4bc5308ad",
+      "tvm_ffi/_version.py": "f6f20c754951af74675499f673620e950169dda7325b193f5ef14952e8435f87",
+      "tvm_ffi/access_path.py": "86f4938374ab51b00c9f69bbdd431093ad16300f5bfefb335c1d8720ee96d611",
+      "tvm_ffi/config.py": "76f2900952097f30214a3d8e8439c5ca2646f8b8b6215bc6b9ee20a26340cad6",
+      "tvm_ffi/container.py": "56370a4226227da71f3ed108c8d310b654d5447ccc4c544342370bc075c2084c",
+      "tvm_ffi/core.cpython-310-x86_64-linux-gnu.so": "f5f7d217466635371b5ce598200de70aa573ea8d7d2d4cc59c68c9324c68d79e",
+      "tvm_ffi/core.pyi": "7030c42d448ca31327d8d53a1cea4cda30d52c294933b1e5cb0f28fa32dfc194",
+      "tvm_ffi/cpp/__init__.py": "e39c99d377c0909378be4b97bf92891cd3c6befaf967d0d8248639daed55c9a3",
+      "tvm_ffi/cpp/__pycache__/__init__.cpython-310.pyc": "0811e75cd7e662b8d29912d6269ccbdd756606b6d0b25544efd475962f00d41d",
+      "tvm_ffi/cpp/__pycache__/dtype.cpython-310.pyc": "42e60c7e6888f73117ebd78cbd5f47328be158cf88d2d787fa2fba74655a3a0b",
+      "tvm_ffi/cpp/__pycache__/extension.cpython-310.pyc": "afc8c10dc6d86536d4c0ae8733a71746097da3c5be00713e7bd3f156c288df64",
+      "tvm_ffi/cpp/__pycache__/nvrtc.cpython-310.pyc": "085fb5fb37346be53694f3236b39524aaa53f11763ba7046b0c92ef7426a0232",
+      "tvm_ffi/cpp/dtype.py": "4255813d47609e08b3e0a49415b8cf8cd1ef6c703b6b96a64e1efbabc1959855",
+      "tvm_ffi/cpp/extension.py": "6b0704dc0309f1e7fcd33af3a6bf39b32a2ff9de0c73cacfe7326fa9786d28e8",
+      "tvm_ffi/cpp/nvrtc.py": "a032b7cbf13fae4da5a2e23ed021081903ff8c3f3fb4dab9ac17ba6d364fb439",
+      "tvm_ffi/cython/base.pxi": "913eecda947e22fa1b5184de63d264dbea6df4b8b7ae85829c3fbe389f2eab41",
+      "tvm_ffi/cython/core.pyx": "129959e5528b41806cccc5c90396eea53491823acfe809f0819f33eea91f4d5b",
+      "tvm_ffi/cython/device.pxi": "cfa9afc79a9657c68095c92566cd2c0c46e934b8eef096b8724400550646f9bf",
+      "tvm_ffi/cython/dtype.pxi": "c354a1af5b7c2e73fe63f61c05f89d245e3ef050b00a3231bb563f7ffd7354ea",
+      "tvm_ffi/cython/error.pxi": "7c90d4c5ecea0b13b30444687b798323cfb32a70dc34f802356b1919d9cb3395",
+      "tvm_ffi/cython/function.pxi": "40fba9880817d3b013e8978146491110434bd8b36d3a702ff4a93a230ff1c021",
+      "tvm_ffi/cython/object.pxi": "32adf585a12d6091da133edcb4d7fcfe6f66b7cc66ec1168612652797d137a8e",
+      "tvm_ffi/cython/pycallback.pxi": "925ea3a5cd2c34f4c8db49b95b742047e1e6a74cf68c6549cb9d18b74432f841",
+      "tvm_ffi/cython/pyclass_type_converter.pxi": "e502f0456fa057242b9644ac92220d1a1d401b25e3c08928f310dcea9e83e62a",
+      "tvm_ffi/cython/string.pxi": "bc4fafc50a936d0d33ad9382a7d38ab1aab7ce043053b9e7e36423605fc53977",
+      "tvm_ffi/cython/tensor.pxi": "2cce70b984ef29eabe07f911066c41263177590562cfe7b201455a18682a84ad",
+      "tvm_ffi/cython/tvm_ffi_python_helpers.h": "a11be0560a2cc4b75845ab63fc7cb67f0dd890b8d89c32b58d7efb408172089f",
+      "tvm_ffi/cython/type_info.pxi": "d758b490d7b2644e70d4020d9808d3fccb7aa6d188bcd22370b659b36de0ef96",
+      "tvm_ffi/dataclasses/__init__.py": "ab839482aa072e7df2a2d74cb78cb284a42ed05d6674b68236c0429786e9702b",
+      "tvm_ffi/dataclasses/__pycache__/__init__.cpython-310.pyc": "bf50d60d07a906dde94464e18aabe3b0e3210f780fe3a78eb78d4c5a67ece39d",
+      "tvm_ffi/dataclasses/__pycache__/c_class.cpython-310.pyc": "4e21bccdde273e36b99c01f528b8471a91e7ce98c81e3c9949cb450bdbd2ae18",
+      "tvm_ffi/dataclasses/__pycache__/common.cpython-310.pyc": "3f88666117c3d234d068e2b08869c153198e2ca6b5ea3065eaf177e915c46f71",
+      "tvm_ffi/dataclasses/__pycache__/enum.cpython-310.pyc": "2982f1a5df09cf830c187484664b5a4ed85bed53d8268ac6f6ae776b1d71bcde",
+      "tvm_ffi/dataclasses/__pycache__/field.cpython-310.pyc": "a93e36fb7210817ae40a74295c18a4e7ec5563ec00fae5f79428a740a1e6572d",
+      "tvm_ffi/dataclasses/__pycache__/py_class.cpython-310.pyc": "c32390902894000da7ccc447abe48b19367f0e5d58e90c99d0798d84a51e730c",
+      "tvm_ffi/dataclasses/c_class.py": "94ddf6689e11fb0f63caf138aa87f3b3c3faea2e8589cbde18719f15d54fd48f",
+      "tvm_ffi/dataclasses/common.py": "c1971f3798e5081cb18dd123197b379eaf8cc6063ee88197aa1bcf7dc37317b4",
+      "tvm_ffi/dataclasses/enum.py": "2234e54a7b1766ab8cab9b5495b740c3b483e825eb92db48a163d557dfb3c651",
+      "tvm_ffi/dataclasses/field.py": "486102a2e4fffe416b29d06743cc27a72ec848140e7a24cfc69a4233f0ff4201",
+      "tvm_ffi/dataclasses/py_class.py": "4775eecc4e2e7e5a54ab23034031bc6a9dade3b9c3329971f97188a83fb9169e",
+      "tvm_ffi/error.py": "9bd62269a21c063e408c2f3014e54fd0402fd2e9709624116c5b695c73d4089a",
+      "tvm_ffi/include/dlpack/dlpack.h": "62052bef24bd69bb7b52e95428f9e99bd7951783850c36c5f2a41e71fd63c2fc",
+      "tvm_ffi/include/tvm/ffi/any.h": "2b2bd80d47e07c6c849e7e93c959d126d716f45a3b93178be609f34527709123",
+      "tvm_ffi/include/tvm/ffi/base_details.h": "fe1db814c948105e825fdbb07b8d738b7890798a2b8a5ca6b63ff2eb3a09400f",
+      "tvm_ffi/include/tvm/ffi/c_api.h": "9c4010e4d6a321fb6749d3f8c5fba0d5b40ab504b3227b418d16aaadad47a6ca",
+      "tvm_ffi/include/tvm/ffi/cast.h": "c0fdf758c768501a44b3b15a1538a5d1a976bad73d619d8802662df7d5d912e6",
+      "tvm_ffi/include/tvm/ffi/container/array.h": "d5f63f6a7100fe680cc19011dda172fda22da567ce3b758da9a1457f11c6940d",
+      "tvm_ffi/include/tvm/ffi/container/container_details.h": "1e8023107b3f0ae38f9f022df7cc09901e65e0b5270fe61b2350d455670032f5",
+      "tvm_ffi/include/tvm/ffi/container/dict.h": "05f850d542364050dcfee760f26aadd947c37575a09a426f2984488bf0979ab8",
+      "tvm_ffi/include/tvm/ffi/container/list.h": "36e9170766c67cee0bfb23046553878d8da24eeedb5e87dfeced6484feec69ce",
+      "tvm_ffi/include/tvm/ffi/container/map.h": "f019ec72b80bc6bce7ab47c588ddf5ba620ef70d242576c90b5c6f2b8ae5e0b9",
+      "tvm_ffi/include/tvm/ffi/container/map_base.h": "63d70b6a7c33795c2060aee6487a4a1ccb3a573ded4858bd3c11e8de79c2f37d",
+      "tvm_ffi/include/tvm/ffi/container/seq_base.h": "a21dab0e87b93bcb45e6a7c93373ca95aff9a87fa8470720b39c65401b6cb44f",
+      "tvm_ffi/include/tvm/ffi/container/shape.h": "fffc4d3f6f8150ff1208efbebeb5b866b004b442adcecdcee844bc04e7b36718",
+      "tvm_ffi/include/tvm/ffi/container/tensor.h": "ecd08135109c2391c7247e3ab1744b97985c9ab287c148d810639f59b7276f0a",
+      "tvm_ffi/include/tvm/ffi/container/tuple.h": "1fe70b47a69904e86b153620b1f5c6f695d957c94c92fe815daa4ded4704f336",
+      "tvm_ffi/include/tvm/ffi/container/variant.h": "d1337b33966ec490f226ddc3a99aaa16266df11dbe10d2cd1a2ca45d1d0965f0",
+      "tvm_ffi/include/tvm/ffi/dtype.h": "9ab33b0bc7b8d13f13d62c244337a930b31996433d77d0da6a1548dd7c6702e7",
+      "tvm_ffi/include/tvm/ffi/endian.h": "1d20ae0a24a6dd558e0b8877631aeb8ad2f4eda31860a8a3ddeccbe63abcb115",
+      "tvm_ffi/include/tvm/ffi/enum.h": "ebcb4f9baa34b77245cd9f6db64a9c5d4fd02b2c308101a46ea982af403bc14b",
+      "tvm_ffi/include/tvm/ffi/error.h": "37c5b6747b0f8f4b4fb3db48410492236ebaa00edabd9a0fcabb9b3b3ded2f5b",
+      "tvm_ffi/include/tvm/ffi/expected.h": "70614e2cffa8d61f42cff5d4b19c5523255835d82e718aada7d68cc0f281576f",
+      "tvm_ffi/include/tvm/ffi/extra/base.h": "621cb527eb301cafbab0a674caf78ddd9b6e106658b5f572f694d48bbfd4f40f",
+      "tvm_ffi/include/tvm/ffi/extra/base64.h": "16fe03281d8dc109f275383ae2adf63368e9001874098848550e12b5ee742207",
+      "tvm_ffi/include/tvm/ffi/extra/c_env_api.h": "afca6fcd61cc385772c7bd0aef1d75b41195e40ed50075be9f7166dbeed6b0c9",
+      "tvm_ffi/include/tvm/ffi/extra/cuda/base.h": "36267b0c8d604e944500c1fba163d398736bb389c1415bae9b6849957619115d",
+      "tvm_ffi/include/tvm/ffi/extra/cuda/cubin_launcher.h": "3eb6641d665ee9f2de4f6626970f3820724cf9f29548aa872c45ce08b0823383",
+      "tvm_ffi/include/tvm/ffi/extra/cuda/device_guard.h": "97376eb35a262a3f87c40663b1900ea712e6864d51af8e0d5d672af2371e59da",
+      "tvm_ffi/include/tvm/ffi/extra/cuda/internal/unified_api.h": "113c519059f02027585e9c289ac3919a126d096238b6018b55a1740cb025778a",
+      "tvm_ffi/include/tvm/ffi/extra/dataclass.h": "743fe32ac48ae2d177add6d7ec07886599010e592433dc3f4ed12a65649baf9b",
+      "tvm_ffi/include/tvm/ffi/extra/dtype.h": "0ba5202d60ed98822b06402189bba6585d99b3a13cb1b33e1f2ba12baf532bcf",
+      "tvm_ffi/include/tvm/ffi/extra/json.h": "6a6e89fb0e70adeaf2cdf0c39cae56782ff3d44ec2805703c6cb3f8c00da2987",
+      "tvm_ffi/include/tvm/ffi/extra/module.h": "6080d50021397ac3e01b8f12616039bb4684930bf4602958479f4bfab255c794",
+      "tvm_ffi/include/tvm/ffi/extra/serialization.h": "8afcdd33a3d37819b0c46c8875b3527569d491a040fc5e918aad7c9ec4630065",
+      "tvm_ffi/include/tvm/ffi/extra/stl.h": "5e7ff0671b1402a0272d23fdd722341a2c09e81e299119902e1bb4bd0a730f22",
+      "tvm_ffi/include/tvm/ffi/extra/structural_equal.h": "fc5300a8936a61d03b097e5805d83e3d059a6cc102061b85ab8458155639c8aa",
+      "tvm_ffi/include/tvm/ffi/extra/structural_hash.h": "414c1e41f78964d98d8e3e0d1df9c76ea52887fc616707cf1b0a385b325c62e0",
+      "tvm_ffi/include/tvm/ffi/extra/structural_key.h": "608e336dd248e67c830e893b5c67a395fb59aa9d774ade4e3ec4462a319c62fb",
+      "tvm_ffi/include/tvm/ffi/function.h": "42dd75a992d4fc9b5216709a5e115c6af91270843a7ab63cc3e9b6ba3d5a1236",
+      "tvm_ffi/include/tvm/ffi/function_details.h": "fb7f741036bb278bbad760b9e81340d2e9ffef32387ac716dc021f9e4aba694f",
+      "tvm_ffi/include/tvm/ffi/memory.h": "1f5c24dd5c740645606bb4bc39f066b44b5a9d244334399d9fb37006c460d9d4",
+      "tvm_ffi/include/tvm/ffi/object.h": "b1c98cf2f0e9e4c1b347b1aea09013f48f6dd75f26459290d382b647d17f8d34",
+      "tvm_ffi/include/tvm/ffi/optional.h": "b5f9abccb7d7ddecea36fa850457296b7cb5002cd0b9002450c2e24934cf9987",
+      "tvm_ffi/include/tvm/ffi/reflection/access_path.h": "c77d73a6adcfecbb6062d285f726b748f506e0504958942390e86bbb37496d9e",
+      "tvm_ffi/include/tvm/ffi/reflection/accessor.h": "cbb755daab82858d92838f45647023b3ecb51ceb8658e6f50beb6df1ffe83680",
+      "tvm_ffi/include/tvm/ffi/reflection/creator.h": "dc09a28f145db611f7a12009b281f4895bc964bf0a4d288c802fabcbbd0ea0c9",
+      "tvm_ffi/include/tvm/ffi/reflection/enum_def.h": "69760cb1ce0160afa90f400405ee91bc9cd66ff81399cb2d2e0b7f109081dd69",
+      "tvm_ffi/include/tvm/ffi/reflection/overload.h": "64a45a8095dbca887f545c075155613f92ccb28885910b65081d48998eb9c989",
+      "tvm_ffi/include/tvm/ffi/reflection/registry.h": "a65fe906e8bdd43480ba25738ea16e9ed2c1bf874230275dbf21356222b969e5",
+      "tvm_ffi/include/tvm/ffi/rvalue_ref.h": "1a9d6b976a546a14cb2dc7536b0395b5090288d31240d9ed968c4be558f95dec",
+      "tvm_ffi/include/tvm/ffi/string.h": "1661c3d6fe73891a80aed865bbbf85e90278ea037e029ba117560259d142fbab",
+      "tvm_ffi/include/tvm/ffi/tvm_ffi.h": "2144de704b0a3470c93ef652052a4b16bebca4429b082604278de822cf5acadb",
+      "tvm_ffi/include/tvm/ffi/type_traits.h": "bd6a81abed03b66ca326769b048360a09f6d564347056a96c98e3cade1954ee3",
+      "tvm_ffi/include/tvm_ffi_python_helpers.h": "a11be0560a2cc4b75845ab63fc7cb67f0dd890b8d89c32b58d7efb408172089f",
+      "tvm_ffi/lib/libtvm_ffi.so": "8cb7bdda84545ad7eb5294198bb02fe16930e47e4c3c6de67ab87cad19f6bb7e",
+      "tvm_ffi/lib/libtvm_ffi_testing.so": "83fac978636c8def292c45753a71f2d2225f993d593bfa408905844c6083f8ea",
+      "tvm_ffi/libinfo.py": "0e8056920a353044fb226ef316629f27241be7c11131bafbc30cb5d9a78e1f22",
+      "tvm_ffi/module.py": "19650f41717c6957754f1cf1418a54935e7ae53024da744ff3e91e6babca3d71",
+      "tvm_ffi/py.typed": "ec6daa1aed7c7f716b69bf2b8365b891325e474b52524511fe7aa11fc585853a",
+      "tvm_ffi/registry.py": "9601233667c7eba406b01f31419ea8be8275ff042b6b85046b771d07a27b5481",
+      "tvm_ffi/serialization.py": "6263ff08dec66fa975eb3eba77b1777e28e8a10c25c2f01b9e6c1e31d99f4f56",
+      "tvm_ffi/share/cmake/tvm_ffi/Utils/AddGoogleTest.cmake": "d0a1bd8e93577c3b90b79a1415beb0ac7a3b2c89917746b324a5bcaac2306f9c",
+      "tvm_ffi/share/cmake/tvm_ffi/Utils/AddLibbacktrace.cmake": "1cbd3f9443abb3ea55a621c7460bfbe6612a40623ce5d56de1476d75263368ed",
+      "tvm_ffi/share/cmake/tvm_ffi/Utils/CxxWarning.cmake": "ca46dc223a244809b734d24fe11f18454dd3ebdfe66790837cfcd2a1b6a4c52f",
+      "tvm_ffi/share/cmake/tvm_ffi/Utils/DetectTargetTriple.cmake": "0b0c657f32094aa49c978f6bb23f6af08df1a44878870995ca7ac8bc640033c7",
+      "tvm_ffi/share/cmake/tvm_ffi/Utils/EmbedCubin.cmake": "f9db1f2045825dce91b5a92a16def73ff5d138b138a6b48d361f331290088039",
+      "tvm_ffi/share/cmake/tvm_ffi/Utils/Library.cmake": "77602e17b73b07be51c888b953f7802c44b0e709db892801960d4b6793b4d4e6",
+      "tvm_ffi/share/cmake/tvm_ffi/Utils/ObjectCopyUtil.cmake": "328df3f0433adefceeba5b692d9284af4f0f961f93b89fa82b9b610b09c47158",
+      "tvm_ffi/share/cmake/tvm_ffi/Utils/Sanitizer.cmake": "1943646236a8dfb643962e0974ff86c53c882761f6bf48311219eadafd816dc1",
+      "tvm_ffi/share/cmake/tvm_ffi/tvm_ffi-config.cmake": "b62f1fae03d01390d2b211936f25a24c65e2584de6ac1fd4f440443933eafc9d",
+      "tvm_ffi/src/ffi/backtrace.cc": "d709791d5fe69c7d2ad635494b3c38cb01aa6a2a7e275903e03080684387e4cc",
+      "tvm_ffi/src/ffi/backtrace_utils.h": "fadb86aa26b502570fef96231b30082e5f42f95a294e6ce76fbc5d7f71bae320",
+      "tvm_ffi/src/ffi/backtrace_win.cc": "313d0fee90b393adf7061896d955bc78a3d3a5f52b52df921d9930199a1cd840",
+      "tvm_ffi/src/ffi/container.cc": "9e823c0511d88ed722e6e029f03c3948c1103d8ff1fa6a3f054da50e56d9b0e2",
+      "tvm_ffi/src/ffi/dtype.cc": "2f556d08507c1f2ca463e979970603855554d3f6a166aed35d716cc5b6455670",
+      "tvm_ffi/src/ffi/error.cc": "dd31eda1e7596687e4661de09d63db8a6cb04d4f4b7e9005e7e7ff895c94bd24",
+      "tvm_ffi/src/ffi/extra/buffer_stream.h": "011e4a1a809d063f740ffc296a04db32f304a242efff8ddd199204d22a9a94a5",
+      "tvm_ffi/src/ffi/extra/dataclass.cc": "c4aa202f89727834412e5e8d49771a94c7cfef02cf87a631a430f712a8e2dd73",
+      "tvm_ffi/src/ffi/extra/env_c_api.cc": "5e9322023efca42e75c80466146f331b4c899b27a4b73b56b7109069752eafd2",
+      "tvm_ffi/src/ffi/extra/env_context.cc": "941edd8415cca875c010f456f1f06f2f336b8978c64531f4953c1c4d848d490c",
+      "tvm_ffi/src/ffi/extra/json_parser.cc": "3f8e8bce2d5f906c681a38216da7f7fbfc0969f565034e4f13c6449d188e8284",
+      "tvm_ffi/src/ffi/extra/json_writer.cc": "7eb84f2e5f284018e16bb1f948441c0e688b6c504a83c17c36a5d02b58c3afae",
+      "tvm_ffi/src/ffi/extra/library_module.cc": "4974db098b6ddb87d93934f46d1237e29ecb20a20e8303315ec1c472632a7865",
+      "tvm_ffi/src/ffi/extra/library_module_dynamic_lib.cc": "34c51130a3d1c76356b1a5bcf9e89ba57566a04a477ad27f2abffec141d1f01f",
+      "tvm_ffi/src/ffi/extra/library_module_system_lib.cc": "e6e811fd83f7da5a28015594572e36df807ffb82b3fd5b7b98aba02d937f88fd",
+      "tvm_ffi/src/ffi/extra/module.cc": "591955ecbfd59dd6d133e92bc9b3340dff6d78a11394e1f8a1ae57e32d1bdf4e",
+      "tvm_ffi/src/ffi/extra/module_internal.h": "7273bcaa800ff5a20f2529c63db61bca16a2e8cfee93d5de495e1a6e3f412ff0",
+      "tvm_ffi/src/ffi/extra/reflection_extra.cc": "29a272ec7c187453baf90e7edefc1cf2b6af3d42d048e135dd9b53da8ebb2ce3",
+      "tvm_ffi/src/ffi/extra/serialization.cc": "9e5008b0a2f1d707cc073272ca8cee6134b9e8081b6feb04a70940898f446dc8",
+      "tvm_ffi/src/ffi/extra/structural_equal.cc": "665b051997d697c268b98ad17b191508bedb4fa261419f82e1f291ed0cf44361",
+      "tvm_ffi/src/ffi/extra/structural_hash.cc": "288bf4dd30031a5268b20c15d3c0d2f09a8243287478399342cbdbe43f175833",
+      "tvm_ffi/src/ffi/function.cc": "d8b2862e2e695454f2db5ead2332bb14e962ce59438551558f38c7462d044c0e",
+      "tvm_ffi/src/ffi/init_once.cc": "2d972c3afd16d8e0958d8f4b292224cd2bcd2d334a847a0b4a91208774026f8b",
+      "tvm_ffi/src/ffi/object.cc": "e000ec76566ed51d54c1c571653afbb9cabcc126c626895752bb20cfe2e25254",
+      "tvm_ffi/src/ffi/object_internal.h": "ebd8fe11552127235400be87ce52da837f0dc101191fa99cdd3de751b68fcb22",
+      "tvm_ffi/src/ffi/tensor.cc": "58c40f36ec981d9d7f58ccb53fe92b25c169b860bcc85eb19f2a99f1ea7f1b59",
+      "tvm_ffi/src/ffi/testing/testing.cc": "0ff9787387ac684ae327f1d4031e3b1491596f03cb3156824b6b5bdb47acf277",
+      "tvm_ffi/stream.py": "586413f5558bd8682f31280743cf7fe6581a17b7e2eb270e19ffcceba12c2f0c",
+      "tvm_ffi/structural.py": "3d719d7ffcaf49c22e63e43eea4566cbb5cc478ce7a8789b850cf4aa08785f08",
+      "tvm_ffi/stub/__init__.py": "76189338252f4e3fcb40d34da59126d1879e248d0e4e12ced4999d8067395e3c",
+      "tvm_ffi/stub/__pycache__/__init__.cpython-310.pyc": "4f6bb334cfe27254ddcd454405ea34864ed3aabca1dd25bb0cea82d0b018791c",
+      "tvm_ffi/stub/__pycache__/cli.cpython-310.pyc": "629db74a65b16514fdafc9e06c00e10000aeddc8b061806795d4f790314fadca",
+      "tvm_ffi/stub/__pycache__/codegen.cpython-310.pyc": "400694ea39eef266843f250aaceb4d9623400a2663c3943238aae2ae925f7724",
+      "tvm_ffi/stub/__pycache__/consts.cpython-310.pyc": "0fd1ce2a0e199892252cdb6e23fb183a8f149f624b989093978b033f1e37cc3d",
+      "tvm_ffi/stub/__pycache__/file_utils.cpython-310.pyc": "b90b3b74ef8ae279810c1478f1b2c8aa78e90631305f192d5040fca6ab4e0f46",
+      "tvm_ffi/stub/__pycache__/lib_state.cpython-310.pyc": "eb8c443a048c2468d54f9a95d22503c2aacddb72f7f96c8e5e48a45c260e9965",
+      "tvm_ffi/stub/__pycache__/utils.cpython-310.pyc": "16d4b754f445399627f9e977a0a406777aab6f64540e7c3e6093704164beeeba",
+      "tvm_ffi/stub/cli.py": "4d124bec5ad81248cc81eba415ff69c752b1fca20dd16bd63a9905ca45e5c1ac",
+      "tvm_ffi/stub/codegen.py": "ba5efeab3d0c4f0eaa496ea4fa7d848faa0fc160280ac42d3948b0a4c70f004a",
+      "tvm_ffi/stub/consts.py": "7b87ba73733bb8412a071bfdab77165ceee173031067af1597deafdaf43a26fe",
+      "tvm_ffi/stub/file_utils.py": "7a9d5ce60ca38fb0cb27ce0dc7b652f8ddeaa1813e7249c2c33b70ab6ebb7a19",
+      "tvm_ffi/stub/lib_state.py": "2f3357b02d5f8403a5cc6ab0c9475acd0e8ecd3474873970cd65b0747da4ad7d",
+      "tvm_ffi/stub/utils.py": "fdb64ed0839e38ff997f033bd53b5bff3713e26935d20878d523ae3a0da43a4b",
+      "tvm_ffi/testing/__init__.py": "2d0d63723b3d6937aad35d9b726e4fa72f63a59320eef6d44599e3bf7cbccfaf",
+      "tvm_ffi/testing/__pycache__/__init__.cpython-310.pyc": "3f251954f567b817e31cd0bb95ec92451b8aeaba7a8be95e138f79fc23d4a465",
+      "tvm_ffi/testing/__pycache__/_ffi_api.cpython-310.pyc": "9084ca22239d165bed8dff085f3324727aa618603c7b5aef977ab4435c0e4bf5",
+      "tvm_ffi/testing/__pycache__/testing.cpython-310.pyc": "2e920db9b8049540070fef156666b12c691cf6675b9d4178ab33fe89584405cc",
+      "tvm_ffi/testing/_ffi_api.py": "f798abc015fe24401067c0c0eec75d1922404f382cebe071d39cddefecdb6c9b",
+      "tvm_ffi/testing/testing.py": "3da8ee81f7e9a82175d96ca1cae7b24347510d8be1c04775a857383919446444",
+      "tvm_ffi/utils/__init__.py": "7f36dc8f2e9773c566c83a56301a829460846d907486194f04e3e91fe09e08d2",
+      "tvm_ffi/utils/__pycache__/__init__.cpython-310.pyc": "b4ba9fbbbb1f4f778b1776e35048749c0246e0c5cc06142ee111ba6f98a856aa",
+      "tvm_ffi/utils/__pycache__/_build_optional_torch_c_dlpack.cpython-310.pyc": "a61d1003976554a12b3978b0e8d5d463327f87951e3f5828a570de1f1f57af59",
+      "tvm_ffi/utils/__pycache__/embed_cubin.cpython-310.pyc": "ef4a828fe4b43b8f532ac3a83de2007f0833ac10dc3644b047726bfb9627ae85",
+      "tvm_ffi/utils/__pycache__/kwargs_wrapper.cpython-310.pyc": "e95f80fa7d7d0dc03dcd0782825eb565ccae8847e1aeef6941519b0da123721f",
+      "tvm_ffi/utils/__pycache__/lockfile.cpython-310.pyc": "486c133bfcb20fead4a66f650a01165afe091ff59006859cdeeaeb578433ec1c",
+      "tvm_ffi/utils/__pycache__/unpack_dataclass.cpython-310.pyc": "907b0f7fddf320daafcf53a8800fe71a4261caaf29cc27721122cb9f80db188a",
+      "tvm_ffi/utils/_build_optional_torch_c_dlpack.py": "00642488be9a3bdc9560f14fa5d5b73172e096e89b09ffc35a7f18225feae9ce",
+      "tvm_ffi/utils/embed_cubin.py": "7957512acf353376f3ea12e7478784febe8368cfd30cbc0b231f5994adc2da1b",
+      "tvm_ffi/utils/kwargs_wrapper.py": "0b58430fa55618e413037e7996889ce8cb4bbcb12bfaa4e0d14e5bfff0a102a0",
+      "tvm_ffi/utils/lockfile.py": "5e5b941036979eb44566e64e351e7fddadd27360a9efe56c52493313be15f100",
+      "tvm_ffi/utils/unpack_dataclass.py": "f38f2b85c25d06452c97993c480bc64afc16993155bea5d4a4502edf2e543439",
+      "xgrammar/__init__.py": "f9bbc4855891b442a676d6dcaa4e7923f7126fe40ad0e0290bcdbd3767dc162b",
+      "xgrammar/__pycache__/__init__.cpython-310.pyc": "e9d1cd322a59f41c53c234f8c9ce0a38e5eaa9d0a64e7f62aa83fe02247c02e7",
+      "xgrammar/__pycache__/_version.cpython-310.pyc": "66a73a36928198979c58ff2044a76ddc3862ba0fed54b428157089c7f1ce11c6",
+      "xgrammar/__pycache__/base.cpython-310.pyc": "f267f24ee105a3fe9a85dc9b6f999dde97933043ac48ca1416e7855a6ea63a60",
+      "xgrammar/__pycache__/builtin_structural_tag.cpython-310.pyc": "9699e1a187f7f9c670eac3d82fcb111d869586d57c08a55ce71b89caa3d5c96e",
+      "xgrammar/__pycache__/compiler.cpython-310.pyc": "20e23a614540eda4242e78f99426ed889c97fed5922df10c9b84007b9cc781ca",
+      "xgrammar/__pycache__/config.cpython-310.pyc": "0858dc582a5d7cbf032e83f4db5a6ec23660bc5e84d446e767ada36ceb6ebbb2",
+      "xgrammar/__pycache__/exception.cpython-310.pyc": "fe090a24f87b7dbeb3baaff4660fefb2de8753a82b9e7fc0cba5e3b6515a8af8",
+      "xgrammar/__pycache__/grammar.cpython-310.pyc": "68f6ffb50b0369fd24cbdafa22fca10fe0dda2d63932f2fcb1abe3af7b375b68",
+      "xgrammar/__pycache__/load_binding.cpython-310.pyc": "bab3545c1d3afee863cb1503889cf4c47bb80b058dbb0e8b5b7f3765fb82c76d",
+      "xgrammar/__pycache__/matcher.cpython-310.pyc": "d1f353b2e0399818bc45f0e9e827ffa58b7c4a131bd37893fd6eacdecd01a07c",
+      "xgrammar/__pycache__/openai_tool_call_schema.cpython-310.pyc": "1d79866bb8c8dc6481814c09c02c6384f84f861202deeef05889b432c4417d86",
+      "xgrammar/__pycache__/structural_tag.cpython-310.pyc": "99e981c0d0dadc7918fbbf2c542202c82b78950bc85401355047e0c37206b1ed",
+      "xgrammar/__pycache__/testing.cpython-310.pyc": "acf4b7254531b24b54bf033081b39fde77901a9b90602d5b4d2bb8b92d8f0858",
+      "xgrammar/__pycache__/tokenizer_info.cpython-310.pyc": "7f1bf9bdb07dba7303b1a61c22e4f2bc9a5ba258269f7e3ba5d2e05d7e2edcb7",
+      "xgrammar/_version.py": "44a6a6bcfd3cff0d5041ca4516815f9a0cc86111d903cfd01e21d2031c746c90",
+      "xgrammar/base.py": "91deece4e88c68292cee2c5c932b677a6c874f96054715ee1fc33109a60dee79",
+      "xgrammar/builtin_structural_tag.py": "e98b5f7595431dfd489c2a150047b31637bae48c52ca2e17a0cbc509e8918a1b",
+      "xgrammar/compiler.py": "aaaf3e52c5c0efaa0ea60918451f3c4f16429a8d3560342f8c7ec709a0a5d797",
+      "xgrammar/config.py": "e51fdb2401a9887cd3c1152f3cbea536e911d349879fbe21d101844b53e131ba",
+      "xgrammar/contrib/__init__.py": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "xgrammar/contrib/__pycache__/__init__.cpython-310.pyc": "a61289fe2ce6a59126e3da90470087a4c3567b88b7d832ca2f7b77e790f5c10a",
+      "xgrammar/contrib/__pycache__/hf.cpython-310.pyc": "b891e92eaf4ca392f0b071fe6b850e0186bc1a18f80c4e569eea5141d892b23a",
+      "xgrammar/contrib/__pycache__/mlxlm.cpython-310.pyc": "0d9ccb60c32feead62adf666fcb71bacebd0f57c688402394b5f4528e36f7bb8",
+      "xgrammar/contrib/hf.py": "f81e92e9ce8465c7e4f4c8ab5785c0b660380177c0f88c7c61023b99aaa45f17",
+      "xgrammar/contrib/mlxlm.py": "7a86796dac5a209a653f4a2188163a023a1f1db8df9fa279bfdb055a2fa5c29c",
+      "xgrammar/exception.py": "9a1913663347e549c478c6bbe5378f9d8baad1bd47d3c8e9f43678ec113f3b1e",
+      "xgrammar/grammar.py": "d701312eb72b8fd0e98809fdbbfc627c6a4fa724ed460a4a4fcef077fe99e48e",
+      "xgrammar/kernels/__init__.py": "473f2c05c64c6d07986622a8c6f1b5bbb8ed7908f44bb80e27730239f256457d",
+      "xgrammar/kernels/__pycache__/__init__.cpython-310.pyc": "1843b6c6fe09c0e5d6193e453fc9852c833cf9e658009911c3603a8d04f4f0ee",
+      "xgrammar/kernels/__pycache__/apply_token_bitmask_inplace_cpu.cpython-310.pyc": "04339d326b9d76440946cfc7e4f89c56ec8fedae8e95ca40c50e643a41c51bf9",
+      "xgrammar/kernels/__pycache__/apply_token_bitmask_inplace_cuda.cpython-310.pyc": "4d79f27b442d8d5416fef80a75c3b557915714b482bced673e56c6ed56d16e9a",
+      "xgrammar/kernels/__pycache__/apply_token_bitmask_inplace_torch.cpython-310.pyc": "0f65ce59b071113910a874c98a44427e097531071c9149f2315be82663702ec4",
+      "xgrammar/kernels/__pycache__/apply_token_bitmask_inplace_torch_compile.cpython-310.pyc": "5b47b1d3bf5c294e108017a1d1648495e50ff6709a6564173e9a3f03197feb51",
+      "xgrammar/kernels/__pycache__/apply_token_bitmask_inplace_triton.cpython-310.pyc": "ef5087a6ee68b7700b9126523f86a113d6b51bc5b028449d5d211dcdb81aa1f7",
+      "xgrammar/kernels/__pycache__/apply_token_bitmask_mlx.cpython-310.pyc": "d1d3130e431fdcf98156a12bbcd82d0c1222c6c22cf9a1cebef30dbeb574b60c",
+      "xgrammar/kernels/apply_token_bitmask_inplace_cpu.py": "93666ad12042ae070469086e2fee86ea782996183c5f06b9e38df084a08ae7f4",
+      "xgrammar/kernels/apply_token_bitmask_inplace_cuda.cu": "032cc8bc41da3a0508acd8e28b5f9051b0adbf30e709eee40cfd62e49019bc79",
+      "xgrammar/kernels/apply_token_bitmask_inplace_cuda.py": "87c3fbd3ae686311b445d8b52db851902a40ddf87a815bd5fa6c7096f251c655",
+      "xgrammar/kernels/apply_token_bitmask_inplace_torch.py": "91a1e3b5d1593daf34bddde54ac906d4d27ffad5231416e4ac22a66c36f79e00",
+      "xgrammar/kernels/apply_token_bitmask_inplace_torch_compile.py": "9b6fb04c156f4b28beb1e6c48122917d022183cff48ede598605be74f2968ece",
+      "xgrammar/kernels/apply_token_bitmask_inplace_triton.py": "9669d35701e508b93130237ef2a953f8c59f47a1afad911a81a9a1948a8b8aa9",
+      "xgrammar/kernels/apply_token_bitmask_mlx.py": "37585b5a20b273478eb8ad11d828fd2c75958b50e73aa6635953f94ef42582c5",
+      "xgrammar/libxgrammar_bindings.so": "e29a573bcd0eaa9210138004b3dfc5f76496fa88da4fdf555e82b93439c4407f",
+      "xgrammar/load_binding.py": "0d2be9f814f3a34f3fec8b98b6dfb834f214381dac146da18e3bf81b03cce190",
+      "xgrammar/matcher.py": "02fe4d9507c7feb3c7498306d47be52751a332fb7499c375483768898eb46f01",
+      "xgrammar/openai_tool_call_schema.py": "62d92f0e58d1c2e6f30fd808b16d23f4ac26d56395b74de69a9e07c1905d70eb",
+      "xgrammar/py.typed": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "xgrammar/structural_tag.py": "06edc9a2b819d3c6c214cdb11ab0dbf27f1c901780480d2fc8def23170d74721",
+      "xgrammar/testing.py": "43307e8242ab8a3c950f9aa707df357685c6c6018d560e3e3956ea59e21c670d",
+      "xgrammar/tokenizer_info.py": "05afed275b89b868568cebbea53606a046e4894fc1b62121dbcb23f97e8d6871",
+      "xgrammar/tvm_ffi_binding/__init__.py": "153d446f150093172f8364468a7f3a09716e22eaf2282c469d40da9699181cd4",
+      "xgrammar/tvm_ffi_binding/__pycache__/__init__.cpython-310.pyc": "07607cf19bbf6728dcafab94ac686d2a6b114377693b340a43813244a77228e3",
+      "xgrammar/tvm_ffi_binding/__pycache__/_ffi_api.cpython-310.pyc": "9a20846a4f877309b56df698b9141fd67cee81bb7a331c638a2204e4ad6434c7",
+      "xgrammar/tvm_ffi_binding/_ffi_api.py": "09b62a543ffd5de0982bb05adf5d9c28e48fbb306962f0dcdf696ab1cc21cc96",
+      "xgrammar/tvm_ffi_binding/config/__init__.py": "615e9623d99c0144801950646f35c92ca84019e859c126aa13436d6cfc792d02",
+      "xgrammar/tvm_ffi_binding/config/__pycache__/__init__.cpython-310.pyc": "41757e51816601e75d0f3e664e93aedbb56c2a61500088339700c3a53eec54c7",
+      "xgrammar/tvm_ffi_binding/config/__pycache__/_ffi_api.cpython-310.pyc": "ea9cd1d039eb38874787a9a37ebceabb5f8f506b55667c7e17084b7974d4a872",
+      "xgrammar/tvm_ffi_binding/config/_ffi_api.py": "db5b24e5e5bd99fbae507e1a63182a2cd56d4dfb2d8b466fbbcae1deed87996c",
+      "xgrammar/tvm_ffi_binding/kernels/__init__.py": "c7038a1ee259b3531cfd8798ba062b2273d433db3c62db89dea3975145a4d64f",
+      "xgrammar/tvm_ffi_binding/kernels/__pycache__/__init__.cpython-310.pyc": "801a8eba05ac7e6afda19a45480f20d540a27b29453eb1ca570f305442f3d465",
+      "xgrammar/tvm_ffi_binding/kernels/__pycache__/_ffi_api.cpython-310.pyc": "37f950ee1f64b1f91770f38c69def16e3fee609a743640e2c6466120ed7232a6",
+      "xgrammar/tvm_ffi_binding/kernels/_ffi_api.py": "39e8de26835da5d1c1d1e70390e8d914ec93733ffa2232cca2ddc325116c11fd",
+      "xgrammar/tvm_ffi_binding/testing/__init__.py": "a78697f4d44872d2eb7f1ebddfb0769c3c479522c55704f7d75c9eafffe62f50",
+      "xgrammar/tvm_ffi_binding/testing/__pycache__/__init__.cpython-310.pyc": "788258dde19fc4f92be1acbf30b32c850bc5609e1b97aa6a253c25291b24ceb9",
+      "xgrammar/tvm_ffi_binding/testing/__pycache__/_ffi_api.cpython-310.pyc": "7ecc49237e0ff19bf44a3237ebc632279a54659bd528a31c7fb15596acd8372e",
+      "xgrammar/tvm_ffi_binding/testing/_ffi_api.py": "645c6416b3b86d82c13a9351fb906ff77ab698748be0194d88e5f90e2d2262af",
+      "xgrammar/tvm_ffi_binding/testing/grammar_functor/__init__.py": "ef6966198e61297b7d65fabc99f1e74f580e662c3d9b4689d75edfac201deefd",
+      "xgrammar/tvm_ffi_binding/testing/grammar_functor/__pycache__/__init__.cpython-310.pyc": "190596502c2b6c8d54d32d1d8423b9bbdc65379eb3f3440713dd768c73e83dec",
+      "xgrammar/tvm_ffi_binding/testing/grammar_functor/__pycache__/_ffi_api.cpython-310.pyc": "72ba5707959e05d53179bb3d3bc641652a55b2e18808344acc3d933c2ddc58c7",
+      "xgrammar/tvm_ffi_binding/testing/grammar_functor/_ffi_api.py": "c85be1c82504bc2d37ee6e0165103c7989dcd007fe1e6de417833a666cff94ea",
+      "xgrammar-0.2.8.dist-info/INSTALLER": "ceebae7b8927a3227e5303cf5e0f1f7b34bb542ad7250ac03fbcde36ec2f1508",
+      "xgrammar-0.2.8.dist-info/METADATA": "91ffa7936f8bde807ef453245bb41617818b06190d610f9777b135f746197bd8",
+      "xgrammar-0.2.8.dist-info/RECORD": "6dd007a007dfe4255ff14062f904305c0c4564b25e973d5c37d638b3e63e8351",
+      "xgrammar-0.2.8.dist-info/REQUESTED": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "xgrammar-0.2.8.dist-info/WHEEL": "7b4a31d7748942d1d6177d234163f1a0ce056719eecf4cc1f3f6ee1e9bde8abf",
+      "xgrammar-0.2.8.dist-info/licenses/LICENSE": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4",
+      "xgrammar-0.2.8.dist-info/licenses/NOTICE": "769c6907073c65801bfcfe3ce1c0e80bf0ae4e124e2769d4f026c038ad583c0f"
+    }
+  },
+  "all_trial_metrics": "final-normal-validation-trials.json.gz",
+  "verified_pairs": 18
+}

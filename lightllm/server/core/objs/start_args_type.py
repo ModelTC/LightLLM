@@ -103,6 +103,8 @@ class StartArgs:
     disable_aggressive_schedule: bool = field(default=False)
     enable_prefill_decode_mixed: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
+    tool_call_cache_retention_seconds: float = field(default=0.0)
+    tool_call_cache_max_fraction: float = field(default=0.5)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
     disable_chunked_mm_input: bool = field(default=False)

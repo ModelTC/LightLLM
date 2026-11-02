@@ -1,0 +1,360 @@
+{
+  "scope": "Actual startup backend labels and source/model/image identities matched the stated policy comparison in both peers of all12 completed phases.",
+  "image_id": "sha256:58530f39a9549d46157aecbf1818f8beae36ed01c3849fa6f06a9978f5c82831",
+  "phases": [
+    {
+      "phase": "validation-normal-short-v9",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          0
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "validation-normal-long-v9",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          0
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "heldout-normal-v9",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          0
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "heldout-normal-cross-v9",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          0
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "disabled-audit-v9",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          0
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "22888b4237aa2c895fc24176e08089cf14bc6c89",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "disabled-audit-cross-v9",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "22888b4237aa2c895fc24176e08089cf14bc6c89",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          0
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "pressure-final-v9",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          0
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3-4B",
+        "model_config_sha256": "8ba006f74fecfaaeb392872a60f4a480e7ec9860153d2e1b769ec81f9a147f8a",
+        "gpu_indices": [
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "prefill  TritonAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "validation-hybrid-short-v10",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          0,
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          4,
+          5
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "validation-hybrid-long-v10",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          0,
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          4,
+          5
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "heldout-hybrid-v10",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          0,
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          4,
+          5
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "heldout-hybrid-cross-v10",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          4,
+          5
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          0,
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      }
+    },
+    {
+      "phase": "pressure-hybrid-continuation-v10",
+      "candidate": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          4,
+          5
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      },
+      "control": {
+        "revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+        "model": "Qwen3.5-27B",
+        "model_config_sha256": "f8d190c5b89c1521220f935d2567a587d6e291ed69066a45a106560b05a2174c",
+        "gpu_indices": [
+          0,
+          1
+        ],
+        "backends": [
+          "decode  FlashInferAttBackend",
+          "decode 1 TritonLinearAttBackend",
+          "prefill  TritonAttBackend",
+          "prefill 1 FlashQlaLinearAttBackend"
+        ]
+      }
+    }
+  ]
+}

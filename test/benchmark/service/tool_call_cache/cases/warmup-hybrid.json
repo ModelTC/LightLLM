@@ -1,0 +1,3 @@
+[
+  {"name": "representative-warmup", "options": {"sessions": 16, "turns": 4, "split": "validation", "context_scale": 0.25, "max_prompt_tokens": 60000, "wait_scale": 0.01, "max_wait": 0.5}}
+]

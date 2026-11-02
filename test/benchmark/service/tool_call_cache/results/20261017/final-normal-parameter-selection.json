@@ -1,0 +1,29 @@
+{
+  "status": "selected_on_validation_before_heldout",
+  "retention_seconds": 3,
+  "fraction": 0.5,
+  "selection_rule": "Prefer3s unless30s improves trace-c16 reported prefill reduction by>2pp and wall speedup by>2%, without>2% relative ordinary-request slowdown.",
+  "source_revision": "dcd3551c53a13c5613d8a8b644870de00dd57820",
+  "heldout_sha256": "432541baf73ca109a29a74885294af70a226d3a4b7818386120ceb4a4299a5be",
+  "recorded_unix": 1792240083.0804753,
+  "short": {
+    "prefill_reduction": -0.0010253017421644934,
+    "wall_speedup": 1.0238735224990099,
+    "request_speedup": 1.0125326052691734
+  },
+  "long": {
+    "prefill_reduction": 0.10223311582260497,
+    "wall_speedup": 1.0077992646394995,
+    "request_speedup": 1.0739656456097724
+  },
+  "ordinary_short": {
+    "prefill_reduction": -0.0052798310454065245,
+    "wall_speedup": 1.008634349057679,
+    "request_speedup": 1.039198661600722
+  },
+  "ordinary_long": {
+    "prefill_reduction": 0.0,
+    "wall_speedup": 1.0002898786696877,
+    "request_speedup": 1.009867941401786
+  }
+}

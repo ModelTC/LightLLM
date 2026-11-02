@@ -45,6 +45,7 @@ logger = init_logger(__name__)
 class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
     def __init__(self, args: StartArgs):
         self.args = args
+        self.tool_call_admission_enabled = args.tool_call_cache_retention_seconds > 0 and args.run_mode == "normal"
         self.model_weightdir = args.model_dir
         self.world_size = args.tp
         self.node_world_size = self.world_size // args.nnodes
@@ -199,6 +200,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                 self.max_total_token_num,
                 node_world_size=self.node_world_size,
                 dp_world_size=self.dp_world_size,
+                tool_call_retention_enabled=self.tool_call_admission_enabled,
             )
         self.req_queue = build_req_queue(self.args, self, self.dp_size_in_node)
         logger.info(f"use req queue {self.req_queue.__class__.__name__}")
@@ -383,12 +385,31 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                     count += 1
             return count
 
+    def get_tool_call_prefix_hints(self, dp_index):
+        # Local monotonic deadlines and queue priority must not reorder separate
+        # multinode routers differently. PD keeps its original admission path.
+        if not self.tool_call_admission_enabled or self.is_multinode_tp or self.radix_cache_client is None:
+            return None
+        return self.radix_cache_client.get_tool_call_prefix_hints(dp_index)
+
+    def get_tool_call_reserved_tokens(self, dp_index):
+        # PD has no completion-feedback path to its separate prefill cache.
+        # Reservation only changes normal-service admission, never KV refs.
+        if not getattr(self, "tool_call_admission_enabled", False) or self.radix_cache_client is None:
+            return 0
+        return self.radix_cache_client.get_tool_call_reserved_tokens(dp_index)
+
     def get_used_tokens(self, dp_index):
         if not self.args.disable_dynamic_prompt_cache:
             return (
                 self.max_total_token_num
                 - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
                 - self.radix_cache_client.get_unrefed_tokens_num(dp_index)
+                + (
+                    self.get_tool_call_reserved_tokens(dp_index)
+                    if getattr(self, "tool_call_admission_enabled", False)
+                    else 0
+                )
             )
         else:
             return self.max_total_token_num - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
@@ -404,6 +425,10 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
             # 附加一个私有标记变量，标记请求是否已经被router发送过abort命令给推理进程，
             # 防止反复发送abort命令给推理进程
             req._router_aborted = False
+            if self.tool_call_admission_enabled:
+                req._tool_call_prefix_memo = {}
+                req._tool_call_priority_skips = 0
+                req._tool_call_cache_hit = False
             # 作用同 _router_aborted 类似
             req_group.append(req)
 

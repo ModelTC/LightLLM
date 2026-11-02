@@ -1,0 +1,38 @@
+{
+  "scope": "Complete first hardware assignment only; all nine prescribed normal cases and both default-off cases, three seeds each. Hardware/order crossover pending. These 33 pairs are a subset of the later final 54 normal + 12 off report; NEVER add them again.",
+  "source_revision": "e6d00d6cf8df7ea013a6ea6706c53d4140eb22ec",
+  "harness_revision": "b491a8807239a3cfdc091613b79d23cd403b44cd",
+  "normal_pairs": 27,
+  "defaultoff_pairs": 6,
+  "interim_audit_experiment": "261018-124216-python3-mtc-sufubao-tool-call-cache-rework-20261",
+  "all_actual_inputs_outputs_and_generated_counts_matched": true,
+  "candidate_gpu": 0,
+  "off_gpu": 1,
+  "original_gpu": 4,
+  "hardware": "H200, shared host CPU/I/O; selected GPUs isolated and monitored",
+  "model": "Qwen3-4B BF16 TP1",
+  "cache_tokens": 32768,
+  "max_req_tokens": 16384,
+  "batch_tokens": 8192,
+  "max_running": 32,
+  "retention_seconds": 3,
+  "fraction": 0.5,
+  "artifacts": {
+    "normal-public.json.gz": {
+      "sha256": "e5868748f9d02d4e355da1d2f2d699ca888ecfdfb194015ac5f78c4730aa8b4d",
+      "uncompressed_sha256": "d960c9561059d48974561168673fe4e299abeb27f5debf87598c4483a81f3b44"
+    },
+    "normal-workload.json.gz": {
+      "sha256": "fd27ce9866366ae69740ee62ca4be970958b16cb1cf0abfc50fbd03f053ab95a",
+      "uncompressed_sha256": "753f3ef1901cbf897ed36a69c6fa17e65411db9d17517a81296e6224ac240035"
+    },
+    "defaultoff-public.json.gz": {
+      "sha256": "80d0391ef6c094edb9822c8478e8fc646007b7fb7ee0b41824c071b5204f34a9",
+      "uncompressed_sha256": "3a7ce57a1cdc06cc6eb55e81c359b30f9f892a318cc3434b4cd8a8bcea92fc1a"
+    },
+    "defaultoff-workload.json.gz": {
+      "sha256": "a44cb22ff22a73e6487c6b12841a3ac862637a9b37e3aa1696f067b7ec0fac54",
+      "uncompressed_sha256": "992d33686a7b2c33b3adf001e86ad2b5068fc7b9947587ad1dbccbdef8c304b4"
+    }
+  }
+}
