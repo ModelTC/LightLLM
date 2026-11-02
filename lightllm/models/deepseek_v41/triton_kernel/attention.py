@@ -224,22 +224,83 @@ def _candidate_scores(LOGITS, LENGTHS, OUT, STRIDE, WIDTH, BLOCK: tl.constexpr):
 
 
 @triton.jit
-def _mark_candidates(INDICES, MASK, WIDTH, TOPK: tl.constexpr, BLOCK: tl.constexpr):
+def _sort_candidates(INDICES, LENGTHS, TOPK: tl.constexpr, BLOCK: tl.constexpr):
     row = tl.program_id(0)
     col = tl.arange(0, BLOCK)
     index = tl.load(INDICES + row * TOPK + col, col < TOPK, -1)
-    tl.store(MASK + row * WIDTH + index, True, (col < TOPK) & (index >= 0))
+    valid = (index >= 0) & (index < tl.cdiv(tl.load(LENGTHS + row), 8))
+    index = tl.sort(tl.where(valid, index, 2147483647))
+    valid = (index != 2147483647) & ((col == 0) | (index != tl.gather(index, tl.maximum(col - 1, 0), axis=0)))
+    rank = tl.cumsum(valid.to(tl.int32)) - 1
+    count = tl.sum(valid.to(tl.int32))
+    tl.store(INDICES + row * TOPK + col, -1, (col < TOPK) & (col >= count))
+    tl.store(INDICES + row * TOPK + rank, index, valid)
 
 
 @triton.jit
-def _mask_candidates(LOGITS, LENGTHS, MASK, STRIDE, WIDTH, BLOCK: tl.constexpr):
+def _candidate_indexer_logits(
+    Q,
+    CACHE,
+    WEIGHTS,
+    PAGES,
+    CANDIDATES,
+    LENGTHS,
+    LOGITS,
+    Q_ROW: tl.constexpr,
+    Q_HEAD: tl.constexpr,
+    CACHE_PAGE: tl.constexpr,
+    WEIGHT_ROW: tl.constexpr,
+    PAGE_ROW: tl.constexpr,
+    CANDIDATE_ROW: tl.constexpr,
+    HEADS: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+    BLOCK_N: tl.constexpr,
+):
     row, tile = tl.program_id(0), tl.program_id(1)
-    length = tl.load(LENGTHS + row)
-    if tile * BLOCK < length:
-        col = tile * BLOCK + tl.arange(0, BLOCK)
-        selected = tl.load(MASK + row * WIDTH + col // 8, col < length, False)
-        value = tl.load(LOGITS + row * STRIDE + col, col < length, -float("inf"))
-        tl.store(LOGITS + row * STRIDE + col, tl.where(selected, value, -float("inf")), col < length)
+    col = tile * BLOCK_N + tl.arange(0, BLOCK_N)
+    block = tl.load(CANDIDATES + row * CANDIDATE_ROW + col // 8, col < CANDIDATE_ROW * 8, -1)
+    position = block * 8 + col % 8
+    valid = (block >= 0) & (position < tl.load(LENGTHS + row))
+    page = tl.load(PAGES + row * PAGE_ROW + position // 64, valid, 0)
+    base = CACHE + page * CACHE_PAGE
+    d = tl.arange(0, 128)
+    h = tl.arange(0, BLOCK_H)
+    q = tl.load(Q + row * Q_ROW + h[:, None] * Q_HEAD + d[None, :], h[:, None] < HEADS, 0.0)
+    k = tl.load(
+        (base[None, :] + (position % 64)[None, :] * 128 + d[:, None]).to(tl.pointer_type(tl.float8e4nv)),
+        valid[None, :],
+        0.0,
+    )
+    scale = tl.load((base + 64 * 128 + position % 64 * 4).to(tl.pointer_type(tl.float32)), valid, 0)
+    weights = tl.load(WEIGHTS + row * WEIGHT_ROW + h, h < HEADS, 0)
+    scores = tl.sum(tl.maximum(tl.dot(q, k), 0.0) * weights[:, None], axis=0) * scale
+    tl.store(LOGITS + row * CANDIDATE_ROW * 8 + col, tl.where(valid, scores, -float("inf")), col < CANDIDATE_ROW * 8)
+
+
+def candidate_indexer_logits(query, cache, weights, pages, candidates, lengths):
+    """Score only the selected eight-key blocks in the existing Hopper FP8 slabs."""
+    assert query.shape[-1] == 128
+    logits = torch.empty((query.shape[0], candidates.shape[1] * 8), dtype=torch.float32, device=query.device)
+    _candidate_indexer_logits[(query.shape[0], triton.cdiv(logits.shape[1], 64))](
+        query,
+        cache,
+        weights,
+        pages,
+        candidates,
+        lengths,
+        logits,
+        query.stride(0),
+        query.stride(1),
+        cache.stride(0),
+        weights.stride(0),
+        pages.stride(0),
+        candidates.stride(0),
+        query.shape[1],
+        max(16, triton.next_power_of_2(query.shape[1])),
+        64,
+        num_warps=4,
+    )
+    return logits
 
 
 @triton.jit
@@ -255,17 +316,25 @@ def _indexer_topk_transform(
     PAGE_SIZE: tl.constexpr,
     TOPK: tl.constexpr,
     BLOCK: tl.constexpr,
+    CANDIDATES,
+    CANDIDATE_STRIDE: tl.constexpr,
+    SPARSE: tl.constexpr,
 ):
     row = tl.program_id(0)
     col = tl.arange(0, BLOCK)
     index = tl.load(RAW + row * TOPK + col, col < TOPK, -1)
-    # Native top-k can repeat its dummy index when fewer than TOPK scores are finite.
-    index = tl.sort(index, descending=False)
-    previous = tl.gather(index, tl.maximum(col - 1, 0), axis=0)
-    valid = (col < TOPK) & (index >= 0) & (index < tl.load(VALID_LENGTHS + row))
-    valid &= (col == 0) | (index != previous)
+    width = CANDIDATE_STRIDE * 8 if SPARSE else tl.load(VALID_LENGTHS + row)
+    valid = (col < TOPK) & (index >= 0) & (index < width)
     score = tl.load(LOGITS + row * LOGIT_STRIDE + index, valid, -float("inf"))
     valid &= score > -float("inf")
+    if SPARSE:
+        block = tl.load(CANDIDATES + row * CANDIDATE_STRIDE + index // 8, valid, -1)
+        index = block * 8 + index % 8
+        valid &= (block >= 0) & (index < tl.load(VALID_LENGTHS + row))
+    # Native top-k can repeat its dummy index when fewer than TOPK scores are finite.
+    index = tl.sort(tl.where(valid, index, 2147483647))
+    previous = tl.gather(index, tl.maximum(col - 1, 0), axis=0)
+    valid = (index != 2147483647) & ((col == 0) | (index != previous))
     rank = tl.cumsum(valid.to(tl.int32)) - 1
     count = tl.sum(valid.to(tl.int32))
     page = tl.load(PAGES + row * PAGE_STRIDE + index // PAGE_SIZE, valid, 0)
@@ -274,12 +343,12 @@ def _indexer_topk_transform(
     tl.store(LENGTHS + row, count)
 
 
-def select_indexer_candidates(logits, lengths, mask, topk):
+def select_indexer_candidates(logits, lengths, indices):
     from lightllm.utils.vllm_utils import vllm_ops
 
-    topk = min(topk, mask.shape[1])
-    scores = torch.empty(mask.shape, dtype=torch.float32, device=logits.device)
-    _candidate_scores[(logits.shape[0], triton.cdiv(mask.shape[1], 128))](
+    topk = indices.shape[1]
+    scores = torch.empty((logits.shape[0], triton.cdiv(logits.shape[1], 8)), dtype=torch.float32, device=logits.device)
+    _candidate_scores[(logits.shape[0], triton.cdiv(scores.shape[1], 128))](
         logits,
         lengths,
         scores,
@@ -288,7 +357,6 @@ def select_indexer_candidates(logits, lengths, mask, topk):
         128,
     )
     block_lengths = (lengths + 7) // 8
-    indices = torch.empty((logits.shape[0], topk), dtype=torch.int32, device=logits.device)
     vllm_ops.top_k_per_row_decode(
         scores,
         1,
@@ -299,27 +367,15 @@ def select_indexer_candidates(logits, lengths, mask, topk):
         1,
         topk,
     )
-    _mark_candidates[(logits.shape[0],)](
+    _sort_candidates[(logits.shape[0],)](
         indices,
-        mask,
-        mask.stride(0),
+        lengths,
         topk,
         triton.next_power_of_2(topk),
     )
 
 
-def mask_indexer_candidates(logits, lengths, mask):
-    _mask_candidates[(logits.shape[0], triton.cdiv(logits.shape[1], 1024))](
-        logits,
-        lengths,
-        mask,
-        logits.stride(0),
-        mask.stride(0),
-        1024,
-    )
-
-
-def select_indexer_topk(logits, lengths, pages, slots, selected_lengths):
+def select_indexer_topk(logits, lengths, pages, slots, selected_lengths, candidate_blocks=None):
     from lightllm.utils.vllm_utils import vllm_ops
     from lightllm.models.deepseek_v4.triton_kernel.cache_io import INDEXER_PAGE_SIZE
 
@@ -328,7 +384,7 @@ def select_indexer_topk(logits, lengths, pages, slots, selected_lengths):
     vllm_ops.top_k_per_row_decode(
         logits,
         1,
-        lengths,
+        lengths if candidate_blocks is None else lengths.clamp_max(logits.shape[1]),
         raw,
         logits.shape[0],
         logits.stride(0),
@@ -347,4 +403,7 @@ def select_indexer_topk(logits, lengths, pages, slots, selected_lengths):
         INDEXER_PAGE_SIZE,
         topk,
         triton.next_power_of_2(topk),
+        candidate_blocks,
+        candidate_blocks.stride(0) if candidate_blocks is not None else 0,
+        candidate_blocks is not None,
     )

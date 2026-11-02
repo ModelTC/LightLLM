@@ -19,7 +19,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             starts = torch.where(self.b_ready_cache_len < self.b_prefill_commit_start, self.b_ready_cache_len, 0)
             bound_swa_replay(self, starts[batch])
         self.v41_sparse_selection = None
-        self.candidate_block_mask = None
+        self.candidate_block_indices = None
         self.engram_hashes = model.engram_hasher(self) if model.engram_hasher is not None else None
         self.decoder_state = None
         self.decoder_token_indices = None
@@ -70,7 +70,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
                 setattr(state, name, value[rows])
         bound_swa_replay(state, ready[batch[rows]])
         state.v41_sparse_selection = {name: value[rows] for name, value in self.v41_sparse_selection.items()}
-        state.candidate_block_mask = self.candidate_block_mask[rows]
+        state.candidate_block_indices = self.candidate_block_indices[rows]
         if self.engram_hashes is not None:
             state.engram_hashes = self.engram_hashes[rows]
         self.decoder_state = state

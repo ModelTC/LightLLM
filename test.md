@@ -143,3 +143,21 @@ GPU首轮273 passed/2 failed，失败均为测试将源码挂成只读，而auto
 短 extend 不足128行时额外重算此前最多128行 encoder（图片块内起点退到块首），decoder 始终取得整个当前 prompt 的最后 min(N,128) 行。ModelInput 分开实际计算起点和原始 KV 提交边界；调度计入重算行，但请求进度、页分配和共享前缀不回退。历史重算行禁止写 main/global KV 和 indexer K，encoder/decoder SWA 分别按 replay 起点截断，Engram lookback 对齐计算起点。保留21层全量＋19层裁剪、FP8及现有持久化布局。
 
 H200隔离单卡、只读源码和独立可写 autotune 缓存：V4.1 GPU回归146 passed（含文本/视觉、DSpark、GPU checkpoint、CPU cache 恢复、decode graph）；输入/分页CPU回归53 passed。256-token缓存命中＋新增1 token的 decoder FFN 从1行变为128行，新增断言确认共享 global KV 前256个物理槽逐字节不变。这是语义修复，可能增加短 suffix TTFT，不当作加速。尚未跑完整权重 GSM8K 或多机 PD。日志：/mnt/vqa/wanzihao/v41_four_optimizations_20261102/replay_{cpu,gpu}.log。未修改在线实例。
+
+
+### 2026-11-02：优化 2 — Hopper FP8 候选集内 Reindex
+
+候选源输出最多2048个排序去重block ID；四个后续Reindex直接读取最多16384个候选位置的现有FP8 paged K/FP32 scale，以Tensor Core评分并复用公共Top-K/物理槽转换。不再生成全长候选bool mask或consumer全长logits；源层扫描保持原样。短上下文候选已覆盖全部位置时保留DeepGEMM并省掉无意义的mask，不强制切换较慢的新kernel。
+
+H200数值、causal/HOLD、非连续页、CUDA Graph专项20 passed，完整V4.1 GPU回归146 passed。新旧候选评分按已有atol0.03/rtol0.01核对。真实调用使用现有deep_gemm与FP8 cache格式，无依赖升级。
+
+同卡合成分页cache、32heads、FP8、CUDA Graph三轮median，以下为单个consumer评分＋mask/Top-K/slot转换，不含Q投影、候选源及整模型：
+
+| Context | Query rows | 原路径 ms | 候选路径 ms | 倍率 |
+| --- | --- | --- | --- | --- |
+| 64K | 64 | 0.11737 | 0.07714 | 1.52x |
+| 256K | 64 | 0.42725 | 0.08107 | 5.27x |
+| 1M | 64 | 1.62156 | 0.08581 | 18.90x |
+| 1M | 384 | 8.56060 | 0.38703 | 22.12x |
+
+1M/64行consumer logits从256MiB降到4MiB（64倍）；物理KV布局仍1800B/token。8K/64行单独复测原0.02550ms、实际选用的DeepGEMM免mask路径0.02251ms；直接强用新kernel为0.04176ms，因而未在该范围启用。不能将局部倍率当TPOT/TPM提升。原始日志/参数：/mnt/vqa/wanzihao/v41_four_optimizations_20261102/indexer_{gpu,model_gpu}.log、indexer_bench.jsonl、indexer_short_bench.jsonl；可复跑test/benchmark/kernel/benchmark_dsv41_candidate_indexer.py。未改线上服务或重跑完整权重评测。

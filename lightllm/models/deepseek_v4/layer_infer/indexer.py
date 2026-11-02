@@ -252,7 +252,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
 
     def _build_v41_metadata(self, x, q_lora, infer_state, layer_weight, use_custom_tensor_manager):
         from lightllm.models.deepseek_v41.triton_kernel.attention import (
-            mask_indexer_candidates,
+            candidate_indexer_logits,
             select_indexer_candidates,
             select_indexer_topk,
         )
@@ -263,8 +263,32 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             x, q_lora, infer_state, layer_weight, use_custom_tensor_manager=use_custom_tensor_manager
         )
         capacity = triton.cdiv(max(1, infer_state.max_kv_seq_len // self.compress_ratio), 64) * 64
+        sparse_candidates = self.uses_candidate_blocks and capacity > self.candidate_topk_blocks * 8
         dense_prefill = self._use_dense_prefill(infer_state)
-        metadata = infer_state.get_indexer_metadata(self.layer_idx_, capacity, dense_prefill=dense_prefill)
+        metadata = infer_state.get_indexer_metadata(
+            self.layer_idx_, capacity, dense_prefill=dense_prefill or sparse_candidates
+        )
+        alloc = self.alloc_tensor if use_custom_tensor_manager else torch.empty
+        slots = alloc((x.shape[0], self.index_topk), dtype=torch.int32, device=x.device)
+        lengths = alloc((x.shape[0],), dtype=torch.int32, device=x.device)
+        if sparse_candidates:
+            logits = candidate_indexer_logits(
+                query,
+                cache,
+                weights,
+                metadata.logits_page_table,
+                infer_state.candidate_block_indices,
+                metadata.valid_lengths,
+            )
+            select_indexer_topk(
+                logits,
+                metadata.valid_lengths,
+                metadata.row_page_table,
+                slots,
+                lengths,
+                candidate_blocks=infer_state.candidate_block_indices,
+            )
+            return {"extra_indices": slots.unsqueeze(1), "extra_lengths": lengths}
         if dense_prefill:
             key_lengths = (infer_state.b_seq_len // self.compress_ratio).to(torch.int32)
             key_lengths.masked_fill_(infer_state.b_req_idx == infer_state.req_manager.HOLD_REQUEST_ID, 0)
@@ -281,12 +305,11 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 max(1, infer_state.total_token_num // self.compress_ratio),
                 capacity,
             )
-        alloc = self.alloc_tensor if use_custom_tensor_manager else torch.empty
-        slots = alloc((x.shape[0], self.index_topk), dtype=torch.int32, device=x.device)
-        lengths = alloc((x.shape[0],), dtype=torch.int32, device=x.device)
         if self.is_candidate_source:
-            infer_state.candidate_block_mask = torch.zeros(
-                (x.shape[0], triton.cdiv(capacity, 8)), dtype=torch.bool, device=x.device
+            infer_state.candidate_block_indices = torch.empty(
+                (x.shape[0], min(self.candidate_topk_blocks, triton.cdiv(capacity, 8))),
+                dtype=torch.int32,
+                device=x.device,
             )
         chunk_size = metadata.rows_per_chunk
         for chunk, start in enumerate(range(0, x.shape[0], chunk_size)):
@@ -315,11 +338,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
                 )
             valid = metadata.valid_lengths[start:end]
             if self.is_candidate_source:
-                select_indexer_candidates(
-                    logits, valid, infer_state.candidate_block_mask[start:end], self.candidate_topk_blocks
-                )
-            elif self.uses_candidate_blocks:
-                mask_indexer_candidates(logits, valid, infer_state.candidate_block_mask[start:end])
+                select_indexer_candidates(logits, valid, infer_state.candidate_block_indices[start:end])
             select_indexer_topk(logits, valid, metadata.row_page_table[start:end], slots[start:end], lengths[start:end])
             del logits
         return {"extra_indices": slots.unsqueeze(1), "extra_lengths": lengths}

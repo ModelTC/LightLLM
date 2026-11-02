@@ -411,9 +411,8 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
         b_seq_len=lengths if mode != "decode" else lengths[req.long()],
         _dsv4_token_to_batch_idx=req.long(),
         req_manager=SimpleNamespace(cache_config=config, req_to_token_indexs=table, HOLD_REQUEST_ID=1),
-        candidate_block_mask=torch.zeros(4, ((capacity + 63) // 64) * 8, dtype=torch.bool, device="cuda"),
+        candidate_block_indices=torch.tensor([[0, 2, 17, 100]] * 4, dtype=torch.int32, device="cuda"),
     )
-    state.candidate_block_mask[:, [0, 2, 17, 100]] = True
     indexer = indexer_module.DeepseekV4IndexInfer(
         0,
         dict(
@@ -452,7 +451,8 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
         valid = (query_pos + 1) // ratio
         valid.masked_fill_(req == 1, 0)
         if candidates == "consumer":
-            scores.masked_fill_(~candidate_mask[:, torch.arange(keys, device="cuda") // 8], -float("inf"))
+            selected = (candidate_mask[:, :, None] == torch.arange(keys, device="cuda")[None, None, :] // 8).any(1)
+            scores.masked_fill_(~selected, -float("inf"))
         inverse = torch.full((pages * 256 // ratio,), -1, device="cuda", dtype=torch.long)
         inverse[slots[closed].long() // ratio] = torch.arange(keys, device="cuda")
         for row in range(4):
@@ -472,20 +472,19 @@ def test_paged_indexer_selection_and_graph_replay(ratio, mode, candidates, monke
             for row in range(4):
                 recent = (valid[row].item() - 1) // 8
                 if recent >= 0:
-                    assert candidate_mask[row, recent]
-                assert candidate_mask[row].sum().item() == min(4, (valid[row].item() + 7) // 8)
+                    assert recent in candidate_mask[row].tolist()
+                assert (candidate_mask[row] >= 0).sum().item() == min(4, (valid[row].item() + 7) // 8)
 
-    check(run(), state.candidate_block_mask)
+    check(run(), state.candidate_block_indices)
     state.indexer_metadata = None
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         result = run()
-    captured_mask = state.candidate_block_mask
+    captured_mask = state.candidate_block_indices
     query.normal_()
     query_pos.copy_(torch.tensor([ratio - 1, 257 * ratio - 1, 900 * ratio - 1, 0], device="cuda"))
     if candidates == "consumer":
-        captured_mask.zero_()
-        captured_mask[:, [1, 5, 30]] = True
+        captured_mask.copy_(torch.tensor([[1, 5, 30, -1]] * 4, dtype=torch.int32, device="cuda"))
     graph.replay()
     check(result, captured_mask)
     # Capture must use the real length tensors, not bake in the capture-time lengths.
@@ -552,15 +551,15 @@ def test_candidate_selection_2048_blocks_and_recent_block():
 
     scores = torch.randn(4, 65536, device="cuda")
     lengths = torch.tensor([0, 7, 20000, 60000], dtype=torch.int32, device="cuda")
-    mask = torch.zeros(4, 8192, dtype=torch.bool, device="cuda")
-    select_indexer_candidates(scores, lengths, mask, 2048)
+    indices = torch.empty(4, 2048, dtype=torch.int32, device="cuda")
+    select_indexer_candidates(scores, lengths, indices)
     for row, length in enumerate(lengths.tolist()):
         blocks = (length + 7) // 8
         expected = torch.nn.functional.pad(scores[row, :length], (0, -length % 8), value=-float("inf"))
         expected = expected.view(-1, 8).amax(-1)
         if blocks:
             expected[-1] = float("inf")
-        chosen = mask[row].nonzero().flatten()
+        chosen = indices[row][indices[row] >= 0].long()
         assert chosen.numel() == min(2048, blocks)
         assert (chosen < blocks).all()
         torch.testing.assert_close(
@@ -897,7 +896,7 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     state.dsv4_swa_indices = torch.arange(332 * 128, dtype=torch.int32, device="cuda").view(332, 128)
     state.dsv4_swa_lengths = torch.full((332,), 128, dtype=torch.int32, device="cuda")
     state.v41_sparse_selection = {"extra_indices": torch.arange(332, device="cuda")[:, None, None]}
-    state.candidate_block_mask = torch.arange(332, device="cuda")[:, None]
+    state.candidate_block_indices = torch.arange(332, device="cuda")[:, None]
     state.engram_hashes = torch.arange(332, device="cuda")[:, None, None]
     state.indexer_metadata = object()
     original_swa = state.dsv4_swa_indices.clone()
@@ -915,7 +914,7 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     assert decoder.b_ready_cache_len.tolist() == [92, 1000, 129]
     assert decoder.b_q_start_loc.tolist() == [0, 128, 131]
     torch.testing.assert_close(decoder.engram_hashes[:, 0, 0], expected_rows)
-    torch.testing.assert_close(decoder.candidate_block_mask[:, 0], expected_rows)
+    torch.testing.assert_close(decoder.candidate_block_indices[:, 0], expected_rows)
     torch.testing.assert_close(decoder.v41_sparse_selection["extra_indices"][:, 0, 0], expected_rows)
     expected_lengths = torch.tensor([*range(1, 129), 1, 2, 3, *range(1, 129)], device="cuda", dtype=torch.int32)
     torch.testing.assert_close(decoder.dsv4_swa_lengths, expected_lengths)
