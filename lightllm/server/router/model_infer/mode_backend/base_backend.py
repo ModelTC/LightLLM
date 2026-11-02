@@ -149,36 +149,9 @@ class ModeBackend:
         self.draft_models = []
         if self.args.mtp_mode is not None:
             self.init_mtp_draft_model(model_kvargs)
-        from lightllm.utils.envs_utils import set_model_init_status
-        from lightllm.utils.torch_memory_saver_utils import MemoryTag
-        from lightllm.common.attention_state import AttentionStateManager
-        from lightllm.common.req_manager import ReqManager
+        from lightllm.common.basemodel.model_group import initialize_model_group
 
-        models = (self.model, *self.draft_models)
-        assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
-        assert all(
-            item.max_req_num == self.model.max_req_num for item in models
-        ), "models must share the request domain"
-        # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
-        max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
-        with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            req_manager = ReqManager(max_request_num=self.model.max_req_num, max_sequence_length=max_seq_len)
-        for item in models:
-            item.bind_req_manager(req_manager=req_manager)
-        for item in models:
-            item.prepare_attention_states()
-        manager: AttentionStateManager = self.model.att_state_manager
-        assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
-        with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            manager.finish_state_registration()
-            manager.load_full_att_calibration(args=self.model.args)
-            manager.initialize_storage(
-                self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
-            )
-        for item in models:
-            item.init_runtime()
-        torch.cuda.empty_cache()
-        set_model_init_status(True)
+        initialize_model_group(self.model, self.draft_models)
         set_random_seed(2147483647)
         self.is_hybrid_att_model = bool(self.model.att_state_manager.get_bounded_attention_states())
 
