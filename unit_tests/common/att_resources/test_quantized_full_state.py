@@ -329,3 +329,60 @@ def test_deferred_storage_preserves_real_fp8_calibration(kind: str):
     state.allocate_storage(source.capacity)
     assert torch.equal(state.scales, source.scales)
     assert torch.equal(torch.from_numpy(state.cpu_scales), source.scales)
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_int4_prefill_with_separate_storage(device, monkeypatch):
+    import weakref
+    from types import SimpleNamespace
+    from lightllm.common.basemodel.attention.triton.int4kv import Int4kvTritonPrefillAttState
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from lightllm.common.basemodel.triton_kernel.kv_copy import ppl_int4kv_copy_kv
+    from lightllm.common.basemodel.triton_kernel.att.prefill_att import context_flashattention_nopad
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    state = GroupQuantizedFullAttentionState(
+        GroupQuantizedAttentionConfig(
+            logical_layer_groups=((0,),),
+            global_head_num=1,
+            head_dim=64,
+            scale_dtype=torch.float32,
+            bits=4,
+        ),
+        device=device,
+    )
+    state.allocate_storage(8)
+    (k, k_scale), (v, v_scale) = state.get_layer_view(0)
+    k.view(torch.uint8).fill_(0x88)
+    v.view(torch.uint8).fill_(0x99)
+    k_scale.fill_(0.25)
+    v_scale.fill_(0.5)
+    assert k.untyped_storage().data_ptr() != v.untyped_storage().data_ptr()
+    assert k_scale.untyped_storage().data_ptr() != v_scale.untyped_storage().data_ptr()
+    owner = InferStateInfo()
+    owner.total_token_num = owner.max_kv_seq_len = owner.max_q_seq_len = 2
+    owner.b_seq_len = torch.tensor([2], dtype=torch.int32, device=device)
+    owner.b_req_idx = torch.tensor([0], dtype=torch.int32, device=device)
+    owner.b_ready_cache_len = owner.b_q_start_loc = torch.zeros(1, dtype=torch.int32, device=device)
+    owner.req_manager = SimpleNamespace(req_to_token_indexs=torch.arange(8, device=device).view(1, -1))
+    prefill = Int4kvTritonPrefillAttState(
+        backend=SimpleNamespace(quant_group_size=8), _infer_state_weak_ref=weakref.ref(owner)
+    )
+    prefill.init_state()
+    if device == "cpu":
+
+        def dequantize(**kwargs):
+            assert kwargs["k"] is k and kwargs["v"] is v
+            assert kwargs["k_scale"] is k_scale and kwargs["v_scale"] is v_scale
+            kwargs["k_out"].fill_(0.25)
+            kwargs["v_out"].fill_(1)
+
+        def attention(**kwargs):
+            kwargs["o"].copy_(kwargs["v"].expand(-1, 2, -1))
+
+        monkeypatch.setattr(ppl_int4kv_copy_kv, "dequantize_int4kv", dequantize)
+        monkeypatch.setattr(context_flashattention_nopad, "context_attention_fwd_contiguous_kv", attention)
+    q = torch.randn(2, 2, 64, device=device)
+    output = prefill.prefill_att(q, (k, k_scale), (v, v_scale))
+    torch.testing.assert_close(output, torch.ones_like(q))
