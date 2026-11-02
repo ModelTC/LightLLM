@@ -154,7 +154,9 @@ class ModeBackend:
 
         models = (self.model, *self.draft_models)
         assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
-        assert all(item.max_req_num == self.model.max_req_num for item in models), "models must share the request domain"
+        assert all(
+            item.max_req_num == self.model.max_req_num for item in models
+        ), "models must share the request domain"
         # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
         max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
         with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
@@ -240,13 +242,17 @@ class ModeBackend:
             # PD 和 DP 使用独立导出，避免 PD 读者收到大小页池或 DP 读者丢失页池。
             if self.args.run_mode in ("prefill", "decode"):
                 publish_att_resources(
-                    self.model.att_state_manager, self.model.req_manager.req_to_token_indexs,
-                    kind="pd", reader_count=self.node_world_size,
+                    self.model.att_state_manager,
+                    self.model.req_manager.req_to_token_indexs,
+                    kind="pd",
+                    reader_count=self.node_world_size,
                 )
             if self.args.enable_dp_prompt_cache_fetch:
                 publish_att_resources(
-                    self.model.att_state_manager, self.model.req_manager.req_to_token_indexs,
-                    kind="dp", reader_count=self.dp_size_in_node - 1,
+                    self.model.att_state_manager,
+                    self.model.req_manager.req_to_token_indexs,
+                    kind="dp",
+                    reader_count=self.dp_size_in_node - 1,
                 )
             dist.barrier(group=self.node_nccl_group)
 

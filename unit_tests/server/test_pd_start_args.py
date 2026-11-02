@@ -95,9 +95,15 @@ def test_default_attention_factory_uses_gqa():
     import torch
     from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState, create_gqa_state
 
-    state = create_gqa_state(config=GQAAttentionConfig(
-        logical_layer_groups=((0,),), global_head_num=4, head_dim=128, dtype=torch.bfloat16,
-    ), device="meta")
+    state = create_gqa_state(
+        config=GQAAttentionConfig(
+            logical_layer_groups=((0,),),
+            global_head_num=4,
+            head_dim=128,
+            dtype=torch.bfloat16,
+        ),
+        device="meta",
+    )
     assert isinstance(state, GQAFullAttentionState)
 
 

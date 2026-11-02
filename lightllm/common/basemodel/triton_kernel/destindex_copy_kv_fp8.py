@@ -35,7 +35,12 @@ def _fwd_kernel_destindex_copy_kv_per_head_fp8(
     if SPLIT_KV:
         # 两块独立分配的 K/V 具有相同形状和 stride，输入仍按 K heads、V heads 排列。
         k_ptrs = Out + dest_index * stride_o_bs + stride_o_h * offs_h[:, None] + stride_o_d * offs_d[None, :]
-        v_ptrs = Out_v + dest_index * stride_o_bs + stride_o_h * (offs_h[:, None] - head_num // 2) + stride_o_d * offs_d[None, :]
+        v_ptrs = (
+            Out_v
+            + dest_index * stride_o_bs
+            + stride_o_h * (offs_h[:, None] - head_num // 2)
+            + stride_o_d * offs_d[None, :]
+        )
         o_ptrs = tl.where(offs_h[:, None] < head_num // 2, k_ptrs, v_ptrs)
     else:
         o_ptrs = Out + dest_index * stride_o_bs + stride_o_h * offs_h[:, None] + stride_o_d * offs_d[None, :]

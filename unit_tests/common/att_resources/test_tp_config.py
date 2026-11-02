@@ -61,7 +61,9 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
     cpu_args.cpu_cache_token_page_size = 4
     if state_cls is MLAFullAttentionState:
         config = MLAConfig(
-            logical_layer_groups=((0,),), latent_dim=4, latent_dtype=torch.float32,
+            logical_layer_groups=((0,),),
+            latent_dim=4,
+            latent_dtype=torch.float32,
         )
     else:
         config = GQAAttentionConfig(
@@ -75,7 +77,10 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
     reference.allocate_storage(4)
     for storage_buffer in full_state_test_buffers(reference).values():
         storage_buffer.copy_(torch.arange(storage_buffer.numel()).reshape(storage_buffer.shape))
-    fields = {name: field.tensor for name, field in full_state_test_fields(reference, full_state_test_buffers(reference)).items()}
+    fields = {
+        name: field.tensor
+        for name, field in full_state_test_fields(reference, full_state_test_buffers(reference)).items()
+    }
     reference_layout = cpu_layout(reference)
     buffer = torch.zeros((1, reference_layout.byte_end), dtype=torch.uint8, pin_memory=True)
 
@@ -97,7 +102,9 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
         )
 
     for rank, (start, end) in enumerate(target_ranges):
-        target = state_cls(replace(restored_config, tp_rank=rank, tp_world_size=len(target_ranges)), page_size=4, device="cuda")
+        target = state_cls(
+            replace(restored_config, tp_rank=rank, tp_world_size=len(target_ranges)), page_size=4, device="cuda"
+        )
         target.allocate_storage(4)
         layout = cpu_layout(target)
         assert layout.byte_end == reference_layout.byte_end
@@ -199,14 +206,18 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
         assert page_bytes == page_tokens * 192
     assert manager.get_pd_operator().get_page_bytes() == page_bytes
     getter = (
-        manager.get_pd_operator().get_pd_bounded_att_page_layouts if bounded else manager.get_pd_operator().get_pd_full_att_page_layouts
+        manager.get_pd_operator().get_pd_bounded_att_page_layouts
+        if bounded
+        else manager.get_pd_operator().get_pd_full_att_page_layouts
     )
     layouts = getter()
     assert getter() is layouts
     assert set(layouts) == {source.state_name, other.state_name}
     assert all(layout.tokens_per_page == (None if bounded else page_tokens) for layout in layouts.values())
     unused_getter = (
-        manager.get_pd_operator().get_pd_full_att_page_layouts if bounded else manager.get_pd_operator().get_pd_bounded_att_page_layouts
+        manager.get_pd_operator().get_pd_full_att_page_layouts
+        if bounded
+        else manager.get_pd_operator().get_pd_bounded_att_page_layouts
     )
     assert unused_getter() == {}
     assert manager.get_pd_operator().get_page_bytes() == page_bytes

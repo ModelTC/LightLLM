@@ -122,15 +122,18 @@ def test_manager_allocates_page_tensors_only_for_snapshot_states(
         partial(FullAttKVAllocator, pin_memory=False),
     )
     manager = AttentionStateManager(request_capacity=3)
-    manager.register_state("main", GQAFullAttentionState(
-        layout_config=GQAAttentionConfig(
-            logical_layer_groups=((3,),),
-            global_head_num=1,
-            head_dim=4,
-            dtype=torch.bfloat16,
+    manager.register_state(
+        "main",
+        GQAFullAttentionState(
+            layout_config=GQAAttentionConfig(
+                logical_layer_groups=((3,),),
+                global_head_num=1,
+                head_dim=4,
+                dtype=torch.bfloat16,
+            ),
+            device="meta",
         ),
-        device="meta",
-    ))
+    )
     manager.register_state("main", state)
     manager.finish_state_registration()
     manager.allocate_storage(
@@ -189,4 +192,4 @@ def test_pd_window_restores_different_mtp_rings(
     torch.testing.assert_close(target.buffer[:, 2], expected, rtol=0, atol=0)
     assert (target.buffer[:, :2] == 37).all()
     assert (pages[0] == 253).all() and (pages[2] == 253).all()
-    assert (pages[1, :16] == 253).all() and (pages[1, layout.byte_end:] == 253).all()
+    assert (pages[1, :16] == 253).all() and (pages[1, layout.byte_end :] == 253).all()

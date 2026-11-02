@@ -41,7 +41,9 @@ class MLAConfig:
             isinstance(group, tuple) and group for group in self.logical_layer_groups
         ), "layer groups must be a tuple of nonempty tuples"
         layers = [layer for group in self.logical_layer_groups for layer in group]
-        assert all(isinstance(layer, int) and layer >= 0 for layer in layers), "logical layer IDs must be nonnegative integers"
+        assert all(
+            isinstance(layer, int) and layer >= 0 for layer in layers
+        ), "logical layer IDs must be nonnegative integers"
         assert len(layers) == len(set(layers)), "a logical layer must belong to exactly one storage group"
         assert self.latent_dim > 0 and 0 <= self.tp_rank < self.tp_world_size
 
@@ -126,12 +128,13 @@ class MLAFullAttentionState(FullAttentionState):
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
         assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
-        assert src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel(), (
-            "token copies require equal one-dimensional index tensors"
-        )
-        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (torch.int32, torch.int64), (
-            "token indices must be integer tensors"
-        )
+        assert (
+            src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
+        ), "token copies require equal one-dimensional index tensors"
+        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (
+            torch.int32,
+            torch.int64,
+        ), "token indices must be integer tensors"
         assert self.storage.is_cuda, "token copies require CUDA storage"
         if not src_indices.numel():
             return
@@ -209,9 +212,9 @@ class MLAFullAttentionState(FullAttentionState):
         remote_dp_full_att_state: MLAFullAttentionState,
     ) -> None:
         """复制其他 DP 同一 TP 分片的完整 token 数据，层顺序保持一致。"""
-        assert type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config, (
-            "DP copy requires the same encoding and equivalent TP state configurations"
-        )
+        assert (
+            type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config
+        ), "DP copy requires the same encoding and equivalent TP state configurations"
         assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
         copy_packed_tokens(

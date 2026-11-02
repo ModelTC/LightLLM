@@ -53,46 +53,56 @@ class Glm5NextTpPartModel(TpPartBaseModel):
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
-        assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
+        assert not (
+            args.mtp_step and args.enable_prefill_decode_mixed
+        ), "MTP linear attention does not support mixed prefill/decode"
         cfg = Glm5NextResourceConfig.from_model_config(config, args)
         states = []
-        linear_layers = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval)
+        linear_layers = tuple(
+            layer for i, layer in enumerate(model_logical_layer_ids) if (i + 1) % cfg.full_attention_interval
+        )
         if linear_layers:
-            states.append(create_kda_state(
-                config=ConvSSMStateConfig(
-                    logical_layer_ids=linear_layers,
-                    global_k_heads=cfg.global_linear_k_heads,
-                    global_v_heads=cfg.global_linear_v_heads,
-                    key_dim=cfg.head_linear_k_dim,
-                    value_dim=cfg.head_linear_v_dim,
-                    conv_width=cfg.conv_kernel_size - 1,
-                    conv_dtype=cfg.conv_state_dtype,
-                    ssm_dtype=cfg.ssm_state_dtype,
-                    tp_rank=tp_rank,
-                    tp_world_size=tp_world_size,
-                ),
-                request_capacity=request_capacity,
-                mtp_step=args.mtp_step,
-                device=device,
-            ))
+            states.append(
+                create_kda_state(
+                    config=ConvSSMStateConfig(
+                        logical_layer_ids=linear_layers,
+                        global_k_heads=cfg.global_linear_k_heads,
+                        global_v_heads=cfg.global_linear_v_heads,
+                        key_dim=cfg.head_linear_k_dim,
+                        value_dim=cfg.head_linear_v_dim,
+                        conv_width=cfg.conv_kernel_size - 1,
+                        conv_dtype=cfg.conv_state_dtype,
+                        ssm_dtype=cfg.ssm_state_dtype,
+                        tp_rank=tp_rank,
+                        tp_world_size=tp_world_size,
+                    ),
+                    request_capacity=request_capacity,
+                    mtp_step=args.mtp_step,
+                    device=device,
+                )
+            )
         full_layers = tuple(model_logical_layer_ids[index] for index in cfg.get_full_att_layer_indices())
         if full_layers:
-            assert args.linear_att_hash_page_size % config["index_kpool"] == 0, "GLM cache pages must align to index_kpool"
-            states.append(create_window_compressor_state(
-                config=WindowCompressorStateConfig(
-                    logical_layer_ids=full_layers,
-                    window_size=config["index_kpool"],
-                    compress_stride=config["index_kpool"],
-                    candidate_dim=config["index_head_dim"],
-                    target="indexer",
-                    dtype=get_torch_dtype(args.data_type),
-                    tp_rank=tp_rank,
-                    tp_world_size=tp_world_size,
-                ),
-                request_capacity=request_capacity,
-                mtp_step=args.mtp_step,
-                device=device,
-            ))
+            assert (
+                args.linear_att_hash_page_size % config["index_kpool"] == 0
+            ), "GLM cache pages must align to index_kpool"
+            states.append(
+                create_window_compressor_state(
+                    config=WindowCompressorStateConfig(
+                        logical_layer_ids=full_layers,
+                        window_size=config["index_kpool"],
+                        compress_stride=config["index_kpool"],
+                        candidate_dim=config["index_head_dim"],
+                        target="indexer",
+                        dtype=get_torch_dtype(args.data_type),
+                        tp_rank=tp_rank,
+                        tp_world_size=tp_world_size,
+                    ),
+                    request_capacity=request_capacity,
+                    mtp_step=args.mtp_step,
+                    device=device,
+                )
+            )
         return states
 
     @classmethod
@@ -159,9 +169,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
                 latent_dim=cfg.full_att_head_dim,
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
-                format="packed_group64_e8m0" if args.llm_kv_type == "fp8kv_dsa" else (
-                    "packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16"
-                ),
+                format="packed_group64_e8m0"
+                if args.llm_kv_type == "fp8kv_dsa"
+                else ("packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16"),
             ),
             page_size=args.page_size,
             device="meta",
@@ -171,7 +181,9 @@ class Glm5NextTpPartModel(TpPartBaseModel):
     def _init_att_backend(self):
         from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import Fp8Glm5NextSparseAttBackend
 
-        backend_class = Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
+        backend_class = (
+            Fp8Glm5NextSparseAttBackend if self.args.llm_kv_type == "fp8kv_dsa" else Glm5NextSparseAttBackend
+        )
         self.prefill_att_backend = backend_class(model=self)
         self.decode_att_backend = self.prefill_att_backend
 

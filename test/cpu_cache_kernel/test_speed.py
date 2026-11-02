@@ -63,7 +63,9 @@ def main():
     resources = AttentionStateManager(request_capacity=1)
     bounded_state = create_gdn_state(
         config=ConvSSMStateConfig(
-            logical_layer_ids=tuple(layer for layer in range(cfg.all_layer_num) if (layer + 1) % cfg.full_attention_interval),
+            logical_layer_ids=tuple(
+                layer for layer in range(cfg.all_layer_num) if (layer + 1) % cfg.full_attention_interval
+            ),
             global_k_heads=cfg.global_linear_k_heads,
             global_v_heads=cfg.global_linear_v_heads,
             key_dim=cfg.head_linear_k_dim,
@@ -88,7 +90,9 @@ def main():
     resources.finish_state_registration()
     pages = list(range(args.pages))
     slots = resources.bounded_att_big_page_allocator.alloc(args.pages)
-    cpu_page_buffers = torch.zeros((args.pages, resources.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    cpu_page_buffers = torch.zeros(
+        (args.pages, resources.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True
+    )
     # Populate every TP region through the production API before measuring restores.
     full.k_storage.zero_()
     full.v_storage.zero_()
@@ -128,11 +132,16 @@ def main():
         + full.v_storage[:, :tokens].numel() * full.v_storage.element_size()
     )
     pool = (
-        resources.main_kda_conv_bf16_ssm_fp32_state if hasattr(resources, "main_kda_conv_bf16_ssm_fp32_state") else resources.main_gdn_conv_bf16_ssm_fp32_state
+        resources.main_kda_conv_bf16_ssm_fp32_state
+        if hasattr(resources, "main_kda_conv_bf16_ssm_fp32_state")
+        else resources.main_gdn_conv_bf16_ssm_fp32_state
     ).big_pages_pool
     state_bytes = args.pages * sum(t[0].numel() * t.element_size() for t in (pool.conv_state, pool.ssm_state))
     median = statistics.median(times)
-    print(f"Pages: {args.pages}; tokens/page: {args.tokens_per_page}; CPU bytes/page: {resources.get_cpu_cache_operator().get_page_bytes():,}")
+    print(
+        f"Pages: {args.pages}; tokens/page: {args.tokens_per_page}; "
+        f"CPU bytes/page: {resources.get_cpu_cache_operator().get_page_bytes():,}"
+    )
     print(f"Mean: {statistics.mean(times) * 1000:.3f} ms; median: {median * 1000:.3f} ms")
     print(f"KV + state payload throughput: {(token_bytes + state_bytes) / median / 1024**3:.3f} GiB/s")
 

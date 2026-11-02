@@ -119,9 +119,9 @@ class PDOperator:
                     )
             case "att_state":
                 assert req_idx is not None, "state PD pages require a request index"
-                assert state_token_len is not None and state_token_len >= 0, (
-                    "PD state requires its prefill prefix length"
-                )
+                assert (
+                    state_token_len is not None and state_token_len >= 0
+                ), "PD state requires its prefill prefix length"
                 for state in self.owner.get_bounded_attention_states():
                     state.write_to_pd_page(
                         req_idx=req_idx,
@@ -155,9 +155,9 @@ class PDOperator:
                     )
             case "att_state":
                 assert req_idx is not None, "state PD pages require a request index"
-                assert state_token_len is not None and state_token_len >= 0, (
-                    "PD state requires its prefill prefix length"
-                )
+                assert (
+                    state_token_len is not None and state_token_len >= 0
+                ), "PD state requires its prefill prefix length"
                 for state in self.owner.get_bounded_attention_states():
                     state.read_from_pd_page(
                         pd_page_buffers=pd_page_buffers,

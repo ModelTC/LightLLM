@@ -33,9 +33,7 @@ def get_swa_token_indices(swa_state, req_idx, position_ids, *, prefill_state=Non
     hold_slot = swa_state.HOLD_SWA_SLOT
     if prefill_state is not None:
         ready = prefill_state.prefill_token_ranges[req_idx, 0]
-        first = (
-            (ready - config.window_size + 1).clamp_min(0) // config.page_token_size * config.page_token_size
-        )
+        first = (ready - config.window_size + 1).clamp_min(0) // config.page_token_size * config.page_token_size
         workspace = prefill_state.swa_prefill_workspace_offsets[req_idx]
         swa_token_indices = workspace + position_ids - first
         hold_slot = prefill_state.HOLD_SWA_SLOT
@@ -104,7 +102,11 @@ def _copy_swa_prefix_to_workspace_kernel(
         return
     source_slot = req_idx * SWA_CAPACITY_TOKENS + position % SWA_CAPACITY_TOKENS
     source = runtime_swa_buffer + layer * RUNTIME_LAYER_STRIDE + source_slot // SWA_PAGE_TOKEN_NUM * PACKED_BYTES
-    target = workspace_swa_buffer + layer * WORKSPACE_LAYER_STRIDE + (target_slot // SWA_PAGE_TOKEN_NUM + block) * PACKED_BYTES
+    target = (
+        workspace_swa_buffer
+        + layer * WORKSPACE_LAYER_STRIDE
+        + (target_slot // SWA_PAGE_TOKEN_NUM + block) * PACKED_BYTES
+    )
     lanes = tl.arange(0, BLOCK)
     for chunk in range(0, PACKED_BYTES, BLOCK):
         offset = chunk + lanes

@@ -141,8 +141,10 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         backend: LinearAttBackend = self.backend
 
         state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role, state_type_filter="gdn",
-            logical_layer_id=layer_num, state_class=GDNState,
+            model_role=self.infer_state.att_state_role,
+            state_type_filter="gdn",
+            logical_layer_id=layer_num,
+            state_class=GDNState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
@@ -220,7 +222,8 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         # MTP 元数据按模型初始化，沿用每个角色只有一个 GDN State 的约束。
         # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
         (state,) = (
-            state for state in self.infer_state.att_state_manager.get_bounded_attention_states(
+            state
+            for state in self.infer_state.att_state_manager.get_bounded_attention_states(
                 self.infer_state.att_state_role
             )
             if isinstance(state, GDNState)
@@ -297,8 +300,10 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
 
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
         state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role, state_type_filter="gdn",
-            logical_layer_id=layer_num, state_class=GDNState,
+            model_role=self.infer_state.att_state_role,
+            state_type_filter="gdn",
+            logical_layer_id=layer_num,
+            state_class=GDNState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
 

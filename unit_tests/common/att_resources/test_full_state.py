@@ -20,18 +20,25 @@ from lightllm.common.attention_state.full_att import (
     MLAConfig,
 )
 from lightllm.common.attention_state.types import (
-    AxisMapping, StateTransferLayout, TransferRegion,
+    AxisMapping,
+    StateTransferLayout,
+    TransferRegion,
 )
 
 
 def full_state(cls: type[FullAttentionState] = GQAFullAttentionState, device: str | torch.device | int = "cpu"):
     if cls is MLAFullAttentionState:
         config = MLAConfig(
-            logical_layer_groups=((2,), (5,)), latent_dim=4, latent_dtype=torch.float32,
+            logical_layer_groups=((2,), (5,)),
+            latent_dim=4,
+            latent_dtype=torch.float32,
         )
     else:
         config = GQAAttentionConfig(
-            logical_layer_groups=((2,), (5,)), global_head_num=1, head_dim=4, dtype=torch.float32,
+            logical_layer_groups=((2,), (5,)),
+            global_head_num=1,
+            head_dim=4,
+            dtype=torch.float32,
         )
     prepared_full_state = cls(config, page_size=4, device=device)
     prepared_full_state.allocate_storage(12)
@@ -103,6 +110,7 @@ def test_full_attention_write_copy_and_pd(
                 head_end = head_start + buffer.shape[2]
                 buffer[layer, ids.long()] = values[:, head_start:head_end]
                 head_start = head_end
+
     def reject_host_list(tensor: torch.Tensor):
         raise AssertionError("token copies must not convert indices to Python lists")
 
@@ -197,7 +205,8 @@ def test_cpu_partial_last_page(state_offset: int, extra_page_bytes: int):
     )
     assert torch.equal(read_kv_storage(target)[:, [6, 7, 8, 9, 10]], read_kv_storage(state)[:, [0, 1, 2, 3, 7]])
     assert (buffer[[1, 3]] == 252).all()
-    assert (buffer[:, :layout.byte_start] == 252).all() and (buffer[:, layout.byte_end:] == 252).all()
+    assert (buffer[:, : layout.byte_start] == 252).all() and (buffer[:, layout.byte_end :] == 252).all()
+
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_invalid_late_region_shape_cannot_partially_write_pd_page():
@@ -244,7 +253,8 @@ def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int)
     if device == "cpu":
         with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
             target.copy_tokens_from_dp(
-                src_token_indices=torch.tensor([2, 0]), dst_token_indices=torch.tensor([6, 7]),
+                src_token_indices=torch.tensor([2, 0]),
+                dst_token_indices=torch.tensor([6, 7]),
                 remote_dp_full_att_state=source,
             )
         return

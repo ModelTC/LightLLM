@@ -98,7 +98,9 @@ class DPChunkedPrefillBackend(ModeBackend):
         infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         req_dp_ranks = [req[3] for req in reqs]
         self.dp_kv_shared_module.fill_reqs_info(reqs=infer_reqs)
-        transfer_tasks = self.dp_kv_shared_module.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
+        transfer_tasks = self.dp_kv_shared_module.build_shared_kv_trans_tasks(
+            reqs=infer_reqs, req_dp_ranks=req_dp_ranks
+        )
         self.dp_kv_shared_module.kv_trans(trans_tasks=transfer_tasks)
 
         # other_dp_reqs 只是为本 DP 做完 prefix cache / KV 拉取后的临时本地对象，

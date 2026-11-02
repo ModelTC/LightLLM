@@ -23,6 +23,7 @@ CUDA_HOST_REGISTER_MAPPED = 2
 # 一、页池分配：普通存储或 DP fetch 所需的共享 pinned 存储
 # ========================================================================
 
+
 def create_page_pool_tensor(
     size: tuple[int, ...],
     dtype: torch.dtype,
@@ -80,6 +81,7 @@ def create_page_pool_tensor(
 # ========================================================================
 # 二、本进程注册：首次创建和跨进程接收复用同一入口
 # ========================================================================
+
 
 def register_page_pool_tensor(tensor: torch.Tensor) -> None:
     """将共享 CPU 存储注册到当前进程，已 pinned、空存储或 GPU Tensor 无需处理。

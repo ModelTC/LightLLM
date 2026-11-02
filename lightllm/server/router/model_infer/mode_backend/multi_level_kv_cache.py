@@ -160,10 +160,12 @@ class MultiLevelKvCacheModule(object):
             # FA3 的资源搬运需等待已有计算流完成。
             torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
         assert 0 <= start_token_len <= req.cur_kv_len, "invalid CPU page start"
-        token_indices = torch.cat([
-            req_manager.req_to_token_indexs[req.req_idx, start_token_len:req.cur_kv_len],
-            mem_indexes.cuda(non_blocking=True),
-        ])
+        token_indices = torch.cat(
+            [
+                req_manager.req_to_token_indexs[req.req_idx, start_token_len : req.cur_kv_len],
+                mem_indexes.cuda(non_blocking=True),
+            ]
+        )
         assert token_indices.numel() == page_lengths[-1] - start_token_len
 
         # 阶段二：只为完整 bounded 页分配普通大页，碎页 LOAD 槽位由资源层管理。
@@ -171,9 +173,9 @@ class MultiLevelKvCacheModule(object):
         if self.backend.is_hybrid_att_model:
             page_tokens = self.args.cpu_cache_token_page_size
             complete_page_lengths = [length for length in page_lengths if length % page_tokens == 0]
-            assert len(complete_page_lengths) == len(page_lengths) - int(page_lengths[-1] % page_tokens != 0), (
-                "only the final CPU page may be partial"
-            )
+            assert len(complete_page_lengths) == len(page_lengths) - int(
+                page_lengths[-1] % page_tokens != 0
+            ), "only the final CPU page may be partial"
             allocator = resources.bounded_att_big_page_allocator
             big_page_slot_ids = allocator.alloc(len(complete_page_lengths))
             assert big_page_slot_ids is not None, "not enough bounded state slots for CPU cache load"
@@ -248,9 +250,7 @@ class MultiLevelKvCacheModule(object):
 
         return true_finished_reqs
 
-    def write_req_to_cpu(
-        self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
-    ) -> Optional["TransTask"]:
+    def write_req_to_cpu(self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream) -> Optional["TransTask"]:
         """选择请求可缓存的前缀，分配 CPU 页并提交写出，返回待确认完成的任务。"""
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
@@ -324,7 +324,9 @@ class MultiLevelKvCacheModule(object):
             if self.backend.is_hybrid_att_model:
                 page_tokens = self.args.cpu_cache_token_page_size
                 radix_cache = g_infer_context.radix_cache
-                shared_slots = radix_cache.get_big_page_ids_by_node(req.shared_kv_node) if radix_cache is not None else []
+                shared_slots = (
+                    radix_cache.get_big_page_ids_by_node(req.shared_kv_node) if radix_cache is not None else []
+                )
                 big_slots = {(i + 1) * page_tokens: slot for i, slot in enumerate(shared_slots)}
                 big_slots.update(req.hybrid_len_to_big_page_id)
                 big_page_slot_ids = [

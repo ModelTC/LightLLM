@@ -147,7 +147,9 @@ class TpPartBaseModel:
         if self.is_mtp_draft_model:
             self.att_state_manager = self.main_model.att_state_manager
             assert not self.att_state_manager._state_registration_finished, "State registration is already finished"
-            assert self.max_req_num + 1 == self.att_state_manager._request_capacity, "models must share the request domain"
+            assert (
+                self.max_req_num + 1 == self.att_state_manager._request_capacity
+            ), "models must share the request domain"
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             if not self.is_mtp_draft_model:
                 self.att_state_manager = AttentionStateManager(request_capacity=self.max_req_num + 1)
@@ -158,12 +160,19 @@ class TpPartBaseModel:
             # 当前模型拥有的全局逻辑层 ID，按模型内部层顺序排列；各工厂自行选择参与层及共享分组。
             logical_layer_ids = tuple(layer.layer_num_ for layer in self.layers_infer)
             full_states = self.create_full_att_states(
-                model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
-                tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
+                model_config=self.config,
+                args=self.args,
+                model_logical_layer_ids=logical_layer_ids,
+                tp_rank=self.tp_rank_,
+                tp_world_size=self.tp_world_size_,
             )
             bounded_states = self.create_bounded_att_states(
-                model_config=self.config, args=self.args, model_logical_layer_ids=logical_layer_ids,
-                request_capacity=self.max_req_num + 1, tp_rank=self.tp_rank_, tp_world_size=self.tp_world_size_,
+                model_config=self.config,
+                args=self.args,
+                model_logical_layer_ids=logical_layer_ids,
+                request_capacity=self.max_req_num + 1,
+                tp_rank=self.tp_rank_,
+                tp_world_size=self.tp_world_size_,
                 device="cuda",
             )
             for state in (*full_states, *bounded_states):
@@ -254,8 +263,13 @@ class TpPartBaseModel:
 
     @classmethod
     def create_full_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        *,
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """返回本模型的 full-attention 定义列表；默认没有此类资源，不分配 KV 容量。
 
@@ -266,9 +280,15 @@ class TpPartBaseModel:
 
     @classmethod
     def create_bounded_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], request_capacity: int = 1,
-        tp_rank: int = 0, tp_world_size: int = 1, device: str = "meta",
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        *,
+        model_logical_layer_ids: tuple[int, ...],
+        request_capacity: int = 1,
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+        device: str = "meta",
     ) -> list["BoundedAttentionState"]:
         """返回本模型的 bounded 运行态列表；meta 用于布局查询，大小页后续分配。
 

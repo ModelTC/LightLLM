@@ -172,9 +172,7 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
     state.att_state_role = "main"
     state.att_state_manager = SimpleNamespace(
-        get_state=lambda **kwargs: SimpleNamespace(
-            get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv)
-        )
+        get_state=lambda **kwargs: SimpleNamespace(get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv))
     )
     state.prefill_att_state = Glm5NextSparsePrefillState()
     state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
@@ -420,6 +418,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     assert all(not hasattr(model, "att_state_manager") for model in (main, *drafts))
     assert all(not hasattr(model, "linear_config") for model in (main, *drafts))
     from contextlib import nullcontext
+
     for model in (main, *drafts):
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     main.prepare_attention_states()

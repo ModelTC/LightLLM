@@ -83,17 +83,13 @@ class CpuCacheOperator:
             big_page_slot_ids = [] if big_page_slot_ids is None else big_page_slot_ids
             small_page_slot_ids = [] if small_page_slot_ids is None else small_page_slot_ids
             big_page_count = len(big_page_slot_ids)
-            assert big_page_count + len(small_page_slot_ids) == len(cpu_page_indices), (
-                "one state slot is required per CPU page"
-            )
+            assert big_page_count + len(small_page_slot_ids) == len(
+                cpu_page_indices
+            ), "one state slot is required per CPU page"
             big_cpu_page_indices = cpu_page_indices[:big_page_count]
             small_cpu_page_indices = cpu_page_indices[big_page_count:]
-            big_page_readies = (
-                cpu_page_ready_flags[:big_page_count] if cpu_page_ready_flags is not None else None
-            )
-            small_page_readies = (
-                cpu_page_ready_flags[big_page_count:] if cpu_page_ready_flags is not None else None
-            )
+            big_page_readies = cpu_page_ready_flags[:big_page_count] if cpu_page_ready_flags is not None else None
+            small_page_readies = cpu_page_ready_flags[big_page_count:] if cpu_page_ready_flags is not None else None
 
         for state in full_states:
             state.write_to_cpu(
@@ -148,9 +144,9 @@ class CpuCacheOperator:
             page_tokens = get_env_start_args().cpu_cache_token_page_size
             has_partial_page = token_indices.numel() % page_tokens != 0
             assert isinstance(big_page_slot_ids, list), "slot indices must be a list"
-            assert len(big_page_slot_ids) + int(has_partial_page) == len(cpu_page_indices), (
-                "slots must cover complete CPU pages only"
-            )
+            assert len(big_page_slot_ids) + int(has_partial_page) == len(
+                cpu_page_indices
+            ), "slots must cover complete CPU pages only"
             load_big_page_slot_ids = big_page_slot_ids.copy()
             if has_partial_page:
                 load_big_page_slot_ids.append(self.owner.bounded_att_cpu_load_big_page_slot)

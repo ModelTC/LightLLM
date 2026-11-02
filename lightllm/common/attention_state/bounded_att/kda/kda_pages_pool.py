@@ -18,9 +18,9 @@ class KDAPagesPool:
         pin_memory: bool = True,
     ) -> None:
         assert size >= 0, "pool size must be nonnegative"
-        assert config.num_k_heads == config.num_v_heads and config.key_dim == config.value_dim, (
-            "KDA pages require equal Q/K/V heads and dimensions"
-        )
+        assert (
+            config.num_k_heads == config.num_v_heads and config.key_dim == config.value_dim
+        ), "KDA pages require equal Q/K/V heads and dimensions"
         self.size = size
         device = torch.device(device)
         pin_memory = pin_memory and device.type == "cpu"

@@ -67,9 +67,7 @@ def test_bounded_cache_miss_resets_runtime_and_preserves_pages(monkeypatch):
     req.req_idx = 1
     req.cur_kv_len = req.cur_output_len = 0
     req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
-    req.shm_req = SimpleNamespace(
-        input_len=1, hybrid_token_hash_list=SimpleNamespace(get_all=lambda: [], size=0)
-    )
+    req.shm_req = SimpleNamespace(input_len=1, hybrid_token_hash_list=SimpleNamespace(get_all=lambda: [], size=0))
     req._hybrid_match_radix_cache()
 
     for state in resources.get_bounded_attention_states():

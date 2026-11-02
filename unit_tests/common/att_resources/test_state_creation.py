@@ -10,12 +10,24 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.full_att import (
-    GQAAttentionConfig, MLAConfig, FullAttentionState, GQAFullAttentionState, GroupQuantizedFullAttentionState,
-    StaticFP8FullAttentionState, MLAFullAttentionState, PackedMLAFullAttentionState,
-    PackedMLALogicalConfig, create_gqa_state, create_mla_state, create_packed_mla_state,
+    GQAAttentionConfig,
+    MLAConfig,
+    FullAttentionState,
+    GQAFullAttentionState,
+    GroupQuantizedFullAttentionState,
+    StaticFP8FullAttentionState,
+    MLAFullAttentionState,
+    PackedMLAFullAttentionState,
+    PackedMLALogicalConfig,
+    create_gqa_state,
+    create_mla_state,
+    create_packed_mla_state,
 )
 from lightllm.common.attention_state.bounded_att import (
-    BoundedAttentionState, ConvSSMStateConfig, create_gdn_state, create_kda_state,
+    BoundedAttentionState,
+    ConvSSMStateConfig,
+    create_gdn_state,
+    create_kda_state,
 )
 from lightllm.common.attention_state.bounded_att import WindowCompressorStateConfig, create_window_compressor_state
 
@@ -108,8 +120,11 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
         state = create_packed_mla_state(config=config, page_size=4, device="meta")
     else:
         config = MLAConfig(
-            logical_layer_groups=((2,), (6,)), latent_dim=kv_dim, latent_dtype=torch.bfloat16,
-            tp_rank=1, tp_world_size=4,
+            logical_layer_groups=((2,), (6,)),
+            latent_dim=kv_dim,
+            latent_dtype=torch.bfloat16,
+            tp_rank=1,
+            tp_world_size=4,
         )
         state = create_mla_state(config=config, page_size=4, device="meta")
     assert state.get_state_type() == expected_type
@@ -163,7 +178,9 @@ def test_bounded_creation_allocates_runtime_but_defers_pools(create_state: Calla
 def test_kpool_creation_preserves_pool_and_mtp_dimensions():
     config = WindowCompressorStateConfig(
         logical_layer_ids=(3, 7),
-        window_size=4, compress_stride=4, target="indexer",
+        window_size=4,
+        compress_stride=4,
+        target="indexer",
         candidate_dim=128,
         dtype=torch.bfloat16,
     )
@@ -188,7 +205,9 @@ def test_create_rejects_encoding_from_another_logical_family():
     with pytest.raises(AssertionError, match="unsupported GQA encoding"):
         create_gqa_state(config=config, kv_type="fp8kv_dsa", device="meta")
     packed_config = PackedMLALogicalConfig(
-        logical_layer_groups=((0,),), latent_dim=576, format="packed_group128_fp8",
+        logical_layer_groups=((0,),),
+        latent_dim=576,
+        format="packed_group128_fp8",
     )
     with pytest.raises(AssertionError, match="normal MLA creation"):
         create_mla_state(config=packed_config, device="meta")
@@ -201,8 +220,13 @@ def test_create_rejects_encoding_from_another_logical_family():
 
 @pytest.mark.parametrize(
     "state_class",
-    [GQAFullAttentionState, GroupQuantizedFullAttentionState, StaticFP8FullAttentionState,
-     MLAFullAttentionState, PackedMLAFullAttentionState],
+    [
+        GQAFullAttentionState,
+        GroupQuantizedFullAttentionState,
+        StaticFP8FullAttentionState,
+        MLAFullAttentionState,
+        PackedMLAFullAttentionState,
+    ],
 )
 def test_full_attention_implementations_are_independent(state_class: type[FullAttentionState]):
     # 具体方案只共享抽象契约，不继承其他具体方案的存储或操作实现。

@@ -11,10 +11,19 @@ import torch
 from lightllm.common.attention_state.types import TensorField
 from lightllm.common.attention_state.bounded_att import GDNState, KDAState, WindowCompressorState
 from lightllm.common.attention_state.full_att import (
-    FullAttentionState, GQAAttentionConfig, MLAConfig,
-    GroupQuantizedAttentionConfig, StaticFP8AttentionConfig, PackedMLAAttentionConfig,
-    CompressedAttentionConfig, FP8E8M0PackedMLAConfig, StaticFP8FullAttentionState,
-    GQAFullAttentionState, GroupQuantizedFullAttentionState, MLAFullAttentionState, PackedMLAFullAttentionState,
+    FullAttentionState,
+    GQAAttentionConfig,
+    MLAConfig,
+    GroupQuantizedAttentionConfig,
+    StaticFP8AttentionConfig,
+    PackedMLAAttentionConfig,
+    CompressedAttentionConfig,
+    FP8E8M0PackedMLAConfig,
+    StaticFP8FullAttentionState,
+    GQAFullAttentionState,
+    GroupQuantizedFullAttentionState,
+    MLAFullAttentionState,
+    PackedMLAFullAttentionState,
 )
 
 
@@ -46,7 +55,9 @@ def bind_test_fp8_calibration(
         q_scales = q_scales.repeat(1, config.tp_world_size)
         calibration["num_head"] = heads * config.tp_world_size
         calibration["q_calibration"] = {
-            "num_head": q_scales.shape[1], "scales_shape": list(q_scales.shape), "scales": q_scales.tolist(),
+            "num_head": q_scales.shape[1],
+            "scales_shape": list(q_scales.shape),
+            "scales": q_scales.tolist(),
         }
     calibration["scales_shape"] = list(scales.shape)
     calibration["scales"] = scales.tolist()
@@ -56,9 +67,14 @@ def bind_test_fp8_calibration(
 def rebuild_full_state(
     template: FullAttentionState,
     config: (
-        GQAAttentionConfig | MLAConfig | GroupQuantizedAttentionConfig
-        | StaticFP8AttentionConfig | PackedMLAAttentionConfig
-        | CompressedAttentionConfig | FP8E8M0PackedMLAConfig | None
+        GQAAttentionConfig
+        | MLAConfig
+        | GroupQuantizedAttentionConfig
+        | StaticFP8AttentionConfig
+        | PackedMLAAttentionConfig
+        | CompressedAttentionConfig
+        | FP8E8M0PackedMLAConfig
+        | None
     ) = None,
     token_capacity: int | None = None,
     page_size: int | None = None,
@@ -73,7 +89,9 @@ def rebuild_full_state(
     device = template.device if device is None else device
     if isinstance(template, StaticFP8FullAttentionState):
         prepared_full_state = type(template)(
-            config, page_size=page_size, device=device,
+            config,
+            page_size=page_size,
+            device=device,
         )
         bind_test_fp8_calibration(
             state=prepared_full_state,
@@ -83,7 +101,9 @@ def rebuild_full_state(
         prepared_full_state.allocate_storage(token_capacity)
         return prepared_full_state
     prepared_full_state = type(template)(
-        config, page_size=page_size, device=device,
+        config,
+        page_size=page_size,
+        device=device,
     )
     prepared_full_state.allocate_storage(token_capacity)
     return prepared_full_state
@@ -128,15 +148,16 @@ def prepare_model_states(model: TpPartBaseModel, logical_layer_ids: Sequence[int
 
 
 def create_full_attention_roles(
-    template: FullAttentionState, main_layer_count: int,
+    template: FullAttentionState,
+    main_layer_count: int,
 ) -> tuple[FullAttentionState, FullAttentionState | None]:
     """仅用于测试：按配置层号创建各自拥有独立存储的 main 和单个 draft。"""
     layers = template.config.logical_layer_groups
     boundary = sum(all(layer < main_layer_count for layer in group) for group in layers)
     assert boundary and all(layer < main_layer_count for group in layers[:boundary] for layer in group)
-    assert all(layer >= main_layer_count for group in layers[boundary:] for layer in group), (
-        "draft layers must follow main layers and cannot share main storage"
-    )
+    assert all(
+        layer >= main_layer_count for group in layers[boundary:] for layer in group
+    ), "draft layers must follow main layers and cannot share main storage"
     states = []
     for start, end in ((0, boundary), (boundary, len(layers))):
         if start == end:
@@ -178,8 +199,10 @@ def full_state_test_buffers(state: FullAttentionState) -> dict[str, torch.Tensor
     """仅供多方案参数化测试枚举实际存储，检查容量、独立分配及字节一致性。"""
     if isinstance(state, GroupQuantizedFullAttentionState):
         return {
-            "k": state.k_storage, "v": state.v_storage,
-            "k_scale": state.k_scales, "v_scale": state.v_scales,
+            "k": state.k_storage,
+            "v": state.v_storage,
+            "k_scale": state.k_scales,
+            "v_scale": state.v_scales,
         }
     if isinstance(state, (GQAFullAttentionState, StaticFP8FullAttentionState)):
         return {"k": state.k_storage, "v": state.v_storage}
@@ -188,7 +211,8 @@ def full_state_test_buffers(state: FullAttentionState) -> dict[str, torch.Tensor
 
 
 def full_state_test_fields(
-    state: FullAttentionState, buffers: dict[str, torch.Tensor] | None = None,
+    state: FullAttentionState,
+    buffers: dict[str, torch.Tensor] | None = None,
 ) -> dict[str, TensorField]:
     """测试中独立描述实际数据，用于校验不同存储方案的传输内容。"""
     buffers = full_state_test_buffers(state) if buffers is None else buffers
@@ -199,15 +223,19 @@ def full_state_test_fields(
         if state.config.dtype == torch.float8_e4m3fn:
             fields = {
                 "kv_nope": TensorField(tensor=raw[..., :512], axes=axes),
-                "kv_scale": TensorField(tensor=raw[..., 512:528].view(torch.float32), axes=("layer", "token", "head", "group")),
+                "kv_scale": TensorField(
+                    tensor=raw[..., 512:528].view(torch.float32), axes=("layer", "token", "head", "group")
+                ),
                 "kv_rope": TensorField(tensor=raw[..., 528:656].view(torch.bfloat16), axes=axes),
             }
         else:
-            fields = {"kv": TensorField(tensor=storage[..., :state.config.latent_dim], axes=axes)}
+            fields = {"kv": TensorField(tensor=storage[..., : state.config.latent_dim], axes=axes)}
         start = state.config.indexer_offset
         end = start + state.config.indexer_dim
         fields["indexer_k"] = TensorField(tensor=raw[..., start:end], axes=axes)
-        fields["indexer_scale"] = TensorField(tensor=raw[..., end:end + 4].view(torch.float32), axes=("layer", "token", "head", "scale"))
+        fields["indexer_scale"] = TensorField(
+            tensor=raw[..., end : end + 4].view(torch.float32), axes=("layer", "token", "head", "scale")
+        )
         return fields
     return {
         name: TensorField(tensor=tensor, axes=("layer", "token", "head", "group") if name.endswith("_scale") else axes)
@@ -256,7 +284,9 @@ def build_hybrid_resources(
         device="cuda",
     )
     bounded_state.initialize_page_pools(
-        big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity, pin_memory=True,
+        big_page_capacity=big_page_capacity,
+        small_page_capacity=small_page_capacity,
+        pin_memory=True,
     )
     manager.register_state("main", bounded_state)
     for role, state in (("main", full_state), ("draft0", draft_full_state)):
@@ -293,11 +323,15 @@ def window_states(
     manager: AttentionStateManager,
     role: str | None = None,
 ) -> tuple[WindowCompressorState, ...]:
-    return tuple(state for state in manager.get_bounded_attention_states(role) if isinstance(state, WindowCompressorState))
+    return tuple(
+        state for state in manager.get_bounded_attention_states(role) if isinstance(state, WindowCompressorState)
+    )
 
 
 def linear_states(
     manager: AttentionStateManager,
     role: str | None = None,
 ) -> tuple[GDNState | KDAState, ...]:
-    return tuple(state for state in manager.get_bounded_attention_states(role) if isinstance(state, (GDNState, KDAState)))
+    return tuple(
+        state for state in manager.get_bounded_attention_states(role) if isinstance(state, (GDNState, KDAState))
+    )

@@ -53,9 +53,9 @@ def copy_page(
                 state_layouts = pd_operator.get_pd_bounded_att_page_layouts()
             case _:
                 assert False, f"unknown PD task kind {task_kind}"
-        assert state_layouts and pd_operator.get_page_bytes() == pd_page_buffers.shape[1], (
-            "PD page layout does not match this group"
-        )
+        assert (
+            state_layouts and pd_operator.get_page_bytes() == pd_page_buffers.shape[1]
+        ), "PD page layout does not match this group"
         tp_transfer_layouts.append(state_layouts)
 
     for att_manager, state_layouts in zip(tp_att_managers, tp_transfer_layouts):

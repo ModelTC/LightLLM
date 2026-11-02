@@ -40,7 +40,11 @@ __all__ += [
     "PackedMLALayerView",
 ]
 
-from .compressed_att.compressed_att_state import CompressedAttentionConfig, CompressedAttentionState, CompressedAttentionLayerView
+from .compressed_att.compressed_att_state import (
+    CompressedAttentionConfig,
+    CompressedAttentionState,
+    CompressedAttentionLayerView,
+)
 from .compressed_att.create_compressed_att_state import create_compressed_att_state
 
 __all__ += [

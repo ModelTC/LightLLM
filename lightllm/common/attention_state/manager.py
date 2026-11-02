@@ -77,9 +77,7 @@ class AttentionStateManager:
         """返回当前资源管理器唯一的 PD 操作对象。"""
         return self._pd_operator
 
-    def register_state(
-        self, model_role: str, state: FullAttentionState | BoundedAttentionState
-    ) -> None:
+    def register_state(self, model_role: str, state: FullAttentionState | BoundedAttentionState) -> None:
         """按模型角色和具体方案注册 State，保留原对象及其存储。
 
         成员名和 state_name 均为 {model_role}_{state.get_state_type()}_state。
@@ -93,7 +91,9 @@ class AttentionStateManager:
         assert state_type.isidentifier() and state_type.islower(), f"invalid State type {state_type}"
         name = f"{model_role}_{state_type}_state"
         assert name not in self.__dict__, f"State {name} is already bound"
-        assert all(state is not value for value in self.__dict__.values()), "a State cannot belong to multiple model roles"
+        assert all(
+            state is not value for value in self.__dict__.values()
+        ), "a State cannot belong to multiple model roles"
         # config 只描述布局，资源身份仅保存在 State；绑定时保留原配置对象。
         state.state_name = name
         setattr(self, name, state)
@@ -155,9 +155,9 @@ class AttentionStateManager:
             if any(state.config.scale_mode == "per_tensor" for state in calibration_states):
                 from lightllm.utils.config_utils import get_model_architectures
 
-                assert calibration["architectures"] == get_model_architectures(args.model_dir), (
-                    "calibration architecture does not match the model"
-                )
+                assert calibration["architectures"] == get_model_architectures(
+                    args.model_dir
+                ), "calibration architecture does not match the model"
 
         # 阶段二：显式使用模型角色顺序，避免注册先后及 draft10 的字符串排序影响标定行。
         storage_layer_start = 0
@@ -165,7 +165,8 @@ class AttentionStateManager:
             states = sorted(
                 self.get_full_attention_states(role),
                 key=lambda state: (
-                    min(layer for group in state.config.logical_layer_groups for layer in group), state.state_name,
+                    min(layer for group in state.config.logical_layer_groups for layer in group),
+                    state.state_name,
                 ),
             )
             for state in states:
@@ -175,7 +176,9 @@ class AttentionStateManager:
                         storage_layer_start=storage_layer_start,
                     )
                 storage_layer_start += len(state.config.logical_layer_groups)
-        logger.info("Full-attention calibration bound: states=%d, source=%s", len(calibration_states), path or "unit scales")
+        logger.info(
+            "Full-attention calibration bound: states=%d, source=%s", len(calibration_states), path or "unit scales"
+        )
 
     def initialize_storage(
         self,
@@ -281,7 +284,8 @@ class AttentionStateManager:
                 if not state.get_cpu_transfer_regions():
                     continue
                 state.initialize_page_pools(
-                    big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity,
+                    big_page_capacity=big_page_capacity,
+                    small_page_capacity=small_page_capacity,
                     pin_memory=torch.device(device).type == "cuda",
                 )
             self.bounded_att_cpu_load_big_page_slot = big_page_capacity - 2
@@ -343,11 +347,15 @@ class AttentionStateManager:
     ) -> None:
         """按各请求已执行的绝对 token 长度保存全部 bounded State；三个列表逐项对应。"""
         bounded_states = self.get_bounded_attention_states()
-        assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "request and slot indices must be lists"
+        assert isinstance(req_indices, list) and isinstance(
+            page_slot_ids, list
+        ), "request and slot indices must be lists"
         assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
         allocator = self.bounded_att_big_page_allocator if page_kind == "big" else self.bounded_att_small_page_allocator
         assert allocator is not None, f"{page_kind} pages are disabled"
-        assert len(page_slot_ids) == len(req_indices) == len(state_token_lens), "one length and slot are required per request"
+        assert (
+            len(page_slot_ids) == len(req_indices) == len(state_token_lens)
+        ), "one length and slot are required per request"
         for state in bounded_states:
             state.save_bounded_att_runtime_to_pages(
                 req_indices=req_indices,
@@ -365,11 +373,15 @@ class AttentionStateManager:
     ) -> None:
         """按各快照对应的绝对 token 长度恢复运行态及 ring 位置等控制信息。"""
         bounded_states = self.get_bounded_attention_states()
-        assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "request and slot indices must be lists"
+        assert isinstance(req_indices, list) and isinstance(
+            page_slot_ids, list
+        ), "request and slot indices must be lists"
         assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
         allocator = self.bounded_att_big_page_allocator if page_kind == "big" else self.bounded_att_small_page_allocator
         assert allocator is not None, f"{page_kind} pages are disabled"
-        assert len(page_slot_ids) == len(req_indices) == len(state_token_lens), "one length and slot are required per request"
+        assert (
+            len(page_slot_ids) == len(req_indices) == len(state_token_lens)
+        ), "one length and slot are required per request"
         assert not page_slot_ids or bounded_states, "state restore requires participating bounded states"
         for state in bounded_states:
             state.restore_bounded_att_runtime_from_pages(

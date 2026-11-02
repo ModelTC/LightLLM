@@ -20,6 +20,7 @@ MODEL_ROLES = ("main", *(f"draft{i}" for i in range(MAX_DRAFT_MODELS)))
 # 一、State 命名与返回值副本
 # ========================================================================
 
+
 def dtype_name(dtype: torch.dtype):
     return {torch.bfloat16: "bf16", torch.float16: "fp16", torch.float32: "fp32"}[dtype]
 
@@ -70,9 +71,9 @@ def merge_contiguous_tail_dims(
     if start_dim < 0:
         start_dim += ndim
     tail_dims = ndim - start_dim
-    assert len(destination_shape) >= tail_dims and source_shape[start_dim:] == destination_shape[-tail_dims:], (
-        "copy tail shapes must match"
-    )
+    assert (
+        len(destination_shape) >= tail_dims and source_shape[start_dim:] == destination_shape[-tail_dims:]
+    ), "copy tail shapes must match"
 
     # 阶段一：从末轴向前检查；两侧的前缀容量和轴数独立，按距末轴的距离对齐。
     first_tail_dim = ndim - 1

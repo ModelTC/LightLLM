@@ -58,7 +58,9 @@ class GroupQuantizedAttentionConfig:
             isinstance(group, tuple) and group for group in self.logical_layer_groups
         ), "layer groups must be a tuple of nonempty tuples"
         layers = [layer for group in self.logical_layer_groups for layer in group]
-        assert all(isinstance(layer, int) and layer >= 0 for layer in layers), "logical layer IDs must be nonnegative integers"
+        assert all(
+            isinstance(layer, int) and layer >= 0 for layer in layers
+        ), "logical layer IDs must be nonnegative integers"
         assert len(layers) == len(set(layers)), "a logical layer must belong to exactly one storage group"
         assert self.global_head_num > 0 and self.head_dim > 0 and 0 <= self.tp_rank < self.tp_world_size
         assert (
@@ -66,17 +68,18 @@ class GroupQuantizedAttentionConfig:
             or self.global_head_num % self.tp_world_size == 0
             or self.tp_world_size % self.global_head_num == 0
         ), "KV heads require complete TP shards or replicas"
-        assert self.bits in (4, 8) and self.group_size >= 2 and not (
-            self.group_size & (self.group_size - 1)
+        assert (
+            self.bits in (4, 8) and self.group_size >= 2 and not (self.group_size & (self.group_size - 1))
         ), "INT4/INT8 quantization requires a power-of-two group size"
         assert self.head_dim % self.group_size == 0 and self.scale_dtype in (
-            torch.float16, torch.bfloat16, torch.float32
+            torch.float16,
+            torch.bfloat16,
+            torch.float32,
         ), "group scales require a floating dtype and complete groups"
 
 
 class GroupQuantizedFullAttentionState(FullAttentionState):
     """管理 INT4/INT8 KV 与逐 token 分组 scale，复制和传输始终覆盖二者。"""
-
 
     # ========================================================================
     # 一、资源定义与初始化
@@ -108,7 +111,9 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
 
     def get_state_type(self) -> str:
         """返回量化位数、分组大小及 scale 精度对应的存储方案标记。"""
-        return f"gqa_int{self.config.bits}_group{self.config.group_size}_{dtype_name(dtype=self.config.scale_dtype)}_scale"
+        return (
+            f"gqa_int{self.config.bits}_group{self.config.group_size}_{dtype_name(dtype=self.config.scale_dtype)}_scale"
+        )
 
     def allocate_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配独立的量化 KV 与配套动态 scale。"""
@@ -117,8 +122,10 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         self.k_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
         self.v_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
         shape = (
-            len(self.config.logical_layer_groups), token_capacity + self.page_size,
-            self.config.head_num, self.config.head_dim // self.config.group_size,
+            len(self.config.logical_layer_groups),
+            token_capacity + self.page_size,
+            self.config.head_num,
+            self.config.head_dim // self.config.group_size,
         )
         self.k_scales = torch.empty(size=shape, dtype=self.config.scale_dtype, device=self.device)
         self.v_scales = torch.empty(size=shape, dtype=self.config.scale_dtype, device=self.device)
@@ -142,10 +149,15 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         """按逻辑层号查询存储及配套字段的物理行；共享逻辑层返回同一下标。"""
         return self._logical_to_storage_layer[logical_layer_id]
 
-    def get_layer_view(self, logical_layer_id: int) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
+    def get_layer_view(
+        self, logical_layer_id: int
+    ) -> tuple[tuple[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
         """返回该层 K/V 编码数据及各自的分组 scale 视图。"""
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        return (self.k_storage[storage_layer_index], self.k_scales[storage_layer_index]), (self.v_storage[storage_layer_index], self.v_scales[storage_layer_index])
+        return (self.k_storage[storage_layer_index], self.k_scales[storage_layer_index]), (
+            self.v_storage[storage_layer_index],
+            self.v_scales[storage_layer_index],
+        )
 
     def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """量化输入浮点 K/V，并将编码数据和分组 scale 写入相同 token 位置。"""
@@ -160,7 +172,7 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
             (0, self.k_storage, self.k_scales),
             (self.config.head_num, self.v_storage, self.v_scales),
         ):
-            values = kv[:, offset:offset + self.config.head_num]
+            values = kv[:, offset : offset + self.config.head_num]
             if self.config.bits == 4:
                 from lightllm.common.basemodel.triton_kernel.kv_copy.ppl_int4kv_copy_kv import destindex_copy_int4kv
 
@@ -172,7 +184,9 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
                     quant_group_size=self.config.group_size,
                 )
             else:
-                from lightllm.common.basemodel.triton_kernel.kv_copy.ppl_int8kv_copy_kv import destindex_copy_quantize_kv
+                from lightllm.common.basemodel.triton_kernel.kv_copy.ppl_int8kv_copy_kv import (
+                    destindex_copy_quantize_kv,
+                )
 
                 destindex_copy_quantize_kv(
                     K=values,
@@ -185,12 +199,13 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
         assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
-        assert src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel(), (
-            "token copies require equal one-dimensional index tensors"
-        )
-        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (torch.int32, torch.int64), (
-            "token indices must be integer tensors"
-        )
+        assert (
+            src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
+        ), "token copies require equal one-dimensional index tensors"
+        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (
+            torch.int32,
+            torch.int64,
+        ), "token indices must be integer tensors"
         assert self.k_storage.is_cuda, "token copies require CUDA storage"
         if not src_indices.numel():
             return
@@ -294,12 +309,10 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         assert (
             remote_dp_full_att_state.config.bits,
             remote_dp_full_att_state.config.group_size,
-        ) == (
-            self.config.bits, self.config.group_size
-        ), "incompatible group quantization"
-        assert type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config, (
-            "DP copy requires the same encoding and equivalent TP state configurations"
-        )
+        ) == (self.config.bits, self.config.group_size), "incompatible group quantization"
+        assert (
+            type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config
+        ), "DP copy requires the same encoding and equivalent TP state configurations"
         assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
         copy_group_quantized_tokens(
@@ -458,6 +471,8 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
 
     def _storage_shape(self) -> tuple[int, ...]:
         return (
-            len(self.config.logical_layer_groups), self.capacity + self.page_size,
-            self.config.head_num, self.config.head_dim * self.config.bits // 8,
+            len(self.config.logical_layer_groups),
+            self.capacity + self.page_size,
+            self.config.head_num,
+            self.config.head_dim * self.config.bits // 8,
         )

@@ -242,7 +242,7 @@ def test_kpool_chunk_boundaries_and_fragmented_token_kv(cuda_graph):
         for group in range(seqs[batch] // 4):
             values = source[start + group * 4 : start + group * 4 + 4]
             expected = (values[:, :128].float() * (values[:, 128:].float() + ape).softmax(0)).sum(0).bfloat16()
-            expected_key, expected_scale = hadamard_transform_quant_fp8(expected[None], scale=128**-0.5)
+            expected_key, expected_scale = hadamard_transform_quant_fp8(expected[None], scale=128 ** -0.5)
             torch.testing.assert_close(keys[batch * 3 + group].float(), expected_key[0].float(), atol=0, rtol=0)
             torch.testing.assert_close(scales[batch * 3 + group], expected_scale[0, 0], atol=0, rtol=0)
     lengths = torch.tensor(seqs, device="cuda", dtype=torch.int32)
@@ -299,7 +299,7 @@ def test_kpool_decode_cuda_graph_and_padding():
             if pending == 0:
                 values = source[batch, pos - 3 : pos + 1]
                 pooled = (values[:, :128].float() * (values[:, 128:].float() + ape).softmax(0)).sum(0).bfloat16()
-                key, scale = hadamard_transform_quant_fp8(pooled[None], 128**-0.5)
+                key, scale = hadamard_transform_quant_fp8(pooled[None], 128 ** -0.5)
                 actual = packed[table[batch, pos].long(), 0]
                 assert torch.equal(actual[:128], key.view(torch.uint8)[0])
                 assert torch.equal(actual[128:].view(torch.float32), scale.flatten())
@@ -391,7 +391,7 @@ def test_gather_pools_long_context_cuda_graph(max_pools):
 
 def test_kpool_packed_kv_above_two_gib():
     # Automatic KV sizing on H200 can put pool keys beyond a 32-bit byte offset.
-    loc = 2**31 // (584 * 2) + 1
+    loc = 2 ** 31 // (584 * 2) + 1
     storage = torch.empty(loc + 1, 1, 584, device="cuda", dtype=torch.bfloat16)
     packed = storage.view(torch.uint8)[:, :, -132:]
     raw = torch.randn(4, 256, device="cuda", dtype=torch.bfloat16)
@@ -404,7 +404,7 @@ def test_kpool_packed_kv_above_two_gib():
     compress_pools(raw, tail, packed, ape, lengths, zero, ragged, zero[:1], cu_q_lens, lengths[-1:], max_q_len=4)
     keys, scales = gather_pools(packed, ragged[None], zero[:1], lengths[-1:], 1)
     pooled = (raw[:, :128].float() * (raw[:, 128:].float() + ape).softmax(0)).sum(0).bfloat16()
-    expected_key, expected_scale = hadamard_transform_quant_fp8(pooled[None], scale=128**-0.5)
+    expected_key, expected_scale = hadamard_transform_quant_fp8(pooled[None], scale=128 ** -0.5)
     assert torch.equal(keys.view(torch.uint8), expected_key.view(torch.uint8))
     assert torch.equal(scales, expected_scale.flatten())
 
@@ -481,7 +481,7 @@ def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
         state *= gate[:, i, :, None, None].exp()
         delta = (v[:, i].float() - torch.einsum("bhkv,bhk->bhv", state, k[:, i].float())) * beta[:, i, :, None]
         state += k[:, i, :, :, None].float() * delta[:, :, None, :]
-        expected.append(torch.einsum("bhkv,bhk->bhv", state, q[:, i].float()) / dim**0.5)
+        expected.append(torch.einsum("bhkv,bhk->bhv", state, q[:, i].float()) / dim ** 0.5)
     out, final = chunk_gated_delta_rule(
         q,
         k,
@@ -592,7 +592,8 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         att_state_manager=SimpleNamespace(
             get_state=lambda state_type_filter, **kwargs: (
                 SimpleNamespace(get_layer_view=lambda logical_layer_id: tail)
-                if "compressor_indexer" in state_type_filter else full_att_state
+                if "compressor_indexer" in state_type_filter
+                else full_att_state
             ),
         ),
         is_draft_model=False,
@@ -645,11 +646,11 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
     pool_count = tokens // 4
     pool_values = hidden[: pool_count * 4].view(pool_count, 4, dim)
     pooled = (pool_values.float() * (pool_values.float() * 0.25 + ape).softmax(1)).sum(1).bfloat16()
-    k_fp8, k_scale = hadamard_transform_quant_fp8(pooled, dim**-0.5)
+    k_fp8, k_scale = hadamard_transform_quant_fp8(pooled, dim ** -0.5)
     query = (hidden[-1:] @ q_weight).view(heads, dim)
-    q_fp8, q_scale = hadamard_transform_quant_fp8(query, dim**-0.5)
+    q_fp8, q_scale = hadamard_transform_quant_fp8(query, dim ** -0.5)
     logits = (q_fp8.float() @ k_fp8.float().T * k_scale.flatten()).clamp_min(0)
-    scores = (logits * q_scale * (heads**-0.5 * dim**-0.5)).sum(0)
+    scores = (logits * q_scale * (heads ** -0.5 * dim ** -0.5)).sum(0)
     expected_groups = set(scores.topk(512).indices.tolist())
     assert set((decoded[0, :2048:4] // 4).tolist()) == expected_groups
 

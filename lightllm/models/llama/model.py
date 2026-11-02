@@ -41,8 +41,13 @@ class LlamaTpPartModel(TpPartBaseModel):
 
     @classmethod
     def create_full_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        *,
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """按本模型的全局逻辑层创建 GQA 布局，量化存储由算法入口选择。"""
         from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
@@ -58,9 +63,12 @@ class LlamaTpPartModel(TpPartBaseModel):
                 global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
                 head_dim=config.get("head_dim", config["hidden_size"] // config["num_attention_heads"]),
                 dtype=get_torch_dtype(args.data_type),
-                tp_rank=tp_rank, tp_world_size=tp_world_size,
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
             ),
-            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+            kv_type=args.llm_kv_type,
+            page_size=args.page_size,
+            device="meta",
         )
         return [state]
 

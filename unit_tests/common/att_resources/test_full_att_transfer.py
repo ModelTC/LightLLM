@@ -12,7 +12,11 @@ import torch
 
 from lightllm.common.attention_state.full_att import StaticFP8FullAttentionState
 from lightllm.common.attention_state.types import StateTransferLayout
-from unit_tests.common.att_resources.model_helpers import full_state_test_buffers, full_state_test_fields, rebuild_full_state
+from unit_tests.common.att_resources.model_helpers import (
+    full_state_test_buffers,
+    full_state_test_fields,
+    rebuild_full_state,
+)
 from unit_tests.common.att_resources.test_capacity import definition
 
 if TYPE_CHECKING:
@@ -66,11 +70,14 @@ def test_full_att_pages_copy_all_fields_with_bounded_grid(
     regions = source.get_cpu_transfer_regions() if transfer == "cpu" else source.get_pd_transfer_regions()
     if grid_num == 1:
         # 调换层/token 轴，验证寻址使用真实 stride；region 顺序也不要求与存储成员相同。
-        regions = tuple(replace(
-            region,
-            axes=("token", "layer", *region.axes[2:]),
-            shape=(region.shape[1], region.shape[0], *region.shape[2:]),
-        ) for region in reversed(regions))
+        regions = tuple(
+            replace(
+                region,
+                axes=("token", "layer", *region.axes[2:]),
+                shape=(region.shape[1], region.shape[0], *region.shape[2:]),
+            )
+            for region in reversed(regions)
+        )
     layout = StateTransferLayout(
         state_name=source.state_name,
         tokens_per_page=page_tokens,
@@ -152,7 +159,9 @@ def test_full_att_pages_copy_all_fields_with_bounded_grid(
     assert (pages[:, :16] == 91).all() and (pages[:, -16:] == 91).all()
     last_count = token_count - (page_count - 1) * page_tokens
     for region in regions:
-        last_page = page_view[page_indices[-1], region.byte_start:region.byte_end].view(region.dtype).view(region.shape)
+        last_page = (
+            page_view[page_indices[-1], region.byte_start : region.byte_end].view(region.dtype).view(region.shape)
+        )
         unused = [slice(None)] * 4
         unused[region.axes.index("token")] = slice(last_count, None)
         assert (last_page[tuple(unused)].contiguous().view(torch.uint8) == 91).all()
@@ -160,7 +169,8 @@ def test_full_att_pages_copy_all_fields_with_bounded_grid(
 
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="two CUDA devices required")
 def test_all_full_att_schemes_transfer_through_peer_ipc(
-    pd_args: EasyDict, monkeypatch: pytest.MonkeyPatch,
+    pd_args: EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """各编码字段通过生产 IPC peer 映射跨 GPU 搬运，padding 保留目标值。"""
     from multiprocessing.reduction import ForkingPickler
@@ -184,13 +194,15 @@ def test_all_full_att_schemes_transfer_through_peer_ipc(
         for name, field in source_fields.items():
             expected_fields[name].tensor.copy_(other=field.tensor[:, 1:2])
         regions = state.get_pd_transfer_regions()
-        layouts.append(StateTransferLayout(
-            state_name=state.state_name,
-            tokens_per_page=4,
-            byte_start=0,
-            byte_end=max(region.byte_end for region in regions),
-            regions=regions,
-        ))
+        layouts.append(
+            StateTransferLayout(
+                state_name=state.state_name,
+                tokens_per_page=4,
+                byte_start=0,
+                byte_end=max(region.byte_end for region in regions),
+                regions=regions,
+            )
+        )
         states.append(state)
         expected_buffers.append(expected)
     torch.cuda.synchronize(device=1)
@@ -219,7 +231,9 @@ def test_all_full_att_schemes_transfer_through_peer_ipc(
 
 
 def _peer_transfer_worker(
-    connection: Connection, payload: bytes, layouts: list[StateTransferLayout],
+    connection: Connection,
+    payload: bytes,
+    layouts: list[StateTransferLayout],
 ) -> None:
     from multiprocessing.reduction import ForkingPickler
     import traceback
@@ -256,7 +270,9 @@ def _peer_transfer_worker(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("kind", ["gqa", *SCHEMES])
-@pytest.mark.parametrize("readies", [[False, True, False], [True, False, True], [True, True, True], [False, False, False]])
+@pytest.mark.parametrize(
+    "readies", [[False, True, False], [True, False, True], [True, True, True], [False, False, False]]
+)
 @pytest.mark.parametrize("grid_num", [1, 36])
 def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
     kind: str,

@@ -55,10 +55,14 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
 
         config = cls.normalize_model_config(model_config)
         assert config["num_attention_heads"] % tp_world_size == 0
-        assert not (args.mtp_step and args.enable_prefill_decode_mixed), "MTP linear attention does not support mixed prefill/decode"
+        assert not (
+            args.mtp_step and args.enable_prefill_decode_mixed
+        ), "MTP linear attention does not support mixed prefill/decode"
         cfg = Qwen3NextResourceConfig.from_model_config(config, args)
         full_layer_indices = set(cfg.get_full_att_layer_indices())
-        logical_layer_ids = tuple(layer for i, layer in enumerate(model_logical_layer_ids) if i not in full_layer_indices)
+        logical_layer_ids = tuple(
+            layer for i, layer in enumerate(model_logical_layer_ids) if i not in full_layer_indices
+        )
         if not logical_layer_ids:
             return []
         state = create_gdn_state(

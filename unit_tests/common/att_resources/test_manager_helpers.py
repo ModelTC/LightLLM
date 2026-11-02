@@ -38,7 +38,10 @@ def layouts_for(manager: AttentionStateManager, kind: str = "cpu"):
     if kind != "att_state":
         layouts += [layout_for(state) for state in (manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)]
     if kind != "kv":
-        layouts += [page_layout(state) for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)]
+        layouts += [
+            page_layout(state)
+            for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)
+        ]
 
     offset = 0
     result = {}
@@ -61,8 +64,8 @@ def init_source(manager: AttentionStateManager):
     for i, state in enumerate((manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)):
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.copy_(
-                        torch.arange(storage_buffer.numel(), device=storage_buffer.device).reshape_as(storage_buffer) + i
-                    )
+                torch.arange(storage_buffer.numel(), device=storage_buffer.device).reshape_as(storage_buffer) + i
+            )
     for i, state in enumerate((manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)):
         state.conv_state[:, 0].fill_(11 + i)
         state.conv_state[:, 1].fill_(23 + i)
@@ -108,8 +111,6 @@ def test_shared_slots_save_restore_and_propagate_failure(monkeypatch: pytest.Mon
     assert manager.bounded_att_big_page_allocator.free_count == 1
     manager.bounded_att_big_page_allocator.free(slots)
     assert manager.bounded_att_big_page_allocator.free_count == 3
-
-
 
 
 @pytest.mark.parametrize("operation", ["save_bounded_att_runtime_to_pages", "restore_bounded_att_runtime_from_pages"])
@@ -197,10 +198,6 @@ def test_pd_bounded_only_forwards_prefix_length(operation: str, monkeypatch: pyt
     assert lengths == [(2, 29)] * len(manager.get_bounded_attention_states())
 
 
-
-
-
-
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("token_count", [2, 4, 6, 8])
 def test_cpu_restore_owns_partial_slot_and_restores_final_runtime(token_count: int):
@@ -225,7 +222,7 @@ def test_cpu_restore_owns_partial_slot_and_restores_final_runtime(token_count: i
         cpu_page_buffers=pages,
         cpu_page_indices=page_ids,
         layouts=layouts,
-        big_page_slot_ids=source_slots[:token_count // 4],
+        big_page_slot_ids=source_slots[: token_count // 4],
         small_page_slot_ids=small_slots,
     )
     torch.cuda.synchronize()
@@ -262,19 +259,13 @@ def test_cpu_restore_owns_partial_slot_and_restores_final_runtime(token_count: i
             torch.testing.assert_close(dst.big_pages_pool.conv_state[2], src.big_pages_pool.conv_state[final_slot])
             torch.testing.assert_close(dst.big_pages_pool.ssm_state[2], src.big_pages_pool.ssm_state[final_slot])
     for src, dst in zip(source.get_full_attention_states(), target.get_full_attention_states()):
-        torch.testing.assert_close(read_kv_storage(dst)[:, 4:4 + token_count], read_kv_storage(src)[:, :token_count])
-
-
-
-
-
-
-
-
+        torch.testing.assert_close(read_kv_storage(dst)[:, 4 : 4 + token_count], read_kv_storage(src)[:, :token_count])
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("readies", [[True, False, False], [False, True, False], [False, False, True], [True, True, True]])
+@pytest.mark.parametrize(
+    "readies", [[True, False, False], [False, True, False], [False, False, True], [True, True, True]]
+)
 def test_cpu_ready_joint_pages_preserve_full_and_bounded_fields(readies: list[bool]):
     source = composition("cuda")
     big_slots = init_source(source)

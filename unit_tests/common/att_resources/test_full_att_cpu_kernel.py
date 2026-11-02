@@ -56,6 +56,7 @@ def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeyp
             def launch(**kwargs):
                 launches.append((kwargs["HEADS"], kwargs["WIDTH"], kwargs["ELEMENT_BYTES"]))
                 return kernel[grid](**kwargs)
+
             return launch
 
     monkeypatch.setattr(gqa_transfer, "_copy_gqa_pages", CaptureLaunch())
@@ -95,9 +96,20 @@ def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeyp
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("kind", [
-    "gqa", "mla", "int4", "int8", "static_head", "static_tensor", "packed", "packed_fp8", "packed_glm",
-])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "gqa",
+        "mla",
+        "int4",
+        "int8",
+        "static_head",
+        "static_tensor",
+        "packed",
+        "packed_fp8",
+        "packed_glm",
+    ],
+)
 @pytest.mark.parametrize("token_major", [False, True])
 def test_direct_cpu_pages_preserve_bytes_without_gather(kind: str, token_major: bool, monkeypatch: pytest.MonkeyPatch):
     source = allocated_state(kind, device="cuda")
@@ -172,7 +184,7 @@ def test_direct_cpu_pages_preserve_bytes_without_gather(kind: str, token_major: 
     assert (pages[:, :32] == 91).all() and (pages[:, -32:] == 91).all()
     assert (pages[[1, 3]] == 91).all()
     for region in layout.regions:
-        external = page_view[0, region.byte_start:region.byte_end].view(region.dtype).view(region.shape)
+        external = page_view[0, region.byte_start : region.byte_end].view(region.dtype).view(region.shape)
         # 最后一页只有一个有效 token，其余槽位仍保留填充值。
         unused = [slice(None)] * len(region.shape)
         unused[region.axes.index("token")] = slice(1, None)
@@ -193,7 +205,9 @@ def test_direct_cpu_pages_only_update_selected_head_slice_and_skip_replica_write
                 local_start=1,
                 external_start=0,
                 length=1,
-            ) if item.axis == "head" else item
+            )
+            if item.axis == "head"
+            else item
             for item in region.axis_mappings
         )
         regions.append(replace(region, axis_mappings=slices))
@@ -340,9 +354,20 @@ def test_gqa_single_cpu_page_and_empty_transfer(token_count: int) -> None:
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-@pytest.mark.parametrize("kind", [
-    "gqa", "mla", "int4", "int8", "static_head", "static_tensor", "packed", "packed_fp8", "packed_glm",
-])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "gqa",
+        "mla",
+        "int4",
+        "int8",
+        "static_head",
+        "static_tensor",
+        "packed",
+        "packed_fp8",
+        "packed_glm",
+    ],
+)
 def test_full_state_interfaces_reject_cpu_token_indices(kind: str) -> None:
     state = allocated_state(kind, device="cuda")
     layout = transfer_layout(state)

@@ -119,9 +119,7 @@ class RadixCache:
             raise ValueError(f"page_size must be >= 1, got {page_size}")
         allocator = None if att_state_manager is None else att_state_manager.full_att_allocator
         if allocator is not None and page_size != allocator.page_size:
-            raise ValueError(
-                f"RadixCache page_size {page_size} must match allocator page_size {allocator.page_size}"
-            )
+            raise ValueError(f"RadixCache page_size {page_size} must match allocator page_size {allocator.page_size}")
         self.page_size = page_size
 
         self.root_node = TreeNode(page_size=page_size)

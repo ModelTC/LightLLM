@@ -196,8 +196,14 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     )
     resources = AttentionStateManager(request_capacity=4)
     config = ConvSSMStateConfig(
-        logical_layer_ids=(0,), global_k_heads=heads, global_v_heads=heads,
-        key_dim=dim, value_dim=dim, conv_width=3, conv_dtype=conv.dtype, ssm_dtype=ssm.dtype,
+        logical_layer_ids=(0,),
+        global_k_heads=heads,
+        global_v_heads=heads,
+        key_dim=dim,
+        value_dim=dim,
+        conv_width=3,
+        conv_dtype=conv.dtype,
+        ssm_dtype=ssm.dtype,
     )
     for model_role in ("main", "draft0"):
         linear = KDAState(config, request_capacity=4, mtp_step=2, device="meta")

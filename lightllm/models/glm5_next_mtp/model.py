@@ -95,9 +95,9 @@ class Glm5NextMTPModel(TpPartBaseModel):
                 latent_dim=config["kv_lora_rank"],
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
-                format="packed_group64_e8m0" if args.llm_kv_type == "fp8kv_dsa" else (
-                    "packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16"
-                ),
+                format="packed_group64_e8m0"
+                if args.llm_kv_type == "fp8kv_dsa"
+                else ("packed_fp16" if get_torch_dtype(args.data_type) == torch.float16 else "packed_bf16"),
             ),
             page_size=args.page_size,
             device="meta",
@@ -116,7 +116,10 @@ class Glm5NextMTPModel(TpPartBaseModel):
         device: str = "meta",
     ) -> list["BoundedAttentionState"]:
         """直接选择本模型的 K-pool 窗口层，不依赖 full State 创建过程。"""
-        from lightllm.common.attention_state.bounded_att import create_window_compressor_state, WindowCompressorStateConfig
+        from lightllm.common.attention_state.bounded_att import (
+            create_window_compressor_state,
+            WindowCompressorStateConfig,
+        )
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)

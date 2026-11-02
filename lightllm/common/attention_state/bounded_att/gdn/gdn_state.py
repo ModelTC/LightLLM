@@ -57,7 +57,13 @@ class GDNState(BoundedAttentionState):
             device=device,
         )
         self.ssm_state = torch.zeros(
-            (storage_layer_count, request_capacity * (mtp_step + 1), config.num_v_heads, config.key_dim, config.value_dim),
+            (
+                storage_layer_count,
+                request_capacity * (mtp_step + 1),
+                config.num_v_heads,
+                config.key_dim,
+                config.value_dim,
+            ),
             dtype=config.ssm_dtype,
             device=device,
         )
@@ -67,10 +73,7 @@ class GDNState(BoundedAttentionState):
 
     def get_state_type(self) -> str:
         """返回 GDN 算法及 Conv/SSM 存储精度。"""
-        return (
-            f"gdn_conv_{dtype_name(dtype=self.config.conv_dtype)}"
-            f"_ssm_{dtype_name(dtype=self.config.ssm_dtype)}"
-        )
+        return f"gdn_conv_{dtype_name(dtype=self.config.conv_dtype)}" f"_ssm_{dtype_name(dtype=self.config.ssm_dtype)}"
 
     def initialize_page_pools(
         self,
@@ -134,7 +137,9 @@ class GDNState(BoundedAttentionState):
         page_slot_ids: List[int],
     ) -> None:
         """保存各请求指定绝对 token 长度处的基准状态；Conv/SSM 不依赖长度定位。"""
-        assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "request and slot indices must be lists"
+        assert isinstance(req_indices, list) and isinstance(
+            page_slot_ids, list
+        ), "request and slot indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
         # TODO：大小页仅在 prefill 阶段保存，mtp_state_index 始终为 0，可直接复制基准状态。
@@ -154,7 +159,9 @@ class GDNState(BoundedAttentionState):
         page_slot_ids: List[int],
     ) -> None:
         """恢复各请求指定绝对 token 长度处的基准状态并归零游标；Conv/SSM 不依赖长度定位。"""
-        assert isinstance(req_indices, list) and isinstance(page_slot_ids, list), "request and slot indices must be lists"
+        assert isinstance(req_indices, list) and isinstance(
+            page_slot_ids, list
+        ), "request and slot indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
         conv_copies, ssm_copies = [], []
@@ -267,9 +274,9 @@ class GDNState(BoundedAttentionState):
         """复制同一 TP 分片的大页 Conv/SSM 快照，保留源页和双方请求运行态。"""
         assert isinstance(src_page_ids, list) and isinstance(dst_page_ids, list), "page indices must be lists"
         assert len(src_page_ids) == len(dst_page_ids), "source and destination page counts differ"
-        assert type(remote_dp_bounded_state) is type(self) and remote_dp_bounded_state.config == self.config, (
-            "DP copy requires the same algorithm and equivalent TP state configurations"
-        )
+        assert (
+            type(remote_dp_bounded_state) is type(self) and remote_dp_bounded_state.config == self.config
+        ), "DP copy requires the same algorithm and equivalent TP state configurations"
         src_pool = remote_dp_bounded_state.big_pages_pool
         dst_pool = self.big_pages_pool
         assert src_pool is not None and dst_pool is not None, "DP big page copy requires both page pools"
@@ -291,22 +298,26 @@ class GDNState(BoundedAttentionState):
         """复制同一 TP 分片的 prefill 基准运行态并重置目标游标，不写入页池。"""
         assert isinstance(src_req_indices, list) and isinstance(dst_req_indices, list), "request indices must be lists"
         assert len(src_req_indices) == len(dst_req_indices), "source and destination request counts differ"
-        assert type(remote_dp_bounded_state) is type(self) and remote_dp_bounded_state.config == self.config, (
-            "DP copy requires the same algorithm and equivalent TP state configurations"
-        )
+        assert (
+            type(remote_dp_bounded_state) is type(self) and remote_dp_bounded_state.config == self.config
+        ), "DP copy requires the same algorithm and equivalent TP state configurations"
         # TODO：当前 DP fetch 只复制 prefill 基准状态，源 MTP 游标为 0；
         # 若以后支持 decode/MTP 后迁移，需按已接受游标选择源 Conv 窗口及 SSM 槽位。
         # 跨设备源存储必须已通过 peer/IPC 映射，批量复制不改变双方页池。
         conv_copies, ssm_copies = [], []
         for src_req, dst_req in zip(src_req_indices, dst_req_indices):
-            conv_copies.append((
-                remote_dp_bounded_state.conv_state[:, src_req, :, : self.config.conv_width],
-                self.conv_state[:, dst_req, :, : self.config.conv_width],
-            ))
-            ssm_copies.append((
-                remote_dp_bounded_state.ssm_state[:, src_req * (remote_dp_bounded_state.mtp_step + 1)],
-                self.ssm_state[:, dst_req * (self.mtp_step + 1)],
-            ))
+            conv_copies.append(
+                (
+                    remote_dp_bounded_state.conv_state[:, src_req, :, : self.config.conv_width],
+                    self.conv_state[:, dst_req, :, : self.config.conv_width],
+                )
+            )
+            ssm_copies.append(
+                (
+                    remote_dp_bounded_state.ssm_state[:, src_req * (remote_dp_bounded_state.mtp_step + 1)],
+                    self.ssm_state[:, dst_req * (self.mtp_step + 1)],
+                )
+            )
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
         if self.mtp_state_index is not None:
@@ -427,7 +438,8 @@ class GDNState(BoundedAttentionState):
             )
             regions.append(conv_region)
             logger.debug(
-                "%s Conv %s: local_channel_start=%d, global_channel_start=%d, channels=%d, replicas=%d, write_enabled=%s",
+                "%s Conv %s: local_channel_start=%d, global_channel_start=%d, "
+                "channels=%d, replicas=%d, write_enabled=%s",
                 self.state_name,
                 name,
                 local_channel_start,

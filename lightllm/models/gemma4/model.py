@@ -210,12 +210,16 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         sliding_partial = sliding_params.get("partial_rotary_factor", 1.0)
         sliding_rot_dim = int(sliding_head_dim * sliding_partial)
         inv_freq_sliding = 1.0 / (
-            sliding_theta ** (torch.arange(
-                start=0,
-                end=sliding_rot_dim,
-                step=2,
-                dtype=torch.float32,
-            ) / sliding_rot_dim)
+            sliding_theta
+            ** (
+                torch.arange(
+                    start=0,
+                    end=sliding_rot_dim,
+                    step=2,
+                    dtype=torch.float32,
+                )
+                / sliding_rot_dim
+            )
         )
         freqs_s = torch.outer(t, inv_freq_sliding)
         self._cos_cached_sliding = torch.cos(freqs_s).to(self.data_type).cuda()
@@ -235,12 +239,16 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         if rope_type == "proportional":
             rope_angles = int(full_partial * full_head_dim // 2)
             inv_freq_rot = 1.0 / (
-                full_theta ** (torch.arange(
-                    start=0,
-                    end=2 * rope_angles,
-                    step=2,
-                    dtype=torch.float32,
-                ) / full_head_dim)
+                full_theta
+                ** (
+                    torch.arange(
+                        start=0,
+                        end=2 * rope_angles,
+                        step=2,
+                        dtype=torch.float32,
+                    )
+                    / full_head_dim
+                )
             )
             nope_angles = full_head_dim // 2 - rope_angles
             if nope_angles > 0:
@@ -249,12 +257,18 @@ class Gemma4TpPartModel(LlamaTpPartModel):
                 inv_freq_full = inv_freq_rot
         else:
             full_rot_dim = int(full_head_dim * full_partial)
-            inv_freq_full = 1.0 / (full_theta ** (torch.arange(
-                start=0,
-                end=full_rot_dim,
-                step=2,
-                dtype=torch.float32,
-            ) / full_rot_dim))
+            inv_freq_full = 1.0 / (
+                full_theta
+                ** (
+                    torch.arange(
+                        start=0,
+                        end=full_rot_dim,
+                        step=2,
+                        dtype=torch.float32,
+                    )
+                    / full_rot_dim
+                )
+            )
 
         freqs_f = torch.outer(t, inv_freq_full)
         self._cos_cached_full = torch.cos(freqs_f).to(self.data_type).cuda()

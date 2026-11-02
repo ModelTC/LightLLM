@@ -71,7 +71,7 @@ def linear_cache(monkeypatch, tmp_path, request):
             head_dim=8,
             dtype=torch.bfloat16,
         ),
-         page_size=args.page_size,
+        page_size=args.page_size,
     )
     full.allocate_storage(384)
     requests = ReqManager(2, 512)
@@ -271,7 +271,9 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     full, resources, requests, config = linear_cache
     slots = resources.bounded_att_big_page_allocator.alloc(allocated_pages) if allocated_pages else []
     shared_slots = [slots[0]] if shared_prefix and slots else []
-    monkeypatch.setattr(g_infer_context, "radix_cache", SimpleNamespace(get_big_page_ids_by_node=lambda node: shared_slots))
+    monkeypatch.setattr(
+        g_infer_context, "radix_cache", SimpleNamespace(get_big_page_ids_by_node=lambda node: shared_slots)
+    )
     big_slots = {128 * (i + 1): slot for i, slot in enumerate(slots) if not shared_prefix or i > 0}
     req = SimpleNamespace(
         req_idx=0,
@@ -298,7 +300,9 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         cpu_page_indices,
         **kwargs,
     ):
-        writes.append((token_indices.numel(), cpu_page_indices, kwargs["big_page_slot_ids"], kwargs["small_page_slot_ids"]))
+        writes.append(
+            (token_indices.numel(), cpu_page_indices, kwargs["big_page_slot_ids"], kwargs["small_page_slot_ids"])
+        )
 
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = get_env_start_args()
@@ -311,7 +315,8 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     )
     module.cpu_cache_client = SimpleNamespace(
         lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
-        allocate_pages=allocate_pages, cpu_kv_cache_tensor=torch.empty((2, 1), dtype=torch.uint8),
+        allocate_pages=allocate_pages,
+        cpu_kv_cache_tensor=torch.empty((2, 1), dtype=torch.uint8),
     )
     monkeypatch.setattr(resources.get_cpu_cache_operator(), "write_req", write_to_cpu)
     broadcasts = []
@@ -325,11 +330,15 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         assert writes == []
         return
     task.sync_event.synchronize()
-    assert broadcasts == [[{
-        "item_size": allocated_pages,
-        "page_list": list(range(allocated_pages)),
-        "ready_list": [False] * allocated_pages,
-    }]]
+    assert broadcasts == [
+        [
+            {
+                "item_size": allocated_pages,
+                "page_list": list(range(allocated_pages)),
+                "ready_list": [False] * allocated_pages,
+            }
+        ]
+    ]
     # 即使 CPU 只分配一页，也申请完整可缓存范围；未选中的 256 位置不要求提供槽位。
     assert requested_hashes == [[11, 22]]
     assert writes == [(allocated_pages * 128, list(range(allocated_pages)), slots, [])]

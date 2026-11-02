@@ -105,7 +105,9 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         tp_world_size: int = 1,
     ) -> list[FullAttentionState]:
         """分别创建 C4/C128 定义；逻辑索引保留原始 token 域，不提前分配存储。"""
-        from lightllm.common.attention_state.full_att.compressed_att.create_compressed_att_state import create_compressed_att_state
+        from lightllm.common.attention_state.full_att.compressed_att.create_compressed_att_state import (
+            create_compressed_att_state,
+        )
         from .config import create_attention_config
 
         assert args.llm_kv_type in ("None", "fp8kv_dsa"), f"unsupported V4 KV encoding: {args.llm_kv_type}"
@@ -119,11 +121,13 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         for ratio in (4, 128):
             if ratio not in config.compress_ratios:
                 continue
-            states.append(create_compressed_att_state(
-                config=config.create_compressed_config(compress_ratio=ratio),
-                page_size=args.page_size,
-                device="meta",
-            ))
+            states.append(
+                create_compressed_att_state(
+                    config=config.create_compressed_config(compress_ratio=ratio),
+                    page_size=args.page_size,
+                    device="meta",
+                )
+            )
         return states
 
     @classmethod
@@ -151,39 +155,45 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             tp_rank=tp_rank,
             tp_world_size=tp_world_size,
         )
-        states = [create_sliding_window_state(
-            config=config.create_swa_config(),
-            request_capacity=request_capacity,
-            mtp_step=args.mtp_step,
-            device=device,
-        )]
+        states = [
+            create_sliding_window_state(
+                config=config.create_swa_config(),
+                request_capacity=request_capacity,
+                mtp_step=args.mtp_step,
+                device=device,
+            )
+        ]
         # 模型决定窗口组合：CSA 使用 W8/S4，HCA 使用 W128/S128；State 本身不识别 C4/C128。
         for ratio, window_size in ((4, 8), (128, 128)):
             layers = tuple(
-                layer for layer, compress_ratio in zip(model_logical_layer_ids, config.compress_ratios)
+                layer
+                for layer, compress_ratio in zip(model_logical_layer_ids, config.compress_ratios)
                 if compress_ratio == ratio
             )
             if not layers:
                 continue
             targets = (
                 (("kv", config.head_dim), ("indexer", config.indexer_head_dim))
-                if ratio == 4 else (("kv", config.head_dim),)
+                if ratio == 4
+                else (("kv", config.head_dim),)
             )
             for target, head_dim in targets:
-                states.append(create_window_compressor_state(
-                    config=WindowCompressorStateConfig(
-                        logical_layer_ids=layers,
-                        window_size=window_size,
-                        compress_stride=ratio,
-                        candidate_dim=head_dim * (2 if window_size > ratio else 1),
-                        target=target,
-                        tp_rank=tp_rank,
-                        tp_world_size=tp_world_size,
-                    ),
-                    request_capacity=request_capacity,
-                    mtp_step=args.mtp_step,
-                    device=device,
-                ))
+                states.append(
+                    create_window_compressor_state(
+                        config=WindowCompressorStateConfig(
+                            logical_layer_ids=layers,
+                            window_size=window_size,
+                            compress_stride=ratio,
+                            candidate_dim=head_dim * (2 if window_size > ratio else 1),
+                            target=target,
+                            tp_rank=tp_rank,
+                            tp_world_size=tp_world_size,
+                        ),
+                        request_capacity=request_capacity,
+                        mtp_step=args.mtp_step,
+                        device=device,
+                    )
+                )
         return states
 
     def prepare_attention_states(self) -> None:

@@ -328,7 +328,6 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
     assert not buffer[:2].any()
 
 
-
 @pytest.mark.parametrize("hybrid", [False, True])
 def test_production_offload_preserves_ready_pages_without_host_sync(
     runtime: None,
@@ -410,6 +409,7 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
         monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
         monkeypatch.setattr(common.g_infer_context, "is_hybrid_att_model", hybrid)
         monkeypatch.setattr(common.g_infer_context, "radix_cache", None)
+
         def reject_host_sync(*args: object, **kwargs: object) -> None:
             pytest.fail("CPU offload must use stream dependencies instead of host synchronization")
 

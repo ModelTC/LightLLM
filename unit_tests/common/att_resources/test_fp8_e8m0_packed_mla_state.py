@@ -62,7 +62,8 @@ def test_factory_selects_independent_encoding_and_meta_geometry(pd_args: EasyDic
     with pytest.raises(AssertionError, match="latent 576"):
         create_packed_mla_state(
             config=PackedMLALogicalConfig(
-                logical_layer_groups=((0,),), latent_dim=512,
+                logical_layer_groups=((0,),),
+                latent_dim=512,
                 format="packed_group128_fp8",
             ),
             device="meta",
@@ -70,7 +71,8 @@ def test_factory_selects_independent_encoding_and_meta_geometry(pd_args: EasyDic
     with pytest.raises(AssertionError, match="512-dimensional"):
         create_packed_mla_state(
             config=PackedMLALogicalConfig(
-                logical_layer_groups=((0,),), latent_dim=576,
+                logical_layer_groups=((0,),),
+                latent_dim=576,
                 format="packed_group64_e8m0",
             ),
             device="meta",
@@ -119,9 +121,7 @@ def test_fixed_quantizer_preserves_indexer_and_other_rows() -> None:
     indices = torch.tensor([1, 7, 12], dtype=torch.int32, device="cuda")
     kv = torch.randn((3, 1, 512), dtype=torch.bfloat16, device="cuda")
     expected = torch.empty((3, 1, 584), dtype=torch.uint8, device="cuda")
-    write_fp8_e8m0_packed_kv(
-        kv=kv, token_indices=torch.arange(3, dtype=torch.int32, device="cuda"), packed_kv=expected
-    )
+    write_fp8_e8m0_packed_kv(kv=kv, token_indices=torch.arange(3, dtype=torch.int32, device="cuda"), packed_kv=expected)
     state.write_full_att_kv(logical_layer_id=4, token_indices=indices, kv=kv)
     view = state.get_layer_view(logical_layer_id=0)
     torch.testing.assert_close(view.kv[indices], expected, rtol=0, atol=0)
@@ -187,9 +187,7 @@ def test_full_payload_roundtrip_skips_padding(
             source.write_to_pd_page(token_indices=src_ids, pd_page_buffers=page_view, pd_page_index=3, layout=layout)
             target.read_from_pd_page(pd_page_buffers=page_view, token_indices=dst_ids, pd_page_index=3, layout=layout)
     stream.synchronize()
-    torch.testing.assert_close(
-        target.storage[:, dst_ids, :, :716], source.storage[:, src_ids, :, :716], rtol=0, atol=0
-    )
+    torch.testing.assert_close(target.storage[:, dst_ids, :, :716], source.storage[:, src_ids, :, :716], rtol=0, atol=0)
     assert target.storage[..., 716:].eq(173).all()
     assert target.storage[:, 16:].eq(173).all()
     assert pages[:, :16].eq(99).all() and pages[:, -16:].eq(99).all()

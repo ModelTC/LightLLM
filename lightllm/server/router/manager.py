@@ -235,8 +235,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
                     for dp_index in range(self.dp_size_in_node):
                         token_ratio1 = self.get_used_tokens(dp_index) / self.max_total_token_num
                         token_ratio2 = (
-                            self.max_total_token_num
-                            - self.kv_capacity_reader.get_available_tokens(dp_index)
+                            self.max_total_token_num - self.kv_capacity_reader.get_available_tokens(dp_index)
                         ) / self.max_total_token_num
                         d_i = dp_index
                         estimated_peak_token_count = self.shared_token_load.get_estimated_peak_token_count(d_i)

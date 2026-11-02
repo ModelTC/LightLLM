@@ -85,8 +85,10 @@ class KDAPrefillAttState(BasePrefillAttState):
         backend: KDALinearAttBackend = self.backend
 
         state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role, state_type_filter="kda",
-            logical_layer_id=layer_num, state_class=KDAState,
+            model_role=self.infer_state.att_state_role,
+            state_type_filter="kda",
+            logical_layer_id=layer_num,
+            state_class=KDAState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
@@ -144,7 +146,8 @@ class KDADecodeAttState(BaseDecodeAttState):
         # MTP 元数据按模型初始化，沿用每个角色只有一个 KDA State 的约束。
         # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
         (state,) = (
-            state for state in self.infer_state.att_state_manager.get_bounded_attention_states(
+            state
+            for state in self.infer_state.att_state_manager.get_bounded_attention_states(
                 self.infer_state.att_state_role
             )
             if isinstance(state, KDAState)
@@ -220,8 +223,10 @@ class KDADecodeAttState(BaseDecodeAttState):
         backend: KDALinearAttBackend = self.backend
 
         state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role, state_type_filter="kda",
-            logical_layer_id=layer_num, state_class=KDAState,
+            model_role=self.infer_state.att_state_role,
+            state_type_filter="kda",
+            logical_layer_id=layer_num,
+            state_class=KDAState,
         )
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=self.b_conv_buffer_idx)

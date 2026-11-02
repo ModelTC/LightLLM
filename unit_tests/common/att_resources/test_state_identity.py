@@ -92,7 +92,12 @@ def test_numbered_drafts_keep_state_name_order_and_unique_members():
         manager.register_state("draft1", definition("gqa"))
     manager.finish_state_registration()
     assert [state.state_name.split("_", 1)[0] for state in manager.get_full_attention_states()] == [
-        "draft0", "draft10", "draft1", "draft2", "draft35", "main",
+        "draft0",
+        "draft10",
+        "draft1",
+        "draft2",
+        "draft35",
+        "main",
     ]
     assert manager.get_full_attention_states("draft1") == (manager.draft1_gqa_bf16_state,)
     assert manager.get_full_attention_states("draft10") == (manager.draft10_gqa_bf16_state,)
@@ -211,7 +216,9 @@ def test_independent_role_states_copy_and_transfer_distinct_layers(kind: str, cp
     source.finish_state_registration()
     assert getattr(source, main.state_name) is main
     assert getattr(source, draft.state_name) is draft
-    source.copy_full_att_tokens(torch.tensor([0, 1], dtype=torch.long, device="cuda"), torch.tensor([4, 5], dtype=torch.long, device="cuda"))
+    source.copy_full_att_tokens(
+        torch.tensor([0, 1], dtype=torch.long, device="cuda"), torch.tensor([4, 5], dtype=torch.long, device="cuda")
+    )
 
     target_physical = allocated_state(kind, device="cuda")
     target_main, target_draft = create_full_attention_roles(target_physical, 1)
@@ -234,7 +241,9 @@ def test_independent_role_states_copy_and_transfer_distinct_layers(kind: str, cp
         layouts=source.get_cpu_cache_operator().get_page_layouts(),
     )
     for src, dst in ((main, target_main), (draft, target_draft)):
-        fields = {name: field.tensor for name, field in full_state_test_fields(dst, full_state_test_buffers(dst)).items()}
+        fields = {
+            name: field.tensor for name, field in full_state_test_fields(dst, full_state_test_buffers(dst)).items()
+        }
         for name, field in full_state_test_fields(src, full_state_test_buffers(src)).items():
             if "token" in field.axes:
                 assert torch.equal(field.tensor[:, :2], fields[name][:, 6:8])
@@ -282,7 +291,9 @@ def test_mixed_quantization_in_one_role_remains_distinct_in_copy_and_cpu_pages(c
     for state in (full, quant):
         manager.register_state("main", state)
     manager.finish_state_registration()
-    manager.copy_full_att_tokens(torch.tensor([0, 1], dtype=torch.long, device="cuda"), torch.tensor([4, 5], dtype=torch.long, device="cuda"))
+    manager.copy_full_att_tokens(
+        torch.tensor([0, 1], dtype=torch.long, device="cuda"), torch.tensor([4, 5], dtype=torch.long, device="cuda")
+    )
     for state in (full, quant):
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             assert (field.tensor[:, 4:6] == 5).all()

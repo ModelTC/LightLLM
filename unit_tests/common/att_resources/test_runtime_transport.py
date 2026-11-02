@@ -102,7 +102,9 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
             target_ids=[4, 6],
         )
 
-    cpu_pages = torch.empty((1, managers[0].get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=device == "cuda")
+    cpu_pages = torch.empty(
+        (1, managers[0].get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=device == "cuda"
+    )
     if device == "cpu":
         with pytest.raises(AssertionError, match="CUDA State storage"):
             managers[0].get_cpu_cache_operator().write_req(
@@ -195,7 +197,7 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
         # 生产拷贝入口只使用已映射的资源，不负责打开设备间访问。
         from cuda.bindings import runtime
 
-        error, = runtime.cudaDeviceEnablePeerAccess(source_device, 0)
+        (error,) = runtime.cudaDeviceEnablePeerAccess(source_device, 0)
         assert error in (runtime.cudaError_t.cudaSuccess, runtime.cudaError_t.cudaErrorPeerAccessAlreadyEnabled)
     for i, field in enumerate(full_state_test_fields(source_full, full_state_test_buffers(source_full)).values()):
         if "token" in field.axes:
@@ -288,11 +290,14 @@ def test_dp_fetch_restores_baseline_runtime_and_full_token_fields(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("p2p", [False, True])
-@pytest.mark.parametrize("share_pools,ipc_kinds", [
-    (False, ("pd",)),
-    (True, ("pd", "dp")),
-    (True, ("dp", "pd")),
-])
+@pytest.mark.parametrize(
+    "share_pools,ipc_kinds",
+    [
+        (False, ("pd",)),
+        (True, ("pd", "dp")),
+        (True, ("dp", "pd")),
+    ],
+)
 def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
     monkeypatch: pytest.MonkeyPatch,
     p2p: bool,
@@ -359,8 +364,8 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
         assert error is None, error
         assert (read_kv_storage(full)[:, 4] == 9).all()
         window = resources.main_compressor_indexer_w4_s4_bf16_state
-        assert not window.buffer[:, 1, :, :window.config.candidate_dim].any()
-        assert torch.isneginf(window.buffer[:, 1, :, window.config.candidate_dim:]).all()
+        assert not window.buffer[:, 1, :, : window.config.candidate_dim].any()
+        assert torch.isneginf(window.buffer[:, 1, :, window.config.candidate_dim :]).all()
         assert (main_linear_state(resources).conv_state == 11).all()
         assert (main_linear_state(resources).big_pages_pool.conv_state[slot[0]] == 11).all()
         assert not main_linear_state(resources).big_pages_pool.ssm_state[slot[0]].any()
@@ -386,18 +391,24 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
 @pytest.mark.parametrize("source_tp,target_tp", [(1, 4), (4, 1), (2, 8), (8, 2)])
 def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, target_tp: int, pd_args: EasyDict):
     pd_args.pd_kv_page_size = 128
-    source = [make_resources(
-        glm=False,
-        tp=source_tp,
-        rank=rank,
-        mtp=2,
-    ) for rank in range(source_tp)]
-    target = [make_resources(
-        glm=False,
-        tp=target_tp,
-        rank=rank,
-        mtp=2,
-    ) for rank in range(target_tp)]
+    source = [
+        make_resources(
+            glm=False,
+            tp=source_tp,
+            rank=rank,
+            mtp=2,
+        )
+        for rank in range(source_tp)
+    ]
+    target = [
+        make_resources(
+            glm=False,
+            tp=target_tp,
+            rank=rank,
+            mtp=2,
+        )
+        for rank in range(target_tp)
+    ]
     for rank, (manager, full) in enumerate(source):
         for field_index, field in enumerate(full_state_test_fields(full, full_state_test_buffers(full)).values()):
             for local_head in range(full.config.head_num):
@@ -493,7 +504,10 @@ def test_ipc_readers_accept_different_pickle_lengths(kind: str, monkeypatch: pyt
     monkeypatch.setattr(shared_att_resources_utils.ForkingPickler, "dumps", serialize)
 
     shared_att_resources_utils.publish_att_resources(
-        resources=resources, request_mapping=mapping, kind=kind, reader_count=3,
+        resources=resources,
+        request_mapping=mapping,
+        kind=kind,
+        reader_count=3,
     )
     assert len(payloads) == 3 and len({len(payload) for payload in payloads}) == 3
     buffer = storage[f"rank_storage_{kind}_0"].buf
@@ -538,7 +552,9 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
                 main_linear_state(resources).small_pages_pool.conv_state.flatten()[0] = 37
             assert not hasattr(resources, "req_to_token_indexs")
             assert mapping[1, 0].item() == 7
-            resources.copy_full_att_tokens(torch.tensor([0], dtype=torch.long, device="cuda"), torch.tensor([4], dtype=torch.long, device="cuda"))
+            resources.copy_full_att_tokens(
+                torch.tensor([0], dtype=torch.long, device="cuda"), torch.tensor([4], dtype=torch.long, device="cuda")
+            )
             for window in window_states(resources):
                 window.reset_bounded_att_state([1])
             torch.cuda.synchronize()

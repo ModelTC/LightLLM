@@ -105,7 +105,9 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
     next_token = output.logits.argmax(dim=-1).cpu()
     source_indices = model.req_manager.req_to_token_indexs[int(source_req[0]), :prefix_len].clone()
 
-    cpu = torch.zeros((len(pages), resources.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    cpu = torch.zeros(
+        (len(pages), resources.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True
+    )
     resources.get_cpu_cache_operator().write_req(
         token_indices=source_indices,
         cpu_page_buffers=cpu,
@@ -119,7 +121,9 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
     runtime_layouts = resources.get_pd_operator().get_pd_bounded_att_page_layouts()
     pd = {"kv": torch.empty((1, resources.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")}
     if runtime_layouts:
-        pd["att_state"] = torch.empty((1, resources.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")
+        pd["att_state"] = torch.empty(
+            (1, resources.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda"
+        )
     resources.get_pd_operator().write_page(
         pd_page_buffers=pd["kv"],
         pd_page_index=0,
@@ -148,8 +152,10 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
             resources.copy_full_att_tokens(source_indices, indices)
             if hybrid:
                 resources.restore_bounded_att_runtime_from_pages(
-                    req_indices=request.tolist(), state_token_lens=[prefix_len],
-                    page_kind="big", page_slot_ids=[source_slots[-1]],
+                    req_indices=request.tolist(),
+                    state_token_lens=[prefix_len],
+                    page_kind="big",
+                    page_slot_ids=[source_slots[-1]],
                 )
         elif kind == "cpu_pages":
             slots = big.alloc(len(pages)) if hybrid else None

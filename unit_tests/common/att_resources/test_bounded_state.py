@@ -15,7 +15,9 @@ from lightllm.common.attention_state.bounded_att import (
     ConvSSMStateConfig,
 )
 from lightllm.common.attention_state.types import (
-    AxisMapping, StateTransferLayout, TransferRegion,
+    AxisMapping,
+    StateTransferLayout,
+    TransferRegion,
 )
 
 if TYPE_CHECKING:
@@ -23,6 +25,7 @@ if TYPE_CHECKING:
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for aggregated copies")
+
 
 def make_state(
     cls: type[KDAState] | type[GDNState] = KDAState,
@@ -369,13 +372,15 @@ def test_dp_runtime_copy_preserves_pages_and_other_requests(cls, device, src_mtp
     target.big_pages_pool.conv_state.fill_(91)
     target.big_pages_pool.ssm_state.fill_(92)
     for req in (0, 2):
-        source.conv_state[:, req, :, :source.config.conv_width].fill_(10 + req)
+        source.conv_state[:, req, :, : source.config.conv_width].fill_(10 + req)
         source.ssm_state[:, req * (src_mtp_step + 1)].fill_(20 + req)
     src_conv = source.conv_state.clone()
     src_ssm = source.ssm_state.clone()
 
     target.copy_runtime_state_from_dp(
-        src_req_indices=[2, 0], dst_req_indices=[0, 1], remote_dp_bounded_state=source,
+        src_req_indices=[2, 0],
+        dst_req_indices=[0, 1],
+        remote_dp_bounded_state=source,
     )
 
     for src_req, dst_req in ((2, 0), (0, 1)):
@@ -383,10 +388,10 @@ def test_dp_runtime_copy_preserves_pages_and_other_requests(cls, device, src_mtp
         assert (target.conv_state[:, dst_req, :, 2:] == -1).all()
         dst_slot = dst_req * (dst_mtp_step + 1)
         assert (target.ssm_state[:, dst_slot] == 20 + src_req).all()
-        assert (target.ssm_state[:, dst_slot + 1:dst_slot + dst_mtp_step + 1] == -2).all()
+        assert (target.ssm_state[:, dst_slot + 1 : dst_slot + dst_mtp_step + 1] == -2).all()
         assert target.mtp_state_index[dst_req] == 0
     assert (target.conv_state[:, 2] == -1).all()
-    assert (target.ssm_state[:, 2 * (dst_mtp_step + 1):] == -2).all()
+    assert (target.ssm_state[:, 2 * (dst_mtp_step + 1) :] == -2).all()
     assert target.mtp_state_index[2] == 1
     assert (target.big_pages_pool.conv_state == 91).all()
     assert (target.big_pages_pool.ssm_state == 92).all()
@@ -412,7 +417,9 @@ def test_dp_big_page_copy_preserves_runtime_and_other_pages(cls):
     src_ssm = source.big_pages_pool.ssm_state.clone()
 
     target.copy_big_pages_from_dp(
-        src_page_ids=[2, 0], dst_page_ids=[0, 1], remote_dp_bounded_state=source,
+        src_page_ids=[2, 0],
+        dst_page_ids=[0, 1],
+        remote_dp_bounded_state=source,
     )
 
     torch.cuda.synchronize()

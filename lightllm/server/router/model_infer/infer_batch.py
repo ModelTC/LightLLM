@@ -180,9 +180,7 @@ class InferenceContext:
                 req.tail_small_page_buffer_id = None
             # 释放请求执行期间申请、但不再插入 radix cache 的大页状态。
             if req.hybrid_len_to_big_page_id:
-                self.att_state_manager.bounded_att_big_page_allocator.free(
-                    list(req.hybrid_len_to_big_page_id.values())
-                )
+                self.att_state_manager.bounded_att_big_page_allocator.free(list(req.hybrid_len_to_big_page_id.values()))
                 req.hybrid_len_to_big_page_id.clear()
 
         # 解除请求对已命中 GPU radix cache 前缀节点的引用。
@@ -296,9 +294,7 @@ class InferenceContext:
             # big page 模式下请求在 prefill 跨过 big page 边界后、到达末尾前被 pause / abort。
             # 若不释放，会泄漏 big page state slot，并触发 free_a_req_mem 中 dict 为空的断言。
             if req.hybrid_len_to_big_page_id:
-                self.att_state_manager.bounded_att_big_page_allocator.free(
-                    list(req.hybrid_len_to_big_page_id.values())
-                )
+                self.att_state_manager.bounded_att_big_page_allocator.free(list(req.hybrid_len_to_big_page_id.values()))
                 req.hybrid_len_to_big_page_id.clear()
 
             req.cur_kv_len = shared_kv_len

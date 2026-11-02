@@ -39,6 +39,7 @@ def test_dp_narrow_head_fields_merge_before_copy(monkeypatch: pytest.MonkeyPatch
             def launch(**kwargs):
                 launches.append((kwargs["SHAPES"], kwargs["ELEMENT_BYTES"]))
                 return kernel[grid](**kwargs)
+
             return launch
 
     monkeypatch.setattr(dp_transfer, "_copy_indexed_token_storages", CaptureLaunch())
@@ -73,7 +74,8 @@ def test_dp_copy_preserves_complete_rows_without_temporary_payload(
             pytest.skip("CUDA peer access required")
         # 仅测试直接跨卡 Tensor 的场景需要预先开 peer；生产通过 IPC 装配，不在复制时建映射。
         from cuda.bindings import runtime
-        error, = runtime.cudaDeviceEnablePeerAccess(source_device, 0)
+
+        (error,) = runtime.cudaDeviceEnablePeerAccess(source_device, 0)
         assert error in (runtime.cudaError_t.cudaSuccess, runtime.cudaError_t.cudaErrorPeerAccessAlreadyEnabled)
 
     template = definition(kind)
@@ -142,10 +144,10 @@ def test_dp_copy_uses_real_storage_strides(column_stride: int, offset: int) -> N
     target_base = torch.empty(size=(2, 23, 3, 48), dtype=torch.bfloat16, device="cuda")
     source_base.view(torch.uint8).random_(0, 256)
     target_base.view(torch.uint8).fill_(173)
-    source = source_base[:, ::2, :, offset:offset + 8 * column_stride:column_stride]
-    target = target_base[:, ::3, :, offset:offset + 8 * column_stride:column_stride]
+    source = source_base[:, ::2, :, offset : offset + 8 * column_stride : column_stride]
+    target = target_base[:, ::3, :, offset : offset + 8 * column_stride : column_stride]
     expected = target_base.clone()
-    expected[:, ::3, :, offset:offset + 8 * column_stride:column_stride][:, [4, 0, 6]] = source[:, [7, 2, 7]]
+    expected[:, ::3, :, offset : offset + 8 * column_stride : column_stride][:, [4, 0, 6]] = source[:, [7, 2, 7]]
     copy_gqa_tokens(
         src_k_storage=source,
         src_v_storage=source,

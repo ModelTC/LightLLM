@@ -71,7 +71,8 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         state_class = fa3_fp8.Fp8Fa3PrefillAttState if operation == "prefill" else fa3_fp8.Fp8Fa3DecodeAttState
     else:
         state_class = (
-            flashinfer_fp8.Fp8FlashInferPrefillAttState if operation == "prefill"
+            flashinfer_fp8.Fp8FlashInferPrefillAttState
+            if operation == "prefill"
             else flashinfer_fp8.Fp8FlashInferDecodeAttState
         )
 
@@ -84,6 +85,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         attention.decode_max_q_seq_len = 1
         attention.causal = True
     else:
+
         def run(
             q: torch.Tensor,
             paged_kv_cache: tuple[torch.Tensor, torch.Tensor],

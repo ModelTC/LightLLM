@@ -60,10 +60,15 @@ def test_hybrid_layer_mapping_and_mtp_states(
     config = Qwen3NextResourceConfig.from_model_config(model_config, args)
     logical_layer_ids = tuple(range(len(layer_types)))
     (full_state,) = Qwen3NextTpPartModel.create_full_att_states(
-        model_config=model_config, args=args, model_logical_layer_ids=logical_layer_ids,
+        model_config=model_config,
+        args=args,
+        model_logical_layer_ids=logical_layer_ids,
     )
     (bounded_state,) = Qwen3NextTpPartModel.create_bounded_att_states(
-        model_config=model_config, args=args, model_logical_layer_ids=logical_layer_ids, device="meta",
+        model_config=model_config,
+        args=args,
+        model_logical_layer_ids=logical_layer_ids,
+        device="meta",
     )
     manager = AttentionStateManager(request_capacity=1)
     manager.register_state(model_role="main", state=full_state)

@@ -243,7 +243,11 @@ def test_models_prepare_owned_states_in_one_manager(cache, draft_kind):
         dspark_markov_rank=4,
     )
     args = SimpleNamespace(
-        llm_kv_type="None", page_size=256, mtp_step=3, mtp_mode="vanilla_with_att", run_mode="decode",
+        llm_kv_type="None",
+        page_size=256,
+        mtp_step=3,
+        mtp_mode="vanilla_with_att",
+        run_mode="decode",
         enable_prefill_microbatch_overlap=False,
     )
     main = DeepseekV4TpPartModel.__new__(DeepseekV4TpPartModel)

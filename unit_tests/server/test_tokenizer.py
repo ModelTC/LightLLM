@@ -40,9 +40,14 @@ def test_deepseek_bytelevel_checkpoint_preserves_whitespace(tmp_path: Path, mode
     config = json.loads(config_path.read_text())
     config.update(tokenizer_class="LlamaTokenizerFast", legacy=True)
     config_path.write_text(json.dumps(config))
-    (tmp_path / "config.json").write_text(json.dumps({
-        "model_type": model_type, "architectures": ["DeepseekV3ForCausalLM"],
-    }))
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": model_type,
+                "architectures": ["DeepseekV3ForCausalLM"],
+            }
+        )
+    )
 
     tokenizer = get_tokenizer(str(tmp_path))
     expected_ids = backend.encode(text).ids

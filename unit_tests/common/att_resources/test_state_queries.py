@@ -27,12 +27,16 @@ def test_created_state_queries_keep_the_same_objects_through_storage_initializat
     manager = AttentionStateManager(request_capacity=1)
     for role, kind in (("main", "gqa"), ("draft0", "int8")):
         manager.register_state(role, definition(kind))
-        definitions.append(next(
-            state for state in vars(manager).values()
-            if isinstance(state, FullAttentionState) and state.state_name.startswith(role + "_")
-        ))
+        definitions.append(
+            next(
+                state
+                for state in vars(manager).values()
+                if isinstance(state, FullAttentionState) and state.state_name.startswith(role + "_")
+            )
+        )
         for query in (
-            manager.get_full_attention_states, manager.get_bounded_attention_states,
+            manager.get_full_attention_states,
+            manager.get_bounded_attention_states,
         ):
             with pytest.raises(AssertionError, match="State registration"):
                 query()
@@ -72,7 +76,8 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
     results = {(query.__name__, role): query(role) for query in queries for role in (None, "main", "draft0")}
     assert manager._get_states.cache_info().currsize == 6
     assert manager.get_full_attention_states() == (
-        manager.draft0_mla_fp32_state, manager.main_gqa_fp32_state,
+        manager.draft0_mla_fp32_state,
+        manager.main_gqa_fp32_state,
     )
     assert manager.get_bounded_attention_states("main") == (manager.main_kda_conv_fp32_ssm_fp32_state,)
     assert manager.get_bounded_attention_states("draft0") == (manager.draft0_gdn_conv_fp32_ssm_fp32_state,)
@@ -126,7 +131,6 @@ def test_ipc_copy_preserves_owner_storage_and_shares_runtime_tensors():
         assert getattr(exported, state.state_name) is state
 
 
-
 @pytest.mark.parametrize("share_pools", [False, True])
 def test_pd_and_dp_export_have_distinct_pool_ownership(cpu_args: EasyDict, share_pools: bool) -> None:
     cpu_args.enable_dp_prompt_cache_fetch = share_pools
@@ -162,7 +166,8 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
     assert imported.bounded_att_small_page_allocator is None
     misses = source._get_states.cache_info().misses
     for query in (
-        imported.get_full_attention_states, imported.get_bounded_attention_states,
+        imported.get_full_attention_states,
+        imported.get_bounded_attention_states,
     ):
         for state in query():
             name = state.state_name

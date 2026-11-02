@@ -22,7 +22,9 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 @pytest.mark.parametrize("model_class", [Qwen3DFlash2Model, Qwen3_5DFlashModel, Qwen3_5DSparkModel])
 @pytest.mark.parametrize("nested", [False, True])
 def test_dflash_runtime_and_cpu_state_use_overridden_config(
-    model_class: type[TpPartBaseModel], tmp_path: Path, nested: bool,
+    model_class: type[TpPartBaseModel],
+    tmp_path: Path,
+    nested: bool,
 ) -> None:
     text_config = {
         "num_hidden_layers": 32,
@@ -63,7 +65,8 @@ def test_dflash_runtime_and_cpu_state_use_overridden_config(
 
 @pytest.mark.parametrize("model_class", [Glm4MoeLiteMTPModel, Glm5NextMTPModel, Qwen3_5MTPModel])
 def test_native_mtp_runtime_matches_normalized_config(
-    model_class: type[TpPartBaseModel], tmp_path: Path,
+    model_class: type[TpPartBaseModel],
+    tmp_path: Path,
 ) -> None:
     text_config = {
         "num_hidden_layers": 32,
@@ -98,11 +101,16 @@ def test_native_mtp_runtime_matches_normalized_config(
 
 @pytest.mark.parametrize("model_class", [Glm4MoeLiteMTPModel, Glm5NextMTPModel])
 def test_native_mtp_weights_keep_checkpoint_layer_start(
-    model_class: type[TpPartBaseModel], monkeypatch: pytest.MonkeyPatch,
+    model_class: type[TpPartBaseModel],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    config = model_class.normalize_model_config({
-        "num_hidden_layers": 32, "num_nextn_predict_layers": 1, "hidden_size": 1024,
-    })
+    config = model_class.normalize_model_config(
+        {
+            "num_hidden_layers": 32,
+            "num_nextn_predict_layers": 1,
+            "hidden_size": 1024,
+        }
+    )
     module = importlib.import_module(model_class.pre_and_post_weight_class.__module__)
     names = []
 
@@ -118,7 +126,9 @@ def test_native_mtp_weights_keep_checkpoint_layer_start(
     monkeypatch.setattr(module, "RMSNormWeight", record_weight)
     quant_cfg = SimpleNamespace(get_quant_method=lambda layer, name: None)
     pre_post_weight = model_class.pre_and_post_weight_class(
-        data_type=torch.bfloat16, network_config=config, quant_cfg=quant_cfg,
+        data_type=torch.bfloat16,
+        network_config=config,
+        quant_cfg=quant_cfg,
     )
     assert len(names) == 4
     assert all(name.startswith("model.layers.32.") for name in names)
@@ -127,9 +137,13 @@ def test_native_mtp_weights_keep_checkpoint_layer_start(
     model.config = config
     model.data_type = torch.bfloat16
     model.quant_cfg = quant_cfg
-    model.main_model = SimpleNamespace(pre_post_weight=SimpleNamespace(
-        wte_weight_=object(), lm_head_weight_=object(), final_norm_weight_=object(),
-    ))
+    model.main_model = SimpleNamespace(
+        pre_post_weight=SimpleNamespace(
+            wte_weight_=object(),
+            lm_head_weight_=object(),
+            final_norm_weight_=object(),
+        )
+    )
     model.pre_and_post_weight_class = lambda *args, **kwargs: pre_post_weight
     layers = []
 

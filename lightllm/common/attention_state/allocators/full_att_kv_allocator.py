@@ -51,9 +51,9 @@ class FullAttKVAllocator:
 
     def alloc(self, need_size: int) -> torch.Tensor:
         assert need_size >= 0 and need_size % self.page_size == 0, "allocation must contain complete KV pages"
-        assert need_size <= self.mark_end - self.mark_start, (
-            f"need {need_size} KV tokens, only {self.can_use_mem_size} available"
-        )
+        assert (
+            need_size <= self.mark_end - self.mark_start
+        ), f"need {need_size} KV tokens, only {self.can_use_mem_size} available"
         start = self.mark_start
         end = start + need_size
         self.mark_start = end

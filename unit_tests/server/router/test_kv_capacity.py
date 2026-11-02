@@ -24,7 +24,9 @@ def test_router_reads_each_local_dp_groups_allocator(
     selected_ranks: list[int],
     reader_first: bool,
 ):
-    monkeypatch.setattr(full_att_kv_allocator, "get_env_start_args", lambda: SimpleNamespace(tp=tp, dp=dp, nnodes=nnodes))
+    monkeypatch.setattr(
+        full_att_kv_allocator, "get_env_start_args", lambda: SimpleNamespace(tp=tp, dp=dp, nnodes=nnodes)
+    )
     reader = full_att_kv_allocator.KVCapacityReader() if reader_first else None
     allocators = []
     for rank in range(tp // nnodes):

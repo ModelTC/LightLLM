@@ -55,20 +55,24 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
         regions = []
         for region in state.get_pd_transfer_regions():
             axes = ("token", "layer", "head", "dim") if token_major else region.axes
-            regions.append(replace(
-                region,
-                byte_start=region.byte_start + 16,
-                byte_end=region.byte_end + 16,
-                axes=axes,
-                shape=tuple(region.shape[region.axes.index(axis)] for axis in axes),
-            ))
-        layouts.append(StateTransferLayout(
-            state_name=state.state_name,
-            tokens_per_page=4,
-            byte_start=16,
-            byte_end=max(region.byte_end for region in regions),
-            regions=tuple(regions),
-        ))
+            regions.append(
+                replace(
+                    region,
+                    byte_start=region.byte_start + 16,
+                    byte_end=region.byte_end + 16,
+                    axes=axes,
+                    shape=tuple(region.shape[region.axes.index(axis)] for axis in axes),
+                )
+            )
+        layouts.append(
+            StateTransferLayout(
+                state_name=state.state_name,
+                tokens_per_page=4,
+                byte_start=16,
+                byte_end=max(region.byte_end for region in regions),
+                regions=tuple(regions),
+            )
+        )
     layout, target_layout = layouts
     pages = torch.full(
         size=(3, layout.byte_end + 64),
@@ -79,7 +83,9 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
     page_view = pages[:, 32:-32]  # 页池视图的真实跨度大于可见宽度。
     src_ids = torch.tensor(data=[6, 9, 1, 9, 7, 9], dtype=torch.int32, device="cuda")[::2][:token_count]
     dst_ids = torch.tensor(data=[2, 6, 4], dtype=torch.int64, device="cuda")[:token_count]
-    expected = [tensor[:, src_ids, 2:].contiguous().view(torch.uint8) for tensor in (source.k_storage, source.v_storage)]
+    expected = [
+        tensor[:, src_ids, 2:].contiguous().view(torch.uint8) for tensor in (source.k_storage, source.v_storage)
+    ]
 
     def reject_gather(*args: object, **kwargs: object) -> None:
         pytest.fail("PD transfer must not gather or scatter intermediate KV tensors")
@@ -106,11 +112,16 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
         stream.synchronize()
     for tensor, expected_bytes in zip((target.k_storage, target.v_storage), expected):
         assert torch.equal(tensor[:, dst_ids].contiguous().view(torch.uint8), expected_bytes)
-        assert (tensor[:, [index for index in range(12) if index not in [2, 6, 4][:token_count]]].contiguous().view(torch.uint8) == 173).all()
+        assert (
+            tensor[:, [index for index in range(12) if index not in [2, 6, 4][:token_count]]]
+            .contiguous()
+            .view(torch.uint8)
+            == 173
+        ).all()
     assert (pages[[0, 2]] == 91).all()
     assert (pages[:, :48] == 91).all() and (pages[:, -32:] == 91).all()
     for region in layout.regions:
-        external = page_view[1, region.byte_start:region.byte_end].view(dtype).view(region.shape)
+        external = page_view[1, region.byte_start : region.byte_end].view(dtype).view(region.shape)
         unused = [slice(None)] * 4
         unused[region.axes.index("token")] = slice(token_count, None)
         assert (external[tuple(unused)].contiguous().view(torch.uint8) == 91).all()
@@ -124,7 +135,7 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
         layout=target_layout,
     )
     for region, expected_bytes in zip(target_layout.regions, expected):
-        external = page_view[2, region.byte_start:region.byte_end].view(dtype).view(region.shape)
+        external = page_view[2, region.byte_start : region.byte_end].view(dtype).view(region.shape)
         external = external.permute(tuple(region.axes.index(axis) for axis in ("layer", "token", "head", "dim")))
         assert torch.equal(external[:, :token_count, 2:].contiguous().view(torch.uint8), expected_bytes)
         assert (external[:, :, :2].contiguous().view(torch.uint8) == 91).all()
@@ -161,7 +172,7 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
     )
     pages = torch.zeros(size=(2, layout.byte_end), dtype=torch.uint8, device="cuda")
     for region, value in zip(regions, (3, 7)):
-        pages[1, region.byte_start:region.byte_end].view(region.dtype).fill_(value)
+        pages[1, region.byte_start : region.byte_end].view(region.dtype).fill_(value)
     snapshot = pages.clone()
     ids = torch.tensor(data=[5, 1], dtype=torch.int32, device="cuda")
     state.write_to_pd_page(

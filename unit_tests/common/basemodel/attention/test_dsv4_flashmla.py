@@ -65,7 +65,8 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         att_state_role="main",
     )
     monkeypatch.setattr(
-        backend_class, "get_gpu_workspace_buffer",
+        backend_class,
+        "get_gpu_workspace_buffer",
         lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype),
     )
     workspace, capacity = backend_class.get_swa_prefill_workspace(model=model)

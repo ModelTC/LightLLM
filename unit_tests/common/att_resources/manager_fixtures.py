@@ -34,7 +34,8 @@ class MainDraftTestResourceManager(AttentionStateManager):
                 latent_dim=self.main_gqa_fp32_state.config.head_dim,
                 latent_dtype=self.main_gqa_fp32_state.config.dtype,
             ),
-            page_size=self.main_gqa_fp32_state.page_size, device=device,
+            page_size=self.main_gqa_fp32_state.page_size,
+            device=device,
         )
         prepared_full_state.allocate_storage(self.main_gqa_fp32_state.capacity)
         self.register_state("draft0", prepared_full_state)

@@ -45,14 +45,16 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
         scales = template.scales + value
         scales[1] += 10
         q_scales = None if kind == "static_tensor" else template.q_scales + value
-        states.append(rebuild_full_state(
-            template=template,
-            config=replace_logical_layer_groups(template.config, ((3,), (8,))),
-            token_capacity=8,
-            device="cuda",
-            scales=scales,
-            q_scales=q_scales,
-        ))
+        states.append(
+            rebuild_full_state(
+                template=template,
+                config=replace_logical_layer_groups(template.config, ((3,), (8,))),
+                token_capacity=8,
+                device="cuda",
+                scales=scales,
+                q_scales=q_scales,
+            )
+        )
     manager = AttentionStateManager(request_capacity=2)
     manager.register_state("main", states[0])
     manager.register_state("draft0", states[1])
@@ -141,12 +143,15 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
     from lightllm.common.basemodel.triton_kernel.destindex_copy_kv_fp8 import destindex_copy_kv_fp8
 
     scale_count = 2 if scale_mode == "per_tensor" else 2 * head_num
-    scales = torch.arange(
-        start=1,
-        end=scale_count + 1,
-        dtype=torch.float32,
-        device="cuda",
-    ).unsqueeze(0) / 4
+    scales = (
+        torch.arange(
+            start=1,
+            end=scale_count + 1,
+            dtype=torch.float32,
+            device="cuda",
+        ).unsqueeze(0)
+        / 4
+    )
     state = StaticFP8FullAttentionState(
         layout_config=StaticFP8AttentionConfig(
             logical_layer_groups=((5,),),
@@ -154,10 +159,12 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
             head_dim=128,
             scale_mode=scale_mode,
         ),
-        page_size=4, device="cuda",
+        page_size=4,
+        device="cuda",
     )
     bind_test_fp8_calibration(
-        state=state, scales=scales,
+        state=state,
+        scales=scales,
         q_scales=torch.ones((1, head_num), dtype=torch.float32, device="cuda") if scale_mode == "per_head" else None,
     )
     state.allocate_storage(8)

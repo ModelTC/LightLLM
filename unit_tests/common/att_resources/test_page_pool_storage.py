@@ -51,7 +51,8 @@ def test_page_pool_allocation_strategy(
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_shared_registration_lives_until_last_view(
-    cpu_args: EasyDict, monkeypatch: pytest.MonkeyPatch,
+    cpu_args: EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cpu_args.enable_dp_prompt_cache_fetch = True
     unregistered = []
@@ -83,7 +84,8 @@ def test_gpu_page_pool_keeps_device_allocation(cpu_args: EasyDict) -> None:
 
 
 def test_empty_shared_pool_skips_cuda_registration(
-    cpu_args: EasyDict, monkeypatch: pytest.MonkeyPatch,
+    cpu_args: EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     cpu_args.enable_dp_prompt_cache_fetch = True
 
@@ -99,7 +101,8 @@ def test_empty_shared_pool_skips_cuda_registration(
 @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="two CUDA devices required")
 @pytest.mark.parametrize("pool_cls", [KDAPagesPool, GDNPagesPool])
 def test_pinned_page_pool_survives_queue_on_another_gpu(
-    cpu_args: EasyDict, pool_cls: type[KDAPagesPool] | type[GDNPagesPool],
+    cpu_args: EasyDict,
+    pool_cls: type[KDAPagesPool] | type[GDNPagesPool],
 ) -> None:
     cpu_args.enable_dp_prompt_cache_fetch = True
     torch.cuda.set_device(0)

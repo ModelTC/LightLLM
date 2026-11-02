@@ -64,9 +64,7 @@ def calcu_cpu_cache_meta() -> "CpuKVCacheMeta":
         page_bytes=page_bytes,
     )
 
-    cpu_cache_page_num = int(
-        (args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.page_bytes)
-    )
+    cpu_cache_page_num = int((args.cpu_cache_storage_size * 1024 * 1024 * 1024) / (cpu_cache_meta.page_bytes))
     cpu_cache_meta.page_num = cpu_cache_page_num
 
     logger.info(f"cpu kv cache page num: {cpu_cache_meta.page_num}")

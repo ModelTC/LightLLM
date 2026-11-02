@@ -65,8 +65,13 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
 
     @classmethod
     def create_full_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        *,
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """DeepSeek MLA 保存 latent 与 RoPE，TP 副本规则由 MLA 创建入口处理。"""
         from lightllm.common.attention_state.full_att import MLAConfig, create_mla_state
@@ -81,9 +86,11 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
                 logical_layer_groups=logical_layer_groups,
                 latent_dim=config["kv_lora_rank"] + config["qk_rope_head_dim"],
                 latent_dtype=get_torch_dtype(args.data_type),
-                tp_rank=tp_rank, tp_world_size=tp_world_size,
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
             ),
-            page_size=args.page_size, device="meta",
+            page_size=args.page_size,
+            device="meta",
         )
         return [state]
 

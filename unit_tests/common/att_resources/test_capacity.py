@@ -62,8 +62,10 @@ def definition(kind: str):
             device="meta",
         )
     kv_type = {
-        "int4": "int4kv", "int8": "int8kv",
-        "static_head": "fp8kv_sph", "static_tensor": "fp8kv_spt",
+        "int4": "int4kv",
+        "int8": "int8kv",
+        "static_head": "fp8kv_sph",
+        "static_tensor": "fp8kv_spt",
     }.get(kind, "None")
     state = create_gqa_state(
         config=GQAAttentionConfig(
@@ -79,7 +81,8 @@ def definition(kind: str):
     if kind.startswith("static"):
         heads = 2 if kind == "static_head" else 1
         bind_test_fp8_calibration(
-            state=state, scales=torch.ones((2, heads * 2), dtype=torch.float32),
+            state=state,
+            scales=torch.ones((2, heads * 2), dtype=torch.float32),
             q_scales=torch.ones((2, 2), dtype=torch.float32) if heads == 2 else None,
         )
     return state
@@ -221,7 +224,9 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     tail = WindowCompressorState(
         config=WindowCompressorStateConfig(
             logical_layer_ids=(1,),
-            window_size=4, compress_stride=4, target="indexer",
+            window_size=4,
+            compress_stride=4,
+            target="indexer",
             candidate_dim=3,
             dtype=torch.bfloat16,
         ),
@@ -238,7 +243,13 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     conv = reference.conv_state[:, 0, :, : config.conv_width]
     ssm = reference.ssm_state[:, 0]
     bounded_bytes = conv.numel() * conv.element_size() + ssm.numel() * ssm.element_size()
-    tail_bytes = len(tail.config.logical_layer_ids) * tail.config.window_size * 2 * tail.config.candidate_dim * tail.config.dtype.itemsize
+    tail_bytes = (
+        len(tail.config.logical_layer_ids)
+        * tail.config.window_size
+        * 2
+        * tail.config.candidate_dim
+        * tail.config.dtype.itemsize
+    )
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state("main", reference)
     manager.register_state("main", tail)
@@ -279,7 +290,9 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
     assert not pages[0].any()
     for state in (reference, tail):
         monkeypatch.setattr(
-            state, "get_pd_transfer_regions", lambda *args, **kwargs: pytest.fail("cached page size must not rebuild regions")
+            state,
+            "get_pd_transfer_regions",
+            lambda *args, **kwargs: pytest.fail("cached page size must not rebuild regions"),
         )
     assert manager.get_pd_operator().get_page_bytes() == pages.shape[1]
 
@@ -298,11 +311,16 @@ def test_pd_layout_reserves_aligned_storage_for_mixed_token_formats(
     ):
         if state_cls is MLAFullAttentionState:
             config = MLAConfig(
-                logical_layer_groups=((0,),), latent_dim=dim, latent_dtype=dtype,
+                logical_layer_groups=((0,),),
+                latent_dim=dim,
+                latent_dtype=dtype,
             )
         else:
             config = GQAAttentionConfig(
-                logical_layer_groups=((0,),), global_head_num=1, head_dim=dim, dtype=dtype,
+                logical_layer_groups=((0,),),
+                global_head_num=1,
+                head_dim=dim,
+                dtype=dtype,
             )
         manager.register_state(role, state_cls(config, page_size=1, device="meta"))
     manager.finish_state_registration()
@@ -359,12 +377,15 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
 ):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+
     class AlignedFieldsState(GroupQuantizedFullAttentionState):
         def _get_transfer_regions(self, page_tokens: int):
             regions, offset = [], 0
             for region in super()._get_transfer_regions(page_tokens):
                 offset = (offset + 7) // 8 * 8
-                regions.append(replace(region, byte_start=offset, byte_end=offset + region.byte_end - region.byte_start))
+                regions.append(
+                    replace(region, byte_start=offset, byte_end=offset + region.byte_end - region.byte_start)
+                )
                 offset += prod(region.shape) * region.dtype.itemsize
             return tuple(regions)
 
@@ -390,8 +411,16 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
     for state in manager.get_full_attention_states():
         assert state.get_token_bytes() * 3 == 792
         monkeypatch.setattr(state, "get_token_bytes", lambda: pytest.fail("capacity must use field layouts"))
-    get_layouts = manager.get_cpu_cache_operator().get_page_layouts if transfer == "cpu" else manager.get_pd_operator().get_pd_full_att_page_layouts
-    get_page_bytes = manager.get_cpu_cache_operator().get_page_bytes if transfer == "cpu" else manager.get_pd_operator().get_page_bytes
+    get_layouts = (
+        manager.get_cpu_cache_operator().get_page_layouts
+        if transfer == "cpu"
+        else manager.get_pd_operator().get_pd_full_att_page_layouts
+    )
+    get_page_bytes = (
+        manager.get_cpu_cache_operator().get_page_bytes
+        if transfer == "cpu"
+        else manager.get_pd_operator().get_page_bytes
+    )
     if layout_first:
         with monkeypatch.context() as patch:
             operator = manager.get_cpu_cache_operator() if transfer == "cpu" else manager.get_pd_operator()
@@ -448,8 +477,8 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
             torch.testing.assert_close(field.tensor[:, 4:7], field.tensor[:, :3])
     assert (pages[[0, 2]] == 91).all()
     for offset in (0, 800):
-        assert (pages[1, offset + 780:offset + 784] == 91).all()
-        assert (pages[1, offset + 796:offset + 800] == 91).all()
+        assert (pages[1, offset + 780 : offset + 784] == 91).all()
+        assert (pages[1, offset + 796 : offset + 800] == 91).all()
 
 
 @pytest.mark.parametrize("full_page_tokens", [None, 8, 10, 16])
@@ -464,7 +493,9 @@ def test_pd_runtime_capacity_includes_field_padding(
         @lru_cache(maxsize=None)
         def get_pd_transfer_regions(self):
             return tuple(
-                replace(region, byte_start=region.byte_start + 64, byte_end=region.byte_end + 64) if region.field == "ssm" else region
+                replace(region, byte_start=region.byte_start + 64, byte_end=region.byte_end + 64)
+                if region.field == "ssm"
+                else region
                 for region in super().get_pd_transfer_regions()
             )
 
@@ -489,7 +520,8 @@ def test_pd_runtime_capacity_includes_field_padding(
             conv_dtype=torch.bfloat16,
             ssm_dtype=torch.float32,
         ),
-        request_capacity=1, device="cuda",
+        request_capacity=1,
+        device="cuda",
     )
     manager.register_state("main", state)
     manager.finish_state_registration()
@@ -574,7 +606,11 @@ def test_page_bytes_refresh_with_storage_dependent_layout(
     )
     manager.register_state("main", PaddedState(config, page_size=1, device="meta"))
     manager.finish_state_registration()
-    get_page_bytes = manager.get_cpu_cache_operator().get_page_bytes if transfer == "cpu" else manager.get_pd_operator().get_page_bytes
+    get_page_bytes = (
+        manager.get_cpu_cache_operator().get_page_bytes
+        if transfer == "cpu"
+        else manager.get_pd_operator().get_page_bytes
+    )
     assert get_page_bytes() == 48
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
@@ -586,7 +622,11 @@ def test_page_bytes_refresh_with_storage_dependent_layout(
         device="cpu",
     )
     assert get_page_bytes() == (80 if transfer == "cpu" else 72)
-    layouts = manager.get_cpu_cache_operator().get_page_layouts() if transfer == "cpu" else manager.get_pd_operator().get_pd_full_att_page_layouts()
+    layouts = (
+        manager.get_cpu_cache_operator().get_page_layouts()
+        if transfer == "cpu"
+        else manager.get_pd_operator().get_pd_full_att_page_layouts()
+    )
     assert layouts["main_gqa_bf16_state"].byte_end == 72
 
 
@@ -623,7 +663,9 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
         state = WindowCompressorState(
             config=WindowCompressorStateConfig(
                 logical_layer_ids=(0,),
-                window_size=4, compress_stride=4, target="indexer",
+                window_size=4,
+                compress_stride=4,
+                target="indexer",
                 candidate_dim=1,
                 dtype=torch.float32,
             ),
@@ -672,12 +714,15 @@ def test_cpu_page_bytes_derive_from_cached_transfer_layouts(
     q_scales = torch.ones((len(config.logical_layer_groups), config.head_num)) if kind == "static_head" else None
     manager = AttentionStateManager(request_capacity=3)
     for role in ("main", "draft0"):
-        manager.register_state(role, rebuild_full_state(
-            template=template,
-            config=config,
-            scales=scales,
-            q_scales=q_scales,
-        ))
+        manager.register_state(
+            role,
+            rebuild_full_state(
+                template=template,
+                config=config,
+                scales=scales,
+                q_scales=q_scales,
+            ),
+        )
     for state_cls, v_heads, value_dim in ((KDAState, 1, 1), (GDNState, 2, 3)):
         # 奇数长度的 BF16 Conv 与 FP32 SSM 之间需要补齐，MTP 候选区不应计入页大小。
         bounded_config = ConvSSMStateConfig(
@@ -725,7 +770,8 @@ def test_cpu_bounded_capacity_includes_state_field_padding(cpu_args: EasyDict):
         def get_cpu_transfer_regions(self):
             return tuple(
                 replace(region, byte_start=region.byte_start + 64, byte_end=region.byte_end + 64)
-                if region.field == "ssm" else region
+                if region.field == "ssm"
+                else region
                 for region in super().get_cpu_transfer_regions()
             )
 
@@ -741,7 +787,8 @@ def test_cpu_bounded_capacity_includes_state_field_padding(cpu_args: EasyDict):
             conv_dtype=torch.bfloat16,
             ssm_dtype=torch.float32,
         ),
-        request_capacity=1, device="meta",
+        request_capacity=1,
+        device="meta",
     )
     manager.register_state("main", state)
     manager.finish_state_registration()
@@ -898,19 +945,23 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
         dtype=torch.bfloat16,
     )
     manager.register_state("main", GQAFullAttentionState(config, page_size=1, device="meta"))
-    manager.register_state("main", GDNState(
-        ConvSSMStateConfig(
-            logical_layer_ids=(0,),
-            global_k_heads=1,
-            global_v_heads=1,
-            key_dim=1,
-            value_dim=1,
-            conv_width=1,
-            conv_dtype=torch.bfloat16,
-            ssm_dtype=torch.bfloat16,
+    manager.register_state(
+        "main",
+        GDNState(
+            ConvSSMStateConfig(
+                logical_layer_ids=(0,),
+                global_k_heads=1,
+                global_v_heads=1,
+                key_dim=1,
+                value_dim=1,
+                conv_width=1,
+                conv_dtype=torch.bfloat16,
+                ssm_dtype=torch.bfloat16,
+            ),
+            request_capacity=1,
+            device="cpu",
         ),
-        request_capacity=1, device="cpu",
-    ))
+    )
     manager.finish_state_registration()
     if transfer == "cpu":
         operator = manager.get_cpu_cache_operator()
@@ -940,7 +991,11 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     assert after_layout is not before_layout
     full_state = manager.main_gqa_bf16_state
     assert full_state.page_size == 4 and not read_kv_storage(full_state).is_meta
-    page_bytes = manager.get_cpu_cache_operator().get_page_bytes() if transfer == "cpu" else manager.get_pd_operator().get_page_bytes()
+    page_bytes = (
+        manager.get_cpu_cache_operator().get_page_bytes()
+        if transfer == "cpu"
+        else manager.get_pd_operator().get_page_bytes()
+    )
     if transfer == "pd_runtime":
         assert after_layout.byte_end == 8 and page_bytes == 40
     elif transfer == "cpu":
@@ -948,15 +1003,17 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
         assert (layout_end + 15) // 16 * 16 == page_bytes
     else:
         assert after_layout.byte_end == page_bytes
-    assert not {
-        "cpu_page_tokens", "cpu_page_bytes", "cpu_transfer_layouts", "pd_page_bytes", "pd_transfer_layouts"
-    } & manager.__dict__.keys()
+    assert (
+        not {"cpu_page_tokens", "cpu_page_bytes", "cpu_transfer_layouts", "pd_page_bytes", "pd_transfer_layouts"}
+        & manager.__dict__.keys()
+    )
 
 
 @pytest.mark.parametrize("transfer", ["cpu", "pd"])
 def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str, pd_args: EasyDict):
     if not torch.cuda.is_available():
         pytest.skip("CUDA required")
+
     class ReversedCpuRegionsState(GQAFullAttentionState):
         @deepcopy_result
         @lru_cache(maxsize=None)
@@ -964,7 +1021,8 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
             regions = super().get_cpu_transfer_regions()
             # 本实现的 CPU 页先保存 V 再保存 K，PD 仍沿用 K/V 顺序。
             return tuple(
-                replace(region, byte_start=other.byte_start, byte_end=other.byte_end) for region, other in zip(regions, reversed(regions))
+                replace(region, byte_start=other.byte_start, byte_end=other.byte_end)
+                for region, other in zip(regions, reversed(regions))
             )
 
     pd_args.cpu_cache_token_page_size = pd_args.pd_kv_page_size = 4
@@ -983,7 +1041,11 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
     manager.register_state("draft0", prepared_full_state)
     manager.full_att_allocator = FullAttKVAllocator(8, 4, pin_memory=False)
     manager.finish_state_registration()
-    layouts = manager.get_cpu_cache_operator().get_page_layouts() if transfer == "cpu" else manager.get_pd_operator().get_pd_full_att_page_layouts()
+    layouts = (
+        manager.get_cpu_cache_operator().get_page_layouts()
+        if transfer == "cpu"
+        else manager.get_pd_operator().get_pd_full_att_page_layouts()
+    )
     for index, state in enumerate(manager.get_full_attention_states()):
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.zero_()
@@ -997,7 +1059,11 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
         assert k_region.byte_start == index * state_bytes + k_offset
         assert v_region.byte_start == index * state_bytes + state_bytes // 2 - k_offset
 
-    page_bytes = manager.get_cpu_cache_operator().get_page_bytes() if transfer == "cpu" else manager.get_pd_operator().get_page_bytes()
+    page_bytes = (
+        manager.get_cpu_cache_operator().get_page_bytes()
+        if transfer == "cpu"
+        else manager.get_pd_operator().get_page_bytes()
+    )
     pages = torch.zeros(
         size=(1, page_bytes),
         dtype=torch.uint8,

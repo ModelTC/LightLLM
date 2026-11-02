@@ -27,7 +27,9 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
     original_cuda = torch.Tensor.cuda
 
     def track_upload(tensor: torch.Tensor, *args: object, **kwargs: object) -> torch.Tensor:
-        uploads.append((tensor.device.type, tensor.is_pinned(), kwargs.get("non_blocking"), torch.cuda.current_stream()))
+        uploads.append(
+            (tensor.device.type, tensor.is_pinned(), kwargs.get("non_blocking"), torch.cuda.current_stream())
+        )
         return original_cuda(tensor, *args, **kwargs)
 
     def capture_copy(**kwargs: object) -> None:

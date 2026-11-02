@@ -261,16 +261,8 @@ def _copy_bounded_att_3d(
         axis1 = remaining_indices % SHAPE[1]
         remaining_indices = remaining_indices // SHAPE[1]
         axis0 = remaining_indices
-        source_offsets = (
-            axis0 * src_stride_0
-            + axis1 * src_stride_1
-            + axis2 * src_stride_2
-        )
-        destination_offsets = (
-            axis0 * dst_stride_0
-            + axis1 * dst_stride_1
-            + axis2 * dst_stride_2
-        )
+        source_offsets = axis0 * src_stride_0 + axis1 * src_stride_1 + axis2 * src_stride_2
+        destination_offsets = axis0 * dst_stride_0 + axis1 * dst_stride_1 + axis2 * dst_stride_2
 
         # 阶段三：按元素所属复制项，从两张指针表读取源/目标地址，按元素宽度解释指针。
         # 使用等宽无符号类型保持原始位模式，不进行浮点数值转换。
@@ -328,18 +320,8 @@ def _copy_bounded_att_4d(
         axis1 = remaining_indices % SHAPE[1]
         remaining_indices = remaining_indices // SHAPE[1]
         axis0 = remaining_indices
-        source_offsets = (
-            axis0 * src_stride_0
-            + axis1 * src_stride_1
-            + axis2 * src_stride_2
-            + axis3 * src_stride_3
-        )
-        destination_offsets = (
-            axis0 * dst_stride_0
-            + axis1 * dst_stride_1
-            + axis2 * dst_stride_2
-            + axis3 * dst_stride_3
-        )
+        source_offsets = axis0 * src_stride_0 + axis1 * src_stride_1 + axis2 * src_stride_2 + axis3 * src_stride_3
+        destination_offsets = axis0 * dst_stride_0 + axis1 * dst_stride_1 + axis2 * dst_stride_2 + axis3 * dst_stride_3
 
         # 阶段三：按元素所属复制项，从两张指针表读取源/目标地址，按元素宽度解释指针。
         # 使用等宽无符号类型保持原始位模式，不进行浮点数值转换。

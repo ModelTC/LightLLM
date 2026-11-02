@@ -276,7 +276,9 @@ class DeepseekV4MemoryManager:
         self.manager.get_pd_operator().get_pd_full_att_page_layouts.cache_clear()
         self.manager.get_pd_operator().get_pd_bounded_att_page_layouts.cache_clear()
         self.manager.get_pd_operator().get_page_bytes.cache_clear()
-        self.kv_move_buffer = torch.empty((count, self.manager.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")
+        self.kv_move_buffer = torch.empty(
+            (count, self.manager.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda"
+        )
         return self.kv_move_buffer
 
     def get_pd_kv_move_buffer_size(self):
@@ -333,9 +335,7 @@ class DeepseekV4MemoryManager:
 
 
 class DeepseekV4ReqManager(ReqManager):
-    def __init__(
-        self, count: int, length: int, memory: DeepseekV4MemoryManager | None, config: Any, mtp_step: int = 0
-    ):
+    def __init__(self, count: int, length: int, memory: DeepseekV4MemoryManager | None, config: Any, mtp_step: int = 0):
         super().__init__(count, length)
         self.cache_config = config
         self.states = DeepseekV4TpPartModel.create_bounded_att_states(

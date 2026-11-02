@@ -18,7 +18,9 @@ from lightllm.common.attention_state.utils import merge_contiguous_tail_dims, vi
     ],
 )
 def test_merge_tail_preserves_copy_regions(
-    layout: str, expected_shape: tuple[int, ...], start_dim: int,
+    layout: str,
+    expected_shape: tuple[int, ...],
+    start_dim: int,
 ) -> None:
     source_shape = (2, 5, 3, 8) if layout == "protected_window" else (2, 3, 8)
     destination_shape = source_shape
@@ -121,7 +123,8 @@ def test_merge_tail_singleton_axes_preserve_addressing(
     source = torch.arange(source_size).as_strided(size=shape, stride=source_strides)
     destination = torch.arange(destination_size).as_strided(size=shape, stride=destination_strides)
     source_view, destination_view = merge_contiguous_tail_dims(
-        copies=[(source, destination)], keepdim=keepdim,
+        copies=[(source, destination)],
+        keepdim=keepdim,
     )[0]
     assert source_view.shape == destination_view.shape == (kept_shape if keepdim else flat_shape)
     assert source_view.data_ptr() == source.data_ptr()
@@ -153,9 +156,9 @@ def test_max_copy_dtype_preserves_data_and_aliases(
     source = torch.arange(32).to(dtype=dtype)
     destination = torch.full(size=(32,), fill_value=-1, dtype=dtype)
     expected = destination.clone()
-    source_view = source[src_offset:src_offset + width]
-    destination_view = destination[dst_offset:dst_offset + width]
-    expected[dst_offset:dst_offset + width].copy_(source_view)
+    source_view = source[src_offset : src_offset + width]
+    destination_view = destination[dst_offset : dst_offset + width]
+    expected[dst_offset : dst_offset + width].copy_(source_view)
 
     copies = [(source_view, destination_view)]
     converted = view_max_copy_dtype(copies=copies)
@@ -175,7 +178,9 @@ def test_max_copy_dtype_preserves_data_and_aliases(
     [(1, 0, torch.bfloat16), (0, 2, torch.int32), (0, 0, torch.int64)],
 )
 def test_max_copy_dtype_preserves_row_padding(
-    src_padding: int, dst_padding: int, expected_dtype: torch.dtype,
+    src_padding: int,
+    dst_padding: int,
+    expected_dtype: torch.dtype,
 ) -> None:
     source = torch.arange(2 * (8 + src_padding)).to(dtype=torch.bfloat16).view(2, 8 + src_padding)
     destination = torch.full(size=(2, 8 + dst_padding), fill_value=-1, dtype=torch.bfloat16)
@@ -192,7 +197,7 @@ def test_max_copy_dtype_preserves_row_padding(
 def test_max_copy_dtype_falls_back_for_middle_batch_offset() -> None:
     source = torch.arange(64).to(dtype=torch.bfloat16)
     destination = torch.full(size=(64,), fill_value=-1, dtype=torch.bfloat16)
-    copies = [(source[start:start + 8], destination[end:end + 8]) for start, end in ((0, 0), (9, 16), (24, 32))]
+    copies = [(source[start : start + 8], destination[end : end + 8]) for start, end in ((0, 0), (9, 16), (24, 32))]
     assert view_max_copy_dtype(copies=copies) is copies
 
 
@@ -201,6 +206,8 @@ def test_max_copy_dtype_keeps_strided_last_axis() -> None:
     destination = torch.empty(size=(16,), dtype=torch.float32)
     copies = [(source, destination)]
     assert view_max_copy_dtype(copies=copies) is copies
+
+
 def test_deepcopy_result_protects_cached_values_and_keeps_cache_controls() -> None:
     from functools import lru_cache
     from lightllm.common.attention_state.utils import deepcopy_result

@@ -43,7 +43,9 @@ def publish_att_resources(
         payloads = [ForkingPickler.dumps((ipc_resources, request_mapping)).tobytes() for _ in range(count)]
         size = max(len(payload) for payload in payloads)
         shm = create_or_link_shm(
-            name=f"rank_storage_{kind}_{get_current_rank_in_node()}", expected_size=8 + count * size, force_mode="create"
+            name=f"rank_storage_{kind}_{get_current_rank_in_node()}",
+            expected_size=8 + count * size,
+            force_mode="create",
         )
         shm.buf[:4] = count.to_bytes(4, "little")
         shm.buf[4:8] = size.to_bytes(4, "little")
@@ -54,7 +56,8 @@ def publish_att_resources(
 
 
 def load_att_resources(
-    rank_in_node: int, kind: Literal["pd", "dp"],
+    rank_in_node: int,
+    kind: Literal["pd", "dp"],
 ) -> tuple[AttentionStateManager, torch.Tensor]:
     """读取指定用途的资源；DP 接收方随后通过 manager 统一注册共享页池。"""
     assert kind in ("pd", "dp"), f"unknown IPC storage kind {kind}"

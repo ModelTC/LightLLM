@@ -20,11 +20,14 @@ from lightllm.common.attention_state.full_att import (
     GroupQuantizedFullAttentionState,
     StaticFP8AttentionConfig,
     StaticFP8FullAttentionState,
-    PackedMLAAttentionConfig, PackedMLALogicalConfig,
+    PackedMLAAttentionConfig,
+    PackedMLALogicalConfig,
     PackedMLAFullAttentionState,
 )
 from lightllm.common.attention_state.types import (
-    AxisMapping, StateTransferLayout, TransferRegion,
+    AxisMapping,
+    StateTransferLayout,
+    TransferRegion,
 )
 
 if TYPE_CHECKING:
@@ -55,15 +58,19 @@ def make_quant_state(kind: str, device: str | torch.device | int):
             head_dim=16,
             scale_mode="per_head" if per_head else "per_tensor",
         )
-        scales = torch.arange(
-            start=1,
-            end=9 if per_head else 5,
-            dtype=torch.float32,
-            device=device,
-        ).reshape(2, -1) / 16
+        scales = (
+            torch.arange(
+                start=1,
+                end=9 if per_head else 5,
+                dtype=torch.float32,
+                device=device,
+            ).reshape(2, -1)
+            / 16
+        )
         prepared_full_state = StaticFP8FullAttentionState(config, page_size=4, device=device)
         bind_test_fp8_calibration(
-            state=prepared_full_state, scales=scales,
+            state=prepared_full_state,
+            scales=scales,
             q_scales=torch.ones((2, config.head_num), dtype=torch.float32) if per_head else None,
         )
         prepared_full_state.allocate_storage(8)
@@ -102,7 +109,8 @@ def transfer_layout(state: FullAttentionState):
                         external_start=0,
                         length=dim,
                     )
-                    for axis, dim in zip(field.axes, shape) if axis not in ("layer", "token")
+                    for axis, dim in zip(field.axes, shape)
+                    if axis not in ("layer", "token")
                 ),
             )
         )
@@ -134,7 +142,9 @@ def assert_token_fields_equal(
 @pytest.mark.parametrize("kind", KINDS)
 @pytest.mark.parametrize("device", ["cpu", "cuda"])
 def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
-    kind: str, device: str | torch.device | int, monkeypatch: pytest.MonkeyPatch,
+    kind: str,
+    device: str | torch.device | int,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     if device == "cuda" and not torch.cuda.is_available():
         pytest.skip("CUDA unavailable")
@@ -143,7 +153,9 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
         field.tensor.fill_(i + 1)
         field.tensor[:, 0].fill_(i + 11)
     if device == "cuda":
-        source.copy_full_att_tokens(torch.tensor([0, 2], dtype=torch.long, device=device), torch.tensor([4, 5], dtype=torch.long, device=device))
+        source.copy_full_att_tokens(
+            torch.tensor([0, 2], dtype=torch.long, device=device), torch.tensor([4, 5], dtype=torch.long, device=device)
+        )
         assert_token_fields_equal(
             source=source,
             source_ids=[0, 2],
@@ -235,7 +247,9 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
         if device == "cpu":
             with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
                 target.copy_tokens_from_dp(
-                    src_token_indices=src_indices, dst_token_indices=dst_indices, remote_dp_full_att_state=source,
+                    src_token_indices=src_indices,
+                    dst_token_indices=dst_indices,
+                    remote_dp_full_att_state=source,
                 )
             return
         target.copy_tokens_from_dp(
@@ -273,7 +287,9 @@ def test_cuda_compute_write_preserves_unrelated_fields(kind: str):
             raw = quant.to(torch.uint8)
             quant = torch.stack(((raw & 15).to(torch.int16) - 7, (raw >> 4).to(torch.int16) - 7), -1).flatten(-2)
         dequant = (quant.float() * torch.cat((state.k_scales, state.v_scales), dim=2)[0, ids, ..., None]).reshape_as(kv)
-        assert torch.all((dequant - kv.float()).abs() <= torch.cat((state.k_scales, state.v_scales), dim=2)[0, ids].amax() * 2)
+        assert torch.all(
+            (dequant - kv.float()).abs() <= torch.cat((state.k_scales, state.v_scales), dim=2)[0, ids].amax() * 2
+        )
     elif isinstance(state, StaticFP8FullAttentionState):
         scales = state.scales[0]
         if state.config.scale_mode == "per_tensor":
@@ -301,7 +317,9 @@ def test_cuda_compute_write_preserves_unrelated_fields(kind: str):
 def test_deferred_storage_preserves_real_fp8_calibration(kind: str):
     source = make_quant_state(kind, "cpu")
     state = StaticFP8FullAttentionState(
-        source.config, page_size=source.page_size, device="meta",
+        source.config,
+        page_size=source.page_size,
+        device="meta",
     )
     assert state.scales is None and state.q_scales is None
     bind_test_fp8_calibration(state=state, scales=source.scales, q_scales=source.q_scales)

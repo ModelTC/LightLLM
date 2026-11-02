@@ -9,7 +9,8 @@ from lightllm.common.attention_state.allocators import FullAttKVAllocator
 
 from lightllm.common.attention_state.full_att import (
     PackedMLAFullAttentionState,
-    PackedMLAAttentionConfig, PackedMLALogicalConfig,
+    PackedMLAAttentionConfig,
+    PackedMLALogicalConfig,
 )
 from lightllm.common.req_manager import ReqManager
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
@@ -94,7 +95,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
                 latent_dim=512,
             )
         ),
-         page_size=args.page_size,
+        page_size=args.page_size,
     )
     full.allocate_storage(16)
     req = ReqManager(3, 16)
@@ -167,8 +168,8 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     resources.reset_bounded_att_state([2])
     assert not linear.conv_state[:, 2].any()
     assert not linear.ssm_state[:, 2 * (mtp_step + 1) : 3 * (mtp_step + 1)].any()
-    assert not tail.buffer[:, 2, :, :tail.config.candidate_dim].any()
-    assert torch.isneginf(tail.buffer[:, 2, :, tail.config.candidate_dim:]).all()
+    assert not tail.buffer[:, 2, :, : tail.config.candidate_dim].any()
+    assert torch.isneginf(tail.buffer[:, 2, :, tail.config.candidate_dim :]).all()
     assert torch.equal(tail.buffer[:, [0, 1, 3]], unchanged[:, [0, 1, 3]])
     # KV moves carry MLA latents and pooled FP8 bytes; raw keys/gates only
     # belong to live requests. Bytewise equality checks FP8 scale integrity.

@@ -362,12 +362,20 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
         request_capacity = req_to_mtp_state_index.numel()
         resources = AttentionStateManager(request_capacity=request_capacity)
         config = ConvSSMStateConfig(
-            logical_layer_ids=(3,), global_k_heads=1, global_v_heads=1,
-            key_dim=2, value_dim=2, conv_width=2, conv_dtype=torch.float32, ssm_dtype=torch.float32,
+            logical_layer_ids=(3,),
+            global_k_heads=1,
+            global_v_heads=1,
+            key_dim=2,
+            value_dim=2,
+            conv_width=2,
+            conv_dtype=torch.float32,
+            ssm_dtype=torch.float32,
         )
         for model_role in ("main", "draft0"):
             linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
-            linear.mtp_state_index = req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
+            linear.mtp_state_index = (
+                req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
+            )
             resources.register_state(model_role, linear)
         resources.finish_state_registration()
         infer_state.att_state_manager = resources

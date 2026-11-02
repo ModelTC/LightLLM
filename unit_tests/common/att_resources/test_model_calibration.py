@@ -131,7 +131,9 @@ def test_calibration_binds_all_model_states_after_creation(tmp_path: Path, encod
 
 @pytest.mark.parametrize("tp_world_size", [1, 4])
 def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, tp_world_size: int,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tp_world_size: int,
 ):
     from builtins import open as original_open
     from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
@@ -140,14 +142,18 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
     scales = torch.arange(1, 17, dtype=torch.float32).reshape(4, 4)
     q_scales = scales[:, :2] + 20
     calibration_path = tmp_path / "calibration.json"
-    calibration_path.write_text(json.dumps(dict(
-        num_layers=4,
-        num_head=2,
-        quant_type="per_head",
-        scales_shape=[4, 4],
-        scales=scales.tolist(),
-        q_calibration=dict(num_head=2, scales_shape=[4, 2], scales=q_scales.tolist()),
-    )))
+    calibration_path.write_text(
+        json.dumps(
+            dict(
+                num_layers=4,
+                num_head=2,
+                quant_type="per_head",
+                scales_shape=[4, 4],
+                scales=scales.tolist(),
+                q_calibration=dict(num_head=2, scales_shape=[4, 2], scales=q_scales.tolist()),
+            )
+        )
+    )
     args = StartArgs(kv_quant_calibration_config_path=str(calibration_path))
     reads = []
 
@@ -175,7 +181,9 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
                     dtype=torch.bfloat16,
                     tp_rank=tp_rank,
                     tp_world_size=tp_world_size,
-                ), kv_type=encoding, device="meta",
+                ),
+                kv_type=encoding,
+                device="meta",
             )
             manager.register_state(role, state)
             if encoding != "None":
@@ -187,9 +195,9 @@ def test_calibration_reads_once_and_handles_shared_layers_numeric_roles_and_tp(
         heads = 4 // tp_world_size
         local_heads = slice(tp_rank * heads, (tp_rank + 1) * heads)
         for state, row in expected:
-            expected_k = scales[row:row + 1, :2].repeat_interleave(2, dim=-1)[:, local_heads]
-            expected_v = scales[row:row + 1, 2:].repeat_interleave(2, dim=-1)[:, local_heads]
-            expected_q = q_scales[row:row + 1].repeat_interleave(2, dim=-1)[:, local_heads]
+            expected_k = scales[row : row + 1, :2].repeat_interleave(2, dim=-1)[:, local_heads]
+            expected_v = scales[row : row + 1, 2:].repeat_interleave(2, dim=-1)[:, local_heads]
+            expected_q = q_scales[row : row + 1].repeat_interleave(2, dim=-1)[:, local_heads]
             assert torch.equal(state.scales, torch.cat((expected_k, expected_v), dim=-1))
             assert torch.equal(state.q_scales, expected_q)
             assert state.k_storage is None
@@ -234,7 +242,9 @@ def test_deferred_calibration_keeps_unit_scale_policy(encoding: str):
             global_head_num=2,
             head_dim=16,
             dtype=torch.bfloat16,
-        ), kv_type=encoding, device="cpu",
+        ),
+        kv_type=encoding,
+        device="cpu",
     )
     manager = AttentionStateManager(request_capacity=1)
     manager.register_state("main", state)

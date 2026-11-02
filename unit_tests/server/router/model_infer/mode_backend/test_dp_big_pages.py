@@ -76,7 +76,9 @@ def test_fill_orders_radix_and_owned_pages_and_clears_reused_rows(monkeypatch: p
 
 @pytest.mark.parametrize("capacity,src_kv_len", [(2, 26), (1, 26), (0, 14)])
 def test_build_reserves_only_new_big_pages_before_kv(
-    monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capacity: int,
+    src_kv_len: int,
 ):
     module, req, allocator, allocations = _build_fixture(monkeypatch, capacity, src_kv_len)
     if capacity == 1:
@@ -86,7 +88,7 @@ def test_build_reserves_only_new_big_pages_before_kv(
         assert req.hold_kv_len == 8 and allocator.free_count == 1
         return
     tasks = module.build_shared_kv_trans_tasks([req], req_dp_ranks=[0])
-    task, = tasks
+    (task,) = tasks
     assert task.dst_req is req and task.src_req_idx == 1
     assert task.src_dp_rank == 1
     assert task.src_token_indices.tolist() == list(range(40, 32 + src_kv_len))
@@ -144,9 +146,7 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
     module.big_page_tokens = 8 if hybrid else 0
     module.shared_req_infos = SimpleNamespace(arr=np.zeros((1, 2, 2), dtype=np.int64))
     module.shared_req_infos.arr[0, 1 - local_dp_rank] = [remote_len, 9]
-    module.shared_req_big_page_ids = (
-        SimpleNamespace(arr=np.full((1, 2, 4), -1, dtype=np.int64)) if hybrid else None
-    )
+    module.shared_req_big_page_ids = SimpleNamespace(arr=np.full((1, 2, 4), -1, dtype=np.int64)) if hybrid else None
     owned_pages = {length: 70 + length // 8 for length in range(8, local_len + 1, 8)} if hybrid else {}
     req = SimpleNamespace(
         req_idx=7,
@@ -158,7 +158,9 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
         _kv_cache_alloc_need=allocation_need,
         shm_req=SimpleNamespace(shm_cur_kv_len=local_len),
     )
-    monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", SimpleNamespace(get_can_alloc_token_num=available_tokens))
+    monkeypatch.setattr(
+        dp_shared_kv_trans, "g_infer_context", SimpleNamespace(get_can_alloc_token_num=available_tokens)
+    )
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: barriers.append(group))
 
     module.fill_reqs_info([req])

@@ -153,12 +153,15 @@ def test_backend_allocates_all_roles_before_warmup(
                 logical_layer_ids = {layer_id for group in state.config.logical_layer_groups for layer_id in group}
                 for layer in item.layers_infer:
                     if layer.layer_num_ in logical_layer_ids:
-                        assert item.att_state_manager.get_state(
-                            model_role=item.att_state_role,
-                            state_type_filter="",
-                            logical_layer_id=layer.layer_num_,
-                            state_class=type(state),
-                        ) is state
+                        assert (
+                            item.att_state_manager.get_state(
+                                model_role=item.att_state_role,
+                                state_type_filter="",
+                                logical_layer_id=layer.layer_num_,
+                                state_class=type(state),
+                            )
+                            is state
+                        )
         model.prefill_att_backend = model.decode_att_backend = object()
         model.prefill_att_backend1 = model.decode_att_backend1 = None
         model.backends_bound = True
@@ -255,7 +258,9 @@ def test_backend_allocates_all_roles_before_warmup(
                     )
                 )
         else:
-            assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
+            assert all(
+                getattr(item, "att_state_manager", None) is None for item in models
+            ), "resources already initialized"
             req_manager = create_req_manager(
                 max_request_num=models[0].max_req_num,
                 max_sequence_length=max(item.get_req_manager_max_seq_len() for item in models),
@@ -276,9 +281,7 @@ def test_backend_allocates_all_roles_before_warmup(
             for index, item in enumerate(models):
                 item.init_runtime()
                 assert all(not getattr(other, "backends_bound", False) for other in models[index + 1 :])
-                assert warmed == padded == captured == prefill_captured == {
-                    id(other) for other in models[: index + 1]
-                }
+                assert warmed == padded == captured == prefill_captured == {id(other) for other in models[: index + 1]}
 
     start_runtime()
     assert request_allocations == [(2, 32)]
@@ -294,7 +297,8 @@ def test_backend_allocates_all_roles_before_warmup(
     assert len({state.conv_state.data_ptr() for state in draft_states}) == draft_count
     manager.commit_bounded_att_state(
         torch.tensor([0], dtype=torch.int32, device="cuda"),
-        torch.tensor([draft_count + 1], dtype=torch.int32, device="cuda"), role="main",
+        torch.tensor([draft_count + 1], dtype=torch.int32, device="cuda"),
+        role="main",
     )
     assert all(not state.mtp_state_index.any() for state in draft_states)
     if main_linear:
@@ -303,7 +307,8 @@ def test_backend_allocates_all_roles_before_warmup(
         assert len(state.config.logical_layer_ids) == 1
         manager.commit_bounded_att_state(
             torch.tensor([0], dtype=torch.int32, device="cuda"),
-            torch.tensor([i + 2], dtype=torch.int32, device="cuda"), role=f"draft{i}",
+            torch.tensor([i + 2], dtype=torch.int32, device="cuda"),
+            role=f"draft{i}",
         )
         assert state.mtp_state_index[0] == i + 1
         assert all(not other.mtp_state_index.any() for other in draft_states[i + 1 :])
@@ -330,7 +335,9 @@ def test_backend_allocates_all_roles_before_warmup(
                     assert torch.equal(state.q_scales[:, 0].cpu(), scales[start:end] * 2)
 
     layouts = build_cpu_cache_layouts()
-    assert (max(layout.byte_end for layout in layouts.values()) + 15) // 16 * 16 == manager.get_cpu_cache_operator().get_page_bytes()
+    assert (
+        max(layout.byte_end for layout in layouts.values()) + 15
+    ) // 16 * 16 == manager.get_cpu_cache_operator().get_page_bytes()
     assert layouts.keys() == manager.get_cpu_cache_operator().get_page_layouts().keys()
     for state_name, layout in layouts.items():
         runtime_layout = manager.get_cpu_cache_operator().get_page_layouts()[state_name]

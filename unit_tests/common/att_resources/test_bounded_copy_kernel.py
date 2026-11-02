@@ -37,10 +37,10 @@ def test_aggregate_same_dtype_and_strides(direction: str, grid_num: int, dtype: 
             device=dst_device,
             pin_memory=dst_device == "cpu",
         )
-        source_view = source[..., :shape[3] - 1]
-        target_view = target.permute(1, 0, 2, 3)[:, :, 1:shape[2] + 1, 2:shape[3] + 1]
+        source_view = source[..., : shape[3] - 1]
+        target_view = target.permute(1, 0, 2, 3)[:, :, 1 : shape[2] + 1, 2 : shape[3] + 1]
         expected = target.cpu().clone()
-        expected.permute(1, 0, 2, 3)[:, :, 1:shape[2] + 1, 2:shape[3] + 1].copy_(source_view.cpu())
+        expected.permute(1, 0, 2, 3)[:, :, 1 : shape[2] + 1, 2 : shape[3] + 1].copy_(source_view.cpu())
         sources.append(source)
         targets.append(target)
         copies.append((source_view, target_view))
@@ -72,12 +72,15 @@ def test_registered_shared_pages_and_stream_dependency() -> None:
     assert torch.equal(target, values.cpu())
 
 
-@pytest.mark.parametrize("float_dtype,int_dtype,patterns", [
-    (torch.float16, torch.int16, [0x7E01, -32768, 0x7C00, 1]),
-    (torch.bfloat16, torch.int16, [0x7FC1, -32768, 0x7F80, 1]),
-    (torch.float32, torch.int32, [0x7FC00001, -2147483648, 0x7F800000, 1]),
-    (torch.float64, torch.int64, [0x7FF8000000000001, -9223372036854775808, 0x7FF0000000000000, 1]),
-])
+@pytest.mark.parametrize(
+    "float_dtype,int_dtype,patterns",
+    [
+        (torch.float16, torch.int16, [0x7E01, -32768, 0x7C00, 1]),
+        (torch.bfloat16, torch.int16, [0x7FC1, -32768, 0x7F80, 1]),
+        (torch.float32, torch.int32, [0x7FC00001, -2147483648, 0x7F800000, 1]),
+        (torch.float64, torch.int64, [0x7FF8000000000001, -9223372036854775808, 0x7FF0000000000000, 1]),
+    ],
+)
 def test_exact_float_bit_patterns(float_dtype: torch.dtype, int_dtype: torch.dtype, patterns: list[int]) -> None:
     # 包含 NaN payload、负零和无穷，等宽整数复制不能触发精度转换或规范化。
     bits = torch.tensor(data=patterns, dtype=int_dtype, device="cuda")
@@ -152,7 +155,9 @@ def test_same_shape_batch_uses_one_kernel(
     for _ in range(3):
         shape = (2,) * (ndim - 1) + (517,)
         storage_shape = (4,) * (ndim - 1) + (1034,)
-        source = torch.arange(torch.Size(storage_shape).numel(), dtype=torch.float32, device="cuda").reshape(storage_shape)
+        source = torch.arange(torch.Size(storage_shape).numel(), dtype=torch.float32, device="cuda").reshape(
+            storage_shape
+        )
         # 每个轴都保留间隙，保证降维后仍需调用对应的 1～6 维算子。
         source_view = source[(slice(None, None, 2),) * ndim]
         target = torch.full(size=(*shape[:-1], 1034), fill_value=-17, dtype=source.dtype, pin_memory=True)
@@ -170,7 +175,21 @@ def test_same_shape_batch_uses_one_kernel(
         assert torch.equal(target, expected)
 
 
-@pytest.mark.parametrize("layout", ["ssm", "conv_mtp", "dense", "width4", "middle_unaligned", "prefix", "singletons", "wide_singleton", "wide_singleton_prefix", "all_singletons"])
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "ssm",
+        "conv_mtp",
+        "dense",
+        "width4",
+        "middle_unaligned",
+        "prefix",
+        "singletons",
+        "wide_singleton",
+        "wide_singleton_prefix",
+        "all_singletons",
+    ],
+)
 def test_transfer_views_preserve_gaps_and_alignment(layout: str, monkeypatch: pytest.MonkeyPatch) -> None:
     from lightllm.common.attention_state.bounded_att import copy_kernel
 
@@ -185,6 +204,7 @@ def test_transfer_views_preserve_gaps_and_alignment(layout: str, monkeypatch: py
             def launch(**kwargs):
                 launches.append((self.ndim, kwargs["SHAPE"], kwargs["DTYPE"]))
                 return self.kernel[grid](**kwargs)
+
             return launch
 
     for ndim in range(1, 7):
@@ -246,12 +266,14 @@ def test_transfer_views_preserve_gaps_and_alignment(layout: str, monkeypatch: py
         copies = []
         # 首尾地址都满足 8 字节对齐，中间请求偏移不对齐；整批必须保留 2 字节搬运。
         for src_offset, dst_offset in ((0, 0), (9, 16), (24, 32)):
-            copies.append((source[src_offset:src_offset + 8], target[dst_offset:dst_offset + 8]))
-            expected[dst_offset:dst_offset + 8].copy_(source[src_offset:src_offset + 8].cpu())
+            copies.append((source[src_offset : src_offset + 8], target[dst_offset : dst_offset + 8]))
+            expected[dst_offset : dst_offset + 8].copy_(source[src_offset : src_offset + 8].cpu())
         expected_launch = (1, (8,), tl.uint16)
     else:
         shape = (4, 2, 3, 128) if layout == "dense" else (4, 6)
-        source = torch.arange(torch.Size(shape).numel(), dtype=torch.float32, device="cuda").to(torch.bfloat16).view(shape)
+        source = (
+            torch.arange(torch.Size(shape).numel(), dtype=torch.float32, device="cuda").to(torch.bfloat16).view(shape)
+        )
         target = torch.full(size=shape, fill_value=-1, dtype=source.dtype, pin_memory=True)
         copies = [(source[index], target[index]) for index in (0, 2)]
         expected = target.clone()

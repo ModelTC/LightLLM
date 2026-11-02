@@ -145,8 +145,13 @@ class Gemma3TpPartModel(LlamaTpPartModel):
 
     @classmethod
     def create_full_att_states(
-        cls, model_config: dict[str, object], args: "StartArgs | EasyDict", *,
-        model_logical_layer_ids: tuple[int, ...], tp_rank: int = 0, tp_world_size: int = 1,
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        *,
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
     ) -> list["FullAttentionState"]:
         """Gemma3 使用固定 256 维 BF16 KV，不随权重精度改变。"""
         from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
@@ -161,9 +166,12 @@ class Gemma3TpPartModel(LlamaTpPartModel):
                 global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
                 head_dim=256,
                 dtype=torch.bfloat16,
-                tp_rank=tp_rank, tp_world_size=tp_world_size,
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
             ),
-            kv_type=args.llm_kv_type, page_size=args.page_size, device="meta",
+            kv_type=args.llm_kv_type,
+            page_size=args.page_size,
+            device="meta",
         )
         return [state]
 

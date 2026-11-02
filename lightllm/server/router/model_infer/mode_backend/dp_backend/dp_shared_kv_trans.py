@@ -23,7 +23,8 @@ class DPKVSharedMoudle:
 
         self.big_page_tokens = (
             backend.args.linear_att_hash_page_size * backend.args.linear_att_page_block_num
-            if backend.is_hybrid_att_model else 0
+            if backend.is_hybrid_att_model
+            else 0
         )
         max_big_pages = backend.args.max_req_total_len // self.big_page_tokens if self.big_page_tokens else 0
         # 原共享信息只保存 KV 长度和请求槽位，大页列表使用独立共享数组。
@@ -60,7 +61,7 @@ class DPKVSharedMoudle:
                 # radix 页按路径从根到叶排列；请求持有的页按其前缀长度放到对应位置。
                 if req.shared_kv_node is not None:
                     shared_pages = g_infer_context.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
-                    page_ids[:len(shared_pages)] = shared_pages
+                    page_ids[: len(shared_pages)] = shared_pages
                 for token_len, page_id in req.hybrid_len_to_big_page_id.items():
                     if token_len <= req.cur_kv_len:
                         page_ids[token_len // self.big_page_tokens - 1] = page_id
@@ -107,7 +108,9 @@ class DPKVSharedMoudle:
                         src_big_page_ids = self.shared_req_big_page_ids.arr[
                             req_index, src_dp_rank, first_page:end_page
                         ].tolist()
-                        assert all(page_id >= 0 for page_id in src_big_page_ids), "DP source is missing prefix big pages"
+                        assert all(
+                            page_id >= 0 for page_id in src_big_page_ids
+                        ), "DP source is missing prefix big pages"
                         allocator = self.backend.model.att_state_manager.bounded_att_big_page_allocator
                         dst_big_page_ids = allocator.alloc(len(src_big_page_ids))
                         assert dst_big_page_ids is not None, "DP fetch big page allocation must succeed"
@@ -116,7 +119,7 @@ class DPKVSharedMoudle:
                 # 只搬运有效 KV；页尾预留槽位已写入请求表，不参与本次传输。
                 dst_token_indices = dst_token_indices[:trans_size]
                 src_token_indices = self.backend.dp_req_to_token_indices[src_dp_rank][
-                    src_req_idx, req.cur_kv_len:target_kv_len
+                    src_req_idx, req.cur_kv_len : target_kv_len
                 ]
                 trans_tasks.append(
                     TransTask(

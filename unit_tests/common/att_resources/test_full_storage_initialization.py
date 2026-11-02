@@ -26,12 +26,14 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+pytestmark = [
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+    pytest.mark.usefixtures("runtime"),
+]
 
 
 @pytest.mark.parametrize("kind,encoding,model_cls", CASES)
 def test_model_storage_write_and_copy_preserve_all_fields(
-    runtime: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     kind: str,
@@ -75,7 +77,6 @@ def test_model_storage_write_and_copy_preserve_all_fields(
 @pytest.mark.parametrize("mode", ["normal", "prefill"])
 @pytest.mark.parametrize("kind,encoding,model_cls", CASES[:8])
 def test_auto_profile_fits_actual_gpu_storage_and_pd_pages(
-    runtime: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     mode: str,
@@ -114,4 +115,6 @@ def test_auto_profile_fits_actual_gpu_storage_and_pd_pages(
     assert state.capacity == 16
     assert allocated_bytes(state) == storage_bytes
     if mode == "prefill":
-        assert model.att_state_manager.get_pd_operator().get_page_bytes() == reference.get_pd_operator().get_page_bytes()
+        assert (
+            model.att_state_manager.get_pd_operator().get_page_bytes() == reference.get_pd_operator().get_page_bytes()
+        )

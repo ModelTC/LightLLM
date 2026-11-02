@@ -75,7 +75,8 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             infer_state.mem_index.reshape(-1),
             infer_state.position_ids,
             infer_state.get_compressed_kv_view(logical_layer_id=self.layer_idx_).indexer_k,
-            infer_state.get_compressed_kv_state(logical_layer_id=self.layer_idx_).config.block_token_size // self.compress_ratio,
+            infer_state.get_compressed_kv_state(logical_layer_id=self.layer_idx_).config.block_token_size
+            // self.compress_ratio,
         )
 
     def build_metadata(
@@ -171,7 +172,10 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             return slots.unsqueeze(1), lengths
 
         paged_meta = infer_state.get_c4_indexer_metadata(c4_cap)
-        page_size = infer_state.get_compressed_kv_state(logical_layer_id=self.layer_idx_).config.block_token_size // self.compress_ratio
+        page_size = (
+            infer_state.get_compressed_kv_state(logical_layer_id=self.layer_idx_).config.block_token_size
+            // self.compress_ratio
+        )
 
         packed = infer_state.get_compressed_kv_view(logical_layer_id=self.layer_idx_).indexer_k
         indexer_k_cache = packed.view(

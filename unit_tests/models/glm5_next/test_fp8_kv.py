@@ -1285,9 +1285,13 @@ def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
     monkeypatch.setattr("lightllm.common.attention_state.manager.get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.common.attention_state.cpu_cache_operator.get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.common.attention_state.pd_operator.get_env_start_args", lambda: args)
-    monkeypatch.setattr("lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_state.get_env_start_args", lambda: args)
+    monkeypatch.setattr(
+        "lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_state.get_env_start_args", lambda: args
+    )
     config = PackedMLALogicalConfig(
-        logical_layer_groups=((3,),), latent_dim=512, format="packed_group64_e8m0",
+        logical_layer_groups=((3,),),
+        latent_dim=512,
+        format="packed_group64_e8m0",
     )
     state = create_packed_mla_state(config=config, page_size=4)
     state.allocate_storage(token_capacity=16)
@@ -1313,5 +1317,5 @@ def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
     torch.cuda.synchronize()
     for begin in (4, 8):
         actual = state.get_layer_view(logical_layer_id=3)
-        torch.testing.assert_close(actual.kv[begin:begin + 4], actual.kv[:4], rtol=0, atol=0)
-        torch.testing.assert_close(actual.indexer_k[begin:begin + 4], actual.indexer_k[:4], rtol=0, atol=0)
+        torch.testing.assert_close(actual.kv[begin : begin + 4], actual.kv[:4], rtol=0, atol=0)
+        torch.testing.assert_close(actual.indexer_k[begin : begin + 4], actual.indexer_k[:4], rtol=0, atol=0)

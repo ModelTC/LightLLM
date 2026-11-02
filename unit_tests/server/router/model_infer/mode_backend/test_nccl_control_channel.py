@@ -132,7 +132,8 @@ def test_concurrent_control_channels_retry_port_before_publishing_metadata(monke
                     "127.0.0.1",
                     first_port,
                     first_port + 4,
-                ) for _ in range(2)
+                )
+                for _ in range(2)
             ]
             for future in futures:
                 channels.append(future.result(timeout=15))

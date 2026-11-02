@@ -412,9 +412,7 @@ def test_atomic_page_cpu_and_dp_roundtrip(kind: str) -> None:
         layout=layout,
         cpu_page_ready_flags=[True, False],
     )
-    target.read_state_pages_from_cpu(
-        cpu_page_buffers=pages, cpu_page_indices=[2], big_page_slot_ids=[0], layout=layout
-    )
+    target.read_state_pages_from_cpu(cpu_page_buffers=pages, cpu_page_indices=[2], big_page_slot_ids=[0], layout=layout)
     target.copy_big_pages_from_dp(src_page_ids=[0], dst_page_ids=[2], remote_dp_bounded_state=source)
     target.restore_bounded_att_runtime_from_pages(
         req_indices=[0], state_token_lens=[512], page_kind="big", page_slot_ids=[0]
@@ -442,9 +440,7 @@ def test_manager_joint_cpu_page_roundtrip(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(args, "pd_kv_page_size", 256)
     manager = AttentionStateManager(request_capacity=3)
     full_states = [make_full(ratio=ratio) for ratio in (4, 128)]
-    bounded = [
-        make_atomic_state(kind, mtp_step=2, device="cuda") for kind in ("swa", "kv_w8", "indexer_w8", "kv_w128")
-    ]
+    bounded = [make_atomic_state(kind, mtp_step=2, device="cuda") for kind in ("swa", "kv_w8", "indexer_w8", "kv_w128")]
     for state in (*full_states, *bounded):
         manager.register_state(model_role="main", state=state)
     manager.finish_state_registration()

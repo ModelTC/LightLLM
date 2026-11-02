@@ -56,7 +56,9 @@ class StaticFP8AttentionConfig:
             isinstance(group, tuple) and group for group in self.logical_layer_groups
         ), "layer groups must be a tuple of nonempty tuples"
         layers = [layer for group in self.logical_layer_groups for layer in group]
-        assert all(isinstance(layer, int) and layer >= 0 for layer in layers), "logical layer IDs must be nonnegative integers"
+        assert all(
+            isinstance(layer, int) and layer >= 0 for layer in layers
+        ), "logical layer IDs must be nonnegative integers"
         assert len(layers) == len(set(layers)), "a logical layer must belong to exactly one storage group"
         assert self.global_head_num > 0 and self.head_dim > 0 and 0 <= self.tp_rank < self.tp_world_size
         assert (
@@ -69,7 +71,6 @@ class StaticFP8AttentionConfig:
 
 class StaticFP8FullAttentionState(FullAttentionState):
     """使用静态标定参数的 FP8 KV 存储，固定 scale 随 State 初始化，不逐 token 搬运。"""
-
 
     # ========================================================================
     # 一、资源定义与初始化
@@ -112,7 +113,9 @@ class StaticFP8FullAttentionState(FullAttentionState):
         无文件时仅 per_tensor 可使用单位 scale；per_head 必须有 K/V 标定，Q 标定可选。
         未提供 Q 标定时由 attention backend 动态量化 Q。
         """
-        assert self.k_storage is None and self.scales is None, "calibration must be bound once before storage allocation"
+        assert (
+            self.k_storage is None and self.scales is None
+        ), "calibration must be bound once before storage allocation"
         config = self.config
         storage_layer_count = len(config.logical_layer_groups)
         if calibration is None:
@@ -123,28 +126,30 @@ class StaticFP8FullAttentionState(FullAttentionState):
             # 阶段一：检查文件编码和物理行覆盖范围。
             calibrated_layer_count = calibration["num_layers"]
             storage_layer_end = storage_layer_start + storage_layer_count
-            assert 0 <= storage_layer_start < storage_layer_end <= calibrated_layer_count, (
-                "calibration does not cover this State's physical layers"
-            )
-            assert calibration.get("quant_type", config.scale_mode) == config.scale_mode, (
-                "calibration quantization mode does not match the State"
-            )
+            assert (
+                0 <= storage_layer_start < storage_layer_end <= calibrated_layer_count
+            ), "calibration does not cover this State's physical layers"
+            assert (
+                calibration.get("quant_type", config.scale_mode) == config.scale_mode
+            ), "calibration quantization mode does not match the State"
             limits = torch.finfo(torch.float8_e4m3fn)
-            assert calibration.get("qmin", limits.min) == limits.min and calibration.get("qmax", limits.max) == limits.max, (
-                "calibration range does not match float8_e4m3fn"
-            )
+            assert (
+                calibration.get("qmin", limits.min) == limits.min and calibration.get("qmax", limits.max) == limits.max
+            ), "calibration range does not match float8_e4m3fn"
 
             def scale_tensor(values: Mapping[str, object], shape: tuple[int, ...]) -> torch.Tensor:
                 tensor = torch.tensor(data=values["scales"], dtype=torch.float32)
                 assert tuple(values["scales_shape"]) == tensor.shape == shape, "invalid calibration scale shape"
-                assert bool((torch.isfinite(tensor) & (tensor > 0)).all()), "calibration scales must be finite and positive"
+                assert bool(
+                    (torch.isfinite(tensor) & (tensor > 0)).all()
+                ), "calibration scales must be finite and positive"
                 return tensor[storage_layer_start:storage_layer_end]
 
             def shard(tensor: torch.Tensor, calibrated_heads: int) -> torch.Tensor:
                 heads = config.head_num
-                assert calibrated_heads > 0 and (heads * config.tp_world_size) % calibrated_heads == 0, (
-                    "calibration heads do not cover the model's KV heads"
-                )
+                assert (
+                    calibrated_heads > 0 and (heads * config.tp_world_size) % calibrated_heads == 0
+                ), "calibration heads do not cover the model's KV heads"
                 expanded = tensor.repeat_interleave(repeats=heads * config.tp_world_size // calibrated_heads, dim=-1)
                 return expanded[:, config.tp_rank * heads : (config.tp_rank + 1) * heads].contiguous()
 
@@ -158,7 +163,8 @@ class StaticFP8FullAttentionState(FullAttentionState):
                 q_scales = None
                 if q_config is not None:
                     q_scales = shard(
-                        scale_tensor(q_config, (calibrated_layer_count, q_config["num_head"])), q_config["num_head"],
+                        scale_tensor(q_config, (calibrated_layer_count, q_config["num_head"])),
+                        q_config["num_head"],
                     )
             else:
                 scales = scale_tensor(calibration, (calibrated_layer_count, 2))
@@ -190,10 +196,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
     def get_token_bytes(self) -> int:
         """由配置累计当前 TP rank 的 K/V 单 token 开销，无需分配存储。"""
         config = self.config
-        return (
-            len(config.logical_layer_groups) * 2 * config.head_num * config.head_dim
-            * self.storage_dtype.itemsize
-        )
+        return len(config.logical_layer_groups) * 2 * config.head_num * config.head_dim * self.storage_dtype.itemsize
 
     # ========================================================================
     # 二、Full attention：计算视图、KV 写入与完整 token 复制
@@ -233,12 +236,13 @@ class StaticFP8FullAttentionState(FullAttentionState):
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
         assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
-        assert src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel(), (
-            "token copies require equal one-dimensional index tensors"
-        )
-        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (torch.int32, torch.int64), (
-            "token indices must be integer tensors"
-        )
+        assert (
+            src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
+        ), "token copies require equal one-dimensional index tensors"
+        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (
+            torch.int32,
+            torch.int64,
+        ), "token indices must be integer tensors"
         assert self.k_storage.is_cuda, "token copies require CUDA storage"
         if not src_indices.numel():
             return
@@ -325,9 +329,9 @@ class StaticFP8FullAttentionState(FullAttentionState):
         remote_dp_full_att_state: StaticFP8FullAttentionState,
     ) -> None:
         """复制相同配置的 FP8 KV 编码；各 DP 使用相同的静态标定参数。"""
-        assert type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config, (
-            "DP copy requires the same encoding and equivalent TP state configurations"
-        )
+        assert (
+            type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config
+        ), "DP copy requires the same encoding and equivalent TP state configurations"
         assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
         assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
         copy_gqa_tokens(

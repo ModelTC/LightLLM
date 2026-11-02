@@ -77,7 +77,8 @@ def test_model_local_shared_groups_preserve_global_logical_layer_ids(pd_args: "E
         layer_types=["sliding_attention", "full_attention"] * 3,
     )
     (state,) = Gemma4TpPartModel.create_full_att_states(
-        model_config=config, args=pd_args,
+        model_config=config,
+        args=pd_args,
         model_logical_layer_ids=(10, 11, 12, 13, 14, 15),
     )
     # 共享消费者 14/15 分别使用最后一个同类型生产层 12/13，保持四份物理层存储。
@@ -90,7 +91,9 @@ def test_model_local_shared_groups_preserve_global_logical_layer_ids(pd_args: "E
 @pytest.mark.parametrize("kind", SCHEMES)
 @pytest.mark.parametrize("transfer", ["cpu", "pd"])
 def test_shared_layers_transfer_each_physical_layer_once(
-    kind: str, transfer: str, pd_args: "EasyDict",
+    kind: str,
+    transfer: str,
+    pd_args: "EasyDict",
 ) -> None:
     pd_args.cpu_cache_token_page_size = pd_args.pd_kv_page_size = 4
     template = definition(kind)
@@ -121,7 +124,9 @@ def test_shared_layers_transfer_each_physical_layer_once(
     src_ids = torch.tensor([0, 3, 6], dtype=torch.int32, device="cuda")
     dst_ids = torch.tensor([1, 4, 7], dtype=torch.int32, device="cuda")
     if transfer == "cpu":
-        pages = torch.zeros((2, managers[0].get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+        pages = torch.zeros(
+            (2, managers[0].get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True
+        )
         managers[0].get_cpu_cache_operator().write_req(
             token_indices=src_ids,
             cpu_page_buffers=pages,

@@ -81,7 +81,8 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         compressed_kv = infer_state.get_compressed_kv_view(logical_layer_id=logical_layer_id).kv if ratio else None
         if infer_state.is_prefill:
             swa = infer_state.prefill_att_state.swa_buffer[config.logical_layer_ids.index(logical_layer_id)].view(
-                -1, config.get_packed_kv_bytes(config.page_token_size),
+                -1,
+                config.get_packed_kv_bytes(config.page_token_size),
             )
         return swa, compressed_kv
 

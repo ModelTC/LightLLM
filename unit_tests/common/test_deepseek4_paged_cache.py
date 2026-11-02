@@ -136,7 +136,9 @@ def test_cache_io_copies_individual_token_slots(cache):
         buffer.zero_()
         buffer[source] = torch.arange(1, 5, device="cuda", dtype=torch.uint8)[:, None, None]
     layouts = manager.manager.get_cpu_cache_operator().get_page_layouts()
-    pages = torch.empty((1, manager.manager.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    pages = torch.empty(
+        (1, manager.manager.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True
+    )
     for state in manager.full_states.values():
         state.write_to_cpu(source, pages, [0], layout=layouts[state.state_name])
         state.read_from_cpu(pages, [0], destination, layout=layouts[state.state_name])
@@ -159,16 +161,28 @@ def test_cache_io_copies_individual_token_slots(cache):
 def test_request_runtime_is_independent_of_compressed_kv_capacity(cache, monkeypatch):
     original, requests = cache
     runtime = requests.window
-    before = tuple(tensor.data_ptr() for tensor in (
-        runtime.swa_buffer, runtime.c4_buffer, runtime.indexer_buffer, runtime.c128_buffer,
-    ))
+    before = tuple(
+        tensor.data_ptr()
+        for tensor in (
+            runtime.swa_buffer,
+            runtime.c4_buffer,
+            runtime.indexer_buffer,
+            runtime.c128_buffer,
+        )
+    )
     # 扩展压缩 KV 容量不能重新创建或移动按请求数分配的运行态。
     for state in original.full_states.values():
         state.allocate_storage(token_capacity=16384)
         assert state.storage.shape[1] == 16384 + state.page_size
-    assert before == tuple(tensor.data_ptr() for tensor in (
-        runtime.swa_buffer, runtime.c4_buffer, runtime.indexer_buffer, runtime.c128_buffer,
-    ))
+    assert before == tuple(
+        tensor.data_ptr()
+        for tensor in (
+            runtime.swa_buffer,
+            runtime.c4_buffer,
+            runtime.indexer_buffer,
+            runtime.c128_buffer,
+        )
+    )
     assert runtime.request_capacity == requests.max_request_num + 1
 
 
@@ -242,7 +256,10 @@ def _test_backend(requests, token_capacity=8192):
         "num_attention_heads": 64,
         "compress_ratios": requests.cache_config.compress_ratios,
         "index_topk": 512,
-        "head_dim": 512, "qk_rope_head_dim": 64, "index_head_dim": 128, "sliding_window": requests.sliding_window,
+        "head_dim": 512,
+        "qk_rope_head_dim": 64,
+        "index_head_dim": 128,
+        "sliding_window": requests.sliding_window,
     }
     model.tp_world_size_ = 1
     model.max_req_num = requests.max_request_num
@@ -268,8 +285,10 @@ def _prepare_prefill(requests, req_ids, starts, ends, microbatch_index=0):
     state.prepare_swa_workspace(
         SimpleNamespace(
             req_manager=requests,
-            swa_state=requests.swa_state, get_compressor_state=requests.get_compressor_state,
-            get_compressed_kv_state=requests.get_compressed_kv_state, get_compressed_kv_view=requests.get_compressed_kv_view,
+            swa_state=requests.swa_state,
+            get_compressor_state=requests.get_compressor_state,
+            get_compressed_kv_state=requests.get_compressed_kv_state,
+            get_compressed_kv_view=requests.get_compressed_kv_view,
             b_req_idx=req_ids,
             b_ready_cache_len=starts,
             b_seq_len=ends,
@@ -668,7 +687,9 @@ def test_pd_kv_and_att_state_roundtrip(cache, length):
     for layer in range(requests.cache_config.layer_num):
         torch.testing.assert_close(
             _read_swa(requests, layer, destination, positions, prefill=False),
-            _read_swa(prefill, layer, source, positions, prefill=False), rtol=0, atol=0,
+            _read_swa(prefill, layer, source, positions, prefill=False),
+            rtol=0,
+            atol=0,
         )
     ring_size = requests.swa_capacity_tokens
     assert requests.req_to_swa.flatten(1, 2)[:, : destination * ring_size].eq(0).all()
@@ -679,8 +700,12 @@ def test_pd_kv_and_att_state_roundtrip(cache, length):
         (prefill.req_to_c128_state, requests.req_to_c128_state, 128),
     ):
         positions = torch.arange(max(0, length - width), length, device="cuda")
-        torch.testing.assert_close(source_buffer[:, source, positions % source_buffer.shape[2]],
-                                   target_buffer[:, destination, positions % target_buffer.shape[2]], rtol=0, atol=0)
+        torch.testing.assert_close(
+            source_buffer[:, source, positions % source_buffer.shape[2]],
+            target_buffer[:, destination, positions % target_buffer.shape[2]],
+            rtol=0,
+            atol=0,
+        )
     prefill.free([source], src)
     requests.free([destination], dst)
     assert manager.allocator.can_use_mem_size == manager.size
@@ -746,9 +771,17 @@ def test_pd_transport_completion_covers_peer_gpu_state(cache, length):
     with torch.cuda.stream(consumer_stream):
         positions = torch.arange(max(0, length - requests.sliding_window), length, device="cuda:1")
         for layer in range(requests.cache_config.layer_num):
-            torch.testing.assert_close(_read_swa(requests, layer, destination, positions, prefill=False),
-                                       _read_swa(requests, layer, source, positions, prefill=False), rtol=0, atol=0)
-        for buffer, width in ((requests.req_to_c4_state, 8), (requests.req_to_c4_indexer_state, 8), (requests.req_to_c128_state, 128)):
+            torch.testing.assert_close(
+                _read_swa(requests, layer, destination, positions, prefill=False),
+                _read_swa(requests, layer, source, positions, prefill=False),
+                rtol=0,
+                atol=0,
+            )
+        for buffer, width in (
+            (requests.req_to_c4_state, 8),
+            (requests.req_to_c4_indexer_state, 8),
+            (requests.req_to_c128_state, 128),
+        ):
             positions = torch.arange(max(0, length - width), length, device="cuda:1") % buffer.shape[2]
             torch.testing.assert_close(buffer[:, destination, positions], buffer[:, source, positions], rtol=0, atol=0)
         for buffer in peer.kv_buffer:
@@ -778,8 +811,10 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
         state = SimpleNamespace(
             mem_manager=manager,
             req_manager=requests,
-            swa_state=requests.swa_state, get_compressor_state=requests.get_compressor_state,
-            get_compressed_kv_state=requests.get_compressed_kv_state, get_compressed_kv_view=requests.get_compressed_kv_view,
+            swa_state=requests.swa_state,
+            get_compressor_state=requests.get_compressor_state,
+            get_compressed_kv_state=requests.get_compressed_kv_state,
+            get_compressed_kv_view=requests.get_compressed_kv_view,
             mem_index=slots[start:end],
             position_ids=positions,
             is_prefill=not decode,
@@ -946,8 +981,14 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
             "Model",
             (),
             {
-                "config": dict(num_attention_heads=64, compress_ratios=[0, 0, 0], head_dim=512,
-                               qk_rope_head_dim=64, index_head_dim=128, sliding_window=128),
+                "config": dict(
+                    num_attention_heads=64,
+                    compress_ratios=[0, 0, 0],
+                    head_dim=512,
+                    qk_rope_head_dim=64,
+                    index_head_dim=128,
+                    sliding_window=128,
+                ),
                 "layers_infer": [SimpleNamespace(layer_num_=2)],
                 "tp_rank_": 0,
                 "tp_world_size_": 1,
@@ -988,8 +1029,10 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     reference_kv = backend.get_att_input_params(
         SimpleNamespace(
             req_manager=requests,
-            swa_state=requests.swa_state, get_compressor_state=requests.get_compressor_state,
-            get_compressed_kv_state=requests.get_compressed_kv_state, get_compressed_kv_view=requests.get_compressed_kv_view,
+            swa_state=requests.swa_state,
+            get_compressor_state=requests.get_compressor_state,
+            get_compressed_kv_state=requests.get_compressed_kv_state,
+            get_compressed_kv_view=requests.get_compressed_kv_view,
             is_prefill=True,
             prefill_att_state=requests._test_prefill_states[source],
         ),
@@ -1362,8 +1405,15 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     monkeypatch.setitem(args, "mtp_mode", "dspark")
     monkeypatch.setitem(args, "enable_decode_microbatch_overlap", True)
     monkeypatch.setitem(args, "enable_prefill_microbatch_overlap", False)
-    config = dict(sliding_window=128, index_topk=512, num_attention_heads=64, compress_ratios=[4, 128, 0],
-                  head_dim=512, qk_rope_head_dim=64, index_head_dim=128)
+    config = dict(
+        sliding_window=128,
+        index_topk=512,
+        num_attention_heads=64,
+        compress_ratios=[4, 128, 0],
+        head_dim=512,
+        qk_rope_head_dim=64,
+        index_head_dim=128,
+    )
     model = type("TestModel", (), {})()
     vars(model).update(
         config=config,
@@ -1374,9 +1424,13 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
         has_vision=False,
         args=args,
         req_manager=requests,
-            swa_state=requests.swa_state, get_compressor_state=requests.get_compressor_state,
-            get_compressed_kv_state=requests.get_compressed_kv_state, get_compressed_kv_view=requests.get_compressed_kv_view,
-        tp_rank_=0, tp_world_size_=1, att_state_role="main",
+        swa_state=requests.swa_state,
+        get_compressor_state=requests.get_compressor_state,
+        get_compressed_kv_state=requests.get_compressed_kv_state,
+        get_compressed_kv_view=requests.get_compressed_kv_view,
+        tp_rank_=0,
+        tp_world_size_=1,
+        att_state_role="main",
         layers_infer=[SimpleNamespace(layer_num_=i) for i in range(3)],
     )
     backend = DeepseekV4FlashMlaFp8SparseAttBackend(model)
@@ -1551,7 +1605,10 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         disable_linear_att_small_page_cpu_cache=False,
     )
     module.backend = SimpleNamespace(
-        is_master_in_dp=True, dp_world_size=1, is_hybrid_att_model=True, model=SimpleNamespace(att_state_manager=manager.manager, req_manager=requests)
+        is_master_in_dp=True,
+        dp_world_size=1,
+        is_hybrid_att_model=True,
+        model=SimpleNamespace(att_state_manager=manager.manager, req_manager=requests),
     )
     module.cpu_cache_client = client
     module.cpu_cache_handle_queue = deque()
@@ -1699,8 +1756,10 @@ def test_prefill_fused_writer_preserves_old_prefix_and_runtime_tail(cache):
         slots = _swa_slots(requests, req, positions)
         state = SimpleNamespace(
             req_manager=requests,
-            swa_state=requests.swa_state, get_compressor_state=requests.get_compressor_state,
-            get_compressed_kv_state=requests.get_compressed_kv_state, get_compressed_kv_view=requests.get_compressed_kv_view,
+            swa_state=requests.swa_state,
+            get_compressor_state=requests.get_compressor_state,
+            get_compressed_kv_state=requests.get_compressed_kv_state,
+            get_compressed_kv_view=requests.get_compressed_kv_view,
             is_prefill=True,
             prefill_att_state=requests._test_prefill_states[req],
             dsv4_swa_write_slots=slots,
@@ -1744,16 +1803,22 @@ def test_cpu_cache_preserves_already_published_pages(cache):
     manager.big_page_buffers.buffer[state_id].fill_(7)
     checkpoint_ids = [state_id]
     manager.manager.get_cpu_cache_operator().write_req(
-        token_indices=slots, cpu_page_buffers=pages, cpu_page_indices=page_ids,
-        layouts=manager.manager.get_cpu_cache_operator().get_page_layouts(), cpu_page_ready_flags=readies,
+        token_indices=slots,
+        cpu_page_buffers=pages,
+        cpu_page_indices=page_ids,
+        layouts=manager.manager.get_cpu_cache_operator().get_page_layouts(),
+        cpu_page_ready_flags=readies,
         big_page_slot_ids=checkpoint_ids,
     )
     torch.cuda.synchronize()
     assert pages.eq(221).all()
     readies[0] = False
     manager.manager.get_cpu_cache_operator().write_req(
-        token_indices=slots, cpu_page_buffers=pages, cpu_page_indices=page_ids,
-        layouts=manager.manager.get_cpu_cache_operator().get_page_layouts(), cpu_page_ready_flags=readies,
+        token_indices=slots,
+        cpu_page_buffers=pages,
+        cpu_page_indices=page_ids,
+        layouts=manager.manager.get_cpu_cache_operator().get_page_layouts(),
+        cpu_page_ready_flags=readies,
         big_page_slot_ids=checkpoint_ids,
     )
     torch.cuda.synchronize()

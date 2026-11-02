@@ -11,6 +11,7 @@ from ..types import StateTransferLayout, TensorField
 # 一、CPU/PD 页交换：按状态字段生成复制视图
 # ========================================================================
 
+
 def bounded_att_buffer_copies(
     page_fields: list[Mapping[str, TensorField]],
     page_buffers: torch.Tensor,
@@ -41,7 +42,7 @@ def bounded_att_buffer_copies(
 
             # 阶段二：region 的字节区间和 shape 定位外部页中的全局字段，再对齐轴顺序。
             page_bytes = page_buffers[page_index].view(torch.uint8).view(-1)
-            external_tensor = page_bytes[region.byte_start:region.byte_end].view(region.dtype).view(region.shape)
+            external_tensor = page_bytes[region.byte_start : region.byte_end].view(region.dtype).view(region.shape)
             assert local_tensor.dtype == external_tensor.dtype, "local and external field dtypes must match"
             external_tensor = external_tensor.permute(tuple(region.axes.index(axis) for axis in local_field.axes))
 
@@ -52,7 +53,9 @@ def bounded_att_buffer_copies(
             for axis_mapping in region.axis_mappings:
                 axis = local_field.axes.index(axis_mapping.axis)
                 local_slices[axis] = slice(axis_mapping.local_start, axis_mapping.local_start + axis_mapping.length)
-                external_slices[axis] = slice(axis_mapping.external_start, axis_mapping.external_start + axis_mapping.length)
+                external_slices[axis] = slice(
+                    axis_mapping.external_start, axis_mapping.external_start + axis_mapping.length
+                )
             local_view = local_tensor[tuple(local_slices)]
             external_view = external_tensor[tuple(external_slices)]
             assert local_view.shape == external_view.shape, "local and external copy views must have the same shape"

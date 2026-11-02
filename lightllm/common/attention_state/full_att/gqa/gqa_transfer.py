@@ -86,7 +86,7 @@ def transfer_gqa_pages(
         else:
             raise AssertionError(f"unknown transfer field {region.field}")
         # 从各页中取字段的字节区间，按 dtype 和布局形状解释，不搬运数据。
-        external = page_bytes[:, region.byte_start:region.byte_end].view(region.dtype)
+        external = page_bytes[:, region.byte_start : region.byte_end].view(region.dtype)
         external = external.view(page_buffers.shape[0], *region.shape)
         # 外部统一为 [page, layer, page_token, head, dim]；+1 是因为多了 page 轴。
         external = external.permute(0, *(region.axes.index(axis) + 1 for axis in axes))
@@ -97,13 +97,17 @@ def transfer_gqa_pages(
             # 例：本地 heads [0, 2) 对应外部 heads [4, 6)，切片保留两侧真实 stride。
             axis = axes.index(axis_mapping.axis)
             local_slices[axis] = slice(axis_mapping.local_start, axis_mapping.local_start + axis_mapping.length)
-            external_slices[axis + 1] = slice(axis_mapping.external_start, axis_mapping.external_start + axis_mapping.length)
+            external_slices[axis + 1] = slice(
+                axis_mapping.external_start, axis_mapping.external_start + axis_mapping.length
+            )
         local = local[tuple(local_slices)]
         external = external[tuple(external_slices)]
         # token 轴不比较：local 是 GPU 槽位容量，external 是单页容量。
         assert local.dtype == external.dtype
         assert (local.shape[0], local.shape[2], local.shape[3]) == (
-            external.shape[1], external.shape[3], external.shape[4]
+            external.shape[1],
+            external.shape[3],
+            external.shape[4],
         ), "local and external copy views must have the same shape"
         copy_views.append((local, external))
 

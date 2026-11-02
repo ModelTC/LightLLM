@@ -22,9 +22,9 @@ class DPSharedOperator:
                 if pool is not None:
                     for tensor in vars(pool).values():
                         if isinstance(tensor, torch.Tensor):
-                            assert tensor.device.type == "cpu" and tensor.is_shared(), (
-                                "DP IPC requires shared CPU page pools"
-                            )
+                            assert (
+                                tensor.device.type == "cpu" and tensor.is_shared()
+                            ), "DP IPC requires shared CPU page pools"
         ipc_copy = copy(self.owner)
         ipc_copy.full_att_allocator = None
         ipc_copy.bounded_att_big_page_allocator = None

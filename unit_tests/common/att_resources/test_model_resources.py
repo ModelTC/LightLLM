@@ -19,7 +19,11 @@ from lightllm.common.attention_state.full_att import (
     GQAFullAttentionState,
     GQAAttentionConfig,
 )
-from lightllm.common.attention_state.full_att import PackedMLAFullAttentionState, PackedMLAAttentionConfig, PackedMLALogicalConfig
+from lightllm.common.attention_state.full_att import (
+    PackedMLAFullAttentionState,
+    PackedMLAAttentionConfig,
+    PackedMLALogicalConfig,
+)
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
 from lightllm.server.core.objs.start_args_type import StartArgs
@@ -66,7 +70,7 @@ def make_resources(
                     latent_dim=512,
                 )
             ),
-             page_size=4,
+            page_size=4,
         )
         full.allocate_storage(16)
     else:
@@ -79,7 +83,7 @@ def make_resources(
                 tp_rank=rank,
                 tp_world_size=tp,
             ),
-             page_size=4,
+            page_size=4,
         )
         full.allocate_storage(16)
     main, draft = create_full_attention_roles(full, 4)
@@ -106,18 +110,24 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
     mtp: int,
     cpu_args: EasyDict,
 ):
-    sources = [make_resources(
-        glm=glm,
-        tp=tp,
-        rank=rank,
-        mtp=mtp,
-    ) for rank in range(tp)]
-    targets = [make_resources(
-        glm=glm,
-        tp=tp,
-        rank=rank,
-        mtp=mtp,
-    ) for rank in range(tp)]
+    sources = [
+        make_resources(
+            glm=glm,
+            tp=tp,
+            rank=rank,
+            mtp=mtp,
+        )
+        for rank in range(tp)
+    ]
+    targets = [
+        make_resources(
+            glm=glm,
+            tp=tp,
+            rank=rank,
+            mtp=mtp,
+        )
+        for rank in range(tp)
+    ]
     expected = []
     for rank, (resources, full) in enumerate(sources):
         cfg = main_linear_state(resources).config

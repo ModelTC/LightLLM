@@ -31,10 +31,13 @@ def test_creation_does_not_bind_layers(monkeypatch: pytest.MonkeyPatch) -> None:
             global_head_num=1,
             head_dim=128,
             dtype=torch.bfloat16,
-        ), device="meta",
+        ),
+        device="meta",
     )
     monkeypatch.setattr(
-        LlamaTpPartModel, "create_full_att_states", classmethod(lambda cls, **kwargs: [state]),
+        LlamaTpPartModel,
+        "create_full_att_states",
+        classmethod(lambda cls, **kwargs: [state]),
     )
 
     model.prepare_attention_states()
@@ -49,14 +52,18 @@ def test_query_selects_role_and_scheme_and_preserves_shared_layers(role: str, mo
     manager = AttentionStateManager(request_capacity=1)
     for model_role in ("main", "draft0"):
         for dtype, groups in ((torch.bfloat16, ((0, 2),)), (torch.float16, ((3,),))):
-            manager.register_state(model_role, GQAFullAttentionState(
-                layout_config=GQAAttentionConfig(
-                    logical_layer_groups=groups,
-                    global_head_num=1,
-                    head_dim=128,
-                    dtype=dtype,
-                ), device="meta",
-            ))
+            manager.register_state(
+                model_role,
+                GQAFullAttentionState(
+                    layout_config=GQAAttentionConfig(
+                        logical_layer_groups=groups,
+                        global_head_num=1,
+                        head_dim=128,
+                        dtype=dtype,
+                    ),
+                    device="meta",
+                ),
+            )
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.is_mtp_draft_model = role != "main"
     model.mtp_previous_draft_models = []
@@ -90,7 +97,8 @@ def test_prefix_and_logical_layer_select_quantized_state(finalized: bool) -> Non
     plain = definition("gqa")
     quantized = definition("int8")
     quantized = type(quantized)(
-        layout_config=replace_logical_layer_groups(quantized.config, ((10, 12),)), device="meta",
+        layout_config=replace_logical_layer_groups(quantized.config, ((10, 12),)),
+        device="meta",
     )
     manager.register_state("main", plain)
     manager.register_state("main", quantized)
@@ -152,7 +160,8 @@ def test_mla_selection_excludes_same_layer_tail() -> None:
     tail = make_window()
     template = definition("mla")
     state = type(template)(
-        layout_config=replace_logical_layer_groups(template.config, ((3, 7),)), device="meta",
+        layout_config=replace_logical_layer_groups(template.config, ((3, 7),)),
+        device="meta",
     )
     manager.register_state("main", state)
     manager.register_state("main", tail)
@@ -161,15 +170,17 @@ def test_mla_selection_excludes_same_layer_tail() -> None:
     assert not tail.contains_logical_layer(0)
     assert manager.get_state("main", "mla", 7) is state
     assert manager.get_state("main", "compressor", 7) is tail
-    assert manager.get_state(
-        model_role="main",
-        state_type_filter="",
-        logical_layer_id=7,
-        state_class=FullAttentionState,
-    ) is state
+    assert (
+        manager.get_state(
+            model_role="main",
+            state_type_filter="",
+            logical_layer_id=7,
+            state_class=FullAttentionState,
+        )
+        is state
+    )
     with pytest.raises(AssertionError, match="expected exactly one"):
         manager.get_state("main", "", 7)
-
 
 
 @pytest.mark.parametrize("role", ["draft1", "draft10"])
@@ -186,7 +197,9 @@ def test_precision_variants_have_distinct_names_and_can_coexist(algorithm: str) 
     from dataclasses import replace
 
     manager = AttentionStateManager(request_capacity=3)
-    template = make_window() if algorithm == "compressor" else make_state(cls=KDAState if algorithm == "kda" else GDNState)
+    template = (
+        make_window() if algorithm == "compressor" else make_state(cls=KDAState if algorithm == "kda" else GDNState)
+    )
     states = []
     for dtype in (torch.bfloat16, torch.float32):
         config = replace(template.config, **({"dtype": dtype} if algorithm == "compressor" else {"conv_dtype": dtype}))

@@ -144,7 +144,9 @@ def _snapshot(
     result["conv"] = state.conv_state[:, req_idx, ..., cursor : cursor + state.config.conv_width].float().cpu().numpy()
     result["ssm"] = state.ssm_state[:, req_idx * 3 + cursor].cpu().numpy()
     tail = resources.main_compressor_indexer_w4_s4_bf16_state.buffer[:, req_idx]
-    result["tail"] = torch.stack([tail[:, position % tail.shape[1]] for position in range(1, 5)], dim=1).float().cpu().numpy()
+    result["tail"] = (
+        torch.stack([tail[:, position % tail.shape[1]] for position in range(1, 5)], dim=1).float().cpu().numpy()
+    )
     return result
 
 
@@ -275,7 +277,9 @@ def _worker(connection: Connection, backend: str, sender: bool):
                         pd_page_index=request.dst_page_index,
                         dp_rank_in_node=0,
                         tp_world_size=1,
-                        token_indices=torch.tensor([8, 12, 10, 15, 11], dtype=torch.long, device=device) if kind == "kv" else torch.tensor([], dtype=torch.long, device=device),
+                        token_indices=torch.tensor([8, 12, 10, 15, 11], dtype=torch.long, device=device)
+                        if kind == "kv"
+                        else torch.tensor([], dtype=torch.long, device=device),
                         task_kind=kind,
                         req_idx=2,
                         state_token_len=request.end_kv_index,

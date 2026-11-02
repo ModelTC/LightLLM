@@ -12,7 +12,8 @@ from unit_tests.common.att_resources.model_helpers import create_full_attention_
 
 from lightllm.common.attention_state.full_att import (
     PackedMLAFullAttentionState,
-    PackedMLAAttentionConfig, PackedMLALogicalConfig,
+    PackedMLAAttentionConfig,
+    PackedMLALogicalConfig,
 )
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
@@ -78,7 +79,7 @@ def make_mems(monkeypatch, request):
                         latent_dim=512,
                     )
                 ),
-                 page_size=args.page_size,
+                page_size=args.page_size,
             )
             full.allocate_storage(32)
             main, draft = create_full_attention_roles(full, config.all_layer_num)
@@ -191,7 +192,10 @@ def test_pd_kv_and_runtime_state_roundtrip(
     source_buffer = allocate_transfer_buffer(source_resources[0], 1, device="cuda")
     dest_buffer = allocate_transfer_buffer(dest_resources[0], 1, device="cuda")
     assert source_buffer.shape == dest_buffer.shape
-    assert source_resources[0].get_pd_operator().get_pd_bounded_att_page_layouts().keys() == dest_resources[0].get_pd_operator().get_pd_bounded_att_page_layouts().keys()
+    assert (
+        source_resources[0].get_pd_operator().get_pd_bounded_att_page_layouts().keys()
+        == dest_resources[0].get_pd_operator().get_pd_bounded_att_page_layouts().keys()
+    )
     for kind in ("kv", "att_state"):
         copy_page(
             node_att_managers=source_resources,
@@ -284,7 +288,9 @@ def test_pd_kv_and_runtime_state_roundtrip(
 def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch, caplog):
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 8)
     mem = make_mems(1)[0]
-    full_bytes = max(layout.byte_end for layout in mem.resources.get_pd_operator().get_pd_full_att_page_layouts().values())
+    full_bytes = max(
+        layout.byte_end for layout in mem.resources.get_pd_operator().get_pd_full_att_page_layouts().values()
+    )
     runtime_bytes = max(
         layout.byte_end for layout in mem.resources.get_pd_operator().get_pd_bounded_att_page_layouts().values()
     )
@@ -389,7 +395,7 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
     width = target_step + 1
     # 第一次验证后回访已接受位置；新增候选历史必须由 D 的本地 ring 正确保留。
     for start, count in [(prefix, width), (prefix + 1, 1), (prefix + 2, 1), (prefix + 1, width)]:
-        raw[start:start + count] = torch.randn(
+        raw[start : start + count] = torch.randn(
             size=(count, 256),
             device="cuda",
             dtype=torch.bfloat16,
@@ -401,7 +407,7 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
             dtype=torch.int32,
         )
         compress_pools(
-            raw=raw[start:start + count],
+            raw=raw[start : start + count],
             tail=target.get_layer_view(0),
             packed_buffer=packed,
             ape=ape,
@@ -415,7 +421,7 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
             mtp_index=torch.arange(count, device="cuda", dtype=torch.int32),
         )
         expected = torch.zeros_like(packed)
-        prefill(raw[:start + count], expected, torch.zeros_like(source.get_layer_view(0)))
+        prefill(raw[: start + count], expected, torch.zeros_like(source.get_layer_view(0)))
         closing = torch.arange(start, start + count, device="cuda")
         closing = closing[(closing + 1) % 4 == 0]
         assert torch.equal(packed[closing], expected[closing])

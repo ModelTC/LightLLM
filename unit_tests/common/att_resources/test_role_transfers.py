@@ -18,7 +18,9 @@ if TYPE_CHECKING:
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("glm", [False, True])
 def test_main_and_draft_transfers_copy_pd_and_dp_windows(
-    glm: bool, pd_args: EasyDict, monkeypatch: pytest.MonkeyPatch,
+    glm: bool,
+    pd_args: EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
 ):
     pd_args.pd_kv_page_size = 128
     source, _ = make_resources(
@@ -55,14 +57,22 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
             pd_page_index=0,
             kind=kind,
             layouts=getattr(source.get_pd_operator(), getter)(),
-            **({"token_indices": torch.tensor([0, 1], dtype=torch.long, device="cuda")} if kind == "kv" else {"req_idx": 0, "state_token_len": 8}),
+            **(
+                {"token_indices": torch.tensor([0, 1], dtype=torch.long, device="cuda")}
+                if kind == "kv"
+                else {"req_idx": 0, "state_token_len": 8}
+            ),
         )
         target.get_pd_operator().read_page(
             pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
             layouts=getattr(target.get_pd_operator(), getter)(),
-            **({"token_indices": torch.tensor([8, 9], dtype=torch.long, device="cuda")} if kind == "kv" else {"req_idx": 1, "state_token_len": 8}),
+            **(
+                {"token_indices": torch.tensor([8, 9], dtype=torch.long, device="cuda")}
+                if kind == "kv"
+                else {"req_idx": 1, "state_token_len": 8}
+            ),
         )
     src_indices = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
     dst_indices = torch.tensor([10, 11], dtype=torch.int64, device="cuda")

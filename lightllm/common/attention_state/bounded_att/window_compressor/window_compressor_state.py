@@ -114,8 +114,7 @@ class WindowCompressorState(BoundedAttentionState):
         """用途、窗口、步长和精度共同标识可复用的压缩器方案。"""
         precision = {torch.float32: "fp32", torch.float16: "fp16", torch.bfloat16: "bf16"}[self.config.dtype]
         return (
-            f"compressor_{self.config.target}_w{self.config.window_size}"
-            f"_s{self.config.compress_stride}_{precision}"
+            f"compressor_{self.config.target}_w{self.config.window_size}" f"_s{self.config.compress_stride}_{precision}"
         )
 
     def initialize_page_pools(
@@ -225,14 +224,14 @@ class WindowCompressorState(BoundedAttentionState):
         """校验缓存页对齐产出步长；无重叠历史的窗口不占 CPU 页，也不创建大小页池。"""
         args = get_env_start_args()
         # 大页是小页的整数倍；小页对齐产出步长后，大小页终点均不会落在未完成的组内。
-        assert args.linear_att_hash_page_size % self.config.compress_stride == 0, (
-            "state cache pages must align to the compressor stride"
-        )
+        assert (
+            args.linear_att_hash_page_size % self.config.compress_stride == 0
+        ), "state cache pages must align to the compressor stride"
         # CPU 服务只查询 meta 布局，也要在忽略无重叠窗口之前拒绝不安全的恢复边界。
         if args.cpu_cache_token_page_size is not None:
-            assert args.cpu_cache_token_page_size % self.config.compress_stride == 0, (
-                "CPU cache pages must align to the compressor stride"
-            )
+            assert (
+                args.cpu_cache_token_page_size % self.config.compress_stride == 0
+            ), "CPU cache pages must align to the compressor stride"
         return self._get_transfer_regions(runtime=False)
 
     def write_state_pages_to_cpu(

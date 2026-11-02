@@ -38,6 +38,7 @@ def test_cache_slots_follow_execution_depth_including_unaligned_loop(monkeypatch
     monkeypatch.setattr("lightllm.models.qwen3next.config.get_env_start_args", lambda: args)
     monkeypatch.setattr("transformers.configuration_utils.PretrainedConfig.get_config_dict", lambda _: (config, {}))
     from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+
     normalized = SenseNovaLoopTpPartModel.normalize_model_config(config)
     cache = Qwen3NextResourceConfig.from_model_config(normalized, args)
     full_layers = cache.get_full_att_layer_indices()
@@ -169,11 +170,15 @@ def test_model_and_worker_use_the_same_loop_cache_layout(monkeypatch, custom_lay
     normalized = SenseNovaLoopTpPartModel.normalize_model_config(config)
     raw_cache = Qwen3NextResourceConfig.from_model_config(normalized, args)
     logical_ids = tuple(range(normalized["num_hidden_layers"]))
-    full, = SenseNovaLoopTpPartModel.create_full_att_states(
-        model_config=normalized, args=args, model_logical_layer_ids=logical_ids,
+    (full,) = SenseNovaLoopTpPartModel.create_full_att_states(
+        model_config=normalized,
+        args=args,
+        model_logical_layer_ids=logical_ids,
     )
-    bounded, = SenseNovaLoopTpPartModel.create_bounded_att_states(
-        model_config=normalized, args=args, model_logical_layer_ids=logical_ids,
+    (bounded,) = SenseNovaLoopTpPartModel.create_bounded_att_states(
+        model_config=normalized,
+        args=args,
+        model_logical_layer_ids=logical_ids,
     )
     full_layers = raw_cache.get_full_att_layer_indices()
     assert full.config.logical_layer_groups == tuple((i,) for i in full_layers)

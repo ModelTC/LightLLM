@@ -19,7 +19,8 @@ def test_quantized_kv_buffers_include_the_full_hold_page():
                 scale_dtype=torch.float16,
                 bits=bits,
             ),
-             page_size=4, device="cpu",
+            page_size=4,
+            device="cpu",
         )
         state.allocate_storage(32)
         allocations.extend(tuple(buffer.shape) for buffer in full_state_test_buffers(state).values())

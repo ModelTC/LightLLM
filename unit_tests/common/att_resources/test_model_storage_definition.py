@@ -84,8 +84,13 @@ CASES = [
     ),
     (
         Gemma4TpPartModel,
-        {"num_key_value_heads": 4, "head_dim": 256, "global_head_dim": 256,
-         "num_kv_shared_layers": 1, "layer_types": ["full_attention", "full_attention"]},
+        {
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+            "global_head_dim": 256,
+            "num_kv_shared_layers": 1,
+            "layer_types": ["full_attention", "full_attention"],
+        },
         4,
         256,
         1,
@@ -133,13 +138,18 @@ def test_model_and_cpu_service_use_identical_storage_geometry(
         if storage_layers == 1:
             assert state.config.logical_layer_groups == ((0, 1),)
             assert resources.get_state("main", "gqa", 0) is resources.get_state("main", "gqa", 1)
-            assert state.get_layer_view(logical_layer_id=0)[0].data_ptr() == state.get_layer_view(logical_layer_id=1)[0].data_ptr()
+            assert (
+                state.get_layer_view(logical_layer_id=0)[0].data_ptr()
+                == state.get_layer_view(logical_layer_id=1)[0].data_ptr()
+            )
         assert read_kv_storage(state).dtype == (torch.bfloat16 if model_cls is Gemma3TpPartModel else torch.float16)
         assert resources.full_att_allocator.size == 16
         layout = resources.get_cpu_cache_operator().get_page_layouts()[state.state_name]
         assert (layout.byte_start, layout.byte_end) == (service_layout.byte_start, service_layout.byte_end)
         # 按物理层数计算传输页；共享消费者不重复增加 KV 或传输容量。
-        expected_pd_bytes = storage_layers * args.pd_kv_page_size * 2 * global_heads * dim * read_kv_storage(state).element_size()
+        expected_pd_bytes = (
+            storage_layers * args.pd_kv_page_size * 2 * global_heads * dim * read_kv_storage(state).element_size()
+        )
         assert resources.get_pd_operator().get_page_bytes() == expected_pd_bytes
         fields = layout.regions
         assert all(region.shape[2] == global_heads for region in fields)
@@ -202,7 +212,9 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
 
 
 def test_cpu_layout_uses_all_model_factory_states(
-    args: StartArgs | EasyDict, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    args: StartArgs | EasyDict,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ):
     """同一模型返回多种方案和共享层时，CPU 页采用实际 State 列表。"""
     from lightllm.common.attention_state.full_att import FullAttentionState, GQAFullAttentionState
@@ -227,13 +239,21 @@ def test_cpu_layout_uses_all_model_factory_states(
             return [
                 GQAFullAttentionState(
                     layout_config=dataclasses.replace(
-                        template.config, logical_layer_groups=(model_logical_layer_ids[:2],), dtype=torch.bfloat16,
-                    ), page_size=args.page_size, device="meta",
+                        template.config,
+                        logical_layer_groups=(model_logical_layer_ids[:2],),
+                        dtype=torch.bfloat16,
+                    ),
+                    page_size=args.page_size,
+                    device="meta",
                 ),
                 GQAFullAttentionState(
                     layout_config=dataclasses.replace(
-                        template.config, logical_layer_groups=(model_logical_layer_ids[2:],), dtype=torch.float16,
-                    ), page_size=args.page_size, device="meta",
+                        template.config,
+                        logical_layer_groups=(model_logical_layer_ids[2:],),
+                        dtype=torch.float16,
+                    ),
+                    page_size=args.page_size,
+                    device="meta",
                 ),
             ]
 
