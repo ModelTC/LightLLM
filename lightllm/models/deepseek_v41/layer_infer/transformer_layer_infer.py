@@ -22,6 +22,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.is_kv_source = layer_num in network_config["kv_source_layer_ids"]
+        self.next_engram = None
         self.decoder_start_layer = max(network_config["kv_source_layer_ids"]) + 1
         self.engram_index = (
             network_config["engram_layer_ids"].index(layer_num)
@@ -37,6 +38,13 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             pre_mix = streams.new_zeros((streams.shape[0], self.hc_mult), dtype=torch.float32)
             pre_mix[:, 0] = 1
         if self.engram_index is not None:
+            embedded = None
+            if infer_state.engram_prefetch is not None:
+                embedded, ready = infer_state.engram_prefetch
+                current = torch.cuda.current_stream()
+                current.wait_event(ready)
+                embedded.record_stream(current)
+                infer_state.engram_prefetch = None
             streams = streams.view(-1, self.hc_mult, self.embed_dim_)
             streams = engram_forward(
                 streams,
@@ -45,6 +53,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
                 self.eps_,
                 token_mask=infer_state.input_ids < self.vocab_size if self.has_vision else None,
                 out=streams,
+                local_embedding=embedded,
             ).flatten(1)
         x, res_mix, post_mix, attn_pre = hc_pre_norm_shifted(
             streams,
@@ -104,6 +113,9 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         self, input_embdings, infer_state: DeepseekV41InferStateInfo, layer_weight: DeepseekV41TransformerLayerWeight
     ):
         x, residual, res_mix, post_mix, attn_pre = self._hc_attn_in(input_embdings, infer_state, layer_weight)
+        if self.next_engram is not None:
+            index, weight = self.next_engram
+            infer_state.prefetch_engram(weight, index)
         x = self.token_attention_forward(x, infer_state, layer_weight)
         x, residual, res_mix, post_mix, ffn_pre = self._hc_ffn_in(
             x, residual, res_mix, post_mix, attn_pre, layer_weight

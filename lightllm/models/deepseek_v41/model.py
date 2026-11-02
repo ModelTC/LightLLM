@@ -1,5 +1,7 @@
 """V4.1 integration using the existing V4 model and service interfaces."""
 
+import torch
+
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel, DeepseekV4LayerHiddenCollector
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract
@@ -59,6 +61,13 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             self.engram_hasher.restore_history(model_input.token_lookback, self.req_manager)
         return super().forward(model_input)
 
+    def _token_forward(self, infer_state):
+        if not self.is_mtp_draft_model and self.config["engram_layer_ids"] and self.config["engram_layer_ids"][0] == 0:
+            # This must run inside the decode graph, rather than in state setup:
+            # a replay must gather fresh embeddings from the staged hash inputs.
+            infer_state.prefetch_engram(self.trans_layers_weight[0], 0)
+        return super()._token_forward(infer_state)
+
     def _init_config(self):
         config = get_config_json(self.weight_dir_)
         self.config = {**config["text_config"], **config}
@@ -108,6 +117,7 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     def _init_custom(self):
         super()._init_custom()
         self.engram_hasher = None
+        self.engram_stream = None
         if self.config["engram_layer_ids"]:
             from transformers import AutoTokenizer
 
@@ -116,6 +126,10 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
                 self.config, tokenizer, self.mem_manager.size + self.mem_manager.page_size
             )
             self.token_lookback_depth = self.engram_hasher.order - 1
+            self.engram_stream = torch.cuda.Stream()
+            for index, layer_id in enumerate(self.config["engram_layer_ids"]):
+                if layer_id:
+                    self.layers_infer[layer_id - 1].next_engram = (index, self.trans_layers_weight[layer_id])
 
 
 class DeepseekV41VisionTpPartModel(DeepseekV41TpPartModel):

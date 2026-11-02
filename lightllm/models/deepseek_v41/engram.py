@@ -190,7 +190,8 @@ class EngramEmbeddingWeight(BaseWeightTpl):
     def verify_load(self):
         return all(self.loaded)
 
-    def lookup(self, indices):
+    def gather_local(self, indices):
+        """Read this rank's host shard; no collective is issued on the prefetch stream."""
         indices = indices.contiguous()
         out = torch.empty((*indices.shape, self.dim), dtype=torch.bfloat16, device=indices.device)
         _gather_table[(indices.numel(),)](
@@ -203,9 +204,13 @@ class EngramEmbeddingWeight(BaseWeightTpl):
             self.dim,
             triton.next_power_of_2(self.dim),
         )
+        return out.flatten(1)
+
+    def lookup(self, indices, local_embedding=None):
+        out = self.gather_local(indices) if local_embedding is None else local_embedding
         if self.tp_world_size_ > 1:
             all_reduce(out)
-        return out.flatten(1)
+        return out
 
 
 @triton.jit
@@ -241,8 +246,12 @@ def _engram_gate(
     tl.store(OUT + row * OUT_STRIDE + stream * DIM + col, h + gate * value, valid)
 
 
-def engram_forward(streams, indices, weight, eps, token_mask=None, out=None):
-    embedded = weight.engram_embed_.lookup(indices)
+def engram_forward(streams, indices, weight, eps, token_mask=None, out=None, local_embedding=None):
+    embedded = (
+        weight.engram_embed_.lookup(indices)
+        if local_embedding is None
+        else weight.engram_embed_.lookup(indices, local_embedding=local_embedding)
+    )
     kv = weight.engram_wkv_.mm(embedded)
     mult, dim = streams.shape[-2:]
     if out is None:

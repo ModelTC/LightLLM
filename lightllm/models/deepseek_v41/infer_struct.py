@@ -21,8 +21,20 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         self.v41_sparse_selection = None
         self.candidate_block_indices = None
         self.engram_hashes = model.engram_hasher(self) if model.engram_hasher is not None else None
+        self.engram_stream = model.engram_stream
+        self.engram_prefetch = None
         self.decoder_state = None
         self.decoder_token_indices = None
+
+    def prefetch_engram(self, layer_weight, index):
+        """Keep one local gather alive until its Engram layer consumes it."""
+        stream = self.engram_stream
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            embedded = layer_weight.engram_embed_.gather_local(self.engram_hashes[:, index])
+            ready = torch.cuda.Event()
+            ready.record(stream)
+        self.engram_prefetch = embedded, ready
 
     def init_decoder_state(self):
         """Keep the prompt's last window after the final global-KV producer.

@@ -937,8 +937,9 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
         ("fp8", 128, 64, True, True),  # Unpadded FlashMLA Q, including the DSpark path.
     ],
 )
+@pytest.mark.parametrize("engram_layer", [0, 1])
 def test_text_model_constructs_and_chunked_prefill_matches_full(
-    tmp_path, monkeypatch, o_groups, expert_dtype, block_size, vision, dspark
+    tmp_path, monkeypatch, o_groups, expert_dtype, block_size, vision, dspark, engram_layer
 ):
     """Exercise the real model input, paging, shared KV, attention, MoE and output paths."""
     import json
@@ -997,7 +998,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             hc_mult=4,
             hc_sinkhorn_iters=20,
             hc_eps=1e-6,
-            engram_layer_ids=[1],
+            engram_layer_ids=[engram_layer],
             engram_compressed_vocab_size=64,
             engram_pad_token_id=2,
             engram_max_ngram_size=4,
@@ -1704,6 +1705,48 @@ def test_engram_host_embedding_uses_fp8_scales_and_zeroes_other_tp_rows(monkeypa
     expected = (raw.float() * scale.float().repeat_interleave(32, -1)).bfloat16().cuda()
     torch.testing.assert_close(actual[:2], expected[[0, 3]], atol=0, rtol=0)
     assert actual[2:].count_nonzero() == 0
+
+
+def test_engram_prefetch_graph_reads_new_hashes_and_reduces_on_consumer_stream(monkeypatch):
+    import uuid
+    from lightllm.models.deepseek_v41 import engram
+    from lightllm.models.deepseek_v41.infer_struct import DeepseekV41InferStateInfo
+
+    monkeypatch.setenv("LIGHTLLM_UNIQUE_SERVICE_NAME_ID", "test_v41_prefetch_" + uuid.uuid4().hex)
+    embedding = engram.EngramEmbeddingWeight("layers.0.engram.embed", rows=8, dim=64)
+    raw = torch.randn(8, 64).to(torch.float8_e4m3fn)
+    scale = torch.full((8, 2), 0.5).to(torch.float8_e8m0fnu)
+    embedding.load_hf_weights({embedding.prefix + ".weight": raw, embedding.prefix + ".scale": scale})
+    state = DeepseekV41InferStateInfo()
+    state.engram_stream = torch.cuda.Stream()
+    ids = torch.tensor([[0, 3], [4, 7]], device="cuda")
+    state.engram_hashes = ids[:, None, :]
+    weight = SimpleNamespace(engram_embed_=embedding)
+    collectives = []
+    consumers = []
+    embedding.tp_world_size_ = 2
+    monkeypatch.setattr(engram, "all_reduce", lambda _: collectives.append(torch.cuda.current_stream().cuda_stream))
+
+    def run():
+        state.prefetch_engram(weight, 0)
+        local, ready = state.engram_prefetch
+        current = torch.cuda.current_stream()
+        consumers.append(current.cuda_stream)
+        current.wait_event(ready)
+        local.record_stream(current)
+        return embedding.lookup(ids, local_embedding=local)
+
+    expected = (raw.float() * 0.5).bfloat16().cuda()
+    torch.testing.assert_close(run(), expected[ids].flatten(1), atol=0, rtol=0)
+    assert collectives == [torch.cuda.current_stream().cuda_stream]
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = run()
+    assert collectives == consumers
+    assert state.engram_stream.cuda_stream not in collectives
+    ids.copy_(torch.tensor([[7, 4], [3, 0]], device="cuda"))
+    graph.replay()
+    torch.testing.assert_close(actual, expected[ids].flatten(1), atol=0, rtol=0)
 
 
 def test_engram_dp_ranks_share_host_table_and_load_once(monkeypatch):

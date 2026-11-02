@@ -170,3 +170,16 @@ H200数值、causal/HOLD、非连续页、CUDA Graph专项20 passed，完整V4.1
 H200/hidden5120，CUDA Graph三轮median：1行11.072→8.325us（1.33x）；6行11.649→11.198us（1.04x）。第一版强用融合的16行11.934→13.318us，约慢11.6%；最终shifted仅在8行以内启用融合，16行复测12.089→12.114us，32/64/128/8192行沿用原算子组合且差异约噪声范围。V4原有16行阈值未变，不把小batch的局部收益外推整机速度。
 
 共享mHC回归57 passed（新增24项含hidden128/5120、1/6/16/17/64/128行、禁用/启用DeepGEMM、更新输入后的Graph replay），加V4.1模型共203 passed，含vision/DSpark/cache/graph。日志与首版退化记录均保留：/mnt/vqa/wanzihao/v41_four_optimizations_20261102/mhc_gpu.log、mhc_model_gpu.log、mhc_bench*.jsonl；复跑test/benchmark/kernel/benchmark_dsv41_mhc.py。未改在线服务。
+
+
+### 2026-11-02：优化 5 — Decode Engram 单层提前预取
+
+复用原FP8 host/UVA lookup，将本地shard读取提前到前一层的attention/FFN执行期间，在独立CUDA stream上执行；消费者用event等待并record_stream保护embedding寿命。TP all-reduce仍在消费者原计算stream上执行，不把collective放到预取stream。每次forward至多持有一份待消费embedding，不新增持久化hidden缓存、线程或后台manager。首层Engram在_token_forward入口预取，明确置于decode graph捕获内部，避免graph replay沿用旧hash查出的embedding；DSpark draft不走target的首层预取。
+
+首版仅decode启用；prefill沿用原路径，避免大chunk额外占用embedding缓冲。实际配置24个ngram head、每head256维时，待消费BF16 embedding为每query行12288B，384行约4.5MiB；不增加host权重副本。
+
+H200合成组件微测：264MiB FP8/UE8M0 host表，hash每次graph replay轮转，24heads/256dim，前序计算为5120x5120 BF16投影，三轮median。1行串行23.013→预取20.869us（1.10x），6行24.932→22.156us（1.13x），64行36.368→34.880us（1.04x），384行122.929→122.676us（基本持平）。这些是可重叠工作负载的组件实验，不是实际完整前层或整模型TPOT；没有声称多机吞吐收益。原始记录engram_bench.jsonl/.stderr，复跑test/benchmark/kernel/benchmark_dsv41_engram_prefetch.py。
+
+最终GPU回归212 passed（V4.1 155项＋共享mHC57项），覆盖首层/中间层Engram、文本/视觉、DSpark、GPU/CPU checkpoint恢复与更新输入的decode Graph。额外预取专项验证实际host lookup、更新hash后Graph结果，以及collective位于消费者stream；多rankcollective在该专项用替身检查顺序，尚未做真实TP多机性能验收。CPU输入/分页及PD生命周期回归155 passed。Black/Flake8、git diff --check通过。日志根目录：/mnt/vqa/wanzihao/v41_four_optimizations_20261102/，final_gpu.log、final_cpu.log、engram_model_gpu.log、engram_prefetch_gpu.log。
+
+本轮未部署、未重启线上服务、未升级依赖、未跑完整权重GSM8K。Indexer/mHC/Engram数据均为独立单卡组件实验，Graph使用微测自身的capture形状；真实服务较大的固定graph_max_len_in_batch会影响indexer的静态capacity与路径选择，8K的免mask DeepGEMM微测不能当作默认1M graph容量下整机短上下文成绩。完整checkpoint质量和端到端TTFT/TPOT/TPM仍待独立服务验收。已有launcher及旧test.md未提交内容均保留，本轮commit仅包含四项实现及各自新增记录。
