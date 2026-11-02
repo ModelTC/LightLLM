@@ -101,7 +101,6 @@ def test_transfer_plan_does_not_allocate_or_require_checkpoint_capacity(monkeypa
     module.backend.dp_world_size = 1
     module.backend.rank_in_dp = 0
     module.backend.model.req_manager = NS(get_prompt_cache_page_size=lambda: 256)
-    module.backend.model.mem_manager.swa_pool = NS(page_size=128)
     req = NS(
         req_id=7, cur_kv_len=0, hold_kv_len=0, get_cur_total_len=lambda: 2500, _kv_cache_alloc_need=lambda end: end
     )
@@ -111,9 +110,7 @@ def test_transfer_plan_does_not_allocate_or_require_checkpoint_capacity(monkeypa
         return torch.arange(count)
 
     module.backend._alloc_req_kv_mem = allocate
-    monkeypatch.setattr(
-        transfer, "g_infer_context", NS(get_can_alloc_dsv4_swa_page_num=lambda: 2, get_can_alloc_token_num=lambda: 4096)
-    )
+    monkeypatch.setattr(transfer, "g_infer_context", NS(get_can_alloc_token_num=lambda: 4096))
     monkeypatch.setattr(transfer.dist, "get_world_size", lambda group: 2)
     monkeypatch.setattr(
         transfer.dist, "all_gather_object", lambda output, local, group: output.__setitem__(slice(None), [local, {}])
@@ -134,9 +131,8 @@ def test_model_warmup_free_all_does_not_reset_shared_checkpoint_owners(monkeypat
     slot = manager.big_page_buffers.alloc_one_state_cache()
     manager.big_page_buffers.retain_state_cache([slot])
     calls = []
-    manager.swa_page_allocator = NS(free_all=lambda: calls.append("swa"))
     monkeypatch.setattr(MemoryManager, "free_all", lambda self: calls.append("kv"))
     manager.free_all()
-    assert calls == ["kv", "swa"]
+    assert calls == ["kv"]
     assert manager.big_page_buffers.refs[slot] == 2
     assert manager.big_page_buffers.get_free_cache_num() == 1

@@ -47,7 +47,7 @@ def get_running_max_req_size_per_dp(args) -> int:
     local_dp_size = max(1, args.dp // args.nnodes)
     # DSV4 cache fetch probes foreign requests without allocating local request slots.
     requires_global_capacity = args.diverse_mode or (
-        args.enable_dp_prompt_cache_fetch and get_model_type(args.model_dir) != "deepseek_v4"
+        args.enable_dp_prompt_cache_fetch and get_model_type(args.model_dir) not in ("deepseek_v4", "deepseek_v41")
     )
     if local_dp_size > 1 and not requires_global_capacity:
         return (args.running_max_req_size + local_dp_size - 1) // local_dp_size

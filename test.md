@@ -192,3 +192,16 @@ H200合成组件微测：264MiB FP8/UE8M0 host表，hash每次graph replay轮转
 H200完整V4.1 GPU回归155 passed；补充首个decoder层计数断言后边界/模型回归17 passed。256行输入时，首个decoder层全量KV writer仅调用一次且输入256行，QKV与FFN均128行；既有断言确认共享global KV与未裁剪参考逐字节相同。覆盖Engram首层/中间层、FP8/历史FP4测试fixture、vision、DSpark、GPU/CPU cache恢复及decode graph。最初新断言误读测试外层config而失败，改为读取运行model.config；未为断言改变生产语义。
 
 8192-token单请求chunk的attention/FFN token-layer预算由21*8192+19*128=174464降到20*8192+20*128=166400，少4.622%；全量global KV投影和必要归一化仍存在，该数字不是所有算术量或实测TTFT提升。21＋19的旧预算只描述之前版本，现已被本条替代。Black/Flake8通过，日志：/mnt/vqa/wanzihao/v41_ced_fetch_20261102/ced_gpu.log、ced_boundary_gpu.log；未改在线服务。
+
+
+### 2026-11-02：V4.1 同节点跨 DP prompt cache fetch
+
+移除V4.1对现有--enable_dp_prompt_cache_fetch的禁用，直接沿用DPChunkedPrefillBackend及DPKVSharedMoudle的V4公共路径：只创建owner DP的InferReq，其他DP保留radix/checkpoint引用后提供命中长度；通过CUDA IPC读取源global KV，复制实际四个source pool（C2/C2/C2/C1），继承同TP shard共享CPU池的checkpoint ID并恢复请求状态。没有新增V4.1传输后端或协议；范围与V4一致，为同一节点的DP之间，不是跨机器拉取。
+
+请求容量选择器同步把V4.1归入无需为外国DP请求分配槽位的模型，避免打开fetch后退回每rank全局running_max_req_size、放大SWA和MTP常驻显存。保留diverse_mode原有全局容量。开关仍由已有CLI控制；未修改launcher及运行实例。
+
+双H200真实CUDA IPC、Gloo计划交换、NCCL完成屏障、公共KV传输kernel和真实ReqManager/MemoryManager验证4项通过：V4回归、V4.1大页终点512、V4.1小页终点768/已有本地前缀256/DSpark5运行态布局，以及跨默认128MiB host注册边界的checkpoint拷贝。源物理页刻意非连续；接收端逐字节核对所有source池。checkpoint池填满后仍能继承引用，源释放引用并覆盖原GPU池后接收端仍能再次恢复SWA，最后所有checkpoint引用归零。V4额外核对compressor/indexer state，V4.1保留现有C2/C1对齐检查点契约。
+
+同一双卡测试还模拟源进程Engram history完全缺失，真实CPU输入和preprocess生成129行encoder replay、128行decoder尾窗对应输入，保留原始提交边界；从实际replay起点恢复lookback后，两层Engram hash与整段参考逐位相同，cur_kv_len不被重算倒退。这里只验证DSpark5 cache布局，未启动完整DSpark服务或声称测过整机接收率。
+
+公共源ID/接收引用及V4/V4.1容量契约CPU回归11 passed；允许fetch的V4.1参数与tiny model回归17 passed，含文本/vision、Engram首层/中间层、DSpark及decode Graph。将既有checkpoint GPU回归从已删除的SWA-page API更新为当前请求ring/CacheConfig接口；未为兼容旧fixture改生产接口。Black/Flake8及git diff --check通过。日志：/mnt/vqa/wanzihao/v41_ced_fetch_20261102/fetch_gpu.log、fetch_cpu.log、fetch_model_gpu.log。尚未做完整权重四机服务、GSM8K或LLM Bench性能验收，未把功能通过写成TTFT/TPM收益。

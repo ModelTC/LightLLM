@@ -11,6 +11,16 @@ from lightllm.server.router.req_queue.dp_base_queue import DpQueue
 from lightllm.utils.config_utils import get_running_max_req_size_per_dp
 
 
+@pytest.mark.parametrize("model_type", ["deepseek_v4", "deepseek_v41"])
+@pytest.mark.parametrize("nnodes,expected", [(1, 4), (2, 8)])
+def test_dsv4_cache_fetch_only_reserves_local_request_slots(monkeypatch, model_type, nnodes, expected):
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model_type)
+    args = StartArgs(running_max_req_size=32, dp=8, nnodes=nnodes, enable_dp_prompt_cache_fetch=True)
+    assert get_running_max_req_size_per_dp(args) == expected
+    args.diverse_mode = True
+    assert get_running_max_req_size_per_dp(args) == 32
+
+
 @pytest.mark.parametrize(
     "global_capacity,dp,nnodes,expected",
     [(32, 8, 1, 4), (33, 8, 1, 5), (4, 8, 1, 1), (32, 8, 2, 8), (32, 1, 2, 32), (32, 1, 1, 32)],

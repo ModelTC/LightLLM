@@ -87,7 +87,6 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             args.run_mode not in ("normal", "prefill", "decode")
             or args.mtp_mode not in (None, "dspark")
             or (args.enable_cpu_cache and args.run_mode == "decode")
-            or args.enable_dp_prompt_cache_fetch
             or args.enable_prefill_cudagraph
             or args.enable_prefill_microbatch_overlap
             or args.enable_decode_microbatch_overlap
@@ -95,7 +94,7 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
         ):
             raise ValueError(
                 "DeepSeek-V4.1 supports normal and P/D serving with TP or DP/EP; "
-                "only DSpark MTP is supported; CPU cache on Decode nodes, cross-DP cache fetch, "
+                "only DSpark MTP is supported; CPU cache on Decode nodes, "
                 "prefill CUDA Graph and overlap are unsupported"
             )
         cfg = self.config

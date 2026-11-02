@@ -1157,6 +1157,9 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             unsupported.setattr(model.args, "enable_prefill_cudagraph", True)
             with pytest.raises(ValueError, match="prefill CUDA Graph"):
                 model._verify_params()
+        with monkeypatch.context() as fetch:
+            fetch.setattr(model.args, "enable_dp_prompt_cache_fetch", True)
+            model._verify_params()
         with monkeypatch.context() as cpu_cache:
             cpu_cache.setattr(model.args, "enable_cpu_cache", True)
             for role in ("normal", "prefill"):
