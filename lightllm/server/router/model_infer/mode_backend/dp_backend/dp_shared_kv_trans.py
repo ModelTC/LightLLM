@@ -111,11 +111,12 @@ class DPKVSharedMoudle:
                         assert all(
                             page_id >= 0 for page_id in src_big_page_ids
                         ), "DP source is missing prefix big pages"
-                        allocator = self.backend.model.att_state_manager.bounded_att_big_page_allocator
-                        dst_big_page_ids = allocator.alloc(len(src_big_page_ids))
-                        assert dst_big_page_ids is not None, "DP fetch big page allocation must succeed"
                 dst_token_indices = self.backend._alloc_req_kv_mem(req, alloc_token_num)
                 assert dst_token_indices is not None
+                if src_big_page_ids:
+                    allocator = self.backend.model.att_state_manager.bounded_att_big_page_allocator
+                    dst_big_page_ids = allocator.alloc(len(src_big_page_ids))
+                    assert dst_big_page_ids is not None, "DP fetch big page allocation must succeed"
                 # 只搬运有效 KV；页尾预留槽位已写入请求表，不参与本次传输。
                 dst_token_indices = dst_token_indices[:trans_size]
                 src_token_indices = self.backend.dp_req_to_token_indices[src_dp_rank][

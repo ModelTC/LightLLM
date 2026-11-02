@@ -74,19 +74,13 @@ def test_fill_orders_radix_and_owned_pages_and_clears_reused_rows(monkeypatch: p
     assert module.shared_req_infos.arr[0, 0, 0] == 8
 
 
-@pytest.mark.parametrize("capacity,src_kv_len", [(2, 26), (1, 26), (0, 14)])
-def test_build_reserves_only_new_big_pages_before_kv(
+@pytest.mark.parametrize("capacity,src_kv_len", [(2, 26), (0, 14)])
+def test_build_reserves_only_new_big_pages(
     monkeypatch: pytest.MonkeyPatch,
     capacity: int,
     src_kv_len: int,
 ):
     module, req, allocator, allocations = _build_fixture(monkeypatch, capacity, src_kv_len)
-    if capacity == 1:
-        with pytest.raises(AssertionError, match="DP fetch big page allocation must succeed"):
-            module.build_shared_kv_trans_tasks([req], req_dp_ranks=[0])
-        assert not allocations
-        assert req.hold_kv_len == 8 and allocator.free_count == 1
-        return
     tasks = module.build_shared_kv_trans_tasks([req], req_dp_ranks=[0])
     (task,) = tasks
     assert task.dst_req is req and task.src_req_idx == 1
@@ -211,3 +205,52 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", SimpleNamespace(get_can_alloc_token_num=lambda: 100))
     monkeypatch.setattr(dp_shared_kv_trans.dist, "barrier", lambda group: None)
     return module, req, allocator, allocations
+
+
+@pytest.mark.parametrize("prefix_len", [8, 16])
+def test_build_evicts_cached_state_pages(monkeypatch, kv_allocator_environment, prefix_len):
+    from sortedcontainers import SortedDict
+    from lightllm.common.attention_state.allocators import FullAttKVAllocator
+    from lightllm.server.router.dynamic_prompt import hybrid_att_radix_cache
+    from lightllm.server.router.model_infer.infer_batch import InferenceContext
+    from lightllm.server.router.model_infer.mode_backend import base_backend
+
+    module, req, allocator, _ = _build_fixture(monkeypatch, 2, prefix_len)
+    req.cur_kv_len = req.hold_kv_len = 0
+    req.hybrid_len_to_big_page_id = {}
+    module.shared_req_infos.arr[0, 0, 0] = 0
+    full = FullAttKVAllocator(16, page_size=4, pin_memory=False)
+    manager = module.backend.model.att_state_manager
+    manager.full_att_allocator = full
+    manager.bounded_att_small_page_allocator = StatePageAllocator(0)
+    monkeypatch.setattr(
+        hybrid_att_radix_cache, "SharedArray", lambda name, shape, dtype: SimpleNamespace(arr=np.zeros(shape, dtype))
+    )
+    radix = hybrid_att_radix_cache.HybridAttPagedRadixCache(16, 0, 4, 2, manager)
+    slots = allocator.alloc(2)
+    for i, slot in enumerate(slots):
+        radix.insert(
+            key=torch.arange(8) + i * 8,
+            value=full.alloc(8).clone(),
+            block_hashs=[i * 2, i * 2 + 1],
+            block_state_idxs=[None, None],
+            len_to_big_page_id=SortedDict({8: slot}),
+        )
+    requests = SimpleNamespace(req_to_token_indexs=torch.full((1, 32), -1, dtype=torch.int32))
+    context = SimpleNamespace(att_state_manager=manager, radix_cache=radix, req_manager=requests)
+    context.get_can_alloc_token_num = lambda: InferenceContext.get_can_alloc_token_num(context)
+    monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)
+    monkeypatch.setattr(base_backend, "g_infer_context", context)
+    module.backend.args = SimpleNamespace(page_size=4)
+    module.backend._alloc_req_kv_mem = lambda req, count: base_backend.ModeBackend._alloc_req_kv_mem(
+        module.backend, req, count
+    )
+    assert full.can_use_mem_size == allocator.free_count == 0
+    assert context.get_can_alloc_token_num() == 16
+    (task,) = module.build_shared_kv_trans_tasks([req], req_dp_ranks=[0])
+    assert len(task.dst_big_page_ids) == prefix_len // 8
+    assert len(task.dst_token_indices) == req.hold_kv_len == prefix_len
+    assert radix.get_tree_total_tokens_num() == 16 - prefix_len
+    assert torch.equal(requests.req_to_token_indexs[0, :prefix_len], task.dst_token_indices)
+    assert allocator.free_count == 0
+    assert full.can_use_mem_size == 0
