@@ -2,7 +2,7 @@ import torch
 
 from lightllm.common.basemodel.triton_kernel.mhc.pre_norm import hc_pre_norm_shifted
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
-from lightllm.common.basemodel.triton_kernel.mhc import hc_post
+from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm
 from lightllm.models.deepseek_v4.triton_kernel.cache_io import (
     get_compressed_kv_buffer,
 )
@@ -61,18 +61,21 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         return x, streams, res_mix, post_mix, attn_pre
 
     def _hc_ffn_in(self, x, residual, res_mix, post_mix, attn_pre, layer_weight):
-        streams = hc_post(x, residual, res_mix, post_mix, streams=self.hc_mult)
-        x, res_mix, post_mix, ffn_pre = hc_pre_norm_shifted(
-            streams,
-            attn_pre,
+        x, streams, res_mix, post_mix, ffn_pre = hc_post_pre_norm(
+            x,
+            residual,
+            res_mix,
+            post_mix,
             layer_weight.hc_ffn_fn_.weight,
             layer_weight.hc_ffn_scale_.weight,
             layer_weight.hc_ffn_base_.weight,
             layer_weight.ffn_norm_.weight,
+            self.hc_mult,
             self.eps_,
             self.eps_,
             self.hc_eps,
             self.sinkhorn_iters,
+            previous_pre=attn_pre,
         )
         return x, streams, res_mix, post_mix, ffn_pre
 

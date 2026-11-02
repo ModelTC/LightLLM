@@ -23,6 +23,47 @@ from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
+@pytest.mark.parametrize("tokens", [1, 6, 16, 17, 64, 128])
+@pytest.mark.parametrize("hidden", [128, 5120])
+@pytest.mark.parametrize("disable_deepgemm", [False, True])
+def test_shifted_post_pre_norm_preserves_rounding_and_graph_inputs(monkeypatch, tokens, hidden, disable_deepgemm):
+    monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", disable_deepgemm)
+    residual = torch.randn(tokens, hidden * 4, dtype=torch.bfloat16, device="cuda")
+    y = torch.randn(tokens, hidden, dtype=torch.bfloat16, device="cuda")
+    mix = torch.randn(tokens, 4, 4, device="cuda").softmax(-1)
+    post = torch.rand(tokens, 4, device="cuda")
+    previous = torch.rand(tokens, 4, device="cuda")
+    fn = torch.randn(24, hidden * 4, device="cuda") * 0.005
+    scale, base = torch.randn(3, device="cuda"), torch.randn(24, device="cuda")
+    norm = torch.randn(hidden, dtype=torch.bfloat16, device="cuda")
+    before = residual.clone()
+
+    def reference():
+        updated = hc_post(y, residual, mix, post, 4)
+        result = pre_norm.hc_pre_norm_shifted(updated, previous, fn, scale, base, norm, 1e-6, 1e-6, 1e-6, 20)
+        return result[0], updated, *result[1:]
+
+    def run():
+        return hc_post_pre_norm(
+            y, residual, mix, post, fn, scale, base, norm, 4, 1e-6, 1e-6, 1e-6, 20, previous_pre=previous
+        )
+
+    def check(actual):
+        expected = reference()
+        for i, (a, b) in enumerate(zip(actual, expected)):
+            torch.testing.assert_close(a, b, atol=0.04 if i < 2 else 2e-4, rtol=0.03 if i < 2 else 2e-3)
+        torch.testing.assert_close(residual, before, atol=0, rtol=0)
+
+    check(run())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    previous.uniform_()
+    y.normal_()
+    graph.replay()
+    check(captured)
+
+
 def _hc_pre_reference(x, fn, scale, base, streams, rms_eps, hc_eps, sinkhorn_iters, post_multiplier=2.0):
     """Unfused FP32 reference; returns the merged input before sublayer RMSNorm."""
     assert x.ndim == 2 and x.shape[-1] % streams == 0

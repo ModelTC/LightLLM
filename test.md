@@ -161,3 +161,12 @@ H200数值、causal/HOLD、非连续页、CUDA Graph专项20 passed，完整V4.1
 | 1M | 384 | 8.56060 | 0.38703 | 22.12x |
 
 1M/64行consumer logits从256MiB降到4MiB（64倍）；物理KV布局仍1800B/token。8K/64行单独复测原0.02550ms、实际选用的DeepGEMM免mask路径0.02251ms；直接强用新kernel为0.04176ms，因而未在该范围启用。不能将局部倍率当TPOT/TPM提升。原始日志/参数：/mnt/vqa/wanzihao/v41_four_optimizations_20261102/indexer_{gpu,model_gpu}.log、indexer_bench.jsonl、indexer_short_bench.jsonl；可复跑test/benchmark/kernel/benchmark_dsv41_candidate_indexer.py。未改线上服务或重跑完整权重评测。
+
+
+### 2026-11-02：优化 4 — 复用公共 mHC 融合 V4.1 shifted seam
+
+公共hc_post_pre_norm增加可选previous_pre，复用现有post＋projection kernel及shifted Sinkhorn/mix/norm finish；V4.1的attention→FFN seam不再强制分开post与projection。保留原BF16舍入、FP32累加和系数移位，不引入模型专用后端、Mega-mHC依赖或新的权重格式；层间FFN post暂不延迟，以免改变Engram/hidden collector边界。
+
+H200/hidden5120，CUDA Graph三轮median：1行11.072→8.325us（1.33x）；6行11.649→11.198us（1.04x）。第一版强用融合的16行11.934→13.318us，约慢11.6%；最终shifted仅在8行以内启用融合，16行复测12.089→12.114us，32/64/128/8192行沿用原算子组合且差异约噪声范围。V4原有16行阈值未变，不把小batch的局部收益外推整机速度。
+
+共享mHC回归57 passed（新增24项含hidden128/5120、1/6/16/17/64/128行、禁用/启用DeepGEMM、更新输入后的Graph replay），加V4.1模型共203 passed，含vision/DSpark/cache/graph。日志与首版退化记录均保留：/mnt/vqa/wanzihao/v41_four_optimizations_20261102/mhc_gpu.log、mhc_model_gpu.log、mhc_bench*.jsonl；复跑test/benchmark/kernel/benchmark_dsv41_mhc.py。未改在线服务。

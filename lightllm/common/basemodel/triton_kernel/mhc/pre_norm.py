@@ -382,12 +382,13 @@ def _hc_post_pre_norm_decode(
     sinkhorn_iters,
     post_multiplier,
     run_config=None,
+    previous_pre=None,
 ):
     updated, gp, sp = _hc_post_prenorm_projection(
         layer_output, residual, residual_mix, post_mix, fn, run_config=run_config
     )
     norm_config = {"num_warps": run_config["norm_num_warps"] if run_config else 4, "unroll_sinkhorn": True}
-    x, mix, post = _finish_pre_norm(
+    result = _finish_pre_norm(
         updated,
         gp,
         sp,
@@ -401,8 +402,9 @@ def _hc_post_pre_norm_decode(
         sinkhorn_iters,
         post_multiplier,
         run_config=norm_config,
+        previous_pre=previous_pre,
     )
-    return x, updated, mix, post
+    return result[0], updated, *result[1:]
 
 
 def hc_pre_norm(
@@ -485,17 +487,22 @@ def hc_post_pre_norm(
     hc_eps: float,
     sinkhorn_iters: int,
     post_multiplier: float = 2.0,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    previous_pre: torch.Tensor = None,
+) -> tuple[torch.Tensor, ...]:
     """Complete a deferred post and run the next pre + RMSNorm.
 
     Uses the same flat residuals and mix layout as hc_post / hc_pre_norm.
     Returns (layer_input [T, H], residual [T, S * H], residual_mix [T, S, S], post_mix [T, S]).
     Small decode batches fuse post with the projection; larger batches reuse
     hc_post and DeepGEMM. Both paths preserve bf16 rounding of the updated residual.
+    With previous_pre, use V4.1's shifted mixing and append the next pre coefficients.
     """
     tokens = layer_output.shape[0]
     assert streams == 4
-    if tokens <= 16 and not LIGHTLLM_DISABLE_DEEPGEMM_MHC:
+    # Shifted mixing saves a launch at small batches; from 16 rows the
+    # separate DeepGEMM projection is faster on Hopper.
+    fused_token_limit = 8 if previous_pre is not None else 16
+    if tokens <= fused_token_limit and not LIGHTLLM_DISABLE_DEEPGEMM_MHC:
         return _hc_post_pre_norm_decode(
             layer_output,
             residual,
@@ -511,9 +518,15 @@ def hc_post_pre_norm(
             hc_eps,
             sinkhorn_iters,
             post_multiplier,
+            previous_pre=previous_pre,
         )
     else:
         updated = hc_post(layer_output, residual, residual_mix, post_mix, streams)
+        if previous_pre is not None:
+            result = hc_pre_norm_shifted(
+                updated, previous_pre, fn, scale, base, norm_weight, rms_eps, norm_eps, hc_eps, sinkhorn_iters
+            )
+            return result[0], updated, *result[1:]
         layer_input, next_residual_mix, next_post_mix = hc_pre_norm(
             updated,
             fn,
