@@ -65,6 +65,13 @@ class DeepseekV4Workspace:
         self.token_capacity = ((int(model.batch_max_tokens) + tp - 1) // tp) * tp
         self.flashmla_prefill_q = None
         self.c4_prefill_aux = None
+        self.c128_compress_scratch = None
+
+    def init_c128_compress_scratch(self, model):
+        regions = 1 + int(model.args.enable_decode_microbatch_overlap or model.args.enable_prefill_microbatch_overlap)
+        self.c128_compress_scratch = torch.empty(
+            (regions, self.token_capacity, model.config["head_dim"]), dtype=torch.float32, device="cuda"
+        )
 
     def init_c4_prefill_aux(self, model):
         self.c4_prefill_aux = DeepseekV4C4PrefillWorkspace(

@@ -110,6 +110,9 @@ def _fused_compress_norm_rope_kernel(
     BYTES_PER_PAGE: tl.constexpr,
     BLOCK: tl.constexpr,
     IS_IN_INDEXER: tl.constexpr,
+    compress_scratch,
+    STORE_COMPRESSED: tl.constexpr = False,
+    LOAD_COMPRESSED: tl.constexpr = False,
 ):
     token_idx = tl.program_id(0)
     out_slot = tl.load(compressed_kv_slots + token_idx).to(tl.int64)
@@ -117,65 +120,75 @@ def _fused_compress_norm_rope_kernel(
         return
 
     position = tl.load(position_ids + token_idx)
-    batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
-    req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
-    seq_len = tl.load(b_seq_len + batch_idx)
-    if IS_PREFILL:
-        ready_len = tl.load(b_ready_cache_len + batch_idx)
-        q_start = tl.load(b_q_start_loc + batch_idx)
+    if LOAD_COMPRESSED:
+        offs = tl.arange(0, BLOCK)
+        dim_mask = offs < HEAD_DIM
+        compressed_kv = tl.load(compress_scratch + token_idx * HEAD_DIM + offs, mask=dim_mask, other=0.0)
     else:
-        mtp_index = tl.load(b_mtp_index + batch_idx)
-        ready_len = position - mtp_index
-        q_start = token_idx - mtp_index
+        batch_idx = tl.load(token_to_batch_idx + token_idx) if IS_PREFILL else token_idx
+        req_idx = tl.load(b_req_idx + batch_idx).to(tl.int64)
+        seq_len = tl.load(b_seq_len + batch_idx)
+        if IS_PREFILL:
+            ready_len = tl.load(b_ready_cache_len + batch_idx)
+            q_start = tl.load(b_q_start_loc + batch_idx)
+        else:
+            mtp_index = tl.load(b_mtp_index + batch_idx)
+            ready_len = position - mtp_index
+            q_start = token_idx - mtp_index
 
-    token_offsets = tl.arange(0, WINDOW_SIZE)
-    start = position - WINDOW_SIZE + 1
-    gather_pos = start + token_offsets
-    valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
-    use_current = (gather_pos >= ready_len) & valid_pos
-    current_idx = q_start + (gather_pos - ready_len)
-    state_valid = valid_pos & ~use_current
-    state_slot = req_idx * STATE_CAPACITY_TOKENS + gather_pos % STATE_CAPACITY_TOKENS
-    if IS_C4:
-        head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
-    else:
-        head_offset = token_offsets * 0
+        token_offsets = tl.arange(0, WINDOW_SIZE)
+        start = position - WINDOW_SIZE + 1
+        gather_pos = start + token_offsets
+        valid_pos = (gather_pos >= 0) & (gather_pos < seq_len)
+        use_current = (gather_pos >= ready_len) & valid_pos
+        current_idx = q_start + (gather_pos - ready_len)
+        state_valid = valid_pos & ~use_current
+        state_slot = req_idx * STATE_CAPACITY_TOKENS + gather_pos % STATE_CAPACITY_TOKENS
+        if IS_C4:
+            head_offset = tl.where(token_offsets >= COMPRESS_RATIO, HEAD_DIM, 0)
+        else:
+            head_offset = token_offsets * 0
 
-    offs = tl.arange(0, BLOCK)
-    dim_mask = offs < HEAD_DIM
-    current_mask = use_current[:, None] & dim_mask[None, :]
-    state_mask = state_valid[:, None] & dim_mask[None, :]
+        offs = tl.arange(0, BLOCK) + tl.program_id(1) * BLOCK
+        dim_mask = offs < HEAD_DIM
+        current_mask = use_current[:, None] & dim_mask[None, :]
+        state_mask = state_valid[:, None] & dim_mask[None, :]
 
-    cur_ptrs = (
-        kv_score + current_idx[:, None] * kv_score_stride0 + (head_offset[:, None] + offs[None, :]) * kv_score_stride1
-    )
-    cur_kv = tl.load(
-        cur_ptrs,
-        mask=current_mask,
-        other=0.0,
-    )
-    cur_score = tl.load(
-        cur_ptrs + CANDIDATE_DIM * kv_score_stride1,
-        mask=current_mask,
-        other=float("-inf"),
-    )
+        cur_ptrs = (
+            kv_score
+            + current_idx[:, None] * kv_score_stride0
+            + (head_offset[:, None] + offs[None, :]) * kv_score_stride1
+        )
+        cur_kv = tl.load(
+            cur_ptrs,
+            mask=current_mask,
+            other=0.0,
+        )
+        cur_score = tl.load(
+            cur_ptrs + CANDIDATE_DIM * kv_score_stride1,
+            mask=current_mask,
+            other=float("-inf"),
+        )
 
-    state_ptrs = req_to_compressor_state + state_slot[:, None] * STATE_DIM + head_offset[:, None] + offs[None, :]
-    state_kv = tl.load(
-        state_ptrs,
-        mask=state_mask,
-        other=0.0,
-    )
-    state_score = tl.load(
-        state_ptrs + CANDIDATE_DIM,
-        mask=state_mask,
-        other=float("-inf"),
-    )
+        state_ptrs = req_to_compressor_state + state_slot[:, None] * STATE_DIM + head_offset[:, None] + offs[None, :]
+        state_kv = tl.load(
+            state_ptrs,
+            mask=state_mask,
+            other=0.0,
+        )
+        state_score = tl.load(
+            state_ptrs + CANDIDATE_DIM,
+            mask=state_mask,
+            other=float("-inf"),
+        )
 
-    kv = tl.where(current_mask, cur_kv, state_kv)
-    score = tl.where(current_mask, cur_score, state_score)
-    score = tl.softmax(score, dim=0)
-    compressed_kv = tl.sum(kv * score, axis=0)
+        kv = tl.where(current_mask, cur_kv, state_kv)
+        score = tl.where(current_mask, cur_score, state_score)
+        score = tl.softmax(score, dim=0)
+        compressed_kv = tl.sum(kv * score, axis=0)
+        if STORE_COMPRESSED:
+            tl.store(compress_scratch + token_idx * HEAD_DIM + offs, compressed_kv, mask=dim_mask)
+            return
     # rms_norm
     rms_w = tl.load(norm_weight + offs, mask=dim_mask, other=0.0)
     variance = tl.sum(compressed_kv * compressed_kv, axis=0) / HEAD_DIM

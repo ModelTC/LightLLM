@@ -240,6 +240,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
             prefill_aux_stream = torch.cuda.Stream()
         self.dsv4_workspace = DeepseekV4Workspace(self)
+        self.dsv4_workspace.init_c128_compress_scratch(self)
         if prefill_aux_stream is not None and self.run_mode == "prefill" and 4 in self.config["compress_ratios"]:
             with torch.cuda.stream(prefill_aux_stream):
                 self.dsv4_workspace.init_c4_prefill_aux(self)
