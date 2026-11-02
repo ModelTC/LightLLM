@@ -33,7 +33,7 @@ class DeepseekV41LayerHiddenCollector(DeepseekV4LayerHiddenCollector):
     def finish_output(self, infer_state):
         decoder = infer_state.decoder_state
         if decoder is not None:
-            decoder_start = max(self.model.config["kv_source_layer_ids"]) + 1
+            decoder_start = max(self.model.config["kv_source_layer_ids"])
             # Configurations may select an encoder layer as well as decoder layers.
             self.layer_hiddens = [
                 hidden[infer_state.decoder_token_indices] if layer < decoder_start else hidden

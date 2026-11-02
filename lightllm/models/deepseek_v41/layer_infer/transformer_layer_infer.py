@@ -23,7 +23,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.is_kv_source = layer_num in network_config["kv_source_layer_ids"]
         self.next_engram = None
-        self.decoder_start_layer = max(network_config["kv_source_layer_ids"]) + 1
+        self.decoder_start_layer = max(network_config["kv_source_layer_ids"])
         self.engram_index = (
             network_config["engram_layer_ids"].index(layer_num)
             if layer_num in network_config["engram_layer_ids"]
@@ -95,13 +95,19 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
     def context_forward(
         self, input_embdings, infer_state: DeepseekV41InferStateInfo, layer_weight: DeepseekV41TransformerLayerWeight
     ):
-        if not infer_state.return_all_prompt_logics:
-            if self.layer_num_ == self.decoder_start_layer:
-                rows = infer_state.init_decoder_state()
-                input_embdings = tuple(value[rows] for value in input_embdings)
-            if infer_state.decoder_state is not None:
-                infer_state = infer_state.decoder_state
+        if infer_state.decoder_state is not None:
+            infer_state = infer_state.decoder_state
         x, residual, res_mix, post_mix, attn_pre = self._hc_attn_in(input_embdings, infer_state, layer_weight)
+        if self.is_kv_source:
+            self._write_global_kv(x, infer_state, layer_weight)
+        if self.layer_num_ == self.decoder_start_layer and not infer_state.return_all_prompt_logics:
+            # The first decoder layer projects global KV for every encoder row.
+            # Its Q/SWA, indexer Q, attention and FFN only need the replay tail.
+            rows = infer_state.init_decoder_state()
+            x, residual, res_mix, post_mix, attn_pre = (
+                value[rows] for value in (x, residual, res_mix, post_mix, attn_pre)
+            )
+            infer_state = infer_state.decoder_state
         x = self.context_attention_forward(x, infer_state, layer_weight)
         x, residual, res_mix, post_mix, ffn_pre = self._hc_ffn_in(
             x, residual, res_mix, post_mix, attn_pre, layer_weight
@@ -113,6 +119,8 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         self, input_embdings, infer_state: DeepseekV41InferStateInfo, layer_weight: DeepseekV41TransformerLayerWeight
     ):
         x, residual, res_mix, post_mix, attn_pre = self._hc_attn_in(input_embdings, infer_state, layer_weight)
+        if self.is_kv_source:
+            self._write_global_kv(x, infer_state, layer_weight)
         if self.next_engram is not None:
             index, weight = self.next_engram
             infer_state.prefetch_engram(weight, index)
@@ -124,8 +132,6 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         return self._hc_ffn_out(x, residual, res_mix, post_mix, ffn_pre)
 
     def _compress_and_index(self, q_lora, x, infer_state: DeepseekV41InferStateInfo, layer_weight):
-        if self.is_kv_source:
-            self._write_global_kv(x, infer_state, layer_weight)
         return self.index_infer.build_metadata(x, q_lora, infer_state, layer_weight)
 
     def _write_global_kv(self, x, infer_state: DeepseekV41InferStateInfo, layer_weight):

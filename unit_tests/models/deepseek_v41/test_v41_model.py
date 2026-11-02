@@ -1540,7 +1540,13 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         full_history = [buffer.clone() for buffer in model.mem_manager.kv_buffer]
         model.return_all_prompt_logics = False
         counts = []
-        decoder = model.layers_infer[4]
+        decoder = model.layers_infer[max(model.config["kv_source_layer_ids"])]
+        from unittest.mock import MagicMock
+
+        write_global = MagicMock(wraps=decoder._write_global_kv)
+        get_qkv = MagicMock(wraps=decoder._get_qkv)
+        monkeypatch.setattr(decoder, "_write_global_kv", write_global)
+        monkeypatch.setattr(decoder, "_get_qkv", get_qkv)
         original_ffn = decoder._ffn
 
         def record_decoder_ffn(x, state, weight):
@@ -1550,6 +1556,9 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         monkeypatch.setattr(decoder, "_ffn", record_decoder_ffn)
         assert torch.isfinite(prefill(0, 256)).all()
         assert counts == [128]
+        assert write_global.call_count == get_qkv.call_count == 1
+        assert write_global.call_args.args[0].shape[0] == 256
+        assert get_qkv.call_args.args[0].shape[0] == 128
         for actual, expected in zip(model.mem_manager.kv_buffer, full_history):
             torch.testing.assert_close(actual, expected, atol=0, rtol=0)
         model.req_manager.save_state(

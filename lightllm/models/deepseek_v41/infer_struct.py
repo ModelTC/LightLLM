@@ -37,7 +37,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         self.engram_prefetch = embedded, ready
 
     def init_decoder_state(self):
-        """Keep the prompt's last window after the final global-KV producer.
+        """Keep the prompt's last window after writing decoder global KV.
 
         The original state still owns request advancement and prefix checkpoints.
         Decoder SWA reads only replayed rows, including after a prefix-cache hit.
@@ -82,7 +82,9 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
                 setattr(state, name, value[rows])
         bound_swa_replay(state, ready[batch[rows]])
         state.v41_sparse_selection = {name: value[rows] for name, value in self.v41_sparse_selection.items()}
-        state.candidate_block_indices = self.candidate_block_indices[rows]
+        # The first decoder indexer produces the candidates after this trim.
+        if self.candidate_block_indices is not None:
+            state.candidate_block_indices = self.candidate_block_indices[rows]
         if self.engram_hashes is not None:
             state.engram_hashes = self.engram_hashes[rows]
         self.decoder_state = state

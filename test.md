@@ -183,3 +183,12 @@ H200合成组件微测：264MiB FP8/UE8M0 host表，hash每次graph replay轮转
 最终GPU回归212 passed（V4.1 155项＋共享mHC57项），覆盖首层/中间层Engram、文本/视觉、DSpark、GPU/CPU checkpoint恢复与更新输入的decode Graph。额外预取专项验证实际host lookup、更新hash后Graph结果，以及collective位于消费者stream；多rankcollective在该专项用替身检查顺序，尚未做真实TP多机性能验收。CPU输入/分页及PD生命周期回归155 passed。Black/Flake8、git diff --check通过。日志根目录：/mnt/vqa/wanzihao/v41_four_optimizations_20261102/，final_gpu.log、final_cpu.log、engram_model_gpu.log、engram_prefetch_gpu.log。
 
 本轮未部署、未重启线上服务、未升级依赖、未跑完整权重GSM8K。Indexer/mHC/Engram数据均为独立单卡组件实验，Graph使用微测自身的capture形状；真实服务较大的固定graph_max_len_in_batch会影响indexer的静态capacity与路径选择，8K的免mask DeepGEMM微测不能当作默认1M graph容量下整机短上下文成绩。完整checkpoint质量和端到端TTFT/TPOT/TPM仍待独立服务验收。已有launcher及旧test.md未提交内容均保留，本轮commit仅包含四项实现及各自新增记录。
+
+
+### 2026-11-02：CED 改为20层全量＋20层尾段
+
+按用户要求与SGLang当前write_tail_source_kv路径对齐：decoder起点为最后一个KV source（真实配置layer20），不是其下一层。该层先对全量encoder输出完成mHC混合/归一化与共享global KV/indexer K投影和写入，随后裁剪到最后128行；该层及后19层的Q/SWA、indexer Q/候选选择、attention和FFN均只执行尾段。普通decode与完整prompt logits路径保持全量契约。KV写入移到V4.1自己的context/token forward，索引阶段不再重复写；DSpark collector按新边界对齐encoder/decoder hidden。
+
+H200完整V4.1 GPU回归155 passed；补充首个decoder层计数断言后边界/模型回归17 passed。256行输入时，首个decoder层全量KV writer仅调用一次且输入256行，QKV与FFN均128行；既有断言确认共享global KV与未裁剪参考逐字节相同。覆盖Engram首层/中间层、FP8/历史FP4测试fixture、vision、DSpark、GPU/CPU cache恢复及decode graph。最初新断言误读测试外层config而失败，改为读取运行model.config；未为断言改变生产语义。
+
+8192-token单请求chunk的attention/FFN token-layer预算由21*8192+19*128=174464降到20*8192+20*128=166400，少4.622%；全量global KV投影和必要归一化仍存在，该数字不是所有算术量或实测TTFT提升。21＋19的旧预算只描述之前版本，现已被本条替代。Black/Flake8通过，日志：/mnt/vqa/wanzihao/v41_ced_fetch_20261102/ced_gpu.log、ced_boundary_gpu.log；未改在线服务。
