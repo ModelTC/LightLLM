@@ -261,7 +261,7 @@ def _candidate_indexer_logits(
     block = tl.load(CANDIDATES + row * CANDIDATE_ROW + col // 8, col < CANDIDATE_ROW * 8, -1)
     position = block * 8 + col % 8
     valid = (block >= 0) & (position < tl.load(LENGTHS + row))
-    page = tl.load(PAGES + row * PAGE_ROW + position // 64, valid, 0)
+    page = tl.load(PAGES + row * PAGE_ROW + position // 64, valid, 0).to(tl.int64)
     base = CACHE + page * CACHE_PAGE
     d = tl.arange(0, 128)
     h = tl.arange(0, BLOCK_H)

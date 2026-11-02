@@ -273,3 +273,12 @@ router.wait_to_model_ready 原先单独判断 model_type != deepseek_v4，漏掉
 新增测试实际调用router初始化路径并截取8个worker的init_model参数，覆盖V4/V4.1/其他模型及diverse模式。修复前仅V4.1正常模式失败（256 != 32），其余5例通过；修复后整个请求容量文件24例通过。同步修正同文件既有测试fixture：显式初始化队列所需的per_dp容量，并按现有函数的语义检查普通full-attention容量。此时尚未部署修复，不把KV容量恢复量作为实测结论。
 
 记录：/mnt/vqa/wanzihao/v41_pd_restart_20261102_122400/bugfix_20261102_133822/ 下 router_capacity_before.log、router_capacity_after.log。
+
+
+### 2026-11-02：修复候选 indexer 的 KV 地址 32 位溢出
+
+V4.1 candidate_indexer_logits 从int32页表读取page后直接计算page * CACHE_PAGE，字节偏移超过2GiB时发生有符号32位溢出。大KV池中的物理位置可超过该边界，即便请求上下文本身很短。最小复现仅分配略大于2GiB的cache，写入末尾有效FP8 slab，旧算子在torch.cuda.synchronize处稳定报illegal memory access；不是通过缩小max_total_token_num或关闭动态MTP绕过。修复仅在读取page时转为tl.int64，保留页表、cache格式和计算算法。
+
+新增0、2GiB+4096、4GiB+8192三个物理偏移的GPU回归，数值与精确常量参考一致；同时检查无候选行及CUDA Graph更新输入后的回放。专项及既有paged indexer共21例通过。此前额外诊断覆盖384行indexer的6种组合、24组tiny model、46项相关kernel和15项动态MTP/DSpark测试，均通过；它们没有覆盖大物理偏移，不能代替本次新增回归。带同步诊断的真实四机服务完成128/512请求复现测试，全部HTTP200，但未因此声称原始回放已成功或生产路径已修好。
+
+记录：同一bugfix目录下 repro_candidate_offset.py、repro_candidate_offset_before.log、candidate_offset_after.log、indexer_large_batch.log、baseline_tiny_models.log、diagnostic_concurrency_128.json、diagnostic_concurrency_512.json。完整服务验收待移除诊断同步后重启，按源任务60%会话、factor=1、session_seed=6XzQ8运行。

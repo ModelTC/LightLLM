@@ -354,6 +354,38 @@ def test_c2_keeps_accepted_history_after_rejecting_draft_rows(state_slots, start
         previous_kv, previous_score = new_kv[offset], new_scores[offset]
 
 
+@pytest.mark.parametrize("byte_offset", [0, 2 ** 31 + 4096, 2 ** 32 + 8192])
+def test_candidate_indexer_large_cache_offsets_and_graph(byte_offset):
+    from lightllm.models.deepseek_v41.triton_kernel.attention import candidate_indexer_logits
+
+    # V4.1's page table addresses 64-key slabs in 128-byte units across the
+    # enclosing MLA pages. A real KV pool can put these slabs beyond 4 GiB.
+    storage = torch.empty(byte_offset + 64 * 132, dtype=torch.uint8, device="cuda")
+    slab = storage[byte_offset:]
+    slab[: 64 * 128].view(torch.float8_e4m3fn).fill_(1)
+    slab[64 * 128 :].view(torch.float32).fill_(0.5)
+    cache = storage.as_strided((byte_offset // 128 + 1, 64, 1, 132), (128, 132, 132, 1))
+    query = torch.ones((2, 32, 128), dtype=torch.float8_e4m3fn, device="cuda")
+    weights = torch.ones((2, 32), device="cuda")
+    pages = torch.tensor([[byte_offset // 128], [0]], dtype=torch.int32, device="cuda")
+    candidates = torch.tensor([[0], [-1]], dtype=torch.int32, device="cuda")
+    lengths = torch.tensor([8, 0], dtype=torch.int32, device="cuda")
+
+    def run():
+        return candidate_indexer_logits(query, cache, weights, pages, candidates, lengths)
+
+    expected = torch.full((2, 8), -float("inf"), device="cuda")
+    expected[0].fill_(2048)
+    torch.testing.assert_close(run(), expected, atol=0, rtol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = run()
+    weights.fill_(0.25)
+    expected[0].fill_(512)
+    graph.replay()
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+
 @pytest.mark.parametrize("ratio", [1, 2])
 @pytest.mark.parametrize("mode", ["decode", "prefill", "prefill_paged"])
 @pytest.mark.parametrize("candidates", ["none", "source", "consumer"])
