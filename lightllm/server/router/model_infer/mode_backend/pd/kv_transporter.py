@@ -10,12 +10,16 @@ _NCCL_CONTROL_PORT_MIN = 30000
 _NCCL_CONTROL_PORT_MAX = 40000
 
 
-def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_buffer: Tensor):
+def create_kv_transporter(
+    args: StartArgs, node_id: int, tp_idx: int, kv_move_buffer: Tensor, page_payload_bytes: dict[str, int] | None = None
+):
     backend = args.pd_trans_mode
     if backend == "nixl":
         from .nixl_kv_transporter import NixlKVTransporter
 
-        return NixlKVTransporter(node_id=node_id, tp_idx=tp_idx, kv_move_buffer=kv_move_buffer)
+        return NixlKVTransporter(
+            node_id=node_id, tp_idx=tp_idx, kv_move_buffer=kv_move_buffer, page_payload_bytes=page_payload_bytes
+        )
 
     if backend == "nccl":
         from .nccl_kv_transporter import NcclKVTransporter
@@ -33,6 +37,7 @@ def create_kv_transporter(args: StartArgs, node_id: int, tp_idx: int, kv_move_bu
             host_ip=get_hostname_ip() or args.host,
             control_port_min=port_min,
             control_port_max=port_max,
+            page_payload_bytes=page_payload_bytes,
         )
 
     raise ValueError(f"unsupported pd_trans_mode={backend}")

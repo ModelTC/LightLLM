@@ -141,6 +141,10 @@ class _DecodeTransModule:
             node_id=self.args.pd_node_id,
             tp_idx=device_id,
             kv_move_buffer=kv_move_buffer,
+            page_payload_bytes={
+                kind: self.resource_managers[device_id].get_pd_operator().get_payload_bytes(kind)
+                for kind in ("kv", "att_state")
+            },
         )
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()

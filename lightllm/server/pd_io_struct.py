@@ -145,7 +145,7 @@ class PDAgentMetadata:
     agent_metadata: bytes
     num_pages: int
     page_reg_desc: Optional[bytes] = None
-    page_xfer_handles: Optional[int] = None
+    page_xfer_handles: Optional[Dict[str, int]] = None
 
 
 @dataclass

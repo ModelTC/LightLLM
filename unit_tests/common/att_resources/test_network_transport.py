@@ -176,11 +176,21 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 tp_idx=device,
                 kv_move_buffer=buffer,
                 host_ip="127.0.0.1",
+                page_payload_bytes={
+                    kind: resources.get_pd_operator().get_payload_bytes(kind) for kind in ("kv", "att_state")
+                },
             )
         else:
             from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
 
-            transporter = NixlKVTransporter(os.getpid(), device, buffer)
+            transporter = NixlKVTransporter(
+                os.getpid(),
+                device,
+                buffer,
+                page_payload_bytes={
+                    kind: resources.get_pd_operator().get_payload_bytes(kind) for kind in ("kv", "att_state")
+                },
+            )
         connection.send(
             (
                 "metadata",
@@ -269,6 +279,8 @@ def _worker(connection: Connection, backend: str, sender: bool):
                         assert time.monotonic() < deadline, "PD receive timed out"
                         time.sleep(0.002)
                     assert transporter.check_task_status(request) == "DONE"
+                payload_bytes = resources.get_pd_operator().get_payload_bytes(kind)
+                assert (buffer[request.dst_page_index, payload_bytes:] == 11).all()
                 # Match production: unpack on a separate stream after the done notification.
                 with torch.cuda.stream(copy_stream):
                     copy_page(
