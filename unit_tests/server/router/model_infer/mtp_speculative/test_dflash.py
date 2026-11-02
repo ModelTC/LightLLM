@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from lightllm.server.router.model_infer.mtp_speculative.proposers.dflash import DFlashProposer
@@ -114,3 +115,66 @@ def test_dflash_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         proposal.schedule_scores,
         flat_draft_token_probs.reshape(2, block_size)[:, :2].float(),
     )
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_dflash_hidden_commit_uses_draft_state(device, monkeypatch):
+    from lightllm.common.attention_state import AttentionStateManager
+    from lightllm.common.attention_state.full_att import GQAFullAttentionState, GQAAttentionConfig
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from lightllm.common.basemodel.layer_infer.template.transformer_layer_infer_template import TransformerLayerInferTpl
+    from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
+
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA unavailable")
+    manager = AttentionStateManager(request_capacity=1)
+    states = []
+    for role, layers in (("main", ((0,), (1,), (2,), (3,))), ("draft0", ((4,),))):
+        state = GQAFullAttentionState(
+            GQAAttentionConfig(logical_layer_groups=layers, global_head_num=1, head_dim=16, dtype=torch.float32),
+            device=device,
+        )
+        state.allocate_storage(8)
+        state.k_storage.zero_()
+        state.v_storage.zero_()
+        manager.register_state(role, state)
+        states.append(state)
+    manager.finish_state_registration()
+    main, draft = states
+    ids = torch.tensor([1, 3], dtype=torch.int32, device=device)
+    if device == "cpu":
+
+        def write(logical_layer_id, token_indices, kv):
+            assert logical_layer_id == 4
+            draft.k_storage[0, token_indices.long()] = kv[:, :1]
+            draft.v_storage[0, token_indices.long()] = kv[:, 1:]
+
+        monkeypatch.setattr(draft, "write_full_att_kv", write)
+    model = Qwen3DFlashModel.__new__(Qwen3DFlashModel)
+    model.infer_state_class = InferStateInfo
+    model.att_state_manager = manager
+    model.is_mtp_draft_model = True
+    model.mtp_previous_draft_models = []
+    model._cos_cached = model._sin_cached = torch.zeros(8, 16, device=device)
+    model._select_mem_indexes = lambda _: ids
+    model.pre_post_weight = None
+    model.pre_infer = SimpleNamespace(context_forward=lambda _, state, weight: state.mtp_draft_input_hiddens)
+
+    def commit(hidden, state, weight):
+        TransformerLayerInferTpl._post_cache_kv(SimpleNamespace(layer_num_=4), hidden, state, weight)
+        return hidden
+
+    model.layers_infer = [SimpleNamespace(context_forward=commit)]
+    model.trans_layers_weight = [None]
+    hidden = torch.arange(64, dtype=torch.float32, device=device).view(2, 2, 16)
+    output = model._decode(
+        SimpleNamespace(
+            mtp_draft_input_hiddens=hidden,
+            batch_size=2,
+            b_seq_len=torch.tensor([2, 4], device=device),
+        )
+    )
+    assert output.logits.shape == (2, 1)
+    torch.testing.assert_close(draft.k_storage[0, ids.long()], hidden[:, :1])
+    torch.testing.assert_close(draft.v_storage[0, ids.long()], hidden[:, 1:])
+    assert not main.k_storage.any() and not main.v_storage.any()
