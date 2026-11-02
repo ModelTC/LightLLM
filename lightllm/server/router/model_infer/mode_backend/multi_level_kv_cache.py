@@ -42,20 +42,18 @@ class MultiLevelKvCacheModule(object):
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
-        """
-        fa3 在 offload 和 load kv cache 的时候，需要等待计算流完成，否则可能会概率崩溃。
-        """
-
-        model = self.backend.model
-        att_backends = [
-            model.prefill_att_backend,
-            model.decode_att_backend,
-            model.prefill_att_backend1,
-            model.decode_att_backend1,
-        ]
+        """Honor the resource-access requirement of every selected main/draft provider."""
+        att_backends = []
+        for model in (self.backend.model, *getattr(self.backend, "draft_models", ())):
+            att_backends.extend(
+                getattr(model, "attention_prefill_backends", (model.prefill_att_backend, model.prefill_att_backend1))
+            )
+            att_backends.extend(
+                getattr(model, "attention_decode_backends", (model.decode_att_backend, model.decode_att_backend1))
+            )
         for att_backend in att_backends:
-            if att_backend is not None and "fa3" in att_backend.__class__.__name__.lower():
-                logger.info("MultiLevelKvCacheModule: need sync compute stream for fa3 backend.")
+            if att_backend is not None and att_backend.requires_cache_stream_sync:
+                logger.info("MultiLevelKvCacheModule: backend requires compute stream synchronization.")
                 return True
         logger.info("MultiLevelKvCacheModule: no need sync compute stream.")
         return False
@@ -263,7 +261,6 @@ class MultiLevelKvCacheModule(object):
 
             # 阶段一：确定本次可写出范围，申请 CPU 页。
             if self.backend.is_master_in_dp:
-
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 
@@ -279,7 +276,7 @@ class MultiLevelKvCacheModule(object):
 
                 try:
                     self.cpu_cache_client.lock.acquire_sleep1ms()
-                    page_list, ready_list = self.cpu_cache_client.allocate_pages(
+                    page_list, ready_list = self.cpu_cache_client.reserve_write_pages(
                         token_hash_list[:move_block_size],
                         disk_offload_enable=disk_offload_enable,
                     )
@@ -414,6 +411,7 @@ class MultiLevelKvCacheModule(object):
                         deref=True,
                         disk_offload_enable=CacheTier.DISK in task.req_obj.cache_tiers,
                         token_num_in_page_list=move_token_num,
+                        skip_write_flags=task.page_readies.tolist(),
                     )
                 self.cpu_cache_client.lock.release()
             for task in trans_ok_tasks:

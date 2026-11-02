@@ -12,6 +12,41 @@ pytest.importorskip("flash_mla")
 
 from lightllm.common.basemodel.attention.nsa import dsv4_fp8_flashmla_sparse as attention
 from lightllm.common.basemodel.layer_weights.meta_weights import TpAttSinkWeight
+from lightllm.common.basemodel.attention.contracts import ResourceId
+from lightllm.common.basemodel.attention.sparse import (
+    BoundCompressedSparse,
+    CompressedSparseInput,
+    CompressedSparseMetadata,
+)
+
+
+def _binding(backend, pools, params):
+    swa = backend.swa_config.get_attention_view(pools[0])
+    compressed = None
+    if pools[1] is not None:
+        compressed = backend.compressed_configs[params["compress_ratio"]].get_attention_view(pools[1])
+    return BoundCompressedSparse(
+        ResourceId("main", 0, "window"),
+        swa,
+        swa,
+        compressed,
+        params["compress_ratio"],
+        params["head_dim_v"],
+        params["softmax_scale"],
+        params["attn_sink"],
+    )
+
+
+def _inputs(q, params):
+    return CompressedSparseInput(
+        q,
+        CompressedSparseMetadata(
+            params["swa_indices"],
+            params["swa_lengths"],
+            params.get("extra_indices"),
+            params.get("extra_lengths"),
+        ),
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -40,16 +75,17 @@ assert attention.flashmla.__name__ == 'flash_mla'
 assert not any(name == 'vllm' or name.startswith('vllm.') for name in sys.modules)
 """
     root = Path(__file__).resolve().parents[4]
-    env = dict(os.environ, PYTHONPATH=str(root))
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join((str(root), os.environ.get("PYTHONPATH", ""))))
     result = subprocess.run([sys.executable, "-c", script], cwd=root, env=env, capture_output=True, text=True)
     assert result.returncode == 0, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("run_mode", ["normal", "prefill", "decode"])
-def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.MonkeyPatch, run_mode: str) -> None:
+@pytest.mark.parametrize("overlap", [False, True])
+def test_swa_workspace_includes_decode_padding_prefill(monkeypatch, run_mode, overlap):
     backend_class = attention.DeepseekV4FlashMlaFp8SparseAttBackend
     model = SimpleNamespace(
-        args=SimpleNamespace(run_mode=run_mode, enable_prefill_microbatch_overlap=False),
+        args=SimpleNamespace(run_mode=run_mode, enable_prefill_microbatch_overlap=overlap),
         config=dict(
             compress_ratios=[0, 4, 128],
             head_dim=512,
@@ -64,12 +100,22 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         max_req_num=8,
         att_state_role="main",
     )
-    monkeypatch.setattr(
-        backend_class,
-        "get_gpu_workspace_buffer",
-        lambda key_name, workspace_size, dtype: torch.empty(workspace_size, dtype=dtype),
-    )
+    allocations = []
+    monkeypatch.setattr(backend_class, "_workspace_buffers", {})
+
+    def allocate(key_name, workspace_size, dtype):
+        allocations.append((key_name, workspace_size, dtype))
+        return torch.empty(workspace_size, dtype=dtype)
+
+    monkeypatch.setattr(backend_class, "get_gpu_workspace_buffer", staticmethod(allocate))
+    backend = object.__new__(backend_class)
+    backend.model = model
+    demands = backend.runtime_memory_demands()
+    assert not allocations
+    assert len(demands) == 1
     workspace, capacity = backend_class.get_swa_prefill_workspace(model=model)
+    assert len(allocations) == 1
+    assert demands[0].fixed_bytes == workspace.numel() * workspace.element_size()
     # D 节点仍执行 HOLD 请求的单 token prefill，但无需保留普通请求的长 prefill 临时区。
     assert workspace is not None
     if run_mode == "decode":
@@ -77,7 +123,7 @@ def test_swa_workspace_includes_decode_padding_prefill(monkeypatch: pytest.Monke
         assert workspace.shape == (3, 128, 585)
     else:
         assert capacity >= model.batch_max_tokens
-        assert workspace.shape == (3, capacity + 128, 585)
+        assert workspace.shape == (3, (1 + overlap) * capacity + 128, 585)
 
 
 def _pool(page_size, pages):
@@ -127,8 +173,9 @@ def _case(heads, ratio):
         extra_indices=extra_indices,
         extra_lengths=lengths.clone() if ratio else None,
     )
-    # The attention backend receives all cache inputs through k, without a memory manager.
-    state_info = SimpleNamespace()
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+
+    state_info = InferStateInfo()
     return backend, state_info, q, (pool, extra), decoded, extra_decoded, params
 
 
@@ -171,11 +218,9 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
 
     monkeypatch.setattr(attention.flashmla, "flash_mla_with_kvcache", flashmla_with_out)
     out = torch.full_like(q, float("nan")) if provide_out else None
-    actual = state.prefill_att(
-        q,
-        pool,
-        None,
-        att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params),
+    actual = state.run(
+        _inputs(q, params),
+        _binding(backend, pool, params),
         alloc_func=alloc_output,
         out=out,
     )
@@ -216,17 +261,15 @@ def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, r
         state_info.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         state_info.q = q
         state_info.packed_kv = packed_kv
-        state_info.att_control = attention.AttControl(nsa_decode=True, nsa_decode_dict=params)
+        state_info.attention = _binding(backend, packed_kv, params)
+        state_info.attention_inputs = _inputs(q, params)
         state_info.decode_att_state = backend.create_att_decode_state(state_info)
         state_info.decode_att_state1 = None
         state_info.decode_att_state.init_state()
         cases.append((state_info, decoded, extra_decoded, params))
 
     def decode_func(*states):
-        outputs = tuple(
-            state.decode_att_state.decode_att(state.q, state.packed_kv, None, att_control=state.att_control)
-            for state in states
-        )
+        outputs = tuple(state.decode_att_state.run(state.attention_inputs, state.attention) for state in states)
         return outputs if overlap else outputs[0]
 
     # Exercise the framework's warmup + capture directly, with no operator-specific reset.
@@ -266,9 +309,7 @@ def test_prefill_out_supports_strided_scratch_buffer(heads):
     out = storage[..., :512]
     state = backend.create_att_prefill_state(state_info)
     state.init_state()
-    actual = state.prefill_att(
-        q, pool, None, out=out, att_control=attention.AttControl(nsa_prefill=True, nsa_prefill_dict=params)
-    )
+    actual = state.run(_inputs(q, params), _binding(backend, pool, params), out=out)
     assert actual.data_ptr() == out.data_ptr()
     assert actual.stride() == out.stride()
     assert storage[..., 512:].isnan().all()
@@ -282,7 +323,9 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
     from lightllm.common.basemodel import prefill_cuda_graph as cuda_graph_module
     from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
     from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
-    from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+    from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
+        DeepseekV4TransformerLayerInfer,
+    )
 
     args = SimpleNamespace(
         enable_prefill_microbatch_overlap=False,
@@ -301,8 +344,6 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         packed_kv = (packed_kv[0], extra)
         params["extra_indices"].copy_(indices)
 
-    monkeypatch.setattr(backend, "get_att_input_params", lambda infer_state, logical_layer_id: packed_kv)
-
     def new_request(length):
         infer_state = DeepseekV4InferStateInfo()
         infer_state.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
@@ -312,6 +353,7 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
             infer_state.attn_params["extra_lengths"] = torch.full_like(params["extra_lengths"], length)
         infer_state.prefill_att_state = backend.create_att_prefill_state(infer_state)
         infer_state.prefill_att_state.init_state()
+        infer_state.attention_metadata = (infer_state.prefill_att_state,)
         return infer_state
 
     allocations = []
@@ -323,6 +365,7 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
     layer.compress_ratio = ratio
     layer.softmax_scale = params["softmax_scale"]
     layer.layer_num_ = 0
+    layer.attention = _binding(backend, packed_kv, params)
     layer_weight = SimpleNamespace(attn_sink_=SimpleNamespace(weight=params["attn_sink"]))
 
     def alloc_output(shape, **kwargs):
@@ -333,7 +376,7 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
     def compress_and_index(q_lora, x, infer_state, layer_weight):
         assert not torch.cuda.is_current_stream_capturing()
         callback_states.append(infer_state)
-        return infer_state.attn_params
+        return _inputs(q, infer_state.attn_params).selection
 
     layer.alloc_tensor = alloc_output
     layer._compress_and_index = compress_and_index

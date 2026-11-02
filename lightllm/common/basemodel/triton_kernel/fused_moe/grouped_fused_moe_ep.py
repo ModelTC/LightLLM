@@ -35,12 +35,11 @@ SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm")
 
 
 try:
-    from deep_ep import Buffer, EventOverlap
     import deep_gemm
 
     HAS_DEEPGEMM = True
-except:
-    logger.warning("no deepep or deep_gemm")
+except ImportError:
+    logger.warning("deep_gemm is unavailable")
     HAS_DEEPGEMM = False
 
 
@@ -79,6 +78,7 @@ def masked_group_gemm(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    use_ue8m0_scales: Optional[bool] = None,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
@@ -99,6 +99,7 @@ def masked_group_gemm(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        use_ue8m0_scales=use_ue8m0_scales,
     )
     del gemm_out_a
     gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
@@ -204,7 +205,7 @@ def quantize_fused_experts_input(
         hidden_states,
         block_size_k,
         dtype=w13.weight.dtype,
-        use_ue8m0_scales=get_env_use_ue8m0_scales(),
+        use_ue8m0_scales=quant_method.use_ue8m0_scales,
     )
 
 
@@ -238,6 +239,7 @@ def fused_experts(
         topk_idx=topk_idx,
         num_experts=num_experts,
         block_size_k=quant_method.block_size,
+        use_ue8m0_scales=quant_method.use_ue8m0_scales,
         buffer=buffer,
         is_prefill=is_prefill,
         use_fp8_w8a8=True,
@@ -271,7 +273,10 @@ def fused_experts_impl(
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
     block_size_k: int = 128,
+    use_ue8m0_scales: Optional[bool] = None,
 ):
+    if use_ue8m0_scales is None:
+        use_ue8m0_scales = get_env_use_ue8m0_scales()
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
     assert topk_weights.shape == topk_idx.shape, "topk shape mismatch"
@@ -288,7 +293,7 @@ def fused_experts_impl(
     combined_x = None
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(
-            hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=get_env_use_ue8m0_scales()
+            hidden_states, block_size_k, dtype=w1.dtype, use_ue8m0_scales=use_ue8m0_scales
         )
         allocate_on_comm_stream = previous_event is not None
         # Expanded dispatch directly produces expert-contiguous, alignment-padded inputs:
@@ -335,6 +340,7 @@ def fused_experts_impl(
                 w2=w2,
                 w2_scale=w2_scale,
                 block_size_k=block_size_k,
+                use_ue8m0_scales=use_ue8m0_scales,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(),
                 hidden_dtype=hidden_states.dtype,
                 alpha=alpha,
@@ -383,7 +389,7 @@ def fused_experts_impl(
             num_max_dispatch_tokens_per_rank,
             num_experts,
             use_fp8=use_fp8_w8a8,
-            round_scale=get_env_use_ue8m0_scales(),
+            round_scale=use_ue8m0_scales,
             async_finish=False,
             return_recv_hook=False,
         )
@@ -400,6 +406,7 @@ def fused_experts_impl(
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            use_ue8m0_scales=use_ue8m0_scales,
         )
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
@@ -521,8 +528,11 @@ def chunked_expanded_moe_forward(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    use_ue8m0_scales: Optional[bool] = None,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
+    if use_ue8m0_scales is None:
+        use_ue8m0_scales = get_env_use_ue8m0_scales()
     alignment = 128
     all_tokens, intermediate_twice = recv_x[0].shape[0], w1.shape[1]
     intermediate_size, hidden_size = intermediate_twice // 2, w2.shape[1]
@@ -608,7 +618,7 @@ def chunked_expanded_moe_forward(
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=workspace_quant_alloc,
-                use_ue8m0_scales=get_env_use_ue8m0_scales(),
+                use_ue8m0_scales=use_ue8m0_scales,
             )
             workspace_manager.free(silu_out)
             del silu_out

@@ -1,3 +1,4 @@
+from lightllm.common.basemodel.attention.sparse import SparsePrefillInput, SparseDecodeInput
 from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from typing import Any
@@ -6,7 +7,6 @@ from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepse
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
-from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
 from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
@@ -15,6 +15,17 @@ from lightllm.distributed import all_gather_into_tensor
 
 
 class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
+    def release_attention_resources(self):
+        super().release_attention_resources()
+        if hasattr(self, "indexer"):
+            self.indexer.full_att_view = self.indexer.tail_view = None
+
+    def bind_attention_resources(self, resources):
+        if hasattr(self, "indexer"):
+            self.indexer.full_att_view = resources["kv"].view
+            if "compressor_indexer" in resources:
+                self.indexer.tail_view = resources["compressor_indexer"].view
+
     def __init__(self, layer_num, network_config):
         self.index_topk = network_config["index_topk"]
         super().__init__(layer_num, network_config)
@@ -89,30 +100,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         del infer_state.get_topk_indices_params
 
         # Use NSA backend for attention computation
-        att_control = AttControl(
-            nsa_prefill=True,
-            nsa_prefill_dict={
-                "topk_mem_indices": topk_mem_indices,
-                "topk_indices": topk_indices,
-                "prefill_cache_kv": kv,
-                "softmax_scale": self.softmax_scale,
-                "kv_lora_rank": self.kv_lora_rank,
-            },
+        return self.attention.prefill(
+            SparsePrefillInput(q_all, topk_mem_indices, topk_indices, kv), infer_state.attention_metadata
         )
-
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        mla_out = infer_state.prefill_att_state.prefill_att(
-            q=q_all,
-            k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            v=None,
-            att_control=att_control,
-        )
-        return mla_out
 
     def _token_attention_kernel(
         self,
@@ -137,30 +127,9 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         del infer_state.get_topk_indices_params
 
         # Use NSA backend for attention computation
-        att_control = AttControl(
-            nsa_decode=True,
-            nsa_decode_dict={
-                "layer_index": self.layer_num_,
-                "topk_mem_indices": topk_mem_indices,
-                "softmax_scale": self.softmax_scale,
-                "kv_lora_rank": self.kv_lora_rank,
-                "qk_rope_head_dim": self.qk_rope_head_dim,
-            },
+        return self.attention.decode(
+            SparseDecodeInput(q_nope, q_rope, topk_mem_indices), infer_state.attention_metadata
         )
-
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=(q_nope, q_rope),
-            k=state.get_layer_view(logical_layer_id=self.layer_num_).kv,
-            v=None,
-            att_control=att_control,
-        )
-        return o_tensor
 
 
 class NsaInfer:
@@ -189,7 +158,6 @@ class NsaInfer:
         att_state: Any,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
-
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
 
         if self.tp_world_size_ > 1:
@@ -209,17 +177,11 @@ class NsaInfer:
         q_fp8, q_scale = act_quant(q, self.block_size, self.scale_fmt)
         k_fp8, k_scale = act_quant(k, self.block_size, self.scale_fmt)
 
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_idx_,
-            state_class=FullAttentionState,
-        )
         destindex_copy_indexer_ks(
             K_fp8=k_fp8,
             K_scale=k_scale,
             DestLoc=infer_state.mem_index,
-            O_buffer=state.get_layer_view(logical_layer_id=self.layer_idx_).indexer_k,
+            O_buffer=self.full_att_view.indexer_k,
         )
 
         weights = layer_weight.weights_proj_.mm(hidden_states) * self.index_n_heads_scale
@@ -235,7 +197,7 @@ class NsaInfer:
             mtp_step = get_env_start_args().mtp_step
         # Use efficient Triton kernel to extract FP8 keys and scales from buffer
         k_fp8_, k_scale_ = extract_indexer_ks(
-            I_buffer=state.get_layer_view(logical_layer_id=self.layer_idx_).indexer_k,
+            I_buffer=self.full_att_view.indexer_k,
             b_seq_len=infer_state.b_seq_len,
             b_req_idx=infer_state.b_req_idx,
             req_to_token_indexs=infer_state.req_manager.req_to_token_indexs,

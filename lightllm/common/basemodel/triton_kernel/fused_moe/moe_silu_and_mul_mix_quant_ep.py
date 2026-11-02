@@ -100,6 +100,7 @@ def silu_and_mul_masked_post_quant_fwd(
     alpha=None,
     limit=None,
     clamp_up_add_one=True,
+    use_ue8m0_scales=None,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -161,7 +162,7 @@ def silu_and_mul_masked_post_quant_fwd(
         alpha=alpha,
         limit=limit,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,
-        USE_UE8M0_SCALE=get_env_use_ue8m0_scales(),
+        USE_UE8M0_SCALE=get_env_use_ue8m0_scales() if use_ue8m0_scales is None else use_ue8m0_scales,
         num_warps=num_warps,
     )
     return

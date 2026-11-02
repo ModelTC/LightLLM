@@ -62,3 +62,56 @@ def destindex_copy_kv(K, DestLoc, Out):
         num_stages=1,
     )
     return
+
+
+@triton.jit
+def _copy_kv_pair(
+    KV,
+    IDS,
+    K,
+    V,
+    KV_STRIDES: tl.constexpr,
+    K_STRIDES: tl.constexpr,
+    V_STRIDES: tl.constexpr,
+    ID_STRIDE: tl.constexpr,
+    HEADS: tl.constexpr,
+    DIM: tl.constexpr,
+    BLOCK_HEAD: tl.constexpr,
+    BLOCK_DIM: tl.constexpr,
+):
+    token, plane = tl.program_id(0), tl.program_id(1)
+    heads = tl.arange(0, BLOCK_HEAD)[:, None]
+    dims = tl.arange(0, BLOCK_DIM)[None, :]
+    mask = (heads < HEADS) & (dims < DIM)
+    slot = tl.load(IDS + token * ID_STRIDE).to(tl.int64)
+    value = tl.load(
+        KV + token * KV_STRIDES[0] + (heads + plane * HEADS) * KV_STRIDES[1] + dims * KV_STRIDES[2], mask, 0
+    )
+    if plane == 0:
+        tl.store(K + slot * K_STRIDES[0] + heads * K_STRIDES[1] + dims * K_STRIDES[2], value, mask)
+    else:
+        tl.store(V + slot * V_STRIDES[0] + heads * V_STRIDES[1] + dims * V_STRIDES[2], value, mask)
+
+
+@torch.no_grad()
+def destindex_copy_kv_pair(kv, token_indices, k, v):
+    heads, dim = k.shape[1:]
+    assert kv.shape == (token_indices.numel(), 2 * heads, dim)
+    assert k.shape == v.shape and kv.dtype == k.dtype == v.dtype
+    if token_indices.numel():
+        _copy_kv_pair[(token_indices.numel(), 2)](
+            kv,
+            token_indices,
+            k,
+            v,
+            kv.stride(),
+            k.stride(),
+            v.stride(),
+            token_indices.stride(0),
+            heads,
+            dim,
+            triton.next_power_of_2(heads),
+            triton.next_power_of_2(dim),
+            num_warps=1,
+            num_stages=1,
+        )

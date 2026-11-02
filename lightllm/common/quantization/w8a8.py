@@ -58,7 +58,13 @@ class BaseQuantizationMethod(QuantizationMethod):
         raise NotImplementedError("Not implemented")
 
 
-@QUANTMETHODS.register(["w8a8-vllm", "w8a8"], platform="cuda")
+@QUANTMETHODS.register(
+    ["w8a8-vllm", "w8a8"],
+    platform="cuda",
+    weight_format="int8_per_channel",
+    activation_format="int8_per_token",
+    implementation="vllm",
+)
 class w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -120,7 +126,13 @@ class w8a8QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(["fp8w8a8-vllm", "fp8w8a8"], platform="cuda")
+@QUANTMETHODS.register(
+    ["fp8w8a8-vllm", "fp8w8a8"],
+    platform="cuda",
+    weight_format="fp8_per_channel",
+    activation_format="fp8_per_token",
+    implementation="vllm",
+)
 class FP8w8a8QuantizationMethod(BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -320,7 +332,13 @@ class FP8w8a8PerTensorQuantizationMethod(BaseQuantizationMethod):
         return torch.empty((1,), dtype=torch.float32, device=f"cuda:{device_id}")
 
 
-@QUANTMETHODS.register("fp8w8a8-pt-vllm", platform="cuda")
+@QUANTMETHODS.register(
+    "fp8w8a8-pt-vllm",
+    platform="cuda",
+    weight_format="fp8_per_tensor",
+    activation_format="fp8_per_token",
+    implementation="vllm",
+)
 class FP8w8a8PerTensorVllmQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -349,7 +367,13 @@ class FP8w8a8PerTensorVllmQuantizationMethod(FP8w8a8PerTensorQuantizationMethod)
         return "fp8w8a8-pt-vllm"
 
 
-@QUANTMETHODS.register("fp8w8a8-pt-sgl", platform="cuda")
+@QUANTMETHODS.register(
+    "fp8w8a8-pt-sgl",
+    platform="cuda",
+    weight_format="fp8_per_tensor_repeated_scale",
+    activation_format="fp8_per_token",
+    implementation="sgl",
+)
 class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -382,7 +406,13 @@ class FP8w8a8PerTensorSglQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
         return "fp8w8a8-pt-sgl"
 
 
-@QUANTMETHODS.register(["fp8w8a8-pt-triton", "fp8w8a8-pt"], platform="cuda")
+@QUANTMETHODS.register(
+    ["fp8w8a8-pt-triton", "fp8w8a8-pt"],
+    platform="cuda",
+    weight_format="fp8_per_tensor",
+    activation_format="fp8_per_token",
+    implementation="triton",
+)
 class FP8w8a8PerTensorTritonQuantizationMethod(FP8w8a8PerTensorQuantizationMethod):
     def apply(
         self,
@@ -474,7 +504,14 @@ class FP8w8a8B128QuantizationMethod(BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register("fp8w8a8-b128-vllm", platform="cuda")
+@QUANTMETHODS.register(
+    "fp8w8a8-b128-vllm",
+    platform="cuda",
+    weight_format="fp8_block128",
+    activation_format="fp8_group128",
+    implementation="vllm",
+    content_key="fp8_block128_group128_v1",
+)
 class FP8w8a8B128VllmQuantizationMethod(FP8w8a8B128QuantizationMethod):
     def apply(
         self,
@@ -502,7 +539,14 @@ class FP8w8a8B128VllmQuantizationMethod(FP8w8a8B128QuantizationMethod):
         return "fp8w8a8-b128-vllm"
 
 
-@QUANTMETHODS.register(["fp8w8a8-b128-triton", "fp8w8a8-b128"], platform="cuda")
+@QUANTMETHODS.register(
+    ["fp8w8a8-b128-triton", "fp8w8a8-b128"],
+    platform="cuda",
+    weight_format="fp8_block128",
+    activation_format="fp8_group128",
+    implementation="triton",
+    content_key="fp8_block128_group128_v1",
+)
 class FP8w8a8B128TritonQuantizationMethod(FP8w8a8B128QuantizationMethod):
     def apply(
         self,

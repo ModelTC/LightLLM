@@ -129,6 +129,7 @@ def test_matched_notifications_refresh_local_siblings_only(monkeypatch, stage):
     module = make_module(first, sibling, unrelated)
     remote = make_task(1, 0)
     remote.write_stage = stage
+    remote.transfer_id = first.transfer_id
     remote.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
     remote.shared_time_out_mark.time_mark = -100.0
     module.transporter.get_new_notifs = lambda: {"prefill": [pickle.dumps(remote)]}

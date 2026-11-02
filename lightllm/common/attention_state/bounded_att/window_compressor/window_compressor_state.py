@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 
 from dataclasses import dataclass
 from math import prod
@@ -13,10 +13,9 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 
 from ...utils import deepcopy_result
-from ...types import PageKind, StateTransferLayout, TensorField, TransferRegion
+from ...types import PageKind, TensorField, TransferRegion
 from ..base_state import BoundedAttentionState
-from ..copy_kernel import copy_bounded_att_tensors
-from ..transfer_utils import bounded_att_buffer_copies
+from ..copy_plan import BatchedStateView, bind_window_page_copy
 from ..window_pages_pool import WindowPagesPool
 from .window_compressor_transfer import copy_compressor_window
 
@@ -68,7 +67,11 @@ class WindowCompressorStateConfig:
     def __post_init__(self) -> None:
         assert self.window_size >= self.compress_stride > 0 and self.candidate_dim > 0
         assert self.logical_layer_ids and len(set(self.logical_layer_ids)) == len(self.logical_layer_ids)
-        assert self.target in ("kv", "indexer") and self.dtype in (torch.float32, torch.float16, torch.bfloat16)
+        assert self.target in ("kv", "indexer") and self.dtype in (
+            torch.float32,
+            torch.float16,
+            torch.bfloat16,
+        )
         assert 0 <= self.tp_rank < self.tp_world_size
 
 
@@ -78,6 +81,12 @@ class WindowCompressorState(BoundedAttentionState):
     大小页在产出步长的边界保存重叠历史，PD 则保存完整窗口以支持任意前缀长度。
     无重叠的窗口在组边界不需要快照，因此不创建大小页池，也不占 CPU 联合页字节。
     """
+
+    runtime_storage_fields = ("buffer",)
+
+    @property
+    def resource_kind(self):
+        return "compressor_" + self.config.target
 
     # ========================================================================
     # 一、资源定义与初始化
@@ -117,6 +126,16 @@ class WindowCompressorState(BoundedAttentionState):
             f"compressor_{self.config.target}_w{self.config.window_size}" f"_s{self.config.compress_stride}_{precision}"
         )
 
+    def get_checkpoint_bytes(self):
+        c = self.config
+        return len(c.logical_layer_ids) * c.overlap_tokens * 2 * c.candidate_dim * c.dtype.itemsize
+
+    def allocate_runtime_storage(self, device):
+        allocated = super().allocate_runtime_storage(device)
+        if allocated:
+            self.buffer[:, self.request_capacity - 1, :, self.config.candidate_dim :].fill_(float("-inf"))
+        return allocated
+
     def initialize_page_pools(
         self,
         big_page_capacity: int,
@@ -127,7 +146,11 @@ class WindowCompressorState(BoundedAttentionState):
         """只为跨步重叠历史创建快照池；无重叠时保持 None。"""
         if not self.config.overlap_tokens:
             return
-        shape = (len(self.config.logical_layer_ids), self.config.overlap_tokens, 2 * self.config.candidate_dim)
+        shape = (
+            len(self.config.logical_layer_ids),
+            self.config.overlap_tokens,
+            2 * self.config.candidate_dim,
+        )
         self.big_pages_pool = (
             WindowPagesPool(
                 size=big_page_capacity,
@@ -219,7 +242,7 @@ class WindowCompressorState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """校验缓存页对齐产出步长；无重叠历史的窗口不占 CPU 页，也不创建大小页池。"""
         args = get_env_start_args()
@@ -234,138 +257,15 @@ class WindowCompressorState(BoundedAttentionState):
             ), "CPU cache pages must align to the compressor stride"
         return self._get_transfer_regions(runtime=False)
 
-    def write_state_pages_to_cpu(
-        self,
-        page_kind: PageKind,
-        page_slot_ids: list[int],
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: list[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """将指定快照写入 CPU 页，已就绪页保持不变。"""
-        pool = self._pool(page_kind=page_kind)
-        fields, pages = [], []
-        for index, (slot, page) in enumerate(zip(page_slot_ids, cpu_page_indices)):
-            if cpu_page_ready_flags is not None and cpu_page_ready_flags[index]:
-                continue
-            fields.append({"compressor": TensorField(tensor=pool.buffer[slot], axes=("layer", "window", "channel"))})
-            pages.append(page)
-        for copies in bounded_att_buffer_copies(
-            page_fields=fields,
-            page_buffers=cpu_page_buffers,
-            layout=layout,
-            page_indices=pages,
-            write=True,
-        ):
-            if copies:
-                copy_bounded_att_tensors(copies=copies)
-
-    def read_state_pages_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: list[int],
-        big_page_slot_ids: list[int],
-        layout: StateTransferLayout,
-    ) -> None:
-        """CPU 页先恢复到大页池，随后再按前缀长度恢复请求 ring。"""
-        fields = [
-            {"compressor": TensorField(tensor=self.big_pages_pool.buffer[slot], axes=("layer", "window", "channel"))}
-            for slot in big_page_slot_ids
-        ]
-        for copies in bounded_att_buffer_copies(
-            page_fields=fields,
-            page_buffers=cpu_page_buffers,
-            layout=layout,
-            page_indices=cpu_page_indices,
-            write=False,
-        ):
-            if copies:
-                copy_bounded_att_tensors(copies=copies)
-
-    # ========================================================================
-    # 四、DP：相同方案的快照及请求运行态复制
-    # ========================================================================
-
-    def copy_big_pages_from_dp(
-        self,
-        src_page_ids: list[int],
-        dst_page_ids: list[int],
-        remote_dp_bounded_state: WindowCompressorState,
-    ) -> None:
-        """复制已保存的大页，调用方保持槽位及 stream 依赖一致。"""
-        assert self.config == remote_dp_bounded_state.config
-        if self.big_pages_pool is not None:
-            copy_bounded_att_tensors(
-                copies=[
-                    (remote_dp_bounded_state.big_pages_pool.buffer[src], self.big_pages_pool.buffer[dst])
-                    for src, dst in zip(src_page_ids, dst_page_ids)
-                ]
-            )
-
-    def copy_runtime_state_from_dp(
-        self,
-        src_req_indices: list[int],
-        dst_req_indices: list[int],
-        remote_dp_bounded_state: WindowCompressorState,
-    ) -> None:
-        """直接复制相同配置和 MTP 容量的物理 ring，不创建快照。"""
-        assert self.config == remote_dp_bounded_state.config and self.mtp_step == remote_dp_bounded_state.mtp_step
-        copy_bounded_att_tensors(
-            copies=[
-                (remote_dp_bounded_state.buffer[:, src], self.buffer[:, dst])
-                for src, dst in zip(src_req_indices, dst_req_indices)
-            ]
-        )
-
     # ========================================================================
     # 五、PD：按绝对前缀展开完整逻辑窗口，兼容不同 MTP 容量
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回完整逻辑窗口，不包含本地 MTP 候选区。"""
         return self._get_transfer_regions(runtime=True)
-
-    def write_to_pd_page(
-        self,
-        req_idx: int,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        state_token_len: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按绝对长度将请求 ring 写入选定 PD 页。"""
-        page = pd_page_buffers[pd_page_index].view(torch.uint8).view(-1)
-        for region in layout.regions:
-            if region.write_enabled:
-                external = page[region.byte_start : region.byte_end].view(region.dtype).view(region.shape)
-                self._copy_window(
-                    req_idx=req_idx,
-                    external=external,
-                    state_token_len=state_token_len,
-                    write=True,
-                )
-
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        req_idx: int,
-        pd_page_index: int,
-        state_token_len: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按接收端 ring 容量还原逻辑窗口，不写入大小页池。"""
-        page = pd_page_buffers[pd_page_index].view(torch.uint8).view(-1)
-        for region in layout.regions:
-            external = page[region.byte_start : region.byte_end].view(region.dtype).view(region.shape)
-            self._copy_window(
-                req_idx=req_idx,
-                external=external,
-                state_token_len=state_token_len,
-                write=False,
-            )
 
     # ========================================================================
     # 六、内部页池和窗口搬运
@@ -395,6 +295,20 @@ class WindowCompressorState(BoundedAttentionState):
             ),
         )
 
+    def get_runtime_transfer_view(self):
+        return BatchedStateView(
+            (("compressor", TensorField(self.buffer.movedim(1, 0), ("slot", "layer", "window", "channel"))),)
+        )
+
+    def get_snapshot_transfer_view(self, page_kind):
+        pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
+        return BatchedStateView(
+            () if pool is None else (("compressor", TensorField(pool.buffer, ("slot", "layer", "window", "channel"))),)
+        )
+
+    def bind_pd_copy(self, pages, layout, write):
+        return bind_window_page_copy(self.get_runtime_transfer_view(), pages, layout, write, copy_compressor_window)
+
     def _copy_window(
         self,
         req_idx: int,
@@ -402,8 +316,9 @@ class WindowCompressorState(BoundedAttentionState):
         state_token_len: int,
         write: bool,
     ) -> None:
+        local = self.buffer[:, req_idx]
         copy_compressor_window(
-            local=self.buffer[:, req_idx],
+            local=local,
             external=external,
             state_token_len=state_token_len,
             write=write,

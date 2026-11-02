@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 from typing import Any, List
 
 import torch
@@ -26,7 +26,7 @@ class CoreInterface(ABC):
         返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att 类别前缀，
         也不带 main/draftN 角色或最终的 _state；类别由 Python State 类型表达。
         管理器统一生成 state_name = f"{model_role}_{get_state_type()}_state"，与成员名完全一致。
-        同角色下不同算法、精度或量化方案必须使用不同标记，同方案的全部逻辑层放在同一实例。
+        同角色下不同算法、精度或量化方案使用不同标记；同方案可以按不同逻辑层域注册多个实例。
         层号、容量、设备、TP rank 和请求信息不进入名称；完整布局仍由 config 描述。
         注册后返回值保持稳定，实际分配与 CPU/DP/PD 传输均使用相同标记。
 
@@ -114,7 +114,7 @@ class CpuCacheInterface(ABC):
 
     @abstractmethod
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回一份 CPU 快照的字段区间、全局形状与 TP 切片。
 
@@ -173,9 +173,9 @@ class DpCopyInterface(ABC):
         dst_req_indices: List[int],
         remote_dp_bounded_state: CoreInterface,
     ) -> None:
-        """复制其他 DP 同一 TP 分片的 prefill 基准运行态并重置目标游标，不修改页池。
+        """复制其他 DP 同一 TP 分片已接受的运行态并重置目标游标，不修改页池。
 
-        调用方保证源状态尚未执行 MTP 提交；KDA/GDN 的源游标必须为 0。
+        KDA/GDN 在设备上选择已接受游标；窗口的原生 DP 复制要求两端 ring 几何兼容。
         """
         ...
 
@@ -187,7 +187,7 @@ class PdInterface(ABC):
 
     @abstractmethod
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回 PD 需要的字段、全局形状和 TP 切片，区域偏移相对本 State 起点。
 
@@ -205,9 +205,9 @@ class PdInterface(ABC):
         state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """将指定槽位在 state_token_len 绝对长度处的 prefill 基准运行态写入 PD 页。
+        """将指定槽位在 state_token_len 绝对长度处已接受的运行态写入 PD 页。
 
-        调用方保证源状态尚未执行 MTP 提交；KDA/GDN 的源游标必须为 0。
+        KDA/GDN 在设备上选择已接受游标；窗口根据绝对长度展开所需历史。
         """
         ...
 

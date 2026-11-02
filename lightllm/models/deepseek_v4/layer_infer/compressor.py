@@ -95,7 +95,7 @@ def fused_compress(
     out_buffer: torch.Tensor = None,
 ):
     state = infer_state.get_compressor_state(logical_layer_id=layer_idx, target="indexer" if is_in_indexer else "kv")
-    req_to_compressor_state = state.get_layer_view(logical_layer_id=layer_idx)
+    req_to_compressor_state = infer_state.get_compressor_view(layer_idx, "indexer" if is_in_indexer else "kv")
     compressed_kv_slots = torch.where(
         (infer_state.position_ids + 1) % compress_ratio == 0,
         infer_state.mem_index.reshape(-1) // compress_ratio,
@@ -112,7 +112,7 @@ def fused_compress(
     else:
         compressed = infer_state.get_compressed_kv_state(logical_layer_id=layer_idx)
         out_page_size = compressed.config.block_token_size // compress_ratio
-        out_buffer = compressed.get_layer_view(logical_layer_id=layer_idx).kv
+        out_buffer = infer_state.get_compressed_kv_view(layer_idx).kv
 
     if kv_score.shape[0] == 0:
         return out_buffer

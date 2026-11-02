@@ -89,6 +89,9 @@ def make_infer(manager, window):
     infer.att_state_manager = manager
     infer.att_state_role = "main"
     infer.first_logical_layer_id = window.config.logical_layer_ids[0]
+    from lightllm.common.basemodel.attention.legacy import bind_state_resources
+
+    infer.bound_states = bind_state_resources(manager, "main", window.config.logical_layer_ids)
     return infer
 
 
@@ -106,8 +109,17 @@ def test_backend_reads_owned_state_views(cache):
     assert infer.swa_state is window
     infer.is_prefill = False
     for layer in range(3):
-        swa, compressed = backend.get_att_input_params(infer, layer)
-        assert swa.shape[1] == 74880
+        spec = SimpleNamespace(
+            layer_num_=layer,
+            compress_ratio=backend.layer_compress_ratios[layer],
+            v_head_dim=512,
+            softmax_scale=512 ** -0.5,
+        )
+        weight = SimpleNamespace(attn_sink_=SimpleNamespace(weight=torch.zeros(64, device="cuda")))
+        binding = backend.bind_layer_attention(spec, infer.bound_states[layer], weight)
+        swa, compressed = binding.decode_cache, binding.compressed_cache
+        assert swa.shape[1:] == (128, 1, 584)
+        assert swa.data_ptr() == infer.get_swa_view(layer).data_ptr()
         assert (compressed is None) == (layer == 2)
         if layer != 2:
             assert compressed.data_ptr() == infer.get_compressed_kv_view(layer).kv.data_ptr()
@@ -190,6 +202,11 @@ def test_long_prefill_keeps_swa_prefix_and_runtime_tail(cache):
     freqs = torch.complex(angles.cos(), angles.sin())
     layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
     layer.layer_num_, layer.eps_, layer.freqs_cis = 2, 1e-6, freqs
+    layer.state_bindings = make_infer(manager, window).bound_states[2]
+    layer.compress_ratio, layer.v_head_dim, layer.softmax_scale = 0, 512, 512 ** -0.5
+    layer.attention = backend.bind_layer_attention(
+        layer, layer.state_bindings, SimpleNamespace(attn_sink_=SimpleNamespace(weight=None))
+    )
     for start, end in ((0, 255), (255, 641), (641, 1100), (1100, 2048)):
         infer = make_infer(manager, window)
         positions = torch.arange(start, end, device="cuda", dtype=torch.int32)

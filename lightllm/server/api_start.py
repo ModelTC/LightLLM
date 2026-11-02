@@ -168,6 +168,7 @@ def _launch_subprocesses(args: StartArgs):
         ), "fp8kv inference mode requires --kv_quant_calibration_config_path. "
 
     if args.enable_prefill_microbatch_overlap or args.enable_decode_microbatch_overlap:
+        assert args.dp > 1, "microbatch overlap requires a DP runner (--dp > 1)"
         args.enable_tpsp_mix_mode = True
 
     if args.enable_prefill_decode_mixed:

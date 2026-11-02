@@ -1,10 +1,10 @@
-from lightllm.common.attention_state.bounded_att import GDNState
 import dataclasses
 import weakref
 import torch
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BaseAttState
+from ..recurrent import BoundRecurrent, GDNInput
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_fn
 from lightllm.common.basemodel.triton_kernel.linear_att.fused_gdn_gating import fused_gdn_gating
@@ -27,6 +27,8 @@ if TYPE_CHECKING:
 
 
 class LinearAttBackend(BaseAttBackend, ABC):
+    recurrent_family = "gdn"
+
     def __init__(self, model: "TpPartBaseModel"):
         super().__init__(model=model)
         self._init_linear_layer_metadata(network_config=model.config, tp_world_size=model.tp_world_size_)
@@ -36,8 +38,28 @@ class LinearAttBackend(BaseAttBackend, ABC):
     def get_prefill_kernel(self):
         pass
 
-    def _init_linear_layer_metadata(self, network_config, tp_world_size):
+    def for_recurrent_state(self, config, mtp_step):
+        if mtp_step != self.mtp_step:
+            raise ValueError("GDN storage and execution must use the same speculative width")
+        if config.num_v_heads % config.num_k_heads:
+            raise ValueError("GDN requires complete value/key head groups")
+        selected = object.__new__(type(self))
+        selected.__dict__.update(vars(self))
+        selected.num_k_heads, selected.num_v_heads = config.global_k_heads, config.global_v_heads
+        selected.head_k_dim, selected.head_v_dim = config.key_dim, config.value_dim
+        selected.key_dim = config.global_k_heads * config.key_dim
+        selected.value_dim = config.global_v_heads * config.value_dim
+        selected.tp_num_k_heads, selected.tp_num_v_heads = config.num_k_heads, config.num_v_heads
+        selected.tp_key_dim = config.num_k_heads * config.key_dim
+        selected.tp_value_dim = config.num_v_heads * config.value_dim
+        selected.tp_qkvz_dim = 2 * (selected.tp_key_dim + selected.tp_value_dim)
+        selected.tp_ba_dim = 2 * config.num_v_heads
+        selected.num_v_heads_per_k_head = config.num_v_heads // config.num_k_heads
+        selected.conv_kernel_dim = config.conv_width + 1
+        selected.ssm_state_dtype = config.ssm_dtype
+        return selected
 
+    def _init_linear_layer_metadata(self, network_config, tp_world_size):
         self.mtp_step = get_env_start_args().mtp_step
 
         # Linear attention specific dimensions
@@ -108,8 +130,7 @@ class LinearAttBackend(BaseAttBackend, ABC):
 
 
 @dataclasses.dataclass
-class LinearAttPrefillAttState(BasePrefillAttState):
-
+class LinearAttPrefillAttState(BaseAttState):
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
 
@@ -123,30 +144,11 @@ class LinearAttPrefillAttState(BasePrefillAttState):
         self.b_ssm_buffer_idx = self.infer_state.b_req_idx * (mtp_step + 1)
         return
 
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert att_control.linear_att_prefill, "linear_att_prefill must be True for Linear prefill attention"
-        assert att_control.linear_att_prefill_dict is not None, "linear_att_prefill_dict is required"
-
-        linear_att_dict = att_control.linear_att_prefill_dict
-        mixed_qkvzba: torch.Tensor = linear_att_dict["mixed_qkvzba"]
-        layer_weight = linear_att_dict["layer_weight"]
-        layer_num = linear_att_dict["layer_num"]
+    def run(self, inputs: GDNInput, binding: BoundRecurrent):
+        layer_weight = binding.weight
+        conv_states, ssm_states = binding.state
+        mixed_qkvzba = inputs.mixed_qkvzba
         backend: LinearAttBackend = self.backend
-
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="gdn",
-            logical_layer_id=layer_num,
-            state_class=GDNState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         # 在开启了mtp的时候，conv 状态的最后一维可能存在冗余的部分，需要进行切片对齐。
         # prefill 模式下，使用不到这几个维度，所以需要扣除掉，
         if backend.mtp_step > 0:
@@ -206,7 +208,8 @@ class LinearAttPrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class LinearAttDecodeAttState(BaseDecodeAttState):
+class LinearAttDecodeAttState(BaseAttState):
+    graph_buffer_names = ("b_conv_buffer_idx", "b_ssm_buffer_idx", "b1_mtp_cu_q_seq_len", "b_num_accepted_tokens")
 
     b_conv_buffer_idx: torch.Tensor = None
     b_ssm_buffer_idx: torch.Tensor = None
@@ -219,19 +222,10 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
             self._init_normal_decode_state()
             return
 
-        # MTP 元数据按模型初始化，沿用每个角色只有一个 GDN State 的约束。
-        # 只在此读取游标；Backend 不保存 State，逐层计算按逻辑层号查询资源。
-        (state,) = (
-            state
-            for state in self.infer_state.att_state_manager.get_bounded_attention_states(
-                self.infer_state.att_state_role
-            )
-            if isinstance(state, GDNState)
-        )
         if self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state(draft_step + 1, req_to_mtp_state_index=state.mtp_state_index)
+            self._init_dynamic_mtp_decode_state(draft_step + 1, req_to_mtp_state_index=self.backend.mtp_state_index)
         else:
-            self._init_fixed_mtp_decode_state(draft_step, req_to_mtp_state_index=state.mtp_state_index)
+            self._init_fixed_mtp_decode_state(draft_step, req_to_mtp_state_index=self.backend.mtp_state_index)
 
     def _init_normal_decode_state(self):
         self.b_conv_buffer_idx = self.infer_state.b_req_idx
@@ -281,31 +275,12 @@ class LinearAttDecodeAttState(BaseDecodeAttState):
         ).view(1, mtp_size)
         self.b_ssm_buffer_idx = b_ssm_buffer_start_idx + state_offsets  # [att_batch_size, mtp_size]
 
-    def decode_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert att_control.linear_att_decode, "linear_att_decode must be True for Linear decode attention"
-        assert att_control.linear_att_decode_dict is not None, "linear_att_decode_dict is required"
-
-        linear_att_dict = att_control.linear_att_decode_dict
-        mixed_qkvzba = linear_att_dict["mixed_qkvzba"]
-        layer_weight = linear_att_dict["layer_weight"]
-        layer_num = linear_att_dict["layer_num"]
+    def run(self, inputs: GDNInput, binding: BoundRecurrent):
+        layer_weight = binding.weight
+        conv_states, ssm_states = binding.state
+        mixed_qkvzba = inputs.mixed_qkvzba
         backend: LinearAttBackend = self.backend
-
         mixed_qkv, z, b, a = backend._split_qkvzba(mixed_qkvzba)
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="gdn",
-            logical_layer_id=layer_num,
-            state_class=GDNState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
 
         draft_step = self.backend.model.mtp_manager.get_decode_draft_step(self.backend.model.is_mtp_draft_model)
         if draft_step > 0:

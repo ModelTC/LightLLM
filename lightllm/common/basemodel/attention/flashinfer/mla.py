@@ -1,22 +1,37 @@
+from ..mla import BoundMla, MlaPrefillInput, MlaDecodeInput
 import dataclasses
 import weakref
 import torch
 import triton
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BaseAttState
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
-from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-from ...triton_kernel.repack_kv_index import repack_kv_index
 from ...triton_kernel.flashinfer_mla_plan import fill_mla_decode_plan_for_cuda_graph
 from typing import Tuple
 from .env_utils import set_flashinfer_envs
 from .utils import should_init_decode_wrapper
+from .paged_metadata import prepare_page_metadata, page_index_memory_demands, reserve_page_index_buffers
 
 
 class MlaFlashInferAttBackend(BaseAttBackend):
+    supports_mla = True
     workspace_buffer_key = "flashinfer_mla"
     workspace_buffer_size = 256 * 1024 * 1024
 
-    def __init__(self, model):
+    def reserve_runtime_resources(self):
+        args = self.model.args
+        lanes = 2 if args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap else 1
+        for lane in range(lanes):
+            self.get_gpu_workspace_buffer(self.workspace_buffer_key, self.workspace_buffer_size, lane_id=lane)
+        reserve_page_index_buffers(self)
+
+    def runtime_memory_demands(self):
+        args = self.model.args
+        lanes = 2 if args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap else 1
+        return self.workspace_memory_demands(
+            self.workspace_buffer_key, self.workspace_buffer_size, lanes
+        ) + page_index_memory_demands(self)
+
+    def __init__(self, model, attention_shape=None):
         set_flashinfer_envs()
         super().__init__(model=model)
         self._init_infer_page_size()
@@ -31,14 +46,7 @@ class MlaFlashInferAttBackend(BaseAttBackend):
         self.max_seq_length = model.max_seq_length
         self.max_page_num = triton.cdiv(self.max_seq_length, self.infer_page_size)
         self.softmax_scale = (self.qk_nope_head_dim + self.qk_rope_head_dim) ** (-0.5)
-        self.kv_indices_buffer = [
-            torch.empty(
-                model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
-            ),
-            torch.empty(
-                model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
-            ),
-        ]
+        self.kv_indices_buffer = None
 
         from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
 
@@ -49,7 +57,30 @@ class MlaFlashInferAttBackend(BaseAttBackend):
             if mscale_all_dim:
                 mscale = get_deepseek_mscale(scaling_factor, mscale_all_dim)
                 self.softmax_scale = self.softmax_scale * mscale * mscale
+        if attention_shape is not None:
+            (
+                self.tp_q_head_num,
+                self.qk_nope_head_dim,
+                self.qk_rope_head_dim,
+                self.kv_lora_rank,
+                self.v_head_dim,
+                self.q_data_type,
+                self.softmax_scale,
+            ) = attention_shape
+            self.kv_data_type = self.q_data_type
         return
+
+    def for_attention_spec(self, spec):
+        shape = (
+            self.tp_q_head_num,
+            self.qk_nope_head_dim,
+            self.qk_rope_head_dim,
+            self.kv_lora_rank,
+            self.v_head_dim,
+            self.q_data_type,
+            self.softmax_scale,
+        )
+        return self if shape == spec.shape_key else type(self)(model=self.model, attention_shape=spec.shape_key)
 
     def _init_infer_page_size(self):
         self.infer_page_size = self.model.args.page_size
@@ -66,7 +97,7 @@ class MlaFlashInferAttBackend(BaseAttBackend):
 
 
 @dataclasses.dataclass
-class MlaFlashInferPrefillAttState(BasePrefillAttState):
+class MlaFlashInferPrefillAttState(BaseAttState):
     prefill_wrapper: object = None
 
     def init_state(self):
@@ -81,6 +112,7 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
                 self.backend.get_gpu_workspace_buffer(
                     key_name=self.backend.workspace_buffer_key,
                     workspace_size=self.backend.workspace_buffer_size,
+                    lane_id=self.infer_state.microbatch_index,
                 ),
                 "NHD",
             )
@@ -97,29 +129,8 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
         )
         return
 
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: Tuple[torch.Tensor, torch.Tensor],
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-        return self._mla_prefill_att(
-            q=q,
-            k=k,
-            v=v,
-            alloc_func=alloc_func,
-        )
-
-    def _mla_prefill_att(
-        self, q: torch.Tensor, k: Tuple[torch.Tensor, torch.Tensor], v: torch.Tensor, alloc_func=torch.empty
-    ) -> torch.Tensor:
+    def run(self, inputs: MlaPrefillInput, binding: BoundMla, alloc_func=torch.empty):
+        q, k, v = inputs.q, (inputs.k_nope, inputs.k_rope), inputs.v
         self.backend: MlaFlashInferAttBackend = self.backend  # for typing
         k_nope, k_rope = k
         o_tensor = alloc_func((q.shape[0], q.shape[1], v.shape[-1]), q.dtype, device="cuda")
@@ -130,10 +141,12 @@ class MlaFlashInferPrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class MlaFlashInferDecodeAttState(BaseDecodeAttState):
+class MlaFlashInferDecodeAttState(BaseAttState):
+    graph_buffer_names = ("kv_indices", "kv_starts", "q_indptr_host", "q_indptr")
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
     q_indptr_host: torch.Tensor = None
+    q_indptr: torch.Tensor = None
     decode_wrapper: object = None
 
     def _should_init_decode_wrapper(self) -> bool:
@@ -143,38 +156,11 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
         import flashinfer
 
         self.backend: MlaFlashInferAttBackend = self.backend
-        model = self.backend.model
-        device = self.infer_state.input_ids.device
         batch_size = self.infer_state.batch_size
-
-        # TODO: 将页数及页数前缀和的计算融合为一个 Triton 算子。
-        # token 长度除以页大小并向上取整，末页不足一页也计为一页。
-        b_page_len = (self.infer_state.b_seq_len + (self.backend.infer_page_size - 1)) // self.backend.infer_page_size
-        self.kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
-
-        self.q_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device="cuda")
+        pages = prepare_page_metadata(self.backend, self.infer_state)
+        self.kv_starts, self.kv_indices = pages.starts, pages.indices
+        self.q_indptr = torch.arange(batch_size + 1, dtype=torch.int32, device=self.infer_state.input_ids.device)
         self.q_indptr_host = torch.arange(batch_size + 1, dtype=torch.int32, device="cpu")
-        if batch_size <= model.graph_max_batch_size and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch:
-            self.kv_indices = self.backend.kv_indices_buffer[self.infer_state.microbatch_index][
-                : batch_size * self.backend.max_page_num
-            ]
-        else:
-            self.kv_indices = torch.empty(
-                batch_size * self.backend.max_page_num,
-                dtype=torch.int32,
-                device=device,
-            )
-
-        repack_kv_index(
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
-            b_req_idx=self.infer_state.b_req_idx,
-            b_token_len=self.infer_state.b_seq_len,
-            b_page_start_loc=self.kv_starts[:-1],
-            max_token_len=self.infer_state.max_kv_seq_len,
-            out_page_indices=self.kv_indices,
-            page_size=self.backend.infer_page_size,
-        )
-
         if not self._should_init_decode_wrapper():
             return
 
@@ -184,6 +170,7 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             self.backend.get_gpu_workspace_buffer(
                 key_name=self.backend.workspace_buffer_key,
                 workspace_size=self.backend.workspace_buffer_size,
+                lane_id=self.infer_state.microbatch_index,
             ),
             use_cuda_graph=True,
             qo_indptr=self.q_indptr,
@@ -224,42 +211,11 @@ class MlaFlashInferDecodeAttState(BaseDecodeAttState):
             max_kv_len=max_kv_len,
         )
 
-    def decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-
-        assert v is None
-
-        return self._mla_decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=att_control,
-            alloc_func=alloc_func,
-        )
-
-    def _mla_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
-    ):
-        qk_rope_head_dim = 64
+    def run(self, inputs: MlaDecodeInput, binding: BoundMla, alloc_func=torch.empty):
+        q, k = (inputs.q_nope, inputs.q_rope), binding.cache
+        qk_rope_head_dim = binding.rope_dim
         q_nope, q_rope = q
         o_tensor = alloc_func(q_nope.shape, dtype=q_nope.dtype, device=q_nope.device)
-        assert att_control.mla_decode
 
         self.decode_wrapper.run(
             q_nope,

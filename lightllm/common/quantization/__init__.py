@@ -1,7 +1,9 @@
 import os
 import yaml
 import collections
+from copy import deepcopy
 from .registry import QUANTMETHODS
+from .plan import CheckpointFormat, WeightPlan
 from .w8a8 import *
 from .w8a8gx import *
 from .deepgemm import *
@@ -22,13 +24,18 @@ SUPPORTED_EXPERT_DTYPES = tuple(EXPERT_DTYPE_TO_QUANT_TYPE)
 class Quantcfg:
     def __init__(self, network_config, quant_type="none", custom_cfg_path=None, expert_dtype=None):
         self.layer_num = network_config["n_layer"]
-        self.quant_type = quant_type
+        self.quant_type = deepcopy(quant_type)
+        self._explicit_selection = isinstance(quant_type, dict)
         self.start_args_expert_dtype = expert_dtype
         self.config_expert_dtype = network_config.get("expert_dtype", None)
         # Parse quant_cfg first so model config only fills missing per-layer fused_moe entries;
         # an explicit startup argument is applied afterward and overrides every layer.
         self._parse_custom_cfg(custom_cfg_path)
         self._parse_network_config(network_config)
+        self.checkpoint_format = CheckpointFormat.from_config(self.hf_quantization_config)
+        self.use_ue8m0_scales = (
+            self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
+        ) or os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ("ON", "TRUE", "1")
 
     def _get_expert_quant_type(self, expert_dtype):
         quant_type = EXPERT_DTYPE_TO_QUANT_TYPE.get(expert_dtype)
@@ -51,9 +58,7 @@ class Quantcfg:
         self.quantized_weight = True
         activation_scheme = network_config.get("activation_scheme", "dynamic")
         self.static_activation = activation_scheme == "static"
-        self.hf_quantization_config = hf_quantization_config
-        if hf_quantization_config.get("scale_fmt") == "ue8m0":
-            os.environ["LIGHTLLM_USE_UE8M0_SCALES"] = "1"
+        self.hf_quantization_config = deepcopy(hf_quantization_config)
         self.hf_quantization_method = hf_quantization_config["quant_method"]
         self._mapping_quant_method()
 
@@ -84,7 +89,7 @@ class Quantcfg:
     def _mapping_quant_method(self):
         if self.hf_quantization_method == "fp8":
             block_size = self.hf_quantization_config.get("weight_block_size", None)
-            if block_size == [128, 128]:
+            if block_size == [128, 128] and not self._explicit_selection:
                 from lightllm.common.quantization.deepgemm import HAS_DEEPGEMM
 
                 if HAS_DEEPGEMM:
@@ -95,9 +100,10 @@ class Quantcfg:
             self._mapping_expert_quant_method()
 
         elif self.hf_quantization_method == "awq":
-            self.quant_type = "awq"
-            if is_awq_marlin_compatible(self.hf_quantization_config):
-                self.quant_type = "awq_marlin"
+            if not self._explicit_selection:
+                self.quant_type = "awq"
+                if is_awq_marlin_compatible(self.hf_quantization_config):
+                    self.quant_type = "awq_marlin"
             logger.info(f"select awq quant way: {self.quant_type}")
         else:
             # TODO: more quant method
@@ -112,6 +118,7 @@ class Quantcfg:
             data = yaml.safe_load(file)
 
         self.quant_type = data["quant_type"]
+        self._explicit_selection = isinstance(self.quant_type, dict)
         for layer_quant_cfg in data.get("mix_bits", []):
             name = layer_quant_cfg["name"]
             layer_nums = layer_quant_cfg.get("layer_nums", range(self.layer_num))
@@ -122,12 +129,48 @@ class Quantcfg:
     def get_quant_type(self, layer_num, name):
         layer_config = self.quant_cfg.get(layer_num, None)
         if layer_config is None:
-            return self.quant_type
+            return QUANTMETHODS.resolve(self.quant_type)
         quant_type = layer_config.get(name, self.quant_type)
-        return quant_type
+        return QUANTMETHODS.resolve(quant_type)
+
+    def get_weight_plan(self, layer_num, name):
+        key = self.get_quant_type(layer_num, name)
+        selection = QUANTMETHODS.describe(key)
+        requested = self.quant_cfg.get(layer_num, {}).get(name, self.quant_type)
+        if isinstance(requested, dict):
+            checkpoint = self.checkpoint_format.encoding
+            if selection.weight_format.startswith("awq_"):
+                if checkpoint != "awq":
+                    raise ValueError(
+                        "AWQ representations require an AWQ checkpoint; online AWQ encoding is unavailable"
+                    )
+                if selection.implementation == "marlin" and not is_awq_marlin_compatible(self.hf_quantization_config):
+                    raise ValueError("the AWQ checkpoint is incompatible with Marlin packing")
+            elif checkpoint == "awq":
+                raise ValueError("AWQ checkpoints require an explicitly supported AWQ representation")
+            elif checkpoint == "fp8" and self.hf_quantization_config.get("weight_block_size") == [128, 128]:
+                if selection.weight_format != "fp8_block128":
+                    raise ValueError("block FP8 checkpoint scales require the matching weight representation")
+            if selection.weight_format == "fp4_group32" and not is_sm100_gpu():
+                raise ValueError("FP4 group32 execution requires SM100")
+        return WeightPlan(self.checkpoint_format, selection, key, self.use_ue8m0_scales)
 
     def get_quant_method(self, layer_num, name):
-        quant_type = self.get_quant_type(layer_num, name)
-        quant_method = QUANTMETHODS.get(quant_type)
-        quant_method.hf_quantization_config = self.hf_quantization_config
-        return quant_method
+        return self.get_weight_plan(layer_num, name).bind(QUANTMETHODS)
+
+    def content_identity(self):
+        def describe(layer, name):
+            plan = self.get_weight_plan(layer, name)
+            result = dict(semantics=QUANTMETHODS.content_key(plan.method_key))
+            if plan.method_key == "fp8w8a8-b128-deepgemm":
+                result["power_of_two_scales"] = plan.use_ue8m0_scales
+            return result
+
+        default = describe(-1, "")
+        overrides = {}
+        for layer, values in self.quant_cfg.items():
+            fields = {name: describe(layer, name) for name in values}
+            fields = {name: value for name, value in fields.items() if value != default}
+            if fields:
+                overrides[layer] = fields
+        return dict(checkpoint=self.checkpoint_format, default=default, overrides=overrides)

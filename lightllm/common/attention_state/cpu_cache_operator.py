@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import replace
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 from typing import TYPE_CHECKING, List
 
 import torch
 
 from lightllm.common.attention_state.types import StateTransferLayout
+from lightllm.common.attention_state.token_copy import TokenPageCopyPlan, TransferBatch
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
@@ -23,8 +24,39 @@ class CpuCacheOperator:
 
     def __init__(self, owner: AttentionStateManager):
         self.owner = owner
+        self._token_plans = {}
+        self._state_plans = {}
 
-    @lru_cache(maxsize=None)
+    def _bound_token_plans(self, pages, layouts, write):
+        cached = self._token_plans.get(write)
+        if cached is None or cached[0] is not pages or cached[1] != layouts:
+            plans, legacy = [], []
+            for state in self.owner.get_full_attention_states():
+                fields = state.get_transfer_fields()
+                if fields is None:
+                    legacy.append(state)
+                else:
+                    plans.append(TokenPageCopyPlan.bind(fields, layouts[state.state_name], pages, write))
+            cached = pages, dict(layouts), tuple(plans), tuple(legacy)
+            self._token_plans[write] = cached
+        return cached[2:]
+
+    def _bound_state_plans(self, pages, layouts, page_kind, write):
+        key = page_kind, write
+        cached = self._state_plans.get(key)
+        if cached is None or cached[0] is not pages or cached[1] != layouts:
+            plans = []
+            for state in self.owner.get_bounded_attention_states():
+                layout = layouts.get(state.state_name)
+                if layout is None:
+                    assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
+                    continue
+                plans.append(state.bind_cpu_copy(pages, layout, page_kind, write))
+            cached = pages, dict(layouts), tuple(plans)
+            self._state_plans[key] = cached
+        return cached[2]
+
+    @weak_cached_method
     def get_page_layouts(self) -> Mapping[str, StateTransferLayout]:
         page_tokens = get_env_start_args().cpu_cache_token_page_size
         assert page_tokens > 0, "CPU pages require a positive token capacity"
@@ -51,13 +83,15 @@ class CpuCacheOperator:
             offset = state_end
         return layouts
 
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_page_bytes(self) -> int:
         layouts = self.get_page_layouts()
         page_bytes = max((layout.byte_end for layout in layouts.values()), default=0)
         return (page_bytes + 15) // 16 * 16
 
     def clear_layout_cache(self) -> None:
+        self._token_plans.clear()
+        self._state_plans.clear()
         self.get_page_layouts.cache_clear()
         self.get_page_bytes.cache_clear()
 
@@ -77,7 +111,7 @@ class CpuCacheOperator:
             if all(cpu_page_ready_flags):
                 return
 
-        full_states = self.owner.get_full_attention_states()
+        token_plans, full_states = self._bound_token_plans(cpu_page_buffers, layouts, True)
         bounded_states = self.owner.get_bounded_attention_states()
         if bounded_states:
             big_page_slot_ids = [] if big_page_slot_ids is None else big_page_slot_ids
@@ -91,6 +125,14 @@ class CpuCacheOperator:
             big_page_readies = cpu_page_ready_flags[:big_page_count] if cpu_page_ready_flags is not None else None
             small_page_readies = cpu_page_ready_flags[big_page_count:] if cpu_page_ready_flags is not None else None
 
+        if token_plans:
+            batch = TransferBatch.prepare(
+                token_indices, cpu_page_indices, cpu_page_ready_flags, page_count=cpu_page_buffers.shape[0]
+            )
+            for plan in token_plans:
+                plan.validate_batch(batch)
+            for plan in token_plans:
+                plan.run(batch)
         for state in full_states:
             state.write_to_cpu(
                 token_indices=token_indices,
@@ -100,30 +142,13 @@ class CpuCacheOperator:
                 cpu_page_ready_flags=cpu_page_ready_flags,
             )
 
-        for state in bounded_states:
-            layout = layouts.get(state.state_name)
-            if layout is None:
-                # 某些压缩窗口在合法缓存边界不需要快照，因此可以不进入 CPU cache。
-                assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
-                continue
+        if bounded_states:
             if big_page_slot_ids:
-                state.write_state_pages_to_cpu(
-                    page_kind="big",
-                    page_slot_ids=big_page_slot_ids,
-                    cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=big_cpu_page_indices,
-                    layout=layout,
-                    cpu_page_ready_flags=big_page_readies,
-                )
+                for plan in self._bound_state_plans(cpu_page_buffers, layouts, "big", True):
+                    plan.run(big_page_slot_ids, big_cpu_page_indices, big_page_readies)
             if small_page_slot_ids:
-                state.write_state_pages_to_cpu(
-                    page_kind="small",
-                    page_slot_ids=small_page_slot_ids,
-                    cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=small_cpu_page_indices,
-                    layout=layout,
-                    cpu_page_ready_flags=small_page_readies,
-                )
+                for plan in self._bound_state_plans(cpu_page_buffers, layouts, "small", True):
+                    plan.run(small_page_slot_ids, small_cpu_page_indices, small_page_readies)
 
     def read_req(
         self,
@@ -136,7 +161,7 @@ class CpuCacheOperator:
         state_token_len: int | None = None,
     ) -> None:
         """读回请求页面，并从末页恢复 bounded 运行态。"""
-        full_states = self.owner.get_full_attention_states()
+        token_plans, full_states = self._bound_token_plans(cpu_page_buffers, layouts, False)
         bounded_states = self.owner.get_bounded_attention_states()
         if bounded_states:
             assert req_idx is not None and cpu_page_indices, "state recovery requires a target request and prefix pages"
@@ -151,6 +176,12 @@ class CpuCacheOperator:
             if has_partial_page:
                 load_big_page_slot_ids.append(self.owner.bounded_att_cpu_load_big_page_slot)
 
+        if token_plans:
+            batch = TransferBatch.prepare(token_indices, cpu_page_indices, page_count=cpu_page_buffers.shape[0])
+            for plan in token_plans:
+                plan.validate_batch(batch)
+            for plan in token_plans:
+                plan.run(batch)
         for state in full_states:
             state.read_from_cpu(
                 cpu_page_buffers=cpu_page_buffers,
@@ -159,18 +190,9 @@ class CpuCacheOperator:
                 layout=layouts[state.state_name],
             )
 
-        for state in bounded_states:
-            if state.state_name not in layouts:
-                assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
-                continue
-            state.read_state_pages_from_cpu(
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                big_page_slot_ids=load_big_page_slot_ids,
-                layout=layouts[state.state_name],
-            )
-
         if bounded_states:
+            for plan in self._bound_state_plans(cpu_page_buffers, layouts, "big", False):
+                plan.run(load_big_page_slot_ids, cpu_page_indices)
             self.owner.restore_bounded_att_runtime_from_pages(
                 req_indices=[req_idx],
                 state_token_lens=[state_token_len],

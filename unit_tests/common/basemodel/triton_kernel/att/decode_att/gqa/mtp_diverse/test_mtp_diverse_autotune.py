@@ -264,7 +264,9 @@ def test_full_autotune_before_graph_and_cached_reuse(tmp_path, monkeypatch, kv_l
         return out
 
     graph = graph_module.CudaGraph(1, 7, 1, max_batch_size=7, max_len_in_batch=32768)
-    graph.capture_decode(decode, SimpleNamespace(input_ids=torch.ones(7, device="cuda")))
+    graph.capture_decode(
+        decode, SimpleNamespace(input_ids=torch.ones(7, device="cuda"), prepare_attention_capture=lambda: None)
+    )
     torch.cuda.synchronize()
     assert rebuild_count == 1 and benchmark_count == len(kernel.configs_gen_func())
     assert valid_benchmark_count > 0

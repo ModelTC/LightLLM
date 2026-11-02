@@ -114,14 +114,10 @@ def test_full_attention_write_copy_and_pd(
     def reject_host_list(tensor: torch.Tensor):
         raise AssertionError("token copies must not convert indices to Python lists")
 
-    if device == "cuda":
-        with monkeypatch.context() as patch:
-            patch.setattr(torch.Tensor, "tolist", reject_host_list)
-            state.copy_full_att_tokens(ids, torch.tensor([8, 9], dtype=torch.int32, device=device))
-        assert torch.equal(read_kv_storage(state)[:, [1, 3]], read_kv_storage(state)[:, [8, 9]])
-    else:
-        with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
-            state.copy_full_att_tokens(ids, torch.tensor([8, 9], dtype=torch.int32, device=device))
+    with monkeypatch.context() as patch:
+        patch.setattr(torch.Tensor, "tolist", reject_host_list)
+        state.copy_full_att_tokens(ids, torch.tensor([8, 9], dtype=torch.int32, device=device))
+    assert torch.equal(read_kv_storage(state)[:, [1, 3]], read_kv_storage(state)[:, [8, 9]])
     layout = layout_for(state)
     pages = torch.full(
         size=(3, layout.byte_end),
@@ -129,22 +125,6 @@ def test_full_attention_write_copy_and_pd(
         dtype=torch.uint8,
         device=device,
     )
-    if device == "cpu":
-        with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            state.write_to_pd_page(
-                token_indices=ids,
-                pd_page_buffers=pages,
-                pd_page_index=1,
-                layout=layout,
-            )
-        with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            state.read_from_pd_page(
-                pd_page_buffers=pages,
-                token_indices=ids,
-                pd_page_index=1,
-                layout=layout,
-            )
-        return
     state.write_to_pd_page(
         token_indices=ids,
         pd_page_buffers=pages,
@@ -222,7 +202,7 @@ def test_invalid_late_region_shape_cannot_partially_write_pd_page():
         dtype=torch.uint8,
         device="cuda",
     )
-    with pytest.raises(RuntimeError, match="shape"):
+    with pytest.raises(ValueError, match="field representation"):
         state.write_to_pd_page(
             token_indices=torch.tensor([0], dtype=torch.long, device="cuda"),
             pd_page_buffers=buffer.unsqueeze(0),
@@ -250,14 +230,6 @@ def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int)
         storage_buffer.copy_(torch.arange(storage_buffer.numel(), device=device).reshape_as(storage_buffer))
     for storage_buffer in full_state_test_buffers(target).values():
         storage_buffer.fill_(-1)
-    if device == "cpu":
-        with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
-            target.copy_tokens_from_dp(
-                src_token_indices=torch.tensor([2, 0]),
-                dst_token_indices=torch.tensor([6, 7]),
-                remote_dp_full_att_state=source,
-            )
-        return
     target.copy_tokens_from_dp(
         src_token_indices=torch.tensor([2, 0], dtype=torch.long, device=device),
         dst_token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
@@ -274,7 +246,7 @@ def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int)
     single_layer_source.allocate_storage(12)
     for storage_buffer in full_state_test_buffers(single_layer_source).values():
         storage_buffer.fill_(9)
-    with pytest.raises(AssertionError, match="equivalent TP state configurations"):
+    with pytest.raises(ValueError, match="equivalent representations, shards and layer groups"):
         target.copy_tokens_from_dp(
             src_token_indices=torch.tensor([2, 0], dtype=torch.long, device=device),
             dst_token_indices=torch.tensor([8, 9], dtype=torch.long, device=device),

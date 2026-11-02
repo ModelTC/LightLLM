@@ -69,6 +69,18 @@ def test_supported_models_pass_startup_validation(launch_args, output_constraint
         _launch_subprocesses(args)
 
 
+@pytest.mark.parametrize("phase", ["prefill", "decode"])
+@pytest.mark.parametrize("dp", [1, 2])
+def test_microbatch_overlap_requires_a_runner_with_two_batches(launch_args, phase, dp):
+    args = launch_args("qwen3_5_text", tp=dp, dp=dp, **{f"enable_{phase}_microbatch_overlap": True})
+    if dp == 1:
+        with pytest.raises(AssertionError, match="DP runner"):
+            _launch_subprocesses(args)
+    else:
+        with pytest.raises(RuntimeError, match="startup validation passed"):
+            _launch_subprocesses(args)
+
+
 @pytest.mark.parametrize(
     "model_type,disable_mm,disable_vision,batch_tokens,passes",
     [

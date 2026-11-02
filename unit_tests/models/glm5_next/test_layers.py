@@ -8,7 +8,10 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
+from lightllm.common.basemodel.attention.nsa.glm5_next import (
+    Glm5NextSparsePrefillState,
+    Glm5NextSparseDecodeState,
+)
 from lightllm.common.quantization import Quantcfg
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
@@ -61,7 +64,12 @@ def config():
         "index_head_dim": 128,
         "index_topk": 2048,
         "index_kpool": 4,
-        "linear_attn_config": {"num_heads": 4, "head_dim": 128, "short_conv_kernel_size": 4, "kda_layers": [0, 1, 2]},
+        "linear_attn_config": {
+            "num_heads": 4,
+            "head_dim": 128,
+            "short_conv_kernel_size": 4,
+            "kda_layers": [0, 1, 2],
+        },
         "layer_types": ["linear_attention"] * 3 + ["deepseek_sparse_attention"],
         "mhc": False,
         "n_routed_experts": 4,
@@ -95,7 +103,16 @@ def test_kda_projections_need_no_sparse_attention_config(config):
     weight = Glm5NextTransformerLayerWeight(0, torch.bfloat16, config, Quantcfg(config))
     projections = {
         name: random_weight(size, 128)
-        for name, size in {"q": 512, "k": 512, "v": 512, "b": 4, "f_a": 128, "g_a": 128, "f_b": 512, "g_b": 512}.items()
+        for name, size in {
+            "q": 512,
+            "k": 512,
+            "v": 512,
+            "b": 4,
+            "f_a": 128,
+            "g_a": 128,
+            "f_b": 512,
+            "g_b": 512,
+        }.items()
     }
     weight.load_hf_weights(
         {f"model.language_model.layers.0.self_attn.{name}_proj.weight": value for name, value in projections.items()}
@@ -175,6 +192,11 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
         get_state=lambda **kwargs: SimpleNamespace(get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv))
     )
     state.prefill_att_state = Glm5NextSparsePrefillState()
+    from lightllm.common.basemodel.attention.contracts import ResourceId
+    from lightllm.common.basemodel.attention.sparse import BoundSparse
+
+    layer.attention = BoundSparse(ResourceId("main", 3), kv, layer.softmax_scale, 512, 0)
+    state.attention_metadata = (state.prefill_att_state,)
     state.b1_cu_q_seq_len = torch.arange(4, device="cuda", dtype=torch.int32)
     state.max_q_seq_len = 1
     state.decode_att_state = Glm5NextSparseDecodeState(
@@ -191,6 +213,7 @@ def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     expected = torch.stack(expected)
     prefill = layer._context_attention_kernel(q, None, state, weight)
     state.get_topk_indices_params = {"hidden_states": None, "q_lora": None}
+    state.attention_metadata = (state.decode_att_state,)
     decode = layer._token_attention_kernel(q, state, weight)
     for output in (prefill, decode):
         torch.testing.assert_close(output.float(), expected, atol=1e-3, rtol=0.015)
@@ -422,8 +445,8 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
     for model in (main, *drafts):
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     main.prepare_attention_states()
-    assert main.att_state_manager.main_kda_conv_bf16_ssm_fp32_state.conv_state.is_cuda
-    assert main.att_state_manager.main_compressor_indexer_w4_s4_bf16_state.buffer.is_cuda
+    assert main.att_state_manager.main_kda_conv_bf16_ssm_fp32_state.conv_state.is_meta
+    assert main.att_state_manager.main_compressor_indexer_w4_s4_bf16_state.buffer.is_meta
     for step, draft in enumerate(drafts):
         draft.prepare_attention_states()
         assert draft.att_state_manager is main.att_state_manager
@@ -435,7 +458,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         assert state.config.logical_layer_groups == ((4 + step,),)
         assert state.state_name == f"draft{step}_mla_packed_bf16_state"
         assert draft.prefill_att_backend1 is None and draft.decode_att_backend1 is None
-        assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_cuda
+        assert getattr(draft.att_state_manager, f"draft{step}_compressor_indexer_w4_s4_bf16_state").buffer.is_meta
 
     # NoPE state initialization must not require a model-owned RoPE cache.
     for model in (main, *drafts):

@@ -58,9 +58,10 @@ def test_shared_registration_lives_until_last_view(
     unregistered = []
     unregister = utils._unregister_page_pool_storage
 
-    def record_unregister(ptr: int, device_id: int) -> None:
-        unregistered.append(ptr)
-        unregister(ptr=ptr, device_id=device_id)
+    def record_unregister(storage, device_id: int) -> None:
+        unregistered.append(storage.data_ptr())
+        assert storage.nbytes() == 4096 * 4
+        unregister(storage=storage, device_id=device_id)
 
     monkeypatch.setattr(utils, "_unregister_page_pool_storage", record_unregister)
     tensor = utils.create_page_pool_tensor(size=(4096,), dtype=torch.float32)

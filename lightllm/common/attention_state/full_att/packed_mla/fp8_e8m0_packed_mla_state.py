@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 
 from dataclasses import dataclass
 from typing import ClassVar
@@ -12,10 +12,8 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 
 from ...utils import deepcopy_result
-from ...types import AxisMapping, StateTransferLayout, TransferRegion
+from ...types import AxisMapping, StateTransferLayout, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-from ..dp_transfer import copy_packed_tokens
-from ..packed_mla.packed_transfer import transfer_packed_pages
 from ..packed_mla.packed_mla_state import PackedMLALayerView
 
 
@@ -62,6 +60,8 @@ class FP8E8M0PackedMLAState(FullAttentionState):
     # 一、资源定义与初始化
     # ========================================================================
 
+    storage_fields = ("storage",)
+
     def __init__(
         self,
         layout_config: FP8E8M0PackedMLAConfig,
@@ -94,6 +94,12 @@ class FP8E8M0PackedMLAState(FullAttentionState):
             device=self.device,
         )
 
+    def get_transfer_fields(self):
+        return {"kv": TensorField(self.storage[..., : self.config.payload_bytes], ("layer", "token", "head", "dim"))}
+
+    def get_token_copy_fields(self):
+        return {"packed": TensorField(self.storage, ("layer", "token", "head", "byte"))}
+
     def get_token_bytes(self) -> int:
         """返回当前 TP rank 的单 token 开销，包含全部物理层和行尾 padding。"""
         return len(self.config.logical_layer_groups) * self.config.token_bytes
@@ -118,154 +124,30 @@ class FP8E8M0PackedMLAState(FullAttentionState):
             indexer_k=row[..., self.config.KV_BYTES : self.config.payload_bytes],
         )
 
-    def write_full_att_kv(
-        self,
-        logical_layer_id: int,
-        token_indices: torch.Tensor,
-        kv: torch.Tensor,
-    ) -> None:
-        """使用固定 group64/E8M0 算子量化并写入 KV，保留 indexer 和行尾 padding。"""
-        from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import (
-            write_fp8_e8m0_packed_kv,
-        )
+    def bind_kv_writer(self, logical_layer_id: int):
+        from lightllm.common.basemodel.attention.writers import bind_e8m0_writer
 
-        assert token_indices.is_cuda, "token indices must reside on CUDA"
-        if token_indices.numel() == 0:
-            return
-        write_fp8_e8m0_packed_kv(
-            kv=kv,
-            token_indices=token_indices,
-            packed_kv=self.get_layer_view(logical_layer_id=logical_layer_id).kv,
-        )
-
-    def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
-        """按 CUDA 索引复制完整物理行，包含 indexer、scale 和 padding；两组索引不得重叠。"""
-        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
-
-        assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
-        if src_indices.numel() == 0:
-            return
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.storage,
-        )
+        return bind_e8m0_writer(self.get_layer_view(logical_layer_id).kv)
 
     # ========================================================================
     # 三、CPU Cache：按 token 搬运整份有效编码
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回 CPU 页中的完整有效 token 编码，包含 indexer，不包含 GPU 行尾 padding。"""
         return self._get_transfer_regions(page_tokens=get_env_start_args().cpu_cache_token_page_size)
-
-    def write_to_cpu(
-        self,
-        token_indices: torch.Tensor,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: list[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """直接写出 KV、E8M0 scale 和 indexer；已就绪的 CPU 页面保持不变。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_packed_pages(
-            kv_storage=self.storage[..., : self.config.payload_bytes],
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            write=True,
-            page_readies=cpu_page_ready_flags,
-        )
-
-    def read_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: list[int],
-        token_indices: torch.Tensor,
-        layout: StateTransferLayout,
-    ) -> None:
-        """从 CPU 页恢复完整有效 token 编码，支持末页只恢复部分 token。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_packed_pages(
-            kv_storage=self.storage[..., : self.config.payload_bytes],
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            write=False,
-        )
-
-    # ========================================================================
-    # 四、DP 迁移：复制相同编码的完整物理行
-    # ========================================================================
-
-    def copy_tokens_from_dp(
-        self,
-        src_token_indices: torch.Tensor,
-        dst_token_indices: torch.Tensor,
-        remote_dp_full_att_state: FP8E8M0PackedMLAState,
-    ) -> None:
-        """从其他 DP 的同一 TP 分片复制完整 token 数据，由调用方提供可访问的 CUDA 索引。"""
-        assert (
-            type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config
-        ), "DP copy requires the same encoding and equivalent TP state configurations"
-        assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
-        copy_packed_tokens(
-            src_storage=remote_dp_full_att_state.storage,
-            dst_storage=self.storage,
-            src_token_indices=src_token_indices,
-            dst_token_indices=dst_token_indices,
-        )
 
     # ========================================================================
     # 五、PD 分离：传输固定的完整 token 编码
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回固定 FP8/E8M0 格式的 PD 页描述，由管理器安排联合页偏移。"""
         return self._get_transfer_regions(page_tokens=get_env_start_args().pd_kv_page_size)
-
-    def write_to_pd_page(
-        self,
-        token_indices: torch.Tensor,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """将完整有效 token 编码写入指定 PD 页，网络发送与同步由调用方负责。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_packed_pages(
-            kv_storage=self.storage[..., : self.config.payload_bytes],
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            write=True,
-        )
-
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        token_indices: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """从指定 PD 页恢复完整有效 token 编码，保留其他 token 与行尾 padding。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_packed_pages(
-            kv_storage=self.storage[..., : self.config.payload_bytes],
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            write=False,
-        )
 
     # ========================================================================
     # 六、私有辅助：固定 packed 编码作为一个区域传输

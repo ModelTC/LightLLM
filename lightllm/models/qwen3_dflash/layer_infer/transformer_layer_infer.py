@@ -1,4 +1,5 @@
 import torch
+from dataclasses import replace
 
 from lightllm.common.basemodel.triton_kernel.norm.qk_norm import qk_rmsnorm_forward
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
@@ -19,6 +20,9 @@ class Qwen3DFlashTransformerLayerInfer(LlamaTransformerLayerInfer):
         super().__init__(layer_num, network_config)
         self.head_dim_ = network_config["head_dim"]
         self.partial_rotary_factor = network_config.get("partial_rotary_factor", 1.0)
+
+    def get_attention_spec(self, resource, dtype):
+        return replace(super().get_attention_spec(resource, dtype), causal=False)
 
     def context_forward(
         self,

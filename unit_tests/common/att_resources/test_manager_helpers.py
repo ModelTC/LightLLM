@@ -36,11 +36,14 @@ def composition(device: str | torch.device | int = "cpu"):
 def layouts_for(manager: AttentionStateManager, kind: str = "cpu"):
     layouts = []
     if kind != "att_state":
-        layouts += [layout_for(state) for state in (manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)]
+        layouts += [layout_for(state) for state in (manager.main_gqa_fp32_h1_d4_state, manager.draft0_mla_fp32_state)]
     if kind != "kv":
         layouts += [
             page_layout(state)
-            for state in (manager.main_kda_conv_fp32_ssm_fp32_state, manager.draft0_gdn_conv_fp32_ssm_fp32_state)
+            for state in (
+                manager.main_kda_conv_fp32_ssm_fp32_state,
+                manager.draft0_gdn_conv_fp32_ssm_fp32_state,
+            )
         ]
 
     offset = 0
@@ -61,7 +64,7 @@ def layouts_for(manager: AttentionStateManager, kind: str = "cpu"):
 
 
 def init_source(manager: AttentionStateManager):
-    for i, state in enumerate((manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)):
+    for i, state in enumerate((manager.main_gqa_fp32_h1_d4_state, manager.draft0_mla_fp32_state)):
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.copy_(
                 torch.arange(storage_buffer.numel(), device=storage_buffer.device).reshape_as(storage_buffer) + i
@@ -143,9 +146,9 @@ def test_cpu_restore_forwards_absolute_length_for_partial_prefix(monkeypatch: py
     layouts = layouts_for(manager)
     manager.bounded_att_cpu_load_big_page_slot = 2
     for state in manager.get_full_attention_states():
+        monkeypatch.setattr(state, "get_transfer_fields", lambda: None)
         monkeypatch.setattr(state, "read_from_cpu", lambda **kwargs: None)
-    for state in manager.get_bounded_attention_states():
-        monkeypatch.setattr(state, "read_state_pages_from_cpu", lambda **kwargs: None)
+    monkeypatch.setattr(manager.get_cpu_cache_operator(), "_bound_state_plans", lambda *args: ())
     restored = []
 
     def record_restore(

@@ -352,6 +352,8 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
     meta.page_num = 2
     client = cpu_cache_factory(meta)
     pages, _ = client.allocate_pages([11, 22], disk_offload_enable=False)
+
+    client.recycle_pages([pages[1]])
     client.cpu_kv_cache_tensor[pages[0]].fill_(123)
     client.update_pages_status_to_ready([pages[0]], deref=False)
     slots = resources.bounded_att_big_page_allocator.alloc(2) if hybrid else None

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 from typing import Any, List
 
 import torch
@@ -25,17 +25,17 @@ class CoreInterface(ABC):
         返回小写 snake_case 的“算法＋存储方案”，不带 full_att/bounded_att 类别前缀，
         也不带 main/draftN 角色或最终的 _state；类别由 Python State 类型表达。
         管理器统一生成 state_name = f"{model_role}_{get_state_type()}_state"，与成员名完全一致。
-        同角色下不同算法、精度或量化方案必须使用不同标记，同方案的全部逻辑层放在同一实例。
+        同角色下不同算法、精度或量化方案使用不同标记；同方案的多个实例由管理器追加成员名后缀。
         层号、容量、设备、TP rank 和请求信息不进入名称；完整布局仍由 config 描述。
         注册后返回值保持稳定，实际分配与 CPU/DP/PD 传输均使用相同标记。
 
-        - GQA 浮点 KV：gqa_{bf16|fp16|fp32}。
-        - GQA 分组量化：gqa_int{4|8}_group{分组大小}_{scale精度}_scale。
-        - GQA 静态 FP8：gqa_fp8_static_{per_tensor|per_head}。
+        - GQA 浮点 KV：gqa_{bf16|fp16|fp32}_h{全局KV头数}_d{head_dim}。
+        - GQA 分组量化：gqa_int{4|8}_group{分组大小}_{scale精度}_scale_h{全局KV头数}_d{head_dim}。
+        - GQA 静态 FP8：gqa_fp8_static_{per_tensor|per_head}_h{全局KV头数}_d{head_dim}。
         - MLA 浮点：mla_{精度}；KV/indexer 联合存储：mla_packed_{精度}。
         - MLA packed FP8：mla_packed_fp8_group128，或 mla_packed_fp8_group64_e8m0。
         - 序列压缩历史：compressed_c{压缩比例}_fp8_group64_e8m0。
-        例如 gqa_int8_group128_bf16_scale 对应 main_gqa_int8_group128_bf16_scale_state。
+        例如 gqa_bf16_h8_d128 对应 main_gqa_bf16_h8_d128_state。
         新量化实现必须区分影响方案选择的位宽、分组、scale 方式及精度，不编码标定数值。
         """
         ...
@@ -70,18 +70,15 @@ class CoreInterface(ABC):
         raise NotImplementedError()
 
     @abstractmethod
-    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: Any) -> None:
-        """向已分配位置写入一层 KV，并完成该布局要求的编码、量化和关联参数更新。
+    def bind_kv_writer(self, logical_layer_id: int):
 
-        融合压缩等专用写入路径可直接使用计算视图，不调用本接口。
-        """
         raise NotImplementedError()
 
     @abstractmethod
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制全部所辖层的完整 token 数据，包含动态 scale、indexer 字段，保持原存储表示。
 
-        源和目标索引为存储设备上的等长一维 CUDA 整数 Tensor，位置不重叠，直接使用原 dtype 和 stride。"""
+        源和目标索引为存储执行域上的等长一维整数 Tensor，位置不重叠，直接使用原 dtype 和 stride。"""
         raise NotImplementedError()
 
 
@@ -92,7 +89,7 @@ class CpuCacheInterface(ABC):
 
     @abstractmethod
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 cpu_cache_token_page_size 返回 CPU 字段、全局形状和 TP 切片。
 
@@ -143,7 +140,7 @@ class DpCopyInterface(ABC):
     ) -> None:
         """复制其他 DP 同一 TP 分片的完整 token 数据，包含量化参数及 indexer 字段。
 
-        源、目标索引须已位于各自存储的 CUDA 设备，可为 int32/int64；接口不转换设备或 dtype。
+        源、目标索引须与存储处于同一 CPU/CUDA 执行域，可为 int32/int64；接口不转换设备或 dtype。
         调用方保证 peer/IPC 可访问、源数据就绪、目标索引唯一，且源目标数据区域不重叠。
         """
         raise NotImplementedError()
@@ -156,7 +153,7 @@ class PdInterface(ABC):
 
     @abstractmethod
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 pd_kv_page_size 返回 PD 字段、全局形状和 TP 切片，区域偏移相对本 State 起点。
 

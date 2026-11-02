@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
 from math import prod
@@ -11,10 +11,8 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 from ...utils import deepcopy_result, dtype_name
-from ...types import AxisMapping, TransferRegion
+from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-from .group_quantized_transfer import transfer_group_quantized_pages
-from ..dp_transfer import copy_group_quantized_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -81,6 +79,8 @@ class GroupQuantizedAttentionConfig:
 class GroupQuantizedFullAttentionState(FullAttentionState):
     """管理 INT4/INT8 KV 与逐 token 分组 scale，复制和传输始终覆盖二者。"""
 
+    storage_fields = ("k_storage", "v_storage", "k_scales", "v_scales")
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
@@ -110,9 +110,10 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         self.v_scales: torch.Tensor | None = None
 
     def get_state_type(self) -> str:
-        """返回量化位数、分组大小及 scale 精度对应的存储方案标记。"""
+        """返回量化方案及全局 head 布局对应的存储方案标记。"""
         return (
             f"gqa_int{self.config.bits}_group{self.config.group_size}_{dtype_name(dtype=self.config.scale_dtype)}_scale"
+            f"_h{self.config.global_head_num}_d{self.config.head_dim}"
         )
 
     def allocate_storage(self, token_capacity: int) -> None:
@@ -129,6 +130,33 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         )
         self.k_scales = torch.empty(size=shape, dtype=self.config.scale_dtype, device=self.device)
         self.v_scales = torch.empty(size=shape, dtype=self.config.scale_dtype, device=self.device)
+
+    def get_transfer_fields(self):
+        return {
+            "k": TensorField(self.k_storage, ("layer", "token", "head", "dim")),
+            "v": TensorField(self.v_storage, ("layer", "token", "head", "dim")),
+            "k_scale": TensorField(self.k_scales, ("layer", "token", "head", "group")),
+            "v_scale": TensorField(self.v_scales, ("layer", "token", "head", "group")),
+        }
+
+    def get_attention_format(self):
+        from lightllm.common.basemodel.attention.contracts import KVFormat
+
+        config = self.config
+        return KVFormat(
+            f"int{config.bits}",
+            self.storage_dtype,
+            config.global_head_num,
+            config.head_num,
+            config.head_dim,
+            self.page_size,
+            config.tp_rank,
+            config.tp_world_size,
+            config.replicated,
+            group_size=config.group_size,
+            scale_dtype=config.scale_dtype,
+            packing="adjacent_low_nibble_first_offset7" if config.bits == 4 else "signed_int8",
+        )
 
     def get_token_bytes(self) -> int:
         """累计量化 KV 编码与逐 token 分组 scale 的开销，无需分配存储。"""
@@ -159,82 +187,11 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
             self.v_scales[storage_layer_index],
         )
 
-    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
-        """量化输入浮点 K/V，并将编码数据和分组 scale 写入相同 token 位置。"""
-        assert token_indices.is_cuda, "token indices must reside on CUDA"
-        storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        if not len(token_indices):
-            return
-        assert self.k_storage.is_cuda, "KV writes require CUDA storage"
-        # TODO：融合 K/V 两次量化写入，同时输出各自编码和动态 scale，保持分组及舍入语义。
-        # K/V 分别写入独立存储，各自携带同一 token 的动态 scale。
-        for offset, storage, scales_buffer in (
-            (0, self.k_storage, self.k_scales),
-            (self.config.head_num, self.v_storage, self.v_scales),
-        ):
-            values = kv[:, offset : offset + self.config.head_num]
-            if self.config.bits == 4:
-                from lightllm.common.basemodel.triton_kernel.kv_copy.ppl_int4kv_copy_kv import destindex_copy_int4kv
+    def bind_kv_writer(self, logical_layer_id: int):
+        from lightllm.common.basemodel.attention.writers import bind_group_quantized_writer
 
-                destindex_copy_int4kv(
-                    KV=values,
-                    DestLoc=token_indices,
-                    KV_buffer=storage[storage_layer_index],
-                    KV_scale_buffer=scales_buffer[storage_layer_index],
-                    quant_group_size=self.config.group_size,
-                )
-            else:
-                from lightllm.common.basemodel.triton_kernel.kv_copy.ppl_int8kv_copy_kv import (
-                    destindex_copy_quantize_kv,
-                )
-
-                destindex_copy_quantize_kv(
-                    K=values,
-                    DestLoc=token_indices,
-                    Out=storage[storage_layer_index],
-                    Out_scale=scales_buffer[storage_layer_index],
-                    quant_group_dim=self.config.group_size,
-                )
-
-    def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
-        """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
-        assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
-        assert (
-            src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
-        ), "token copies require equal one-dimensional index tensors"
-        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (
-            torch.int32,
-            torch.int64,
-        ), "token indices must be integer tensors"
-        assert self.k_storage.is_cuda, "token copies require CUDA storage"
-        if not src_indices.numel():
-            return
-        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
-
-        # 直接使用调用方提供的 CUDA 索引，保留原 dtype 和 stride。
-        # 按字节直接从源槽位写到目标槽位，覆盖量化 scale 和 packed padding，不创建中间 KV。
-        # 调用方保证源、目标集合不相交，且目标索引不重复，避免并行读写竞争。
-        # TODO：将 K/V 编码及各自的动态 scale 的同索引 token 复制融合为一次 kernel 发射，
-        # 保持原始字节编码及各字段 stride，仍要求源目标不重叠、目标索引不重复。
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.k_storage,
-        )
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.v_storage,
-        )
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.k_scales,
-        )
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.v_scales,
+        return bind_group_quantized_writer(
+            *self.get_layer_view(logical_layer_id), self.config.bits, self.config.group_size
         )
 
     # ========================================================================
@@ -242,7 +199,7 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小返回字段区间与 TP 切片，作为 CPU 页容量计算依据。
 
@@ -251,135 +208,20 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         page_tokens = get_env_start_args().cpu_cache_token_page_size
         return self._get_transfer_regions(page_tokens=page_tokens)
 
-    def write_to_cpu(
-        self,
-        token_indices: torch.Tensor,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_group_quantized_pages(
-            k_storage=self.k_storage,
-            v_storage=self.v_storage,
-            k_scales=self.k_scales,
-            v_scales=self.v_scales,
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            write=True,
-            page_readies=cpu_page_ready_flags,
-        )
-
-    def read_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        token_indices: torch.Tensor,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_group_quantized_pages(
-            k_storage=self.k_storage,
-            v_storage=self.v_storage,
-            k_scales=self.k_scales,
-            v_scales=self.v_scales,
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            write=False,
-        )
-
     # ========================================================================
     # 四、DP 迁移
     # ========================================================================
-
-    def copy_tokens_from_dp(
-        self,
-        src_token_indices: torch.Tensor,
-        dst_token_indices: torch.Tensor,
-        remote_dp_full_att_state: GroupQuantizedFullAttentionState,
-    ) -> None:
-        """校验量化位数和分组大小，再复制 KV 与动态 scale。"""
-        assert (
-            remote_dp_full_att_state.config.bits,
-            remote_dp_full_att_state.config.group_size,
-        ) == (self.config.bits, self.config.group_size), "incompatible group quantization"
-        assert (
-            type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config
-        ), "DP copy requires the same encoding and equivalent TP state configurations"
-        assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
-        assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        copy_group_quantized_tokens(
-            src_k_storage=remote_dp_full_att_state.k_storage,
-            src_v_storage=remote_dp_full_att_state.v_storage,
-            src_k_scales=remote_dp_full_att_state.k_scales,
-            src_v_scales=remote_dp_full_att_state.v_scales,
-            dst_k_storage=self.k_storage,
-            dst_v_storage=self.v_storage,
-            dst_k_scales=self.k_scales,
-            dst_v_scales=self.v_scales,
-            src_token_indices=src_token_indices,
-            dst_token_indices=dst_token_indices,
-        )
 
     # ========================================================================
     # 五、PD 分离传输
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 PD 页大小返回字段与切片，交由管理器安排其在联合页中的位置。"""
         page_tokens = get_env_start_args().pd_kv_page_size
         return self._get_transfer_regions(page_tokens=page_tokens)
-
-    def write_to_pd_page(
-        self,
-        token_indices: torch.Tensor,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_group_quantized_pages(
-            k_storage=self.k_storage,
-            v_storage=self.v_storage,
-            k_scales=self.k_scales,
-            v_scales=self.v_scales,
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            write=True,
-        )
-
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        token_indices: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_group_quantized_pages(
-            k_storage=self.k_storage,
-            v_storage=self.v_storage,
-            k_scales=self.k_scales,
-            v_scales=self.v_scales,
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            write=False,
-        )
 
     # ========================================================================
     # 六、私有辅助实现

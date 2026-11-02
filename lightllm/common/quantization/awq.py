@@ -66,7 +66,9 @@ class AWQBaseQuantizationMethod(QuantizationMethod):
         return "awq-base"
 
 
-@QUANTMETHODS.register("awq", platform="cuda")
+@QUANTMETHODS.register(
+    "awq", platform="cuda", weight_format="awq_int4_gemm", activation_format="plain", implementation="vllm"
+)
 class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -135,7 +137,9 @@ class AWQW4A16QuantizationMethod(AWQBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register("awq_marlin", platform="cuda")
+@QUANTMETHODS.register(
+    "awq_marlin", platform="cuda", weight_format="awq_int4_marlin", activation_format="plain", implementation="marlin"
+)
 class AWQMARLINW4A16QuantizationMethod(AWQBaseQuantizationMethod):
     def __init__(self):
         super().__init__()

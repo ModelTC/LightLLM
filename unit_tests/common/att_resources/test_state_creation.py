@@ -35,11 +35,11 @@ from lightllm.common.attention_state.bounded_att import WindowCompressorStateCon
 @pytest.mark.parametrize(
     "kv_type, expected_type, storage_dtype, width",
     [
-        ("None", "gqa_bf16", torch.bfloat16, 128),
-        ("int4kv", "gqa_int4_group16_bf16_scale", torch.int8, 64),
-        ("int8kv", "gqa_int8_group16_bf16_scale", torch.int8, 128),
-        ("fp8kv_spt", "gqa_fp8_static_per_tensor", torch.uint8, 128),
-        ("fp8kv_sph", "gqa_fp8_static_per_head", torch.uint8, 128),
+        ("None", "gqa_bf16_h8_d128", torch.bfloat16, 128),
+        ("int4kv", "gqa_int4_group16_bf16_scale_h8_d128", torch.int8, 64),
+        ("int8kv", "gqa_int8_group16_bf16_scale_h8_d128", torch.int8, 128),
+        ("fp8kv_spt", "gqa_fp8_static_per_tensor_h8_d128", torch.uint8, 128),
+        ("fp8kv_sph", "gqa_fp8_static_per_head_h8_d128", torch.uint8, 128),
     ],
 )
 def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(

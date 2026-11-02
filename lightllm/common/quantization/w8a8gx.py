@@ -37,7 +37,13 @@ class _BaseQuantizationMethod(QuantizationMethod):
         raise NotImplementedError("Not implemented")
 
 
-@QUANTMETHODS.register(["fp8w8a8g128-triton", "fp8w8a8g128"], platform="cuda")
+@QUANTMETHODS.register(
+    ["fp8w8a8g128-triton", "fp8w8a8g128"],
+    platform="cuda",
+    weight_format="fp8_per_channel",
+    activation_format="fp8_group128",
+    implementation="triton",
+)
 class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -137,7 +143,13 @@ class FP8w8a8g128QuantizationMethod(_BaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register(["fp8w8a8g64-triton", "fp8w8a8g64"], platform="cuda")
+@QUANTMETHODS.register(
+    ["fp8w8a8g64-triton", "fp8w8a8g64"],
+    platform="cuda",
+    weight_format="fp8_per_channel",
+    activation_format="fp8_group64",
+    implementation="triton",
+)
 class FP8w8a8g64QuantizationMethod(FP8w8a8g128QuantizationMethod):
     def __init__(self):
         super().__init__()

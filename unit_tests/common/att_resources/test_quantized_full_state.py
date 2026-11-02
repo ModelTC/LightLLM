@@ -164,70 +164,45 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
         )
     layout = transfer_layout(source)
     cpu = torch.zeros((2, layout.byte_end), dtype=torch.uint8, pin_memory=device == "cuda")
-    if device == "cpu":
-        with pytest.raises(AssertionError, match="CUDA State storage"):
-            source.write_to_cpu(
-                token_indices=torch.tensor([0, 1, 2, 3, 4], device=device),
-                cpu_page_buffers=cpu,
-                cpu_page_indices=[1, 0],
-                layout=layout,
-            )
-    else:
-        source.write_to_cpu(
-            token_indices=torch.tensor([0, 1, 2, 3, 4], dtype=torch.long, device=device),
-            cpu_page_buffers=cpu,
-            cpu_page_indices=[1, 0],
-            layout=layout,
-        )
-        if device == "cuda":
-            torch.cuda.synchronize()
-        target.read_from_cpu(
-            cpu_page_buffers=cpu,
-            cpu_page_indices=[1, 0],
-            token_indices=torch.tensor([1, 2, 3, 4, 5], dtype=torch.long, device=device),
-            layout=layout,
-        )
-        assert_token_fields_equal(
-            source=source,
-            source_ids=[0, 1, 2, 3, 4],
-            target=target,
-            target_ids=[1, 2, 3, 4, 5],
-        )
+    source.write_to_cpu(
+        token_indices=torch.tensor([0, 1, 2, 3, 4], dtype=torch.long, device=device),
+        cpu_page_buffers=cpu,
+        cpu_page_indices=[1, 0],
+        layout=layout,
+    )
+    if device == "cuda":
+        torch.cuda.synchronize()
+    target.read_from_cpu(
+        cpu_page_buffers=cpu,
+        cpu_page_indices=[1, 0],
+        token_indices=torch.tensor([1, 2, 3, 4, 5], dtype=torch.long, device=device),
+        layout=layout,
+    )
+    assert_token_fields_equal(
+        source=source,
+        source_ids=[0, 1, 2, 3, 4],
+        target=target,
+        target_ids=[1, 2, 3, 4, 5],
+    )
     page = torch.empty(layout.byte_end, dtype=torch.uint8, device=device)
-    if device == "cpu":
-        with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            source.write_to_pd_page(
-                token_indices=torch.tensor([0, 3], dtype=torch.long, device=device),
-                pd_page_buffers=page.unsqueeze(0),
-                pd_page_index=0,
-                layout=layout,
-            )
-        with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            target.read_from_pd_page(
-                pd_page_buffers=page.unsqueeze(0),
-                token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
-                pd_page_index=0,
-                layout=layout,
-            )
-    else:
-        source.write_to_pd_page(
-            token_indices=torch.tensor([0, 3], dtype=torch.long, device=device),
-            pd_page_buffers=page.unsqueeze(0),
-            pd_page_index=0,
-            layout=layout,
-        )
-        target.read_from_pd_page(
-            pd_page_buffers=page.unsqueeze(0),
-            token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
-            pd_page_index=0,
-            layout=layout,
-        )
-        assert_token_fields_equal(
-            source=source,
-            source_ids=[0, 3],
-            target=target,
-            target_ids=[6, 7],
-        )
+    source.write_to_pd_page(
+        token_indices=torch.tensor([0, 3], dtype=torch.long, device=device),
+        pd_page_buffers=page.unsqueeze(0),
+        pd_page_index=0,
+        layout=layout,
+    )
+    target.read_from_pd_page(
+        pd_page_buffers=page.unsqueeze(0),
+        token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
+        pd_page_index=0,
+        layout=layout,
+    )
+    assert_token_fields_equal(
+        source=source,
+        source_ids=[0, 3],
+        target=target,
+        target_ids=[6, 7],
+    )
     src_indices = torch.tensor([0, 1], dtype=torch.int32, device=device)
     dst_indices = torch.tensor([0, 2], dtype=torch.int64, device=device)
 
@@ -244,14 +219,6 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
     with monkeypatch.context() as patch:
         patch.setattr(torch.Tensor, "tolist", reject_host_list)
         patch.setattr(torch.Tensor, "to", reject_index_conversion)
-        if device == "cpu":
-            with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
-                target.copy_tokens_from_dp(
-                    src_token_indices=src_indices,
-                    dst_token_indices=dst_indices,
-                    remote_dp_full_att_state=source,
-                )
-            return
         target.copy_tokens_from_dp(
             src_token_indices=src_indices,
             dst_token_indices=dst_indices,

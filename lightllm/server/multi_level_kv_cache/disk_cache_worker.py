@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import List, Optional
 
 import torch
+from lightllm.common.attention_state.lifecycle import UncertainCompletion
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 from .cpu_cache_client import CpuKvCacheClient
@@ -38,9 +39,12 @@ class DiskCacheWorker:
         disk_cache_storage_size: float,
         cpu_cache_client: CpuKvCacheClient,
         disk_cache_dir: Optional[str] = None,
+        state_manifest=None,
     ):
         self.cpu_cache_client = cpu_cache_client
         self._pages_all_idle = False
+        self._failed = False
+        self._retired_tasks = []
 
         assert disk_cache_storage_size > 0
         storage_size = int(disk_cache_storage_size * (1024 ** 3))
@@ -54,6 +58,10 @@ class DiskCacheWorker:
         if not cache_dir:
             cache_dir = os.path.join(tempfile.gettempdir(), f"lightllm_disk_cache_{get_unique_server_name()}")
         os.makedirs(cache_dir, exist_ok=True)
+        if state_manifest is not None:
+            from lightllm.common.attention_state.manifest import validate_disk_manifest
+
+            validate_disk_manifest(cache_dir, state_manifest)
         cache_file = os.path.join(cache_dir, "cache_file")
 
         self.max_concurrent_write_tasks = max_concurrent_write_tasks
@@ -80,9 +88,14 @@ class DiskCacheWorker:
         return tensor.flatten(1).view(dtype=torch.uint8)
 
     def _wait_task(self, task, cond_name: str) -> bool:
-        cond = getattr(task, cond_name)
         deadline = time.monotonic() + TASK_WAIT_TIMEOUT_S
-        while not cond():
+        while True:
+            try:
+                if getattr(task, cond_name)():
+                    return True
+            except Exception as error:
+                self._retain_failed_task(task)
+                raise UncertainCompletion("disk completion query failed") from error
             if time.monotonic() >= deadline:
                 logger.error(
                     f"disk cache task '{cond_name}' wait timeout after "
@@ -91,10 +104,37 @@ class DiskCacheWorker:
                 try:
                     self.service.abort(task)
                 except Exception as e:
-                    logger.error(f"disk cache abort task failed: {e}")
+                    self._retain_failed_task(task)
+                    raise UncertainCompletion("disk cache abort failed; pages must remain reserved") from e
                 return False
             time.sleep(0.001)
-        return True
+
+    def _submit_task(self, **kwargs):
+        try:
+            return self.service.create(**kwargs)
+        except Exception as error:
+            self._retain_failed_task(None)
+            raise UncertainCompletion("disk submission failed without a completion handle") from error
+
+    def _retain_failed_task(self, task):
+        self._failed = True
+        if not hasattr(self, "_retired_tasks"):
+            self._retired_tasks = []
+        self._retired_tasks.append(task)
+
+    def _quarantine_pages(self, pages):
+        self.cpu_cache_client.lock.acquire_sleep1ms()
+        try:
+            self.cpu_cache_client.quarantine_pages(pages)
+        finally:
+            self.cpu_cache_client.lock.release()
+
+    def _release_pages(self, pages):
+        self.cpu_cache_client.lock.acquire_sleep1ms()
+        try:
+            self.cpu_cache_client.deref_pages(pages)
+        finally:
+            self.cpu_cache_client.lock.release()
 
     def run(self) -> None:
         while True:
@@ -134,42 +174,65 @@ class DiskCacheWorker:
         hashs = [payload.hash_key for payload in payloads]
         if not page_indexes:
             return
+        if getattr(self, "_failed", False):
+            self._release_pages(page_indexes)
+            return
 
         kv_indexer = torch.tensor(page_indexes, dtype=torch.int32, device="cpu")
-        query_result = self.service.query(hashs)
+        try:
+            query_result = self.service.query(hashs)
+            if not all(query_result):
+                # 限制写入并发量，给读取操作留资源
+                throttle_deadline = time.monotonic() + TASK_WAIT_TIMEOUT_S
+                while (
+                    self.service.active_threads("r")
+                    and self.service.active_threads("w") >= self.max_concurrent_write_tasks
+                ):
+                    if time.monotonic() >= throttle_deadline:
+                        logger.error(
+                            f"disk cache write throttle wait timeout after {TASK_WAIT_TIMEOUT_S:.1f}s, "
+                            "proceeding to submit"
+                        )
+                        break
+                    time.sleep(0.001)
+        except Exception:
+
+            self._failed = True
+            self._release_pages(page_indexes)
+            logger.exception("Disk query failed before submission; disabling disk I/O")
+            return
+
         if not all(query_result):
-            # 限制写入并发量，给读取操作留资源
-            throttle_deadline = time.monotonic() + TASK_WAIT_TIMEOUT_S
-            while (
-                self.service.active_threads("r") and self.service.active_threads("w") >= self.max_concurrent_write_tasks
-            ):
-                if time.monotonic() >= throttle_deadline:
-                    logger.error(
-                        f"disk cache write throttle wait timeout after {TASK_WAIT_TIMEOUT_S:.1f}s, "
-                        "proceeding to submit"
-                    )
-                    break
-                time.sleep(0.001)
-
-            task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="w")
+            try:
+                task = self._submit_task(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="w")
+            except UncertainCompletion:
+                self._quarantine_pages(page_indexes)
+                logger.exception("Disk submission failed; retaining its source pages")
+                return
             # 立即释放已经在disk cache中的页面
-            if task.page_already_list:
-                self.cpu_cache_client.lock.acquire_sleep1ms()
-                self.cpu_cache_client.deref_pages(page_list=task.page_already_list)
-                self.cpu_cache_client.lock.release()
+            try:
+                already_present = task.page_already_list
+            except Exception:
+                self._retain_failed_task(task)
+                self._quarantine_pages(page_indexes)
+                logger.exception("Disk submission status is unknown; retaining its source pages")
+                return
+            if already_present:
+                self._release_pages(already_present)
 
-            self._wait_task(task, "data_safe")
+            remaining_indexes = list(set(page_indexes) - set(already_present))
+            try:
+                self._wait_task(task, "data_safe")
+            except UncertainCompletion:
+                self._quarantine_pages(remaining_indexes)
+                logger.exception("Disk write completion is unknown; disabling disk I/O and retaining its pages")
+                return
 
             # 释放剩余需要写入的页面
-            remining_indexes = list(set(page_indexes) - set(task.page_already_list))
-            if remining_indexes:
-                self.cpu_cache_client.lock.acquire_sleep1ms()
-                self.cpu_cache_client.deref_pages(page_list=remining_indexes)
-                self.cpu_cache_client.lock.release()
+            if remaining_indexes:
+                self._release_pages(remaining_indexes)
         else:
-            self.cpu_cache_client.lock.acquire_sleep1ms()
-            self.cpu_cache_client.deref_pages(page_list=page_indexes)
-            self.cpu_cache_client.lock.release()
+            self._release_pages(page_indexes)
 
     def query_loadable_pages(self, hashs: List[int], start_pos: int) -> int:
         """
@@ -177,10 +240,15 @@ class DiskCacheWorker:
         Returns:
             loadable_len: 从start_pos开始可以加载的长度
         """
-        if not hashs or start_pos < 0 or start_pos >= len(hashs):
+        if getattr(self, "_failed", False) or not hashs or start_pos < 0 or start_pos >= len(hashs):
             return 0
 
-        query_result = self.service.query(hashs)
+        try:
+            query_result = self.service.query(hashs)
+        except Exception:
+            self._failed = True
+            logger.exception("Disk lookup failed; recomputing the request prefix")
+            return 0
         n = self.service._n
         start_block = start_pos // n
         try:
@@ -192,6 +260,8 @@ class DiskCacheWorker:
 
     # 从磁盘读取数据到内存
     def load_pages(self, hashs: List[int], page_indexes: List[int], start_pos: int = 0) -> bool:
+        if getattr(self, "_failed", False):
+            return False
         if not hashs or not page_indexes or len(hashs) != len(page_indexes):
             return False
         if start_pos < 0 or start_pos >= len(hashs):
@@ -203,7 +273,13 @@ class DiskCacheWorker:
         #     return False
 
         kv_indexer = torch.tensor(page_indexes, dtype=torch.int32, device="cpu")
-        task = self.service.create(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="r", start_pos=start_pos)
+        task = self._submit_task(hash_128s=hashs, kv_page_indexer=kv_indexer, mode="r", start_pos=start_pos)
         if not self._wait_task(task, "ready"):
             return False
-        return all(state == PyState.Finished for state in task.state())
+        try:
+            return all(state == PyState.Finished for state in task.state())
+        except Exception:
+
+            self._failed = True
+            logger.exception("Disk read finished without a readable result; recomputing the request prefix")
+            return False

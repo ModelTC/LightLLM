@@ -6,7 +6,6 @@ from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_env_use_ue8m0_scales,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
@@ -142,7 +141,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
             num_experts=self.total_expert_num_contain_redundancy,
             use_fp8=use_fp8_w8a8,
-            round_scale=get_env_use_ue8m0_scales(),
+            round_scale=self.quant_method.use_ue8m0_scales,
             async_finish=False,
             return_recv_hook=True,
         )
@@ -235,6 +234,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            use_ue8m0_scales=self.quant_method.use_ue8m0_scales,
         )
 
     def prefilled_group_gemm(
@@ -269,6 +269,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                 w2=w2_weight,
                 w2_scale=w2_scale,
                 block_size_k=self.quant_method.block_size,
+                use_ue8m0_scales=self.quant_method.use_ue8m0_scales,
                 workspace=dist_group_manager.get_deep_ep_prefill_moe_workspace(microbatch_index),
                 hidden_dtype=hidden_dtype,
                 alpha=alpha,

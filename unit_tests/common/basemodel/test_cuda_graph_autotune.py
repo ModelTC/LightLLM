@@ -82,7 +82,10 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
 
     general, general_cache = make_kernel(AutotuneKernelType.GENERAL)
     attention, attention_cache = make_kernel(AutotuneKernelType.DECODE_ATTENTION)
-    states = [SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64)) for _ in range(2 if overlap else 1)]
+    states = [
+        SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64), prepare_attention_capture=lambda: None)
+        for _ in range(2 if overlap else 1)
+    ]
     outputs = [object() for _ in states]
     forward_calls = []
 
@@ -115,7 +118,10 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
 def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
     capture_env.args.enable_decode_microbatch_overlap = overlap
     graph = CudaGraph(1, 2, 1, max_batch_size=2)
-    states = [SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64)) for _ in range(2 if overlap else 1)]
+    states = [
+        SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64), prepare_attention_capture=lambda: None)
+        for _ in range(2 if overlap else 1)
+    ]
 
     def decode_func(*infer_states):
         assert Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION)
@@ -127,4 +133,16 @@ def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
         assert Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.GENERAL)
     assert not Autotuner.is_autotune_warmup()
     assert capture_env.capture_count == 0
+    assert graph.graph == {}
+
+
+@pytest.mark.parametrize("overlap", [False, True])
+def test_graph_rejects_wrong_batch_count_before_capture_or_replay(capture_env, overlap):
+    capture_env.args.enable_decode_microbatch_overlap = overlap
+    graph = CudaGraph(1, 2, 1, max_batch_size=2)
+    first, second = object(), None if overlap else object()
+    with pytest.raises(ValueError, match="batch count"):
+        graph.capture_decode(None, first, second)
+    with pytest.raises(ValueError, match="batch count"):
+        graph.replay(first, second)
     assert graph.graph == {}

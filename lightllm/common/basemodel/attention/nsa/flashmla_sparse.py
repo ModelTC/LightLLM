@@ -1,3 +1,5 @@
+from ..sparse import BoundSparse, SparsePrefillInput, SparseDecodeInput
+
 # Adapted from https://github.com/sgl-project/sglang/blob/main/python/sglang/srt/layers/attention/nsa_backend.py
 # Uses sgl_kernel.flash_mla and sgl_kernel.flash_attn from the sglang kernel library.
 
@@ -6,7 +8,7 @@ import weakref
 import torch
 from typing import Tuple, TYPE_CHECKING
 
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BaseAttState
 from lightllm.utils.dist_utils import get_current_device_id
 
 if TYPE_CHECKING:
@@ -14,12 +16,30 @@ if TYPE_CHECKING:
 
 
 class NsaFlashMlaSparseAttBackend(BaseAttBackend):
+    metadata_lanes = 2
+
     def __init__(self, model):
         super().__init__(model=model)
-        device = get_current_device_id()
+        self.ragged_mem_buffers = None
+
+    def runtime_memory_demands(self):
+        size = self.model.graph_max_batch_size * self.model.max_seq_length
+        if not size:
+            return ()
+        return self.workspace_memory_demands(
+            f"nsa_ragged_indices_{self.model.att_state_role}", size, lanes=self.metadata_lanes, dtype=torch.int32
+        )
+
+    def reserve_runtime_resources(self):
+        size = self.model.graph_max_batch_size * self.model.max_seq_length
+        if not size:
+            self.ragged_mem_buffers = []
+            return
         self.ragged_mem_buffers = [
-            torch.empty(model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=device)
-            for _ in range(2)
+            self.get_gpu_workspace_buffer(
+                f"nsa_ragged_indices_{self.model.att_state_role}", size, dtype=torch.int32, lane_id=lane
+            )
+            for lane in range(self.metadata_lanes)
         ]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaSparsePrefillAttState":
@@ -30,7 +50,7 @@ class NsaFlashMlaSparseAttBackend(BaseAttBackend):
 
 
 @dataclasses.dataclass
-class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
+class NsaFlashMlaSparsePrefillAttState(BaseAttState):
     """Prefill attention state for NSA using flash_mla_sparse_fwd."""
 
     ks: torch.Tensor = None
@@ -58,31 +78,13 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
         )
         return
 
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
-        assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
-
-        return self._nsa_prefill_att(q=q, kv=k, att_control=att_control)
-
-    def _nsa_prefill_att(
-        self,
-        q: torch.Tensor,
-        kv: torch.Tensor,
-        att_control: AttControl,
-    ) -> torch.Tensor:
+    def run(self, inputs: SparsePrefillInput, binding: BoundSparse):
+        q, kv = inputs.q, binding.cache
         from sgl_kernel.flash_mla import flash_mla_sparse_fwd
 
-        nsa_dict = att_control.nsa_prefill_dict
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
+        topk_mem_indices = inputs.topk_mem_indices
+        softmax_scale = binding.softmax_scale
+        kv_lora_rank = binding.value_dim
 
         if topk_mem_indices.ndim == 2:
             topk_mem_indices = topk_mem_indices.unsqueeze(1)
@@ -98,8 +100,7 @@ class NsaFlashMlaSparsePrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
-
+class NsaFlashMlaSparseDecodeAttState(BaseAttState):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
@@ -144,32 +145,14 @@ class NsaFlashMlaSparseDecodeAttState(BaseDecodeAttState):
         padded_seq_lens[1:].copy_(self.nsa_cache_seqlens, non_blocking=True)
         self.nsa_cu_seqlens_k_new = padded_seq_lens.cumsum(dim=0, dtype=torch.int32)
 
-    def decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert att_control.nsa_decode, "nsa_decode must be True for NSA decode attention"
-        assert att_control.nsa_decode_dict is not None, "nsa_decode_dict is required"
-
-        return self._nsa_decode_att(q=q, kv=k, att_control=att_control)
-
-    def _nsa_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        kv: torch.Tensor,
-        att_control: AttControl,
-    ) -> torch.Tensor:
+    def run(self, inputs: SparseDecodeInput, binding: BoundSparse):
+        q, kv = (inputs.q_nope, inputs.q_rope), binding.cache
         from sgl_kernel.flash_attn import flash_attn_with_kvcache
 
-        nsa_dict = att_control.nsa_decode_dict
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
-        qk_rope_head_dim = nsa_dict["qk_rope_head_dim"]
+        topk_mem_indices = inputs.topk_mem_indices
+        softmax_scale = binding.softmax_scale
+        kv_lora_rank = binding.value_dim
+        qk_rope_head_dim = binding.rope_dim
 
         q_nope, q_rope = q
 

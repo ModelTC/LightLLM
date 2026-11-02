@@ -165,6 +165,10 @@ def _worker(connection: Connection, backend: str, sender: bool):
             rank=0,
             mtp=2,
         )
+        from lightllm.common.attention_state.manifest import build_state_manifest
+
+        resources.model_identities["main"] = "synthetic-checkpoint"
+        manifest = build_state_manifest(resources)
         buffer = allocate_transfer_buffer(resources, 3, device=f"cuda:{device}")
         buffer.fill_(93 if sender else 11)
         copy_stream = torch.cuda.Stream()
@@ -176,11 +180,12 @@ def _worker(connection: Connection, backend: str, sender: bool):
                 tp_idx=device,
                 kv_move_buffer=buffer,
                 host_ip="127.0.0.1",
+                state_manifest=manifest,
             )
         else:
             from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
 
-            transporter = NixlKVTransporter(os.getpid(), device, buffer)
+            transporter = NixlKVTransporter(os.getpid(), device, buffer, state_manifest=manifest)
         connection.send(
             (
                 "metadata",

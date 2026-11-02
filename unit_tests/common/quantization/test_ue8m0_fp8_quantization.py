@@ -354,6 +354,7 @@ def test_deepgemm_load_and_apply(monkeypatch, rows, scale_fmt, env_value, prequa
             config["quantization_config"]["scale_fmt"] = scale_fmt
     method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
     use_ue8m0_scales = scale_fmt == "ue8m0" or env_value == "1"
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", "0" if use_ue8m0_scales else "1")
     weight_pack, _ = method.create_weight([256], 1024, torch.bfloat16, 0)
     assert method.use_ue8m0_scales == use_ue8m0_scales
     assert method.use_packed_ue8m0 == (use_ue8m0_scales and deepgemm.is_sm100_gpu())
@@ -474,7 +475,8 @@ def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_p
     use_ue8m0_scales = scale_source != "none"
     monkeypatch.setattr(deepgemm, "is_sm100_gpu", lambda: sm100)
     method = Quantcfg(config, quant_type="fp8w8a8-b128-deepgemm").get_quant_method(0, "q_proj")
-    assert get_env_use_ue8m0_scales() == use_ue8m0_scales
+    assert get_env_use_ue8m0_scales() == (scale_source == "env")
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", str(int(not use_ue8m0_scales)))
     w13, _ = method.create_moe_weight([128, 128], 512, torch.bfloat16, 0, 2)
     w2, _ = method.create_moe_weight([512], 128, torch.bfloat16, 0, 2)
     x = torch.randn((3, 512), device="cuda", dtype=torch.bfloat16)
@@ -493,6 +495,7 @@ def test_ep_moe_rounds_scales_and_preserves_logical_block_size(monkeypatch, is_p
 
     def check_dispatch(**kwargs):
         seen.append(kwargs["block_size_k"])
+        assert kwargs["use_ue8m0_scales"] == use_ue8m0_scales
         assert (
             kwargs["w1_scale"].dtype
             == kwargs["w2_scale"].dtype

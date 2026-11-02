@@ -9,8 +9,11 @@ import pickle
 from typing import List, Dict, Optional, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.copy_plan import CopyPlan
+from lightllm.common.basemodel.attention.runtime import DeviceRuntime
+from lightllm.common.attention_state.lifecycle import RetiredTransfers, transfer_completion
 from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
-from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
+from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
@@ -108,12 +111,20 @@ class _PrefillTransModule:
             self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
         )
         self.kv_move_buffer = kv_move_buffer
+        self.runtime = DeviceRuntime(kv_move_buffer.device)
+        self.copy_plans = tuple(
+            CopyPlan.for_pd(resource_managers[start : start + self.dp_world_size], kv_move_buffer, write=True)
+            for start in range(0, len(resource_managers), self.dp_world_size)
+        )
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
+        from lightllm.common.attention_state.manifest import build_state_manifest
+
         self.transporter = create_kv_transporter(
             args=self.args,
             node_id=self.args.pd_node_id,
             tp_idx=device_id,
             kv_move_buffer=kv_move_buffer,
+            state_manifest=build_state_manifest(self.resource_managers[device_id]),
         )
         self.waiting_dict_lock = threading.Lock()
         self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
@@ -125,6 +136,7 @@ class _PrefillTransModule:
         self.failed_queue = queue.Queue()
 
         self.page_index_queue = queue.Queue()
+        self.retired_transfers = RetiredTransfers(self.transporter, self.page_index_queue, "src_page_index")
         for page_index in range(self.args.pd_kv_page_num):
             self.page_index_queue.put(page_index)
 
@@ -149,15 +161,7 @@ class _PrefillTransModule:
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 cpu_token_indices = torch.tensor([0], dtype=torch.long, device="cpu")
                 token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
-                copy_page(
-                    node_att_managers=self.resource_managers,
-                    pd_page_buffers=self.kv_move_buffer,
-                    write_to_pd_page=True,
-                    token_indices=token_indices,
-                    pd_page_index=0,
-                    dp_rank_in_node=dp_index,
-                    tp_world_size=self.dp_world_size,
-                )
+                self.copy_plans[dp_index].run(token_indices=token_indices, pd_page_index=0)
                 torch.cuda.current_stream().synchronize()
         return
 
@@ -165,6 +169,9 @@ class _PrefillTransModule:
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.request_id == request_id:
+                    transfer_completion(trans_task).cancelled = True
+                    trans_task.error_info = error_info
                 if trans_task.request_id == request_id and trans_task.xfer_handle is None:
                     # 已经提交给底层 transporter 的异步传输不能直接失败，
                     # 否则 fail_loop 可能在传输静默前归还 source page，导致脏数据。
@@ -214,22 +221,24 @@ class _PrefillTransModule:
                     cpu_token_indices = torch.tensor(trans_task.mem_indexes, dtype=torch.long, device="cpu")
                     # 索引上传和后续页拷贝使用同一流，保证执行顺序。
                     token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
-                copy_page(
-                    node_att_managers=self.resource_managers,
-                    pd_page_buffers=self.kv_move_buffer,
-                    write_to_pd_page=True,
-                    token_indices=token_indices,
-                    pd_page_index=trans_task.src_page_index,
-                    dp_rank_in_node=trans_task.prefill_dp_index,
-                    tp_world_size=self.dp_world_size,
-                    task_kind=trans_task.page_kind,
-                    req_idx=trans_task.req_idx,
-                    state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
-                )
-                sync_event = torch.cuda.Event()
-                sync_event.record()
+                try:
+                    self.copy_plans[trans_task.prefill_dp_index].run(
+                        token_indices=token_indices,
+                        pd_page_index=trans_task.src_page_index,
+                        task_kind=trans_task.page_kind,
+                        req_idx=trans_task.req_idx,
+                        state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
+                    )
+                except Exception as error:
+                    trans_task.error_info = f"packing state failed: {error}"
 
-            self.ready_transfer_queue.put((sync_event, trans_task))
+                sync_event = self.runtime.record_completion()
+                transfer_completion(trans_task).source_reusable = sync_event
+
+            if getattr(trans_task, "error_info", None) is not None:
+                self.failed_queue.put(trans_task)
+            else:
+                self.ready_transfer_queue.put((sync_event, trans_task))
         return
 
     @log_exception
@@ -287,7 +296,11 @@ class _PrefillTransModule:
                         if notify_obj.write_stage == "ready":
                             key = notify_obj.get_key()
                             with self.waiting_dict_lock:
-                                trans_task = self.waiting_dict.pop(key, None)
+                                trans_task = self.waiting_dict.get(key)
+                                if trans_task is not None and trans_task.transfer_id == notify_obj.transfer_id:
+                                    self.waiting_dict.pop(key)
+                                else:
+                                    trans_task = None
                             if trans_task is not None:
                                 trans_task.dst_page_index = notify_obj.dst_page_index
                                 self.write_peer_kv_queue.put(trans_task)
@@ -316,6 +329,8 @@ class _PrefillTransModule:
         return
 
     def _check_tasks_time_out(self):
+        if hasattr(self, "retired_transfers"):
+            self.retired_transfers.poll()
         with self.waiting_dict_lock:
             timeout_tasks = []
             for key, trans_task in list(self.waiting_dict.items()):
@@ -335,6 +350,8 @@ class _PrefillTransModule:
             trans_task: PDChunckedTransTask = trans_task
 
             try:
+                transfer_completion(trans_task).network_submitted = True
+                self.retired_transfers.watch(trans_task)
                 xfer_handle = self.transporter.write_blocks_paged(trans_task=trans_task)
                 trans_task.xfer_handle = xfer_handle
                 trans_task.start_trans_time = time.time()
@@ -384,6 +401,7 @@ class _PrefillTransModule:
                     continue
 
                 if ret == "DONE":
+                    transfer_completion(trans_task).network_done = True
                     completed_task = self.waiting_dict.pop(trans_task.get_key(), None)
                     if completed_task is None:
                         continue
@@ -440,10 +458,7 @@ class _PrefillTransModule:
         while True:
             trans_task: PDChunckedTransTask = self.success_queue.get()
             # 写回后，回收页面
-            if trans_task.src_page_index is not None:
-                self.page_index_queue.put(trans_task.src_page_index)
-            if trans_task.xfer_handle is not None:
-                self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            self.retired_transfers.retire(trans_task)
 
             ret = trans_task.createRetObj()
             ret.first_gen_token_id = None
@@ -461,12 +476,12 @@ class _PrefillTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
+            completion = transfer_completion(trans_task)
+            completion.cancelled = True
+            completion.wait_local_accesses()
 
             # 回收页面
-            if trans_task.src_page_index is not None:
-                self.page_index_queue.put(trans_task.src_page_index)
-            if trans_task.xfer_handle is not None:
-                self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            self.retired_transfers.retire(trans_task)
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)

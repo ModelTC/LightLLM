@@ -11,9 +11,11 @@ logger = init_logger(__name__)
 
 
 class Fp8FlashInferAttBackend(FlashInferAttBackend):
-    def __init__(self, model):
+    supported_kv_encodings = ("fp8_e4m3fn_per_tensor",)
+
+    def __init__(self, model, attention_shape=None):
         set_flashinfer_envs()
-        super().__init__(model=model)
+        super().__init__(model=model, attention_shape=attention_shape)
         self.kv_data_type = torch.float8_e4m3fn
 
     def _init_infer_page_size(self):
@@ -58,7 +60,7 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
             k=k,
             v=v,
             alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
+            calibration=att_control,
         )
 
     def _fp8_prefill_att(
@@ -66,19 +68,16 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        logical_layer_id: int,
+        calibration: AttControl,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        state = getattr(
-            self.infer_state.att_state_manager,
-            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_tensor_state",
-        )
-        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        k_descale = state.cpu_scales[storage_layer_index][0]
-        v_descale = state.cpu_scales[storage_layer_index][1]
+        if calibration.cpu_kv_scales is None:
+            raise ValueError("FP8 attention requires bound KV calibration")
+        k_descale = calibration.cpu_kv_scales[0]
+        v_descale = calibration.cpu_kv_scales[1]
         self.prefill_wrapper.run(
             q=q,
             paged_kv_cache=(k, v),
@@ -115,7 +114,7 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
             k=k,
             v=v,
             alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
+            calibration=att_control,
         )
 
     def _fp8_decode_att(
@@ -123,21 +122,18 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        logical_layer_id: int,
+        calibration: AttControl,
         alloc_func=torch.empty,
     ):
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
 
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        state = getattr(
-            self.infer_state.att_state_manager,
-            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_tensor_state",
-        )
-        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
+        if calibration.cpu_kv_scales is None:
+            raise ValueError("FP8 attention requires bound KV calibration")
 
-        k_descale = state.cpu_scales[storage_layer_index][0]
-        v_descale = state.cpu_scales[storage_layer_index][1]
+        k_descale = calibration.cpu_kv_scales[0]
+        v_descale = calibration.cpu_kv_scales[1]
         self.decode_wrapper.run(
             q=q,
             paged_kv_cache=(k, v),

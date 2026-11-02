@@ -4,7 +4,7 @@ import weakref
 import torch
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Optional, TYPE_CHECKING, Tuple, Dict
+from typing import Optional, TYPE_CHECKING, Tuple
 
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
@@ -23,6 +23,11 @@ class BaseAttBackend:
     _instances = {}
     _workspace_buffers = {}
     _workspace_buffer_lock = threading.Lock()
+    supported_kv_encodings = ("plain",)
+    supported_kv_layouts = ("separate_kv_nhd",)
+    supported_attention_features = ()
+    supports_mla = False
+    requires_cache_stream_sync = False
 
     def __new__(cls, *args, **kwargs):
         """
@@ -30,7 +35,7 @@ class BaseAttBackend:
         和缓存布局，不能只按 backend class 共享实例。
         """
         model = kwargs.get("model", args[0] if args else None)
-        instance_key = (cls, model)
+        instance_key = (cls, model, kwargs.get("attention_shape"))
         if instance_key not in cls._instances:
             instance = super().__new__(cls)
             cls._instances[instance_key] = instance
@@ -39,8 +44,63 @@ class BaseAttBackend:
     def __init__(self, model: "TpPartBaseModel"):
         self.model = model
 
+    def attention_support_error(self, spec, format, phase):
+        for feature, required in (
+            ("alibi", spec.alibi),
+            ("window", spec.window != (-1, -1)),
+            ("sink", spec.attention_sink),
+            ("noncausal", not spec.causal),
+        ):
+            if required and feature not in self.supported_attention_features:
+                return f"unsupported attention feature {feature}"
+        if format.version != 1 or format.layout not in self.supported_kv_layouts:
+            return f"unsupported KV layout {format.layout} version {format.version}"
+        if format.encoding not in self.supported_kv_encodings:
+            return f"unsupported KV encoding {format.encoding}"
+        if format.encoding == "plain" and format.dtype != spec.dtype:
+            return "query and unquantized KV dtypes must match"
+        if format.group_size is not None and format.group_size != getattr(self, "quant_group_size", None):
+            return "kernel quantization group size differs from the KV format"
+        packing = {"int4": "adjacent_low_nibble_first_offset7", "int8": "signed_int8"}
+        if format.encoding in packing and (format.packing != packing[format.encoding] or format.dtype != torch.int8):
+            return "integer KV packing differs from the kernel encoding"
+        return None
+
+    def attention_metadata_key(self, spec, format, phase):
+        return spec.shape_key, format
+
+    def mla_support_error(self, spec, format, phase):
+        if not self.supports_mla:
+            return "provider does not implement MLA"
+        if format.version != 1 or format.encoding != "mla_plain" or format.dtype != spec.dtype:
+            return "unsupported MLA latent encoding or dtype"
+        return None
+
+    def for_attention_spec(self, spec):
+        return self
+
+    def reserve_runtime_resources(self):
+        pass
+
+    def runtime_memory_demands(self):
+        return ()
+
+    def workspace_memory_demands(self, key_name, workspace_size, lanes, dtype=torch.int8):
+        from lightllm.common.attention_state.memory_plan import MemoryDemand
+
+        device_id = get_current_device_id()
+        return tuple(
+            MemoryDemand(
+                f"workspace:{key_name}:{workspace_size}:{dtype}:lane{lane}", "cuda", workspace_size * dtype.itemsize
+            )
+            for lane in range(lanes)
+            if (device_id, key_name, workspace_size, dtype, lane) not in self._workspace_buffers
+        )
+
     @staticmethod
-    def get_gpu_workspace_buffer(key_name: str, workspace_size: int, dtype: torch.dtype = torch.int8) -> torch.Tensor:
+    def get_gpu_workspace_buffer(
+        key_name: str, workspace_size: int, dtype: torch.dtype = torch.int8, lane_id: int = 0
+    ) -> torch.Tensor:
         """Return a process-local workspace shared by key name and CUDA device."""
         if not key_name:
             raise ValueError("workspace key_name must not be empty")
@@ -48,7 +108,9 @@ class BaseAttBackend:
             raise ValueError(f"workspace_size must be positive, got {workspace_size}")
 
         device_id = get_current_device_id()
-        buffer_key = (device_id, key_name, workspace_size, dtype)
+        if lane_id < 0:
+            raise ValueError("workspace lane must be nonnegative")
+        buffer_key = (device_id, key_name, workspace_size, dtype, lane_id)
         with BaseAttBackend._workspace_buffer_lock:
             workspace_buffer = BaseAttBackend._workspace_buffers.get(buffer_key)
             if workspace_buffer is None:
@@ -88,28 +150,41 @@ class AttControl:
     sliding_window: Tuple[int, int] = (-1, -1)
     use_att_sink: bool = False
     sink_weight: torch.Tensor = None
-    # mla 专用传参项
-    mla_prefill: bool = False
-    mla_prefill_dict: Dict = None
-    mla_decode: bool = False
-    mla_decode_dict: Dict = None
-    # nsa (native sparse attention) 专用传参项
-    nsa_prefill: bool = False
-    nsa_prefill_dict: Dict = None
-    nsa_decode: bool = False
-    nsa_decode_dict: Dict = None
-    # linear attention 专用传参项
-    linear_att_prefill: bool = False
-    linear_att_prefill_dict: Dict = None
-    linear_att_decode: bool = False
-    linear_att_decode_dict: Dict = None
-    # 静态 FP8 标定按此逻辑层号查询 State 的物理行；其他后端可不使用。
     logical_layer_id: Optional[int] = None
+    kv_scales: Optional[torch.Tensor] = None
+    q_scale: Optional[torch.Tensor] = None
+    cpu_kv_scales: object = None
 
 
 @dataclass
 class BaseAttState(ABC):
-    """Attention metadata with a weak reference to its owning InferStateInfo."""
+    """Batch metadata with a weak reference to its owning InferStateInfo."""
+
+    graph_buffer_names = None
+
+    def prepare_for_capture(self):
+        pass
+
+    def copy_for_decode_cuda_graph(self, new_state: "BaseAttState"):
+        """Copy tensor metadata into the buffers owned by the captured graph."""
+        names = self.graph_buffer_names
+        if names is None:
+            names = tuple(name for name, value in vars(new_state).items() if isinstance(value, torch.Tensor))
+        copies = []
+        for name in names:
+            old, new = getattr(self, name), getattr(new_state, name)
+            if old is None and new is None:
+                continue
+            if (
+                old is None
+                or new is None
+                or (old.shape, old.dtype, old.device, old.stride()) != (new.shape, new.dtype, new.device, new.stride())
+            ):
+                raise ValueError(f"graph metadata {name} changed layout; select another capture bucket")
+            if old.data_ptr() != new.data_ptr():
+                copies.append((old, new))
+        for old, new in copies:
+            old.copy_(new, non_blocking=True)
 
     backend: BaseAttBackend = None
     # InferStateInfo 已强引用本状态，这里反向使用弱引用，避免形成强引用环。
@@ -161,14 +236,6 @@ class BasePrefillAttState(BaseAttState):
 
 @dataclass
 class BaseDecodeAttState(BaseAttState):
-    def copy_for_decode_cuda_graph(self, new_state: "BaseDecodeAttState"):
-        """Copy tensor metadata into the buffers owned by the captured graph."""
-        for attr_name, attr_value in vars(new_state).items():
-            if isinstance(attr_value, torch.Tensor):
-                attr_ = getattr(self, attr_name, None)
-                if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
-                    attr_.copy_(attr_value, non_blocking=True)
-
     @abstractmethod
     def decode_att(
         self,

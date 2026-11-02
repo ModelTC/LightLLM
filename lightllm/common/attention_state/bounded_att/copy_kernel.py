@@ -17,6 +17,7 @@ def copy_bounded_att_tensors(
     grid_num: int = 24,
     num_warps: int = 8,
     num_stages: int = 1,
+    source_byte_offsets: torch.Tensor | None = None,
 ) -> None:
     """在当前 CUDA stream 上聚合复制同一形状的视图，默认 24 个 program；warp 数与循环流水深度可按搬运场景覆盖。
 
@@ -45,13 +46,19 @@ def copy_bounded_att_tensors(
     # 阶段一：只合并两端共同连续的尾部维度，保留前面的布局。
     copies = merge_contiguous_tail_dims(copies=copies)
     # 阶段二：按整批地址和行布局选择最宽的搬运单元，不转换数值。
-    copies = view_max_copy_dtype(copies=copies)
+    if source_byte_offsets is None:
+        copies = view_max_copy_dtype(copies=copies)
+    else:
+
+        assert source_byte_offsets.shape == (len(copies),)
+        assert source_byte_offsets.dtype == torch.int64 and source_byte_offsets.is_cuda
     # 阶段三：上传两张指针表，按最终视图维数发射聚合拷贝算子。
     _launch_copy_kernel(
         copies=copies,
         grid_num=grid_num,
         num_warps=num_warps,
         num_stages=num_stages,
+        source_byte_offsets=source_byte_offsets,
     )
 
 
@@ -65,6 +72,7 @@ def _launch_copy_kernel(
     grid_num: int,
     num_warps: int,
     num_stages: int,
+    source_byte_offsets: torch.Tensor | None = None,
 ) -> None:
     """使用整理后的视图地址和共享布局，在当前流上发射一次聚合拷贝。"""
     # 确保当前设备上下文已经建立；纯 CPU 页池之间的复制也使用这个设备和流。
@@ -97,6 +105,8 @@ def _launch_copy_kernel(
         device="cpu",
         pin_memory=True,
     ).to(device=stream.device, non_blocking=True)
+    if source_byte_offsets is not None:
+        source_pointer_tensor.add_(source_byte_offsets)
     destination_pointer_tensor = torch.tensor(
         data=destination_pointers,
         dtype=torch.int64,

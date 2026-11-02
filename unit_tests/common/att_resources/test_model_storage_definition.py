@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 
 @pytest.fixture
 def args(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     value = StartArgs(
         model_dir=str(tmp_path),
         data_type="float16",
@@ -70,17 +71,29 @@ CASES = [
     (Gemma3TpPartModel, {"num_key_value_heads": 4}, 4, 256, 1),
     (
         Gemma4TpPartModel,
-        {"num_key_value_heads": 4, "head_dim": 256, "num_global_key_value_heads": None, "global_head_dim": 512},
-        8,
+        {
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+            "num_global_key_value_heads": None,
+            "global_head_dim": 512,
+            "layer_types": ["sliding_attention"] * 2,
+        },
+        4,
         256,
-        2,
+        1,
     ),
     (
         Gemma4TpPartModel,
-        {"num_key_value_heads": 16, "head_dim": 256, "num_global_key_value_heads": 4, "global_head_dim": 512},
-        16,
-        256,
+        {
+            "num_key_value_heads": 16,
+            "head_dim": 256,
+            "num_global_key_value_heads": 4,
+            "global_head_dim": 512,
+            "layer_types": ["full_attention"] * 2,
+        },
         4,
+        512,
+        1,
     ),
     (
         Gemma4TpPartModel,
@@ -174,7 +187,7 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
         pd_kv_page_num=3,
     )
     reserve = reference.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
-    required = state.get_token_bytes() * (32 + args.page_size)
+    required = state.get_token_bytes() * (32 + args.page_size) + state.get_fixed_storage_bytes()
     # One byte below the full 32-token budget must drop a complete page.
     total = 1 << 30
     free = required - 1 + reserve + total // 4
@@ -200,11 +213,13 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
     resources = AttentionStateManager(request_capacity=1)
     resources.register_state("main", rebuild_full_state(template, config=template.config))
     resources.finish_state_registration()
+    allocate_storage = resources.allocate_storage
+    monkeypatch.setattr(resources, "allocate_storage", lambda **kwargs: allocate_storage(**{**kwargs, "device": "cpu"}))
     resources.initialize_storage(
         args=args,
         token_capacity=None,
         mem_fraction=0.75,
-        device="cpu",
+        device="cuda",
     )
     assert resources.full_att_allocator.size == 28
     assert resources.get_pd_operator().get_page_bytes() == reference.get_pd_operator().get_page_bytes()
@@ -272,5 +287,58 @@ def test_cpu_layout_uses_all_model_factory_states(
     prepare_model_states(model)
     model.att_state_manager.finish_state_registration()
     runtime_layouts = model.att_state_manager.get_cpu_cache_operator().get_page_layouts()
-    assert set(cpu_layouts) == set(runtime_layouts) == {"main_gqa_bf16_state", "main_gqa_fp16_state"}
+    assert set(cpu_layouts) == set(runtime_layouts) == {"main_gqa_bf16_h8_d16_state", "main_gqa_fp16_h8_d16_state"}
     assert cpu_layouts == runtime_layouts
+
+
+@pytest.mark.parametrize("with_draft", [False, True])
+@pytest.mark.parametrize("kv_type", ["None", "fp8kv_spt"])
+def test_cpu_manifest_identifies_weights_and_calibration_without_cuda(args, monkeypatch, tmp_path, with_draft, kv_type):
+    from lightllm.utils.cpu_cache_layout import build_cpu_cache_manifest
+
+    config = dict(
+        model_type="llama", num_attention_heads=8, num_key_value_heads=4, hidden_size=128, num_hidden_layers=2
+    )
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    (tmp_path / "model.safetensors").write_bytes(b"main checkpoint")
+    monkeypatch.setattr("lightllm.utils.llm_utils.get_llm_model_class", lambda: LlamaTpPartModel)
+    monkeypatch.setattr("lightllm.models.get_draft_model_class", lambda *args: LlamaTpPartModel)
+    monkeypatch.setattr(torch.cuda, "_lazy_init", lambda: pytest.fail("manifest must not initialize CUDA"))
+    roles = {"main": (0, 1)}
+    if with_draft:
+        directory = tmp_path / "draft"
+        directory.mkdir()
+        (directory / "config.json").write_text(json.dumps(config))
+        (directory / "model.safetensors").write_bytes(b"draft checkpoint")
+        args.mtp_mode, args.mtp_step = "vanilla_with_att", 1
+        args.mtp_draft_model_dir = [str(directory)]
+        roles["draft0"] = (2, 3)
+    args.llm_kv_type = kv_type
+    calibration = dict(
+        version=2,
+        quant_type="per_tensor",
+        layers={role: {str(layer): dict(k=[0.1], v=[0.2]) for layer in layers} for role, layers in roles.items()},
+    )
+    path = tmp_path / "calibration.json"
+    if kv_type != "None":
+        path.write_text(json.dumps(calibration))
+        args.kv_quant_calibration_config_path = str(path)
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(dataclasses.asdict(args)))
+    get_env_start_args.cache_clear()
+    original = build_cpu_cache_manifest()
+    assert set(original["models"]) == set(roles)
+    assert {state["role"] for state in original["states"]} == set(roles)
+    assert build_cpu_cache_manifest() == original
+    if with_draft:
+        assert original["models"]["main"] != original["models"]["draft0"]
+    if kv_type != "None":
+        calibration["layers"]["main"]["0"]["k"] = [0.3]
+        path.write_text(json.dumps(calibration))
+        changed = build_cpu_cache_manifest()
+        assert changed["models"] == original["models"]
+        before = next(state for state in original["states"] if state["role"] == "main")
+        after = next(state for state in changed["states"] if state["role"] == "main")
+        assert after["byte_end"] == before["byte_end"]
+        assert after["kv_calibration"] != before["kv_calibration"]
+    (tmp_path / "model.safetensors").write_bytes(b"another checkpoint")
+    assert build_cpu_cache_manifest()["models"]["main"] != original["models"]["main"]

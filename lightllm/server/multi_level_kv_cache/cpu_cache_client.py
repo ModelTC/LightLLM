@@ -108,12 +108,42 @@ class CpuKvCacheClient(object):
         ready_list.extend([False for _ in range(left_num)])
         return page_list, ready_list
 
+    def reserve_write_pages(self, hash_keys: List[int], disk_offload_enable: bool):
+
+        pages, skip_write = [], []
+        for hash_key in hash_keys:
+            existing = self.page_hash_dict.get(hash_key) is not None
+            index, _ = self.allocate_one_page(self.page_items.linked_items, hash_key, disk_offload_enable)
+            if index is None:
+                break
+            pages.append(index)
+            skip_write.append(existing)
+        missing = len(hash_keys) - len(pages)
+        return pages + [-1] * missing, skip_write + [True] * missing
+
+    def reserve_scratch_pages(self, count: int) -> List[int]:
+
+        pages = []
+        for _ in range(count):
+            page = self.page_items.head.get_next_item()
+            if page.self_index == self.page_items.tail.self_index or not page.can_realloc(False):
+                break
+            if not page.is_empty():
+                self.page_hash_dict.remove(page.hash_key)
+            page.del_self_from_list()
+            page.hash_key = 0
+            page.status = _CpuPageStatus.SCRATCH
+            page.ref_count = 1
+            pages.append(page.self_index)
+        return pages
+
     def update_pages_status_to_ready(
         self,
         page_list: List[int],
         deref: bool = True,
         disk_offload_enable: bool = False,
         token_num_in_page_list: Optional[int] = None,
+        skip_write_flags: Optional[List[bool]] = None,
     ):
         """
         token_num_in_page_list, 只有在 disk_offload_enable 为True时, 需要传入，用于
@@ -126,11 +156,21 @@ class CpuKvCacheClient(object):
         offload_candidates: List[int] = []
         page_items = self.page_items.linked_items
         not_exist_none_page = True
-        for page_index in page_list:
+        for position, page_index in enumerate(page_list):
             if page_index != -1:
                 cur_page: _CpuPageStatus = page_items[page_index]
-                if cur_page.status < _CpuPageStatus.READY:
+                if cur_page.status in (_CpuPageStatus.QUARANTINED, _CpuPageStatus.FAILED):
+                    if deref:
+                        self.deref_one_page(page_index)
+                    not_exist_none_page = False
+                    continue
+                if cur_page.status < _CpuPageStatus.READY and (
+                    skip_write_flags is None or not skip_write_flags[position]
+                ):
                     cur_page.status = _CpuPageStatus.READY
+
+                if not cur_page.is_data_ready():
+                    not_exist_none_page = False
 
                 if deref:
                     assert cur_page.ref_count > 0
@@ -195,28 +235,41 @@ class CpuKvCacheClient(object):
                 return False
         return True
 
+    def quarantine_pages(self, page_list: List[int]):
+
+        for index in page_list:
+            page = self.page_items.linked_items[index]
+            assert page.ref_count > 0
+            if self.page_hash_dict.get(page.hash_key) == index:
+                self.page_hash_dict.remove(page.hash_key)
+            page.status = _CpuPageStatus.QUARANTINED
+
+    def any_pages_failed(self, page_list: List[int]) -> bool:
+        return any(
+            self.page_items.linked_items[index].status in (_CpuPageStatus.QUARANTINED, _CpuPageStatus.FAILED)
+            for index in page_list
+        )
+
     def deref_pages(self, page_list: List[int]):
         """
         deref_pages
         """
-        page_items = self.page_items.linked_items
         for page_index in page_list:
             if page_index != -1:
-                page_item: _CpuPageStatus = page_items[page_index]
-                assert page_item.ref_count > 0
-                page_item.ref_count -= 1
-                if page_item.ref_count == 0:
-                    # 放回 LRU 列表头部
-                    self.page_items.add_item_to_tail(page_item.self_index)
+                self.deref_one_page(page_index)
         return
 
     def deref_one_page(self, page_index: int):
         page_item: _CpuPageStatus = self.page_items.get_item_by_index(page_index)
         assert page_item.ref_count > 0
         page_item.ref_count -= 1
-        if page_item.ref_count == 0:
-            # 放回 LRU 列表头部
-            self.page_items.add_item_to_tail(page_item.self_index)
+        if page_item.ref_count == 0 and page_item.status != _CpuPageStatus.QUARANTINED:
+            if page_item.status in (_CpuPageStatus.FAILED, _CpuPageStatus.SCRATCH):
+                page_item.hash_key = 0
+                page_item.status = _CpuPageStatus.EMPTY
+                self.page_items.add_item_to_head(page_item.self_index)
+            else:
+                self.page_items.add_item_to_tail(page_item.self_index)
         return
 
     def get_pages_to_offloading(self) -> List[List[int]]:
@@ -233,7 +286,7 @@ class CpuKvCacheClient(object):
             groups.append(page_list[index + 1 : index + 1 + group_size])
             for page_index in groups[-1]:
                 page_item: _CpuPageStatus = page_items[page_index]
-                assert page_item.is_ready()
+                assert page_item.is_ready() or page_item.status == _CpuPageStatus.QUARANTINED
 
             index = index + 1 + group_size
 
@@ -248,19 +301,13 @@ class CpuKvCacheClient(object):
             if page_index == -1:
                 continue
             cur_page: _CpuPageStatus = page_items[page_index]
+            if cur_page.is_loading():
+                if self.page_hash_dict.get(cur_page.hash_key) == cur_page.self_index:
+                    self.page_hash_dict.remove(cur_page.hash_key)
 
+                cur_page.status = _CpuPageStatus.FAILED
             if cur_page.ref_count > 0:
-                cur_page.ref_count -= 1
-                if cur_page.ref_count == 0:
-                    if cur_page.is_loading():
-                        existing_index = self.page_hash_dict.get(cur_page.hash_key)
-                        assert existing_index is not None and existing_index == cur_page.self_index
-                        self.page_hash_dict.remove(cur_page.hash_key)
-                        cur_page.hash_key = 0
-                        cur_page.status = _CpuPageStatus.EMPTY
-                        self.page_items.add_item_to_head(cur_page.self_index)
-                    else:
-                        self.page_items.add_item_to_tail(cur_page.self_index)
+                self.deref_one_page(page_index)
 
         return
 
@@ -294,6 +341,9 @@ class _CpuPageStatus(_LinkedListItem):
     ]
 
     EMPTY = 0  # 空闲
+    QUARANTINED = -1
+    SCRATCH = -2
+    FAILED = -3
     LOADING = 1  # 从 gpu buffer 加载到 cpu 的状态，或者是从磁盘加载到 cpu 的状态
     READY = 2  # 数据已经加载到 cpu ok 的状态
 

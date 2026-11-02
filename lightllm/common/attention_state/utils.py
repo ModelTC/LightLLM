@@ -4,8 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from copy import deepcopy
-from functools import WRAPPER_ASSIGNMENTS, wraps
+from functools import WRAPPER_ASSIGNMENTS, lru_cache, wraps
 from typing import ParamSpec, TypeVar
+from weakref import WeakKeyDictionary, ref
 
 import torch
 
@@ -14,6 +15,36 @@ _R = TypeVar("_R")
 
 MAX_DRAFT_MODELS = 36
 MODEL_ROLES = ("main", *(f"draft{i}" for i in range(MAX_DRAFT_MODELS)))
+
+
+def weak_cached_method(func):
+
+    caches = WeakKeyDictionary()
+
+    @wraps(func)
+    def wrapped(self, *args, **kwargs):
+        cached = caches.get(self)
+        if cached is None:
+            owner = ref(self)
+
+            @lru_cache(maxsize=None)
+            def cached(*args, **kwargs):
+                return func(owner(), *args, **kwargs)
+
+            caches[self] = cached
+        return cached(*args, **kwargs)
+
+    def cache_info():
+        empty = lru_cache(maxsize=None)(lambda: None).cache_info()
+        infos = [cached.cache_info() for cached in caches.values()]
+        return type(empty)(
+            sum(i.hits for i in infos), sum(i.misses for i in infos), None, sum(i.currsize for i in infos)
+        )
+
+    wrapped.cache_clear = caches.clear
+    wrapped.cache_info = cache_info
+    wrapped.cache_parameters = lambda: {"maxsize": None, "typed": False}
+    return wrapped
 
 
 # ========================================================================

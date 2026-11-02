@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 from typing import TYPE_CHECKING, List
 from math import prod
 from dataclasses import dataclass
@@ -10,10 +10,8 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 
 from ...utils import deepcopy_result, dtype_name
-from ...types import AxisMapping, TransferRegion
+from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-from ..packed_mla.packed_transfer import transfer_packed_pages
-from ..dp_transfer import copy_packed_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -55,6 +53,8 @@ class MLAFullAttentionState(FullAttentionState):
     # 一、资源定义与初始化
     # ========================================================================
 
+    storage_fields = ("storage",)
+
     def __init__(
         self,
         layout_config: MLAConfig,
@@ -78,6 +78,14 @@ class MLAFullAttentionState(FullAttentionState):
     def get_state_type(self) -> str:
         """返回 MLA 压缩 KV 精度对应的存储方案标记。"""
         return "mla_" + dtype_name(dtype=self.config.latent_dtype)
+
+    def get_transfer_fields(self):
+        return {"kv": TensorField(self.storage, ("layer", "token", "head", "dim"))}
+
+    def get_attention_format(self):
+        from lightllm.common.basemodel.attention.contracts import MlaFormat
+
+        return MlaFormat(self.config.latent_dtype, self.config.latent_dim, self.page_size)
 
     def allocate_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
@@ -114,47 +122,17 @@ class MLAFullAttentionState(FullAttentionState):
         """按逻辑层号返回压缩 latent 视图，不拆分为 GQA 的 K/V head。"""
         return self.storage[self.get_storage_layer_index(logical_layer_id=logical_layer_id)]
 
-    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
-        """通过 CUDA 算子将形状匹配的 MLA latent 数据写入指定物理 token 位置。"""
-        assert token_indices.is_cuda, "token indices must reside on CUDA"
-        storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        if not len(token_indices):
-            return
-        assert self.storage.is_cuda, "KV writes require CUDA storage"
-        from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
+    def bind_kv_writer(self, logical_layer_id: int):
+        from lightllm.common.basemodel.attention.writers import bind_latent_writer
 
-        destindex_copy_kv(K=kv, DestLoc=token_indices, Out=self.storage[storage_layer_index])
-
-    def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
-        """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
-        assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
-        assert (
-            src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
-        ), "token copies require equal one-dimensional index tensors"
-        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (
-            torch.int32,
-            torch.int64,
-        ), "token indices must be integer tensors"
-        assert self.storage.is_cuda, "token copies require CUDA storage"
-        if not src_indices.numel():
-            return
-        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
-
-        # 直接使用调用方提供的 CUDA 索引，保留原 dtype 和 stride。
-        # 按字节直接从源槽位写到目标槽位，覆盖量化 scale 和 packed padding，不创建中间 KV。
-        # 调用方保证源、目标集合不相交，且目标索引不重复，避免并行读写竞争。
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.storage,
-        )
+        return bind_latent_writer(self.get_layer_view(logical_layer_id))
 
     # ========================================================================
     # 三、CPU Cache 数据交换
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小返回字段区间与 TP 切片，作为 CPU 页容量计算依据。
 
@@ -163,113 +141,20 @@ class MLAFullAttentionState(FullAttentionState):
         page_tokens = get_env_start_args().cpu_cache_token_page_size
         return self._get_transfer_regions(page_tokens=page_tokens)
 
-    def write_to_cpu(
-        self,
-        token_indices: torch.Tensor,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_packed_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            write=True,
-            page_readies=cpu_page_ready_flags,
-        )
-
-    def read_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        token_indices: torch.Tensor,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_packed_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            write=False,
-        )
-
     # ========================================================================
     # 四、DP 迁移
     # ========================================================================
-
-    def copy_tokens_from_dp(
-        self,
-        src_token_indices: torch.Tensor,
-        dst_token_indices: torch.Tensor,
-        remote_dp_full_att_state: MLAFullAttentionState,
-    ) -> None:
-        """复制其他 DP 同一 TP 分片的完整 token 数据，层顺序保持一致。"""
-        assert (
-            type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config
-        ), "DP copy requires the same encoding and equivalent TP state configurations"
-        assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
-        assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        copy_packed_tokens(
-            src_storage=remote_dp_full_att_state.storage,
-            dst_storage=self.storage,
-            src_token_indices=src_token_indices,
-            dst_token_indices=dst_token_indices,
-        )
 
     # ========================================================================
     # 五、PD 分离传输
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 PD 页大小返回字段与切片，交由管理器安排其在联合页中的位置。"""
         page_tokens = get_env_start_args().pd_kv_page_size
         return self._get_transfer_regions(page_tokens=page_tokens)
-
-    def write_to_pd_page(
-        self,
-        token_indices: torch.Tensor,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_packed_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            write=True,
-        )
-
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        token_indices: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_packed_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            write=False,
-        )
 
     # ========================================================================
     # 六、私有辅助实现

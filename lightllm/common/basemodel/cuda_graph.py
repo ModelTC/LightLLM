@@ -129,6 +129,7 @@ class CudaGraph:
                 if param_name not in pure_para_set:
                     delattr(infer_state, param_name)
 
+        infer_state.prepare_attention_capture()
         with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
             model_output = decode_func(infer_state)
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
@@ -165,6 +166,8 @@ class CudaGraph:
                 if para_name not in pure_para_set1:
                     delattr(infer_state1, para_name)
 
+        infer_state.prepare_attention_capture()
+        infer_state1.prepare_attention_capture()
         with self.torch_memory_saver.cuda_graph(graph_obj, pool=self.mempool):
             model_output, model_output1 = decode_func(infer_state, infer_state1)
         self.graph[batch_size] = (
@@ -211,6 +214,7 @@ class CudaGraph:
         Capture the cuda graph for the decoding stage.
         input_ids1 and infer_state1 is used for the overlap.
         """
+        self._check_batch_count(infer_state1)
         if self.enable_decode_microbatch_overlap:
             return self._capture_decode_overlap(decode_func, infer_state, infer_state1)
         else:
@@ -243,11 +247,16 @@ class CudaGraph:
         return graph_model_output, graph_model_output1
 
     def replay(self, infer_state, infer_state1=None):
+        self._check_batch_count(infer_state1)
         if self.enable_decode_microbatch_overlap:
             return self._replay_overlap(infer_state, infer_state1)
         else:
             assert infer_state1 is None
             return self._replay(infer_state)
+
+    def _check_batch_count(self, second_batch):
+        if self.enable_decode_microbatch_overlap != (second_batch is not None):
+            raise ValueError("decode Graph batch count differs from its bound overlap mode")
 
     @torch.no_grad()
     def warmup(self, model):
@@ -258,47 +267,48 @@ class CudaGraph:
         model: TpPartBaseModel = model
         # decode cuda graph init
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
-            seq_len = 2
-            total_token_num = batch_size * seq_len
-            max_len_in_batch = self.graph_max_len_in_batch
-            input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
-            b_req_idx = torch.tensor(
-                [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-            )
-            b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
-            b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-            b_shared_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-            b_shared_radix_node_id = torch.full((batch_size,), -1, dtype=torch.int64, device="cuda")
+            with model._startup_stage(f"decode_graph:batch{batch_size}"):
+                seq_len = 2
+                total_token_num = batch_size * seq_len
+                max_len_in_batch = self.graph_max_len_in_batch
+                input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
+                b_req_idx = torch.tensor(
+                    [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+                )
+                b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
+                b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+                b_shared_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+                b_shared_radix_node_id = torch.full((batch_size,), -1, dtype=torch.int64, device="cuda")
 
-            model_input = ModelInput(
-                batch_size=batch_size,
-                total_token_num=total_token_num,
-                max_q_seq_len=1,
-                max_kv_seq_len=max_len_in_batch,
-                input_ids=input_ids,
-                b_req_idx=b_req_idx,
-                b_seq_len=b_seq_len,
-                b_mtp_index=b_mtp_index,
-                b_shared_seq_len=b_shared_seq_len,
-                b_shared_radix_node_id=b_shared_radix_node_id,
-                b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
-                is_prefill=False,
-                multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
-                **model._gen_special_model_input(batch_size),
-            )
-            model_output: ModelOutput = model.forward(model_input)
-            del model_output
-            del input_ids
-            del b_req_idx
-            del b_seq_len
+                model_input = ModelInput(
+                    batch_size=batch_size,
+                    total_token_num=total_token_num,
+                    max_q_seq_len=1,
+                    max_kv_seq_len=max_len_in_batch,
+                    input_ids=input_ids,
+                    b_req_idx=b_req_idx,
+                    b_seq_len=b_seq_len,
+                    b_mtp_index=b_mtp_index,
+                    b_shared_seq_len=b_shared_seq_len,
+                    b_shared_radix_node_id=b_shared_radix_node_id,
+                    b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
+                    is_prefill=False,
+                    multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                    **model._gen_special_model_input(batch_size),
+                )
+                model_output: ModelOutput = model.forward(model_input)
+                del model_output
+                del input_ids
+                del b_req_idx
+                del b_seq_len
 
-            model.att_state_manager.full_att_allocator.free_all()
-            model.req_manager.free_all()
-            # release local tensors
-            for var_name, var_value in list(locals().items()):
-                if isinstance(var_value, torch.Tensor):
-                    del locals()[var_name]
-            torch.cuda.empty_cache()
+                model.att_state_manager.full_att_allocator.free_all()
+                model.req_manager.free_all()
+                # release local tensors
+                for var_name, var_value in list(locals().items()):
+                    if isinstance(var_value, torch.Tensor):
+                        del locals()[var_name]
+                torch.cuda.empty_cache()
 
         logger.info(
             f"Capture cudagraph success, batch_size <={self.max_batch_size} "
@@ -313,57 +323,58 @@ class CudaGraph:
 
         model: TpPartBaseModel = model
         for batch_size in self.cuda_graph_batch_sizes[::-1]:
-            decode_batches = []
-            for micro_batch_index in [0, 1]:
-                # dummy decoding, capture the cudagraph
-                seq_len = 2
-                total_token_num = batch_size * seq_len
-                max_len_in_batch = self.graph_max_len_in_batch
-                input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
-                b_req_idx = torch.tensor(
-                    [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-                )
-                b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
-                b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-                b_shared_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-                b_shared_radix_node_id = torch.full((batch_size,), -1, dtype=torch.int64, device="cuda")
+            with model._startup_stage(f"decode_graph:batch{batch_size}"):
+                decode_batches = []
+                for micro_batch_index in [0, 1]:
+                    # dummy decoding, capture the cudagraph
+                    seq_len = 2
+                    total_token_num = batch_size * seq_len
+                    max_len_in_batch = self.graph_max_len_in_batch
+                    input_ids = torch.tensor([1 for _ in range(batch_size)], dtype=torch.int64, device="cuda")
+                    b_req_idx = torch.tensor(
+                        [model.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
+                    )
+                    b_seq_len = torch.full((batch_size,), seq_len, dtype=torch.int32, device="cuda")
+                    b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+                    b_shared_seq_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+                    b_shared_radix_node_id = torch.full((batch_size,), -1, dtype=torch.int64, device="cuda")
 
-                micro_batch = ModelInput(
-                    is_prefill=False,
-                    batch_size=batch_size,
-                    total_token_num=total_token_num,
-                    max_q_seq_len=1,
-                    max_kv_seq_len=max_len_in_batch,
-                    input_ids=input_ids,
-                    b_mtp_index=b_mtp_index,
-                    b_req_idx=b_req_idx,
-                    b_seq_len=b_seq_len,
-                    b_shared_seq_len=b_shared_seq_len,
-                    b_shared_radix_node_id=b_shared_radix_node_id,
-                    b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
-                    multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
-                    **model._gen_special_model_input(batch_size),
-                )
-                decode_batches.append(micro_batch)
-                del micro_batch
+                    micro_batch = ModelInput(
+                        is_prefill=False,
+                        batch_size=batch_size,
+                        total_token_num=total_token_num,
+                        max_q_seq_len=1,
+                        max_kv_seq_len=max_len_in_batch,
+                        input_ids=input_ids,
+                        b_mtp_index=b_mtp_index,
+                        b_req_idx=b_req_idx,
+                        b_seq_len=b_seq_len,
+                        b_shared_seq_len=b_shared_seq_len,
+                        b_shared_radix_node_id=b_shared_radix_node_id,
+                        b_position_delta=torch.zeros(batch_size, dtype=torch.int32, device="cuda"),
+                        multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                        **model._gen_special_model_input(batch_size),
+                    )
+                    decode_batches.append(micro_batch)
+                    del micro_batch
 
+                    for var_name, var_value in list(locals().items()):
+                        if isinstance(var_value, torch.Tensor):
+                            del locals()[var_name]
+                    torch.cuda.empty_cache()
+
+                _, _ = model.microbatch_overlap_decode(decode_batches[0], decode_batches[1])
+
+                model.att_state_manager.full_att_allocator.free_all()
+                model.req_manager.free_all()
+
+                del decode_batches
+
+                # release local tensors
                 for var_name, var_value in list(locals().items()):
                     if isinstance(var_value, torch.Tensor):
                         del locals()[var_name]
                 torch.cuda.empty_cache()
-
-            _, _ = model.microbatch_overlap_decode(decode_batches[0], decode_batches[1])
-
-            model.att_state_manager.full_att_allocator.free_all()
-            model.req_manager.free_all()
-
-            del decode_batches
-
-            # release local tensors
-            for var_name, var_value in list(locals().items()):
-                if isinstance(var_value, torch.Tensor):
-                    del locals()[var_name]
-            torch.cuda.empty_cache()
 
         logger.info(
             f"Capture overlap cudagraph success, batch_size <={self.max_batch_size} "

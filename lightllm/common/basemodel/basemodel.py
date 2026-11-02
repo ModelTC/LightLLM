@@ -118,6 +118,22 @@ class TpPartBaseModel:
         self._init_some_value()
         self._init_custom()
         self.load_weights(self.weight_dict)
+        if self.run_mode in ("prefill", "decode"):
+            from lightllm.common.attention_state.manifest import model_content_identity
+
+            identity = [None, None]
+            if self.tp_rank_ == 0:
+                try:
+                    identity[0] = model_content_identity(self)
+                except Exception as error:
+                    identity[1] = f"{type(error).__name__}: {error}"
+            if self.tp_world_size_ > 1:
+                group = dist_group_manager.get_group(0).device_group
+                source = torch.distributed.get_global_rank(group, 0)
+                torch.distributed.broadcast_object_list(identity, src=source, group=group)
+            if identity[1] is not None:
+                raise ValueError(f"cannot establish PD model identity: {identity[1]}")
+            self.state_content_identity = identity[0]
         # The backend calls each model's runtime stages after all weights are loaded.
         self.graph = None
         return
@@ -153,6 +169,8 @@ class TpPartBaseModel:
         with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             if not self.is_mtp_draft_model:
                 self.att_state_manager = AttentionStateManager(request_capacity=self.max_req_num + 1)
+            if hasattr(self, "state_content_identity"):
+                self.att_state_manager.model_identities[self.att_state_role] = self.state_content_identity
             # 无 attention 的 draft 只共享管理器，不创建自身 State。
             if self.is_mtp_draft_model and self.args.mtp_mode in ("vanilla_no_att", "eagle_no_att"):
                 return
@@ -173,17 +191,62 @@ class TpPartBaseModel:
                 request_capacity=self.max_req_num + 1,
                 tp_rank=self.tp_rank_,
                 tp_world_size=self.tp_world_size_,
-                device="cuda",
+                device="meta",
             )
             for state in (*full_states, *bounded_states):
                 self.att_state_manager.register_state(self.att_state_role, state)
+
+    def prepare_attention_runtime(self) -> None:
+        from .attention.legacy import prepare_model_attention
+
+        self._init_att_backend()
+        self._init_att_backend1()
+        prepare_model_attention(self)
+
+    def attention_memory_demands(self):
+        demands = []
+        seen = set()
+        for backend in (*self.attention_prefill_backends, *self.attention_decode_backends):
+            if backend is not None and id(backend) not in seen:
+                demands.extend(backend.runtime_memory_demands())
+                seen.add(id(backend))
+        return tuple(demands)
+
+    def release_attention_runtime(self):
+
+        if self.att_state_manager.storage_published:
+            raise RuntimeError("cannot release a published attention runtime")
+        self.graph = self.prefill_graph = None
+        for layer in self.layers_infer:
+            layer.release_attention_resources()
+        self.bound_states = {}
+        self.attention_bindings = {}
+        self.hidden_collector_prototype = None
+        if getattr(g_cache_manager, "cache_env_ok", False):
+            g_cache_manager.cache_env_out()
+
+    def _startup_stage(self, name):
+        from contextlib import nullcontext
+
+        profile = getattr(self, "startup_memory_profile", None)
+        return nullcontext() if profile is None else profile.stage(self.att_state_role + ":" + name)
 
     def init_runtime(self) -> None:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
-        self._init_att_backend()
-        self._init_att_backend1()
+        if not hasattr(self, "attention_plans"):
+            self.prepare_attention_runtime()
+        seen = set()
+        for backend in (*self.attention_prefill_backends, *self.attention_decode_backends):
+            if backend is not None and id(backend) not in seen:
+                backend.reserve_runtime_resources()
+                seen.add(id(backend))
+        from .attention.legacy import bind_model_attention, explain_attention_plans
+
+        bind_model_attention(self)
+        for plan in explain_attention_plans(self):
+            logger.info("Bound attention plan: %s", plan)
         self._init_hidden_collector()
         role = self.att_state_role
         logger.info(
@@ -196,12 +259,17 @@ class TpPartBaseModel:
                 f"{type(self.decode_att_backend1).__name__}"
             )
 
-        self._autotune_warmup()
-        self._init_padded_req()
-        self._init_cudagraph()
-        self._init_prefill_cuda_graph()
+        with self._startup_stage("autotune"):
+            self._autotune_warmup()
+        with self._startup_stage("padding"):
+            self._init_padded_req()
+        with self._startup_stage("decode_graph"):
+            self._init_cudagraph()
+        with self._startup_stage("prefill_graph"):
+            self._init_prefill_cuda_graph()
         if not self.is_mtp_draft_model:
-            self._check_max_len_infer()
+            with self._startup_stage("max_prefill"):
+                self._check_max_len_infer()
 
     @classmethod
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
@@ -249,6 +317,12 @@ class TpPartBaseModel:
         return
 
     def load_weights(self, weight_dict: dict):
+        external_cache_bound = getattr(self, "att_state_manager", None) is not None and any(
+            getattr(self.args, option, False)
+            for option in ("enable_cpu_cache", "enable_disk_cache", "enable_dp_prompt_cache_fetch")
+        )
+        if getattr(self, "state_content_identity", None) is not None or external_cache_bound:
+            raise RuntimeError("weight updates require draining transfers and rebuilding external caches and manifests")
         assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
             data_type=self.data_type,
@@ -337,6 +411,7 @@ class TpPartBaseModel:
         return
 
     def _init_att_backend(self):
+        self._gqa_auto_candidates = True
         role = self.att_state_role
         if not self.att_state_manager.get_full_attention_states(role):
             # FFN-only and linear-only models do not need a full-attention backend.
@@ -467,7 +542,24 @@ class TpPartBaseModel:
         # 特殊模型，特殊模式的特定变量初始化操作。
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
 
-        if infer_state.is_prefill:
+        if hasattr(self, "attention_bindings"):
+            infer_state.bound_states = self.bound_states
+            backends = self.attention_prefill_backends if infer_state.is_prefill else self.attention_decode_backends
+            created = {}
+            metadata = []
+            for backend in backends:
+                if backend is not None and id(backend) not in created:
+                    create = (
+                        backend.create_att_prefill_state if infer_state.is_prefill else backend.create_att_decode_state
+                    )
+                    created[id(backend)] = create(infer_state=infer_state)
+                metadata.append(None if backend is None else created[id(backend)])
+            infer_state.attention_metadata = tuple(metadata)
+            if infer_state.is_prefill:
+                infer_state.prefill_att_state, infer_state.prefill_att_state1 = metadata[:2]
+            else:
+                infer_state.decode_att_state, infer_state.decode_att_state1 = metadata[:2]
+        elif infer_state.is_prefill:
             infer_state.prefill_att_state = (
                 self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
                 if self.prefill_att_backend is not None
@@ -722,7 +814,6 @@ class TpPartBaseModel:
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -767,8 +858,10 @@ class TpPartBaseModel:
 
         else:
             g_cache_manager.cache_env_in()
-            output_tensors: List[torch.Tensor] = prefill_func(input_tensors, infer_state)
-            g_cache_manager.cache_env_out()
+            try:
+                output_tensors: List[torch.Tensor] = prefill_func(input_tensors, infer_state)
+            finally:
+                g_cache_manager.cache_env_out()
 
         input_embs = output_tensors[0]
 
@@ -1117,7 +1210,9 @@ class TpPartBaseModel:
             self.req_manager.free_all()
             self.att_state_manager.full_att_allocator.free_all()
             logger.info(f"check max_len {self.batch_max_tokens} infer ok")
-        except (RuntimeError, torch.OutOfMemoryError) as e:
+        except torch.OutOfMemoryError:
+            raise
+        except RuntimeError as e:
             logger.exception(str(e))
             exception_str = (
                 "check max len infer fail, you can try:"
@@ -1126,7 +1221,10 @@ class TpPartBaseModel:
                 "3.Set the --batch_max_tokens startup parameter to a smaller value."
             )
             logger.error(exception_str)
-            raise Exception(exception_str)
+            raise RuntimeError(exception_str) from e
+        finally:
+            self.req_manager.free_all()
+            self.att_state_manager.full_att_allocator.free_all()
         torch.cuda.empty_cache()
         return
 
@@ -1138,7 +1236,6 @@ class TpPartBaseModel:
     @torch.no_grad()
     @post_empty_cache
     def _autotune_warmup(self):
-        Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
         torch.distributed.barrier()
 
         warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
@@ -1151,64 +1248,66 @@ class TpPartBaseModel:
         warmup_lengths.sort(reverse=True)
 
         layer_num_bak = self.layers_num
-        self.layers_num = self.autotune_layers()
-        for input_len in tqdm(warmup_lengths, desc="warming up"):
+        with Autotuner.autotune_warmup(AutotuneKernelType.GENERAL):
             try:
-                rand_gen = torch.Generator(device="cuda")
-                rand_gen.manual_seed(input_len)
-                dummy_input_ids = torch.randint(
-                    0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
-                )
-                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-                page_size = self.att_state_manager.full_att_allocator.page_size
-                alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-                mem_indexes = self.att_state_manager.full_att_allocator.alloc(alloc_token_num).cuda()
-                self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-                b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
-                b_seq_len[:] = input_len
-                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
-                total_token_num = input_len
-                b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-                b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
-                model_input = ModelInput(
-                    batch_size=1,
-                    total_token_num=total_token_num,
-                    max_q_seq_len=input_len,
-                    max_kv_seq_len=input_len,
-                    max_cache_len=0,
-                    input_ids=dummy_input_ids,
-                    b_req_idx=b_req_idx,
-                    b_seq_len=b_seq_len,
-                    b_mtp_index=b_mtp_index,
-                    b_is_decode_req=b_is_decode_req,
-                    is_prefill=True,
-                    b_ready_cache_len=b_ready_cache_len,
-                    b_prefill_start_loc=b_prefill_start_loc,
-                    b_prefill_has_output_cpu=[
-                        False,
-                    ],
-                    multimodal_params=[{"images": [], "audios": []}],
-                    **self._gen_special_model_input(total_token_num),
-                )
-                model_output = self.forward(
-                    model_input,
-                )
-                del model_output
-                self.req_manager.free_all()
-                self.att_state_manager.full_att_allocator.free_all()
-                gc.collect()
-                torch.cuda.empty_cache()
-            except Exception as e:
-                logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
-                logger.exception(str(e))
-                self.req_manager.free_all()
-                self.att_state_manager.full_att_allocator.free_all()
-                gc.collect()
-                torch.cuda.empty_cache()
-        self.layers_num = layer_num_bak
+                self.layers_num = self.autotune_layers()
+                for input_len in tqdm(warmup_lengths, desc="warming up"):
+                    try:
+                        rand_gen = torch.Generator(device="cuda")
+                        rand_gen.manual_seed(input_len)
+                        dummy_input_ids = torch.randint(
+                            0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
+                        )
+                        b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
+                        page_size = self.att_state_manager.full_att_allocator.page_size
+                        alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
+                        mem_indexes = self.att_state_manager.full_att_allocator.alloc(alloc_token_num).cuda()
+                        self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
+                        b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
+                        b_seq_len[:] = input_len
+                        b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
+                        b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
+                        total_token_num = input_len
+                        b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
+                        b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
+                        model_input = ModelInput(
+                            batch_size=1,
+                            total_token_num=total_token_num,
+                            max_q_seq_len=input_len,
+                            max_kv_seq_len=input_len,
+                            max_cache_len=0,
+                            input_ids=dummy_input_ids,
+                            b_req_idx=b_req_idx,
+                            b_seq_len=b_seq_len,
+                            b_mtp_index=b_mtp_index,
+                            b_is_decode_req=b_is_decode_req,
+                            is_prefill=True,
+                            b_ready_cache_len=b_ready_cache_len,
+                            b_prefill_start_loc=b_prefill_start_loc,
+                            b_prefill_has_output_cpu=[
+                                False,
+                            ],
+                            multimodal_params=[{"images": [], "audios": []}],
+                            **self._gen_special_model_input(total_token_num),
+                        )
+                        model_output = self.forward(
+                            model_input,
+                        )
+                        del model_output
+                    except torch.OutOfMemoryError:
+                        raise
+                    except Exception as error:
+                        logger.exception("autotune warmup for length %d failed: %s", input_len, error)
+                    finally:
+                        self.req_manager.free_all()
+                        self.att_state_manager.full_att_allocator.free_all()
+                        if getattr(g_cache_manager, "cache_env_ok", False):
+                            g_cache_manager.cache_env_out()
+                        gc.collect()
+                        torch.cuda.empty_cache()
+            finally:
+                self.layers_num = layer_num_bak
         torch.distributed.barrier()
-        Autotuner.end_autotune_warmup()
 
     @final
     @torch.no_grad()

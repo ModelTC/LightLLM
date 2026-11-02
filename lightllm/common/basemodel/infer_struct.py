@@ -134,7 +134,11 @@ class InferStateInfo:
             self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
 
     def init_att_state(self):
-        if self.is_prefill:
+        self._paged_attention_metadata = {}
+        if hasattr(self, "attention_metadata"):
+            for state in self._unique_attention_metadata():
+                state.init_state()
+        elif self.is_prefill:
             if self.prefill_att_state is not None:
                 self.prefill_att_state.init_state()
             if self.prefill_att_state1 is not None:
@@ -145,6 +149,13 @@ class InferStateInfo:
             if self.decode_att_state1 is not None:
                 self.decode_att_state1.init_state()
         self.check_att_states()
+
+    def _unique_attention_metadata(self):
+        seen = set()
+        for state in self.attention_metadata:
+            if state is not None and id(state) not in seen:
+                seen.add(id(state))
+                yield state
 
     def check_att_states(self) -> None:
         """检查 attention state，防止其强引用 InferStateInfo 而形成循环引用。
@@ -170,7 +181,12 @@ class InferStateInfo:
         注意：检查仅扫描非空 attention state 的第一层实例属性，不递归检查容器或
         回调闭包；实现后端时也应避免通过这些位置间接保存 infer_state 的强引用。
         """
-        for state in (self.prefill_att_state, self.prefill_att_state1, self.decode_att_state, self.decode_att_state1):
+        states = getattr(
+            self,
+            "attention_metadata",
+            (self.prefill_att_state, self.prefill_att_state1, self.decode_att_state, self.decode_att_state1),
+        )
+        for state in states:
             if state is not None:
                 state.check_no_infer_state()
 
@@ -181,11 +197,30 @@ class InferStateInfo:
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
 
+        if hasattr(self, "attention_metadata"):
+            if len(self.attention_metadata) != len(new_infer_state.attention_metadata):
+                raise ValueError("attention metadata topology changed after graph capture")
+            seen = set()
+            for old, new in zip(self.attention_metadata, new_infer_state.attention_metadata):
+                if old is not None and id(old) not in seen:
+                    if type(old) is not type(new):
+                        raise ValueError("attention provider changed after graph capture")
+                    old.copy_for_decode_cuda_graph(new)
+                    seen.add(id(old))
+            return
         if self.decode_att_state is not None:
             self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
         if self.decode_att_state1 is not None:
             self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return
+
+    def prepare_attention_capture(self):
+        states = getattr(self, "attention_metadata", (self.decode_att_state, self.decode_att_state1))
+        seen = set()
+        for state in states:
+            if state is not None and id(state) not in seen:
+                state.prepare_for_capture()
+                seen.add(id(state))
 
     def call_overlap_hook(self):
         """

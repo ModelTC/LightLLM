@@ -9,8 +9,11 @@ import pickle
 from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.copy_plan import CopyPlan
+from lightllm.common.basemodel.attention.runtime import DeviceRuntime
+from lightllm.common.attention_state.lifecycle import RetiredTransfers, transfer_completion
 from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
-from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
+from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer
 from lightllm.server.pd_io_struct import (
     PDChunckedTransTask,
     PDChunckedTransTaskGroup,
@@ -135,12 +138,20 @@ class _DecodeTransModule:
             self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
         )
         self.kv_move_buffer = kv_move_buffer
+        self.runtime = DeviceRuntime(kv_move_buffer.device)
+        self.copy_plans = tuple(
+            CopyPlan.for_pd(resource_managers[start : start + self.dp_world_size], kv_move_buffer, write=False)
+            for start in range(0, len(resource_managers), self.dp_world_size)
+        )
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
+        from lightllm.common.attention_state.manifest import build_state_manifest
+
         self.transporter = create_kv_transporter(
             args=self.args,
             node_id=self.args.pd_node_id,
             tp_idx=device_id,
             kv_move_buffer=kv_move_buffer,
+            state_manifest=build_state_manifest(self.resource_managers[device_id]),
         )
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()
@@ -151,6 +162,7 @@ class _DecodeTransModule:
         self.failed_queue = queue.Queue()
 
         self.page_index_queue = queue.Queue()
+        self.retired_transfers = RetiredTransfers(self.transporter, self.page_index_queue, "dst_page_index")
         for page_index in range(self.args.pd_kv_page_num):
             self.page_index_queue.put(page_index)
 
@@ -174,15 +186,7 @@ class _DecodeTransModule:
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 cpu_token_indices = torch.tensor([0], dtype=torch.long, device="cpu")
                 token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
-                copy_page(
-                    node_att_managers=self.resource_managers,
-                    pd_page_buffers=self.kv_move_buffer,
-                    write_to_pd_page=False,
-                    token_indices=token_indices,
-                    pd_page_index=0,
-                    dp_rank_in_node=dp_index,
-                    tp_world_size=self.dp_world_size,
-                )
+                self.copy_plans[dp_index].run(token_indices=token_indices, pd_page_index=0)
                 torch.cuda.current_stream().synchronize()
         return
 
@@ -201,6 +205,9 @@ class _DecodeTransModule:
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.request_id == request_id:
+                    transfer_completion(trans_task).cancelled = True
+                    trans_task.error_info = error_info
                 if trans_task.request_id == request_id and trans_task.dst_page_index is None:
                     # 对于 已经分配了page index 的任务，不能直接失败，需要两边走完正常流程再失败，不然可能
                     # 出现复杂的异步协同问题。
@@ -280,11 +287,6 @@ class _DecodeTransModule:
                                 local_trans_task = self.waiting_dict.pop(notify_obj.get_key(), None)
                                 if local_trans_task is not None:
                                     local_trans_task.error_info = notify_obj.error_info
-                                    # TODO: 这里设置 12 秒超时后会立即将任务放入 failed_queue，
-                                    # fail_loop 会直接归还任务占用的 page，因此该超时时间实际不会再被检查。
-                                    # 如果底层异步传输尚未结束，page 可能被新任务提前复用，导致脏数据。
-                                    # 后续需要在确认传输已经静默（DONE/ERR）后再回收 page。
-                                    local_trans_task.transfer_time_out_secs = 12
                                     self.failed_queue.put(local_trans_task)
 
                             self._abort(
@@ -300,6 +302,7 @@ class _DecodeTransModule:
                                 local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
                             if local_trans_task is not None:
                                 local_trans_task.shared_time_out_mark.update()
+                                local_trans_task.transfer_id = remote_trans_task.transfer_id
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
                                 local_trans_task.prefill_agent_metadata = remote_trans_task.prefill_agent_metadata
                                 local_trans_task.prefill_num_pages = remote_trans_task.prefill_num_pages
@@ -328,14 +331,26 @@ class _DecodeTransModule:
                         # prefill 写完数据到了 done 阶段
                         if remote_trans_task.write_stage == "done":
                             with self.waiting_dict_lock:
-                                local_trans_task = self.waiting_dict.pop(remote_trans_task.get_key(), None)
+                                local_trans_task = self.waiting_dict.get(remote_trans_task.get_key())
+                                if (
+                                    local_trans_task is not None
+                                    and local_trans_task.transfer_id == remote_trans_task.transfer_id
+                                ):
+                                    self.waiting_dict.pop(remote_trans_task.get_key())
+                                else:
+                                    local_trans_task = None
                             if local_trans_task is not None:
+                                transfer_completion(local_trans_task).network_done = True
                                 local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
                                 if self.args.pd_detail_log:
                                     logger.debug(f"recv WRITE done from prefill: {remote_trans_task.to_str()}")
+                            elif hasattr(self, "retired_transfers") and self.retired_transfers.remote_done(
+                                remote_trans_task.transfer_id
+                            ):
+                                continue
                             else:
                                 # Same race as the WRITE request stage: decode may have cleaned the
                                 # waiting task because the request was aborted, then a late done notify
@@ -356,6 +371,8 @@ class _DecodeTransModule:
                 time.sleep(0.001)
 
     def _check_tasks_time_out(self):
+        if hasattr(self, "retired_transfers"):
+            self.retired_transfers.poll()
         with self.waiting_dict_lock:
             timeout_tasks = []
             for key, trans_task in list(self.waiting_dict.items()):
@@ -379,6 +396,8 @@ class _DecodeTransModule:
             try:
                 with self.waiting_dict_lock:
                     self.waiting_dict[key] = trans_task
+                transfer_completion(trans_task).network_submitted = True
+                self.retired_transfers.watch(trans_task)
                 self.transporter.send_write_ready_task_to_prefill_node(trans_task=trans_task)
             except BaseException as e:
                 with self.waiting_dict_lock:
@@ -397,6 +416,9 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.ready_page_task_queue.get()
+            if transfer_completion(trans_task).cancelled:
+                self.failed_queue.put(trans_task)
+                continue
             if trans_task.xfer_handle is not None:
                 # 只有 NCCL 接收端会创建本地 Xfer 句柄；NIXL 的远端 WRITE 完成通知
                 # 已代表其写入完成，不经过这里的本地 CUDA event 轮询。
@@ -423,20 +445,22 @@ class _DecodeTransModule:
                     cpu_token_indices = torch.tensor(trans_task.mem_indexes, dtype=torch.long, device="cpu")
                     # 索引上传和后续页拷贝使用同一流，保证执行顺序。
                     token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
-                copy_page(
-                    node_att_managers=self.resource_managers,
-                    pd_page_buffers=self.kv_move_buffer,
-                    write_to_pd_page=False,
-                    token_indices=token_indices,
-                    pd_page_index=trans_task.dst_page_index,
-                    dp_rank_in_node=trans_task.decode_dp_index,
-                    tp_world_size=self.dp_world_size,
-                    task_kind=trans_task.page_kind,
-                    req_idx=trans_task.req_idx,
-                    state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
-                )
+                try:
+                    self.copy_plans[trans_task.decode_dp_index].run(
+                        token_indices=token_indices,
+                        pd_page_index=trans_task.dst_page_index,
+                        task_kind=trans_task.page_kind,
+                        req_idx=trans_task.req_idx,
+                        state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
+                    )
+                except Exception as error:
+                    trans_task.error_info = f"unpacking state failed: {error}"
                 copy_end_event.record(self.copy_cuda_stream)
-            self.success_queue.put((copy_end_event, copy_start_event, trans_task))
+                transfer_completion(trans_task).destination_ready = copy_end_event
+            if getattr(trans_task, "error_info", None) is not None:
+                self.failed_queue.put(trans_task)
+            else:
+                self.success_queue.put((copy_end_event, copy_start_event, trans_task))
 
     @log_exception
     def success_loop(self):
@@ -451,11 +475,7 @@ class _DecodeTransModule:
                 copy_end_event.synchronize()
                 read_page_gpu_time_ms = copy_start_event.elapsed_time(copy_end_event)
 
-            if trans_task.dst_page_index is not None:
-                self.page_index_queue.put(trans_task.dst_page_index)
-
-            if trans_task.xfer_handle is not None:
-                self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            self.retired_transfers.retire(trans_task)
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)
@@ -474,13 +494,12 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
+            completion = transfer_completion(trans_task)
+            completion.cancelled = True
+            completion.wait_local_accesses()
 
             # 回收页面
-            if trans_task.dst_page_index is not None:
-                self.page_index_queue.put(trans_task.dst_page_index)
-
-            if trans_task.xfer_handle is not None:
-                self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            self.retired_transfers.retire(trans_task)
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)

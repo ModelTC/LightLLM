@@ -7,6 +7,22 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_g
 
 
 class TritonAttBackend(BaseAttBackend):
+    supported_attention_features = ("alibi", "window")
+
+    def attention_support_error(self, spec, format, phase):
+        reason = super().attention_support_error(spec, format, phase)
+        if reason:
+            return reason
+        if spec.alibi and spec.window != (-1, -1):
+            return "Triton does not combine ALiBi with a sliding window"
+        if phase == "decode" and spec.q_heads == spec.kv_heads and spec.window != (-1, -1):
+            return "Triton MHA decode does not implement sliding windows"
+        if phase == "decode" and spec.window != (-1, -1):
+            mtp = getattr(self.model, "mtp_manager", None)
+            if mtp is not None and mtp.get_decode_draft_step(self.model.is_mtp_draft_model) > 0:
+                return "Triton speculative decode does not implement sliding windows"
+        return None
+
     def create_att_prefill_state(self, infer_state) -> "TritonPrefillAttState":
         return TritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -95,6 +111,7 @@ class TritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class TritonDecodeAttState(BaseDecodeAttState):
+    graph_buffer_names = ("b_mark_mtp_shared_group",)
     b_mark_mtp_shared_group: torch.Tensor = None
     decode_max_kv_seq_len: int = None
 

@@ -14,6 +14,28 @@ from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache
 from lightllm.server.router.model_infer.infer_batch import InferenceContext
 
 
+@pytest.mark.parametrize("draft", [False, True])
+def test_cache_sync_honors_bound_provider_in_any_model_role(draft):
+    def model(selected):
+        unused = SimpleNamespace(requires_cache_stream_sync=False)
+        return SimpleNamespace(
+            prefill_att_backend=unused,
+            decode_att_backend=unused,
+            prefill_att_backend1=None,
+            decode_att_backend1=None,
+            attention_prefill_backends=(None, None, selected),
+            attention_decode_backends=(None, None, selected),
+        )
+
+    required = SimpleNamespace(requires_cache_stream_sync=True)
+    optional = SimpleNamespace(requires_cache_stream_sync=False)
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(
+        model=model(optional if draft else required), draft_models=[model(required if draft else optional)]
+    )
+    assert module.need_sync_compute_stream()
+
+
 def test_cache_tiers_reassignment_is_rejected():
     context = InferenceContext()
     context.cache_placement_controller = AdaptiveCachePlacementController(
@@ -225,6 +247,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda: SimpleNamespace(synchronize=lambda: None))
 
     module.load_cpu_cache_to_reqs([req])
 

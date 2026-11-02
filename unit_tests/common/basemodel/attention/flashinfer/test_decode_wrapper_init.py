@@ -6,7 +6,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from lightllm.common.basemodel.attention.flashinfer import fp, fp8, mla
+from lightllm.common.basemodel.attention.flashinfer import fp, fp8, mla, paged_metadata
 from lightllm.common.basemodel.attention.flashinfer.utils import should_init_decode_wrapper
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -42,19 +42,15 @@ def decode_init(request, monkeypatch):
 
     monkeypatch.setattr(module, "torch", SimpleNamespace(int32=torch.int32, arange=cpu_arange, empty=torch.empty))
 
-    def cumsum_params(q_lengths, kv_lengths):
-        return tuple(
-            torch.cat((torch.zeros(1, dtype=torch.int32), lengths.cumsum(0, dtype=torch.int32)))
-            for lengths in (q_lengths, kv_lengths)
-        )
+    def build_pages(infer, page_size, indices):
+        pages = (infer.b_seq_len + page_size - 1) // page_size
+        starts = torch.cat((torch.zeros(1, dtype=torch.int32), pages.cumsum(0, dtype=torch.int32)))
+        last = infer.b_seq_len - (pages - 1) * page_size
+        indices.fill_(7)
+        return paged_metadata.PageMetadata(starts, last, indices)
 
-    monkeypatch.setattr(module, "gen_cumsum_pad0_tensor", cumsum_params)
-
-    def repack(**kwargs):
-        kwargs["out_page_indices"].fill_(7)
-
-    repack_indices = Mock(side_effect=repack)
-    monkeypatch.setattr(module, "repack_kv_index", repack_indices)
+    repack_indices = Mock(side_effect=build_pages)
+    monkeypatch.setattr(paged_metadata, "build_page_metadata", repack_indices)
     can_run = Mock(return_value=True)
     backend = SimpleNamespace(
         model=SimpleNamespace(
@@ -110,9 +106,9 @@ def test_decode_init_uses_explicit_graph_mode_for_wrapper_creation(decode_init, 
     assert decode_init.state.kv_indices.data_ptr() == decode_init.backend.kv_indices_buffer[0].data_ptr()
     assert torch.all(decode_init.state.kv_indices == 7)
     decode_init.repack_indices.assert_called_once()
-    repack_args = decode_init.repack_indices.call_args.kwargs
-    assert repack_args["b_req_idx"] is infer_state.b_req_idx
-    assert repack_args["b_token_len"] is infer_state.b_seq_len
+    owner, page_size, indices = decode_init.repack_indices.call_args.args
+    assert owner is infer_state and page_size == decode_init.backend.infer_page_size
+    assert indices is decode_init.state.kv_indices
     if decode_init.module is fp:
         expected_last_page_lengths = [1, 1] if decode_init.backend.infer_page_size == 1 else [1, 2]
         torch.testing.assert_close(

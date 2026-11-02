@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 
 from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
@@ -13,10 +13,8 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 
 from ...utils import deepcopy_result
-from ...types import AxisMapping, TransferRegion
+from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-from ..packed_mla.packed_transfer import transfer_packed_pages
-from ..dp_transfer import copy_packed_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -107,6 +105,8 @@ class CompressedAttentionState(FullAttentionState):
     # 一、资源定义与初始化
     # ========================================================================
 
+    storage_fields = ("storage",)
+
     def __init__(
         self,
         layout_config: CompressedAttentionConfig,
@@ -153,6 +153,9 @@ class CompressedAttentionState(FullAttentionState):
             device=self.device,
         )
 
+    def get_transfer_fields(self):
+        return {"kv": TensorField(self.storage, ("layer", "token", "head", "dim"), self.config.block_token_size)}
+
     def get_token_bytes(self) -> int:
         """返回每个原始 token 索引的存储开销，包含全部物理层及压缩块 padding。"""
         config = self.config
@@ -184,210 +187,32 @@ class CompressedAttentionState(FullAttentionState):
         )
         return CompressedAttentionLayerView(kv=blocks[:, :kv_bytes], indexer_k=indexer)
 
-    def write_full_att_kv(
-        self,
-        logical_layer_id: int,
-        token_indices: torch.Tensor,
-        kv: torch.Tensor,
-    ) -> None:
-        """压缩器通过计算视图融合写入；普通 KV 写入路径不应调用此方法。"""
-        raise NotImplementedError("compressed KV is written by the fused compressor")
+    def bind_kv_writer(self, logical_layer_id: int):
+        from lightllm.common.basemodel.attention.writers import fused_compressor_write_only
 
-    def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
-        """复制完整压缩块；调用方保证块内索引完整、顺序对应且源目标不重叠。"""
-        assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
-        assert (
-            src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
-        ), "token copies require equal one-dimensional index tensors"
-        # 数据、scale 和 indexer 在块内分区保存，不能只复制部分原始 token 槽位。
-        assert (
-            src_indices.numel() % self.config.block_token_size == 0
-        ), "token copies require complete compressed blocks"
-        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (
-            torch.int32,
-            torch.int64,
-        ), "token indices must be integer tensors"
-        assert self.storage.is_cuda, "token copies require CUDA storage"
-        if not src_indices.numel():
-            return
-        copy_packed_tokens(
-            src_storage=self.storage,
-            dst_storage=self.storage,
-            src_token_indices=src_indices,
-            dst_token_indices=dst_indices,
-        )
+        return fused_compressor_write_only
 
     # ========================================================================
     # 三、CPU Cache 数据交换
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小描述完整压缩块，包含 KV、scale、indexer 和块内 padding。"""
         page_tokens = get_env_start_args().cpu_cache_token_page_size
         return self._get_transfer_regions(page_tokens=page_tokens)
-
-    def write_to_cpu(
-        self,
-        token_indices: torch.Tensor,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        page_tokens = layout.tokens_per_page
-        assert (
-            page_tokens is not None and page_tokens > 0 and page_tokens % self.config.block_token_size == 0
-        ), "CPU page token capacity must be a positive multiple of block_token_size"
-        # 联合页可包含其他 State；只校验本 State 的区域完整且不越过单页末尾。
-        page_bytes = prod(cpu_page_buffers.shape[1:]) * cpu_page_buffers.element_size()
-        required_bytes = self.get_token_bytes() * page_tokens
-        assert (
-            0 <= layout.byte_start < layout.byte_start + required_bytes <= layout.byte_end <= page_bytes
-        ), "compressed State byte range must fit within one CPU page"
-        assert all(
-            0 <= page < cpu_page_buffers.shape[0] for page in cpu_page_indices
-        ), "CPU page index is out of bounds"
-        transfer_packed_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            write=True,
-            page_readies=cpu_page_ready_flags,
-        )
-
-    def read_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        token_indices: torch.Tensor,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        page_tokens = layout.tokens_per_page
-        assert (
-            page_tokens is not None and page_tokens > 0 and page_tokens % self.config.block_token_size == 0
-        ), "CPU page token capacity must be a positive multiple of block_token_size"
-        # 读回也允许联合页中的非零偏移；页面必须完整容纳当前 State 的全部压缩块。
-        page_bytes = prod(cpu_page_buffers.shape[1:]) * cpu_page_buffers.element_size()
-        required_bytes = self.get_token_bytes() * page_tokens
-        assert (
-            0 <= layout.byte_start < layout.byte_start + required_bytes <= layout.byte_end <= page_bytes
-        ), "compressed State byte range must fit within one CPU page"
-        assert all(
-            0 <= page < cpu_page_buffers.shape[0] for page in cpu_page_indices
-        ), "CPU page index is out of bounds"
-        transfer_packed_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            write=False,
-        )
-
-    # ========================================================================
-    # 四、DP 迁移
-    # ========================================================================
-
-    def copy_tokens_from_dp(
-        self,
-        src_token_indices: torch.Tensor,
-        dst_token_indices: torch.Tensor,
-        remote_dp_full_att_state: CompressedAttentionState,
-    ) -> None:
-        """复制其他 DP 的完整压缩块；调用方保证块内索引完整且顺序对应。"""
-        assert (
-            type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config
-        ), "DP copy requires the same encoding and equivalent TP state configurations"
-        assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
-        assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        assert (
-            src_token_indices.numel() % self.config.block_token_size == 0
-        ), "DP token copies require complete compressed blocks"
-        copy_packed_tokens(
-            src_storage=remote_dp_full_att_state.storage,
-            dst_storage=self.storage,
-            src_token_indices=src_token_indices,
-            dst_token_indices=dst_token_indices,
-        )
 
     # ========================================================================
     # 五、PD 分离传输
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 PD 页大小返回字段与切片，交由管理器安排其在联合页中的位置。"""
         page_tokens = get_env_start_args().pd_kv_page_size
         return self._get_transfer_regions(page_tokens=page_tokens)
-
-    def write_to_pd_page(
-        self,
-        token_indices: torch.Tensor,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        # packed scale/indexer 可位于末尾有效 token 之后，PD 必须传完整的末压缩块。
-        # TODO：将末块索引扩展融合到传输 kernel，省去这份很小的索引临时区。
-        alignment = self.config.block_token_size
-        padding = (-token_indices.numel()) % alignment
-        if token_indices.numel() and padding:
-            tail = token_indices[-1:] + torch.arange(
-                start=1,
-                end=padding + 1,
-                dtype=token_indices.dtype,
-                device=token_indices.device,
-            )
-            token_indices = torch.cat(tensors=(token_indices, tail))
-        transfer_packed_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            write=True,
-        )
-
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        token_indices: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        # packed scale/indexer 可位于末尾有效 token 之后，PD 必须传完整的末压缩块。
-        # TODO：将末块索引扩展融合到传输 kernel，省去这份很小的索引临时区。
-        alignment = self.config.block_token_size
-        padding = (-token_indices.numel()) % alignment
-        if token_indices.numel() and padding:
-            tail = token_indices[-1:] + torch.arange(
-                start=1,
-                end=padding + 1,
-                dtype=token_indices.dtype,
-                device=token_indices.device,
-            )
-            token_indices = torch.cat(tensors=(token_indices, tail))
-        transfer_packed_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            write=False,
-        )
 
     # ========================================================================
     # 六、私有辅助实现

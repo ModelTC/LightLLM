@@ -52,11 +52,13 @@ class MultiLevelKVCacheManager:
         self.disk_cache_thread = None
         if self.args.enable_disk_cache:
             from .disk_cache_worker import DiskCacheWorker
+            from lightllm.utils.cpu_cache_layout import build_cpu_cache_manifest
 
             self.disk_cache_worker = DiskCacheWorker(
                 disk_cache_storage_size=self.args.disk_cache_storage_size,
                 cpu_cache_client=self.cpu_cache_client,
                 disk_cache_dir=self.args.disk_cache_dir,
+                state_manifest=build_cpu_cache_manifest(),
             )
             self.disk_cache_thread = threading.Thread(target=self.disk_cache_worker.run, daemon=True)
             self.disk_cache_thread.start()
@@ -98,39 +100,55 @@ class MultiLevelKVCacheManager:
         if loadable_len == 0:
             return all_pages, 0
 
-        missing_hash_keys = token_hash_list[cpu_hit_len : cpu_hit_len + loadable_len]
         self.cpu_cache_client.lock.acquire_sleep1ms()
-        allocated_pages, _ = self.cpu_cache_client.allocate_pages(
-            hash_keys=missing_hash_keys, disk_offload_enable=self.args.enable_disk_cache
-        )
-        self.cpu_cache_client.lock.release()
-
-        # 收集成功分配的页面,直接append到all_pages
         new_page_indexes = []
-        for page_index in allocated_pages:
-            if page_index == -1:
-                break
-            all_pages.append(page_index)
-            new_page_indexes.append(page_index)
+        scratch_pages = []
+        block_size = self.disk_cache_worker.service._n
+        load_start_pos = cpu_hit_len // block_size * block_size
+        try:
+            for hash_key in token_hash_list[cpu_hit_len : cpu_hit_len + loadable_len]:
+                if self.cpu_cache_client.page_hash_dict.get(hash_key) is not None:
+                    break
+                page_index = self.cpu_cache_client.get_one_empty_page(hash_key, self.args.enable_disk_cache)
+                if page_index is None:
+                    break
+                new_page_indexes.append(page_index)
+
+            if new_page_indexes:
+                scratch_pages = self.cpu_cache_client.reserve_scratch_pages(cpu_hit_len - load_start_pos)
+                if len(scratch_pages) != cpu_hit_len - load_start_pos:
+                    self.cpu_cache_client.recycle_pages(new_page_indexes + scratch_pages)
+                    return all_pages, 0
+        finally:
+            self.cpu_cache_client.lock.release()
 
         if not new_page_indexes:
             return all_pages, 0
 
-        # 计算需要从disk加载的范围,必须按block边界对齐
-        block_size = self.disk_cache_worker.service._n
-        start_block = cpu_hit_len // block_size
-        load_start_pos = start_block * block_size
+        all_pages = all_pages + new_page_indexes
 
+        io_pages = all_pages[:load_start_pos] + scratch_pages + new_page_indexes
         hashs = token_hash_list[: cpu_hit_len + len(new_page_indexes)]
-        if not self.disk_cache_worker.load_pages(hashs=hashs, page_indexes=all_pages, start_pos=load_start_pos):
+        from lightllm.common.attention_state.lifecycle import UncertainCompletion
+
+        try:
+            loaded = self.disk_cache_worker.load_pages(hashs=hashs, page_indexes=io_pages, start_pos=load_start_pos)
+        except UncertainCompletion:
             self.cpu_cache_client.lock.acquire_sleep1ms()
-            self.cpu_cache_client.recycle_pages(new_page_indexes)
+            self.cpu_cache_client.quarantine_pages(new_page_indexes + scratch_pages)
+            self.cpu_cache_client.lock.release()
+            logger.exception("Disk read completion is unknown; retaining its pages and recomputing the prefix")
+            return all_pages[:cpu_hit_len], 0
+        if not loaded:
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            self.cpu_cache_client.recycle_pages(new_page_indexes + scratch_pages)
             self.cpu_cache_client.lock.release()
             return all_pages[:cpu_hit_len], 0
 
         self.cpu_cache_client.lock.acquire_sleep1ms()
+        self.cpu_cache_client.recycle_pages(scratch_pages)
         self.cpu_cache_client.update_pages_status_to_ready(
-            page_list=all_pages,
+            page_list=new_page_indexes,
             deref=False,
             disk_offload_enable=False,
         )
@@ -204,6 +222,13 @@ class MultiLevelKVCacheManager:
                     raise e
 
             while not self.cpu_cache_client.check_allpages_ready(finded_page_indexes):
+                if self.cpu_cache_client.any_pages_failed(finded_page_indexes):
+                    self.cpu_cache_client.lock.acquire_sleep1ms()
+                    self.cpu_cache_client.deref_pages(finded_page_indexes)
+                    self.cpu_cache_client.lock.release()
+                    finded_page_indexes = []
+                    req.disk_prompt_cache_len = 0
+                    break
                 time.sleep(0.01)
 
             req.cpu_cache_match_page_indexes.fill(finded_page_indexes)

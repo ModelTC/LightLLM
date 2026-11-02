@@ -189,7 +189,9 @@ def test_full_tuning_graph_and_cache_reuse(tmp_path, monkeypatch, length):
         return inputs["out"]
 
     graph = graph_module.CudaGraph(1, 2, 1, max_batch_size=2, max_len_in_batch=32768)
-    graph.capture_decode(decode, SimpleNamespace(input_ids=torch.ones(2, device="cuda")))
+    graph.capture_decode(
+        decode, SimpleNamespace(input_ids=torch.ones(2, device="cuda"), prepare_attention_capture=lambda: None)
+    )
     torch.cuda.synchronize()
     assert rebuild_count == 1 and benchmark_count == 20
     torch.testing.assert_close(inputs["out"].float(), reduction_reference(inputs), atol=2e-3, rtol=1e-2)

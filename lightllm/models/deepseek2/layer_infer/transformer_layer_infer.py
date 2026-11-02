@@ -1,9 +1,9 @@
+from lightllm.common.basemodel.attention.mla import MlaPrefillInput, MlaDecodeInput
 from lightllm.common.attention_state.full_att import FullAttentionState
 import os
 import torch
 import triton
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
-from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
@@ -86,12 +86,8 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             layer_weight=layer_weight,
         )
 
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=q,
-            k=(k_nope, k_rope),
-            v=v,
-            att_control=AttControl(mla_prefill=True, mla_prefill_dict={"softmax_scale": self.softmax_scale}),
-            alloc_func=self.alloc_tensor,
+        o_tensor = self.attention.prefill(
+            MlaPrefillInput(q, k_nope, k_rope, v), infer_state.attention_metadata, self.alloc_tensor
         )
         return o_tensor
 
@@ -104,21 +100,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        kv = state.get_layer_view(logical_layer_id=self.layer_num_)
-
-        out = infer_state.decode_att_state.decode_att(
-            q=(q_nope, q_rope),
-            k=kv,
-            v=None,
-            att_control=AttControl(mla_decode=True, mla_decode_dict={"softmax_scale": self.softmax_scale}),
-            alloc_func=self.alloc_tensor,
-        )
+        out = self.attention.decode(MlaDecodeInput(q_nope, q_rope), infer_state.attention_metadata, self.alloc_tensor)
         return out
 
     def _decompress_kv(
@@ -126,13 +108,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek2TransformerLayerWeight,
     ):
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        compressed_kv = state.get_layer_view(logical_layer_id=self.layer_num_)
+        compressed_kv = self.full_att_view
 
         total_token_num = infer_state.total_token_num
         sampled_compressed_kv_nope = self.alloc_tensor(
@@ -229,7 +205,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn_tp(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
-
         hidden_states = input.view(-1, self.embed_dim_)
         num_tokens, hidden_dim = hidden_states.shape
 
@@ -258,7 +233,6 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     def _moe_ffn_edp(
         self, input, infer_state: Deepseek2InferStateInfo, layer_weight: Deepseek2TransformerLayerWeight
     ) -> torch.Tensor:
-
         hidden_states = input
         token_num, hidden_dim = hidden_states.shape
         if self.n_shared_experts is not None:

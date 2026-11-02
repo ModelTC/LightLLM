@@ -24,6 +24,23 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         self.embed_dim_ = -1
         return
 
+    def get_attention_spec(self, resource, dtype):
+        from lightllm.common.basemodel.attention.contracts import AttentionSpec
+
+        return AttentionSpec(
+            resource.model_role,
+            self.layer_num_,
+            resource,
+            self.tp_q_head_num_,
+            self.tp_k_head_num_,
+            self.head_dim_,
+            dtype,
+            cache_writer="upstream" if resource.producer_layer == self.layer_num_ else "shared",
+        )
+
+    def attention_backend_index(self):
+        return 0
+
     def _att_norm(self, input, infer_state: InferStateInfo, layer_weight) -> torch.Tensor:
         raise Exception("need to impl")
 
@@ -34,17 +51,7 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         raise Exception("need to impl")
 
     def _post_cache_kv(self, cache_kv, infer_state: InferStateInfo, layer_weight):
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        state.write_full_att_kv(
-            logical_layer_id=self.layer_num_,
-            token_indices=infer_state.mem_index,
-            kv=cache_kv,
-        )
+        self.write_full_att_kv(token_indices=infer_state.mem_index, kv=cache_kv)
         return
 
     def _context_attention_kernel(self, q, kv, infer_state: InferStateInfo, layer_weight, out=None) -> torch.Tensor:

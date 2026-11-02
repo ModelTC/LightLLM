@@ -100,14 +100,7 @@ class Gemma4TpPartModel(LlamaTpPartModel):
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
-        # 每层的 KV 槽位须容纳 sliding/full 两类 attention 的最大宽度。
-        head_dim = config["head_dim"]
         num_global_kv = config.get("num_global_key_value_heads") or config["num_key_value_heads"]
-        sliding_total = config["num_key_value_heads"] * head_dim
-        full_total = num_global_kv * config["global_head_dim"]
-        per_token_k_width = max(sliding_total, full_total)
-        assert per_token_k_width % head_dim == 0, "Gemma4 KV width must contain complete storage heads"
-
         shared_layer_count = config.get("num_kv_shared_layers") or 0
         storage_layer_count = len(model_logical_layer_ids) - shared_layer_count
         assert 0 <= shared_layer_count < len(model_logical_layer_ids), "invalid KV-shared layer count"
@@ -120,23 +113,30 @@ class Gemma4TpPartModel(LlamaTpPartModel):
                     break
             else:
                 raise AssertionError("KV-shared layer requires an earlier producer of the same attention type")
-        logical_layer_groups = tuple(tuple(group) for group in layer_groups)
-        if not logical_layer_groups:
-            return []
-        state = create_gqa_state(
-            config=GQAAttentionConfig(
-                logical_layer_groups=logical_layer_groups,
-                global_head_num=per_token_k_width // head_dim,
-                head_dim=head_dim,
-                dtype=get_torch_dtype(args.data_type),
-                tp_rank=tp_rank,
-                tp_world_size=tp_world_size,
-            ),
-            kv_type=args.llm_kv_type,
-            page_size=args.page_size,
-            device="meta",
-        )
-        return [state]
+        layouts = {}
+        for local_layer, group in enumerate(layer_groups):
+            sliding = config["layer_types"][local_layer] == "sliding_attention"
+            shape = (
+                config["num_key_value_heads"] if sliding else num_global_kv,
+                config["head_dim"] if sliding else config["global_head_dim"],
+            )
+            layouts.setdefault(shape, []).append(tuple(group))
+        return [
+            create_gqa_state(
+                config=GQAAttentionConfig(
+                    logical_layer_groups=tuple(groups),
+                    global_head_num=heads,
+                    head_dim=head_dim,
+                    dtype=get_torch_dtype(args.data_type),
+                    tp_rank=tp_rank,
+                    tp_world_size=tp_world_size,
+                ),
+                kv_type=args.llm_kv_type,
+                page_size=args.page_size,
+                device="meta",
+            )
+            for (heads, head_dim), groups in layouts.items()
+        ]
 
     def _init_att_backend(self):
         # Gemma-4 has per-layer heterogeneous attention: sliding layers use

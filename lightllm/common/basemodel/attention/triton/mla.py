@@ -1,11 +1,22 @@
+from ..mla import BoundMla, MlaPrefillInput, MlaDecodeInput
 import dataclasses
 import weakref
 import torch
-from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttBackend, BaseAttState
 from typing import Tuple
 
 
 class MlaTritonAttBackend(BaseAttBackend):
+    supports_mla = True
+
+    def mla_support_error(self, spec, format, phase):
+        reason = super().mla_support_error(spec, format, phase)
+        if reason:
+            return reason
+        if phase == "decode" and spec.rope_dim != 64:
+            return "Triton MLA decode requires RoPE dimension 64"
+        return None
+
     def create_att_prefill_state(self, infer_state) -> "MlaTritonPrefillAttState":
         return MlaTritonPrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -14,45 +25,26 @@ class MlaTritonAttBackend(BaseAttBackend):
 
 
 @dataclasses.dataclass
-class MlaTritonPrefillAttState(BasePrefillAttState):
+class MlaTritonPrefillAttState(BaseAttState):
+    graph_buffer_names = ()
+
     def init_state(self):
         pass
 
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: Tuple[torch.Tensor, torch.Tensor],
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-        if q.shape[2] == 256:
-            # glm model
-            return self._contiguous_kv_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
-        else:
-            return self._mla_prefill_att(q=q, k=k, v=v, att_control=att_control, alloc_func=alloc_func)
+    def run(self, inputs: MlaPrefillInput, binding: BoundMla, alloc_func=torch.empty):
+        if inputs.q.shape[2] == 256:
+            return self._contiguous_kv_prefill_att(inputs, binding, alloc_func)
+        return self._mla_prefill_att(inputs, binding, alloc_func)
 
-    def _mla_prefill_att(
-        self,
-        q: torch.Tensor,
-        k: Tuple[torch.Tensor, torch.Tensor],
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
-    ):
+    def _mla_prefill_att(self, inputs: MlaPrefillInput, binding: BoundMla, alloc_func=torch.empty):
+        q, k, v = inputs.q, (inputs.k_nope, inputs.k_rope), inputs.v
         from ...triton_kernel.mla_att.prefill_att import context_attention_fwd_with_v
 
-        qk_rope_head_dim = 64
+        qk_rope_head_dim = binding.rope_dim
         q_nope, q_rope = q[:, :, :-qk_rope_head_dim], q[:, :, -qk_rope_head_dim:]
         o_tensor = alloc_func((q_nope.shape[0], q_nope.shape[1], v.shape[-1]), dtype=q_nope.dtype, device=q.device)
         k_nope, k_rope = k
-        assert att_control.mla_prefill
-        softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
+        softmax_scale = binding.softmax_scale
         context_attention_fwd_with_v(
             q_nope,
             q_rope,
@@ -69,14 +61,8 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
         )
         return o_tensor
 
-    def _contiguous_kv_prefill_att(
-        self,
-        q: torch.Tensor,
-        k: Tuple[torch.Tensor, torch.Tensor],
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
-    ):
+    def _contiguous_kv_prefill_att(self, inputs: MlaPrefillInput, binding: BoundMla, alloc_func=torch.empty):
+        q, k, v = inputs.q, (inputs.k_nope, inputs.k_rope), inputs.v
         from ...triton_kernel.att.prefill_att.context_flashattention_nopad import context_attention_fwd_contiguous_kv
 
         k_nope, k_rope = k
@@ -101,50 +87,27 @@ class MlaTritonPrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class MlaTritonDecodeAttState(BaseDecodeAttState):
+class MlaTritonDecodeAttState(BaseAttState):
+    graph_buffer_names = ()
+    decode_att_block_seq: torch.Tensor = None
+    mid_o_batch_start_index: torch.Tensor = None
+
     def init_state(self):
-        pass
+        self.prepare_for_capture()
+
+    def prepare_for_capture(self):
+        self.decode_att_block_seq = self.mid_o_batch_start_index = None
 
     def copy_for_decode_cuda_graph(self, new_state: "MlaTritonDecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
 
-    def decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ):
-        assert (
-            att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-            and att_control.use_alibi is False
-        )
-        assert v is None
-
-        return self._mla_decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=att_control,
-            alloc_func=alloc_func,
-        )
-
-    def _mla_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl,
-        alloc_func=torch.empty,
-    ):
-        assert att_control.mla_decode
-        softmax_scale = att_control.mla_decode_dict["softmax_scale"]
+    def run(self, inputs: MlaDecodeInput, binding: BoundMla, alloc_func=torch.empty):
+        q, k = (inputs.q_nope, inputs.q_rope), binding.cache
+        softmax_scale = binding.softmax_scale
 
         from ...triton_kernel.mla_att.decode_att import gqa_token_decode_attention_flash_decoding
 
-        qk_rope_head_dim = 64
+        qk_rope_head_dim = binding.rope_dim
         q_nope, q_rope = q
         kv = k
 
@@ -156,5 +119,6 @@ class MlaTritonDecodeAttState(BaseDecodeAttState):
             infer_state=self.infer_state,
             softmax_scale=softmax_scale,
             alloc_tensor_func=alloc_func,
+            metadata=self,
         )
         return out

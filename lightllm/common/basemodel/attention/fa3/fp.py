@@ -14,9 +14,20 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_g
 
 
 class Fa3AttBackend(BaseAttBackend):
+    supported_attention_features = ("window", "sink", "noncausal")
+
     """Common fixed page-table storage for FA3 attention backends."""
 
     page_table_buffers = None
+    requires_cache_stream_sync = True
+
+    def attention_support_error(self, spec, format, phase):
+        reason = super().attention_support_error(spec, format, phase)
+        if reason:
+            return reason
+        if spec.head_dim > 256:
+            return "FA3 supports head dimensions up to 256"
+        return None
 
     def __init__(self, model):
         super().__init__(model=model)
@@ -29,12 +40,22 @@ class Fa3AttBackend(BaseAttBackend):
             f"must be divisible by infer_page_size {self.infer_page_size}"
         )
 
-    # 延迟到首次获取 page table 时再初始化，避免 PD 分离模式下的 prefill 节点
-    # 分配仅供 decode 使用的 buffer，减少显存浪费。
-    def _init_page_table_buffers(self):
-        if self.page_table_buffers is not None:
-            return
+    def reserve_runtime_resources(self):
+        if self.model.run_mode != "prefill":
+            self._init_page_table_buffers()
 
+    def runtime_memory_demands(self):
+        if self.model.run_mode == "prefill":
+            return ()
+        batch, max_seq_len, count = self._page_table_geometry()
+        size = batch * triton.cdiv(max_seq_len, self.infer_page_size)
+        return tuple(
+            demand
+            for lane in range(count)
+            for demand in self.workspace_memory_demands(f"fa3_page_table_{lane}", size, 1, torch.int32)
+        )
+
+    def _page_table_geometry(self):
         model = self.model
         args = model.args
         # Dynamic verification may keep the target row and all MTP draft rows for
@@ -44,11 +65,18 @@ class Fa3AttBackend(BaseAttBackend):
         if args.enable_tpsp_mix_mode:
             tp_size = model.tp_world_size_
             running_max_batch_size = (running_max_batch_size + tp_size - 1) // tp_size * tp_size
-        self.page_table_max_batch_size = max(running_max_batch_size, model.graph_max_batch_size)
+        max_batch_size = max(running_max_batch_size, model.graph_max_batch_size)
         # max_seq_length is max_req_total_len plus the MTP headroom reserved when
         # the model is initialized.
-        self.supported_max_seq_len = model.max_seq_length
         buffer_count = 2 if args.enable_decode_microbatch_overlap else 1
+        return max_batch_size, model.max_seq_length, buffer_count
+
+    # 延迟到首次获取 page table 时再初始化，避免 PD 分离模式下的 prefill 节点
+    # 分配仅供 decode 使用的 buffer，减少显存浪费。
+    def _init_page_table_buffers(self):
+        if self.page_table_buffers is not None:
+            return
+        self.page_table_max_batch_size, self.supported_max_seq_len, buffer_count = self._page_table_geometry()
         workspace_size = self.page_table_max_batch_size * triton.cdiv(self.supported_max_seq_len, self.infer_page_size)
         self.page_table_buffers = [
             self.get_gpu_workspace_buffer(
@@ -127,7 +155,12 @@ class Fa3PrefillAttState(BasePrefillAttState):
         )
 
     def _nomarl_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        att_control: AttControl,
+        alloc_func=torch.empty,
     ) -> torch.Tensor:
         self.backend: Fa3AttBackend = self.backend  # for typing
 
@@ -167,6 +200,7 @@ class Fa3PrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class Fa3DecodeAttState(BaseDecodeAttState):
+    graph_buffer_names = ("cu_seqlens_q", "cu_seqlens_k", "page_table", "b_att_seq_len")
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None

@@ -46,21 +46,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.prefill_att_state.prefill_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=AttControl(logical_layer_id=self.layer_num_),
-            alloc_func=self.alloc_tensor,
-        )
+        o_tensor = self.attention.prefill(_q, infer_state.attention_metadata, self.alloc_tensor)
         o_tensor = o_tensor.view(q.shape)
         return o_tensor
 
@@ -70,21 +57,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(
-            q=_q,
-            k=_k,
-            v=_v,
-            att_control=AttControl(logical_layer_id=self.layer_num_),
-            alloc_func=self.alloc_tensor,
-        )
+        o_tensor = self.attention.decode(_q, infer_state.attention_metadata, self.alloc_tensor)
         return o_tensor.view(q.shape)
 
     def _att_norm(

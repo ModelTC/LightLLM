@@ -83,6 +83,7 @@ def test_backend_allocates_all_roles_before_warmup(
         linear_key_head_dim=8,
         linear_value_head_dim=8,
         linear_conv_kernel_dim=3,
+        hidden_act="silu",
     )
     draft_config = dict(
         config,
@@ -162,8 +163,14 @@ def test_backend_allocates_all_roles_before_warmup(
                             )
                             is state
                         )
-        model.prefill_att_backend = model.decode_att_backend = object()
-        model.prefill_att_backend1 = model.decode_att_backend1 = None
+        model.prefill_att_backend = model.decode_att_backend = SimpleNamespace(
+            reserve_runtime_resources=lambda: None, runtime_memory_demands=lambda: ()
+        )
+        from lightllm.common.basemodel.attention.linear.triton import TritonLinearAttBackend
+
+        linear = object.__new__(TritonLinearAttBackend)
+        TritonLinearAttBackend.__init__(linear, model)
+        model.prefill_att_backend1 = model.decode_att_backend1 = linear
         model.backends_bound = True
 
     def warmup(model: TpPartBaseModel):
@@ -198,6 +205,7 @@ def test_backend_allocates_all_roles_before_warmup(
         model.max_seq_length, model.batch_max_tokens = (32 if index else 24), 16
         model.tp_world_size_, model.tp_rank_ = 1, 0
         model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(offset, offset + model.config["n_layer"])]
+        model.trans_layers_weight = [None] * len(model.layers_infer)
         offset += len(model.layers_infer)
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
         if index:
@@ -217,13 +225,19 @@ def test_backend_allocates_all_roles_before_warmup(
         manager = models[0].att_state_manager
         states = manager.get_full_attention_states()
         assert all(read_kv_storage(state) is None for state in states)
-        assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.conv_state.is_cuda
+        assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.conv_state.is_meta
         assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.big_pages_pool is None
         assert manager.full_att_allocator is None
         assert not warmed
-        return manager.get_full_att_token_bytes() * (32 + args.page_size), 0
+        fixed_bytes = sum(state.get_fixed_storage_bytes() for state in states)
+        fixed_bytes += sum(state.get_unallocated_runtime_bytes() for state in manager.get_bounded_attention_states())
+        return manager.get_full_att_token_bytes() * (32 + args.page_size) + fixed_bytes, 0
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory_info)
+    monkeypatch.setattr(
+        "lightllm.common.basemodel.attention.startup.StartupMemoryProfile",
+        lambda: SimpleNamespace(stage=lambda *_: nullcontext(), peak_bytes=0, explain=lambda: {}),
+    )
     monkeypatch.setattr("lightllm.utils.envs_utils.set_model_init_status", ready.append)
     assert all(not hasattr(item, "att_state_manager") for item in models)
 

@@ -90,6 +90,27 @@ def _get_decode_backend_priority(priority_list: list, mtp_step: int) -> list:
     return ["fa3"] + [backend_name for backend_name in priority_list if backend_name != "fa3"]
 
 
+def gqa_backend_candidates(model, phase, preferred, index=0):
+
+    yield preferred
+    args = model.args
+    requested = getattr(args, f"llm_{phase}_att_backend")[index]
+    if requested != "auto":
+        return
+    priority = ["fa3", "flashinfer", "triton"] if phase == "prefill" else ["flashinfer", "fa3", "triton"]
+    if phase == "decode":
+        priority = _get_decode_backend_priority(priority, args.mtp_step)
+    backend_map = data_type_to_backend[args.llm_kv_type]
+    for name in priority:
+        if name not in backend_map or (name == "flashinfer" and args.enable_ep_moe):
+            continue
+        cls = load_backend_class(backend_map[name])
+        if cls is type(preferred):
+            continue
+        if validate(name):
+            yield cls(model=model)
+
+
 def get_prefill_att_backend_class(index=0, priority_list: list = ["fa3", "flashinfer", "triton"]) -> BaseAttBackend:
     args = get_env_start_args()
     llm_dtype = args.llm_kv_type

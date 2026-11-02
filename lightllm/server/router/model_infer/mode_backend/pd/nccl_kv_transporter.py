@@ -4,6 +4,7 @@ import queue
 import pickle
 import threading
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Dict, List, Optional
 
 import rpyc
@@ -47,10 +48,12 @@ class NcclKVTransporter:
         host_ip: Optional[str] = None,
         control_port_min: int = 30000,
         control_port_max: int = 40000,
+        state_manifest: dict | None = None,
     ):
         self.node_id = node_id
         self.tp_idx = tp_idx
         self.kv_move_buffer = kv_move_buffer
+        self.state_manifest = state_manifest
         args = get_env_start_args()
         self.args = args
         assert args.run_mode in ["prefill", "decode"], args.run_mode
@@ -86,13 +89,16 @@ class NcclKVTransporter:
             )
         )
 
-    @property
+    @cached_property
     def local_page_mem_desc(self) -> bytes:
+        from lightllm.common.attention_state.manifest import state_manifest_fingerprint
+
         return pickle.dumps(
             {
                 "num_pages": self.num_pages,
                 # PD buffer 固定为二维 uint8，页长度就是单页字节数。
                 "page_bytes": self.kv_move_buffer.shape[1],
+                "state_manifest": state_manifest_fingerprint(self.state_manifest),
             }
         )
 
@@ -112,6 +118,9 @@ class NcclKVTransporter:
         ), f"Peer name {metadata.agent_name} does not match remote name {remote_agent.agent_name}"
 
         page = pickle.loads(remote_agent.page_reg_desc)
+        from lightllm.common.attention_state.manifest import validate_state_manifest
+
+        validate_state_manifest(self.state_manifest, page.get("state_manifest"))
         assert page["page_bytes"] == self.kv_move_buffer.shape[1], "PD peers must use the same page byte capacity"
         self.remote_agents[remote_agent.agent_name] = remote_agent
         logger.info(f"Added NCCL remote agent {remote_agent.agent_name} at {metadata.host_ip}:{metadata.control_port}")

@@ -45,7 +45,13 @@ class DeepGEMMBaseQuantizationMethod(QuantizationMethod):
         return "base-deepgemm"
 
 
-@QUANTMETHODS.register("fp8w8a8-b128-deepgemm", platform="cuda")
+@QUANTMETHODS.register(
+    "fp8w8a8-b128-deepgemm",
+    platform="cuda",
+    weight_format="fp8_block128",
+    activation_format="fp8_group128",
+    implementation="deepgemm",
+)
 class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()
@@ -55,6 +61,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         self.weight_scale_suffix = "weight_scale_inv"
         self.has_weight_scale = True
         self.has_weight_zero_point = False
+        self.use_ue8m0_scales = None
 
     @property
     def method_name(self):
@@ -121,9 +128,11 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def _create_weight(
         self, out_dims: Union[int, List[int]], in_dim: int, dtype: torch.dtype, device_id: int, num_experts: int = 1
     ) -> Tuple[WeightPack, List[WeightPack]]:
-        self.use_ue8m0_scales = (
-            self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
-        ) or os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
+        if self.use_ue8m0_scales is None:
+
+            self.use_ue8m0_scales = (
+                self.hf_quantization_config is not None and self.hf_quantization_config.get("scale_fmt") == "ue8m0"
+            ) or os.getenv("LIGHTLLM_USE_UE8M0_SCALES", "0").upper() in ["ON", "TRUE", "1"]
         self.use_packed_ue8m0 = self.use_ue8m0_scales and is_sm100_gpu()
         out_dim = sum(out_dims) if isinstance(out_dims, list) else out_dims
         weight_scale_out_dims = [(_out_dim + self.block_size - 1) // self.block_size for _out_dim in out_dims]
@@ -160,7 +169,13 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         return mm_param, mm_param_list
 
 
-@QUANTMETHODS.register("fp4fp8-b32-deepgemm", platform="cuda")
+@QUANTMETHODS.register(
+    "fp4fp8-b32-deepgemm",
+    platform="cuda",
+    weight_format="fp4_group32",
+    activation_format="fp8_group32",
+    implementation="deepgemm",
+)
 class DeepGEMMFP8FP4B32QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     def __init__(self):
         super().__init__()

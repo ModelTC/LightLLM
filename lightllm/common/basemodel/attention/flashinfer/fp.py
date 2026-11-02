@@ -4,17 +4,16 @@ import torch
 import triton
 from ..base_att import BaseAttBackend, BasePrefillAttState, BaseDecodeAttState, AttControl
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_device_id
-from ...triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-from ...triton_kernel.repack_kv_index import repack_kv_index
 from .env_utils import set_flashinfer_envs
 from .utils import should_init_decode_wrapper
+from .paged_metadata import prepare_page_metadata, page_index_memory_demands, reserve_page_index_buffers
 
 
 class FlashInferAttBackend(BaseAttBackend):
     workspace_buffer_key = "flashinfer_fp"
     workspace_buffer_size = 512 * 1024 * 1024
 
-    def __init__(self, model):
+    def __init__(self, model, attention_shape=None):
         set_flashinfer_envs()
         super().__init__(model=model)
         self._init_infer_page_size()
@@ -23,18 +22,36 @@ class FlashInferAttBackend(BaseAttBackend):
         self.tp_kv_head_num = max(model.config["num_key_value_heads"] // tp_world_size, 1)
         head_dim = model.config["hidden_size"] // model.config["num_attention_heads"]
         self.head_dim = model.config.get("head_dim", head_dim)
+        if attention_shape is not None:
+            self.tp_q_head_num, self.tp_kv_head_num, self.head_dim = attention_shape
         self.max_seq_length = model.max_seq_length
         self.max_page_num = triton.cdiv(self.max_seq_length, self.infer_page_size)
-        self.kv_indices_buffer = [
-            torch.empty(
-                model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
-            ),
-            torch.empty(
-                model.graph_max_batch_size * self.max_page_num, dtype=torch.int32, device=get_current_device_id()
-            ),
-        ]
+        self.kv_indices_buffer = None
         self.q_data_type = model.data_type
         self.kv_data_type = model.data_type
+
+    def for_attention_spec(self, spec):
+        shape = spec.q_heads, spec.kv_heads, spec.head_dim
+        if shape == (self.tp_q_head_num, self.tp_kv_head_num, self.head_dim):
+            return self
+        return type(self)(model=self.model, attention_shape=shape)
+
+    def reserve_runtime_resources(self):
+        lanes = (
+            2
+            if (self.model.args.enable_decode_microbatch_overlap or self.model.args.enable_prefill_microbatch_overlap)
+            else 1
+        )
+        for lane in range(lanes):
+            self.get_gpu_workspace_buffer(self.workspace_buffer_key, self.workspace_buffer_size, lane_id=lane)
+        reserve_page_index_buffers(self)
+
+    def runtime_memory_demands(self):
+        args = self.model.args
+        lanes = 2 if args.enable_decode_microbatch_overlap or args.enable_prefill_microbatch_overlap else 1
+        return self.workspace_memory_demands(
+            self.workspace_buffer_key, self.workspace_buffer_size, lanes
+        ) + page_index_memory_demands(self)
 
     def _init_infer_page_size(self):
         self.infer_page_size = self.model.args.page_size
@@ -59,33 +76,14 @@ class FlashInferPrefillAttState(BasePrefillAttState):
 
         import flashinfer
 
-        batch_size = self.infer_state.batch_size
-        device = self.infer_state.input_ids.device
-
         q_starts = self.infer_state.b1_cu_q_seq_len.int()
-        # TODO: 将页数、页数前缀和及末页有效 token 数的计算融合为一个 Triton 算子。
-        # token 长度除以页大小并向上取整，末页不足一页也计为一页。
-        b_page_len = (self.infer_state.b_seq_len + (self.backend.infer_page_size - 1)) // self.backend.infer_page_size
-        kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
-        kv_last_page_len = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.infer_page_size
-        kv_indices = torch.empty(
-            batch_size * self.backend.max_page_num,
-            dtype=torch.int32,
-            device=device,
-        )
-        repack_kv_index(
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
-            b_req_idx=self.infer_state.b_req_idx,
-            b_token_len=self.infer_state.b_seq_len,
-            b_page_start_loc=kv_starts[:-1],
-            max_token_len=self.infer_state.max_kv_seq_len,
-            out_page_indices=kv_indices,
-            page_size=self.backend.infer_page_size,
-        )
+        pages = prepare_page_metadata(self.backend, self.infer_state)
+        kv_starts, kv_last_page_len, kv_indices = pages.starts, pages.last_page_len, pages.indices
         self.prefill_wrapper = flashinfer.prefill.BatchPrefillWithPagedKVCacheWrapper(
             self.backend.get_gpu_workspace_buffer(
                 key_name=self.backend.workspace_buffer_key,
                 workspace_size=self.backend.workspace_buffer_size,
+                lane_id=self.infer_state.microbatch_index,
             ),
             qo_indptr_buf=q_starts,
             paged_kv_indptr_buf=kv_starts,
@@ -146,6 +144,7 @@ class FlashInferPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class FlashInferDecodeAttState(BaseDecodeAttState):
+    graph_buffer_names = ("kv_last_page_len_buffer", "kv_indices", "kv_starts")
     kv_last_page_len_buffer: torch.Tensor = None
     kv_indices: torch.Tensor = None
     kv_starts: torch.Tensor = None
@@ -158,35 +157,11 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
         import flashinfer
 
         self.backend: FlashInferAttBackend = self.backend
-        device = self.infer_state.input_ids.device
-        model = self.backend.model
-        # TODO: 将页数、页数前缀和及末页有效 token 数的计算融合为一个 Triton 算子。
-        # token 长度除以页大小并向上取整，末页不足一页也计为一页。
-        b_page_len = (self.infer_state.b_seq_len + (self.backend.infer_page_size - 1)) // self.backend.infer_page_size
-        self.kv_last_page_len_buffer = self.infer_state.b_seq_len - (b_page_len - 1) * self.backend.infer_page_size
-        if (
-            self.infer_state.batch_size <= model.graph_max_batch_size
-            and self.infer_state.max_kv_seq_len <= model.graph_max_len_in_batch
-        ):
-            self.kv_indices = self.backend.kv_indices_buffer[self.infer_state.microbatch_index][
-                : self.infer_state.batch_size * self.backend.max_page_num
-            ]
-        else:
-            self.kv_indices = torch.empty(
-                self.infer_state.batch_size * self.backend.max_page_num,
-                dtype=torch.int32,
-                device=device,
-            )
-
-        self.kv_starts, _ = gen_cumsum_pad0_tensor(b_page_len, b_page_len)
-        repack_kv_index(
-            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
-            b_req_idx=self.infer_state.b_req_idx,
-            b_token_len=self.infer_state.b_seq_len,
-            b_page_start_loc=self.kv_starts[:-1],
-            max_token_len=self.infer_state.max_kv_seq_len,
-            out_page_indices=self.kv_indices,
-            page_size=self.backend.infer_page_size,
+        pages = prepare_page_metadata(self.backend, self.infer_state)
+        self.kv_starts, self.kv_last_page_len_buffer, self.kv_indices = (
+            pages.starts,
+            pages.last_page_len,
+            pages.indices,
         )
         if not self._should_init_decode_wrapper():
             # 处于 graph replay 回放阶段，不需要特殊初始化 decode wrapper。
@@ -197,6 +172,7 @@ class FlashInferDecodeAttState(BaseDecodeAttState):
             self.backend.get_gpu_workspace_buffer(
                 key_name=self.backend.workspace_buffer_key,
                 workspace_size=self.backend.workspace_buffer_size,
+                lane_id=self.infer_state.microbatch_index,
             ),
             "NHD",
             use_cuda_graph=True,

@@ -20,10 +20,12 @@ from lightllm.models.deepseek_v4.layer_infer.post_layer_infer import (
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import (
     DeepseekV4TransformerLayerInfer,
 )
-from lightllm.common.basemodel.attention import get_nsa_prefill_att_backend_class, get_nsa_decode_att_backend_class
+from lightllm.common.basemodel.attention import (
+    get_nsa_prefill_att_backend_class,
+    get_nsa_decode_att_backend_class,
+)
 from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
     DSV4_NSA_BACKENDS,
-    DeepseekV4FlashMlaFp8SparseAttBackend,
 )
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
@@ -195,11 +197,6 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
                     )
                 )
         return states
-
-    def prepare_attention_states(self) -> None:
-        super().prepare_attention_states()
-        # 在统一容量规划前预留长 prefill 的 SWA 临时区，避免 KV 分配挤占计算所需空间。
-        DeepseekV4FlashMlaFp8SparseAttBackend.get_swa_prefill_workspace(self)
 
     def _init_quant(self):
         if not self.is_mtp_draft_model:

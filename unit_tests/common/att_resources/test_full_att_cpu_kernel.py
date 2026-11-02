@@ -17,7 +17,7 @@ from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFull
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("page_device", ["cpu", "cuda"])
 def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    from lightllm.common.attention_state.full_att import gqa_transfer
+    from lightllm.common.attention_state import token_copy
 
     config = GQAAttentionConfig(
         logical_layer_groups=((0,), (1,)),
@@ -49,17 +49,17 @@ def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeyp
     )
     page_view = pages[:, 16:-16]
     launches = []
-    kernel = gqa_transfer._copy_gqa_pages
+    kernel = token_copy._copy_token_pages
 
     class CaptureLaunch:
         def __getitem__(self, grid: tuple[int]):
-            def launch(**kwargs):
-                launches.append((kwargs["HEADS"], kwargs["WIDTH"], kwargs["ELEMENT_BYTES"]))
-                return kernel[grid](**kwargs)
+            def launch(*args, **kwargs):
+                launches.append((tuple(args[0].shape[2:]), args[0].element_size()))
+                return kernel[grid](*args, **kwargs)
 
             return launch
 
-    monkeypatch.setattr(gqa_transfer, "_copy_gqa_pages", CaptureLaunch())
+    monkeypatch.setattr(token_copy, "_copy_token_pages", CaptureLaunch())
     if page_device == "cpu":
         source.write_to_cpu(
             token_indices=src_ids,
@@ -88,7 +88,7 @@ def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeyp
         )
     torch.cuda.synchronize()
     # 单个 BF16 head 只有 2 字节；合并 4 个 head 后才能按 INT64 搬运。
-    assert launches == [(1, 1, 8)] * 4
+    assert launches == [((1,), 8)] * 4
     for actual, reference in zip((target.k_storage, target.v_storage), expected):
         assert torch.equal(actual.view(torch.uint8), reference.view(torch.uint8))
     assert (pages[0] == 91).all()
@@ -288,12 +288,13 @@ def test_direct_cpu_pages_accept_registered_external_memory():
 
 @pytest.mark.parametrize("kind", ["gqa", "int8", "static_head", "mla", "packed_fp8"])
 @pytest.mark.parametrize("write", [True, False])
-def test_cpu_cache_transfer_rejects_cpu_state(kind: str, write: bool):
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_cpu_cache_transfer_rejects_device_indices_for_cpu_state(kind: str, write: bool):
     state = allocated_state(kind, device="cpu")
     layout = transfer_layout(state)
     pages = torch.zeros((1, layout.byte_end), dtype=torch.uint8)
-    ids = torch.tensor([0], dtype=torch.int64)
-    with pytest.raises(AssertionError, match="CUDA State storage"):
+    ids = torch.tensor([0], dtype=torch.int64, device="cuda")
+    with pytest.raises(ValueError, match="same memory domain"):
         if write:
             state.write_to_cpu(
                 token_indices=ids,
@@ -378,32 +379,32 @@ def test_full_state_interfaces_reject_cpu_token_indices(kind: str) -> None:
     with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
         state.write_full_att_kv(state.config.logical_layer_groups[0][0], cpu_ids, torch.empty(0, device="cuda"))
     for src, dst in ((cpu_ids, cuda_ids), (cuda_ids, cpu_ids)):
-        with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+        with pytest.raises(ValueError, match="same memory domain"):
             state.copy_full_att_tokens(src, dst)
-        with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+        with pytest.raises(ValueError, match="same memory domain"):
             state.copy_tokens_from_dp(src, dst, state)
-    with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+    with pytest.raises(ValueError, match="same memory domain"):
         state.write_to_cpu(
             token_indices=cpu_ids,
             cpu_page_buffers=cpu_pages,
             cpu_page_indices=[0],
             layout=layout,
         )
-    with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+    with pytest.raises(ValueError, match="same memory domain"):
         state.read_from_cpu(
             cpu_page_buffers=cpu_pages,
             cpu_page_indices=[0],
             token_indices=cpu_ids,
             layout=layout,
         )
-    with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+    with pytest.raises(ValueError, match="same memory domain"):
         state.write_to_pd_page(
             token_indices=cpu_ids,
             pd_page_buffers=pd_pages,
             pd_page_index=0,
             layout=layout,
         )
-    with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+    with pytest.raises(ValueError, match="same memory domain"):
         state.read_from_pd_page(
             pd_page_buffers=pd_pages,
             token_indices=cpu_ids,

@@ -76,6 +76,41 @@ def test_commit_without_recurrent_state_and_invalid_role():
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("family", ["gdn", "kda"])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+def test_checkpoint_restores_the_accepted_recurrent_state(family, dtype):
+    from dataclasses import replace
+    from lightllm.common.attention_state.bounded_att import KDAState
+
+    cls = GDNState if family == "gdn" else KDAState
+    config = replace(make_state().config, conv_dtype=dtype, ssm_dtype=dtype)
+    state = cls(config, request_capacity=3, mtp_step=2, device="cuda")
+    state.initialize_page_pools(big_page_capacity=3, pin_memory=True)
+    state.conv_state.copy_(torch.arange(state.conv_state.numel(), device="cuda").reshape(state.conv_state.shape))
+    state.ssm_state.copy_(torch.arange(state.ssm_state.numel(), device="cuda").reshape(state.ssm_state.shape))
+    requests, accepted = [2, 0, 1], [1, 2, 3]
+    state.commit_bounded_att_state(
+        torch.tensor(requests, device="cuda"), torch.tensor(accepted, dtype=torch.int32, device="cuda")
+    )
+    expected = [
+        (
+            state.conv_state[:, request, :, count - 1 : count - 1 + config.conv_width].clone(),
+            state.ssm_state[:, request * 3 + count - 1].clone(),
+        )
+        for request, count in zip(requests, accepted)
+    ]
+    state.save_bounded_att_runtime_to_pages(requests, [8, 9, 10], "big", [0, 1, 2])
+    torch.cuda.synchronize()
+    state.reset_bounded_att_state(requests)
+    state.restore_bounded_att_runtime_from_pages(requests, [8, 9, 10], "big", [0, 1, 2])
+    torch.cuda.synchronize()
+    for request, (conv, ssm) in zip(requests, expected):
+        assert torch.equal(state.conv_state[:, request, :, : config.conv_width], conv)
+        assert torch.equal(state.ssm_state[:, request * 3], ssm)
+    assert not state.mtp_state_index.any()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("widths", [(3, 3, 3), (3, 1, 2)])
 def test_verify_commits_main_states_for_fixed_and_dynamic_widths(widths: tuple[int, ...]):
     manager = make_manager("cuda")

@@ -150,7 +150,10 @@ def test_budget_matches_token_stores_including_hold_and_padding(
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
-    for budget, expected in ((actual, 20), (actual - 1, 16), (minimum, 0), (minimum - 1, None)):
+    fixed_bytes = state.get_fixed_storage_bytes()
+    total = actual + fixed_bytes + 16 * 20
+    minimum += fixed_bytes
+    for budget, expected in ((total, 20), (total - 1, 16), (minimum, None), (minimum - 1, None)):
         resources = AttentionStateManager(request_capacity=1)
         resources.register_state("main", rebuild_full_state(template, config=template.config))
         monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (budget + reserve, budget + reserve))
@@ -162,14 +165,7 @@ def test_budget_matches_token_stores_including_hold_and_padding(
                     token_capacity=None,
                     mem_fraction=1.0,
                     device="cpu",
-                )
-        elif expected == 0:
-            with pytest.raises(AssertionError, match="at least one complete page"):
-                resources.initialize_storage(
-                    args=args,
-                    token_capacity=None,
-                    mem_fraction=1.0,
-                    device="cpu",
+                    memory_limits={"cpu": budget + reserve},
                 )
         else:
             resources.initialize_storage(
@@ -177,6 +173,7 @@ def test_budget_matches_token_stores_including_hold_and_padding(
                 token_capacity=None,
                 mem_fraction=1.0,
                 device="cpu",
+                memory_limits={"cpu": budget + reserve},
             )
             assert resources.full_att_allocator.size == expected
             assert resources.get_pd_operator().get_page_bytes() == manager.get_pd_operator().get_page_bytes()
@@ -627,7 +624,7 @@ def test_page_bytes_refresh_with_storage_dependent_layout(
         if transfer == "cpu"
         else manager.get_pd_operator().get_pd_full_att_page_layouts()
     )
-    assert layouts["main_gqa_bf16_state"].byte_end == 72
+    assert layouts["main_gqa_bf16_h1_d3_state"].byte_end == 72
 
 
 @pytest.mark.parametrize("with_tail", [False, True])
@@ -681,7 +678,7 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
     manager.finish_state_registration()
     assert manager.get_pd_operator().get_page_bytes() == max(runtime_page_bytes, runtime_page_bytes + extra_tokens * 8)
     assert manager.full_att_allocator is None
-    assert read_kv_storage(manager.main_gqa_fp32_state) is None
+    assert read_kv_storage(manager.main_gqa_fp32_h1_d1_state) is None
     assert not hasattr(manager, "pd_transfer_layouts")
 
 
@@ -974,7 +971,7 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
         getter = operator.get_pd_bounded_att_page_layouts
     before = getter()
     assert getter() is before
-    state = manager.main_gdn_conv_bf16_ssm_bf16_state if transfer == "pd_runtime" else manager.main_gqa_bf16_state
+    state = manager.main_gdn_conv_bf16_ssm_bf16_state if transfer == "pd_runtime" else manager.main_gqa_bf16_h1_d3_state
     before_layout = before[state.state_name]
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
@@ -989,7 +986,7 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     after_layout = after[state.state_name]
     assert after is not before and getter() is after
     assert after_layout is not before_layout
-    full_state = manager.main_gqa_bf16_state
+    full_state = manager.main_gqa_bf16_h1_d3_state
     assert full_state.page_size == 4 and not read_kv_storage(full_state).is_meta
     page_bytes = (
         manager.get_cpu_cache_operator().get_page_bytes()

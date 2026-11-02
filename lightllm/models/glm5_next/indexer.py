@@ -38,19 +38,8 @@ class Glm5NextNsaInfer:
         k = layer_weight.k_norm_(layer_weight.wk_proj_.mm(hidden_states), eps=self.eps)
         gate = layer_weight.index_kpool_compress_gate.mm(hidden_states)
         raw = torch.cat((k, gate), -1)
-        role = infer_state.att_state_role
-        tail = infer_state.att_state_manager.get_state(
-            model_role=role,
-            state_type_filter=f"compressor_indexer_w{self.pool_size}_s{self.pool_size}",
-            logical_layer_id=self.layer_idx,
-        ).get_layer_view(logical_layer_id=self.layer_idx)
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="mla",
-            logical_layer_id=self.layer_idx,
-            state_class=FullAttentionState,
-        )
-        packed_buffer = state.get_layer_view(logical_layer_id=self.layer_idx).indexer_k
+        tail = self.tail_view
+        packed_buffer = self.full_att_view.indexer_k
         compress_pools(
             raw=raw,
             tail=tail,

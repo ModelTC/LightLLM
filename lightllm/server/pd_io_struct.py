@@ -2,6 +2,7 @@ import enum
 import time
 import copy
 from dataclasses import dataclass, field
+from uuid import uuid4
 from typing import Dict, List, Optional
 from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to_group_id
 from fastapi import WebSocket
@@ -104,7 +105,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)
@@ -176,6 +176,7 @@ class PDChunckedTransTask:
     first_gen_token_id: Optional[int]
     first_gen_token_logprob: Optional[float]
 
+    transfer_id: str = field(default_factory=lambda: uuid4().hex)
     write_stage: Optional[str] = None
 
     # transfer params
@@ -234,6 +235,7 @@ class PDChunckedTransTask:
     def copy_for_notify(self) -> "PDChunckedTransTask":
         task = copy.copy(self)
         task.__dict__.pop("shared_time_out_mark", None)
+        task.__dict__.pop("_local_completion", None)
         task.mem_indexes = None
         task.xfer_handle = None
         return task

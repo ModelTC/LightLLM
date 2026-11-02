@@ -6,7 +6,8 @@ import triton
 import flash_mla as flashmla
 
 
-from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
+from ..base_att import BaseAttBackend, BaseAttState
+from ..sparse import BoundCompressedSparse, CompressedSparseInput
 
 if TYPE_CHECKING:
     from flash_mla.flash_mla_interface import FlashMLASchedMeta
@@ -37,8 +38,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         }
 
     @classmethod
-    def get_swa_prefill_workspace(cls, model):
-        """由 backend 复用计算临时区；模型在 KV 容量评估前调用，以计入实际显存占用。"""
+    def _swa_prefill_workspace_shape(cls, model):
         from lightllm.models.deepseek_v4.config import create_attention_config
 
         config = create_attention_config(
@@ -51,7 +51,8 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         max_forward_tokens = max(model.batch_max_tokens, model.max_req_num) + 2 * model.tp_world_size_
         capacity = (
             triton.cdiv(
-                max_forward_tokens + model.max_req_num * (config.window_size + 2 * page_token_num), page_token_num
+                max_forward_tokens + model.max_req_num * (config.window_size + 2 * page_token_num),
+                page_token_num,
             )
             * page_token_num
         )
@@ -65,61 +66,68 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
         # 物理行宽由 SWA 原子配置给出，backend 仅决定 workspace 的 token 容量。
         slot_bytes = config.get_packed_kv_bytes(page_token_num) // page_token_num
         layer_count = len(config.logical_layer_ids)
-        buffer = cls.get_gpu_workspace_buffer(
-            key_name=f"deepseek_v4_swa_prefill_{model.att_state_role}",
-            workspace_size=layer_count * token_num * slot_bytes,
+        return (layer_count, token_num, slot_bytes), capacity
+
+    def runtime_memory_demands(self):
+        shape, _ = self._swa_prefill_workspace_shape(self.model)
+        return self.workspace_memory_demands(
+            f"deepseek_v4_swa_prefill_{self.model.att_state_role}",
+            shape[0] * shape[1] * shape[2],
+            lanes=1,
             dtype=torch.uint8,
         )
-        return buffer.view(layer_count, token_num, slot_bytes), capacity
 
-    def get_att_input_params(self, infer_state, logical_layer_id: int):
-        state = infer_state.swa_state
-        swa_buffer = state.get_layer_view(logical_layer_id=logical_layer_id)
-        config = state.config
-        swa = swa_buffer.view(-1, config.get_packed_kv_bytes(config.page_token_size))
-        ratio = self.layer_compress_ratios[logical_layer_id]
-        compressed_kv = infer_state.get_compressed_kv_view(logical_layer_id=logical_layer_id).kv if ratio else None
-        if infer_state.is_prefill:
-            swa = infer_state.prefill_att_state.swa_buffer[config.logical_layer_ids.index(logical_layer_id)].view(
-                -1,
-                config.get_packed_kv_bytes(config.page_token_size),
-            )
-        return swa, compressed_kv
+    def reserve_runtime_resources(self):
+        self.get_swa_prefill_workspace(self.model)
 
-    def _flashmla_att(
-        self,
-        q: torch.Tensor,
-        packed_kv: Tuple[torch.Tensor, Optional[torch.Tensor]],
-        nsa_dict: dict,
-        sched_meta: "FlashMLASchedMeta",
-        out: torch.Tensor,
-    ) -> torch.Tensor:
-        """Attend to SWA plus optional compressed KV and return all padded Q heads."""
-        swa_packed, compressed_packed = packed_kv
-        # 原子配置提供计算视图；backend 不再计算编码字节数或解释压缩块布局。
+    @classmethod
+    def get_swa_prefill_workspace(cls, model):
+        shape, capacity = cls._swa_prefill_workspace_shape(model)
+        buffer = cls.get_gpu_workspace_buffer(
+            key_name=f"deepseek_v4_swa_prefill_{model.att_state_role}",
+            workspace_size=shape[0] * shape[1] * shape[2],
+            dtype=torch.uint8,
+        )
+        return buffer.view(shape), capacity
+
+    def bind_layer_attention(self, layer, resources, weight):
+        window = resources["window"]
+        config = window.implementation.config
+        workspace, _ = self.get_swa_prefill_workspace(self.model)
+        row = config.logical_layer_ids.index(layer.layer_num_)
+        compressed = resources.get("kv")
         compressed_cache = None
-        if compressed_packed is not None:
-            config = self.compressed_configs[nsa_dict["compress_ratio"]]
-            compressed_cache = config.get_attention_view(packed_kv=compressed_packed)
-        swa_cache = self.swa_config.get_attention_view(packed_kv=swa_packed)
+        if compressed is not None:
+            compressed_cache = compressed.implementation.config.get_attention_view(compressed.view.kv)
+        return BoundCompressedSparse(
+            window.resource,
+            config.get_attention_view(workspace[row]),
+            config.get_attention_view(window.view),
+            compressed_cache,
+            layer.compress_ratio,
+            layer.v_head_dim,
+            layer.softmax_scale,
+            weight.attn_sink_.weight,
+        )
 
+    def _flashmla_att(self, inputs: CompressedSparseInput, binding: BoundCompressedSparse, swa_cache, sched_meta, out):
         padded_out, _ = flashmla.flash_mla_with_kvcache(
-            q=q.unsqueeze(1),
+            q=inputs.q.unsqueeze(1),
             k_cache=swa_cache,
             block_table=None,
             cache_seqlens=None,
-            head_dim_v=nsa_dict["head_dim_v"],
+            head_dim_v=binding.value_dim,
             tile_scheduler_metadata=sched_meta,
             num_splits=None,
-            softmax_scale=nsa_dict["softmax_scale"],
+            softmax_scale=binding.softmax_scale,
             causal=False,
             is_fp8_kvcache=True,
-            indices=nsa_dict["swa_indices"],
-            attn_sink=nsa_dict["attn_sink"],
-            topk_length=nsa_dict["swa_lengths"],
-            extra_k_cache=compressed_cache,
-            extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
-            extra_topk_length=nsa_dict.get("extra_lengths"),
+            indices=inputs.selection.swa_indices,
+            attn_sink=binding.attention_sink,
+            topk_length=inputs.selection.swa_lengths,
+            extra_k_cache=binding.compressed_cache,
+            extra_indices_in_kvcache=inputs.selection.extra_indices,
+            extra_topk_length=inputs.selection.extra_lengths,
             out=out.unsqueeze(1),
         )
         return padded_out[:, 0]
@@ -132,7 +140,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
 
 
 @dataclasses.dataclass
-class _PrefillAttState(BasePrefillAttState):
+class _PrefillAttState(BaseAttState):
     sched_meta_by_ratio: dict[int, "FlashMLASchedMeta"] | None = None
 
     def prepare_swa_workspace(self, infer_state):
@@ -159,32 +167,28 @@ class _PrefillAttState(BasePrefillAttState):
     def init_state(self):
         self.sched_meta_by_ratio = {ratio: flashmla.get_mla_metadata()[0] for ratio in self.backend.compress_ratios}
 
-    def prefill_att(
+    def run(
         self,
-        q: torch.Tensor,
-        k: Tuple[torch.Tensor, Optional[torch.Tensor]],
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
+        inputs: CompressedSparseInput,
+        binding: BoundCompressedSparse,
         alloc_func=torch.empty,
         *,
-        out: torch.Tensor = None,
-    ) -> torch.Tensor:
-        nsa_dict = att_control.nsa_prefill_dict
+        out=None,
+    ):
         if out is None:
-            out = alloc_func((q.shape[0], q.shape[1], nsa_dict["head_dim_v"]), dtype=q.dtype, device=q.device)
-
+            out = alloc_func(
+                (inputs.q.shape[0], inputs.q.shape[1], binding.value_dim),
+                dtype=inputs.q.dtype,
+                device=inputs.q.device,
+            )
         padded_out = self.backend._flashmla_att(
-            q,
-            k,
-            nsa_dict,
-            self.sched_meta_by_ratio[nsa_dict["compress_ratio"]],
-            out=out,
+            inputs, binding, binding.prefill_cache, self.sched_meta_by_ratio[binding.compress_ratio], out
         )
         return padded_out[:, : self.backend.tp_q_head_num]
 
 
 @dataclasses.dataclass
-class _DecodeAttState(BaseDecodeAttState):
+class _DecodeAttState(BaseAttState):
     sched_meta_by_ratio: dict[int, "FlashMLASchedMeta"] | None = None
     capture_sched_meta_by_ratio: dict[int, "FlashMLASchedMeta"] | None = None
 
@@ -195,25 +199,17 @@ class _DecodeAttState(BaseDecodeAttState):
             ratio: flashmla.get_mla_metadata()[0] for ratio in self.backend.compress_ratios
         }
 
-    def decode_att(
-        self,
-        q: torch.Tensor,
-        k: Tuple[torch.Tensor, Optional[torch.Tensor]],
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        nsa_dict = att_control.nsa_decode_dict
-        sched_meta_by_ratio = (
+    def run(self, inputs: CompressedSparseInput, binding: BoundCompressedSparse, alloc_func=torch.empty):
+        sched_meta = (
             self.capture_sched_meta_by_ratio if torch.cuda.is_current_stream_capturing() else self.sched_meta_by_ratio
         )
-        out = alloc_func((q.shape[0], q.shape[1], nsa_dict["head_dim_v"]), dtype=q.dtype, device=q.device)
+        out = alloc_func(
+            (inputs.q.shape[0], inputs.q.shape[1], binding.value_dim),
+            dtype=inputs.q.dtype,
+            device=inputs.q.device,
+        )
         padded_out = self.backend._flashmla_att(
-            q,
-            k,
-            nsa_dict,
-            sched_meta_by_ratio[nsa_dict["compress_ratio"]],
-            out=out,
+            inputs, binding, binding.decode_cache, sched_meta[binding.compress_ratio], out
         )
         return padded_out[:, : self.backend.tp_q_head_num]
 

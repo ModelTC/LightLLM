@@ -5,7 +5,7 @@ TransferRegion / StateTransferLayout 用于 State 与 CPU/PD 页之间的搬运�
 DP 在对应 TP 分片间直接复制，不需要字段映射类型。
 
 byte_start、byte_end 使用字节单位，表示左闭右开的区间；shape、轴切片起点和 length 使用元素单位。
-层维度完整、同序对应，token/request 索引由每次搬运的调用参数提供。
+层维度可按逻辑资源映射到不同的物理行，token/request 索引由每次搬运的调用参数提供。
 frozen=True 只禁止重新赋值描述属性，不冻结被引用 Tensor 的数据。
 KV 示例统一使用 head_dim=128。
 
@@ -18,6 +18,14 @@ from dataclasses import dataclass
 from typing import Literal
 
 import torch
+
+
+@dataclass(frozen=True)
+class ResourceId:
+    model_role: str
+    producer_layer: int
+    kind: str = "kv"
+
 
 # ========================================================================
 # 一、状态页类别
@@ -63,6 +71,12 @@ class TensorField:
     # 选择某个请求或状态页后，搬运视图会移除已选定的 request/page 轴。
     axes: tuple[str, ...]
 
+    token_block_size: int = 1
+
+    def __post_init__(self):
+        if self.token_block_size <= 0:
+            raise ValueError("token block size must be positive")
+
 
 @dataclass(frozen=True)
 class AxisMapping:
@@ -86,7 +100,7 @@ class AxisMapping:
     """
 
     # 要映射的轴名，必须同时存在于本地和外部字段中，例如 head、channel、dim。
-    # layer 固定完整复制，token 由本次传输数量控制，这两个轴不放入 AxisMapping。
+
     axis: str
 
     # 本地 State 轴的起始元素索引，包含该位置且必须非负。
@@ -123,7 +137,7 @@ class TransferRegion:
 
     由 StateTransferLayout.regions 组织，同一字段可以对应多个区域映射。
     区域的 shape 覆盖外部完整数据，axis_mappings 选择当前 rank 的子范围。
-    本地和外部区域的层数必须一致，并按相同存储顺序完整复制。
+    本地和外部层数或顺序不同时，使用 layer 轴映射选择对应的逻辑资源。
 
     示例：外部 K 区域有 4 个全局 heads，head_dim=128，当前 rank 持有后 2 个 heads。
     整个区域占 2 * 8 * 4 * 128 * 2 = 16384 字节（16 KiB），位于页内 [16384, 32768)。
@@ -203,7 +217,7 @@ class StateTransferLayout:
         ...     ),
         ... )
         >>> layout = StateTransferLayout(
-        ...     state_name="main_gqa_fp16_state",
+        ...     state_name="main_gqa_fp16_h8_d128_state",
         ...     tokens_per_page=8,
         ...     byte_start=16384, byte_end=49152,
         ...     regions=(k_region, replace(k_region, field="v", byte_start=32768, byte_end=49152)),

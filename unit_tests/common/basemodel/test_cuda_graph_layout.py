@@ -110,6 +110,7 @@ def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, i
 
     # 执行真实构造函数的容量计算，在读取模型配置、分配 GPU 权重前停止。
     monkeypatch.setattr(model, "_init_config", stop_before_weights)
+    monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
     with pytest.raises(StopBeforeWeights):
         model.__init__(dict(run_mode="normal", weight_dir="", max_total_token_num=1024, graph_max_batch_size=7))
 

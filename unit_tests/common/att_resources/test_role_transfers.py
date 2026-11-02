@@ -38,7 +38,7 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
         draft_layers=2,
     )
     for index, role in enumerate(("main", "draft0")):
-        state = getattr(source, f"{role}_mla_packed_bf16_state" if glm else f"{role}_gqa_bf16_state")
+        state = source.get_full_attention_states(role)[0]
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             if "token" in field.axes:
                 field.tensor.fill_(11 + index)
@@ -92,7 +92,7 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
             dst_req_idx=2,
         )
     for index, role in enumerate(("main", "draft0")):
-        state = getattr(target, f"{role}_mla_packed_bf16_state" if glm else f"{role}_gqa_bf16_state")
+        state = target.get_full_attention_states(role)[0]
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             if "token" in field.axes:
                 assert (field.tensor[:, 8:12] == 11 + index).all()
@@ -137,7 +137,7 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
         req_idx=1,
     )
     for index, role in enumerate(("main", "draft0")):
-        state = getattr(target, f"{role}_mla_packed_bf16_state" if glm else f"{role}_gqa_bf16_state")
+        state = target.get_full_attention_states(role)[0]
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             if "token" in field.axes:
                 assert (field.tensor[:, 8:16] == 11 + index).all()

@@ -382,6 +382,7 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
     state = gdn.LinearAttDecodeAttState(
         backend=SimpleNamespace(
             model=model,
+            mtp_state_index=req_to_mtp_state_index,
             uses_dynamic_spec_verify_layout=lambda: dynamic_layout,
         ),
         _infer_state_weak_ref=weakref.ref(infer_state),

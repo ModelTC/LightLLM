@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 from math import prod
-from weakref import finalize
+from threading import RLock
+from weakref import WeakValueDictionary, finalize
 
 import torch
 
@@ -17,6 +18,16 @@ logger = init_logger(__name__)
 CUDA_HOST_REGISTER_PORTABLE = 1
 # Mapped：建立设备可访问映射，供 CUDA/Triton kernel 直接访问主机存储。
 CUDA_HOST_REGISTER_MAPPED = 2
+
+_registrations = WeakValueDictionary()
+_registration_lock = RLock()
+
+
+class _HostRegistration:
+    def __init__(self, storage, device_id):
+        self.storage = storage
+        cleanup = finalize(self, _unregister_page_pool_storage, storage, device_id)
+        cleanup.atexit = False
 
 
 # ========================================================================
@@ -89,24 +100,26 @@ def register_page_pool_tensor(tensor: torch.Tensor) -> None:
     接收端必须先选定自己的 CUDA device。按整个 Storage 注册，避免多个视图重复注册
     重叠区间；注册和注销信息只保存在本进程，不依赖发送方的对象属性或默认 GPU。
     """
-    if tensor.device.type != "cpu" or tensor.numel() == 0 or tensor.is_pinned():
+    if tensor.device.type != "cpu" or tensor.numel() == 0:
         return
     assert tensor.is_shared(), "page pool registration requires shared CPU storage"
     storage = tensor.untyped_storage()
     ptr = storage.data_ptr()
     nbytes = storage.nbytes()
-    device_id = torch.cuda.current_device()
-    flags = CUDA_HOST_REGISTER_PORTABLE | CUDA_HOST_REGISTER_MAPPED
-    torch.cuda.check_error(torch.cuda.cudart().cudaHostRegister(ptr, nbytes, flags))
-    # finalizer 绑定 Storage，所有本地 Tensor 及视图释放后才注销，不能绑在单个 Tensor 上。
-    # 正常释放时等待 GPU 完成使用；解释器退出时交给进程清理，避免 CUDA 已关闭后再调用。
-    cleanup = finalize(
-        storage,
-        _unregister_page_pool_storage,
-        ptr,
-        device_id,
-    )
-    cleanup.atexit = False
+    with _registration_lock:
+        registration = _registrations.get((ptr, nbytes))
+        if registration is not None:
+            tensor._page_pool_registration = registration
+            return
+        if tensor.is_pinned():
+            return
+        device_id = torch.cuda.current_device()
+        flags = CUDA_HOST_REGISTER_PORTABLE | CUDA_HOST_REGISTER_MAPPED
+        torch.cuda.check_error(torch.cuda.cudart().cudaHostRegister(ptr, nbytes, flags))
+
+        registration = _HostRegistration(storage, device_id)
+        _registrations[(ptr, nbytes)] = registration
+        tensor._page_pool_registration = registration
     logger.info(
         f"Registered shared bounded attention page pool: bytes={nbytes}, cuda_device={device_id}, "
         "flags=Portable|Mapped; registration applies to this process's mapping"
@@ -118,8 +131,9 @@ def register_page_pool_tensor(tensor: torch.Tensor) -> None:
 # ========================================================================
 
 
-def _unregister_page_pool_storage(ptr: int, device_id: int) -> None:
+def _unregister_page_pool_storage(storage, device_id: int) -> None:
     """等待当前 GPU 使用结束，再注销本进程的映射；共享内存本身由 Storage 管理。"""
+    ptr = storage.data_ptr()
     torch.cuda.synchronize(device=device_id)
     torch.cuda.check_error(torch.cuda.cudart().cudaHostUnregister(ptr))
     logger.debug(f"Unregistered shared bounded attention page pool: cuda_device={device_id}, ptr={ptr}")

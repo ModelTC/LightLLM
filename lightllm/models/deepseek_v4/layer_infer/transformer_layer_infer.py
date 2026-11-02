@@ -1,7 +1,7 @@
 import torch
 import triton
 from lightllm.common.basemodel import TransformerLayerInferTpl
-from lightllm.common.basemodel.attention.base_att import AttControl
+from lightllm.common.basemodel.attention.sparse import CompressedSparseInput
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
@@ -336,9 +336,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
     def _norm_rope_and_cache_kv(self, kv, infer_state, layer_weight):
         from lightllm.models.deepseek_v4.triton_kernel.norm_rope import fused_kv_norm_rope_to_swa
 
-        state = infer_state.swa_state
-        att_state = infer_state.prefill_att_state if infer_state.is_prefill else infer_state.decode_att_state
-        swa, _ = att_state.backend.get_att_input_params(infer_state, self.layer_num_)
+        state = self.state_bindings["window"].implementation
+        swa = self.attention.prefill_write_cache if infer_state.is_prefill else self.attention.decode_write_cache
         # 一次完成 RMSNorm、RoPE、FP8 打包和 SWA 写入。
         fused_kv_norm_rope_to_swa(
             kv=kv,
@@ -350,7 +349,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             swa_runtime_write_slots=infer_state.dsv4_swa_runtime_write_slots,
             swa_kv_buffer=swa,
             swa_page_token_num=state.config.page_token_size,
-            req_to_swa=state.get_layer_view(logical_layer_id=self.layer_num_),
+            req_to_swa=self.state_bindings["window"].view,
         )
 
     def _get_qkv(
@@ -463,8 +462,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             self.compressor.compress(x, infer_state, layer_weight, cos_table, sin_table)
             main_stream.wait_stream(aux_stream)  # join before prefill_att reads the indices / latent KV
             # C4 indices and lengths are allocated on aux and consumed on main.
-            meta["extra_indices"].record_stream(main_stream)
-            meta["extra_lengths"].record_stream(main_stream)
+            meta.extra_indices.record_stream(main_stream)
+            meta.extra_lengths.record_stream(main_stream)
             return meta
 
         self.compressor.compress(x, infer_state, layer_weight, cos_table, sin_table)
@@ -482,23 +481,8 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         out=None,
     ):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
-        att_control = AttControl(
-            nsa_prefill=True,
-            nsa_prefill_dict={
-                "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.v_head_dim,
-                "softmax_scale": self.softmax_scale,
-                "attn_sink": layer_weight.attn_sink_.weight,
-                **meta,
-            },
-        )
-        return infer_state.prefill_att_state.prefill_att(
-            q=q,
-            k=infer_state.prefill_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
-            v=None,
-            att_control=att_control,
-            alloc_func=self.alloc_tensor,
-            out=out,
+        return self.attention.prefill(
+            CompressedSparseInput(q, meta), infer_state.attention_metadata, self.alloc_tensor, out=out
         )
 
     # ------------------------------------------------------------------ attention (decode)
@@ -513,22 +497,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
         meta = self._compress_and_index(q_lora, x, infer_state, layer_weight)
-        att_control = AttControl(
-            nsa_decode=True,
-            nsa_decode_dict={
-                "compress_ratio": self.compress_ratio,
-                "head_dim_v": self.v_head_dim,
-                "softmax_scale": self.softmax_scale,
-                "attn_sink": layer_weight.attn_sink_.weight,
-                **meta,
-            },
-        )
-        return infer_state.decode_att_state.decode_att(
-            q=q,
-            k=infer_state.decode_att_state.backend.get_att_input_params(infer_state, self.layer_num_),
-            v=None,
-            att_control=att_control,
-        )
+        return self.attention.decode(CompressedSparseInput(q, meta), infer_state.attention_metadata, self.alloc_tensor)
 
     # ------------------------------------------------------------------ moe
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):

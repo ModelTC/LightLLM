@@ -1,8 +1,9 @@
+from ..mla import BoundMla, MlaPrefillInput, MlaDecodeInput
 import dataclasses
 import weakref
 import torch
 import triton
-from ..base_att import BasePrefillAttState, BaseDecodeAttState, AttControl
+from ..base_att import BaseAttState
 from typing import Optional, TYPE_CHECKING, Tuple
 from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params, page_table_copy
@@ -13,6 +14,8 @@ from .fp import Fa3AttBackend
 
 
 class MlaFa3AttBackend(Fa3AttBackend):
+    supports_mla = True
+
     def create_att_prefill_state(self, infer_state) -> "MlaFa3PrefillAttState":
         return MlaFa3PrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -21,7 +24,8 @@ class MlaFa3AttBackend(Fa3AttBackend):
 
 
 @dataclasses.dataclass
-class MlaFa3PrefillAttState(BasePrefillAttState):
+class MlaFa3PrefillAttState(BaseAttState):
+    graph_buffer_names = ("cu_seqlens_q", "cu_seqlens_k")
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     causal: bool = None
@@ -31,30 +35,8 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
         self.cu_seqlens_q = self.infer_state.b1_cu_q_seq_len.int()
         self.cu_seqlens_k = self.infer_state.b1_cu_kv_seq_len.int()
 
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: Tuple[torch.Tensor, torch.Tensor],
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-        return self._mla_prefill_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=att_control,
-            alloc_func=alloc_func,
-        )
-
-    def _mla_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, att_control: AttControl, alloc_func=torch.empty
-    ) -> torch.Tensor:
+    def run(self, inputs: MlaPrefillInput, binding: BoundMla, alloc_func=torch.empty):
+        q, k, v = inputs.q, (inputs.k_nope, inputs.k_rope), inputs.v
         self.backend: MlaFa3AttBackend = self.backend  # for typing
         k_nope, k_rope = k
         q_head_num = q.shape[1]
@@ -62,8 +44,7 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
 
         assert q.ndim == 3 and k.ndim == 3 and v.ndim == 3
 
-        assert att_control.mla_prefill
-        softmax_scale = att_control.mla_prefill_dict["softmax_scale"]
+        softmax_scale = binding.softmax_scale
 
         o_tensor = flash_attn_varlen_func(
             q=q,
@@ -81,7 +62,8 @@ class MlaFa3PrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class MlaFa3DecodeAttState(BaseDecodeAttState):
+class MlaFa3DecodeAttState(BaseAttState):
+    graph_buffer_names = ("cu_seqlens_q", "cu_seqlens_k", "b_att_seq_len", "page_table")
     cu_seqlens_q: torch.Tensor = None
     cu_seqlens_k: torch.Tensor = None
     page_table: torch.Tensor = None
@@ -182,46 +164,16 @@ class MlaFa3DecodeAttState(BaseDecodeAttState):
     def copy_for_decode_cuda_graph(self, new_state: "MlaFa3DecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
 
-    def decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ):
-        assert (
-            att_control.use_alibi is False
-            and att_control.use_sliding_window is False
-            and att_control.use_att_sink is False
-        )
-        assert v is None
-
-        return self._mla_decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=att_control,
-            alloc_func=alloc_func,
-        )
-
-    def _mla_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ):
+    def run(self, inputs: MlaDecodeInput, binding: BoundMla, alloc_func=torch.empty):
+        q, k = (inputs.q_nope, inputs.q_rope), binding.cache
         q_nope, q_rope = q
         kv = k
-        qk_rope_head_dim = 64
+        qk_rope_head_dim = binding.rope_dim
         kv_lora_rank = kv.shape[-1] - qk_rope_head_dim
         k_rope = kv[:, :, -qk_rope_head_dim:].view(-1, self.backend.infer_page_size, 1, qk_rope_head_dim)
         kv_nope = kv[:, :, :-qk_rope_head_dim].view(-1, self.backend.infer_page_size, 1, kv_lora_rank)
         k_descale, v_descale = None, None
-        assert att_control.mla_decode
-        softmax_scale = att_control.mla_decode_dict["softmax_scale"]
+        softmax_scale = binding.softmax_scale
 
         o_tensor = flash_attn_with_kvcache(
             q=q_rope,

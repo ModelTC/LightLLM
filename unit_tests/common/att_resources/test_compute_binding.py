@@ -57,7 +57,9 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
         dtype=torch.bfloat16,
         device="cuda",
     )
-    layer = SimpleNamespace(layer_num_=8)
+    from functools import partial
+
+    layer = SimpleNamespace(layer_num_=8, write_full_att_kv=partial(state.write_full_att_kv, logical_layer_id=8))
     TransformerLayerInferTpl._post_cache_kv(
         self=layer,
         cache_kv=kv,

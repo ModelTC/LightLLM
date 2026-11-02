@@ -2,18 +2,18 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 
 from dataclasses import dataclass
+from functools import partial
 from math import prod
 
 import torch
 
 from ...utils import deepcopy_result
-from ...types import PageKind, StateTransferLayout, TensorField, TransferRegion
+from ...types import PageKind, TensorField, TransferRegion
 from ..base_state import BoundedAttentionState
-from ..copy_kernel import copy_bounded_att_tensors
-from ..transfer_utils import bounded_att_buffer_copies
+from ..copy_plan import BatchedStateView, bind_window_page_copy
 from ..window_pages_pool import WindowPagesPool
 from .fp8_e8m0_swa_transfer import copy_swa_window
 
@@ -63,6 +63,9 @@ class FP8E8M0SlidingWindowConfig:
 class FP8E8M0SlidingWindowState(BoundedAttentionState):
     """仅保存近期原始 KV；prefill workspace 由计算 backend 管理。"""
 
+    resource_kind = "window"
+    runtime_storage_fields = ("swa_buffer",)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
@@ -99,6 +102,9 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     def get_state_type(self) -> str:
         """窗口长度参与方案名称，允许同一模型组合不同滑窗。"""
         return f"swa_w{self.config.window_size}_fp8_group64_e8m0"
+
+    def get_checkpoint_bytes(self):
+        return len(self.config.logical_layer_ids) * self.config.window_size * self.config.kv_bytes
 
     def initialize_page_pools(
         self,
@@ -188,143 +194,20 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """CPU 快照保存完整近期窗口。"""
         return self._get_transfer_regions()
-
-    def write_state_pages_to_cpu(
-        self,
-        page_kind: PageKind,
-        page_slot_ids: list[int],
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: list[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """将指定快照写入 CPU 页，已就绪页保持不变。"""
-        pool = self._pool(page_kind=page_kind)
-        fields, pages = [], []
-        for index, (slot, page) in enumerate(zip(page_slot_ids, cpu_page_indices)):
-            if cpu_page_ready_flags is not None and cpu_page_ready_flags[index]:
-                continue
-            fields.append({"swa": TensorField(tensor=pool.buffer[slot], axes=("layer", "window", "channel"))})
-            pages.append(page)
-        for copies in bounded_att_buffer_copies(
-            page_fields=fields,
-            page_buffers=cpu_page_buffers,
-            layout=layout,
-            page_indices=pages,
-            write=True,
-        ):
-            if copies:
-                copy_bounded_att_tensors(copies=copies)
-
-    def read_state_pages_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: list[int],
-        big_page_slot_ids: list[int],
-        layout: StateTransferLayout,
-    ) -> None:
-        """CPU 页先恢复到大页池，随后再按前缀长度恢复请求 ring。"""
-        fields = [
-            {"swa": TensorField(tensor=self.big_pages_pool.buffer[slot], axes=("layer", "window", "channel"))}
-            for slot in big_page_slot_ids
-        ]
-        for copies in bounded_att_buffer_copies(
-            page_fields=fields,
-            page_buffers=cpu_page_buffers,
-            layout=layout,
-            page_indices=cpu_page_indices,
-            write=False,
-        ):
-            if copies:
-                copy_bounded_att_tensors(copies=copies)
-
-    # ========================================================================
-    # 四、DP：相同方案的快照及请求运行态复制
-    # ========================================================================
-
-    def copy_big_pages_from_dp(
-        self,
-        src_page_ids: list[int],
-        dst_page_ids: list[int],
-        remote_dp_bounded_state: FP8E8M0SlidingWindowState,
-    ) -> None:
-        """复制已保存的大页，调用方保持槽位及 stream 依赖一致。"""
-        assert self.config == remote_dp_bounded_state.config
-        if self.big_pages_pool is not None:
-            copy_bounded_att_tensors(
-                copies=[
-                    (remote_dp_bounded_state.big_pages_pool.buffer[src], self.big_pages_pool.buffer[dst])
-                    for src, dst in zip(src_page_ids, dst_page_ids)
-                ]
-            )
-
-    def copy_runtime_state_from_dp(
-        self,
-        src_req_indices: list[int],
-        dst_req_indices: list[int],
-        remote_dp_bounded_state: FP8E8M0SlidingWindowState,
-    ) -> None:
-        """直接复制相同配置和 MTP 容量的物理 ring，不创建快照。"""
-        assert self.config == remote_dp_bounded_state.config and self.mtp_step == remote_dp_bounded_state.mtp_step
-        copy_bounded_att_tensors(
-            copies=[
-                (remote_dp_bounded_state.swa_buffer[:, src], self.swa_buffer[:, dst])
-                for src, dst in zip(src_req_indices, dst_req_indices)
-            ]
-        )
 
     # ========================================================================
     # 五、PD：按绝对前缀展开完整逻辑窗口，兼容不同 MTP 容量
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回完整逻辑窗口，不包含本地 MTP 候选区。"""
         return self._get_transfer_regions()
-
-    def write_to_pd_page(
-        self,
-        req_idx: int,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        state_token_len: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按绝对长度将请求 ring 写入选定 PD 页。"""
-        page = pd_page_buffers[pd_page_index].view(torch.uint8).view(-1)
-        for region in layout.regions:
-            if region.write_enabled:
-                external = page[region.byte_start : region.byte_end].view(region.dtype).view(region.shape)
-                self._copy_window(
-                    req_idx=req_idx,
-                    external=external,
-                    state_token_len=state_token_len,
-                    write=True,
-                )
-
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        req_idx: int,
-        pd_page_index: int,
-        state_token_len: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按接收端 ring 容量还原逻辑窗口，不写入大小页池。"""
-        page = pd_page_buffers[pd_page_index].view(torch.uint8).view(-1)
-        for region in layout.regions:
-            external = page[region.byte_start : region.byte_end].view(region.dtype).view(region.shape)
-            self._copy_window(
-                req_idx=req_idx,
-                external=external,
-                state_token_len=state_token_len,
-                write=False,
-            )
 
     # ========================================================================
     # 六、内部页池和窗口搬运
@@ -351,6 +234,26 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
             ),
         )
 
+    def get_runtime_transfer_view(self):
+        return BatchedStateView(
+            (("swa", TensorField(self.swa_buffer.movedim(1, 0), ("slot", "layer", "window", "channel"))),)
+        )
+
+    def get_snapshot_transfer_view(self, page_kind):
+        pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
+        return BatchedStateView(
+            () if pool is None else (("swa", TensorField(pool.buffer, ("slot", "layer", "window", "channel"))),)
+        )
+
+    def bind_pd_copy(self, pages, layout, write):
+        return bind_window_page_copy(
+            self.get_runtime_transfer_view(),
+            pages,
+            layout,
+            write,
+            partial(copy_swa_window, config=self.config),
+        )
+
     def _copy_window(
         self,
         req_idx: int,
@@ -358,8 +261,9 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
         state_token_len: int,
         write: bool,
     ) -> None:
+        local = self.swa_buffer[:, req_idx]
         copy_swa_window(
-            local=self.swa_buffer[:, req_idx],
+            local=local,
             external=external,
             state_token_len=state_token_len,
             config=self.config,

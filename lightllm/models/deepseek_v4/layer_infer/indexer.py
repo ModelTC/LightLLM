@@ -1,5 +1,6 @@
 import torch
 import deep_gemm
+from lightllm.common.basemodel.attention.sparse import CompressedSparseMetadata
 
 from lightllm.common.basemodel import BaseLayerInfer
 from ..infer_struct import DeepseekV4InferStateInfo
@@ -102,12 +103,9 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
         elif self.compress_ratio == 128:
             extra_indices = infer_state.dsv4_c128_indices.unsqueeze(1)
             extra_lengths = infer_state.dsv4_c128_lengths
-        return {
-            "swa_indices": infer_state.dsv4_swa_indices.unsqueeze(1),
-            "swa_lengths": infer_state.dsv4_swa_lengths,
-            "extra_indices": extra_indices,
-            "extra_lengths": extra_lengths,
-        }
+        return CompressedSparseMetadata(
+            infer_state.dsv4_swa_indices.unsqueeze(1), infer_state.dsv4_swa_lengths, extra_indices, extra_lengths
+        )
 
     def _indexer_q_weight(
         self,

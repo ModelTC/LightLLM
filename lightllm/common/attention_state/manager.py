@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 from typing import List
 
 import torch
@@ -23,6 +23,7 @@ from .utils import MODEL_ROLES
 if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
+    from .memory_plan import MemoryPlan
 
 
 logger = init_logger(__name__)
@@ -55,15 +56,19 @@ class AttentionStateManager:
         self.bounded_att_big_page_allocator = None
         self.bounded_att_small_page_allocator = None
         self._request_capacity = request_capacity
+        self.model_identities = {}
+        self.storage_published = False
         self._cpu_cache_operator = CpuCacheOperator(self)
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
+        self._token_copies = None
 
     def _reset_operators(self) -> None:
         """让浅拷贝后的 Operator 指向新的资源管理器副本。"""
         self._cpu_cache_operator = CpuCacheOperator(self)
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
+        self._token_copies = None
 
     def get_cpu_cache_operator(self) -> CpuCacheOperator:
         """返回当前资源管理器唯一的 CPU cache 操作对象。"""
@@ -83,22 +88,47 @@ class AttentionStateManager:
         成员名和 state_name 均为 {model_role}_{state.get_state_type()}_state。
         model_role 为 main 或 draft0..draft35；State 只返回中间的算法/存储方案标记，
         不自行添加角色或 _state。各 State 基类的 get_state_type 注释规定具体命名格式。
-        同角色、同标记不能重复注册；成员名是资源身份，不代表完整布局兼容性。
+        同角色、同标记的不同逻辑层域可以独立注册；成员名只是兼容接口，不定义内容共享。
         """
         assert not self._state_registration_finished, "State registration is already finished"
         assert model_role in MODEL_ROLES, f"unknown model role {model_role}"
         state_type = state.get_state_type()
         assert state_type.isidentifier() and state_type.islower(), f"invalid State type {state_type}"
         name = f"{model_role}_{state_type}_state"
-        assert name not in self.__dict__, f"State {name} is already bound"
         assert all(
             state is not value for value in self.__dict__.values()
         ), "a State cannot belong to multiple model roles"
+        peers = [
+            value
+            for value in self.__dict__.values()
+            if isinstance(value, (FullAttentionState, BoundedAttentionState))
+            and value.model_role == model_role
+            and value.get_state_type() == state_type
+        ]
+        if peers:
+
+            def layers(item):
+                groups = getattr(item.config, "logical_layer_groups", ())
+                return (
+                    tuple(sorted(layer for group in groups for layer in group))
+                    if groups
+                    else tuple(item.config.logical_layer_ids)
+                )
+
+            domain = set(layers(state))
+            assert all(not domain.intersection(layers(peer)) for peer in peers), f"State {name} is already bound"
+            for peer in peers:
+                peer_name = f"{model_role}_{state_type}_l{'_'.join(map(str, layers(peer)))}_state"
+                delattr(self, peer.state_name)
+                peer.state_name = peer_name
+                setattr(self, peer_name, peer)
+            name = f"{model_role}_{state_type}_l{'_'.join(map(str, layers(state)))}_state"
         # config 只描述布局，资源身份仅保存在 State；绑定时保留原配置对象。
+        state.model_role = model_role
         state.state_name = name
         setattr(self, name, state)
 
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_state(
         self,
         model_role: str,
@@ -152,7 +182,11 @@ class AttentionStateManager:
         if path is not None:
             with open(path) as file:
                 calibration = json.load(file)
-            if any(state.config.scale_mode == "per_tensor" for state in calibration_states):
+            if calibration.get("version", 1) not in (1, 2):
+                raise ValueError("unsupported KV calibration version")
+            if calibration.get("version", 1) == 1 and any(
+                state.config.scale_mode == "per_tensor" for state in calibration_states
+            ):
                 from lightllm.utils.config_utils import get_model_architectures
 
                 assert calibration["architectures"] == get_model_architectures(
@@ -171,14 +205,92 @@ class AttentionStateManager:
             )
             for state in states:
                 if isinstance(state, StaticFP8FullAttentionState):
-                    state.bind_calibration(
-                        calibration=calibration,
-                        storage_layer_start=storage_layer_start,
-                    )
+                    if calibration is not None and calibration.get("version", 1) == 2:
+                        state.bind_logical_calibration(calibration, role)
+                    else:
+                        state.bind_calibration(calibration=calibration, storage_layer_start=storage_layer_start)
+                    from .manifest import digest
+
+                    if calibration is None:
+                        kv_calibration = (state.config.scale_mode, "unit")
+                    elif calibration.get("version", 1) == 2:
+                        entries = calibration["layers"][role]
+                        kv_calibration = {
+                            str(group[0]): {field: entries[str(group[0])][field] for field in ("k", "v")}
+                            for group in state.config.logical_layer_groups
+                        }
+                    else:
+                        end = storage_layer_start + len(state.config.logical_layer_groups)
+                        kv_calibration = calibration["scales"][storage_layer_start:end]
+                    state.kv_calibration_digest = digest(kv_calibration)
+                    state.kv_calibration_digests = {
+                        group[0]: digest(
+                            (state.config.scale_mode, "unit")
+                            if calibration is None
+                            else (
+                                kv_calibration[str(group[0])]
+                                if calibration.get("version", 1) == 2
+                                else kv_calibration[row]
+                            )
+                        )
+                        for row, group in enumerate(state.config.logical_layer_groups)
+                    }
                 storage_layer_start += len(state.config.logical_layer_groups)
         logger.info(
-            "Full-attention calibration bound: states=%d, source=%s", len(calibration_states), path or "unit scales"
+            "Full-attention calibration bound: states=%d, source=%s",
+            len(calibration_states),
+            path or "unit scales",
         )
+
+    def plan_storage(
+        self,
+        args: StartArgs | EasyDict,
+        token_capacity: int | None,
+        mem_fraction: float,
+        device: str | torch.device | int = "cuda",
+        memory_limits: dict[str, int] | None = None,
+        runtime_demands: tuple = (),
+        runtime_peak_bytes: int = 0,
+    ) -> MemoryPlan:
+
+        assert self._state_registration_finished, "State registration must finish before resource initialization"
+
+        from dataclasses import replace
+        import psutil
+        from .memory_plan import MemoryDemand, plan_memory, merge_memory_demands
+
+        if not self.get_full_attention_states() and token_capacity is None:
+            raise ValueError("recurrent-only models require max_total_token_num to bound retained checkpoints")
+        allocation_device = torch.device(device)
+        demands = merge_memory_demands(self.get_storage_memory_demands(args, allocation_device.type), runtime_demands)
+        if memory_limits is None:
+            local_ranks = max(1, args.tp // args.nnodes)
+            memory_limits = {"cpu": psutil.virtual_memory().available // local_ranks}
+        else:
+            memory_limits = dict(memory_limits)
+        if allocation_device.type == "cuda" and "cuda" not in memory_limits:
+            torch.cuda.empty_cache()
+            gpu_device = torch.device("cuda", get_current_device_id())
+            free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_device)
+            memory_limits["cuda"] = free_bytes
+            demands += (
+                MemoryDemand(
+                    "runtime_headroom", "cuda", max(int(total_bytes * (1 - mem_fraction)), runtime_peak_bytes)
+                ),
+            )
+        elif runtime_peak_bytes:
+            demands += (MemoryDemand("runtime_headroom", allocation_device.type, runtime_peak_bytes),)
+        plan = plan_memory(demands, memory_limits, args.page_size, token_capacity)
+        index_capacity = ((1 << 31) - args.page_size) // args.page_size * args.page_size
+        if plan.capacity > index_capacity:
+            if token_capacity is not None:
+                raise ValueError("requested KV capacity including HOLD must fit int32 indices")
+            plan = replace(plan, capacity=index_capacity)
+        if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+            capacity = torch.tensor(plan.capacity, dtype=torch.int64, device=allocation_device)
+            torch.distributed.all_reduce(capacity, op=torch.distributed.ReduceOp.MIN)
+            plan = replace(plan, capacity=capacity.item())
+        return plan
 
     def initialize_storage(
         self,
@@ -186,59 +298,85 @@ class AttentionStateManager:
         token_capacity: int | None,
         mem_fraction: float,
         device: str | torch.device | int = "cuda",
+        memory_limits: dict[str, int] | None = None,
+        runtime_demands: tuple = (),
+        runtime_peak_bytes: int = 0,
     ) -> None:
-        """全部模型完成资源准备后，规划共享容量并初始化缓存存储。
-
-        调用前，所有模型的权重和绑定请求容量的运行态已创建，full-attention
-        已完成创建标记和所需的静态标定绑定，大小页池尚未分配。调用方在本方法返回后，
-        依次执行各模型的运行时初始化，由模型读取 allocator 中的最终容量。
-        """
-        assert self._state_registration_finished, "State registration must finish before resource initialization"
-
-        # 阶段一：规划共享 token 容量，并向下对齐到完整 KV 页。
-        # 未指定容量时，根据剩余显存评估；固定运行态的显存已经在前面占用。
-        # PD 模式还需为传输 buffer 预留空间，布局按全部 full-attention State 计算。
-        assert self.get_full_attention_states(), "the shared token index domain requires a full-attention State"
-        pd_reserved_bytes = 0
-        if args.run_mode in ("prefill", "decode"):
-            pd_reserved_bytes = self.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
-        if token_capacity is None:
-            # 权重和固定运行态已分配，用当前设备剩余显存扣除保留比例及 PD buffer。
-            torch.cuda.empty_cache()
-            gpu_device = torch.device("cuda", get_current_device_id())
-            free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_device)
-            budget = int(free_bytes - total_bytes * (1 - mem_fraction)) - pd_reserved_bytes
-
-            # 按每页开销直接计算容量，预留一个 HOLD 页；静态量化参数占比较小，不单独扣减。
-            assert args.page_size > 0, "capacity planning requires a positive page size"
-            page_bytes = self.get_full_att_token_bytes() * args.page_size
-            if page_bytes > budget:
-                raise MemoryError("attention storage budget cannot fit HOLD pages")
-            token_capacity = (budget // page_bytes - 1) * args.page_size
-
-            # 各 rank 的显存余量可能不同，统一采用最小容量。
-            if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
-                capacity = torch.tensor(token_capacity, dtype=torch.int64, device=gpu_device)
-                torch.distributed.all_reduce(capacity, op=torch.distributed.ReduceOp.MIN)
-                token_capacity = capacity.item()
-            logger.info(
-                f"Attention storage budget: {budget / 1024**3:.3f} GiB, "
-                f"transfer reserve: {pd_reserved_bytes / 1024**2:.3f} MiB, "
-                f"profiled token capacity: {token_capacity} (mem_fraction={mem_fraction})"
-            )
-        token_capacity = token_capacity // args.page_size * args.page_size
-        assert token_capacity > 0, "attention capacity must contain at least one complete page"
+        plan = self.plan_storage(
+            args, token_capacity, mem_fraction, device, memory_limits, runtime_demands, runtime_peak_bytes
+        )
+        self.memory_plan = plan
+        logger.info("Attention memory plan: capacity=%d, domains=%s", plan.capacity, plan.explain())
 
         # 阶段二：管理器为已创建的 State 分配实际存储与共享 allocator。
         # State 对象保持不变，查询缓存继续引用相同对象；固定运行态不重复分配。
         big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
         self.allocate_storage(
-            token_capacity=token_capacity,
+            token_capacity=plan.capacity,
             page_size=args.page_size,
             big_page_tokens=big_page_tokens,
             small_page_capacity=args.linear_att_cache_size or 0,
             device=device,
         )
+
+    def release_unpublished_storage(self):
+        if self.storage_published:
+            raise RuntimeError("published attention storage cannot be replanned")
+        states = self.get_full_attention_states()
+        if any(not state.storage_fields for state in states):
+            raise RuntimeError("all storage providers must declare allocation ownership before replanning")
+        self._reset_operators()
+        for state in states:
+            state.release_storage()
+        for state in self.get_bounded_attention_states():
+            state.release_page_pools()
+        self.full_att_allocator = None
+        self.bounded_att_big_page_allocator = None
+        self.bounded_att_small_page_allocator = None
+
+    def get_storage_memory_demands(self, args, storage_domain="cuda"):
+        from .memory_plan import MemoryDemand
+
+        demands = [MemoryDemand("token_allocator", "cpu", bytes_per_unit=16)]
+        for state in self.get_full_attention_states():
+            token_bytes = state.get_token_bytes()
+            demands.append(
+                MemoryDemand(
+                    state.state_name,
+                    storage_domain,
+                    token_bytes * args.page_size + state.get_fixed_storage_bytes(),
+                    token_bytes,
+                )
+            )
+        if args.run_mode in ("prefill", "decode"):
+            demands.append(
+                MemoryDemand(
+                    "pd_staging",
+                    storage_domain,
+                    self.get_pd_operator().get_page_bytes() * args.pd_kv_page_num,
+                )
+            )
+        big_page_tokens = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        small_pages = args.linear_att_cache_size or 0
+        for state in self.get_bounded_attention_states():
+            runtime_bytes = state.get_unallocated_runtime_bytes()
+            if runtime_bytes:
+                demands.append(MemoryDemand(state.state_name + "_runtime", storage_domain, runtime_bytes))
+            page_bytes = state.get_checkpoint_bytes()
+            if page_bytes:
+                demands.append(
+                    MemoryDemand(
+                        state.state_name + "_checkpoints",
+                        "cpu",
+                        page_bytes * (small_pages + 2),
+                        page_bytes,
+                        big_page_tokens,
+                    )
+                )
+        if self.get_bounded_attention_states():
+
+            demands.append(MemoryDemand("checkpoint_allocators", "cpu", 64 * (small_pages + 2), 64, big_page_tokens))
+        return tuple(demands)
 
     # 创建完成只表示对象集合就绪；实际容量和存储在后续阶段初始化。
     def finish_state_registration(self) -> None:
@@ -256,18 +394,20 @@ class AttentionStateManager:
     ) -> None:
         """在 State 对象创建完成后分配 full-attention 存储、共享 allocator 和 bounded 大小页。
 
-        请求容量对应的 bounded 运行态（包括压缩窗口）已由各模型创建，这里仅补齐缓存存储。
+        请求容量对应的 bounded 运行态和缓存存储都在预算确定后分配。
         """
         assert self._state_registration_finished, "State registration must finish before storage initialization"
         assert self.full_att_allocator is None, "resources already initialized"
         full_states = self.get_full_attention_states()
-        assert full_states, "the shared token index domain requires a full-attention State"
+        assert full_states or self.get_bounded_attention_states(), "no attention state requirements"
         for state in full_states:
             # 管理器统一设置实际页规格和设备；State 的分配接口只接收 token 容量。
             state.page_size = page_size
             state.device = torch.device(device)
             state.allocate_storage(token_capacity)
-        self.full_att_allocator = FullAttKVAllocator(token_capacity, page_size)
+        self.full_att_allocator = FullAttKVAllocator(
+            token_capacity, page_size, pin_memory=torch.device(device).type == "cuda"
+        )
 
         # bounded-attention 大页池末尾保留 CPU 加载/卸载暂存槽位，普通分配不使用它们。
         bounded_states = self.get_bounded_attention_states()
@@ -279,6 +419,7 @@ class AttentionStateManager:
                 StatePageAllocator(small_page_capacity) if small_page_capacity else None
             )
             for state in bounded_states:
+                state.allocate_runtime_storage(device)
                 # 无快照区域的 State 在合法缓存边界无需历史，不为它分配大小页 Tensor。
                 # 共享槽位 allocator 仍供其他 State 和缓存流程使用，不随单个 State 重复创建。
                 if not state.get_cpu_transfer_regions():
@@ -298,6 +439,7 @@ class AttentionStateManager:
         # Layout cache 归属于各 Operator；State 存储规格变化后统一失效。
         self.get_cpu_cache_operator().clear_layout_cache()
         self.get_pd_operator().clear_layout_cache()
+        self._bind_token_copies()
 
     def get_full_attention_states(self, role: str | None = None) -> tuple[FullAttentionState, ...]:
         """返回全部或指定角色的 full-attention State；只缓存对象引用。"""
@@ -319,12 +461,36 @@ class AttentionStateManager:
     # ========================================================================
 
     # Full attention：在所有参与 State 内复制相同的物理 token 索引，不修改请求映射。
+    def _bind_token_copies(self):
+        from .token_copy import TokenPageCopyPlan
+
+        copies = []
+        for state in self.get_full_attention_states():
+            fields = state.get_token_copy_fields()
+            copies.append(
+                (TokenPageCopyPlan.for_tokens(fields, fields), None)
+                if fields is not None
+                else (None, state.copy_full_att_tokens)
+            )
+        self._token_copies = tuple(copies)
+
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制 KV 及随 token 保存的量化参数、indexer 字段等完整 token 数据。"""
-        full_states = self.get_full_attention_states()
-        assert full_states, "no full-attention storage in this composition"
-        for state in full_states:
-            state.copy_full_att_tokens(src_indices, dst_indices)
+        from .token_copy import TransferBatch
+
+        if src_indices.numel() != dst_indices.numel():
+            raise ValueError("source and destination token counts differ")
+        if self._token_copies is None:
+            self._bind_token_copies()
+        batch = TransferBatch(src_indices, dst_indices)
+        for plan, _ in self._token_copies:
+            if plan is not None:
+                plan.validate_batch(batch)
+        for plan, legacy in self._token_copies:
+            if plan is not None:
+                plan.run(batch)
+            else:
+                legacy(src_indices, dst_indices)
 
     # ========================================================================
     # 三、Bounded attention：运行态重置、大小页保存与恢复、MTP 提交
@@ -413,7 +579,7 @@ class AttentionStateManager:
     # ========================================================================
 
     # 私有实现：缓存创建完成后的成员集合，模型逐层计算直接访问具体 State 成员。
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def _get_states(
         self,
         state_class: type[FullAttentionState] | type[BoundedAttentionState],
@@ -425,6 +591,6 @@ class AttentionStateManager:
         states = (
             state
             for state in self.__dict__.values()
-            if isinstance(state, state_class) and (role is None or state.state_name.startswith(role + "_"))
+            if isinstance(state, state_class) and (role is None or state.model_role == role)
         )
         return tuple(sorted(states, key=lambda state: state.state_name))

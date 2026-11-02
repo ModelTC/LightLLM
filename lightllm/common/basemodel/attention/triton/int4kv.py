@@ -7,6 +7,8 @@ from typing import Optional, Tuple
 
 
 class Int4kvTritonAttBackend(BaseAttBackend):
+    supported_kv_encodings = ("int4",)
+
     def __init__(self, model):
         super().__init__(model)
         self.quant_group_size: int = get_env_start_args().llm_kv_quant_group_size
@@ -20,7 +22,6 @@ class Int4kvTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class Int4kvTritonPrefillAttState(BasePrefillAttState):
-
     # 用于反量化的时候使用，可以减少反量化占用的显存数量。按需使用。
     b_kv_start_loc: torch.Tensor = None
 
@@ -113,6 +114,7 @@ class Int4kvTritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class Int4kvTritonDecodeAttState(BaseDecodeAttState):
+    graph_buffer_names = ()
     decode_max_kv_seq_len: int = None
 
     def init_state(self):

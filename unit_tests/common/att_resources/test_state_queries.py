@@ -77,7 +77,7 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
     assert manager._get_states.cache_info().currsize == 6
     assert manager.get_full_attention_states() == (
         manager.draft0_mla_fp32_state,
-        manager.main_gqa_fp32_state,
+        manager.main_gqa_fp32_h1_d4_state,
     )
     assert manager.get_bounded_attention_states("main") == (manager.main_kda_conv_fp32_ssm_fp32_state,)
     assert manager.get_bounded_attention_states("draft0") == (manager.draft0_gdn_conv_fp32_ssm_fp32_state,)
@@ -175,7 +175,7 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
     assert imported._get_states.cache_info().misses == misses + 2
 
 
-def test_clearing_query_cache_releases_manager_and_states():
+def test_query_cache_does_not_retain_manager_and_states():
     manager = MainDraftTestResourceManager()
     manager.get_full_attention_states()
     manager.get_bounded_attention_states()
@@ -183,7 +183,7 @@ def test_clearing_query_cache_releases_manager_and_states():
     state_ref = weakref.ref(manager.main_kda_conv_fp32_ssm_fp32_state)
     del manager
     gc.collect()
-    assert manager_ref() is not None and state_ref() is not None
+    assert manager_ref() is None and state_ref() is None
     AttentionStateManager._get_states.cache_clear()
     gc.collect()
     assert manager_ref() is None and state_ref() is None

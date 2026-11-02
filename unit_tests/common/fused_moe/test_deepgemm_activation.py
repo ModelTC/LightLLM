@@ -7,7 +7,7 @@ from lightllm.common.quantization import Quantcfg
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available() or not ep.HAS_DEEPGEMM or torch.cuda.get_device_capability()[0] < 9,
-    reason="SM90+, DeepEP and DeepGEMM required",
+    reason="SM90+ and DeepGEMM required",
 )
 
 
@@ -20,7 +20,8 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
     config = {"quant_method": "fp8", "weight_block_size": [128, 128]}
     if use_ue8m0_scales:
         config["scale_fmt"] = "ue8m0"
-    Quantcfg({"n_layer": 1, "quantization_config": config})
+    plan = Quantcfg({"n_layer": 1, "quantization_config": config}).get_weight_plan(0, "fused_moe")
+    monkeypatch.setenv("LIGHTLLM_USE_UE8M0_SCALES", str(int(not use_ue8m0_scales)))
     # Identity projections isolate activation/FP8 behavior from GEMM rounding.
     dim, padded = 128, 128
     x = torch.linspace(-24, 24, 5 * dim, device="cuda").view(5, dim).to(torch.float8_e4m3fn)
@@ -30,7 +31,7 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
     w1_scale = torch.ones(2, 2, 1, device="cuda")
     w2_scale = torch.ones(2, 1, 1, device="cuda")
     counts = torch.tensor([3, 2], device="cuda", dtype=torch.int32)
-    activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one)
+    activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one, use_ue8m0_scales=plan.use_ue8m0_scales)
     recv = torch.zeros(2, padded, dim, device="cuda", dtype=torch.float8_e4m3fn)
     recv[0, :3] = x[:3]
     recv[1, :2] = x[3:]

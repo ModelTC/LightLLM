@@ -15,6 +15,9 @@ logger = init_logger(__name__)
 
 
 class Fp8Fa3AttBackend(Fa3AttBackend):
+    supported_kv_encodings = ("fp8_e4m3fn_per_head",)
+    supported_attention_features = ("noncausal",)
+
     def _init_infer_page_size(self):
         # TODO: FP8 FA3 完成多 token 推理页适配后，改为继承模型 page_size。
         self.infer_page_size = 1
@@ -36,27 +39,6 @@ class Fp8Fa3AttBackend(Fa3AttBackend):
 
 @dataclasses.dataclass
 class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
-    k_descale: torch.Tensor = None
-    v_descale: torch.Tensor = None
-
-    def init_state(self):
-        super().init_state()
-        batch_size = self.infer_state.batch_size
-        state = getattr(
-            self.infer_state.att_state_manager,
-            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_head_state",
-        )
-
-        offline_scales: torch.Tensor = state.scales
-        head_num = state.config.head_num
-        # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = (
-            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        )
-        self.v_descale = (
-            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], batch_size, head_num)
-        )
-
     def prefill_att(
         self,
         q: torch.Tensor,
@@ -75,7 +57,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             k=k,
             v=v,
             alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
+            calibration=att_control,
         )
 
     def _fp8_prefill_att(
@@ -83,7 +65,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        logical_layer_id: int,
+        calibration: AttControl,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
         self.backend: Fp8Fa3AttBackend = self.backend  # for typing
@@ -98,13 +80,10 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         cache_v = v.view(
             size=(-1, 1, k_head_num, k_head_dim),
         ).view(torch.float8_e4m3fn)
-        state = getattr(
-            self.infer_state.att_state_manager,
-            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_head_state",
-        )
-        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
+        if calibration.kv_scales is None:
+            raise ValueError("FP8 attention requires bound KV calibration")
         q = q.reshape(q.shape[0], k_head_num, -1)
-        if state.q_scales is None:
+        if calibration.q_scale is None:
             # 旧标定文件仅包含 K/V；按本次请求的 Q 长度动态计算每个 KV head 的 scale。
             q, q_scale = q_per_head_fp8_quant(
                 q=q,
@@ -112,7 +91,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
                 b1_start_loc=self.cu_seqlens_q,
             )
         else:
-            static_q_scales = state.q_scales[storage_layer_index]
+            static_q_scales = calibration.q_scale
             q = q_per_head_static_fp8_quant(q=q, scales=static_q_scales)
             q_scale = static_q_scales.view(1, k_head_num).expand(self.infer_state.b_seq_len.shape[0], k_head_num)
         o = flash_attn_with_kvcache(
@@ -128,8 +107,8 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale,
-            k_descale=self.k_descale[storage_layer_index],
-            v_descale=self.v_descale[storage_layer_index],
+            k_descale=calibration.kv_scales[:k_head_num].view(1, -1).expand(self.cu_seqlens_q.numel() - 1, -1),
+            v_descale=calibration.kv_scales[k_head_num:].view(1, -1).expand(self.cu_seqlens_q.numel() - 1, -1),
             return_softmax_lse=False,
         )
         return o
@@ -137,35 +116,6 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
 
 @dataclasses.dataclass
 class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
-    k_descale: torch.Tensor = None
-    v_descale: torch.Tensor = None
-
-    def init_state(self):
-        self.backend: Fp8Fa3AttBackend = self.backend
-
-        state = getattr(
-            self.infer_state.att_state_manager,
-            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_head_state",
-        )
-        super().init_state()
-
-        att_batch_size = self.b_att_seq_len.shape[0]
-        offline_scales: torch.Tensor = state.scales
-        head_num = state.config.head_num
-
-        # 为了减少推理计算量，在推理外部初始化k_descale和v_descale
-        self.k_descale = (
-            offline_scales[:, :head_num].view(-1, 1, head_num).expand(offline_scales.shape[0], att_batch_size, head_num)
-        )
-        self.v_descale = (
-            offline_scales[:, head_num:].view(-1, 1, head_num).expand(offline_scales.shape[0], att_batch_size, head_num)
-        )
-
-        return
-
-    def copy_for_decode_cuda_graph(self, new_state: "Fp8Fa3DecodeAttState"):
-        super().copy_for_decode_cuda_graph(new_state)
-
     def decode_att(
         self,
         q: torch.Tensor,
@@ -184,7 +134,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             k=k,
             v=v,
             alloc_func=alloc_func,
-            logical_layer_id=att_control.logical_layer_id,
+            calibration=att_control,
         )
 
     def _fp8_decode_att(
@@ -192,7 +142,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
-        logical_layer_id: int,
+        calibration: AttControl,
         alloc_func=torch.empty,
     ):
         k_head_num = k.shape[1]
@@ -205,16 +155,13 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             size=(-1, 1, k_head_num, k_head_dim),
         ).view(torch.float8_e4m3fn)
 
-        state = getattr(
-            self.infer_state.att_state_manager,
-            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_head_state",
-        )
-        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
+        if calibration.kv_scales is None:
+            raise ValueError("FP8 attention requires bound KV calibration")
 
         q_head_num = q.shape[1]
         att_batch_size = self.b_att_seq_len.shape[0]
         q = q.reshape(q.shape[0], k_head_num, -1)
-        if state.q_scales is None:
+        if calibration.q_scale is None:
             # 使用 FA3 的实际 Q 分组，兼容普通 decode、MTP 多 token 及零长度填充组。
             q, q_scale = q_per_head_fp8_quant(
                 q=q,
@@ -222,7 +169,7 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
                 b1_start_loc=self.cu_seqlens_q,
             )
         else:
-            static_q_scales = state.q_scales[storage_layer_index]
+            static_q_scales = calibration.q_scale
             q = q_per_head_static_fp8_quant(q=q, scales=static_q_scales)
             q_scale = static_q_scales.view(1, k_head_num).expand(att_batch_size, k_head_num)
         o = flash_attn_with_kvcache(
@@ -238,8 +185,8 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale.view(att_batch_size, k_head_num),
-            k_descale=self.k_descale[storage_layer_index],
-            v_descale=self.v_descale[storage_layer_index],
+            k_descale=calibration.kv_scales[:k_head_num].view(1, -1).expand(self.cu_seqlens_q.numel() - 1, -1),
+            v_descale=calibration.kv_scales[k_head_num:].view(1, -1).expand(self.cu_seqlens_q.numel() - 1, -1),
             return_softmax_lse=False,
         )
         return o

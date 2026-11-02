@@ -130,7 +130,8 @@ def test_kpool_verify_and_draft_rewind_match_full_prefill(mtp_step, prefix):
 def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     from types import SimpleNamespace
 
-    from lightllm.common.basemodel.attention.base_att import AttControl
+    from lightllm.common.basemodel.attention.contracts import ResourceId
+    from lightllm.common.basemodel.attention.recurrent import BoundRecurrent, KDAInput
     from lightllm.common.basemodel.attention.linear.kda import KDADecodeAttState
     from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import causal_conv1d_update
 
@@ -187,6 +188,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
             row += 1
     backend = SimpleNamespace(
         mtp_step=2,
+        mtp_state_index=accepted_offsets,
         tp_num_heads=heads,
         head_dim=dim,
         tp_hidden_size=hidden,
@@ -227,16 +229,9 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
     )
     state = KDADecodeAttState(backend=backend, _infer_state_weak_ref=weakref.ref(infer))
     state.init_state()
-    actual = state.decode_att(
-        None,
-        None,
-        None,
-        AttControl(
-            linear_att_decode=True,
-            linear_att_decode_dict=dict(
-                layer_weight=weight, layer_num=0, mixed_qkv=mixed, raw_gate=gate, raw_beta=beta
-            ),
-        ),
+    actual = state.run(
+        KDAInput(mixed, gate, beta),
+        BoundRecurrent(ResourceId(role, 0, "kda"), (conv, ssm), weight),
     )
     torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
     torch.testing.assert_close(ssm, expected_ssm, atol=2e-3, rtol=1e-2)

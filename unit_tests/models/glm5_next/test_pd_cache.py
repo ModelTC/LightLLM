@@ -285,7 +285,11 @@ def test_pd_kv_and_runtime_state_roundtrip(
     assert torch.equal(*outputs)
 
 
-def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch, caplog):
+def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch):
+    from lightllm.common.attention_state import pd_operator
+
+    warnings = []
+    monkeypatch.setattr(pd_operator.logger, "warning", warnings.append)
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 8)
     mem = make_mems(1)[0]
     full_bytes = max(
@@ -296,7 +300,7 @@ def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch,
     )
     assert runtime_bytes > full_bytes
     assert mem.resources.get_pd_operator().get_page_bytes() == runtime_bytes
-    assert "smaller than the complete attention runtime" in caplog.text
+    assert any("smaller than the complete attention runtime" in message for message in warnings)
 
 
 @pytest.mark.parametrize("source_step,target_step", [(0, 1), (0, 5), (3, 2), (5, 1)])

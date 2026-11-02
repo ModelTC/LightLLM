@@ -1,3 +1,4 @@
+from unit_tests.models.glm5_next.attention_helpers import run_sparse_prefill, run_sparse_decode
 import weakref
 import dataclasses
 import math
@@ -498,7 +499,6 @@ def test_shared_chunk_kernel_preserves_gdn_natural_log_decay():
 
 @pytest.mark.parametrize("heads", [16, 64, 128])
 def test_nope_attention_native_512_and_cuda_graph(heads):
-    from lightllm.common.basemodel.attention.base_att import AttControl
     from lightllm.common.basemodel.attention.nsa.glm5_next import Glm5NextSparsePrefillState, Glm5NextSparseDecodeState
 
     if torch.cuda.get_device_capability()[0] != 9:
@@ -521,11 +521,9 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         return torch.stack(expected)
 
     expected = reference()
-    control = AttControl(
-        nsa_prefill_dict={"topk_mem_indices": indexes, "softmax_scale": 0.0625, "kv_lora_rank": kv.shape[-1]}
-    )
+    control = {"topk_mem_indices": indexes, "softmax_scale": 0.0625, "kv_lora_rank": kv.shape[-1]}
     prefill_state = Glm5NextSparsePrefillState()
-    prefill = prefill_state._nsa_prefill_att(q, kv, control)
+    prefill = run_sparse_prefill(prefill_state, q, kv, control)
     torch.testing.assert_close(prefill.float(), expected, atol=0.012, rtol=0.015)
     infer_state = InferStateInfo()
     infer_state.b1_cu_q_seq_len = torch.arange(10, dtype=torch.int32, device="cuda")
@@ -535,20 +533,19 @@ def test_nope_attention_native_512_and_cuda_graph(heads):
         nsa_cache_seqlens=lengths,
         nsa_cu_seqlens_k_new=torch.nn.functional.pad(lengths.cumsum(0, dtype=torch.int32), (1, 0)),
     )
-    control.nsa_decode_dict = control.nsa_prefill_dict
-    out = decode._nsa_decode_att((q, q[..., :0]), kv, control)
+    out = run_sparse_decode(decode, (q, q[..., :0]), kv, control)
     torch.testing.assert_close(out.float(), expected, atol=0.012, rtol=0.015)
 
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        prefill_state._nsa_prefill_att(q, kv, control)
-        decode._nsa_decode_att((q, q[..., :0]), kv, control)
+        run_sparse_prefill(prefill_state, q, kv, control)
+        run_sparse_decode(decode, (q, q[..., :0]), kv, control)
     torch.cuda.current_stream().wait_stream(stream)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        graph_prefill = prefill_state._nsa_prefill_att(q, kv, control)
-        graph_decode = decode._nsa_decode_att((q, q[..., :0]), kv, control)
+        graph_prefill = run_sparse_prefill(prefill_state, q, kv, control)
+        graph_decode = run_sparse_decode(decode, (q, q[..., :0]), kv, control)
     graph.replay()
     torch.testing.assert_close(graph_prefill.float(), expected, atol=0.012, rtol=0.015)
     torch.testing.assert_close(graph_decode.float(), expected, atol=0.012, rtol=0.015)
@@ -619,6 +616,8 @@ def test_kpool_indexer_long_prefill_and_cached_decode(max_kv_seq_len):
         {"index_topk": 2048, "index_n_heads": heads, "index_head_dim": dim, "rms_norm_eps": 1e-5, "index_kpool": 4},
         1,
     )
+    indexer.tail_view = tail
+    indexer.full_att_view = full_att_state.get_layer_view(0)
     _, full = indexer._get_indices(hidden, hidden, infer, state, weights)
     assert full[-1, 2048].item() == tokens - 1  # Always-selected incomplete tail.
     assert full[0, 0].item() == 0 and (full[0, 1:] == -1).all()

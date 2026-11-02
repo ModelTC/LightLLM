@@ -1,24 +1,18 @@
+from ..sparse import BoundSparse, SparsePrefillInput, SparseDecodeInput
 import dataclasses
 import weakref
 import torch
 from typing import TYPE_CHECKING, Tuple
 
-from ..base_att import AttControl, BaseAttBackend, BaseDecodeAttState, BasePrefillAttState
+from ..base_att import BaseAttState
+from .flashmla_sparse import NsaFlashMlaSparseAttBackend
 from lightllm.utils.dist_utils import get_current_device_id
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
-class NsaFlashMlaFp8SparseAttBackend(BaseAttBackend):
-    def __init__(self, model):
-        super().__init__(model=model)
-        device = get_current_device_id()
-        self.ragged_mem_buffers = [
-            torch.empty(model.graph_max_batch_size * model.max_seq_length, dtype=torch.int32, device=device)
-            for _ in range(2)
-        ]
-
+class NsaFlashMlaFp8SparseAttBackend(NsaFlashMlaSparseAttBackend):
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "NsaFlashMlaFp8SparsePrefillAttState":
         return NsaFlashMlaFp8SparsePrefillAttState(backend=self, _infer_state_weak_ref=weakref.ref(infer_state))
 
@@ -27,7 +21,7 @@ class NsaFlashMlaFp8SparseAttBackend(BaseAttBackend):
 
 
 @dataclasses.dataclass
-class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
+class NsaFlashMlaFp8SparsePrefillAttState(BaseAttState):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
@@ -53,32 +47,15 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
         )
         return
 
-    def prefill_att(
-        self,
-        q: torch.Tensor,
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert att_control.nsa_prefill, "nsa_prefill must be True for NSA prefill attention"
-        assert att_control.nsa_prefill_dict is not None, "nsa_prefill_dict is required"
-        return self._nsa_prefill_att(q=q, packed_kv=k, att_control=att_control)
-
-    def _nsa_prefill_att(
-        self,
-        q: torch.Tensor,
-        packed_kv: torch.Tensor,
-        att_control: AttControl,
-    ) -> torch.Tensor:
+    def run(self, inputs: SparsePrefillInput, binding: BoundSparse):
+        q, packed_kv = inputs.q, binding.cache
         import flash_mla
 
-        nsa_dict = att_control.nsa_prefill_dict
-        topk_indices = nsa_dict["topk_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        prefill_cache_kv = nsa_dict["prefill_cache_kv"]
+        topk_indices = inputs.topk_indices
+        softmax_scale = binding.softmax_scale
+        kv_lora_rank = binding.value_dim
+        topk_mem_indices = inputs.topk_mem_indices
+        prefill_cache_kv = inputs.new_kv
 
         if self.infer_state.max_cache_len > 0:
             # 当前推理生成的token kv部分从 prefill_cache_kv 中获取，历史
@@ -112,7 +89,7 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
 
 
 @dataclasses.dataclass
-class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
+class NsaFlashMlaFp8SparseDecodeAttState(BaseAttState):
     ks: torch.Tensor = None
     ke: torch.Tensor = None
     lengths: torch.Tensor = None
@@ -152,30 +129,13 @@ class NsaFlashMlaFp8SparseDecodeAttState(BaseDecodeAttState):
         self.flashmla_sched_meta, _ = flash_mla.get_mla_metadata()
         return
 
-    def decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        k: torch.Tensor,
-        v: torch.Tensor,
-        att_control: AttControl = AttControl(),
-        alloc_func=torch.empty,
-    ) -> torch.Tensor:
-        assert att_control.nsa_decode, "nsa_decode must be True for NSA decode attention"
-        assert att_control.nsa_decode_dict is not None, "nsa_decode_dict is required"
-        return self._nsa_decode_att(q=q, packed_kv=k, att_control=att_control)
-
-    def _nsa_decode_att(
-        self,
-        q: Tuple[torch.Tensor, torch.Tensor],
-        packed_kv: torch.Tensor,
-        att_control: AttControl,
-    ) -> torch.Tensor:
+    def run(self, inputs: SparseDecodeInput, binding: BoundSparse):
+        q, packed_kv = (inputs.q_nope, inputs.q_rope), binding.cache
         import flash_mla
 
-        nsa_dict = att_control.nsa_decode_dict
-        topk_mem_indices = nsa_dict["topk_mem_indices"]
-        softmax_scale = nsa_dict["softmax_scale"]
-        kv_lora_rank = nsa_dict["kv_lora_rank"]
+        topk_mem_indices = inputs.topk_mem_indices
+        softmax_scale = binding.softmax_scale
+        kv_lora_rank = binding.value_dim
 
         if topk_mem_indices.ndim == 2:
             topk_mem_indices = topk_mem_indices.unsqueeze(1)

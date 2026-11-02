@@ -32,34 +32,22 @@ class DeepseekV4InferStateInfo(InferStateInfo):
 
     @property
     def swa_state(self) -> FP8E8M0SlidingWindowState:
-        return self.att_state_manager.get_state(
-            model_role=self.att_state_role,
-            state_type_filter="swa_",
-            logical_layer_id=self.first_logical_layer_id,
-            state_class=FP8E8M0SlidingWindowState,
-        )
+        return self.bound_states[self.first_logical_layer_id]["window"].implementation
 
-    def get_compressor_state(
-        self, logical_layer_id: int, target: Literal["kv", "indexer"] = "kv"
-    ) -> WindowCompressorState:
-        """按当前层和用途选择独立的窗口压缩器。"""
-        return self.att_state_manager.get_state(
-            model_role=self.att_state_role,
-            state_type_filter=f"compressor_{target}_",
-            logical_layer_id=logical_layer_id,
-            state_class=WindowCompressorState,
-        )
+    def get_swa_view(self, logical_layer_id):
+        return self.bound_states[logical_layer_id]["window"].view
+
+    def get_compressor_state(self, logical_layer_id: int, target: Literal["kv", "indexer"] = "kv"):
+        return self.bound_states[logical_layer_id]["compressor_" + target].implementation
+
+    def get_compressor_view(self, logical_layer_id: int, target: Literal["kv", "indexer"] = "kv"):
+        return self.bound_states[logical_layer_id]["compressor_" + target].view
 
     def get_compressed_kv_state(self, logical_layer_id: int) -> CompressedAttentionState:
-        return self.att_state_manager.get_state(
-            model_role=self.att_state_role,
-            state_type_filter="compressed",
-            logical_layer_id=logical_layer_id,
-            state_class=CompressedAttentionState,
-        )
+        return self.bound_states[logical_layer_id]["kv"].implementation
 
     def get_compressed_kv_view(self, logical_layer_id: int) -> CompressedAttentionLayerView:
-        return self.get_compressed_kv_state(logical_layer_id).get_layer_view(logical_layer_id)
+        return self.bound_states[logical_layer_id]["kv"].view
 
     def __init__(self):
         super().__init__()

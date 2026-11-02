@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.utils import weak_cached_method
 from typing import TYPE_CHECKING, List, Literal
 from dataclasses import dataclass
 from math import prod
@@ -11,10 +11,8 @@ from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 from ...utils import deepcopy_result, dtype_name
-from ...types import AxisMapping, TransferRegion
+from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-from .packed_mla_transfer import transfer_packed_mla_pages
-from ..dp_transfer import copy_packed_tokens
 
 if TYPE_CHECKING:
     from lightllm.common.attention_state.types import StateTransferLayout
@@ -146,6 +144,8 @@ class PackedMLALayerView:
 class PackedMLAFullAttentionState(FullAttentionState):
     """在同一物理 token 行中存储 MLA latent、量化参数及稀疏 indexer key/scale。"""
 
+    storage_fields = ("storage",)
+
     # ========================================================================
     # 一、资源定义与初始化
     # ========================================================================
@@ -195,6 +195,25 @@ class PackedMLAFullAttentionState(FullAttentionState):
             device=self.device,
         )
 
+    def get_transfer_fields(self):
+        raw = self.storage.view(torch.uint8)
+        if self.config.kv_encoding == "fp8_group128":
+            fields = {
+                "kv_nope": (raw[..., :512], "dim"),
+                "kv_scale": (raw[..., 512:528].view(torch.float32), "group"),
+                "kv_rope": (raw[..., 528:656].view(torch.bfloat16), "dim"),
+            }
+        else:
+            fields = {"kv": (self.storage[..., : self.config.latent_dim], "dim")}
+        start = self.config.indexer_offset
+        end = start + self.config.indexer_dim
+        fields["indexer_k"] = raw[..., start:end], "dim"
+        fields["indexer_scale"] = raw[..., end : end + 4].view(torch.float32), "scale"
+        return {name: TensorField(tensor, ("layer", "token", "head", axis)) for name, (tensor, axis) in fields.items()}
+
+    def get_token_copy_fields(self):
+        return {"packed": TensorField(self.storage, ("layer", "token", "head", "byte"))}
+
     def get_token_bytes(self) -> int:
         """返回全部物理层的单 token 存储字节数，包含编码、indexer 和 padding。"""
         return len(self.config.logical_layer_groups) * self.config.token_bytes
@@ -223,69 +242,22 @@ class PackedMLAFullAttentionState(FullAttentionState):
         indexer = raw[..., self.config.indexer_offset : self.config.indexer_offset + self.config.indexer_dim + 4]
         return PackedMLALayerView(kv=kv, indexer_k=indexer)
 
-    def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
-        """写入 MLA KV 及其量化参数，保留同一 token 行中的 indexer 区域。"""
-        assert token_indices.is_cuda, "token indices must reside on CUDA"
-        storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        if not len(token_indices):
-            return
-        assert self.storage.is_cuda, "KV writes require CUDA storage"
+    def bind_kv_writer(self, logical_layer_id: int):
+        from lightllm.common.basemodel.attention.writers import bind_latent_writer, bind_packed_fp8_writer
+
+        cache = self.get_layer_view(logical_layer_id).kv
         if self.config.kv_encoding == "fp8_group128":
-            from lightllm.common.basemodel.triton_kernel.kv_copy.destindex_copy_kv_flashmla_fp8 import (
-                destindex_copy_kv_flashmla_fp8,
+            return bind_packed_fp8_writer(
+                cache, self.config.latent_dim - self.config.rope_dim, self.config.rope_dim, self.config.quant_group_size
             )
-
-            raw = self.storage[storage_layer_index]
-            nope_dim = self.config.latent_dim - self.config.rope_dim
-            scale_bytes = nope_dim // self.config.quant_group_size * torch.float32.itemsize
-            rope_start = nope_dim + scale_bytes
-            destindex_copy_kv_flashmla_fp8(
-                KV_nope=kv[..., :nope_dim],
-                KV_rope=kv[..., nope_dim:],
-                DestLoc=token_indices,
-                O_nope=raw[..., :nope_dim].view(torch.float8_e4m3fn),
-                O_scale=raw[..., nope_dim:rope_start].view(torch.float32),
-                O_rope=raw[..., rope_start : rope_start + self.config.rope_dim * torch.bfloat16.itemsize].view(
-                    torch.bfloat16
-                ),
-            )
-        else:
-            from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
-
-            destindex_copy_kv(
-                K=kv, DestLoc=token_indices, Out=self.storage[storage_layer_index, ..., : self.config.latent_dim]
-            )
-
-    def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
-        """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
-        assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
-        assert (
-            src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
-        ), "token copies require equal one-dimensional index tensors"
-        assert src_indices.dtype in (torch.int32, torch.int64) and dst_indices.dtype in (
-            torch.int32,
-            torch.int64,
-        ), "token indices must be integer tensors"
-        assert self.storage.is_cuda, "token copies require CUDA storage"
-        if not src_indices.numel():
-            return
-        from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer
-
-        # 直接使用调用方提供的 CUDA 索引，保留原 dtype 和 stride。
-        # 按字节直接从源槽位写到目标槽位，覆盖量化 scale 和 packed padding，不创建中间 KV。
-        # 调用方保证源、目标集合不相交，且目标索引不重复，避免并行读写竞争。
-        copy_kv_buffer_to_kv_buffer(
-            src_mem_index=src_indices,
-            dst_mem_index=dst_indices,
-            kv_buffer=self.storage,
-        )
+        return bind_latent_writer(cache)
 
     # ========================================================================
     # 三、CPU Cache 数据交换
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小返回字段区间与 TP 切片，作为 CPU 页容量计算依据。
 
@@ -294,134 +266,20 @@ class PackedMLAFullAttentionState(FullAttentionState):
         page_tokens = get_env_start_args().cpu_cache_token_page_size
         return self._get_transfer_regions(page_tokens=page_tokens)
 
-    def write_to_cpu(
-        self,
-        token_indices: torch.Tensor,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_packed_mla_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            kv_dim=self.config.latent_dim,
-            indexer_offset=self.config.indexer_offset,
-            indexer_dim=self.config.indexer_dim,
-            write=True,
-            page_readies=cpu_page_ready_flags,
-        )
-
-    def read_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        token_indices: torch.Tensor,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
-        transfer_packed_mla_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=cpu_page_buffers,
-            page_indices=cpu_page_indices,
-            layout=layout,
-            kv_dim=self.config.latent_dim,
-            indexer_offset=self.config.indexer_offset,
-            indexer_dim=self.config.indexer_dim,
-            write=False,
-        )
-
     # ========================================================================
     # 四、DP 迁移
     # ========================================================================
-
-    def copy_tokens_from_dp(
-        self,
-        src_token_indices: torch.Tensor,
-        dst_token_indices: torch.Tensor,
-        remote_dp_full_att_state: PackedMLAFullAttentionState,
-    ) -> None:
-        """校验 MLA 编码与区域尺寸，再复制完整 KV 和 indexer 数据。"""
-        assert (
-            remote_dp_full_att_state.config.kv_encoding,
-            remote_dp_full_att_state.config.latent_dim,
-            remote_dp_full_att_state.config.indexer_dim,
-        ) == (
-            self.config.kv_encoding,
-            self.config.latent_dim,
-            self.config.indexer_dim,
-        ), "incompatible packed MLA format"
-        assert (
-            type(remote_dp_full_att_state) is type(self) and remote_dp_full_att_state.config == self.config
-        ), "DP copy requires the same encoding and equivalent TP state configurations"
-        assert src_token_indices.is_cuda and dst_token_indices.is_cuda, "DP token indices must reside on CUDA"
-        assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        copy_packed_tokens(
-            src_storage=remote_dp_full_att_state.storage,
-            dst_storage=self.storage,
-            src_token_indices=src_token_indices,
-            dst_token_indices=dst_token_indices,
-        )
 
     # ========================================================================
     # 五、PD 分离传输
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @weak_cached_method
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 PD 页大小返回字段与切片，交由管理器安排其在联合页中的位置。"""
         page_tokens = get_env_start_args().pd_kv_page_size
         return self._get_transfer_regions(page_tokens=page_tokens)
-
-    def write_to_pd_page(
-        self,
-        token_indices: torch.Tensor,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接写出有效 token 及配套字段，不创建中间 KV 存储。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_packed_mla_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            kv_dim=self.config.latent_dim,
-            indexer_offset=self.config.indexer_offset,
-            indexer_dim=self.config.indexer_dim,
-            write=True,
-        )
-
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        token_indices: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按布局直接恢复有效 token 及配套字段，保留未参与的存储区域。"""
-        assert pd_page_buffers.is_cuda, "PD pages must reside on CUDA"
-        transfer_packed_mla_pages(
-            kv_storage=self.storage,
-            token_indices=token_indices,
-            page_buffers=pd_page_buffers,
-            page_indices=[pd_page_index],
-            layout=layout,
-            kv_dim=self.config.latent_dim,
-            indexer_offset=self.config.indexer_offset,
-            indexer_dim=self.config.indexer_dim,
-            write=False,
-        )
 
     # ========================================================================
     # 六、私有辅助实现

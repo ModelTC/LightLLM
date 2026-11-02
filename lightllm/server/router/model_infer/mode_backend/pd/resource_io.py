@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 import torch
+from lightllm.common.attention_state.copy_plan import CopyPlan
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,57 +44,10 @@ def copy_page(
         and len(tp_att_managers) == tp_world_size
         and 0 <= pd_page_index < len(pd_page_buffers)
     ), "invalid PD group or page index"
-    tp_transfer_layouts = []
-    for att_manager in tp_att_managers:
-        pd_operator = att_manager.get_pd_operator()
-        match task_kind:
-            case "kv":
-                state_layouts = pd_operator.get_pd_full_att_page_layouts()
-            case "att_state":
-                state_layouts = pd_operator.get_pd_bounded_att_page_layouts()
-            case _:
-                assert False, f"unknown PD task kind {task_kind}"
-        assert (
-            state_layouts and pd_operator.get_page_bytes() == pd_page_buffers.shape[1]
-        ), "PD page layout does not match this group"
-        tp_transfer_layouts.append(state_layouts)
-
-    for att_manager, state_layouts in zip(tp_att_managers, tp_transfer_layouts):
-        pd_operator = att_manager.get_pd_operator()
-        match task_kind:
-            case "kv":
-                if write_to_pd_page:
-                    pd_operator.write_page(
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        kind=task_kind,
-                        layouts=state_layouts,
-                        token_indices=token_indices,
-                    )
-                else:
-                    pd_operator.read_page(
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        kind=task_kind,
-                        layouts=state_layouts,
-                        token_indices=token_indices,
-                    )
-            case "att_state":
-                if write_to_pd_page:
-                    pd_operator.write_page(
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        kind=task_kind,
-                        layouts=state_layouts,
-                        req_idx=req_idx,
-                        state_token_len=state_token_len,
-                    )
-                else:
-                    pd_operator.read_page(
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        kind=task_kind,
-                        layouts=state_layouts,
-                        req_idx=req_idx,
-                        state_token_len=state_token_len,
-                    )
+    CopyPlan.for_pd(tp_att_managers, pd_page_buffers, write_to_pd_page).run(
+        pd_page_index=pd_page_index,
+        task_kind=task_kind,
+        token_indices=token_indices,
+        req_idx=req_idx,
+        state_token_len=state_token_len,
+    )

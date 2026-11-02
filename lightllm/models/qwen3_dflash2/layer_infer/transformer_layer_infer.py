@@ -1,5 +1,4 @@
-from lightllm.common.attention_state.full_att import FullAttentionState
-from lightllm.common.basemodel.attention import AttControl
+from dataclasses import replace
 from lightllm.models.qwen3_dflash.layer_infer.transformer_layer_infer import Qwen3DFlashTransformerLayerInfer
 from lightllm.models.qwen3_dflash2.triton_kernel import grouped_dynamic_conv
 
@@ -14,42 +13,22 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         self.sliding_window_ = int(network_config.get("sliding_window", 0) or 0)
 
     def _token_attention_kernel(self, q, infer_state, layer_weight):
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        k, v = state.get_layer_view(logical_layer_id=self.layer_num_)
-        k = k.view(k.shape[0], self.tp_k_head_num_, self.head_dim_)
-        v = v.view(v.shape[0], self.tp_k_head_num_, self.head_dim_)
         q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        use_sliding_window = self.sliding_window_ > 0
+        output = self.attention.decode(q, infer_state.attention_metadata, self.alloc_tensor)
+        return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
+
+    def get_attention_spec(self, resource, dtype):
         # DFlash2 attention is non-causal, so its local window must retain both
         # the visible prefix on the left and the complete draft block on the right.
         window = self.sliding_window_ - 1
-        output = infer_state.decode_att_state.decode_att(
-            q=q,
-            k=k,
-            v=v,
-            att_control=AttControl(
-                logical_layer_id=self.layer_num_,
-                use_sliding_window=use_sliding_window,
-                sliding_window=(window, window) if use_sliding_window else (-1, -1),
-            ),
-            alloc_func=self.alloc_tensor,
+        return replace(
+            super().get_attention_spec(resource, dtype),
+            window=(window, window) if self.sliding_window_ > 0 else (-1, -1),
         )
-        return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
-        state = infer_state.att_state_manager.get_state(
-            model_role=infer_state.att_state_role,
-            state_type_filter="gqa",
-            logical_layer_id=self.layer_num_,
-            state_class=FullAttentionState,
-        )
-        storage_head_num = state.config.head_num
-        storage_head_dim = state.config.head_dim
+        storage_head_num = self.full_att_state.config.head_num
+        storage_head_dim = self.full_att_state.config.head_dim
         storage_kv = cache_kv.view(cache_kv.shape[0], 2 * storage_head_num, storage_head_dim)
         return super()._post_cache_kv(storage_kv, infer_state, layer_weight)
 

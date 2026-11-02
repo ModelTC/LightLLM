@@ -9,6 +9,8 @@ from lightllm.common.basemodel.triton_kernel.diverse_utils import build_diverse_
 
 
 class Int8kvTritonAttBackend(BaseAttBackend):
+    supported_kv_encodings = ("int8",)
+
     def __init__(self, model):
         super().__init__(model)
         self.quant_group_size: int = get_env_start_args().llm_kv_quant_group_size
@@ -22,7 +24,6 @@ class Int8kvTritonAttBackend(BaseAttBackend):
 
 @dataclasses.dataclass
 class Int8kvTritonPrefillAttState(BasePrefillAttState):
-
     # 用于反量化的时候使用，可以减少反量化占用的显存数量。按需使用。
     b_kv_start_loc: torch.Tensor = None
 
@@ -112,6 +113,7 @@ class Int8kvTritonPrefillAttState(BasePrefillAttState):
 
 @dataclasses.dataclass
 class Int8kvTritonDecodeAttState(BaseDecodeAttState):
+    graph_buffer_names = ("b_shared_seq_len", "b_mark_shared_group")
     b_shared_seq_len: torch.Tensor = None
     b_mark_shared_group: torch.Tensor = None
     decode_max_kv_seq_len: int = None
@@ -169,7 +171,6 @@ class Int8kvTritonDecodeAttState(BaseDecodeAttState):
         v_scale: torch.Tensor,
         alloc_func=torch.empty,
     ) -> torch.Tensor:
-
         from ...triton_kernel.att.decode_att.int8kv.int8kv_flash_decoding_diverse import (
             token_decode_attention_flash_decoding,
         )

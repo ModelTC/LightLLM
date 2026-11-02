@@ -155,7 +155,7 @@ def test_compressed_cpu_page_boundaries(
             page_indices = [2]
     # 只需索引数量，不创建 CUDA Tensor；所有非法输入必须在读取实际存储前被拦截。
     indices = torch.empty(256, dtype=torch.int32, device="meta")
-    with pytest.raises(AssertionError, match="CPU page|CPU pages"):
+    with pytest.raises(ValueError, match="page capacity|page layout|page index"):
         if write:
             state.write_to_cpu(
                 token_indices=indices,
@@ -287,7 +287,7 @@ def test_compressed_token_copy_rejects_partial_blocks(ratio: int, token_count: i
     source.allocate_storage(token_capacity=512)
     target.allocate_storage(token_capacity=512)
     indices = torch.arange(token_count, dtype=torch.int64, device="cuda")
-    with pytest.raises(AssertionError, match="complete compressed blocks"):
+    with pytest.raises(ValueError, match="complete token blocks"):
         if from_dp:
             target.copy_tokens_from_dp(
                 src_token_indices=indices,

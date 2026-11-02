@@ -315,7 +315,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     )
     module.cpu_cache_client = SimpleNamespace(
         lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
-        allocate_pages=allocate_pages,
+        reserve_write_pages=allocate_pages,
         cpu_kv_cache_tensor=torch.empty((2, 1), dtype=torch.uint8),
     )
     monkeypatch.setattr(resources.get_cpu_cache_operator(), "write_req", write_to_cpu)

@@ -100,11 +100,35 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
         attention.prefill_wrapper = attention.decode_wrapper = SimpleNamespace(run=run)
 
     infer.prefill_att_state = infer.decode_att_state = attention
+    infer.attention_metadata = (attention, None)
     layer = LlamaTransformerLayerInfer.__new__(LlamaTransformerLayerInfer)
     layer.layer_num_ = logical_layer_id
     layer.tp_q_head_num_ = layer.tp_k_head_num_ = state.config.head_num
     layer.head_dim_ = state.config.head_dim
     layer.alloc_tensor = lambda shape, dtype, device: torch.empty(shape, dtype=dtype, device="cpu")
+    from lightllm.common.basemodel.attention.base_att import AttControl
+    from lightllm.common.basemodel.attention.binding import BoundAttention
+    from lightllm.common.basemodel.attention.contracts import ResourceId
+    from lightllm.common.basemodel.attention.legacy import describe_gqa_format
+
+    row = state.get_storage_layer_index(logical_layer_id)
+    control = AttControl(
+        logical_layer_id=logical_layer_id,
+        kv_scales=state.scales[row],
+        cpu_kv_scales=state.cpu_scales[row],
+        q_scale=None if state.q_scales is None else state.q_scales[row],
+    )
+    spec = layer.get_attention_spec(ResourceId(role, state.config.logical_layer_groups[row][0]), torch.bfloat16)
+    layer.attention = BoundAttention(
+        spec, describe_gqa_format(state), state.get_layer_view(logical_layer_id), None, control, 0, 0
+    )
+    if backend_name == "fa3":
+        attention.cu_seqlens_q = torch.tensor([0, 1], dtype=torch.int32)
+
+    def fail(*args, **kwargs):
+        pytest.fail("FP8 execution queried the resource manager")
+
+    monkeypatch.setattr(manager, "get_state", fail)
     q = torch.ones((1, state.config.head_num, state.config.head_dim))
     if operation == "prefill":
         output = layer._context_attention_kernel(

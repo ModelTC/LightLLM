@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from functools import partial
-from importlib import import_module
 from typing import TYPE_CHECKING
 
 import pytest
@@ -34,6 +32,19 @@ SCHEMES = {
     "packed_fp8": "packed_mla",
     "packed_glm": "packed_mla",
 }
+
+
+def use_copy_grid(monkeypatch, grid_num):
+    from lightllm.common.attention_state import token_copy
+
+    kernel = token_copy._copy_token_pages
+
+    class GridOverride:
+        def __getitem__(self, grid):
+            assert grid == (24,)
+            return kernel[(grid_num,)]
+
+    monkeypatch.setattr(token_copy, "_copy_token_pages", GridOverride())
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -104,11 +115,7 @@ def test_full_att_pages_copy_all_fields_with_bounded_grid(
     for name, field in source_fields.items():
         expected_fields[name].tensor.copy_(other=field.tensor[:, src_ids])
 
-    # 直接覆盖 State 调用的入口参数，读写仍通过生产 State 接口提交。
-    scheme = SCHEMES[kind]
-    state_module = import_module(name=type(source).__module__)
-    transfer_name = f"transfer_{scheme}_pages"
-    monkeypatch.setattr(state_module, transfer_name, partial(getattr(state_module, transfer_name), grid_num=grid_num))
+    use_copy_grid(monkeypatch, grid_num)
 
     def reject_gather(*args: object, **kwargs: object) -> None:
         pytest.fail("page transfers must not gather/scatter KV or copy token indices to host")
@@ -284,10 +291,7 @@ def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
     pd_args.cpu_cache_token_page_size = 5
     state = rebuild_full_state(definition(kind), token_capacity=32, device="cuda")
     # 单 program 验证跳过 ready 块后仍会处理后续未就绪块；默认 grid 保持生产配置。
-    state_module = import_module(name=type(state).__module__)
-    scheme = "gqa" if kind == "gqa" else SCHEMES[kind]
-    transfer_name = f"transfer_{scheme}_pages"
-    monkeypatch.setattr(state_module, transfer_name, partial(getattr(state_module, transfer_name), grid_num=grid_num))
+    use_copy_grid(monkeypatch, grid_num)
     for buffer in full_state_test_buffers(state).values():
         buffer.view(torch.uint8).random_(0, 256)
     regions = state.get_cpu_transfer_regions()

@@ -51,7 +51,9 @@ def make_state(
     )
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state("main", state)
-    state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
+    state.initialize_page_pools(
+        big_page_capacity=3, small_page_capacity=2, pin_memory=torch.device(device).type == "cuda"
+    )
     return state
 
 
@@ -434,3 +436,59 @@ def test_dp_big_page_copy_preserves_runtime_and_other_pages(cls):
     assert (target.mtp_state_index == 1).all()
     assert torch.equal(source.big_pages_pool.conv_state, src_conv)
     assert torch.equal(source.big_pages_pool.ssm_state, src_ssm)
+
+
+@pytest.mark.parametrize("cls", [KDAState, GDNState])
+@pytest.mark.parametrize("accepted", [0, 1, 2, 3])
+@pytest.mark.parametrize("route", ["checkpoint", "dp", "peer_dp", "pd"])
+def test_recurrent_transfer_selects_accepted_candidate(cls, accepted, route):
+    if route == "peer_dp" and torch.cuda.device_count() < 2:
+        pytest.skip("peer copy requires two CUDA devices")
+    source = make_state(cls, device="cuda:0", mtp_step=3)
+    target_device = "cuda:1" if route == "peer_dp" else "cuda:0"
+    target = make_state(cls, device=target_device, mtp_step=1)
+    source.conv_state.copy_(torch.arange(source.conv_state.numel(), device="cuda:0").reshape(source.conv_state.shape))
+    source.ssm_state.copy_(torch.arange(source.ssm_state.numel(), device="cuda:0").reshape(source.ssm_state.shape))
+    source.mtp_state_index[0] = accepted
+    target.conv_state.fill_(-1)
+    target.ssm_state.fill_(-2)
+    target.mtp_state_index.fill_(1)
+    expected_conv = source.conv_state[:, 0, :, accepted : accepted + source.config.conv_width].clone()
+    expected_ssm = source.ssm_state[:, accepted].clone()
+    layout = page_layout(source)
+    pages = torch.full((2, layout.byte_end), 254, dtype=torch.uint8, device="cuda:0")
+    torch.cuda.synchronize(0)
+
+    with torch.cuda.device(target_device):
+        if route == "peer_dp":
+            from cuda.bindings import runtime
+
+            if not torch.cuda.can_device_access_peer(1, 0):
+                pytest.skip("CUDA peer access required")
+            (error,) = runtime.cudaDeviceEnablePeerAccess(0, 0)
+            assert error in (runtime.cudaError_t.cudaSuccess, runtime.cudaError_t.cudaErrorPeerAccessAlreadyEnabled)
+        previous = torch.cuda.get_sync_debug_mode()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            if route == "checkpoint":
+                source.save_bounded_att_runtime_to_pages([0], [37], "big", [1])
+                target.copy_big_pages_from_dp([1], [2], source)
+                target.restore_bounded_att_runtime_from_pages([1], [37], "big", [2])
+            elif route in ("dp", "peer_dp"):
+                target.copy_runtime_state_from_dp([0], [1], source)
+            else:
+                source.write_to_pd_page(0, pages, 1, 37, layout)
+                target.read_from_pd_page(pages, 1, 1, 37, layout)
+        finally:
+            torch.cuda.set_sync_debug_mode(previous)
+
+    torch.cuda.synchronize(target_device)
+    torch.testing.assert_close(target.conv_state[:, 1, :, :2].cpu(), expected_conv.cpu(), rtol=0, atol=0)
+    torch.testing.assert_close(target.ssm_state[:, 2].cpu(), expected_ssm.cpu(), rtol=0, atol=0)
+    assert (target.conv_state[:, 1, :, 2:] == -1).all()
+    assert (target.conv_state[:, [0, 2]] == -1).all()
+    assert (target.ssm_state[:, [0, 1, 3, 4, 5]] == -2).all()
+    assert target.mtp_state_index.tolist() == [1, 0, 1]
+    assert source.mtp_state_index[0] == accepted
+    if route == "pd":
+        assert (pages[0] == 254).all() and (pages[1, :16] == 254).all()

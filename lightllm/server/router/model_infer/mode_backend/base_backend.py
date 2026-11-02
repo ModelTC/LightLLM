@@ -170,11 +170,11 @@ class ModeBackend:
         with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
             manager.load_full_att_calibration(args=self.model.args)
-            manager.initialize_storage(
-                self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
-            )
         for item in models:
-            item.init_runtime()
+            item.prepare_attention_runtime()
+        from lightllm.common.basemodel.attention.startup import initialize_attention_runtime
+
+        initialize_attention_runtime(models)
         torch.cuda.empty_cache()
         set_model_init_status(True)
         set_random_seed(2147483647)
@@ -330,6 +330,7 @@ class ModeBackend:
                 req_to_token_indices = self.model.req_manager.req_to_token_indexs
             self.dp_att_state_managers[dp_rank] = att_state_manager
             self.dp_req_to_token_indices[dp_rank] = req_to_token_indices
+            self.model.att_state_manager.get_dp_shared_operator().bind_peer(att_state_manager)
         return
 
     def get_max_total_token_num(self):
@@ -762,7 +763,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue

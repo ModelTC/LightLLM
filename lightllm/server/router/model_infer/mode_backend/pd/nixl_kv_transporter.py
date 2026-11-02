@@ -3,6 +3,7 @@ import os
 import threading
 import time
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Dict
 from torch import Tensor
 from lightllm.server.pd_io_struct import PDChunckedTransTask, PDAgentMetadata
@@ -23,9 +24,10 @@ except ImportError:
 
 
 class NixlKVTransporter:
-    def __init__(self, node_id: int, tp_idx: int, kv_move_buffer: Tensor):
+    def __init__(self, node_id: int, tp_idx: int, kv_move_buffer: Tensor, state_manifest: dict | None = None):
         self.node_id = node_id
         self.tp_idx = tp_idx
+        self.state_manifest = state_manifest
         self.capture_telemetry = os.getenv("LIGHTLLM_NIXL_CAPTURE_TELEMETRY", "0").lower() in (
             "1",
             "true",
@@ -53,9 +55,16 @@ class NixlKVTransporter:
     def agent_metadata(self):
         return self.nixl_agent.get_agent_metadata()
 
-    @property
+    @cached_property
     def local_page_mem_desc(self):
-        return self.nixl_agent.get_serialized_descs(self.page_reg_desc)
+        from lightllm.common.attention_state.manifest import state_manifest_fingerprint
+
+        return pickle.dumps(
+            {
+                "state_manifest": state_manifest_fingerprint(self.state_manifest),
+                "registration": self.nixl_agent.get_serialized_descs(self.page_reg_desc),
+            }
+        )
 
     def get_new_notifs(self) -> Dict[str, list[bytes]]:
         return self.nixl_agent.get_new_notifs()
@@ -83,6 +92,11 @@ class NixlKVTransporter:
 
             start_time = time.time()
 
+            from lightllm.common.attention_state.manifest import validate_state_manifest
+
+            descriptor = pickle.loads(remote_agent.page_reg_desc)
+            validate_state_manifest(self.state_manifest, descriptor.get("state_manifest"))
+
             peer_name = self.nixl_agent.add_remote_agent(remote_agent.agent_metadata)
             if isinstance(peer_name, bytes):
                 peer_name = peer_name.decode()
@@ -91,7 +105,7 @@ class NixlKVTransporter:
                 peer_name == remote_agent.agent_name
             ), f"Peer name {peer_name} does not match remote name {remote_agent.agent_name}"
 
-            page_mem_desc = self.nixl_agent.deserialize_descs(remote_agent.page_reg_desc)
+            page_mem_desc = self.nixl_agent.deserialize_descs(descriptor["registration"])
             kv_page_xfer_handles = self._create_paged_xfer_handles(
                 page_mem_desc, remote_agent.num_pages, agent_name=peer_name
             )

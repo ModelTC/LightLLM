@@ -118,6 +118,7 @@ def test_notification_payload(backend, page_kind, method, stage, destination):
     original = vars(task).copy()
     time_mark = task.shared_time_out_mark.time_mark
     transporter = backend.__new__(backend)
+    transporter.state_manifest = None
     transporter.node_id, transporter.tp_idx = 10, 0
     transporter.num_pages = 12
     transporter.remote_agents = {"prefill": object(), "decode": object()}
@@ -206,10 +207,11 @@ def test_nccl_checks_peer_page_bytes_before_accepting_agent():
     from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclAgentMetadata
 
     transporter = NcclKVTransporter.__new__(NcclKVTransporter)
+    transporter.state_manifest = None
     transporter.remote_agents = {}
     transporter.kv_move_buffer = SimpleNamespace(shape=(2, 128))
     transporter.num_pages = 2
-    assert pickle.loads(transporter.local_page_mem_desc) == {"num_pages": 2, "page_bytes": 128}
+    assert pickle.loads(transporter.local_page_mem_desc) == {"num_pages": 2, "page_bytes": 128, "state_manifest": None}
     peer = SimpleNamespace(
         agent_name="peer",
         agent_metadata=pickle.dumps(NcclAgentMetadata("peer", "127.0.0.1", 1234, 0)),

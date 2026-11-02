@@ -22,6 +22,7 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
     device_id = torch.cuda.current_device()
     args = SimpleNamespace(tp=2, dp=2, nnodes=1, pd_kv_page_num=2, pd_kv_page_size=4, pd_node_id=1)
     resource = SimpleNamespace(get_pd_operator=lambda: SimpleNamespace(get_page_bytes=lambda: 64))
+    monkeypatch.setattr("lightllm.common.attention_state.manifest.build_state_manifest", lambda _: {"version": 1})
     uploads = []
     copies = []
     original_cuda = torch.Tensor.cuda
@@ -37,7 +38,16 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
         copies.append((kwargs, None if indices is None else indices.clone()))
 
     monkeypatch.setattr(torch.Tensor, "cuda", track_upload)
-    monkeypatch.setattr(implementation, "copy_page", capture_copy)
+    planned = []
+
+    def bind_plan(managers, buffer, write):
+        dp_index = len(planned)
+        planned.append(tuple(managers))
+        return SimpleNamespace(
+            run=lambda **kwargs: capture_copy(dp_rank_in_node=dp_index, write_to_pd_page=write, **kwargs)
+        )
+
+    monkeypatch.setattr(implementation.CopyPlan, "for_pd", bind_plan)
     monkeypatch.setattr(implementation, "create_kv_transporter", lambda **kwargs: SimpleNamespace())
     monkeypatch.setattr(implementation.threading.Thread, "start", lambda self: None)
     if prefill:
@@ -101,6 +111,24 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
     assert all(kwargs["write_to_pd_page"] is prefill for kwargs, _ in copies)
     assert all(indices is None or indices.is_cuda and indices.dtype == torch.long for _, indices in copies)
 
+    written = torch.zeros(8, device=module.kv_move_buffer.device)
+
+    def fail_after_first_field(**kwargs):
+        written.fill_(17)
+        raise RuntimeError("invalid second field")
+
+    module.copy_plans[0].run = fail_after_first_field
+    monkeypatch.setattr(task_queue, "get", Mock(side_effect=[tasks[0], _StopLoop()]))
+    with pytest.raises(_StopLoop):
+        copy_loop()
+    failed = module.failed_queue.get_nowait()
+    assert failed is tasks[0]
+    assert "invalid second field" in failed.error_info
+    completion = failed._local_completion
+    fence = completion.source_reusable if prefill else completion.destination_ready
+    fence.synchronize()
+    assert torch.equal(written, torch.full_like(written, 17))
+
 
 class _StopLoop(Exception):
     pass
@@ -116,7 +144,7 @@ def test_failed_receive_is_not_read_or_copied(monkeypatch: pytest.MonkeyPatch) -
     module.ready_page_task_queue = SimpleNamespace(get=Mock(side_effect=[task, _StopLoop()]))
     monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
     copy = Mock()
-    monkeypatch.setattr(decode_trans_process, "copy_page", copy)
+    module.copy_plans = [SimpleNamespace(run=copy)]
 
     with pytest.raises(_StopLoop):
         module.read_page_to_mems_loop()

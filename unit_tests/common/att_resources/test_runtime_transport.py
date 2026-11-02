@@ -9,6 +9,7 @@ from unit_tests.common.att_resources.model_helpers import full_state_test_buffer
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
 from typing import TYPE_CHECKING
+import gc
 from unit_tests.common.att_resources.model_helpers import main_linear_state
 from types import SimpleNamespace
 from contextlib import nullcontext
@@ -65,88 +66,55 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
 
     monkeypatch.setattr(torch.Tensor, "tolist", reject_host_list)
     page = allocate_transfer_buffer(managers[0], 1, device=device)
-    if device == "cpu":
-        with pytest.raises(AssertionError, match="PD pages must reside on CUDA"):
-            copy_page(
-                node_att_managers=[managers[0]],
-                pd_page_buffers=page,
-                pd_page_index=0,
-                dp_rank_in_node=0,
-                tp_world_size=1,
-                token_indices=source_indices,
-                write_to_pd_page=True,
-            )
-    else:
-        copy_page(
-            node_att_managers=[managers[0]],
-            pd_page_buffers=page,
-            pd_page_index=0,
-            dp_rank_in_node=0,
-            tp_world_size=1,
-            token_indices=source_indices,
-            write_to_pd_page=True,
-        )
-        copy_page(
-            node_att_managers=[managers[1]],
-            pd_page_buffers=page,
-            pd_page_index=0,
-            dp_rank_in_node=0,
-            tp_world_size=1,
-            token_indices=pd_indices,
-            write_to_pd_page=False,
-        )
-        assert_token_fields_equal(
-            source=src,
-            source_ids=[1, 3],
-            target=dst,
-            target_ids=[4, 6],
-        )
+    copy_page(
+        node_att_managers=[managers[0]],
+        pd_page_buffers=page,
+        pd_page_index=0,
+        dp_rank_in_node=0,
+        tp_world_size=1,
+        token_indices=source_indices,
+        write_to_pd_page=True,
+    )
+    copy_page(
+        node_att_managers=[managers[1]],
+        pd_page_buffers=page,
+        pd_page_index=0,
+        dp_rank_in_node=0,
+        tp_world_size=1,
+        token_indices=pd_indices,
+        write_to_pd_page=False,
+    )
+    assert_token_fields_equal(
+        source=src,
+        source_ids=[1, 3],
+        target=dst,
+        target_ids=[4, 6],
+    )
 
     cpu_pages = torch.empty(
         (1, managers[0].get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=device == "cuda"
     )
-    if device == "cpu":
-        with pytest.raises(AssertionError, match="CUDA State storage"):
-            managers[0].get_cpu_cache_operator().write_req(
-                token_indices=source_indices,
-                cpu_page_buffers=cpu_pages,
-                cpu_page_indices=[0],
-                layouts=managers[0].get_cpu_cache_operator().get_page_layouts(),
-            )
-    else:
-        managers[0].get_cpu_cache_operator().write_req(
-            token_indices=source_indices,
-            cpu_page_buffers=cpu_pages,
-            cpu_page_indices=[0],
-            layouts=managers[0].get_cpu_cache_operator().get_page_layouts(),
-        )
-        if device == "cuda":
-            torch.cuda.synchronize()
-        managers[1].get_cpu_cache_operator().read_req(
-            cpu_page_buffers=cpu_pages,
-            cpu_page_indices=[0],
-            token_indices=cpu_indices,
-            layouts=managers[1].get_cpu_cache_operator().get_page_layouts(),
-        )
-        assert_token_fields_equal(
-            source=src,
-            source_ids=[1, 3],
-            target=dst,
-            target_ids=[5, 7],
-        )
+    managers[0].get_cpu_cache_operator().write_req(
+        token_indices=source_indices,
+        cpu_page_buffers=cpu_pages,
+        cpu_page_indices=[0],
+        layouts=managers[0].get_cpu_cache_operator().get_page_layouts(),
+    )
+    if device == "cuda":
+        torch.cuda.synchronize()
+    managers[1].get_cpu_cache_operator().read_req(
+        cpu_page_buffers=cpu_pages,
+        cpu_page_indices=[0],
+        token_indices=cpu_indices,
+        layouts=managers[1].get_cpu_cache_operator().get_page_layouts(),
+    )
+    assert_token_fields_equal(
+        source=src,
+        source_ids=[1, 3],
+        target=dst,
+        target_ids=[5, 7],
+    )
 
-    if device == "cpu":
-        with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
-            managers[1].get_dp_shared_operator().copy_from_dp(
-                remote_att_manager=managers[0],
-                src_token_indices=source_indices,
-                dst_token_indices=dp_indices,
-                src_big_page_ids=[],
-                dst_big_page_ids=[],
-                src_req_idx=0,
-                dst_req_idx=0,
-            )
-        return
     managers[1].get_dp_shared_operator().copy_from_dp(
         remote_att_manager=managers[0],
         src_token_indices=source_indices,
@@ -346,6 +314,7 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
     mapping = torch.zeros((3, 16), dtype=torch.int32, device=f"cuda:{source_device}")
     mapping[1, 0] = 7
     torch.cuda.synchronize(source_device)
+    assert (main_linear_state(resources).big_pages_pool.conv_state[slot[0]] == 11).all(), "snapshot before export"
     for kind in ipc_kinds:
         shared_att_resources_utils.publish_att_resources(
             resources=resources,
@@ -353,6 +322,7 @@ def test_actual_rank_storage_ipc_separates_pd_and_dp_exports(
             kind=kind,
             reader_count=1,
         )
+        assert (main_linear_state(resources).big_pages_pool.conv_state[slot[0]] == 11).all(), f"after {kind} export"
     ctx = mp.get_context("spawn")
     parent, child = ctx.Pipe()
     process = ctx.Process(target=_ipc_worker, args=(child, ipc_kinds))
@@ -567,5 +537,7 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
     except BaseException:
         connection.send(traceback.format_exc())
     finally:
-        AttentionStateManager._get_states.cache_clear()
+        resources = mapping = state = pool = window = copied = None
+        gc.collect()
+        torch.cuda.ipc_collect()
         connection.close()

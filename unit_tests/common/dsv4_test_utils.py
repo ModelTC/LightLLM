@@ -257,6 +257,7 @@ class DeepseekV4MemoryManager:
         from copy import copy
 
         self.manager = copy(self.manager)
+        self.manager._reset_operators()
         for original in self.manager.get_bounded_attention_states():
             state = copy(original)
             if isinstance(state, FP8E8M0SlidingWindowState):
@@ -423,6 +424,15 @@ class DeepseekV4ReqManager(ReqManager):
 
     def get_compressed_kv_state(self, logical_layer_id):
         return self.memory.full_states[logical_layer_id]
+
+    def get_compressor_view(self, logical_layer_id, target="kv"):
+        return self.get_compressor_state(logical_layer_id, target).get_layer_view(logical_layer_id)
+
+    @property
+    def bound_states(self):
+        from lightllm.common.basemodel.attention.legacy import bind_state_resources
+
+        return bind_state_resources(self.memory.manager, "main", self.swa_state.config.logical_layer_ids)
 
     def get_compressed_kv_view(self, logical_layer_id: int):
         return self.memory.full_states[logical_layer_id].get_layer_view(logical_layer_id)

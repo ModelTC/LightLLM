@@ -93,23 +93,28 @@ def test_real_model_resource_hooks_and_shared_draft(
             index_kpool=4,
             index_head_dim=128,
             layer_types=["linear_attention"] * 3 + ["deepseek_sparse_attention"],
-            linear_attn_config={"num_heads": 4, "head_dim": 8, "short_conv_kernel_size": 3, "kda_layers": [0, 1, 2]},
+            linear_attn_config={
+                "num_heads": 4,
+                "head_dim": 8,
+                "short_conv_kernel_size": 3,
+                "kda_layers": [0, 1, 2],
+            },
         )
     observed = []
 
     def check_runtime_before_profile(device: str | torch.device | int):
         resources = model.att_state_manager
         states = resources.get_full_attention_states()
-        assert main_linear_state(resources).conv_state.is_cuda
+        assert main_linear_state(resources).conv_state.is_meta
         assert main_linear_state(resources).big_pages_pool is None
         assert resources.full_att_allocator is None
         assert not hasattr(resources, "pd_page_bytes")
         assert not hasattr(resources, "pd_transfer_layouts")
         assert read_kv_storage(states[0]) is None
-        observed.append(main_linear_state(resources).conv_state.data_ptr())
-        reserve = 0
+        observed.append(main_linear_state(resources))
+        reserve = sum(state.get_unallocated_runtime_bytes() for state in resources.get_bounded_attention_states())
         if mode == "prefill":
-            reserve = resources.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
+            reserve += resources.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
         return resources.get_full_att_token_bytes() * (32 + args.page_size) + reserve, 0
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", check_runtime_before_profile)
@@ -158,7 +163,8 @@ def test_real_model_resource_hooks_and_shared_draft(
     assert full_state.config.logical_layer_groups == tuple(
         (layer,) for layer in range(full_interval - 1, model.config["num_hidden_layers"], full_interval)
     )
-    assert observed == [main_linear_state(resources).conv_state.data_ptr()]
+    assert observed == [main_linear_state(resources)]
+    assert main_linear_state(resources).conv_state.is_cuda
     assert resources.bounded_att_big_page_allocator.size == 6
     assert resources.bounded_att_small_page_allocator.size == 2
     assert not hasattr(model, "mtp_state_cursors")
@@ -180,4 +186,4 @@ def test_real_model_resource_hooks_and_shared_draft(
         )
         assert not hasattr(draft, "mem_manager")
         assert not hasattr(draft, "mtp_state_cursors")
-        assert observed == [main_linear_state(resources).conv_state.data_ptr()]
+        assert observed == [main_linear_state(resources)]
