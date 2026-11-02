@@ -164,3 +164,72 @@ def test_native_mtp_weights_keep_checkpoint_layer_start(
         monkeypatch.setattr(importlib.import_module(model_class.__module__), "load_hf_weights", lambda *a, **kw: None)
     model._init_weights()
     assert layers == [32]
+
+
+@pytest.mark.parametrize(
+    "model_type,text_model_type,wrapper",
+    [
+        ("internvl_chat", kind, "llm_config")
+        for kind in ("phi3", "internlm2", "llama", "qwen2", "deepseek_v2", "qwen3", "qwen3_moe")
+    ]
+    + [
+        ("neo_chat", "qwen3", "llm_config"),
+        ("neo_chat", "qwen3_moe", "llm_config"),
+        ("qwen3_omni_moe", "qwen3_moe", "thinker_config"),
+        ("qwen3_vl", "qwen3", "text_config"),
+        ("llama", "llama", None),
+    ],
+)
+def test_multimodal_cpu_layout_matches_runtime(model_type, text_model_type, wrapper, tmp_path, monkeypatch):
+    from dataclasses import asdict
+    from lightllm.common.attention_state import AttentionStateManager
+    from lightllm.models import get_model_class
+    from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
+    from lightllm.utils.envs_utils import get_env_start_args
+    from lightllm.utils.llm_utils import get_llm_model_class
+
+    text = dict(
+        model_type=text_model_type,
+        num_hidden_layers=2,
+        num_attention_heads=4,
+        num_key_value_heads=2,
+        hidden_size=256,
+        kv_lora_rank=64,
+        qk_rope_head_dim=32,
+    )
+    raw = (
+        text
+        if wrapper is None
+        else {
+            "model_type": model_type,
+            wrapper: {"text_config": text} if wrapper == "thinker_config" else text,
+        }
+    )
+    original = deepcopy(raw)
+    (tmp_path / "config.json").write_text(json.dumps(raw))
+    args = StartArgs(model_dir=str(tmp_path), data_type="bfloat16", enable_cpu_cache=True, cpu_cache_token_page_size=8)
+    monkeypatch.setenv("LIGHTLLM_START_ARGS", json.dumps(asdict(args)))
+    get_env_start_args.cache_clear()
+    get_llm_model_class.cache_clear()
+    try:
+        layouts = build_cpu_cache_layouts()
+        cls = get_model_class(raw)
+        model = cls.__new__(cls)
+        model.weight_dir_, model.finetune_config = str(tmp_path), None
+        model._init_config()
+        normalized = cls.normalize_model_config(raw)
+        assert model.config == normalized
+        assert cls.normalize_model_config(normalized) == normalized
+        assert raw == original
+        manager = AttentionStateManager(request_capacity=0)
+        for state in cls.create_full_att_states(
+            model_config=model.config,
+            args=args,
+            model_logical_layer_ids=(0, 1),
+        ):
+            manager.register_state("main", state)
+        manager.finish_state_registration()
+        assert layouts and layouts == manager.get_cpu_cache_operator().get_page_layouts()
+    finally:
+        get_llm_model_class.cache_clear()
+        get_env_start_args.cache_clear()
