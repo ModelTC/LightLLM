@@ -88,28 +88,28 @@ def main():
     resources.finish_state_registration()
     pages = list(range(args.pages))
     slots = resources.bounded_att_big_page_allocator.alloc(args.pages)
-    cpu_page_buffers = torch.zeros((args.pages, resources.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    cpu_page_buffers = torch.zeros((args.pages, resources.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
     # Populate every TP region through the production API before measuring restores.
     full.k_storage.zero_()
     full.v_storage.zero_()
     resources.save_bounded_att_runtime_to_pages([0] * args.pages, page_kind="big", page_slot_ids=slots)
     torch.cuda.synchronize()
     token_indices = torch.arange(tokens, dtype=torch.int64, device="cuda")
-    resources.write_req_to_cpu(
+    resources.get_cpu_cache_operator().write_req(
         token_indices=token_indices,
         cpu_page_buffers=cpu_page_buffers,
         cpu_page_indices=pages,
-        layouts=resources.get_cpu_page_layouts(),
+        layouts=resources.get_cpu_cache_operator().get_page_layouts(),
         big_page_slot_ids=slots,
     )
     torch.cuda.synchronize()
 
     def restore():
-        resources.read_req_from_cpu(
+        resources.get_cpu_cache_operator().read_req(
             cpu_page_buffers=cpu_page_buffers,
             cpu_page_indices=pages,
             token_indices=token_indices,
-            layouts=resources.get_cpu_page_layouts(),
+            layouts=resources.get_cpu_cache_operator().get_page_layouts(),
             big_page_slot_ids=slots,
             req_idx=0,
         )
@@ -132,7 +132,7 @@ def main():
     ).big_pages_pool
     state_bytes = args.pages * sum(t[0].numel() * t.element_size() for t in (pool.conv_state, pool.ssm_state))
     median = statistics.median(times)
-    print(f"Pages: {args.pages}; tokens/page: {args.tokens_per_page}; CPU bytes/page: {resources.get_cpu_page_bytes():,}")
+    print(f"Pages: {args.pages}; tokens/page: {args.tokens_per_page}; CPU bytes/page: {resources.get_cpu_cache_operator().get_page_bytes():,}")
     print(f"Mean: {statistics.mean(times) * 1000:.3f} ms; median: {median * 1000:.3f} ms")
     print(f"KV + state payload throughput: {(token_bytes + state_bytes) / median / 1024**3:.3f} GiB/s")
 

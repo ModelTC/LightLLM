@@ -145,14 +145,14 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
         )
         torch.cuda.synchronize()
         expected.append((state.big_pages_pool.conv_state[slot].clone(), state.big_pages_pool.ssm_state[slot].clone()))
-    size = sources[0][0].get_cpu_page_bytes()
+    size = sources[0][0].get_cpu_cache_operator().get_page_bytes()
     buffer = torch.zeros((2, size), dtype=torch.uint8, pin_memory=True)
     for resources, full in sources:
-        resources.write_req_to_cpu(
+        resources.get_cpu_cache_operator().write_req(
             token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
             cpu_page_buffers=buffer,
             cpu_page_indices=[1],
-            layouts=resources.get_cpu_page_layouts(),
+            layouts=resources.get_cpu_cache_operator().get_page_layouts(),
             big_page_slot_ids=[0],
         )
     torch.cuda.synchronize()
@@ -160,7 +160,7 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
         if glm:
             resources.main_compressor_indexer_w4_s4_bf16_state.buffer.fill_(13)
         slot = resources.bounded_att_big_page_allocator.alloc(1)[0]
-        resources.read_req_from_cpu(
+        resources.get_cpu_cache_operator().read_req(
             cpu_page_buffers=buffer,
             cpu_page_indices=[1],
             token_indices=torch.arange(
@@ -170,7 +170,7 @@ def test_model_cpu_layout_roundtrip_tp_shards_replicas_and_tail(
                 device="cuda",
             ),
             state_token_len=8,
-            layouts=resources.get_cpu_page_layouts(),
+            layouts=resources.get_cpu_cache_operator().get_page_layouts(),
             big_page_slot_ids=[slot],
             req_idx=1,
         )
@@ -200,5 +200,5 @@ def test_cpu_layout_query_does_not_require_cpu_cache_enabled(monkeypatch: pytest
         rank=0,
         mtp=0,
     )
-    assert all(layout.tokens_per_page == 8 for layout in resources.get_cpu_page_layouts().values())
+    assert all(layout.tokens_per_page == 8 for layout in resources.get_cpu_cache_operator().get_page_layouts().values())
     get_env_start_args.cache_clear()

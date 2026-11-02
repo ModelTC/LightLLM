@@ -102,29 +102,29 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
             target_ids=[4, 6],
         )
 
-    cpu_pages = torch.empty((1, managers[0].get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=device == "cuda")
+    cpu_pages = torch.empty((1, managers[0].get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=device == "cuda")
     if device == "cpu":
         with pytest.raises(AssertionError, match="CUDA State storage"):
-            managers[0].write_req_to_cpu(
+            managers[0].get_cpu_cache_operator().write_req(
                 token_indices=source_indices,
                 cpu_page_buffers=cpu_pages,
                 cpu_page_indices=[0],
-                layouts=managers[0].get_cpu_page_layouts(),
+                layouts=managers[0].get_cpu_cache_operator().get_page_layouts(),
             )
     else:
-        managers[0].write_req_to_cpu(
+        managers[0].get_cpu_cache_operator().write_req(
             token_indices=source_indices,
             cpu_page_buffers=cpu_pages,
             cpu_page_indices=[0],
-            layouts=managers[0].get_cpu_page_layouts(),
+            layouts=managers[0].get_cpu_cache_operator().get_page_layouts(),
         )
         if device == "cuda":
             torch.cuda.synchronize()
-        managers[1].read_req_from_cpu(
+        managers[1].get_cpu_cache_operator().read_req(
             cpu_page_buffers=cpu_pages,
             cpu_page_indices=[0],
             token_indices=cpu_indices,
-            layouts=managers[1].get_cpu_page_layouts(),
+            layouts=managers[1].get_cpu_cache_operator().get_page_layouts(),
         )
         assert_token_fields_equal(
             source=src,
@@ -135,7 +135,7 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
 
     if device == "cpu":
         with pytest.raises(AssertionError, match="DP token indices must reside on CUDA"):
-            managers[1].copy_from_dp(
+            managers[1].get_dp_shared_operator().copy_from_dp(
                 remote_att_manager=managers[0],
                 src_token_indices=source_indices,
                 dst_token_indices=dp_indices,
@@ -145,7 +145,7 @@ def test_cpu_pd_and_dp_model_layouts_cover_quantized_fields(
                 dst_req_idx=0,
             )
         return
-    managers[1].copy_from_dp(
+    managers[1].get_dp_shared_operator().copy_from_dp(
         remote_att_manager=managers[0],
         src_token_indices=source_indices,
         dst_token_indices=dp_indices,
@@ -468,8 +468,8 @@ def test_qwen_pd_reshards_full_and_linear_replicated_heads(source_tp: int, targe
 def test_ipc_readers_accept_different_pickle_lengths(kind: str, monkeypatch: pytest.MonkeyPatch) -> None:
     """各读者独立导出；模拟 IPC 计数变化引起的长度差异，并验证补齐后仍可逐份读取。"""
     resources = SimpleNamespace(
-        create_pd_ipc_copy=lambda: {"kind": "pd"},
-        create_dp_ipc_copy=lambda: {"kind": "dp"},
+        get_pd_operator=lambda: SimpleNamespace(create_ipc_copy=lambda: {"kind": "pd"}),
+        get_dp_shared_operator=lambda: SimpleNamespace(create_ipc_copy=lambda: {"kind": "dp"}),
     )
     mapping = [[0, 1, 2]]
     payloads = []
@@ -522,8 +522,8 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
                 for state in linear_states(resources):
                     assert state.big_pages_pool.conv_state.is_shared()
                     assert not state.big_pages_pool.conv_state.is_pinned()
-                resources.register_page_pools_pin_memory()
-                resources.register_page_pools_pin_memory()
+                resources.get_dp_shared_operator().register_page_pools_pin_memory()
+                resources.get_dp_shared_operator().register_page_pools_pin_memory()
             for state in linear_states(resources):
                 for pool in (state.big_pages_pool, state.small_pages_pool):
                     if kind == "dp":

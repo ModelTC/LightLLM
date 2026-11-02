@@ -281,8 +281,10 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=table),
             att_state_manager=SimpleNamespace(
-                get_cpu_page_layouts=lambda: {},
-                read_req_from_cpu=lambda **kwargs: loaded.append(req.cur_kv_len + kwargs["token_indices"].numel()),
+                get_cpu_cache_operator=lambda: SimpleNamespace(
+                    get_page_layouts=lambda: {},
+                    read_req=lambda **kwargs: loaded.append(req.cur_kv_len + kwargs["token_indices"].numel()),
+                ),
             ),
         ),
     )

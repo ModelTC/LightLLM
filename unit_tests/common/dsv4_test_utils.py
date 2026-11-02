@@ -273,17 +273,17 @@ class DeepseekV4MemoryManager:
             setattr(self.manager, state.state_name, state)
         self.manager._get_states.cache_clear()
         get_env_start_args().pd_kv_page_size = page_size
-        self.manager.get_pd_token_page_layouts.cache_clear()
-        self.manager.get_pd_runtime_page_layouts.cache_clear()
-        self.manager.get_pd_page_bytes.cache_clear()
-        self.kv_move_buffer = torch.empty((count, self.manager.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
+        self.manager.get_pd_operator().get_pd_full_att_page_layouts.cache_clear()
+        self.manager.get_pd_operator().get_pd_bounded_att_page_layouts.cache_clear()
+        self.manager.get_pd_operator().get_page_bytes.cache_clear()
+        self.kv_move_buffer = torch.empty((count, self.manager.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")
         return self.kv_move_buffer
 
     def get_pd_kv_move_buffer_size(self):
-        return self.manager.get_pd_page_bytes() * get_env_start_args().pd_kv_page_num
+        return self.manager.get_pd_operator().get_page_bytes() * get_env_start_args().pd_kv_page_num
 
     def get_paged_kv_move_buffer_shape(self, count: int, page_size: int):
-        return (count, self.manager.get_pd_page_bytes())
+        return (count, self.manager.get_pd_operator().get_page_bytes())
 
     def write_mem_to_page_kv_move_buffer(
         self,
@@ -296,13 +296,13 @@ class DeepseekV4MemoryManager:
         req_idx: int | None = None,
     ):
         for manager in managers[dp_index * tp_size : dp_index * tp_size + 1]:
-            manager.manager.write_to_pd_page(
+            manager.manager.get_pd_operator().write_page(
                 pd_page_buffers=self.kv_move_buffer,
                 pd_page_index=page,
                 kind=kind,
-                layouts=manager.manager.get_pd_token_page_layouts()
+                layouts=manager.manager.get_pd_operator().get_pd_full_att_page_layouts()
                 if kind == "kv"
-                else manager.manager.get_pd_runtime_page_layouts(),
+                else manager.manager.get_pd_operator().get_pd_bounded_att_page_layouts(),
                 token_indices=torch.tensor(indices, device="cuda", dtype=torch.int64),
                 req_idx=req_idx,
                 state_token_len=getattr(manager, "state_token_len", 0),
@@ -319,13 +319,13 @@ class DeepseekV4MemoryManager:
         req_idx: int | None = None,
     ):
         for manager in managers[dp_index * tp_size : (dp_index + 1) * tp_size]:
-            manager.manager.read_from_pd_page(
+            manager.manager.get_pd_operator().read_page(
                 pd_page_buffers=self.kv_move_buffer,
                 pd_page_index=page,
                 kind=kind,
-                layouts=manager.manager.get_pd_token_page_layouts()
+                layouts=manager.manager.get_pd_operator().get_pd_full_att_page_layouts()
                 if kind == "kv"
-                else manager.manager.get_pd_runtime_page_layouts(),
+                else manager.manager.get_pd_operator().get_pd_bounded_att_page_layouts(),
                 token_indices=torch.tensor(indices, device="cuda", dtype=torch.int64),
                 req_idx=req_idx,
                 state_token_len=getattr(manager, "state_token_len", 0),

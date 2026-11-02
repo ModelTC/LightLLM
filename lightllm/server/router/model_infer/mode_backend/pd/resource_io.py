@@ -14,7 +14,7 @@ if TYPE_CHECKING:
 def allocate_transfer_buffer(resources: AttentionStateManager, page_count: int, device: str | torch.device | int):
     if page_count <= 0:
         raise ValueError("PD buffer must contain pages")
-    return torch.empty((page_count, resources.get_pd_page_bytes()), dtype=torch.uint8, device=device)
+    return torch.empty((page_count, resources.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device=device)
 
 
 def copy_page(
@@ -45,23 +45,25 @@ def copy_page(
     ), "invalid PD group or page index"
     tp_transfer_layouts = []
     for att_manager in tp_att_managers:
+        pd_operator = att_manager.get_pd_operator()
         match task_kind:
             case "kv":
-                state_layouts = att_manager.get_pd_token_page_layouts()
+                state_layouts = pd_operator.get_pd_full_att_page_layouts()
             case "att_state":
-                state_layouts = att_manager.get_pd_runtime_page_layouts()
+                state_layouts = pd_operator.get_pd_bounded_att_page_layouts()
             case _:
                 assert False, f"unknown PD task kind {task_kind}"
-        assert state_layouts and att_manager.get_pd_page_bytes() == pd_page_buffers.shape[1], (
+        assert state_layouts and pd_operator.get_page_bytes() == pd_page_buffers.shape[1], (
             "PD page layout does not match this group"
         )
         tp_transfer_layouts.append(state_layouts)
 
     for att_manager, state_layouts in zip(tp_att_managers, tp_transfer_layouts):
+        pd_operator = att_manager.get_pd_operator()
         match task_kind:
             case "kv":
                 if write_to_pd_page:
-                    att_manager.write_to_pd_page(
+                    pd_operator.write_page(
                         pd_page_buffers=pd_page_buffers,
                         pd_page_index=pd_page_index,
                         kind=task_kind,
@@ -69,7 +71,7 @@ def copy_page(
                         token_indices=token_indices,
                     )
                 else:
-                    att_manager.read_from_pd_page(
+                    pd_operator.read_page(
                         pd_page_buffers=pd_page_buffers,
                         pd_page_index=pd_page_index,
                         kind=task_kind,
@@ -78,7 +80,7 @@ def copy_page(
                     )
             case "att_state":
                 if write_to_pd_page:
-                    att_manager.write_to_pd_page(
+                    pd_operator.write_page(
                         pd_page_buffers=pd_page_buffers,
                         pd_page_index=pd_page_index,
                         kind=task_kind,
@@ -87,7 +89,7 @@ def copy_page(
                         state_token_len=state_token_len,
                     )
                 else:
-                    att_manager.read_from_pd_page(
+                    pd_operator.read_page(
                         pd_page_buffers=pd_page_buffers,
                         pd_page_index=pd_page_index,
                         kind=task_kind,

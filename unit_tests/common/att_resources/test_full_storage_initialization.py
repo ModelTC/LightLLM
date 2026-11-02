@@ -94,7 +94,7 @@ def test_auto_profile_fits_actual_gpu_storage_and_pd_pages(
     (state,) = reference.get_full_attention_states("main")
     args = get_env_start_args()
     args.run_mode, args.pd_kv_page_size, args.pd_kv_page_num = mode, 8, 3
-    transfer_bytes = reference.get_pd_page_bytes() * 3 if mode == "prefill" else 0
+    transfer_bytes = reference.get_pd_operator().get_page_bytes() * 3 if mode == "prefill" else 0
     storage_bytes = allocated_bytes(state)
     budget = storage_bytes + transfer_bytes
     monkeypatch.setattr(torch.cuda, "mem_get_info", lambda device: (budget, 1 << 30))
@@ -114,4 +114,4 @@ def test_auto_profile_fits_actual_gpu_storage_and_pd_pages(
     assert state.capacity == 16
     assert allocated_bytes(state) == storage_bytes
     if mode == "prefill":
-        assert model.att_state_manager.get_pd_page_bytes() == reference.get_pd_page_bytes()
+        assert model.att_state_manager.get_pd_operator().get_page_bytes() == reference.get_pd_operator().get_page_bytes()

@@ -35,9 +35,9 @@ def publish_att_resources(
         mp.reductions.reduce_tensor.__code__ = reduce_tensor.__code__
     count = reader_count
     if kind == "pd":
-        ipc_resources = resources.create_pd_ipc_copy()
+        ipc_resources = resources.get_pd_operator().create_ipc_copy()
     else:
-        ipc_resources = resources.create_dp_ipc_copy()
+        ipc_resources = resources.get_dp_shared_operator().create_ipc_copy()
     with FileLock(f"/tmp/{get_service_shm_name(f'rank_storage_{kind}_lock')}"):
         # 每个读者独立序列化 CUDA IPC 引用；计数偏移变化可能使各份 pickle 长度不同。
         payloads = [ForkingPickler.dumps((ipc_resources, request_mapping)).tobytes() for _ in range(count)]

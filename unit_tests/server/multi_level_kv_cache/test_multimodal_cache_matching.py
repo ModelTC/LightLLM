@@ -80,9 +80,11 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1)),
             att_state_manager=SimpleNamespace(
-                get_cpu_page_layouts=lambda: {},
-                read_req_from_cpu=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: copied_pages.extend(
-                    cpu_page_indices
+                get_cpu_cache_operator=lambda: SimpleNamespace(
+                    get_page_layouts=lambda: {},
+                    read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: copied_pages.extend(
+                        cpu_page_indices
+                    ),
                 ),
             ),
         ),

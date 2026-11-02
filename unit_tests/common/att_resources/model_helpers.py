@@ -89,6 +89,19 @@ def rebuild_full_state(
     return prepared_full_state
 
 
+def replace_logical_layer_groups(config, logical_layer_groups):
+    """替换测试配置的逻辑层分组，兼容 Packed MLA 的嵌套 logical_config。"""
+    if isinstance(config, PackedMLAAttentionConfig):
+        return replace(
+            config,
+            logical_config=replace(
+                config.logical_config,
+                logical_layer_groups=logical_layer_groups,
+            ),
+        )
+    return replace(config, logical_layer_groups=logical_layer_groups)
+
+
 def owned_states(attributes: Mapping[str, object], state_class: type | tuple[type, ...]):
     """从显式成员选择指定类型的 State，按资源身份排序。"""
     return tuple(

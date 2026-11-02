@@ -182,9 +182,11 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         return mem_indexes
 
     resources = SimpleNamespace(
-        get_cpu_page_layouts=lambda: {},
-        read_req_from_cpu=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded_indexes.extend(
-            token_indices.tolist()
+        get_cpu_cache_operator=lambda: SimpleNamespace(
+            get_page_layouts=lambda: {},
+            read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded_indexes.extend(
+                token_indices.tolist()
+            ),
         ),
     )
     backend = SimpleNamespace(

@@ -135,8 +135,8 @@ def test_cache_io_copies_individual_token_slots(cache):
     for buffer in manager.kv_buffer:
         buffer.zero_()
         buffer[source] = torch.arange(1, 5, device="cuda", dtype=torch.uint8)[:, None, None]
-    layouts = manager.manager.get_cpu_page_layouts()
-    pages = torch.empty((1, manager.manager.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    layouts = manager.manager.get_cpu_cache_operator().get_page_layouts()
+    pages = torch.empty((1, manager.manager.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
     for state in manager.full_states.values():
         state.write_to_cpu(source, pages, [0], layout=layouts[state.state_name])
         state.read_from_cpu(pages, [0], destination, layout=layouts[state.state_name])
@@ -1743,17 +1743,17 @@ def test_cpu_cache_preserves_already_published_pages(cache):
     state_id = manager.big_page_buffers.alloc_one_state_cache()
     manager.big_page_buffers.buffer[state_id].fill_(7)
     checkpoint_ids = [state_id]
-    manager.manager.write_req_to_cpu(
+    manager.manager.get_cpu_cache_operator().write_req(
         token_indices=slots, cpu_page_buffers=pages, cpu_page_indices=page_ids,
-        layouts=manager.manager.get_cpu_page_layouts(), cpu_page_ready_flags=readies,
+        layouts=manager.manager.get_cpu_cache_operator().get_page_layouts(), cpu_page_ready_flags=readies,
         big_page_slot_ids=checkpoint_ids,
     )
     torch.cuda.synchronize()
     assert pages.eq(221).all()
     readies[0] = False
-    manager.manager.write_req_to_cpu(
+    manager.manager.get_cpu_cache_operator().write_req(
         token_indices=slots, cpu_page_buffers=pages, cpu_page_indices=page_ids,
-        layouts=manager.manager.get_cpu_page_layouts(), cpu_page_ready_flags=readies,
+        layouts=manager.manager.get_cpu_cache_operator().get_page_layouts(), cpu_page_ready_flags=readies,
         big_page_slot_ids=checkpoint_ids,
     )
     torch.cuda.synchronize()

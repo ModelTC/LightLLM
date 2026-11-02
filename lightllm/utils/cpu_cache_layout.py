@@ -58,4 +58,4 @@ def build_cpu_cache_layouts() -> Mapping[str, StateTransferLayout]:
         assert (
             args.cpu_cache_token_page_size == args.linear_att_hash_page_size * args.linear_att_page_block_num
         ), "hybrid CPU pages must match the large state-page token boundary"
-    return manager.get_cpu_page_layouts()
+    return manager.get_cpu_cache_operator().get_page_layouts()

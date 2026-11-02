@@ -136,11 +136,11 @@ def test_model_and_cpu_service_use_identical_storage_geometry(
             assert state.get_layer_view(logical_layer_id=0)[0].data_ptr() == state.get_layer_view(logical_layer_id=1)[0].data_ptr()
         assert read_kv_storage(state).dtype == (torch.bfloat16 if model_cls is Gemma3TpPartModel else torch.float16)
         assert resources.full_att_allocator.size == 16
-        layout = resources.get_cpu_page_layouts()[state.state_name]
+        layout = resources.get_cpu_cache_operator().get_page_layouts()[state.state_name]
         assert (layout.byte_start, layout.byte_end) == (service_layout.byte_start, service_layout.byte_end)
         # 按物理层数计算传输页；共享消费者不重复增加 KV 或传输容量。
         expected_pd_bytes = storage_layers * args.pd_kv_page_size * 2 * global_heads * dim * read_kv_storage(state).element_size()
-        assert resources.get_pd_page_bytes() == expected_pd_bytes
+        assert resources.get_pd_operator().get_page_bytes() == expected_pd_bytes
         fields = layout.regions
         assert all(region.shape[2] == global_heads for region in fields)
         assert not hasattr(model, "mem_manager")
@@ -163,7 +163,7 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
         pd_kv_page_size=8,
         pd_kv_page_num=3,
     )
-    reserve = reference.get_pd_page_bytes() * args.pd_kv_page_num
+    reserve = reference.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
     required = state.get_token_bytes() * (32 + args.page_size)
     # One byte below the full 32-token budget must drop a complete page.
     total = 1 << 30
@@ -197,7 +197,7 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
         device="cpu",
     )
     assert resources.full_att_allocator.size == 28
-    assert resources.get_pd_page_bytes() == reference.get_pd_page_bytes()
+    assert resources.get_pd_operator().get_page_bytes() == reference.get_pd_operator().get_page_bytes()
     assert observed_devices == [torch.device("cuda", 3)]
 
 
@@ -251,6 +251,6 @@ def test_cpu_layout_uses_all_model_factory_states(
     model.tp_rank_, model.tp_world_size_, model.max_req_num = 0, 1, 1
     prepare_model_states(model)
     model.att_state_manager.finish_state_registration()
-    runtime_layouts = model.att_state_manager.get_cpu_page_layouts()
+    runtime_layouts = model.att_state_manager.get_cpu_cache_operator().get_page_layouts()
     assert set(cpu_layouts) == set(runtime_layouts) == {"main_gqa_bf16_state", "main_gqa_fp16_state"}
     assert cpu_layouts == runtime_layouts

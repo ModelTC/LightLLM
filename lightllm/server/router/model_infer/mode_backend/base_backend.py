@@ -318,7 +318,7 @@ class ModeBackend:
         ):
             if rank_idx != self.rank_in_node:
                 att_state_manager, req_to_token_indices = load_att_resources(rank_idx, kind="dp")
-                att_state_manager.register_page_pools_pin_memory()
+                att_state_manager.get_dp_shared_operator().register_page_pools_pin_memory()
             else:
                 att_state_manager = self.model.att_state_manager
                 req_to_token_indices = self.model.req_manager.req_to_token_indexs

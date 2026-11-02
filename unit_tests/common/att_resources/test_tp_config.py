@@ -7,6 +7,7 @@ from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
 
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
+from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
 
 from typing import TYPE_CHECKING
 import pickle
@@ -35,7 +36,7 @@ def cpu_layout(state: FullAttentionState | BoundedAttentionState):
     manager = AttentionStateManager(request_capacity=1)
     manager.register_state("main", state)
     manager.finish_state_registration()
-    return manager.get_cpu_page_layouts()[state.state_name]
+    return manager.get_cpu_cache_operator().get_page_layouts()[state.state_name]
 
 
 @pytest.mark.parametrize(
@@ -190,22 +191,22 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
     assert query("draft1") == (other,)
     assert query() == (source, other)
 
-    page_bytes = manager.get_pd_page_bytes()
+    page_bytes = manager.get_pd_operator().get_page_bytes()
     assert not hasattr(manager, "pd_page_bytes")
     assert not hasattr(manager, "pd_transfer_layouts")
     if not bounded:
         # 两个 draft 共 6 个全局 KV head：K/V、head_dim=4、FP32，无额外页头。
         assert page_bytes == page_tokens * 192
-    assert manager.get_pd_page_bytes() == page_bytes
+    assert manager.get_pd_operator().get_page_bytes() == page_bytes
     getter = (
-        manager.get_pd_runtime_page_layouts if bounded else manager.get_pd_token_page_layouts
+        manager.get_pd_operator().get_pd_bounded_att_page_layouts if bounded else manager.get_pd_operator().get_pd_full_att_page_layouts
     )
     layouts = getter()
     assert getter() is layouts
     assert set(layouts) == {source.state_name, other.state_name}
     assert all(layout.tokens_per_page == (None if bounded else page_tokens) for layout in layouts.values())
     unused_getter = (
-        manager.get_pd_token_page_layouts if bounded else manager.get_pd_runtime_page_layouts
+        manager.get_pd_operator().get_pd_full_att_page_layouts if bounded else manager.get_pd_operator().get_pd_bounded_att_page_layouts
     )
     assert unused_getter() == {}
-    assert manager.get_pd_page_bytes() == page_bytes
+    assert manager.get_pd_operator().get_page_bytes() == page_bytes

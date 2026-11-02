@@ -21,7 +21,7 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
     module_class = implementation._PrefillTransModule if prefill else implementation._DecodeTransModule
     device_id = torch.cuda.current_device()
     args = SimpleNamespace(tp=2, dp=2, nnodes=1, pd_kv_page_num=2, pd_kv_page_size=4, pd_node_id=1)
-    resource = SimpleNamespace(get_pd_page_bytes=lambda: 64)
+    resource = SimpleNamespace(get_pd_operator=lambda: SimpleNamespace(get_page_bytes=lambda: 64))
     uploads = []
     copies = []
     original_cuda = torch.Tensor.cuda

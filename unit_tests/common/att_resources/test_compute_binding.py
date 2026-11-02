@@ -5,6 +5,7 @@ from unit_tests.common.att_resources.model_helpers import full_state_test_buffer
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
+from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -32,7 +33,7 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
     template = definition(kind)
     state = rebuild_full_state(
         template=template,
-        config=replace(template.config, logical_layer_groups=((3,), (8,))),
+        config=replace_logical_layer_groups(template.config, ((3,), (8,))),
         token_capacity=8,
         device="cuda",
     )

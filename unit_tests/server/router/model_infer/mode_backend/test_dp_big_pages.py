@@ -128,7 +128,7 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
     barriers = []
     manager = SimpleNamespace(
         bounded_att_big_page_allocator=SimpleNamespace(alloc=allocate_pages),
-        copy_from_dp=copy_resources,
+        get_dp_shared_operator=lambda: SimpleNamespace(copy_from_dp=copy_resources),
     )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = SimpleNamespace(

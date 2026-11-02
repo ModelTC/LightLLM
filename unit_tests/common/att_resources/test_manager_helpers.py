@@ -157,7 +157,7 @@ def test_cpu_restore_forwards_absolute_length_for_partial_prefix(monkeypatch: py
 
     monkeypatch.setattr(manager, "restore_bounded_att_runtime_from_pages", record_restore)
     # 只加载绝对位置 [64, 70)，本批长度 6；恢复位置必须是 70，且末尾碎页使用 LOAD。
-    manager.read_req_from_cpu(
+    manager.get_cpu_cache_operator().read_req(
         cpu_page_buffers=torch.empty((2, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8),
         cpu_page_indices=[0, 1],
         token_indices=torch.arange(6, device="cuda"),
@@ -186,7 +186,7 @@ def test_pd_bounded_only_forwards_prefix_length(operation: str, monkeypatch: pyt
 
     for state in manager.get_bounded_attention_states():
         monkeypatch.setattr(state, operation, record_length)
-    getattr(manager, operation)(
+    getattr(manager.get_pd_operator(), "write_page" if operation == "write_to_pd_page" else "read_page")(
         pd_page_buffers=torch.empty((1, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8),
         pd_page_index=0,
         kind="att_state",
@@ -220,7 +220,7 @@ def test_cpu_restore_owns_partial_slot_and_restores_final_runtime(token_count: i
             page_slot_ids=small_slots,
         )
         torch.cuda.synchronize()
-    source.write_req_to_cpu(
+    source.get_cpu_cache_operator().write_req(
         token_indices=torch.arange(token_count, device="cuda"),
         cpu_page_buffers=pages,
         cpu_page_indices=page_ids,
@@ -237,7 +237,7 @@ def test_cpu_restore_owns_partial_slot_and_restores_final_runtime(token_count: i
     slots = allocator.alloc(token_count // 4)
     original_slots = slots.copy()
     free_count = allocator.free_count
-    target.read_req_from_cpu(
+    target.get_cpu_cache_operator().read_req(
         cpu_page_buffers=pages,
         cpu_page_indices=page_ids,
         token_indices=torch.arange(4, 4 + token_count, device="cuda"),
@@ -296,7 +296,7 @@ def test_cpu_ready_joint_pages_preserve_full_and_bounded_fields(readies: list[bo
         pin_memory=True,
     )
     pages = torch.full_like(baseline, 139, pin_memory=True)
-    source.write_req_to_cpu(
+    source.get_cpu_cache_operator().write_req(
         token_indices=token_ids,
         cpu_page_buffers=baseline,
         cpu_page_indices=page_ids,
@@ -312,7 +312,7 @@ def test_cpu_ready_joint_pages_preserve_full_and_bounded_fields(readies: list[bo
     # ready 页不能访问其页池快照；负的越界槽位可检测是否在构造视图前跳过。
     masked_big_slots = [-999 if readies[i] else slot for i, slot in enumerate(big_slots)]
     masked_small_slots = [-999] if readies[2] else small_slots
-    source.write_req_to_cpu(
+    source.get_cpu_cache_operator().write_req(
         token_indices=token_ids,
         cpu_page_buffers=pages,
         cpu_page_indices=page_ids,

@@ -45,23 +45,23 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
             getattr(target, f"{role}_compressor_indexer_w4_s4_bf16_state").buffer[:, 2].fill_(19)
     main_linear_state(source).conv_state.fill_(3)
     main_linear_state(source).ssm_state.fill_(5)
-    page = torch.empty(source.get_pd_page_bytes(), dtype=torch.uint8, device="cuda")
+    page = torch.empty(source.get_pd_operator().get_page_bytes(), dtype=torch.uint8, device="cuda")
     for kind, getter in (
-        ("kv", "get_pd_token_page_layouts"),
-        ("att_state", "get_pd_runtime_page_layouts"),
+        ("kv", "get_pd_full_att_page_layouts"),
+        ("att_state", "get_pd_bounded_att_page_layouts"),
     ):
-        source.write_to_pd_page(
+        source.get_pd_operator().write_page(
             pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
-            layouts=getattr(source, getter)(),
+            layouts=getattr(source.get_pd_operator(), getter)(),
             **({"token_indices": torch.tensor([0, 1], dtype=torch.long, device="cuda")} if kind == "kv" else {"req_idx": 0, "state_token_len": 8}),
         )
-        target.read_from_pd_page(
+        target.get_pd_operator().read_page(
             pd_page_buffers=page.unsqueeze(0),
             pd_page_index=0,
             kind=kind,
-            layouts=getattr(target, getter)(),
+            layouts=getattr(target.get_pd_operator(), getter)(),
             **({"token_indices": torch.tensor([8, 9], dtype=torch.long, device="cuda")} if kind == "kv" else {"req_idx": 1, "state_token_len": 8}),
         )
     src_indices = torch.tensor([0, 1], dtype=torch.int32, device="cuda")
@@ -72,7 +72,7 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
 
     with monkeypatch.context() as patch:
         patch.setattr(torch.Tensor, "tolist", reject_host_list)
-        target.copy_from_dp(
+        target.get_dp_shared_operator().copy_from_dp(
             remote_att_manager=source,
             src_token_indices=src_indices,
             dst_token_indices=dst_indices,
@@ -102,17 +102,17 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
         page_slot_ids=[slot],
     )
     torch.cuda.synchronize()
-    cpu = torch.empty((1, source.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
-    source.write_req_to_cpu(
+    cpu = torch.empty((1, source.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    source.get_cpu_cache_operator().write_req(
         token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
         cpu_page_buffers=cpu,
         cpu_page_indices=[0],
-        layouts=source.get_cpu_page_layouts(),
+        layouts=source.get_cpu_cache_operator().get_page_layouts(),
         big_page_slot_ids=[slot],
     )
     torch.cuda.synchronize()
     dst_slot = target.bounded_att_big_page_allocator.alloc(1)[0]
-    target.read_req_from_cpu(
+    target.get_cpu_cache_operator().read_req(
         cpu_page_buffers=cpu,
         cpu_page_indices=[0],
         token_indices=torch.arange(
@@ -122,7 +122,7 @@ def test_main_and_draft_transfers_copy_pd_and_dp_windows(
             device="cuda",
         ),
         state_token_len=8,
-        layouts=target.get_cpu_page_layouts(),
+        layouts=target.get_cpu_cache_operator().get_page_layouts(),
         big_page_slot_ids=[dst_slot],
         req_idx=1,
     )

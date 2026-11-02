@@ -140,7 +140,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     expected_k = full.k_storage[:, :token_num].clone()
     expected_v = full.v_storage[:, :token_num].clone()
     client = cpu_cache_factory(
-        CpuKVCacheMeta(3, resources.get_cpu_page_bytes()),
+        CpuKVCacheMeta(3, resources.get_cpu_cache_operator().get_page_bytes()),
     )
     indexes = torch.arange(token_num, dtype=torch.int32, device="cuda")
     req = SimpleNamespace(
@@ -313,7 +313,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         lock=SimpleNamespace(acquire_sleep1ms=lambda: None, release=lambda: None),
         allocate_pages=allocate_pages, cpu_kv_cache_tensor=torch.empty((2, 1), dtype=torch.uint8),
     )
-    monkeypatch.setattr(resources, "write_req_to_cpu", write_to_cpu)
+    monkeypatch.setattr(resources.get_cpu_cache_operator(), "write_req", write_to_cpu)
     broadcasts = []
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda data, **kwargs: broadcasts.append(data))
     task = module.write_req_to_cpu(req, torch.cuda.Stream())

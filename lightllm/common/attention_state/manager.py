@@ -1,26 +1,23 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from collections.abc import Mapping
-from copy import copy
-from dataclasses import replace
 from functools import lru_cache
-from typing import List, Literal
+from typing import List
 
 import torch
 
-from lightllm.common.attention_state.types import (
-    StateTransferLayout,
-    PageKind,
-)
+from lightllm.common.attention_state.types import PageKind
 
 from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
 from .allocators import StatePageAllocator, FullAttKVAllocator
+from .cpu_cache_operator import CpuCacheOperator
+from .dp_shared_operator import DPSharedOperator
 from .full_att import FullAttentionState
 from .bounded_att import BoundedAttentionState
+from .pd_operator import PDOperator
 from .utils import MODEL_ROLES
 
 if TYPE_CHECKING:
@@ -36,6 +33,10 @@ class AttentionStateManager:
 
     通过聚合查询操作各类 State；模型通过两类创建接口决定资源组合，main/draft 共享本管理器。
     未支持的传输路径必须明确报错。
+
+    CPU cache、DP shared 和 PD 的实现分别由三个 Operator 持有；管理器只保留
+    State 注册、查询和共享容量规划。Operator 只依赖本管理器提供的 State 查询
+    和 allocator，不复制 State 的算法逻辑。
     """
 
     # ========================================================================
@@ -54,6 +55,27 @@ class AttentionStateManager:
         self.bounded_att_big_page_allocator = None
         self.bounded_att_small_page_allocator = None
         self._request_capacity = request_capacity
+        self._cpu_cache_operator = CpuCacheOperator(self)
+        self._dp_shared_operator = DPSharedOperator(self)
+        self._pd_operator = PDOperator(self)
+
+    def _reset_operators(self) -> None:
+        """让浅拷贝后的 Operator 指向新的资源管理器副本。"""
+        self._cpu_cache_operator = CpuCacheOperator(self)
+        self._dp_shared_operator = DPSharedOperator(self)
+        self._pd_operator = PDOperator(self)
+
+    def get_cpu_cache_operator(self) -> CpuCacheOperator:
+        """返回当前资源管理器唯一的 CPU cache 操作对象。"""
+        return self._cpu_cache_operator
+
+    def get_dp_shared_operator(self) -> DPSharedOperator:
+        """返回当前资源管理器唯一的 DP shared 操作对象。"""
+        return self._dp_shared_operator
+
+    def get_pd_operator(self) -> PDOperator:
+        """返回当前资源管理器唯一的 PD 操作对象。"""
+        return self._pd_operator
 
     def register_state(
         self, model_role: str, state: FullAttentionState | BoundedAttentionState
@@ -176,7 +198,7 @@ class AttentionStateManager:
         assert self.get_full_attention_states(), "the shared token index domain requires a full-attention State"
         pd_reserved_bytes = 0
         if args.run_mode in ("prefill", "decode"):
-            pd_reserved_bytes = self.get_pd_page_bytes() * args.pd_kv_page_num
+            pd_reserved_bytes = self.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
         if token_capacity is None:
             # 权重和固定运行态已分配，用当前设备剩余显存扣除保留比例及 PD buffer。
             torch.cuda.empty_cache()
@@ -269,53 +291,9 @@ class AttentionStateManager:
         for state in (*full_states, *bounded_states):
             state.get_cpu_transfer_regions.cache_clear()
             state.get_pd_transfer_regions.cache_clear()
-        self.get_cpu_page_layouts.cache_clear()
-        self.get_cpu_page_bytes.cache_clear()
-        self.get_pd_token_page_layouts.cache_clear()
-        self.get_pd_runtime_page_layouts.cache_clear()
-        self.get_pd_page_bytes.cache_clear()
-
-    def create_pd_ipc_copy(self) -> AttentionStateManager:
-        """创建 PD 导出副本，保留运行态 Tensor，排除 allocator 和全部大小页池。"""
-        ipc_copy = copy(self)
-        ipc_copy.full_att_allocator = None
-        ipc_copy.bounded_att_big_page_allocator = None
-        ipc_copy.bounded_att_small_page_allocator = None
-
-        # PD 只传运行态；先复制 State 对象再移除页池，避免修改推理进程的资源。
-        for state in self.get_bounded_attention_states():
-            state_copy = copy(state)
-            state_copy.big_pages_pool = None
-            state_copy.small_pages_pool = None
-            setattr(ipc_copy, state.state_name, state_copy)
-        return ipc_copy
-
-    def create_dp_ipc_copy(self) -> AttentionStateManager:
-        """创建 DP shared 导出副本，保留运行态和共享大小页池，仅排除 allocator。"""
-        # DP fetch 初始化已选择共享 CPU 页池；禁止导出私有页池时隐式分配、复制整块存储。
-        for state in self.get_bounded_attention_states():
-            for pool in (state.big_pages_pool, state.small_pages_pool):
-                if pool is not None:
-                    for tensor in vars(pool).values():
-                        if isinstance(tensor, torch.Tensor):
-                            assert tensor.device.type == "cpu" and tensor.is_shared(), "DP IPC requires shared CPU page pools"
-        ipc_copy = copy(self)
-        ipc_copy.full_att_allocator = None
-        ipc_copy.bounded_att_big_page_allocator = None
-        ipc_copy.bounded_att_small_page_allocator = None
-        return ipc_copy
-
-    def register_page_pools_pin_memory(self) -> None:
-        """在当前 GPU 上统一注册所有 bounded State 的大小页池，供 DP 接收端调用。
-
-        调用方先选择本进程设备；注册状态不随 IPC 传递，重复调用会跳过已注册存储。
-        本接口只注册本地映射，不申请槽位或改变原进程的 allocator 所有权。
-        """
-        for state in self.get_bounded_attention_states():
-            if state.big_pages_pool is not None:
-                state.big_pages_pool.register_pin_memory()
-            if state.small_pages_pool is not None:
-                state.small_pages_pool.register_pin_memory()
+        # Layout cache 归属于各 Operator；State 存储规格变化后统一失效。
+        self.get_cpu_cache_operator().clear_layout_cache()
+        self.get_pd_operator().clear_layout_cache()
 
     def get_full_attention_states(self, role: str | None = None) -> tuple[FullAttentionState, ...]:
         """返回全部或指定角色的 full-attention State；只缓存对象引用。"""
@@ -331,36 +309,6 @@ class AttentionStateManager:
         for state in self.get_full_attention_states():
             total += state.get_token_bytes()
         return total
-
-    @lru_cache(maxsize=None)
-    def get_cpu_page_bytes(self) -> int:
-        """从 CPU 联合页布局的最大终点计算物理页大小，包含字段及 State 间的对齐空间。"""
-        page_bytes = 0
-        for layout in self.get_cpu_page_layouts().values():
-            page_bytes = max(page_bytes, layout.byte_end)
-        # State 区间按 8 字节对齐，整个 CPU 物理页再按 16 字节对齐。
-        return (page_bytes + 15) // 16 * 16
-
-    @lru_cache(maxsize=None)
-    def get_pd_page_bytes(self) -> int:
-        """取 KV 页与完整运行态页占用的最大值，保证两类 PD 任务都能容纳。"""
-        full_layouts = self.get_pd_token_page_layouts()
-        runtime_layouts = self.get_pd_runtime_page_layouts()
-        full_att_page_bytes = 0
-        for layout in full_layouts.values():
-            full_att_page_bytes = max(full_att_page_bytes, layout.byte_end)
-        runtime_page_bytes = 0
-        for layout in runtime_layouts.values():
-            runtime_page_bytes = max(runtime_page_bytes, layout.byte_end)
-
-        # KV 页不足时扩大物理传输页，不改变 KV 页的 token 数或各 State 的布局。
-        if full_layouts and full_att_page_bytes < runtime_page_bytes:
-            logger.warning(
-                f"PD KV page size ({full_att_page_bytes} bytes) is smaller than the complete attention runtime "
-                f"({runtime_page_bytes} bytes); using {runtime_page_bytes} bytes per transfer page"
-            )
-        # 纯 KV 或纯运行态取各自占用；没有任何参与资源时返回 0。
-        return max(full_att_page_bytes, runtime_page_bytes)
 
     # ========================================================================
     # 二、Full attention：token 数据复制
@@ -445,360 +393,8 @@ class AttentionStateManager:
             state.commit_bounded_att_state(req_indices, accepted_steps)
 
     # ========================================================================
-    # 四、CPU Cache 数据交换
+    # 四、CPU/DP/PD 操作均由对应 Operator 提供。
     # ========================================================================
-
-    @lru_cache(maxsize=None)
-    def get_cpu_page_layouts(self) -> Mapping[str, StateTransferLayout]:
-        """聚合各 State 的 CPU 字段区间，返回按 state_name 索引的联合页布局。
-
-        使用全局 cpu_cache_token_page_size，按需缓存；不依赖页大小查询。
-        """
-        page_tokens = get_env_start_args().cpu_cache_token_page_size
-        assert page_tokens > 0, "CPU pages require a positive token capacity"
-        states = (*self.get_full_attention_states(), *self.get_bounded_attention_states())
-        assert states, "a CPU page requires participating storage"
-
-        # 按 full-attention、bounded 顺序组织全部角色；各类 State 内部按资源名排序。
-        # 无重叠窗口在缓存组边界无需快照，由 State 返回空 CPU 区域。
-        layouts, offset = {}, 0
-        for state in states:
-            regions = tuple(
-                replace(region, byte_start=offset + region.byte_start, byte_end=offset + region.byte_end)
-                for region in state.get_cpu_transfer_regions()
-            )
-            # 无跨步重叠的压缩器在组边界不需要快照，不占用 CPU 页。
-            if not regions:
-                continue
-            # 以实际字段终点确定 State 占用，保留内部 padding，并对齐下一个 State 的起点。
-            state_end = (max(region.byte_end for region in regions) + 7) // 8 * 8
-            layouts[state.state_name] = StateTransferLayout(
-                state_name=state.state_name,
-                tokens_per_page=page_tokens,
-                byte_start=offset,
-                byte_end=state_end,
-                regions=regions,
-            )
-            offset = state_end
-        return layouts
-
-    # CPU cache：按 layouts 组织联合页；混合模型的每页都包含全部参与 bounded State 的快照。
-    # 纯 full-attention 模型只传 KV；具体实现负责校验格式、长度及各资源的区域映射。
-    def write_req_to_cpu(
-        self,
-        token_indices: torch.Tensor,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        layouts: Mapping[str, StateTransferLayout],
-        cpu_page_ready_flags: List[bool] | None = None,
-        big_page_slot_ids: List[int] | None = None,
-        small_page_slot_ids: List[int] | None = None,
-    ) -> None:
-        """将单个请求本次指定前缀页面的 KV 和 bounded 快照写入 CPU cache。
-
-        cpu_page_indices 前段对应 big_page_slot_ids，后段对应 small_page_slot_ids，
-        各段按列表顺序一一对应；未参与的页池可传 None 或空列表。
-        cpu_page_ready_flags 与 CPU 页一一对应，True 跳过整页；None 表示全部写出。
-        """
-        if cpu_page_ready_flags is not None:
-            assert len(cpu_page_ready_flags) == len(cpu_page_indices), "CPU page and ready counts differ"
-            if all(cpu_page_ready_flags):
-                return
-        full_states = self.get_full_attention_states()
-        bounded_states = self.get_bounded_attention_states()
-        if bounded_states:
-            big_page_slot_ids = [] if big_page_slot_ids is None else big_page_slot_ids
-            small_page_slot_ids = [] if small_page_slot_ids is None else small_page_slot_ids
-            big_page_count = len(big_page_slot_ids)
-            assert big_page_count + len(small_page_slot_ids) == len(cpu_page_indices), "one state slot is required per CPU page"
-            big_cpu_page_indices = cpu_page_indices[:big_page_count]
-            small_cpu_page_indices = cpu_page_indices[big_page_count:]
-            big_page_readies = cpu_page_ready_flags[:big_page_count] if cpu_page_ready_flags is not None else None
-            small_page_readies = cpu_page_ready_flags[big_page_count:] if cpu_page_ready_flags is not None else None
-
-        # 阶段一：统一写出本批 full-attention token 数据。
-        for state in full_states:
-            state.write_to_cpu(
-                token_indices=token_indices,
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                layout=layouts[state.state_name],
-                cpu_page_ready_flags=cpu_page_ready_flags,
-            )
-
-        # 阶段二：分别从大小页池取快照，写入对应 CPU 页面，不修改请求运行态。
-        for state in bounded_states:
-            layout = layouts.get(state.state_name)
-            if layout is None:
-                # 部分 bounded 状态在缓存边界没有需保留的历史（如 W128/S128 压缩器），不写入 CPU cache。
-                # 仅允许未声明 CPU 传输区域的 State 跳过，避免必要快照因布局遗漏而丢失。
-                assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
-                continue
-            if big_page_slot_ids:
-                state.write_state_pages_to_cpu(
-                    page_kind="big",
-                    page_slot_ids=big_page_slot_ids,
-                    cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=big_cpu_page_indices,
-                    layout=layout,
-                    cpu_page_ready_flags=big_page_readies,
-                )
-            if small_page_slot_ids:
-                state.write_state_pages_to_cpu(
-                    page_kind="small",
-                    page_slot_ids=small_page_slot_ids,
-                    cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=small_cpu_page_indices,
-                    layout=layout,
-                    cpu_page_ready_flags=small_page_readies,
-                )
-
-    def read_req_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        token_indices: torch.Tensor,
-        layouts: Mapping[str, StateTransferLayout],
-        big_page_slot_ids: List[int] | None = None,
-        req_idx: int | None = None,
-        state_token_len: int | None = None,
-    ) -> None:
-        """读回单个请求本次指定的有序前缀页面，并从末页恢复 req_idx 的 bounded 运行态。
-
-        big_page_slot_ids 只包含完整 CPU 页对应的普通槽位；末尾碎页使用内部预留的 LOAD 大页。
-        存在 bounded 时须提供 state_token_len，即恢复后的绝对前缀长度，不是本批 token 数。
-        存在 bounded 时必须提供 req_idx；最终前缀须满足各 State 的快照或重置边界。
-        """
-        full_states = self.get_full_attention_states()
-        bounded_states = self.get_bounded_attention_states()
-        if bounded_states:
-            assert req_idx is not None and cpu_page_indices, "state recovery requires a target request and prefix pages"
-        if bounded_states:
-            assert state_token_len is not None, "bounded state recovery requires its absolute prefix length"
-            # CPU 页的 token 数与 bounded 大页边界在启动时统一，直接读取全局配置。
-            page_tokens = get_env_start_args().cpu_cache_token_page_size
-            # token 索引只用于判断本批末页是否完整，不读取 GPU 上的索引值。
-            has_partial_page = token_indices.numel() % page_tokens != 0
-            assert isinstance(big_page_slot_ids, list), "slot indices must be a list"
-            assert len(big_page_slot_ids) + int(has_partial_page) == len(cpu_page_indices), "slots must cover complete CPU pages only"
-            # 只扩展内部列表，预留槽位不写回调用方，也不作为普通大页发布。
-            load_big_page_slot_ids = big_page_slot_ids.copy()
-            if has_partial_page:
-                load_big_page_slot_ids.append(self.bounded_att_cpu_load_big_page_slot)
-
-        # 阶段一：恢复 full-attention token 数据；各 State 负责对应布局的搬运约束。
-        for state in full_states:
-            state.read_from_cpu(
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                token_indices=token_indices,
-                layout=layouts[state.state_name],
-            )
-
-        # 阶段二：完整页和末尾碎页统一读入大页池，碎页使用追加的 LOAD 槽位。
-        for state in bounded_states:
-            if state.state_name not in layouts:
-                # 无跨步历史的 bounded 状态不占 CPU 页，因此无需读回快照；运行态恢复仍在下一阶段处理。
-                # 有 CPU 传输区域的 State 必须具备布局，不能静默跳过。
-                assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
-                continue
-            state.read_state_pages_from_cpu(
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                big_page_slot_ids=load_big_page_slot_ids,
-                layout=layouts[state.state_name],
-            )
-
-        # 阶段三：从末页恢复请求运行态；纯碎页也走 LOAD 槽位。
-        if bounded_states:
-            self.restore_bounded_att_runtime_from_pages(
-                req_indices=[req_idx],
-                state_token_lens=[state_token_len],
-                page_kind="big",
-                page_slot_ids=[load_big_page_slot_ids[-1]],
-            )
-
-    # ========================================================================
-    # 五、DP 迁移
-    # ========================================================================
-
-    def copy_from_dp(
-        self,
-        remote_att_manager: AttentionStateManager,
-        src_token_indices: torch.Tensor,
-        dst_token_indices: torch.Tensor,
-        src_big_page_ids: List[int],
-        dst_big_page_ids: List[int],
-        src_req_idx: int,
-        dst_req_idx: int,
-    ) -> None:
-        """复制其他 DP 同一 TP 分片的 token、大页和指定请求的 prefill 基准运行态。
-
-        token 索引由调用方准备在源、目标各自的 CUDA 设备上，目标索引为 int64。
-        不需要复制 token 或大页时传空 Tensor 或空列表；请求运行态仍按请求索引复制。
-        调用方保证源 MTP 游标为 0、目标前缀满足各 State 的缓存边界，以及源页就绪和引用有效。
-        """
-        assert type(remote_att_manager) is type(self), "DP replicas must use the same model resource manager"
-        assert src_token_indices.numel() == dst_token_indices.numel(), "source and destination token counts differ"
-        assert len(src_big_page_ids) == len(dst_big_page_ids), "source and destination page counts differ"
-        if src_token_indices.numel():
-            for state in self.get_full_attention_states():
-                state.copy_tokens_from_dp(
-                    src_token_indices=src_token_indices,
-                    dst_token_indices=dst_token_indices,
-                    remote_dp_full_att_state=getattr(remote_att_manager, state.state_name),
-                )
-        if src_big_page_ids:
-            for state in self.get_bounded_attention_states():
-                state.copy_big_pages_from_dp(
-                    src_page_ids=src_big_page_ids,
-                    dst_page_ids=dst_big_page_ids,
-                    remote_dp_bounded_state=getattr(remote_att_manager, state.state_name),
-                )
-        # 运行态由具体 State 复制或按合法缓存边界重置，不由大页复制隐式恢复。
-        for state in self.get_bounded_attention_states():
-            state.copy_runtime_state_from_dp(
-                src_req_indices=[src_req_idx],
-                dst_req_indices=[dst_req_idx],
-                remote_dp_bounded_state=getattr(remote_att_manager, state.state_name),
-            )
-
-    # ========================================================================
-    # 六、PD 分离传输
-    # ========================================================================
-
-    @lru_cache(maxsize=None)
-    def get_pd_token_page_layouts(self) -> Mapping[str, StateTransferLayout]:
-        """按实际字段区间生成 kv 布局，各 State 记录自身在页内的起点与终点。
-
-        使用全局 pd_kv_page_size，按需缓存；不依赖页大小查询或运行态布局。
-        """
-        page_tokens = get_env_start_args().pd_kv_page_size
-        assert page_tokens > 0, "PD pages require a positive token capacity"
-        layouts, offset = {}, 0
-        for state in self.get_full_attention_states():
-            regions = tuple(
-                replace(region, byte_start=offset + region.byte_start, byte_end=offset + region.byte_end)
-                for region in state.get_pd_transfer_regions()
-            )
-            # 字段保留自身数据区间，State 终点包含留给下一个资源的对齐空间。
-            state_end = (max(region.byte_end for region in regions) + 7) // 8 * 8
-            layouts[state.state_name] = StateTransferLayout(
-                state_name=state.state_name,
-                tokens_per_page=page_tokens,
-                byte_start=offset,
-                byte_end=state_end,
-                regions=regions,
-            )
-            offset = state_end
-        return layouts
-
-    @lru_cache(maxsize=None)
-    def get_pd_runtime_page_layouts(self) -> Mapping[str, StateTransferLayout]:
-        """独立生成 att_state 布局，记录各运行态 State 的完整字节区间。
-
-        每个 State 保存一份运行态，tokens_per_page 为 None；无 State 时返回空字典。
-        """
-        layouts, offset = {}, 0
-        for state in self.get_bounded_attention_states():
-            regions = tuple(
-                replace(region, byte_start=offset + region.byte_start, byte_end=offset + region.byte_end)
-                for region in state.get_pd_transfer_regions()
-            )
-            state_end = (max(region.byte_end for region in regions) + 7) // 8 * 8
-            layouts[state.state_name] = StateTransferLayout(
-                state_name=state.state_name,
-                tokens_per_page=None,
-                byte_start=offset,
-                byte_end=state_end,
-                regions=regions,
-            )
-            offset = state_end
-        return layouts
-
-    # PD 分离：kind="kv" 传输 token 数据，kind="att_state" 传输 bounded 运行态。
-    # pd_page_buffers 第一维为页，pd_page_index 选择物理页；网络收发与同步由传输流程组织。
-    def write_to_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        kind: Literal["kv", "att_state"],
-        layouts: Mapping[str, StateTransferLayout],
-        token_indices: torch.Tensor | None = None,
-        req_idx: int | None = None,
-        state_token_len: int | None = None,
-    ) -> None:
-        """按任务布局写出 PD 页；att_state 必须传入已执行的绝对前缀长度 state_token_len。"""
-        match kind:
-            case "kv":
-                # KV 页只写出 full-attention 数据；各 State 负责自身布局与容量约束。
-                assert token_indices is not None, "KV PD pages require token indices"
-                for state in self.get_full_attention_states():
-                    state.write_to_pd_page(
-                        token_indices=token_indices,
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        layout=layouts[state.state_name],
-                    )
-
-            case "att_state":
-                # 前缀长度由 PD 任务提供，各 State 据此定位自己的运行态窗口。
-                assert req_idx is not None, "state PD pages require a request index"
-                assert state_token_len is not None and state_token_len >= 0, "PD state requires its prefill prefix length"
-
-                # 阶段一：写出 bounded 的 prefill 基准运行态。
-                for state in self.get_bounded_attention_states():
-                    state.write_to_pd_page(
-                        req_idx=req_idx,
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        state_token_len=state_token_len,
-                        layout=layouts[state.state_name],
-                    )
-
-            case _:
-                raise AssertionError(f"unknown PD page kind {kind}")
-
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        kind: Literal["kv", "att_state"],
-        layouts: Mapping[str, StateTransferLayout],
-        token_indices: torch.Tensor | None = None,
-        req_idx: int | None = None,
-        state_token_len: int | None = None,
-    ) -> None:
-        """按布局恢复 PD 页；att_state 使用绝对前缀长度 state_token_len 恢复运行态位置。"""
-        match kind:
-            case "kv":
-                # KV 页只恢复 full-attention 数据；各 State 负责自身布局与容量约束。
-                assert token_indices is not None, "KV PD pages require token indices"
-                for state in self.get_full_attention_states():
-                    state.read_from_pd_page(
-                        pd_page_buffers=pd_page_buffers,
-                        token_indices=token_indices,
-                        pd_page_index=pd_page_index,
-                        layout=layouts[state.state_name],
-                    )
-
-            case "att_state":
-                # 前缀长度由 PD 任务提供，各 State 据此定位自己的运行态窗口。
-                assert req_idx is not None, "state PD pages require a request index"
-                assert state_token_len is not None and state_token_len >= 0, "PD state requires its prefill prefix length"
-
-                # 阶段一：恢复 bounded 的 prefill 基准运行态。
-                for state in self.get_bounded_attention_states():
-                    state.read_from_pd_page(
-                        pd_page_buffers=pd_page_buffers,
-                        req_idx=req_idx,
-                        pd_page_index=pd_page_index,
-                        state_token_len=state_token_len,
-                        layout=layouts[state.state_name],
-                    )
-
-            case _:
-                raise AssertionError(f"unknown PD page kind {kind}")
 
     # ========================================================================
     # 七、私有辅助实现

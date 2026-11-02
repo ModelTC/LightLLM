@@ -7,6 +7,7 @@ from unit_tests.common.att_resources.model_helpers import full_state_test_buffer
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
+from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
 
 from typing import TYPE_CHECKING
 from dataclasses import replace
@@ -219,25 +220,25 @@ def test_independent_role_states_copy_and_transfer_distinct_layers(kind: str, cp
     target.register_state("draft0", target_draft)
     target.full_att_allocator = FullAttKVAllocator(8, 4, pin_memory=False)
     target.finish_state_registration()
-    page = torch.zeros((1, source.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
-    source.write_req_to_cpu(
+    page = torch.zeros((1, source.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    source.get_cpu_cache_operator().write_req(
         token_indices=torch.tensor([0, 1], dtype=torch.long, device="cuda"),
         cpu_page_buffers=page,
         cpu_page_indices=[0],
-        layouts=source.get_cpu_page_layouts(),
+        layouts=source.get_cpu_cache_operator().get_page_layouts(),
     )
-    target.read_req_from_cpu(
+    target.get_cpu_cache_operator().read_req(
         cpu_page_buffers=page,
         cpu_page_indices=[0],
         token_indices=torch.tensor([6, 7], dtype=torch.long, device="cuda"),
-        layouts=source.get_cpu_page_layouts(),
+        layouts=source.get_cpu_cache_operator().get_page_layouts(),
     )
     for src, dst in ((main, target_main), (draft, target_draft)):
         fields = {name: field.tensor for name, field in full_state_test_fields(dst, full_state_test_buffers(dst)).items()}
         for name, field in full_state_test_fields(src, full_state_test_buffers(src)).items():
             if "token" in field.axes:
                 assert torch.equal(field.tensor[:, :2], fields[name][:, 6:8])
-    assert set(source.get_cpu_page_layouts()) == {main.state_name, draft.state_name}
+    assert set(source.get_cpu_cache_operator().get_page_layouts()) == {main.state_name, draft.state_name}
 
 
 @pytest.mark.parametrize("overlap", [False, True])
@@ -249,7 +250,7 @@ def test_explicit_members_keep_role_and_scheme_distinct_even_with_overlapping_la
     manager.register_state("draft0", draft)
     manager.full_att_allocator = FullAttKVAllocator(main.capacity, main.page_size, pin_memory=False)
     template = allocated_state("int8")
-    quant = rebuild_full_state(template, config=replace(template.config, logical_layer_groups=((4,), (6,))))
+    quant = rebuild_full_state(template, config=replace_logical_layer_groups(template.config, ((4,), (6,))))
     manager.register_state("main", quant)
     if overlap:
         overlapping = allocated_state("static_head")
@@ -285,9 +286,9 @@ def test_mixed_quantization_in_one_role_remains_distinct_in_copy_and_cpu_pages(c
     for state in (full, quant):
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             assert (field.tensor[:, 4:6] == 5).all()
-    layouts = manager.get_cpu_page_layouts()
+    layouts = manager.get_cpu_cache_operator().get_page_layouts()
     page = torch.zeros((1, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8, pin_memory=True)
-    manager.write_req_to_cpu(
+    manager.get_cpu_cache_operator().write_req(
         token_indices=torch.tensor([0, 1], dtype=torch.long, device="cuda"),
         cpu_page_buffers=page,
         cpu_page_indices=[0],
@@ -296,7 +297,7 @@ def test_mixed_quantization_in_one_role_remains_distinct_in_copy_and_cpu_pages(c
     for state in (full, quant):
         for field in full_state_test_fields(state, full_state_test_buffers(state)).values():
             field.tensor[:, 6:8].zero_()
-    manager.read_req_from_cpu(
+    manager.get_cpu_cache_operator().read_req(
         cpu_page_buffers=page,
         cpu_page_indices=[0],
         token_indices=torch.tensor([6, 7], dtype=torch.long, device="cuda"),

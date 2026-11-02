@@ -101,7 +101,7 @@ def test_ipc_copy_preserves_owner_storage_and_shares_runtime_tensors():
     source_states = source.get_bounded_attention_states()
     owner_pools = [(state.big_pages_pool, state.small_pages_pool) for state in source_states]
 
-    exported = source.create_pd_ipc_copy()
+    exported = source.get_pd_operator().create_ipc_copy()
 
     assert type(exported) is type(source) and exported is not source
     for name in ("full_att_allocator", "bounded_att_big_page_allocator", "bounded_att_small_page_allocator"):
@@ -131,16 +131,16 @@ def test_ipc_copy_preserves_owner_storage_and_shares_runtime_tensors():
 def test_pd_and_dp_export_have_distinct_pool_ownership(cpu_args: EasyDict, share_pools: bool) -> None:
     cpu_args.enable_dp_prompt_cache_fetch = share_pools
     source = MainDraftTestResourceManager()
-    pd_copy = source.create_pd_ipc_copy()
+    pd_copy = source.get_pd_operator().create_ipc_copy()
     for state in source.get_bounded_attention_states():
         exported = getattr(pd_copy, state.state_name)
         assert exported.big_pages_pool is None and exported.small_pages_pool is None
         assert state.big_pages_pool is not None and state.small_pages_pool is not None
     if not share_pools:
         with pytest.raises(AssertionError, match="shared CPU page pools"):
-            source.create_dp_ipc_copy()
+            source.get_dp_shared_operator().create_ipc_copy()
         return
-    dp_copy = source.create_dp_ipc_copy()
+    dp_copy = source.get_dp_shared_operator().create_ipc_copy()
     for name in ("full_att_allocator", "bounded_att_big_page_allocator", "bounded_att_small_page_allocator"):
         assert getattr(dp_copy, name) is None
         assert getattr(source, name) is not None
@@ -155,7 +155,7 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
     source = MainDraftTestResourceManager()
     source.get_full_attention_states()
     source.get_bounded_attention_states()
-    imported = pickle.loads(pickle.dumps(source.create_pd_ipc_copy()))
+    imported = pickle.loads(pickle.dumps(source.get_pd_operator().create_ipc_copy()))
     assert imported._state_registration_finished
     assert imported.full_att_allocator is None
     assert imported.bounded_att_big_page_allocator is None

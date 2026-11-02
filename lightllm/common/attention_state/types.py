@@ -229,7 +229,7 @@ class StateTransferLayout:
     # 本 State 在外部页中的结束字节，不包含该位置；涵盖全部字段及本 State 的对齐、预留空间。
     # byte_end - byte_start 是本 State 的占用，不是整张物理页的跨度。
     # 同类布局的最大 byte_end 表示整组 State 的占用；CPU 物理页再按 16 字节对齐，
-    # PD 物理页由 manager.get_pd_page_bytes() 取 KV 与完整运行态布局占用的最大值。
+    # PD 物理页由 PDOperator.get_page_bytes() 取 KV 与完整运行态布局占用的最大值。
     byte_end: int
 
     # 当前 State 参与传输的字段区域；其他 State 的区域放在它们各自的 layout 中。

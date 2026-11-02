@@ -5,6 +5,7 @@ from __future__ import annotations
 from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
 
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
+from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
 
 from typing import TYPE_CHECKING
 from dataclasses import replace
@@ -46,7 +47,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
         q_scales = None if kind == "static_tensor" else template.q_scales + value
         states.append(rebuild_full_state(
             template=template,
-            config=replace(template.config, logical_layer_groups=((3,), (8,))),
+            config=replace_logical_layer_groups(template.config, ((3,), (8,))),
             token_capacity=8,
             device="cuda",
             scales=scales,

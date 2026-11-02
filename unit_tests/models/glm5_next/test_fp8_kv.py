@@ -1283,6 +1283,8 @@ def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
 
     args = SimpleNamespace(cpu_cache_token_page_size=4, pd_kv_page_size=4)
     monkeypatch.setattr("lightllm.common.attention_state.manager.get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.common.attention_state.cpu_cache_operator.get_env_start_args", lambda: args)
+    monkeypatch.setattr("lightllm.common.attention_state.pd_operator.get_env_start_args", lambda: args)
     monkeypatch.setattr("lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_state.get_env_start_args", lambda: args)
     config = PackedMLALogicalConfig(
         logical_layer_groups=((3,),), latent_dim=512, format="packed_group64_e8m0",
@@ -1300,12 +1302,12 @@ def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
     write_fp8_e8m0_packed_kv(kv, indices, expected)
     torch.testing.assert_close(state.get_layer_view(logical_layer_id=3).kv[:4], expected, rtol=0, atol=0)
     state.get_layer_view(logical_layer_id=3).indexer_k[:4].random_(0, 256)
-    cpu_layout = manager.get_cpu_page_layouts()[state.state_name]
-    cpu_pages = torch.empty((1, manager.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    cpu_layout = manager.get_cpu_cache_operator().get_page_layouts()[state.state_name]
+    cpu_pages = torch.empty((1, manager.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
     state.write_to_cpu(token_indices=indices, cpu_page_buffers=cpu_pages, cpu_page_indices=[0], layout=cpu_layout)
     state.read_from_cpu(cpu_page_buffers=cpu_pages, cpu_page_indices=[0], token_indices=indices + 4, layout=cpu_layout)
-    pd_layout = manager.get_pd_token_page_layouts()[state.state_name]
-    pd_pages = torch.empty((1, manager.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
+    pd_layout = manager.get_pd_operator().get_pd_full_att_page_layouts()[state.state_name]
+    pd_pages = torch.empty((1, manager.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")
     state.write_to_pd_page(token_indices=indices, pd_page_buffers=pd_pages, pd_page_index=0, layout=pd_layout)
     state.read_from_pd_page(pd_page_buffers=pd_pages, token_indices=indices + 8, pd_page_index=0, layout=pd_layout)
     torch.cuda.synchronize()

@@ -35,8 +35,9 @@ class MultiLevelKvCacheModule(object):
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
         resources = self.backend.model.att_state_manager
+        self.cpu_cache_operator = resources.get_cpu_cache_operator()
         meta = self.cpu_cache_client.kv_cache_tensor_meta
-        if meta.page_bytes != resources.get_cpu_page_bytes():
+        if meta.page_bytes != self.cpu_cache_operator.get_page_bytes():
             raise ValueError("CPU cache service and model resource page sizes differ")
 
     @lru_cache()
@@ -148,6 +149,7 @@ class MultiLevelKvCacheModule(object):
         if not cpu_page_indices:
             return
         resources = self.backend.model.att_state_manager
+        cpu_cache_operator = resources.get_cpu_cache_operator()
         req_manager = self.backend.model.req_manager
         need_token_num = page_lengths[-1] - req.cur_kv_len
 
@@ -177,11 +179,11 @@ class MultiLevelKvCacheModule(object):
             assert big_page_slot_ids is not None, "not enough bounded state slots for CPU cache load"
 
         # 阶段三：统一恢复各类 State；异常直接向上传播，不在此处回收或继续执行。
-        resources.read_req_from_cpu(
+        cpu_cache_operator.read_req(
             cpu_page_buffers=self.cpu_cache_client.cpu_kv_cache_tensor,
             cpu_page_indices=cpu_page_indices,
             token_indices=token_indices,
-            layouts=resources.get_cpu_page_layouts(),
+            layouts=cpu_cache_operator.get_page_layouts(),
             big_page_slot_ids=big_page_slot_ids,
             req_idx=req.req_idx if self.backend.is_hybrid_att_model else None,
             state_token_len=page_lengths[-1],
@@ -335,11 +337,11 @@ class MultiLevelKvCacheModule(object):
                 if includes_tail_page and page_len_list[-1] % page_tokens != 0:
                     small_page_slot_ids.append(req.tail_small_page_buffer_id)
             # 整批提交并保留 token/page 对齐，由资源层跳过 ready 页。
-            resources.write_req_to_cpu(
+            resources.get_cpu_cache_operator().write_req(
                 token_indices=token_indexes,
                 cpu_page_buffers=self.cpu_cache_client.cpu_kv_cache_tensor,
                 cpu_page_indices=page_list,
-                layouts=resources.get_cpu_page_layouts(),
+                layouts=resources.get_cpu_cache_operator().get_page_layouts(),
                 cpu_page_ready_flags=ready_list,
                 big_page_slot_ids=big_page_slot_ids,
                 small_page_slot_ids=small_page_slot_ids,

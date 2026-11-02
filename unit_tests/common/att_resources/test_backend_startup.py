@@ -330,10 +330,10 @@ def test_backend_allocates_all_roles_before_warmup(
                     assert torch.equal(state.q_scales[:, 0].cpu(), scales[start:end] * 2)
 
     layouts = build_cpu_cache_layouts()
-    assert (max(layout.byte_end for layout in layouts.values()) + 15) // 16 * 16 == manager.get_cpu_page_bytes()
-    assert layouts.keys() == manager.get_cpu_page_layouts().keys()
+    assert (max(layout.byte_end for layout in layouts.values()) + 15) // 16 * 16 == manager.get_cpu_cache_operator().get_page_bytes()
+    assert layouts.keys() == manager.get_cpu_cache_operator().get_page_layouts().keys()
     for state_name, layout in layouts.items():
-        runtime_layout = manager.get_cpu_page_layouts()[state_name]
+        runtime_layout = manager.get_cpu_cache_operator().get_page_layouts()[state_name]
         assert [(r.field, r.byte_start, r.byte_end, r.dtype, r.axes, r.shape) for r in layout.regions] == [
             (r.field, r.byte_start, r.byte_end, r.dtype, r.axes, r.shape) for r in runtime_layout.regions
         ]

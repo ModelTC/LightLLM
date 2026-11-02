@@ -13,6 +13,7 @@ from lightllm.common.basemodel.attention.flashinfer import fp8 as flashinfer_fp8
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from unit_tests.common.att_resources.model_helpers import rebuild_full_state
+from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
 from unit_tests.common.att_resources.test_capacity import definition
 
 
@@ -31,7 +32,7 @@ def test_fp8_backend_selects_calibration_from_logical_layer(
     template = definition("static_head" if backend_name == "fa3" else "static_tensor")
     state = rebuild_full_state(
         template=template,
-        config=replace(template.config, logical_layer_groups=((3, 7), (8, 11))),
+        config=replace_logical_layer_groups(template.config, ((3, 7), (8, 11))),
         token_capacity=8,
         device="cpu",
     )

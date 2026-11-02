@@ -331,11 +331,13 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
         model=SimpleNamespace(
             req_manager=SimpleNamespace(req_to_token_indexs=table),
             att_state_manager=SimpleNamespace(
-                get_cpu_page_layouts=lambda: {},
-                bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: list(range(count))),
-                read_req_from_cpu=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded.append(
-                    req.hold_kv_len
+                get_cpu_cache_operator=lambda: SimpleNamespace(
+                    get_page_layouts=lambda: {},
+                    read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded.append(
+                        req.hold_kv_len
+                    ),
                 ),
+                bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: list(range(count))),
             ),
         ),
     )

@@ -13,6 +13,7 @@ from unit_tests.common.att_resources.model_helpers import (
     full_state_test_buffers,
     full_state_test_fields,
     rebuild_full_state,
+    replace_logical_layer_groups,
 )
 from unit_tests.common.att_resources.test_capacity import definition, allocated_bytes
 
@@ -26,7 +27,7 @@ SCHEMES = ["gqa", "int4", "int8", "static_head", "static_tensor", "mla", "packed
 @pytest.mark.parametrize("kind", SCHEMES)
 def test_shared_layers_use_two_physical_stores(kind: str, pd_args: "EasyDict") -> None:
     template = definition(kind)
-    config = replace(template.config, logical_layer_groups=((0, 4), (8, 11)))
+    config = replace_logical_layer_groups(template.config, ((0, 4), (8, 11)))
     state = rebuild_full_state(
         template=template,
         config=config,
@@ -60,7 +61,7 @@ def test_shared_layers_use_two_physical_stores(kind: str, pd_args: "EasyDict") -
 @pytest.mark.parametrize("groups", [((),), ((0,), (0,)), ((0, 0),), (0, 4)])
 def test_invalid_layer_groups_are_rejected(kind: str, groups: tuple) -> None:
     with pytest.raises(AssertionError):
-        replace(definition(kind).config, logical_layer_groups=groups)
+        replace_logical_layer_groups(definition(kind).config, groups)
 
 
 def test_model_local_shared_groups_preserve_global_logical_layer_ids(pd_args: "EasyDict") -> None:
@@ -95,13 +96,13 @@ def test_shared_layers_transfer_each_physical_layer_once(
     template = definition(kind)
     source = rebuild_full_state(
         template=template,
-        config=replace(template.config, logical_layer_groups=((0, 4), (8,))),
+        config=replace_logical_layer_groups(template.config, ((0, 4), (8,))),
         token_capacity=8,
         device="cuda",
     )
     target = rebuild_full_state(
         template=template,
-        config=replace(template.config, logical_layer_groups=((20, 24), (28,))),
+        config=replace_logical_layer_groups(template.config, ((20, 24), (28,))),
         token_capacity=8,
         device="cuda",
     )
@@ -120,34 +121,34 @@ def test_shared_layers_transfer_each_physical_layer_once(
     src_ids = torch.tensor([0, 3, 6], dtype=torch.int32, device="cuda")
     dst_ids = torch.tensor([1, 4, 7], dtype=torch.int32, device="cuda")
     if transfer == "cpu":
-        pages = torch.zeros((2, managers[0].get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
-        managers[0].write_req_to_cpu(
+        pages = torch.zeros((2, managers[0].get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+        managers[0].get_cpu_cache_operator().write_req(
             token_indices=src_ids,
             cpu_page_buffers=pages,
             cpu_page_indices=[1],
-            layouts=managers[0].get_cpu_page_layouts(),
+            layouts=managers[0].get_cpu_cache_operator().get_page_layouts(),
         )
-        managers[1].read_req_from_cpu(
+        managers[1].get_cpu_cache_operator().read_req(
             cpu_page_buffers=pages,
             cpu_page_indices=[1],
             token_indices=dst_ids,
-            layouts=managers[1].get_cpu_page_layouts(),
+            layouts=managers[1].get_cpu_cache_operator().get_page_layouts(),
         )
     else:
-        pages = torch.zeros((2, managers[0].get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
-        managers[0].write_to_pd_page(
+        pages = torch.zeros((2, managers[0].get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")
+        managers[0].get_pd_operator().write_page(
             pd_page_buffers=pages,
             pd_page_index=1,
             kind="kv",
             token_indices=src_ids,
-            layouts=managers[0].get_pd_token_page_layouts(),
+            layouts=managers[0].get_pd_operator().get_pd_full_att_page_layouts(),
         )
-        managers[1].read_from_pd_page(
+        managers[1].get_pd_operator().read_page(
             pd_page_buffers=pages,
             pd_page_index=1,
             kind="kv",
             token_indices=dst_ids,
-            layouts=managers[1].get_pd_token_page_layouts(),
+            layouts=managers[1].get_pd_operator().get_pd_full_att_page_layouts(),
         )
     torch.cuda.synchronize()
     source_fields = full_state_test_fields(source, source_buffers)

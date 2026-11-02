@@ -12,6 +12,7 @@ from lightllm.common.attention_state.bounded_att import KDAState, GDNState
 from unit_tests.common.att_resources.test_bounded_state import make_state
 from unit_tests.common.att_resources.test_window_compressor_state import make_window
 from unit_tests.common.att_resources.test_capacity import definition
+from unit_tests.common.att_resources.model_helpers import replace_logical_layer_groups
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.common.basemodel.layer_infer.transformer_layer_infer import TransformerLayerInfer
@@ -89,7 +90,7 @@ def test_prefix_and_logical_layer_select_quantized_state(finalized: bool) -> Non
     plain = definition("gqa")
     quantized = definition("int8")
     quantized = type(quantized)(
-        layout_config=replace(quantized.config, logical_layer_groups=((10, 12),)), device="meta",
+        layout_config=replace_logical_layer_groups(quantized.config, ((10, 12),)), device="meta",
     )
     manager.register_state("main", plain)
     manager.register_state("main", quantized)
@@ -151,7 +152,7 @@ def test_mla_selection_excludes_same_layer_tail() -> None:
     tail = make_window()
     template = definition("mla")
     state = type(template)(
-        layout_config=replace(template.config, logical_layer_groups=((3, 7),)), device="meta",
+        layout_config=replace_logical_layer_groups(template.config, ((3, 7),)), device="meta",
     )
     manager.register_state("main", state)
     manager.register_state("main", tail)

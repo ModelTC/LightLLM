@@ -225,10 +225,10 @@ def test_cpu_service_describes_main_and_draft_as_distinct_resources(
             layer for group in draft.config.logical_layer_groups for layer in group
         )
         assert main.capacity == draft.capacity == resources.full_att_allocator.size
-        assert {main.state_name, draft.state_name} <= resources.get_cpu_page_layouts().keys()
-        layout_end = max(layout.byte_end for layout in resources.get_cpu_page_layouts().values())
+        assert {main.state_name, draft.state_name} <= resources.get_cpu_cache_operator().get_page_layouts().keys()
+        layout_end = max(layout.byte_end for layout in resources.get_cpu_cache_operator().get_page_layouts().values())
         assert (layout_end + 15) // 16 * 16 == meta.page_bytes
-        assert resources.get_cpu_page_bytes() == meta.page_bytes
+        assert resources.get_cpu_cache_operator().get_page_bytes() == meta.page_bytes
 
 
 @pytest.mark.parametrize("kind,encoding,model_cls", CASES)
@@ -254,9 +254,9 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
     # No byte-size formulas duplicated in the test: check the service's actual
     # meta-device descriptors against every real model's layout.
     for resources in managers:
-        layout = next(iter(resources.get_cpu_page_layouts().values()))
+        layout = next(iter(resources.get_cpu_cache_operator().get_page_layouts().values()))
         assert 0 <= layout.byte_start < layout.byte_end <= meta.page_bytes
-        assert meta.page_bytes == resources.get_cpu_page_bytes()
+        assert meta.page_bytes == resources.get_cpu_cache_operator().get_page_bytes()
     meta.page_num = 3
     client = cpu_cache_factory(meta)
     buffer = client.cpu_kv_cache_tensor
@@ -287,11 +287,11 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
                 if "token" in f.axes
             }
         )
-        resources.write_req_to_cpu(
+        resources.get_cpu_cache_operator().write_req(
             token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
             cpu_page_buffers=buffer,
             cpu_page_indices=[2],
-            layouts=resources.get_cpu_page_layouts(),
+            layouts=resources.get_cpu_cache_operator().get_page_layouts(),
             **kwargs,
         )
     torch.cuda.synchronize()
@@ -306,7 +306,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
                 big_page_slot_ids=[slot],
                 req_idx=1,
             )
-        resources.read_req_from_cpu(
+        resources.get_cpu_cache_operator().read_req(
             cpu_page_buffers=buffer,
             cpu_page_indices=[2],
             token_indices=torch.arange(
@@ -316,7 +316,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
                 device="cuda",
             ),
             state_token_len=8,
-            layouts=resources.get_cpu_page_layouts(),
+            layouts=resources.get_cpu_cache_operator().get_page_layouts(),
             **kwargs,
         )
         if resources.bounded_att_big_page_allocator is not None:
@@ -330,7 +330,7 @@ def test_cpu_service_layout_and_roundtrip_all_encodings(
 
 
 @pytest.mark.parametrize("hybrid", [False, True])
-def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
+def test_production_offload_preserves_ready_pages_without_host_sync(
     runtime: None,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -357,13 +357,13 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
     client.update_pages_status_to_ready([pages[0]], deref=False)
     slots = resources.bounded_att_big_page_allocator.alloc(2) if hybrid else None
     write_batches = []
-    write_to_cpu = resources.write_req_to_cpu
+    write_to_cpu = resources.get_cpu_cache_operator().write_req
 
     def capture_write(*args: object, **kwargs: object) -> None:
         write_batches.append((kwargs["cpu_page_indices"], kwargs["cpu_page_ready_flags"]))
         write_to_cpu(*args, **kwargs)
 
-    monkeypatch.setattr(resources, "write_req_to_cpu", capture_write)
+    monkeypatch.setattr(resources.get_cpu_cache_operator(), "write_req", capture_write)
     if hybrid:
         # 当前 bounded 页仍由主机复制，测试先准备好源快照。
         # TODO：CPU→CPU kernel 落地后，再覆盖尚未完成 D2H 的快照依赖。
@@ -374,7 +374,8 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
     producer = torch.cuda.Stream()
     producer.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(producer):
-        # 延迟当前生产流的 KV 写入，验证搬运流通过 wait_stream 等待。
+        # 延迟当前生产流的 KV 写入；当前实现不在此处隐式插入 wait_stream，
+        # 生产者与搬运流的依赖由调用方负责组织。
         torch.cuda._sleep(10_000_000)
         (full,) = resources.get_full_attention_states("main")
         for field in full_state_test_fields(full, full_state_test_buffers(full)).values():
@@ -425,7 +426,7 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
             patch.setattr(torch.cuda.Stream, "synchronize", reject_host_sync)
             patch.setattr(torch.cuda.Stream, "wait_stream", record_wait)
             task = module.write_req_to_cpu(req, copy_stream)
-        assert waited_streams == [producer]
+        assert waited_streams == []
     task.sync_event.synchronize()
     assert write_batches == [(pages, [True, False])]
     assert req.cpu_cache_task_status.is_running()
@@ -439,12 +440,12 @@ def test_production_offload_uses_stream_dependency_and_preserves_ready_pages(
         resources.bounded_att_big_page_allocator.free(slots)
         destination = resources.bounded_att_big_page_allocator.alloc(1)[0]
         kwargs = dict(big_page_slot_ids=[destination], req_idx=1)
-    resources.read_req_from_cpu(
+    resources.get_cpu_cache_operator().read_req(
         cpu_page_buffers=client.cpu_kv_cache_tensor,
         cpu_page_indices=[pages[1]],
         token_indices=torch.arange(8, dtype=torch.long, device="cuda"),
         state_token_len=8,
-        layouts=resources.get_cpu_page_layouts(),
+        layouts=resources.get_cpu_cache_operator().get_page_layouts(),
         **kwargs,
     )
     for field in full_state_test_fields(full, full_state_test_buffers(full)).values():
@@ -480,11 +481,11 @@ def test_disk_preserves_resource_pages(
     (full,) = resources.get_full_attention_states("main")
     for storage_buffer in full_state_test_buffers(full).values():
         storage_buffer.random_(0, 256)
-    resources.write_req_to_cpu(
+    resources.get_cpu_cache_operator().write_req(
         token_indices=torch.arange(16, dtype=torch.long, device="cuda"),
         cpu_page_buffers=client.cpu_kv_cache_tensor,
         cpu_page_indices=pages,
-        layouts=resources.get_cpu_page_layouts(),
+        layouts=resources.get_cpu_cache_operator().get_page_layouts(),
     )
     torch.cuda.synchronize()
     expected = client.cpu_kv_cache_tensor.clone()
@@ -500,10 +501,10 @@ def test_disk_preserves_resource_pages(
     assert torch.equal(client.cpu_kv_cache_tensor, expected)
     for storage_buffer in full_state_test_buffers(full).values():
         storage_buffer.zero_()
-    resources.read_req_from_cpu(
+    resources.get_cpu_cache_operator().read_req(
         cpu_page_buffers=client.cpu_kv_cache_tensor,
         cpu_page_indices=pages,
         token_indices=torch.arange(16, dtype=torch.long, device="cuda"),
-        layouts=resources.get_cpu_page_layouts(),
+        layouts=resources.get_cpu_cache_operator().get_page_layouts(),
     )
     assert any((tmp_path / "disk").glob("cache_file*"))

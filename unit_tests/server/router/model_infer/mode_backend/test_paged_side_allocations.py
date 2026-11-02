@@ -174,7 +174,9 @@ def test_dp_imports_only_matching_tp_shards(
     tables = {}
     for rank in expected_ranks:
         managers[rank] = SimpleNamespace(
-            register_page_pools_pin_memory=lambda rank=rank: registered_ranks.append(rank),
+            get_dp_shared_operator=lambda rank=rank: SimpleNamespace(
+                register_page_pools_pin_memory=lambda: registered_ranks.append(rank),
+            ),
         )
         tables[rank] = object()
 

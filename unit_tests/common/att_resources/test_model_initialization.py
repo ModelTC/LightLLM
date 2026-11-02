@@ -109,7 +109,7 @@ def test_real_model_resource_hooks_and_shared_draft(
         observed.append(main_linear_state(resources).conv_state.data_ptr())
         reserve = 0
         if mode == "prefill":
-            reserve = resources.get_pd_page_bytes() * args.pd_kv_page_num
+            reserve = resources.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
         return resources.get_full_att_token_bytes() * (32 + args.page_size) + reserve, 0
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", check_runtime_before_profile)
@@ -164,8 +164,8 @@ def test_real_model_resource_hooks_and_shared_draft(
     assert not hasattr(model, "mtp_state_cursors")
     assert (main_linear_state(resources).mtp_state_index is not None) == bool(mtp)
     if mode == "prefill":
-        assert resources.get_pd_token_page_layouts()
-        assert resources.get_pd_runtime_page_layouts()
+        assert resources.get_pd_operator().get_pd_full_att_page_layouts()
+        assert resources.get_pd_operator().get_pd_bounded_att_page_layouts()
     if mtp:
         draft = drafts[0]
         assert draft.req_manager is model.req_manager

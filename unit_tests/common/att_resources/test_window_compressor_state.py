@@ -143,12 +143,12 @@ def test_manager_allocates_page_tensors_only_for_snapshot_states(
     if window_size == compress_stride:
         initialize_pools.assert_not_called()
         assert state.big_pages_pool is state.small_pages_pool is None
-        assert state.state_name not in manager.get_cpu_page_layouts()
+        assert state.state_name not in manager.get_cpu_cache_operator().get_page_layouts()
     else:
         initialize_pools.assert_called_once()
         assert state.big_pages_pool.buffer.shape == (4, 2, window_size - compress_stride, 4)
         assert state.small_pages_pool.buffer.shape == (3, 2, window_size - compress_stride, 4)
-        assert state.state_name in manager.get_cpu_page_layouts()
+        assert state.state_name in manager.get_cpu_cache_operator().get_page_layouts()
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

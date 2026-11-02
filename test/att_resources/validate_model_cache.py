@@ -105,22 +105,22 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
     next_token = output.logits.argmax(dim=-1).cpu()
     source_indices = model.req_manager.req_to_token_indexs[int(source_req[0]), :prefix_len].clone()
 
-    cpu = torch.zeros((len(pages), resources.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
-    resources.write_req_to_cpu(
+    cpu = torch.zeros((len(pages), resources.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    resources.get_cpu_cache_operator().write_req(
         token_indices=source_indices,
         cpu_page_buffers=cpu,
         cpu_page_indices=pages,
-        layouts=resources.get_cpu_page_layouts(),
+        layouts=resources.get_cpu_cache_operator().get_page_layouts(),
         big_page_slot_ids=source_slots if hybrid else None,
     )
     # Host-side checkpoint repacking consumes the CPU page on the next call.
     torch.cuda.synchronize()
-    full_att_layouts = resources.get_pd_token_page_layouts()
-    runtime_layouts = resources.get_pd_runtime_page_layouts()
-    pd = {"kv": torch.empty((1, resources.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")}
+    full_att_layouts = resources.get_pd_operator().get_pd_full_att_page_layouts()
+    runtime_layouts = resources.get_pd_operator().get_pd_bounded_att_page_layouts()
+    pd = {"kv": torch.empty((1, resources.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")}
     if runtime_layouts:
-        pd["att_state"] = torch.empty((1, resources.get_pd_page_bytes()), dtype=torch.uint8, device="cuda")
-    resources.write_to_pd_page(
+        pd["att_state"] = torch.empty((1, resources.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")
+    resources.get_pd_operator().write_page(
         pd_page_buffers=pd["kv"],
         pd_page_index=0,
         kind="kv",
@@ -128,7 +128,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
         token_indices=source_indices,
     )
     if "att_state" in pd:
-        resources.write_to_pd_page(
+        resources.get_pd_operator().write_page(
             pd_page_buffers=pd["att_state"],
             pd_page_index=0,
             kind="att_state",
@@ -155,17 +155,17 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
             slots = big.alloc(len(pages)) if hybrid else None
             if hybrid:
                 allocated_slots.extend(slots)
-            resources.read_req_from_cpu(
+            resources.get_cpu_cache_operator().read_req(
                 cpu_page_buffers=cpu,
                 cpu_page_indices=pages,
                 token_indices=indices,
-                layouts=resources.get_cpu_page_layouts(),
+                layouts=resources.get_cpu_cache_operator().get_page_layouts(),
                 big_page_slot_ids=slots,
                 req_idx=int(request[0]) if hybrid else None,
                 state_token_len=prefix_len if hybrid else None,
             )
         elif kind == "dp_copy":
-            resources.copy_from_dp(
+            resources.get_dp_shared_operator().copy_from_dp(
                 remote_att_manager=resources,
                 src_token_indices=source_indices,
                 dst_token_indices=indices,
@@ -175,7 +175,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 dst_req_idx=int(request[0]),
             )
         else:
-            resources.read_from_pd_page(
+            resources.get_pd_operator().read_page(
                 pd_page_buffers=pd["kv"],
                 pd_page_index=0,
                 kind="kv",
@@ -183,7 +183,7 @@ def validate(model: TpPartBaseModel, args: Namespace, draft_models: Sequence[TpP
                 token_indices=indices,
             )
             if "att_state" in pd:
-                resources.read_from_pd_page(
+                resources.get_pd_operator().read_page(
                     pd_page_buffers=pd["att_state"],
                     pd_page_index=0,
                     kind="att_state",

@@ -191,7 +191,7 @@ def test_pd_kv_and_runtime_state_roundtrip(
     source_buffer = allocate_transfer_buffer(source_resources[0], 1, device="cuda")
     dest_buffer = allocate_transfer_buffer(dest_resources[0], 1, device="cuda")
     assert source_buffer.shape == dest_buffer.shape
-    assert source_resources[0].get_pd_runtime_page_layouts().keys() == dest_resources[0].get_pd_runtime_page_layouts().keys()
+    assert source_resources[0].get_pd_operator().get_pd_bounded_att_page_layouts().keys() == dest_resources[0].get_pd_operator().get_pd_bounded_att_page_layouts().keys()
     for kind in ("kv", "att_state"):
         copy_page(
             node_att_managers=source_resources,
@@ -284,12 +284,12 @@ def test_pd_kv_and_runtime_state_roundtrip(
 def test_pd_page_capacity_includes_tail_without_resizing(make_mems, monkeypatch, caplog):
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 8)
     mem = make_mems(1)[0]
-    full_bytes = max(layout.byte_end for layout in mem.resources.get_pd_token_page_layouts().values())
+    full_bytes = max(layout.byte_end for layout in mem.resources.get_pd_operator().get_pd_full_att_page_layouts().values())
     runtime_bytes = max(
-        layout.byte_end for layout in mem.resources.get_pd_runtime_page_layouts().values()
+        layout.byte_end for layout in mem.resources.get_pd_operator().get_pd_bounded_att_page_layouts().values()
     )
     assert runtime_bytes > full_bytes
-    assert mem.resources.get_pd_page_bytes() == runtime_bytes
+    assert mem.resources.get_pd_operator().get_page_bytes() == runtime_bytes
     assert "smaller than the complete attention runtime" in caplog.text
 
 

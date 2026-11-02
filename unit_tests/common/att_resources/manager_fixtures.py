@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 from dataclasses import replace
-from functools import lru_cache
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.allocators import StatePageAllocator, FullAttKVAllocator
 from lightllm.common.attention_state.full_att import MLAConfig, MLAFullAttentionState
@@ -43,15 +42,3 @@ class MainDraftTestResourceManager(AttentionStateManager):
         self.bounded_att_big_page_allocator = StatePageAllocator(3)
         self.bounded_att_small_page_allocator = StatePageAllocator(2)
         self.finish_state_registration()
-
-    @lru_cache(maxsize=None)
-    def get_cpu_page_layouts(self):
-        raise NotImplementedError("This test manager uses explicitly supplied CPU layouts")
-
-    @lru_cache(maxsize=None)
-    def get_pd_token_page_layouts(self):
-        raise NotImplementedError("This test manager uses explicitly supplied PD layouts")
-
-    @lru_cache(maxsize=None)
-    def get_pd_runtime_page_layouts(self):
-        raise NotImplementedError("This test manager uses explicitly supplied PD layouts")

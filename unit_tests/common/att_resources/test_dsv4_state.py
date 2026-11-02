@@ -455,17 +455,17 @@ def test_manager_joint_cpu_page_roundtrip(monkeypatch: pytest.MonkeyPatch) -> No
         runtime_buffer(state).random_(0, 127)
     manager.save_bounded_att_runtime_to_pages([0], [256], "big", [0])
     expected = gather_swa_reference(bounded[0], 0, 256)
-    layouts = manager.get_cpu_page_layouts()
+    layouts = manager.get_cpu_cache_operator().get_page_layouts()
     assert bounded[-1].state_name not in layouts
-    pages = torch.zeros((2, manager.get_cpu_page_bytes()), dtype=torch.uint8, pin_memory=True)
-    manager.write_req_to_cpu(
+    pages = torch.zeros((2, manager.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
+    manager.get_cpu_cache_operator().write_req(
         token_indices=torch.arange(256, dtype=torch.int64, device="cuda"),
         cpu_page_buffers=pages,
         cpu_page_indices=[1],
         layouts=layouts,
         big_page_slot_ids=[0],
     )
-    manager.read_req_from_cpu(
+    manager.get_cpu_cache_operator().read_req(
         cpu_page_buffers=pages,
         cpu_page_indices=[1],
         token_indices=torch.arange(256, 512, dtype=torch.int64, device="cuda"),
@@ -479,7 +479,7 @@ def test_manager_joint_cpu_page_roundtrip(monkeypatch: pytest.MonkeyPatch) -> No
         assert torch.equal(full.storage[:, :256], full.storage[:, 256:512])
     assert torch.equal(expected, gather_swa_reference(bounded[0], 1, 256))
     assert not pages[0].any()
-    ipc = manager.create_pd_ipc_copy()
+    ipc = manager.get_pd_operator().create_ipc_copy()
     assert all(state.big_pages_pool is None for state in ipc.get_bounded_attention_states())
     assert bounded[0].big_pages_pool is not None
 
@@ -499,11 +499,11 @@ def test_atomic_dp_ipc_preserves_shared_pools(monkeypatch: pytest.MonkeyPatch) -
             state.initialize_page_pools(big_page_capacity=2, small_page_capacity=1)
             manager.register_state("main", state)
         manager.finish_state_registration()
-        exported = manager.create_dp_ipc_copy()
+        exported = manager.get_dp_shared_operator().create_ipc_copy()
         for state in exported.get_bounded_attention_states():
             for pool in (state.big_pages_pool, state.small_pages_pool):
                 if pool is not None:
                     assert pool.buffer.is_shared()
-        exported.register_page_pools_pin_memory()
+        exported.get_dp_shared_operator().register_page_pools_pin_memory()
     finally:
         get_env_start_args.cache_clear()

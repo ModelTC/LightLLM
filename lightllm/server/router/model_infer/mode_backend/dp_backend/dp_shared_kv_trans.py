@@ -138,7 +138,7 @@ class DPKVSharedMoudle:
             source = self.backend.dp_att_state_managers[task.src_dp_rank]
             # 源索引来自远端 CUDA 请求表；allocator 返回 CPU 索引，在此一次性准备目标 CUDA int64 索引。
             dst_token_indices = task.dst_token_indices.to(device="cuda", dtype=torch.long, non_blocking=True)
-            target.copy_from_dp(
+            target.get_dp_shared_operator().copy_from_dp(
                 remote_att_manager=source,
                 src_token_indices=task.src_token_indices,
                 dst_token_indices=dst_token_indices,
