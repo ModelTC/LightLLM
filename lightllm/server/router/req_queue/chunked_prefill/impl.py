@@ -8,7 +8,7 @@ class ChunkedPrefillQueue(BaseQueue):
     def _init_cache_list(self, current_batch: Batch, is_busy):
         if current_batch is not None:
             self.cache_len_list = [
-                req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+                self._get_req_reservation(req, is_busy)
                 for req in current_batch.reqs
                 if req.sample_params.suggested_dp_index == self.dp_index
             ]
@@ -18,17 +18,10 @@ class ChunkedPrefillQueue(BaseQueue):
 
     # @calculate_time(show=True, min_cost_ms=0.1)
     def _can_add_new_req(self, req: Req, is_busy):
-        self.cache_len_list.append(
-            req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
-        )  # hard to analysis
+        self.cache_len_list.append(self._get_req_reservation(req, is_busy))  # hard to analysis
         self.cache_len_list.sort(key=lambda x: -x[1])
 
-        left_out_len_array = np.array([e[1] for e in self.cache_len_list])
-        has_run_len_array = np.array([e[0] for e in self.cache_len_list])
-        cum_run_len_array = np.cumsum(has_run_len_array)
-        size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
-
-        need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
+        need_max_token_num = self._estimate_peak_tokens()
         ok_token_num = need_max_token_num < self.max_total_tokens
 
         ok_req_num = len(self.cache_len_list) <= self.running_max_req_size
@@ -79,14 +72,18 @@ class ChunkedPrefillQueue(BaseQueue):
     def _calcu_batch_token_load_batch_not_none(self, current_batch: Batch):
         is_busy = self.is_busy()
         self._init_cache_list(current_batch, is_busy)
-        if len(self.cache_len_list) != 0:
-            self.cache_len_list.sort(key=lambda x: -x[1])
-            left_out_len_array = np.array([e[1] for e in self.cache_len_list])
-            has_run_len_array = np.array([e[0] for e in self.cache_len_list])
-            cum_run_len_array = np.cumsum(has_run_len_array)
-            size_array = np.arange(1, len(self.cache_len_list) + 1, 1)
-            need_max_token_num = (left_out_len_array * size_array + cum_run_len_array).max()
-        else:
-            need_max_token_num = 0
+        need_max_token_num = self._estimate_peak_tokens()
 
         return (need_max_token_num, need_max_token_num / self.max_total_tokens)
+
+    def _get_req_reservation(self, req, is_busy):
+        return req.get_tuple_tokens(is_busy, self.router.router_statics.ema_req_out_len)
+
+    def _estimate_peak_tokens(self):
+        if not self.cache_len_list:
+            return 0
+        self.cache_len_list.sort(key=lambda entry: -entry[1])
+        remaining = np.array([entry[1] for entry in self.cache_len_list])
+        resident = np.array([entry[0] for entry in self.cache_len_list])
+        count = np.arange(1, len(self.cache_len_list) + 1)
+        return (remaining * count + np.cumsum(resident)).max()

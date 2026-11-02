@@ -1,0 +1,110 @@
+import datetime
+import json
+import os
+from pathlib import Path
+
+import pytest
+import torch
+import torch.distributed as dist
+import torch.multiprocessing as mp
+
+
+def _worker(rank, world, rendezvous):
+    torch.cuda.set_device(rank)
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    settings = StartArgs()
+    settings.hardware_platform, settings.data_type = "cuda", "bf16"
+    os.environ["LIGHTLLM_START_ARGS"] = json.dumps(vars(settings))
+    for name, value in {
+        "LIGHTLLM_DP_WORLD_SIZE": world,
+        "LIGHTLLM_GLOBAL_WORLD_SIZE": world,
+        "LIGHTLLM_NODE_WORLD_SIZE": world,
+        "LIGHTLLM_CURRENT_DEVICE_ID": rank,
+        "LIGHTLLM_CURRENT_RANK_IN_DP": rank,
+        "LIGHTLLM_CURRENT_RANK_IN_NODE": rank,
+        "LIGHTLLM_GLOBAL_RANK": rank,
+        "LIGHTLLM_DP_SIZE": 1,
+        "LIGHTLLM_GLOBAL_DP_RANK": 0,
+        "LIGHTLLM_DP_RANK_IN_NODE": 0,
+    }.items():
+        os.environ[name] = str(value)
+    dist.init_process_group(
+        "nccl",
+        init_method="file://" + rendezvous,
+        rank=rank,
+        world_size=world,
+        timeout=datetime.timedelta(seconds=180),
+    )
+    from lightllm.distributed.communication_op import CustomProcessGroup
+    from lightllm.distributed.symm_mem_all_reduce import SymmMemAllreduce
+    from lightllm.common.basemodel.tp_reduce import ordered_tp_sum
+
+    try:
+        symmetric = SymmMemAllreduce(dist.group.WORLD, rank)
+        available = torch.tensor(int(not symmetric.disabled), device=rank)
+        dist.all_reduce(available, op=dist.ReduceOp.MIN)
+        if not available.item():
+            if rank == 0:
+                Path(rendezvous + ".unavailable").touch()
+            return
+        group = CustomProcessGroup.__new__(CustomProcessGroup)
+        group.device_group, group.dp_world_size = dist.group.WORLD, world
+        group.symm_mem_reduce, group.flashinfer_reduce = symmetric, None
+        for rows in (1, 8, 24, 512):
+            source = torch.empty((rows, 2560), dtype=torch.bfloat16, device=rank)
+            reference = torch.empty((world * rows, 2560), dtype=source.dtype, device=rank)
+            scratch = torch.empty_like(source)
+
+            def expected():
+                dist.all_gather_into_tensor(reference, source)
+                return reference.view(world, rows, 2560).double().sum(0).to(source.dtype)
+
+            for iteration in range(4):
+                if world >= 4 and iteration == 0:
+                    source.fill_((2**40, 1, -(2**40), 1)[rank] if rank < 4 else 0)
+                else:
+                    source.copy_((torch.arange(source.numel(), device=rank).reshape_as(source) % 257 + rank) / 64)
+                    source.add_(iteration / 8)
+                gold = expected()
+                gathered = symmetric.ordered_all_gather(source)
+                assert gathered is not None
+                scratch.fill_(rank + 2)
+                symmetric.all_reduce(scratch)
+                torch.testing.assert_close(gathered.view_as(reference), reference, rtol=0, atol=0)
+                actual = ordered_tp_sum(source.clone(), group, world)
+                torch.testing.assert_close(actual, gold, rtol=0, atol=0)
+                if rows % world == 0:
+                    actual = ordered_tp_sum(source, group, world, scatter_rank=rank)
+                    torch.testing.assert_close(actual, gold.chunk(world)[rank], rtol=0, atol=0)
+
+            output = torch.empty_like(source)
+            graph = torch.cuda.CUDAGraph()
+            torch.cuda.synchronize()
+            with torch.cuda.graph(graph):
+                output.copy_(source)
+                ordered_tp_sum(output, group, world)
+            for iteration in range(8):
+                source.fill_(rank + iteration / 16)
+                gold = expected()
+                graph.replay()
+                torch.testing.assert_close(output, gold, rtol=0, atol=0)
+            graph.reset()
+    finally:
+        dist.destroy_process_group()
+
+
+@pytest.mark.parametrize("world", [2, 8])
+def test_ordered_sum_preserves_shards_across_collectives_and_graph_replays(world, tmp_path):
+    if torch.cuda.device_count() < world:
+        pytest.skip(f"Requires {world} CUDA GPUs")
+    if any(torch.cuda.get_device_capability(rank)[0] < 9 for rank in range(world)):
+        pytest.skip("Requires Hopper or newer GPUs with multicast support")
+    from lightllm.utils.device_utils import has_nvlink
+
+    if not has_nvlink():
+        pytest.skip("Requires an NVLink-connected node")
+    rendezvous = str(tmp_path / "rendezvous")
+    mp.spawn(_worker, args=(world, rendezvous), nprocs=world, join=True)
+    if Path(rendezvous + ".unavailable").exists():
+        pytest.skip("Symmetric multicast memory is unavailable")

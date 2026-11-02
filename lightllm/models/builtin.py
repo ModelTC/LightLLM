@@ -209,3 +209,11 @@ MODEL_CLASS_PATHS = {
     for config in configs
 }
 MODEL_CLASS_PATHS.update({path.rsplit(":", 1)[1]: path for path in DraftModelRegistry._registry.values()})
+
+ModelRegistry.register("qwen4_exp", "lightllm.models.qwen4_exp.model:Qwen4ExpTpPartModel", is_multimodal=True)
+ModelRegistry.register("qwen4_exp_text", "lightllm.models.qwen4_exp.model:Qwen4ExpTpPartModel")
+DraftModelRegistry.register(
+    ("qwen4_exp", "qwen4_exp_text"), "eagle_with_att", "lightllm.models.qwen4_exp.mtp.model:Qwen4ExpMTPModel"
+)
+MODEL_CLASS_PATHS["Qwen4ExpTpPartModel"] = "lightllm.models.qwen4_exp.model:Qwen4ExpTpPartModel"
+MODEL_CLASS_PATHS["Qwen4ExpMTPModel"] = "lightllm.models.qwen4_exp.mtp.model:Qwen4ExpMTPModel"

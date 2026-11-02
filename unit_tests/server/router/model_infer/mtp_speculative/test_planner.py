@@ -962,3 +962,86 @@ def test_topk_prefix_sums_only_computes_requested_counts():
 
     assert set(result) == {0, 2, 4}
     np.testing.assert_allclose([result[0], result[2], result[4]], [0.0, 1.6, 2.1])
+
+
+def build_stalled_zero_draft_planner(req_num, spec_mode="eagle_no_att"):
+    planner = build_lightspec_planner(max_draft_step=4, spec_mode=spec_mode)
+    for batch_size in range(1, 41):
+        planner.target_infer_costs.update(batch_size, 1.0 + 0.1 * batch_size)
+        planner.draft_infer_costs.update(batch_size, 0.2 + 0.01 * batch_size)
+    planner._update_verified_batch(
+        accept_lengths=[1] * req_num,
+        req_num=req_num,
+        dynamic_batch_size=5 * req_num,
+        verified_draft_step=4,
+    )
+    assert planner._select_draft_step(req_num) == planner.draft_steps[0]
+    planner.pre_draft_step = planner.draft_steps[0]
+    return planner
+
+
+@pytest.mark.parametrize("req_num", [1, 2, 8])
+@pytest.mark.parametrize("all_new", [False, True])
+def test_lightspec_new_request_recovers_from_zero_draft_feedback(req_num, all_new):
+    planner = build_stalled_zero_draft_planner(req_num)
+    target_costs = dict(planner.target_infer_costs.infer_cost_ms_table)
+    draft_costs = dict(planner.draft_infer_costs.infer_cost_ms_table)
+    new_requests = req_num if all_new else 1
+
+    plan = planner.plan(
+        decode_reqs=build_decode_reqs(req_num, req_num_with_proposals=req_num - new_requests),
+        origin_batch_size=5 * req_num,
+    )
+
+    assert plan.pre_draft_step == 0
+    assert plan.dynamic_batch_size == req_num
+    assert plan.draft_step == 4
+    assert not plan.all_reqs_have_proposals
+    assert dict(planner.target_infer_costs.infer_cost_ms_table) == target_costs
+    assert dict(planner.draft_infer_costs.infer_cost_ms_table) == draft_costs
+
+    planner.pre_draft_step = plan.draft_step
+    next_plan = planner.plan(decode_reqs=build_decode_reqs(req_num), origin_batch_size=5 * req_num)
+    assert next_plan.dynamic_batch_size == 5 * req_num
+    planner._update_verified_batch(
+        accept_lengths=[5] * req_num,
+        req_num=req_num,
+        dynamic_batch_size=next_plan.dynamic_batch_size,
+        verified_draft_step=4,
+    )
+    assert planner._select_draft_step(req_num) == 4
+
+
+@pytest.mark.parametrize("empty", [False, True])
+def test_lightspec_existing_or_empty_batch_retains_zero_draft_evidence(empty):
+    planner = build_stalled_zero_draft_planner(2)
+    progress = dict(planner.progress_ema_by_config)
+    survival = list(planner.prefix_survival_by_depth)
+
+    plan = planner.plan(decode_reqs=[] if empty else build_decode_reqs(2), origin_batch_size=0 if empty else 10)
+
+    assert plan.draft_step == 0
+    assert planner.progress_ema_by_config == progress
+    assert planner.prefix_survival_by_depth == survival
+
+
+@pytest.mark.parametrize("req_num", [1, 2, 8])
+@pytest.mark.parametrize("spec_mode", ["eagle_with_att", "eagle3", "vanilla_with_att"])
+def test_lightspec_new_workload_escapes_target_only_verification(req_num, spec_mode):
+    planner = build_stalled_zero_draft_planner(req_num, spec_mode=spec_mode)
+    previous_depth = planner.pre_draft_step
+    assert previous_depth > 0
+    target_costs = dict(planner.target_infer_costs.infer_cost_ms_table)
+    draft_costs = dict(planner.draft_infer_costs.infer_cost_ms_table)
+
+    first = planner.plan(decode_reqs=build_decode_reqs(req_num, 0), origin_batch_size=5 * req_num)
+
+    assert first.pre_draft_step == previous_depth
+    assert first.dynamic_batch_size == req_num
+    assert first.draft_step == 4
+    assert not first.all_reqs_have_proposals
+    assert dict(planner.target_infer_costs.infer_cost_ms_table) == target_costs
+    assert dict(planner.draft_infer_costs.infer_cost_ms_table) == draft_costs
+    planner.pre_draft_step = first.draft_step
+    following = planner.plan(decode_reqs=build_decode_reqs(req_num), origin_batch_size=5 * req_num)
+    assert following.dynamic_batch_size == 5 * req_num
