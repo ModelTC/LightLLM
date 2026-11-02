@@ -221,10 +221,13 @@ def fused_experts(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
 ):
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
+    assert shared_expert_func is None or is_prefill is False
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
+        assert shared_expert_func is None, "Mega MoE does not support shared expert overlap"
         if limit is not None:
             raise NotImplementedError("FP4 Mega MoE does not support clamped SwiGLU")
         return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
@@ -249,6 +252,7 @@ def fused_experts(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        shared_expert_func=shared_expert_func,
     )
 
 
@@ -271,6 +275,7 @@ def fused_experts_impl(
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
     block_size_k: int = 128,
+    shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -403,8 +408,18 @@ def fused_experts_impl(
         )
         # low latency combine
         combined_x, event_overlap, hook = buffer.low_latency_combine(
-            gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=False
+            gemm_out_b,
+            topk_idx,
+            topk_weights,
+            handle,
+            async_finish=False,
+            return_recv_hook=shared_expert_func is not None,
         )
+        if shared_expert_func is not None:
+            # Launch shared computation while the combine send is in flight.
+            shared = shared_expert_func()
+            hook()
+            return combined_x + shared
     return combined_x
 
 

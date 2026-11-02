@@ -101,7 +101,12 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
     ):
+        extra_args = {}
+        if shared_expert_func is not None:
+            assert self.supports_decode_shared_expert_overlap
+            extra_args["shared_expert_func"] = shared_expert_func
         return self._fused_experts(
             input_tensor=input_tensor,
             w13=w13,
@@ -112,6 +117,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            **extra_args,
         )
 
     def __call__(

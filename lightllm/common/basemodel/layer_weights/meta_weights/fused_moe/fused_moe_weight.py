@@ -1,6 +1,6 @@
 import torch
 import threading
-from typing import Dict, Any, Optional, Tuple, List
+from typing import Dict, Any, Optional, Tuple, List, Callable
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
@@ -174,6 +174,7 @@ class FusedMoeWeight(BaseWeightTpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
+        shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
     ) -> torch.Tensor:
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
@@ -188,6 +189,7 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+            shared_expert_func=shared_expert_func,
         )
 
     def low_latency_dispatch(
