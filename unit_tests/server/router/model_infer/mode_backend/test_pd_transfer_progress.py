@@ -112,7 +112,38 @@ def test_first_notify_wait_does_not_charge_prefill_queueing(monkeypatch):
     assert first.shared_time_out_mark.time_mark is None
 
 
-def test_waiting_pages_timeout_from_shared_progress(monkeypatch):
+def test_later_chunk_wait_does_not_charge_prefill_queueing(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(decode_trans_process.time, "time", lambda: now[0])
+    first, later = make_task(1, 0), make_task(1, 1)
+    first.shared_time_out_mark = later.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
+    module = make_module(first, later)
+    notify = make_task(1, 0)
+    notify.write_stage = "request"
+    assert module._get_waiting_task_for_notify(notify) is first
+    first.shared_time_out_mark.update()
+    notify.write_stage = "done"
+    assert module._get_waiting_task_for_notify(notify) is first
+
+    # The first chunk arrived, but P can still be computing or queueing the next
+    # chunk. No WRITE request exists for its page yet.
+    now[0] = 1000.0
+    module._check_tasks_time_out()
+    assert module.failed_queue.empty()
+    assert module.waiting_dict == {later.get_key(): later}
+
+    # Once P requests this page, D's own staging-page wait remains bounded.
+    notify = make_task(1, 1)
+    notify.write_stage = "request"
+    assert module._get_waiting_task_for_notify(notify) is later
+    later.shared_time_out_mark.update()
+    now[0] = 1011.0
+    module._check_tasks_time_out()
+    assert module.failed_queue.get_nowait() is later
+    assert not module.waiting_dict
+
+
+def test_requested_pages_timeout_from_shared_progress(monkeypatch):
     now = [100.0]
     monkeypatch.setattr(decode_trans_process.time, "time", lambda: now[0])
     first, second, unrelated = make_task(1, 0), make_task(1, 1), make_task(2, 0)
@@ -121,6 +152,7 @@ def test_waiting_pages_timeout_from_shared_progress(monkeypatch):
     unrelated.shared_time_out_mark.update()
     for task in (first, second, unrelated):
         task.create_time = 0.0
+        task.write_stage = "request"
     module = make_module(first, second, unrelated)
 
     now[0] = 109.0
