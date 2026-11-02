@@ -230,3 +230,28 @@ H200、hidden=5120、BF16 residual、FP32 mixing、Sinkhorn20次，走真实 V4.
 GPU 唯一用例合计169 passed、8 skipped：专项24项（8项真实 kernel 的跨层 shifted 系数/输入不变性/更新输入后的 CUDA Graph，以及16组 tiny model），其余回归145项。跳过项依赖本容器未挂载的官方视觉参考 image_processor / tokenizer；已有 tiny vision 路径通过。tiny model 的256行 prefill 对照原立即 post 路径，logits 及 DSpark hidden 逐位相同；补充原生 DeepGEMM 开启的单 token decode 对照 logits 与 hidden，16组复验通过（已计入169项，不重复累加）。保留 BF16 舍入，native decode 采用既有数值容差。覆盖 Engram 首层/中间层、FP8/历史 FP4 测试 fixture、DSpark draft、20+20 CED、checkpoint恢复及 decode Graph。
 
 Black/Flake8、git diff --check 通过。记录：/mnt/vqa/wanzihao/v41_cross_layer_mhc_20261102/ 下 model_gpu.log、regression_gpu.log、native_model_gpu.log、boundary_bench.jsonl/.stderr、environment.json；复跑微测使用 test/benchmark/kernel/benchmark_dsv41_mhc.py。未启动或修改在线服务，未测试完整权重 GSM8K/整机性能。既有部署文件和 test.md 未提交内容保留，本次 commit 只包含该优化与本条新增记录。
+
+
+### 2026-11-02：Engram hash 融合与 Decode 提前预取
+
+复用现有 EngramHasher、engram_stream、prefetch_engram 和单份待消费 embedding。首个 Engram lookup 改为在 target _token_forward 入口启动（仍在 decode Graph 内），不等到该层的前一层 attention 入口之后；每次消费 Engram 后，在该层原有 token_forward 预取点提前启动下一层 lookup。真实配置[1,14]因此在 decode 入口准备layer1，在layer1准备layer14，替代原先layer0/layer13准备的安排。没有增加后台manager、持久化embedding副本或新CLI；TP all-reduce及WKV投影仍在原消费stream，prefill lookup策略不变。提前调度本身的整机收益尚未单独量化。
+
+EngramHasher 原逐项PyTorch的映射、历史收集、乘法、XOR、取模和拼接，改为现有engram.py内两个Triton kernel：先统一写当前batch的token history，再读取前驱并产生全部层的hash。分成两个kernel是必要的依赖屏障：chunk/MTP可包含同一请求的多行，跨CTA直接读正在写入的history会有竞争。保留原token压缩表、int64乘法/XOR/取模、逐层multiplier/prime/offset、视觉token截断与padding语义，hash及更新后的history与原Torch实现逐位相同。hash输出shape/layout保持不变，未改FP8表或量化算法。
+
+H200/Torch2.11.0+cu130/Triton3.6.0，合成2层、每层24个hash（4-gram、每阶8 heads）、32768 token map。旧Torch实现保留在现有benchmark内作对照；三轮median。Graph列为hash准备的GPU执行时间；eager列为100次调用提交并同步收尾后的单次平均墙钟时间，包含Python/CUDA提交开销，符合该准备步骤目前在服务decode Graph外执行的性质。这不是完整Engram、整模型TPOT或TPM测试。
+
+| Query 行数 | 原Graph（μs） | 融合Graph（μs） | 原eager（μs） | 融合eager（μs） |
+| --- | ---: | ---: | ---: | ---: |
+| 1 | 77.716 | 3.329 | 423.732 | 35.954 |
+| 6 | 77.137 | 3.314 | 429.322 | 36.354 |
+| 64 | 80.076 | 3.713 | 424.493 | 36.248 |
+| 384 | 105.204 | 3.915 | 426.991 | 36.241 |
+| 8192 | 122.406 | 5.445 | 435.057 | 35.456 |
+
+6行样例torch.profiler记录GPU kernel从60个减到2个（_store_engram_tokens、_engram_hash）；这里位置/请求/slot元数据为int32，token ID为int64，其他dtype下旧路径cast数量可能不同。trace与kernel计数存于hash_previous_trace.json、hash_fused_trace.json、hash_profile.json。复跑现有test/benchmark/kernel/benchmark_dsv41_engram_prefetch.py；bench_final.jsonl/.stderr保存最终结果。现有serial/lookup预取微测仅验证原读取路径，不将其本来就有的重叠收益当作本轮新增收益。
+
+撤回一项实验：直接读取分层hash切片stride、取消contiguous打包，在264MiB host表、轮转hash避免重复小工作集命中的合成重叠测试中，6/64/384行分别比先打包慢约8.9%/44.4%/22.9%；改二维grid仍未消除退化。因此最终完全保留原gather_local/_gather_table和contiguous读取路径，未把“少一次copy”直接当成更快。候选源码engram_strided_candidate.py、benchmark_strided_candidate.py及bench.jsonl、bench_2d.jsonl保留在日志目录，可核对被撤方案；未据此推断实际服务整机退化。
+
+最终GPU回归197 passed、8 skipped（validated_gpu.log）。新增20组ragged/跨CTA/空batch/视觉padding/真实8 heads的hash逐位对照与更新输入后的Graph测试；tiny model从16组扩到24组，新增双Engram，覆盖提前串联预取、CED边界、文本/vision、DSpark target/draft、原生DeepGEMM、GPU/CPU checkpoint恢复和Graph。8项跳过仍是本容器未挂载的官方视觉参考文件。已有本地shard及consumer stream collective契约测试通过；没有改变collective位置。Black/Flake8及git diff --check通过。
+
+日志目录：/mnt/vqa/wanzihao/v41_engram_prefetch_20261102/。未改运行服务、未安装依赖、未测试完整权重GSM8K/服务吞吐；不能将hash组件21–27倍的GPU加速解释为完整Engram或模型同倍加速。当前实际变化是每次forward更低的hash准备开销，以及decode lookup更早开始。既有部署文件与test.md的旧未提交内容保留。

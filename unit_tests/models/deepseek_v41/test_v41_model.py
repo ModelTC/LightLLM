@@ -1004,9 +1004,9 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
         ("fp8", 128, 64, True, True),  # Unpadded FlashMLA Q, including the DSpark path.
     ],
 )
-@pytest.mark.parametrize("engram_layer", [0, 1])
+@pytest.mark.parametrize("engram_layers", [[0], [1], [1, 3]], ids=["first-engram", "one-engram", "two-engrams"])
 def test_text_model_constructs_and_chunked_prefill_matches_full(
-    tmp_path, monkeypatch, o_groups, expert_dtype, block_size, vision, dspark, engram_layer
+    tmp_path, monkeypatch, o_groups, expert_dtype, block_size, vision, dspark, engram_layers
 ):
     """Exercise the real model input, paging, shared KV, attention, MoE and output paths."""
     import json
@@ -1065,14 +1065,14 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             hc_mult=4,
             hc_sinkhorn_iters=20,
             hc_eps=1e-6,
-            engram_layer_ids=[engram_layer],
+            engram_layer_ids=engram_layers,
             engram_compressed_vocab_size=64,
             engram_pad_token_id=2,
             engram_max_ngram_size=4,
             engram_vocab_size=101,
             engram_n_heads=2,
             engram_head_dim=64,
-            engram_num_embeddings=[660],
+            engram_num_embeddings=[660, 864][: len(engram_layers)],
             n_routed_experts=8,
             n_shared_experts=1,
             num_experts_per_tok=6,
@@ -1193,8 +1193,8 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                                 ).to(torch.float8_e8m0fnu)
                             weights[name] = value
                     elif isinstance(attr, EngramEmbeddingWeight):
-                        weights[attr.prefix + ".weight"] = torch.randn(660, 64).to(torch.float8_e4m3fn)
-                        weights[attr.prefix + ".scale"] = torch.full((660, 2), 0.03125).to(torch.float8_e8m0fnu)
+                        weights[attr.prefix + ".weight"] = torch.randn(attr.weight.shape).to(torch.float8_e4m3fn)
+                        weights[attr.prefix + ".scale"] = torch.full(attr.scale.shape, 0.03125).to(torch.float8_e8m0fnu)
                     elif isinstance(attr, BaseWeight):
                         value = (
                             torch.ones_like(attr.weight, device="cpu")
@@ -1312,7 +1312,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             torch.testing.assert_close(actual.mtp_collector.spec_hidden, reference_hidden, atol=0, rtol=0)
         selected = model.hidden_collector_prototype.layer_ids if dspark else ()
         for index, layer in enumerate(model.layers_infer):
-            assert layer.defer_hc_post == (index + 1 != engram_layer and index not in selected)
+            assert layer.defer_hc_post == (index + 1 not in engram_layers and index not in selected)
 
         # Exercise native fused decode too; the remaining checks use the Torch
         # projection to isolate attention / quantization differences.
@@ -1811,7 +1811,8 @@ def test_engram_host_embedding_uses_fp8_scales_and_zeroes_other_tp_rows(monkeypa
     assert embedding.verify_load()
     # Inspect this rank's contribution before the normal TP sum.
     embedding.tp_world_size_ = 1
-    ids = torch.tensor([[0, 3, 4, 7]], dtype=torch.int64, device="cuda")
+    ids = torch.zeros(1, 2, 8, dtype=torch.int64, device="cuda")[:, 1, ::2]
+    ids.copy_(torch.tensor([[0, 3, 4, 7]], device="cuda"))
     actual = embedding.lookup(ids).view(4, 64)
     expected = (raw.float() * scale.float().repeat_interleave(32, -1)).bfloat16().cuda()
     torch.testing.assert_close(actual[:2], expected[[0, 3]], atol=0, rtol=0)
@@ -1830,8 +1831,9 @@ def test_engram_prefetch_graph_reads_new_hashes_and_reduces_on_consumer_stream(m
     embedding.load_hf_weights({embedding.prefix + ".weight": raw, embedding.prefix + ".scale": scale})
     state = DeepseekV41InferStateInfo()
     state.engram_stream = torch.cuda.Stream()
-    ids = torch.tensor([[0, 3], [4, 7]], device="cuda")
-    state.engram_hashes = ids[:, None, :]
+    state.engram_hashes = torch.zeros(2, 2, 2, dtype=torch.int64, device="cuda")
+    ids = state.engram_hashes[:, 0]
+    ids.copy_(torch.tensor([[0, 3], [4, 7]], device="cuda"))
     weight = SimpleNamespace(engram_embed_=embedding)
     collectives = []
     consumers = []
@@ -1887,6 +1889,77 @@ def test_engram_dp_ranks_share_host_table_and_load_once(monkeypatch):
         second._host_registration()
         first._host_shm.unlink()
         get_unique_server_name.cache_clear()
+
+
+@pytest.mark.parametrize("tokens", [0, 1, 6, 17, 513])
+@pytest.mark.parametrize("heads", [2, 8])
+@pytest.mark.parametrize("vision", [False, True])
+def test_engram_fused_hash_matches_torch_for_ragged_inputs_and_graph(monkeypatch, tokens, heads, vision):
+    from lightllm.models.deepseek_v41 import engram
+
+    config = dict(
+        vision_n_layers=int(vision),
+        engram_compressed_vocab_size=64,
+        engram_pad_token_id=2,
+        engram_max_ngram_size=4,
+        engram_layer_ids=[1, 14],
+        engram_vocab_size=101,
+        engram_n_heads=heads,
+    )
+    monkeypatch.setattr(engram, "build_compressed_token_map", lambda _: (list(range(64)), 64))
+    length = tokens + 132
+    table = torch.randperm(3 * length, device="cuda").int().view(3, length)
+    hasher = engram.EngramHasher(config, None, table.numel())
+    hasher.history.random_(64)
+    hasher.history[table[:, 126].long()] = -1 if vision else 0
+    row = torch.arange(tokens, device="cuda")
+    req = (row % 3).int()
+    position = (row // 3 + torch.tensor([0, 127, 130], device="cuda")[req.long()]).int()
+    ids = torch.randint(64, (tokens,), device="cuda")
+    if vision:
+        ids[::5] = 1000
+    state = SimpleNamespace(
+        input_ids=ids,
+        position_ids=position,
+        dsv4_sparse_req_idx=req,
+        mem_index=table[req.long(), position.long()],
+        req_manager=SimpleNamespace(req_to_token_indexs=table),
+    )
+    before = hasher.history.clone()
+
+    def reference():
+        hasher.history[state.mem_index.long()] = hasher._map_token_ids(ids)
+        positions, reqs = position.long(), req.long()
+        blocked = torch.zeros_like(positions, dtype=torch.bool)
+        previous_tokens = []
+        for shift in range(hasher.order):
+            slot = table[reqs, (positions - shift).clamp_min(0)].long()
+            source = hasher.history[slot]
+            blocked |= (positions < shift) | (source == -1)
+            previous_tokens.append(torch.where(blocked, hasher.pad, source))
+        products = torch.stack(previous_tokens, -1)[:, None, :] * hasher.multipliers[None, :, :]
+        rolling, hashes = products[..., 0], []
+        for shift in range(1, hasher.order):
+            rolling = torch.bitwise_xor(rolling, products[..., shift])
+            hashes.append(rolling[..., None] % hasher.primes[:, (shift - 1) * heads : shift * heads])
+        return torch.cat(hashes, -1) + hasher.offsets
+
+    expected = reference()
+    expected_history = hasher.history.clone()
+    hasher.history.copy_(before)
+    torch.testing.assert_close(hasher(state), expected, atol=0, rtol=0)
+    torch.testing.assert_close(hasher.history, expected_history, atol=0, rtol=0)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = hasher(state)
+    ids.random_(64)
+    hasher.history.copy_(before)
+    expected = reference()
+    expected_history = hasher.history.clone()
+    hasher.history.copy_(before)
+    graph.replay()
+    torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    torch.testing.assert_close(hasher.history, expected_history, atol=0, rtol=0)
 
 
 @pytest.mark.parametrize("vision", [False, True])

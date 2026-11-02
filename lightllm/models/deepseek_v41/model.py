@@ -62,10 +62,11 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
         return super().forward(model_input)
 
     def _token_forward(self, infer_state):
-        if not self.is_mtp_draft_model and self.config["engram_layer_ids"] and self.config["engram_layer_ids"][0] == 0:
+        if not self.is_mtp_draft_model and self.config["engram_layer_ids"]:
             # This must run inside the decode graph, rather than in state setup:
             # a replay must gather fresh embeddings from the staged hash inputs.
-            infer_state.prefetch_engram(self.trans_layers_weight[0], 0)
+            first = self.config["engram_layer_ids"][0]
+            infer_state.prefetch_engram(self.trans_layers_weight[first], 0)
         return super()._token_forward(infer_state)
 
     def _init_config(self):
@@ -129,9 +130,11 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             )
             self.token_lookback_depth = self.engram_hasher.order - 1
             self.engram_stream = torch.cuda.Stream()
-            for index, layer_id in enumerate(self.config["engram_layer_ids"]):
-                if layer_id:
-                    self.layers_infer[layer_id - 1].next_engram = (index, self.trans_layers_weight[layer_id])
+            # Once one Engram is consumed, start the next lookup rather than
+            # waiting until the layer immediately preceding its consumer.
+            layers = self.config["engram_layer_ids"]
+            for index in range(1, len(layers)):
+                self.layers_infer[layers[index - 1]].next_engram = (index, self.trans_layers_weight[layers[index]])
 
 
 class DeepseekV41VisionTpPartModel(DeepseekV41TpPartModel):

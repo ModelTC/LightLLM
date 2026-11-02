@@ -96,25 +96,99 @@ class EngramHasher:
         self.history[slots] = self._map_token_ids(rows[:, 2])
 
     def __call__(self, state):
-        positions = state.position_ids.long()
-        reqs = state.dsv4_sparse_req_idx.long()
-        slots = state.mem_index.long()
-        ids = state.input_ids.long()
-        self.history[slots] = self._map_token_ids(ids)
-        tokens = []
-        blocked = torch.zeros_like(positions, dtype=torch.bool)
-        for shift in range(self.order):
-            previous = (positions - shift).clamp_min(0)
-            previous_slots = state.req_manager.req_to_token_indexs[reqs, previous].long()
-            source = self.history[previous_slots]
-            blocked = blocked | (positions < shift) | (source == -1)
-            tokens.append(torch.where(blocked, self.pad, source))
-        products = torch.stack(tokens, -1)[:, None, :] * self.multipliers[None, :, :]
-        rolling, hashes = products[..., 0], []
-        for shift in range(1, self.order):
-            rolling = torch.bitwise_xor(rolling, products[..., shift])
-            hashes.append(rolling[..., None] % self.primes[:, (shift - 1) * self.heads : shift * self.heads])
-        return torch.cat(hashes, -1) + self.offsets
+        count = state.input_ids.numel()
+        layers, columns = self.primes.shape
+        # All rows must reach history before other CTAs read their predecessors:
+        # a prefill chunk or MTP verification can contain several rows per request.
+        _store_engram_tokens[(triton.cdiv(count, 256),)](
+            state.input_ids,
+            state.mem_index,
+            self.token_map,
+            self.history,
+            count,
+            self.token_map.numel(),
+            self.has_vision,
+            256,
+        )
+        out = torch.empty((count, layers, columns), dtype=torch.int64, device=state.input_ids.device)
+        _engram_hash[(triton.cdiv(count, 16), layers)](
+            state.position_ids,
+            state.dsv4_sparse_req_idx,
+            state.req_manager.req_to_token_indexs,
+            self.history,
+            self.multipliers,
+            self.primes,
+            self.offsets,
+            out,
+            count,
+            state.req_manager.req_to_token_indexs.stride(0),
+            self.pad,
+            self.order,
+            self.heads,
+            layers,
+            16,
+            triton.next_power_of_2(self.heads),
+        )
+        return out
+
+
+@triton.jit
+def _store_engram_tokens(
+    IDS, SLOTS, TOKEN_MAP, HISTORY, N, VOCAB: tl.constexpr, VISION: tl.constexpr, BLOCK: tl.constexpr
+):
+    row = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    valid = row < N
+    token = tl.load(IDS + row, valid, 0)
+    slot = tl.load(SLOTS + row, valid, 0).to(tl.int64)
+    mapped = tl.load(TOKEN_MAP + token, valid & (token < VOCAB) if VISION else valid, -1)
+    tl.store(HISTORY + slot, mapped, valid)
+
+
+@triton.jit
+def _engram_hash(
+    POSITIONS,
+    REQS,
+    REQ_TO_TOKEN,
+    HISTORY,
+    MULTIPLIERS,
+    PRIMES,
+    OFFSETS,
+    OUT,
+    N,
+    REQ_STRIDE: tl.constexpr,
+    PAD: tl.constexpr,
+    ORDER: tl.constexpr,
+    HEADS: tl.constexpr,
+    LAYERS: tl.constexpr,
+    BLOCK_T: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    row = tl.program_id(0) * BLOCK_T + tl.arange(0, BLOCK_T)
+    layer = tl.program_id(1)
+    head = tl.arange(0, BLOCK_H)
+    valid = row < N
+    position = tl.load(POSITIONS + row, valid, 0)
+    req = tl.load(REQS + row, valid, 0).to(tl.int64)
+    blocked = tl.full((BLOCK_T,), False, tl.int1)
+    rolling = tl.full((BLOCK_T,), 0, tl.int64)
+    columns: tl.constexpr = (ORDER - 1) * HEADS
+    for shift in tl.static_range(ORDER):
+        slot = tl.load(REQ_TO_TOKEN + req * REQ_STRIDE + tl.maximum(position - shift, 0), valid, 0).to(tl.int64)
+        source = tl.load(HISTORY + slot, valid, 0)
+        blocked = blocked | (position < shift) | (source == -1)
+        token = tl.where(blocked, PAD, source)
+        multiplier = tl.load(MULTIPLIERS + layer * ORDER + shift)
+        rolling = rolling ^ (token * multiplier)
+        if shift > 0:
+            col = (shift - 1) * HEADS + head
+            prime = tl.load(PRIMES + layer * columns + col, head < HEADS, 1)
+            offset = tl.load(OFFSETS + layer * columns + col, head < HEADS, 0)
+            hashed = rolling[:, None] % prime[None, :] + offset[None, :]
+            tl.store(
+                OUT + row[:, None] * LAYERS * columns + layer * columns + col[None, :],
+                hashed,
+                valid[:, None] & (head[None, :] < HEADS),
+            )
 
 
 @triton.jit
