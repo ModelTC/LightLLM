@@ -175,8 +175,8 @@ class StaticFP8FullAttentionState(FullAttentionState):
         self.q_scales = q_scales
 
     def get_state_type(self) -> str:
-        """返回包含 per-tensor 或 per-head 标定方式的 FP8 方案标记。"""
-        return "gqa_fp8_static_" + self.config.scale_mode
+        """返回包含标定方式及全局 head 布局的 FP8 方案标记。"""
+        return f"gqa_fp8_static_{self.config.scale_mode}_h{self.config.global_head_num}_d{self.config.head_dim}"
 
     def allocate_storage(self, token_capacity: int) -> None:
         """绑定 KV 与真实标定参数，并预备 FlashInfer 使用的 CPU scale。"""

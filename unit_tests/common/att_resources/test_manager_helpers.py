@@ -36,7 +36,7 @@ def composition(device: str | torch.device | int = "cpu"):
 def layouts_for(manager: AttentionStateManager, kind: str = "cpu"):
     layouts = []
     if kind != "att_state":
-        layouts += [layout_for(state) for state in (manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)]
+        layouts += [layout_for(state) for state in (manager.main_gqa_fp32_h1_d4_state, manager.draft0_mla_fp32_state)]
     if kind != "kv":
         layouts += [
             page_layout(state)
@@ -61,7 +61,7 @@ def layouts_for(manager: AttentionStateManager, kind: str = "cpu"):
 
 
 def init_source(manager: AttentionStateManager):
-    for i, state in enumerate((manager.main_gqa_fp32_state, manager.draft0_mla_fp32_state)):
+    for i, state in enumerate((manager.main_gqa_fp32_h1_d4_state, manager.draft0_mla_fp32_state)):
         for storage_buffer in full_state_test_buffers(state).values():
             storage_buffer.copy_(
                 torch.arange(storage_buffer.numel(), device=storage_buffer.device).reshape_as(storage_buffer) + i
