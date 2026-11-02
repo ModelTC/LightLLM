@@ -205,3 +205,28 @@ H200完整V4.1 GPU回归155 passed；补充首个decoder层计数断言后边界
 同一双卡测试还模拟源进程Engram history完全缺失，真实CPU输入和preprocess生成129行encoder replay、128行decoder尾窗对应输入，保留原始提交边界；从实际replay起点恢复lookback后，两层Engram hash与整段参考逐位相同，cur_kv_len不被重算倒退。这里只验证DSpark5 cache布局，未启动完整DSpark服务或声称测过整机接收率。
 
 公共源ID/接收引用及V4/V4.1容量契约CPU回归11 passed；允许fetch的V4.1参数与tiny model回归17 passed，含文本/vision、Engram首层/中间层、DSpark及decode Graph。将既有checkpoint GPU回归从已删除的SWA-page API更新为当前请求ring/CacheConfig接口；未为兼容旧fixture改生产接口。Black/Flake8及git diff --check通过。日志：/mnt/vqa/wanzihao/v41_ced_fetch_20261102/fetch_gpu.log、fetch_cpu.log、fetch_model_gpu.log。尚未做完整权重四机服务、GSM8K或LLM Bench性能验收，未把功能通过写成TTFT/TPM收益。
+
+
+### 2026-11-02：V4.1 复用 V4 的跨层延迟 mHC post
+
+将 support_ds4 已有的跨层衔接补到 V4.1：非末层 FFN 输出先携带 (x, residual, residual_mix, post_mix, shifted_pre)，下一层 attention 入口调用现有公共 hc_post_pre_norm(previous_pre=...)，合并上一层 post 与本层 shifted pre / RMSNorm。未新增算子、后端、依赖或 CLI 开关；生产代码仅两个文件增加22行。共享算子的原有选择不变：shifted 路径不超过8行才融合 post 与投影，较大 batch 仍使用原 post + DeepGEMM。
+
+Engram 前一层立即完成 post，保证注入发生在完整 residual 上、下一层 mHC 投影之前。DSpark 由现有 hidden collector 的目标层声明在初始化时关闭这些层的延迟，直接收集已完成的 streams，不在 collector 与下一层重复做 post。末层按运行时 is_last_layer 完成 post，兼容 DSpark draft 构造时重新确定末层的顺序。CED 首个 decoder 层仍先对全量 encoder rows 完成混合、归一化和共享 KV 写入，再裁剪尾窗；未改变20+20契约。
+
+H200、hidden=5120、BF16 residual、FP32 mixing、Sinkhorn20次，走真实 V4.1 _hc_ffn_out → _hc_attn_in 调用，比较立即完成与延迟完成两种路径。CUDA Graph 微测，三轮 median；LIGHTLLM_TRITON_AUTOTUNE_LEVEL 未设置（默认0），使用现有/默认 kernel 配置，没有强制新一轮 autotune。时间仅为单个跨层 mHC 衔接，不含 attention / MoE，不代表完整模型 TPOT 或 TPM。
+
+| Query 行数 | 原立即 post（μs） | 跨层衔接（μs） | 耗时变化 |
+| --- | ---: | ---: | ---: |
+| 1 | 11.063 | 8.318 | -24.81% |
+| 6 | 11.556 | 11.191 | -3.15% |
+| 16 | 11.936 | 11.961 | +0.21% |
+| 32 | 12.461 | 12.477 | +0.13% |
+| 64 | 13.151 | 13.172 | +0.16% |
+| 128 | 15.223 | 15.169 | -0.36% |
+| 8192 | 387.393 | 388.169 | +0.20% |
+
+16行及以上复用相同的原有 GPU 算子，变化处于本次微测噪声范围；收益集中在小 batch decode。本次只是接通现有跨层融合，未实现论文完整 Mega-mHC 或系数计算的跨流重叠。
+
+GPU 唯一用例合计169 passed、8 skipped：专项24项（8项真实 kernel 的跨层 shifted 系数/输入不变性/更新输入后的 CUDA Graph，以及16组 tiny model），其余回归145项。跳过项依赖本容器未挂载的官方视觉参考 image_processor / tokenizer；已有 tiny vision 路径通过。tiny model 的256行 prefill 对照原立即 post 路径，logits 及 DSpark hidden 逐位相同；补充原生 DeepGEMM 开启的单 token decode 对照 logits 与 hidden，16组复验通过（已计入169项，不重复累加）。保留 BF16 舍入，native decode 采用既有数值容差。覆盖 Engram 首层/中间层、FP8/历史 FP4 测试 fixture、DSpark draft、20+20 CED、checkpoint恢复及 decode Graph。
+
+Black/Flake8、git diff --check 通过。记录：/mnt/vqa/wanzihao/v41_cross_layer_mhc_20261102/ 下 model_gpu.log、regression_gpu.log、native_model_gpu.log、boundary_bench.jsonl/.stderr、environment.json；复跑微测使用 test/benchmark/kernel/benchmark_dsv41_mhc.py。未启动或修改在线服务，未测试完整权重 GSM8K/整机性能。既有部署文件和 test.md 未提交内容保留，本次 commit 只包含该优化与本条新增记录。

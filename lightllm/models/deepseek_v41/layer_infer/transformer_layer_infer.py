@@ -29,8 +29,25 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
             if layer_num in network_config["engram_layer_ids"]
             else None
         )
+        # Engram consumes completed streams before the next attention pre.
+        self.defer_hc_post = layer_num + 1 not in network_config["engram_layer_ids"]
 
     def _hc_attn_in(self, input_embdings, infer_state, layer_weight):
+        if isinstance(input_embdings, tuple) and len(input_embdings) == 5:
+            # Finish the previous FFN post together with this layer's shifted pre.
+            return hc_post_pre_norm(
+                *input_embdings[:4],
+                fn=layer_weight.hc_attn_fn_.weight,
+                scale=layer_weight.hc_attn_scale_.weight,
+                base=layer_weight.hc_attn_base_.weight,
+                norm_weight=layer_weight.attn_norm_.weight,
+                streams=self.hc_mult,
+                rms_eps=self.eps_,
+                norm_eps=self.eps_,
+                hc_eps=self.hc_eps,
+                sinkhorn_iters=self.sinkhorn_iters,
+                previous_pre=input_embdings[4],
+            )
         if isinstance(input_embdings, tuple):
             streams, pre_mix = input_embdings
         else:
@@ -89,6 +106,8 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         return x, streams, res_mix, post_mix, ffn_pre
 
     def _hc_ffn_out(self, x, residual, res_mix, post_mix, ffn_pre):
+        if self.defer_hc_post and not self.is_last_layer:
+            return x, residual, res_mix, post_mix, ffn_pre
         streams = hc_post(x, residual, res_mix, post_mix, streams=self.hc_mult)
         return streams, ffn_pre
 

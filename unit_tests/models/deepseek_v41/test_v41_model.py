@@ -628,6 +628,73 @@ def test_shifted_mhc_uses_previous_pre_and_returns_new_coefficients(monkeypatch)
     torch.testing.assert_close(new_pre, expected_pre, atol=1e-6, rtol=1e-5)
 
 
+@pytest.mark.parametrize("tokens", [1, 6, 16, 128])
+@pytest.mark.parametrize("hidden", [128, 5120])
+def test_cross_layer_mhc_preserves_shifted_coefficients_and_graph_inputs(tokens, hidden):
+    from lightllm.models.deepseek_v41.layer_infer.transformer_layer_infer import DeepseekV41TransformerLayerInfer
+    from lightllm.common.basemodel.triton_kernel.mhc import hc_post
+    from lightllm.common.basemodel.triton_kernel.mhc.pre_norm import hc_pre_norm_shifted
+
+    layer = DeepseekV41TransformerLayerInfer.__new__(DeepseekV41TransformerLayerInfer)
+    layer.hc_mult = 4
+    layer.eps_ = layer.hc_eps = 1e-6
+    layer.sinkhorn_iters = 20
+    layer.engram_index = None
+    layer.is_last_layer = False
+    layer.defer_hc_post = True
+    weight = SimpleNamespace(
+        hc_attn_fn_=SimpleNamespace(weight=torch.randn(24, 4 * hidden, device="cuda") * 0.005),
+        hc_attn_scale_=SimpleNamespace(weight=torch.randn(3, device="cuda")),
+        hc_attn_base_=SimpleNamespace(weight=torch.randn(24, device="cuda")),
+        attn_norm_=SimpleNamespace(weight=torch.randn(hidden, dtype=torch.bfloat16, device="cuda")),
+    )
+    residual = torch.randn(tokens, 4 * hidden, dtype=torch.bfloat16, device="cuda")
+    y = torch.randn(tokens, hidden, dtype=torch.bfloat16, device="cuda")
+    mix = torch.randn(tokens, 4, 4, device="cuda").softmax(-1)
+    post, previous = torch.rand(tokens, 4, device="cuda"), torch.rand(tokens, 4, device="cuda")
+    before = residual.clone()
+
+    def run():
+        pending = layer._hc_ffn_out(y, residual, mix, post, previous)
+        assert len(pending) == 5
+        return layer._hc_attn_in(pending, None, weight)
+
+    def check(actual):
+        updated = hc_post(y, residual, mix, post, 4)
+        result = hc_pre_norm_shifted(
+            updated,
+            previous,
+            weight.hc_attn_fn_.weight,
+            weight.hc_attn_scale_.weight,
+            weight.hc_attn_base_.weight,
+            weight.attn_norm_.weight,
+            1e-6,
+            1e-6,
+            1e-6,
+            20,
+        )
+        expected = result[0], updated, *result[1:]
+        for i, (a, b) in enumerate(zip(actual, expected)):
+            torch.testing.assert_close(a, b, atol=0.04 if i < 2 else 2e-4, rtol=0.03 if i < 2 else 2e-3)
+        torch.testing.assert_close(residual, before, atol=0, rtol=0)
+
+    check(run())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = run()
+    previous.uniform_()
+    y.normal_()
+    graph.replay()
+    check(captured)
+
+    # Engram / selected DSpark boundaries and the last layer still publish completed streams.
+    for last, defer in ((False, False), (True, True)):
+        layer.is_last_layer, layer.defer_hc_post = last, defer
+        completed, actual_pre = layer._hc_ffn_out(y, residual, mix, post, previous)
+        torch.testing.assert_close(completed, hc_post(y, residual, mix, post, 4), atol=0, rtol=0)
+        assert actual_pre is previous
+
+
 @pytest.mark.parametrize("scale_first", [False, True])
 @pytest.mark.parametrize("tokens", [1, 17, 256])
 def test_block32_fp8_loader_and_native_gemm(scale_first, tokens):
@@ -1213,6 +1280,57 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         def prefill(start, end, req_idx=0):
             return model.forward(prefill_input(start, end, req_idx)).logits.clone()
 
+        def decode_input(ids, position):
+            count = len(ids)
+            return ModelInput(
+                batch_size=count,
+                total_token_num=count,
+                max_q_seq_len=1,
+                max_kv_seq_len=position + count,
+                max_cache_len=position,
+                input_ids=ids,
+                b_req_idx=torch.zeros(count, dtype=torch.int32),
+                b_mtp_index=torch.zeros(count, dtype=torch.int32),
+                b_seq_len=torch.arange(position + 1, position + count + 1, dtype=torch.int32),
+                b_position_delta=torch.zeros(count, dtype=torch.int32),
+                b_shared_seq_len=torch.zeros(count, dtype=torch.int32),
+                b_shared_radix_node_id=torch.zeros(count, dtype=torch.int32),
+                is_prefill=False,
+                multimodal_params=[{"images": [], "audios": []}] * count,
+            )
+
+        # Compare against the eager-post path, including Engram injection and CED trimming.
+        with monkeypatch.context() as eager_post:
+            for layer in model.layers_infer:
+                eager_post.setattr(layer, "defer_hc_post", False)
+            reference = model.forward(prefill_input(0, 256))
+            reference_logits = reference.logits.clone()
+            reference_hidden = reference.mtp_collector.spec_hidden.clone() if dspark else None
+        actual = model.forward(prefill_input(0, 256))
+        torch.testing.assert_close(actual.logits, reference_logits, atol=0, rtol=0)
+        if dspark:
+            torch.testing.assert_close(actual.mtp_collector.spec_hidden, reference_hidden, atol=0, rtol=0)
+        selected = model.hidden_collector_prototype.layer_ids if dspark else ()
+        for index, layer in enumerate(model.layers_infer):
+            assert layer.defer_hc_post == (index + 1 != engram_layer and index not in selected)
+
+        # Exercise native fused decode too; the remaining checks use the Torch
+        # projection to isolate attention / quantization differences.
+        with monkeypatch.context() as native:
+            native.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", False)
+            with monkeypatch.context() as eager_post:
+                for layer in model.layers_infer:
+                    eager_post.setattr(layer, "defer_hc_post", False)
+                prefill(0, 256)
+                reference = model.forward(decode_input(tokens[256:257], 256))
+                reference_logits = reference.logits.clone()
+                reference_hidden = reference.mtp_collector.spec_hidden.clone() if dspark else None
+            prefill(0, 256)
+            actual = model.forward(decode_input(tokens[256:257], 256))
+            torch.testing.assert_close(actual.logits, reference_logits, atol=0.0625, rtol=0.03)
+            if dspark:
+                torch.testing.assert_close(actual.mtp_collector.spec_hidden, reference_hidden, atol=0.04, rtol=0.03)
+
         if dspark:
             from copy import copy
             from lightllm.models.draft_registry import DraftModelRegistry
@@ -1281,25 +1399,6 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 draft.forward(commit)
             # Every draft stage owns target-hidden KV, without modifying target history.
             assert model.req_manager.req_to_swa[5:].count_nonzero() > 0
-
-            def decode_input(ids, position):
-                count = len(ids)
-                return ModelInput(
-                    batch_size=count,
-                    total_token_num=count,
-                    max_q_seq_len=1,
-                    max_kv_seq_len=position + count,
-                    max_cache_len=position,
-                    input_ids=ids,
-                    b_req_idx=torch.zeros(count, dtype=torch.int32),
-                    b_mtp_index=torch.zeros(count, dtype=torch.int32),
-                    b_seq_len=torch.arange(position + 1, position + count + 1, dtype=torch.int32),
-                    b_position_delta=torch.zeros(count, dtype=torch.int32),
-                    b_shared_seq_len=torch.zeros(count, dtype=torch.int32),
-                    b_shared_radix_node_id=torch.zeros(count, dtype=torch.int32),
-                    is_prefill=False,
-                    multimodal_params=[{"images": [], "audios": []}] * count,
-                )
 
             verify = decode_input(tokens[256:260], 256)
             verified = model.forward(verify)

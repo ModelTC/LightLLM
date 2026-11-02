@@ -110,6 +110,9 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     def _init_hidden_collector(self):
         if not self.is_mtp_draft_model and self.mtp_manager.args.mtp_mode == "dspark":
             self.hidden_collector_prototype = DeepseekV41LayerHiddenCollector(self)
+            # Collect completed streams once, without repeating post in the next layer.
+            for layer in self.hidden_collector_prototype.layer_ids:
+                self.layers_infer[layer].defer_hc_post = False
         else:
             super()._init_hidden_collector()
 
