@@ -255,42 +255,6 @@ def get_hidden_size(model_path: str) -> Optional[int]:
     return None
 
 
-@lru_cache(maxsize=None)
-def get_num_key_value_heads(model_path: str) -> int:
-    num_key_value_heads = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_key_value_heads"])
-    if isinstance(num_key_value_heads, int):
-        return num_key_value_heads
-    return None
-
-
-@lru_cache(maxsize=None)
-def get_num_attention_heads(model_path: str) -> int:
-    num_attention_heads = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_attention_heads"])
-    if isinstance(num_attention_heads, int):
-        return num_attention_heads
-    return None
-
-
-@lru_cache(maxsize=None)
-def get_head_dim(model_path: str) -> int:
-    head_dim = _get_config_llm_keyvalue(model_path=model_path, key_name=["head_dim"])
-    if isinstance(head_dim, int):
-        return head_dim
-
-    # calcu head_dim
-    head_dim = get_hidden_size(model_path=model_path) // get_num_attention_heads(model_path=model_path)
-
-    return head_dim
-
-
-@lru_cache(maxsize=None)
-def get_layer_num(model_path: str) -> int:
-    num_hidden_layers = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_hidden_layers"])
-    if isinstance(num_hidden_layers, int):
-        return num_hidden_layers
-    return None
-
-
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
     # gemma4 special eos_token_id
     try:
@@ -406,19 +370,6 @@ def get_dtype(model_path: str):
         return "float16"
     else:
         return torch_dtype
-
-
-@lru_cache(maxsize=None)
-def get_fixed_kv_len():
-    start_args = get_env_start_args()
-    model_cfg = get_config_json(start_args.model_dir)
-    if "prompt_cache_token_ids" in model_cfg:
-        fixed_kv_len = len(model_cfg["prompt_cache_token_ids"])
-        # 固定 KV 最终会插入 radix cache，只加载完整的模型 KV 页面；不足一页
-        # 的尾部直接截断，因此 router 也只扣除实际常驻的页面容量。
-        return fixed_kv_len // start_args.page_size * start_args.page_size
-    else:
-        return 0
 
 
 @lru_cache(maxsize=None)

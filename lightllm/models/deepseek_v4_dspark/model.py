@@ -53,21 +53,25 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         assert not self.mtp_previous_draft_models, "DeepSeek-V4 DSpark uses one parallel draft model"
         super().__init__(kvargs)
 
-    def _init_config(self):
-        super()._init_config()
-        draft_layer_num = len(self.config["compress_ratios"]) - self.config["n_layer"]
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        config = super().normalize_model_config(model_config)
+        # draft 接在 main 的逻辑层之后；实际 checkpoint 权重使用 mtp.{stage_id} 前缀。
+        config.setdefault("draft_layer_start_id", config["num_hidden_layers"])
+        draft_layer_num = len(config["compress_ratios"]) - config["draft_layer_start_id"]
         assert draft_layer_num > 0
-        assert self.config["compress_ratios"][-draft_layer_num:] == [0] * draft_layer_num
-        assert len(self.config["dspark_target_layer_ids"]) == draft_layer_num
-        self.config["dspark_layer_num"] = draft_layer_num
+        assert config["compress_ratios"][-draft_layer_num:] == [0] * draft_layer_num
+        assert len(config["dspark_target_layer_ids"]) == draft_layer_num
+        config.update(num_hidden_layers=draft_layer_num, n_layer=draft_layer_num)
 
         # Aliases consumed by the shared block/Markov implementation.
-        self.config["block_size"] = int(self.config["dspark_block_size"])
-        self.config["mask_token_id"] = int(self.config["dspark_noise_token_id"])
-        self.config["markov_rank"] = int(self.config["dspark_markov_rank"])
-        self.config["markov_head_type"] = "vanilla"
-        self.config["enable_confidence_head"] = True
-        self.config["confidence_head_with_markov"] = True
+        config["block_size"] = int(config["dspark_block_size"])
+        config["mask_token_id"] = int(config["dspark_noise_token_id"])
+        config["markov_rank"] = int(config["dspark_markov_rank"])
+        config["markov_head_type"] = "vanilla"
+        config["enable_confidence_head"] = True
+        config["confidence_head_with_markov"] = True
+        return config
 
     def _verify_params(self):
         super()._verify_params()
@@ -82,8 +86,8 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
 
     def _init_quant(self):
         super()._init_quant()
-        expert_quant_type = self.quant_cfg.get_quant_type(self.config["n_layer"] - 1, "fused_moe")
-        for layer_idx in range(self.config["n_layer"], len(self.config["compress_ratios"])):
+        expert_quant_type = self.quant_cfg.get_quant_type(self.config["draft_layer_start_id"] - 1, "fused_moe")
+        for layer_idx in range(self.config["draft_layer_start_id"], len(self.config["compress_ratios"])):
             self.quant_cfg.quant_cfg[layer_idx]["fused_moe"] = expert_quant_type
 
     def _init_weights(self, start_layer_index=None):
@@ -94,7 +98,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
         )
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
-        first_layer = self.config["n_layer"]
+        first_layer = self.config["draft_layer_start_id"]
         self.trans_layers_weight = [
             self.transformer_weight_class(
                 first_layer + stage_id,
@@ -102,7 +106,7 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
                 network_config=self.config,
                 quant_cfg=self.quant_cfg,
             )
-            for stage_id in range(self.config["dspark_layer_num"])
+            for stage_id in range(self.config["n_layer"])
         ]
         self.context_wkv_weight = ROWMMWeight(
             in_dim=self.config["hidden_size"],
@@ -113,12 +117,6 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             tp_rank=0,
             tp_world_size=1,
         )
-
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
         # A DSpark logical request always occupies one complete physical block.
@@ -134,15 +132,11 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
     def _init_infer_layer(self, start_layer_index=None):
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
-        first_layer = self.config["n_layer"]
+        first_layer = self.config["draft_layer_start_id"]
         self.layers_infer = [
             self.transformer_layer_infer_class(first_layer + stage_id, network_config=self.config)
-            for stage_id in range(self.config["dspark_layer_num"])
+            for stage_id in range(self.config["n_layer"])
         ]
-
-    def _init_some_value(self):
-        super()._init_some_value()
-        self.layers_num = self.config["dspark_layer_num"]
 
     def _init_custom(self):
         self._freqs_cis_sliding = self.main_model._freqs_cis_sliding

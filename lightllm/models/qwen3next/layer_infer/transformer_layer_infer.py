@@ -8,7 +8,6 @@ from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTrans
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
-from lightllm.common.kv_cache_mem_manager import Qwen3NextMemManager
 from lightllm.common.basemodel.attention.base_att import AttControl
 from typing import Tuple
 from lightllm.models.qwen3next.triton_kernel.shared_expert_gate import sigmoid_mul_
@@ -245,7 +244,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if not self.is_linear_attention_layer:
             return super().context_attention_forward(input_embdings, infer_state, layer_weight)
 
-        assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
 
         if torch.cuda.is_current_stream_capturing():
@@ -281,7 +279,6 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
         if not self.is_linear_attention_layer:
             return super().token_attention_forward(input_embdings, infer_state, layer_weight)
 
-        assert isinstance(infer_state.mem_manager, Qwen3NextMemManager)
         mixed_qkvzba = self._linear_in_proj(input_embdings, layer_weight)
         core_attn_out, z = infer_state.decode_att_state1.decode_att(
             q=None,

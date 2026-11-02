@@ -15,7 +15,7 @@ def _build_dspark_swa_indices_kernel(
     HOLD_REQUEST_ID: tl.constexpr,
     HOLD_SWA_SLOT: tl.constexpr,
     SLIDING_WINDOW: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr,
+    block_size,
     WIDTH: tl.constexpr,
     BLOCK_W: tl.constexpr,
 ):
@@ -24,14 +24,16 @@ def _build_dspark_swa_indices_kernel(
     position = tl.load(position_ids + token_idx).to(tl.int64)
     is_hold = req_idx == HOLD_REQUEST_ID
 
-    block_offset = token_idx % BLOCK_SIZE
+    # draft proposal 长度随请求变化，不参与编译期分支；保持运行时参数避免
+    # 每种 MTP 接受长度都生成一份新的 kernel。
+    block_offset = token_idx % block_size
     block_start = tl.maximum(position - block_offset, 0)
     history_len = tl.minimum(block_start, SLIDING_WINDOW)
 
     column = tl.arange(0, BLOCK_W)
     in_width = column < WIDTH
     is_history = column < history_len
-    is_block = (column >= history_len) & (column < history_len + BLOCK_SIZE)
+    is_block = (column >= history_len) & (column < history_len + block_size)
     history_position = block_start - 1 - column
     block_position = block_start + column - history_len
     source_position = tl.where(is_history, history_position, block_position)
@@ -43,7 +45,7 @@ def _build_dspark_swa_indices_kernel(
     output = tl.where(is_hold, HOLD_SWA_SLOT, output).to(tl.int32)
     tl.store(swa_indices + token_idx * swa_indices_stride0 + column, output, mask=in_width)
 
-    length = tl.where(is_hold, 1, history_len + BLOCK_SIZE).to(tl.int32)
+    length = tl.where(is_hold, 1, history_len + block_size).to(tl.int32)
     tl.store(swa_lengths + token_idx, length)
     write_slot = req_idx * SWA_CAPACITY_TOKENS + position % SWA_CAPACITY_TOKENS
     write_slot = tl.where(is_hold, HOLD_SWA_SLOT, write_slot).to(tl.int32)
@@ -53,14 +55,11 @@ def _build_dspark_swa_indices_kernel(
 def build_dspark_swa_indices(
     token_req_idx: torch.Tensor,
     position_ids: torch.Tensor,
-    req_manager,
+    swa_state,
     swa_indices: torch.Tensor,
     swa_lengths: torch.Tensor,
     swa_write_slots: torch.Tensor,
-    sliding_window: int,
     block_size: int,
-    hold_req_id: int,
-    hold_swa_slot: int,
 ):
     """Build ``history SWA + complete draft block`` indices for every DSpark query row."""
 
@@ -76,11 +75,11 @@ def build_dspark_swa_indices(
         swa_indices.stride(0),
         swa_lengths,
         swa_write_slots,
-        SWA_CAPACITY_TOKENS=req_manager.swa_capacity_tokens,
-        HOLD_REQUEST_ID=hold_req_id,
-        HOLD_SWA_SLOT=hold_swa_slot,
-        SLIDING_WINDOW=sliding_window,
-        BLOCK_SIZE=block_size,
+        SWA_CAPACITY_TOKENS=swa_state.swa_capacity_tokens,
+        HOLD_REQUEST_ID=swa_state.HOLD_REQUEST_ID,
+        HOLD_SWA_SLOT=swa_state.HOLD_SWA_SLOT,
+        SLIDING_WINDOW=swa_state.config.window_size,
+        block_size=block_size,
         WIDTH=width,
         BLOCK_W=triton.next_power_of_2(width),
         num_warps=4,

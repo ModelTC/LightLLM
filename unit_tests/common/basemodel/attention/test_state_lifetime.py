@@ -152,3 +152,23 @@ def test_decode_graph_replay_preserves_capture_buffers_and_owner_lifetime(no_cyc
     assert runtime_ref() is None
     graph.graph.clear()
     assert captured_ref() is None
+
+
+@pytest.mark.parametrize("is_prefill", [False, True])
+def test_secondary_state_without_primary(is_prefill):
+    owner = InferStateInfo()
+    owner.is_prefill = is_prefill
+    owner.position_ids = torch.arange(4)
+    slot = "prefill_att_state1" if is_prefill else "decode_att_state1"
+    state_cls = _PrefillState if is_prefill else _DecodeState
+    secondary = state_cls(_infer_state_weak_ref=weakref.ref(owner))
+    setattr(owner, slot, secondary)
+    owner.init_att_state()
+    torch.testing.assert_close(secondary.positions, owner.position_ids)
+    if not is_prefill:
+        runtime = InferStateInfo()
+        runtime.position_ids = owner.position_ids + 7
+        runtime.decode_att_state1 = _DecodeState(_infer_state_weak_ref=weakref.ref(runtime))
+        runtime.decode_att_state1.init_state()
+        owner.copy_for_cuda_graph(runtime)
+        torch.testing.assert_close(secondary.positions, runtime.position_ids)

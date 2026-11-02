@@ -58,20 +58,30 @@ class Fp8FlashInferPrefillAttState(FlashInferPrefillAttState):
             k=k,
             v=v,
             alloc_func=alloc_func,
+            logical_layer_id=att_control.logical_layer_id,
         )
 
     def _fp8_prefill_att(
-        self, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, alloc_func=torch.empty
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        logical_layer_id: int,
+        alloc_func=torch.empty,
     ) -> torch.Tensor:
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
-        k_descale = self.infer_state.mem_manager.cpu_scales[layer_index][0]
-        v_descale = self.infer_state.mem_manager.cpu_scales[layer_index][1]
+        state = getattr(
+            self.infer_state.att_state_manager,
+            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_tensor_state",
+        )
+        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
+        k_descale = state.cpu_scales[storage_layer_index][0]
+        v_descale = state.cpu_scales[storage_layer_index][1]
         self.prefill_wrapper.run(
-            q,
-            (k, v),
+            q=q,
+            paged_kv_cache=(k, v),
             k_scale=k_descale,
             v_scale=v_descale,
             out=o_tensor,
@@ -105,6 +115,7 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
             k=k,
             v=v,
             alloc_func=alloc_func,
+            logical_layer_id=att_control.logical_layer_id,
         )
 
     def _fp8_decode_att(
@@ -112,19 +123,24 @@ class Fp8FlashInferDecodeAttState(FlashInferDecodeAttState):
         q: torch.Tensor,
         k: torch.Tensor,
         v: torch.Tensor,
+        logical_layer_id: int,
         alloc_func=torch.empty,
     ):
         o_tensor = alloc_func(q.shape, q.dtype, device="cuda")
 
         k = k.unsqueeze(1).view(torch.float8_e4m3fn)
         v = v.unsqueeze(1).view(torch.float8_e4m3fn)
-        layer_index = self.backend._find_layer_index(k=k, v=v, att_state=self)
+        state = getattr(
+            self.infer_state.att_state_manager,
+            f"{self.infer_state.att_state_role}_gqa_fp8_static_per_tensor_state",
+        )
+        storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
 
-        k_descale = self.infer_state.mem_manager.cpu_scales[layer_index][0]
-        v_descale = self.infer_state.mem_manager.cpu_scales[layer_index][1]
+        k_descale = state.cpu_scales[storage_layer_index][0]
+        v_descale = state.cpu_scales[storage_layer_index][1]
         self.decode_wrapper.run(
-            q,
-            (k, v),
+            q=q,
+            paged_kv_cache=(k, v),
             k_scale=k_descale,
             v_scale=v_descale,
             out=o_tensor,

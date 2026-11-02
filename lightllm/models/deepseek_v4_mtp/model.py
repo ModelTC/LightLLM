@@ -39,6 +39,14 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         super().__init__(kvargs)
         return
 
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        config = super().normalize_model_config(model_config)
+        # 权重层号用于量化配置及权重构造，与各 draft 实例的执行逻辑层号分别记录。
+        config.setdefault("draft_weight_layer_id", config["num_hidden_layers"])
+        config.update(num_hidden_layers=1, n_layer=1)
+        return config
+
     def _init_custom(self):
         self._freqs_cis_sliding = self.main_model._freqs_cis_sliding
         self._freqs_cis_compress = self.main_model._freqs_cis_compress
@@ -53,16 +61,8 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
             layer.sin_compress_table = self._sin_cached_compress
         return
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-        return
-
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
-        return
-
     def _init_weights(self, start_layer_index=None):
-        mtp_layer_index = self.config["n_layer"]
+        draft_weight_layer_id = self.config["draft_weight_layer_id"]
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
         )
@@ -70,7 +70,7 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
         self.trans_layers_weight = [
             self.transformer_weight_class(
-                mtp_layer_index,
+                draft_weight_layer_id,
                 self.data_type,
                 network_config=self.config,
                 quant_cfg=self.quant_cfg,
@@ -87,11 +87,6 @@ class DeepseekV4MTPModel(DeepseekV4TpPartModel):
         )
         self.layers_infer = [self.transformer_layer_infer_class(total_pre_layers_num, network_config=self.config)]
         assert self.layers_infer[0].compress_ratio == 0, "DeepSeek-V4 MTP draft layer must be SWA-only"
-        return
-
-    def _init_some_value(self):
-        super()._init_some_value()
-        self.layers_num = 1
         return
 
     def _gen_special_model_input(self, token_num: int):

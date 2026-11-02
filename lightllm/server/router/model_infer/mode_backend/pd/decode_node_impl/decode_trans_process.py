@@ -8,7 +8,9 @@ import queue
 import pickle
 from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
-from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.attention_state import AttentionStateManager
+from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
+from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
 from lightllm.server.pd_io_struct import (
     PDChunckedTransTask,
     PDChunckedTransTaskGroup,
@@ -83,20 +85,20 @@ def _init_env(
 
         task_out_queue.put("proc_start")
 
-        # 从共享内存读取所有rank的mem_manager
+        # 从共享内存读取所有 rank 的 attention 资源
         node_world_size = args.tp // args.nnodes
-        mem_managers: List[MemoryManager] = [
-            MemoryManager.loads_from_shm(rank_in_node=rank) for rank in range(node_world_size)
+        resource_managers: List[AttentionStateManager] = [
+            load_att_resources(rank, kind="pd")[0] for rank in range(node_world_size)
         ]
 
-        task_out_queue.put("get_mem_managers_ok")
+        task_out_queue.put("get_resources_ok")
 
         manager = _DecodeTransModule(
             args=args,
             device_id=device_id,
             task_in_queue=task_in_queue,
             task_out_queue=task_out_queue,
-            mem_managers=mem_managers,
+            resource_managers=resource_managers,
             up_status_in_queue=up_status_in_queue,
         )
         assert manager is not None
@@ -119,7 +121,7 @@ class _DecodeTransModule:
         device_id: int,
         task_in_queue: mp.Queue,
         task_out_queue: mp.Queue,
-        mem_managers: List[MemoryManager],
+        resource_managers: List[AttentionStateManager],
         up_status_in_queue: Optional[mp.SimpleQueue],
     ):
         self.args = args
@@ -127,12 +129,12 @@ class _DecodeTransModule:
         self.device_id = device_id
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
-        self.mem_managers = mem_managers
+        self.resource_managers = resource_managers
         self.up_status_in_queue = up_status_in_queue
-        cur_mem_manager: MemoryManager = self.mem_managers[device_id]
-        kv_move_buffer = cur_mem_manager.alloc_paged_kv_move_buffer(
-            page_num=self.args.pd_kv_page_num, page_size=self.args.pd_kv_page_size
+        kv_move_buffer = allocate_transfer_buffer(
+            self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
         )
+        self.kv_move_buffer = kv_move_buffer
         self.copy_cuda_stream = torch.cuda.Stream(priority=-1)
         self.transporter = create_kv_transporter(
             args=self.args,
@@ -170,13 +172,16 @@ class _DecodeTransModule:
     def _warmup(self):
         for dp_index in range(self.args.dp // self.args.nnodes):
             with torch.cuda.stream(stream=self.copy_cuda_stream):
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    mem_indexes=[0],
-                    page_index=0,
-                    dp_index=dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
+                cpu_token_indices = torch.tensor([0], dtype=torch.long, device="cpu")
+                token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
+                copy_page(
+                    node_att_managers=self.resource_managers,
+                    pd_page_buffers=self.kv_move_buffer,
+                    write_to_pd_page=False,
+                    token_indices=token_indices,
+                    pd_page_index=0,
+                    dp_rank_in_node=dp_index,
+                    tp_world_size=self.dp_world_size,
                 )
                 torch.cuda.current_stream().synchronize()
         return
@@ -392,19 +397,43 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.ready_page_task_queue.get()
+            if trans_task.xfer_handle is not None:
+                # 只有 NCCL 接收端会创建本地 Xfer 句柄；NIXL 的远端 WRITE 完成通知
+                # 已代表其写入完成，不经过这里的本地 CUDA event 轮询。
+                # P 的 done 不代表 D 本地接收已完成；统一轮询传输状态，
+                # 直到接收 event 完成后，独立搬运流才读取 PD 页。
+                while True:
+                    status = self.transporter.check_task_status(trans_task=trans_task)
+                    if status == "PROC":
+                        time.sleep(0.001)
+                        continue
+                    if status != "DONE":
+                        trans_task.error_info = trans_task.xfer_handle.error_info
+                        self.failed_queue.put(trans_task)
+                    break
+                if status != "DONE":
+                    continue
             copy_start_event = torch.cuda.Event(enable_timing=True)
             copy_end_event = torch.cuda.Event(enable_timing=True)
             with torch.cuda.stream(stream=self.copy_cuda_stream):
                 copy_start_event.record(self.copy_cuda_stream)
-                cur_mem = self.mem_managers[self.device_id]
-                cur_mem.read_page_kv_move_buffer_to_mem(
-                    trans_task.mem_indexes,
-                    page_index=trans_task.dst_page_index,
-                    dp_index=trans_task.decode_dp_index,
-                    mem_managers=self.mem_managers,
-                    dp_world_size=self.dp_world_size,
-                    page_kind=trans_task.page_kind,
+                # 只有 KV 页使用 token 索引；att_state 直接按请求槽位搬运运行态。
+                token_indices = None
+                if trans_task.page_kind == "kv":
+                    cpu_token_indices = torch.tensor(trans_task.mem_indexes, dtype=torch.long, device="cpu")
+                    # 索引上传和后续页拷贝使用同一流，保证执行顺序。
+                    token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
+                copy_page(
+                    node_att_managers=self.resource_managers,
+                    pd_page_buffers=self.kv_move_buffer,
+                    write_to_pd_page=False,
+                    token_indices=token_indices,
+                    pd_page_index=trans_task.dst_page_index,
+                    dp_rank_in_node=trans_task.decode_dp_index,
+                    tp_world_size=self.dp_world_size,
+                    task_kind=trans_task.page_kind,
                     req_idx=trans_task.req_idx,
+                    state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
                 )
                 copy_end_event.record(self.copy_cuda_stream)
             self.success_queue.put((copy_end_event, copy_start_event, trans_task))

@@ -39,7 +39,7 @@ class KVTransProcess:
                 up_status_in_queue,
             )
             assert self.task_out_queue.get(timeout=30) == "proc_start"
-            assert self.task_out_queue.get(timeout=60) == "get_mem_managers_ok"
+            assert self.task_out_queue.get(timeout=60) == "get_resources_ok"
 
             return True
 

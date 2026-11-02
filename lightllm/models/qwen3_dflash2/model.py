@@ -18,20 +18,24 @@ class Qwen3DFlash2Model(Qwen3DFlashModel):
     post_layer_infer_class = Qwen3DFlash2PostLayerInfer
     transformer_layer_infer_class = Qwen3DFlash2TransformerLayerInfer
 
-    def _init_config(self):
-        super()._init_config()
-        dflash_config = self.config.get("dflash_config", {})
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """合并 draft 专有配置，再同步别名及 rotary 参数；启动与 CPU cache 使用同一结果。"""
+        config = model_config.get("text_config", model_config).copy()
+        dflash_config = config.get("dflash_config", {})
         if not isinstance(dflash_config, dict):
             raise ValueError("dflash_config must be an object in the DFlash2 checkpoint config")
-        self.config.update(dflash_config)
+        config.update(dflash_config)
+        config = super().normalize_model_config(config)
 
-        rope_parameters = self.config.get("rope_parameters", {})
-        if "rope_theta" in rope_parameters and "rope_theta" not in self.config:
-            self.config["rope_theta"] = rope_parameters["rope_theta"]
-        if "partial_rotary_factor" in rope_parameters and "partial_rotary_factor" not in self.config:
-            self.config["partial_rotary_factor"] = rope_parameters["partial_rotary_factor"]
-        if rope_parameters and "rope_scaling" not in self.config:
-            self.config["rope_scaling"] = rope_parameters
+        rope_parameters = config.get("rope_parameters", {})
+        if "rope_theta" in rope_parameters and "rope_theta" not in config:
+            config["rope_theta"] = rope_parameters["rope_theta"]
+        if "partial_rotary_factor" in rope_parameters and "partial_rotary_factor" not in config:
+            config["partial_rotary_factor"] = rope_parameters["partial_rotary_factor"]
+        if rope_parameters and "rope_scaling" not in config:
+            config["rope_scaling"] = rope_parameters
+        return config
 
     def _verify_params(self):
         LlamaTpPartModel._verify_params(self)
@@ -60,18 +64,6 @@ class Qwen3DFlash2Model(Qwen3DFlashModel):
         LlamaTpPartModel._init_custom(self)
         self.block_size = int(self.config["block_size"])
         self.mask_token_id = int(self.config["mask_token_id"])
-
-    def _init_mem_manager(self):
-        main_mem_manager = self.main_model.mem_manager
-        draft_head_num = max(self.config["num_key_value_heads"] // self.tp_world_size_, 1)
-        draft_width = draft_head_num * self.config["head_dim"]
-        target_width = main_mem_manager.head_num * main_mem_manager.head_dim
-        assert draft_width == target_width, (
-            "DFlash2 draft and target KV must have equal flat widths: "
-            f"draft=({draft_head_num}, {self.config['head_dim']}), "
-            f"target=({main_mem_manager.head_num}, {main_mem_manager.head_dim})"
-        )
-        self.mem_manager = main_mem_manager
 
     def _init_weights(self, start_layer_index=None):
         super()._init_weights(start_layer_index=start_layer_index)

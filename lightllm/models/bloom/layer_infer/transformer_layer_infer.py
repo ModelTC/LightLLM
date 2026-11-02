@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from typing import Tuple
 from lightllm.common.basemodel import TransformerLayerInferTpl
@@ -28,7 +29,13 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
         layer_weight: BloomTransformerLayerWeight,
         out=None,
     ) -> torch.Tensor:
-        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.prefill_att_state.prefill_att(
             q=_q,
@@ -43,7 +50,13 @@ class BloomTransformerLayerInfer(TransformerLayerInferTpl):
     def _token_attention_kernel(
         self, q: torch.Tensor, infer_state: InferStateInfo, layer_weight: BloomTransformerLayerWeight, out=None
     ) -> torch.Tensor:
-        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.decode_att_state.decode_att(
             q=_q,

@@ -1,7 +1,7 @@
 import torch
 import triton
 import collections
-from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
@@ -47,7 +47,8 @@ class InferStateInfo:
         self.is_prefill: bool = None
         self.is_draft_model: bool = False
 
-        self.mem_manager: MemoryManager = None
+        self.att_state_manager: AttentionStateManager = None
+        self.att_state_role: str = "main"  # main 或 draft0 .. draft35，区分共享管理器中的 State。
         self.req_manager: ReqManager = None
 
         self.mem_index: torch.Tensor = None
@@ -134,11 +135,13 @@ class InferStateInfo:
 
     def init_att_state(self):
         if self.is_prefill:
-            self.prefill_att_state.init_state()
+            if self.prefill_att_state is not None:
+                self.prefill_att_state.init_state()
             if self.prefill_att_state1 is not None:
                 self.prefill_att_state1.init_state()
         else:
-            self.decode_att_state.init_state()
+            if self.decode_att_state is not None:
+                self.decode_att_state.init_state()
             if self.decode_att_state1 is not None:
                 self.decode_att_state1.init_state()
         self.check_att_states()
@@ -178,7 +181,8 @@ class InferStateInfo:
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
 
-        self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
+        if self.decode_att_state is not None:
+            self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
         if self.decode_att_state1 is not None:
             self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return

@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.full_att import FullAttentionState
 import torch
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer, LlamaInferStateInfo
@@ -72,7 +73,13 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             window_size = (-1, -1)
             use_sliding_window = False
 
-        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.prefill_att_state.prefill_att(
             q=_q,
@@ -99,7 +106,13 @@ class GptOssTransformerLayerInfer(LlamaTransformerLayerInfer):
             window_size = (-1, -1)
             use_sliding_window = False
 
-        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.decode_att_state.decode_att(
             q=_q,

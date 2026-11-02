@@ -1,5 +1,6 @@
 """Tokenizer entry points must not eagerly load unrelated model implementations."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -11,6 +12,47 @@ import pytest
 
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+@pytest.mark.parametrize("model_type", ["deepseek_v32", "deepseek_v3"])
+def test_deepseek_bytelevel_checkpoint_preserves_whitespace(tmp_path: Path, model_type: str) -> None:
+    from tokenizers import Tokenizer, decoders, pre_tokenizers, trainers
+    from tokenizers.models import BPE
+    from transformers import PreTrainedTokenizerFast
+    from lightllm.server.tokenizer import get_tokenizer
+
+    text = "Question: What is 2 + 3?\nAnswer: #### 5"
+    backend = Tokenizer(BPE(unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
+    backend.decoder = decoders.ByteLevel()
+    backend.train_from_iterator(
+        [text],
+        trainers.BpeTrainer(
+            vocab_size=300,
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+            special_tokens=["<unk>"],
+        ),
+    )
+    fast = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>")
+    fast.save_pretrained(tmp_path)
+    # 真实 DeepSeek checkpoint 声明 LlamaTokenizerFast，但实际编码和解码均为 ByteLevel。
+    config_path = tmp_path / "tokenizer_config.json"
+    config = json.loads(config_path.read_text())
+    config.update(tokenizer_class="LlamaTokenizerFast", legacy=True)
+    config_path.write_text(json.dumps(config))
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": model_type,
+                "architectures": ["DeepseekV3ForCausalLM"],
+            }
+        )
+    )
+
+    tokenizer = get_tokenizer(str(tmp_path))
+    expected_ids = backend.encode(text).ids
+    assert tokenizer.encode(text, add_special_tokens=False) == expected_ids
+    assert tokenizer.decode(expected_ids, skip_special_tokens=True) == text
 
 
 @pytest.mark.parametrize("model_type", ["llama", "deepseek_v32", "deepseek_v4"])
@@ -48,13 +90,6 @@ sys.meta_path.insert(0, RejectUnrelatedModels())
 from lightllm.server import tokenizer as module
 assert not any(name.startswith("lightllm.models.") for name in sys.modules)
 
-if model_type == "deepseek_v32":
-    original = module.AutoTokenizer.from_pretrained
-    def load(*args, **kwargs):
-        assert AutoConfig.for_model("deepseek_v32").model_type == "deepseek_v32"
-        return original(*args, **kwargs)
-    module.AutoTokenizer.from_pretrained = load
-
 with tempfile.TemporaryDirectory() as directory:
     fast = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"hello": 0, "[UNK]": 1}, unk_token="[UNK]")))
     fast.save_pretrained(directory)
@@ -64,6 +99,7 @@ with tempfile.TemporaryDirectory() as directory:
     tokenizer = module.get_tokenizer(directory)
     assert tokenizer.encode("hello") == [0]
     if model_type == "deepseek_v32":
+        assert AutoConfig.for_model("deepseek_v32").model_type == "deepseek_v32"
         assert tokenizer.__class__.__module__ == "lightllm.models.deepseek3_2.tokenizer"
         prompt = tokenizer.apply_chat_template(messages=[{"role": "user", "content": "hello"}])
         assert "hello" in prompt

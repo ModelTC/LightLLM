@@ -20,7 +20,7 @@ class DeepseekV4MTPPreAndPostLayerWeight(PreAndPostLayerWeight):
         hidden = network_config["hidden_size"]
         vocab = network_config["vocab_size"]
         hc_mult = network_config["hc_mult"]
-        layer_idx = network_config["n_layer"]
+        layer_idx = network_config["draft_weight_layer_id"]
         prefix = "mtp.0"
 
         self.wte_weight_ = EmbeddingWeight(

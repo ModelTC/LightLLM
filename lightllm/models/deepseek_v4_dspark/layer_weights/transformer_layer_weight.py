@@ -8,5 +8,5 @@ class DeepseekV4DSparkTransformerLayerWeight(DeepseekV4TransformerLayerWeight):
 
     def _parse_config(self):
         super()._parse_config()
-        stage_id = self.layer_num_ - self.network_config_["n_layer"]
+        stage_id = self.layer_num_ - self.network_config_["draft_layer_start_id"]
         self.prefix = f"mtp.{stage_id}"

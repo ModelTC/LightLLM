@@ -80,24 +80,6 @@ def test_prefill_unpad_restores_empty_output():
     assert unpadded.prompt_logics.shape == (0, 4)
 
 
-def _create_empty_decode_input():
-    return ModelInput(
-        batch_size=0,
-        total_token_num=0,
-        max_q_seq_len=1,
-        max_kv_seq_len=0,
-        input_ids=torch.empty((0,), dtype=torch.int64),
-        b_req_idx=torch.empty((0,), dtype=torch.int32),
-        b_mtp_index=torch.empty((0,), dtype=torch.int32),
-        b_seq_len=torch.empty((0,), dtype=torch.int32),
-        b_position_delta=torch.empty((0,), dtype=torch.int32),
-        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
-        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
-        is_prefill=False,
-        multimodal_params=[],
-    )
-
-
 @torch.no_grad()
 def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
     execution_configs = (
@@ -122,7 +104,6 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         model.tp_world_size_ = tp_world_size
         model.is_mtp_draft_model = False
         model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
-        model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1)
         model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
 
         pad_batch_sizes = []
@@ -195,7 +176,6 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
     model.tp_world_size_ = 2
     model.is_mtp_draft_model = False
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
-    model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1)
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88)
     initializations = []
     executions = []
@@ -344,3 +324,21 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
     assert seen_sizes == [expected_size] * (2 if overlap else 1)
     torch.testing.assert_close(output.logits, expected)
     torch.testing.assert_close(torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1), expected)
+
+
+def _create_empty_decode_input():
+    return ModelInput(
+        batch_size=0,
+        total_token_num=0,
+        max_q_seq_len=1,
+        max_kv_seq_len=0,
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        b_mtp_index=torch.empty((0,), dtype=torch.int32),
+        b_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_position_delta=torch.empty((0,), dtype=torch.int32),
+        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
+        is_prefill=False,
+        multimodal_params=[],
+    )

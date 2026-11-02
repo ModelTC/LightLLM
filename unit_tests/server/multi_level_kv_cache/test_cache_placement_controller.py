@@ -148,7 +148,7 @@ def test_factory_creates_legacy_controller_for_legacy_strategy():
 def test_factory_calculates_adaptive_cache_capacities_across_local_dp_replicas_and_applies_gpu_ratio(monkeypatch):
     from lightllm.utils import envs_utils, kv_cache_utils
 
-    cpu_cache_meta = SimpleNamespace(page_num=10, calcu_one_page_size=lambda: 64)
+    cpu_cache_meta = SimpleNamespace(page_num=10, page_bytes=64)
     monkeypatch.setattr(kv_cache_utils, "calcu_cpu_cache_meta", lambda: cpu_cache_meta)
     monkeypatch.setattr(envs_utils, "get_cache_placement_gpu_capacity_ratio", lambda: 0.5)
     args = SimpleNamespace(
