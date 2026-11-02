@@ -51,7 +51,12 @@ def make_state(
     )
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state("main", state)
-    state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
+    state.initialize_page_pools(
+        big_page_capacity=3,
+        small_page_capacity=2,
+        device="meta" if torch.device(device).type == "meta" else "cpu",
+        pin_memory=device != "cpu",
+    )
     return state
 
 
