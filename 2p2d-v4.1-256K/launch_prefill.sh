@@ -36,6 +36,7 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --disable_cudagraph \
     --linear_att_page_block_num 16 \
     --enable_cpu_cache \
+    --enable_dp_prompt_cache_fetch \
     --cpu_cache_storage_size 1024 \
     --enable_disk_cache \
     --disk_cache_storage_size 5120 \

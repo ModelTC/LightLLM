@@ -28,6 +28,7 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --max_req_total_len "$MAX_REQ_TOTAL_LEN" \
     --mtp_mode dspark \
     --mtp_step 5 \
+    --mtp_dynamic_verify \
     --mtp_draft_model_dir "$MTP_DRAFT_MODEL_DIR" \
     --disable_audio \
     --batch_max_tokens 1024 \

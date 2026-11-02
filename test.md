@@ -255,3 +255,12 @@ H200/Torch2.11.0+cu130/Triton3.6.0，合成2层、每层24个hash（4-gram、每
 最终GPU回归197 passed、8 skipped（validated_gpu.log）。新增20组ragged/跨CTA/空batch/视觉padding/真实8 heads的hash逐位对照与更新输入后的Graph测试；tiny model从16组扩到24组，新增双Engram，覆盖提前串联预取、CED边界、文本/vision、DSpark target/draft、原生DeepGEMM、GPU/CPU checkpoint恢复和Graph。8项跳过仍是本容器未挂载的官方视觉参考文件。已有本地shard及consumer stream collective契约测试通过；没有改变collective位置。Black/Flake8及git diff --check通过。
 
 日志目录：/mnt/vqa/wanzihao/v41_engram_prefetch_20261102/。未改运行服务、未安装依赖、未测试完整权重GSM8K/服务吞吐；不能将hash组件21–27倍的GPU加速解释为完整Engram或模型同倍加速。当前实际变化是每次forward更低的hash准备开销，以及decode lookup更早开始。既有部署文件与test.md的旧未提交内容保留。
+
+
+### 2026-11-02：2P2D 启动参数启用 DP fetch 与动态 DSpark verify
+
+P launcher 增加 --enable_dp_prompt_cache_fetch（同节点DP之间），D launcher 增加 --mtp_dynamic_verify；D 保留CUDA Graph。两个参数按现有调用路径分别放在P/D，不给D添加不会走到的DP前缀拉取路径。每个参数仍单独一行。
+
+P/D 的 --mtp_step 暂保持5。P prefill仅用target hidden做draft KV-only commit，不会因为step5额外生成5个草稿；但当前DeepseekV4AttStatePageHelper按物理顺序整块传输SWA/compressor ring。get_runtime_state_shapes中C2 ring长度为4+mtp_step，P1会有5槽、D5为9槽，直接混用会造成恢复布局和物理索引不一致。要允许P1/D5，应先支持逻辑位置重排的状态传输或解耦统一传输容量，不能仅修改launcher数字。
+
+bash -n及git diff --check通过；本条仅为命令配置更新，未重启/部署服务，未声称动态调度性能或P1/D5多机已验收。既有节点配置、DeepEP隔离路径及旧文档的未提交修改保留，本次commit只包含两个新增参数及对应说明。

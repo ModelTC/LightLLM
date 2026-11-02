@@ -24,3 +24,5 @@ bash "$RUN_DIR/deploy/launch_decode.sh" 1   # .23.201
 ```
 
 当前为迁移后的待验证命令，尚未启动四机服务。验证进度与性能结果追加到仓库根目录 test.md。
+
+P 开启 `--enable_dp_prompt_cache_fetch`，在同一节点的 DP rank 间复用前缀缓存；D 开启 `--mtp_dynamic_verify`，按置信度动态选择主模型验证行，draft 最大步数仍为5。P/D 的 `--mtp_step` 暂均保持5：P 仅提交 draft KV，但当前 P/D 原样传输的 compressor ring 尺寸依赖该值，不能单独把 P 改成1。
