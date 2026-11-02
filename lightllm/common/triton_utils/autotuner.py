@@ -179,6 +179,7 @@ class Autotuner:
         self.run_key_func = run_key_func
         self.run_key_distance_func = run_key_distance_func
         self.cached_configs = {}
+        self._missing_config_keys = set()
         self.fast_match_configs = collections.defaultdict(dict)
         self.warmuped_configs_set = set()
         self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
@@ -302,7 +303,7 @@ class Autotuner:
         return self._cache_dir
 
     def _try_load_cache(self, static_key):
-        if static_key in self.cached_configs:
+        if static_key in self.cached_configs or static_key in self._missing_config_keys:
             return False
 
         cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(static_key))
@@ -310,6 +311,9 @@ class Autotuner:
             logger.info(f"Loading cached configs for {self.kernel_name} - {static_key}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
+        else:
+            # Cache misses too: repeated checks can block every layer on a remote filesystem.
+            self._missing_config_keys.add(static_key)
         return True
 
     def kernel_warmup(self, static_key, *args, **kwargs):
