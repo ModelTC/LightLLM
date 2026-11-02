@@ -47,6 +47,7 @@ class NcclKVTransporter:
         host_ip: Optional[str] = None,
         control_port_min: int = 30000,
         control_port_max: int = 40000,
+        page_payload_bytes: dict[str, int] | None = None,
     ):
         self.node_id = node_id
         self.tp_idx = tp_idx
@@ -57,6 +58,12 @@ class NcclKVTransporter:
         self.is_prefill_node = args.run_mode == "prefill"
         self.capture_telemetry = False
         self.num_pages = kv_move_buffer.shape[0]
+        page_bytes = kv_move_buffer.shape[1]
+        self.page_payload_bytes = (
+            dict(page_payload_bytes) if page_payload_bytes is not None else {"kv": page_bytes, "att_state": page_bytes}
+        )
+        assert set(self.page_payload_bytes) == {"kv", "att_state"}
+        assert all(0 <= size <= page_bytes for size in self.page_payload_bytes.values())
 
         self.host_ip = host_ip or get_hostname_ip()
         assert self.host_ip is not None, "can not get host ip for NcclKVTransporter"
@@ -93,6 +100,7 @@ class NcclKVTransporter:
                 "num_pages": self.num_pages,
                 # PD buffer 固定为二维 uint8，页长度就是单页字节数。
                 "page_bytes": self.kv_move_buffer.shape[1],
+                "payload_bytes": self.page_payload_bytes,
             }
         )
 
@@ -113,6 +121,9 @@ class NcclKVTransporter:
 
         page = pickle.loads(remote_agent.page_reg_desc)
         assert page["page_bytes"] == self.kv_move_buffer.shape[1], "PD peers must use the same page byte capacity"
+        assert page.get("payload_bytes", dict.fromkeys(("kv", "att_state"), page["page_bytes"])) == (
+            self.page_payload_bytes
+        ), "PD peers must use the same payload byte lengths"
         self.remote_agents[remote_agent.agent_name] = remote_agent
         logger.info(f"Added NCCL remote agent {remote_agent.agent_name} at {metadata.host_ip}:{metadata.control_port}")
         return
@@ -314,6 +325,9 @@ class _NcclPeer:
     def send_page(self, trans_task: PDChunckedTransTask) -> _NcclXferHandle:
         assert trans_task.src_page_index is not None and trans_task.dst_page_index is not None
         page_tensor = self.transporter.kv_move_buffer[trans_task.src_page_index]
+        payload_bytes = self.transporter.page_payload_bytes[trans_task.page_kind]
+        assert payload_bytes > 0, "PD page kind has no payload"
+        page_tensor = page_tensor[:payload_bytes]
         comm = self._ensure_comm(is_server=True)
         stream = self._get_stream()
 
@@ -378,6 +392,9 @@ class _NcclPeer:
     def _recv_page(self, trans_task: PDChunckedTransTask):
         try:
             page_tensor = self.transporter.kv_move_buffer[trans_task.dst_page_index]
+            payload_bytes = self.transporter.page_payload_bytes[trans_task.page_kind]
+            assert payload_bytes > 0, "PD page kind has no payload"
+            page_tensor = page_tensor[:payload_bytes]
             comm = self._ensure_comm(is_server=False)
             stream = self._get_stream()
             comm.recv(page_tensor, src=0, stream=stream)
