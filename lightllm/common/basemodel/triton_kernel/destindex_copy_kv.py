@@ -5,6 +5,64 @@ import triton.language as tl
 
 
 @triton.jit
+def _fwd_kernel_destindex_copy_kv_split(
+    KV,
+    DestLoc,
+    OutK,
+    OutV,
+    stride_kv_bs,
+    stride_kv_h,
+    stride_kv_d,
+    stride_index,
+    stride_k_bs,
+    stride_k_h,
+    stride_k_d,
+    stride_v_bs,
+    stride_v_h,
+    stride_v_d,
+    HEAD_NUM: tl.constexpr,
+    HEAD_DIM: tl.constexpr,
+    BLOCK_HEAD: tl.constexpr,
+    BLOCK_DMODEL: tl.constexpr,
+):
+    token = tl.program_id(0)
+    heads = tl.arange(0, BLOCK_HEAD)[:, None]
+    dims = tl.arange(0, BLOCK_DMODEL)[None, :]
+    mask = (heads < HEAD_NUM) & (dims < HEAD_DIM)
+    dest = tl.load(DestLoc + token * stride_index).to(tl.int64)
+    source = KV + token * stride_kv_bs + heads * stride_kv_h + dims * stride_kv_d
+    k = tl.load(source, mask=mask, other=0)
+    v = tl.load(source + HEAD_NUM * stride_kv_h, mask=mask, other=0)
+    tl.store(OutK + dest * stride_k_bs + heads * stride_k_h + dims * stride_k_d, k, mask=mask)
+    tl.store(OutV + dest * stride_v_bs + heads * stride_v_h + dims * stride_v_d, v, mask=mask)
+
+
+@torch.no_grad()
+def destindex_copy_kv_split(KV, DestLoc, OutK, OutV):
+    head_num, head_dim = OutK.shape[1:]
+    assert OutK.shape == OutV.shape
+    assert KV.shape == (DestLoc.numel(), 2 * head_num, head_dim)
+    if not DestLoc.numel():
+        return
+    _fwd_kernel_destindex_copy_kv_split[(DestLoc.numel(),)](
+        KV,
+        DestLoc,
+        OutK,
+        OutV,
+        *KV.stride(),
+        DestLoc.stride(0),
+        *OutK.stride(),
+        *OutV.stride(),
+        HEAD_NUM=head_num,
+        HEAD_DIM=head_dim,
+        BLOCK_HEAD=triton.next_power_of_2(head_num),
+        BLOCK_DMODEL=triton.next_power_of_2(head_dim),
+        num_warps=1,
+        num_stages=1,
+    )
+
+
+@triton.jit
 def _fwd_kernel_destindex_copy_kv(
     K,
     Dest_loc,
