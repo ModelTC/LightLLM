@@ -9,13 +9,14 @@
 """
 
 import asyncio
+import hmac
 import pickle
 
 import ujson as json
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
 from lightllm.server.pd_io_struct import ObjType
-from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size
+from lightllm.utils.envs_utils import get_lightllm_websocket_max_message_size, get_pd_register_token
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
@@ -27,13 +28,26 @@ router = APIRouter()
 async def register_and_keep_alive(websocket: WebSocket):
     from .api_http import g_objs
 
+    try:
+        expected = f"Bearer {get_pd_register_token()}".encode("utf-8")
+    except ValueError:
+        await websocket.close(code=1008, reason="PD registration unauthorized")
+        return
+    authorization = websocket.headers.get("authorization", "").encode("utf-8")
+    if not hmac.compare_digest(authorization, expected):
+        await websocket.close(code=1008, reason="PD registration unauthorized")
+        return
+
     await websocket.accept()
     websocket._receive_bytes_max_size = get_lightllm_websocket_max_message_size()
     client_ip, client_port = websocket.client
     logger.info(f"Client connected from IP: {client_ip}, Port: {client_port}")
-    regist_json = json.loads(await websocket.receive_text())
-    logger.info(f"received regist_json {regist_json}")
-    await g_objs.httpserver_manager.register_pd(regist_json, websocket)
+    try:
+        regist_json = json.loads(await websocket.receive_text())
+        await g_objs.httpserver_manager.register_pd(regist_json, websocket)
+    except (ValueError, TypeError, KeyError, AssertionError):
+        await websocket.close(code=1008, reason="PD registration rejected")
+        return
 
     try:
         heartbeat_timeout_seconds = 30
