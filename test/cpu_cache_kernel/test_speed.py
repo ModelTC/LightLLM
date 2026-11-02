@@ -96,7 +96,12 @@ def main():
     # Populate every TP region through the production API before measuring restores.
     full.k_storage.zero_()
     full.v_storage.zero_()
-    resources.save_bounded_att_runtime_to_pages([0] * args.pages, page_kind="big", page_slot_ids=slots)
+    resources.save_bounded_att_runtime_to_pages(
+        [0] * args.pages,
+        state_token_lens=[(page + 1) * args.tokens_per_page for page in pages],
+        page_kind="big",
+        page_slot_ids=slots,
+    )
     torch.cuda.synchronize()
     token_indices = torch.arange(tokens, dtype=torch.int64, device="cuda")
     resources.get_cpu_cache_operator().write_req(
@@ -116,6 +121,7 @@ def main():
             layouts=resources.get_cpu_cache_operator().get_page_layouts(),
             big_page_slot_ids=slots,
             req_idx=0,
+            state_token_len=tokens,
         )
 
     for _ in range(args.warmup):
