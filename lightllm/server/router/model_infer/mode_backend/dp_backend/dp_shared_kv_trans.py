@@ -138,18 +138,26 @@ class DPKVSharedMoudle:
 
     def kv_trans(self, trans_tasks: List["TransTask"]) -> None:
         target = self.backend.model.att_state_manager
+        tasks_by_dp = {}
         for task in trans_tasks:
-            source = self.backend.dp_att_state_managers[task.src_dp_rank]
-            # 源索引来自远端 CUDA 请求表；allocator 返回 CPU 索引，在此一次性准备目标 CUDA int64 索引。
-            dst_token_indices = task.dst_token_indices.to(device="cuda", dtype=torch.long, non_blocking=True)
-            target.get_dp_shared_operator().copy_from_dp(
-                remote_att_manager=source,
-                src_token_indices=task.src_token_indices,
+            tasks_by_dp.setdefault(task.src_dp_rank, []).append(task)
+        for src_dp_rank, tasks in tasks_by_dp.items():
+            src_token_indices = tasks[0].src_token_indices
+            dst_token_indices = tasks[0].dst_token_indices
+            if len(tasks) > 1:
+                src_token_indices = torch.cat([task.src_token_indices for task in tasks]).to(
+                    device="cuda", non_blocking=True
+                )
+                dst_token_indices = torch.cat([task.dst_token_indices for task in tasks])
+            dst_token_indices = dst_token_indices.to(device="cuda", dtype=torch.long, non_blocking=True)
+            target.get_dp_shared_operator().copy_batch_from_dp(
+                remote_att_manager=self.backend.dp_att_state_managers[src_dp_rank],
+                src_token_indices=src_token_indices,
                 dst_token_indices=dst_token_indices,
-                src_big_page_ids=task.src_big_page_ids,
-                dst_big_page_ids=task.dst_big_page_ids,
-                src_req_idx=task.src_req_idx,
-                dst_req_idx=task.dst_req.req_idx,
+                src_big_page_ids=[page for task in tasks for page in task.src_big_page_ids],
+                dst_big_page_ids=[page for task in tasks for page in task.dst_big_page_ids],
+                src_req_indices=[task.src_req_idx for task in tasks],
+                dst_req_indices=[task.dst_req.req_idx for task in tasks],
             )
         # Source requests may be released on other ranks immediately afterwards.
         # All ranks participate, including those without a local transfer task.
