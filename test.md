@@ -136,3 +136,10 @@ MTP平均token/step来自每轮完成请求的Prometheus直方图sum/count差值
 GPU首轮273 passed/2 failed，失败均为测试将源码挂成只读，而autotuner需在源码下创建NVIDIA_H200缓存目录。只为测试增加独立可写缓存挂载后完整重跑283项全部通过；没有为此修改生产代码、测试断言或包。首轮与复测原始日志均保留在 `/mnt/vqa/wanzihao/v41_update_20261101/`：upstream_cpu.log、backend_cpu.log、v41_gpu.log、block32_repro.log、v41_gpu_writable_cache.log。
 
 迁移状态：文本/FP8、CED/Engram、vision和DSpark已有完整权重旧版本及本轮GPU小模型验证；此前DPEP16 GSM8K为1212/1319=91.8878%、MTP接收50.8418%。这些是同步前整机成绩，本次合并未重跑完整权重、GSM8K或压力测试，不能据此宣称本轮加速。历史20%回放97.7111%成功率和13.303小时长尾尚未完成失败归因；四机PD依用户要求仍待安排，prefill CUDA Graph、微批overlap及cross-DP cache fetch仍不支持。原两台DPEP16节点已失联，本轮没有把代码合并描述成服务恢复或四机验收通过。
+
+
+### 2026-11-02：优化 1 — 补齐短 suffix 的 Decoder SWA Bounded Replay
+
+短 extend 不足128行时额外重算此前最多128行 encoder（图片块内起点退到块首），decoder 始终取得整个当前 prompt 的最后 min(N,128) 行。ModelInput 分开实际计算起点和原始 KV 提交边界；调度计入重算行，但请求进度、页分配和共享前缀不回退。历史重算行禁止写 main/global KV 和 indexer K，encoder/decoder SWA 分别按 replay 起点截断，Engram lookback 对齐计算起点。保留21层全量＋19层裁剪、FP8及现有持久化布局。
+
+H200隔离单卡、只读源码和独立可写 autotune 缓存：V4.1 GPU回归146 passed（含文本/视觉、DSpark、GPU checkpoint、CPU cache 恢复、decode graph）；输入/分页CPU回归53 passed。256-token缓存命中＋新增1 token的 decoder FFN 从1行变为128行，新增断言确认共享 global KV 前256个物理槽逐字节不变。这是语义修复，可能增加短 suffix TTFT，不当作加速。尚未跑完整权重 GSM8K 或多机 PD。日志：/mnt/vqa/wanzihao/v41_four_optimizations_20261102/replay_{cpu,gpu}.log。未修改在线实例。

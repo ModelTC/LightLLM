@@ -5,6 +5,7 @@ import pytest
 import torch
 from lightllm.server.router.model_infer.infer_batch import InferReq
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
+from lightllm.server.router.model_infer import infer_batch
 
 
 def _patch_empty_input_context(monkeypatch):
@@ -13,7 +14,7 @@ def _patch_empty_input_context(monkeypatch):
         alloc=lambda size: torch.empty((size,), dtype=torch.int32),
     )
     infer_context = SimpleNamespace(
-        backend=SimpleNamespace(model=SimpleNamespace(token_lookback_depth=0)),
+        backend=SimpleNamespace(model=SimpleNamespace(token_lookback_depth=0, prefill_replay_window=0)),
         args=SimpleNamespace(page_size=1),
         req_manager=SimpleNamespace(
             HOLD_REQUEST_ID=-1,
@@ -69,6 +70,47 @@ def test_prepare_prefill_inputs_allows_empty_batch(monkeypatch):
     assert model_input.b_prefill_has_output_cpu == []
     assert model_input.max_q_seq_len == 0
     assert model_input.max_kv_seq_len == 0
+
+
+@pytest.mark.parametrize("suffix", [1, 127, 128, 129])
+@pytest.mark.parametrize("hit", [0, 64, 256])
+def test_v41_replay_keeps_commit_boundary_and_accounts_for_compute(monkeypatch, suffix, hit):
+    context = _patch_empty_input_context(monkeypatch)
+    context.backend.model.prefill_replay_window = 128
+    context.backend.model.token_lookback_depth = 3
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
+    ids = np.arange(hit + suffix, dtype=np.int64)
+    req = InferReq.__new__(InferReq)
+    req.req_idx = 0
+    req.cur_kv_len = hit
+    req.hold_kv_len = (hit + suffix + 255) // 256 * 256
+    req.args = SimpleNamespace(page_size=256)
+    req.mm_input_spans = []
+    req.token_history_ready = False
+    req.multimodal_params = {"images": [], "audios": []}
+    req.get_input_token_ids = lambda: ids
+    req.get_chuncked_input_token_ids = lambda: ids
+    req.get_chuncked_input_token_len = lambda: len(ids)
+    req.get_cur_total_len = lambda: len(ids)
+    start = max(0, hit - 128) if suffix < 128 else hit
+    model_input, _ = generic_pre_process.prepare_prefill_inputs([req], True)
+    assert model_input.b_ready_cache_len.tolist() == [start]
+    assert model_input.b_prefill_commit_start.tolist() == [hit]
+    assert model_input.input_ids.tolist() == ids[start:].tolist()
+    assert req.prefill_need_token_num(True) == (len(ids) - start, 0)
+    assert req.cur_kv_len == hit
+    expected_history = [(0, start, ids[max(0, start - 3) : start].tolist())] if start else None
+    assert model_input.token_lookback == expected_history
+
+
+def test_v41_replay_start_preserves_multimodal_block(monkeypatch):
+    context = _patch_empty_input_context(monkeypatch)
+    context.backend.model.prefill_replay_window = 128
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
+    req = InferReq.__new__(InferReq)
+    req.cur_kv_len = 256
+    req.mm_input_spans = [(100, 200)]
+    assert req.get_prefill_input_start(257) == 100
 
 
 def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):

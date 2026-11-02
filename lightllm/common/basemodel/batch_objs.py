@@ -34,6 +34,9 @@ class ModelInput:
     b_shared_radix_node_id: torch.Tensor = None
     is_prefill: bool = False
     b_ready_cache_len: torch.Tensor = None
+    # Replay may start before the cached prefix; only positions at/after this
+    # original boundary may write global KV. None means no replay.
+    b_prefill_commit_start: torch.Tensor = None
     # Request/row-aligned MRoPE position offset. It is decode-only; prefill
     # builds positions directly from the complete prompt layout.
     # Row-aligned decode input transforms must preserve the tensor unchanged.
@@ -68,6 +71,8 @@ class ModelInput:
             # Prefill 必须提供的张量。
             self.input_ids = self.input_ids.cuda(non_blocking=True)
             self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
+            if self.b_prefill_commit_start is not None:
+                self.b_prefill_commit_start = self.b_prefill_commit_start.cuda(non_blocking=True)
             self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
             self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
         else:
@@ -105,6 +110,8 @@ class ModelInput:
             assert self.b_prefill_start_loc is not None
             assert self.b_is_decode_req is not None
             assert self.b_ready_cache_len.shape == self.b_req_idx.shape
+            if self.b_prefill_commit_start is not None:
+                assert self.b_prefill_commit_start.shape == self.b_req_idx.shape
             assert self.b_prefill_start_loc.shape == self.b_req_idx.shape
             assert self.b_is_decode_req.shape == self.b_req_idx.shape
             assert self.b_is_decode_req.dtype == torch.bool

@@ -6,6 +6,55 @@ import triton.language as tl
 
 
 @triton.jit
+def _bound_swa_replay(
+    INDICES,
+    LENGTHS,
+    POS,
+    STARTS,
+    IMAGE_LEFT,
+    IMAGE_RIGHT,
+    STRIDE: tl.constexpr,
+    WIDTH: tl.constexpr,
+    WINDOW: tl.constexpr,
+    HAS_IMAGE: tl.constexpr,
+    BLOCK: tl.constexpr,
+):
+    row = tl.program_id(0)
+    col = tl.arange(0, BLOCK)
+    pos, start = tl.load(POS + row), tl.load(STARTS + row)
+    length = tl.load(LENGTHS + row)
+    shift = 0
+    if HAS_IMAGE:
+        left, right = tl.load(IMAGE_LEFT + row), tl.load(IMAGE_RIGHT + row)
+        is_image = (left > 0) | (right > 0)
+        first = tl.maximum(pos - (WINDOW - 1) - tl.maximum(left - (WINDOW - 1), 0), 0)
+        shift = tl.where(is_image, tl.maximum(start - first, 0), 0)
+        length = tl.where(is_image, tl.maximum(length - shift, 0), tl.minimum(length, pos - start + 1))
+    else:
+        length = tl.minimum(length, pos - start + 1)
+    value = tl.load(INDICES + row * STRIDE + col + shift, (col < length) & (col + shift < WIDTH), -1)
+    tl.store(INDICES + row * STRIDE + col, value, col < WIDTH)
+    tl.store(LENGTHS + row, length)
+
+
+def bound_swa_replay(state, starts):
+    width = state.dsv4_swa_indices.shape[1]
+    _bound_swa_replay[(state.position_ids.numel(),)](
+        state.dsv4_swa_indices,
+        state.dsv4_swa_lengths,
+        state.position_ids,
+        starts,
+        state.dsv4_image_left,
+        state.dsv4_image_right,
+        state.dsv4_swa_indices.stride(0),
+        width,
+        state.req_manager.cache_config.sliding_window,
+        state.dsv4_image_left is not None,
+        triton.next_power_of_2(width),
+    )
+
+
+@triton.jit
 def _pool_pairs(
     KV,
     SCORE,
@@ -117,7 +166,10 @@ def _fwd_kernel_destindex_copy_kv_dsv41(
     pos = tl.load(POS + row)
     if (pos + 1) % RATIO != 0:
         return
-    slot = tl.load(FULL_SLOT + row).to(tl.int64) // RATIO
+    slot = tl.load(FULL_SLOT + row).to(tl.int64)
+    if slot < 0:
+        return
+    slot //= RATIO
     page, offset = slot // PAGE, slot % PAGE
     d = tl.arange(0, 512)
     pair = tl.arange(0, 256)

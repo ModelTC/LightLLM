@@ -58,7 +58,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             key = layer_weight.idx_k_norm_(layer_weight.idx_wk_.mm(x), eps=self.eps)
             destindex_copy_indexer_k(
                 key,
-                infer_state.mem_index,
+                infer_state.global_kv_write_slots,
                 infer_state.position_ids,
                 get_indexer_k_buffer(infer_state.mem_manager, self.layer_idx_),
                 infer_state.req_manager.cache_config.compressed_kv_token_alignment // self.compress_ratio,

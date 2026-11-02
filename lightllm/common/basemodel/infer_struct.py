@@ -33,6 +33,7 @@ class InferStateInfo:
         self.total_token_num: int = None
         self.b_req_idx: torch.Tensor = None
         self.b_ready_cache_len: torch.Tensor = None  # only for prefill prompt cache used.
+        self.b_prefill_commit_start: torch.Tensor = None
 
         self.b_shared_seq_len: torch.Tensor = None  # raw decode radix-cache shared lengths.
         self.b_shared_radix_node_id: torch.Tensor = None  # raw decode radix-node ids.

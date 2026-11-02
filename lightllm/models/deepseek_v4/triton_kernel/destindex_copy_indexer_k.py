@@ -31,6 +31,8 @@ def _destindex_copy_indexer_k_kernel(
         return
 
     mem_slot = tl.load(mem_index + cur_index).to(tl.int64)
+    if mem_slot < 0:
+        return
     compressed_kv_slot = mem_slot // COMPRESS_RATIO
 
     page = compressed_kv_slot // PAGE_SIZE

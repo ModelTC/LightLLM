@@ -21,7 +21,7 @@ from lightllm.server.httpserver.req_id_generator_server import convert_sub_id_to
 from lightllm.server.multimodal_params import MultimodalParams
 from lightllm.utils.custom_kernel_utis import custom_cat
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, get_mm_input_spans
+from lightllm.utils.multimodal_chunk_utils import adjust_mm_chunk_end, clamp_mm_cache_len, get_mm_input_spans
 from lightllm.server.pd_io_struct import PDDecodeNodeInfo
 from lightllm.server.embed_cache.embed_cache_client import CpuEmbedCacheClient
 from lightllm.server.multi_level_kv_cache import CachePlacementController, CacheTier
@@ -894,6 +894,14 @@ class InferReq:
         ids = self.get_input_token_ids()[max(0, start - depth) : start].tolist()
         return self.req_idx, start, ids
 
+    def get_prefill_input_start(self, end):
+        """Replay a cached encoder window when this extend cannot fill the decoder tail."""
+        window = g_infer_context.backend.model.prefill_replay_window
+        start = self.cur_kv_len
+        if window and end - start < window:
+            start = clamp_mm_cache_len(max(0, start - window), self.mm_input_spans)
+        return start
+
     def get_chuncked_input_token_ids(self):
         chunked_start = self.cur_kv_len
         chunked_end = min(self.get_cur_total_len(), chunked_start + self.args.chunked_prefill_size)
@@ -1019,7 +1027,7 @@ class InferReq:
             target_kv_len = self.get_chuncked_input_token_len()
         else:
             target_kv_len = self.get_cur_total_len()
-        token_num = target_kv_len - self.cur_kv_len
+        token_num = target_kv_len - self.get_prefill_input_start(target_kv_len)
         alloc_token_num = self._kv_cache_alloc_need(target_kv_len)
         return token_num, alloc_token_num
 

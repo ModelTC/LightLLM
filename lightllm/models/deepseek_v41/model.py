@@ -50,6 +50,10 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     post_layer_infer_class = DeepseekV41PostLayerInfer
     infer_state_class = DeepseekV41InferStateInfo
 
+    @property
+    def prefill_replay_window(self):
+        return 0 if self.return_all_prompt_logics or self.is_mtp_draft_model else self.config["sliding_window"]
+
     def forward(self, model_input):
         if not self.is_mtp_draft_model and model_input.token_lookback is not None:
             self.engram_hasher.restore_history(model_input.token_lookback, self.req_manager)

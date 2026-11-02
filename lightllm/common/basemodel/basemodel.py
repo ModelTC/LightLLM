@@ -59,6 +59,7 @@ torch.backends.cudnn.enabled = True
 class TpPartBaseModel:
     is_mtp_draft_model = False
     token_lookback_depth = 0
+    prefill_replay_window = 0
 
     # weight class
     pre_and_post_weight_class = None
@@ -402,6 +403,7 @@ class TpPartBaseModel:
         infer_state.req_manager = self.req_manager
 
         infer_state.mem_index = self._select_mem_indexes(model_input)
+        infer_state.b_prefill_commit_start = model_input.b_prefill_commit_start
         infer_state.microbatch_index = microbatch_index
         infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
 
@@ -489,6 +491,8 @@ class TpPartBaseModel:
         new_model_input.b_mtp_index = F.pad(new_model_input.b_mtp_index, (0, 1), mode="constant", value=0)
         new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
         new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
+        if new_model_input.b_prefill_commit_start is not None:
+            new_model_input.b_prefill_commit_start = F.pad(new_model_input.b_prefill_commit_start, (0, 1), value=0)
         new_model_input.b_is_decode_req = F.pad(new_model_input.b_is_decode_req, (0, 1), mode="constant", value=False)
         b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
         new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len

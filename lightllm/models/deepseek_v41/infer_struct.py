@@ -8,6 +8,16 @@ from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
     def init_some_extra_state(self, model):
         super().init_some_extra_state(model)
+        self.global_kv_write_slots = self.mem_index
+        if self.is_prefill and self.b_prefill_commit_start is not None:
+            batch = self._dsv4_token_to_batch_idx.long()
+            self.global_kv_write_slots = self.mem_index.masked_fill(
+                self.position_ids < self.b_prefill_commit_start[batch], -1
+            )
+            from .triton_kernel.attention import bound_swa_replay
+
+            starts = torch.where(self.b_ready_cache_len < self.b_prefill_commit_start, self.b_ready_cache_len, 0)
+            bound_swa_replay(self, starts[batch])
         self.v41_sparse_selection = None
         self.candidate_block_mask = None
         self.engram_hashes = model.engram_hasher(self) if model.engram_hasher is not None else None
@@ -15,7 +25,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         self.decoder_token_indices = None
 
     def init_decoder_state(self):
-        """Keep each extend's last window after the final global-KV producer.
+        """Keep the prompt's last window after the final global-KV producer.
 
         The original state still owns request advancement and prefix checkpoints.
         Decoder SWA reads only replayed rows, including after a prefix-cache hit.
@@ -41,6 +51,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             "position_sin_compress",
             "dsv4_sparse_req_idx",
             "dsv4_swa_indices",
+            "dsv4_swa_lengths",
             "dsv4_swa_write_slots",
             "dsv4_swa_runtime_write_slots",
             "_dsv4_token_to_batch_idx",
@@ -51,10 +62,13 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
         state.b1_cu_q_seq_len = torch.cat((lengths.new_zeros(1), lengths.cumsum(0, dtype=lengths.dtype)))
         state.b_q_start_loc = state.b1_cu_q_seq_len[:-1]
         state.max_q_seq_len = min(self.max_q_seq_len, window)
-        state.dsv4_swa_lengths = state.position_ids - ready[batch[rows]] + 1
-        state.dsv4_swa_indices.masked_fill_(
-            torch.arange(window, device=rows.device)[None, :] >= state.dsv4_swa_lengths[:, None], -1
-        )
+        from .triton_kernel.attention import bound_swa_replay
+
+        for name in ("dsv4_image_left", "dsv4_image_right"):
+            value = getattr(self, name)
+            if value is not None:
+                setattr(state, name, value[rows])
+        bound_swa_replay(state, ready[batch[rows]])
         state.v41_sparse_selection = {name: value[rows] for name, value in self.v41_sparse_selection.items()}
         state.candidate_block_mask = self.candidate_block_mask[rows]
         if self.engram_hashes is not None:

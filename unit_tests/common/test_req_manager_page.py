@@ -56,6 +56,7 @@ def _make_context(monkeypatch):
         args=SimpleNamespace(page_size=4),
         req_manager=req_manager,
         radix_cache=None,
+        backend=SimpleNamespace(model=SimpleNamespace(token_lookback_depth=0, prefill_replay_window=0)),
     )
     monkeypatch.setattr(generic_pre_process, "g_infer_context", context)
     monkeypatch.setattr(base_backend, "g_infer_context", context)
@@ -67,6 +68,7 @@ def _make_context(monkeypatch):
 def _make_req(req_idx):
     req = SimpleNamespace(req_idx=req_idx, cur_kv_len=0, hold_kv_len=0)
     req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
+    req.get_prefill_input_start = lambda end: req.cur_kv_len
     return req
 
 
@@ -148,6 +150,7 @@ def test_need_token_num_distinguishes_compute_and_page_allocation():
         get_cur_total_len=lambda: 10,
     )
     req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
+    req.get_prefill_input_start = lambda end: req.cur_kv_len
 
     assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=True) == (3, 4)
     assert InferReq.prefill_need_token_num(req, is_chuncked_prefill=False) == (7, 8)

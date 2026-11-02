@@ -917,7 +917,7 @@ def test_decoder_replay_ragged_rows_and_swa_floor_preserve_encoder_state():
     torch.testing.assert_close(decoder.engram_hashes[:, 0, 0], expected_rows)
     torch.testing.assert_close(decoder.candidate_block_mask[:, 0], expected_rows)
     torch.testing.assert_close(decoder.v41_sparse_selection["extra_indices"][:, 0, 0], expected_rows)
-    expected_lengths = torch.tensor([*range(1, 129), 1, 2, 3, *range(1, 129)], device="cuda", dtype=torch.int64)
+    expected_lengths = torch.tensor([*range(1, 129), 1, 2, 3, *range(1, 129)], device="cuda", dtype=torch.int32)
     torch.testing.assert_close(decoder.dsv4_swa_lengths, expected_lengths)
     invalid = torch.arange(128, device="cuda")[None, :] >= expected_lengths[:, None]
     assert (decoder.dsv4_swa_indices[invalid] == -1).all()
@@ -1182,6 +1182,9 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
 
         def prefill_input(start, end, req_idx=0):
             tensor = lambda value: torch.tensor([value], dtype=torch.int32)
+            commit_start = start
+            if model.prefill_replay_window and end - start < model.prefill_replay_window:
+                start = max(0, start - model.prefill_replay_window)
             return ModelInput(
                 batch_size=1,
                 total_token_num=end,
@@ -1194,6 +1197,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 b_seq_len=tensor(end),
                 b_is_decode_req=torch.tensor([False]),
                 b_ready_cache_len=tensor(start),
+                b_prefill_commit_start=tensor(commit_start) if model.prefill_replay_window else None,
                 b_prefill_start_loc=tensor(0),
                 b_prefill_has_output_cpu=[True],
                 is_prefill=True,
@@ -1551,8 +1555,11 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
         model.req_manager.save_state(
             SimpleNamespace(req_idx=0, get_chuncked_input_token_len=lambda: 256), 0, checkpoints
         )
+        shared_prefix = [buffer[:256].clone() for buffer in model.mem_manager.kv_buffer]
         expected = prefill(256, 257)
-        assert counts[-1] == 1
+        assert counts[-1] == 128
+        for buffer, saved in zip(model.mem_manager.kv_buffer, shared_prefix):
+            torch.testing.assert_close(buffer[:256], saved, atol=0, rtol=0)
         model.req_manager.restore_state(SimpleNamespace(req_idx=1, cur_kv_len=256), checkpoints, 0)
         # Decoder replay must not read saved SWA before the replay boundary.
         model.req_manager.req_to_swa[4, 1].fill_(255)
@@ -1582,7 +1589,7 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             reference = prefill(0, length, req_idx=request)
             torch.testing.assert_close(batched[request], reference[0], atol=0.0625, rtol=0.03)
         prefill(200, 256)
-        assert counts[-1] == 56
+        assert counts[-1] == 128
         assert torch.isfinite(decode(256)).all()
         # Startup captures decode graphs with repeated HOLD requests before any real prefill.
         model.req_manager.free_all()

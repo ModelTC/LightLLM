@@ -141,7 +141,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
         destindex_copy_kv_dsv41(
             latent,
             self.freqs_cis,
-            infer_state.mem_index,
+            infer_state.global_kv_write_slots,
             infer_state.position_ids,
             get_compressed_kv_buffer(infer_state.mem_manager, self.layer_num_),
             ratio,

@@ -18,15 +18,13 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
     b_q_seq_len = []
     batch_multimodal_params = []
     b_ready_cache_len = []
+    b_prefill_commit_start = []
+    replay_window = g_infer_context.backend.model.prefill_replay_window
     b_mtp_index = []
     b_prefill_has_output = []
     b_is_decode_req = []
 
     for req in req_objs:
-        if lookback_depth:
-            history = req.get_token_lookback(lookback_depth)
-            if history is not None:
-                token_lookback.append(history)
         run_reqs.append(req)
         batch_multimodal_params.append(req.multimodal_params)
         b_req_idx.append(req.req_idx)
@@ -39,15 +37,27 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_prefill_has_output.append(False if len(input_token_ids) < req.get_cur_total_len() else True)
 
         seq_len = len(input_token_ids)
-        input_token_len = seq_len - req.cur_kv_len
+        start = req.get_prefill_input_start(seq_len) if replay_window else req.cur_kv_len
+        input_token_len = seq_len - start
+        if lookback_depth:
+            if start < req.cur_kv_len:
+                history = (req.req_idx, start, input_token_ids[max(0, start - lookback_depth) : start].tolist())
+                req.token_history_ready = True
+                if start == 0:
+                    history = None
+            else:
+                history = req.get_token_lookback(lookback_depth)
+            if history is not None:
+                token_lookback.append(history)
 
-        input_id = input_token_ids[req.cur_kv_len :]
+        input_id = input_token_ids[start:]
 
         b_seq_len.append(seq_len)
         b_q_seq_len.append(input_token_len)
         input_ids.append(input_id)
         total_token_num += seq_len
-        b_ready_cache_len.append(req.cur_kv_len)
+        b_ready_cache_len.append(start)
+        b_prefill_commit_start.append(req.cur_kv_len)
         b_mtp_index.append(0)
         if hasattr(req, "is_decode_req_mixed_in_prefill"):
             b_is_decode_req.append(True)
@@ -88,6 +98,7 @@ def prepare_prefill_inputs(req_objs: List[InferReq], is_chuncked_mode: bool) -> 
         b_prefill_has_output_cpu=b_prefill_has_output,
         multimodal_params=batch_multimodal_params,
         token_lookback=token_lookback or None,
+        b_prefill_commit_start=(torch.tensor(b_prefill_commit_start, dtype=torch.int32) if replay_window else None),
     )
 
     return model_input, run_reqs
