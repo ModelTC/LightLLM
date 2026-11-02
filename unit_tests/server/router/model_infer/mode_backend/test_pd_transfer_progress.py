@@ -163,7 +163,7 @@ def test_matched_notifications_refresh_local_siblings_only(monkeypatch, stage):
     target_queue = module.request_page_task_queue if stage == "request" else module.ready_page_task_queue
     assert target_queue.get_nowait() is first
 
-    # The repeated notify cannot keep siblings alive once its waiting task was removed.
+    # A repeated notify cannot keep siblings alive after the first one was accepted.
     now[0] = 1010.0
     with monkeypatch.context() as patch:
         patch.setattr(module, "_check_tasks_time_out", Mock(side_effect=_StopLoop))

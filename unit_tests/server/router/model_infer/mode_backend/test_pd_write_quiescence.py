@@ -1,13 +1,14 @@
 import pickle
 import queue
 import threading
+from contextlib import nullcontext
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import pytest
 
-from lightllm.server.pd_io_struct import PDChunckedTransTask
+from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import _DecodeTransModule
 from lightllm.server.router.model_infer.mode_backend.pd import nixl_kv_transporter
 from lightllm.server.router.model_infer.mode_backend.pd.nixl_kv_transporter import NixlKVTransporter
@@ -116,6 +117,187 @@ def _deliver(module, task, monkeypatch):
                 module.accept_decode_write_task_loop()
             else:
                 module.accept_peer_task_loop()
+
+
+@pytest.mark.parametrize("nixl", [False, True])
+@pytest.mark.parametrize("cancel", ["abort", "timeout"])
+def test_prefill_preparation_queue_cancellation_waits_for_copy_before_releasing_page(cancel, nixl):
+    module = _module(_PrefillTransModule)
+    module.use_write_quiescence = nixl
+    task = _task(src_page_index=0, write_stage="prepare")
+    module.waiting_dict[task.get_key()] = task
+    module.transporter.send_write_request_task_to_decode_node = MagicMock()
+
+    def synchronize():
+        if cancel == "abort":
+            module._abort(task.request_id)
+        else:
+            task.time_out = lambda: True
+            module._check_tasks_time_out()
+        # The copy still owns this source page until the event has completed.
+        assert module.failed_queue.empty()
+        assert module.page_index_queue.empty()
+
+    module.ready_transfer_queue = _SequenceQueue((SimpleNamespace(synchronize=synchronize), task))
+    with pytest.raises(_StopLoop):
+        module.ready_transfer_loop()
+    module.transporter.send_write_request_task_to_decode_node.assert_not_called()
+    assert module.failed_queue.qsize() == 1
+    assert not module.waiting_dict
+    _fail_one(module)
+    assert module.page_index_queue.get_nowait() == 0
+    assert module.task_out_queue.qsize() == 1
+    assert task.write_quiesced
+
+
+@pytest.mark.parametrize("nixl", [False, True])
+def test_prefill_receive_processes_abort_without_waiting_for_source_page(nixl):
+    module = _module(_PrefillTransModule)
+    module.use_write_quiescence = nixl
+    task = _task()
+    module.task_in_queue = _SequenceQueue(task, PDAbortReq(task.request_id, device_id=0))
+    module.local_copy_kv_queue = queue.Queue()
+    module.page_index_queue = MagicMock()
+    module.page_index_queue.get.side_effect = AssertionError("receive thread must not wait for pages")
+    with pytest.raises(_StopLoop):
+        module.recv_task_loop()
+    module.page_index_queue.get.assert_not_called()
+    assert module.local_copy_kv_queue.get_nowait() is task
+    assert task.error_info == "aborted req"
+
+    module.local_copy_kv_queue = _SequenceQueue(task)
+    with pytest.raises(_StopLoop):
+        module.local_copy_kv_loop()
+    module.page_index_queue.get.assert_not_called()
+    assert module.failed_queue.get_nowait() is task
+    assert not module.waiting_dict
+
+
+@pytest.mark.parametrize("nixl", [False, True])
+def test_prefill_preparation_hands_page_to_existing_write_protocol(monkeypatch, nixl):
+    module = _module(_PrefillTransModule)
+    module.use_write_quiescence = nixl
+    task = _task()
+    module.task_in_queue = _SequenceQueue(task)
+    module.local_copy_kv_queue = queue.Queue()
+    with pytest.raises(_StopLoop):
+        module.recv_task_loop()
+    assert module.waiting_dict[task.get_key()] is task
+    assert task.write_stage == "prepare"
+
+    module.local_copy_kv_queue = _SequenceQueue(module.local_copy_kv_queue.get_nowait())
+    module.ready_transfer_queue = queue.Queue()
+    module.copy_cuda_stream = object()
+    module.dp_world_size = 1
+    module.mem_managers = [SimpleNamespace(write_mem_to_page_kv_move_buffer=MagicMock(return_value=128))]
+    event = SimpleNamespace(record=MagicMock(), synchronize=MagicMock())
+    monkeypatch.setattr(prefill_trans_process.torch.cuda, "stream", lambda stream: nullcontext())
+    monkeypatch.setattr(prefill_trans_process.torch.cuda, "Event", lambda: event)
+    module.page_index_queue.put(0)
+    with pytest.raises(_StopLoop):
+        module.local_copy_kv_loop()
+    assert task.src_page_index == 0 and task.transfer_nbytes == 128
+    event.record.assert_called_once()
+    module.ready_transfer_queue = _SequenceQueue(module.ready_transfer_queue.get_nowait())
+    module.transporter.send_write_request_task_to_decode_node = MagicMock()
+    with pytest.raises(_StopLoop):
+        module.ready_transfer_loop()
+    event.synchronize.assert_called_once()
+    module.transporter.send_write_request_task_to_decode_node.assert_called_once_with(task)
+    assert task.write_stage == "request"
+    assert module.waiting_dict[task.get_key()] is task
+    assert module.failed_queue.empty() and module.page_index_queue.empty()
+
+
+def test_prefill_stop_during_preparation_waits_for_copy_before_confirming():
+    module = _module(_PrefillTransModule)
+    task = _task(src_page_index=0, write_stage="prepare")
+    module.waiting_dict[task.get_key()] = task
+    stop = replace(task, write_stage="error", write_id="allocation-1", dst_page_index=1, error_info="D timeout")
+
+    def synchronize():
+        module._handle_stop_request(stop)
+        module.transporter.send_error_info_to_decode_node.assert_not_called()
+        assert module.failed_queue.empty() and module.page_index_queue.empty()
+
+    module.ready_transfer_queue = _SequenceQueue((SimpleNamespace(synchronize=synchronize), task))
+    module.transporter.send_write_request_task_to_decode_node = MagicMock()
+    with pytest.raises(_StopLoop):
+        module.ready_transfer_loop()
+    module.transporter.send_write_request_task_to_decode_node.assert_not_called()
+    _fail_one(module)
+    ack = module.transporter.send_error_info_to_decode_node.call_args.kwargs["trans_task"]
+    assert ack.write_quiesced and ack.write_id == "allocation-1" and ack.dst_page_index == 1
+    assert module.page_index_queue.get_nowait() == 0
+    assert module.task_out_queue.qsize() == 1
+
+
+@pytest.mark.parametrize("nixl", [False, True])
+@pytest.mark.parametrize("cancel_at", ["waiting", "acquired"])
+def test_prefill_page_wait_cancellation_reclaims_only_the_page_it_acquired(nixl, cancel_at):
+    module = _module(_PrefillTransModule)
+    module.use_write_quiescence = nixl
+    task = _task(write_stage="prepare")
+    module.waiting_dict[task.get_key()] = task
+    module.local_copy_kv_queue = _SequenceQueue(task)
+
+    def get_page(timeout):
+        assert module.page_index_queue.get.call_count == 1
+        module._abort(task.request_id)
+        if cancel_at == "waiting":
+            raise queue.Empty()
+        return 1
+
+    module.page_index_queue = SimpleNamespace(get=MagicMock(side_effect=get_page), put=MagicMock())
+    with pytest.raises(_StopLoop):
+        module.local_copy_kv_loop()
+    assert module.failed_queue.qsize() == 1
+    assert task.src_page_index == (1 if cancel_at == "acquired" else None)
+    module.page_index_queue.put.assert_not_called()
+    _fail_one(module)
+    assert module.task_out_queue.qsize() == 1
+    if cancel_at == "acquired":
+        module.page_index_queue.put.assert_called_once_with(1)
+    else:
+        module.page_index_queue.put.assert_not_called()
+
+
+@pytest.mark.parametrize("nixl", [False, True])
+@pytest.mark.parametrize("cancel_at", ["queued", "waiting", "acquired"])
+def test_decode_page_queue_cancellation_never_sends_ready_or_leaks_page(monkeypatch, cancel_at, nixl):
+    module = _module(_DecodeTransModule)
+    module.use_write_quiescence = nixl
+    task = _task()
+    module.waiting_dict[task.get_key()] = task
+    module.request_page_task_queue = queue.Queue()
+    _deliver(module, replace(task, write_stage="request"), monkeypatch)
+    module.request_page_task_queue = _SequenceQueue(module.request_page_task_queue.get_nowait())
+    module.transporter.send_write_ready_task_to_prefill_node = MagicMock()
+
+    def get_page(timeout):
+        assert module.page_index_queue.get.call_count == 1, "cancelled task must stop waiting for a page"
+        module._abort(task.request_id)
+        if cancel_at == "waiting":
+            raise queue.Empty()
+        return 1
+
+    module.page_index_queue = SimpleNamespace(get=MagicMock(side_effect=get_page), put=MagicMock())
+    if cancel_at == "queued":
+        module._abort(task.request_id)
+    with pytest.raises(_StopLoop):
+        module.request_page_loop()
+
+    module.transporter.send_write_ready_task_to_prefill_node.assert_not_called()
+    assert module.failed_queue.qsize() == 1
+    assert module.failed_queue.get_nowait() is task
+    assert not module.waiting_dict and not module.quarantined_tasks
+    assert task.dst_page_index is None
+    if cancel_at == "queued":
+        module.page_index_queue.get.assert_not_called()
+    if cancel_at == "acquired":
+        module.page_index_queue.put.assert_called_once_with(1)
+    else:
+        module.page_index_queue.put.assert_not_called()
 
 
 def test_decode_timeout_holds_page_until_matching_stop_confirmation(monkeypatch):
@@ -300,9 +482,11 @@ def test_quarantined_capacity_rejects_new_transfers_without_recycling_pages(cls,
     else:
         module.quarantined_tasks = {"a": object(), "b": object()}
     task = _task()
+    module.waiting_dict[task.get_key()] = task
     if cls is _PrefillTransModule:
-        module.task_in_queue = _SequenceQueue(task)
-        loop = module.recv_task_loop
+        task.write_stage = "prepare"
+        module.local_copy_kv_queue = _SequenceQueue(task)
+        loop = module.local_copy_kv_loop
     else:
         module.request_page_task_queue = _SequenceQueue(task)
         loop = module.request_page_loop
@@ -472,6 +656,7 @@ def test_lost_stop_notification_does_not_remove_active_peer_descriptors():
 def test_nixl_notify_failure_and_timeout_have_one_cleanup_owner(cls, timeout_first):
     module = _module(cls)
     task = _task()
+    module.waiting_dict[task.get_key()] = task
     task.time_out = lambda: True
     module.transporter.remove_remote_agent = MagicMock()
 

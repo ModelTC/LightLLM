@@ -10,7 +10,10 @@ from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.server.router.model_infer.mode_backend import base_backend
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl import decode_impl
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_impl import PDDecodeNode
-from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import _DecodeTransModule
+from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import (
+    _DecodeTransModule,
+    _SharedTimeOutMark,
+)
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_impl, prefill_trans_process
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl import (
     PDChunkedPrefillForPrefillNode,
@@ -31,7 +34,7 @@ class _SequenceQueue:
     def __init__(self, *values):
         self.values = list(values)
 
-    def get(self):
+    def get(self, *args, **kwargs):
         if self.values:
             return self.values.pop(0)
         raise _StopLoop()
@@ -42,7 +45,6 @@ def _make_transfer_task(page_kind="kv"):
         request_id=123,
         start_kv_index=0 if page_kind == "kv" else 4,
         end_kv_index=4,
-        request_kv_len=4,
         time_out_secs=10,
         pd_master_node_id=0,
         prefill_dp_index=0,
@@ -146,26 +148,24 @@ def test_prefill_capacity_pause_waits_for_pending_pd_tasks(monkeypatch, success_
     backend.batch_max_tokens = 8192
     backend.info_queue = queue.Queue()
     backend._timer_merge_radix_tree = MagicMock()
-    backend._reorder_pd_high_priority_reqs = lambda reqs: reqs
-    backend._reorder_long_prefill_reqs = lambda reqs: reqs
+    backend.prefill_queue_strategy = SimpleNamespace(reorder=lambda reqs, **kwargs: reqs)
 
     context = prefill_impl.g_infer_context
     monkeypatch.setattr(context, "requests_mapping", {req.req_id: req})
     monkeypatch.setattr(context, "get_can_alloc_token_num", lambda: 0)
-    monkeypatch.setattr(context, "get_can_alloc_dsv4_swa_page_num", lambda: 0)
     monkeypatch.setattr(context, "cache_placement_controller", SimpleNamespace(set_req_cache_way=MagicMock()))
     monkeypatch.setattr(context, "filter_reqs", MagicMock())
     pause_reqs = MagicMock()
     monkeypatch.setattr(context, "pause_reqs", pause_reqs)
 
     # Capacity pressure marks the unfinished request for pausing on the next iteration.
-    assert backend._get_classed_reqs(req_ids=[req.req_id], no_decode=True) == ([], [])
+    assert backend._get_classed_reqs(req_ids=[req.req_id], no_decode=True) == ([], [], 0)
     assert req.wait_pause
     pause_reqs.assert_called_once_with([], is_master_in_dp=True)
 
     req.infer_aborted = abort_while_waiting
     pause_reqs.reset_mock()
-    assert backend._get_classed_reqs(req_ids=[req.req_id], no_decode=True) == ([], [])
+    assert backend._get_classed_reqs(req_ids=[req.req_id], no_decode=True) == ([], [], 0)
     pause_reqs.assert_called_once_with([], is_master_in_dp=True)
 
     req.pd_task_success_num = success_num
@@ -262,8 +262,8 @@ def test_prefill_trans_process_handles_abort_without_allocating_page(monkeypatch
 
 
 def test_prefill_abort_only_fails_tasks_not_submitted_to_transporter():
-    pending_task = SimpleNamespace(request_id=123, xfer_handle=None, error_info=None)
-    active_task = SimpleNamespace(request_id=123, xfer_handle=object(), error_info=None)
+    pending_task = SimpleNamespace(request_id=123, xfer_handle=None, error_info=None, write_stage=None)
+    active_task = SimpleNamespace(request_id=123, xfer_handle=object(), error_info=None, write_stage=None)
     unrelated_task = SimpleNamespace(request_id=456, xfer_handle=None, error_info=None)
     module = _PrefillTransModule.__new__(_PrefillTransModule)
     module.use_write_quiescence = False
@@ -334,7 +334,7 @@ def test_notify_send_error_only_cleans_up_the_task_it_still_owns(monkeypatch, si
     module.use_write_quiescence = False
     module.device_id = 0
     module.waiting_dict_lock = threading.Lock()
-    module.waiting_dict = {}
+    module.waiting_dict = {task.get_key(): task}
     module.request_last_progress_time = {}
     module.failed_queue = queue.Queue()
     next_stage = queue.Queue()
@@ -360,6 +360,7 @@ def test_notify_send_error_only_cleans_up_the_task_it_still_owns(monkeypatch, si
         module.ready_transfer_queue = _SequenceQueue((SimpleNamespace(synchronize=lambda: None), task))
         loop = module.ready_transfer_loop
     else:
+        task.shared_time_out_mark = _SharedTimeOutMark()
         module.page_index_queue = _SequenceQueue(7)
         module.request_page_task_queue = _SequenceQueue(task)
         loop = module.request_page_loop
@@ -392,7 +393,7 @@ def test_prefill_send_error_does_not_remove_a_write_that_already_started(monkeyp
     module.use_write_quiescence = False
     module.device_id = 0
     module.waiting_dict_lock = threading.Lock()
-    module.waiting_dict = {}
+    module.waiting_dict = {task.get_key(): task}
     module.failed_queue = queue.Queue()
     module.ready_transfer_queue = _SequenceQueue((SimpleNamespace(synchronize=lambda: None), task))
     monkeypatch.setattr(prefill_trans_process.torch.cuda, "set_device", lambda _device_id: None)

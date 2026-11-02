@@ -282,6 +282,10 @@ class _PrefillTransModule:
         aborted_tasks = []
         with self.waiting_dict_lock:
             for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.request_id == request_id and trans_task.write_stage == "prepare":
+                    # The preparation thread still owns the page, possibly with a copy in flight.
+                    trans_task.error_info = error_info
+                    continue
                 if self.use_write_quiescence:
                     if trans_task.request_id == request_id:
                         trans_task.error_info = error_info
@@ -313,35 +317,35 @@ class _PrefillTransModule:
             assert isinstance(obj, PDChunckedTransTask), f"unsupported prefill transfer task type: {type(obj)}"
 
             trans_task = obj
-            if self.use_write_quiescence:
-                page_index = None
-                while len(self.quarantined_tasks) < self.args.pd_kv_page_num:
-                    try:
-                        page_index = self.page_index_queue.get(timeout=1.0)
-                        break
-                    except queue.Empty:
-                        pass
-                if page_index is None:
-                    trans_task.error_info = "all source transfer pages quarantined; transport recovery required"
-                    trans_task.write_quiesced = True
-                    self.failed_queue.put(trans_task)
-                    continue
-            else:
-                page_index = self.page_index_queue.get()
-            trans_task.src_page_index = page_index
-
-            # 初次校验 time out
-            if trans_task.time_out():
-                trans_task.error_info = "time out in recv_task_loop"
-                self.failed_queue.put(trans_task)
-            else:
-                self.local_copy_kv_queue.put(trans_task)
+            with self.waiting_dict_lock:
+                trans_task.write_stage = "prepare"
+                self.waiting_dict[trans_task.get_key()] = trans_task
+            # Keep consuming control messages even when every source page is busy.
+            self.local_copy_kv_queue.put(trans_task)
 
     @log_exception
     def local_copy_kv_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.local_copy_kv_queue.get()
+
+            while trans_task.error_info is None:
+                if trans_task.time_out():
+                    trans_task.error_info = "time out preparing source page"
+                    break
+                if self.use_write_quiescence and len(self.quarantined_tasks) >= self.args.pd_kv_page_num:
+                    trans_task.error_info = "all source transfer pages quarantined; transport recovery required"
+                    break
+                try:
+                    trans_task.src_page_index = self.page_index_queue.get(timeout=1.0)
+                    break
+                except queue.Empty:
+                    pass
+
+            if trans_task.error_info is not None:
+                with self.waiting_dict_lock:
+                    self._fail_waiting_task_locked(trans_task, trans_task.error_info)
+                continue
 
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
             with torch.cuda.stream(stream=self.copy_cuda_stream):
@@ -377,7 +381,10 @@ class _PrefillTransModule:
             key = trans_task.get_key()
             try:
                 with self.waiting_dict_lock:
-                    self.waiting_dict[key] = trans_task
+                    if trans_task.error_info is not None:
+                        self._fail_waiting_task_locked(trans_task, trans_task.error_info)
+                        continue
+                    trans_task.write_stage = "request"
                 self.transporter.send_write_request_task_to_decode_node(trans_task)
                 logger.debug(f"send WRITE request to decode: {key}")
             except BaseException as e:
@@ -474,6 +481,10 @@ class _PrefillTransModule:
         with self.waiting_dict_lock:
             timeout_tasks = []
             for key, trans_task in list(self.waiting_dict.items()):
+                if trans_task.write_stage == "prepare":
+                    if trans_task.error_info is None and trans_task.time_out():
+                        trans_task.error_info = "time out preparing source page"
+                    continue
                 if self.use_write_quiescence:
                     # 已提交的任务由 status 线程推进，不能在此将 IN_PROG 当作静默。
                     if not trans_task.write_submitting and not trans_task.write_submitted and trans_task.time_out():

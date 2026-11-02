@@ -291,21 +291,25 @@ class _DecodeTransModule:
 
             self.up_status_in_queue.put(up_status)
 
-    def _pop_waiting_task_for_notify(self, notify_task: PDChunckedTransTask):
+    def _get_waiting_task_for_notify(self, notify_task: PDChunckedTransTask):
         with self.waiting_dict_lock:
             local_trans_task = self.waiting_dict.get(notify_task.get_key())
             if local_trans_task is None:
                 return None
+            if notify_task.write_stage == "request" and local_trans_task.write_stage is not None:
+                return None
             if self.use_write_quiescence:
-                if notify_task.write_stage == "request" and local_trans_task.dst_page_index is not None:
-                    return None
                 if notify_task.write_stage == "done" and (
                     local_trans_task.write_id is None
                     or notify_task.write_id != local_trans_task.write_id
                     or notify_task.dst_page_index != local_trans_task.dst_page_index
                 ):
                     return None
-            self.waiting_dict.pop(notify_task.get_key())
+            if notify_task.write_stage == "request":
+                # Keep queued page requests visible to cancellation and idle timeout.
+                local_trans_task.write_stage = "request"
+            else:
+                self.waiting_dict.pop(notify_task.get_key())
 
             return local_trans_task
 
@@ -373,7 +377,7 @@ class _DecodeTransModule:
                         # 到了请求页面的阶段
                         remote_trans_task = notify_obj
                         if remote_trans_task.write_stage == "request":
-                            local_trans_task = self._pop_waiting_task_for_notify(remote_trans_task)
+                            local_trans_task = self._get_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
                                 local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.transfer_nbytes = remote_trans_task.transfer_nbytes
@@ -404,7 +408,7 @@ class _DecodeTransModule:
 
                         # prefill 写完数据到了 done 阶段
                         if remote_trans_task.write_stage == "done":
-                            local_trans_task = self._pop_waiting_task_for_notify(remote_trans_task)
+                            local_trans_task = self._get_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
                                 local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
@@ -457,28 +461,33 @@ class _DecodeTransModule:
         torch.cuda.set_device(self.device_id)
         while True:
             trans_task: PDChunckedTransTask = self.request_page_task_queue.get()
-            if self.use_write_quiescence:
-                dst_page_index = None
-                while len(self.quarantined_tasks) < self.args.pd_kv_page_num:
-                    try:
-                        dst_page_index = self.page_index_queue.get(timeout=1.0)
-                        break
-                    except queue.Empty:
-                        pass
-                if dst_page_index is None:
-                    trans_task.error_info = "all destination transfer pages quarantined; transport recovery required"
-                    self.failed_queue.put(trans_task)
-                    continue
-            else:
-                dst_page_index = self.page_index_queue.get()
-            trans_task.dst_page_index = dst_page_index
-            if self.use_write_quiescence:
-                trans_task.write_id = uuid.uuid4().hex
-            trans_task.start_trans_time = time.time()
             key = trans_task.get_key()
+            dst_page_index = None
+            while True:
+                with self.waiting_dict_lock:
+                    if self.waiting_dict.get(key) is not trans_task:
+                        break
+                    if self.use_write_quiescence and len(self.quarantined_tasks) >= self.args.pd_kv_page_num:
+                        self._fail_waiting_task_locked(
+                            trans_task, "all destination transfer pages quarantined; transport recovery required"
+                        )
+                        break
+                try:
+                    dst_page_index = self.page_index_queue.get(timeout=1.0)
+                    break
+                except queue.Empty:
+                    pass
+            if dst_page_index is None:
+                continue
             try:
                 with self.waiting_dict_lock:
-                    self.waiting_dict[key] = trans_task
+                    if self.waiting_dict.get(key) is not trans_task:
+                        self.page_index_queue.put(dst_page_index)
+                        continue
+                    trans_task.dst_page_index = dst_page_index
+                    if self.use_write_quiescence:
+                        trans_task.write_id = uuid.uuid4().hex
+                    trans_task.start_trans_time = time.time()
                 self.transporter.send_write_ready_task_to_prefill_node(trans_task=trans_task)
             except BaseException as e:
                 logger.error(f"send write ready task to prefill node failed: {trans_task.to_str()}")
