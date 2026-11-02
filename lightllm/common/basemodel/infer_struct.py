@@ -135,11 +135,13 @@ class InferStateInfo:
 
     def init_att_state(self):
         if self.is_prefill:
-            self.prefill_att_state.init_state()
+            if self.prefill_att_state is not None:
+                self.prefill_att_state.init_state()
             if self.prefill_att_state1 is not None:
                 self.prefill_att_state1.init_state()
         else:
-            self.decode_att_state.init_state()
+            if self.decode_att_state is not None:
+                self.decode_att_state.init_state()
             if self.decode_att_state1 is not None:
                 self.decode_att_state1.init_state()
         self.check_att_states()
@@ -179,7 +181,8 @@ class InferStateInfo:
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
 
-        self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
+        if self.decode_att_state is not None:
+            self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
         if self.decode_att_state1 is not None:
             self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return

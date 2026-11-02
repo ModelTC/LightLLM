@@ -66,6 +66,9 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     assert state.is_draft_model
     assert state.prefill_att_state is None and state.decode_att_state is None
     assert state.req_manager is draft.req_manager
+    state.init_att_state()
+    if not prefill:
+        state.copy_for_cuda_graph(draft._create_inferstate(model_input))
 
 
 @pytest.mark.parametrize("mode", ["vanilla_with_att", "eagle_with_att"])
