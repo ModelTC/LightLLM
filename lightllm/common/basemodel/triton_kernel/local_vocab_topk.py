@@ -5,18 +5,18 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["logits_stride_b", "logits_stride_v", "bias_stride_b", "bias_stride_v"])
 def _vocab_bias_max_partial(
     logits,
     bias,
     values,
     indexes,
+    logits_stride_b,
+    logits_stride_v,
+    bias_stride_b,
+    bias_stride_v,
     batch,
     vocab: tl.constexpr,
-    logits_stride_b: tl.constexpr,
-    logits_stride_v: tl.constexpr,
-    bias_stride_b: tl.constexpr,
-    bias_stride_v: tl.constexpr,
     chunks: tl.constexpr,
     BLOCK_V: tl.constexpr,
     BLOCK_B: tl.constexpr,
@@ -24,8 +24,19 @@ def _vocab_bias_max_partial(
     v = tl.program_id(0) * BLOCK_V + tl.arange(0, BLOCK_V)
     b = tl.program_id(1) * BLOCK_B + tl.arange(0, BLOCK_B)
     mask = (v[:, None] < vocab) & (b[None, :] < batch)
-    base = tl.load(logits + v[:, None] * logits_stride_v + b[None, :] * logits_stride_b, mask, 0).to(tl.float32)
-    extra = tl.load(bias + v[:, None] * bias_stride_v + b[None, :] * bias_stride_b, mask, 0).to(tl.float32)
+    # 词表下标本身放得进 int32，但下标乘 stride 会超过 int32。地址统一用 int64。
+    v_offsets = v.to(tl.int64)
+    b_offsets = b.to(tl.int64)
+    logits_stride_b = logits_stride_b.to(tl.int64)
+    logits_stride_v = logits_stride_v.to(tl.int64)
+    bias_stride_b = bias_stride_b.to(tl.int64)
+    bias_stride_v = bias_stride_v.to(tl.int64)
+    base = tl.load(
+        logits + v_offsets[:, None] * logits_stride_v + b_offsets[None, :] * logits_stride_b, mask, 0
+    ).to(tl.float32)
+    extra = tl.load(
+        bias + v_offsets[:, None] * bias_stride_v + b_offsets[None, :] * bias_stride_b, mask, 0
+    ).to(tl.float32)
     scores = tl.where(mask, base + extra, -float("inf"))
     maximum = tl.max(scores, axis=0)
     winner = tl.min(tl.where((scores == maximum[None, :]) & mask, v[:, None], 2147483647), axis=0)
@@ -66,10 +77,10 @@ def local_vocab_bias_max(base_logits: torch.Tensor, bias: torch.Tensor, alloc_fu
         bias,
         partial_values,
         partial_indexes,
-        batch,
-        vocab,
         *base_logits.stride(),
         *bias.stride(),
+        batch,
+        vocab,
         chunks,
         **run_config,
     )
