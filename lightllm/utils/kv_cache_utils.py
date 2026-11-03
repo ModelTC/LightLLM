@@ -5,6 +5,7 @@ import os
 import math
 import xxhash
 import threading
+import time
 import concurrent.futures
 import numpy as np
 import triton
@@ -26,9 +27,7 @@ from lightllm.common.kv_cache_mem_manager import (
     Deepseek2MemoryManager,
 )
 
-from typing import List, Tuple, Optional
-from tqdm import tqdm
-from lightllm.utils.dist_utils import get_current_device_id
+from typing import List, Optional
 from lightllm.common.state_cache_manager import get_hybrid_cache_config
 
 logger = init_logger(__name__)
@@ -197,7 +196,7 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
         err = ctypes.get_errno()
         if use_hugetlb:
             raise Exception(
-                f"shmget with SHM_HUGETLB failed (errno={err}). Falling back to regular pages."
+                f"shmget with SHM_HUGETLB failed (errno={err}); regular-page fallback is not enabled."
                 f"You may need to configure hugepages manually, e.g.,"
                 f"sudo sed -i 's/^GRUB_CMDLINE_LINUX=\"/& default_hugepagesz=1G \
                     hugepagesz=1G hugepages={hugepages_num}/' /etc/default/grub"
@@ -219,6 +218,7 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
 
     # Best-effort memory prefaulting in background to speed up subsequent cudaHostRegister
     def _pre_warm_memory():
+        started = time.monotonic()
         page_size = _get_default_hugepage_size() if use_hugetlb else 4096
         arr = np.ctypeslib.as_array(ctypes.cast(shm_addr, ctypes.POINTER(ctypes.c_uint8)), shape=(size_to_alloc,))
         worker_num = 8
@@ -231,7 +231,10 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
             volatile_sum = sum(executor.map(_warm_range, range(worker_num)))
-        logger.info(f"pre warmed shared memory pages successfully, checksum={volatile_sum})")
+        logger.info(
+            f"pre warmed shared memory pages successfully, checksum={volatile_sum}, "
+            f"bytes={size_to_alloc}, page_stride={page_size}, wall_seconds={time.monotonic() - started:.3f}"
+        )
 
     th = threading.Thread(target=_pre_warm_memory, name=f"cpu_cache_pre_warm_{key}", daemon=True)
     th.start()
@@ -240,54 +243,18 @@ def create_shm_kv_cache_ptr(key: int, size: int) -> int:
 
 
 @lru_cache(maxsize=None)
-def register_shm_ptr_to_pin(shm_ptr: int, size: int, registration_alignment: int = 1) -> int:
+def _register_shm_ptr(shm_ptr: int, size: int, registration_alignment: int):
     """Register page-aligned segments without splitting a caller's copy unit."""
+    from lightllm.utils.host_memory import HostMemoryRegistration
+
     chunk_bytes = 128 * 1024 * 1024  # 128M性能最好
     alignment = math.lcm(registration_alignment, os.sysconf("SC_PAGE_SIZE"))
     chunk_bytes = max(alignment, chunk_bytes // alignment * alignment)
-    tasks: list[tuple[int, int]] = []
-    offset = 0
-    while offset < size:
-        seg_len = min(chunk_bytes, size - offset)
-        tasks.append((offset, seg_len))
-        offset += seg_len
+    return HostMemoryRegistration(shm_ptr, size, chunk_bytes, workers=min(8, triton.cdiv(size, chunk_bytes)))
 
-    cuda = ctypes.CDLL("/usr/local/cuda/targets/x86_64-linux/lib/libcudart.so")
-    cuda.cudaHostRegister.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint]
-    cuda.cudaHostRegister.restype = ctypes.c_int
-    cuda.cudaHostGetDevicePointer.argtypes = [ctypes.POINTER(ctypes.c_void_p), ctypes.c_void_p, ctypes.c_int]
-    cuda.cudaHostGetDevicePointer.restype = ctypes.c_int
 
-    cudaHostRegisterFlag = 3
-
-    device_id = get_current_device_id()
-    torch.cuda.set_device(device_id)
-    desc = f"pid {os.getpid()} Registering pinned host memory"
-
-    def _register_one_segment(task: Tuple[int, int]):
-        offset, seg_len = task
-        torch.cuda.set_device(device_id)
-        ptr = ctypes.c_void_p(shm_ptr + offset)
-        r = cuda.cudaHostRegister(ptr, ctypes.c_size_t(seg_len), cudaHostRegisterFlag)
-        if r != 0:
-            raise Exception(f"cudaHostRegister failed with error code {r}, prefer to use hugetlb")
-        return
-
-    # worker_num的数值需要与_pre_warm_memory一致，不然会丢失warmup的效果
-    if tasks:
-        worker_num = min(8, len(tasks))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=worker_num) as executor:
-            futures = [executor.submit(_register_one_segment, task) for task in tasks]
-            for future in tqdm(concurrent.futures.as_completed(futures), total=len(futures), desc=desc):
-                future.result()
-
-    device_ptr = ctypes.c_void_p()
-    host_ptr = ctypes.c_void_p(shm_ptr)
-    res = cuda.cudaHostGetDevicePointer(ctypes.byref(device_ptr), host_ptr, 0)
-    if res != 0:
-        raise Exception(f"cudaHostGetDevicePointer failed with error code {res}")
-    logger.info(f"cudaHostGetDevicePointer success, host_ptr={host_ptr.value}, device_ptr={device_ptr.value}")
-    return device_ptr.value
+def register_shm_ptr_to_pin(shm_ptr: int, size: int, registration_alignment: int = 1) -> int:
+    return _register_shm_ptr(shm_ptr, size, registration_alignment).device_ptr
 
 
 @lru_cache(maxsize=None)
@@ -349,7 +316,7 @@ def _get_online_numa_nodes() -> List[int]:
     return [0]
 
 
-def interleave_pages_across_numa_nodes(libc, addr: int, size: int) -> bool:
+def interleave_pages_across_numa_nodes(libc, addr: int, size: int, *, use_hugetlb: Optional[bool] = None) -> bool:
     """为 CPU KV cache 的共享内存映射设置 NUMA 交错分配策略。
 
     CPU KV cache 使用 SysV SHM 在多个进程间共享。默认的 first-touch 策略会把物理页分配到
@@ -382,7 +349,9 @@ def interleave_pages_across_numa_nodes(libc, addr: int, size: int) -> bool:
         logger.warning(f"unsupported architecture {os.uname().machine}, skip cpu cache numa interleave")
         return False
 
-    if enable_huge_page():
+    if use_hugetlb is None:
+        use_hugetlb = enable_huge_page()
+    if use_hugetlb:
         huge_sz = _get_default_hugepage_size()
         size = triton.cdiv(size, huge_sz) * huge_sz
 
