@@ -1179,9 +1179,11 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
     torch.distributed.init_process_group("nccl", init_method=f"file://{tmp_path}/nccl", rank=0, world_size=1)
     dist_group_manager.create_groups(1)
 
+    host_ready = []
+
     class TinyModel(DeepseekV41VisionTpPartModel if vision else DeepseekV41TpPartModel):
         def _autotune_warmup(self):
-            pass
+            assert host_ready, "Host registrations must finish before capture/autotune warmup"
 
         def _check_max_len_infer(self):
             pass
@@ -1250,8 +1252,10 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
                 max_seq_length=512,
                 batch_max_tokens=512,
                 disable_cudagraph=True,
+                wait_for_host_memory=lambda: host_ready.append(True),
             )
         )
+        assert host_ready == [True]
         with monkeypatch.context() as unsupported:
             unsupported.setattr(model.args, "enable_prefill_cudagraph", True)
             with pytest.raises(ValueError, match="prefill CUDA Graph"):

@@ -5,6 +5,8 @@ import gc
 import copy
 import math
 import json
+import time
+from contextlib import contextmanager
 import torch
 import torch.nn.functional as F
 import triton
@@ -113,12 +115,14 @@ class TpPartBaseModel:
         self._init_quant()
 
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
-        with profile_mtp_weight_memory(self):
-            with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
-                self._init_weights()
-        with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            self._init_req_manager()
-            self._init_mem_manager()
+        with self._startup_stage("weight_objects"):
+            with profile_mtp_weight_memory(self):
+                with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
+                    self._init_weights()
+        with self._startup_stage("request_state_and_kv_capacity"):
+            with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+                self._init_req_manager()
+                self._init_mem_manager()
 
         # Qwen3.5 等 linear attention 模型会在 req_manager 中保存大量运行时 state。先初始化
         # req_manager、再初始化 mem_manager，可以让 KV cache 显存评估包含这些 state 的实际占用；
@@ -127,8 +131,16 @@ class TpPartBaseModel:
         self._check_mem_size()
         self._init_infer_layer()
         self._init_some_value()
-        self._init_custom()
-        self.load_weights(self.weight_dict)
+        with self._startup_stage("custom_state"):
+            self._init_custom()
+        with self._startup_stage("checkpoint_load_and_host_mapping"):
+            self.load_weights(self.weight_dict)
+        # Host registration may overlap construction and loading, but CUDA's
+        # global capture mode forbids registration concurrent with graph/autotune
+        # warmup. The worker that owns the host pool supplies this readiness gate.
+        if kvargs.get("wait_for_host_memory") is not None:
+            with self._startup_stage("host_memory_ready"):
+                kvargs["wait_for_host_memory"]()
 
         self._init_att_backend()
         self._init_att_backend1()
@@ -140,15 +152,34 @@ class TpPartBaseModel:
             logger.info(f"use decode att backend1: {self.decode_att_backend1.__class__.__name__}")
 
         self._init_hidden_collector()
-        self._autotune_warmup()
-        self._kernel_warmup()
+        with self._startup_stage("autotune"):
+            self._autotune_warmup()
+        with self._startup_stage("kernel_warmup"):
+            self._kernel_warmup()
         self._init_padded_req()
-        self._init_cudagraph()
-        self._init_prefill_cuda_graph()
-        self._check_max_len_infer()
+        with self._startup_stage("decode_graph"):
+            self._init_cudagraph()
+        with self._startup_stage("prefill_graph"):
+            self._init_prefill_cuda_graph()
+        with self._startup_stage("max_length_check"):
+            self._check_max_len_infer()
         torch.cuda.empty_cache()
         set_model_init_status(True)
         return
+
+    @contextmanager
+    def _startup_stage(self, stage):
+        # Host wall time only: do not insert a device synchronization or change
+        # memory evaluation/initialization ordering for timing instrumentation.
+        identity = f"rank={os.environ.get('LIGHTLLM_GLOBAL_RANK')} draft={self.is_mtp_draft_model} stage={stage}"
+        started = time.monotonic()
+        logger.info(f"model_startup begin {identity}")
+        try:
+            yield
+        except BaseException:
+            logger.exception(f"model_startup failed {identity} wall_seconds={time.monotonic() - started:.3f}")
+            raise
+        logger.info(f"model_startup complete {identity} wall_seconds={time.monotonic() - started:.3f}")
 
     def _init_config(self):
         with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:

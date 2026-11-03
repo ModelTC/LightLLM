@@ -1,4 +1,6 @@
 import ctypes
+import concurrent.futures
+import time
 from lightllm.utils.envs_utils import get_env_start_args, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
@@ -15,7 +17,7 @@ class CpuKvCacheClient(object):
     This class is responsible for handling cpu kv cache meta data.
     """
 
-    def __init__(self, only_create_meta_data: bool, init_shm_data: bool):
+    def __init__(self, only_create_meta_data: bool, init_shm_data: bool, *, defer_registration: bool = False):
         self.args = get_env_start_args()
         # to do here need calcu from from settings.
         self.kv_cache_tensor_meta = calcu_cpu_cache_meta()
@@ -36,12 +38,32 @@ class CpuKvCacheClient(object):
                 dtype=self.kv_cache_tensor_meta.data_type,
                 size_bytes=self.kv_cache_tensor_meta.calcu_size(),
             )
-            tensor_creator = CpuCacheCreator(tensor_spec=tensor_spec)
-            self.cpu_kv_cache_tensor = tensor_creator.create_or_attach(
-                init_shm_data=init_shm_data,
-                pin=not init_shm_data,
-            )
+            self.tensor_creator = CpuCacheCreator(tensor_spec=tensor_spec)
+            self._registration_executor = None
+            if defer_registration:
+                assert not init_shm_data, "Only inference consumers register CPU cache asynchronously"
+                self._registration_executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="cpu-cache-registration"
+                )
+                self._registration_future = self._registration_executor.submit(
+                    self.tensor_creator.create_or_attach, init_shm_data=False, pin=True
+                )
+            else:
+                self.cpu_kv_cache_tensor = self.tensor_creator.create_or_attach(
+                    init_shm_data=init_shm_data, pin=not init_shm_data
+                )
         return
+
+    def wait_registration(self):
+        """Publish the full tensor only after every host segment is mapped in this process."""
+        if self._registration_executor is not None:
+            started = time.monotonic()
+            try:
+                self.cpu_kv_cache_tensor = self._registration_future.result()
+            finally:
+                self._registration_executor.shutdown(wait=True)
+                self._registration_executor = None
+            logger.info(f"CPU KV registration remaining startup wait: {time.monotonic() - started:.3f}s")
 
     def get_one_empty_page(self, hash_key: int, disk_offload_enable: bool) -> Optional[int]:
         assert self.page_hash_dict.get(hash_key) is None

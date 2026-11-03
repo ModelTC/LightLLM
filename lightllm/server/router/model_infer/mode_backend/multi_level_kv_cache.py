@@ -7,7 +7,6 @@ from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
-from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.envs_utils import get_env_start_args, get_dsv4_cpu_cache_max_pages_per_task
 from ..infer_batch import InferReq
@@ -39,7 +38,8 @@ class MultiLevelKvCacheModule(object):
         self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
-        self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
+        self.cpu_cache_client = backend.cpu_cache_client
+        self.cpu_cache_client.wait_registration()
         if backend.is_deepseek_v4:
             self.dsv4_sessions = {}
             self.dsv4_load_tasks = deque()

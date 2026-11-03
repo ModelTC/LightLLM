@@ -126,6 +126,15 @@ class ModeBackend:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(self.weight_dir)
 
+        if self.args.enable_cpu_cache:
+            from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
+
+            # The cache service already owns the mapping. Overlap each consumer's
+            # registration with model loading, then join before inference starts.
+            self.cpu_cache_client = CpuKvCacheClient(
+                only_create_meta_data=False, init_shm_data=False, defer_registration=True
+            )
+
         model_kvargs = {
             "weight_dir": self.weight_dir,
             "max_total_token_num": max_total_token_num,
@@ -145,6 +154,8 @@ class ModeBackend:
             "expert_dtype": kvargs.get("expert_dtype", None),
             "run_mode": self.run_mode,
         }
+        if self.args.enable_cpu_cache:
+            model_kvargs["wait_for_host_memory"] = self.cpu_cache_client.wait_registration
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
         set_random_seed(2147483647)
