@@ -262,6 +262,8 @@ class ExponentialDecayLengthPenalty(ctypes.Structure):
         self.item0 = inputs[0]
         assert self.item0 >= 0, "ExponentialDecayLengthPenalty item0 must be int >= 0"
         self.item1 = inputs[1]
+        if not math.isfinite(self.item1):
+            raise ValueError("exponential_decay_length_penalty[1] must be finite")
         assert self.item1 >= 1.0, "ExponentialDecayLengthPenalty item1 must be a float >= 1.0"
         return
 
