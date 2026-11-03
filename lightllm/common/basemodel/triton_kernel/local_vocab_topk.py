@@ -31,12 +31,12 @@ def _vocab_bias_max_partial(
     logits_stride_v = logits_stride_v.to(tl.int64)
     bias_stride_b = bias_stride_b.to(tl.int64)
     bias_stride_v = bias_stride_v.to(tl.int64)
-    base = tl.load(
-        logits + v_offsets[:, None] * logits_stride_v + b_offsets[None, :] * logits_stride_b, mask, 0
-    ).to(tl.float32)
-    extra = tl.load(
-        bias + v_offsets[:, None] * bias_stride_v + b_offsets[None, :] * bias_stride_b, mask, 0
-    ).to(tl.float32)
+    base = tl.load(logits + v_offsets[:, None] * logits_stride_v + b_offsets[None, :] * logits_stride_b, mask, 0).to(
+        tl.float32
+    )
+    extra = tl.load(bias + v_offsets[:, None] * bias_stride_v + b_offsets[None, :] * bias_stride_b, mask, 0).to(
+        tl.float32
+    )
     scores = tl.where(mask, base + extra, -float("inf"))
     maximum = tl.max(scores, axis=0)
     winner = tl.min(tl.where((scores == maximum[None, :]) & mask, v[:, None], 2147483647), axis=0)
