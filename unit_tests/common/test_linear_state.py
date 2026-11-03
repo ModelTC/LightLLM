@@ -43,11 +43,11 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(c
     expected_conv = state.conv_state[:, src, ..., offset : offset + 3].clone()
     expected_ssm = state.ssm_state[:, src * state.ssm_slots_per_req + (offset if mode == "native" else 0)].clone()
     if mode == "replay":
-        state.ssm_backend.raw_keys.zero_()
-        state.ssm_backend.raw_values.zero_()
-        state.ssm_backend.gates.fill_(-0.5)
-        state.ssm_backend.betas.zero_()
-        state.ssm_backend.cursors[src] = 1
+        state._ssm.raw_keys.zero_()
+        state._ssm.raw_values.zero_()
+        state._ssm.gates.fill_(-0.5)
+        state._ssm.betas.zero_()
+        state._ssm.cursors[src] = 1
         expected_ssm = (expected_ssm.float() * torch.exp(torch.tensor(-0.5))).to(dtype)
     before = state.ssm_state.clone()
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
@@ -60,7 +60,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(c
         torch.testing.assert_close(pool.ssm_state[0], expected_ssm.cpu(), rtol=2e-5, atol=2e-5)
     assert torch.equal(state.ssm_state, before)
     if mode == "replay":
-        assert state.ssm_backend.cursors[src].item() == 1
+        assert state._ssm.cursors[src].item() == 1
 
     for restore in (
         lambda: state.restore_bounded_att_runtime_from_pages([dst], [8], "small", [0]),
@@ -70,7 +70,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(c
         if state.mtp_state_index is not None:
             state.mtp_state_index[dst] = step
         if mode == "replay":
-            state.ssm_backend.cursors[dst] = 3
+            state._ssm.cursors[dst] = 3
         restore()
         actual = state.get_accepted_state(dst)
         torch.testing.assert_close(actual.conv, expected_conv, rtol=0, atol=0)
@@ -78,7 +78,7 @@ def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(c
         if state.mtp_state_index is not None:
             assert state.mtp_state_index[dst].item() == 0
         if mode == "replay":
-            assert state.ssm_backend.cursors[dst].item() == 0
+            assert state._ssm.cursors[dst].item() == 0
     state.reset_bounded_att_state([dst])
     assert not state.conv_state[:, dst].any()
     start = dst * state.ssm_slots_per_req
@@ -92,7 +92,11 @@ def copy_on_cpu(*, copies):
 
 def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state(monkeypatch):
     # Exercise layout and accepted-state selection independently of the CUDA copy kernel.
-    monkeypatch.setattr(import_module(GDNState.__module__), "copy_bounded_att_tensors", copy_on_cpu)
+    monkeypatch.setattr(
+        import_module("lightllm.common.attention_state.bounded_att.conv_ssm_state"),
+        "copy_bounded_att_tensors",
+        copy_on_cpu,
+    )
     config = ConvSSMStateConfig(
         logical_layer_ids=(0,),
         global_k_heads=1,

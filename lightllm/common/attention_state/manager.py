@@ -397,12 +397,19 @@ class AttentionStateManager:
         req_indices: torch.Tensor,
         accepted_steps: torch.Tensor,
         role: str,
+        *,
+        context=None,
     ) -> None:
         """传入 CUDA 请求索引和 int32 接受步数，包含基准输入步；无参与 State 时为空操作。"""
         assert req_indices.is_cuda and accepted_steps.is_cuda, "commit inputs must be CUDA tensors"
         assert role in MODEL_ROLES, f"unknown model role {role}"
-        for state in self.get_bounded_attention_states(role):
-            state.commit_bounded_att_state(req_indices, accepted_steps)
+        states = self.get_bounded_attention_states(role)
+        if context is not None:
+            context.validate(req_indices.numel(), {state.state_name for state in states})
+        for state in states:
+            state.validate_bounded_att_commit(context)
+        for state in states:
+            state.commit_bounded_att_state(req_indices, accepted_steps, context=context)
 
     # ========================================================================
     # 四、CPU/DP/PD 操作均由对应 Operator 提供。

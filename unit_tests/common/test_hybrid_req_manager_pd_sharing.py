@@ -20,8 +20,8 @@ def _assert_received_manager_roundtrip(payload, state_name, mode, expected):
     state = getattr(resources, state_name)
     assert state.big_pages_pool is state.small_pages_pool is None
     assert resources.full_att_allocator is None
-    if state.ssm_backend is not None:
-        assert state.ssm_backend.state is state.ssm_state
+    if state._ssm is not None:
+        assert state._ssm.state is state.ssm_state
     layout = resources.get_pd_operator().get_pd_bounded_att_page_layouts()[state_name]
     block = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     state.write_to_pd_page(1, block, 0, 8, layout)
@@ -32,8 +32,8 @@ def _assert_received_manager_roundtrip(payload, state_name, mode, expected):
     assert state.mtp_state_index[2] == 0
     assert state.mtp_state_index[1] == 1
     if mode == "replay":
-        assert state.ssm_backend.cursors[2] == 0
-        assert state.ssm_backend.cursors[1] == 1
+        assert state._ssm.cursors[2] == 0
+        assert state._ssm.cursors[1] == 1
     torch.cuda.synchronize()
 
 
@@ -81,7 +81,7 @@ def test_pd_export_copy_keeps_worker_pools_and_runtime_identity(cls, mode):
     assert copy.big_pages_pool is copy.small_pages_pool is None
     assert copy.conv_state is state.conv_state
     assert copy.ssm_state is state.ssm_state
-    assert copy.ssm_backend is state.ssm_backend
+    assert copy._ssm is state._ssm
     assert copy.mtp_state_index is state.mtp_state_index
     assert all(vars(state)[name] is value for name, value in before.items())
 
@@ -100,11 +100,11 @@ def test_shared_attention_state_roundtrip_preserves_worker_resources(
         state.ssm_state[:, slot].fill_(slot + 1)
     state.mtp_state_index[1], state.mtp_state_index[2] = 1, 2
     if mode == "replay":
-        state.ssm_backend.raw_keys.zero_()
-        state.ssm_backend.raw_values.zero_()
-        state.ssm_backend.gates.fill_(-0.5)
-        state.ssm_backend.betas.zero_()
-        state.ssm_backend.cursors[1], state.ssm_backend.cursors[2] = 1, 3
+        state._ssm.raw_keys.zero_()
+        state._ssm.raw_values.zero_()
+        state._ssm.gates.fill_(-0.5)
+        state._ssm.betas.zero_()
+        state._ssm.cursors[1], state._ssm.cursors[2] = 1, 3
     expected = [tensor.cpu().tolist() for tensor in state.get_accepted_state(1)]
     before = vars(state).copy()
     source_conv, source_ssm = state.conv_state[:, 1].clone(), state.ssm_state[:, state.ssm_slots_per_req].clone()

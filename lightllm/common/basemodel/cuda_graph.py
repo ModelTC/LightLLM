@@ -2,7 +2,6 @@ import os
 import copy
 import bisect
 import math
-import weakref
 from typing import Optional
 
 import torch
@@ -29,8 +28,7 @@ def _copy_warmup_state(infer_state: InferStateInfo) -> InferStateInfo:
     for name in ("decode_att_state", "decode_att_state1"):
         state = getattr(infer_state, name, None)
         if state is not None:
-            state = copy.copy(state)
-            state._infer_state_weak_ref = weakref.ref(warmup_state)
+            state = state.clone_for_warmup(warmup_state)
             setattr(warmup_state, name, state)
     return warmup_state
 

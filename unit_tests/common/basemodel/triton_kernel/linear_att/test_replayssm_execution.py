@@ -1,11 +1,12 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
 )
-from lightllm.common.linear_state import LinearStateManager
+from types import SimpleNamespace
+from lightllm.common.attention_state.commit import MtpCommitContext
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -29,10 +30,10 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
             compute_mode="precompute",
             run_config=config,
         )
-        for cls in [ReplaySSMBackend, ReplaySSMBackend]
+        for cls in [ReplaySSMState, ReplaySSMState]
     ]
-    manager = object.__new__(LinearStateManager)
-    manager.ssm_backend = ssm_backends[1]
+    manager = SimpleNamespace()
+    manager._ssm = ssm_backends[1]
     manager.mtp_state_index = torch.zeros(5, device="cuda", dtype=torch.int32)
     rows = torch.full((12,), 4, device="cuda", dtype=torch.int32)
     mtp = torch.zeros_like(rows)
@@ -80,7 +81,13 @@ def test_request_manager_accept_with_replay_graph(dtype, capture_metadata, varle
         if index == 0:
             ssm_backend.accept_updates(reqs, accepted)
         else:
-            manager.commit_accepted_state(starts, rows, mtp, flags, 4)
+            manager._ssm.commit(
+                rows[starts.long()],
+                None,
+                manager.mtp_state_index,
+                MtpCommitContext(starts, rows, mtp, flags, 4),
+                "main",
+            )
         return out
 
     inputs(0)
@@ -142,7 +149,7 @@ def test_decode_accept_order_preserves_forward_snapshot(dtype, capture_metadata,
     torch.manual_seed(731)
     initial = torch.randn(3, 3, 4, 128, 128, device="cuda", dtype=dtype) * 0.01
     ssm_backends = [
-        ReplaySSMBackend(
+        ReplaySSMState(
             initial.clone(),
             8,
             1,
@@ -237,7 +244,7 @@ def test_cross_layer_fold_with_state_offset_above_int32():
     sparse.copy_(dense)
     config = {"BV": 32, "num_warps": 1, "num_stages": 1}
     ssm_backends = [
-        ReplaySSMBackend(state, 8, 4, torch.bfloat16, num_key_heads=4, run_config=config) for state in [dense, sparse]
+        ReplaySSMState(state, 8, 4, torch.bfloat16, num_key_heads=4, run_config=config) for state in [dense, sparse]
     ]
     q = torch.randn(1, 8, 4, 128, device="cuda", dtype=torch.bfloat16)
     k = torch.randn_like(q)
@@ -280,7 +287,7 @@ def test_small_batch_matches_larger_graph_padding(batch, dtype, kda):
     initial = torch.randn(2, 14, 4, 128, 128, device="cuda", dtype=dtype) * 0.01
     config = {"BV": 32, "num_warps": 1, "num_stages": 1}
     ssm_backends = [
-        ReplaySSMBackend(initial.clone(), 8, 4, num_key_heads=2, kda=kda, compute_mode="precompute", run_config=config)
+        ReplaySSMState(initial.clone(), 8, 4, num_key_heads=2, kda=kda, compute_mode="precompute", run_config=config)
         for _ in range(2)
     ]
     reqs = torch.arange(batch, device="cuda", dtype=torch.int32)

@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.commit import StateCommitBatch
 import time
 from typing import List, Tuple
 
@@ -533,7 +534,7 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=model_input.b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=model_input.b_mtp_index,
-                    linear_state_batches=((req_num, model_output.linear_state_commit),),
+                    state_commit_batches=(StateCommitBatch(req_num, model_output.state_commits),),
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                     key="accepted_index",
@@ -808,9 +809,9 @@ class DPChunkedPrefillBackend(ModeBackend):
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
                     b_mtp_index=b_mtp_index,
-                    linear_state_batches=(
-                        (real_request_num0, model_output0.linear_state_commit),
-                        (real_request_num1, model_output1.linear_state_commit),
+                    state_commit_batches=(
+                        StateCommitBatch(real_request_num0, model_output0.state_commits),
+                        StateCommitBatch(real_request_num1, model_output1.state_commits),
                     ),
                 )
                 mtp_accept_len0 = mtp_accept_len[:real_request_num0]

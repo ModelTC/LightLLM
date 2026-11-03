@@ -6,9 +6,10 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.triton_kernel.linear_att import ssm_autotune as tuning
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
-from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
-from lightllm.common.linear_state import LinearStateManager
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
+from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
+from lightllm.common.attention_state.commit import MtpCommitContext, StateCommitBatch
+from lightllm.common.attention_state.bounded_att.ssm.forward import SSMForward
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.common import kernel_config as kernel_config_module
 from lightllm.common.triton_utils import autotuner as autotuner_module
@@ -19,9 +20,9 @@ def make_inputs(mode, dtype=torch.bfloat16, device="cpu", width=4, compute_mode=
     layers, slots, batch, h, hv, kd, vd = 2, 9, 3, 2, 4, 32, 64
     state = torch.randn(layers, slots, hv, kd, vd, dtype=dtype, device=device) * 0.01
     if mode == "replay":
-        ssm_backend = ReplaySSMBackend(state, 8, width, num_key_heads=h, compute_mode=compute_mode, kda=kda)
+        ssm_backend = ReplaySSMState(state, 8, width, num_key_heads=h, compute_mode=compute_mode, kda=kda)
     else:
-        ssm_backend = CompactSSMBackend(state, width, torch.bfloat16, num_key_heads=h, kda=kda)
+        ssm_backend = CompactSSMState(state, width, torch.bfloat16, num_key_heads=h, kda=kda)
     tokens = batch * width
     packed = torch.randn(1, tokens, 2 * h * kd + hv * vd, dtype=torch.bfloat16, device=device)
     q, k, v = [
@@ -334,7 +335,8 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
     from lightllm.common.attention_state.bounded_att import KDAState, GDNState
 
     manager = object.__new__(KDAState if kda else GDNState)
-    manager.ssm_backend = ssm_backend
+    manager._ssm = ssm_backend
+    manager.state_name = "main_kda" if kda else "main_gdn"
     manager.mtp_state_index = torch.zeros(9, dtype=torch.int32, device="cuda")
     buckets = []
     for index, ids in enumerate(([0], [1, 3])):
@@ -374,14 +376,17 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
         state.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (manager,))
         state.hidden_collector = SimpleNamespace(finish_output=lambda **kw: ModelMtpOutputCollector())
         att_class = KDALinearAttDecodeAttState if kda else GDNLinearAttDecodeAttState
-        state.decode_att_state1 = att_class(_infer_state_weak_ref=weakref.ref(state), run_config=config)
+        state.decode_att_state1 = att_class(
+            _infer_state_weak_ref=weakref.ref(state),
+            forwards={manager.state_name: SSMForward(manager, reqs, reqs, cu, None, config)},
+        )
         output = TpPartBaseModel._create_model_output(
             None, PostLayerOutput(logits=outputs[0].view(count * 4, -1)), state
         )
-        commit = output.linear_state_commit
-        assert (commit is not None) == (mode == "compact")
+        commits = output.state_commits
+        assert bool(commits) == (mode == "compact")
         output = TpPartBaseModel._create_unpad_decode_model_output(None, output, len(ids) * 4)
-        assert output.linear_state_commit is commit
+        assert output.state_commits is commits
         buckets.append((graph, outputs, output, ref, args, reqs, cu, ids))
     # Published contexts and captured launches must survive later changes to
     # the tuner's dictionaries, including when two graphs replay alternately.
@@ -405,14 +410,10 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
                 torch.testing.assert_close(outputs[layer], expected, atol=0, rtol=0)
         counts = [1 + (iteration + i) % 4 for i in range(3)]
         flags = torch.tensor([int(j < n) for n in counts for j in range(4)], dtype=torch.int32, device="cuda")
-        manager.commit_accepted_state(
-            starts,
-            rows,
-            mtp,
-            flags,
-            4,
-            linear_state_batches=tuple((len(b[-1]), b[2].linear_state_commit) for b in buckets),
+        context = MtpCommitContext(
+            starts, rows, mtp, flags, 4, tuple(StateCommitBatch(len(b[-1]), b[2].state_commits) for b in buckets)
         )
+        manager.commit_bounded_att_state(rows[starts.long()], torch.tensor(counts, device="cuda"), context=context)
         for _, _, _, ref, _, reqs, _, ids in buckets:
             ref.accept_updates(reqs[:-1], manager.mtp_state_index)
             torch.testing.assert_close(ssm_backend.state[:, ids], ref.state[:, ids], atol=0, rtol=0)

@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.linear_state import LinearStateManager
+from lightllm.common.attention_state.bounded_att import GDNState, ConvSSMStateConfig
 
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
     build_dynamic_mtp_linear_att_state_params,
@@ -14,16 +14,24 @@ def test_dynamic_sequences_stay_within_request_capacity_under_graph(request_capa
     hold = request_capacity
     reqs = torch.full((token_bucket,), hold, dtype=torch.int32, device="cuda")
     mtp_index = torch.zeros_like(reqs)
-    manager = object.__new__(LinearStateManager)
-    manager.mtp_state_index = torch.arange(request_capacity + 1, dtype=torch.int32, device="cuda") % 4
-    manager.ssm_slots_per_req = 4
-    manager.ssm_backend = None
+    config = ConvSSMStateConfig(
+        logical_layer_ids=(0,),
+        global_k_heads=1,
+        global_v_heads=1,
+        key_dim=2,
+        value_dim=2,
+        conv_width=3,
+        conv_dtype=torch.float32,
+        ssm_dtype=torch.float32,
+    )
+    manager = GDNState(config, request_capacity + 1, mtp_step=3)
+    manager.mtp_state_index.copy_(torch.arange(request_capacity + 1, dtype=torch.int32, device="cuda") % 4)
     sequences = min(request_capacity, token_bucket)
 
     def build():
         cu, ids = build_dynamic_mtp_linear_att_state_params(reqs, mtp_index, hold)
-        ids, ssm, counts = manager.prepare_mtp_decode(ids, cu)
-        return cu, ids, ssm, counts
+        forward = manager.prepare_decode(ids, cu)
+        return cu, forward.req_indices, forward.state_indices, forward.accepted_token_counts
 
     build()
     torch.cuda.synchronize()

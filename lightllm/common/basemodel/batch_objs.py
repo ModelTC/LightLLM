@@ -7,7 +7,7 @@ import torch
 from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 if TYPE_CHECKING:
-    from lightllm.common.linear_state import LinearStateCommit
+    from lightllm.common.attention_state.commit import StateCommit
 
 
 @dataclass
@@ -206,7 +206,7 @@ class ModelOutput:
     logits_token_ids: Optional[torch.Tensor] = None
 
     # Detached state-commit metadata for this forward/graph; preserved when unpadding.
-    linear_state_commit: Optional["LinearStateCommit"] = None
+    state_commits: tuple["StateCommit", ...] = ()
 
     def __post_init__(self) -> None:
         if self.mtp_collector is None:

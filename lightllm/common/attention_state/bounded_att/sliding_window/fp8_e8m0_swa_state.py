@@ -179,7 +179,9 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
                 write=False,
             )
 
-    def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
+    def commit_bounded_att_state(
+        self, req_indices: torch.Tensor, accepted_steps: torch.Tensor, *, context=None
+    ) -> None:
         """ring 按绝对 token 位置寻址，无需提交额外游标。"""
         pass
 

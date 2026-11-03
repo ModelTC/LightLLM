@@ -3,8 +3,8 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
-from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
+from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -20,8 +20,8 @@ def test_grouped_keys_graph_fold_partial_accept(mode, group, dtype):
 
     def make_ssm_backend(key_heads):
         if mode == "replay":
-            return ReplaySSMBackend(state.clone(), 16, width, num_key_heads=key_heads)
-        return CompactSSMBackend(state.clone(), width, torch.bfloat16, num_key_heads=key_heads)
+            return ReplaySSMState(state.clone(), 16, width, num_key_heads=key_heads)
+        return CompactSSMState(state.clone(), width, torch.bfloat16, num_key_heads=key_heads)
 
     ssm_backends = [make_ssm_backend(hv), make_ssm_backend(h)]
     assert ssm_backends[0].keys.numel() == ssm_backends[1].keys.numel() * group

@@ -3,8 +3,10 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
-from lightllm.common.linear_state import LinearStateManager
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
+from types import SimpleNamespace
+from lightllm.common.attention_state.commit import MtpCommitContext
+from lightllm.common.attention_state.bounded_att.ssm.native import NativeSSMState
 
 
 def make(n, width):
@@ -20,24 +22,25 @@ def make(n, width):
         mtps.extend(range(l))
     tensor = lambda x: torch.tensor(x, device="cuda", dtype=torch.int32)
     args = [tensor(starts), tensor(reqs), tensor(mtps), tensor([1] * len(reqs)), width]
-    ssm_backend = ReplaySSMBackend.__new__(ReplaySSMBackend)
+    ssm_backend = ReplaySSMState.__new__(ReplaySSMState)
     ssm_backend.cursors = tensor([7] * (hold + 1))
     ssm_backend.hold_req_id = hold
     ssm_backend.capacity = max(4, triton.next_power_of_2(width))
     ssm_backend.verify_width = width
-    manager = object.__new__(LinearStateManager)
+    manager = SimpleNamespace()
     manager.mtp_state_index = tensor([-9] * (hold + 1))
-    manager.ssm_backend = ssm_backend
+    manager._ssm = ssm_backend
     return manager, args, (ids, lengths, starts)
 
 
 def accept_unfused(m, args):
     update(m.mtp_state_index, *args)
-    m.ssm_backend.accept_updates(args[1][args[0].long()], m.mtp_state_index)
+    m._ssm.accept_updates(args[1][args[0].long()], m.mtp_state_index)
 
 
 def accept_fused(m, args):
-    m.commit_accepted_state(*args)
+    reqs = args[1][args[0].long()]
+    m._ssm.commit(reqs, None, m.mtp_state_index, MtpCommitContext(*args), "main")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -58,15 +61,15 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
             expected_cursor = [7] * len(expected_index)
             m.mtp_state_index.fill_(-9)
             ref.mtp_state_index.fill_(-9)
-            m.ssm_backend.cursors.fill_(7)
-            ref.ssm_backend.cursors.fill_(7)
+            m._ssm.cursors.fill_(7)
+            ref._ssm.cursors.fill_(7)
             for step in range(24):
                 mask = []
                 for i, (r, l) in enumerate(zip(ids, lengths)):
                     count = (step + i) % (l + 1)
                     mask.extend([1] * count + [0] * (l - count))
                     expected_index[r] = count - 1
-                    if r != m.ssm_backend.hold_req_id:
+                    if r != m._ssm.hold_req_id:
                         expected_cursor[r] += count if width > 1 else 1
                 args[3].copy_(torch.tensor(mask, device="cuda", dtype=torch.int32))
                 accept_unfused(ref, args)
@@ -75,26 +78,15 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                 else:
                     accept_fused(m, args)
                 assert torch.equal(m.mtp_state_index, ref.mtp_state_index)
-                assert torch.equal(m.ssm_backend.cursors, ref.ssm_backend.cursors)
+                assert torch.equal(m._ssm.cursors, ref._ssm.cursors)
                 assert m.mtp_state_index.tolist() == expected_index
-                assert m.ssm_backend.cursors.tolist() == expected_cursor
+                assert m._ssm.cursors.tolist() == expected_cursor
                 checks += 1
-            # Native optional-pointer path and manager dispatch leave metadata-only backend absent.
-            m.ssm_backend = None
+
+            m._ssm = NativeSSMState(torch.empty(0), width)
             accept_fused(m, args)
             assert m.mtp_state_index.tolist() == expected_index
 
-    # Non-Replay backends must still receive the accepted request IDs and indexes.
-    class CompactProbe:
-        def accept_updates(self, reqs, index):
-            self.seen = (reqs.clone(), index.clone())
-
-    m, args, (ids, _, _) = make(7, 4)
-    probe = CompactProbe()
-    m.ssm_backend = probe
-    accept_fused(m, args)
-    assert probe.seen[0].tolist() == ids
-    assert torch.equal(probe.seen[1], m.mtp_state_index)
     print("ACCEPT_EQUIVALENCE_CHECKS=" + str(checks), flush=True)
 
 
@@ -105,7 +97,7 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
     torch.manual_seed(93)
     initial = torch.randn(2, 8, 4, 32, 32, device="cuda").to(dtype) * 0.01
     ssm_backends = [
-        ReplaySSMBackend(
+        ReplaySSMState(
             initial.clone(),
             8,
             4,
@@ -118,8 +110,8 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
     ]
     managers = []
     for ssm_backend in ssm_backends:
-        manager = object.__new__(LinearStateManager)
-        manager.ssm_backend = ssm_backend
+        manager = SimpleNamespace()
+        manager._ssm = ssm_backend
         manager.mtp_state_index = torch.zeros(8, dtype=torch.int32, device="cuda")
         managers.append(manager)
     reqs = torch.full((4,), 7, dtype=torch.int32, device="cuda")
@@ -188,8 +180,8 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
             assert torch.equal(ssm_backends[0].state, ssm_backends[1].state)
         if iteration == 19:
             for manager in managers:
-                manager.ssm_backend.clear_history(1)
-                manager.ssm_backend.state[:, 1].zero_()
+                manager._ssm.clear_history(1)
+                manager._ssm.state[:, 1].zero_()
                 manager.mtp_state_index[1] = 0
     for ssm_backend in ssm_backends:
         ssm_backend.merge_accepted_updates(reqs[:3])

@@ -149,13 +149,13 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     conv = linear.conv_state[:, 0, ..., :3].clone()
     ssm = linear.ssm_state[:, 0].clone()
     if mode == "replay":
-        linear.ssm_backend.raw_keys.zero_()
-        linear.ssm_backend.raw_values.zero_()
-        linear.ssm_backend.gates.fill_(-0.5)
-        linear.ssm_backend.betas.zero_()
-        linear.ssm_backend.cursors[0] = 1
-        ssm = linear.ssm_backend.get_accepted_state(0).clone()
-        linear.ssm_backend.cursors[2] = 3
+        linear._ssm.raw_keys.zero_()
+        linear._ssm.raw_values.zero_()
+        linear._ssm.gates.fill_(-0.5)
+        linear._ssm.betas.zero_()
+        linear._ssm.cursors[0] = 1
+        ssm = linear._ssm.get_accepted_state(0).clone()
+        linear._ssm.cursors[2] = 3
     if mtp_step:
         linear.mtp_state_index[2] = mtp_step
     resources.save_bounded_att_runtime_to_pages(
@@ -179,7 +179,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     assert torch.equal(linear.conv_state[:, 2, ..., :3], conv)
     assert torch.equal(linear.ssm_state[:, 2 * linear.ssm_slots_per_req], ssm)
     if mode == "replay":
-        assert linear.ssm_backend.cursors[2] == 0
+        assert linear._ssm.cursors[2] == 0
     if mtp_step:
         assert linear.mtp_state_index[2] == 0
     # 整组边界不依赖旧窗口，恢复大小页无需改动无重叠窗口。

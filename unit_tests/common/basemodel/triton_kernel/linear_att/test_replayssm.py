@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -30,7 +30,7 @@ def reference(q, k, v, a, b, a_log, bias, state, kda=False, gate_lower_bound=-5.
 @pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
 def test_fp16_correction_history_preserves_finite_recurrence(capacity, bv, state_dtype, kda):
     state = torch.zeros(1, 2, 1, 128, 128, dtype=state_dtype, device="cuda")
-    ssm_backend = ReplaySSMBackend(
+    ssm_backend = ReplaySSMState(
         state,
         capacity,
         2,
@@ -103,7 +103,7 @@ def test_replay_acceptance_flush_and_graph(
     h, hv = head_geometry
     slots = 5
     state = (torch.randn(2, slots, hv, kdim, vdim, device="cuda") * 0.01).to(dtype)
-    ssm_backend = ReplaySSMBackend(
+    ssm_backend = ReplaySSMState(
         state,
         capacity,
         width,
@@ -265,7 +265,7 @@ def test_precomputed_projections_preserve_precision(warps, decay, state_dtype, d
     state = (torch.randn((1, 3, 4, 128, 128), device="cuda") * 0.1).to(state_dtype)
     config = {"BV": bv, "num_warps": warps}
     ssm_backends = [
-        ReplaySSMBackend(
+        ReplaySSMState(
             state.clone(),
             16 if width == 1 else 8,
             width,
@@ -312,7 +312,7 @@ def test_bf16_decode_fold_uses_rounded_checkpoint():
     # Automatic fold and explicit materialization must start from the same BF16
     # checkpoint, including the token computed inside the automatic-fold kernel.
     state = torch.full((1, 2, 1, 32, 64), 0.123, device="cuda", dtype=torch.bfloat16)
-    ssm_backends = [ReplaySSMBackend(state.clone(), 16, 1, torch.float32) for _ in range(2)]
+    ssm_backends = [ReplaySSMState(state.clone(), 16, 1, torch.float32) for _ in range(2)]
     reqs = torch.tensor([0], device="cuda", dtype=torch.int32)
     for ssm_backend in ssm_backends:
         ssm_backend.raw_keys.zero_()
@@ -343,7 +343,7 @@ def test_bf16_decode_fold_uses_rounded_checkpoint():
 def test_dynamic_verify_lengths_fill_history_before_folding(dtype, compute_mode, capture_metadata):
     torch.manual_seed(31)
     state = (torch.randn(2, 4, 4, 128, 128, device="cuda") * 0.01).to(dtype)
-    ssm_backend = ReplaySSMBackend(
+    ssm_backend = ReplaySSMState(
         state, 8, 4, dtype, num_key_heads=2, compute_mode=compute_mode, run_config={"BV": 32, "num_warps": 1}
     )
     expected = state.float().clone()
@@ -431,7 +431,7 @@ def test_dynamic_verify_lengths_fill_history_before_folding(dtype, compute_mode,
 
 def test_snapshot_without_history_copies_active_state():
     state = torch.randn((2, 3, 2, 32, 64), device="cuda", dtype=torch.bfloat16)
-    ssm_backend = ReplaySSMBackend(state, 4, 3)
+    ssm_backend = ReplaySSMState(state, 4, 3)
     snapshot = ssm_backend.get_accepted_state(1)
     torch.testing.assert_close(snapshot, state[:, 1], rtol=0, atol=0)
     assert ssm_backend.cursors[1].item() == 0
@@ -439,12 +439,12 @@ def test_snapshot_without_history_copies_active_state():
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 def test_compact_preserves_accepted_prefix(dtype, run_config=None, kda=False):
-    from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
+    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
 
     torch.manual_seed(17)
     hv, kd, vd, width = 4, 128 if kda else 64, 128 if kda else 64, 3
     state = torch.randn(2, 4, hv, kd, vd, device="cuda", dtype=dtype) * 0.01
-    ssm_backend = CompactSSMBackend(state, width, torch.bfloat16, num_key_heads=hv, kda=kda, run_config=run_config)
+    ssm_backend = CompactSSMState(state, width, torch.bfloat16, num_key_heads=hv, kda=kda, run_config=run_config)
     reqs = torch.tensor([2, 0, 3], device="cuda", dtype=torch.int32)
     cu = torch.tensor([0, 3, 5, 5], device="cuda", dtype=torch.int32)
     accepted = torch.tensor([1, 0, 0, 0], device="cuda", dtype=torch.int32)
@@ -479,7 +479,7 @@ def test_compact_preserves_accepted_prefix(dtype, run_config=None, kda=False):
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("width", [3, 4])
 def test_compact_matches_native_mtp(dtype, width, run_config=None):
-    from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
+    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
     from lightllm.common.basemodel.triton_kernel.linear_att.mtp_fused_recurrent import (
         mtp_fused_recurrent_gated_delta_rule,
     )
@@ -500,7 +500,7 @@ def test_compact_matches_native_mtp(dtype, width, run_config=None):
     idx = torch.arange(batch * width, device="cuda", dtype=torch.int32).view(batch, width)
     counts = torch.ones(batch, device="cuda", dtype=torch.int32)
     accepted = torch.tensor([0, width // 2, width - 1, 0], device="cuda", dtype=torch.int32)
-    ssm_backend = CompactSSMBackend(state, width, torch.bfloat16, num_key_heads=h, run_config=run_config)
+    ssm_backend = CompactSSMState(state, width, torch.bfloat16, num_key_heads=h, run_config=run_config)
     for _ in range(32):
         q.normal_()
         k.normal_()
@@ -570,7 +570,7 @@ def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, dtype):
     state.mtp_state_index[1] = 1
     state.conv_state.normal_()
     state.ssm_state.zero_()
-    backend = state.ssm_backend
+    backend = state._ssm
     backend.raw_keys.normal_()
     backend.raw_values.normal_()
     backend.gates.uniform_(-0.1, -0.01)

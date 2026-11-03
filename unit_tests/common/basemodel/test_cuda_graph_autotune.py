@@ -141,24 +141,30 @@ def test_linear_config_is_local_to_capture_state(capture_env, overlap, kda):
     from lightllm.common.basemodel.batch_objs import PostLayerOutput
     from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
     from lightllm.common.basemodel.infer_struct import InferStateInfo
-    from lightllm.common.basemodel.triton_kernel.linear_att.compact_ssm import CompactSSMBackend
-    from lightllm.common.linear_state import SSMRunConfig
+    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
+    from lightllm.common.ssm_types import SSMRunConfig
     from lightllm.common.attention_state.bounded_att import GDNState, KDAState
 
     capture_env.args.enable_decode_microbatch_overlap = overlap
     graph = CudaGraph(1, 2, 1, max_batch_size=2)
-    manager = object.__new__(KDAState if kda else GDNState)
-    manager.ssm_backend = object.__new__(CompactSSMBackend)
+    from unit_tests.common.test_linear_state import make_state
+    from lightllm.common.attention_state.commit import StateCommit
+
+    manager, resources, _ = make_state(KDAState if kda else GDNState, mode="compact", device="cpu")
     att_class = KDALinearAttDecodeAttState if kda else GDNLinearAttDecodeAttState
     states = []
     configs = [SSMRunConfig(8, 1), SSMRunConfig(32, 2)]
     for _ in range(2 if overlap else 1):
         state = InferStateInfo()
         state.input_ids = torch.ones(2, dtype=torch.int64)
-        state.att_state_manager = SimpleNamespace(get_bounded_attention_states=lambda role: (manager,))
+        state.att_state_manager = resources
         state.hidden_collector = NoopHiddenCollector()
         state.decode_att_state = TritonDecodeAttState(_infer_state_weak_ref=weakref.ref(state))
         state.decode_att_state1 = att_class(_infer_state_weak_ref=weakref.ref(state))
+        state.decode_att_state1.forwards[manager.state_name] = manager.prepare_decode(
+            torch.tensor([0, 1], dtype=torch.int32),
+            torch.tensor([0, 3, 6], dtype=torch.int32),
+        )
         states.append(state)
 
     def decode_func(*infer_states):
@@ -166,9 +172,10 @@ def test_linear_config_is_local_to_capture_state(capture_env, overlap, kda):
         for index, state in enumerate(infer_states):
             att = state.decode_att_state1
             assert att.infer_state is state
-            assert att.run_config is None
+            forward = att.get_forward(0)
+            assert forward.run_config is None
             assert (att is states[index].decode_att_state1) == capture_env.capturing
-            att.run_config = configs[index] if capture_env.capturing else SSMRunConfig(128, 4)
+            forward.run_config = configs[index] if capture_env.capturing else SSMRunConfig(128, 4)
             outputs.append(TpPartBaseModel._create_model_output(None, PostLayerOutput(torch.ones(2, 1)), state))
         return tuple(outputs) if overlap else outputs[0]
 
@@ -176,13 +183,19 @@ def test_linear_config_is_local_to_capture_state(capture_env, overlap, kda):
     outputs = result if overlap else (result,)
     runtime_states = [cuda_graph_module._copy_warmup_state(state) for state in states]
     for state in runtime_states:
-        state.decode_att_state1.run_config = None
+        state.decode_att_state1.forwards[manager.state_name] = manager.prepare_decode(
+            torch.tensor([1, 0], dtype=torch.int32),
+            torch.tensor([0, 1, 4], dtype=torch.int32),
+        )
     replay = graph.replay(*runtime_states)
     assert replay == result
     for index, (state, output) in enumerate(zip(states, outputs)):
-        assert state.decode_att_state1.run_config is configs[index]
-        state.decode_att_state1.run_config = SSMRunConfig(64, 4)
-        assert output.linear_state_commit == manager.create_commit(configs[index])
+        forward = state.decode_att_state1.get_forward(0)
+        assert forward.run_config is configs[index]
+        assert forward.req_indices.tolist() == [1, 0]
+        assert forward.cu_seqlens.tolist() == [0, 1, 4]
+        forward.run_config = SSMRunConfig(64, 4)
+        assert output.state_commits == (StateCommit(manager.state_name, configs[index]),)
         unpadded = TpPartBaseModel._create_unpad_decode_model_output(None, output, 1)
         assert unpadded.logits.shape[0] == 1
-        assert unpadded.linear_state_commit is output.linear_state_commit
+        assert unpadded.state_commits is output.state_commits

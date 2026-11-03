@@ -6,33 +6,26 @@ from __future__ import annotations
 
 import dataclasses
 import weakref
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import torch
 
 from lightllm.common.attention_state.bounded_att import KDAState
-from lightllm.common.linear_state import get_linear_state
+from .state import LinearDecodeAttState, LinearPrefillAttState, get_resource
 from lightllm.common.basemodel.attention.base_att import (
     AttControl,
     BaseAttBackend,
-    BaseDecodeAttState,
-    BasePrefillAttState,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d import (
     causal_conv1d_fn,
     causal_conv1d_update,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import chunk_kda_with_fused_gate
-from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
 from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
     causal_conv1d_update as causal_conv1d_update_mtp,
 )
-from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
-    build_dynamic_mtp_linear_att_state_params,
-)
 
 if TYPE_CHECKING:
-    from lightllm.common.linear_state import LinearStateCommit, SSMRunConfig
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
     from lightllm.common.basemodel.infer_struct import InferStateInfo
 
@@ -61,13 +54,8 @@ class KDALinearAttBackend(BaseAttBackend):
 
 
 @dataclasses.dataclass
-class KDALinearAttPrefillAttState(BasePrefillAttState):
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-
-    def init_state(self):
-        linear_state_manager = get_linear_state(self.infer_state, KDAState)
-        self.b_conv_buffer_idx, self.b_ssm_buffer_idx = linear_state_manager.prepare_prefill(self.infer_state.b_req_idx)
+class KDALinearAttPrefillAttState(LinearPrefillAttState):
+    state_class = KDAState
 
     def prefill_att(
         self,
@@ -86,12 +74,8 @@ class KDALinearAttPrefillAttState(BasePrefillAttState):
         raw_beta = params["raw_beta"]
         backend: KDALinearAttBackend = self.backend
 
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="kda",
-            logical_layer_id=layer_num,
-            state_class=KDAState,
-        )
+        state = get_resource(self, layer_num)
+        conv_indices, ssm_indices = self.state_indices[state.state_name]
         conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
         conv_states = conv_states[..., : backend.conv_kernel_size - 1]
         mixed_qkv = causal_conv1d_fn(
@@ -99,7 +83,7 @@ class KDALinearAttPrefillAttState(BasePrefillAttState):
             layer_weight.get_merged_kda_conv_weight(),
             bias=None,
             query_start_loc=self.infer_state.b1_cu_q_seq_len,
-            cache_indices=self.b_conv_buffer_idx,
+            cache_indices=conv_indices,
             has_initial_state=self.infer_state.b_ready_cache_len > 0,
             conv_states=conv_states,
             activation="silu",
@@ -112,7 +96,7 @@ class KDALinearAttPrefillAttState(BasePrefillAttState):
         raw_gate = raw_gate.view(1, -1, backend.tp_hidden_size)
         raw_beta = raw_beta.view(1, -1, backend.tp_num_heads)
 
-        initial_state = ssm_states[self.b_ssm_buffer_idx].contiguous()
+        initial_state = ssm_states[ssm_indices].contiguous()
         output, final_state = chunk_kda_with_fused_gate(
             q=q,
             k=k,
@@ -128,67 +112,13 @@ class KDALinearAttPrefillAttState(BasePrefillAttState):
             safe_gate=True,
             lower_bound=backend.lower_bound,
         )
-        ssm_states[self.b_ssm_buffer_idx] = final_state.to(ssm_states.dtype, copy=False)
+        ssm_states[ssm_indices] = final_state.to(ssm_states.dtype, copy=False)
         return output
 
 
 @dataclasses.dataclass
-class KDALinearAttDecodeAttState(BaseDecodeAttState):
-    run_config: Optional["SSMRunConfig"] = None
-    b_conv_buffer_idx: torch.Tensor = None
-    b_ssm_buffer_idx: torch.Tensor = None
-    b1_mtp_cu_q_seq_len: torch.Tensor = None
-    b_num_accepted_tokens: torch.Tensor = None
-
-    def get_linear_state_commit(self) -> Optional["LinearStateCommit"]:
-        return get_linear_state(self.infer_state, KDAState).create_commit(self.run_config)
-
-    def init_state(self):
-        mtp_step = self.backend.mtp_step
-        if mtp_step == 0:
-            self._init_normal_decode_state()
-        elif self.backend.uses_dynamic_spec_verify_layout():
-            self._init_dynamic_mtp_decode_state()
-        else:
-            self._init_fixed_mtp_decode_state(mtp_step)
-        linear_state_manager = get_linear_state(self.infer_state, KDAState)
-        if mtp_step == 0:
-            linear_state_manager.prepare_decode(self.b_conv_buffer_idx, single_token=True)
-        else:
-            (
-                self.b_conv_buffer_idx,
-                self.b_ssm_buffer_idx,
-                self.b_num_accepted_tokens,
-            ) = linear_state_manager.prepare_mtp_decode(self.b_conv_buffer_idx, self.b1_mtp_cu_q_seq_len)
-
-    def _init_normal_decode_state(self):
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx
-        self.b_ssm_buffer_idx = self.infer_state.b_req_idx
-
-    def _init_dynamic_mtp_decode_state(self):
-        (self.b1_mtp_cu_q_seq_len, self.b_conv_buffer_idx,) = build_dynamic_mtp_linear_att_state_params(
-            b_req_idx=self.infer_state.b_req_idx,
-            b_mtp_index=self.infer_state.b_mtp_index,
-            hold_req_id=self.infer_state.req_manager.HOLD_REQUEST_ID,
-        )
-
-    def _init_fixed_mtp_decode_state(self, mtp_step: int) -> None:
-        mtp_size = mtp_step + 1
-        batch_size = self.infer_state.batch_size
-        assert batch_size % mtp_size == 0, (
-            "KDA fixed-layout decode requires batch_size to be divisible by mtp_step + 1, "
-            f"got batch_size={batch_size}, mtp_step={mtp_step}."
-        )
-
-        att_batch_size = batch_size // mtp_size
-        self.b1_mtp_cu_q_seq_len = torch.arange(
-            0,
-            batch_size + 1,
-            mtp_size,
-            dtype=torch.int32,
-            device=self.infer_state.b_req_idx.device,
-        )
-        self.b_conv_buffer_idx = self.infer_state.b_req_idx.view(att_batch_size, mtp_size)[:, 0].contiguous()
+class KDALinearAttDecodeAttState(LinearDecodeAttState):
+    state_class = KDAState
 
     def decode_att(
         self,
@@ -207,21 +137,16 @@ class KDALinearAttDecodeAttState(BaseDecodeAttState):
         raw_beta = params["raw_beta"]
         backend: KDALinearAttBackend = self.backend
 
-        state = self.infer_state.att_state_manager.get_state(
-            model_role=self.infer_state.att_state_role,
-            state_type_filter="kda",
-            logical_layer_id=layer_num,
-            state_class=KDAState,
-        )
-        conv_states, ssm_states = state.get_layer_view(logical_layer_id=layer_num)
-        conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=self.b_conv_buffer_idx)
+        forward = self.get_forward(layer_num)
+        conv_states, _ = forward.resource.get_layer_view(layer_num)
+        conv_kwargs = dict(bias=None, activation="silu", conv_state_indices=forward.req_indices)
         conv_update = causal_conv1d_update
         if backend.mtp_step > 0:
             conv_update = causal_conv1d_update_mtp
             conv_kwargs.update(
                 mtp_step=backend.mtp_step,
-                num_accepted_tokens=self.b_num_accepted_tokens,
-                query_start_loc=self.b1_mtp_cu_q_seq_len,
+                num_accepted_tokens=forward.accepted_token_counts,
+                query_start_loc=forward.cu_seqlens,
             )
         mixed_qkv = conv_update(mixed_qkv, conv_states, layer_weight.get_merged_kda_conv_weight(), **conv_kwargs)
         q, k, v = backend.split_qkv(mixed_qkv)
@@ -231,36 +156,13 @@ class KDALinearAttDecodeAttState(BaseDecodeAttState):
         v = v.view(*shape, backend.tp_num_heads, backend.head_dim)
         raw_gate = raw_gate.view(*shape, backend.tp_hidden_size)
         raw_beta = raw_beta.view(*shape, backend.tp_num_heads)
-        ssm_backend = get_linear_state(self.infer_state, KDAState).ssm_backend
-        if ssm_backend is not None:
-            linear_layer_idx = get_linear_state(self.infer_state, KDAState).get_storage_layer_index(layer_num)
-            output, self.run_config = ssm_backend.forward(
-                linear_layer_idx,
-                q,
-                k,
-                v,
-                raw_gate.view(-1, backend.tp_hidden_size),
-                raw_beta.view(-1, backend.tp_num_heads),
-                layer_weight.linear_A_log.weight,
-                layer_weight.linear_dt_bias.weight,
-                self.b_conv_buffer_idx,
-                self.b1_mtp_cu_q_seq_len,
-                run_config=self.run_config,
-            )
-            return output
-        output, _ = fused_recurrent_kda(
-            q=q,
-            k=k,
-            v=v,
-            raw_gate=raw_gate,
-            raw_beta=raw_beta,
-            a_log=layer_weight.linear_A_log.weight,
-            gate_bias=layer_weight.linear_dt_bias.weight,
-            initial_state=ssm_states,
-            lower_bound=backend.lower_bound,
-            inplace_final_state=True,
-            ssm_state_indices=self.b_ssm_buffer_idx,
-            cu_seqlens=self.b1_mtp_cu_q_seq_len,
-            num_accepted_tokens=self.b_num_accepted_tokens,
+        return forward.run_layer(
+            layer_num,
+            q,
+            k,
+            v,
+            raw_gate.view(-1, backend.tp_hidden_size),
+            raw_beta.view(-1, backend.tp_num_heads),
+            layer_weight.linear_A_log.weight,
+            layer_weight.linear_dt_bias.weight,
         )
-        return output

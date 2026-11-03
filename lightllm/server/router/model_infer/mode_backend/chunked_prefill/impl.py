@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.commit import StateCommitBatch
 import time
 from typing import List
 
@@ -298,7 +299,7 @@ class ChunkedPrefillBackend(ModeBackend):
                 b_req_idx=model_input.b_req_idx,
                 b_req_mtp_start_loc=b_req_mtp_start_loc,
                 b_mtp_index=model_input.b_mtp_index,
-                linear_state_batches=((req_num, model_output.linear_state_commit),),
+                state_commit_batches=(StateCommitBatch(req_num, model_output.state_commits),),
             )
             accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
                 key="accepted_index",

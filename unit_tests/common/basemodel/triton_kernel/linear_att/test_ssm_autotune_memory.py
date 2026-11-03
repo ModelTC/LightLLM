@@ -2,13 +2,13 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.triton_kernel.linear_att import ssm_autotune as tuning
-from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import ReplaySSMBackend
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
 
 
 @pytest.mark.parametrize("width", [1, 5])
 def test_scratch_budget_is_independent_of_model_layer_count(width):
     state = torch.empty((48, 257, 48, 128, 128), dtype=torch.bfloat16, device="meta")
-    ssm_backend = ReplaySSMBackend(state, 16, width, num_key_heads=16)
+    ssm_backend = ReplaySSMState(state, 16, width, num_key_heads=16)
     tokens = 256 * width
     inputs = [
         torch.empty(shape, dtype=torch.bfloat16, device="meta")
@@ -16,7 +16,7 @@ def test_scratch_budget_is_independent_of_model_layer_count(width):
     ]
     required = tuning.scratch_size_bytes(ssm_backend, 256, 256, inputs)
     assert required < 1024 ** 3
-    single_layer = ReplaySSMBackend(state[:1], 16, width, num_key_heads=16)
+    single_layer = ReplaySSMState(state[:1], 16, width, num_key_heads=16)
     assert required == tuning.scratch_size_bytes(single_layer, 256, 256, inputs)
 
 
@@ -27,7 +27,7 @@ def test_tuning_budget_falls_back_without_touching_serving_state(monkeypatch, tm
     from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 
     state = torch.zeros((2, 4, 2, 32, 32), dtype=torch.bfloat16, device="cuda")
-    ssm_backend = ReplaySSMBackend(state, 8, width, num_key_heads=2)
+    ssm_backend = ReplaySSMState(state, 8, width, num_key_heads=2)
     for tensor in vars(ssm_backend).values():
         if isinstance(tensor, torch.Tensor):
             tensor.zero_()
