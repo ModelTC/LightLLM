@@ -13,4 +13,5 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --host 0.0.0.0 \
     --port "$PD_MASTER_PORT" \
     --httpserver_workers 4 \
-    --max_req_total_len "$MAX_REQ_TOTAL_LEN"
+    --max_req_total_len "$MAX_REQ_TOTAL_LEN" \
+    --running_max_req_size 512

@@ -10,6 +10,8 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --model_name DeepSeek-V4.1-Flash-FP8 \
     --run_mode prefill \
     --pd_trans_mode nixl \
+    --pd_kv_page_size 2048 \
+    --pd_kv_page_num 8 \
     --tp 16 \
     --dp 16 \
     --nnodes 2 \
@@ -40,4 +42,7 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --cpu_cache_storage_size 1024 \
     --enable_disk_cache \
     --disk_cache_storage_size 5120 \
+    --cache_placement_strategy legacy \
+    --prefill_queue_strategy default \
+    --dp_balancer cache_aware \
     --disk_cache_dir /root/.cache/lightllm-dsv41-opt/pd_disk_cache

@@ -1,13 +1,13 @@
-export RUN_DIR="/mnt/vqa/wanzihao/dsv41_port_support_ds4_20261030/pd"
+export RUN_DIR="/mnt/vqa/wanzihao/dsv41_pd_support_ds4_20261102"
 export SOURCE_DIR="$RUN_DIR/src"
 export LOG_DIR="$RUN_DIR/service"
 export MODEL_DIR="/mnt/vqa/models/DeepSeek-V4.1-Flash-1017-FP8"
 export MTP_DRAFT_MODEL_DIR="$MODEL_DIR"
-export PD_MASTER_IP="10.119.17.62"
+export PD_MASTER_IP="10.119.30.78"
 export PD_MASTER_PORT=60011
 export PD_MASTER_MODE=2p2d
-export PREFILL_NCCL_HOST="10.119.17.62"
-export DECODE_NCCL_HOST="10.119.23.225"
+export PREFILL_NCCL_HOST="10.119.30.78"
+export DECODE_NCCL_HOST="10.119.29.251"
 export MAX_REQ_TOTAL_LEN=262144
 export PATH="/opt/conda/bin:/usr/local/cuda-13.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PYTHONPATH="$SOURCE_DIR"
@@ -26,6 +26,6 @@ export NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE=384
 export NVSHMEM_QP_DEPTH=2048
 export TRITON_CACHE_DIR="/root/.cache/lightllm-dsv41-opt/triton"
 export LIGHTLLM_TRACE_DIR="$LOG_DIR/traces"
-export NO_PROXY="127.0.0.1,localhost,10.119.17.62,10.119.17.55,10.119.23.225,10.119.23.201${NO_PROXY:+,$NO_PROXY}"
+export NO_PROXY="127.0.0.1,localhost,10.119.30.78,10.119.30.56,10.119.29.251,10.119.29.227${NO_PROXY:+,$NO_PROXY}"
 export no_proxy="$NO_PROXY"
 cd "$SOURCE_DIR"

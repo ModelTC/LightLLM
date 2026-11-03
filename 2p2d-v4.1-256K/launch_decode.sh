@@ -3,6 +3,7 @@ set -euo pipefail
 NODE_RANK=${1:?usage: bash launch_decode.sh NODE_RANK}
 ulimit -Sn 1048576
 source "$(dirname -- "${BASH_SOURCE[0]}")/config.txt"
+export PYTHONPATH="$RUN_DIR/deps/deepep-pr696:$PYTHONPATH"
 export NVSHMEM_IB_ENABLE_IBGDA=1
 /opt/conda/bin/python -c 'import lightllm,resource,sys; print(sys.executable,lightllm.__file__,resource.getrlimit(resource.RLIMIT_NOFILE),flush=True)'
 exec /opt/conda/bin/python -u -m lightllm.server.api_server \
@@ -24,7 +25,7 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --httpserver_workers 4 \
     --pd_master_ip "$PD_MASTER_IP" \
     --pd_master_port "$PD_MASTER_PORT" \
-    --running_max_req_size 512 \
+    --running_max_req_size 1024 \
     --max_req_total_len "$MAX_REQ_TOTAL_LEN" \
     --mtp_mode dspark \
     --mtp_step 5 \
@@ -33,5 +34,5 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --disable_audio \
     --batch_max_tokens 1024 \
     --mem_fraction 0.75 \
-    --graph_max_batch_size 64 \
+    --graph_max_batch_size 128 \
     --enable_profiling torch_profiler
