@@ -1211,10 +1211,8 @@ def init_mtp_draft_models(args: SimpleNamespace, main_kvargs: Dict, main_model) 
     return draft_models
 
 
-def configure_profile_cudagraph(
-    args: SimpleNamespace, cases: Sequence[BenchmarkCase], model_kvargs: Dict, model
-) -> None:
-
+def init_deferred_cudagraph(args: SimpleNamespace, cases: Sequence[BenchmarkCase], model_kvargs: Dict, model) -> None:
+    """Capture profile-mode graphs after the real decode batch is known."""
     profile_batch_size = max_decode_batch_size(cases)
     graph_batch_size = profile_batch_size
     if args.mtp_mode in MTP_MODES:
@@ -1234,6 +1232,12 @@ def configure_profile_cudagraph(
             flush=True,
         )
     model.disable_cudagraph = False
+    # Attention backends may size persistent graph buffers during construction.
+    # Rebuild them after replacing the temporary profile-time batch limit.
+    model._init_att_backend()
+    model._init_att_backend1()
+    torch.cuda.empty_cache()
+    model._init_cudagraph()
 
 
 def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue):
@@ -1271,8 +1275,6 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
         from lightllm.common.attention_state import AttentionStateManager
         from lightllm.common.req_manager import ReqManager
-        from lightllm.common.attention_state.memory_plan import merge_memory_demands
-        from lightllm.common.basemodel.attention.startup import initialize_attention_runtime
 
         models = (model, *draft_models)
         assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
@@ -1290,17 +1292,17 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
             manager.load_full_att_calibration(args=model.args)
-        for item in models:
-            item.prepare_attention_runtime()
-        if defer_cudagraph:
-            preview = manager.plan_storage(
-                model.args,
-                token_capacity=model.max_total_token_num,
-                mem_fraction=model.mem_fraction,
-                runtime_demands=merge_memory_demands(*(item.attention_memory_demands() for item in models)),
+            manager.initialize_storage(
+                model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
             )
-            profile_cases = resolve_profile_decode_cases(args, cases, preview.capacity)
-            configure_profile_cudagraph(args, profile_cases, model_kvargs, model)
+        for item in models:
+            item.init_runtime()
+        torch.cuda.empty_cache()
+        set_model_init_status(True)
+        cases = resolve_batch_max_prefill_cases(args, cases, model.att_state_manager.full_att_allocator.size)
+        cases = resolve_profile_decode_cases(args, cases, model.att_state_manager.full_att_allocator.size)
+        if defer_cudagraph:
+            init_deferred_cudagraph(args, cases, model_kvargs, model)
             for draft in draft_models:
                 batch_size = args.graph_max_batch_size
                 if args.enable_decode_microbatch_overlap:
@@ -1308,13 +1310,9 @@ def run_worker(args_dict: Dict, case_dicts: List[Dict], rank_id: int, ans_queue)
                 batch_size *= draft.mtp_manager.get_decode_tokens_per_request(True)
                 draft.graph_max_batch_size = draft._align_decode_batch_size(batch_size)
                 draft.disable_cudagraph = False
-            for item in models:
-                item.prepare_attention_runtime()
-        initialize_attention_runtime(models)
-        torch.cuda.empty_cache()
-        set_model_init_status(True)
-        cases = resolve_batch_max_prefill_cases(args, cases, manager.full_att_allocator.size)
-        cases = resolve_profile_decode_cases(args, cases, manager.full_att_allocator.size)
+                draft._init_att_backend()
+                draft._init_att_backend1()
+                draft._init_cudagraph()
         token_source = TokenSource(args)
         executor = StaticBenchmarkExecutor(args, model, draft_models, token_source)
 
@@ -1635,9 +1633,6 @@ def add_static_benchmark_args(parser: argparse.ArgumentParser):
 
 
 def main(argv: Optional[Sequence[str]] = None):
-    from lightllm.utils.envs_utils import get_unique_server_name, set_unique_server_name
-    from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
-
     parser = make_argument_parser()
     add_static_benchmark_args(parser)
     args = parser.parse_args(argv)
@@ -1648,13 +1643,9 @@ def main(argv: Optional[Sequence[str]] = None):
     if not cases:
         raise ValueError("no benchmark cases were generated")
     args = normalize_args(args, cases)
-    set_unique_server_name(args)
     set_env_start_args(args)
 
-    try:
-        run_benchmark(args, cases)
-    finally:
-        ServiceShmCleanup(get_unique_server_name()).cleanup_service_resources()
+    run_benchmark(args, cases)
 
 
 if __name__ == "__main__":

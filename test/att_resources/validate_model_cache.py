@@ -334,7 +334,6 @@ def main():
         from lightllm.utils.torch_memory_saver_utils import MemoryTag
         from lightllm.common.attention_state import AttentionStateManager
         from lightllm.common.req_manager import ReqManager
-        from lightllm.common.basemodel.attention.startup import initialize_attention_runtime
 
         models = (model, *draft_models)
         assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
@@ -352,9 +351,11 @@ def main():
         with model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
             manager.finish_state_registration()
             manager.load_full_att_calibration(args=model.args)
+            manager.initialize_storage(
+                model.args, token_capacity=model.max_total_token_num, mem_fraction=model.mem_fraction
+            )
         for item in models:
-            item.prepare_attention_runtime()
-        initialize_attention_runtime(models)
+            item.init_runtime()
         torch.cuda.empty_cache()
         set_model_init_status(True)
         report = validate(model, args, draft_models)

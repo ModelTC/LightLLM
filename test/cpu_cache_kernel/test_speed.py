@@ -5,10 +5,6 @@ Run from the repository root, for example:
 The reported time includes validation, KV transfers, and CPU state-page repacking.
 """
 
-from lightllm.common.attention_state.storage import initialize_state_page_pools
-
-from lightllm.common.attention_state.storage import allocate_state_storage
-
 import argparse
 import statistics
 import time
@@ -63,7 +59,7 @@ def main():
             tp_world_size=8,
         ),
     )
-    allocate_state_storage(full, tokens)
+    full.allocate_storage(tokens)
     resources = AttentionStateManager(request_capacity=1)
     bounded_state = create_gdn_state(
         config=ConvSSMStateConfig(
@@ -84,7 +80,7 @@ def main():
         mtp_step=0,
         device="cuda",
     )
-    initialize_state_page_pools(bounded_state, big_page_capacity=args.pages + 2, small_page_capacity=0)
+    bounded_state.initialize_page_pools(big_page_capacity=args.pages + 2, small_page_capacity=0)
     resources.register_state("main", full)
     resources.register_state("main", bounded_state)
     resources.full_att_allocator = FullAttKVAllocator(tokens)
