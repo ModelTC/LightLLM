@@ -6,6 +6,9 @@ import torch
 import torch.distributed as dist
 import random
 import collections
+import hashlib
+import tempfile
+from functools import lru_cache
 from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
@@ -19,6 +22,11 @@ from lightllm.common.kernel_config import KernelConfigs
 from lightllm.utils.dist_utils import get_global_world_size, get_global_rank, get_current_rank_in_node
 
 logger = init_logger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _source_digest(path):
+    return hashlib.sha256(Path(path).read_bytes()).digest()
 
 
 class AutotuneLevel:
@@ -292,9 +300,18 @@ class Autotuner:
                     f"Autotuner for kernel {self.kernel_name} requires a visible CUDA/MUSA device "
                     f"to resolve its cache directory, but torch.cuda.is_available() is False."
                 )
+            root = os.environ.get("LIGHTLLM_AUTOTUNE_CACHE_DIR")
+            if root:
+                # Stable across deployment directories, isolated when the wrapper,
+                # kernel, configuration generator or PyTorch/CUDA build changes.
+                fingerprint = hashlib.sha256(str((torch.__version__, torch.version.cuda)).encode())
+                for path in sorted({__file__, inspect.getfile(self.fn), inspect.getfile(self.configs_gen_func)}):
+                    fingerprint.update(_source_digest(path))
+                root = os.path.join(root, fingerprint.hexdigest())
+            else:
+                root = os.path.join(Path(__file__).parent, "autotune_kernel_configs")
             self._cache_dir = os.path.join(
-                Path(__file__).parent,
-                "autotune_kernel_configs",
+                root,
                 get_triton_version(),
                 device_name,
                 self.kernel_name,
@@ -448,16 +465,20 @@ class Autotuner:
             self.fast_match_configs.pop(_static_key, None)
 
         # save configs to file
-        if rank_id == 0:
+        if rank_id == 0 or (world_size > 1 and get_current_rank_in_node() == 0):
             for _static_key in update_static_key_list:
                 cache_file = os.path.join(self.cache_dir, KernelConfigs.get_config_file_name(_static_key))
-                with open(cache_file, "wb") as f:
+                # Each node persists the merged result on its own local cache.
+                # Atomic replacement also permits a new checkout to read it
+                # while another service is updating the same configuration.
+                with tempfile.NamedTemporaryFile(dir=self.cache_dir, delete=False) as f:
                     f.write(
                         orjson.dumps(
                             self.cached_configs[_static_key],
                             option=orjson.OPT_INDENT_2 | orjson.OPT_SORT_KEYS | orjson.OPT_NON_STR_KEYS,
                         )
                     )
+                os.replace(f.name, cache_file)
                 logger.info(f"Saved configs for {self.kernel_name} - {_static_key}")
 
         logger.info(f"rank {rank_id} tuning {self.kernel_name} _static_key {static_key} finished")

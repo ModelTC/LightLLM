@@ -45,6 +45,37 @@ def make_kernel(tmp_path, monkeypatch, name, kernel_type=None, warmup_all_exist_
     return kernel, calls, benchmarks, cache_dir / "configs.json"
 
 
+def test_persistent_cache_is_independent_of_checkout_and_invalidates_source(tmp_path, monkeypatch):
+    kernel, _, _, _ = make_kernel(tmp_path, monkeypatch, "persistent")
+    del kernel._cache_dir
+    monkeypatch.setenv("LIGHTLLM_AUTOTUNE_CACHE_DIR", str(tmp_path / "shared"))
+    monkeypatch.setattr(autotuner_module, "get_current_device_name", lambda: "test-gpu")
+    first = kernel.cache_dir
+    assert first.startswith(str(tmp_path / "shared"))
+    assert first.endswith("/test-gpu/persistent")
+    del kernel._cache_dir
+    assert kernel.cache_dir == first
+    del kernel._cache_dir
+    monkeypatch.setattr(autotuner_module, "_source_digest", lambda _: b"modified-kernel")
+    assert kernel.cache_dir != first
+
+
+def test_second_node_leader_persists_merged_autotune_results(tmp_path, monkeypatch):
+    kernel, _, _, cache_file = make_kernel(tmp_path, monkeypatch, "second_node")
+    monkeypatch.setattr(autotuner_module, "get_current_rank_in_node", lambda: 0)
+    monkeypatch.setattr(kernel, "_get_autotune_group", lambda: None)
+
+    def gather(output, obj, group):
+        if isinstance(obj, str):
+            output[:] = [obj] * len(output)
+        else:
+            output[:] = [(1.0, obj[1], obj[2], {"block": 2})] * len(output)
+
+    monkeypatch.setattr(autotuner_module.dist, "all_gather_object", gather)
+    kernel._autotune((), {"size": 16}, frozendict({"dtype": "test"}), "16", rank_id=8, world_size=16)
+    assert json.loads(cache_file.read_text()) == {"16": {"block": 2}}
+
+
 @pytest.mark.parametrize("level", [0, 1, 2])
 def test_missing_config_is_checked_once_and_can_be_tuned_later(tmp_path, monkeypatch, level):
     monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: level)
