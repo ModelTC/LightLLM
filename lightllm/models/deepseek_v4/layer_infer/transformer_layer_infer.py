@@ -4,7 +4,11 @@ from lightllm.common.basemodel import TransformerLayerInferTpl
 from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_post_pre_norm, hc_pre_norm
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import use_sm100_mega_moe
-from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
+from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import (
+    silu_and_mul_fwd,
+    silu_and_mul_quant_fp8,
+)
+from lightllm.common.quantization.deepgemm import DeepGEMMFP8w8a8B128QuantizationMethod
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
@@ -534,6 +538,23 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
+        if (
+            isinstance(layer_weight.down_proj.quant_method, DeepGEMMFP8w8a8B128QuantizationMethod)
+            and layer_weight.down_proj.quant_method.use_ue8m0_scales
+            and not layer_weight.down_proj.quant_method.use_packed_ue8m0
+        ):
+            shared, scale = silu_and_mul_quant_fp8(
+                gate_up,
+                layer_weight.down_proj.quant_method.block_size,
+                layer_weight.down_proj.mm_param.weight.dtype,
+                limit=self.swiglu_limit,
+                alloc_func=self.alloc_tensor,
+            )
+            shared.scale = scale
+            del gate_up
+            # FP8 输入不再携带原始激活 dtype，由调用方保留浮点输出类型。
+            out = self.alloc_tensor((input.size(0), layer_weight.down_proj.mm_param.weight.shape[0]), input.dtype)
+            return layer_weight.down_proj.mm(shared, out=out)
         shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
         silu_and_mul_fwd(
             gate_up,
