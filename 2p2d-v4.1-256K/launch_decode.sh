@@ -39,7 +39,7 @@ exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_
     --mtp_draft_model_dir "$MTP_DRAFT_MODEL_DIR" \
     --disable_audio \
     --batch_max_tokens 1024 \
-    --mem_fraction 0.75 \
+    --mem_fraction 0.70 \
     --graph_max_batch_size 96 \
     --graph_split_batch_size 16 \
     --enable_profiling torch_profiler \

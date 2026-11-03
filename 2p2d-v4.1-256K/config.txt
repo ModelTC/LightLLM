@@ -1,6 +1,6 @@
 export RUN_DIR="/mnt/vqa/wanzihao/dsv41_pd_support_ds4_20261102"
-export SOURCE_DIR="/mnt/vqa/wanzihao/v41_restart_20261103_031834_26e9b8137/src"
-export LOG_DIR="/mnt/vqa/wanzihao/v41_restart_20261103_031834_26e9b8137/service"
+export SOURCE_DIR="/mnt/vqa/wanzihao/v41_restart_20261103_031834_26e9b8137/bench/resident_restart_20261103_165756_0d2d63ec2/src"
+export LOG_DIR="/mnt/vqa/wanzihao/v41_restart_20261103_031834_26e9b8137/bench/resident_restart_20261103_165756_0d2d63ec2/service"
 export MODEL_DIR="/mnt/vqa/models/DeepSeek-V4.1-Flash-1017-FP8"
 export MTP_DRAFT_MODEL_DIR="$MODEL_DIR"
 export PD_MASTER_IP="10.119.30.78"
@@ -11,6 +11,7 @@ export DECODE_NCCL_HOST="10.119.29.251"
 export MAX_REQ_TOTAL_LEN=262144
 export PATH="/opt/conda/bin:/usr/local/cuda-13.0/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 export PYTHONPATH="$SOURCE_DIR"
+export LIGHTLLM_WEIGHT_CACHE_DIR="/root/.cache/lightllm-dsv41-opt/resident"
 export LOADWORKER=16
 export OMP_NUM_THREADS=4
 export LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1
