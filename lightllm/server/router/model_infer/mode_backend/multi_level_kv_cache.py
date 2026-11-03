@@ -247,6 +247,10 @@ class MultiLevelKvCacheModule(object):
                 target = self._handle_hybrid_att_last_page(req, target, page_lens)
                 start = session.next_page_index
                 if target <= start:
+                    # A complete CPU hit has no new pages to store, but still
+                    # owns match references until its load event completes.
+                    if start == len(page_lens):
+                        closing_sessions[session.request_id] = session
                     continue
                 hashes = req.shm_req.token_hash_list.get_all()
                 pages, owners = self.cpu_cache_client.allocate_pages(

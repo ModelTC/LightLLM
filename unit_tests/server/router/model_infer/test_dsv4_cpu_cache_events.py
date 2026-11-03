@@ -287,3 +287,88 @@ def test_staging_separates_gpu_request_lifetime_and_handles_two_small_pages(cach
             offset += page_tokens * slot_bytes
         assert cpu_page[offset:].eq(state_value).all()
         assert page.checkpoint_pool.refs[page.checkpoint_id] == 0
+
+
+@pytest.mark.parametrize("page_lens", [[2048, 4096], [2048, 2304], [768]])
+@pytest.mark.parametrize("disk", [False, True])
+@pytest.mark.parametrize("loading", [False, True])
+def test_full_cpu_hit_releases_match_pages_before_decode_finishes(page_lens, disk, loading):
+    obj = module()
+    obj.backend.model = NS(mem_manager=object(), req_manager=object())
+    obj._handle_hybrid_att_last_page = lambda req, target, lens: target
+    pages = [11 + index for index in range(len(page_lens))]
+    event = Event(done=not loading)
+    session = Dsv4CpuCacheSession(
+        7,
+        next_page_index=len(pages),
+        leased_pages=pages,
+        token_num=page_lens[-1],
+        disk_offload_enable=disk,
+        load_event=event,
+    )
+    obj.dsv4_sessions[7] = session
+    obj.cpu_cache_client.ready.update(pages)
+    req = NS(
+        req_id=7,
+        cur_kv_len=page_lens[-1] + 1,
+        shm_req=NS(group_req_id=7, request_id=7, token_hash_page_len_list=values(page_lens)),
+    )
+    obj.store_completed_prefill_pages([req], None)
+    assert session.closing
+    obj.update_cpu_cache_task_states()
+    if loading:
+        assert not obj.cpu_cache_client.released
+        assert 7 in obj.dsv4_sessions
+        event.done = True
+        obj.update_cpu_cache_task_states()
+    assert obj.dsv4_sessions == {}
+    assert obj.cpu_cache_client.released == (pages if disk else list(reversed(pages)))
+    if disk:
+        assert obj.cpu_cache_client.published == [
+            (pages, {"deref": True, "disk_offload_enable": True, "token_num_in_page_list": page_lens[-1]})
+        ]
+    else:
+        assert obj.cpu_cache_client.published == []
+    # No request-finish callback was needed; repeated polls cannot release twice.
+    obj.update_cpu_cache_task_states()
+    assert len(obj.cpu_cache_client.released) == len(pages)
+
+
+def test_partial_cpu_hit_keeps_session_open_for_remaining_prefill():
+    obj = module()
+    obj.backend.model = NS(mem_manager=object(), req_manager=object())
+    obj._handle_hybrid_att_last_page = lambda req, target, lens: target
+    session = Dsv4CpuCacheSession(7, next_page_index=1, leased_pages=[11], token_num=2048)
+    obj.dsv4_sessions[7] = session
+    req = NS(
+        req_id=7,
+        cur_kv_len=2049,
+        shm_req=NS(group_req_id=7, request_id=7, token_hash_page_len_list=values([2048, 4096])),
+    )
+    obj.store_completed_prefill_pages([req], None)
+    obj.update_cpu_cache_task_states()
+    assert not session.closing and obj.dsv4_sessions[7] is session
+    assert obj.cpu_cache_client.released == []
+
+
+def test_completed_page_cursor_still_waits_for_pending_store_before_releasing():
+    obj = module()
+    obj.backend.model = NS(mem_manager=object(), req_manager=object())
+    obj._handle_hybrid_att_last_page = lambda req, target, lens: target
+    session = Dsv4CpuCacheSession(7, next_page_index=1, leased_pages=[11], pending_tasks=1, token_num=2048)
+    obj.dsv4_sessions[7] = session
+    stored = Event()
+    slot = Dsv4StagingSlot(in_use=True)
+    obj.dsv4_store_tasks.append(Dsv4StoreTask([11], [session], slot, stored))
+    req = NS(
+        req_id=7,
+        cur_kv_len=2049,
+        shm_req=NS(group_req_id=7, request_id=7, token_hash_page_len_list=values([2048])),
+    )
+    obj.store_completed_prefill_pages([req], None)
+    obj.update_cpu_cache_task_states()
+    assert session.closing and obj.cpu_cache_client.released == []
+    stored.done = True
+    obj.update_cpu_cache_task_states()
+    assert obj.cpu_cache_client.released == [11] and obj.dsv4_sessions == {}
+    assert not slot.in_use
