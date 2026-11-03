@@ -324,3 +324,19 @@ python test/benchmark/kernel/benchmark_dsv41_engram_prefetch.py --prefill-only
 ```
 
 最终证据：`indexer_before_final.jsonl`、`indexer_scalar_final.jsonl`、`indexer_mixed_before.jsonl`、`indexer_mixed_scalar.jsonl`、`indexer_short_bucket_evaluation.jsonl`、`mhc_final.jsonl`、`engram_prefill_2048.jsonl`、`pd_deadline_bench.jsonl`、`regression_verified.log`、`black_final.log`、`flake8_final.log`、`manifest.json`、`changes.patch`。
+
+### 2026-11-03：2P2D 改为96请求/rank、DSpark3，并核查 zero-copy combine
+
+用户选择96请求/rank＋DSpark3。仅修改权威启动文件：D `running_max_req_size=768`、`graph_max_batch_size=96`；P/D `mtp_step` 同步设3，README同步。D本地8个DP，target最大96×4=384行、draft最大96×3=288行；现有 `NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE=384` 与推导值一致。PR696 legacy RDMA按384行约5.71GiB/卡，非实际新服务测量。`bash -n`、静态参数一致性检查与 `git diff --check` 通过。本轮不部署、不重启服务。
+
+Zero-copy核查：现有 `masked_group_gemm` 独立分配W2输出；legacy combine未设置 `zero_copy=True`。PR696 getter返回 `[E_local, world_size*capacity, hidden]` 的BF16 RDMA view，hidden5120时row stride为5200（包含combine message预留），group stride为 `M*5200`，与普通连续输出不同。
+
+已在现有H200 GPU7测试环境（Torch2.11.0+cu130、DeepGEMM2.6.1）调用实际 `m_grouped_fp8_gemm_nt_masked`：连续输出成功；按上述布局构造的 `[2,128,5120]`、stride `[665600,5200,1]` 输出被 native `utils/layout.hpp:17` 的 `t.stride(0) == t.size(-2)*t.size(-1)` 断言拒绝。没有修改已安装依赖或绕过断言。日志：`/mnt/vqa/wanzihao/v41_zero_copy_20261103/strided_gemm_probe.log`。
+
+进一步读实际 DeepGEMM 源码：masked API调用 `check_major_type_cd(d)`；SM90 masked kernel的TMA descriptor已经传入 `d.stride(-2)`，flattened grouped行也适合 `stride(0)=M*stride(1)` 的规则padding。因此可针对masked输出增加规则padding校验，保留A/B及其他API现有连续布局契约；不能直接全局删除断言。仍需在隔离构建中验证TMA对齐、padding不被覆盖、masked rows与Graph正确性后才可启用。
+
+PR696 `low_latency_combine` 同样有无条件 `x.is_contiguous()` 检查。上游测试在 `zero_copy=True` 前先把 `simulated_gemm_x` 复制到getter view，combine仍传原连续tensor，这种写法保留了完整输出，不能据此宣称省显存。直接消费该view需在zero-copy分支核验它确实别名当前combine buffer且shape/stride正确，普通分支保留连续检查，或提供等价的受约束原生接口。
+
+LightLLM接入点：现有 `masked_group_gemm` 接受可选输出buffer，W2直接写getter view；同时覆盖普通legacy decode和shared-expert-overlap两处调用，combine设置zero_copy。V2/prefill继续现有路径。必须保持dispatch接收完成→W2写入→combine发送/接收hook完成→允许复用的顺序，验证多层奇偶buffer轮换、不同graph batch和MTP多次回放。两节点16rank真实dispatch/combine的验证尚未做。
+
+按本次384行容量，单份BF16 expert输出为 `384*384*5120*2` 字节，即1.40625GiB/卡；旧768行的2.8125GiB不适用于本次配置。该数值是可避免分配的一份tensor大小，不等于已验证的整体峰值收益。当前只完成核查，未提交不可运行的Python zero-copy开关，也未升级或重新编译依赖。

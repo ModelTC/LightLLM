@@ -27,14 +27,14 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --httpserver_workers 4 \
     --pd_master_ip "$PD_MASTER_IP" \
     --pd_master_port "$PD_MASTER_PORT" \
-    --running_max_req_size 1024 \
+    --running_max_req_size 768 \
     --max_req_total_len "$MAX_REQ_TOTAL_LEN" \
     --mtp_mode dspark \
-    --mtp_step 5 \
+    --mtp_step 3 \
     --mtp_dynamic_verify \
     --mtp_draft_model_dir "$MTP_DRAFT_MODEL_DIR" \
     --disable_audio \
     --batch_max_tokens 1024 \
     --mem_fraction 0.75 \
-    --graph_max_batch_size 128 \
+    --graph_max_batch_size 96 \
     --enable_profiling torch_profiler

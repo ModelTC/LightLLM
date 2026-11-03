@@ -9,7 +9,7 @@
 | 10.119.29.251 | D | 0 | 8121 |
 | 10.119.29.227 | D | 1 | 8121 |
 
-每个 P/D 组为 DPEP16、nnodes2；每台注册 master，master mode=2p2d。P 使用 DeepEP V2，D 使用 legacy/IBGDA。主/草稿权重均为 `/mnt/vqa/models/DeepSeek-V4.1-Flash-1017-FP8`，DSpark5，max_req_total_len262144，mem_fraction0.75，KV自动profile。P batch/chunk8192、CPU cache1024GiB/主机、disk cache5120GiB/主机；D batch1024、graph batch64/rank。内核和磁盘缓存保留节点本地目录。
+每个 P/D 组为 DPEP16、nnodes2；每台注册 master，master mode=2p2d。P 使用 DeepEP V2，D 使用 legacy/IBGDA。主/草稿权重均为 `/mnt/vqa/models/DeepSeek-V4.1-Flash-1017-FP8`，DSpark3，max_req_total_len262144，mem_fraction0.75，KV自动profile。P batch/chunk8192、CPU cache1024GiB/主机、disk cache5120GiB/主机；D batch1024、running_max_req_size768/主机（96/rank）、graph batch96/rank，target验证图最多384行。内核和磁盘缓存保留节点本地目录。
 
 运行目录见 config.txt。冻结源码放 `$RUN_DIR/src`，本目录脚本放 `$RUN_DIR/deploy`。先核对 GPU/旧进程/SysV/端口空闲、模型分片可读，再启动 master，随后四台并发启动；每个 launcher 在相同 shell 中设置 PATH/PYTHONPATH/nofile1048576。完整验收需要四节点健康、master2P2D就绪、实际文本/图片请求、KV/state传输和所有长期进程FD检查。
 
@@ -29,4 +29,4 @@ D节点使用隔离目录 `$RUN_DIR/deps/deepep-pr696` 中的历史自编译Deep
 
 本轮外部入口为 `http://10.210.6.10:11046`，映射H100-msw的8020，再由本目录haproxy.cfg转发至P0的60011；10418/10066不修改。
 
-P 开启 `--enable_dp_prompt_cache_fetch`，在同一节点的 DP rank 间复用前缀缓存；D 开启 `--mtp_dynamic_verify`，按置信度动态选择主模型验证行，draft 最大步数仍为5。P/D 的 `--mtp_step` 暂均保持5：P 仅提交 draft KV，但当前 P/D 原样传输的 compressor ring 尺寸依赖该值，不能单独把 P 改成1。
+P 开启 `--enable_dp_prompt_cache_fetch`，在同一节点的 DP rank 间复用前缀缓存；D 开启 `--mtp_dynamic_verify`，按置信度动态选择主模型验证行，draft 最大步数为3。P/D 的 `--mtp_step` 均为3：P 仅提交 draft KV，但当前 P/D 原样传输的 compressor ring 尺寸依赖该值，必须同步修改。D 的 dispatch capacity 为96×(3+1)=384，按 PR696 legacy layout 估算 RDMA buffer 约5.71GiB/卡，不包含其他 MoE 临时张量和 graph pool。
