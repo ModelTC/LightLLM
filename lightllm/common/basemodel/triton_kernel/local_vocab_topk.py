@@ -125,7 +125,8 @@ def _greedy_vocab_partial(
     v = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     scores = tl.load(logits + b * stride_b + v, v < vocab, -float("inf"))
     maximum = tl.max(scores, axis=0)
-    total = tl.sum(tl.exp(scores - maximum), axis=0)
+    # Fully masked chunks contribute zero instead of exp(-inf - -inf) = NaN.
+    total = tl.sum(tl.exp(scores - tl.where(maximum == -float("inf"), 0.0, maximum)), axis=0)
     winner = tl.min(tl.where(scores == maximum, v, 2147483647), axis=0)
     offset = b * chunks + tl.program_id(1)
     tl.store(maxima + offset, maximum)
