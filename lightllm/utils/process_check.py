@@ -25,7 +25,19 @@ def install_fatal_thread_excepthook():
 def is_process_active(pid):
     try:
         process = psutil.Process(pid)
-        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+        if not process.is_running():
+            return False
+        if process.status() != psutil.STATUS_ZOMBIE:
+            return True
+        # CUDA teardown can leave the leader zombie while a remaining thread
+        # still holds GPU/host mappings in the driver. Reap only after it exits.
+        for thread in process.threads():
+            try:
+                if psutil.Process(thread.id).status() != psutil.STATUS_ZOMBIE:
+                    return True
+            except psutil.NoSuchProcess:
+                continue
+        return False
     except psutil.NoSuchProcess:
         return False
 

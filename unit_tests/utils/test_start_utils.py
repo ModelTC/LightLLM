@@ -347,6 +347,8 @@ def test_shutdown_preserves_gpu_owners_until_consumers_exit(monkeypatch, tmp_pat
 
     def wait(procs, timeout):
         calls.append(("wait", sorted(p.pid for p in procs)))
+        for proc in procs:
+            proc.running = False
         return procs, []
 
     monkeypatch.setattr(start_utils.psutil, "wait_procs", wait)
@@ -362,7 +364,8 @@ def test_shutdown_preserves_gpu_owners_until_consumers_exit(monkeypatch, tmp_pat
     ]
 
 
-def test_shutdown_retains_disk_cache_while_process_is_alive(monkeypatch):
+@pytest.mark.parametrize("wait_reports_gone", [True, False])
+def test_shutdown_retains_disk_cache_while_process_is_alive(monkeypatch, wait_reports_gone):
     class Process(FakeProcess):
         def kill(self):
             pass
@@ -371,7 +374,97 @@ def test_shutdown_retains_disk_cache_while_process_is_alive(monkeypatch):
     manager = start_utils.SubmoduleManager()
     manager.processes = [process]
     manager.disk_cache_dir = "cache"
-    monkeypatch.setattr(start_utils.psutil, "wait_procs", lambda procs, timeout: ([], procs))
+    monkeypatch.setattr(
+        start_utils.psutil, "wait_procs", lambda procs, timeout: (procs, []) if wait_reports_gone else ([], procs)
+    )
     monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
     monkeypatch.setattr(start_utils.shutil, "rmtree", lambda _: pytest.fail("Cache still has a live user"))
     assert manager.terminate_all_processes() == [1001]
+
+
+@pytest.mark.parametrize("thread_status,expected", [("disk-sleep", True), ("zombie", False), (None, False)])
+def test_zombie_leader_remains_active_until_cuda_teardown_thread_exits(monkeypatch, thread_status, expected):
+    from lightllm.utils import process_check
+
+    leader = SimpleNamespace(
+        is_running=lambda: True,
+        status=lambda: "zombie",
+        threads=lambda: [SimpleNamespace(id=1002)],
+    )
+
+    def process(pid):
+        if pid == 1001:
+            return leader
+        if thread_status is None:
+            raise process_check.psutil.NoSuchProcess(pid)
+        return SimpleNamespace(status=lambda: thread_status)
+
+    monkeypatch.setattr(process_check.psutil, "Process", process)
+    assert process_check.is_process_active(1001) is expected
+
+
+@pytest.mark.parametrize("progressing", [True, False])
+def test_shutdown_timeout_tracks_completed_unregister_progress(monkeypatch, tmp_path, progressing, caplog):
+    import os
+    from lightllm.utils import envs_utils
+
+    clock = [0]
+    killed_at = []
+
+    class Process(FakeProcess):
+        def send_signal(self, sig):
+            pass
+
+        def kill(self):
+            killed_at.append(clock[0])
+            self.running = False
+
+    worker = Process(1002, name="lightllm::test::model_infer:RANK0")
+    manager = start_utils.SubmoduleManager()
+    manager.processes = [worker]
+    (tmp_path / "1002_ready").touch()
+
+    def advance(_):
+        clock[0] += 60
+        if progressing:
+            path = tmp_path / "1002_progress"
+            path.touch()
+            os.utime(path, ns=(clock[0] * 10 ** 9, clock[0] * 10 ** 9))
+            if clock[0] == 480:
+                (tmp_path / "1002_released").touch()
+
+    monkeypatch.setattr(start_utils.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(start_utils.time, "sleep", advance)
+    monkeypatch.setattr(start_utils, "model_shutdown_path", lambda pid, stage: tmp_path / f"{pid}_{stage}")
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: worker.running)
+    monkeypatch.setattr(start_utils.psutil, "wait_procs", lambda procs, timeout: (procs, []))
+    monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: SimpleNamespace(enable_mps=False))
+    assert manager.terminate_all_processes(graceful=True) == []
+    assert killed_at == ([480] if progressing else [180])
+    assert ("no progress for 180s" in caplog.text) is not progressing
+
+
+def test_actual_linux_zombie_leader_with_live_thread_is_not_released():
+    import subprocess
+    import sys
+    import time
+    from lightllm.utils import process_check
+
+    if not sys.platform.startswith("linux"):
+        pytest.skip("Linux thread-group teardown")
+    code = (
+        "import ctypes,threading,time; "
+        "threading.Thread(target=lambda: time.sleep(60),daemon=True).start(); "
+        "ctypes.CDLL(None).pthread_exit(None)"
+    )
+    child = subprocess.Popen([sys.executable, "-c", code])
+    try:
+        process = process_check.psutil.Process(child.pid)
+        deadline = time.monotonic() + 10
+        while process.status() != process_check.psutil.STATUS_ZOMBIE:
+            assert time.monotonic() < deadline
+            time.sleep(0.05)
+        assert process_check.is_process_active(child.pid)
+    finally:
+        child.kill()
+        child.wait(timeout=10)

@@ -78,7 +78,7 @@ class HostMemoryRegistration:
         )
 
     @staticmethod
-    def _unregister(cuda, bases, device_id):
+    def _unregister(cuda, bases, device_id, progress=None):
         if not bases:
             return
         torch.cuda.set_device(device_id)
@@ -87,26 +87,29 @@ class HostMemoryRegistration:
             result = cuda.cudaHostUnregister(ctypes.c_void_p(base))
             if result == 0:
                 bases.remove(base)
+                if progress is not None:
+                    progress()
             else:
                 errors.append((base, result))
         if errors:
             raise RuntimeError(f"cudaHostUnregister failed: {errors}")
 
-    def close(self):
+    def close(self, progress=None):
         """Idempotent; failed ranges remain owned so a later close can retry."""
         if not self.bases:
             return
         started = time.monotonic()
-        self._unregister(self.cuda, self.bases, self.device_id)
+        logger.info(f"pid {os.getpid()} unregistering {self.size} host bytes in {len(self.bases)} segments")
+        self._unregister(self.cuda, self.bases, self.device_id, progress)
         logger.info(f"pid {os.getpid()} unregistered {self.size} host bytes in {time.monotonic() - started:.3f}s")
 
 
-def close_host_memory_registrations():
+def close_host_memory_registrations(progress=None):
     """Call only after this process has stopped and synchronized its GPU consumers."""
     errors = []
     for registration in list(_registrations):
         try:
-            registration.close()
+            registration.close(progress=progress)
         except Exception as error:
             errors.append(error)
     if errors:

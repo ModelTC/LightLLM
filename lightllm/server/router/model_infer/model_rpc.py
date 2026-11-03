@@ -107,10 +107,14 @@ class ModelRpcServer(rpyc.Service):
     def _release_host_memory(self):
         self.shutdown_requested.wait()
         started = time.monotonic()
+        logger.info(f"host_memory_cleanup rank={self.rank} phase=stopping_inference")
         self.backend.shutdown_requested.set()
         self.backend.inference_stopped.wait()
         self.backend.infer_loop_thread.join()
         self.backend.infer_loop_thread1.join()
+        logger.info(
+            f"host_memory_cleanup rank={self.rank} phase=synchronizing elapsed={time.monotonic() - started:.3f}s"
+        )
         # Includes CPU KV copies, Engram prefetch and local/IPC GPU copies.
         # Keep GPU allocations alive until the launcher stops PD transport processes.
         import torch
@@ -118,7 +122,22 @@ class ModelRpcServer(rpyc.Service):
 
         torch.cuda.set_device(self.backend.current_device_id)
         torch.cuda.synchronize()
-        close_host_memory_registrations()
+        logger.info(
+            f"host_memory_cleanup rank={self.rank} phase=unregistering elapsed={time.monotonic() - started:.3f}s"
+        )
+        progress_path = model_shutdown_path(os.getpid(), "progress")
+        progress_path.touch()
+        last_progress = time.monotonic()
+
+        def report_progress():
+            nonlocal last_progress
+            now = time.monotonic()
+            if now - last_progress >= 5:
+                progress_path.touch()
+                logger.info(f"host_memory_cleanup rank={self.rank} phase=unregistering elapsed={now - started:.3f}s")
+                last_progress = now
+
+        close_host_memory_registrations(progress=report_progress)
         model_shutdown_path(os.getpid(), "released").touch()
         logger.info(f"host_memory_released rank={self.rank} elapsed={time.monotonic() - started:.3f}s")
 

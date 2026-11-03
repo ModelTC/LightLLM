@@ -36,7 +36,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.dist_utils import set_distributed_rank_env, set_current_device_id
 from lightllm.utils.envs_utils import set_env_start_args, get_unique_server_name
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.process_check import install_fatal_thread_excepthook
+from lightllm.utils.process_check import install_fatal_thread_excepthook, is_process_active
 from lightllm.utils.service_shm_cleanup import ServiceShmCleanup
 
 logger = init_logger(__name__)
@@ -167,7 +167,7 @@ class WeightOwner:
                 # Even a partial send can leave CUDA IPC views in a client. EOF
                 # alone does not prove its CUDA context has completed cleanup.
                 try:
-                    while peer.is_running() and peer.status() != psutil.STATUS_ZOMBIE:
+                    while peer.is_running() and is_process_active(peer.pid):
                         time.sleep(0.1)
                 except psutil.NoSuchProcess:
                     pass
@@ -240,9 +240,9 @@ def control_owners(directory, operation):
                     processes.append(psutil.Process(status["pid"]))
                 except psutil.NoSuchProcess:
                     pass
-            _, alive = psutil.wait_procs(processes, timeout=180)
+            psutil.wait_procs(processes, timeout=180)
             remaining = [
-                process.pid for process in alive if process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+                process.pid for process in processes if process.is_running() and is_process_active(process.pid)
             ]
             if remaining:
                 raise RuntimeError(f"Weight owners are still releasing resources: {remaining}")

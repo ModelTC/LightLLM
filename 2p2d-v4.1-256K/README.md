@@ -44,6 +44,8 @@ P 开启 `--enable_dp_prompt_cache_fetch`，在同一节点的 DP rank 间复用
 
 日志区分 `serving_stopped`、`host_memory_released`、`workers_exited`。仍有活进程时不删除磁盘缓存、不报告退出成功，launcher 返回失败；共享内存仍由现有独立清理进程按 service namespace 回收。`workers_exited` 不应被当作 SysV 物理页已回收的单独证据，重启前仍需检查 attachment、GPU进程和 cgroup。
 
+大池清理按每个 worker 的注销进展计时：只有成功的 `cudaHostUnregister` 才刷新进度，连续180秒没有进展才进入强制退出，避免总耗时超过180秒就打断仍在工作的清理线程。`host_memory_cleanup` 分别记录停止推理、GPU同步、注销阶段；每个注册对象另记字节数、分段数与注销耗时。主线程为 zombie 时仍检查其余线程，驱动清理线程未退出前不宣布完成、不提前清理 launcher 共享内存或释放权重租约。这些修改不保留1 TiB CPU KV池，也不保证注销或物理回收耗时下降；权重常驻的收益不能覆盖这段成本。
+
 本轮只提交代码和配置，不重启当前服务。HOST_NUMA/FABRIC、CPU KV 分阶段扩容或 staging、处理后权重 artifact 尚未实现；这些需要单独容量、传输及整机验证，不能用局部测试代替。
 
 ## 可选的权重常驻

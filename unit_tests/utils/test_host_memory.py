@@ -97,6 +97,19 @@ def test_unregister_failure_keeps_only_failed_bases_for_retry(runtime):
     assert removed == [8192, 4096]
 
 
+def test_cleanup_progress_requires_a_successful_unregister(runtime):
+    _, _, removed, failures = runtime
+    registration = host_memory.HostMemoryRegistration(4096, 8192, 4096, workers=2)
+    progress = []
+    failures.add(4096)
+    with pytest.raises(RuntimeError, match="cudaHostUnregister"):
+        registration.close(progress=lambda: progress.append(len(removed)))
+    assert progress == [1]
+    failures.clear()
+    registration.close(progress=lambda: progress.append(len(removed)))
+    assert progress == [1, 2]
+
+
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 def test_real_segmented_uva_reads_writes_and_explicit_release(monkeypatch):
     from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor

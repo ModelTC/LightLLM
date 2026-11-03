@@ -32,9 +32,8 @@ import sys
 import time
 from pathlib import Path
 
-import psutil
-
 from lightllm.utils.log_utils import init_logger
+from lightllm.utils.process_check import is_process_active
 
 
 logger = init_logger(__name__)
@@ -134,15 +133,6 @@ class ServiceShmCleanup:
                 f"Cleaned service shm for {self.service_name}: "
                 f"POSIX={removed_posix}, System V keys={removed_system_v}, IPC files={removed_ipc}"
             )
-
-
-def is_process_active(pid):
-    """检查进程是否存在且不是僵尸进程。"""
-    try:
-        process = psutil.Process(pid)
-        return process.status() != psutil.STATUS_ZOMBIE
-    except psutil.NoSuchProcess:
-        return False
 
 
 def run_launcher_shm_cleanup_process(service_name, parent_pid):

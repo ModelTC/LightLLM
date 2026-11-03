@@ -127,16 +127,18 @@ def test_non_inference_mode_skips_system_v_shm_cleanup(monkeypatch):
 
 
 def test_active_process_rejects_missing_pid_and_zombie(monkeypatch):
+    from lightllm.utils import process_check
+
     monkeypatch.setattr(
-        service_shm_cleanup.psutil,
+        process_check.psutil,
         "Process",
-        lambda pid: SimpleNamespace(status=lambda: psutil.STATUS_RUNNING),
+        lambda pid: SimpleNamespace(is_running=lambda: True, status=lambda: psutil.STATUS_RUNNING),
     )
     assert service_shm_cleanup.is_process_active(123)
     monkeypatch.setattr(
-        service_shm_cleanup.psutil,
+        process_check.psutil,
         "Process",
-        lambda pid: SimpleNamespace(status=lambda: psutil.STATUS_ZOMBIE),
+        lambda pid: SimpleNamespace(is_running=lambda: True, status=lambda: psutil.STATUS_ZOMBIE, threads=lambda: []),
     )
     assert not service_shm_cleanup.is_process_active(123)
 

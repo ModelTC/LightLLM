@@ -116,18 +116,30 @@ class SubmoduleManager:
                         model_workers.append(proc)
                 except psutil.NoSuchProcess:
                     pass
-            deadline = time.monotonic() + 180
-            pending = list(model_workers)
-            while pending and time.monotonic() < deadline:
-                pending = [
-                    proc
-                    for proc in pending
-                    if is_process_active(proc.pid) and not model_shutdown_path(proc.pid, "released").exists()
-                ]
+            pending = set(model_workers)
+            deadlines = {proc: time.monotonic() + 180 for proc in pending}
+            progress = {proc: None for proc in pending}
+            timed_out = []
+            while pending:
+                now = time.monotonic()
+                for proc in list(pending):
+                    if not is_process_active(proc.pid) or model_shutdown_path(proc.pid, "released").exists():
+                        pending.remove(proc)
+                        continue
+                    try:
+                        updated = model_shutdown_path(proc.pid, "progress").stat().st_mtime_ns
+                    except FileNotFoundError:
+                        updated = None
+                    if updated != progress[proc]:
+                        progress[proc] = updated
+                        deadlines[proc] = now + 180
+                    if now >= deadlines[proc]:
+                        pending.remove(proc)
+                        timed_out.append(proc.pid)
                 if pending:
                     time.sleep(0.1)
-            if pending:
-                logger.warning(f"Host memory cleanup timed out; forcing remaining workers: {[p.pid for p in pending]}")
+            if timed_out:
+                logger.warning(f"Host memory cleanup made no progress for 180s; forcing remaining workers: {timed_out}")
 
         # Workers stay alive after unregister so GPU IPC owners outlive transport
         # users. Kill consumers first; a killed parent must not trigger the worker
@@ -138,8 +150,8 @@ class SubmoduleManager:
                 proc.kill()
             except psutil.NoSuchProcess:
                 pass
-        _, alive_consumers = psutil.wait_procs(list(consumers), timeout=30)
-        active_consumers = [proc.pid for proc in alive_consumers if is_process_active(proc.pid)]
+        psutil.wait_procs(list(consumers), timeout=30)
+        active_consumers = [proc.pid for proc in consumers if proc.is_running() and is_process_active(proc.pid)]
         if active_consumers:
             logger.warning(f"Consumers still alive before worker termination: {active_consumers}")
         for proc in model_workers:
@@ -148,8 +160,10 @@ class SubmoduleManager:
             except psutil.NoSuchProcess:
                 pass
 
-        _, alive = psutil.wait_procs(list(processes), timeout=180)
-        alive_pids = [proc.pid for proc in alive if is_process_active(proc.pid)]
+        psutil.wait_procs(list(processes), timeout=180)
+        # wait_procs can classify a zombie leader as gone before its remaining
+        # CUDA teardown threads have exited. Check the whole captured tree.
+        alive_pids = [proc.pid for proc in processes if proc.is_running() and is_process_active(proc.pid)]
         if alive_pids:
             logger.warning(f"Processes still alive after SIGKILL: {alive_pids}")
 
