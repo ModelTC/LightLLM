@@ -1,5 +1,6 @@
 """Compare eager and deferred FFN post at the actual V4.1 cross-layer boundary."""
 
+import argparse
 import json
 import statistics
 from types import SimpleNamespace
@@ -11,9 +12,12 @@ from lightllm.models.deepseek_v41.layer_infer.transformer_layer_infer import Dee
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--rows", type=int, nargs="+", default=[1, 6, 16, 32, 64, 128, 384, 640, 768])
+    args = parser.parse_args()
     torch.manual_seed(410)
     hidden = 5120
-    for tokens in (1, 6, 16, 32, 64, 128, 8192):
+    for tokens in args.rows:
         residual = torch.randn(tokens, 4 * hidden, dtype=torch.bfloat16, device="cuda")
         y = torch.randn(tokens, hidden, dtype=torch.bfloat16, device="cuda")
         mix = torch.randn(tokens, 4, 4, device="cuda").softmax(-1)

@@ -78,7 +78,11 @@ def _module(cls):
     module.use_write_quiescence = True
     module.args = SimpleNamespace(pd_kv_page_num=2)
     module.waiting_dict_lock = threading.Lock()
-    module.waiting_dict = {}
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import (
+        _WaitingTasks,
+    )
+
+    module.waiting_dict = _WaitingTasks() if cls is _DecodeTransModule else {}
     module.quarantined_tasks = {}
     module.write_recoveries = {}
     module.write_peer_kv_queue = queue.Queue()
@@ -763,6 +767,11 @@ def test_recovery_fence_requires_done_before_reclaim_and_matching_decode_stop(in
     module, decode = _module(_PrefillTransModule), _module(_DecodeTransModule)
     task = _uncertain_source(module)
     dst = replace(task, src_page_index=None, xfer_handle=None, write_submitted=False)
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import (
+        _SharedTimeOutMark,
+    )
+
+    dst.shared_time_out_mark = _SharedTimeOutMark()
     decode.waiting_dict[dst.get_key()] = dst
     decode._fail_waiting_task_locked(dst, "failed source WRITE")
     module.transporter.start_write_fence = _submit_fence
@@ -1078,3 +1087,30 @@ def test_completed_fence_proof_is_accepted_even_if_periodic_check_runs_after_dea
     assert module.page_index_queue.get_nowait() == 0
     assert module.write_peer_kv_queue.empty()
     assert recovery.attempts == 1
+
+
+def test_prefill_done_notification_and_telemetry_do_not_hold_task_lock():
+    module = _module(_PrefillTransModule)
+    task = _task(xfer_handle=7, src_page_index=0, write_submitted=True)
+    module.waiting_dict[task.get_key()] = task
+    module.transporter.check_task_status.return_value = "DONE"
+    module.transporter.capture_telemetry = True
+    calls = []
+
+    def unlocked(name):
+        assert module.waiting_dict_lock.acquire(blocking=False)
+        module.waiting_dict_lock.release()
+        assert task.get_key() not in module.waiting_dict
+        module.transporter.release_xfer_handle.assert_not_called()
+        calls.append(name)
+
+    def telemetry(_handle):
+        unlocked("telemetry")
+        return SimpleNamespace(xferDuration=10, postDuration=2, totalBytes=100)
+
+    module.transporter.nixl_agent = SimpleNamespace(get_xfer_telemetry=telemetry, query_xfer_backend=lambda _: "UCX")
+    module.transporter.send_write_done_task_to_decode_node.side_effect = lambda _: unlocked("done")
+    module._update_task_status_once()
+    assert calls == ["telemetry", "done"]
+    assert module.success_queue.get_nowait() is task
+    assert module.failed_queue.empty()

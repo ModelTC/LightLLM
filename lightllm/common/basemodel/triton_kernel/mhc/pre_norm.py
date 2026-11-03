@@ -20,8 +20,9 @@ from .configs import (
     pre_norm_key,
     projection_configs,
     projection_key,
+    shifted_post_pre_configs,
 )
-from .post import _hc_post_values, hc_post
+from .post import _hc_post_values, hc_post, _hc_post_norm_kernel
 
 LIGHTLLM_DISABLE_DEEPGEMM_MHC = os.getenv("LIGHTLLM_DISABLE_DEEPGEMM_MHC", "False").upper() in ["ON", "TRUE", "1"]
 
@@ -472,6 +473,138 @@ def hc_pre_norm(
     )
 
 
+@triton.jit
+def _hc_shifted_weights_kernel(
+    GP,
+    SP,
+    SCALE,
+    BASE,
+    POST,
+    MIX,
+    PRE,
+    TOKENS: tl.constexpr,
+    HIDDEN: tl.constexpr,
+    N_SPLITS: tl.constexpr,
+    BLOCK_SPLITS: tl.constexpr,
+    RMS_EPS: tl.constexpr,
+    HC_EPS: tl.constexpr,
+    POST_MULTIPLIER: tl.constexpr,
+    SINKHORN_ITERS: tl.constexpr,
+):
+    row = tl.program_id(0)
+    pre, post, matrix = _hc_mix_weights(
+        GP,
+        SP,
+        SCALE,
+        BASE,
+        row,
+        TOKENS * 24,
+        24,
+        TOKENS,
+        1,
+        4 * HIDDEN,
+        RMS_EPS,
+        4,
+        HC_EPS,
+        POST_MULTIPLIER,
+        SINKHORN_ITERS,
+        N_SPLITS,
+        BLOCK_SPLITS,
+        True,
+    )
+    tl.store(PRE + row * 4 + tl.arange(0, 4), pre)
+    tl.store(POST + row * 4 + tl.arange(0, 4), post)
+    tl.store(MIX + row * 16 + tl.arange(0, 16), tl.reshape(matrix, (16,)))
+
+
+@autotune(
+    kernel_name="mhc_post_pre_norm_shifted:v1",
+    configs_gen_func=shifted_post_pre_configs,
+    static_key_func=decode_post_pre_key,
+    run_key_func=lambda layer_output: layer_output.shape[0],
+    benchmark_repeats=32,
+    benchmark_retries=5,
+)
+def _hc_shifted_post_pre_norm(
+    layer_output,
+    residual,
+    residual_mix,
+    post_mix,
+    fn,
+    scale,
+    base,
+    norm_weight,
+    streams,
+    rms_eps,
+    norm_eps,
+    hc_eps,
+    sinkhorn_iters,
+    post_multiplier=2.0,
+    previous_pre=None,
+    run_config=None,
+):
+    tokens, hidden = layer_output.shape
+    if run_config is None:
+        run_config = {
+            "fuse_post_norm": 32 <= tokens <= 128 and hidden >= 4096,
+            "post_num_warps": 16,
+            "weights_num_warps": 1,
+        }
+    if not run_config["fuse_post_norm"]:
+        updated = hc_post(layer_output, residual, residual_mix, post_mix, streams)
+        result = hc_pre_norm_shifted(
+            updated,
+            previous_pre,
+            fn,
+            scale,
+            base,
+            norm_weight,
+            rms_eps,
+            norm_eps,
+            hc_eps,
+            sinkhorn_iters,
+        )
+        return result[0], updated, *result[1:]
+    updated = torch.empty_like(residual)
+    output = torch.empty_like(layer_output)
+    _hc_post_norm_kernel[(tokens,)](
+        layer_output,
+        residual,
+        residual_mix,
+        post_mix,
+        previous_pre,
+        norm_weight,
+        updated,
+        output,
+        HIDDEN=hidden,
+        EPS=norm_eps,
+        BLOCK_H=triton.next_power_of_2(hidden),
+        num_warps=run_config["post_num_warps"],
+    )
+    gp, sp = _hc_prenorm_projection(updated, fn)
+    next_pre, post = torch.empty_like(previous_pre), torch.empty_like(post_mix)
+    mix = torch.empty_like(residual_mix)
+    _hc_shifted_weights_kernel[(tokens,)](
+        gp,
+        sp,
+        scale,
+        base,
+        post,
+        mix,
+        next_pre,
+        TOKENS=tokens,
+        HIDDEN=hidden,
+        N_SPLITS=gp.shape[0],
+        BLOCK_SPLITS=triton.next_power_of_2(gp.shape[0]),
+        RMS_EPS=rms_eps,
+        HC_EPS=hc_eps,
+        POST_MULTIPLIER=post_multiplier,
+        SINKHORN_ITERS=sinkhorn_iters,
+        num_warps=run_config["weights_num_warps"],
+    )
+    return output, updated, mix, post, next_pre
+
+
 def hc_post_pre_norm(
     layer_output: torch.Tensor,
     residual: torch.Tensor,
@@ -521,6 +654,24 @@ def hc_post_pre_norm(
             previous_pre=previous_pre,
         )
     else:
+        if previous_pre is not None and layer_output.dtype == torch.bfloat16 and not LIGHTLLM_DISABLE_DEEPGEMM_MHC:
+            return _hc_shifted_post_pre_norm(
+                layer_output,
+                residual,
+                residual_mix,
+                post_mix,
+                fn,
+                scale,
+                base,
+                norm_weight,
+                streams,
+                rms_eps,
+                norm_eps,
+                hc_eps,
+                sinkhorn_iters,
+                post_multiplier,
+                previous_pre,
+            )
         updated = hc_post(layer_output, residual, residual_mix, post_mix, streams)
         if previous_pre is not None:
             result = hc_pre_norm_shifted(

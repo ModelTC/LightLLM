@@ -25,7 +25,7 @@ class _SequenceQueue:
 
 
 def make_task(request_id, page, empty=False):
-    return PDChunckedTransTask(
+    task = PDChunckedTransTask(
         request_id=request_id,
         start_kv_index=page,
         end_kv_index=page if empty else page + 1,
@@ -47,6 +47,8 @@ def make_task(request_id, page, empty=False):
         first_gen_token_id=42,
         first_gen_token_logprob=-0.5,
     )
+    task.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
+    return task
 
 
 def make_module(*tasks):
@@ -55,7 +57,7 @@ def make_module(*tasks):
     module.use_write_quiescence = False
     module.args = SimpleNamespace(pd_node_id=2, pd_detail_log=False)
     module.waiting_dict_lock = threading.Lock()
-    module.waiting_dict = {task.get_key(): task for task in tasks}
+    module.waiting_dict = decode_trans_process._WaitingTasks(tasks)
     module.transporter = SimpleNamespace(
         agent_name="decode",
         agent_metadata=b"decode metadata",
@@ -127,6 +129,7 @@ def test_waiting_pages_timeout_from_shared_progress(monkeypatch):
     module._check_tasks_time_out()
     assert len(module.waiting_dict) == 3
     first.shared_time_out_mark.update()
+    module.waiting_dict.refresh(first)
     now[0] = 111.0
     module._check_tasks_time_out()
     assert module.failed_queue.get_nowait() is unrelated
@@ -193,3 +196,40 @@ def test_started_transfer_keeps_real_per_page_timeout(monkeypatch):
     assert module.failed_queue.get_nowait() is task
     assert task.error_info == "time out in accept_peer_task_loop"
     assert not module.waiting_dict
+
+
+def test_idle_deadline_index_has_one_event_per_request_and_no_page_scan(monkeypatch):
+    now = [100.0]
+    monkeypatch.setattr(decode_trans_process.time, "time", lambda: now[0])
+    mark = decode_trans_process._SharedTimeOutMark()
+    tasks = [make_task(1, page) for page in range(256)]
+    for task in tasks:
+        task.shared_time_out_mark = mark
+    waiting = decode_trans_process._WaitingTasks(tasks)
+    mark.update()
+    waiting.refresh(tasks[0])
+    assert len(waiting.deadlines) == 1
+    for _ in range(100):
+        now[0] += 0.01
+        mark.update()
+        waiting.refresh(tasks[0])
+    assert len(waiting.deadlines) == 1
+    assert waiting.expired(110.5) == []
+    assert len(waiting.deadlines) == 1
+    assert waiting.expired(112.0) == tasks
+
+
+def test_cancelled_deadlines_are_bounded_and_cannot_expire_replacement(monkeypatch):
+    monkeypatch.setattr(decode_trans_process.time, "time", lambda: 100.0)
+    waiting = decode_trans_process._WaitingTasks()
+    for _ in range(1000):
+        task = make_task(1, 0)
+        task.start_trans_time = 100.0
+        waiting[task.get_key()] = task
+        waiting.pop(task.get_key())
+    assert len(waiting.deadlines) <= 64
+    replacement = make_task(1, 0)
+    replacement.start_trans_time = 200.0
+    waiting[replacement.get_key()] = replacement
+    assert waiting.expired(167.0) == []
+    assert waiting.expired(267.0) == [replacement]

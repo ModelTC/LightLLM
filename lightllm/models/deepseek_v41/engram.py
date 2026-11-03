@@ -264,10 +264,11 @@ class EngramEmbeddingWeight(BaseWeightTpl):
     def verify_load(self):
         return all(self.loaded)
 
-    def gather_local(self, indices):
+    def gather_local(self, indices, out=None):
         """Read this rank's host shard; no collective is issued on the prefetch stream."""
         indices = indices.contiguous()
-        out = torch.empty((*indices.shape, self.dim), dtype=torch.bfloat16, device=indices.device)
+        if out is None:
+            out = torch.empty((*indices.shape, self.dim), dtype=torch.bfloat16, device=indices.device)
         _gather_table[(indices.numel(),)](
             indices,
             self.device_weight,
@@ -320,7 +321,60 @@ def _engram_gate(
     tl.store(OUT + row * OUT_STRIDE + stream * DIM + col, h + gate * value, valid)
 
 
-def engram_forward(streams, indices, weight, eps, token_mask=None, out=None, local_embedding=None):
+def engram_forward(
+    streams,
+    indices,
+    weight,
+    eps,
+    token_mask=None,
+    out=None,
+    local_embedding=None,
+    prefetch_stream=None,
+):
+    # Two bounded buffers: 48 MiB total at 24 heads x 256 BF16 dimensions.
+    chunk_rows = 2048
+    if prefetch_stream is not None and streams.shape[0] > chunk_rows:
+        if out is None:
+            out = torch.empty_like(streams)
+        current = torch.cuda.current_stream()
+        buffers = [
+            indices.new_empty(
+                (chunk_rows, indices.shape[1], weight.engram_embed_.dim),
+                dtype=torch.bfloat16,
+            )
+            for _ in range(2)
+        ]
+        ready = [torch.cuda.Event() for _ in range(2)]
+        consumed = [torch.cuda.Event() for _ in range(2)]
+        prefetch_stream.wait_stream(current)
+        with torch.cuda.stream(prefetch_stream):
+            weight.engram_embed_.gather_local(indices[:chunk_rows], out=buffers[0])
+            ready[0].record(prefetch_stream)
+        for chunk, start in enumerate(range(0, streams.shape[0], chunk_rows)):
+            slot = chunk % 2
+            end = min(start + chunk_rows, streams.shape[0])
+            if end < streams.shape[0]:
+                next_slot = 1 - slot
+                next_end = min(end + chunk_rows, streams.shape[0])
+                with torch.cuda.stream(prefetch_stream):
+                    if chunk:
+                        prefetch_stream.wait_event(consumed[next_slot])
+                    weight.engram_embed_.gather_local(indices[end:next_end], out=buffers[next_slot][: next_end - end])
+                    ready[next_slot].record(prefetch_stream)
+            current.wait_event(ready[slot])
+            engram_forward(
+                streams[start:end],
+                indices[start:end],
+                weight,
+                eps,
+                token_mask=None if token_mask is None else token_mask[start:end],
+                out=out[start:end],
+                local_embedding=buffers[slot][: end - start].flatten(1),
+            )
+            consumed[slot].record(current)
+        for buffer in buffers:
+            buffer.record_stream(prefetch_stream)
+        return out
     embedded = (
         weight.engram_embed_.lookup(indices)
         if local_embedding is None

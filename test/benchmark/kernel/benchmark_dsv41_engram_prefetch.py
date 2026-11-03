@@ -5,6 +5,7 @@ every graph replay to avoid repeatedly reading the same small set of host rows.
 """
 
 import json
+import argparse
 import os
 import statistics
 import time
@@ -14,7 +15,7 @@ from types import SimpleNamespace
 import torch
 from triton.testing import do_bench_cudagraph
 
-from lightllm.models.deepseek_v41.engram import EngramEmbeddingWeight, EngramHasher
+from lightllm.models.deepseek_v41.engram import EngramEmbeddingWeight, EngramHasher, engram_forward
 from lightllm.models.deepseek_v41.infer_struct import DeepseekV41InferStateInfo
 
 
@@ -48,7 +49,69 @@ def eager_ms(func):
     return statistics.median(timings)
 
 
+def benchmark_prefill():
+    """Full lookup/gate with a synthetic BF16 WKV, including host submission."""
+    table_rows, dim, heads, hidden = 1 << 20, 256, 24, 5120
+    embedding = EngramEmbeddingWeight("layers.1.engram.embed", table_rows, dim)
+    embedding.weight.copy_(torch.randn(table_rows, dim).to(torch.float8_e4m3fn))
+    embedding.scale.fill_(0.5)
+    projection = torch.randn(heads * dim, 5 * hidden, device="cuda", dtype=torch.bfloat16) * 0.001
+    weight = SimpleNamespace(
+        engram_embed_=embedding,
+        engram_wkv_=SimpleNamespace(mm=lambda x: x @ projection),
+        engram_q_=SimpleNamespace(weight=torch.randn(4, hidden, device="cuda", dtype=torch.bfloat16)),
+        engram_k_=SimpleNamespace(weight=torch.randn(4, hidden, device="cuda", dtype=torch.bfloat16)),
+    )
+    stream = torch.cuda.Stream()
+    for rows in (1024, 8192):
+        inputs = torch.randn(rows, 4, hidden, dtype=torch.bfloat16, device="cuda")
+        out = torch.empty_like(inputs)
+        indices = torch.randint(table_rows, (rows, heads), device="cuda")
+        reference = engram_forward(inputs, indices, weight, 1e-6)
+        actual = engram_forward(inputs, indices, weight, 1e-6, prefetch_stream=stream)
+        torch.testing.assert_close(actual, reference, atol=0.03125, rtol=0.03)
+        del actual, reference
+        for mode in ("serial", "pipeline"):
+
+            def run():
+                indices.add_(65537).remainder_(table_rows)
+                return engram_forward(
+                    inputs, indices, weight, 1e-6, out=out, prefetch_stream=stream if mode == "pipeline" else None
+                )
+
+            run()
+            torch.cuda.synchronize()
+            memory_before = torch.cuda.memory_allocated()
+            torch.cuda.reset_peak_memory_stats()
+            gpu, wall = [], []
+            for _ in range(10):
+                start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+                begin = time.perf_counter()
+                start.record()
+                run()
+                end.record()
+                end.synchronize()
+                wall.append((time.perf_counter() - begin) * 1000)
+                gpu.append(start.elapsed_time(end))
+            print(
+                json.dumps(
+                    dict(
+                        component="prefill_bf16_wkv",
+                        rows=rows,
+                        mode=mode,
+                        gpu_ms=statistics.median(gpu),
+                        wall_ms=statistics.median(wall),
+                        peak_increment_bytes=torch.cuda.max_memory_allocated() - memory_before,
+                    )
+                ),
+                flush=True,
+            )
+
+
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--prefill-only", action="store_true")
+    args = parser.parse_args()
     for name in (
         "GLOBAL_RANK",
         "CURRENT_RANK_IN_DP",
@@ -62,6 +125,9 @@ if __name__ == "__main__":
         os.environ["LIGHTLLM_" + name] = "1"
     os.environ["LIGHTLLM_UNIQUE_SERVICE_NAME_ID"] = "bench_v41_prefetch_" + uuid.uuid4().hex
     torch.manual_seed(410)
+    if args.prefill_only:
+        benchmark_prefill()
+        raise SystemExit(0)
     hasher = EngramHasher.__new__(EngramHasher)
     hasher.token_map = torch.arange(32768, device="cuda")
     hasher.has_vision, hasher.pad, hasher.order, hasher.heads = False, 2, 4, 8

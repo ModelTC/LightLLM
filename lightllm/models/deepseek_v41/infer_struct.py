@@ -20,7 +20,7 @@ class DeepseekV41InferStateInfo(DeepseekV4InferStateInfo):
             bound_swa_replay(self, starts[batch])
         self.v41_sparse_selection = None
         self.candidate_block_indices = None
-        self.engram_hashes = model.engram_hasher(self) if model.engram_hasher is not None else None
+        self.engram_hashes = model.engram_hasher(self) if self.is_prefill and model.engram_hasher is not None else None
         self.engram_stream = model.engram_stream
         self.engram_prefetch = None
         self.decoder_state = None

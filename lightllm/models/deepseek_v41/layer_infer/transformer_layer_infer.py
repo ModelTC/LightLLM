@@ -71,6 +71,7 @@ class DeepseekV41TransformerLayerInfer(DeepseekV4TransformerLayerInfer):
                 token_mask=infer_state.input_ids < self.vocab_size if self.has_vision else None,
                 out=streams,
                 local_embedding=embedded,
+                prefetch_stream=infer_state.engram_stream if infer_state.is_prefill else None,
             ).flatten(1)
         x, res_mix, post_mix, attn_pre = hc_pre_norm_shifted(
             streams,

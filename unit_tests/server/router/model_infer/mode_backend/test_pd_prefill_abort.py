@@ -13,6 +13,7 @@ from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_
 from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import (
     _DecodeTransModule,
     _SharedTimeOutMark,
+    _WaitingTasks,
 )
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_impl, prefill_trans_process
 from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl.prefill_impl import (
@@ -41,7 +42,7 @@ class _SequenceQueue:
 
 
 def _make_transfer_task(page_kind="kv"):
-    return PDChunckedTransTask(
+    task = PDChunckedTransTask(
         request_id=123,
         start_kv_index=0 if page_kind == "kv" else 4,
         end_kv_index=4,
@@ -64,6 +65,9 @@ def _make_transfer_task(page_kind="kv"):
         first_gen_token_logprob=None,
         page_kind=page_kind,
     )
+
+    task.shared_time_out_mark = _SharedTimeOutMark()
+    return task
 
 
 def test_prefill_infer_forwards_abort_to_kv_move_manager(monkeypatch):
@@ -334,7 +338,7 @@ def test_notify_send_error_only_cleans_up_the_task_it_still_owns(monkeypatch, si
     module.use_write_quiescence = False
     module.device_id = 0
     module.waiting_dict_lock = threading.Lock()
-    module.waiting_dict = {task.get_key(): task}
+    module.waiting_dict = {task.get_key(): task} if is_prefill else _WaitingTasks([task])
     module.request_last_progress_time = {}
     module.failed_queue = queue.Queue()
     next_stage = queue.Queue()
@@ -342,6 +346,9 @@ def test_notify_send_error_only_cleans_up_the_task_it_still_owns(monkeypatch, si
 
     def send(*args, **kwargs):
         if outcome == "timeout":
+            task.transfer_time_out_secs = -1
+            if not is_prefill:
+                module.waiting_dict.activate(task)
             module._check_tasks_time_out()
         elif outcome == "advanced":
             with module.waiting_dict_lock:
@@ -360,7 +367,6 @@ def test_notify_send_error_only_cleans_up_the_task_it_still_owns(monkeypatch, si
         module.ready_transfer_queue = _SequenceQueue((SimpleNamespace(synchronize=lambda: None), task))
         loop = module.ready_transfer_loop
     else:
-        task.shared_time_out_mark = _SharedTimeOutMark()
         module.page_index_queue = _SequenceQueue(7)
         module.request_page_task_queue = _SequenceQueue(task)
         loop = module.request_page_loop

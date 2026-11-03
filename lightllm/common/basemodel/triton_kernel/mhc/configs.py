@@ -47,6 +47,14 @@ def decode_post_pre_key(layer_output, fn, norm_weight, sinkhorn_iters):
     return dict(post_projection_key(layer_output, fn), norm_dtype=str(norm_weight.dtype), sinkhorn_iters=sinkhorn_iters)
 
 
+def shifted_post_pre_configs():
+    return [{"fuse_post_norm": False}] + [
+        {"fuse_post_norm": True, "post_num_warps": post, "weights_num_warps": weights}
+        for post in [8, 16]
+        for weights in [1, 4]
+    ]
+
+
 def post_configs():
     return [
         {"BLOCK_H": block_h, "num_warps": warps}

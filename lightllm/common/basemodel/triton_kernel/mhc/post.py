@@ -91,6 +91,48 @@ def _hc_post_4stream_kernel(
     tl.store(output_base + 3 * hidden, accumulator_3, mask=hidden_mask)
 
 
+@triton.jit
+def _hc_post_norm_kernel(
+    X,
+    R,
+    MIX,
+    POST,
+    PRE,
+    NORM,
+    UPDATED,
+    OUT,
+    HIDDEN: tl.constexpr,
+    EPS: tl.constexpr,
+    BLOCK_H: tl.constexpr,
+):
+    row = tl.program_id(0)
+    h = tl.arange(0, BLOCK_H)
+    valid = h < HIDDEN
+    x = tl.load(X + row * HIDDEN + h, valid, 0).to(tl.float32)
+    r0 = tl.load(R + row * 4 * HIDDEN + h, valid, 0).to(tl.float32)
+    r1 = tl.load(R + row * 4 * HIDDEN + HIDDEN + h, valid, 0).to(tl.float32)
+    r2 = tl.load(R + row * 4 * HIDDEN + 2 * HIDDEN + h, valid, 0).to(tl.float32)
+    r3 = tl.load(R + row * 4 * HIDDEN + 3 * HIDDEN + h, valid, 0).to(tl.float32)
+    r0, r1, r2, r3 = _hc_post_values(x, r0, r1, r2, r3, MIX + row * 16, POST + row * 4)
+    r0 = r0.to(tl.bfloat16).to(tl.float32)
+    r1 = r1.to(tl.bfloat16).to(tl.float32)
+    r2 = r2.to(tl.bfloat16).to(tl.float32)
+    r3 = r3.to(tl.bfloat16).to(tl.float32)
+    tl.store(UPDATED + row * 4 * HIDDEN + h, r0, valid)
+    tl.store(UPDATED + row * 4 * HIDDEN + HIDDEN + h, r1, valid)
+    tl.store(UPDATED + row * 4 * HIDDEN + 2 * HIDDEN + h, r2, valid)
+    tl.store(UPDATED + row * 4 * HIDDEN + 3 * HIDDEN + h, r3, valid)
+    value = tl.full((BLOCK_H,), 0, tl.float32)
+    value += r0 * tl.load(PRE + row * 4)
+    value += r1 * tl.load(PRE + row * 4 + 1)
+    value += r2 * tl.load(PRE + row * 4 + 2)
+    value += r3 * tl.load(PRE + row * 4 + 3)
+    value = value.to(tl.bfloat16).to(tl.float32)
+    inv = tl.rsqrt(tl.sum(value * value, 0) / HIDDEN + EPS)
+    norm = tl.load(NORM + h, valid, 0)
+    tl.store(OUT + row * HIDDEN + h, value * inv * norm, valid)
+
+
 @autotune(
     kernel_name="mhc_post:v1",
     configs_gen_func=post_configs,

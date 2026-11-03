@@ -2064,3 +2064,85 @@ def test_engram_hashes_survive_chunk_and_swa_page_boundaries(monkeypatch, vision
     hasher.restore_history([(1, 130, ids[127:130].tolist())], manager)
     graph.replay()
     torch.testing.assert_close(replayed, full[130:], atol=0, rtol=0)
+
+
+@pytest.mark.parametrize("tokens", [2049, 6145])
+def test_engram_bounded_prefill_matches_serial_and_reuses_two_buffers(monkeypatch, tokens):
+    from lightllm.models.deepseek_v41.engram import (
+        EngramEmbeddingWeight,
+        engram_forward,
+    )
+
+    embedding = EngramEmbeddingWeight("layers.1.engram.embed", rows=64, dim=64)
+    embedding.load_hf_weights(
+        {
+            embedding.prefix + ".weight": torch.randn(64, 64).to(torch.float8_e4m3fn),
+            embedding.prefix + ".scale": torch.ones(64, 2).to(torch.float8_e8m0fnu),
+        }
+    )
+    dim, heads = 128, 24
+    projection = torch.randn(heads * 64, 5 * dim, device="cuda", dtype=torch.bfloat16) * 0.01
+    weight = SimpleNamespace(
+        engram_embed_=embedding,
+        engram_wkv_=SimpleNamespace(mm=lambda x: x @ projection),
+        engram_q_=SimpleNamespace(weight=torch.randn(4, dim, device="cuda", dtype=torch.bfloat16)),
+        engram_k_=SimpleNamespace(weight=torch.randn(4, dim, device="cuda", dtype=torch.bfloat16)),
+    )
+    streams = torch.randn(tokens, 4, dim, device="cuda", dtype=torch.bfloat16)
+    indices = torch.randint(64, (tokens, heads), device="cuda")
+    mask = torch.arange(tokens, device="cuda") % 5 != 0
+    expected = engram_forward(streams, indices, weight, 1e-6, mask)
+    allocations = []
+    gather = embedding.gather_local
+
+    def record_gather(ids, out=None):
+        assert out is not None and out.shape[0] <= 2048
+        allocations.append(out.untyped_storage().data_ptr())
+        return gather(ids, out=out)
+
+    monkeypatch.setattr(embedding, "gather_local", record_gather)
+    original = streams.clone()
+    result = engram_forward(
+        streams,
+        indices,
+        weight,
+        1e-6,
+        mask,
+        out=streams,
+        prefetch_stream=torch.cuda.Stream(),
+    )
+    torch.testing.assert_close(result, expected, atol=0.015625, rtol=0.01)
+    torch.testing.assert_close(result[~mask], original[~mask], atol=0, rtol=0)
+    assert len(set(allocations)) == 2
+
+
+def test_candidate_indexer_fixed_capacity_short_rows_and_updated_graph():
+    from lightllm.models.deepseek_v41.triton_kernel.attention import (
+        candidate_indexer_logits,
+    )
+
+    rows, context, width = 4, 8192, 2048
+    storage = torch.empty((context // 64, 64 * 132), dtype=torch.uint8, device="cuda")
+    storage[:, : 64 * 128].view(torch.float8_e4m3fn).fill_(1)
+    storage[:, 64 * 128 :].view(torch.float32).fill_(0.5)
+    cache = storage.view(-1, 64, 1, 132)
+    pages = torch.randperm(context // 64, dtype=torch.int32, device="cuda").expand(rows, -1).contiguous()
+    query = torch.ones(rows, 32, 128, dtype=torch.float8_e4m3fn, device="cuda")
+    weights = torch.ones(rows, 32, device="cuda")
+    lengths = torch.tensor([0, 1024, 1081, 8192], dtype=torch.int32, device="cuda")
+    candidates = torch.full((rows, width), -1, dtype=torch.int32, device="cuda")
+    candidates[:, : context // 8] = torch.arange(context // 8, device="cuda")
+
+    def check(actual):
+        positions = (candidates[:, :, None] * 8 + torch.arange(8, device="cuda")).flatten(1)
+        valid = (candidates[:, :, None] >= 0).expand(-1, -1, 8).flatten(1) & (positions < lengths[:, None])
+        expected = torch.where(valid, 2048.0, -float("inf"))
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+
+    check(candidate_indexer_logits(query, cache, weights, pages, candidates, lengths))
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = candidate_indexer_logits(query, cache, weights, pages, candidates, lengths)
+    lengths.copy_(torch.tensor([8192, 0, 1, 1024], device="cuda", dtype=torch.int32))
+    graph.replay()
+    check(actual)

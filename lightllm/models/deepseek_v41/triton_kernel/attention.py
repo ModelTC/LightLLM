@@ -258,27 +258,40 @@ def _candidate_indexer_logits(
 ):
     row, tile = tl.program_id(0), tl.program_id(1)
     col = tile * BLOCK_N + tl.arange(0, BLOCK_N)
-    block = tl.load(CANDIDATES + row * CANDIDATE_ROW + col // 8, col < CANDIDATE_ROW * 8, -1)
-    position = block * 8 + col % 8
-    valid = (block >= 0) & (position < tl.load(LENGTHS + row))
-    page = tl.load(PAGES + row * PAGE_ROW + position // 64, valid, 0).to(tl.int64)
-    base = CACHE + page * CACHE_PAGE
-    d = tl.arange(0, 128)
-    h = tl.arange(0, BLOCK_H)
-    q = tl.load(Q + row * Q_ROW + h[:, None] * Q_HEAD + d[None, :], h[:, None] < HEADS, 0.0)
-    k = tl.load(
-        (base[None, :] + (position % 64)[None, :] * 128 + d[:, None]).to(tl.pointer_type(tl.float8e4nv)),
-        valid[None, :],
-        0.0,
-    )
-    scale = tl.load((base + 64 * 128 + position % 64 * 4).to(tl.pointer_type(tl.float32)), valid, 0)
-    weights = tl.load(WEIGHTS + row * WEIGHT_ROW + h, h < HEADS, 0)
-    scores = tl.sum(tl.maximum(tl.dot(q, k), 0.0) * weights[:, None], axis=0) * scale
-    tl.store(LOGITS + row * CANDIDATE_ROW * 8 + col, tl.where(valid, scores, -float("inf")), col < CANDIDATE_ROW * 8)
+    # The producer sorts valid blocks and pads their tail with -1. Test one
+    # scalar before materializing the dot's vector inputs and live ranges.
+    first = tl.load(CANDIDATES + row * CANDIDATE_ROW + tile * (BLOCK_N // 8), tile * (BLOCK_N // 8) < CANDIDATE_ROW, -1)
+    length = tl.load(LENGTHS + row)
+    if (first >= 0) & (first * 8 < length):
+        block = tl.load(CANDIDATES + row * CANDIDATE_ROW + col // 8, col < CANDIDATE_ROW * 8, -1)
+        position = block * 8 + col % 8
+        valid = (block >= 0) & (position < length)
+        page = tl.load(PAGES + row * PAGE_ROW + position // 64, valid, 0).to(tl.int64)
+        base = CACHE + page * CACHE_PAGE
+        d = tl.arange(0, 128)
+        h = tl.arange(0, BLOCK_H)
+        q = tl.load(Q + row * Q_ROW + h[:, None] * Q_HEAD + d[None, :], h[:, None] < HEADS, 0.0)
+        k = tl.load(
+            (base[None, :] + (position % 64)[None, :] * 128 + d[:, None]).to(tl.pointer_type(tl.float8e4nv)),
+            valid[None, :],
+            0.0,
+        )
+        scale = tl.load(
+            (base + 64 * 128 + position % 64 * 4).to(tl.pointer_type(tl.float32)),
+            valid,
+            0,
+        )
+        weights = tl.load(WEIGHTS + row * WEIGHT_ROW + h, h < HEADS, 0)
+        scores = tl.sum(tl.maximum(tl.dot(q, k), 0.0) * weights[:, None], axis=0) * scale
+        tl.store(
+            LOGITS + row * CANDIDATE_ROW * 8 + col, tl.where(valid, scores, -float("inf")), col < CANDIDATE_ROW * 8
+        )
+    else:
+        tl.store(LOGITS + row * CANDIDATE_ROW * 8 + col, -float("inf"), col < CANDIDATE_ROW * 8)
 
 
 def candidate_indexer_logits(query, cache, weights, pages, candidates, lengths):
-    """Score only the selected eight-key blocks in the existing Hopper FP8 slabs."""
+    """Score the producer's sorted, -1-padded eight-key blocks in Hopper FP8 slabs."""
     assert query.shape[-1] == 128
     logits = torch.empty((query.shape[0], candidates.shape[1] * 8), dtype=torch.float32, device=query.device)
     _candidate_indexer_logits[(query.shape[0], triton.cdiv(logits.shape[1], 64))](

@@ -282,3 +282,45 @@ V4.1 candidate_indexer_logits 从int32页表读取page后直接计算page * CACH
 新增0、2GiB+4096、4GiB+8192三个物理偏移的GPU回归，数值与精确常量参考一致；同时检查无候选行及CUDA Graph更新输入后的回放。专项及既有paged indexer共21例通过。此前额外诊断覆盖384行indexer的6种组合、24组tiny model、46项相关kernel和15项动态MTP/DSpark测试，均通过；它们没有覆盖大物理偏移，不能代替本次新增回归。带同步诊断的真实四机服务完成128/512请求复现测试，全部HTTP200，但未因此声称原始回放已成功或生产路径已修好。
 
 记录：同一bugfix目录下 repro_candidate_offset.py、repro_candidate_offset_before.log、candidate_offset_after.log、indexer_large_batch.log、baseline_tiny_models.log、diagnostic_concurrency_128.json、diagnostic_concurrency_512.json。完整服务验收待移除诊断同步后重启，按源任务60%会话、factor=1、session_seed=6XzQ8运行。
+
+### 2026-11-03：2P2D 前四项执行路径优化与固定容量验证
+
+本轮仅修改 `lightllm-ds4-v41` 工作树和测试，不部署、不重启服务、不新建 LLM Bench 回放。原有 `.gitignore` 与本文件已有未提交记录保留。H200单卡组件实验，Torch2.11.0+cu130 / Triton3.6.0，日志、修改前源码和撤回候选保存在 `/mnt/vqa/wanzihao/v41_four_followups_20261103/`；组件倍率不是整模型TPOT/TPM。
+
+1. Candidate indexer：利用源层已排序、去重且尾部填 `-1` 的契约，以每tile第一个候选的标量判断跳过全无效tile，仍完整写 `-inf`。保留部分有效tile、Top-K/物理槽转换及int64 cache地址。第一版向量归约判断在长上下文有退化，已替换并保留结果。benchmark新增固定graph capacity、混合行及保存基线模块对照，候选宽度不随短请求缩小。
+2. Shifted mHC：融合post和使用previous_pre的stream mixing/RMSNorm，projection继续由现有DeepGEMM执行，Sinkhorn复用公共系数计算，保留BF16舍入。接入现有autotuner/config选择新旧组合，默认仅hidden>=4096的32–128行使用新组合，原<=8行投影融合阈值不变，较大行数保持原路径。实测退化的Tensor Core post/projection候选未进入最终源码。
+3. Engram：target decode的两个hash kernel移至 `_token_forward` 的graph内；draft不拥有Engram hasher，按模型身份明确跳过。history restore仍先于当前token写入和前驱hash。Prefill超过2048行时使用两份2048行embedding buffer，复用现有lookup/WKV/gate，ready/consumed events约束复用；collective仍在consumer stream。24 heads×256维时两份BF16 embedding共48MiB，小prefill保留原路径。
+4. PD：D的waiting-page集合拥有每请求一个idle deadline和每在途WRITE一个deadline，heap到期处理取代接收循环逐页扫描；进展惰性更新deadline，取消条目压缩有界，保留现有首次进展/idle/WRITE超时政策与隔离页面回收规则。P在锁内取走已完成任务后，由当前线程独占处理telemetry/DONE，再交给成功/失败队列；native status查询仍在锁内，避免未经证明的handle生命周期变化。
+
+Indexer图长度按当前服务容量计算：262144 + 3×mtp_step5 + 16 = **262175**，scorer capacity按64对齐为 **262208**。下表为相同FP8 cache/候选形状、CUDA Graph三轮median，单个consumer的评分＋Top-K/槽位转换，不含候选源、Q投影或整模型；基线为修改前保存的attention.py。
+
+| 实际上下文 / Query rows | 原组件 ms | 新组件 ms | 倍率 |
+| --- | ---: | ---: | ---: |
+| 1K / 64 | 0.07105 | 0.03070 | 2.31x |
+| 1K / 384 | 0.34730 | 0.11276 | 3.08x |
+| 8K / 64 | 0.07427 | 0.05275 | 1.41x |
+| 8K / 384 | 0.35728 | 0.23284 | 1.53x |
+| 64K / 384 | 0.36580 | 0.36746 | 约持平 |
+| 64K / 768 | 0.72425 | 0.72659 | 约持平 |
+| 混合0/1K/8K/64K / 384 | 0.35859 | 0.19426 | 1.85x |
+
+另做8K小容量图对照：64行的1K/8K DeepGEMM选路组件分别0.01173/0.02257ms，说明长度bucket仍有进一步空间，但不是256K图部署成绩。此次未新增按长度拆分batch或多长度graph的生产调度；混合batch含长行时仍需覆盖其最大长度。
+
+mHC hidden5120、真实 `_hc_ffn_out -> _hc_attn_in` 边界、Graph三轮median：32行12.526→11.837us，64行13.149→12.077us，128行15.174→13.465us，分别1.058/1.089/1.127x；384/640/768行维持原算子组合，差异约噪声。未把1/6行既有收益计为本轮新增收益。
+
+Engram有界prefill使用真实FP8/UVA lookup、轮换hash和合成BF16 WKV（hidden5120），包含host提交和同步收尾：8192行墙钟5.075→5.109ms，未发现稳定延迟收益；额外CUDA allocated峰值496→148MiB，减少约70%。两份embedding为48MiB，其余峰值包含WKV临时输出。1024行继续原路径。该实验不是完整checkpoint的FP8 WKV或真实2P2D成绩。
+
+PD合成管理实验：256请求×256页=65536个waiting task，idle heap仅256条；无到期事件的检查中位数，原逐页遍历约14006us，新deadline检查约0.20us。这里只比较Python管理开销，不代表服务CPU或TPM倍率；专项覆盖共享进展延期、独立WRITE deadline、取消后同key替换、heap引用有界，以及P通知/telemetry锁外且handle尚未释放。
+
+最终回归 **389 passed**：V4.1模型/vision/DSpark/更新输入后的decode Graph/CPU-GPU checkpoint、公共mHC、PD checkpoint/idle/abort/WRITE静默确认。新增2049/6145行prefill检查两份buffer和尾块、全无效/部分有效tile固定候选Graph，以及32/384/768行强制mHC候选的系数和Graph正确性。项目Black规则（120列、py310）、Flake8 6.1.0、`git diff --check`通过。未跑完整权重质量评测或线上吞吐验收；自建测试容器已停止并移除，缓存和日志保留。
+
+可复跑：
+
+```bash
+python test/benchmark/kernel/benchmark_dsv41_candidate_indexer.py --contexts 1024 8192 65536 --rows 64 384 768 --graph-capacity 262175
+python test/benchmark/kernel/benchmark_dsv41_candidate_indexer.py --contexts 65536 --rows 384 --graph-capacity 262175 --mixed
+python test/benchmark/kernel/benchmark_dsv41_mhc.py --rows 1 6 16 32 64 128 384 640 768
+python test/benchmark/kernel/benchmark_dsv41_engram_prefetch.py --prefill-only
+```
+
+最终证据：`indexer_before_final.jsonl`、`indexer_scalar_final.jsonl`、`indexer_mixed_before.jsonl`、`indexer_mixed_scalar.jsonl`、`indexer_short_bucket_evaluation.jsonl`、`mhc_final.jsonl`、`engram_prefill_2048.jsonl`、`pd_deadline_bench.jsonl`、`regression_verified.log`、`black_final.log`、`flake8_final.log`、`manifest.json`、`changes.patch`。

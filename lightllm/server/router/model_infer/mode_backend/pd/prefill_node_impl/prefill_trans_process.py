@@ -561,6 +561,7 @@ class _PrefillTransModule:
             time.sleep(0.001)
 
     def _update_task_status_once(self):
+        completed_tasks = []
         with self.waiting_dict_lock:
             tasks = list(self.waiting_dict.values())
             if self.use_write_quiescence:
@@ -624,40 +625,7 @@ class _PrefillTransModule:
                     completed_task = self.waiting_dict.pop(trans_task.get_key(), None)
                     if completed_task is None:
                         continue
-                    if self.transporter.capture_telemetry:
-                        try:
-                            telem = self.transporter.nixl_agent.get_xfer_telemetry(completed_task.xfer_handle)
-                            total_us = telem.xferDuration
-                            post_us = telem.postDuration
-                            backend_us = telem.xferDuration - telem.postDuration
-                            nixl_backend = self.transporter.nixl_agent.query_xfer_backend(completed_task.xfer_handle)
-                            logger.debug(
-                                f"write trans task request_id={completed_task.request_id} "
-                                f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
-                                f"src_page={completed_task.src_page_index} "
-                                f"dst_page={completed_task.dst_page_index} "
-                                f"xfer time: {total_us:.3f} us, "
-                                f"post time: {post_us:.3f} us, backend time: {backend_us:.3f} us, "
-                                f"nixl_backend: {nixl_backend}, total_bytes: {telem.totalBytes}"
-                            )
-                        except BaseException:
-                            logger.exception(f"get transfer telemetry failed: {completed_task.to_str()}")
-
-                    try:
-                        self.transporter.send_write_done_task_to_decode_node(completed_task)
-                    except BaseException as e:
-                        logger.exception(f"send WRITE done nixl notify failed: {completed_task.to_str()}")
-                        completed_task.error_info = f"send WRITE done nixl notify failed: {str(e)}"
-                        self.failed_queue.put(completed_task)
-                        continue
-
-                    logger.debug(
-                        f"send WRITE done nixl notify "
-                        f"request_id={completed_task.request_id} "
-                        f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
-                        f"src_page={completed_task.src_page_index} dst_page={completed_task.dst_page_index}"
-                    )
-                    self.success_queue.put(completed_task)
+                    completed_tasks.append(completed_task)
                 elif ret == "ERR":
                     failed_task = self.waiting_dict.pop(trans_task.get_key(), None)
                     if failed_task is not None:
@@ -668,6 +636,44 @@ class _PrefillTransModule:
                     if failed_task is not None:
                         failed_task.error_info = "time out in update_task_status_loop"
                         self.failed_queue.put(failed_task)
+
+        # Removed tasks are owned here until success/failure is queued. Native
+        # telemetry and peer DONE notification no longer block task registration.
+        for completed_task in completed_tasks:
+            if self.transporter.capture_telemetry:
+                try:
+                    telem = self.transporter.nixl_agent.get_xfer_telemetry(completed_task.xfer_handle)
+                    total_us = telem.xferDuration
+                    post_us = telem.postDuration
+                    backend_us = telem.xferDuration - telem.postDuration
+                    nixl_backend = self.transporter.nixl_agent.query_xfer_backend(completed_task.xfer_handle)
+                    logger.debug(
+                        f"write trans task request_id={completed_task.request_id} "
+                        f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
+                        f"src_page={completed_task.src_page_index} "
+                        f"dst_page={completed_task.dst_page_index} "
+                        f"xfer time: {total_us:.3f} us, "
+                        f"post time: {post_us:.3f} us, backend time: {backend_us:.3f} us, "
+                        f"nixl_backend: {nixl_backend}, total_bytes: {telem.totalBytes}"
+                    )
+                except BaseException:
+                    logger.exception(f"get transfer telemetry failed: {completed_task.to_str()}")
+
+            try:
+                self.transporter.send_write_done_task_to_decode_node(completed_task)
+            except BaseException as e:
+                logger.exception(f"send WRITE done nixl notify failed: {completed_task.to_str()}")
+                completed_task.error_info = f"send WRITE done nixl notify failed: {str(e)}"
+                self.failed_queue.put(completed_task)
+                continue
+
+            logger.debug(
+                f"send WRITE done nixl notify "
+                f"request_id={completed_task.request_id} "
+                f"kv=[{completed_task.start_kv_index},{completed_task.end_kv_index}) "
+                f"src_page={completed_task.src_page_index} dst_page={completed_task.dst_page_index}"
+            )
+            self.success_queue.put(completed_task)
 
     def _release_source_page(self, task: PDChunckedTransTask):
         if task.xfer_handle is not None:

@@ -7,6 +7,8 @@ import torch.multiprocessing as mp
 import queue
 import pickle
 import uuid
+import heapq
+import itertools
 from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.kv_cache_mem_manager import MemoryManager
@@ -149,7 +151,7 @@ class _DecodeTransModule:
         )
         self.recv_task_group_queue = queue.Queue()
         self.waiting_dict_lock = threading.Lock()
-        self.waiting_dict: Dict[str, PDChunckedTransTask] = {}
+        self.waiting_dict = _WaitingTasks()
         self.use_write_quiescence = args.pd_trans_mode == "nixl"
         self.quarantined_tasks: Dict[str, PDChunckedTransTask] = {}
         if self.use_write_quiescence:
@@ -308,7 +310,9 @@ class _DecodeTransModule:
             if notify_task.write_stage == "request":
                 # Keep queued page requests visible to cancellation and idle timeout.
                 local_trans_task.write_stage = "request"
-            else:
+            local_trans_task.shared_time_out_mark.update()
+            self.waiting_dict.refresh(local_trans_task)
+            if notify_task.write_stage != "request":
                 self.waiting_dict.pop(notify_task.get_key())
 
             return local_trans_task
@@ -379,7 +383,6 @@ class _DecodeTransModule:
                         if remote_trans_task.write_stage == "request":
                             local_trans_task = self._get_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
-                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.transfer_nbytes = remote_trans_task.transfer_nbytes
                                 local_trans_task.checkpoint_len = remote_trans_task.checkpoint_len
                                 local_trans_task.prefill_agent_name = remote_trans_task.prefill_agent_name
@@ -410,7 +413,6 @@ class _DecodeTransModule:
                         if remote_trans_task.write_stage == "done":
                             local_trans_task = self._get_waiting_task_for_notify(remote_trans_task)
                             if local_trans_task is not None:
-                                local_trans_task.shared_time_out_mark.update()
                                 local_trans_task.first_gen_token_id = remote_trans_task.first_gen_token_id
                                 local_trans_task.first_gen_token_logprob = remote_trans_task.first_gen_token_logprob
                                 self.ready_page_task_queue.put(local_trans_task)
@@ -438,12 +440,11 @@ class _DecodeTransModule:
         with self.waiting_dict_lock:
             timeout_tasks = []
             now = time.time()
-            for key, trans_task in list(self.waiting_dict.items()):
-                if trans_task.shared_time_out_mark.time_out(trans_task):
-                    if self.use_write_quiescence:
-                        self._fail_waiting_task_locked(trans_task, "time out in accept_peer_task_loop")
-                    else:
-                        timeout_tasks.append(self.waiting_dict.pop(key))
+            for trans_task in self.waiting_dict.expired(now):
+                if self.use_write_quiescence:
+                    self._fail_waiting_task_locked(trans_task, "time out in accept_peer_task_loop")
+                else:
+                    timeout_tasks.append(self.waiting_dict.pop(trans_task.get_key()))
 
         for trans_task in timeout_tasks:
             trans_task.error_info = "time out in accept_peer_task_loop"
@@ -488,6 +489,7 @@ class _DecodeTransModule:
                     if self.use_write_quiescence:
                         trans_task.write_id = uuid.uuid4().hex
                     trans_task.start_trans_time = time.time()
+                    self.waiting_dict.activate(trans_task)
                 self.transporter.send_write_ready_task_to_prefill_node(trans_task=trans_task)
             except BaseException as e:
                 logger.error(f"send write ready task to prefill node failed: {trans_task.to_str()}")
@@ -606,3 +608,88 @@ class _SharedTimeOutMark:
         if task.start_trans_time is not None:
             return task.time_out()
         return self.time_mark is not None and time.time() - self.time_mark > task.time_out_secs
+
+
+class _WaitingTasks(dict):
+    """Own waiting-page membership and its request-idle / active-WRITE deadlines.
+
+    All operations use the caller's waiting_dict_lock. Only one idle event is
+    queued per request; progress is checked lazily when that event becomes due.
+    """
+
+    def __init__(self, tasks=()):
+        super().__init__()
+        self.pending = {}
+        self.active = {}
+        self.scheduled = set()
+        self.deadlines = []
+        self.sequence = itertools.count()
+        for task in tasks:
+            self[task.get_key()] = task
+
+    def __setitem__(self, key, task):
+        if key in self:
+            self.pop(key)
+        super().__setitem__(key, task)
+        self.pending.setdefault(task.shared_time_out_mark, {})[key] = task
+        if task.start_trans_time is not None:
+            self.activate(task)
+        else:
+            self.refresh(task)
+
+    def _push(self, deadline, owner):
+        heapq.heappush(self.deadlines, (deadline, next(self.sequence), owner))
+
+    def refresh(self, task):
+        mark = task.shared_time_out_mark
+        if mark in self.pending and mark.time_mark is not None and mark not in self.scheduled:
+            self.scheduled.add(mark)
+            self._push(mark.time_mark + task.time_out_secs, mark)
+
+    def _remove_pending(self, task):
+        mark = task.shared_time_out_mark
+        pages = self.pending.get(mark)
+        if pages is not None:
+            pages.pop(task.get_key(), None)
+            if not pages:
+                self.pending.pop(mark)
+                self.scheduled.discard(mark)
+
+    def activate(self, task):
+        self._remove_pending(task)
+        self.active[task.get_key()] = task
+        self._push(task.start_trans_time + task.transfer_time_out_secs, task)
+
+    def pop(self, key, *default):
+        task = super().pop(key, *default)
+        if task is not None:
+            self._remove_pending(task)
+            self.active.pop(key, None)
+        # Bound lazy cancelled entries, including their references to page metadata.
+        if len(self.deadlines) > 2 * (len(self.pending) + len(self.active)) + 64:
+            self.deadlines = [entry for entry in self.deadlines if self._current(entry[2])]
+            heapq.heapify(self.deadlines)
+        return task
+
+    def _current(self, owner):
+        if isinstance(owner, _SharedTimeOutMark):
+            return owner in self.pending
+        return self.active.get(owner.get_key()) is owner
+
+    def expired(self, now):
+        expired = []
+        while self.deadlines and self.deadlines[0][0] < now:
+            _, _, owner = heapq.heappop(self.deadlines)
+            if not self._current(owner):
+                continue
+            if isinstance(owner, _SharedTimeOutMark):
+                pages = self.pending[owner]
+                deadline = owner.time_mark + next(iter(pages.values())).time_out_secs
+                if deadline >= now:
+                    self._push(deadline, owner)
+                else:
+                    expired.extend(pages.values())
+                    self.scheduled.discard(owner)
+            else:
+                expired.append(owner)
+        return expired

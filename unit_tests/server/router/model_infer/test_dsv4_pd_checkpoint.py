@@ -251,11 +251,22 @@ def test_decode_notify_keeps_local_checkpoint_destination(monkeypatch):
         checkpoint_page_kind="small",
         checkpoint_buffer_id=7,
     )
-    local.shared_time_out_mark = SimpleNamespace(update=lambda: None)
-    remote = replace(local, checkpoint_buffer_id=99, checkpoint_len=512, transfer_nbytes=100, write_stage="request")
+    from lightllm.server.router.model_infer.mode_backend.pd.decode_node_impl.decode_trans_process import (
+        _SharedTimeOutMark,
+        _WaitingTasks,
+    )
+
+    local.shared_time_out_mark = _SharedTimeOutMark()
+    remote = replace(
+        local,
+        checkpoint_buffer_id=99,
+        checkpoint_len=512,
+        transfer_nbytes=100,
+        write_stage="request",
+    )
     module = _DecodeTransModule.__new__(_DecodeTransModule)
     module.device_id, module.use_write_quiescence = 0, False
-    module.waiting_dict_lock, module.waiting_dict = threading.Lock(), {local.get_key(): local}
+    module.waiting_dict_lock, module.waiting_dict = threading.Lock(), _WaitingTasks([local])
     module.request_page_task_queue = queue.Queue()
     module.transporter = SimpleNamespace(get_new_notifs=lambda: {"P": [pickle.dumps(remote)]})
 

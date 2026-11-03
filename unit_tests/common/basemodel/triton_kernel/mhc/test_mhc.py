@@ -242,3 +242,52 @@ def test_shared_mhc_cuda_graph_replay(tokens):
         layer_output.normal_()
         graph.replay()
         torch.testing.assert_close(actual, reference(), atol=0.06, rtol=0.04)
+
+
+@pytest.mark.parametrize("tokens", [32, 384, 768])
+def test_shifted_batch_candidate_preserves_coefficients_and_graph_inputs(tokens):
+    from lightllm.common.basemodel.triton_kernel.mhc import pre_norm
+
+    hidden = 5120
+    y = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn(tokens, 4 * hidden, device="cuda", dtype=torch.bfloat16)
+    mix = torch.randn(tokens, 4, 4, device="cuda").softmax(-1)
+    post, previous = torch.rand(tokens, 4, device="cuda"), torch.rand(tokens, 4, device="cuda")
+    fn = torch.randn(24, 4 * hidden, device="cuda") * 0.005
+    scale, base = torch.randn(3, device="cuda"), torch.randn(24, device="cuda")
+    norm = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+
+    def candidate():
+        return pre_norm._hc_shifted_post_pre_norm(
+            y,
+            residual,
+            mix,
+            post,
+            fn,
+            scale,
+            base,
+            norm,
+            4,
+            1e-6,
+            1e-6,
+            1e-6,
+            20,
+            previous_pre=previous,
+            run_config={"fuse_post_norm": True, "post_num_warps": 16, "weights_num_warps": 1},
+        )
+
+    def check(actual):
+        updated = hc_post(y, residual, mix, post, 4)
+        ref = pre_norm.hc_pre_norm_shifted(updated, previous, fn, scale, base, norm, 1e-6, 1e-6, 1e-6, 20)
+        expected = (ref[0], updated, *ref[1:])
+        for i, (a, b) in enumerate(zip(actual, expected)):
+            torch.testing.assert_close(a, b, atol=0.04 if i < 2 else 2e-4, rtol=0.03 if i < 2 else 2e-3)
+
+    check(candidate())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = candidate()
+    y.normal_()
+    previous.uniform_()
+    graph.replay()
+    check(actual)

@@ -62,6 +62,9 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
         return super().forward(model_input)
 
     def _token_forward(self, infer_state):
+        if not self.is_mtp_draft_model and self.engram_hasher is not None:
+            # Stage inputs/history first; both hash kernels are replayed with decode.
+            infer_state.engram_hashes = self.engram_hasher(infer_state)
         if not self.is_mtp_draft_model and self.config["engram_layer_ids"]:
             # This must run inside the decode graph, rather than in state setup:
             # a replay must gather fresh embeddings from the staged hash inputs.
