@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 import argparse
 import json
 import os
@@ -16,7 +17,7 @@ from lightllm.common.basemodel.attention.base_att import AttControl
 from lightllm.common.basemodel.attention.binding import BoundAttention
 from lightllm.common.basemodel.attention.contracts import AttentionSpec, ResourceId
 from lightllm.common.basemodel.attention.planner import select_attention
-from lightllm.common.basemodel.attention.runtime import DeviceRuntime
+from lightllm.common.device_runtime import DeviceRuntime
 from lightllm.common.basemodel.attention.torch_cpu import TorchCPUAttentionBackend
 from lightllm.utils.envs_utils import get_env_start_args
 
@@ -33,7 +34,7 @@ def create_storage(groups, dtype):
     manager = AttentionStateManager(request_capacity=2)
     for group in groups:
         state = GQAFullAttentionState(GQAAttentionConfig(group, 2, 16, dtype), device="cpu")
-        state.allocate_storage(16)
+        allocate_state_storage(state, 16)
         state.k_storage.zero_()
         state.v_storage.zero_()
         manager.register_state("main", state)

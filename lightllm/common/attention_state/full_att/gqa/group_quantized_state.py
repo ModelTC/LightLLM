@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from lightllm.common.attention_state.utils import weak_cached_method
-from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
 from math import prod
 
@@ -13,9 +12,6 @@ from lightllm.utils.log_utils import init_logger
 from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-
-if TYPE_CHECKING:
-    from lightllm.common.attention_state.types import StateTransferLayout
 
 
 logger = init_logger(name=__name__)
@@ -116,20 +112,15 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
             f"_h{self.config.global_head_num}_d{self.config.head_dim}"
         )
 
-    def allocate_storage(self, token_capacity: int) -> None:
-        """按统一 token 容量分配独立的量化 KV 与配套动态 scale。"""
-        self.capacity = token_capacity
-        shape = self._storage_shape()
-        self.k_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
-        self.v_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
-        shape = (
-            len(self.config.logical_layer_groups),
-            token_capacity + self.page_size,
-            self.config.head_num,
-            self.config.head_dim // self.config.group_size,
-        )
-        self.k_scales = torch.empty(size=shape, dtype=self.config.scale_dtype, device=self.device)
-        self.v_scales = torch.empty(size=shape, dtype=self.config.scale_dtype, device=self.device)
+    def get_storage_specs(self, token_capacity):
+        from ...storage import TensorStorageSpec
+
+        prefix = (len(self.config.logical_layer_groups), token_capacity + self.page_size, self.config.head_num)
+        payload = prefix + (self.config.head_dim * self.config.bits // 8,)
+        scales = prefix + (self.config.head_dim // self.config.group_size,)
+        return tuple(
+            TensorStorageSpec(name, payload, self.storage_dtype) for name in ("k_storage", "v_storage")
+        ) + tuple(TensorStorageSpec(name, scales, self.config.scale_dtype) for name in ("k_scales", "v_scales"))
 
     def get_transfer_fields(self):
         return {
@@ -185,13 +176,6 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
         return (self.k_storage[storage_layer_index], self.k_scales[storage_layer_index]), (
             self.v_storage[storage_layer_index],
             self.v_scales[storage_layer_index],
-        )
-
-    def bind_kv_writer(self, logical_layer_id: int):
-        from lightllm.common.basemodel.attention.writers import bind_group_quantized_writer
-
-        return bind_group_quantized_writer(
-            *self.get_layer_view(logical_layer_id), self.config.bits, self.config.group_size
         )
 
     # ========================================================================
@@ -310,11 +294,3 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
             byte_offset,
         )
         return tuple(regions)
-
-    def _storage_shape(self) -> tuple[int, ...]:
-        return (
-            len(self.config.logical_layer_groups),
-            self.capacity + self.page_size,
-            self.config.head_num,
-            self.config.head_dim * self.config.bits // 8,
-        )

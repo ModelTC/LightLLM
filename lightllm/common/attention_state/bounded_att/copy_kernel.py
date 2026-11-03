@@ -7,6 +7,33 @@ import triton.language as tl
 from ..utils import merge_contiguous_tail_dims, view_max_copy_dtype
 
 
+def copy_cpu_tensors(copies, source_byte_offsets=None):
+    if source_byte_offsets is not None:
+        if source_byte_offsets.device.type != "cpu" or source_byte_offsets.shape != (len(copies),):
+            raise ValueError("CPU copies require one host byte offset per source")
+    for index, (source, destination) in enumerate(copies):
+        if source.device.type != "cpu" or destination.device.type != "cpu":
+            raise ValueError("CPU copies require host tensors")
+        if source.shape != destination.shape or source.dtype != destination.dtype:
+            raise ValueError("CPU copy shapes and dtypes must match")
+        if source_byte_offsets is not None:
+            offset = int(source_byte_offsets[index])
+            if offset % source.element_size():
+                raise ValueError("source byte offset must align to its element size")
+            source = source.as_strided(
+                source.shape, source.stride(), source.storage_offset() + offset // source.element_size()
+            )
+        destination.copy_(source)
+
+
+def bind_bounded_copy(device):
+    if torch.device(device).type == "cpu":
+        return copy_cpu_tensors
+    if torch.device(device).type == "cuda":
+        return copy_bounded_att_tensors
+    raise ValueError(f"no bounded copy provider for {device}")
+
+
 # ========================================================================
 # 一、聚合入口：只上传指针表，shape/stride 作为常量
 # ========================================================================

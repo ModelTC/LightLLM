@@ -1,6 +1,9 @@
 """Verification commits State-owned recurrent data without model cursor aliases."""
 
 from __future__ import annotations
+from lightllm.common.attention_state.bounded_att.operations import bind_state_operations
+
+from lightllm.common.attention_state.storage import allocate_runtime_storage, initialize_state_page_pools
 
 
 from types import SimpleNamespace
@@ -75,22 +78,31 @@ def test_commit_without_recurrent_state_and_invalid_role():
         )
 
 
-@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
 @pytest.mark.parametrize("family", ["gdn", "kda"])
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_checkpoint_restores_the_accepted_recurrent_state(family, dtype):
+def test_checkpoint_restores_the_accepted_recurrent_state(family, dtype, device, monkeypatch):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    if device == "cpu":
+
+        def reject_cuda(*args, **kwargs):
+            pytest.fail("CPU recurrent recovery touched CUDA")
+
+        monkeypatch.setattr(torch.cuda, "current_stream", reject_cuda)
+        monkeypatch.setattr(torch.cuda, "current_device", reject_cuda)
     from dataclasses import replace
     from lightllm.common.attention_state.bounded_att import KDAState
 
     cls = GDNState if family == "gdn" else KDAState
     config = replace(make_state().config, conv_dtype=dtype, ssm_dtype=dtype)
-    state = cls(config, request_capacity=3, mtp_step=2, device="cuda")
-    state.initialize_page_pools(big_page_capacity=3, pin_memory=True)
-    state.conv_state.copy_(torch.arange(state.conv_state.numel(), device="cuda").reshape(state.conv_state.shape))
-    state.ssm_state.copy_(torch.arange(state.ssm_state.numel(), device="cuda").reshape(state.ssm_state.shape))
+    state = allocate_runtime_storage(cls(config, request_capacity=3, mtp_step=2), device)
+    initialize_state_page_pools(state, big_page_capacity=3, pin_memory=device == "cuda")
+    state.conv_state.copy_(torch.arange(state.conv_state.numel(), device=device).reshape(state.conv_state.shape))
+    state.ssm_state.copy_(torch.arange(state.ssm_state.numel(), device=device).reshape(state.ssm_state.shape))
     requests, accepted = [2, 0, 1], [1, 2, 3]
-    state.commit_bounded_att_state(
-        torch.tensor(requests, device="cuda"), torch.tensor(accepted, dtype=torch.int32, device="cuda")
+    bind_state_operations(state).commit(
+        torch.tensor(requests, device=device), torch.tensor(accepted, dtype=torch.int32, device=device)
     )
     expected = [
         (
@@ -99,11 +111,13 @@ def test_checkpoint_restores_the_accepted_recurrent_state(family, dtype):
         )
         for request, count in zip(requests, accepted)
     ]
-    state.save_bounded_att_runtime_to_pages(requests, [8, 9, 10], "big", [0, 1, 2])
-    torch.cuda.synchronize()
-    state.reset_bounded_att_state(requests)
-    state.restore_bounded_att_runtime_from_pages(requests, [8, 9, 10], "big", [0, 1, 2])
-    torch.cuda.synchronize()
+    bind_state_operations(state).save(requests, [8, 9, 10], "big", [0, 1, 2])
+    if device == "cuda":
+        torch.cuda.synchronize()
+    bind_state_operations(state).reset(requests)
+    bind_state_operations(state).restore(requests, [8, 9, 10], "big", [0, 1, 2])
+    if device == "cuda":
+        torch.cuda.synchronize()
     for request, (conv, ssm) in zip(requests, expected):
         assert torch.equal(state.conv_state[:, request, :, : config.conv_width], conv)
         assert torch.equal(state.ssm_state[:, request * 3], ssm)

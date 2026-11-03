@@ -1,3 +1,5 @@
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page
+from lightllm.common.attention_state.storage import allocate_state_storage
 from unit_tests.common.att_resources.model_helpers import window_states, build_hybrid_resources
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
@@ -81,7 +83,7 @@ def make_mems(monkeypatch, request):
                 ),
                 page_size=args.page_size,
             )
-            full.allocate_storage(32)
+            allocate_state_storage(full, 32)
             main, draft = create_full_attention_roles(full, config.all_layer_num)
             resources = build_hybrid_resources(
                 config=config,
@@ -380,21 +382,9 @@ def test_pd_prefill_tail_continues_mtp_after_rejection(source_step, target_step,
         regions=regions,
     )
     pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
-    source.write_to_pd_page(
-        req_idx=0,
-        pd_page_buffers=pages,
-        pd_page_index=0,
-        state_token_len=prefix,
-        layout=layout,
-    )
+    copy_pd_page(source, pages, 0, layout, write=True, req_idx=0, state_token_len=prefix)
     target.buffer.fill_(17)
-    target.read_from_pd_page(
-        pd_page_buffers=pages,
-        req_idx=0,
-        pd_page_index=0,
-        state_token_len=prefix,
-        layout=layout,
-    )
+    copy_pd_page(target, pages, 0, layout, write=False, req_idx=0, state_token_len=prefix)
     assert (target.buffer[:, 1] == 17).all()
     width = target_step + 1
     # 第一次验证后回访已接受位置；新增候选历史必须由 D 的本地 ring 正确保留。

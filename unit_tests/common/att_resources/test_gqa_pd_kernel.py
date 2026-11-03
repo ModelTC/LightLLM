@@ -1,6 +1,9 @@
 """GQA PD 直接搬运：原始位模式、物理页选择、TP 切片及有效 token 范围。"""
 
 from __future__ import annotations
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -45,7 +48,7 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
         device="cuda",
     )
     for state in (source, target):
-        state.allocate_storage(token_capacity=8)
+        allocate_state_storage(state, token_capacity=8)
     for tensor in (source.k_storage, source.v_storage):
         tensor.view(torch.uint8).random_(0, 256)
     for tensor in (target.k_storage, target.v_storage):
@@ -97,18 +100,8 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
         patch.setattr(torch.Tensor, "index_copy_", reject_gather)
         patch.setattr(torch.Tensor, "tolist", reject_gather)
         with torch.cuda.stream(stream):
-            source.write_to_pd_page(
-                token_indices=src_ids,
-                pd_page_buffers=page_view,
-                pd_page_index=1,
-                layout=layout,
-            )
-            target.read_from_pd_page(
-                pd_page_buffers=page_view,
-                token_indices=dst_ids,
-                pd_page_index=1,
-                layout=target_layout,
-            )
+            copy_pd_page(source, page_view, 1, layout, write=True, token_indices=src_ids)
+            copy_pd_page(target, page_view, 1, target_layout, write=False, token_indices=dst_ids)
         stream.synchronize()
     for tensor, expected_bytes in zip((target.k_storage, target.v_storage), expected):
         assert torch.equal(tensor[:, dst_ids].contiguous().view(torch.uint8), expected_bytes)
@@ -128,12 +121,7 @@ def test_gqa_pd_direct_copy_between_tp_layouts(
 
     # 反向验证分片写出：rank 1 只修改全局 heads [2, 4)，rank 0 区域保持原始字节。
     pages.fill_(91)
-    target.write_to_pd_page(
-        token_indices=dst_ids,
-        pd_page_buffers=page_view,
-        pd_page_index=2,
-        layout=target_layout,
-    )
+    copy_pd_page(target, page_view, 2, target_layout, write=True, token_indices=dst_ids)
     for region, expected_bytes in zip(target_layout.regions, expected):
         external = page_view[2, region.byte_start : region.byte_end].view(dtype).view(region.shape)
         external = external.permute(tuple(region.axes.index(axis) for axis in ("layer", "token", "head", "dim")))
@@ -159,7 +147,7 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
         page_size=4,
         device="cuda",
     )
-    state.allocate_storage(token_capacity=8)
+    allocate_state_storage(state, token_capacity=8)
     state.k_storage.fill_(19)
     state.v_storage.fill_(19)
     regions = state.get_pd_transfer_regions()
@@ -175,18 +163,8 @@ def test_gqa_pd_head_slice_and_replica_reads(pd_args: EasyDict) -> None:
         pages[1, region.byte_start : region.byte_end].view(region.dtype).fill_(value)
     snapshot = pages.clone()
     ids = torch.tensor(data=[5, 1], dtype=torch.int32, device="cuda")
-    state.write_to_pd_page(
-        token_indices=ids,
-        pd_page_buffers=pages,
-        pd_page_index=1,
-        layout=layout,
-    )
-    state.read_from_pd_page(
-        pd_page_buffers=pages,
-        token_indices=ids,
-        pd_page_index=1,
-        layout=layout,
-    )
+    copy_pd_page(state, pages, 1, layout, write=True, token_indices=ids)
+    copy_pd_page(state, pages, 1, layout, write=False, token_indices=ids)
     assert torch.equal(pages, snapshot)
     assert (state.k_storage[:, ids] == 3).all() and (state.v_storage[:, ids] == 7).all()
     assert (state.k_storage[:, [0, 2, 3, 4, 6, 7]] == 19).all()
@@ -214,7 +192,7 @@ def test_gqa_pd_direct_copy_through_peer_ipc(pd_args: EasyDict, monkeypatch: pyt
         page_size=4,
         device="cuda:1",
     )
-    state.allocate_storage(token_capacity=8)
+    allocate_state_storage(state, token_capacity=8)
     state.k_storage.zero_()
     state.v_storage.zero_()
     state.k_storage[:, 1].fill_(3)
@@ -261,17 +239,21 @@ def _peer_pd_worker(connection: Connection, payload: bytes, layout: StateTransfe
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
-            state.write_to_pd_page(
+            copy_pd_page(
+                state,
+                pages,
+                1,
+                layout,
+                write=True,
                 token_indices=torch.tensor(data=[1], dtype=torch.int32, device="cuda:0"),
-                pd_page_buffers=pages,
-                pd_page_index=1,
-                layout=layout,
             )
-            state.read_from_pd_page(
-                pd_page_buffers=pages,
+            copy_pd_page(
+                state,
+                pages,
+                1,
+                layout,
+                write=False,
                 token_indices=torch.tensor(data=[5], dtype=torch.int64, device="cuda:0"),
-                pd_page_index=1,
-                layout=layout,
             )
         stream.synchronize()
         assert not pages[0].any()

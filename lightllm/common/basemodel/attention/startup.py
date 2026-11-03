@@ -5,6 +5,7 @@ from dataclasses import asdict, dataclass
 import torch
 
 from lightllm.common.attention_state.memory_plan import merge_memory_demands
+from lightllm.common.device_runtime import get_device_runtime
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 
@@ -16,57 +17,51 @@ class MemoryObservation:
     stage: str
     allocated_bytes: int
     reserved_bytes: int
-    peak_allocated_bytes: int
-    peak_reserved_bytes: int
-    device_used_bytes: int
+    peak_allocated_bytes: int | None
+    peak_reserved_bytes: int | None
+    device_used_bytes: int | None
 
 
 class StartupMemoryProfile:
-    def __init__(self):
-        torch.cuda.synchronize()
-        self.initial_allocated = torch.cuda.memory_allocated()
-        self.initial_reserved = torch.cuda.memory_reserved()
-        free, total = torch.cuda.mem_get_info()
-        self.initial_device_used = total - free
+    def __init__(self, runtime=None):
+        self.runtime = runtime or get_device_runtime("cuda")
+        self.runtime.synchronize()
+        initial = self.runtime.memory_stats()
+        self.initial_allocated = initial["allocated_bytes"]
+        self.initial_reserved = initial["reserved_bytes"]
+        self.initial_device_used = initial["device_used_bytes"]
         self.observations = []
 
     @contextmanager
     def stage(self, name):
-        torch.cuda.reset_peak_memory_stats()
+        self.runtime.reset_memory_peak()
         try:
             yield
         finally:
-            torch.cuda.synchronize()
-            free, total = torch.cuda.mem_get_info()
-            self.observations.append(
-                MemoryObservation(
-                    name,
-                    torch.cuda.memory_allocated(),
-                    torch.cuda.memory_reserved(),
-                    torch.cuda.max_memory_allocated(),
-                    torch.cuda.max_memory_reserved(),
-                    total - free,
-                )
-            )
+            self.runtime.synchronize()
+            self.observations.append(MemoryObservation(name, **self.runtime.memory_stats()))
 
     @property
     def peak_bytes(self):
-
-        return max(
-            (
-                value
-                for item in self.observations
-                for value in (
-                    item.peak_allocated_bytes - self.initial_allocated,
-                    item.peak_reserved_bytes - self.initial_reserved,
-                    item.device_used_bytes - self.initial_device_used,
-                )
-            ),
-            default=0,
-        )
+        changes = [0]
+        for item in self.observations:
+            for current, initial in (
+                (item.allocated_bytes, self.initial_allocated),
+                (item.reserved_bytes, self.initial_reserved),
+                (item.peak_allocated_bytes, self.initial_allocated),
+                (item.peak_reserved_bytes, self.initial_reserved),
+                (item.device_used_bytes, self.initial_device_used),
+            ):
+                if current is not None and initial is not None:
+                    changes.append(current - initial)
+        return max(changes)
 
     def explain(self):
-        return dict(peak_bytes=max(0, self.peak_bytes), stages=[asdict(item) for item in self.observations])
+        return dict(
+            peak_bytes=self.peak_bytes,
+            peak_tracking=self.runtime.tracks_memory_peaks,
+            stages=[asdict(item) for item in self.observations],
+        )
 
 
 def _distributed():
@@ -74,18 +69,19 @@ def _distributed():
 
 
 def _release_unpublished_runtime(models, manager):
-    torch.cuda.synchronize()
+    models[0].runtime.synchronize()
     for model in models:
         model.release_attention_runtime()
     manager.release_unpublished_storage()
     models[0].req_manager.free_all()
     gc.collect()
-    torch.cuda.empty_cache()
+    models[0].runtime.empty_cache()
 
 
 def initialize_attention_runtime(models):
 
     main = models[0]
+    runtime = main.runtime
     manager = main.att_state_manager
     requested_capacity = main.max_total_token_num
     runtime_reserve = 0
@@ -97,10 +93,11 @@ def initialize_attention_runtime(models):
                 main.args,
                 token_capacity=requested_capacity,
                 mem_fraction=main.mem_fraction,
+                device=runtime.device,
                 runtime_demands=demands,
                 runtime_peak_bytes=runtime_reserve,
             )
-        profile = StartupMemoryProfile()
+        profile = StartupMemoryProfile(runtime)
         failure = None
         try:
             for model in models:
@@ -117,19 +114,21 @@ def initialize_attention_runtime(models):
                 model.startup_memory_profile = None
 
         plan = manager.memory_plan
-        planned_workspace = sum(d.fixed_bytes for d in demands if d.domain == "cuda")
+        planned_workspace = sum(d.fixed_bytes for d in demands if d.domain == runtime.device.type)
         observed_runtime = max(0, profile.peak_bytes - planned_workspace)
         reserved = next((d.fixed_bytes for d in plan.demands if d.name == "runtime_headroom"), 0)
-        domain = "cuda" if "cuda" in dict(plan.limits) else "cpu"
+        domain = runtime.device.type
         measured_plan = plan.with_runtime_peak(observed_runtime, domain)
         shortage = max(0, measured_plan.usage(domain) - dict(plan.limits)[domain])
         if failure is not None:
             storage_bytes = sum(
-                d.at_capacity(plan.capacity) for d in plan.demands if d.bytes_per_unit and d.domain == "cuda"
+                d.at_capacity(plan.capacity)
+                for d in plan.demands
+                if d.bytes_per_unit and d.domain == runtime.device.type
             )
             shortage = max(shortage, min(256 * 1024 ** 2, max(storage_bytes // 10, 1)))
         if _distributed():
-            missing = torch.tensor(shortage, dtype=torch.int64, device="cuda")
+            missing = torch.tensor(shortage, dtype=torch.int64, device=runtime.device)
             torch.distributed.all_reduce(missing, op=torch.distributed.ReduceOp.MAX)
             shortage = missing.item()
         attempts.append(dict(capacity=plan.capacity, oom=failure, **profile.explain()))

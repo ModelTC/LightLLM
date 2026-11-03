@@ -4,12 +4,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from lightllm.common.attention_state.utils import weak_cached_method
-from typing import Any, List
+from typing import Any
 
-import torch
 
 from ..utils import deepcopy_result
-from lightllm.common.attention_state.types import PageKind, StateTransferLayout, TransferRegion
+from lightllm.common.attention_state.types import TransferRegion
 
 
 class CoreInterface(ABC):
@@ -38,15 +37,8 @@ class CoreInterface(ABC):
         ...
 
     @abstractmethod
-    def initialize_page_pools(
-        self,
-        big_page_capacity: int,
-        small_page_capacity: int = 0,
-        device: str | torch.device | int = "cpu",
-        pin_memory: bool = True,
-    ) -> None:
-        """容量规划完成后创建大小页池；容量为零表示不启用该页池。"""
-        ...
+    def get_snapshot_storage_specs(self):
+        raise NotImplementedError()
 
     # ========================================================================
     # 二、Bounded attention：计算视图、运行态重置、大小页与 MTP 提交
@@ -60,50 +52,6 @@ class CoreInterface(ABC):
     @abstractmethod
     def get_layer_view(self, logical_layer_id: int) -> Any:
         """按逻辑层号返回运行态和算法控制信息的计算视图。"""
-        ...
-
-    @abstractmethod
-    def reset_bounded_att_state(self, req_indices: List[int]) -> None:
-        """将指定槽位的运行态及控制信息恢复到长度 0，保留大小页快照。"""
-        ...
-
-    @abstractmethod
-    def save_bounded_att_runtime_to_pages(
-        self,
-        req_indices: List[int],
-        state_token_lens: List[int],
-        page_kind: PageKind,
-        page_slot_ids: List[int],
-    ) -> None:
-        """按各请求已执行的绝对 token 长度保存基准运行态，三个列表逐项对应。
-
-        长度不包含尚未执行的采样 token；ring 状态据此确定窗口和槽位位置。
-        前缀与页槽位的关联仍由调用方维护，不要求页池保存长度元数据。
-        """
-        ...
-
-    @abstractmethod
-    def restore_bounded_att_runtime_from_pages(
-        self,
-        req_indices: List[int],
-        state_token_lens: List[int],
-        page_kind: PageKind,
-        page_slot_ids: List[int],
-    ) -> None:
-        """将页快照恢复到对应请求的绝对 token 长度，保留源快照数据。
-
-        req_indices、state_token_lens、page_slot_ids 逐项对应；长度用于恢复 ring 位置等控制信息，
-        不表示本批搬运的 token 数，调用方保证与所选快照的前缀一致。
-        """
-        ...
-
-    @abstractmethod
-    def commit_bounded_att_state(
-        self,
-        req_indices: torch.Tensor,
-        accepted_steps: torch.Tensor,
-    ) -> None:
-        """两个输入均为 CUDA Tensor；int32 接受步数包含基准输入步，候选区与游标由实现管理。"""
         ...
 
 
@@ -126,59 +74,6 @@ class CpuCacheInterface(ABC):
         """
         ...
 
-    @abstractmethod
-    def write_state_pages_to_cpu(
-        self,
-        page_kind: PageKind,
-        page_slot_ids: List[int],
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """将指定页池槽位的快照写入 CPU 页；跳过 cpu_page_ready_flags 中为 True 的页面。"""
-        ...
-
-    @abstractmethod
-    def read_state_pages_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        big_page_slot_ids: List[int],
-        layout: StateTransferLayout,
-    ) -> None:
-        """读入指定大页槽位；请求运行态另行通过 restore_bounded_att_runtime_from_pages 恢复。"""
-        ...
-
-
-class DpCopyInterface(ABC):
-    # ========================================================================
-    # 四、DP 迁移：大页快照与基准运行态
-    # ========================================================================
-
-    @abstractmethod
-    def copy_big_pages_from_dp(
-        self,
-        src_page_ids: List[int],
-        dst_page_ids: List[int],
-        remote_dp_bounded_state: CoreInterface,
-    ) -> None:
-        """将其他 DP 同一 TP 分片的大页快照复制到本地大页，不修改运行态或分配页槽位。"""
-        ...
-
-    @abstractmethod
-    def copy_runtime_state_from_dp(
-        self,
-        src_req_indices: List[int],
-        dst_req_indices: List[int],
-        remote_dp_bounded_state: CoreInterface,
-    ) -> None:
-        """复制其他 DP 同一 TP 分片已接受的运行态并重置目标游标，不修改页池。
-
-        KDA/GDN 在设备上选择已接受游标；窗口的原生 DP 复制要求两端 ring 几何兼容。
-        """
-        ...
-
 
 class PdInterface(ABC):
     # ========================================================================
@@ -196,37 +91,9 @@ class PdInterface(ABC):
         """
         ...
 
-    @abstractmethod
-    def write_to_pd_page(
-        self,
-        req_idx: int,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        state_token_len: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """将指定槽位在 state_token_len 绝对长度处已接受的运行态写入 PD 页。
-
-        KDA/GDN 在设备上选择已接受游标；窗口根据绝对长度展开所需历史。
-        """
-        ...
-
-    @abstractmethod
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        req_idx: int,
-        pd_page_index: int,
-        state_token_len: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """按 state_token_len 恢复请求运行态及 ring 位置等控制信息，不写入大小页池。"""
-        ...
-
 
 __all__ = [
     "CoreInterface",
     "CpuCacheInterface",
-    "DpCopyInterface",
     "PdInterface",
 ]

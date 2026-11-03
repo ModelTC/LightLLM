@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import torch
 
-from lightllm.common.basemodel.attention.runtime import DeviceRuntime
+from lightllm.common.device_runtime import DeviceRuntime
 from lightllm.common.basemodel.attention.torch_cpu import TorchCPUAttentionBackend
 from unit_tests.common.basemodel.attention.test_binding import bind_test_model, make_state
 

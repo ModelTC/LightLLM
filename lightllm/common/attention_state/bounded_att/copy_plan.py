@@ -3,7 +3,7 @@ from dataclasses import dataclass, replace
 import torch
 
 from ..types import TensorField
-from .copy_kernel import copy_bounded_att_tensors
+from .copy_kernel import bind_bounded_copy
 
 
 @dataclass(frozen=True)
@@ -12,6 +12,7 @@ class BatchedStateView:
     fields: tuple[tuple[str, TensorField], ...]
     cursor: torch.Tensor | None = None
     candidate_strides: tuple[tuple[str, int], ...] = ()
+    execution_device: torch.device | None = None
 
     def __post_init__(self):
         names = [name for name, _ in self.fields]
@@ -47,7 +48,9 @@ class BatchedStateView:
     def offsets(self, indices, device):
         if self.cursor is None:
             return {}
-        requests = torch.tensor(indices, dtype=torch.int64, pin_memory=True).to(self.cursor.device, non_blocking=True)
+        requests = torch.tensor(indices, dtype=torch.int64, pin_memory=self.cursor.is_cuda).to(
+            self.cursor.device, non_blocking=True
+        )
         accepted = self.cursor[requests].to(device=device, dtype=torch.int64, non_blocking=True)
         return {name: accepted * stride for name, stride in self.candidate_strides}
 
@@ -104,10 +107,12 @@ class BoundedPageCopy:
     view: BatchedStateView
     regions: tuple
     write: bool
+    copy: object
 
     @classmethod
     def bind(cls, view, pages, layout, write):
-        return cls(view, _bind_regions(view, pages, layout, write), write)
+        device = view.execution_device or (view.fields[0][1].tensor.device if view.fields else pages.device)
+        return cls(view, _bind_regions(view, pages, layout, write), write, bind_bounded_copy(device))
 
     def run(self, slots, pages, ready=None):
         if len(slots) != len(pages) or (ready is not None and len(ready) != len(pages)):
@@ -126,7 +131,7 @@ class BoundedPageCopy:
             copies = [(local[slot], external[page]) for slot, page in selected]
             if not self.write:
                 copies = [(dst, src) for src, dst in copies]
-            copy_bounded_att_tensors(copies, source_byte_offsets=offsets.get(name))
+            self.copy(copies, source_byte_offsets=offsets.get(name))
         if not self.write:
             self.view.finish_restore(indices)
 

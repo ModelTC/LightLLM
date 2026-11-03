@@ -1,3 +1,5 @@
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+from lightllm.common.attention_state.storage import allocate_state_storage
 from dataclasses import replace
 from functools import lru_cache
 from math import prod
@@ -18,10 +20,13 @@ from unit_tests.common.basemodel.attention.test_binding import bind_test_model
 
 
 class AffineInt4State(FullAttentionState):
+    storage_fields = ("k", "k_scale", "k_zero", "v", "v_scale", "v_zero")
+
     def __init__(self):
         self.config = GQAAttentionConfig(((0,),), 2, 16, torch.bfloat16)
         self.page_size, self.state_name = 1, None
-        self.allocate_storage(8)
+        self.device = torch.device("cpu")
+        allocate_state_storage(self, 8)
 
     def get_state_type(self):
         return "test_affine_int4"
@@ -47,14 +52,19 @@ class AffineInt4State(FullAttentionState):
             yield plane + "_scale", torch.float32, 2
             yield plane + "_zero", torch.uint8, 2
 
-    def allocate_storage(self, token_capacity):
+    def get_storage_specs(self, token_capacity):
+        from lightllm.common.attention_state.storage import TensorStorageSpec
+
+        return tuple(
+            TensorStorageSpec(name, (1, token_capacity + self.page_size, 2, width), dtype, fill=0)
+            for name, dtype, width in self._field_specs()
+        )
+
+    def bind_storage(self, buffers, token_capacity):
+        super().bind_storage(buffers, token_capacity)
         self.capacity = token_capacity
         self.fields = {
-            name: TensorField(
-                torch.zeros(1, token_capacity + self.page_size, 2, width, dtype=dtype),
-                ("layer", "token", "head", "width"),
-            )
-            for name, dtype, width in self._field_specs()
+            name: TensorField(tensor, ("layer", "token", "head", "width")) for name, tensor in buffers.items()
         }
 
     def get_token_bytes(self):
@@ -76,10 +86,6 @@ class AffineInt4State(FullAttentionState):
     def get_transfer_fields(self):
         return self.fields
 
-    def bind_kv_writer(self, logical_layer_id):
-        cache = self.get_layer_view(logical_layer_id)
-        return lambda *, token_indices, kv: affine_write(cache, token_indices, kv)
-
     def _regions(self, tokens):
         regions, offset = [], 0
         for name, dtype, width in self._field_specs():
@@ -97,6 +103,12 @@ class AffineInt4State(FullAttentionState):
     @lru_cache(None)
     def get_pd_transfer_regions(self):
         return self._regions(get_env_start_args().pd_kv_page_size)
+
+
+@bind_kv_writer.register(AffineInt4State)
+def bind_affine_writer(self, logical_layer_id):
+    cache = self.get_layer_view(logical_layer_id)
+    return lambda *, token_indices, kv: affine_write(cache, token_indices, kv)
 
 
 def affine_write(cache, indices, kv):

@@ -27,14 +27,14 @@ Fixed provider buffers follow the same order: FlashInfer page indices, NSA ragge
 DeepSeek V4 SWA prefill workspace are included before allocation. Compatible FlashInfer layer shapes share page-index
 storage, with separate regions for concurrent lanes and separate keys for model roles.
 
-Startup records allocated/reserved peaks for warmup, every decode/prefill Graph bucket and the maximum prefill check.
+CUDA startup records allocated/reserved peaks for warmup, every decode/prefill Graph bucket and the maximum prefill check.
 The final memory plan separates observed runtime cost from the remaining reserve. If automatic capacity exceeds its
 budget, startup synchronizes, drops Graphs and bound views, releases unpublished storage/checkpoint pools, reallocates
 and captures again. Explicit capacity is never silently reduced. Retries are bounded to three attempts. Single-rank OOM
 can use this path; a multi-rank OOM fails rather than rebinding while a peer may still be executing a collective.
 Autotune OOM propagates while restoring the layer count, tuning phase and request allocations.
-Fixed request storage can remain allocated across retries; subsequent plans account for it through observed free
-memory rather than reserving its bytes twice. Compressor HOLD slots retain their invalid gate initialization.
+Fixed request storage and static calibration can remain allocated across retries; subsequent plans account for them
+through observed free memory rather than reserving their bytes twice. Compressor HOLD slots retain their invalid gate initialization.
 `plan_storage()` previews capacity without allocating native states. The static benchmark uses this preview to
 resolve automatic batch/Graph limits before entering the same startup path as serving. The real-model cache validator
 also uses shared startup. Standalone benchmarks initialize and clean their own shared-memory service identity.
@@ -49,10 +49,12 @@ share the token index domain but have separate resources. Shared KV consumers ca
 logical layer domains may use separate State instances with the same legacy format label. State member names remain a
 compatibility interface, rather than the logical identity of an attention operation.
 
-The `legacy` adapter still bridges existing State allocation/transport interfaces. GQA, MLA, sparse, compressed-sparse
-and recurrent execution have separate typed inputs. State implementations retain allocation and native-layout
-declarations; KV writer factories consume native views and parameters at binding time. Their execution does not query a State or recompute physical layer indices. The old
-`write_full_att_kv` method remains a compatibility entry point.
+The `legacy` adapter maps existing model declarations to typed GQA, MLA, sparse, compressed-sparse and recurrent plans.
+State classes declare immutable `TensorStorageSpec` values and native views. The storage module allocates and binds KV,
+static calibration, fixed request state and snapshot pools. Buffer allocation completes before replacing an existing
+binding; initial values, including the compressor HOLD gate, belong to the storage specification.
+KV writers are separate providers bound to native views and static parameters. State allocation, writer and transfer
+execution methods have been removed; execution does not query a State or recompute physical layer indices.
 
 Weight loading also has an immutable `WeightPlan`: checkpoint encoding is separate from the requested weight and
 activation representations and the implementation. Existing quantization strings remain accepted. A `quant_type` YAML
@@ -100,8 +102,9 @@ format, shard, KV calibration and complete bounded-state compatibility are check
 Bounded CPU/DP/PD plans bind runtime and checkpoint field views, TP slices and page offsets before executing transfers.
 `BatchedStateView` retains the native buffers and accepted cursor; execution selects request/page slots without querying
 the State or rebuilding field mappings. CPU bindings are invalidated when their page buffer or layout changes.
-Window providers bind their native ring-conversion kernels separately. Bounded State classes retain allocation and
-snapshot semantics and inherit compatibility transfer entry points. Raw DP ring copies require compatible geometry.
+Window providers bind their native ring-conversion kernels separately. Bounded State classes declare runtime and
+snapshot representations. Independent lifecycle plans bind reset, snapshot, restore and accepted-cursor commit operations.
+The manager retains these plans until its storage is released. Raw DP ring copies require compatible geometry.
 Packed group64/E8M0 MLA now uses the common native-field CPU/DP/PD paths as well. Its external pages contain the payload;
 local/DP copies preserve complete physical rows, including padding. Regrouping tests include plain and packed MLA.
 Compressed KV declares its indivisible physical block size in the native field contract. CPU/DP copies require whole
@@ -109,7 +112,8 @@ blocks; PD completes the final physical block inside the copy kernel without upl
 compressed ratios and optional indexer bytes use the common plans, including different physical layer groupings.
 CPU page binding accepts contiguous multidimensional page views and checks byte regions and host page indices before
 submitting writes. All participating native plans validate batch constraints before any field is copied.
-Full-attention State classes now declare their native fields and inherit the same local/CPU/DP/PD copy implementations.
+Full-attention State classes declare native fields consumed by the common local/CPU/DP/PD plans. There is no fallback
+to State copy callbacks. Adding a format requires its storage fields, writer and consuming kernel, not separate transfer APIs.
 PD wire version 2 orders full-attention and bounded resources by logical producer, independently of each endpoint's arena grouping.
 Layer mappings place split or reordered local rows into that wire layout. Explicit format padding remains intact, and
 static KV calibration digests belong to individual logical resources. CPU cache page layouts remain unchanged. CPU manifests retain zero-overlap compressor semantics without inventing snapshot bytes. Missing required layouts remain errors.
@@ -143,6 +147,16 @@ on the GPU. Their common Conv/SSM implementation also selects this cursor for DP
 source/destination speculative widths; restoration normalizes the destination cursor to zero. Sliding-window and
 compressor snapshots preserve the logical restore position. Restoring KV alone is not a
 valid hybrid recovery point.
+
+`DeviceRuntime` is shared by storage, startup and model execution. It supplies allocation, device memory observations,
+completion fences, synchronization and Graph mechanisms. The runner binds input movement and temporary buffers to the
+selected device. CUDA Graph bucket implementations remain CUDA providers. Other device types can register a runtime;
+unsupported Graph execution fails explicitly. CPU memory observations report process RSS at stage boundaries and mark
+peak tracking unavailable; they do not claim allocator peak coverage.
+
+Recurrent CPU plans copy accepted Conv/SSM candidates and restore the cursor without CUDA calls. GPU-owned host snapshot
+pools retain their GPU execution domain, including host-to-host copies, so their asynchronous completion semantics remain
+unchanged. This covers native CPU state operations, not full CPU model serving or a second accelerator.
 
 ## Evidence and outstanding acceptance
 
@@ -334,3 +348,44 @@ Set GPU/CPU/disk capacity ratios so all desired tiers are actually exercised; me
 at least two DP replicas and shared KV. It forces DP0 then DP1 prefix reuse, runs concurrent generations and, with
 `--cancel-streams`, closes streams after their first event and verifies subsequent outputs. The JSON preserves prompts,
 full responses and partial evidence on failure. Server abort logs must independently confirm cancellation.
+
+The state-separation follow-up passed 2888 tests with 24 skips on H200 4/5 (r96, 186.30 seconds). This includes four
+CPU GDN/KDA accepted-state recovery cases in BF16/FP32, independent writer/copy/lifecycle binding, allocation failure
+atomicity, and the existing local IPC/network and Graph matrix. The exact source fingerprint and preserved migration
+failures are recorded in `benchmarks/evidence/attention_h200.json`.
+
+The combined State and DeviceRuntime follow-up passed 2892 tests with 24 skips on H200 4/5 (r106, 196.51 seconds),
+including overlap input movement and reuse of resident FP8 calibration during replanning. Repository Black, flake8 and
+diff checks passed. On this source, Qwen3.5-0.8B BF16 and FP8 each reproduced all 180 full-vocabulary logit rows from the
+fixed baseline (r107, batch 1/4, context 128/2048, two request mappings, prefill and eight teacher-forced decode steps).
+A separate CPU process rejected CUDA API calls and passed eight GQA attention/page-recovery checks and four GDN/KDA
+accepted-state recovery checks (r108). CUDA stayed uninitialized; CPU memory reporting marked peak tracking unavailable.
+CPU/disk serving reproduced all 28 baseline generations and 16 repeat results with five CPU-hit requests and one
+disk-hit request, with zero server errors (r103). These functional checks do not certify a service performance gate.
+MTP with DP prefix fetch and decode overlap reproduced all 24 generations, including eight after four confirmed
+cancellations; all four cross-DP restores hit 768-token prefixes and the server recorded zero errors (r104).
+Local NIXL TP1-to-TP2 serving reproduced all 20 generations. Four cancellations were confirmed by P and both D ranks;
+P/D recorded zero errors and the master recorded the four expected client-cancellation errors (r105).
+These transfers used local UCX TCP/IPC and do not substitute for cross-node/RDMA acceptance.
+
+The final runtime source also received one fixed four-round same-budget remeasurement (r109): candidate, baseline,
+baseline, candidate, on H200 4 with an 8 GiB budget and the same server/client CPU affinity. Each short/long profile
+used 96 warmups and 512 measured requests, for 4096 measured requests with no errors. Short/long offered rates were
+15/7 requests per second; observed server prompt lengths were 137–140/4105–4108 tokens and outputs were exactly 64/128.
+SLO goodput used TTFT limits of 150/1000 ms and per-request ITL limits of 3/5 ms.
+
+| Same-budget metric | Short | Long |
+| --- | ---: | ---: |
+| Mean output-token throughput change | -0.019% | -0.012% |
+| Mean SLO goodput change | -0.736% | -0.012% |
+| Baseline request p99, each round (ms) | 290.7 / 307.5 | 832.7 / 735.3 |
+| Candidate request p99, each round (ms) | 318.3 / 308.8 | 845.9 / 736.2 |
+| Pooled request p99 change | +5.234% | +1.730% |
+| Pooled per-request ITL p99 change | +5.587% | +7.747% |
+
+Pooled percentiles use the 1024 measured requests for each version/workload, excluding warmup; individual round
+percentiles remain in the evidence. The stable 1–2% performance gate is not passed. Goodput and throughput averages do
+not cancel the observed tail increases, and the large between-round variation prevents attributing them solely to code.
+Capacity remained 316630 baseline versus 316144 candidate (-0.1535%). Sampled device peaks were 7253/7279 MiB;
+recorded allocator peaks stayed within the common ceiling. This run does not replace equal-capacity measurements or
+certify other precision, model, overlap or concurrency settings. The benchmark servers and their sampling processes exited.

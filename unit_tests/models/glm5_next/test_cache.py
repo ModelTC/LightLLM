@@ -1,3 +1,6 @@
+from unit_tests.common.att_resources.transfer_helpers import copy_tokens
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+from lightllm.common.attention_state.storage import allocate_state_storage
 from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 import dataclasses
 from types import SimpleNamespace
@@ -97,7 +100,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
         ),
         page_size=args.page_size,
     )
-    full.allocate_storage(16)
+    allocate_state_storage(full, 16)
     req = ReqManager(3, 16)
     from unit_tests.common.att_resources.model_helpers import create_full_attention_roles
 
@@ -128,7 +131,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
         device="cuda",
     )
     destinations = torch.tensor([5, 9], dtype=torch.int32, device="cuda")
-    full.write_full_att_kv(3, destinations, new_kv)
+    bind_kv_writer(full, 3)(token_indices=destinations, kv=new_kv)
     assert torch.equal(att_kv[destinations], new_kv)
     assert torch.equal(index_bytes, expected_index_bytes)
     assert tail.get_layer_view(3).shape == (4, 4 + mtp_step, 256)
@@ -175,7 +178,7 @@ def test_hybrid_checkpoint_restore_and_packed_kv_copy(
     # belong to live requests. Bytewise equality checks FP8 scale integrity.
     packed_bytes = full.storage.view(torch.uint8)
     packed_bytes[:, 0].random_(0, 256)
-    full.copy_full_att_tokens(torch.tensor([0], device="cuda"), torch.tensor([7], device="cuda"))
+    copy_tokens(full, full, torch.tensor([0], device="cuda"), torch.tensor([7], device="cuda"))
     assert torch.equal(packed_bytes[:, 0], packed_bytes[:, 7])
 
 

@@ -10,7 +10,7 @@ from typing import List, Dict, Union, Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.copy_plan import CopyPlan
-from lightllm.common.basemodel.attention.runtime import DeviceRuntime
+from lightllm.common.device_runtime import get_device_runtime
 from lightllm.common.attention_state.lifecycle import RetiredTransfers, transfer_completion
 from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer
@@ -138,7 +138,7 @@ class _DecodeTransModule:
             self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
         )
         self.kv_move_buffer = kv_move_buffer
-        self.runtime = DeviceRuntime(kv_move_buffer.device)
+        self.runtime = get_device_runtime(kv_move_buffer.device)
         self.copy_plans = tuple(
             CopyPlan.for_pd(resource_managers[start : start + self.dp_world_size], kv_move_buffer, write=False)
             for start in range(0, len(resource_managers), self.dp_world_size)

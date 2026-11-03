@@ -1,6 +1,6 @@
 from dataclasses import asdict, dataclass
 
-from .copy_kernel import copy_bounded_att_tensors
+from .copy_kernel import bind_bounded_copy
 
 
 @dataclass(frozen=True)
@@ -9,6 +9,7 @@ class BoundedPeerCopy:
     destination: object
     runtime_fields: tuple
     snapshot_fields: tuple
+    copy: object
 
     @classmethod
     def bind(cls, source, destination, source_row=0, destination_row=0, layers=None):
@@ -50,7 +51,8 @@ class BoundedPeerCopy:
             source.get_snapshot_transfer_view("big").narrow_layers(source_row, layers),
             destination.get_snapshot_transfer_view("big").narrow_layers(destination_row, layers),
         )
-        return cls(src, dst, runtime, snapshots)
+        device = dst.execution_device or dst.fields[0][1].tensor.device
+        return cls(src, dst, runtime, snapshots, bind_bounded_copy(device))
 
     def _copy(self, fields, source_indices, destination_indices, offsets=None):
         for _, source, destination in fields:
@@ -60,7 +62,7 @@ class BoundedPeerCopy:
                 raise ValueError("DP state index lies outside its allocation")
         for name, source, destination in fields:
             copies = [(source[src], destination[dst]) for src, dst in zip(source_indices, destination_indices)]
-            copy_bounded_att_tensors(copies, source_byte_offsets=None if offsets is None else offsets.get(name))
+            self.copy(copies, source_byte_offsets=None if offsets is None else offsets.get(name))
 
     def copy_runtime(self, source_requests, destination_requests):
         if len(source_requests) != len(destination_requests):

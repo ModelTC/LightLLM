@@ -1,3 +1,5 @@
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+from lightllm.common.attention_state.storage import allocate_state_storage
 from types import SimpleNamespace
 import weakref
 
@@ -17,7 +19,7 @@ def test_bound_gqa_prefill_decode_and_replay_with_new_request_contents(heads, di
     torch.manual_seed(42)
     state = make_state(((3,),), heads=heads, dim=dim, device="cuda")
     kv = torch.randn(8, 2 * heads, dim, dtype=torch.bfloat16, device="cuda")
-    state.write_full_att_kv(3, torch.arange(8, dtype=torch.int32, device="cuda"), kv)
+    bind_kv_writer(state, 3)(token_indices=torch.arange(8, dtype=torch.int32, device="cuda"), kv=kv)
     model = bind_test_model([state])
     model.mtp_manager = SimpleNamespace(get_decode_draft_step=lambda _: 0)
     model.is_mtp_draft_model = False
@@ -77,7 +79,7 @@ def test_flashinfer_heterogeneous_layers_share_pages_and_replay_changed_lengths(
     states = [make_state(((i,),), heads=h, dim=d, device="cuda") for i, (h, d) in enumerate(((2, 64), (4, 128)))]
     for state in states:
         state.page_size = 2
-        state.allocate_storage(8)
+        allocate_state_storage(state, 8)
         state.k_storage.normal_()
         state.v_storage.normal_()
     model = bind_test_model(states)

@@ -9,6 +9,7 @@ import torch
 
 from lightllm.common.attention_state.types import StateTransferLayout
 from lightllm.common.attention_state.token_copy import TokenPageCopyPlan, TransferBatch
+from lightllm.common.attention_state.bounded_att.copy_plan import BoundedPageCopy
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
@@ -30,16 +31,13 @@ class CpuCacheOperator:
     def _bound_token_plans(self, pages, layouts, write):
         cached = self._token_plans.get(write)
         if cached is None or cached[0] is not pages or cached[1] != layouts:
-            plans, legacy = [], []
+            plans = []
             for state in self.owner.get_full_attention_states():
                 fields = state.get_transfer_fields()
-                if fields is None:
-                    legacy.append(state)
-                else:
-                    plans.append(TokenPageCopyPlan.bind(fields, layouts[state.state_name], pages, write))
-            cached = pages, dict(layouts), tuple(plans), tuple(legacy)
+                plans.append(TokenPageCopyPlan.bind(fields, layouts[state.state_name], pages, write))
+            cached = pages, dict(layouts), tuple(plans)
             self._token_plans[write] = cached
-        return cached[2:]
+        return cached[2]
 
     def _bound_state_plans(self, pages, layouts, page_kind, write):
         key = page_kind, write
@@ -51,7 +49,7 @@ class CpuCacheOperator:
                 if layout is None:
                     assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
                     continue
-                plans.append(state.bind_cpu_copy(pages, layout, page_kind, write))
+                plans.append(BoundedPageCopy.bind(state.get_snapshot_transfer_view(page_kind), pages, layout, write))
             cached = pages, dict(layouts), tuple(plans)
             self._state_plans[key] = cached
         return cached[2]
@@ -111,7 +109,7 @@ class CpuCacheOperator:
             if all(cpu_page_ready_flags):
                 return
 
-        token_plans, full_states = self._bound_token_plans(cpu_page_buffers, layouts, True)
+        token_plans = self._bound_token_plans(cpu_page_buffers, layouts, True)
         bounded_states = self.owner.get_bounded_attention_states()
         if bounded_states:
             big_page_slot_ids = [] if big_page_slot_ids is None else big_page_slot_ids
@@ -133,14 +131,6 @@ class CpuCacheOperator:
                 plan.validate_batch(batch)
             for plan in token_plans:
                 plan.run(batch)
-        for state in full_states:
-            state.write_to_cpu(
-                token_indices=token_indices,
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                layout=layouts[state.state_name],
-                cpu_page_ready_flags=cpu_page_ready_flags,
-            )
 
         if bounded_states:
             if big_page_slot_ids:
@@ -161,7 +151,7 @@ class CpuCacheOperator:
         state_token_len: int | None = None,
     ) -> None:
         """读回请求页面，并从末页恢复 bounded 运行态。"""
-        token_plans, full_states = self._bound_token_plans(cpu_page_buffers, layouts, False)
+        token_plans = self._bound_token_plans(cpu_page_buffers, layouts, False)
         bounded_states = self.owner.get_bounded_attention_states()
         if bounded_states:
             assert req_idx is not None and cpu_page_indices, "state recovery requires a target request and prefix pages"
@@ -182,13 +172,6 @@ class CpuCacheOperator:
                 plan.validate_batch(batch)
             for plan in token_plans:
                 plan.run(batch)
-        for state in full_states:
-            state.read_from_cpu(
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                token_indices=token_indices,
-                layout=layouts[state.state_name],
-            )
 
         if bounded_states:
             for plan in self._bound_state_plans(cpu_page_buffers, layouts, "big", False):

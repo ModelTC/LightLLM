@@ -13,11 +13,10 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 
 from ...utils import deepcopy_result
-from ...types import PageKind, TensorField, TransferRegion
+from ...types import TensorField, TransferRegion
 from ..base_state import BoundedAttentionState
-from ..copy_plan import BatchedStateView, bind_window_page_copy
-from ..window_pages_pool import WindowPagesPool
-from .window_compressor_transfer import copy_compressor_window
+from ..copy_plan import BatchedStateView
+from ...storage import StatePagesPool
 
 
 @dataclass(frozen=True)
@@ -97,27 +96,17 @@ class WindowCompressorState(BoundedAttentionState):
         config: WindowCompressorStateConfig,
         request_capacity: int,
         mtp_step: int = 0,
-        device: str | torch.device = "cuda",
     ) -> None:
         self.config = config
         self.state_name: str | None = None
         self.request_capacity = request_capacity
         self.mtp_step = mtp_step
         self._logical_to_storage_layer = {layer: index for index, layer in enumerate(config.logical_layer_ids)}
-        self.buffer = torch.zeros(
-            size=(
-                len(config.logical_layer_ids),
-                request_capacity,
-                config.window_size + mtp_step,
-                2 * config.candidate_dim,
-            ),
-            dtype=config.dtype,
-            device=device,
-        )
-        # HOLD 不得成为有效候选；正常请求在 reset 时初始化候选及 gate。
-        self.buffer[:, request_capacity - 1, :, config.candidate_dim :].fill_(float("-inf"))
-        self.big_pages_pool: WindowPagesPool | None = None
-        self.small_pages_pool: WindowPagesPool | None = None
+        from ...storage import allocate_buffers
+
+        self.bind_runtime_storage(allocate_buffers(self.get_runtime_storage_specs(), "meta"))
+        self.big_pages_pool: StatePagesPool | None = None
+        self.small_pages_pool: StatePagesPool | None = None
 
     def get_state_type(self) -> str:
         """用途、窗口、步长和精度共同标识可复用的压缩器方案。"""
@@ -130,48 +119,22 @@ class WindowCompressorState(BoundedAttentionState):
         c = self.config
         return len(c.logical_layer_ids) * c.overlap_tokens * 2 * c.candidate_dim * c.dtype.itemsize
 
-    def allocate_runtime_storage(self, device):
-        allocated = super().allocate_runtime_storage(device)
-        if allocated:
-            self.buffer[:, self.request_capacity - 1, :, self.config.candidate_dim :].fill_(float("-inf"))
-        return allocated
+    def get_runtime_storage_specs(self):
+        from ...storage import TensorStorageSpec
 
-    def initialize_page_pools(
-        self,
-        big_page_capacity: int,
-        small_page_capacity: int = 0,
-        device: str | torch.device | int = "cpu",
-        pin_memory: bool = True,
-    ) -> None:
-        """只为跨步重叠历史创建快照池；无重叠时保持 None。"""
-        if not self.config.overlap_tokens:
-            return
-        shape = (
-            len(self.config.logical_layer_ids),
-            self.config.overlap_tokens,
-            2 * self.config.candidate_dim,
-        )
-        self.big_pages_pool = (
-            WindowPagesPool(
-                size=big_page_capacity,
-                snapshot_shape=shape,
-                dtype=self.config.dtype,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if big_page_capacity
-            else None
-        )
-        self.small_pages_pool = (
-            WindowPagesPool(
-                size=small_page_capacity,
-                snapshot_shape=shape,
-                dtype=self.config.dtype,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if small_page_capacity
-            else None
+        c = self.config
+        shape = (len(c.logical_layer_ids), self.request_capacity, c.window_size + self.mtp_step, 2 * c.candidate_dim)
+        hold_gate = (slice(None), self.request_capacity - 1, slice(None), slice(c.candidate_dim, None))
+        return (TensorStorageSpec("buffer", shape, c.dtype, fill=0, fill_regions=((hold_gate, float("-inf")),)),)
+
+    def get_snapshot_storage_specs(self):
+        from ...storage import TensorStorageSpec
+
+        c = self.config
+        if not c.overlap_tokens:
+            return ()
+        return (
+            TensorStorageSpec("buffer", (len(c.logical_layer_ids), c.overlap_tokens, 2 * c.candidate_dim), c.dtype),
         )
 
     # ========================================================================
@@ -184,58 +147,6 @@ class WindowCompressorState(BoundedAttentionState):
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """返回该层 [request, window+MTP, candidate|gate] 的计算视图。"""
         return self.buffer[self._logical_to_storage_layer[logical_layer_id]]
-
-    def reset_bounded_att_state(self, req_indices: list[int]) -> None:
-        for req_idx in req_indices:
-            self.buffer[:, req_idx].zero_()
-            self.buffer[:, req_idx, :, self.config.candidate_dim :].fill_(float("-inf"))
-
-    def save_bounded_att_runtime_to_pages(
-        self,
-        req_indices: list[int],
-        state_token_lens: list[int],
-        page_kind: PageKind,
-        page_slot_ids: list[int],
-    ) -> None:
-        """边界必须完成一个产出步长；仅保留下一步仍需读取的窗口重叠部分。"""
-        assert all(
-            length % self.config.compress_stride == 0 for length in state_token_lens
-        ), "prefix must close a compressor stride"
-        if not self.config.overlap_tokens:
-            return
-        pool = self._pool(page_kind=page_kind)
-        for req_idx, length, slot in zip(req_indices, state_token_lens, page_slot_ids):
-            self._copy_window(
-                req_idx=req_idx,
-                external=pool.buffer[slot],
-                state_token_len=length,
-                write=True,
-            )
-
-    def restore_bounded_att_runtime_from_pages(
-        self,
-        req_indices: list[int],
-        state_token_lens: list[int],
-        page_kind: PageKind,
-        page_slot_ids: list[int],
-    ) -> None:
-        assert all(
-            length % self.config.compress_stride == 0 for length in state_token_lens
-        ), "prefix must close a compressor stride"
-        if not self.config.overlap_tokens:
-            return
-        pool = self._pool(page_kind=page_kind)
-        for req_idx, length, slot in zip(req_indices, state_token_lens, page_slot_ids):
-            self._copy_window(
-                req_idx=req_idx,
-                external=pool.buffer[slot],
-                state_token_len=length,
-                write=False,
-            )
-
-    def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
-        """按绝对位置寻址；接受后继续覆盖 ring，不维护额外 MTP 游标。"""
-        pass
 
     # ========================================================================
     # 三、CPU Cache：仅搬运时间有序的大小页快照
@@ -271,12 +182,6 @@ class WindowCompressorState(BoundedAttentionState):
     # 六、内部页池和窗口搬运
     # ========================================================================
 
-    def _pool(self, page_kind: PageKind) -> WindowPagesPool:
-        assert page_kind in ("big", "small")
-        pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
-        assert pool is not None, f"{page_kind} pages are disabled"
-        return pool
-
     def _get_transfer_regions(self, runtime: bool) -> tuple[TransferRegion, ...]:
         window = self.config.window_size if runtime else self.config.overlap_tokens
         if not window:
@@ -303,23 +208,6 @@ class WindowCompressorState(BoundedAttentionState):
     def get_snapshot_transfer_view(self, page_kind):
         pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
         return BatchedStateView(
-            () if pool is None else (("compressor", TensorField(pool.buffer, ("slot", "layer", "window", "channel"))),)
-        )
-
-    def bind_pd_copy(self, pages, layout, write):
-        return bind_window_page_copy(self.get_runtime_transfer_view(), pages, layout, write, copy_compressor_window)
-
-    def _copy_window(
-        self,
-        req_idx: int,
-        external: torch.Tensor,
-        state_token_len: int,
-        write: bool,
-    ) -> None:
-        local = self.buffer[:, req_idx]
-        copy_compressor_window(
-            local=local,
-            external=external,
-            state_token_len=state_token_len,
-            write=write,
+            () if pool is None else (("compressor", TensorField(pool.buffer, ("slot", "layer", "window", "channel"))),),
+            execution_device=self.buffer.device,
         )

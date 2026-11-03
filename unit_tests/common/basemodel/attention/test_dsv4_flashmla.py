@@ -174,8 +174,10 @@ def _case(heads, ratio):
         extra_lengths=lengths.clone() if ratio else None,
     )
     from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from lightllm.common.device_runtime import get_device_runtime
 
     state_info = InferStateInfo()
+    state_info.runtime = get_device_runtime(q.device)
     return backend, state_info, q, (pool, extra), decoded, extra_decoded, params
 
 
@@ -345,7 +347,10 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         params["extra_indices"].copy_(indices)
 
     def new_request(length):
+        from lightllm.common.device_runtime import get_device_runtime
+
         infer_state = DeepseekV4InferStateInfo()
+        infer_state.runtime = get_device_runtime(q.device)
         infer_state.input_ids = torch.zeros(q.shape[0], dtype=torch.int64, device=q.device)
         infer_state.hidden_collector = NoopHiddenCollector()
         infer_state.attn_params = dict(params, swa_lengths=torch.full_like(params["swa_lengths"], length))

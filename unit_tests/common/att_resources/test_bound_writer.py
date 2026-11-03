@@ -1,3 +1,5 @@
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+from lightllm.common.attention_state.storage import allocate_state_storage
 import pytest
 import torch
 
@@ -16,7 +18,7 @@ def test_writer_retains_native_views_without_state_queries(monkeypatch, kind):
         state = make_state(((1,), (3,)), device="cuda")
     elif kind == "mla":
         state = MLAFullAttentionState(MLAConfig(((1,), (3,)), 576, torch.bfloat16), device="cuda")
-        state.allocate_storage(8)
+        allocate_state_storage(state, 8)
     elif kind == "e8m0":
         state = make_e8m0_state(device="cuda")
     else:
@@ -32,16 +34,16 @@ def test_writer_retains_native_views_without_state_queries(monkeypatch, kind):
     torch.manual_seed(38)
     kv = torch.randn(2, heads, dim, device="cuda", dtype=torch.bfloat16)
     indices = torch.tensor([2, 5], dtype=torch.int32, device="cuda")
-    state.write_full_att_kv(layer, indices, kv)
+    bind_kv_writer(state, layer)(token_indices=indices, kv=kv)
     expected = {name: field.tensor.clone() for name, field in fields.items()}
     for field in fields.values():
         field.tensor.zero_()
-    writer = state.bind_kv_writer(layer)
+    writer = bind_kv_writer(state, layer)
 
     def forbidden(*args, **kwargs):
         pytest.fail("bound KV writer consulted State")
 
-    for name in ("get_layer_view", "get_storage_layer_index", "write_full_att_kv", "bind_kv_writer"):
+    for name in ("get_layer_view", "get_storage_layer_index"):
         monkeypatch.setattr(state, name, forbidden)
     writer(token_indices=indices, kv=kv)
     writer(token_indices=indices[:0], kv=kv[:0])

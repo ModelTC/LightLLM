@@ -1,6 +1,7 @@
 """DP 直接索引复制：完整编码、真实 stride、非默认流和跨设备 IPC。"""
 
 from __future__ import annotations
+from unit_tests.common.att_resources.transfer_helpers import copy_tokens
 
 from multiprocessing.connection import Connection
 from multiprocessing.reduction import ForkingPickler
@@ -121,11 +122,7 @@ def test_dp_copy_preserves_complete_rows_without_temporary_payload(
         for method in ("index_select", "index_copy_", "to", "tolist", "cpu", "contiguous"):
             patch.setattr(torch.Tensor, method, reject_intermediate)
         with torch.cuda.stream(stream):
-            target.copy_tokens_from_dp(
-                src_token_indices=src_ids,
-                dst_token_indices=dst_ids,
-                remote_dp_full_att_state=source,
-            )
+            copy_tokens(source, target, src_ids, dst_ids)
     stream.synchronize()
     for name, tensor in target_buffers.items():
         # 比较全部存储：包含未选槽位、HOLD 页、packed padding 和任意浮点位模式。
@@ -205,11 +202,7 @@ def _ipc_copy_worker(connection: Connection, payload: bytes) -> None:
             expected = {name: tensor.cpu().view(torch.uint8) for name, tensor in target_buffers.items()}
             for name, tensor in full_state_test_buffers(source).items():
                 expected[name][:, [8, 2, 5]] = tensor.cpu().view(torch.uint8)[:, [3, 1, 3]]
-            target.copy_tokens_from_dp(
-                src_token_indices=src_ids,
-                dst_token_indices=torch.tensor([8, 2, 5], dtype=torch.int64, device="cuda:0"),
-                remote_dp_full_att_state=source,
-            )
+            copy_tokens(source, target, src_ids, torch.tensor([8, 2, 5], dtype=torch.int64, device="cuda:0"))
             torch.cuda.synchronize()
             for name, tensor in target_buffers.items():
                 assert torch.equal(tensor.cpu().view(torch.uint8), expected[name])

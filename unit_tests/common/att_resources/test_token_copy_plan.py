@@ -145,7 +145,7 @@ def test_cpu_copy_checks_all_block_constraints_before_writing_any_field():
         layout = StateTransferLayout(str(i), 8, i * 8, (i + 1) * 8, (region,))
         plans.append(TokenPageCopyPlan.bind({"data": TensorField(tensor, axes, block_size)}, layout, pages, False))
     operator = CpuCacheOperator(SimpleNamespace(get_bounded_attention_states=lambda: ()))
-    operator._bound_token_plans = lambda *args: (plans, ())
+    operator._bound_token_plans = lambda *args: plans
     with pytest.raises(ValueError, match="complete token blocks"):
         operator.read_req(pages, [0], torch.tensor([0, 1]), {})
     assert (plain == 173).all() and (packed == 173).all()

@@ -1,5 +1,7 @@
 """GQA 共用搬运 kernel 在受限 grid 下完整覆盖多轮、跨页和尾块数据。"""
 
+from lightllm.common.attention_state.storage import allocate_state_storage
+
 from typing import TYPE_CHECKING
 
 import pytest
@@ -26,8 +28,8 @@ def test_gqa_grid_stride_covers_all_tokens(grid_num: int, page_device: str, pd_a
     )
     source = GQAFullAttentionState(layout_config=config, page_size=32, device="cuda")
     target = GQAFullAttentionState(layout_config=config, page_size=32, device="cuda")
-    source.allocate_storage(token_capacity=128)
-    target.allocate_storage(token_capacity=128)
+    allocate_state_storage(source, token_capacity=128)
+    allocate_state_storage(target, token_capacity=128)
     for tensor in (source.k_storage, source.v_storage):
         tensor.view(torch.uint8).random_(0, 256)
     for tensor in (target.k_storage, target.v_storage):
@@ -123,8 +125,8 @@ def test_wide_transfer_preserves_unaligned_pages_and_strided_fields(
     )
     source = GQAFullAttentionState(layout_config=config, page_size=2, device="cuda")
     target = GQAFullAttentionState(layout_config=config, page_size=2, device="cuda")
-    source.allocate_storage(token_capacity=8)
-    target.allocate_storage(token_capacity=8)
+    allocate_state_storage(source, token_capacity=8)
+    allocate_state_storage(target, token_capacity=8)
     for name in ("k_storage", "v_storage"):
         storage = getattr(source, name)
         if dim_stride != 1:

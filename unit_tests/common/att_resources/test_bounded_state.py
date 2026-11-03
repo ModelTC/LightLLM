@@ -1,4 +1,8 @@
 from __future__ import annotations
+from lightllm.common.attention_state.bounded_att.operations import bind_state_operations
+from unit_tests.common.att_resources.transfer_helpers import copy_bounded_peer, copy_pd_page, copy_snapshot_pages
+
+from lightllm.common.attention_state.storage import allocate_runtime_storage, initialize_state_page_pools
 
 from typing import TYPE_CHECKING
 from dataclasses import replace
@@ -43,16 +47,11 @@ def make_state(
         conv_dtype=torch.float32,
         ssm_dtype=torch.float32,
     )
-    state = cls(
-        config=config,
-        request_capacity=3,
-        mtp_step=mtp_step,
-        device=device,
-    )
+    state = allocate_runtime_storage(cls(config=config, request_capacity=3, mtp_step=mtp_step), device)
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state("main", state)
-    state.initialize_page_pools(
-        big_page_capacity=3, small_page_capacity=2, pin_memory=torch.device(device).type == "cuda"
+    initialize_state_page_pools(
+        state, big_page_capacity=3, small_page_capacity=2, pin_memory=torch.device(device).type == "cuda"
     )
     return state
 
@@ -145,12 +144,7 @@ def test_prefill_state_is_saved_and_restored(
         conv_dtype=torch.float32,
         ssm_dtype=torch.float32,
     )
-    state = cls(
-        config=config,
-        request_capacity=3,
-        mtp_step=2,
-        device=device,
-    )
+    state = allocate_runtime_storage(cls(config=config, request_capacity=3, mtp_step=2), device)
     assert state.state_name is None and not hasattr(config, "state_name")
     assert state.big_pages_pool is None and state.small_pages_pool is None
     conv, ssm = state.get_layer_view(3)
@@ -162,14 +156,16 @@ def test_prefill_state_is_saved_and_restored(
         state.ssm_state[:, j].fill_(j + 20)
     state.mtp_state_index[2].fill_(1)
     # 延后创建页池不能重建运行态或重置已接受的 MTP 游标。
-    state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device == "cuda")
+    initialize_state_page_pools(state, big_page_capacity=3, small_page_capacity=2, pin_memory=device == "cuda")
     assert conv.data_ptr() == state.conv_state[1].data_ptr()
     assert ssm.data_ptr() == state.ssm_state[1].data_ptr()
-    assert type(state.big_pages_pool) is pool_cls
-    assert type(state.small_pages_pool) is pool_cls
+    from lightllm.common.attention_state.storage import StatePagesPool
+
+    assert type(state.big_pages_pool) is StatePagesPool
+    assert type(state.small_pages_pool) is StatePagesPool
     assert state.big_pages_pool is not state.small_pages_pool
     assert state.mtp_state_index.tolist() == [0, 0, 1]
-    state.save_bounded_att_runtime_to_pages(
+    bind_state_operations(state).save(
         req_indices=[0],
         state_token_lens=[8],
         page_kind=page_kind,
@@ -182,7 +178,7 @@ def test_prefill_state_is_saved_and_restored(
     assert torch.equal(pool.conv_state[1, ..., 1], torch.full_like(pool.conv_state[1, ..., 1], 11))
     assert (pool.ssm_state[1] == 20).all()
     state.mtp_state_index[1] = 2
-    state.restore_bounded_att_runtime_from_pages(
+    bind_state_operations(state).restore(
         req_indices=[1],
         state_token_lens=[8],
         page_kind=page_kind,
@@ -201,13 +197,8 @@ def test_gdn_dimensions_and_page_restore():
         key_dim=2,
         value_dim=3,
     )
-    state = GDNState(
-        config=config,
-        request_capacity=3,
-        mtp_step=2,
-        device="cuda",
-    )
-    state.initialize_page_pools(big_page_capacity=2, small_page_capacity=2, pin_memory=True)
+    state = allocate_runtime_storage(GDNState(config=config, request_capacity=3, mtp_step=2), "cuda")
+    initialize_state_page_pools(state, big_page_capacity=2, small_page_capacity=2, pin_memory=True)
     conv = torch.arange(40, dtype=config.conv_dtype).reshape(2, 10, 2)
     ssm = torch.arange(24, dtype=config.ssm_dtype).reshape(
         shape=(2, 2, 2, 3),
@@ -215,15 +206,15 @@ def test_gdn_dimensions_and_page_restore():
     state.conv_state[:, 0, :, :2].copy_(conv)
     state.ssm_state[:, 0].copy_(ssm)
     for page_kind in ("big", "small"):
-        state.save_bounded_att_runtime_to_pages(
+        bind_state_operations(state).save(
             req_indices=[0],
             state_token_lens=[8],
             page_kind=page_kind,
             page_slot_ids=[0],
         )
-    state.reset_bounded_att_state([0])
+    bind_state_operations(state).reset([0])
     for req, page_kind in enumerate(("big", "small"), start=1):
-        state.restore_bounded_att_runtime_from_pages(
+        bind_state_operations(state).restore(
             req_indices=[req],
             state_token_lens=[8],
             page_kind=page_kind,
@@ -240,7 +231,7 @@ def test_reset_requests_preserves_pages(cls: type[KDAState] | type[GDNState]):
     state = make_state(cls, device="cuda")
     state.conv_state[:, 0].fill_(7)
     state.ssm_state[:, 0:3].fill_(11)
-    state.save_bounded_att_runtime_to_pages(
+    bind_state_operations(state).save(
         req_indices=[0],
         state_token_lens=[6],
         page_kind="small",
@@ -250,13 +241,13 @@ def test_reset_requests_preserves_pages(cls: type[KDAState] | type[GDNState]):
     state.conv_state[:, 0, :, 2:4].fill_(19)
     state.ssm_state[:, 2].fill_(23)
     state.mtp_state_index[0].fill_(2)
-    state.reset_bounded_att_state([0])
+    bind_state_operations(state).reset([0])
     assert not state.conv_state[:, 0].any() and not state.ssm_state[:, :3].any()
     assert state.mtp_state_index[0] == 0
     assert (state.small_pages_pool.conv_state[0] == 7).all()
     assert (state.small_pages_pool.ssm_state[0] == 11).all()
-    with pytest.raises(AssertionError, match="CUDA tensors"):
-        state.commit_bounded_att_state(torch.tensor([0]), torch.tensor([1], dtype=torch.int32))
+    with pytest.raises(ValueError, match="recurrent state device"):
+        bind_state_operations(state).commit(torch.tensor([0]), torch.tensor([1], dtype=torch.int32))
 
 
 @pytest.mark.parametrize("cls", [KDAState, GDNState])
@@ -264,7 +255,7 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
     source = make_state(cls, device="cuda")
     source.conv_state[:, 0].fill_(13)
     source.ssm_state[:, 0].fill_(29)
-    source.save_bounded_att_runtime_to_pages(
+    bind_state_operations(source).save(
         req_indices=[0],
         state_token_lens=[8],
         page_kind="big",
@@ -272,23 +263,12 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
     )
     layout = page_layout(source)
     buffer = torch.full((3, layout.byte_end), 255, dtype=torch.uint8, pin_memory=True)
-    source.write_state_pages_to_cpu(
-        page_kind="big",
-        page_slot_ids=[0],
-        cpu_page_buffers=buffer,
-        cpu_page_indices=[2],
-        layout=layout,
-    )
+    copy_snapshot_pages(source, "big", [0], buffer, [2], layout, write=True, ready=None)
     torch.cuda.synchronize()
     assert (buffer[:2] == 255).all() and (buffer[2, :16] == 255).all()
     target = make_state(cls, device="cuda")
-    target.read_state_pages_from_cpu(
-        cpu_page_buffers=buffer,
-        cpu_page_indices=[2],
-        big_page_slot_ids=[1],
-        layout=layout,
-    )
-    target.restore_bounded_att_runtime_from_pages(
+    copy_snapshot_pages(target, "big", [1], buffer, [2], layout, write=False, ready=None)
+    bind_state_operations(target).restore(
         req_indices=[2],
         state_token_lens=[8],
         page_kind="big",
@@ -297,19 +277,8 @@ def test_cpu_pages_roundtrip_offsets(cls: type[KDAState] | type[GDNState]):
     assert (target.conv_state[:, 2, :, :2] == 13).all()
     assert (target.ssm_state[:, 6] == 29).all()
     # 页池只保存快照数据；前缀关联由调用方维护，读回的快照可以再次写出。
-    target.read_state_pages_from_cpu(
-        cpu_page_buffers=buffer,
-        cpu_page_indices=[2],
-        big_page_slot_ids=[0],
-        layout=layout,
-    )
-    target.write_state_pages_to_cpu(
-        page_kind="big",
-        page_slot_ids=[0],
-        cpu_page_buffers=buffer,
-        cpu_page_indices=[0],
-        layout=layout,
-    )
+    copy_snapshot_pages(target, "big", [0], buffer, [2], layout, write=False, ready=None)
+    copy_snapshot_pages(target, "big", [0], buffer, [0], layout, write=True, ready=None)
     torch.cuda.synchronize()
     assert torch.equal(buffer[0], buffer[2])
 
@@ -336,21 +305,9 @@ def test_pd_roundtrip_uses_baseline_state_and_page_relative_offset(
         device=device,
     )
     page = allocation[1]
-    source.write_to_pd_page(
-        req_idx=0,
-        pd_page_buffers=allocation,
-        pd_page_index=1,
-        state_token_len=8,
-        layout=layout,
-    )
+    copy_pd_page(source, allocation, 1, layout, write=True, req_idx=0, state_token_len=8)
     target = make_state(cls, device=device, mtp_step=1)
-    target.read_from_pd_page(
-        pd_page_buffers=allocation,
-        req_idx=2,
-        pd_page_index=1,
-        state_token_len=8,
-        layout=layout,
-    )
+    copy_pd_page(target, allocation, 1, layout, write=False, req_idx=2, state_token_len=8)
     assert (target.conv_state[:, 2, :, :2] == 23).all()
     assert (target.ssm_state[:, 4] == 47).all()
     assert (allocation[0] == 254).all() and (allocation[2] == 254).all()
@@ -379,11 +336,7 @@ def test_dp_runtime_copy_preserves_pages_and_other_requests(cls, device, src_mtp
     src_conv = source.conv_state.clone()
     src_ssm = source.ssm_state.clone()
 
-    target.copy_runtime_state_from_dp(
-        src_req_indices=[2, 0],
-        dst_req_indices=[0, 1],
-        remote_dp_bounded_state=source,
-    )
+    copy_bounded_peer(source, target, [2, 0], [0, 1], runtime=True)
 
     for src_req, dst_req in ((2, 0), (0, 1)):
         assert (target.conv_state[:, dst_req, :, :2] == 10 + src_req).all()
@@ -418,11 +371,7 @@ def test_dp_big_page_copy_preserves_runtime_and_other_pages(cls):
     src_conv = source.big_pages_pool.conv_state.clone()
     src_ssm = source.big_pages_pool.ssm_state.clone()
 
-    target.copy_big_pages_from_dp(
-        src_page_ids=[2, 0],
-        dst_page_ids=[0, 1],
-        remote_dp_bounded_state=source,
-    )
+    copy_bounded_peer(source, target, [2, 0], [0, 1], runtime=False)
 
     torch.cuda.synchronize()
     for src_page, dst_page in ((2, 0), (0, 1)):
@@ -471,14 +420,14 @@ def test_recurrent_transfer_selects_accepted_candidate(cls, accepted, route):
         torch.cuda.set_sync_debug_mode("error")
         try:
             if route == "checkpoint":
-                source.save_bounded_att_runtime_to_pages([0], [37], "big", [1])
-                target.copy_big_pages_from_dp([1], [2], source)
-                target.restore_bounded_att_runtime_from_pages([1], [37], "big", [2])
+                bind_state_operations(source).save([0], [37], "big", [1])
+                copy_bounded_peer(source, target, [1], [2], runtime=False)
+                bind_state_operations(target).restore([1], [37], "big", [2])
             elif route in ("dp", "peer_dp"):
-                target.copy_runtime_state_from_dp([0], [1], source)
+                copy_bounded_peer(source, target, [0], [1], runtime=True)
             else:
-                source.write_to_pd_page(0, pages, 1, 37, layout)
-                target.read_from_pd_page(pages, 1, 1, 37, layout)
+                copy_pd_page(source, pages, 1, layout, write=True, req_idx=0, state_token_len=37)
+                copy_pd_page(target, pages, 1, layout, write=False, req_idx=1, state_token_len=37)
         finally:
             torch.cuda.set_sync_debug_mode(previous)
 

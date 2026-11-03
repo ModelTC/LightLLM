@@ -236,7 +236,7 @@ def test_backend_allocates_all_roles_before_warmup(
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory_info)
     monkeypatch.setattr(
         "lightllm.common.basemodel.attention.startup.StartupMemoryProfile",
-        lambda: SimpleNamespace(stage=lambda *_: nullcontext(), peak_bytes=0, explain=lambda: {}),
+        lambda runtime=None: SimpleNamespace(stage=lambda *_: nullcontext(), peak_bytes=0, explain=lambda: {}),
     )
     monkeypatch.setattr("lightllm.utils.envs_utils.set_model_init_status", ready.append)
     assert all(not hasattr(item, "att_state_manager") for item in models)

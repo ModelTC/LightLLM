@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lightllm.common.attention_state.bounded_att.operations import bind_state_operations
 
 from unit_tests.common.att_resources.model_helpers import window_states, linear_states
 
@@ -526,7 +527,7 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
                 torch.tensor([0], dtype=torch.long, device="cuda"), torch.tensor([4], dtype=torch.long, device="cuda")
             )
             for window in window_states(resources):
-                window.reset_bounded_att_state([1])
+                bind_state_operations(window).reset([1])
             torch.cuda.synchronize()
             # 一类通道耗尽不会影响另一类通道的读取计数。
             with pytest.raises(RuntimeError, match="exhausted"):

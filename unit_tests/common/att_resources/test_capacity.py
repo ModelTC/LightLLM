@@ -1,5 +1,9 @@
 from __future__ import annotations
 
+from lightllm.common.attention_state.storage import allocate_runtime_storage, initialize_state_page_pools
+
+from lightllm.common.attention_state.storage import allocate_state_storage
+
 from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
@@ -146,11 +150,12 @@ def test_budget_matches_token_stores_including_hold_and_padding(
     reserve = manager.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-    monkeypatch.setattr("lightllm.common.attention_state.manager.get_current_device_id", lambda: 0)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr("lightllm.common.device_runtime.DeviceRuntime.empty_cache", lambda self: None)
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
-    fixed_bytes = state.get_fixed_storage_bytes()
+    fixed_bytes = state.get_fixed_storage_bytes(torch.device("cpu"))
     total = actual + fixed_bytes + 16 * 20
     minimum += fixed_bytes
     for budget, expected in ((total, 20), (total - 1, 16), (minimum, None), (minimum - 1, None)):
@@ -218,25 +223,22 @@ def test_pd_state_page_covers_one_snapshot_without_transfer_metadata(
         conv_dtype=torch.bfloat16,
         ssm_dtype=torch.float32,
     )
-    tail = WindowCompressorState(
-        config=WindowCompressorStateConfig(
-            logical_layer_ids=(1,),
-            window_size=4,
-            compress_stride=4,
-            target="indexer",
-            candidate_dim=3,
-            dtype=torch.bfloat16,
+    tail = allocate_runtime_storage(
+        WindowCompressorState(
+            config=WindowCompressorStateConfig(
+                logical_layer_ids=(1,),
+                window_size=4,
+                compress_stride=4,
+                target="indexer",
+                candidate_dim=3,
+                dtype=torch.bfloat16,
+            ),
+            request_capacity=3,
+            mtp_step=3,
         ),
-        request_capacity=3,
-        mtp_step=3,
-        device="cuda",
+        "cuda",
     )
-    reference = state_cls(
-        config=config,
-        request_capacity=3,
-        mtp_step=3,
-        device="cuda",
-    )
+    reference = allocate_runtime_storage(state_cls(config=config, request_capacity=3, mtp_step=3), "cuda")
     conv = reference.conv_state[:, 0, :, : config.conv_width]
     ssm = reference.ssm_state[:, 0]
     bounded_bytes = conv.numel() * conv.element_size() + ssm.numel() * ssm.element_size()
@@ -397,10 +399,10 @@ def test_capacity_uses_quantized_field_padding_and_preserves_page_boundaries(
     )
     manager = AttentionStateManager(request_capacity=1)
     prepared_full_state = AlignedFieldsState(config, page_size=1, device="cuda")
-    prepared_full_state.allocate_storage(8)
+    allocate_state_storage(prepared_full_state, 8)
     manager.register_state("main", prepared_full_state)
     prepared_full_state = AlignedFieldsState(config, page_size=1, device="cuda")
-    prepared_full_state.allocate_storage(8)
+    allocate_state_storage(prepared_full_state, 8)
     manager.register_state("draft0", prepared_full_state)
     manager.full_att_allocator = FullAttKVAllocator(8, 1, pin_memory=False)
     manager.finish_state_registration()
@@ -506,19 +508,21 @@ def test_pd_runtime_capacity_includes_field_padding(
             dtype=torch.float32,
         )
         manager.register_state("main", GQAFullAttentionState(config, page_size=1, device="meta"))
-    state = PaddedGDNState(
-        ConvSSMStateConfig(
-            logical_layer_ids=(0,),
-            global_k_heads=1,
-            global_v_heads=1,
-            key_dim=1,
-            value_dim=1,
-            conv_width=1,
-            conv_dtype=torch.bfloat16,
-            ssm_dtype=torch.float32,
+    state = allocate_runtime_storage(
+        PaddedGDNState(
+            ConvSSMStateConfig(
+                logical_layer_ids=(0,),
+                global_k_heads=1,
+                global_v_heads=1,
+                key_dim=1,
+                value_dim=1,
+                conv_width=1,
+                conv_dtype=torch.bfloat16,
+                ssm_dtype=torch.float32,
+            ),
+            request_capacity=1,
         ),
-        request_capacity=1,
-        device="cuda",
+        "cuda",
     )
     manager.register_state("main", state)
     manager.finish_state_registration()
@@ -654,21 +658,23 @@ def test_hybrid_pd_capacity_covers_all_runtime_states_before_storage_allocation(
             conv_dtype=torch.float32,
             ssm_dtype=torch.float32,
         )
-        state = cls(config, request_capacity=1, device="meta")
+        state = allocate_runtime_storage(cls(config, request_capacity=1), "meta")
         manager.register_state(role, state)
     if with_tail:
-        state = WindowCompressorState(
-            config=WindowCompressorStateConfig(
-                logical_layer_ids=(0,),
-                window_size=4,
-                compress_stride=4,
-                target="indexer",
-                candidate_dim=1,
-                dtype=torch.float32,
+        state = allocate_runtime_storage(
+            WindowCompressorState(
+                config=WindowCompressorStateConfig(
+                    logical_layer_ids=(0,),
+                    window_size=4,
+                    compress_stride=4,
+                    target="indexer",
+                    candidate_dim=1,
+                    dtype=torch.float32,
+                ),
+                request_capacity=1,
+                mtp_step=0,
             ),
-            request_capacity=1,
-            mtp_step=0,
-            device="meta",
+            "meta",
         )
         manager.register_state("main", state)
     # 两份运行态各占 16 字节数据，tail 另占 32 字节，无页头及长度、版本字段。
@@ -734,12 +740,7 @@ def test_cpu_page_bytes_derive_from_cached_transfer_layouts(
             tp_rank=tp_world_size - 1,
             tp_world_size=tp_world_size,
         )
-        bounded = state_cls(
-            config=bounded_config,
-            request_capacity=3,
-            mtp_step=2,
-            device="meta",
-        )
+        bounded = allocate_runtime_storage(state_cls(config=bounded_config, request_capacity=3, mtp_step=2), "meta")
         manager.register_state("main", bounded)
     manager.finish_state_registration()
     # CPU 容量和布局都只依赖 State 的 CPU 字段描述，不读取 GPU 存储开销或 PD 布局。
@@ -773,19 +774,21 @@ def test_cpu_bounded_capacity_includes_state_field_padding(cpu_args: EasyDict):
             )
 
     manager = AttentionStateManager(request_capacity=1)
-    state = PaddedGDNState(
-        ConvSSMStateConfig(
-            logical_layer_ids=(0,),
-            global_k_heads=1,
-            global_v_heads=1,
-            key_dim=1,
-            value_dim=1,
-            conv_width=1,
-            conv_dtype=torch.bfloat16,
-            ssm_dtype=torch.float32,
+    state = allocate_runtime_storage(
+        PaddedGDNState(
+            ConvSSMStateConfig(
+                logical_layer_ids=(0,),
+                global_k_heads=1,
+                global_v_heads=1,
+                key_dim=1,
+                value_dim=1,
+                conv_width=1,
+                conv_dtype=torch.bfloat16,
+                ssm_dtype=torch.float32,
+            ),
+            request_capacity=1,
         ),
-        request_capacity=1,
-        device="meta",
+        "meta",
     )
     manager.register_state("main", state)
     manager.finish_state_registration()
@@ -874,13 +877,8 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
             conv_dtype=torch.bfloat16,
             ssm_dtype=torch.float32,
         )
-        state = state_cls(
-            config=config,
-            request_capacity=1,
-            mtp_step=2,
-            device="cuda",
-        )
-        state.initialize_page_pools(big_page_capacity=2, small_page_capacity=1, pin_memory=True)
+        state = allocate_runtime_storage(state_cls(config=config, request_capacity=1, mtp_step=2), "cuda")
+        initialize_state_page_pools(state, big_page_capacity=2, small_page_capacity=1, pin_memory=True)
         manager.register_state(role, state)
     manager.finish_state_registration()
     states = manager.get_bounded_attention_states()
@@ -944,19 +942,21 @@ def test_transfer_layouts_are_lazy_cached_and_refreshed_after_storage_allocation
     manager.register_state("main", GQAFullAttentionState(config, page_size=1, device="meta"))
     manager.register_state(
         "main",
-        GDNState(
-            ConvSSMStateConfig(
-                logical_layer_ids=(0,),
-                global_k_heads=1,
-                global_v_heads=1,
-                key_dim=1,
-                value_dim=1,
-                conv_width=1,
-                conv_dtype=torch.bfloat16,
-                ssm_dtype=torch.bfloat16,
+        allocate_runtime_storage(
+            GDNState(
+                ConvSSMStateConfig(
+                    logical_layer_ids=(0,),
+                    global_k_heads=1,
+                    global_v_heads=1,
+                    key_dim=1,
+                    value_dim=1,
+                    conv_width=1,
+                    conv_dtype=torch.bfloat16,
+                    ssm_dtype=torch.bfloat16,
+                ),
+                request_capacity=1,
             ),
-            request_capacity=1,
-            device="cpu",
+            "cpu",
         ),
     )
     manager.finish_state_registration()
@@ -1031,10 +1031,10 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
     )
     manager = AttentionStateManager(request_capacity=1)
     prepared_full_state = ReversedCpuRegionsState(config, page_size=4, device="cuda")
-    prepared_full_state.allocate_storage(8)
+    allocate_state_storage(prepared_full_state, 8)
     manager.register_state("main", prepared_full_state)
     prepared_full_state = ReversedCpuRegionsState(config, page_size=4, device="cuda")
-    prepared_full_state.allocate_storage(8)
+    allocate_state_storage(prepared_full_state, 8)
     manager.register_state("draft0", prepared_full_state)
     manager.full_att_allocator = FullAttKVAllocator(8, 4, pin_memory=False)
     manager.finish_state_registration()

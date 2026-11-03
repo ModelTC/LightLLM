@@ -1,6 +1,7 @@
 """各 full-attention 编码的统一 CPU/PD kernel：无中间 KV、跳步循环与字段完整性。"""
 
 from __future__ import annotations
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page, copy_token_pages
 
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -128,31 +129,11 @@ def test_full_att_pages_copy_all_fields_with_bounded_grid(
         patch.setattr(torch.Tensor, "tolist", reject_gather)
         with torch.cuda.stream(stream):
             if transfer == "cpu":
-                source.write_to_cpu(
-                    token_indices=src_ids,
-                    cpu_page_buffers=page_view,
-                    cpu_page_indices=page_indices,
-                    layout=layout,
-                )
-                target.read_from_cpu(
-                    cpu_page_buffers=page_view,
-                    cpu_page_indices=page_indices,
-                    token_indices=dst_ids,
-                    layout=layout,
-                )
+                copy_token_pages(source, src_ids, page_view, page_indices, layout, write=True, ready=None)
+                copy_token_pages(target, dst_ids, page_view, page_indices, layout, write=False, ready=None)
             else:
-                source.write_to_pd_page(
-                    token_indices=src_ids,
-                    pd_page_buffers=page_view,
-                    pd_page_index=3,
-                    layout=layout,
-                )
-                target.read_from_pd_page(
-                    pd_page_buffers=page_view,
-                    token_indices=dst_ids,
-                    pd_page_index=3,
-                    layout=layout,
-                )
+                copy_pd_page(source, page_view, 3, layout, write=True, token_indices=src_ids)
+                copy_pd_page(target, page_view, 3, layout, write=False, token_indices=dst_ids)
         stream.synchronize()
 
     # 比较整行原始字节：packed padding 沿用目标填充值，字段数据来自源存储。
@@ -254,18 +235,8 @@ def _peer_transfer_worker(
             target_ids = torch.tensor(data=[5], dtype=torch.int64, device="cuda:0")
             for state, layout in zip(states, layouts):
                 pages = torch.empty(size=(2, layout.byte_end), dtype=torch.uint8, device="cuda:0")
-                state.write_to_pd_page(
-                    token_indices=source_ids,
-                    pd_page_buffers=pages,
-                    pd_page_index=1,
-                    layout=layout,
-                )
-                state.read_from_pd_page(
-                    pd_page_buffers=pages,
-                    token_indices=target_ids,
-                    pd_page_index=1,
-                    layout=layout,
-                )
+                copy_pd_page(state, pages, 1, layout, write=True, token_indices=source_ids)
+                copy_pd_page(state, pages, 1, layout, write=False, token_indices=target_ids)
         stream.synchronize()
         connection.send(None)
         connection.recv()
@@ -312,12 +283,7 @@ def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
         pin_memory=True,
     )
     pages = torch.full_like(baseline, 173, pin_memory=True)
-    state.write_to_cpu(
-        token_indices=token_indices,
-        cpu_page_buffers=baseline[:, 16:-16],
-        cpu_page_indices=page_indices,
-        layout=layout,
-    )
+    copy_token_pages(state, token_indices, baseline[:, 16:-16], page_indices, layout, write=True, ready=None)
     torch.cuda.synchronize()
     expected = pages.clone()
     for page, ready in zip(page_indices, readies):
@@ -330,13 +296,7 @@ def test_cpu_ready_pages_preserve_fields_and_logical_token_positions(
     with monkeypatch.context() as patch:
         if all(readies):
             patch.setattr(torch, "tensor", reject_allocation)
-        state.write_to_cpu(
-            token_indices=token_indices,
-            cpu_page_buffers=pages[:, 16:-16],
-            cpu_page_indices=page_indices,
-            layout=layout,
-            cpu_page_ready_flags=readies,
-        )
+        copy_token_pages(state, token_indices, pages[:, 16:-16], page_indices, layout, write=True, ready=readies)
     torch.cuda.synchronize()
     # 整页比较同时覆盖 KV、量化 scale、packed indexer 字段及前后 padding。
     assert torch.equal(pages, expected)

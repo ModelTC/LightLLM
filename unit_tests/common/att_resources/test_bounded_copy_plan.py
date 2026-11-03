@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import initialize_state_page_pools
 import pytest
 import torch
 
@@ -14,7 +15,7 @@ def test_bound_cpu_snapshots_reuse_native_views_and_preserve_ready_pages(pd_args
     target = bounded_peers(family, 1, False, 1)[0]
     for manager in (source, target):
         for state in manager.get_bounded_attention_states():
-            state.initialize_page_pools(3, 2, pin_memory=True)
+            initialize_state_page_pools(state, 3, 2, pin_memory=True)
     operator = source.get_cpu_cache_operator()
     layouts = operator.get_page_layouts()
     pages = torch.full((3, operator.get_page_bytes()), 173, dtype=torch.uint8, pin_memory=True)
@@ -27,7 +28,7 @@ def test_bound_cpu_snapshots_reuse_native_views_and_preserve_ready_pages(pd_args
     with monkeypatch.context() as patch:
         for manager in (source, target):
             for state in manager.get_bounded_attention_states():
-                for name in ("get_snapshot_transfer_view", "get_snapshot_fields", "bind_cpu_copy"):
+                for name in ("get_snapshot_transfer_view", "get_snapshot_fields"):
                     patch.setattr(state, name, lambda *args: pytest.fail("native CPU fields must be prebound"))
         assert operator._bound_state_plans(pages, layouts, page_kind, True) is writers
         for writer in writers:

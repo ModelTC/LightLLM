@@ -1,6 +1,9 @@
 """FP8 backends obtain calibration from the role's matching storage scheme."""
 
 from __future__ import annotations
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
 
@@ -185,12 +188,12 @@ def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_nu
         scales=scales,
         q_scales=torch.ones((1, head_num), dtype=torch.float32, device="cuda") if scale_mode == "per_head" else None,
     )
-    state.allocate_storage(8)
+    allocate_state_storage(state, 8)
     state.k_storage.zero_()
     state.v_storage.zero_()
     indices = torch.tensor([1, 6], dtype=torch.int32, device="cuda")
     kv = torch.randn((2, 2 * head_num, 128), dtype=torch.bfloat16, device="cuda")
-    state.write_full_att_kv(logical_layer_id=5, token_indices=indices, kv=kv)
+    bind_kv_writer(state, 5)(token_indices=indices, kv=kv)
     k, v = state.get_layer_view(5)
     assert k.untyped_storage().data_ptr() != v.untyped_storage().data_ptr()
     actual = torch.cat((k[indices], v[indices]), dim=1)

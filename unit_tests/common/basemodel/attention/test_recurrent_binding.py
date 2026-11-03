@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
+from lightllm.common.attention_state.storage import allocate_runtime_storage
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
 from lightllm.common.basemodel.attention.legacy import (
     prepare_model_attention,
@@ -52,7 +53,7 @@ def make_model(monkeypatch, family, device="cpu", mtp_step=0):
         if family == "kda":
             dim = 128
         config = ConvSSMStateConfig((layer,), heads, heads, dim, dim, 3, torch.bfloat16, torch.float32)
-        state = (GDNState if family == "gdn" else KDAState)(config, 3, mtp_step, device=device)
+        state = allocate_runtime_storage((GDNState if family == "gdn" else KDAState)(config, 3, mtp_step), device)
         model.att_state_manager.register_state("main", state)
         states.append(state)
     model.att_state_manager.finish_state_registration()

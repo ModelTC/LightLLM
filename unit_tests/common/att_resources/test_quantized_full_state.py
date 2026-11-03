@@ -1,4 +1,8 @@
 from __future__ import annotations
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page, copy_token_pages, copy_tokens
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
 
@@ -48,7 +52,7 @@ def make_quant_state(kind: str, device: str | torch.device | int):
             bits=int(kind[-1]),
         )
         prepared_full_state = GroupQuantizedFullAttentionState(config, page_size=4, device=device)
-        prepared_full_state.allocate_storage(8)
+        allocate_state_storage(prepared_full_state, 8)
         return prepared_full_state
     if kind.startswith("fp8_"):
         per_head = kind == "fp8_head"
@@ -73,7 +77,7 @@ def make_quant_state(kind: str, device: str | torch.device | int):
             scales=scales,
             q_scales=torch.ones((2, config.head_num), dtype=torch.float32) if per_head else None,
         )
-        prepared_full_state.allocate_storage(8)
+        allocate_state_storage(prepared_full_state, 8)
         return prepared_full_state
     fp8 = kind == "packed_fp8"
     config = PackedMLAAttentionConfig(
@@ -84,7 +88,7 @@ def make_quant_state(kind: str, device: str | torch.device | int):
         )
     )
     prepared_full_state = PackedMLAFullAttentionState(config, page_size=4, device=device)
-    prepared_full_state.allocate_storage(8)
+    allocate_state_storage(prepared_full_state, 8)
     return prepared_full_state
 
 
@@ -153,8 +157,11 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
         field.tensor.fill_(i + 1)
         field.tensor[:, 0].fill_(i + 11)
     if device == "cuda":
-        source.copy_full_att_tokens(
-            torch.tensor([0, 2], dtype=torch.long, device=device), torch.tensor([4, 5], dtype=torch.long, device=device)
+        copy_tokens(
+            source,
+            source,
+            torch.tensor([0, 2], dtype=torch.long, device=device),
+            torch.tensor([4, 5], dtype=torch.long, device=device),
         )
         assert_token_fields_equal(
             source=source,
@@ -164,19 +171,25 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
         )
     layout = transfer_layout(source)
     cpu = torch.zeros((2, layout.byte_end), dtype=torch.uint8, pin_memory=device == "cuda")
-    source.write_to_cpu(
-        token_indices=torch.tensor([0, 1, 2, 3, 4], dtype=torch.long, device=device),
-        cpu_page_buffers=cpu,
-        cpu_page_indices=[1, 0],
-        layout=layout,
+    copy_token_pages(
+        source,
+        torch.tensor([0, 1, 2, 3, 4], dtype=torch.long, device=device),
+        cpu,
+        [1, 0],
+        layout,
+        write=True,
+        ready=None,
     )
     if device == "cuda":
         torch.cuda.synchronize()
-    target.read_from_cpu(
-        cpu_page_buffers=cpu,
-        cpu_page_indices=[1, 0],
-        token_indices=torch.tensor([1, 2, 3, 4, 5], dtype=torch.long, device=device),
-        layout=layout,
+    copy_token_pages(
+        target,
+        torch.tensor([1, 2, 3, 4, 5], dtype=torch.long, device=device),
+        cpu,
+        [1, 0],
+        layout,
+        write=False,
+        ready=None,
     )
     assert_token_fields_equal(
         source=source,
@@ -185,17 +198,21 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
         target_ids=[1, 2, 3, 4, 5],
     )
     page = torch.empty(layout.byte_end, dtype=torch.uint8, device=device)
-    source.write_to_pd_page(
+    copy_pd_page(
+        source,
+        page.unsqueeze(0),
+        0,
+        layout,
+        write=True,
         token_indices=torch.tensor([0, 3], dtype=torch.long, device=device),
-        pd_page_buffers=page.unsqueeze(0),
-        pd_page_index=0,
-        layout=layout,
     )
-    target.read_from_pd_page(
-        pd_page_buffers=page.unsqueeze(0),
+    copy_pd_page(
+        target,
+        page.unsqueeze(0),
+        0,
+        layout,
+        write=False,
         token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
-        pd_page_index=0,
-        layout=layout,
     )
     assert_token_fields_equal(
         source=source,
@@ -219,11 +236,7 @@ def test_quantized_cpu_pd_dp_and_token_copy_include_every_field(
     with monkeypatch.context() as patch:
         patch.setattr(torch.Tensor, "tolist", reject_host_list)
         patch.setattr(torch.Tensor, "to", reject_index_conversion)
-        target.copy_tokens_from_dp(
-            src_token_indices=src_indices,
-            dst_token_indices=dst_indices,
-            remote_dp_full_att_state=source,
-        )
+        copy_tokens(source, target, src_indices, dst_indices)
     assert_token_fields_equal(
         source=source,
         source_ids=[0, 1],
@@ -245,7 +258,7 @@ def test_cuda_compute_write_preserves_unrelated_fields(kind: str):
     heads = 1 if isinstance(state, PackedMLAFullAttentionState) else 2 * state.config.head_num
     kv = torch.randn((2, heads, dims), dtype=torch.bfloat16, device="cuda")
     ids = torch.tensor([1, 6], dtype=torch.int32, device="cuda")
-    state.write_full_att_kv(1, ids, kv)
+    bind_kv_writer(state, 1)(token_indices=ids, kv=kv)
     if isinstance(state, GroupQuantizedFullAttentionState):
         quant = read_kv_storage(state)[0, ids].reshape(
             shape=(2, heads, -1, state.config.group_size * state.config.bits // 8),
@@ -293,7 +306,7 @@ def test_deferred_storage_preserves_real_fp8_calibration(kind: str):
     assert read_kv_storage(state) is None and not state.scales.is_meta
     assert torch.equal(state.scales, source.scales)
     state.device = torch.device("cpu")
-    state.allocate_storage(source.capacity)
+    allocate_state_storage(state, source.capacity)
     assert torch.equal(state.scales, source.scales)
     assert torch.equal(torch.from_numpy(state.cpu_scales), source.scales)
 
@@ -319,7 +332,7 @@ def test_int4_prefill_with_separate_storage(device, monkeypatch):
         ),
         device=device,
     )
-    state.allocate_storage(8)
+    allocate_state_storage(state, 8)
     (k, k_scale), (v, v_scale) = state.get_layer_view(0)
     k.view(torch.uint8).fill_(0x88)
     v.view(torch.uint8).fill_(0x99)

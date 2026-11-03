@@ -1,4 +1,8 @@
 """统一窗口状态：K-pool 的组边界及不同 MTP 容量间的 PD 恢复。"""
+from lightllm.common.attention_state.bounded_att.operations import bind_state_operations
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page
+
+from lightllm.common.attention_state.storage import allocate_runtime_storage, initialize_state_page_pools
 
 from dataclasses import replace
 from functools import partial
@@ -20,18 +24,20 @@ def make_window(
     mtp_step: int = 2,
     dtype: torch.dtype = torch.float32,
 ) -> WindowCompressorState:
-    return WindowCompressorState(
-        config=WindowCompressorStateConfig(
-            logical_layer_ids=(3, 7),
-            window_size=4,
-            compress_stride=4,
-            candidate_dim=2,
-            target="indexer",
-            dtype=dtype,
+    return allocate_runtime_storage(
+        WindowCompressorState(
+            config=WindowCompressorStateConfig(
+                logical_layer_ids=(3, 7),
+                window_size=4,
+                compress_stride=4,
+                candidate_dim=2,
+                target="indexer",
+                dtype=dtype,
+            ),
+            request_capacity=3,
+            mtp_step=mtp_step,
         ),
-        request_capacity=3,
-        mtp_step=mtp_step,
-        device=device,
+        device,
     )
 
 
@@ -53,22 +59,22 @@ def test_nonoverlapping_window_needs_no_cpu_snapshot() -> None:
     state = make_window()
     assert state.buffer.shape == (2, 3, 6, 4)
     state.buffer.fill_(17)
-    state.reset_bounded_att_state([0, 1])
+    bind_state_operations(state).reset([0, 1])
     assert not state.buffer[:, :2, :, :2].any()
     assert torch.isneginf(state.buffer[:, :2, :, 2:]).all()
     assert (state.buffer[:, 2] == 17).all()
-    state.initialize_page_pools(big_page_capacity=5, small_page_capacity=2)
+    initialize_state_page_pools(state, big_page_capacity=5, small_page_capacity=2)
     assert state.big_pages_pool is state.small_pages_pool is None
     assert state.get_cpu_transfer_regions() == ()
     # 组边界不依赖此前窗口；下一组四个输入均由新数据覆盖，无需读取快照。
-    state.restore_bounded_att_runtime_from_pages(
+    bind_state_operations(state).restore(
         req_indices=[2],
         state_token_lens=[8],
         page_kind="big",
         page_slot_ids=[0],
     )
     with pytest.raises(AssertionError, match="stride"):
-        state.restore_bounded_att_runtime_from_pages(
+        bind_state_operations(state).restore(
             req_indices=[2],
             state_token_lens=[7],
             page_kind="big",
@@ -90,10 +96,12 @@ def test_window_cache_boundaries_must_close_compressor_groups(
         cpu_args.linear_att_hash_page_size += 1
     else:
         cpu_args.cpu_cache_token_page_size += 1
-    state = WindowCompressorState(
-        config=replace(make_window().config, window_size=window_size, compress_stride=compress_stride),
-        request_capacity=3,
-        device="meta",
+    state = allocate_runtime_storage(
+        WindowCompressorState(
+            config=replace(make_window().config, window_size=window_size, compress_stride=compress_stride),
+            request_capacity=3,
+        ),
+        "meta",
     )
     # 即使不占 CPU 页，也不能在未完成的压缩组内恢复，否则缺少该组历史。
     with pytest.raises(AssertionError, match="pages must align to the compressor stride"):
@@ -110,13 +118,15 @@ def test_manager_allocates_page_tensors_only_for_snapshot_states(
     cpu_args.linear_att_hash_page_size = 128
     cpu_args.linear_att_page_block_num = 2
     cpu_args.cpu_cache_token_page_size = 256
-    state = WindowCompressorState(
-        config=replace(make_window().config, window_size=window_size, compress_stride=compress_stride),
-        request_capacity=3,
-        device="cpu",
+    state = allocate_runtime_storage(
+        WindowCompressorState(
+            config=replace(make_window().config, window_size=window_size, compress_stride=compress_stride),
+            request_capacity=3,
+        ),
+        "cpu",
     )
-    initialize_pools = Mock(wraps=state.initialize_page_pools)
-    monkeypatch.setattr(state, "initialize_page_pools", initialize_pools)
+    initialize_pools = Mock(wraps=initialize_state_page_pools)
+    monkeypatch.setattr("lightllm.common.attention_state.manager.initialize_state_page_pools", initialize_pools)
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator",
         partial(FullAttKVAllocator, pin_memory=False),
@@ -171,20 +181,8 @@ def test_pd_window_restores_different_mtp_rings(
     layout = window_layout(source)
     assert layout == window_layout(target)
     pages = torch.full((3, layout.byte_end + 16), 253, dtype=torch.uint8, device="cuda")
-    source.write_to_pd_page(
-        req_idx=1,
-        pd_page_buffers=pages,
-        pd_page_index=1,
-        state_token_len=length,
-        layout=layout,
-    )
-    target.read_from_pd_page(
-        pd_page_buffers=pages,
-        req_idx=2,
-        pd_page_index=1,
-        state_token_len=length,
-        layout=layout,
-    )
+    copy_pd_page(source, pages, 1, layout, write=True, req_idx=1, state_token_len=length)
+    copy_pd_page(target, pages, 1, layout, write=False, req_idx=2, state_token_len=length)
     expected = torch.full_like(target.buffer[:, 2], 37)
     for position in range(length - 4, length):
         slot = position % (4 + target_step)

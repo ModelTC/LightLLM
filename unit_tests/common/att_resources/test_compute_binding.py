@@ -1,4 +1,5 @@
 from __future__ import annotations
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
 
@@ -57,9 +58,7 @@ def test_transformer_writes_logical_layer_through_manager(kind: str, role: str, 
         dtype=torch.bfloat16,
         device="cuda",
     )
-    from functools import partial
-
-    layer = SimpleNamespace(layer_num_=8, write_full_att_kv=partial(state.write_full_att_kv, logical_layer_id=8))
+    layer = SimpleNamespace(layer_num_=8, write_full_att_kv=bind_kv_writer(state, 8))
     TransformerLayerInferTpl._post_cache_kv(
         self=layer,
         cache_kv=kv,
@@ -113,7 +112,7 @@ def test_packed_fp8_prefill_combines_history_and_fresh_kv_with_sparse_remapping(
         dtype=torch.bfloat16,
         device="cuda",
     )
-    state.write_full_att_kv(0, history_ids, history)
+    bind_kv_writer(state, 0)(token_indices=history_ids, kv=history)
     fresh = torch.full(
         size=(1, 1, 576),
         fill_value=123,

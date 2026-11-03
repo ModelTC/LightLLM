@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from lightllm.common.attention_state.utils import weak_cached_method
-from typing import TYPE_CHECKING, List
 from math import prod
 
 import torch
@@ -12,11 +11,8 @@ from ..utils import deepcopy_result, dtype_name
 from ..types import AxisMapping, TensorField, TransferRegion
 from .base_state import BoundedAttentionState
 from .conv_ssm_types import ConvSSMStateConfig
-from .copy_kernel import copy_bounded_att_tensors
 from .copy_plan import BatchedStateView
 
-if TYPE_CHECKING:
-    from lightllm.common.attention_state.types import PageKind
 
 logger = init_logger(__name__)
 
@@ -24,7 +20,6 @@ logger = init_logger(__name__)
 class ConvSSMState(BoundedAttentionState):
 
     algorithm: str
-    pool_type: type
     runtime_storage_fields = ("conv_state", "ssm_state", "mtp_state_index")
 
     @property
@@ -40,7 +35,6 @@ class ConvSSMState(BoundedAttentionState):
         config: ConvSSMStateConfig,
         request_capacity: int,
         mtp_step: int = 0,
-        device: str | torch.device = "cuda",
     ) -> None:
         """按请求容量创建 Conv/SSM 运行态和 MTP 游标；大小页池延后初始化。"""
         assert isinstance(config, ConvSSMStateConfig), "config must be ConvSSMStateConfig"
@@ -52,24 +46,10 @@ class ConvSSMState(BoundedAttentionState):
             logical_layer_id: storage_layer_index
             for storage_layer_index, logical_layer_id in enumerate(config.logical_layer_ids)
         }
-        storage_layer_count = len(config.logical_layer_ids)
-        self.conv_state = torch.zeros(
-            (storage_layer_count, request_capacity, config.conv_channels, config.conv_width + mtp_step),
-            dtype=config.conv_dtype,
-            device=device,
-        )
-        self.ssm_state = torch.zeros(
-            (
-                storage_layer_count,
-                request_capacity * (mtp_step + 1),
-                config.num_v_heads,
-                config.key_dim,
-                config.value_dim,
-            ),
-            dtype=config.ssm_dtype,
-            device=device,
-        )
-        self.mtp_state_index = torch.zeros(request_capacity, dtype=torch.int32, device=device) if mtp_step else None
+        from ..storage import allocate_buffers
+
+        self.mtp_state_index = None
+        self.bind_runtime_storage(allocate_buffers(self.get_runtime_storage_specs(), "meta"))
         self.big_pages_pool = None
         self.small_pages_pool = None
 
@@ -87,35 +67,32 @@ class ConvSSMState(BoundedAttentionState):
             + c.num_v_heads * c.key_dim * c.value_dim * c.ssm_dtype.itemsize
         )
 
-    def initialize_page_pools(
-        self,
-        big_page_capacity: int,
-        small_page_capacity: int = 0,
-        device: str | torch.device | int = "cpu",
-        pin_memory: bool = True,
-    ) -> None:
-        """容量规划完成后创建本算法的大小页池；容量为零的页池保持 None。"""
-        assert self.big_pages_pool is None and self.small_pages_pool is None, "page pools already initialized"
-        assert big_page_capacity >= 0 and small_page_capacity >= 0, "page capacities must be nonnegative"
-        self.big_pages_pool = (
-            self.pool_type(
-                size=big_page_capacity,
-                config=self.config,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if big_page_capacity
-            else None
+    def get_runtime_storage_specs(self):
+        from ..storage import TensorStorageSpec
+
+        c, layers, requests = self.config, len(self.config.logical_layer_ids), self.request_capacity
+        specs = (
+            TensorStorageSpec(
+                "conv_state", (layers, requests, c.conv_channels, c.conv_width + self.mtp_step), c.conv_dtype, fill=0
+            ),
+            TensorStorageSpec(
+                "ssm_state",
+                (layers, requests * (self.mtp_step + 1), c.num_v_heads, c.key_dim, c.value_dim),
+                c.ssm_dtype,
+                fill=0,
+            ),
         )
-        self.small_pages_pool = (
-            self.pool_type(
-                size=small_page_capacity,
-                config=self.config,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if small_page_capacity
-            else None
+        if self.mtp_step:
+            specs += (TensorStorageSpec("mtp_state_index", (requests,), torch.int32, fill=0),)
+        return specs
+
+    def get_snapshot_storage_specs(self):
+        from ..storage import TensorStorageSpec
+
+        c, layers = self.config, len(self.config.logical_layer_ids)
+        return (
+            TensorStorageSpec("conv_state", (layers, c.conv_channels, c.conv_width), c.conv_dtype),
+            TensorStorageSpec("ssm_state", (layers, c.num_v_heads, c.key_dim, c.value_dim), c.ssm_dtype),
         )
 
     # ========================================================================
@@ -130,70 +107,6 @@ class ConvSSMState(BoundedAttentionState):
         """按逻辑层号映射到物理层，返回 Conv/SSM Tensor 引用；MTP 游标和步数直接从 State 读取。"""
         storage_layer_index = self._logical_to_storage_layer[logical_layer_id]
         return self.conv_state[storage_layer_index], self.ssm_state[storage_layer_index]
-
-    def reset_bounded_att_state(self, req_indices: List[int]) -> None:
-        """清零指定请求的 Conv 历史、全部 SSM 候选及 MTP 游标，保留页池快照。"""
-        assert isinstance(req_indices, list), "request indices must be a list"
-        for req_idx in req_indices:
-            self.conv_state[:, req_idx].zero_()
-            start = req_idx * (self.mtp_step + 1)
-            self.ssm_state[:, start : start + self.mtp_step + 1].zero_()
-            if self.mtp_state_index is not None:
-                self.mtp_state_index[req_idx].fill_(0)
-
-    def save_bounded_att_runtime_to_pages(
-        self,
-        req_indices: List[int],
-        state_token_lens: List[int],
-        page_kind: PageKind,
-        page_slot_ids: List[int],
-    ) -> None:
-        """保存各请求指定绝对 token 长度处的基准状态；Conv/SSM 不依赖长度定位。"""
-        assert isinstance(req_indices, list) and isinstance(
-            page_slot_ids, list
-        ), "request and slot indices must be lists"
-        assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
-        pool = self._pool(page_kind)
-        offsets = self._accepted_byte_offsets(req_indices, self.conv_state.device)
-        conv_copies, ssm_copies = [], []
-        for req_idx, slot_id in zip(req_indices, page_slot_ids):
-            conv_copies.append((self.conv_state[:, req_idx, :, : self.config.conv_width], pool.conv_state[slot_id]))
-            ssm_copies.append((self.ssm_state[:, req_idx * (self.mtp_step + 1)], pool.ssm_state[slot_id]))
-        copy_bounded_att_tensors(copies=conv_copies, source_byte_offsets=offsets["conv"])
-        copy_bounded_att_tensors(copies=ssm_copies, source_byte_offsets=offsets["ssm"])
-
-    def restore_bounded_att_runtime_from_pages(
-        self,
-        req_indices: List[int],
-        state_token_lens: List[int],
-        page_kind: PageKind,
-        page_slot_ids: List[int],
-    ) -> None:
-        """恢复各请求指定绝对 token 长度处的基准状态并归零游标；Conv/SSM 不依赖长度定位。"""
-        assert isinstance(req_indices, list) and isinstance(
-            page_slot_ids, list
-        ), "request and slot indices must be lists"
-        assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
-        pool = self._pool(page_kind)
-        conv_copies, ssm_copies = [], []
-        for req_idx, slot_id in zip(req_indices, page_slot_ids):
-            conv_copies.append((pool.conv_state[slot_id], self.conv_state[:, req_idx, :, : self.config.conv_width]))
-            ssm_copies.append((pool.ssm_state[slot_id], self.ssm_state[:, req_idx * (self.mtp_step + 1)]))
-        copy_bounded_att_tensors(copies=conv_copies)
-        copy_bounded_att_tensors(copies=ssm_copies)
-        if self.mtp_state_index is not None:
-            for req_idx in req_indices:
-                self.mtp_state_index[req_idx].fill_(0)
-
-    def commit_bounded_att_state(
-        self,
-        req_indices: torch.Tensor,
-        accepted_steps: torch.Tensor,
-    ) -> None:
-        """用 CUDA 请求索引和 int32 接受步数选择 SSM 候选位置；步数包含基准输入步。"""
-        assert req_indices.is_cuda and accepted_steps.is_cuda, "commit inputs must be CUDA tensors"
-        if self.mtp_state_index is not None:
-            self.mtp_state_index[req_indices] = accepted_steps - 1
 
     # ========================================================================
     # 三、CPU Cache 数据交换
@@ -340,17 +253,6 @@ class ConvSSMState(BoundedAttentionState):
         )
         return tuple(regions)
 
-    def _pool(self, page_kind: PageKind):
-        """根据大小页类型取得已启用的页池，不访问 allocator。"""
-        assert page_kind in ("big", "small"), f"unknown page kind {page_kind}"
-        pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
-        assert pool is not None, f"{page_kind} pages are disabled for {self.state_name}"
-        return pool
-
-    def _accepted_byte_offsets(self, requests, device):
-        offsets = self.get_runtime_transfer_view().offsets(requests, device)
-        return dict(conv=offsets.get("conv"), ssm=offsets.get("ssm"))
-
     def get_runtime_transfer_view(self):
         return BatchedStateView(
             (
@@ -384,5 +286,6 @@ class ConvSSMState(BoundedAttentionState):
             (
                 ("conv", TensorField(pool.conv_state, ("slot", "layer", "channel", "window"))),
                 ("ssm", TensorField(pool.ssm_state, ("slot", "layer", "head", "key_dim", "value_dim"))),
-            )
+            ),
+            execution_device=self.conv_state.device,
         )

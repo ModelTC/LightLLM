@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from lightllm.common.attention_state.utils import weak_cached_method
-from typing import TYPE_CHECKING, List
 from math import prod
 from dataclasses import dataclass
 
@@ -12,9 +11,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-
-if TYPE_CHECKING:
-    from lightllm.common.attention_state.types import StateTransferLayout
 
 
 @dataclass(frozen=True)
@@ -87,19 +83,11 @@ class MLAFullAttentionState(FullAttentionState):
 
         return MlaFormat(self.config.latent_dtype, self.config.latent_dim, self.page_size)
 
-    def allocate_storage(self, token_capacity: int) -> None:
-        """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
-        self.capacity = token_capacity
-        self.storage = torch.empty(
-            size=(
-                len(self.config.logical_layer_groups),
-                token_capacity + self.page_size,
-                1,
-                self.config.latent_dim,
-            ),
-            dtype=self.config.latent_dtype,
-            device=self.device,
-        )
+    def get_storage_specs(self, token_capacity):
+        from ...storage import TensorStorageSpec
+
+        shape = (len(self.config.logical_layer_groups), token_capacity + self.page_size, 1, self.config.latent_dim)
+        return (TensorStorageSpec("storage", shape, self.config.latent_dtype),)
 
     def get_token_bytes(self) -> int:
         """由配置计算当前 TP rank 的单 token latent 字节数，无需分配存储。"""
@@ -121,11 +109,6 @@ class MLAFullAttentionState(FullAttentionState):
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """按逻辑层号返回压缩 latent 视图，不拆分为 GQA 的 K/V head。"""
         return self.storage[self.get_storage_layer_index(logical_layer_id=logical_layer_id)]
-
-    def bind_kv_writer(self, logical_layer_id: int):
-        from lightllm.common.basemodel.attention.writers import bind_latent_writer
-
-        return bind_latent_writer(self.get_layer_view(logical_layer_id))
 
     # ========================================================================
     # 三、CPU Cache 数据交换

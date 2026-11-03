@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from lightllm.common.attention_state.utils import weak_cached_method
-from typing import TYPE_CHECKING, List
 from math import prod
 from dataclasses import dataclass
 
@@ -13,9 +12,6 @@ from lightllm.utils.log_utils import init_logger
 from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-
-if TYPE_CHECKING:
-    from lightllm.common.attention_state.types import StateTransferLayout
 
 
 logger = init_logger(name=__name__)
@@ -132,12 +128,16 @@ class GQAFullAttentionState(FullAttentionState):
             config.replicated,
         )
 
-    def allocate_storage(self, token_capacity: int) -> None:
-        """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
-        self.capacity = token_capacity
-        shape = self._storage_shape()
-        self.k_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
-        self.v_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
+    def get_storage_specs(self, token_capacity):
+        from ...storage import TensorStorageSpec
+
+        shape = (
+            len(self.config.logical_layer_groups),
+            token_capacity + self.page_size,
+            self.config.head_num,
+            self.config.head_dim,
+        )
+        return tuple(TensorStorageSpec(name, shape, self.storage_dtype) for name in self.storage_fields)
 
     def get_token_bytes(self) -> int:
         """由配置累计当前 TP rank 的 K/V 单 token 开销，无需分配存储。"""
@@ -160,11 +160,6 @@ class GQAFullAttentionState(FullAttentionState):
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
         return self.k_storage[storage_layer_index], self.v_storage[storage_layer_index]
-
-    def bind_kv_writer(self, logical_layer_id: int):
-        from lightllm.common.basemodel.attention.writers import bind_plain_kv_writer
-
-        return bind_plain_kv_writer(*self.get_layer_view(logical_layer_id))
 
     # ========================================================================
     # 三、CPU Cache 数据交换
@@ -280,11 +275,3 @@ class GQAFullAttentionState(FullAttentionState):
             byte_offset,
         )
         return tuple(regions)
-
-    def _storage_shape(self) -> tuple[int, ...]:
-        return (
-            len(self.config.logical_layer_groups),
-            self.capacity + self.page_size,
-            self.config.head_num,
-            self.config.head_dim,
-        )

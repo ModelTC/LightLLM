@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 from types import SimpleNamespace
 
 import pytest
@@ -25,7 +26,7 @@ def test_validator_checks_all_compressed_states(monkeypatch, draft_count, bad_ro
         )
         for ratio in (4, 128):
             state = create_compressed_att_state(config.create_compressed_config(ratio), device="meta")
-            state.allocate_storage(256 if role == bad_role and ratio == 4 else 512)
+            allocate_state_storage(state, 256 if role == bad_role and ratio == 4 else 512)
             resources.register_state(role, state)
         models.append(SimpleNamespace(att_state_manager=resources, att_state_role=role, req_manager=req_manager))
     resources.finish_state_registration()

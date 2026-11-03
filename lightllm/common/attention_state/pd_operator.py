@@ -102,6 +102,7 @@ class PDOperator:
 
     def __init__(self, owner: AttentionStateManager):
         self.owner = owner
+        self._copy_plans = {}
 
     @weak_cached_method
     def get_pd_full_att_page_layouts(self) -> Mapping[str, StateTransferLayout]:
@@ -127,6 +128,7 @@ class PDOperator:
         return max(full_bytes, runtime_bytes)
 
     def clear_layout_cache(self) -> None:
+        self._copy_plans.clear()
         self.get_pd_full_att_page_layouts.cache_clear()
         self.get_pd_bounded_att_page_layouts.cache_clear()
         self.get_page_bytes.cache_clear()
@@ -155,31 +157,13 @@ class PDOperator:
         req_idx: int | None = None,
         state_token_len: int | None = None,
     ) -> None:
-        match kind:
-            case "kv":
-                assert token_indices is not None, "KV PD pages require token indices"
-                for state in self.owner.get_full_attention_states():
-                    state.write_to_pd_page(
-                        token_indices=token_indices,
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        layout=layouts[state.state_name],
-                    )
-            case "att_state":
-                assert req_idx is not None, "state PD pages require a request index"
-                assert (
-                    state_token_len is not None and state_token_len >= 0
-                ), "PD state requires its prefill prefix length"
-                for state in self.owner.get_bounded_attention_states():
-                    state.write_to_pd_page(
-                        req_idx=req_idx,
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        state_token_len=state_token_len,
-                        layout=layouts[state.state_name],
-                    )
-            case _:
-                raise AssertionError(f"unknown PD page kind {kind}")
+        self._bound_copy(pd_page_buffers, layouts, kind, True).run(
+            pd_page_index=pd_page_index,
+            task_kind=kind,
+            token_indices=token_indices,
+            req_idx=req_idx,
+            state_token_len=state_token_len,
+        )
 
     def read_page(
         self,
@@ -191,28 +175,30 @@ class PDOperator:
         req_idx: int | None = None,
         state_token_len: int | None = None,
     ) -> None:
-        match kind:
-            case "kv":
-                assert token_indices is not None, "KV PD pages require token indices"
-                for state in self.owner.get_full_attention_states():
-                    state.read_from_pd_page(
-                        pd_page_buffers=pd_page_buffers,
-                        token_indices=token_indices,
-                        pd_page_index=pd_page_index,
-                        layout=layouts[state.state_name],
-                    )
-            case "att_state":
-                assert req_idx is not None, "state PD pages require a request index"
-                assert (
-                    state_token_len is not None and state_token_len >= 0
-                ), "PD state requires its prefill prefix length"
-                for state in self.owner.get_bounded_attention_states():
-                    state.read_from_pd_page(
-                        pd_page_buffers=pd_page_buffers,
-                        req_idx=req_idx,
-                        pd_page_index=pd_page_index,
-                        state_token_len=state_token_len,
-                        layout=layouts[state.state_name],
-                    )
-            case _:
-                raise AssertionError(f"unknown PD page kind {kind}")
+        self._bound_copy(pd_page_buffers, layouts, kind, False).run(
+            pd_page_index=pd_page_index,
+            task_kind=kind,
+            token_indices=token_indices,
+            req_idx=req_idx,
+            state_token_len=state_token_len,
+        )
+
+    def _bound_copy(self, pages, layouts, kind, write):
+        from .copy_plan import CopyPlan
+
+        if kind not in ("kv", "att_state"):
+            raise ValueError(f"unknown PD page kind {kind}")
+        key = kind, write
+        cached = self._copy_plans.get(key)
+        if cached is None or cached[0] is not pages or cached[1] != layouts:
+            plan = CopyPlan.bind(
+                self.owner.get_full_attention_states() if kind == "kv" else (),
+                self.owner.get_bounded_attention_states() if kind == "att_state" else (),
+                pages,
+                layouts if kind == "kv" else {},
+                layouts if kind == "att_state" else {},
+                write,
+            )
+            cached = pages, dict(layouts), plan
+            self._copy_plans[key] = cached
+        return cached[2]

@@ -1,3 +1,5 @@
+from functools import cached_property
+from lightllm.common.device_runtime import get_device_runtime
 import torch
 import triton
 import collections
@@ -18,6 +20,10 @@ class InferStateInfo:
     """
     推理时用的信息结构体
     """
+
+    @cached_property
+    def runtime(self):
+        return get_device_runtime(self.b_req_idx.device)
 
     def __init__(self):
         # prefill 和 decode 使用的 att 状态对象
@@ -248,8 +254,8 @@ class InferStateInfo:
 
         args = get_env_start_args()
 
-        dp_input_lens = torch.empty(size=(args.dp,), device="cuda", dtype=torch.int32)
-        input_len = torch.empty(size=(1,), device="cuda", dtype=torch.int32)
+        dp_input_lens = torch.empty(size=(args.dp,), device=self.runtime.device, dtype=torch.int32)
+        input_len = torch.empty(size=(1,), device=self.runtime.device, dtype=torch.int32)
         input_len.fill_(len(input_ids))
         dist.all_gather_into_tensor(
             output_tensor=dp_input_lens,
@@ -378,7 +384,7 @@ class InferStateInfo:
         dest_data = g_cache_manager.alloc_tensor(
             shape=(handle_len * scale_size,),
             data_type=data.dtype,
-            device="cuda",
+            device=self.runtime.device,
         )
         dist.all_to_all_single(
             output=dest_data.view(-1),
@@ -408,7 +414,7 @@ class InferStateInfo:
         origin_data = g_cache_manager.alloc_tensor(
             shape=(origin_len * scale_size,),
             data_type=data.dtype,
-            device="cuda",
+            device=self.runtime.device,
         )
         dist.all_to_all_single(
             output=origin_data.view(-1),
@@ -424,8 +430,8 @@ class InferStateInfo:
     def prefill_cuda_graph_create_graph_obj(self):
         if not hasattr(self, "prefill_cuda_graph_exe_list"):
             self.prefill_cuda_graph_exe_list = []
-        graph_obj = torch.cuda.CUDAGraph()
-        capture_graph = torch.cuda.graph(graph_obj, pool=self.mem_pool)
+        graph_obj = self.runtime.create_graph()
+        capture_graph = self.runtime.capture_graph(graph_obj, pool=self.mem_pool)
         self.prefill_cuda_graph_exe_list.append((graph_obj, capture_graph))
         return
 

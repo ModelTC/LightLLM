@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from lightllm.common.attention_state.storage import initialize_state_page_pools
+
+from lightllm.common.attention_state.storage import allocate_state_storage
+
 from typing import TYPE_CHECKING
 from contextlib import nullcontext
 from dataclasses import replace
@@ -98,14 +102,14 @@ def rebuild_full_state(
             scales=template.scales if scales is None else scales,
             q_scales=template.q_scales if q_scales is None else q_scales,
         )
-        prepared_full_state.allocate_storage(token_capacity)
+        allocate_state_storage(prepared_full_state, token_capacity)
         return prepared_full_state
     prepared_full_state = type(template)(
         config,
         page_size=page_size,
         device=device,
     )
-    prepared_full_state.allocate_storage(token_capacity)
+    allocate_state_storage(prepared_full_state, token_capacity)
     return prepared_full_state
 
 
@@ -283,10 +287,8 @@ def build_hybrid_resources(
         mtp_step=mtp_step,
         device="cuda",
     )
-    bounded_state.initialize_page_pools(
-        big_page_capacity=big_page_capacity,
-        small_page_capacity=small_page_capacity,
-        pin_memory=True,
+    initialize_state_page_pools(
+        bounded_state, big_page_capacity=big_page_capacity, small_page_capacity=small_page_capacity, pin_memory=True
     )
     manager.register_state("main", bounded_state)
     for role, state in (("main", full_state), ("draft0", draft_full_state)):

@@ -1,5 +1,7 @@
 """FP8E8M0SlidingWindowState 的独立创建入口。"""
 
+from lightllm.common.attention_state.storage import allocate_runtime_storage
+
 import torch
 
 from .fp8_e8m0_swa_state import FP8E8M0SlidingWindowConfig, FP8E8M0SlidingWindowState
@@ -11,9 +13,6 @@ def create_sliding_window_state(
     mtp_step: int = 0,
     device: str | torch.device = "cuda",
 ) -> FP8E8M0SlidingWindowState:
-    return FP8E8M0SlidingWindowState(
-        config=config,
-        request_capacity=request_capacity,
-        mtp_step=mtp_step,
-        device=device,
+    return allocate_runtime_storage(
+        FP8E8M0SlidingWindowState(config=config, request_capacity=request_capacity, mtp_step=mtp_step), device
     )

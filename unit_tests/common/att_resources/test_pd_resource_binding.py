@@ -1,3 +1,6 @@
+from lightllm.common.attention_state.storage import allocate_runtime_storage
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 from dataclasses import replace
 import json
 
@@ -110,7 +113,7 @@ def test_pd_regrouping_and_resharding_preserve_global_heads_and_calibration(
             manager.finish_state_registration()
             manager.load_full_att_calibration(pd_args)
             for state in manager.get_full_attention_states():
-                state.allocate_storage(8)
+                allocate_state_storage(state, 8)
                 for field in state.get_transfer_fields().values():
                     field.tensor.view(torch.uint8).fill_(173)
             managers.append(manager)
@@ -162,13 +165,15 @@ def bounded_peers(family, tp, split, mtp_step):
             for layers in ((1,), (5,)) if split else ((5, 1),):
                 if family in ("gdn", "kda"):
                     config = ConvSSMStateConfig(layers, 2, 2, 8, 8, 4, torch.bfloat16, torch.float32, rank, tp)
-                    state = (GDNState if family == "gdn" else KDAState)(config, 3, mtp_step, device="cuda")
+                    state = allocate_runtime_storage(
+                        (GDNState if family == "gdn" else KDAState)(config, 3, mtp_step), "cuda"
+                    )
                 elif family == "window":
                     config = FP8E8M0SlidingWindowConfig(layers, 16, 128, 64, tp_rank=rank, tp_world_size=tp)
-                    state = FP8E8M0SlidingWindowState(config, 3, mtp_step, device="cuda")
+                    state = allocate_runtime_storage(FP8E8M0SlidingWindowState(config, 3, mtp_step), "cuda")
                 else:
                     config = WindowCompressorStateConfig(layers, 8, 4, 16, tp_rank=rank, tp_world_size=tp)
-                    state = WindowCompressorState(config, 3, mtp_step, device="cuda")
+                    state = allocate_runtime_storage(WindowCompressorState(config, 3, mtp_step), "cuda")
                 manager.register_state(role, state)
         manager.finish_state_registration()
         managers.append(manager)
@@ -224,12 +229,7 @@ def test_bounded_pd_preserves_logical_layers_across_grouping_and_tp(
     with monkeypatch.context() as patch:
         for manager in (*source, *target):
             for state in manager.get_bounded_attention_states():
-                for name in (
-                    "get_runtime_transfer_view",
-                    "bind_pd_copy",
-                    "write_to_pd_page",
-                    "read_from_pd_page",
-                ):
+                for name in ("get_runtime_transfer_view",):
                     patch.setattr(state, name, lambda *args, **kwargs: pytest.fail("native PD fields must be prebound"))
         writer.run(pd_page_index=1, task_kind="att_state", req_idx=0, state_token_len=length)
         reader.run(pd_page_index=1, task_kind="att_state", req_idx=1, state_token_len=length)

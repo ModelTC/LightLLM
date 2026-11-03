@@ -1,5 +1,5 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 from dataclasses import replace
-from types import SimpleNamespace
 
 import pytest
 import torch
@@ -9,7 +9,7 @@ from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_
 
 
 @pytest.mark.parametrize("kv_type", ["None", "int4kv", "int8kv", "fp8kv_spt", "fp8kv_sph"])
-def test_gqa_layouts_coexist_and_match_across_tp_and_registration_order(kv_type, pd_args, monkeypatch):
+def test_gqa_layouts_coexist_and_match_across_tp_and_registration_order(kv_type, pd_args):
     config = GQAAttentionConfig(logical_layer_groups=((0,),), global_head_num=8, head_dim=128, dtype=torch.bfloat16)
     configs = [
         config,
@@ -38,25 +38,6 @@ def test_gqa_layouts_coexist_and_match_across_tp_and_registration_order(kv_type,
         assert set(layouts) == set(peer_layouts) == {state.state_name for state in states}
         ordered = sorted(layouts.values(), key=lambda layout: layout.byte_start)
         assert all(a.byte_end <= b.byte_start for a, b in zip(ordered, ordered[1:]))
-    copied = []
-    for state in states:
-
-        monkeypatch.setattr(state, "get_token_copy_fields", lambda: None)
-        monkeypatch.setattr(
-            state,
-            "copy_tokens_from_dp",
-            lambda *, remote_dp_full_att_state, **_: copied.append(remote_dp_full_att_state),
-        )
-    source.get_dp_shared_operator().copy_from_dp(
-        remote_att_manager=target,
-        src_token_indices=torch.tensor([0]),
-        dst_token_indices=torch.tensor([1]),
-        src_big_page_ids=[],
-        dst_big_page_ids=[],
-        src_req_idx=0,
-        dst_req_idx=1,
-    )
-    assert copied == [getattr(target, state.state_name) for state in states]
 
 
 def test_fp8_bindings_keep_calibration_with_each_head_layout():
@@ -72,8 +53,16 @@ def test_fp8_bindings_keep_calibration_with_each_head_layout():
             logical_layer_groups=((layer,),), global_head_num=heads, head_dim=128, dtype=torch.bfloat16
         )
         state = create_gqa_state(config, kv_type="fp8kv_sph", device="cpu")
-        state.scales = torch.arange(1, 2 * heads + 1, dtype=torch.float32).view(1, -1)
-        state.allocate_storage(8)
+        state.bind_logical_calibration(
+            {
+                "quant_type": "per_head",
+                "layers": {
+                    "main": {str(layer): {"k": list(range(1, heads + 1)), "v": list(range(heads + 1, 2 * heads + 1))}}
+                },
+            },
+            "main",
+        )
+        allocate_state_storage(state, 8)
         states.append(state)
     model = bind_test_model(states, backend=Fp8Backend(object()))
     for layer, state in zip(model.layers_infer, states):

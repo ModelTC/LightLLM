@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 from types import SimpleNamespace
 
 import pytest
@@ -134,7 +135,7 @@ def test_dflash_hidden_commit_uses_draft_state(device, monkeypatch):
             GQAAttentionConfig(logical_layer_groups=layers, global_head_num=1, head_dim=16, dtype=torch.float32),
             device=device,
         )
-        state.allocate_storage(8)
+        allocate_state_storage(state, 8)
         state.k_storage.zero_()
         state.v_storage.zero_()
         manager.register_state(role, state)

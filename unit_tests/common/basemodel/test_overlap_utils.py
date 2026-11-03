@@ -12,13 +12,13 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
     model_input0 = _make_prefill_input([10, 11], req_idx=20, is_decode_req=False)
     model_input1 = _make_prefill_input([12], req_idx=21, is_decode_req=True)
     events = []
-    original_to_cuda = ModelInput.to_cuda
+    original_to_device = ModelInput.to_device
 
-    def record_to_cuda(self):
-        events.append("to_cuda")
-        original_to_cuda(self)
+    def record_to_device(self, device):
+        events.append("to_device")
+        original_to_device(self, device)
 
-    monkeypatch.setattr(ModelInput, "to_cuda", record_to_cuda)
+    monkeypatch.setattr(ModelInput, "to_device", record_to_device)
 
     def fake_gather(**kwargs):
         events.append("gather")
@@ -45,7 +45,7 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
 
     outputs = model.microbatch_overlap_prefill(model_input0, model_input1)
 
-    assert events == ["to_cuda", "gather", "to_cuda", "gather", "forward"]
+    assert events == ["to_device", "gather", "to_device", "gather", "forward"]
     assert captured_inputs == [model_input0, model_input1]
     assert captured_inputs[0].input_ids.tolist() == [10, 91]
     assert captured_inputs[1].input_ids.tolist() == [92]
@@ -58,13 +58,13 @@ def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch
     model_input1 = _make_empty_decode_input()
     model_input1.input_ids = None
     events = []
-    original_to_cuda = ModelInput.to_cuda
+    original_to_device = ModelInput.to_device
 
-    def record_to_cuda(self):
-        events.append("to_cuda")
-        original_to_cuda(self)
+    def record_to_device(self, device):
+        events.append("to_device")
+        original_to_device(self, device)
 
-    monkeypatch.setattr(ModelInput, "to_cuda", record_to_cuda)
+    monkeypatch.setattr(ModelInput, "to_device", record_to_device)
 
     def fake_gather(**kwargs):
         events.append("gather")
@@ -96,7 +96,7 @@ def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch
 
     model.microbatch_overlap_decode(model_input0, model_input1)
 
-    assert events == ["to_cuda", "gather", "to_cuda", "forward"]
+    assert events == ["to_device", "gather", "to_device", "forward"]
     assert captured_inputs == [model_input0, model_input1]
     assert captured_inputs[0].input_ids.tolist() == [40, 41, 42, 43, 44, 45]
     assert captured_inputs[1].input_ids.numel() == 0
@@ -118,8 +118,8 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     model_input0.multimodal_params = model_input0.multimodal_params[:1]
     model_input0.check_input()
     model_input1 = _make_empty_decode_input()
-    model_input0.to_cuda()
-    model_input1.to_cuda()
+    model_input0.to_device("cuda")
+    model_input1.to_device("cuda")
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1)

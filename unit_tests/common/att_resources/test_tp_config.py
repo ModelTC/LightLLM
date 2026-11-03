@@ -1,6 +1,11 @@
 """State 配置独立保留全局布局，改变 TP 后仍可恢复同一份缓存。"""
 
 from __future__ import annotations
+from unit_tests.common.att_resources.transfer_helpers import copy_token_pages
+
+from lightllm.common.attention_state.storage import allocate_runtime_storage
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
@@ -74,7 +79,7 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
             replicated=replicated,
         )
     reference = state_cls(config, page_size=4, device="cuda")
-    reference.allocate_storage(4)
+    allocate_state_storage(reference, 4)
     for storage_buffer in full_state_test_buffers(reference).values():
         storage_buffer.copy_(torch.arange(storage_buffer.numel()).reshape(storage_buffer.shape))
     fields = {
@@ -89,30 +94,24 @@ def test_serialized_full_config_restores_cpu_pages_with_different_tp(
     assert "head_num" not in vars(restored_config)
     for rank, (start, end) in enumerate(source_ranges):
         source = state_cls(replace(config, tp_rank=rank, tp_world_size=len(source_ranges)), page_size=4, device="cuda")
-        source.allocate_storage(4)
+        allocate_state_storage(source, 4)
         layout = cpu_layout(source)
         assert layout.byte_end == reference_layout.byte_end
         for name, field in full_state_test_fields(source, full_state_test_buffers(source)).items():
             field.tensor.copy_(fields[name][:, :, start:end])
-        source.write_to_cpu(
-            token_indices=torch.arange(4, dtype=torch.long, device="cuda"),
-            cpu_page_buffers=buffer,
-            cpu_page_indices=[0],
-            layout=layout,
+        copy_token_pages(
+            source, torch.arange(4, dtype=torch.long, device="cuda"), buffer, [0], layout, write=True, ready=None
         )
 
     for rank, (start, end) in enumerate(target_ranges):
         target = state_cls(
             replace(restored_config, tp_rank=rank, tp_world_size=len(target_ranges)), page_size=4, device="cuda"
         )
-        target.allocate_storage(4)
+        allocate_state_storage(target, 4)
         layout = cpu_layout(target)
         assert layout.byte_end == reference_layout.byte_end
-        target.read_from_cpu(
-            cpu_page_buffers=buffer,
-            cpu_page_indices=[0],
-            token_indices=torch.arange(4, dtype=torch.long, device="cuda"),
-            layout=layout,
+        copy_token_pages(
+            target, torch.arange(4, dtype=torch.long, device="cuda"), buffer, [0], layout, write=False, ready=None
         )
         for name, field in full_state_test_fields(target, full_state_test_buffers(target)).items():
             torch.testing.assert_close(field.tensor[:, :4], fields[name][:, :4, start:end])
@@ -132,10 +131,10 @@ def test_bounded_config_keeps_distinct_global_heads_when_local_heads_are_replica
         tp_rank=7,
         tp_world_size=8,
     )
-    source = GDNState(config, request_capacity=1, device="meta")
+    source = allocate_runtime_storage(GDNState(config, request_capacity=1), "meta")
     assert config.num_k_heads == config.num_v_heads == 1
     restored_config = replace(pickle.loads(pickle.dumps(config)), tp_rank=0, tp_world_size=1)
-    target = GDNState(restored_config, request_capacity=1, device="meta")
+    target = allocate_runtime_storage(GDNState(restored_config, request_capacity=1), "meta")
     assert restored_config.num_k_heads == 2 and restored_config.num_v_heads == 4
     assert "num_k_heads" not in vars(config) and "num_v_heads" not in vars(config)
     assert target.conv_state.shape == (1, 1, 20, 2)
@@ -168,7 +167,7 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
             ssm_dtype=torch.float32,
             tp_world_size=8,
         )
-        source = GDNState(config, request_capacity=1, device="meta")
+        source = allocate_runtime_storage(GDNState(config, request_capacity=1), "meta")
         other_config = replace(config, logical_layer_ids=(1,), global_k_heads=4)
     else:
         config = GQAAttentionConfig(
@@ -181,11 +180,9 @@ def test_drafts_keep_independent_global_layouts_with_equal_local_shapes(
         source = GQAFullAttentionState(config, page_size=4, device="meta")
         other_config = replace(config, logical_layer_groups=((1,),), global_head_num=4)
     if bounded:
-        other = type(source)(
-            config=other_config,
-            request_capacity=source.request_capacity,
-            mtp_step=source.mtp_step,
-            device="meta",
+        other = allocate_runtime_storage(
+            type(source)(config=other_config, request_capacity=source.request_capacity, mtp_step=source.mtp_step),
+            "meta",
         )
     else:
         other = rebuild_full_state(source, config=other_config)

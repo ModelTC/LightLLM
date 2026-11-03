@@ -8,7 +8,6 @@ import torch
 
 from lightllm.common.attention_state.types import PageKind
 
-from lightllm.utils.dist_utils import get_current_device_id
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 
@@ -19,6 +18,13 @@ from .full_att import FullAttentionState
 from .bounded_att import BoundedAttentionState
 from .pd_operator import PDOperator
 from .utils import MODEL_ROLES
+from .storage import (
+    allocate_state_storage,
+    release_state_storage,
+    allocate_runtime_storage,
+    initialize_state_page_pools,
+    release_state_page_pools,
+)
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -62,6 +68,7 @@ class AttentionStateManager:
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
         self._token_copies = None
+        self._state_operations = None
 
     def _reset_operators(self) -> None:
         """让浅拷贝后的 Operator 指向新的资源管理器副本。"""
@@ -69,6 +76,7 @@ class AttentionStateManager:
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
         self._token_copies = None
+        self._state_operations = None
 
     def get_cpu_cache_operator(self) -> CpuCacheOperator:
         """返回当前资源管理器唯一的 CPU cache 操作对象。"""
@@ -261,21 +269,27 @@ class AttentionStateManager:
 
         if not self.get_full_attention_states() and token_capacity is None:
             raise ValueError("recurrent-only models require max_total_token_num to bound retained checkpoints")
+        from lightllm.common.device_runtime import get_device_runtime
+
         allocation_device = torch.device(device)
-        demands = merge_memory_demands(self.get_storage_memory_demands(args, allocation_device.type), runtime_demands)
+        runtime = get_device_runtime(allocation_device)
+        demands = merge_memory_demands(
+            self.get_storage_memory_demands(args, allocation_device.type, runtime.device), runtime_demands
+        )
         if memory_limits is None:
             local_ranks = max(1, args.tp // args.nnodes)
             memory_limits = {"cpu": psutil.virtual_memory().available // local_ranks}
         else:
             memory_limits = dict(memory_limits)
-        if allocation_device.type == "cuda" and "cuda" not in memory_limits:
-            torch.cuda.empty_cache()
-            gpu_device = torch.device("cuda", get_current_device_id())
-            free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_device)
-            memory_limits["cuda"] = free_bytes
+        if allocation_device.type != "cpu" and allocation_device.type not in memory_limits:
+            runtime.empty_cache()
+            free_bytes, total_bytes = runtime.memory_info()
+            memory_limits[allocation_device.type] = free_bytes
             demands += (
                 MemoryDemand(
-                    "runtime_headroom", "cuda", max(int(total_bytes * (1 - mem_fraction)), runtime_peak_bytes)
+                    "runtime_headroom",
+                    allocation_device.type,
+                    max(int(total_bytes * (1 - mem_fraction)), runtime_peak_bytes),
                 ),
             )
         elif runtime_peak_bytes:
@@ -327,14 +341,14 @@ class AttentionStateManager:
             raise RuntimeError("all storage providers must declare allocation ownership before replanning")
         self._reset_operators()
         for state in states:
-            state.release_storage()
+            release_state_storage(state)
         for state in self.get_bounded_attention_states():
-            state.release_page_pools()
+            release_state_page_pools(state)
         self.full_att_allocator = None
         self.bounded_att_big_page_allocator = None
         self.bounded_att_small_page_allocator = None
 
-    def get_storage_memory_demands(self, args, storage_domain="cuda"):
+    def get_storage_memory_demands(self, args, storage_domain="cuda", allocation_device=None):
         from .memory_plan import MemoryDemand
 
         demands = [MemoryDemand("token_allocator", "cpu", bytes_per_unit=16)]
@@ -344,7 +358,7 @@ class AttentionStateManager:
                 MemoryDemand(
                     state.state_name,
                     storage_domain,
-                    token_bytes * args.page_size + state.get_fixed_storage_bytes(),
+                    token_bytes * args.page_size + state.get_fixed_storage_bytes(allocation_device),
                     token_bytes,
                 )
             )
@@ -404,7 +418,7 @@ class AttentionStateManager:
             # 管理器统一设置实际页规格和设备；State 的分配接口只接收 token 容量。
             state.page_size = page_size
             state.device = torch.device(device)
-            state.allocate_storage(token_capacity)
+            allocate_state_storage(state, token_capacity)
         self.full_att_allocator = FullAttKVAllocator(
             token_capacity, page_size, pin_memory=torch.device(device).type == "cuda"
         )
@@ -419,12 +433,13 @@ class AttentionStateManager:
                 StatePageAllocator(small_page_capacity) if small_page_capacity else None
             )
             for state in bounded_states:
-                state.allocate_runtime_storage(device)
+                allocate_runtime_storage(state, device)
                 # 无快照区域的 State 在合法缓存边界无需历史，不为它分配大小页 Tensor。
                 # 共享槽位 allocator 仍供其他 State 和缓存流程使用，不随单个 State 重复创建。
                 if not state.get_cpu_transfer_regions():
                     continue
-                state.initialize_page_pools(
+                initialize_state_page_pools(
+                    state,
                     big_page_capacity=big_page_capacity,
                     small_page_capacity=small_page_capacity,
                     pin_memory=torch.device(device).type == "cuda",
@@ -440,6 +455,7 @@ class AttentionStateManager:
         self.get_cpu_cache_operator().clear_layout_cache()
         self.get_pd_operator().clear_layout_cache()
         self._bind_token_copies()
+        self._bind_state_operations()
 
     def get_full_attention_states(self, role: str | None = None) -> tuple[FullAttentionState, ...]:
         """返回全部或指定角色的 full-attention State；只缓存对象引用。"""
@@ -467,11 +483,7 @@ class AttentionStateManager:
         copies = []
         for state in self.get_full_attention_states():
             fields = state.get_token_copy_fields()
-            copies.append(
-                (TokenPageCopyPlan.for_tokens(fields, fields), None)
-                if fields is not None
-                else (None, state.copy_full_att_tokens)
-            )
+            copies.append(TokenPageCopyPlan.for_tokens(fields, fields))
         self._token_copies = tuple(copies)
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
@@ -483,24 +495,32 @@ class AttentionStateManager:
         if self._token_copies is None:
             self._bind_token_copies()
         batch = TransferBatch(src_indices, dst_indices)
-        for plan, _ in self._token_copies:
-            if plan is not None:
-                plan.validate_batch(batch)
-        for plan, legacy in self._token_copies:
-            if plan is not None:
-                plan.run(batch)
-            else:
-                legacy(src_indices, dst_indices)
+        for plan in self._token_copies:
+            plan.validate_batch(batch)
+        for plan in self._token_copies:
+            plan.run(batch)
 
     # ========================================================================
     # 三、Bounded attention：运行态重置、大小页保存与恢复、MTP 提交
     # ========================================================================
 
+    def _bind_state_operations(self):
+        from .bounded_att.operations import bind_state_operations
+
+        self._state_operations = tuple(
+            (state.model_role, bind_state_operations(state)) for state in self.get_bounded_attention_states()
+        )
+
+    def get_state_operations(self):
+        if self._state_operations is None:
+            self._bind_state_operations()
+        return self._state_operations
+
     # 空前缀初始化：只处理 bounded attention；无此类 State 时可为空操作。
     def reset_bounded_att_state(self, req_indices: List[int]) -> None:
         """将指定槽位的 bounded 运行态及控制信息恢复到长度 0，保留 KV 和状态页。"""
-        for state in self.get_bounded_attention_states():
-            state.reset_bounded_att_state(req_indices)
+        for _, operations in self.get_state_operations():
+            operations.reset(req_indices)
 
     # Bounded attention 状态页：供 radix/CPU cache 复用；未启用对应页池时操作报错。
     # 调用方提供已分配的大小页槽位；发布前完成保存，解除引用并结束使用后直接归还 allocator。
@@ -512,7 +532,7 @@ class AttentionStateManager:
         page_slot_ids: List[int],
     ) -> None:
         """按各请求已执行的绝对 token 长度保存全部 bounded State；三个列表逐项对应。"""
-        bounded_states = self.get_bounded_attention_states()
+        bounded_states = self.get_state_operations()
         assert isinstance(req_indices, list) and isinstance(
             page_slot_ids, list
         ), "request and slot indices must be lists"
@@ -522,8 +542,8 @@ class AttentionStateManager:
         assert (
             len(page_slot_ids) == len(req_indices) == len(state_token_lens)
         ), "one length and slot are required per request"
-        for state in bounded_states:
-            state.save_bounded_att_runtime_to_pages(
+        for _, operations in bounded_states:
+            operations.save(
                 req_indices=req_indices,
                 state_token_lens=state_token_lens,
                 page_kind=page_kind,
@@ -538,7 +558,7 @@ class AttentionStateManager:
         page_slot_ids: List[int],
     ) -> None:
         """按各快照对应的绝对 token 长度恢复运行态及 ring 位置等控制信息。"""
-        bounded_states = self.get_bounded_attention_states()
+        bounded_states = self.get_state_operations()
         assert isinstance(req_indices, list) and isinstance(
             page_slot_ids, list
         ), "request and slot indices must be lists"
@@ -549,8 +569,8 @@ class AttentionStateManager:
             len(page_slot_ids) == len(req_indices) == len(state_token_lens)
         ), "one length and slot are required per request"
         assert not page_slot_ids or bounded_states, "state restore requires participating bounded states"
-        for state in bounded_states:
-            state.restore_bounded_att_runtime_from_pages(
+        for _, operations in bounded_states:
+            operations.restore(
                 req_indices=req_indices,
                 state_token_lens=state_token_lens,
                 page_kind=page_kind,
@@ -565,10 +585,10 @@ class AttentionStateManager:
         role: str,
     ) -> None:
         """传入 CUDA 请求索引和 int32 接受步数，包含基准输入步；无参与 State 时为空操作。"""
-        assert req_indices.is_cuda and accepted_steps.is_cuda, "commit inputs must be CUDA tensors"
         assert role in MODEL_ROLES, f"unknown model role {role}"
-        for state in self.get_bounded_attention_states(role):
-            state.commit_bounded_att_state(req_indices, accepted_steps)
+        for model_role, operations in self.get_state_operations():
+            if model_role == role:
+                operations.commit(req_indices, accepted_steps)
 
     # ========================================================================
     # 四、CPU/DP/PD 操作均由对应 Operator 提供。

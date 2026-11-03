@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lightllm.common.attention_state.storage import allocate_state_storage
+
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
 from typing import TYPE_CHECKING
@@ -250,12 +252,12 @@ def test_deferred_calibration_keeps_unit_scale_policy(encoding: str):
     manager.register_state("main", state)
     manager.finish_state_registration()
     with pytest.raises(AssertionError, match="calibration must be bound"):
-        state.allocate_storage(4)
+        allocate_state_storage(state, 4)
     if encoding == "fp8kv_sph":
         with pytest.raises(AssertionError, match="requires a KV calibration file"):
             manager.load_full_att_calibration(args=StartArgs())
     else:
         manager.load_full_att_calibration(args=StartArgs())
         assert torch.equal(state.scales, torch.ones((2, 2)))
-        state.allocate_storage(4)
+        allocate_state_storage(state, 4)
         assert state.k_storage.shape[0] == 2

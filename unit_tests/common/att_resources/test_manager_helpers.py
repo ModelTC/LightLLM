@@ -12,7 +12,7 @@ import torch
 
 from lightllm.common.attention_state.allocators import FullAttKVAllocator, StatePageAllocator
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.types import PageKind, StateTransferLayout
+from lightllm.common.attention_state.types import PageKind
 from unit_tests.common.att_resources.manager_fixtures import MainDraftTestResourceManager
 from unit_tests.common.att_resources.test_full_state import full_state, layout_for
 from unit_tests.common.att_resources.test_bounded_state import page_layout
@@ -103,7 +103,7 @@ def test_shared_slots_save_restore_and_propagate_failure(monkeypatch: pytest.Mon
     def fail(*args: object, **kwargs: object):
         raise RuntimeError("simulated copy failure")
 
-    monkeypatch.setattr(manager.draft0_gdn_conv_fp32_ssm_fp32_state, "save_bounded_att_runtime_to_pages", fail)
+    monkeypatch.setattr(next(op for role, op in manager.get_state_operations() if role == "draft0"), "save", fail)
     with pytest.raises(RuntimeError):
         manager.save_bounded_att_runtime_to_pages(
             req_indices=[0, 1],
@@ -129,8 +129,8 @@ def test_page_operations_forward_each_request_length(operation: str, monkeypatch
     ) -> None:
         calls.append((req_indices, state_token_lens, page_kind, page_slot_ids))
 
-    for state in manager.get_bounded_attention_states():
-        monkeypatch.setattr(state, operation, record_lengths)
+    for _, plan in manager.get_state_operations():
+        monkeypatch.setattr(plan, "save" if operation.startswith("save") else "restore", record_lengths)
     getattr(manager, operation)(
         req_indices=[0, 2],
         state_token_lens=[17, 29],
@@ -145,9 +145,7 @@ def test_cpu_restore_forwards_absolute_length_for_partial_prefix(monkeypatch: py
     manager = composition()
     layouts = layouts_for(manager)
     manager.bounded_att_cpu_load_big_page_slot = 2
-    for state in manager.get_full_attention_states():
-        monkeypatch.setattr(state, "get_transfer_fields", lambda: None)
-        monkeypatch.setattr(state, "read_from_cpu", lambda **kwargs: None)
+    monkeypatch.setattr(manager.get_cpu_cache_operator(), "_bound_token_plans", lambda *args: ())
     monkeypatch.setattr(manager.get_cpu_cache_operator(), "_bound_state_plans", lambda *args: ())
     restored = []
 
@@ -181,15 +179,15 @@ def test_pd_bounded_only_forwards_prefix_length(operation: str, monkeypatch: pyt
 
     def record_length(
         req_idx: int,
-        pd_page_buffers: torch.Tensor,
         pd_page_index: int,
         state_token_len: int,
-        layout: StateTransferLayout,
     ) -> None:
         lengths.append((req_idx, state_token_len))
 
-    for state in manager.get_bounded_attention_states():
-        monkeypatch.setattr(state, operation, record_length)
+    monkeypatch.setattr(
+        "lightllm.common.attention_state.copy_plan.bind_runtime_page_copy",
+        lambda *args: record_length,
+    )
     getattr(manager.get_pd_operator(), "write_page" if operation == "write_to_pd_page" else "read_page")(
         pd_page_buffers=torch.empty((1, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8),
         pd_page_index=0,

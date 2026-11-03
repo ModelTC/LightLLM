@@ -1,6 +1,10 @@
 """旧 V4 行为用例的测试夹具；数据操作委托新的 State，不向生产代码添加兼容接口。"""
 
 from __future__ import annotations
+from lightllm.common.attention_state.bounded_att.operations import bind_state_operations
+from unit_tests.common.att_resources.transfer_helpers import copy_tokens
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 import math
 from dataclasses import dataclass
@@ -225,7 +229,7 @@ class DeepseekV4MemoryManager:
                 ),
                 page_size=self.page_size,
             )
-            state.allocate_storage(size)
+            allocate_state_storage(state, size)
             self.manager.register_state("main", state)
             self.full_states[layer] = state
             self.kv_buffer.append(state.storage[0])
@@ -251,7 +255,7 @@ class DeepseekV4MemoryManager:
 
     def copy_mem_to_mem(self, src_mem_index: torch.Tensor, dst_mem_index: torch.Tensor):
         for state in self.full_states.values():
-            state.copy_full_att_tokens(src_mem_index, dst_mem_index)
+            copy_tokens(state, state, src_mem_index, dst_mem_index)
 
     def alloc_paged_kv_move_buffer(self, count: int, page_size: int):
         from copy import copy
@@ -458,8 +462,9 @@ class DeepseekV4ReqManager(ReqManager):
                     if isinstance(state, FP8E8M0SlidingWindowState)
                     else (pool.indexer_state if state.config.target == "indexer" else pool.c4_state)
                 )
-                state._copy_window(
-                    req_idx=req.req_idx,
+                operation = bind_state_operations(state)
+                operation.kernel(
+                    local=operation.buffer[:, req.req_idx],
                     external=external[slot],
                     state_token_len=req.get_chuncked_input_token_len(),
                     write=True,
@@ -473,8 +478,12 @@ class DeepseekV4ReqManager(ReqManager):
                     if isinstance(state, FP8E8M0SlidingWindowState)
                     else (pool.indexer_state if state.config.target == "indexer" else pool.c4_state)
                 )
-                state._copy_window(
-                    req_idx=req.req_idx, external=external[slot], state_token_len=req.cur_kv_len, write=False
+                operation = bind_state_operations(state)
+                operation.kernel(
+                    local=operation.buffer[:, req.req_idx],
+                    external=external[slot],
+                    state_token_len=req.cur_kv_len,
+                    write=False,
                 )
 
     def free(self, reqs: list[int], indices: torch.Tensor = None):

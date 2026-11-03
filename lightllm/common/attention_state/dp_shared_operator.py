@@ -17,7 +17,6 @@ if TYPE_CHECKING:
 @dataclass(frozen=True)
 class _PeerCopyPlan:
     token_plans: tuple
-    legacy_tokens: tuple
     bounded_plans: tuple
 
 
@@ -79,7 +78,7 @@ class DPSharedOperator:
         local_resources, remote_resources = _resources(self.owner), _resources(remote_att_manager)
         if local_resources.keys() != remote_resources.keys():
             raise ValueError("DP replicas have different logical resources")
-        plans, legacy, descriptions, static_scales = [], [], {}, {}
+        plans, descriptions, static_scales = [], {}, {}
 
         def describe(state):
             if state not in descriptions:
@@ -94,12 +93,6 @@ class DPSharedOperator:
 
         for state in self.owner.get_full_attention_states():
             fields = state.get_token_copy_fields()
-            if fields is None:
-                remote = getattr(remote_att_manager, state.state_name, None)
-                if remote is None or state.config.logical_layer_groups != remote.config.logical_layer_groups:
-                    raise ValueError("this DP representation requires identical physical layer groups")
-                legacy.append((state, remote))
-                continue
             runs = []
             for row, group in enumerate(state.config.logical_layer_groups):
                 resource = ResourceId(state.model_role, group[0])
@@ -137,7 +130,7 @@ class DPSharedOperator:
                 else:
                     runs.append([remote, remote_row, row, 1])
             bounded.extend(BoundedPeerCopy.bind(remote, state, src, dst, count) for remote, src, dst, count in runs)
-        plan = _PeerCopyPlan(tuple(plans), tuple(legacy), tuple(bounded))
+        plan = _PeerCopyPlan(tuple(plans), tuple(bounded))
         self._peer_plans[remote_att_manager] = plan
         return plan
 
@@ -187,12 +180,6 @@ class DPSharedOperator:
                 token_plan.validate_batch(batch)
             for token_plan in plan.token_plans:
                 token_plan.run(batch)
-            for state, remote in plan.legacy_tokens:
-                state.copy_tokens_from_dp(
-                    src_token_indices=src_token_indices,
-                    dst_token_indices=dst_token_indices,
-                    remote_dp_full_att_state=remote,
-                )
         if src_big_page_ids:
             for bounded in plan.bounded_plans:
                 bounded.copy_pages(src_big_page_ids, dst_big_page_ids)

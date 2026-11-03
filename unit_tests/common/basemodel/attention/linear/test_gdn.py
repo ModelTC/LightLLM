@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_runtime_storage
 import weakref
 import inspect
 import sys
@@ -372,7 +373,9 @@ def _create_decode_state(*, draft_step, dynamic_layout, b_req_idx, req_to_mtp_st
             ssm_dtype=torch.float32,
         )
         for model_role in ("main", "draft0"):
-            linear = GDNState(config, request_capacity=request_capacity, mtp_step=draft_step, device="meta")
+            linear = allocate_runtime_storage(
+                GDNState(config, request_capacity=request_capacity, mtp_step=draft_step), "meta"
+            )
             linear.mtp_state_index = (
                 req_to_mtp_state_index if model_role == role else torch.zeros_like(req_to_mtp_state_index)
             )

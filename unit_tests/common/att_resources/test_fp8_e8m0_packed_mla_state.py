@@ -1,6 +1,10 @@
 """独立 FP8/E8M0 MLA：显式选择、固定编码、完整 payload 搬运和 padding 保留。"""
 
 from __future__ import annotations
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page, copy_token_pages, copy_tokens
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from dataclasses import replace
 from types import SimpleNamespace
@@ -36,7 +40,7 @@ def make_state(device: str = "meta", capacity: int = 16, tp_rank: int = 0) -> FP
         page_size=4,
         device=device,
     )
-    state.allocate_storage(token_capacity=capacity)
+    allocate_state_storage(state, token_capacity=capacity)
     return state
 
 
@@ -122,7 +126,7 @@ def test_fixed_quantizer_preserves_indexer_and_other_rows() -> None:
     kv = torch.randn((3, 1, 512), dtype=torch.bfloat16, device="cuda")
     expected = torch.empty((3, 1, 584), dtype=torch.uint8, device="cuda")
     write_fp8_e8m0_packed_kv(kv=kv, token_indices=torch.arange(3, dtype=torch.int32, device="cuda"), packed_kv=expected)
-    state.write_full_att_kv(logical_layer_id=4, token_indices=indices, kv=kv)
+    bind_kv_writer(state, 4)(token_indices=indices, kv=kv)
     view = state.get_layer_view(logical_layer_id=0)
     torch.testing.assert_close(view.kv[indices], expected, rtol=0, atol=0)
     assert view.indexer_k.eq(173).all()
@@ -177,15 +181,11 @@ def test_full_payload_roundtrip_skips_padding(
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         if transfer == "cpu":
-            source.write_to_cpu(
-                token_indices=src_ids, cpu_page_buffers=page_view, cpu_page_indices=[3, 0, 4], layout=layout
-            )
-            target.read_from_cpu(
-                cpu_page_buffers=page_view, cpu_page_indices=[3, 0, 4], token_indices=dst_ids, layout=layout
-            )
+            copy_token_pages(source, src_ids, page_view, [3, 0, 4], layout, write=True, ready=None)
+            copy_token_pages(target, dst_ids, page_view, [3, 0, 4], layout, write=False, ready=None)
         else:
-            source.write_to_pd_page(token_indices=src_ids, pd_page_buffers=page_view, pd_page_index=3, layout=layout)
-            target.read_from_pd_page(pd_page_buffers=page_view, token_indices=dst_ids, pd_page_index=3, layout=layout)
+            copy_pd_page(source, page_view, 3, layout, write=True, token_indices=src_ids)
+            copy_pd_page(target, page_view, 3, layout, write=False, token_indices=dst_ids)
     stream.synchronize()
     torch.testing.assert_close(target.storage[:, dst_ids, :, :716], source.storage[:, src_ids, :, :716], rtol=0, atol=0)
     assert target.storage[..., 716:].eq(173).all()
@@ -204,12 +204,14 @@ def test_cpu_ready_pages_remain_unchanged(pd_args: EasyDict) -> None:
         state_name=source.state_name, tokens_per_page=4, byte_start=0, byte_end=regions[0].byte_end, regions=regions
     )
     pages = torch.full((3, layout.byte_end), 99, dtype=torch.uint8, pin_memory=True)
-    source.write_to_cpu(
-        token_indices=torch.arange(9, dtype=torch.int32, device="cuda"),
-        cpu_page_buffers=pages,
-        cpu_page_indices=[2, 0, 1],
-        layout=layout,
-        cpu_page_ready_flags=[False, True, False],
+    copy_token_pages(
+        source,
+        torch.arange(9, dtype=torch.int32, device="cuda"),
+        pages,
+        [2, 0, 1],
+        layout,
+        write=True,
+        ready=[False, True, False],
     )
     torch.cuda.synchronize()
     assert pages[0].eq(99).all()
@@ -227,9 +229,7 @@ def test_local_and_dp_copy_include_entire_physical_row() -> None:
     target.storage.fill_(173)
     src_ids = torch.tensor([0, 3, 11], dtype=torch.int32, device="cuda")
     dst_ids = torch.tensor([5, 20, 31], dtype=torch.int64, device="cuda")
-    target.copy_tokens_from_dp(src_token_indices=src_ids, dst_token_indices=dst_ids, remote_dp_full_att_state=source)
+    copy_tokens(source, target, src_ids, dst_ids)
     torch.testing.assert_close(target.storage[:, dst_ids], source.storage[:, src_ids], rtol=0, atol=0)
-    source.copy_full_att_tokens(
-        src_indices=src_ids, dst_indices=torch.tensor([4, 6, 8], dtype=torch.int64, device="cuda")
-    )
+    copy_tokens(source, source, src=src_ids, dst=torch.tensor([4, 6, 8], dtype=torch.int64, device="cuda"))
     torch.testing.assert_close(source.storage[:, [4, 6, 8]], source.storage[:, src_ids], rtol=0, atol=0)

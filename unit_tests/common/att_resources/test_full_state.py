@@ -1,4 +1,8 @@
 from __future__ import annotations
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page, copy_token_pages, copy_tokens
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
@@ -41,7 +45,7 @@ def full_state(cls: type[FullAttentionState] = GQAFullAttentionState, device: st
             dtype=torch.float32,
         )
     prepared_full_state = cls(config, page_size=4, device=device)
-    prepared_full_state.allocate_storage(12)
+    allocate_state_storage(prepared_full_state, 12)
     return prepared_full_state
 
 
@@ -98,11 +102,11 @@ def test_full_attention_write_copy_and_pd(
         2, read_kv_storage(state).shape[2], 4
     )
     if device == "cuda":
-        state.write_full_att_kv(2, ids, data)
-        state.write_full_att_kv(5, ids, data + 100)
+        bind_kv_writer(state, 2)(token_indices=ids, kv=data)
+        bind_kv_writer(state, 5)(token_indices=ids, kv=data + 100)
     else:
         with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
-            state.write_full_att_kv(2, ids, data)
+            bind_kv_writer(state, 2)(token_indices=ids, kv=data)
         # CPU 仅构造复制和传输测试的数据，不执行推理 KV 写入。
         for layer, values in ((0, data), (1, data + 100)):
             head_start = 0
@@ -116,7 +120,7 @@ def test_full_attention_write_copy_and_pd(
 
     with monkeypatch.context() as patch:
         patch.setattr(torch.Tensor, "tolist", reject_host_list)
-        state.copy_full_att_tokens(ids, torch.tensor([8, 9], dtype=torch.int32, device=device))
+        copy_tokens(state, state, ids, torch.tensor([8, 9], dtype=torch.int32, device=device))
     assert torch.equal(read_kv_storage(state)[:, [1, 3]], read_kv_storage(state)[:, [8, 9]])
     layout = layout_for(state)
     pages = torch.full(
@@ -125,20 +129,12 @@ def test_full_attention_write_copy_and_pd(
         dtype=torch.uint8,
         device=device,
     )
-    state.write_to_pd_page(
-        token_indices=ids,
-        pd_page_buffers=pages,
-        pd_page_index=1,
-        layout=layout,
-    )
+    copy_pd_page(state, pages, 1, layout, write=True, token_indices=ids)
     target = full_state(cls, device)
     for storage_buffer in full_state_test_buffers(target).values():
         storage_buffer.zero_()
-    target.read_from_pd_page(
-        pd_page_buffers=pages,
-        token_indices=torch.tensor([5, 6], dtype=torch.long, device=device),
-        pd_page_index=1,
-        layout=layout,
+    copy_pd_page(
+        target, pages, 1, layout, write=False, token_indices=torch.tensor([5, 6], dtype=torch.long, device=device)
     )
     assert torch.equal(read_kv_storage(target)[:, [5, 6]], read_kv_storage(state)[:, [1, 3]])
     assert (pages[0] == 255).all() and (pages[2] == 255).all()
@@ -168,20 +164,26 @@ def test_cpu_partial_last_page(state_offset: int, extra_page_bytes: int):
         dtype=torch.uint8,
         pin_memory=True,
     )
-    state.write_to_cpu(
-        token_indices=torch.tensor([0, 1, 2, 3, 7], dtype=torch.long, device="cuda"),
-        cpu_page_buffers=buffer,
-        cpu_page_indices=[2, 0],
-        layout=layout,
+    copy_token_pages(
+        state,
+        torch.tensor([0, 1, 2, 3, 7], dtype=torch.long, device="cuda"),
+        buffer,
+        [2, 0],
+        layout,
+        write=True,
+        ready=None,
     )
     target = full_state(device="cuda")
     for storage_buffer in full_state_test_buffers(target).values():
         storage_buffer.zero_()
-    target.read_from_cpu(
-        cpu_page_buffers=buffer,
-        cpu_page_indices=[2, 0],
-        token_indices=torch.tensor([6, 7, 8, 9, 10], dtype=torch.long, device="cuda"),
-        layout=layout,
+    copy_token_pages(
+        target,
+        torch.tensor([6, 7, 8, 9, 10], dtype=torch.long, device="cuda"),
+        buffer,
+        [2, 0],
+        layout,
+        write=False,
+        ready=None,
     )
     assert torch.equal(read_kv_storage(target)[:, [6, 7, 8, 9, 10]], read_kv_storage(state)[:, [0, 1, 2, 3, 7]])
     assert (buffer[[1, 3]] == 252).all()
@@ -203,11 +205,13 @@ def test_invalid_late_region_shape_cannot_partially_write_pd_page():
         device="cuda",
     )
     with pytest.raises(ValueError, match="field representation"):
-        state.write_to_pd_page(
+        copy_pd_page(
+            state,
+            buffer.unsqueeze(0),
+            0,
+            bad,
+            write=True,
             token_indices=torch.tensor([0], dtype=torch.long, device="cuda"),
-            pd_page_buffers=buffer.unsqueeze(0),
-            pd_page_index=0,
-            layout=bad,
         )
     assert (buffer == 53).all()
 
@@ -223,17 +227,18 @@ def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int)
         dtype=torch.float32,
     )
     source = GQAFullAttentionState(config, page_size=4, device=device)
-    source.allocate_storage(12)
+    allocate_state_storage(source, 12)
     target = GQAFullAttentionState(config, page_size=4, device=device)
-    target.allocate_storage(12)
+    allocate_state_storage(target, 12)
     for storage_buffer in full_state_test_buffers(source).values():
         storage_buffer.copy_(torch.arange(storage_buffer.numel(), device=device).reshape_as(storage_buffer))
     for storage_buffer in full_state_test_buffers(target).values():
         storage_buffer.fill_(-1)
-    target.copy_tokens_from_dp(
-        src_token_indices=torch.tensor([2, 0], dtype=torch.long, device=device),
-        dst_token_indices=torch.tensor([6, 7], dtype=torch.long, device=device),
-        remote_dp_full_att_state=source,
+    copy_tokens(
+        source,
+        target,
+        torch.tensor([2, 0], dtype=torch.long, device=device),
+        torch.tensor([6, 7], dtype=torch.long, device=device),
     )
     torch.testing.assert_close(read_kv_storage(target)[:, [6, 7]], read_kv_storage(source)[:, [2, 0]])
     assert (read_kv_storage(target)[:, 8:] == -1).all()
@@ -243,13 +248,14 @@ def test_dp_copies_all_layers_in_storage_order(device: str | torch.device | int)
     single_layer_source = GQAFullAttentionState(
         replace(config, logical_layer_groups=config.logical_layer_groups[:1]), page_size=4, device=device
     )
-    single_layer_source.allocate_storage(12)
+    allocate_state_storage(single_layer_source, 12)
     for storage_buffer in full_state_test_buffers(single_layer_source).values():
         storage_buffer.fill_(9)
-    with pytest.raises(ValueError, match="equivalent representations, shards and layer groups"):
-        target.copy_tokens_from_dp(
-            src_token_indices=torch.tensor([2, 0], dtype=torch.long, device=device),
-            dst_token_indices=torch.tensor([8, 9], dtype=torch.long, device=device),
-            remote_dp_full_att_state=single_layer_source,
+    with pytest.raises(ValueError, match="incompatible token copy shape"):
+        copy_tokens(
+            single_layer_source,
+            target,
+            torch.tensor([2, 0], dtype=torch.long, device=device),
+            torch.tensor([8, 9], dtype=torch.long, device=device),
         )
     assert (read_kv_storage(target)[:, 8:] == -1).all()

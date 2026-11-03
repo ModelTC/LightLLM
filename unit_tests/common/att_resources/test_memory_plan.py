@@ -1,9 +1,34 @@
+from lightllm.common.attention_state.storage import allocate_runtime_storage, initialize_state_page_pools
 import pytest
 import torch
 
 from lightllm.common.attention_state.memory_plan import MemoryDemand, plan_memory, merge_memory_demands
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
 from lightllm.common.attention_state.bounded_att import WindowCompressorState, WindowCompressorStateConfig
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_replanning_reuses_resident_calibration_without_reserving_it_twice(cpu_args):
+    from lightllm.common.attention_state import AttentionStateManager
+    from unit_tests.common.att_resources.test_capacity import definition
+
+    state = definition("static_head")
+    manager = AttentionStateManager(1)
+    manager.register_state("main", state)
+    manager.finish_state_registration()
+    cpu_args.page_size = 4
+    device = torch.device("cuda", torch.cuda.current_device())
+    constants = state.get_fixed_storage_bytes(device)
+    storage_bytes = state.get_token_bytes() * (32 + cpu_args.page_size)
+    limits = {"cpu": 1 << 20, "cuda": storage_bytes + constants}
+    manager.initialize_storage(cpu_args, None, 1.0, device=device, memory_limits=limits)
+    assert manager.memory_plan.capacity == 32 and constants > 0
+    pointers = state.scales.data_ptr(), state.q_scales.data_ptr()
+    manager.release_unpublished_storage()
+    assert state.get_fixed_storage_bytes(device) == 0
+    manager.initialize_storage(cpu_args, None, 1.0, device=device, memory_limits={**limits, "cuda": storage_bytes})
+    assert manager.memory_plan.capacity == 32
+    assert (state.scales.data_ptr(), state.q_scales.data_ptr()) == pointers
 
 
 def test_checkpoint_boundary_can_limit_capacity_before_device_memory():
@@ -66,7 +91,9 @@ def test_checkpoint_requirement_matches_native_pool_allocations(family):
             conv_dtype=torch.bfloat16,
             ssm_dtype=torch.float32,
         )
-        state = (GDNState if family == "gdn" else KDAState)(config, request_capacity=2, mtp_step=3, device="cpu")
+        state = allocate_runtime_storage(
+            (GDNState if family == "gdn" else KDAState)(config, request_capacity=2, mtp_step=3), "cpu"
+        )
     else:
         config = WindowCompressorStateConfig(
             logical_layer_ids=(0, 2),
@@ -76,8 +103,8 @@ def test_checkpoint_requirement_matches_native_pool_allocations(family):
             target="indexer",
             dtype=torch.bfloat16,
         )
-        state = WindowCompressorState(config, request_capacity=2, mtp_step=3, device="cpu")
-    state.initialize_page_pools(3, 2, device="cpu", pin_memory=False)
+        state = allocate_runtime_storage(WindowCompressorState(config, request_capacity=2, mtp_step=3), "cpu")
+    initialize_state_page_pools(state, 3, 2, device="cpu", pin_memory=False)
     actual = sum(
         t.numel() * t.element_size()
         for pool in (state.big_pages_pool, state.small_pages_pool)
@@ -105,7 +132,7 @@ def test_bounded_runtime_is_allocated_only_after_budget_acceptance(cpu_args, fam
     else:
         cls = WindowCompressorState
         config = WindowCompressorStateConfig((0, 2), 8 if family == "compressor" else 4, 4, 8)
-    state = cls(config, request_capacity=3, mtp_step=2, device="meta")
+    state = allocate_runtime_storage(cls(config, request_capacity=3, mtp_step=2), "meta")
     manager = AttentionStateManager(3)
     manager.register_state("main", state)
     manager.finish_state_registration()
@@ -126,7 +153,7 @@ def test_bounded_runtime_is_allocated_only_after_budget_acceptance(cpu_args, fam
     assert state.get_unallocated_runtime_bytes() == runtime_bytes
     manager.initialize_storage(cpu_args, 8, 1.0, device="cpu", memory_limits={"cpu": 1 << 20})
     assert manager.memory_plan == preview
-    expected = cls(config, request_capacity=3, mtp_step=2, device="cpu")
+    expected = allocate_runtime_storage(cls(config, request_capacity=3, mtp_step=2), "cpu")
     assert not manager.get_full_attention_states()
     for name in state.runtime_storage_fields:
         actual, reference = getattr(state, name), getattr(expected, name)
@@ -137,7 +164,7 @@ def test_bounded_runtime_is_allocated_only_after_budget_acceptance(cpu_args, fam
     pointers = [
         getattr(state, name).data_ptr() for name in state.runtime_storage_fields if getattr(state, name) is not None
     ]
-    assert not state.allocate_runtime_storage("cpu")
+    assert allocate_runtime_storage(state, "cpu") is state
     assert pointers == [
         getattr(state, name).data_ptr() for name in state.runtime_storage_fields if getattr(state, name) is not None
     ]

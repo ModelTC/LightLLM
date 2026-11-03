@@ -3485,10 +3485,10 @@
     }
   },
   "validation_source": {
-    "sha256": "6a1b393d3ed19e608e069a6fd42fe3c38c12e2fc3d97b6bd4d19decb2e800f69",
-    "runtime_python_files": 1095,
+    "sha256": "3569dff541ba3ef8ef54b55b66fe6d9331f47996d59508e74733ebc5afeb4640",
+    "runtime_python_files": 1099,
     "algorithm": "sorted relative path NUL contents NUL",
-    "scope": "PR preparation: new comment/docstring cleanup and repository Black configuration; normalized runtime AST unchanged from r86"
+    "scope": "r106 state separation, shared DeviceRuntime and resident calibration replan budget"
   },
   "pd_tp_reshard_previous": {
     "model": "Qwen3.5-0.8B",
@@ -11108,6 +11108,864 @@
         "before": "e29ed7a503de9c32ac886b63bb146f454535b3373395c8e4ba5ded985d74deb6",
         "after": "91c2d19239cf17a06200fe5bba2c0581b60a6d893dab444e6966c6b9f67d4ea7"
       }
+    }
+  },
+  "state_separation": {
+    "validation_source": {
+      "sha256": "567649f8c1f9b18b7eb36587892479651597b12f8dfb7412195f761f81d1952d",
+      "runtime_python_files": 1099,
+      "algorithm": "sorted relative path NUL contents NUL",
+      "scope": "r96 state storage specs, independent writers/copy/lifecycle providers, native CPU recurrent recovery"
+    },
+    "base_commit": "e8f1886ca1d3ff9e6e0d8c311a3551148dd9b5f2",
+    "full_regression": {
+      "passed": 2888,
+      "skipped": 24,
+      "warnings": 3,
+      "seconds": 186.3,
+      "log": "/tmp/lightllm-refactor-state-operations-r96.log",
+      "gpus": "H200 4,5"
+    },
+    "allocation_regression": {
+      "passed": 2884,
+      "skipped": 24,
+      "log": "/tmp/lightllm-refactor-storage-specs-r92.log"
+    },
+    "scope": [
+      "Immutable TensorStorageSpec and centralized allocation, including calibration and HOLD initialization",
+      "Independent prebound KV writers and native CPU/DP/PD plans; removed State transfer compatibility callbacks",
+      "Independent recurrent/window snapshot/reset/commit plans; accepted cursors retained",
+      "CPU GDN/KDA accepted-state recovery for BF16 and FP32 without CUDA stream or device calls"
+    ],
+    "diagnostics": [
+      "/tmp/lightllm-refactor-storage-specs-r89.log",
+      "/tmp/lightllm-refactor-storage-specs-r90.log",
+      "/tmp/lightllm-refactor-storage-specs-r91.log",
+      "/tmp/lightllm-refactor-providers-r93.log",
+      "/tmp/lightllm-refactor-providers-r94.log",
+      "/tmp/lightllm-refactor-state-operations-r95.log"
+    ],
+    "limitations": [
+      "Unit/kernel/local IPC and network regression, not refreshed whole-model serving or performance acceptance",
+      "CPU coverage is native GQA/recovery plus recurrent lifecycle, not full CPU serving or a second accelerator"
+    ]
+  },
+  "validation_source_before_state_separation": {
+    "sha256": "6a1b393d3ed19e608e069a6fd42fe3c38c12e2fc3d97b6bd4d19decb2e800f69",
+    "runtime_python_files": 1095,
+    "algorithm": "sorted relative path NUL contents NUL",
+    "scope": "PR preparation: new comment/docstring cleanup and repository Black configuration; normalized runtime AST unchanged from r86"
+  },
+  "device_runtime": {
+    "validation_source": {
+      "sha256": "3569dff541ba3ef8ef54b55b66fe6d9331f47996d59508e74733ebc5afeb4640",
+      "runtime_python_files": 1099,
+      "algorithm": "sorted relative path NUL contents NUL",
+      "scope": "r106 state separation, shared DeviceRuntime and resident calibration replan budget"
+    },
+    "full_regression": {
+      "passed": 2892,
+      "skipped": 24,
+      "warnings": 3,
+      "seconds": 196.51,
+      "log": "/tmp/lightllm-refactor-device-runtime-r106.log",
+      "gpus": "H200 4,5"
+    },
+    "scope": [
+      "Storage, startup memory observations, model input movement, warmup allocations and Graph mechanism use the bound runtime",
+      "Replanning reuses resident FP8 calibration without reserving its bytes twice",
+      "CPU native GQA and recurrent state recovery complete with CUDA APIs rejected"
+    ],
+    "cpu_native": {
+      "log": "/tmp/lightllm-cpu-runtime-r108.log",
+      "report": "/tmp/lightllm-cpu-runtime-r108.json",
+      "gqa_checks": 8,
+      "recurrent_checks": 4,
+      "cuda_initialized": false,
+      "memory_peak_tracking": false
+    },
+    "fixed_batch_outputs": {
+      "root": "/tmp/lightllm-fixed-batch-r107",
+      "rows_per_precision": 180,
+      "bf16": {
+        "baseline": "/tmp/lightllm-fixed-batch-r82/bf16-baseline",
+        "candidate": "/tmp/lightllm-fixed-batch-r107/bf16-candidate",
+        "scope": "fixed teacher-forced inputs with real prefill and 8 decode steps, two request mappings, full vocabulary logits; not service scheduling or task-quality acceptance",
+        "checks": [
+          {
+            "file": "b1-c128.pt",
+            "records": 18,
+            "rows": 18,
+            "finite": true,
+            "bit_identical": true,
+            "max_abs_error": 0.0,
+            "argmax_identical": true
+          },
+          {
+            "file": "b1-c2048.pt",
+            "records": 18,
+            "rows": 18,
+            "finite": true,
+            "bit_identical": true,
+            "max_abs_error": 0.0,
+            "argmax_identical": true
+          },
+          {
+            "file": "b4-c128.pt",
+            "records": 18,
+            "rows": 72,
+            "finite": true,
+            "bit_identical": true,
+            "max_abs_error": 0.0,
+            "argmax_identical": true
+          },
+          {
+            "file": "b4-c2048.pt",
+            "records": 18,
+            "rows": 72,
+            "finite": true,
+            "bit_identical": true,
+            "max_abs_error": 0.0,
+            "argmax_identical": true
+          }
+        ]
+      },
+      "fp8": {
+        "baseline": "/tmp/lightllm-fixed-batch-r82b/fp8-baseline",
+        "candidate": "/tmp/lightllm-fixed-batch-r107/fp8-candidate",
+        "scope": "fixed teacher-forced inputs with real prefill and 8 decode steps, two request mappings, full vocabulary logits; not service scheduling or task-quality acceptance",
+        "checks": [
+          {
+            "file": "b1-c128.pt",
+            "records": 18,
+            "rows": 18,
+            "finite": true,
+            "bit_identical": true,
+            "max_abs_error": 0.0,
+            "argmax_identical": true
+          },
+          {
+            "file": "b1-c2048.pt",
+            "records": 18,
+            "rows": 18,
+            "finite": true,
+            "bit_identical": true,
+            "max_abs_error": 0.0,
+            "argmax_identical": true
+          },
+          {
+            "file": "b4-c128.pt",
+            "records": 18,
+            "rows": 72,
+            "finite": true,
+            "bit_identical": true,
+            "max_abs_error": 0.0,
+            "argmax_identical": true
+          },
+          {
+            "file": "b4-c2048.pt",
+            "records": 18,
+            "rows": 72,
+            "finite": true,
+            "bit_identical": true,
+            "max_abs_error": 0.0,
+            "argmax_identical": true
+          }
+        ]
+      },
+      "scope": "Complete vocabulary logits, batch 1/4, context 128/2048, two request mappings, prefill plus 8 teacher-forced decode steps; no performance or quality claim"
+    },
+    "style": {
+      "black": "21.12b0, line 120, PY310",
+      "flake8": "repository ignore list; passed",
+      "diff_check": "passed"
+    },
+    "diagnostics": [
+      "/tmp/lightllm-refactor-device-runtime-r97.log",
+      "/tmp/lightllm-refactor-device-runtime-r98.log",
+      "/tmp/lightllm-refactor-device-runtime-r100.log",
+      "/tmp/lightllm-cpu-runtime-r99.log"
+    ],
+    "limitations": [
+      "CPU native operations are not full CPU model serving or a second accelerator",
+      "Cross-node, full Gemma4/V4 and stable performance gate remain open"
+    ],
+    "cpu_disk_serving": {
+      "root": "/tmp/lightllm-cache-native-r103",
+      "matches": 28,
+      "checks": 28,
+      "repeat_matches": 16,
+      "cpu_hit_requests": 5,
+      "disk_hit_requests": 1,
+      "server_errors": 0,
+      "gpu": "H200 7"
+    },
+    "mtp_dp_overlap": {
+      "root": "/tmp/lightllm-mtp-binding-r104",
+      "matches": 24,
+      "checks": 24,
+      "cancellations": [
+        {
+          "index": 0,
+          "first_event": "data:{\"token\":{\"id\":16,\"text\":\"1\",\"logprob\":-1.449752688407898,\"special\":false,\"count_output_tokens\":1,\"prompt_tokens\":779,\"logprobs\":{\"16\":{\"logprob\":-1.449752688407898,\"rank\":null,\"decoded_token\":\"1\"}}},\"generated_text\":null,\"finished\":false,\"finish_reason\":null,\"details\":null,\"input_usage\":{\"input_text_tokens\":779,\"input_audio_tokens\":0,\"input_image_tokens\":0}}"
+        },
+        {
+          "index": 1,
+          "first_event": "data:{\"token\":{\"id\":16,\"text\":\"1\",\"logprob\":-1.229783058166504,\"special\":false,\"count_output_tokens\":1,\"prompt_tokens\":779,\"logprobs\":{\"16\":{\"logprob\":-1.229783058166504,\"rank\":null,\"decoded_token\":\"1\"}}},\"generated_text\":null,\"finished\":false,\"finish_reason\":null,\"details\":null,\"input_usage\":{\"input_text_tokens\":779,\"input_audio_tokens\":0,\"input_image_tokens\":0}}"
+        },
+        {
+          "index": 2,
+          "first_event": "data:{\"token\":{\"id\":16,\"text\":\"1\",\"logprob\":-1.2610514163970947,\"special\":false,\"count_output_tokens\":1,\"prompt_tokens\":779,\"logprobs\":{\"16\":{\"logprob\":-1.2610514163970947,\"rank\":null,\"decoded_token\":\"1\"}}},\"generated_text\":null,\"finished\":false,\"finish_reason\":null,\"details\":null,\"input_usage\":{\"input_text_tokens\":779,\"input_audio_tokens\":0,\"input_image_tokens\":0}}"
+        },
+        {
+          "index": 3,
+          "first_event": "data:{\"token\":{\"id\":16,\"text\":\"1\",\"logprob\":-1.2171543836593628,\"special\":false,\"count_output_tokens\":1,\"prompt_tokens\":779,\"logprobs\":{\"16\":{\"logprob\":-1.2171543836593628,\"rank\":null,\"decoded_token\":\"1\"}}},\"generated_text\":null,\"finished\":false,\"finish_reason\":null,\"details\":null,\"input_usage\":{\"input_text_tokens\":779,\"input_audio_tokens\":0,\"input_image_tokens\":0}}"
+        }
+      ],
+      "after_cancel_matches": 8,
+      "restored_prefix_lengths": [
+        768,
+        768,
+        768,
+        768
+      ],
+      "server_errors": 0,
+      "abort_log_lines": [
+        "WARNING 11-03 08:14:11 [manager.py:957] aborted group_request_id 144",
+        "WARNING 11-03 08:14:11 [manager.py:957] aborted group_request_id 136",
+        "WARNING 11-03 08:14:11 [manager.py:957] aborted group_request_id 160",
+        "WARNING 11-03 08:14:11 [manager.py:957] aborted group_request_id 152"
+      ],
+      "gpus": "H200 4,5"
+    },
+    "pd_tp_reshard": {
+      "root": "/tmp/lightllm-pd-serving-r105",
+      "matches": 20,
+      "checks": 20,
+      "cancellations": [
+        {
+          "prompt_index": 0,
+          "first_event": "data:{\"token\":{\"id\":16,\"text\":\"1\",\"logprob\":-1.5972838401794434,\"special\":false,\"count_output_tokens\":1,\"prompt_tokens\":127,\"logprobs\":{\"16\":{\"logprob\":-1.5972838401794434,\"rank\":null,\"decoded_token\":\"1\"}}},\"generated_text\":null,\"finished\":false,\"finish_reason\":null,\"details\":null,\"input_usage\":{\"input_text_tokens\":127,\"input_audio_tokens\":0,\"input_image_tokens\":0}}"
+        },
+        {
+          "prompt_index": 1,
+          "first_event": "data:{\"token\":{\"id\":16,\"text\":\"1\",\"logprob\":-1.5913788080215454,\"special\":false,\"count_output_tokens\":1,\"prompt_tokens\":129,\"logprobs\":{\"16\":{\"logprob\":-1.5913788080215454,\"rank\":null,\"decoded_token\":\"1\"}}},\"generated_text\":null,\"finished\":false,\"finish_reason\":null,\"details\":null,\"input_usage\":{\"input_text_tokens\":129,\"input_audio_tokens\":0,\"input_image_tokens\":0}}"
+        },
+        {
+          "prompt_index": 2,
+          "first_event": "data:{\"token\":{\"id\":16,\"text\":\"1\",\"logprob\":-1.3847273588180542,\"special\":false,\"count_output_tokens\":1,\"prompt_tokens\":2048,\"logprobs\":{\"16\":{\"logprob\":-1.3847273588180542,\"rank\":null,\"decoded_token\":\"1\"}}},\"generated_text\":null,\"finished\":false,\"finish_reason\":null,\"details\":null,\"input_usage\":{\"input_text_tokens\":2048,\"input_audio_tokens\":0,\"input_image_tokens\":0}}"
+        },
+        {
+          "prompt_index": 3,
+          "first_event": "data:{\"token\":{\"id\":16,\"text\":\"1\",\"logprob\":-1.4300614595413208,\"special\":false,\"count_output_tokens\":1,\"prompt_tokens\":2051,\"logprobs\":{\"16\":{\"logprob\":-1.4300614595413208,\"rank\":null,\"decoded_token\":\"1\"}}},\"generated_text\":null,\"finished\":false,\"finish_reason\":null,\"details\":null,\"input_usage\":{\"input_text_tokens\":2051,\"input_audio_tokens\":0,\"input_image_tokens\":0}}"
+        }
+      ],
+      "after_cancel_matches": 4,
+      "abort_counts": {
+        "pd_master": {
+          "296": 1,
+          "320": 1,
+          "304": 1,
+          "336": 1
+        },
+        "prefill": {
+          "296": 1,
+          "320": 1,
+          "304": 1,
+          "336": 1
+        },
+        "decode": {
+          "296": 2,
+          "320": 2,
+          "304": 2,
+          "336": 2
+        }
+      },
+      "error_counts": {
+        "pd_master": 4,
+        "prefill": 0,
+        "decode": 0
+      },
+      "master_errors": "Four expected client cancellation errors; P and D recorded zero errors",
+      "gpus": "P: H200 4; D TP2: H200 5,7",
+      "transport": "NIXL UCX tcp,sm,self,cuda_copy,cuda_ipc",
+      "scope": "local TP1-to-TP2, complete hybrid restore and cancellation; not cross-node or RDMA",
+      "write_completion_counts": {
+        "kv": 31,
+        "att_state": 25
+      }
+    },
+    "same_memory_budget": {
+      "root": "/tmp/lightllm-same-budget-r109",
+      "design": {
+        "source": "3569dff541ba3ef8ef54b55b66fe6d9331f47996d59508e74733ebc5afeb4640",
+        "base_commit": "1d36f7a64",
+        "candidate_commit": "9a7b789ba",
+        "order": [
+          "candidate",
+          "baseline",
+          "baseline",
+          "candidate"
+        ],
+        "gpu": 4,
+        "memory_budget_gib": 8,
+        "requests_per_profile": 512,
+        "warmup_requests": 96,
+        "cases": [
+          [
+            "short",
+            128,
+            64,
+            15
+          ],
+          [
+            "long",
+            4096,
+            128,
+            7
+          ]
+        ],
+        "decision": "One fixed four-round remeasurement after implementation changes; preserve all rounds and existing r65/r58 evidence; do not claim a 1-2 percent gate if spread or regressions exceed it."
+      },
+      "source": {
+        "sha256": "3569dff541ba3ef8ef54b55b66fe6d9331f47996d59508e74733ebc5afeb4640",
+        "runtime_python_files": 1099,
+        "algorithm": "sorted relative path NUL contents NUL",
+        "scope": "r106 state separation, shared DeviceRuntime and resident calibration replan budget"
+      },
+      "measured_requests": 4096,
+      "warmup_requests": 768,
+      "errors": 0,
+      "cases": {
+        "short": {
+          "versions": {
+            "baseline": {
+              "capacity": [
+                316630,
+                316630
+              ],
+              "sampled_peak_mib": 7149.0,
+              "output_tokens_per_second_mean": 955.5072707506,
+              "goodput_mean": 8.20960433992153,
+              "server_prompt_tokens": [
+                137,
+                138,
+                139,
+                140
+              ],
+              "server_completion_tokens": [
+                64
+              ],
+              "metrics": {
+                "request_latency": {
+                  "round_p99": [
+                    290.68146693,
+                    307.4735598099998
+                  ],
+                  "mean_round_p99": 299.0775133699999,
+                  "pooled_p99": 296.2620542199999,
+                  "pooled_mean": 239.2725425205078
+                },
+                "time_to_first_token": {
+                  "round_p99": [
+                    71.47849046999995,
+                    70.68950684999999
+                  ],
+                  "mean_round_p99": 71.08399865999996,
+                  "pooled_p99": 71.30360054999998,
+                  "pooled_mean": 51.43950860058594
+                },
+                "inter_token_latency": {
+                  "round_p99": [
+                    3.6172040057142856,
+                    3.764871774603173
+                  ],
+                  "mean_round_p99": 3.6910378901587295,
+                  "pooled_p99": 3.662333677460316,
+                  "pooled_mean": 2.9818980073825814
+                }
+              }
+            },
+            "candidate": {
+              "capacity": [
+                316144,
+                316144
+              ],
+              "sampled_peak_mib": 7271.0,
+              "output_tokens_per_second_mean": 955.3239418748549,
+              "goodput_mean": 8.149208253565536,
+              "server_prompt_tokens": [
+                137,
+                138,
+                139,
+                140
+              ],
+              "server_completion_tokens": [
+                64
+              ],
+              "metrics": {
+                "request_latency": {
+                  "round_p99": [
+                    318.28938931999994,
+                    308.78092943999997
+                  ],
+                  "mean_round_p99": 313.53515938,
+                  "pooled_p99": 311.7675478299999,
+                  "pooled_mean": 239.13999256933593
+                },
+                "time_to_first_token": {
+                  "round_p99": [
+                    74.27809504999999,
+                    72.32564212999999
+                  ],
+                  "mean_round_p99": 73.30186859,
+                  "pooled_p99": 73.78294630999999,
+                  "pooled_mean": 51.38863987402343
+                },
+                "inter_token_latency": {
+                  "round_p99": [
+                    3.9062998139682525,
+                    3.8183770387301568
+                  ],
+                  "mean_round_p99": 3.8623384263492047,
+                  "pooled_p99": 3.866945701904761,
+                  "pooled_mean": 2.9803994454838807
+                }
+              }
+            }
+          },
+          "percent_change": {
+            "output_tokens_per_second_mean": -0.019186549527883123,
+            "goodput_mean": -0.7356759699404747,
+            "pooled_p99": {
+              "request_latency": 5.233708937455028,
+              "time_to_first_token": 3.4771676898159187,
+              "inter_token_latency": 5.5869301506774605
+            },
+            "mean_round_p99": {
+              "request_latency": 4.834079916972556,
+              "time_to_first_token": 3.120069174229023,
+              "inter_token_latency": 4.640985578804457
+            }
+          }
+        },
+        "long": {
+          "versions": {
+            "baseline": {
+              "capacity": [
+                316630,
+                316630
+              ],
+              "sampled_peak_mib": 7253.0,
+              "output_tokens_per_second_mean": 891.6357573357029,
+              "goodput_mean": 6.864389303305943,
+              "server_prompt_tokens": [
+                4105,
+                4106,
+                4107,
+                4108
+              ],
+              "server_completion_tokens": [
+                128
+              ],
+              "metrics": {
+                "request_latency": {
+                  "round_p99": [
+                    832.6776991,
+                    735.3003039199999
+                  ],
+                  "mean_round_p99": 783.98900151,
+                  "pooled_p99": 818.9325958499991,
+                  "pooled_mean": 683.2730861005859
+                },
+                "time_to_first_token": {
+                  "round_p99": [
+                    135.25092245,
+                    134.15562609999998
+                  ],
+                  "mean_round_p99": 134.70327427499998,
+                  "pooled_p99": 134.35615235999998,
+                  "pooled_mean": 116.26092208007812
+                },
+                "inter_token_latency": {
+                  "round_p99": [
+                    5.529856443307087,
+                    4.834740503385825
+                  ],
+                  "mean_round_p99": 5.182298473346456,
+                  "pooled_p99": 5.091733801732283,
+                  "pooled_mean": 4.465032540481255
+                }
+              }
+            },
+            "candidate": {
+              "capacity": [
+                316144,
+                316144
+              ],
+              "sampled_peak_mib": 7279.0,
+              "output_tokens_per_second_mean": 891.5307176534025,
+              "goodput_mean": 6.863575916072693,
+              "server_prompt_tokens": [
+                4105,
+                4106,
+                4107,
+                4108
+              ],
+              "server_completion_tokens": [
+                128
+              ],
+              "metrics": {
+                "request_latency": {
+                  "round_p99": [
+                    845.9119975099999,
+                    736.24578757
+                  ],
+                  "mean_round_p99": 791.07889254,
+                  "pooled_p99": 833.09741921,
+                  "pooled_mean": 635.6245060126953
+                },
+                "time_to_first_token": {
+                  "round_p99": [
+                    137.33621293999997,
+                    132.17427651999998
+                  ],
+                  "mean_round_p99": 134.75524472999996,
+                  "pooled_p99": 135.26403546999998,
+                  "pooled_mean": 114.83370986816406
+                },
+                "inter_token_latency": {
+                  "round_p99": [
+                    5.57354790527559,
+                    4.898484124724409
+                  ],
+                  "mean_round_p99": 5.236016015,
+                  "pooled_p99": 5.486187388503937,
+                  "pooled_mean": 4.101032380797148
+                }
+              }
+            }
+          },
+          "percent_change": {
+            "output_tokens_per_second_mean": -0.011780559655250045,
+            "goodput_mean": -0.01184937504722372,
+            "pooled_p99": {
+              "request_latency": 1.7296690144930293,
+              "time_to_first_token": 0.6757287210543028,
+              "inter_token_latency": 7.746940475117836
+            },
+            "mean_round_p99": {
+              "request_latency": 0.9043355220984539,
+              "time_to_first_token": 0.038581434103734935,
+              "inter_token_latency": 1.036558236269558
+            }
+          }
+        }
+      },
+      "rounds": [
+        {
+          "run": 0,
+          "version": "candidate",
+          "case": "short",
+          "rate": 15,
+          "slo": {
+            "ttft_ms": 150,
+            "tpot_ms": 3
+          },
+          "request_count": 512.0,
+          "sampled_peak_mib": 7145.0,
+          "capacity": 316144,
+          "allocator_ceiling_bytes": 6818889728,
+          "peak_reserved_bytes": 6314524672,
+          "output_token_throughput": 955.0418957968008,
+          "goodput": 8.161007441117716,
+          "latency": {
+            "request_latency": {
+              "avg": 240.08923104296875,
+              "p50": 226.196223,
+              "p95": 271.38721145,
+              "p99": 318.28938931999994
+            },
+            "time_to_first_token": {
+              "avg": 51.78300265625,
+              "p50": 51.651666999999996,
+              "p95": 65.10380985,
+              "p99": 74.27809504999999
+            },
+            "inter_token_latency": {
+              "avg": 2.9890764826529836,
+              "p50": 2.8121464603174604,
+              "p95": 3.2991851507936505,
+              "p99": 3.9062998139682525
+            }
+          }
+        },
+        {
+          "run": 0,
+          "version": "candidate",
+          "case": "long",
+          "rate": 7,
+          "slo": {
+            "ttft_ms": 1000,
+            "tpot_ms": 5
+          },
+          "request_count": 512.0,
+          "sampled_peak_mib": 7279.0,
+          "capacity": 316144,
+          "allocator_ceiling_bytes": 6818889728,
+          "peak_reserved_bytes": 6314524672,
+          "output_token_throughput": 891.5870954271587,
+          "goodput": 6.802788721575733,
+          "latency": {
+            "request_latency": {
+              "avg": 654.6731969882812,
+              "p50": 636.3149495,
+              "p95": 725.65484935,
+              "p99": 845.9119975099999
+            },
+            "time_to_first_token": {
+              "avg": 116.04696564453124,
+              "p50": 115.9352935,
+              "p95": 130.18284355,
+              "p99": 137.33621293999997
+            },
+            "inter_token_latency": {
+              "avg": 4.241493785732111,
+              "p50": 4.094611291338582,
+              "p95": 4.729178812598426,
+              "p99": 5.57354790527559
+            }
+          }
+        },
+        {
+          "run": 1,
+          "version": "baseline",
+          "case": "short",
+          "rate": 15,
+          "slo": {
+            "ttft_ms": 150,
+            "tpot_ms": 3
+          },
+          "request_count": 512.0,
+          "sampled_peak_mib": 7149.0,
+          "capacity": 316630,
+          "allocator_ceiling_bytes": 6818889728,
+          "peak_reserved_bytes": 6318718976,
+          "output_token_throughput": 955.4424952951202,
+          "goodput": 8.16542742369849,
+          "latency": {
+            "request_latency": {
+              "avg": 239.9336087832031,
+              "p50": 227.781479,
+              "p95": 271.5751275,
+              "p99": 290.68146693
+            },
+            "time_to_first_token": {
+              "avg": 51.67401044726562,
+              "p50": 51.650271,
+              "p95": 65.10911075,
+              "p99": 71.47849046999995
+            },
+            "inter_token_latency": {
+              "avg": 2.9887179920575906,
+              "p50": 2.8237807460317463,
+              "p95": 3.300586353174603,
+              "p99": 3.6172040057142856
+            }
+          }
+        },
+        {
+          "run": 1,
+          "version": "baseline",
+          "case": "long",
+          "rate": 7,
+          "slo": {
+            "ttft_ms": 1000,
+            "tpot_ms": 5
+          },
+          "request_count": 512.0,
+          "sampled_peak_mib": 7253.0,
+          "capacity": 316630,
+          "allocator_ceiling_bytes": 6818889728,
+          "peak_reserved_bytes": 6318718976,
+          "output_token_throughput": 891.6233442069065,
+          "goodput": 6.803065298918882,
+          "latency": {
+            "request_latency": {
+              "avg": 697.6357676523437,
+              "p50": 701.6144194999999,
+              "p95": 726.7173951499999,
+              "p99": 832.6776991
+            },
+            "time_to_first_token": {
+              "avg": 116.4991854296875,
+              "p50": 116.7448855,
+              "p95": 130.0088985,
+              "p99": 135.25092245
+            },
+            "inter_token_latency": {
+              "avg": 4.576248151579113,
+              "p50": 4.602268157480315,
+              "p95": 4.78492324527559,
+              "p99": 5.529856443307087
+            }
+          }
+        },
+        {
+          "run": 2,
+          "version": "baseline",
+          "case": "short",
+          "rate": 15,
+          "slo": {
+            "ttft_ms": 150,
+            "tpot_ms": 3
+          },
+          "request_count": 512.0,
+          "sampled_peak_mib": 7035.0,
+          "capacity": 316630,
+          "allocator_ceiling_bytes": 6818889728,
+          "peak_reserved_bytes": 6318718976,
+          "output_token_throughput": 955.5720462060798,
+          "goodput": 8.253781256144567,
+          "latency": {
+            "request_latency": {
+              "avg": 238.61147625781248,
+              "p50": 226.0683195,
+              "p95": 271.26390835,
+              "p99": 307.4735598099998
+            },
+            "time_to_first_token": {
+              "avg": 51.20500675390625,
+              "p50": 50.838441499999995,
+              "p95": 65.09993475,
+              "p99": 70.68950684999999
+            },
+            "inter_token_latency": {
+              "avg": 2.9750780227075717,
+              "p50": 2.808929111111111,
+              "p95": 3.3046291137352783,
+              "p99": 3.764871774603173
+            }
+          }
+        },
+        {
+          "run": 2,
+          "version": "baseline",
+          "case": "long",
+          "rate": 7,
+          "slo": {
+            "ttft_ms": 1000,
+            "tpot_ms": 5
+          },
+          "request_count": 512.0,
+          "sampled_peak_mib": 7253.0,
+          "capacity": 316630,
+          "allocator_ceiling_bytes": 6818889728,
+          "peak_reserved_bytes": 6318718976,
+          "output_token_throughput": 891.6481704644995,
+          "goodput": 6.9257133076930035,
+          "latency": {
+            "request_latency": {
+              "avg": 668.9104045488281,
+              "p50": 691.075806,
+              "p95": 718.32552445,
+              "p99": 735.3003039199999
+            },
+            "time_to_first_token": {
+              "avg": 116.02265873046875,
+              "p50": 115.99454399999999,
+              "p95": 130.29540465,
+              "p99": 134.15562609999998
+            },
+            "inter_token_latency": {
+              "avg": 4.353816929383397,
+              "p50": 4.560348219972503,
+              "p95": 4.685796606299212,
+              "p99": 4.834740503385825
+            }
+          }
+        },
+        {
+          "run": 3,
+          "version": "candidate",
+          "case": "short",
+          "rate": 15,
+          "slo": {
+            "ttft_ms": 150,
+            "tpot_ms": 3
+          },
+          "request_count": 512.0,
+          "sampled_peak_mib": 7271.0,
+          "capacity": 316144,
+          "allocator_ceiling_bytes": 6818889728,
+          "peak_reserved_bytes": 6314524672,
+          "output_token_throughput": 955.605987952909,
+          "goodput": 8.137409066013356,
+          "latency": {
+            "request_latency": {
+              "avg": 238.1907540957031,
+              "p50": 226.11997749999998,
+              "p95": 270.93219185000004,
+              "p99": 308.78092943999997
+            },
+            "time_to_first_token": {
+              "avg": 50.994277091796874,
+              "p50": 50.913985499999995,
+              "p95": 64.841388,
+              "p99": 72.32564212999999
+            },
+            "inter_token_latency": {
+              "avg": 2.971722408314778,
+              "p50": 2.8132676612903222,
+              "p95": 3.3046685849206345,
+              "p99": 3.8183770387301568
+            }
+          }
+        },
+        {
+          "run": 3,
+          "version": "candidate",
+          "case": "long",
+          "rate": 7,
+          "slo": {
+            "ttft_ms": 1000,
+            "tpot_ms": 5
+          },
+          "request_count": 512.0,
+          "sampled_peak_mib": 7271.0,
+          "capacity": 316144,
+          "allocator_ceiling_bytes": 6818889728,
+          "peak_reserved_bytes": 6314524672,
+          "output_token_throughput": 891.4743398796462,
+          "goodput": 6.9243631105696535,
+          "latency": {
+            "request_latency": {
+              "avg": 616.5758150371094,
+              "p50": 598.3704035,
+              "p95": 702.3992073999999,
+              "p99": 736.24578757
+            },
+            "time_to_first_token": {
+              "avg": 113.62045409179687,
+              "p50": 113.38891199999999,
+              "p95": 127.53314259999999,
+              "p99": 132.17427651999998
+            },
+            "inter_token_latency": {
+              "avg": 3.960570975862183,
+              "p50": 3.818660011811023,
+              "p95": 4.569534122834645,
+              "p99": 4.898484124724409
+            }
+          }
+        }
+      ],
+      "decision": "Stable 1-2 percent performance gate not passed. Short pooled request p99 +5.23 percent; pooled per-request ITL p99 +5.59/+7.75 percent. Both baseline and candidate vary across rounds. Retain all rounds and previous r58/r65 failures.",
+      "limitations": [
+        "One fixed four-round same-budget workload; no generic performance or saturation claim",
+        "Pooled percentiles exclude warmup; each round percentile is retained",
+        "Prior r58/r65 regressions and shared-host variability remain separate evidence"
+      ]
     }
   }
 }

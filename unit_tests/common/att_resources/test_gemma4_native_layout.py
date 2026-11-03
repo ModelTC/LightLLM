@@ -1,3 +1,5 @@
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+from lightllm.common.attention_state.storage import allocate_state_storage
 from dataclasses import replace
 
 import pytest
@@ -30,7 +32,7 @@ def test_gemma4_uses_native_width_and_shares_only_declared_content(tp, device):
     manager = AttentionStateManager(2)
     for state in states:
         state.device = torch.device(device)
-        state.allocate_storage(16)
+        allocate_state_storage(state, 16)
         manager.register_state("main", state)
     manager.finish_state_registration()
     sliding, full = manager.get_state("main", "gqa", 3), manager.get_state("main", "gqa", 7)
@@ -45,6 +47,6 @@ def test_gemma4_uses_native_width_and_shares_only_declared_content(tp, device):
     if device == "cuda":
         indices = torch.tensor([1, 6], dtype=torch.int32, device=device)
         kv = torch.randn(2, 8 // tp, 512, dtype=torch.bfloat16, device=device)
-        full.write_full_att_kv(7, indices, kv)
+        bind_kv_writer(full, 7)(token_indices=indices, kv=kv)
         k, v = full.get_layer_view(11)
         torch.testing.assert_close(torch.cat((k[indices], v[indices]), dim=1), kv, atol=0, rtol=0)

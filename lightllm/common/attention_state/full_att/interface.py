@@ -2,12 +2,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from lightllm.common.attention_state.utils import weak_cached_method
-from typing import Any, List
+from typing import Any
 
-import torch
 
 from ..utils import deepcopy_result
-from lightllm.common.attention_state.types import StateTransferLayout, TransferRegion
+from lightllm.common.attention_state.types import TransferRegion
 
 
 class CoreInterface(ABC):
@@ -41,8 +40,7 @@ class CoreInterface(ABC):
         ...
 
     @abstractmethod
-    def allocate_storage(self, token_capacity: int) -> None:
-        """按 token 容量和 logical_layer_groups 的物理层数创建存储，沿用已设置的页大小、设备及配套参数。"""
+    def get_storage_specs(self, token_capacity: int):
         raise NotImplementedError()
 
     @abstractmethod
@@ -69,18 +67,6 @@ class CoreInterface(ABC):
         """按逻辑层号返回存储视图；同组逻辑层返回同一物理层的数据，具体字段由该布局定义。"""
         raise NotImplementedError()
 
-    @abstractmethod
-    def bind_kv_writer(self, logical_layer_id: int):
-
-        raise NotImplementedError()
-
-    @abstractmethod
-    def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
-        """复制全部所辖层的完整 token 数据，包含动态 scale、indexer 字段，保持原存储表示。
-
-        源和目标索引为存储执行域上的等长一维整数 Tensor，位置不重叠，直接使用原 dtype 和 stride。"""
-        raise NotImplementedError()
-
 
 class CpuCacheInterface(ABC):
     # ========================================================================
@@ -102,49 +88,6 @@ class CpuCacheInterface(ABC):
         """
         ...
 
-    @abstractmethod
-    def write_to_cpu(
-        self,
-        token_indices: torch.Tensor,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        layout: StateTransferLayout,
-        cpu_page_ready_flags: list[bool] | None = None,
-    ) -> None:
-        """按布局写出 token 数据及配套字段；cpu_page_ready_flags 中为 True 的页跳过写入。"""
-        raise NotImplementedError()
-
-    @abstractmethod
-    def read_from_cpu(
-        self,
-        cpu_page_buffers: torch.Tensor,
-        cpu_page_indices: List[int],
-        token_indices: torch.Tensor,
-        layout: StateTransferLayout,
-    ) -> None:
-        """从指定 CPU 页读回 token 数据，保留目标中由其他资源或 TP 分片持有的区域。"""
-        raise NotImplementedError()
-
-
-class DpCopyInterface(ABC):
-    # ========================================================================
-    # 四、DP 迁移
-    # ========================================================================
-
-    @abstractmethod
-    def copy_tokens_from_dp(
-        self,
-        src_token_indices: torch.Tensor,
-        dst_token_indices: torch.Tensor,
-        remote_dp_full_att_state: CoreInterface,
-    ) -> None:
-        """复制其他 DP 同一 TP 分片的完整 token 数据，包含量化参数及 indexer 字段。
-
-        源、目标索引须与存储处于同一 CPU/CUDA 执行域，可为 int32/int64；接口不转换设备或 dtype。
-        调用方保证 peer/IPC 可访问、源数据就绪、目标索引唯一，且源目标数据区域不重叠。
-        """
-        raise NotImplementedError()
-
 
 class PdInterface(ABC):
     # ========================================================================
@@ -163,32 +106,9 @@ class PdInterface(ABC):
         """
         ...
 
-    @abstractmethod
-    def write_to_pd_page(
-        self,
-        token_indices: torch.Tensor,
-        pd_page_buffers: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """将 token 数据写入 PD 页集合中的指定发送页，网络发送与同步由调用方负责。"""
-        raise NotImplementedError()
-
-    @abstractmethod
-    def read_from_pd_page(
-        self,
-        pd_page_buffers: torch.Tensor,
-        token_indices: torch.Tensor,
-        pd_page_index: int,
-        layout: StateTransferLayout,
-    ) -> None:
-        """从 PD 页集合中的指定接收页还原 token 数据，不分配索引或修改请求映射。"""
-        raise NotImplementedError()
-
 
 __all__ = [
     "CoreInterface",
     "CpuCacheInterface",
-    "DpCopyInterface",
     "PdInterface",
 ]

@@ -5,17 +5,15 @@ from __future__ import annotations
 from lightllm.common.attention_state.utils import weak_cached_method
 
 from dataclasses import dataclass
-from functools import partial
 from math import prod
 
 import torch
 
 from ...utils import deepcopy_result
-from ...types import PageKind, TensorField, TransferRegion
+from ...types import TensorField, TransferRegion
 from ..base_state import BoundedAttentionState
-from ..copy_plan import BatchedStateView, bind_window_page_copy
-from ..window_pages_pool import WindowPagesPool
-from .fp8_e8m0_swa_transfer import copy_swa_window
+from ..copy_plan import BatchedStateView
+from ...storage import StatePagesPool
 
 
 @dataclass(frozen=True)
@@ -75,7 +73,6 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
         config: FP8E8M0SlidingWindowConfig,
         request_capacity: int,
         mtp_step: int = 0,
-        device: str | torch.device = "cuda",
     ) -> None:
         self.config = config
         self.state_name: str | None = None
@@ -86,18 +83,11 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
         self.swa_capacity_tokens = (config.window_size + 2 * mtp_step + page_tokens - 1) // page_tokens * page_tokens
         self.HOLD_REQUEST_ID = request_capacity - 1
         self.HOLD_SWA_SLOT = self.HOLD_REQUEST_ID * self.swa_capacity_tokens
-        self.swa_buffer = torch.zeros(
-            size=(
-                len(config.logical_layer_ids),
-                request_capacity,
-                self.swa_capacity_tokens,
-                config.get_packed_kv_bytes(page_tokens) // page_tokens,
-            ),
-            dtype=torch.uint8,
-            device=device,
-        )
-        self.big_pages_pool: WindowPagesPool | None = None
-        self.small_pages_pool: WindowPagesPool | None = None
+        from ...storage import allocate_buffers
+
+        self.bind_runtime_storage(allocate_buffers(self.get_runtime_storage_specs(), "meta"))
+        self.big_pages_pool: StatePagesPool | None = None
+        self.small_pages_pool: StatePagesPool | None = None
 
     def get_state_type(self) -> str:
         """窗口长度参与方案名称，允许同一模型组合不同滑窗。"""
@@ -106,37 +96,23 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     def get_checkpoint_bytes(self):
         return len(self.config.logical_layer_ids) * self.config.window_size * self.config.kv_bytes
 
-    def initialize_page_pools(
-        self,
-        big_page_capacity: int,
-        small_page_capacity: int = 0,
-        device: str | torch.device | int = "cpu",
-        pin_memory: bool = True,
-    ) -> None:
-        """大小页只保存时间有序 KV，不保存 ring padding 或 MTP 候选位置。"""
-        shape = (len(self.config.logical_layer_ids), self.config.window_size, self.config.kv_bytes)
-        self.big_pages_pool = (
-            WindowPagesPool(
-                size=big_page_capacity,
-                snapshot_shape=shape,
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if big_page_capacity
-            else None
+    def get_runtime_storage_specs(self):
+        from ...storage import TensorStorageSpec
+
+        c = self.config
+        shape = (
+            len(c.logical_layer_ids),
+            self.request_capacity,
+            self.swa_capacity_tokens,
+            c.get_packed_kv_bytes(c.page_token_size) // c.page_token_size,
         )
-        self.small_pages_pool = (
-            WindowPagesPool(
-                size=small_page_capacity,
-                snapshot_shape=shape,
-                dtype=torch.uint8,
-                device=device,
-                pin_memory=pin_memory,
-            )
-            if small_page_capacity
-            else None
-        )
+        return (TensorStorageSpec("swa_buffer", shape, torch.uint8, fill=0),)
+
+    def get_snapshot_storage_specs(self):
+        from ...storage import TensorStorageSpec
+
+        c = self.config
+        return (TensorStorageSpec("buffer", (len(c.logical_layer_ids), c.window_size, c.kv_bytes), torch.uint8),)
 
     # ========================================================================
     # 二、运行态：层视图、重置与大小页保存恢复
@@ -148,46 +124,6 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     def get_layer_view(self, logical_layer_id: int) -> torch.Tensor:
         """返回该层的 [request, ring_token, packed_byte] 视图。"""
         return self.swa_buffer[self._logical_to_storage_layer[logical_layer_id]]
-
-    def reset_bounded_att_state(self, req_indices: list[int]) -> None:
-        for req_idx in req_indices:
-            self.swa_buffer[:, req_idx].zero_()
-
-    def save_bounded_att_runtime_to_pages(
-        self,
-        req_indices: list[int],
-        state_token_lens: list[int],
-        page_kind: PageKind,
-        page_slot_ids: list[int],
-    ) -> None:
-        pool = self._pool(page_kind=page_kind)
-        for req_idx, length, slot in zip(req_indices, state_token_lens, page_slot_ids):
-            self._copy_window(
-                req_idx=req_idx,
-                external=pool.buffer[slot],
-                state_token_len=length,
-                write=True,
-            )
-
-    def restore_bounded_att_runtime_from_pages(
-        self,
-        req_indices: list[int],
-        state_token_lens: list[int],
-        page_kind: PageKind,
-        page_slot_ids: list[int],
-    ) -> None:
-        pool = self._pool(page_kind=page_kind)
-        for req_idx, length, slot in zip(req_indices, state_token_lens, page_slot_ids):
-            self._copy_window(
-                req_idx=req_idx,
-                external=pool.buffer[slot],
-                state_token_len=length,
-                write=False,
-            )
-
-    def commit_bounded_att_state(self, req_indices: torch.Tensor, accepted_steps: torch.Tensor) -> None:
-        """ring 按绝对 token 位置寻址，无需提交额外游标。"""
-        pass
 
     # ========================================================================
     # 三、CPU Cache：仅搬运时间有序的大小页快照
@@ -213,12 +149,6 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     # 六、内部页池和窗口搬运
     # ========================================================================
 
-    def _pool(self, page_kind: PageKind) -> WindowPagesPool:
-        assert page_kind in ("big", "small")
-        pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
-        assert pool is not None, f"{page_kind} pages are disabled"
-        return pool
-
     def _get_transfer_regions(self) -> tuple[TransferRegion, ...]:
         shape = (len(self.config.logical_layer_ids), self.config.window_size, self.config.kv_bytes)
         return (
@@ -242,30 +172,6 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     def get_snapshot_transfer_view(self, page_kind):
         pool = self.big_pages_pool if page_kind == "big" else self.small_pages_pool
         return BatchedStateView(
-            () if pool is None else (("swa", TensorField(pool.buffer, ("slot", "layer", "window", "channel"))),)
-        )
-
-    def bind_pd_copy(self, pages, layout, write):
-        return bind_window_page_copy(
-            self.get_runtime_transfer_view(),
-            pages,
-            layout,
-            write,
-            partial(copy_swa_window, config=self.config),
-        )
-
-    def _copy_window(
-        self,
-        req_idx: int,
-        external: torch.Tensor,
-        state_token_len: int,
-        write: bool,
-    ) -> None:
-        local = self.swa_buffer[:, req_idx]
-        copy_swa_window(
-            local=local,
-            external=external,
-            state_token_len=state_token_len,
-            config=self.config,
-            write=write,
+            () if pool is None else (("swa", TensorField(pool.buffer, ("slot", "layer", "window", "channel"))),),
+            execution_device=self.swa_buffer.device,
         )

@@ -1,6 +1,10 @@
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page, copy_token_pages, copy_tokens
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
 """CPU 页直接拷贝：真实索引、跨页布局、原始编码与未参与区域的保持。"""
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from dataclasses import replace
 
@@ -27,8 +31,8 @@ def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeyp
     )
     source = GQAFullAttentionState(layout_config=config, page_size=4, device="cuda")
     target = GQAFullAttentionState(layout_config=config, page_size=4, device="cuda")
-    source.allocate_storage(token_capacity=8)
-    target.allocate_storage(token_capacity=12)
+    allocate_state_storage(source, token_capacity=8)
+    allocate_state_storage(target, token_capacity=12)
     src_ids = torch.tensor([5, 1, 7], dtype=torch.int32, device="cuda")
     dst_ids = torch.tensor([9, 0, 6], dtype=torch.int64, device="cuda")
     expected = []
@@ -61,31 +65,11 @@ def test_narrow_head_fields_merge_before_page_transfer(page_device: str, monkeyp
 
     monkeypatch.setattr(token_copy, "_copy_token_pages", CaptureLaunch())
     if page_device == "cpu":
-        source.write_to_cpu(
-            token_indices=src_ids,
-            cpu_page_buffers=page_view,
-            cpu_page_indices=[1],
-            layout=layout,
-        )
-        target.read_from_cpu(
-            cpu_page_buffers=page_view,
-            cpu_page_indices=[1],
-            token_indices=dst_ids,
-            layout=layout,
-        )
+        copy_token_pages(source, src_ids, page_view, [1], layout, write=True, ready=None)
+        copy_token_pages(target, dst_ids, page_view, [1], layout, write=False, ready=None)
     else:
-        source.write_to_pd_page(
-            token_indices=src_ids,
-            pd_page_buffers=page_view,
-            pd_page_index=1,
-            layout=layout,
-        )
-        target.read_from_pd_page(
-            pd_page_buffers=page_view,
-            token_indices=dst_ids,
-            pd_page_index=1,
-            layout=layout,
-        )
+        copy_pd_page(source, page_view, 1, layout, write=True, token_indices=src_ids)
+        copy_pd_page(target, page_view, 1, layout, write=False, token_indices=dst_ids)
     torch.cuda.synchronize()
     # 单个 BF16 head 只有 2 字节；合并 4 个 head 后才能按 INT64 搬运。
     assert launches == [((1,), 8)] * 4
@@ -165,18 +149,8 @@ def test_direct_cpu_pages_preserve_bytes_without_gather(kind: str, token_major: 
         patch.setattr(torch.Tensor, "index_select", reject_gather)
         patch.setattr(torch.Tensor, "index_copy_", reject_gather)
         with torch.cuda.stream(stream):
-            source.write_to_cpu(
-                token_indices=src_ids,
-                cpu_page_buffers=page_view,
-                cpu_page_indices=[2, 0],
-                layout=layout,
-            )
-            target.read_from_cpu(
-                cpu_page_buffers=page_view,
-                cpu_page_indices=[2, 0],
-                token_indices=dst_ids,
-                layout=layout,
-            )
+            copy_token_pages(source, src_ids, page_view, [2, 0], layout, write=True, ready=None)
+            copy_token_pages(target, dst_ids, page_view, [2, 0], layout, write=False, ready=None)
         stream.synchronize()
     for name, tensor in full_state_test_buffers(target).items():
         assert torch.equal(tensor[:, dst_ids].contiguous().view(torch.uint8), expected[name].view(torch.uint8))
@@ -214,29 +188,14 @@ def test_direct_cpu_pages_only_update_selected_head_slice_and_skip_replica_write
     layout = replace(layout, regions=tuple(regions))
     pages = torch.zeros((1, layout.byte_end), dtype=torch.uint8, pin_memory=True)
     ids = torch.tensor([1, 5], dtype=torch.int64, device="cuda")
-    state.write_to_cpu(
-        token_indices=ids,
-        cpu_page_buffers=pages,
-        cpu_page_indices=[0],
-        layout=layout,
-    )
+    copy_token_pages(state, ids, pages, [0], layout, write=True, ready=None)
     torch.cuda.synchronize()
     snapshot = pages.clone()
     state.k_storage.fill_(19)
     state.v_storage.fill_(19)
     read_only = replace(layout, regions=tuple(replace(region, write_enabled=False) for region in layout.regions))
-    state.write_to_cpu(
-        token_indices=ids,
-        cpu_page_buffers=pages,
-        cpu_page_indices=[0],
-        layout=read_only,
-    )
-    state.read_from_cpu(
-        cpu_page_buffers=pages,
-        cpu_page_indices=[0],
-        token_indices=ids,
-        layout=read_only,
-    )
+    copy_token_pages(state, ids, pages, [0], read_only, write=True, ready=None)
+    copy_token_pages(state, ids, pages, [0], read_only, write=False, ready=None)
     torch.cuda.synchronize()
     assert torch.equal(pages, snapshot)
     assert (state.k_storage[:, ids, 1] == 3).all() and (state.v_storage[:, ids, 1] == 7).all()
@@ -263,20 +222,10 @@ def test_direct_cpu_pages_accept_registered_external_memory():
     try:
         assert pages.is_pinned()
         ids = torch.tensor([1, 5], dtype=torch.int32, device="cuda")
-        state.write_to_cpu(
-            token_indices=ids,
-            cpu_page_buffers=pages,
-            cpu_page_indices=[0],
-            layout=layout,
-        )
+        copy_token_pages(state, ids, pages, [0], layout, write=True, ready=None)
         state.k_storage.zero_()
         state.v_storage.zero_()
-        state.read_from_cpu(
-            cpu_page_buffers=pages,
-            cpu_page_indices=[0],
-            token_indices=ids,
-            layout=layout,
-        )
+        copy_token_pages(state, ids, pages, [0], layout, write=False, ready=None)
         torch.cuda.synchronize()
         assert (state.k_storage[:, ids] == 3).all() and (state.v_storage[:, ids] == 7).all()
     finally:
@@ -296,19 +245,9 @@ def test_cpu_cache_transfer_rejects_device_indices_for_cpu_state(kind: str, writ
     ids = torch.tensor([0], dtype=torch.int64, device="cuda")
     with pytest.raises(ValueError, match="same memory domain"):
         if write:
-            state.write_to_cpu(
-                token_indices=ids,
-                cpu_page_buffers=pages,
-                cpu_page_indices=[0],
-                layout=layout,
-            )
+            copy_token_pages(state, ids, pages, [0], layout, write=True, ready=None)
         else:
-            state.read_from_cpu(
-                cpu_page_buffers=pages,
-                cpu_page_indices=[0],
-                token_indices=ids,
-                layout=layout,
-            )
+            copy_token_pages(state, ids, pages, [0], layout, write=False, ready=None)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -331,18 +270,8 @@ def test_gqa_single_cpu_page_and_empty_transfer(token_count: int) -> None:
     dst_ids = torch.tensor(data=[2], dtype=torch.int64, device="cuda")[:token_count]
     page_indices = [1] if token_count else []
 
-    source.write_to_cpu(
-        token_indices=src_ids,
-        cpu_page_buffers=pages,
-        cpu_page_indices=page_indices,
-        layout=layout,
-    )
-    target.read_from_cpu(
-        cpu_page_buffers=pages,
-        cpu_page_indices=page_indices,
-        token_indices=dst_ids,
-        layout=layout,
-    )
+    copy_token_pages(source, src_ids, pages, page_indices, layout, write=True, ready=None)
+    copy_token_pages(target, dst_ids, pages, page_indices, layout, write=False, ready=None)
     torch.cuda.synchronize()
     if token_count:
         assert (target.k_storage[:, 2] == 3).all() and (target.v_storage[:, 2] == 7).all()
@@ -377,37 +306,19 @@ def test_full_state_interfaces_reject_cpu_token_indices(kind: str) -> None:
     cpu_pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, pin_memory=True)
     pd_pages = torch.empty((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
-        state.write_full_att_kv(state.config.logical_layer_groups[0][0], cpu_ids, torch.empty(0, device="cuda"))
+        bind_kv_writer(state, state.config.logical_layer_groups[0][0])(
+            token_indices=cpu_ids, kv=torch.empty(0, device="cuda")
+        )
     for src, dst in ((cpu_ids, cuda_ids), (cuda_ids, cpu_ids)):
         with pytest.raises(ValueError, match="same memory domain"):
-            state.copy_full_att_tokens(src, dst)
+            copy_tokens(state, state, src, dst)
         with pytest.raises(ValueError, match="same memory domain"):
-            state.copy_tokens_from_dp(src, dst, state)
+            copy_tokens(state, state, src, dst)
     with pytest.raises(ValueError, match="same memory domain"):
-        state.write_to_cpu(
-            token_indices=cpu_ids,
-            cpu_page_buffers=cpu_pages,
-            cpu_page_indices=[0],
-            layout=layout,
-        )
+        copy_token_pages(state, cpu_ids, cpu_pages, [0], layout, write=True, ready=None)
     with pytest.raises(ValueError, match="same memory domain"):
-        state.read_from_cpu(
-            cpu_page_buffers=cpu_pages,
-            cpu_page_indices=[0],
-            token_indices=cpu_ids,
-            layout=layout,
-        )
+        copy_token_pages(state, cpu_ids, cpu_pages, [0], layout, write=False, ready=None)
     with pytest.raises(ValueError, match="same memory domain"):
-        state.write_to_pd_page(
-            token_indices=cpu_ids,
-            pd_page_buffers=pd_pages,
-            pd_page_index=0,
-            layout=layout,
-        )
+        copy_pd_page(state, pd_pages, 0, layout, write=True, token_indices=cpu_ids)
     with pytest.raises(ValueError, match="same memory domain"):
-        state.read_from_pd_page(
-            pd_page_buffers=pd_pages,
-            token_indices=cpu_ids,
-            pd_page_index=0,
-            layout=layout,
-        )
+        copy_pd_page(state, pd_pages, 0, layout, write=False, token_indices=cpu_ids)

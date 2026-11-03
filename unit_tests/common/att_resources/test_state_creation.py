@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from lightllm.common.attention_state.storage import allocate_state_storage
+
 from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
 
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
@@ -84,7 +86,7 @@ def test_gqa_creation_preserves_logical_tp_config_and_deferred_capacity(
     elif kv_type.startswith("fp8"):
         assert not hasattr(state.config, "dtype")
     state.device = torch.device("cpu")
-    state.allocate_storage(8)
+    allocate_state_storage(state, 8)
     assert state.k_storage.shape == state.v_storage.shape == (2, 12, 2, width)
     assert state.k_storage.untyped_storage().data_ptr() != state.v_storage.untyped_storage().data_ptr()
     assert state.k_storage.dtype == state.v_storage.dtype == storage_dtype
@@ -140,7 +142,7 @@ def test_mla_creation_computes_packed_width_from_logical_dimensions(
     assert type(state.config).__bases__ == (object,)
     assert not hasattr(state.config, "head_num") and not hasattr(state.config, "global_head_num")
     state.device = torch.device("cpu")
-    state.allocate_storage(8)
+    allocate_state_storage(state, 8)
     assert read_kv_storage(state).shape == (2, 12, 1, row_width)
     assert read_kv_storage(state).dtype == (torch.uint8 if kv_type == "fp8kv_dsa" else torch.bfloat16)
     if packed:

@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_runtime_storage
 import weakref
 import pytest
 import torch
@@ -208,7 +209,7 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str):
         ssm_dtype=ssm.dtype,
     )
     for model_role in ("main", "draft0"):
-        linear = KDAState(config, request_capacity=4, mtp_step=2, device="meta")
+        linear = allocate_runtime_storage(KDAState(config, request_capacity=4, mtp_step=2), "meta")
         linear.mtp_state_index = accepted_offsets if model_role == role else torch.zeros_like(accepted_offsets)
         if model_role == role:
             linear.conv_state, linear.ssm_state = conv.unsqueeze(0), ssm.unsqueeze(0)

@@ -1,4 +1,17 @@
 """V4 State 独立验证：packed 字段、逻辑快照及不同 MTP ring 的 PD 恢复。"""
+from lightllm.common.attention_state.bounded_att.operations import bind_state_operations
+from unit_tests.common.att_resources.transfer_helpers import (
+    copy_bounded_peer,
+    copy_pd_page,
+    copy_snapshot_pages,
+    copy_token_pages,
+    copy_tokens,
+)
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+
+from lightllm.common.attention_state.storage import allocate_runtime_storage, initialize_state_page_pools
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from dataclasses import replace
 
@@ -81,7 +94,7 @@ def test_compressed_meta_geometry() -> None:
         state = make_full(ratio=ratio)
         assert state.config.token_slot_bytes == slot_bytes
         assert state.storage is None
-        state.allocate_storage(token_capacity=512)
+        allocate_state_storage(state, token_capacity=512)
         assert state.storage.shape == (1, 768, 1, slot_bytes)
         view = state.get_layer_view(logical_layer_id=5 if ratio == 4 else 8)
         assert view.kv.shape[0] == 3
@@ -90,10 +103,8 @@ def test_compressed_meta_geometry() -> None:
         assert attention_view.shape == (3, 256 // ratio, 1, 584)
         assert attention_view.stride(0) == view.kv.stride(0)
         with pytest.raises(NotImplementedError, match="fused compressor"):
-            state.write_full_att_kv(
-                logical_layer_id=5 if ratio == 4 else 8,
-                token_indices=torch.empty(0, dtype=torch.int64, device="meta"),
-                kv=torch.empty(0, device="meta"),
+            bind_kv_writer(state, 5 if ratio == 4 else 8)(
+                token_indices=torch.empty(0, dtype=torch.int64, device="meta"), kv=torch.empty(0, device="meta")
             )
 
 
@@ -157,19 +168,9 @@ def test_compressed_cpu_page_boundaries(
     indices = torch.empty(256, dtype=torch.int32, device="meta")
     with pytest.raises(ValueError, match="page capacity|page layout|page index"):
         if write:
-            state.write_to_cpu(
-                token_indices=indices,
-                cpu_page_buffers=pages,
-                cpu_page_indices=page_indices,
-                layout=layout,
-            )
+            copy_token_pages(state, indices, pages, page_indices, layout, write=True, ready=None)
         else:
-            state.read_from_cpu(
-                cpu_page_buffers=pages,
-                cpu_page_indices=page_indices,
-                token_indices=indices,
-                layout=layout,
-            )
+            copy_token_pages(state, indices, pages, page_indices, layout, write=False, ready=None)
 
 
 @pytest.mark.parametrize("ratio,block_tokens,indexer_dim,slot_bytes", [(4, 256, 0, 153), (8, 512, 32, 81)])
@@ -196,7 +197,7 @@ def test_atomic_compressed_config_controls_layout(
     assert not hasattr(config, "cache_config")
     assert config.token_slot_bytes == slot_bytes
     assert state.get_token_bytes() == 2 * slot_bytes
-    state.allocate_storage(token_capacity=2 * block_tokens)
+    allocate_state_storage(state, token_capacity=2 * block_tokens)
     assert state.storage.shape == (2, 3 * block_tokens, 1, slot_bytes)
     assert state.get_storage_layer_index(0) == state.get_storage_layer_index(4)
     view = state.get_layer_view(logical_layer_id=4)
@@ -214,15 +215,15 @@ def test_pd_compressed_kv_preserves_partial_block(ratio: int, monkeypatch: pytes
 
     monkeypatch.setattr(get_env_start_args(), "pd_kv_page_size", 256)
     source, target = make_full(ratio=ratio, device="cuda"), make_full(ratio=ratio, device="cuda")
-    source.allocate_storage(token_capacity=512)
-    target.allocate_storage(token_capacity=512)
+    allocate_state_storage(source, token_capacity=512)
+    allocate_state_storage(target, token_capacity=512)
     source.storage.random_(0, 256)
     target.storage.zero_()
     layout = pd_layout(source)
     pages = torch.zeros((1, layout.byte_end), dtype=torch.uint8, device="cuda")
     indices = torch.arange(17, dtype=torch.int32, device="cuda")
-    source.write_to_pd_page(token_indices=indices, pd_page_buffers=pages, pd_page_index=0, layout=layout)
-    target.read_from_pd_page(pd_page_buffers=pages, token_indices=indices, pd_page_index=0, layout=layout)
+    copy_pd_page(source, pages, 0, layout, write=True, token_indices=indices)
+    copy_pd_page(target, pages, 0, layout, write=False, token_indices=indices)
     torch.cuda.synchronize()
     assert torch.equal(source.storage[:, :256], target.storage[:, :256])
     assert not target.storage[:, 256:].any()
@@ -235,8 +236,8 @@ def test_compressed_cpu_and_token_copy(ratio: int, monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(get_env_start_args(), "cpu_cache_token_page_size", 256)
     source, target = make_full(ratio=ratio, device="cuda"), make_full(ratio=ratio, device="cuda")
-    source.allocate_storage(token_capacity=512)
-    target.allocate_storage(token_capacity=768)
+    allocate_state_storage(source, token_capacity=512)
+    allocate_state_storage(target, token_capacity=768)
     source.storage.random_(0, 256)
     regions = source.get_cpu_transfer_regions()
     layout = StateTransferLayout(
@@ -249,29 +250,15 @@ def test_compressed_cpu_and_token_copy(ratio: int, monkeypatch: pytest.MonkeyPat
     cpu_pages = torch.zeros((3, layout.byte_end), dtype=torch.uint8, pin_memory=True)
     src_indices = torch.arange(256, 512, dtype=torch.int32, device="cuda")
     dst_indices = torch.arange(256, dtype=torch.int64, device="cuda")
-    source.write_to_cpu(
-        token_indices=src_indices,
-        cpu_page_buffers=cpu_pages,
-        cpu_page_indices=[2],
-        layout=layout,
-    )
-    target.read_from_cpu(
-        cpu_page_buffers=cpu_pages,
-        cpu_page_indices=[2],
-        token_indices=dst_indices,
-        layout=layout,
-    )
-    target.copy_tokens_from_dp(
-        src_token_indices=src_indices,
-        dst_token_indices=dst_indices + 512,
-        remote_dp_full_att_state=source,
-    )
+    copy_token_pages(source, src_indices, cpu_pages, [2], layout, write=True, ready=None)
+    copy_token_pages(target, dst_indices, cpu_pages, [2], layout, write=False, ready=None)
+    copy_tokens(source, target, src_indices, dst_indices + 512)
     torch.cuda.synchronize()
     assert torch.equal(source.storage[:, 256:512], target.storage[:, :256])
     assert torch.equal(source.storage[:, 256:512], target.storage[:, 512:768])
     assert not target.storage[:, 256:512].any()
     assert not cpu_pages[:2].any()
-    target.copy_full_att_tokens(src_indices=dst_indices, dst_indices=dst_indices + 256)
+    copy_tokens(target, target, dst_indices, dst_indices + 256)
     torch.cuda.synchronize()
     assert torch.equal(source.storage[:, 256:512], target.storage[:, 256:512])
     assert not target.storage[:, 768:].any()
@@ -284,27 +271,25 @@ def test_compressed_cpu_and_token_copy(ratio: int, monkeypatch: pytest.MonkeyPat
 def test_compressed_token_copy_rejects_partial_blocks(ratio: int, token_count: int, from_dp: bool) -> None:
     """即使长度已按压缩比例对齐，也不能拆开含 KV/scale/indexer 的物理块。"""
     source, target = make_full(ratio=ratio, device="cuda"), make_full(ratio=ratio, device="cuda")
-    source.allocate_storage(token_capacity=512)
-    target.allocate_storage(token_capacity=512)
+    allocate_state_storage(source, token_capacity=512)
+    allocate_state_storage(target, token_capacity=512)
     indices = torch.arange(token_count, dtype=torch.int64, device="cuda")
     with pytest.raises(ValueError, match="complete token blocks"):
         if from_dp:
-            target.copy_tokens_from_dp(
-                src_token_indices=indices,
-                dst_token_indices=indices,
-                remote_dp_full_att_state=source,
-            )
+            copy_tokens(source, target, indices, indices)
         else:
-            target.copy_full_att_tokens(src_indices=indices, dst_indices=indices)
+            copy_tokens(target, target, indices, indices)
 
 
 def make_atomic_state(kind: str, mtp_step: int = 0, device: str = "meta") -> BoundedAttentionState:
     if kind == "swa":
-        return FP8E8M0SlidingWindowState(
-            config=FP8E8M0SlidingWindowConfig(logical_layer_ids=(2, 5), window_size=128, kv_dim=512, rope_dim=64),
-            request_capacity=3,
-            mtp_step=mtp_step,
-            device=device,
+        return allocate_runtime_storage(
+            FP8E8M0SlidingWindowState(
+                config=FP8E8M0SlidingWindowConfig(logical_layer_ids=(2, 5), window_size=128, kv_dim=512, rope_dim=64),
+                request_capacity=3,
+                mtp_step=mtp_step,
+            ),
+            device,
         )
     window, compress_stride, candidate_dim, target = {
         "kv_w8": (8, 4, 1024, "kv"),
@@ -312,17 +297,19 @@ def make_atomic_state(kind: str, mtp_step: int = 0, device: str = "meta") -> Bou
         "kv_w128": (128, 128, 512, "kv"),
         "generic_w12": (12, 4, 24, "kv"),
     }[kind]
-    return WindowCompressorState(
-        config=WindowCompressorStateConfig(
-            logical_layer_ids=(2, 5),
-            window_size=window,
-            compress_stride=compress_stride,
-            candidate_dim=candidate_dim,
-            target=target,
+    return allocate_runtime_storage(
+        WindowCompressorState(
+            config=WindowCompressorStateConfig(
+                logical_layer_ids=(2, 5),
+                window_size=window,
+                compress_stride=compress_stride,
+                candidate_dim=candidate_dim,
+                target=target,
+            ),
+            request_capacity=3,
+            mtp_step=mtp_step,
         ),
-        request_capacity=3,
-        mtp_step=mtp_step,
-        device=device,
+        device,
     )
 
 
@@ -345,7 +332,7 @@ def test_atomic_window_definitions(kind: str) -> None:
     if isinstance(source, WindowCompressorState):
         assert source.config.overlap_tokens == source.config.window_size - source.config.compress_stride
         assert (source.get_cpu_transfer_regions() == ()) == (source.config.overlap_tokens == 0)
-        source.initialize_page_pools(big_page_capacity=3, device="meta", pin_memory=False)
+        initialize_state_page_pools(source, big_page_capacity=3, device="meta", pin_memory=False)
         assert (source.big_pages_pool is None) == (source.config.overlap_tokens == 0)
     else:
         assert source.swa_capacity_tokens == 128 and target.swa_capacity_tokens == 256
@@ -363,11 +350,11 @@ def test_atomic_pd_windows_ignore_mtp_capacity(kind: str, length: int, source_st
     source = make_atomic_state(kind, mtp_step=source_step, device="cuda")
     target = make_atomic_state(kind, mtp_step=target_step, device="cuda")
     runtime_buffer(source).random_(0, 127)
-    target.reset_bounded_att_state([1])
+    bind_state_operations(target).reset([1])
     layout = pd_layout(source)
     pages = torch.full((2, layout.byte_end + 32), 53, dtype=torch.uint8, device="cuda")
-    source.write_to_pd_page(req_idx=0, pd_page_buffers=pages, pd_page_index=1, state_token_len=length, layout=layout)
-    target.read_from_pd_page(pd_page_buffers=pages, req_idx=1, pd_page_index=1, state_token_len=length, layout=layout)
+    copy_pd_page(source, pages, 1, layout, write=True, req_idx=0, state_token_len=length)
+    copy_pd_page(target, pages, 1, layout, write=False, req_idx=1, state_token_len=length)
     torch.cuda.synchronize()
     if isinstance(source, FP8E8M0SlidingWindowState):
         assert torch.equal(gather_swa_reference(source, 0, length), gather_swa_reference(target, 1, length))
@@ -383,14 +370,12 @@ def test_atomic_pd_windows_ignore_mtp_capacity(kind: str, length: int, source_st
 def test_atomic_page_cpu_and_dp_roundtrip(kind: str) -> None:
     source = make_atomic_state(kind, mtp_step=3, device="cuda")
     target = make_atomic_state(kind, mtp_step=3, device="cuda")
-    source.initialize_page_pools(big_page_capacity=3)
-    target.initialize_page_pools(big_page_capacity=3)
+    initialize_state_page_pools(source, big_page_capacity=3)
+    initialize_state_page_pools(target, big_page_capacity=3)
     runtime_buffer(source).random_(0, 127)
-    target.reset_bounded_att_state([0, 1])
-    source.save_bounded_att_runtime_to_pages(
-        req_indices=[0], state_token_lens=[512], page_kind="big", page_slot_ids=[0]
-    )
-    target.copy_runtime_state_from_dp(src_req_indices=[0], dst_req_indices=[1], remote_dp_bounded_state=source)
+    bind_state_operations(target).reset([0, 1])
+    bind_state_operations(source).save(req_indices=[0], state_token_lens=[512], page_kind="big", page_slot_ids=[0])
+    copy_bounded_peer(source, target, [0], [1], runtime=True)
     regions = tuple(
         replace(region, byte_start=region.byte_start + 64, byte_end=region.byte_end + 64)
         for region in source.get_cpu_transfer_regions()
@@ -398,25 +383,16 @@ def test_atomic_page_cpu_and_dp_roundtrip(kind: str) -> None:
     if not regions:
         assert source.big_pages_pool is None
         with pytest.raises(AssertionError, match="stride"):
-            source.restore_bounded_att_runtime_from_pages([0], [513], "big", [0])
+            bind_state_operations(source).restore([0], [513], "big", [0])
         return
     layout = StateTransferLayout(
         state_name=None, tokens_per_page=256, byte_start=64, byte_end=regions[-1].byte_end, regions=regions
     )
     pages = torch.full((3, layout.byte_end + 32), 53, dtype=torch.uint8, pin_memory=True)
-    source.write_state_pages_to_cpu(
-        page_kind="big",
-        page_slot_ids=[0, 0],
-        cpu_page_buffers=pages,
-        cpu_page_indices=[1, 2],
-        layout=layout,
-        cpu_page_ready_flags=[True, False],
-    )
-    target.read_state_pages_from_cpu(cpu_page_buffers=pages, cpu_page_indices=[2], big_page_slot_ids=[0], layout=layout)
-    target.copy_big_pages_from_dp(src_page_ids=[0], dst_page_ids=[2], remote_dp_bounded_state=source)
-    target.restore_bounded_att_runtime_from_pages(
-        req_indices=[0], state_token_lens=[512], page_kind="big", page_slot_ids=[0]
-    )
+    copy_snapshot_pages(source, "big", [0, 0], pages, [1, 2], layout, write=True, ready=[True, False])
+    copy_snapshot_pages(target, "big", [0], pages, [2], layout, write=False, ready=None)
+    copy_bounded_peer(source, target, [0], [2], runtime=False)
+    bind_state_operations(target).restore(req_indices=[0], state_token_lens=[512], page_kind="big", page_slot_ids=[0])
     torch.cuda.synchronize()
     assert torch.equal(source.big_pages_pool.buffer[0], target.big_pages_pool.buffer[0])
     assert torch.equal(source.big_pages_pool.buffer[0], target.big_pages_pool.buffer[2])
@@ -492,7 +468,7 @@ def test_atomic_dp_ipc_preserves_shared_pools(monkeypatch: pytest.MonkeyPatch) -
         manager = AttentionStateManager(request_capacity=3)
         for kind in ("swa", "kv_w8", "kv_w128"):
             state = make_atomic_state(kind, device="cuda")
-            state.initialize_page_pools(big_page_capacity=2, small_page_capacity=1)
+            initialize_state_page_pools(state, big_page_capacity=2, small_page_capacity=1)
             manager.register_state("main", state)
         manager.finish_state_registration()
         exported = manager.get_dp_shared_operator().create_ipc_copy()

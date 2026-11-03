@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 import gc
 import weakref
 
@@ -13,7 +14,7 @@ def test_metadata_caches_do_not_retain_storage_after_owner_release(cpu_args):
         state = GQAFullAttentionState(GQAAttentionConfig(((0,),), 2, 16, torch.bfloat16), device="cpu")
         manager.register_state("main", state)
         manager.finish_state_registration()
-        state.allocate_storage(8)
+        allocate_state_storage(state, 8)
         manager.get_state("main", "gqa", 0)
         manager.get_cpu_cache_operator().get_page_bytes()
         manager.get_pd_operator().get_page_bytes()

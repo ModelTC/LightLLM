@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from lightllm.common.attention_state.utils import weak_cached_method
 
-from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
 from math import lcm, prod
 
@@ -15,9 +14,6 @@ from lightllm.utils.envs_utils import get_env_start_args
 from ...utils import deepcopy_result
 from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-
-if TYPE_CHECKING:
-    from lightllm.common.attention_state.types import StateTransferLayout
 
 
 @dataclass(frozen=True)
@@ -131,27 +127,22 @@ class CompressedAttentionState(FullAttentionState):
         """返回序列压缩比例、FP8 分组及 E8M0 scale 编码对应的方案标记。"""
         return f"compressed_c{self.config.compress_ratio}_fp8_group64_e8m0"
 
-    def allocate_storage(self, token_capacity: int) -> None:
-        """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
-        # 外部 allocator 的每个物理页必须包含完整压缩块，不能拆开块内的数据和 scale。
+    def get_storage_specs(self, token_capacity):
+        from ...storage import TensorStorageSpec
+
         assert (
             self.page_size > 0 and self.page_size % self.config.block_token_size == 0
         ), "allocator page_size must be a positive multiple of block_token_size"
         assert (
             token_capacity % self.config.block_token_size == 0
         ), "token capacity must contain complete compressed blocks"
-        self.capacity = token_capacity
-        # token 轴仍使用原始索引域；每 block_token_size 个槽位组成一个完整 packed 压缩块。
-        self.storage = torch.zeros(
-            size=(
-                len(self.config.logical_layer_groups),
-                token_capacity + self.page_size,
-                1,
-                self.config.token_slot_bytes,
-            ),
-            dtype=torch.uint8,
-            device=self.device,
+        shape = (
+            len(self.config.logical_layer_groups),
+            token_capacity + self.page_size,
+            1,
+            self.config.token_slot_bytes,
         )
+        return (TensorStorageSpec("storage", shape, torch.uint8, fill=0),)
 
     def get_transfer_fields(self):
         return {"kv": TensorField(self.storage, ("layer", "token", "head", "dim"), self.config.block_token_size)}
@@ -186,11 +177,6 @@ class CompressedAttentionState(FullAttentionState):
             else None
         )
         return CompressedAttentionLayerView(kv=blocks[:, :kv_bytes], indexer_k=indexer)
-
-    def bind_kv_writer(self, logical_layer_id: int):
-        from lightllm.common.basemodel.attention.writers import fused_compressor_write_only
-
-        return fused_compressor_write_only
 
     # ========================================================================
     # 三、CPU Cache 数据交换

@@ -200,7 +200,7 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory_info)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
-    monkeypatch.setattr("lightllm.common.attention_state.manager.get_current_device_id", lambda: 3)
+    monkeypatch.setattr("lightllm.common.device_runtime.DeviceRuntime.empty_cache", lambda self: None)
     monkeypatch.setattr(
         "lightllm.common.attention_state.manager.FullAttKVAllocator", partial(FullAttKVAllocator, pin_memory=False)
     )
@@ -219,7 +219,7 @@ def test_gpu_profile_counts_token_fields_hold_and_transfer_reserve(
         args=args,
         token_capacity=None,
         mem_fraction=0.75,
-        device="cuda",
+        device="cuda:3",
     )
     assert resources.full_att_allocator.size == 28
     assert resources.get_pd_operator().get_page_bytes() == reference.get_pd_operator().get_page_bytes()

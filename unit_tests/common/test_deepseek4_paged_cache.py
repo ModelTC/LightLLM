@@ -1,3 +1,5 @@
+from unit_tests.common.att_resources.transfer_helpers import copy_token_pages
+from lightllm.common.attention_state.storage import allocate_state_storage
 import json
 from types import SimpleNamespace
 
@@ -140,8 +142,8 @@ def test_cache_io_copies_complete_compressed_blocks(cache):
         (1, manager.manager.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True
     )
     for state in manager.full_states.values():
-        state.write_to_cpu(source, pages, [0], layout=layouts[state.state_name])
-        state.read_from_cpu(pages, [0], destination, layout=layouts[state.state_name])
+        copy_token_pages(state, source, pages, [0], layouts[state.state_name], write=True, ready=None)
+        copy_token_pages(state, destination, pages, [0], layouts[state.state_name], write=False, ready=None)
     torch.cuda.synchronize()
     for buffer in manager.kv_buffer:
         torch.testing.assert_close(buffer[destination], buffer[source], rtol=0, atol=0)
@@ -152,8 +154,8 @@ def test_cache_io_copies_complete_compressed_blocks(cache):
 
     for state in manager.full_states.values():
         with pytest.raises(ValueError, match="complete token blocks"):
-            state.read_from_cpu(pages, [0], destination[:2], layout=layouts[state.state_name])
-        state.read_from_cpu(pages, [0], destination[:256], layout=layouts[state.state_name])
+            copy_token_pages(state, destination[:2], pages, [0], layouts[state.state_name], write=False, ready=None)
+        copy_token_pages(state, destination[:256], pages, [0], layouts[state.state_name], write=False, ready=None)
     for buffer in manager.kv_buffer:
         torch.testing.assert_close(buffer[destination[:256]], buffer[source[:256]], rtol=0, atol=0)
         assert buffer[destination[256:]].eq(0).all()
@@ -173,7 +175,7 @@ def test_request_runtime_is_independent_of_compressed_kv_capacity(cache, monkeyp
     )
     # 扩展压缩 KV 容量不能重新创建或移动按请求数分配的运行态。
     for state in original.full_states.values():
-        state.allocate_storage(token_capacity=16384)
+        allocate_state_storage(state, token_capacity=16384)
         assert state.storage.shape[1] == 16384 + state.page_size
     assert before == tuple(
         tensor.data_ptr()
@@ -469,7 +471,7 @@ def test_model_selects_held_slots_without_allocating_swa(cache, model_kind):
         b_shared_radix_node_id=torch.full((1,), -1, dtype=torch.int64),
         multimodal_params=[{"images": [], "audios": []}],
     )
-    model_input.to_cuda()
+    model_input.to_device("cuda")
     for _ in range(2):
         torch.testing.assert_close(model._select_mem_indexes(model_input), slots[256:257])
         assert manager.allocator.can_use_mem_size == manager.size - 512

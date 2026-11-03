@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -40,7 +41,7 @@ def bind_test_model(states, backend=None, role="main"):
 
 def make_state(groups=((3, 7),), heads=2, dim=16, device="cpu"):
     state = GQAFullAttentionState(GQAAttentionConfig(groups, heads, dim, torch.bfloat16), device=device)
-    state.allocate_storage(8)
+    allocate_state_storage(state, 8)
     return state
 
 
@@ -219,7 +220,7 @@ def test_mla_binds_heterogeneous_projection_shapes_before_allocation():
     model.layers_infer = []
     for i, latent in enumerate((512, 256)):
         state = MLAFullAttentionState(MLAConfig(((i,),), latent + 64, torch.bfloat16), device="cpu")
-        state.allocate_storage(8)
+        allocate_state_storage(state, 8)
         model.att_state_manager.register_state("main", state)
         layer = Deepseek2TransformerLayerInfer.__new__(Deepseek2TransformerLayerInfer)
         layer.layer_num_, layer.tp_q_head_num_ = i, 4 * (i + 1)

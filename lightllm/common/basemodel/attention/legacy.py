@@ -1,3 +1,4 @@
+from .state_writers import bind_kv_writer
 from lightllm.common.attention_state.full_att import (
     FullAttentionState,
     StaticFP8FullAttentionState,
@@ -199,7 +200,7 @@ def bind_model_attention(model):
     for layer, state in model.attention_resources:
         layer.full_att_state = state
         layer.full_att_view = state.get_layer_view(layer.layer_num_)
-        layer.write_full_att_kv = state.bind_kv_writer(layer.layer_num_)
+        layer.write_full_att_kv = bind_kv_writer(state, layer.layer_num_)
         if isinstance(state, (PackedMLAFullAttentionState, FP8E8M0PackedMLAState)):
             layer.attention = BoundSparse(
                 ResourceId(model.att_state_role, layer.layer_num_),

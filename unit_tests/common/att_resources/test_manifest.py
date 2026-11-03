@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_runtime_storage
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -38,8 +39,8 @@ def test_recurrent_algorithms_with_equal_shapes_have_different_semantics(pd_args
     from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState, KDAState
 
     config = ConvSSMStateConfig((1, 3), 2, 2, 16, 16, 4, torch.bfloat16, torch.float32)
-    a = manifest(GDNState(config, request_capacity=2, device="meta"))
-    b = manifest(KDAState(config, request_capacity=2, device="meta"))
+    a = manifest(allocate_runtime_storage(GDNState(config, request_capacity=2), "meta"))
+    b = manifest(allocate_runtime_storage(KDAState(config, request_capacity=2), "meta"))
     assert a["states"][0]["fields"] == b["states"][0]["fields"]
     with pytest.raises(ValueError, match="incompatible state semantics"):
         validate_state_manifest(a, b)
@@ -117,7 +118,7 @@ def test_large_hybrid_manifest_fits_request_transfer_parameters(pd_args, backend
     config = replace(template.config, logical_layer_groups=tuple((i,) for i in range(0, 256, 4)))
     manager.register_state("main", type(template)(config, device="meta"))
     config = ConvSSMStateConfig(tuple(i for i in range(256) if i % 4), 2, 2, 16, 16, 4, torch.bfloat16, torch.float32)
-    manager.register_state("main", GDNState(config, request_capacity=2, device="meta"))
+    manager.register_state("main", allocate_runtime_storage(GDNState(config, request_capacity=2), "meta"))
     manager.finish_state_registration()
     local = build_state_manifest(manager)
     assert len(pickle.dumps(local)) > 8192
@@ -147,8 +148,11 @@ def test_cpu_manifest_includes_compressor_semantics_without_snapshot_bytes(cpu_a
     cpu_args.linear_att_hash_page_size = 128
     manager = AttentionStateManager(2)
     manager.register_state("main", definition("gqa"))
-    state = WindowCompressorState(
-        WindowCompressorStateConfig((1, 3), window, stride, 16, target=target), request_capacity=2, device="meta"
+    state = allocate_runtime_storage(
+        WindowCompressorState(
+            WindowCompressorStateConfig((1, 3), window, stride, 16, target=target), request_capacity=2
+        ),
+        "meta",
     )
     manager.register_state("main", state)
     manager.finish_state_registration()

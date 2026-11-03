@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from lightllm.common.attention_state.utils import weak_cached_method
 
-from typing import TYPE_CHECKING, List
 from collections.abc import Mapping
 from dataclasses import dataclass
 from math import prod
@@ -15,9 +14,6 @@ from lightllm.utils.log_utils import init_logger
 from ...utils import deepcopy_result
 from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
-
-if TYPE_CHECKING:
-    from lightllm.common.attention_state.types import StateTransferLayout
 
 
 logger = init_logger(name=__name__)
@@ -171,9 +167,9 @@ class StaticFP8FullAttentionState(FullAttentionState):
                 scales = scale_tensor(calibration, (calibrated_layer_count, 2))
                 q_scales = None
 
-        # 阶段三：绑定标定数值；后续 allocate_storage 将其迁移到实际设备。
         self.scales = scales
         self.q_scales = q_scales
+        self.cpu_scales = scales.detach().cpu().numpy()
 
     def bind_logical_calibration(self, calibration: Mapping[str, object], model_role: str) -> None:
 
@@ -216,6 +212,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
                     queries[logical_layer] = shard(read(entry, "q"))
         self.scales = torch.stack(rows)
         self.logical_q_scales = queries
+        self.cpu_scales = self.scales.detach().cpu().numpy()
 
     def get_query_scale(self, logical_layer_id: int) -> torch.Tensor | None:
         if self.logical_q_scales is not None:
@@ -251,28 +248,41 @@ class StaticFP8FullAttentionState(FullAttentionState):
             scale_dtype=torch.float32,
         )
 
-    def allocate_storage(self, token_capacity: int) -> None:
-        """绑定 KV 与真实标定参数，并预备 FlashInfer 使用的 CPU scale。"""
-        assert self.scales is not None, "static FP8 calibration must be bound before allocation"
-        self.capacity = token_capacity
-        shape = self._storage_shape()
-        self.k_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
-        self.v_storage = torch.empty(size=shape, dtype=self.storage_dtype, device=self.device)
-        # 统一标定阶段保留 CPU 数值，实际分配时再迁移到 KV 所在设备。
-        if self.k_storage.device.type != "meta":
-            self.scales = self.scales.to(device=self.k_storage.device)
-            if self.q_scales is not None:
-                self.q_scales = self.q_scales.to(device=self.k_storage.device)
-            if self.logical_q_scales is not None:
-                self.logical_q_scales = {
-                    layer: scale.to(device=self.k_storage.device) for layer, scale in self.logical_q_scales.items()
-                }
-        # 提前准备 CPU scale，避免计算热路径同步设备。
-        self.cpu_scales = self.scales.detach().cpu().numpy()
+    def get_storage_specs(self, token_capacity):
+        from ...storage import TensorStorageSpec
 
-    def get_fixed_storage_bytes(self):
+        assert self.scales is not None, "static FP8 calibration must be bound before allocation"
+        shape = (
+            len(self.config.logical_layer_groups),
+            token_capacity + self.page_size,
+            self.config.head_num,
+            self.config.head_dim,
+        )
+        specs = [TensorStorageSpec(name, shape, self.storage_dtype) for name in self.storage_fields]
+        constants = {"scales": self.scales, "q_scales": self.q_scales}
+        constants.update({f"logical_q_{layer}": scale for layer, scale in (self.logical_q_scales or {}).items()})
+        specs.extend(
+            TensorStorageSpec(name, tuple(value.shape), value.dtype, source=value)
+            for name, value in constants.items()
+            if value is not None
+        )
+        return tuple(specs)
+
+    def bind_storage(self, buffers, token_capacity):
+        self.k_storage, self.v_storage = buffers["k_storage"], buffers["v_storage"]
+        self.scales = buffers["scales"]
+        self.q_scales = buffers.get("q_scales")
+        if self.logical_q_scales is not None:
+            self.logical_q_scales = {layer: buffers[f"logical_q_{layer}"] for layer in self.logical_q_scales}
+        self.capacity = token_capacity
+
+    def get_fixed_storage_bytes(self, device=None):
         tensors = [self.scales, self.q_scales, *(self.logical_q_scales or {}).values()]
-        return sum(tensor.numel() * tensor.element_size() for tensor in tensors if tensor is not None)
+        return sum(
+            tensor.numel() * tensor.element_size()
+            for tensor in tensors
+            if tensor is not None and (device is None or tensor.device != device)
+        )
 
     def get_token_bytes(self) -> int:
         """由配置累计当前 TP rank 的 K/V 单 token 开销，无需分配存储。"""
@@ -295,14 +305,6 @@ class StaticFP8FullAttentionState(FullAttentionState):
         """按逻辑层号返回 K、V 视图，head 数使用当前 TP 分片配置。"""
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
         return self.k_storage[storage_layer_index], self.v_storage[storage_layer_index]
-
-    def bind_kv_writer(self, logical_layer_id: int):
-        from lightllm.common.basemodel.attention.writers import bind_static_fp8_writer
-
-        row = self.get_storage_layer_index(logical_layer_id)
-        return bind_static_fp8_writer(
-            self.k_storage[row], self.v_storage[row], self.scales[row], self.config.scale_mode == "per_tensor"
-        )
 
     # ========================================================================
     # 三、CPU Cache 数据交换
@@ -418,11 +420,3 @@ class StaticFP8FullAttentionState(FullAttentionState):
             byte_offset,
         )
         return tuple(regions)
-
-    def _storage_shape(self) -> tuple[int, ...]:
-        return (
-            len(self.config.logical_layer_groups),
-            self.capacity + self.page_size,
-            self.config.head_num,
-            self.config.head_dim,
-        )

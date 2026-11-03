@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 import dataclasses
 import json
@@ -73,7 +74,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         ),
         page_size=args.page_size,
     )
-    full.allocate_storage(384)
+    allocate_state_storage(full, 384)
     requests = ReqManager(2, 512)
     resources = build_hybrid_resources(
         config=config,

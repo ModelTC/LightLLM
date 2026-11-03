@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 from unit_tests.common.att_resources.model_helpers import full_state_test_buffers
 
 import torch
@@ -22,7 +23,7 @@ def test_quantized_kv_buffers_include_the_full_hold_page():
             page_size=4,
             device="cpu",
         )
-        state.allocate_storage(32)
+        allocate_state_storage(state, 32)
         allocations.extend(tuple(buffer.shape) for buffer in full_state_test_buffers(state).values())
 
     assert allocations == [

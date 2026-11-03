@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from lightllm.common.attention_state.storage import allocate_state_storage
+
 from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
@@ -72,7 +74,7 @@ def make_resources(
             ),
             page_size=4,
         )
-        full.allocate_storage(16)
+        allocate_state_storage(full, 16)
     else:
         full = GQAFullAttentionState(
             GQAAttentionConfig(
@@ -85,7 +87,7 @@ def make_resources(
             ),
             page_size=4,
         )
-        full.allocate_storage(16)
+        allocate_state_storage(full, 16)
     main, draft = create_full_attention_roles(full, 4)
     resources = build_hybrid_resources(
         config=config,

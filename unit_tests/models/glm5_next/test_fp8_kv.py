@@ -1,3 +1,6 @@
+from unit_tests.common.att_resources.transfer_helpers import copy_pd_page, copy_token_pages
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
+from lightllm.common.attention_state.storage import allocate_state_storage
 from unit_tests.models.glm5_next.attention_helpers import run_sparse_prefill, run_sparse_decode
 import weakref
 from types import SimpleNamespace
@@ -1263,26 +1266,26 @@ def test_fp8_state_preserves_kv_and_indexer_across_cpu_and_pd(monkeypatch):
         format="packed_group64_e8m0",
     )
     state = create_packed_mla_state(config=config, page_size=4)
-    state.allocate_storage(token_capacity=16)
+    allocate_state_storage(state, token_capacity=16)
     state.storage.zero_()
     manager = AttentionStateManager(request_capacity=1)
     manager.register_state("main", state)
     manager.finish_state_registration()
     indices = torch.arange(4, dtype=torch.int64, device="cuda")
     kv = torch.randn((4, 1, 512), dtype=torch.bfloat16, device="cuda")
-    state.write_full_att_kv(logical_layer_id=3, token_indices=indices, kv=kv)
+    bind_kv_writer(state, 3)(token_indices=indices, kv=kv)
     expected = torch.zeros((4, 1, 584), dtype=torch.uint8, device="cuda")
     write_fp8_e8m0_packed_kv(kv, indices, expected)
     torch.testing.assert_close(state.get_layer_view(logical_layer_id=3).kv[:4], expected, rtol=0, atol=0)
     state.get_layer_view(logical_layer_id=3).indexer_k[:4].random_(0, 256)
     cpu_layout = manager.get_cpu_cache_operator().get_page_layouts()[state.state_name]
     cpu_pages = torch.empty((1, manager.get_cpu_cache_operator().get_page_bytes()), dtype=torch.uint8, pin_memory=True)
-    state.write_to_cpu(token_indices=indices, cpu_page_buffers=cpu_pages, cpu_page_indices=[0], layout=cpu_layout)
-    state.read_from_cpu(cpu_page_buffers=cpu_pages, cpu_page_indices=[0], token_indices=indices + 4, layout=cpu_layout)
+    copy_token_pages(state, indices, cpu_pages, [0], cpu_layout, write=True, ready=None)
+    copy_token_pages(state, indices + 4, cpu_pages, [0], cpu_layout, write=False, ready=None)
     pd_layout = manager.get_pd_operator().get_pd_full_att_page_layouts()[state.state_name]
     pd_pages = torch.empty((1, manager.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda")
-    state.write_to_pd_page(token_indices=indices, pd_page_buffers=pd_pages, pd_page_index=0, layout=pd_layout)
-    state.read_from_pd_page(pd_page_buffers=pd_pages, token_indices=indices + 8, pd_page_index=0, layout=pd_layout)
+    copy_pd_page(state, pd_pages, 0, pd_layout, write=True, token_indices=indices)
+    copy_pd_page(state, pd_pages, 0, pd_layout, write=False, token_indices=indices + 8)
     torch.cuda.synchronize()
     for begin in (4, 8):
         actual = state.get_layer_view(logical_layer_id=3)

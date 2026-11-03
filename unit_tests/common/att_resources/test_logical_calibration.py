@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 import pytest
 import torch
 
@@ -21,7 +22,7 @@ def test_shared_kv_keeps_distinct_query_scales_after_repacking_and_sharding():
             StaticFP8AttentionConfig(groups, 4, 128, tp_rank=1, tp_world_size=2, scale_mode="per_head"), device="cpu"
         )
         state.bind_logical_calibration(calibration, "main")
-        state.allocate_storage(8)
+        allocate_state_storage(state, 8)
         row = state.get_storage_layer_index(3)
         torch.testing.assert_close(state.scales[row], torch.tensor([3, 4, 7, 8], dtype=torch.float32))
         torch.testing.assert_close(state.get_query_scale(3), torch.tensor([11, 12], dtype=torch.float32))

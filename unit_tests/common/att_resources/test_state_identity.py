@@ -1,4 +1,7 @@
 from __future__ import annotations
+from unit_tests.common.att_resources.transfer_helpers import copy_tokens
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
@@ -70,7 +73,7 @@ def test_full_state_prepares_layout_before_capacity_allocation(kind: str, pd_arg
     assert read_kv_storage(state) is None
     original_config = state.config
     state.device = torch.device("cpu")
-    state.allocate_storage(8)
+    allocate_state_storage(state, 8)
     assert state.config is original_config
     assert state.capacity == 8 and read_kv_storage(state).shape[1] == 8 + state.page_size
     assert not read_kv_storage(state).is_meta
@@ -335,7 +338,7 @@ def test_token_copy_captures_large_index_sets_and_preserves_complete_buffers(kin
     buffers = tuple(full_state_test_buffers(state).values())
     for buffer in buffers:
         buffer.view(torch.uint8).random_(0, 256)
-    state.copy_full_att_tokens(source, target)  # 先完成 Triton 编译。
+    copy_tokens(state, state, source, target)  # 先完成 Triton 编译。
     torch.cuda.synchronize()
 
     expected = []
@@ -346,7 +349,7 @@ def test_token_copy_captures_large_index_sets_and_preserves_complete_buffers(kin
         expected.append(snapshot)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
-        state.copy_full_att_tokens(source, target)
+        copy_tokens(state, state, source, target)
     for buffer in buffers:
         buffer.index_fill_(1, target, 0)
     graph.replay()

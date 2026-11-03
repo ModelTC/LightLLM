@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage, release_state_storage
 from contextlib import nullcontext
 from types import SimpleNamespace
 import weakref
@@ -22,24 +23,47 @@ def test_native_storage_can_be_reallocated_without_changing_logical_identity(kin
 
     state = definition(kind)
     state.device = torch.device("cpu")
-    state.allocate_storage(20)
+    allocate_state_storage(state, 20)
     config = state.config
     references = [weakref.ref(getattr(state, name)) for name in state.storage_fields]
-    state.release_storage()
+    release_state_storage(state)
     assert all(reference() is None for reference in references)
-    state.allocate_storage(12)
+    allocate_state_storage(state, 12)
     assert state.config is config
     assert state.capacity == 12
 
 
+def test_failed_allocation_keeps_previous_bound_storage(monkeypatch):
+    from lightllm.common.device_runtime import DeviceRuntime
+
+    state = GQAFullAttentionState(GQAAttentionConfig(((0,),), 1, 8, torch.bfloat16), device="cpu")
+    allocate_state_storage(state, 8)
+    previous = state.k_storage, state.v_storage
+    allocate = DeviceRuntime.allocate
+    calls = 0
+
+    def fail_second(runtime, *args):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise torch.OutOfMemoryError("second field")
+        return allocate(runtime, *args)
+
+    monkeypatch.setattr(DeviceRuntime, "allocate", fail_second)
+    with pytest.raises(torch.OutOfMemoryError, match="second field"):
+        allocate_state_storage(state, 16)
+    assert state.capacity == 8
+    assert state.k_storage is previous[0] and state.v_storage is previous[1]
+
+
 def startup_model(monkeypatch, *, explicit=False, peak=0, failures=0):
-    monkeypatch.setattr(torch.cuda, "synchronize", lambda: None)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda device=None: None)
     monkeypatch.setattr(torch.cuda, "empty_cache", lambda: None)
     monkeypatch.setattr(torch.distributed, "is_initialized", lambda: False)
     monkeypatch.setattr(
         startup,
         "StartupMemoryProfile",
-        lambda: SimpleNamespace(stage=lambda *_: nullcontext(), peak_bytes=peak, explain=lambda: {}),
+        lambda runtime=None: SimpleNamespace(stage=lambda *_: nullcontext(), peak_bytes=peak, explain=lambda: {}),
     )
     args = StartArgs(page_size=4)
     manager = AttentionStateManager(request_capacity=2)
@@ -47,8 +71,11 @@ def startup_model(monkeypatch, *, explicit=False, peak=0, failures=0):
     manager.register_state("main", state)
     manager.finish_state_registration()
     initialize = manager.initialize_storage
-    manager.initialize_storage = lambda *a, **kw: initialize(*a, device="cpu", memory_limits={"cpu": 2048}, **kw)
+    manager.initialize_storage = lambda *a, **kw: initialize(*a, memory_limits={"cpu": 2048}, **kw)
     model = TpPartBaseModel.__new__(TpPartBaseModel)
+    from lightllm.common.device_runtime import get_device_runtime
+
+    model.runtime = get_device_runtime("cpu")
     model.args = args
     model.att_state_manager = manager
     model.is_mtp_draft_model = False
@@ -161,8 +188,9 @@ def test_gpu_replanning_recaptures_against_new_kv_storage(monkeypatch):
     monkeypatch.setattr(torch.cuda, "synchronize", synchronize)
     monkeypatch.setattr(torch.cuda, "empty_cache", empty_cache)
     manager.initialize_storage = lambda *a, **kw: AttentionStateManager.initialize_storage(
-        manager, *a, device="cuda", memory_limits={"cpu": 64 * 1024 ** 2, "cuda": 32 * 1024 ** 2}, **kw
+        manager, *a, memory_limits={"cpu": 64 * 1024 ** 2, "cuda": 32 * 1024 ** 2}, **kw
     )
+    model.runtime = startup.get_device_runtime("cuda")
     state = manager.get_full_attention_states()[0]
 
     def capture():

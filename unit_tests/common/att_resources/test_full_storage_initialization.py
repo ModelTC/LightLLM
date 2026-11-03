@@ -1,6 +1,7 @@
 """Real model initialization, compute writes, and profiled allocation."""
 
 from __future__ import annotations
+from lightllm.common.basemodel.attention.state_writers import bind_kv_writer
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
 
@@ -60,7 +61,7 @@ def test_model_storage_write_and_copy_preserve_all_fields(
         device="cuda",
         dtype=torch.bfloat16,
     )
-    state.write_full_att_kv(config.logical_layer_groups[-1][0], ids, kv)
+    bind_kv_writer(state, config.logical_layer_groups[-1][0])(token_indices=ids, kv=kv)
     if len(config.logical_layer_groups) > 1:
         assert not read_kv_storage(state)[0].any()
     resources.copy_full_att_tokens(ids, torch.tensor([1, 5], dtype=torch.int32, device="cuda"))

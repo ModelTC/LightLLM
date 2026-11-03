@@ -1,3 +1,6 @@
+from lightllm.common.attention_state.storage import initialize_state_page_pools
+
+from lightllm.common.attention_state.storage import allocate_state_storage
 from dataclasses import replace
 
 import pytest
@@ -50,7 +53,7 @@ def resources(kv_type, split, device):
             if kv_type.startswith("fp8"):
                 width = 2 if kv_type == "fp8kv_spt" else 2 * state.config.head_num
                 state.scales = torch.tensor([[0.1 * (group[0] + 1)] * width for group in groups])
-            state.allocate_storage(2048 if kv_type.startswith("compressed_") else 8)
+            allocate_state_storage(state, 2048 if kv_type.startswith("compressed_") else 8)
             manager.register_state(role, state)
     manager.finish_state_registration()
     return manager
@@ -147,7 +150,7 @@ def test_dp_bounded_copy_binds_runtime_and_checkpoints_by_logical_resource(famil
     target = bounded_peers(family, 1, not source_split, 2)[0]
     for manager, original in ((source, True), (target, False)):
         for state in manager.get_bounded_attention_states():
-            state.initialize_page_pools(3, 2, pin_memory=True)
+            initialize_state_page_pools(state, 3, 2, pin_memory=True)
             for request in range(3):
                 for field in state.get_runtime_copy_fields(request).values():
                     field.tensor.fill_(173)

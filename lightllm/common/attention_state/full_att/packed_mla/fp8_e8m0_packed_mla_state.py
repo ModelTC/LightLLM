@@ -12,7 +12,7 @@ import torch
 from lightllm.utils.envs_utils import get_env_start_args
 
 from ...utils import deepcopy_result
-from ...types import AxisMapping, StateTransferLayout, TransferRegion, TensorField
+from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
 from ..packed_mla.packed_mla_state import PackedMLALayerView
 
@@ -85,14 +85,11 @@ class FP8E8M0PackedMLAState(FullAttentionState):
         """返回固定算法、量化分组与 scale 编码标记，用于 main/draft 的规范成员名。"""
         return "mla_packed_fp8_group64_e8m0"
 
-    def allocate_storage(self, token_capacity: int) -> None:
-        """分配普通 token 及 HOLD 页；完整行包含 KV、indexer 和 16 字节对齐 padding。"""
-        self.capacity = token_capacity
-        self.storage = torch.empty(
-            size=(len(self.config.logical_layer_groups), token_capacity + self.page_size, 1, self.config.token_bytes),
-            dtype=torch.uint8,
-            device=self.device,
-        )
+    def get_storage_specs(self, token_capacity):
+        from ...storage import TensorStorageSpec
+
+        shape = (len(self.config.logical_layer_groups), token_capacity + self.page_size, 1, self.config.token_bytes)
+        return (TensorStorageSpec("storage", shape, torch.uint8),)
 
     def get_transfer_fields(self):
         return {"kv": TensorField(self.storage[..., : self.config.payload_bytes], ("layer", "token", "head", "dim"))}
@@ -123,11 +120,6 @@ class FP8E8M0PackedMLAState(FullAttentionState):
             kv=row[..., : self.config.KV_BYTES],
             indexer_k=row[..., self.config.KV_BYTES : self.config.payload_bytes],
         )
-
-    def bind_kv_writer(self, logical_layer_id: int):
-        from lightllm.common.basemodel.attention.writers import bind_e8m0_writer
-
-        return bind_e8m0_writer(self.get_layer_view(logical_layer_id).kv)
 
     # ========================================================================
     # 三、CPU Cache：按 token 搬运整份有效编码

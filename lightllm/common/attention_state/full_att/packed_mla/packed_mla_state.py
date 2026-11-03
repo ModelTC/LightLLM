@@ -14,9 +14,6 @@ from ...utils import deepcopy_result, dtype_name
 from ...types import AxisMapping, TransferRegion, TensorField
 from ..base_state import FullAttentionState
 
-if TYPE_CHECKING:
-    from lightllm.common.attention_state.types import StateTransferLayout
-
 
 logger = init_logger(name=__name__)
 
@@ -179,21 +176,17 @@ class PackedMLAFullAttentionState(FullAttentionState):
         )
         return "mla_packed_" + encoding
 
-    def allocate_storage(self, token_capacity: int) -> None:
-        """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""
-        self.capacity = token_capacity
-        # FP8 行混合保存多种字段，用字节 buffer 承载，字段视图再解释各自的 dtype。
-        storage_dtype = torch.uint8 if self.config.kv_encoding == "fp8_group128" else self.config.dtype
-        self.storage = torch.empty(
-            size=(
-                len(self.config.logical_layer_groups),
-                token_capacity + self.page_size,
-                1,
-                self.config.token_bytes // storage_dtype.itemsize,
-            ),
-            dtype=storage_dtype,
-            device=self.device,
+    def get_storage_specs(self, token_capacity):
+        from ...storage import TensorStorageSpec
+
+        dtype = torch.uint8 if self.config.kv_encoding == "fp8_group128" else self.config.dtype
+        shape = (
+            len(self.config.logical_layer_groups),
+            token_capacity + self.page_size,
+            1,
+            self.config.token_bytes // dtype.itemsize,
         )
+        return (TensorStorageSpec("storage", shape, dtype),)
 
     def get_transfer_fields(self):
         raw = self.storage.view(torch.uint8)
@@ -241,16 +234,6 @@ class PackedMLAFullAttentionState(FullAttentionState):
         )
         indexer = raw[..., self.config.indexer_offset : self.config.indexer_offset + self.config.indexer_dim + 4]
         return PackedMLALayerView(kv=kv, indexer_k=indexer)
-
-    def bind_kv_writer(self, logical_layer_id: int):
-        from lightllm.common.basemodel.attention.writers import bind_latent_writer, bind_packed_fp8_writer
-
-        cache = self.get_layer_view(logical_layer_id).kv
-        if self.config.kv_encoding == "fp8_group128":
-            return bind_packed_fp8_writer(
-                cache, self.config.latent_dim - self.config.rope_dim, self.config.rope_dim, self.config.quant_group_size
-            )
-        return bind_latent_writer(cache)
 
     # ========================================================================
     # 三、CPU Cache 数据交换

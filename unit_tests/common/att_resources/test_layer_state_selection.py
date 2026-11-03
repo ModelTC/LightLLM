@@ -1,5 +1,7 @@
 """按角色、层归属及方案查询资源，不在推理层保存绑定状态。"""
 
+from lightllm.common.attention_state.storage import allocate_runtime_storage
+
 from contextlib import nullcontext
 from types import SimpleNamespace
 
@@ -203,7 +205,7 @@ def test_precision_variants_have_distinct_names_and_can_coexist(algorithm: str) 
     states = []
     for dtype in (torch.bfloat16, torch.float32):
         config = replace(template.config, **({"dtype": dtype} if algorithm == "compressor" else {"conv_dtype": dtype}))
-        state = type(template)(config=config, request_capacity=3, device="cpu")
+        state = allocate_runtime_storage(type(template)(config=config, request_capacity=3), "cpu")
         manager.register_state("main", state)
         states.append(state)
     manager.finish_state_registration()

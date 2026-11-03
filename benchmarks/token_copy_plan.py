@@ -1,3 +1,4 @@
+from lightllm.common.attention_state.storage import allocate_state_storage
 import json
 import os
 import statistics
@@ -23,7 +24,7 @@ def main():
             state = GQAFullAttentionState(
                 GQAAttentionConfig(((i,),), global_head_num=4, head_dim=128, dtype=torch.bfloat16), device="cuda"
             )
-            state.allocate_storage(4096)
+            allocate_state_storage(state, 4096)
             state.k_storage.normal_()
             state.v_storage.normal_()
             manager.register_state(f"draft{i}", state)

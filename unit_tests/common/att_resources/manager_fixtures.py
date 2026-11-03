@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+from lightllm.common.attention_state.storage import allocate_runtime_storage, initialize_state_page_pools
+
+from lightllm.common.attention_state.storage import allocate_state_storage
+
 from typing import TYPE_CHECKING
 from dataclasses import replace
 from lightllm.common.attention_state import AttentionStateManager
@@ -19,13 +23,15 @@ class MainDraftTestResourceManager(AttentionStateManager):
     def __init__(self, device: str | torch.device | int = "cpu"):
         super().__init__(request_capacity=3)
         self.register_state("main", make_state(device=device))
-        draft_state = GDNState(
-            config=replace(self.main_kda_conv_fp32_ssm_fp32_state.config, global_v_heads=2),
-            request_capacity=3,
-            mtp_step=self.main_kda_conv_fp32_ssm_fp32_state.mtp_step,
-            device=device,
+        draft_state = allocate_runtime_storage(
+            GDNState(
+                config=replace(self.main_kda_conv_fp32_ssm_fp32_state.config, global_v_heads=2),
+                request_capacity=3,
+                mtp_step=self.main_kda_conv_fp32_ssm_fp32_state.mtp_step,
+            ),
+            device,
         )
-        draft_state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
+        initialize_state_page_pools(draft_state, big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
         self.register_state("draft0", draft_state)
         self.register_state("main", full_state(device=device))
         prepared_full_state = MLAFullAttentionState(
@@ -37,7 +43,7 @@ class MainDraftTestResourceManager(AttentionStateManager):
             page_size=self.main_gqa_fp32_h1_d4_state.page_size,
             device=device,
         )
-        prepared_full_state.allocate_storage(self.main_gqa_fp32_h1_d4_state.capacity)
+        allocate_state_storage(prepared_full_state, self.main_gqa_fp32_h1_d4_state.capacity)
         self.register_state("draft0", prepared_full_state)
         self.full_att_allocator = FullAttKVAllocator(12, page_size=4, pin_memory=False)
         self.bounded_att_big_page_allocator = StatePageAllocator(3)
