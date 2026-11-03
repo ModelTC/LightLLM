@@ -1,5 +1,6 @@
 import ctypes
 import torch
+from dataclasses import dataclass
 from lightllm.utils.envs_utils import get_env_start_args, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
@@ -9,6 +10,13 @@ from lightllm.server.core.objs import AtomicShmLock
 from lightllm.utils.kv_cache_utils import calcu_cpu_cache_meta
 
 logger = init_logger(__name__)
+
+
+@dataclass
+class CpuPageAllocation:
+    page_indices: List[int]
+    ready_flags: List[bool]
+    writer_flags: List[bool]
 
 
 class CpuKvCacheClient(object):
@@ -84,33 +92,37 @@ class CpuKvCacheClient(object):
             else:
                 return None, False
 
-    def allocate_pages(
-        self, hash_keys: List[int], disk_offload_enable: bool, *, return_ownership: bool = False
-    ) -> Tuple[List[int], List[bool]]:
-        """
-        allocate_pages will add _CpuPageStaus ref_count
-        return_ownership 返回新建页的写入所有权，而不是 ready 标记；调用方须持有 cache lock。
-        """
+    def allocate_pages(self, hash_keys: List[int], disk_offload_enable: bool) -> Tuple[List[int], List[bool]]:
+        """保持原接口：增加页面引用，返回页面和 READY 标记；调用方持有 cache lock。"""
+        allocation = self.allocate_pages_for_write(hash_keys, disk_offload_enable)
+        return allocation.page_indices, allocation.ready_flags
+
+    def allocate_pages_for_write(self, hash_keys: List[int], disk_offload_enable: bool) -> CpuPageAllocation:
+        """调用方持有 cache lock；增加引用，只对新建页授予 writer，READY 与 writer 分别返回。"""
         page_list = []
         ready_list = []
+        writer_list = []
         page_items = self.page_items.linked_items
         for hash_key in hash_keys:
-            is_owner = return_ownership and self.page_hash_dict.get(hash_key) is None
+            is_owner = self.page_hash_dict.get(hash_key) is None
             page_index, ready = self.allocate_one_page(
                 page_items=page_items, hash_key=hash_key, disk_offload_enable=disk_offload_enable
             )
             if page_index is not None:
                 page_list.append(page_index)
-                ready_list.append(is_owner if return_ownership else ready)
+                ready_list.append(ready)
+                writer_list.append(is_owner)
             else:
                 page_list.append(-1)
                 ready_list.append(False)
+                writer_list.append(False)
                 break
 
         left_num = len(hash_keys) - len(page_list)
         page_list.extend([-1 for _ in range(left_num)])
         ready_list.extend([False for _ in range(left_num)])
-        return page_list, ready_list
+        writer_list.extend([False for _ in range(left_num)])
+        return CpuPageAllocation(page_list, ready_list, writer_list)
 
     def update_pages_status_to_ready(
         self,

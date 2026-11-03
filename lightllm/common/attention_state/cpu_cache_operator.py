@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import replace
 from functools import lru_cache
 from typing import TYPE_CHECKING, List
@@ -12,6 +12,7 @@ from lightllm.common.attention_state.types import StateTransferLayout
 from lightllm.utils.envs_utils import get_env_start_args
 
 if TYPE_CHECKING:
+    from lightllm.common.basemodel.attention.base_att import BaseAttBackend
     from lightllm.common.attention_state.manager import AttentionStateManager
 
 
@@ -27,9 +28,14 @@ class CpuCacheOperator:
 
     def __init__(self, owner: AttentionStateManager):
         self.owner = owner
+        self.async_cache = False
+
+    def configure_backends(self, backends: Iterable[BaseAttBackend | None]) -> None:
+        """容量规划和实际 staging 分配共用已选定的 main/draft backend 能力。"""
+        self.async_cache = not any(backend.requires_cpu_cache_sync for backend in backends if backend is not None)
 
     def get_staging_bytes(self) -> int:
-        return self.STAGING_SLOTS * self.STAGING_PAGES * self.get_page_bytes()
+        return self.STAGING_SLOTS * self.STAGING_PAGES * self.get_page_bytes() if self.async_cache else 0
 
     @lru_cache(maxsize=None)
     def get_page_layouts(self) -> Mapping[str, StateTransferLayout]:

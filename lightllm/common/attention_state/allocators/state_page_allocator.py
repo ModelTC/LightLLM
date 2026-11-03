@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import List
+from typing import Callable, List
 from collections import deque
 
 
@@ -16,6 +16,7 @@ class StatePageAllocator:
         self._free = deque(range(self.capacity))
         self._allocated = bytearray(self.capacity)
         self._retained = {}
+        self.on_allocation_pressure: Callable[[StatePageAllocator, int], None] | None = None
 
     @property
     def free_count(self) -> int:
@@ -23,6 +24,8 @@ class StatePageAllocator:
 
     def alloc(self, num_pages: int) -> list[int] | None:
         assert num_pages >= 0, "num_pages must be nonnegative"
+        if num_pages > self.free_count and self.on_allocation_pressure is not None:
+            self.on_allocation_pressure(self, num_pages)
         if num_pages > self.free_count:
             return None
         slots = [self._free.popleft() for _ in range(num_pages)]

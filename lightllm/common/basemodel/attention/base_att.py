@@ -20,6 +20,8 @@ class BaseAttBackend:
     每个 model 复用一个 backend 实例。
     """
 
+    requires_cpu_cache_sync = False
+
     _instances = {}
     _workspace_buffers = {}
     _workspace_buffer_lock = threading.Lock()

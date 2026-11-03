@@ -179,11 +179,12 @@ class TpPartBaseModel:
                 self.att_state_manager.register_state(self.att_state_role, state)
 
     def init_runtime(self) -> None:
-        """Initialize this model's backends, warmup and graphs after shared allocation."""
+        """Finish runtime initialization, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
-        self._init_att_backend()
-        self._init_att_backend1()
+        if not self.args.enable_cpu_cache:
+            self._init_att_backend()
+            self._init_att_backend1()
         self._init_hidden_collector()
         role = self.att_state_role
         logger.info(

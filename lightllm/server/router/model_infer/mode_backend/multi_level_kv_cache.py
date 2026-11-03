@@ -2,7 +2,7 @@ import torch.distributed as dist
 import torch
 import dataclasses
 import bisect
-from functools import lru_cache
+from itertools import islice
 from typing import Optional, List, Deque
 from collections import deque
 from lightllm.server.multi_level_kv_cache import CacheTier
@@ -38,6 +38,7 @@ class MultiLevelKvCacheModule(object):
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.load_tasks = deque()
+        self.checkpoint_tasks = deque()
         self.store_tasks = deque()
         self.cache_sessions = {}
         self.staging_slots = []
@@ -47,11 +48,15 @@ class MultiLevelKvCacheModule(object):
         meta = self.cpu_cache_client.kv_cache_tensor_meta
         if meta.page_bytes != self.cpu_cache_operator.get_page_bytes():
             raise ValueError("CPU cache service and model resource page sizes differ")
-        self.async_cache = not self.need_sync_compute_stream()
+        self.async_cache = self.cpu_cache_operator.async_cache
+        logger.info("MultiLevelKvCacheModule: async CPU cache=%s", self.async_cache)
         self.incremental_offload = self.async_cache and isinstance(
             g_infer_context.cache_placement_controller, LegacyCachePlacementController
         )
         if self.async_cache:
+            for allocator in (resources.bounded_att_big_page_allocator, resources.bounded_att_small_page_allocator):
+                if allocator is not None:
+                    allocator.on_allocation_pressure = self._reclaim_checkpoint_slots
             self.staging_slots = [
                 StagingSlot(
                     torch.empty(
@@ -61,25 +66,16 @@ class MultiLevelKvCacheModule(object):
                 for _ in range(self.cpu_cache_operator.STAGING_SLOTS)
             ]
 
-    @lru_cache()
     def need_sync_compute_stream(self) -> bool:
-        """
-        fa3 在 offload 和 load kv cache 的时候，需要等待计算流完成，否则可能会概率崩溃。
-        """
+        return not self.cpu_cache_operator.async_cache
 
-        model = self.backend.model
-        att_backends = [
-            model.prefill_att_backend,
-            model.decode_att_backend,
-            model.prefill_att_backend1,
-            model.decode_att_backend1,
-        ]
-        for att_backend in att_backends:
-            if att_backend is not None and "fa3" in att_backend.__class__.__name__.lower():
-                logger.info("MultiLevelKvCacheModule: need sync compute stream for fa3 backend.")
-                return True
-        logger.info("MultiLevelKvCacheModule: no need sync compute stream.")
-        return False
+    def _reclaim_checkpoint_slots(self, allocator, num_pages: int) -> None:
+        # 各 TP rank 的队列和分配顺序一致；只在槽位不足时等待必要的源快照搬运。
+        while allocator.free_count < num_pages and self.checkpoint_tasks:
+            task = self.checkpoint_tasks.popleft()
+            task.event.synchronize()
+            for owner, slots in task.leases:
+                owner.free(slots)
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
@@ -160,7 +156,9 @@ class MultiLevelKvCacheModule(object):
                     dist.all_reduce(self.load_sync_tensor, group=self.init_sync_group)
                 event = torch.cuda.Event()
                 event.record()
-                self.load_tasks.append(LoadTask(all_page_list, event, checkpoint_leases))
+                self.load_tasks.append(LoadTask(all_page_list, event))
+                if checkpoint_leases:
+                    self.checkpoint_tasks.append(CheckpointTask(event, checkpoint_leases))
             for req in reqs:
                 self.cache_sessions[req.req_id] = CacheSession(req.req_id)
         else:
@@ -299,6 +297,7 @@ class MultiLevelKvCacheModule(object):
         """按已完成的 prompt 页增量写出；任务持有独立暂存区，不依赖请求的退出时机。"""
         resources = self.backend.model.att_state_manager
         page_tokens = self.args.cpu_cache_token_page_size
+        requests = []
         for req in reqs:
             session = self.cache_sessions[req.req_id]
             if session.closing or req.shm_req.group_req_id != req.shm_req.request_id:
@@ -309,32 +308,56 @@ class MultiLevelKvCacheModule(object):
             page_lens = req.shm_req.token_hash_page_len_list.get_all()
             target = bisect.bisect_right(page_lens, req.cur_kv_len)
             target = self._handle_hybrid_att_last_page(req, target, page_lens)
-            start = len(session.pages)
-            if target <= start:
-                continue
-            if self.backend.is_master_in_dp:
-                self.cpu_cache_client.lock.acquire_sleep1ms()
-                try:
+            if target > session.page_count:
+                requests.append((req, session, page_lens, target))
+        if not requests:
+            return
+
+        # 一轮内批量分配并广播；只根据各 rank 一致的请求进度决定是否进入 collective。
+        if self.backend.is_master_in_dp:
+            allocations = []
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            try:
+                for req, session, _, target in requests:
                     hashes = req.shm_req.token_hash_list.get_all()
-                    pages, owners = self.cpu_cache_client.allocate_pages(
-                        hashes[start:target], disk_offload_enable=False, return_ownership=True
+                    allocation = self.cpu_cache_client.allocate_pages_for_write(
+                        hashes[session.page_count : target], disk_offload_enable=False
                     )
-                finally:
-                    self.cpu_cache_client.lock.release()
-                if -1 in pages:
-                    count = pages.index(-1)
-                    pages, owners = pages[:count], owners[:count]
-                data = [pages, owners]
-            else:
-                data = [None, None]
-            dist.broadcast_object_list(data, group=self.gloo_group, group_src=0)
-            pages, owners = data
-            session.pages.extend(pages)
+                    if -1 in allocation.page_indices:
+                        count = allocation.page_indices.index(-1)
+                        allocation.page_indices = allocation.page_indices[:count]
+                        allocation.ready_flags = allocation.ready_flags[:count]
+                        allocation.writer_flags = allocation.writer_flags[:count]
+                    session.disk_offload = CacheTier.DISK in req.cache_tiers or (
+                        self.incremental_offload and self.args.enable_disk_cache
+                    )
+                    if not session.disk_offload:
+                        # 已有页无需本请求写入；其 writer 或 READY 状态拥有独立生命周期。
+                        self.cpu_cache_client.deref_pages(
+                            [
+                                page
+                                for page, writer in zip(allocation.page_indices, allocation.writer_flags)
+                                if not writer
+                            ]
+                        )
+                    allocations.append(allocation)
+            finally:
+                self.cpu_cache_client.lock.release()
+            data = [allocations]
+        else:
+            data = [None]
+        dist.broadcast_object_list(data, group=self.gloo_group, group_src=0)
+        for (req, session, page_lens, _), allocation in zip(requests, data[0]):
+            pages, owners = allocation.page_indices, allocation.writer_flags
+            start = session.page_count
+            session.page_count += len(pages)
             session.disk_offload = CacheTier.DISK in req.cache_tiers or (
                 self.incremental_offload and self.args.enable_disk_cache
             )
+            if session.disk_offload:
+                session.disk_pages.extend(pages)
             if pages:
-                session.token_num = page_lens[len(session.pages) - 1]
+                session.token_num = page_lens[session.page_count - 1]
             shared_slots = []
             if self.backend.is_hybrid_att_model and req.shared_kv_node is not None:
                 shared_slots = g_infer_context.radix_cache.get_big_page_ids_by_node(req.shared_kv_node)
@@ -352,10 +375,9 @@ class MultiLevelKvCacheModule(object):
                 ]
                 if not selected:
                     continue
-                self._poll_async_tasks()
                 slot = next((slot for slot in self.staging_slots if not slot.in_use), None)
                 if slot is None:
-                    # 暂存区已满才施加背压；不能覆盖仍在被 CPU 写入流读取的暂存页。
+                    # 暂存区满才回收/施加背压，不对每个请求或每组页面执行 object collective。
                     self.store_tasks[0].event.synchronize()
                     self._poll_async_tasks()
                     slot = next(slot for slot in self.staging_slots if not slot.in_use)
@@ -363,12 +385,10 @@ class MultiLevelKvCacheModule(object):
                 with torch.cuda.stream(producer_stream):
                     for index, _ in selected:
                         end = page_lens[index]
-                        indexes = self.backend.model.req_manager.req_to_token_indexs[
-                            req.req_idx, index * page_tokens : end
-                        ]
-                        if indexes.numel() < page_tokens:
-                            indexes = torch.cat([indexes, indexes.new_full((page_tokens - indexes.numel(),), -1)])
-                        token_indices.append(indexes)
+                        # 最后一页可短于 CPU 页；保持真实长度，不向 transfer kernel 传负索引。
+                        token_indices.append(
+                            self.backend.model.req_manager.req_to_token_indexs[req.req_idx, index * page_tokens : end]
+                        )
                         if self.backend.is_hybrid_att_model:
                             if end % page_tokens:
                                 small_slots.append(req.tail_small_page_buffer_id)
@@ -397,7 +417,9 @@ class MultiLevelKvCacheModule(object):
                     )
                     packed = torch.cuda.Event()
                     packed.record()
-                # 原 KV 可以在计算流上复用；pinned checkpoint 的独立引用保留至写出完成。
+                if leases:
+                    self.checkpoint_tasks.append(CheckpointTask(packed, leases))
+                # 源 KV 在计算流上复用；pinned 快照引用只保留到 pack 完成。
                 torch.cuda.current_stream().wait_event(packed)
                 with torch.cuda.stream(g_infer_context.get_cpu_kv_cache_stream()):
                     torch.cuda.current_stream().wait_event(packed)
@@ -410,7 +432,7 @@ class MultiLevelKvCacheModule(object):
                     event.record()
                 slot.in_use = True
                 session.pending_tasks += 1
-                self.store_tasks.append(StoreTask([page for _, page in selected], session, slot, event, leases))
+                self.store_tasks.append(StoreTask([page for _, page in selected], session, slot, event))
 
     def close_cache_sessions(self, reqs: List[InferReq]):
         # GPU-only、自适应未选中 CPU、diverse 从请求和 abort 也必须结束已有会话。
@@ -418,68 +440,64 @@ class MultiLevelKvCacheModule(object):
             self.cache_sessions[req.req_id].closing = True
 
     def _poll_async_tasks(self):
-        # TP master 的完成事件包含所有 TP 分片；各 rank 按同一顺序归还资源。
-        completed = []
+        # 只对各 rank 一致的队列/会话状态短路，不能根据本地 event.query() 跳过 collective。
+        if not (self.checkpoint_tasks or self.load_tasks or self.store_tasks) and not any(
+            session.closing for session in self.cache_sessions.values()
+        ):
+            return
         if self.backend.is_master_in_dp:
-            for tasks in (self.load_tasks, self.store_tasks):
+            completed = []
+            for tasks in (self.checkpoint_tasks, self.load_tasks, self.store_tasks):
                 count = 0
                 for task in tasks:
                     if not task.event.query():
                         break
                     count += 1
                 completed.append(count)
-        else:
-            completed = [None, None]
-        dist.broadcast_object_list(completed, group=self.filter_group, group_src=0)
-        for _ in range(completed[0]):
-            task = self.load_tasks.popleft()
-            for allocator, slots in task.leases:
-                allocator.free(slots)
-            if self.backend.is_master_in_dp:
-                self.cpu_cache_client.lock.acquire_sleep1ms()
-                try:
-                    self.cpu_cache_client.deref_pages(task.pages)
-                finally:
-                    self.cpu_cache_client.lock.release()
-        for _ in range(completed[1]):
-            task = self.store_tasks.popleft()
-            for allocator, slots in task.leases:
-                allocator.free(slots)
-            if self.backend.is_master_in_dp:
-                self.cpu_cache_client.lock.acquire_sleep1ms()
-                try:
-                    self.cpu_cache_client.update_pages_status_to_ready(task.pages, deref=False)
-                finally:
-                    self.cpu_cache_client.lock.release()
-            task.slot.in_use = False
-            task.session.pending_tasks -= 1
-        if self.backend.is_master_in_dp:
             self.cpu_cache_client.lock.acquire_sleep1ms()
             try:
+                for task in islice(self.load_tasks, completed[1]):
+                    self.cpu_cache_client.deref_pages(task.pages)
+                pending = {}
+                for task in islice(self.store_tasks, completed[2]):
+                    self.cpu_cache_client.update_pages_status_to_ready(task.pages, deref=not task.session.disk_offload)
+                    pending[task.session.req_id] = pending.get(task.session.req_id, 0) + 1
                 closed = []
                 for req_id, session in self.cache_sessions.items():
-                    if not session.closing or session.pending_tasks:
+                    if not session.closing or session.pending_tasks != pending.get(req_id, 0):
                         continue
-                    # 同一前缀可能由另一个请求或 DP 写入，完整链 READY 后才能交给 disk。
-                    if session.disk_offload and not self.cpu_cache_client.check_allpages_ready(session.pages):
-                        continue
+                    # disk 链单独持有引用；不能将其他 writer 尚未完成的页发布到 disk。
                     if session.disk_offload:
+                        if not self.cpu_cache_client.check_allpages_ready(session.disk_pages):
+                            continue
                         self.cpu_cache_client.update_pages_status_to_ready(
-                            session.pages,
+                            session.disk_pages,
                             deref=True,
                             disk_offload_enable=True,
                             token_num_in_page_list=session.token_num,
                         )
-                    else:
-                        self.cpu_cache_client.deref_pages(list(reversed(session.pages)))
                     closed.append(req_id)
             finally:
                 self.cpu_cache_client.lock.release()
-            data = [closed]
+            data = [completed, closed]
         else:
-            data = [None]
+            data = [None, None]
+        # 完成计数和会话关闭合并为一次广播；CPU 页 READY 的事件包含全部 TP 分片。
         dist.broadcast_object_list(data, group=self.filter_group, group_src=0)
-        for req_id in data[0]:
+        completed, closed = data
+        for _ in range(completed[0]):
+            task = self.checkpoint_tasks.popleft()
+            # pack 没有 TP collective；master 的完成不能代替本 rank 的 pinned 源读取完成。
+            task.event.synchronize()
+            for allocator, slots in task.leases:
+                allocator.free(slots)
+        for _ in range(completed[1]):
+            self.load_tasks.popleft()
+        for _ in range(completed[2]):
+            task = self.store_tasks.popleft()
+            task.slot.in_use = False
+            task.session.pending_tasks -= 1
+        for req_id in closed:
             del self.cache_sessions[req_id]
 
     def write_req_to_cpu(self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream) -> Optional["TransTask"]:
@@ -668,7 +686,8 @@ class TransTask:
 @dataclasses.dataclass
 class CacheSession:
     req_id: int
-    pages: List[int] = dataclasses.field(default_factory=list)
+    page_count: int = 0
+    disk_pages: List[int] = dataclasses.field(default_factory=list)
     token_num: int = 0
     pending_tasks: int = 0
     closing: bool = False
@@ -682,10 +701,15 @@ class StagingSlot:
 
 
 @dataclasses.dataclass
+class CheckpointTask:
+    event: torch.cuda.Event
+    leases: list
+
+
+@dataclasses.dataclass
 class LoadTask:
     pages: List[int]
     event: torch.cuda.Event
-    leases: list
 
 
 @dataclasses.dataclass
@@ -694,4 +718,3 @@ class StoreTask:
     session: CacheSession
     slot: StagingSlot
     event: torch.cuda.Event
-    leases: list

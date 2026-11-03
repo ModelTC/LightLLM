@@ -16,6 +16,7 @@ from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_g
 class Fa3AttBackend(BaseAttBackend):
     """Common fixed page-table storage for FA3 attention backends."""
 
+    requires_cpu_cache_sync = True
     page_table_buffers = None
 
     def __init__(self, model):
