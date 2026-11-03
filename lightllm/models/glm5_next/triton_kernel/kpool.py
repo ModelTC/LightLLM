@@ -232,13 +232,12 @@ def _gather_pools(
     MAX_POOLS_PER_ROW,
     POOLS_PER_BLOCK: tl.constexpr,
 ):
-    # Gather multiple pools per CTA without changing key or scale bits.
     batch_row = tl.program_id(1)
     pool_indices = tl.program_id(0) * POOLS_PER_BLOCK + tl.arange(0, POOLS_PER_BLOCK)
     sequence_length = tl.load(b_seq_len + batch_row)
     cur_req_idx = tl.load(b_req_idx + batch_row)
     valid_pools = (pool_indices < MAX_POOLS_PER_ROW) & (pool_indices < sequence_length // 4)
-    # Each pool is stored at its fourth token's physical slot.
+    # Four tokens form one pool; its key is stored at the last token.
     token_slots = tl.load(
         req_to_token_indexs + cur_req_idx * stride_req_to_token_m + pool_indices * 4 + 3, valid_pools, 0
     ).to(tl.int64)
@@ -259,10 +258,9 @@ def _gather_pools(
 
 
 def gather_pools(packed_buffer, req_to_token_indexs, b_req_idx, b_seq_len, max_pools):
-    """Gather prefill FP8 keys [batch * max_pools, 128] and FP32 scales.
+    """Gather FP8 keys and FP32 scales for prefill.
 
-    b_seq_len is in tokens; max_pools is the pool capacity per row.
-    b_req_idx selects requests; req_to_token_indexs maps tokens to physical slots.
+    b_seq_len counts tokens; max_pools is the pool capacity per row.
     """
     keys = torch.empty(
         (b_req_idx.numel() * max_pools, 128),
@@ -270,7 +268,7 @@ def gather_pools(packed_buffer, req_to_token_indexs, b_req_idx, b_seq_len, max_p
         dtype=torch.float8_e4m3fn,
     )
     scales = torch.empty((keys.shape[0],), device=keys.device, dtype=torch.float32)
-    # Put pools on X to avoid grid Y's 65535-block limit.
+    # Use grid X for pools because grid Y is limited to 65535 blocks.
     _gather_pools[(triton.cdiv(max_pools, 32), b_req_idx.numel())](
         packed_buffer,
         req_to_token_indexs,
@@ -301,11 +299,11 @@ def _gather_paged_pools(
     REUSE_GROUP_SIZE: tl.constexpr,
 ):
     batch_row = tl.program_id(1)
-    # Read batch size from the grid to reuse kernels across batch sizes.
+    # Avoid compiling a separate kernel for each batch size.
     num_batch_rows = tl.num_programs(1)
     cur_req_idx = tl.load(b_req_idx + batch_row)
     gather_pool_count = tl.load(pool_lengths + batch_row)
-    # Recheck request slots on each replay before sharing pages.
+    # The first row copies shared pages; other rows only update the page table.
     owner_row = batch_row
     if REUSE_GROUP_SIZE > 1:
         group_start_row = batch_row // REUSE_GROUP_SIZE * REUSE_GROUP_SIZE
@@ -318,11 +316,10 @@ def _gather_paged_pools(
             & (tl.max(group_pool_counts, 0) >= 4096)
         )
         owner_row = tl.where(can_share_pages, group_start_row, batch_row)
-        # Copy the group's longest prefix; keep each query's causal length.
         gather_pool_count = tl.where(can_share_pages, tl.max(group_pool_counts, 0), gather_pool_count)
     pool_offsets = tl.arange(0, 64)
     key_offsets = tl.arange(0, 128)
-    # Copy valid pages; empty rows still get one dummy page.
+    # Empty rows need one initialized page.
     for logical_page in range(tl.program_id(0), tl.cdiv(tl.maximum(gather_pool_count, 1), 64), tl.num_programs(0)):
         if batch_row != owner_row:
             tl.store(
@@ -346,27 +343,25 @@ def _gather_paged_pools(
                 1.0,
             )
             output_page_ptr = pages + (batch_row.to(tl.int64) * MAX_PAGES_PER_ROW + logical_page) * (64 * 132)
-            # Page layout: 64 FP8 keys, then 64 FP32 scales.
+            # Page layout: [64 x 128 key bytes][64 FP32 scales].
             tl.store(output_page_ptr + pool_offsets[:, None] * 128 + key_offsets[None, :], key_bytes)
             tl.store((output_page_ptr + 64 * 128).to(tl.pointer_type(tl.float32)) + pool_offsets, pool_scales)
 
 
 def gather_paged_pools(packed_buffer, req_to_token_indexs, b_req_idx, pool_lengths, max_pools, reuse_group=4):
-    """Gather decode pages and their per-query page table.
+    """Gather decode pages and the page table.
 
-    pool_lengths counts valid pools; max_pools is capacity per row.
-    Eligible groups of reuse_group adjacent rows share pages.
+    pool_lengths counts valid pools; max_pools is the pool capacity per row.
     """
     if reuse_group not in (1, 2, 4, 8):
         raise ValueError("reuse_group must be 1, 2, 4 or 8")
     batch_size = b_req_idx.numel()
     max_pages_per_row = triton.cdiv(max_pools, 64)
-    # Keep per-row capacity so graph replay supports any request layout.
+    # Reserve each row's capacity so sharing can change on graph replay.
     pages = torch.empty((batch_size * max_pages_per_row, 64, 1, 132), device=packed_buffer.device, dtype=torch.uint8)
     block_table = torch.arange(batch_size * max_pages_per_row, device=pages.device, dtype=torch.int32).view(
         batch_size, max_pages_per_row
     )
-    # Size the grid for the groups expected to copy keys.
     estimated_copy_groups = max(1, triton.cdiv(batch_size, reuse_group)) if max_pools >= 4096 else batch_size
     page_blocks_per_row = min(max_pages_per_row, triton.cdiv(get_device_sm_count() * 4, estimated_copy_groups))
     _gather_paged_pools[(page_blocks_per_row, batch_size)](
