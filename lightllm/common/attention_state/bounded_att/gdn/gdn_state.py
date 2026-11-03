@@ -207,10 +207,10 @@ class GDNState(BoundedAttentionState):
         layout: StateTransferLayout,
         cpu_page_ready_flags: list[bool] | None = None,
     ) -> None:
-        """将指定页池槽位的快照写入 CPU 页。"""
+        """将指定页池槽位的快照写入 CPU 页或 CUDA 暂存页。"""
         assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
-        assert cpu_page_buffers.device.type == "cpu", "CPU cache buffer must reside on CPU"
+        assert cpu_page_buffers.device.type in ("cpu", "cuda"), "CPU cache pages require CPU or CUDA staging"
         pool = self._pool(page_kind)
         assert isinstance(page_slot_ids, list), "slot indices must be a list"
         assert isinstance(cpu_page_indices, list), "CPU page indices must be a list"

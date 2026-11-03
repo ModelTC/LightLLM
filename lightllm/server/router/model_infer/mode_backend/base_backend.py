@@ -730,7 +730,7 @@ class ModeBackend:
         # 定期对 radix cache 进行 merge，防止查询插入的操作效率下降
         self._timer_merge_radix_tree()
 
-        if self.args.enable_cpu_cache and len(g_infer_context.infer_req_ids) > 0:
+        if self.args.enable_cpu_cache:
             self.multi_level_cache_module.update_cpu_cache_task_states()
 
         if req_ids is None:
@@ -859,6 +859,8 @@ class ModeBackend:
         else:
             true_finished_reqs = finished_reqs
 
+        if self.args.enable_cpu_cache and self.multi_level_cache_module.async_cache:
+            self.multi_level_cache_module.close_cache_sessions(true_finished_reqs)
         g_infer_context.filter_reqs(finished_reqs=true_finished_reqs)
         g_infer_context.pause_reqs(wait_pause_reqs, is_master_in_dp=self.is_master_in_dp)
 
@@ -887,10 +889,14 @@ class ModeBackend:
     # 一些可以复用的通用功能函数
     def _pre_post_handle(self, run_reqs: List[InferReq], is_chuncked_mode: bool) -> List[InferReqUpdatePack]:
         update_func_objs: List[InferReqUpdatePack] = []
+        cpu_store_reqs = []
         # 通用状态预先填充
         is_master_in_dp = self.is_master_in_dp
         for req_obj in run_reqs:
             req_obj: InferReq = req_obj
+            if self.args.enable_cpu_cache and self.multi_level_cache_module.incremental_offload:
+                if req_obj.cur_kv_len < req_obj.shm_req.input_len:
+                    cpu_store_reqs.append(req_obj)
             if is_chuncked_mode:
                 new_kv_len = req_obj.get_chuncked_input_token_len()
             else:
@@ -910,6 +916,10 @@ class ModeBackend:
             req_obj.cur_output_len += 1
             pack = InferReqUpdatePack(req_obj=req_obj, output_len=req_obj.cur_output_len)
             update_func_objs.append(pack)
+        if cpu_store_reqs:
+            self.multi_level_cache_module.store_completed_prefill_pages(
+                cpu_store_reqs, producer_stream=g_infer_context.get_overlap_stream()
+            )
         return update_func_objs
 
     # 一些可以复用的通用功能函数

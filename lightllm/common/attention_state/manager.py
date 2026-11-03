@@ -202,12 +202,13 @@ class AttentionStateManager:
         pd_reserved_bytes = 0
         if args.run_mode in ("prefill", "decode"):
             pd_reserved_bytes = self.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
+        cpu_staging_bytes = self.get_cpu_cache_operator().get_staging_bytes() if args.enable_cpu_cache else 0
         if token_capacity is None:
             # 权重和固定运行态已分配，用当前设备剩余显存扣除保留比例及 PD buffer。
             torch.cuda.empty_cache()
             gpu_device = torch.device("cuda", get_current_device_id())
             free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_device)
-            budget = int(free_bytes - total_bytes * (1 - mem_fraction)) - pd_reserved_bytes
+            budget = int(free_bytes - total_bytes * (1 - mem_fraction)) - pd_reserved_bytes - cpu_staging_bytes
 
             # 按每页开销直接计算容量，预留一个 HOLD 页；静态量化参数占比较小，不单独扣减。
             assert args.page_size > 0, "capacity planning requires a positive page size"
@@ -224,6 +225,7 @@ class AttentionStateManager:
             logger.info(
                 f"Attention storage budget: {budget / 1024**3:.3f} GiB, "
                 f"transfer reserve: {pd_reserved_bytes / 1024**2:.3f} MiB, "
+                f"CPU cache staging reserve: {cpu_staging_bytes / 1024**2:.3f} MiB, "
                 f"profiled token capacity: {token_capacity} (mem_fraction={mem_fraction})"
             )
         token_capacity = token_capacity // args.page_size * args.page_size

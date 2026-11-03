@@ -84,20 +84,24 @@ class CpuKvCacheClient(object):
             else:
                 return None, False
 
-    def allocate_pages(self, hash_keys: List[int], disk_offload_enable: bool) -> Tuple[List[int], List[bool]]:
+    def allocate_pages(
+        self, hash_keys: List[int], disk_offload_enable: bool, *, return_ownership: bool = False
+    ) -> Tuple[List[int], List[bool]]:
         """
         allocate_pages will add _CpuPageStaus ref_count
+        return_ownership 返回新建页的写入所有权，而不是 ready 标记；调用方须持有 cache lock。
         """
         page_list = []
         ready_list = []
         page_items = self.page_items.linked_items
         for hash_key in hash_keys:
+            is_owner = return_ownership and self.page_hash_dict.get(hash_key) is None
             page_index, ready = self.allocate_one_page(
                 page_items=page_items, hash_key=hash_key, disk_offload_enable=disk_offload_enable
             )
             if page_index is not None:
                 page_list.append(page_index)
-                ready_list.append(ready)
+                ready_list.append(is_owner if return_ownership else ready)
             else:
                 page_list.append(-1)
                 ready_list.append(False)
