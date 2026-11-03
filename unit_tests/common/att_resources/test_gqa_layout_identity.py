@@ -84,5 +84,5 @@ def test_fa3_prepares_descales_for_each_head_layout(prefill, monkeypatch):
     att.init_state()
     for state in manager.get_full_attention_states("main"):
         heads = state.config.head_num
-        torch.testing.assert_close(att.k_descale[state.state_name][0], state.scales[0, :heads].expand(2, heads))
-        torch.testing.assert_close(att.v_descale[state.state_name][0], state.scales[0, heads:].expand(2, heads))
+        torch.testing.assert_close(state.get_k_descale(0, 2), state.scales[0, :heads].expand(2, heads))
+        torch.testing.assert_close(state.get_v_descale(0, 2), state.scales[0, heads:].expand(2, heads))

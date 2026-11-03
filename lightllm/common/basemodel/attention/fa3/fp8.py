@@ -36,24 +36,8 @@ class Fp8Fa3AttBackend(Fa3AttBackend):
 
 @dataclasses.dataclass
 class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
-    k_descale: dict[str, torch.Tensor] = None
-    v_descale: dict[str, torch.Tensor] = None
-
     def init_state(self):
         super().init_state()
-        batch_size = self.infer_state.batch_size
-        self.k_descale, self.v_descale = {}, {}
-        for state in self.infer_state.att_state_manager.get_full_attention_states(self.infer_state.att_state_role):
-            if "gqa_fp8_static_per_head" not in state.get_state_type():
-                continue
-            offline_scales = state.scales
-            head_num = state.config.head_num
-            self.k_descale[state.state_name] = (
-                offline_scales[:, :head_num].view(-1, 1, head_num).expand(-1, batch_size, head_num)
-            )
-            self.v_descale[state.state_name] = (
-                offline_scales[:, head_num:].view(-1, 1, head_num).expand(-1, batch_size, head_num)
-            )
 
     def prefill_att(
         self,
@@ -100,6 +84,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             self.infer_state.att_state_role, "gqa_fp8_static_per_head", logical_layer_id
         )
         storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
+        batch_size = self.infer_state.batch_size
         q = q.reshape(q.shape[0], k_head_num, -1)
         if state.q_scales is None:
             # 旧标定文件仅包含 K/V；按本次请求的 Q 长度动态计算每个 KV head 的 scale。
@@ -111,7 +96,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
         else:
             static_q_scales = state.q_scales[storage_layer_index]
             q = q_per_head_static_fp8_quant(q=q, scales=static_q_scales)
-            q_scale = static_q_scales.view(1, k_head_num).expand(self.infer_state.b_seq_len.shape[0], k_head_num)
+            q_scale = static_q_scales.view(1, k_head_num).expand(batch_size, k_head_num)
         o = flash_attn_with_kvcache(
             q=q.reshape(-1, q_head_num, q_head_dim),
             k_cache=cache_k,
@@ -125,8 +110,8 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale,
-            k_descale=self.k_descale[state.state_name][storage_layer_index],
-            v_descale=self.v_descale[state.state_name][storage_layer_index],
+            k_descale=state.get_k_descale(storage_layer_index, batch_size),
+            v_descale=state.get_v_descale(storage_layer_index, batch_size),
             return_softmax_lse=False,
         )
         return o
@@ -134,26 +119,10 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
 
 @dataclasses.dataclass
 class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
-    k_descale: dict[str, torch.Tensor] = None
-    v_descale: dict[str, torch.Tensor] = None
-
     def init_state(self):
         self.backend: Fp8Fa3AttBackend = self.backend
 
         super().init_state()
-        att_batch_size = self.b_att_seq_len.shape[0]
-        self.k_descale, self.v_descale = {}, {}
-        for state in self.infer_state.att_state_manager.get_full_attention_states(self.infer_state.att_state_role):
-            if "gqa_fp8_static_per_head" not in state.get_state_type():
-                continue
-            offline_scales = state.scales
-            head_num = state.config.head_num
-            self.k_descale[state.state_name] = (
-                offline_scales[:, :head_num].view(-1, 1, head_num).expand(-1, att_batch_size, head_num)
-            )
-            self.v_descale[state.state_name] = (
-                offline_scales[:, head_num:].view(-1, 1, head_num).expand(-1, att_batch_size, head_num)
-            )
 
     def copy_for_decode_cuda_graph(self, new_state: "Fp8Fa3DecodeAttState"):
         super().copy_for_decode_cuda_graph(new_state)
@@ -229,8 +198,8 @@ class Fp8Fa3DecodeAttState(Fa3DecodeAttState):
             window_size=(-1, -1),
             softcap=0.0,
             q_descale=q_scale.view(att_batch_size, k_head_num),
-            k_descale=self.k_descale[state.state_name][storage_layer_index],
-            v_descale=self.v_descale[state.state_name][storage_layer_index],
+            k_descale=state.get_k_descale(storage_layer_index, att_batch_size),
+            v_descale=state.get_v_descale(storage_layer_index, att_batch_size),
             return_softmax_lse=False,
         )
         return o
