@@ -43,6 +43,5 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --enable_disk_cache \
     --disk_cache_storage_size 5120 \
     --cache_placement_strategy legacy \
-    --prefill_queue_strategy default \
     --dp_balancer cache_aware \
     --disk_cache_dir /root/.cache/lightllm-dsv41-opt/pd_disk_cache

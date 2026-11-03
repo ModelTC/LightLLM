@@ -11,6 +11,8 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --model_name DeepSeek-V4.1-Flash-FP8 \
     --run_mode decode \
     --pd_trans_mode nixl \
+    --pd_kv_page_size 2048 \
+    --pd_kv_page_num 8 \
     --tp 16 \
     --dp 16 \
     --nnodes 2 \
