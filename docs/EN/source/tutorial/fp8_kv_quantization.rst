@@ -70,6 +70,12 @@ The following example uses GLM-5.3 Flash, which requires ``bfloat16`` and suppor
         --model_dir /path/to/GLM-5.3-Flash --tp 4 \
         --data_type bfloat16 --llm_kv_type fp8kv_dsa
 
+The GLM-5.3 Flash indexer limits each temporary FP32 logits chunk to 64 MiB by default.
+Set ``LIGHTLLM_GLM53_PREFILL_LOGITS_MIB`` to an integer from 16 to 1024 MiB to change this
+budget. Larger budgets allow more queries per chunk at the cost of more temporary GPU
+memory. This also applies to unquantized KV; it controls indexer logits chunking, not
+the model's total GPU memory use.
+
 Disaggregated P/D Deployment
 ----------------------------
 

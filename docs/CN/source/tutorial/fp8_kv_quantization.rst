@@ -66,6 +66,11 @@ DeepSeek-V3.2 和 GLM-5.3 Flash 使用 ``--llm_kv_type fp8kv_dsa``，无需提�
         --model_dir /path/to/GLM-5.3-Flash --tp 4 \
         --data_type bfloat16 --llm_kv_type fp8kv_dsa
 
+GLM-5.3 Flash 的 indexer 默认将每块 FP32 logits 临时张量限制在 64 MiB。
+可通过 ``LIGHTLLM_GLM53_PREFILL_LOGITS_MIB`` 设置 16–1024 MiB 的整数预算；
+更大的预算允许每块并行处理更多 query，同时增加临时显存占用。
+该设置也适用于未量化 KV，只控制 indexer logits 分块，不限制模型的总显存。
+
 P/D 分离部署
 ------------
 
