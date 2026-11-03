@@ -1,5 +1,4 @@
 import os
-import time
 import threading
 import psutil
 import signal
@@ -41,15 +40,15 @@ def kill_child_processes(parent_pid):
             logger.warning(f"kill pid {child.pid} failed {str(e)}")
 
 
-def check_parent_alive():
+def check_parent_alive(stop_event):
     parent_pid = os.getppid()
-    while True:
+    while not stop_event.is_set():
         if not is_process_active(parent_pid):
             logger.warning(f"parent is dead, kill self {os.getpid()}")
             kill_child_processes(os.getpid())
             os.kill(os.getpid(), signal.SIGKILL)
 
-        time.sleep(10)
+        stop_event.wait(10)
     return
 
 
@@ -57,5 +56,7 @@ def start_parent_check_thread():
     """
     检测父进程是否健康，如果出现问题，清理退出所有进程
     """
-    thread = threading.Thread(target=check_parent_alive, daemon=True)
+    stop_event = threading.Event()
+    thread = threading.Thread(target=check_parent_alive, args=(stop_event,), daemon=True)
     thread.start()
+    return stop_event

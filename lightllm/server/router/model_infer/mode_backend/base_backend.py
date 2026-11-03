@@ -55,6 +55,8 @@ from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
 
 class ModeBackend:
     def __init__(self) -> None:
+        self.shutdown_requested = threading.Event()
+        self.inference_stopped = threading.Event()
         self.shm_req_manager = ShmReqManager()
 
         self.overlap_event_manager = OverlapEventManager()
@@ -210,7 +212,7 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
-            self.dp_control_tensor = torch.zeros(2, dtype=torch.int32, device="cpu", requires_grad=False)
+            self.dp_control_tensor = torch.zeros(3, dtype=torch.int32, device="cpu", requires_grad=False)
             self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
@@ -1036,6 +1038,7 @@ class ModeBackend:
         """
         self.dp_control_tensor[0] = bool(prefill_reqs)
         self.dp_control_tensor[1] = bool(decode_reqs)
+        self.dp_control_tensor[2] = self.shutdown_requested.is_set()
         all_reduce(
             self.dp_control_tensor,
             op=dist.ReduceOp.MAX,

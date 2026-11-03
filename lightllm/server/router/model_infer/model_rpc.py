@@ -8,6 +8,8 @@ import torch.multiprocessing as mp
 import multiprocessing
 import threading
 import inspect
+import signal
+import time
 import setproctitle
 from typing import Dict, List, Tuple
 from rpyc.utils.classic import obtain
@@ -30,7 +32,7 @@ from lightllm.server.router.model_infer.mode_backend.ep_balance_monitor import (
 )
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger
-from lightllm.utils.graceful_utils import graceful_registry
+from lightllm.utils.graceful_utils import graceful_registry, model_shutdown_path
 from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name, get_model_infer_recursion_limit
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
@@ -50,6 +52,7 @@ class ModelRpcServer(rpyc.Service):
         self.rank_in_node = rank_in_node
         self.backend = None
         self.rl_backend_ops = None
+        self.shutdown_requested = threading.Event()
         logger.info(f"Initialized RPC server for rank {self.rank}.")
         return
 
@@ -93,7 +96,31 @@ class ModelRpcServer(rpyc.Service):
             monitor = EPBalanceMonitor(self.backend.model)
             if monitor.enabled:
                 self.backend.model.ep_balance_monitor = monitor
+
+        # Coordinated stop uses the DP scheduler's existing control collective.
+        # Overlap and non-DP backends retain the launcher's forced-exit path.
+        if self.args.dp > 1 and not self.backend.support_overlap and not self.args.enable_rl:
+            threading.Thread(target=self._release_host_memory, name="host-memory-cleanup", daemon=True).start()
+            model_shutdown_path(os.getpid(), "ready").touch()
         return
+
+    def _release_host_memory(self):
+        self.shutdown_requested.wait()
+        started = time.monotonic()
+        self.backend.shutdown_requested.set()
+        self.backend.inference_stopped.wait()
+        self.backend.infer_loop_thread.join()
+        self.backend.infer_loop_thread1.join()
+        # Includes CPU KV copies, Engram prefetch and local/IPC GPU copies.
+        # Keep GPU allocations alive until the launcher stops PD transport processes.
+        import torch
+        from lightllm.utils.host_memory import close_host_memory_registrations
+
+        torch.cuda.set_device(self.backend.current_device_id)
+        torch.cuda.synchronize()
+        close_host_memory_registrations()
+        model_shutdown_path(os.getpid(), "released").touch()
+        logger.info(f"host_memory_released rank={self.rank} elapsed={time.monotonic() - started:.3f}s")
 
     def exposed_get_max_total_token_num(self):
         return self.backend.get_max_total_token_num()
@@ -170,9 +197,15 @@ def _init_env(
     # 注册graceful 退出的处理
     graceful_registry(inspect.currentframe().f_code.co_name)
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::model_infer:RANK{rank}")
-    start_parent_check_thread()
+    parent_check_stop = start_parent_check_thread()
 
     model_rpc_server = ModelRpcServer(args, rank, rank_in_node, node_world_size, info_queue)
+
+    def request_shutdown(_signum, _frame):
+        parent_check_stop.set()
+        model_rpc_server.shutdown_requested.set()
+
+    signal.signal(signal.SIGUSR1, request_shutdown)
     # Start rpyc server with Unix socket
     t = ThreadedServer(model_rpc_server, socket_path=socket_path, protocol_config={"allow_pickle": True})
 

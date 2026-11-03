@@ -153,6 +153,13 @@ class DPChunkedPrefillBackend(ModeBackend):
 
                 event_pack.wait_to_forward()
 
+                if self.inference_stopped.is_set():
+                    # Release the preceding thread's final handoff without issuing
+                    # another collective or submitting more GPU work.
+                    event_pack.notify_post_handle_event.set()
+                    event_pack.notify_pre_post_handle_event.set()
+                    return
+
                 # EPLB polling performs collectives and may commit weights, so keep all ranks ordered before normal
                 # collectives/forward.
                 if self.model.eplb_manager is not None:
@@ -169,6 +176,12 @@ class DPChunkedPrefillBackend(ModeBackend):
                 has_prefill, has_decode = self._dp_all_reduce_req_presence(
                     prefill_reqs=prefill_reqs, decode_reqs=decode_reqs
                 )
+
+                if self.dp_control_tensor[2]:
+                    # Carry stop to every rank in the existing control collective.
+                    self.inference_stopped.set()
+                    event_pack.notify_pre_post_handle()
+                    return
 
                 run_way = self.control_state_machine.select_run_way(
                     has_prefill=has_prefill,

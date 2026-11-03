@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import threading
 
 import torch
 
@@ -10,7 +11,8 @@ from lightllm.server.router.model_infer.mode_backend.dp_backend.control_state im
 def test_dp_req_presence_uses_one_cpu_collective(monkeypatch):
     control_group = object()
     backend = ModeBackend.__new__(ModeBackend)
-    backend.dp_control_tensor = torch.zeros(2, dtype=torch.int32, device="cpu")
+    backend.dp_control_tensor = torch.zeros(3, dtype=torch.int32, device="cpu")
+    backend.shutdown_requested = threading.Event()
     calls = []
 
     def all_reduce(tensor, op, group, async_op):
@@ -24,7 +26,7 @@ def test_dp_req_presence_uses_one_cpu_collective(monkeypatch):
 
     assert (has_prefill, has_decode) == (True, True)
     assert calls == [
-        ([1, 0], "cpu", torch.distributed.ReduceOp.MAX, control_group, False),
+        ([1, 0, 0], "cpu", torch.distributed.ReduceOp.MAX, control_group, False),
     ]
 
 

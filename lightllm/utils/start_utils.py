@@ -11,6 +11,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.process_check import is_process_active
 from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.service_shm_cleanup import start_launcher_shm_cleanup_process
+from lightllm.utils.graceful_utils import model_shutdown_path
 
 logger = init_logger(__name__)
 
@@ -94,22 +95,66 @@ class SubmoduleManager:
             self.processes.append(process)
             self.process_names[process] = process_name
 
-    def terminate_all_processes(self):
+    def terminate_all_processes(self, graceful=False):
         from lightllm.utils.envs_utils import get_env_start_args
 
+        # Capture descendants before terminating parents, including helpers created
+        # after the initial supervision scan. psutil identities include create time.
+        processes = set(self.processes)
         for proc in self.processes:
-            if proc.is_running():
-                kill_recursive(proc)
+            try:
+                processes.update(proc.children(recursive=True))
+            except psutil.NoSuchProcess:
+                pass
 
-        # Signal every process before waiting. Registered router descendants may
-        # remain zombies under another parent, so bound the total wait time.
-        _, alive = psutil.wait_procs(self.processes, timeout=5)
+        model_workers = []
+        if graceful:
+            for proc in processes:
+                try:
+                    if "::model_infer:RANK" in proc.name() and model_shutdown_path(proc.pid, "ready").exists():
+                        proc.send_signal(signal.SIGUSR1)
+                        model_workers.append(proc)
+                except psutil.NoSuchProcess:
+                    pass
+            deadline = time.monotonic() + 180
+            pending = list(model_workers)
+            while pending and time.monotonic() < deadline:
+                pending = [
+                    proc
+                    for proc in pending
+                    if is_process_active(proc.pid) and not model_shutdown_path(proc.pid, "released").exists()
+                ]
+                if pending:
+                    time.sleep(0.1)
+            if pending:
+                logger.warning(f"Host memory cleanup timed out; forcing remaining workers: {[p.pid for p in pending]}")
+
+        # Workers stay alive after unregister so GPU IPC owners outlive transport
+        # users. Kill consumers first; a killed parent must not trigger the worker
+        # watchdog during this planned stop.
+        consumers = processes.difference(model_workers)
+        for proc in consumers:
+            try:
+                proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+        _, alive_consumers = psutil.wait_procs(list(consumers), timeout=30)
+        active_consumers = [proc.pid for proc in alive_consumers if is_process_active(proc.pid)]
+        if active_consumers:
+            logger.warning(f"Consumers still alive before worker termination: {active_consumers}")
+        for proc in model_workers:
+            try:
+                proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+
+        _, alive = psutil.wait_procs(list(processes), timeout=180)
         alive_pids = [proc.pid for proc in alive if is_process_active(proc.pid)]
         if alive_pids:
             logger.warning(f"Processes still alive after SIGKILL: {alive_pids}")
 
         # LightMem owns files under this directory, so remove it only after the cache process has exited.
-        if self.disk_cache_dir is not None:
+        if self.disk_cache_dir is not None and not alive_pids:
             try:
                 shutil.rmtree(self.disk_cache_dir)
             except FileNotFoundError:
@@ -120,12 +165,13 @@ class SubmoduleManager:
                 logger.info(f"Removed disk cache directory {self.disk_cache_dir}")
 
         # recover the gpu compute mode
-        if get_env_start_args().enable_mps:
+        if not alive_pids and get_env_start_args().enable_mps:
             from lightllm.utils.device_utils import stop_mps
 
             stop_mps()
         if not alive_pids:
-            logger.info("All processes terminated gracefully.")
+            logger.info("workers_exited: all managed processes have exited and been reaped")
+        return alive_pids
 
     def setup_exit_controller(self):
         """启动 launcher 的独立资源清理进程。
@@ -153,9 +199,8 @@ class SubmoduleManager:
                     if http_server_process is not None:
                         kill_recursive(http_server_process)
                 finally:
-                    self.terminate_all_processes()
-                logger.info("All processes have been forcefully terminated.")
-                sys.exit(0)
+                    remaining = self.terminate_all_processes()
+                sys.exit(1 if remaining else 0)
 
             if sig == signal.SIGTERM:
                 logger.info("Received SIGTERM, shutting down gracefully...")
@@ -167,14 +212,13 @@ class SubmoduleManager:
                     http_server_process.send_signal(graceful_shutdown_signal)
                     try:
                         http_server_process.wait(timeout=60)
-                        logger.info("HTTP server exited gracefully")
+                        logger.info("serving_stopped: HTTP server exited")
                     except subprocess.TimeoutExpired:
                         logger.warning("HTTP server did not exit in time, killing it...")
                         kill_recursive(http_server_process)
             finally:
-                self.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully.")
-            sys.exit(0)
+                remaining = self.terminate_all_processes(graceful=True)
+            sys.exit(1 if remaining else 0)
 
         signal.signal(signal.SIGTERM, signal_handler)
         signal.signal(signal.SIGINT, signal_handler)

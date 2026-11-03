@@ -154,7 +154,7 @@ def test_setup_signal_handlers_registers_and_handles_sigterm(monkeypatch):
         "signal",
         lambda sig, handler: registered_handlers.__setitem__(sig, handler),
     )
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: terminate_calls.append(True))
+    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda **kwargs: terminate_calls.append(True))
 
     process_manager.setup_signal_handlers(http_server_process)
 
@@ -181,7 +181,7 @@ def test_setup_signal_handlers_uses_configured_graceful_shutdown_signal(monkeypa
         "signal",
         lambda sig, handler: registered_handlers.__setitem__(sig, handler),
     )
-    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda: None)
+    monkeypatch.setattr(process_manager, "terminate_all_processes", lambda **kwargs: None)
 
     process_manager.setup_signal_handlers(
         http_server_process,
@@ -320,3 +320,58 @@ def test_supervisor_supports_submodule_only_processes(monkeypatch):
 
     assert kill_calls == []
     assert terminate_calls == [True]
+
+
+def test_shutdown_preserves_gpu_owners_until_consumers_exit(monkeypatch, tmp_path):
+    from lightllm.utils import envs_utils
+
+    calls = []
+
+    class Process(FakeProcess):
+        def send_signal(self, sig):
+            calls.append(("signal", self.pid, sig))
+            (tmp_path / f"{self.pid}_released").touch()
+
+        def kill(self):
+            calls.append(("kill", self.pid))
+
+    worker = Process(1002, name="lightllm::test::model_infer:RANK0")
+    consumer = Process(1001, children=[worker], name="lightllm::test::router")
+    manager = start_utils.SubmoduleManager()
+    manager.processes = [consumer, worker]
+    manager.disk_cache_dir = "cache"
+    (tmp_path / "1002_ready").touch()
+    monkeypatch.setattr(start_utils, "model_shutdown_path", lambda pid, stage: tmp_path / f"{pid}_{stage}")
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
+    monkeypatch.setattr(envs_utils, "get_env_start_args", lambda: SimpleNamespace(enable_mps=False))
+
+    def wait(procs, timeout):
+        calls.append(("wait", sorted(p.pid for p in procs)))
+        return procs, []
+
+    monkeypatch.setattr(start_utils.psutil, "wait_procs", wait)
+    monkeypatch.setattr(start_utils.shutil, "rmtree", lambda path: calls.append(("remove", path)))
+    assert manager.terminate_all_processes(graceful=True) == []
+    assert calls == [
+        ("signal", 1002, start_utils.signal.SIGUSR1),
+        ("kill", 1001),
+        ("wait", [1001]),
+        ("kill", 1002),
+        ("wait", [1001, 1002]),
+        ("remove", "cache"),
+    ]
+
+
+def test_shutdown_retains_disk_cache_while_process_is_alive(monkeypatch):
+    class Process(FakeProcess):
+        def kill(self):
+            pass
+
+    process = Process(1001)
+    manager = start_utils.SubmoduleManager()
+    manager.processes = [process]
+    manager.disk_cache_dir = "cache"
+    monkeypatch.setattr(start_utils.psutil, "wait_procs", lambda procs, timeout: ([], procs))
+    monkeypatch.setattr(start_utils, "is_process_active", lambda pid: True)
+    monkeypatch.setattr(start_utils.shutil, "rmtree", lambda _: pytest.fail("Cache still has a live user"))
+    assert manager.terminate_all_processes() == [1001]

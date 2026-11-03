@@ -1,7 +1,14 @@
 import sys
+from pathlib import Path
+from lightllm.utils.envs_utils import get_unique_server_name
 from lightllm.utils.log_utils import init_logger
 
 logger = init_logger(__name__)
+
+
+def model_shutdown_path(pid, stage):
+    """Service-owned worker/launcher handshake, reclaimed with the service SHM namespace."""
+    return Path("/dev/shm") / f"{get_unique_server_name()}_model_shutdown_{pid}_{stage}"
 
 
 def graceful_registry(sub_module_name):
