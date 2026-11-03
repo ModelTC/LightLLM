@@ -20,7 +20,6 @@ from .configs import (
     pre_norm_key,
     projection_configs,
     projection_key,
-    shifted_post_pre_configs,
 )
 from .post import _hc_post_values, hc_post, _hc_post_norm_kernel
 
@@ -517,14 +516,7 @@ def _hc_shifted_weights_kernel(
     tl.store(MIX + row * 16 + tl.arange(0, 16), tl.reshape(matrix, (16,)))
 
 
-@autotune(
-    kernel_name="mhc_post_pre_norm_shifted:v1",
-    configs_gen_func=shifted_post_pre_configs,
-    static_key_func=decode_post_pre_key,
-    run_key_func=lambda layer_output: layer_output.shape[0],
-    benchmark_repeats=32,
-    benchmark_retries=5,
-)
+# Inner kernels autotune collectively; this orchestration must run on every rank.
 def _hc_shifted_post_pre_norm(
     layer_output,
     residual,

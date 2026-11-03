@@ -1,6 +1,6 @@
 export RUN_DIR="/mnt/vqa/wanzihao/dsv41_pd_support_ds4_20261102"
-export SOURCE_DIR="$RUN_DIR/src"
-export LOG_DIR="$RUN_DIR/service"
+export SOURCE_DIR="/mnt/vqa/wanzihao/v41_restart_20261103_031834_26e9b8137/src"
+export LOG_DIR="/mnt/vqa/wanzihao/v41_restart_20261103_031834_26e9b8137/service"
 export MODEL_DIR="/mnt/vqa/models/DeepSeek-V4.1-Flash-1017-FP8"
 export MTP_DRAFT_MODEL_DIR="$MODEL_DIR"
 export PD_MASTER_IP="10.119.30.78"
