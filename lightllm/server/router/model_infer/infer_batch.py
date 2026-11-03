@@ -859,8 +859,10 @@ class InferReq:
         total_end = self.get_cur_total_len()
         end = min(total_end, chunked_end, big_page_end)
 
-        if chunked_start < self.hybrid_cache_len < end:
-            # hybrid checkpoint 对应需要存储的部分。
+        if chunked_start < self.hybrid_cache_len < end and not any(
+            start < self.hybrid_cache_len < stop for start, stop in self.mm_input_spans
+        ):
+            # 多模态块内部不会保存 checkpoint，不能为它额外切分。
             end = self.hybrid_cache_len
 
         end = adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
@@ -878,7 +880,9 @@ class InferReq:
         big_page_end = ((chunked_start // big_page_token_num) + 1) * big_page_token_num
         total_end = self.get_cur_total_len()
         end = min(total_end, chunked_end, big_page_end)
-        if chunked_start < self.hybrid_cache_len < end:
+        if chunked_start < self.hybrid_cache_len < end and not any(
+            start < self.hybrid_cache_len < stop for start, stop in self.mm_input_spans
+        ):
             end = self.hybrid_cache_len
         return adjust_mm_chunk_end(chunked_start, end, self.mm_input_spans)
 
