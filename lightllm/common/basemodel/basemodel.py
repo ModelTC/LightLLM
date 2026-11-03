@@ -52,6 +52,7 @@ from lightllm.utils.torch_memory_saver_utils import (
 )
 from .attention import get_prefill_att_backend_class, get_decode_att_backend_class
 from .attention import BaseAttBackend
+from lightllm.common.weight_cache import is_preloading_weights, validate_weight_cache, WeightCacheClient
 
 logger = init_logger(__name__)
 
@@ -115,11 +116,27 @@ class TpPartBaseModel:
         self._verify_params()
         self._init_quant()
 
+        self.weight_cache_client = None
+        if self.args.weight_cache_dir:
+            validate_weight_cache(self)
+            if not is_preloading_weights():
+                self.weight_cache_client = (
+                    self.main_model.weight_cache_client if self.is_mtp_draft_model else WeightCacheClient(self.args)
+                )
+
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
         with self._startup_stage("weight_objects"):
             with profile_mtp_weight_memory(self):
                 with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
-                    self._init_weights()
+                    if self.weight_cache_client is None:
+                        self._init_weights()
+                    else:
+                        with self.weight_cache_client.initialize_model():
+                            self._init_weights()
+                        self.weight_cache_client.bind_model(self)
+        if is_preloading_weights():
+            self.load_weights(self.weight_dict)
+            return
         with self._startup_stage("request_state_and_kv_capacity"):
             with self.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
                 self._init_req_manager()
@@ -135,7 +152,10 @@ class TpPartBaseModel:
         with self._startup_stage("custom_state"):
             self._init_custom()
         with self._startup_stage("checkpoint_load_and_host_mapping"):
-            self.load_weights(self.weight_dict)
+            if self.weight_cache_client is None:
+                self.load_weights(self.weight_dict)
+            else:
+                self._finalize_resident_weights()
         # Host registration may overlap construction and loading, but CUDA's
         # global capture mode forbids registration concurrent with graph/autotune
         # warmup. The worker that owns the host pool supplies this readiness gate.
@@ -236,6 +256,23 @@ class TpPartBaseModel:
 
     def _filter_hf_weight_keys(self, keys):
         return keys
+
+    def named_resident_weights(self):
+        layers = [
+            ("pre_post", self.pre_post_weight),
+            *((f"layers.{index}", layer) for index, layer in enumerate(self.trans_layers_weight)),
+        ]
+        return {
+            f"{prefix}.{name}": weight
+            for prefix, layer in layers
+            for name, weight in layer.named_weights().items()
+            if weight.supports_resident_cache
+        }
+
+    def _finalize_resident_weights(self):
+        self.pre_post_weight.verify_load()
+        for layer in self.trans_layers_weight:
+            layer.verify_load()
 
     def _init_mem_manager(self):
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0

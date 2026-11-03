@@ -44,4 +44,31 @@ P 开启 `--enable_dp_prompt_cache_fetch`，在同一节点的 DP rank 间复用
 
 日志区分 `serving_stopped`、`host_memory_released`、`workers_exited`。仍有活进程时不删除磁盘缓存、不报告退出成功，launcher 返回失败；共享内存仍由现有独立清理进程按 service namespace 回收。`workers_exited` 不应被当作 SysV 物理页已回收的单独证据，重启前仍需检查 attachment、GPU进程和 cgroup。
 
-本轮只提交代码和配置，不重启当前服务。HOST_NUMA/FABRIC、CPU KV 分阶段扩容或 staging、处理后权重 artifact、权重常驻 owner 尚未实现；这些需要新的共享/所有权协议和单独容量、传输及整机验证，不能用本轮局部测试代替。
+本轮只提交代码和配置，不重启当前服务。HOST_NUMA/FABRIC、CPU KV 分阶段扩容或 staging、处理后权重 artifact 尚未实现；这些需要单独容量、传输及整机验证，不能用局部测试代替。
+
+## 可选的权重常驻
+
+`--weight_cache_dir` 默认关闭。目前支持 CUDA SM90 上的不可变 V4.1 BF16/DeepGEMM FP8 权重及可选 DSpark；不支持 RL 更新、EPLB、memory saver 或其他量化方法。owner 通过现有模型/量化工厂加载处理后的 GPU 权重，并保留已填好的共享 Engram CPU 表。worker 使用 FakeTensor 构造权重骨架后绑定同卡 CUDA IPC tensors，保留 WeightPack、别名、stride 和加载状态；不会先分配整份 GPU 副本，也不会重读或再次处理权重。推理路径直接读 GPU tensors，没有逐请求 owner RPC。
+
+首次启用前先停止旧服务并确认显存可用；已有 owner 的暖重启只停止 worker，保留 owner。owner 是独立于 API launcher 的进程组，必须先启动并等待每张卡打印 `resident_weights_ready`。使用同一份经过核对的 launcher，改变 Python 入口即可，避免另拼权重参数；冻结源码必须包含本功能。例如在每个 P 节点分别执行，rank 参数仍按原拓扑填写：
+
+```bash
+export LIGHTLLM_WEIGHT_CACHE_DIR=/root/.cache/lightllm-dsv41-opt/resident
+# 独立会话中启动 owner；D 节点使用 launch_decode.sh。
+LIGHTLLM_SERVER_MODULE=lightllm.server.weight_cache bash launch_prefill.sh 0
+# owner 全部就绪后，在另一会话启动或重启服务 worker。
+export LIGHTLLM_WEIGHT_CACHE_DIR=/root/.cache/lightllm-dsv41-opt/resident
+bash launch_prefill.sh 0
+```
+
+目录必须位于本地文件系统、由运行用户独占（0700）；owner 与 worker 需共享 IPC、目录并具有可见的进程身份。每卡通过物理 GPU UUID 选择 socket。checkpoint 内容清单/文件元数据、TP/DP/rank、量化、MTP、PyTorch/CUDA/Triton 及权重布局源码不匹配时直接拒绝，不能一边保留旧 owner、一边退回磁盘加载出另一份权重。只修改推理方法或 kernel 可以继续复用；修改权重构造、加载或布局后需要停掉旧 owner 并重新预载。
+
+```bash
+python -m lightllm.server.weight_cache --weight_cache_dir "$LIGHTLLM_WEIGHT_CACHE_DIR" --weight_cache_action status
+# 先停止相应服务的全部 worker，再归还 owner 的 GPU/CPU 资源。
+python -m lightllm.server.weight_cache --weight_cache_dir "$LIGHTLLM_WEIGHT_CACHE_DIR" --weight_cache_action stop
+```
+
+status 给出 owner PID、GPU 权重字节数、Engram 共享表及活跃 worker PID。存在租约时 stop/SIGTERM 会拒绝释放；连接断开后还会等待实际 worker 退出，避免将 EOF 当作 CUDA context 已清理。owner 异常断开会令关联 worker 失败退出，不能继续重放旧 Graph。启动失败留下的 namespace/socket 应先核对进程与共享映射，再处理，不能自动清除不明或仍在使用的资源。
+
+重启预检只允许 status 验证过的 owner 保留；旧 worker、请求 KV、传输进程仍须退出。owner 会常驻显存和 Engram 物理页，完全归还机器时必须另行停止。owner 的额外 CUDA context 开销由实际空闲显存计入 KV profile；target/draft 权重已全部常驻，因此不会再重复预留 MTP 权重。通信、CUDA Graph、请求状态以及 1 TiB CPU KV 池仍需初始化和注册，权重常驻不等于整个服务几秒就绪。

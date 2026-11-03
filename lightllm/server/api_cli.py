@@ -189,6 +189,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
           DS(Deepspeed)""",
     )
     parser.add_argument(
+        "--weight_cache_dir",
+        type=str,
+        default=None,
+        help=(
+            "Private local directory of a preloaded resident weight owner. "
+            "Requires matching V4.1 SM90 weights; no disk fallback."
+        ),
+    )
+    parser.add_argument(
         "--max_total_token_num",
         type=int,
         default=None,

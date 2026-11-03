@@ -13,6 +13,7 @@ from .layer_infer.transformer_layer_infer import DeepseekV41TransformerLayerInfe
 from .engram import EngramHasher
 from lightllm.common.build_utils import repair_config
 from lightllm.utils.config_utils import get_config_json
+from lightllm.common.weight_cache import is_preloading_weights
 
 
 class DeepseekV41LayerHiddenCollector(DeepseekV4LayerHiddenCollector):
@@ -54,13 +55,20 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
 
     def load_weights(self, weight_dict):
         super().load_weights(weight_dict)
-        if self.is_mtp_draft_model:
+        if self.is_mtp_draft_model or is_preloading_weights():
             return
         # Loading writes each physical table once. Every rank then maps the completed
         # table in its own CUDA context, before any warmup or graph can read it.
         for layer in self.trans_layers_weight:
             if layer.has_engram:
                 layer.engram_embed_.finalize_host_registration()
+
+    def _finalize_resident_weights(self):
+        super()._finalize_resident_weights()
+        if not self.is_mtp_draft_model:
+            for layer in self.trans_layers_weight:
+                if layer.has_engram:
+                    layer.engram_embed_.finalize_host_registration()
 
     def _filter_hf_weight_keys(self, keys):
         if not self.args.enable_ep_moe or self.is_mtp_draft_model:

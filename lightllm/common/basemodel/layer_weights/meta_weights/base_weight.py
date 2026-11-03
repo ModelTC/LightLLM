@@ -5,6 +5,8 @@ from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp,
 
 
 class BaseWeight(ABC):
+    supports_resident_cache = True
+
     def __init__(self):
         super().__init__()
         pass

@@ -3,9 +3,13 @@ set -euo pipefail
 NODE_RANK=${1:?usage: bash launch_prefill.sh NODE_RANK}
 ulimit -Sn 1048576
 source "$(dirname -- "${BASH_SOURCE[0]}")/config.txt"
+WEIGHT_CACHE_ARGS=()
+if [[ -n "${LIGHTLLM_WEIGHT_CACHE_DIR:-}" ]]; then
+    WEIGHT_CACHE_ARGS=(--weight_cache_dir "$LIGHTLLM_WEIGHT_CACHE_DIR")
+fi
 export NVSHMEM_IB_ENABLE_IBGDA=0
 /opt/conda/bin/python -c 'import lightllm,resource,sys; print(sys.executable,lightllm.__file__,resource.getrlimit(resource.RLIMIT_NOFILE),flush=True)'
-exec /opt/conda/bin/python -u -m lightllm.server.api_server \
+exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_server}" \
     --model_dir "$MODEL_DIR" \
     --model_name DeepSeek-V4.1-Flash-FP8 \
     --run_mode prefill \
@@ -44,4 +48,5 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --disk_cache_storage_size 5120 \
     --cache_placement_strategy legacy \
     --dp_balancer cache_aware \
-    --disk_cache_dir /root/.cache/lightllm-dsv41-opt/pd_disk_cache
+    --disk_cache_dir /root/.cache/lightllm-dsv41-opt/pd_disk_cache \
+    "${WEIGHT_CACHE_ARGS[@]}"

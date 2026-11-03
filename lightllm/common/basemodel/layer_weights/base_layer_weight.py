@@ -20,6 +20,9 @@ class BaseLayerWeight:
             if isinstance(attr, BaseWeight):
                 attr.load_hf_weights(weights)
 
+    def named_weights(self):
+        return {name: value for name, value in vars(self).items() if isinstance(value, BaseWeight)}
+
     def init_static_params(self):
         """
         design for some static init params, many model dont need do this.

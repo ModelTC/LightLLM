@@ -127,7 +127,7 @@ def init_audio_distributed_env(kvargs):
     del _a
 
 
-def init_distributed_env(kvargs):
+def set_distributed_rank_env(kvargs):
     assert kvargs["world_size"] % kvargs["args"].nnodes == 0, "world_size should be divided by nnodes"
     node_world_size = kvargs["world_size"] // kvargs["args"].nnodes
 
@@ -144,6 +144,10 @@ def init_distributed_env(kvargs):
     dp_size_in_node = max(1, get_dp_size() // nnodes)
     set_dp_rank_in_node(get_global_dp_rank() % dp_size_in_node)
 
+
+def init_distributed_env(kvargs):
+    set_distributed_rank_env(kvargs)
+
     _init_nccl_env()
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
@@ -154,9 +158,13 @@ def init_distributed_env(kvargs):
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],
     )
-    # warmup nccl communicator
-    _a = torch.zeros([1]).to(f"cuda:{device_id}")
-    dist.all_reduce(_a)
+    # Warm the communicator and reject mixed cache modes before their MTP
+    # reservation/profile collectives could enter different execution orders.
+    cached_weights = bool(kvargs["args"].weight_cache_dir)
+    _a = torch.tensor([int(cached_weights), int(not cached_weights)], dtype=torch.int32, device=f"cuda:{device_id}")
+    dist.all_reduce(_a, op=dist.ReduceOp.MAX)
+    if _a.tolist() == [1, 1]:
+        raise ValueError("weight_cache_dir must be enabled or disabled consistently across all model ranks")
     del _a
 
 

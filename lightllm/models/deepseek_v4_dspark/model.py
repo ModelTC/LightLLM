@@ -258,3 +258,10 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
                     dest_tensor.copy_(getattr(source, name))
             dest.load_ok[:] = source.load_ok
         assert self.context_wkv_weight.verify_load(), "Loading DSpark context WKV projection failed"
+
+    def named_resident_weights(self):
+        return {**super().named_resident_weights(), "context_wkv": self.context_wkv_weight}
+
+    def _finalize_resident_weights(self):
+        super()._finalize_resident_weights()
+        assert self.context_wkv_weight.verify_load(), "Resident DSpark context WKV projection is incomplete"

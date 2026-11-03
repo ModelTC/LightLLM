@@ -3,10 +3,14 @@ set -euo pipefail
 NODE_RANK=${1:?usage: bash launch_decode.sh NODE_RANK}
 ulimit -Sn 1048576
 source "$(dirname -- "${BASH_SOURCE[0]}")/config.txt"
+WEIGHT_CACHE_ARGS=()
+if [[ -n "${LIGHTLLM_WEIGHT_CACHE_DIR:-}" ]]; then
+    WEIGHT_CACHE_ARGS=(--weight_cache_dir "$LIGHTLLM_WEIGHT_CACHE_DIR")
+fi
 export PYTHONPATH="$RUN_DIR/deps/deepep-pr696:$PYTHONPATH"
 export NVSHMEM_IB_ENABLE_IBGDA=1
 /opt/conda/bin/python -c 'import lightllm,resource,sys; print(sys.executable,lightllm.__file__,resource.getrlimit(resource.RLIMIT_NOFILE),flush=True)'
-exec /opt/conda/bin/python -u -m lightllm.server.api_server \
+exec /opt/conda/bin/python -u -m "${LIGHTLLM_SERVER_MODULE:-lightllm.server.api_server}" \
     --model_dir "$MODEL_DIR" \
     --model_name DeepSeek-V4.1-Flash-FP8 \
     --run_mode decode \
@@ -38,4 +42,5 @@ exec /opt/conda/bin/python -u -m lightllm.server.api_server \
     --mem_fraction 0.75 \
     --graph_max_batch_size 96 \
     --graph_split_batch_size 16 \
-    --enable_profiling torch_profiler
+    --enable_profiling torch_profiler \
+    "${WEIGHT_CACHE_ARGS[@]}"

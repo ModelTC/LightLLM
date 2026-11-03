@@ -19,7 +19,8 @@ from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import Bas
 from lightllm.distributed.communication_op import all_reduce
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_size
-from lightllm.utils.shm_utils import create_or_link_shm
+from lightllm.utils.shm_utils import create_or_link_shm, ServiceSharedMemory
+from lightllm.common.weight_cache import is_preloading_weights, initializing_weight_client
 
 logger = init_logger(__name__)
 
@@ -250,6 +251,8 @@ def _gather_table(
 class EngramEmbeddingWeight(BaseWeightTpl):
     """One row-sharded FP8 table in pinned host memory; the GPU reads it through UVA."""
 
+    supports_resident_cache = False
+
     def __init__(self, prefix, rows, dim):
         super().__init__()
         self.prefix, self.dim = prefix, dim
@@ -259,6 +262,14 @@ class EngramEmbeddingWeight(BaseWeightTpl):
         self._create_weight()
 
     def _create_weight(self):
+        # GPU weight skeletons are fake tensors; this shared CPU backing must be
+        # real so each worker can register its own view of the owner's loaded table.
+        from torch._subclasses.fake_tensor import unset_fake_temporarily
+
+        with unset_fake_temporarily():
+            self._create_host_weight()
+
+    def _create_host_weight(self):
         weight_bytes = self.part_rows * self.dim
         scale_bytes = self.part_rows * (self.dim // 32)
         logger.info(
@@ -266,9 +277,16 @@ class EngramEmbeddingWeight(BaseWeightTpl):
             f"pinned table {(weight_bytes + scale_bytes) / 2**30:.2f} GiB"
         )
         table_bytes = weight_bytes + scale_bytes
-        if get_dp_size() > 1:
+        client = initializing_weight_client()
+        if get_dp_size() > 1 or is_preloading_weights() or client is not None:
             # DP ranks on this node read the same TP shard; pin one physical table per node.
-            self._host_shm = create_or_link_shm(f"{self.prefix}_tp{self.tp_rank_}", table_bytes + 2)
+            if client is None:
+                self._host_shm = create_or_link_shm(f"{self.prefix}_tp{self.tp_rank_}", table_bytes + 2)
+            else:
+                self._host_shm = ServiceSharedMemory(
+                    name=f"{client.host_namespace}_{self.prefix}_tp{self.tp_rank_}", create=False
+                )
+                assert self._host_shm.size == table_bytes + 2, "Resident Engram table size differs"
             self._host_mapping = self._host_shm._mmap
             self.loaded = np.ndarray((2,), dtype=np.uint8, buffer=self._host_mapping, offset=table_bytes)
             self._load_lock = FileLock(f"/tmp/{self._host_shm.name}.load.lock")
