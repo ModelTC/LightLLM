@@ -31,7 +31,9 @@ def make_state(cls=GDNState, mode="native", step=2, dtype=torch.float32, device=
 @pytest.mark.parametrize("cls", [GDNState, KDAState])
 @pytest.mark.parametrize("mode,step", [("native", 0), ("native", 2), ("compact", 2), ("replay", 0), ("replay", 2)])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(cls, mode, step, dtype):
+def test_checkpoint_and_pd_export_same_accepted_prefix_and_restore_reused_slot(
+    runtime_start_args, cls, mode, step, dtype
+):
     state, _, layout = make_state(cls, mode, step, dtype)
     state.initialize_page_pools(big_page_capacity=2, small_page_capacity=2)
     src, dst, offset = 1, 2, min(1, step)

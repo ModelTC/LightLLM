@@ -549,7 +549,7 @@ def test_autotune_candidates_match_recurrence(dtype, run_config, mode):
 
 @pytest.mark.parametrize("save_big", [False, True])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_checkpoint_restores_pending_history_and_accepted_conv(save_big, dtype):
+def test_checkpoint_restores_pending_history_and_accepted_conv(runtime_start_args, save_big, dtype):
     from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig
     from unit_tests.common.test_linear_state import make_state
 
