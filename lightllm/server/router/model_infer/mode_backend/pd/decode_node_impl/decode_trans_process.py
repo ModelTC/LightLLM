@@ -594,7 +594,7 @@ class _DecodeTransModule:
 
 
 class _SharedTimeOutMark:
-    """Only queued WRITE requests use idle timeout; active pages keep their own deadline."""
+    """Pending-page idle timeout starts at first progress; active pages keep their own deadline."""
 
     def __init__(self):
         self.time_mark: Optional[float] = None
@@ -605,8 +605,4 @@ class _SharedTimeOutMark:
     def time_out(self, task: PDChunckedTransTask) -> bool:
         if task.start_trans_time is not None:
             return task.time_out()
-        return (
-            task.write_stage == "request"
-            and self.time_mark is not None
-            and time.time() - self.time_mark > task.time_out_secs
-        )
+        return self.time_mark is not None and time.time() - self.time_mark > task.time_out_secs
