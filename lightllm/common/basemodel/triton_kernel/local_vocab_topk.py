@@ -111,6 +111,11 @@ def local_vocab_topk(
 
 
 @triton.jit
+def _greedy_maximum(a, b):
+    return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
+
+
+@triton.jit
 def _greedy_vocab_partial(
     logits,
     maxima,
@@ -124,11 +129,11 @@ def _greedy_vocab_partial(
     b = tl.program_id(0)
     v = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     scores = tl.load(logits + b * stride_b + v, v < vocab, -float("inf"))
-    maximum = tl.max(scores, axis=0)
+    maximum = tl.reduce(scores, axis=0, combine_fn=_greedy_maximum)
     # Fully masked chunks contribute zero instead of exp(-inf - -inf) = NaN.
     total = tl.sum(tl.exp(scores - maximum), axis=0)
     total = tl.where(maximum == -float("inf"), 0.0, total)
-    winner = tl.min(tl.where(scores == maximum, v, 2147483647), axis=0)
+    winner = tl.min(tl.where((v < vocab) & ((scores == maximum) | (scores != scores)), v, 2147483647), axis=0)
     offset = b * chunks + tl.program_id(1)
     tl.store(maxima + offset, maximum)
     tl.store(sums + offset, total)
@@ -142,9 +147,9 @@ def _greedy_vocab_finish(maxima, sums, indexes, token_ids, logprobs, chunks: tl.
     maximums = tl.load(maxima + b * chunks + c, c < chunks, -float("inf"))
     partial_sums = tl.load(sums + b * chunks + c, c < chunks, 0)
     ids = tl.load(indexes + b * chunks + c, c < chunks, 2147483647)
-    maximum = tl.max(maximums, axis=0)
+    maximum = tl.reduce(maximums, axis=0, combine_fn=_greedy_maximum)
     total = tl.sum(partial_sums * tl.exp(maximums - maximum), axis=0)
-    winner = tl.min(tl.where(maximums == maximum, ids, 2147483647), axis=0)
+    winner = tl.min(tl.where((c < chunks) & ((maximums == maximum) | (maximums != maximums)), ids, 2147483647), axis=0)
     tl.store(token_ids + b, winner.to(tl.int64))
     tl.store(logprobs + b, -tl.log(total))
 
