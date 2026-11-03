@@ -229,6 +229,7 @@ class GDNLinearAttDecodeAttState(LinearDecodeAttState):
                 b,
                 self.infer_state,
                 layer_weight,
+                layer_num=layer_num,
             )
         else:
             # 非 MTP 模式下，使用线性层 decode 状态。
@@ -241,6 +242,7 @@ class GDNLinearAttDecodeAttState(LinearDecodeAttState):
                 b,
                 self.infer_state,
                 layer_weight,
+                layer_num=layer_num,
             )
         return core_attn_out, z
 
@@ -254,6 +256,8 @@ class GDNLinearAttDecodeAttState(LinearDecodeAttState):
         b: torch.Tensor,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
+        *,
+        layer_num: int,
     ):
         backend: GDNLinearAttBackend = self.backend
 
@@ -277,7 +281,7 @@ class GDNLinearAttDecodeAttState(LinearDecodeAttState):
             backend.head_v_dim,
         )
         core_attn_out = forward.run_layer(
-            layer_weight.layer_num_,
+            layer_num,
             query,
             key,
             value,
@@ -297,6 +301,8 @@ class GDNLinearAttDecodeAttState(LinearDecodeAttState):
         b: torch.Tensor,
         infer_state: "Qwen3NextInferStateInfo",
         layer_weight: "Qwen3NextTransformerLayerWeight",
+        *,
+        layer_num: int,
     ):
         from lightllm.common.basemodel.triton_kernel.linear_att.causal_conv1d_mtp import (
             causal_conv1d_update as causal_conv1d_update_mtp,
@@ -319,7 +325,7 @@ class GDNLinearAttDecodeAttState(LinearDecodeAttState):
 
         query, key, value = backend._rearrange_mixed_qkv(mixed_qkv, decode=False)
         core_attn_out = forward.run_layer(
-            layer_weight.layer_num_,
+            layer_num,
             query,
             key,
             value,

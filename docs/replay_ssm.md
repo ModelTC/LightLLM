@@ -52,6 +52,10 @@ The execution path is:
    the existing fused accepted-position kernel; Compact reconstructs each
    partition using its own forward's launch config.
 
+Weights use checkpoint (physical) layer IDs. Conv, SSM and KV state use logical
+execution layer IDs throughout dispatch. Loop models may reuse one weight object
+at multiple execution depths; its `layer_num_` must never select recurrent state.
+
 Logical request arrays are `[B]`; verification rows are `[T]`. Partition sizes
 count real requests, excluding graph padding. Zero-sized partitions are allowed.
 Registered resource names include the model role, so a draft receipt cannot be
