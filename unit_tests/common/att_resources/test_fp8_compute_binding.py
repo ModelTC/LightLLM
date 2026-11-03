@@ -27,9 +27,6 @@ if TYPE_CHECKING:
     from collections.abc import Sequence
 
 
-pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
-
-
 @pytest.mark.parametrize("kind", ["static_head", "static_tensor"])
 @pytest.mark.parametrize("role", ["main", "draft0"])
 @pytest.mark.parametrize("prefill", [False, True])
@@ -50,7 +47,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
                 template=template,
                 config=replace_logical_layer_groups(template.config, ((3,), (8,))),
                 token_capacity=8,
-                device="cuda",
+                device="cpu",
                 scales=scales,
                 q_scales=q_scales,
             )
@@ -65,9 +62,18 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
         template=plain,
         config=plain.config,
         token_capacity=8,
-        device="cuda",
+        device="cpu",
     )
     manager.register_state(role, plain)
+    other = rebuild_full_state(
+        template=template,
+        config=replace(template.config, logical_layer_groups=((20,), (21,)), global_head_num=4),
+        token_capacity=8,
+        device="cpu",
+        scales=torch.full((2, 8 if kind == "static_head" else 2), 99.0),
+        q_scales=torch.full((2, 4), 99.0) if kind == "static_head" else None,
+    )
+    manager.register_state(role, other)
     manager.finish_state_registration()
     selected = getattr(manager, f"{role}_{template.get_state_type()}_state")
     k, v = selected.get_layer_view(8)
@@ -76,7 +82,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
     infer.is_draft_model = role == "draft0"
     infer.att_state_role = role
     infer.batch_size, infer.max_q_seq_len = 2, 1
-    infer.b_seq_len = torch.ones(2, dtype=torch.int32, device="cuda")
+    infer.b_seq_len = torch.ones(2, dtype=torch.int32, device="cpu")
     backend = object.__new__(BaseAttBackend)
     observed = {}
 
@@ -104,10 +110,10 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
         wrapper = SimpleNamespace(run=lambda *args, **kwargs: observed.update(kwargs))
         att.prefill_wrapper = att.decode_wrapper = wrapper
 
-    q = torch.zeros((2, selected.config.head_num, selected.config.head_dim), dtype=torch.bfloat16, device="cuda")
+    q = torch.zeros((2, selected.config.head_num, selected.config.head_dim), dtype=torch.bfloat16, device="cpu")
 
     def allocate(shape: Sequence[int], dtype: torch.dtype, device: str | torch.device | int):
-        return torch.empty(shape, dtype=dtype, device=device)
+        return torch.empty(shape, dtype=dtype, device="cpu")
 
     if prefill:
         att.prefill_att(
@@ -136,6 +142,7 @@ def test_fp8_kernel_receives_calibration_for_role_and_physical_layer(
     assert not hasattr(infer, "full_att_state")
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("head_num", [1, 3])
 @pytest.mark.parametrize("scale_mode", ["per_tensor", "per_head"])
 def test_fp8_split_storage_matches_calibrated_values_and_combined_kernel(head_num: int, scale_mode: str):

@@ -107,8 +107,8 @@ class GQAFullAttentionState(FullAttentionState):
         self.v_storage: torch.Tensor | None = None
 
     def get_state_type(self) -> str:
-        """返回 GQA KV 精度对应的存储方案标记。"""
-        return "gqa_" + dtype_name(dtype=self.config.dtype)
+        """返回 GQA KV 精度及全局 head 布局对应的存储方案标记。"""
+        return f"gqa_{dtype_name(dtype=self.config.dtype)}_h{self.config.global_head_num}_d{self.config.head_dim}"
 
     def allocate_storage(self, token_capacity: int) -> None:
         """按统一 token 容量分配本 State 的独立 KV 存储与 HOLD 页。"""

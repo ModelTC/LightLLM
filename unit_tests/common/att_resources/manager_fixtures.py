@@ -30,14 +30,14 @@ class MainDraftTestResourceManager(AttentionStateManager):
         self.register_state("main", full_state(device=device))
         prepared_full_state = MLAFullAttentionState(
             layout_config=MLAConfig(
-                logical_layer_groups=self.main_gqa_fp32_state.config.logical_layer_groups,
-                latent_dim=self.main_gqa_fp32_state.config.head_dim,
-                latent_dtype=self.main_gqa_fp32_state.config.dtype,
+                logical_layer_groups=self.main_gqa_fp32_h1_d4_state.config.logical_layer_groups,
+                latent_dim=self.main_gqa_fp32_h1_d4_state.config.head_dim,
+                latent_dtype=self.main_gqa_fp32_h1_d4_state.config.dtype,
             ),
-            page_size=self.main_gqa_fp32_state.page_size,
+            page_size=self.main_gqa_fp32_h1_d4_state.page_size,
             device=device,
         )
-        prepared_full_state.allocate_storage(self.main_gqa_fp32_state.capacity)
+        prepared_full_state.allocate_storage(self.main_gqa_fp32_h1_d4_state.capacity)
         self.register_state("draft0", prepared_full_state)
         self.full_att_allocator = FullAttKVAllocator(12, page_size=4, pin_memory=False)
         self.bounded_att_big_page_allocator = StatePageAllocator(3)
