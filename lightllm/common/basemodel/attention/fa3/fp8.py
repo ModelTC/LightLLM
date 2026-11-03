@@ -84,7 +84,7 @@ class Fp8Fa3PrefillAttState(Fa3PrefillAttState):
             self.infer_state.att_state_role, "gqa_fp8_static_per_head", logical_layer_id
         )
         storage_layer_index = state.get_storage_layer_index(logical_layer_id=logical_layer_id)
-        batch_size = self.infer_state.batch_size
+        batch_size = self.infer_state.b_seq_len.shape[0]
         q = q.reshape(q.shape[0], k_head_num, -1)
         if state.q_scales is None:
             # 旧标定文件仅包含 K/V；按本次请求的 Q 长度动态计算每个 KV head 的 scale。
