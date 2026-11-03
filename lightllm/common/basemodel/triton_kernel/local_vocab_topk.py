@@ -111,7 +111,7 @@ def local_vocab_topk(
 
 
 @triton.jit
-def _greedy_maximum(a, b):
+def _maximum_propagating_nan(a, b):
     return tl.maximum(a, b, propagate_nan=tl.PropagateNan.ALL)
 
 
@@ -129,11 +129,16 @@ def _greedy_vocab_partial(
     b = tl.program_id(0)
     v = tl.program_id(1) * BLOCK + tl.arange(0, BLOCK)
     scores = tl.load(logits + b * stride_b + v, v < vocab, -float("inf"))
-    maximum = tl.reduce(scores, axis=0, combine_fn=_greedy_maximum)
+    maximum = tl.reduce(scores, axis=0, combine_fn=_maximum_propagating_nan)
     # Fully masked chunks contribute zero instead of exp(-inf - -inf) = NaN.
     total = tl.sum(tl.exp(scores - maximum), axis=0)
     total = tl.where(maximum == -float("inf"), 0.0, total)
-    winner = tl.min(tl.where((v < vocab) & ((scores == maximum) | (scores != scores)), v, 2147483647), axis=0)
+    # Match torch.argmax: NaNs take precedence, then choose the first valid index.
+    valid = v < vocab
+    is_nan = scores != scores
+    is_maximum = scores == maximum
+    is_candidate = valid & (is_nan | is_maximum)
+    winner = tl.min(tl.where(is_candidate, v, 2147483647), axis=0)
     offset = b * chunks + tl.program_id(1)
     tl.store(maxima + offset, maximum)
     tl.store(sums + offset, total)
@@ -147,9 +152,13 @@ def _greedy_vocab_finish(maxima, sums, indexes, token_ids, logprobs, chunks: tl.
     maximums = tl.load(maxima + b * chunks + c, c < chunks, -float("inf"))
     partial_sums = tl.load(sums + b * chunks + c, c < chunks, 0)
     ids = tl.load(indexes + b * chunks + c, c < chunks, 2147483647)
-    maximum = tl.reduce(maximums, axis=0, combine_fn=_greedy_maximum)
+    maximum = tl.reduce(maximums, axis=0, combine_fn=_maximum_propagating_nan)
     total = tl.sum(partial_sums * tl.exp(maximums - maximum), axis=0)
-    winner = tl.min(tl.where((c < chunks) & ((maximums == maximum) | (maximums != maximums)), ids, 2147483647), axis=0)
+    valid = c < chunks
+    is_nan = maximums != maximums
+    is_maximum = maximums == maximum
+    is_candidate = valid & (is_nan | is_maximum)
+    winner = tl.min(tl.where(is_candidate, ids, 2147483647), axis=0)
     tl.store(token_ids + b, winner.to(tl.int64))
     tl.store(logprobs + b, -tl.log(total))
 
