@@ -69,9 +69,26 @@ class DeepseekV4Workspace:
 
     def init_c128_compress_scratch(self, model):
         regions = 1 + int(model.args.enable_decode_microbatch_overlap or model.args.enable_prefill_microbatch_overlap)
+        decode_requests = model.max_req_num
+        if model.args.enable_decode_microbatch_overlap:
+            decode_requests = (decode_requests + 1) // 2
+        decode_tokens = decode_requests * model.mtp_manager.get_decode_tokens_per_request(model.is_mtp_draft_model)
+        # Decode budgets count requests, while the compressor sees expanded MTP
+        # rows after TP/SP and graph padding. Keep prefill-only arenas unchanged.
+        token_capacity = max(self.token_capacity, model._align_decode_batch_size(max(1, decode_tokens)))
+        if not model.disable_cudagraph:
+            token_capacity = max(token_capacity, model.graph_max_batch_size)
         self.c128_compress_scratch = torch.empty(
-            (regions, self.token_capacity, model.config["head_dim"]), dtype=torch.float32, device="cuda"
+            (regions, token_capacity, model.config["head_dim"]), dtype=torch.float32, device="cuda"
         )
+
+    def get_c128_compress_scratch(self, token_num: int, microbatch_index: int):
+        regions, capacity, _ = self.c128_compress_scratch.shape
+        if not 0 <= microbatch_index < regions:
+            raise ValueError(f"DeepSeek-V4 C128 workspace has {regions} regions, got region {microbatch_index}")
+        if not 0 <= token_num <= capacity:
+            raise ValueError(f"DeepSeek-V4 C128 workspace capacity {capacity} cannot cover {token_num} tokens")
+        return self.c128_compress_scratch[microbatch_index, :token_num]
 
     def init_c4_prefill_aux(self, model):
         self.c4_prefill_aux = DeepseekV4C4PrefillWorkspace(

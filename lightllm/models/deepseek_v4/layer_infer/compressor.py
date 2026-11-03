@@ -127,11 +127,15 @@ def fused_compress(
     block_head = triton.next_power_of_2(head_dim)
 
     scratch = None
-    stages = ((block_head, 4, False, False),)
+    stages = ("compress_norm_rope_pack",)
     if compress_ratio == 128:
-        scratch = infer_state.dsv4_workspace.c128_compress_scratch[infer_state.microbatch_index]
-        stages = ((64, 8, True, False), (block_head, 4, False, True))
-    for block, warps, store_compressed, load_compressed in stages:
+        scratch = infer_state.dsv4_workspace.get_c128_compress_scratch(kv_score.shape[0], infer_state.microbatch_index)
+        stages = ("window_compress", "norm_rope_pack")
+    for stage in stages:
+        store_compressed = stage == "window_compress"
+        load_compressed = stage == "norm_rope_pack"
+        block = 64 if store_compressed else block_head
+        warps = 8 if store_compressed else 4
         grid = (kv_score.shape[0], triton.cdiv(head_dim, block)) if store_compressed else (kv_score.shape[0],)
         _fused_compress_norm_rope_kernel[grid](
             kv_score,
