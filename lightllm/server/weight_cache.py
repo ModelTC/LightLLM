@@ -266,6 +266,10 @@ def main():
         return
     if not args.model_dir:
         parser.error("--model_dir is required for serve")
+    if args.data_type is None:
+        from lightllm.utils.config_utils import get_dtype
+
+        args.data_type = get_dtype(args.model_dir)
     authkey = cache_authkey(args.weight_cache_dir, create=True)
     if args.nnodes < 1 or args.tp < 1 or args.dp < 1 or args.tp % args.dp or not 0 <= args.node_rank < args.nnodes:
         raise ValueError("Weight owner requires a valid TP/DP/node topology")

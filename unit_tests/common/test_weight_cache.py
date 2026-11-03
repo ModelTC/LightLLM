@@ -16,6 +16,39 @@ from lightllm.server.weight_cache import control_owners
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA IPC requires a GPU")
 
 
+@pytest.mark.parametrize(
+    "config,explicit_dtype,expected",
+    [
+        ({"torch_dtype": "bfloat16"}, None, "bfloat16"),
+        ({"text_config": {"dtype": "float32"}}, None, "float32"),
+        ({}, None, "float16"),
+        ({"torch_dtype": "bfloat16"}, "float32", "float32"),
+    ],
+)
+def test_owner_resolves_dtype_before_spawning(tmp_path, monkeypatch, config, explicit_dtype, expected):
+    from types import SimpleNamespace
+    from lightllm.server import weight_cache
+
+    (tmp_path / "config.json").write_text(json.dumps(config))
+    argv = ["weight_cache", "--model_dir", str(tmp_path), "--weight_cache_dir", str(tmp_path / "cache")]
+    if explicit_dtype is not None:
+        argv.extend(["--data_type", explicit_dtype])
+    monkeypatch.setattr(sys, "argv", argv)
+    monkeypatch.setattr(torch.cuda, "device_count", lambda: 1)
+
+    class ReachedModelWorkers(Exception):
+        pass
+
+    def process(*, target, args):
+        assert target is weight_cache._run_owner
+        assert args[0].data_type == expected
+        raise ReachedModelWorkers
+
+    monkeypatch.setattr(weight_cache.mp, "get_context", lambda _: SimpleNamespace(Process=process))
+    with pytest.raises(ReachedModelWorkers):
+        weight_cache.main()
+
+
 def _run_cached_model(checkpoint, cache, output):
     """A fresh engine process exercising the existing full model/DSpark/graph test."""
     import pytest
