@@ -2,7 +2,11 @@
 
 import math
 import mmap
-import weakref
+import time
+import os
+import json
+import hashlib
+from pathlib import Path
 from contextlib import nullcontext
 from filelock import FileLock
 import numpy as np
@@ -46,20 +50,29 @@ def build_compressed_token_map(tokenizer):
 
 class EngramHasher:
     def __init__(self, config, tokenizer, token_slots):
-        mapping, size = build_compressed_token_map(tokenizer)
-        assert size == config["engram_compressed_vocab_size"], (size, config["engram_compressed_vocab_size"])
+        mapping, primes, offsets, multipliers = self._load_cpu_metadata(config, tokenizer)
         self.token_map = torch.tensor(mapping, dtype=torch.int64, device="cuda")
         self.has_vision = config.get("vision_n_layers", 0) > 0
-        self.pad = mapping[config["engram_pad_token_id"]]
+        self.pad = int(mapping[config["engram_pad_token_id"]])
         self.history = torch.zeros(token_slots, dtype=torch.int64, device="cuda")
         self.order = config["engram_max_ngram_size"]
+        self.primes = torch.tensor(primes, device="cuda")
+        self.offsets = torch.tensor(offsets, device="cuda")
+        self.multipliers = torch.tensor(multipliers, device="cuda")
+        self.heads = config["engram_n_heads"]
+
+    @staticmethod
+    def _build_cpu_metadata(config, tokenizer):
+        mapping, size = build_compressed_token_map(tokenizer)
+        assert size == config["engram_compressed_vocab_size"], (size, config["engram_compressed_vocab_size"])
+        order = config["engram_max_ngram_size"]
         primes, offsets, multipliers, used = [], [], [], set()
         bound = max(1, (np.iinfo(np.int64).max // size) // 2)
         for lid in config["engram_layer_ids"]:
             generator = np.random.default_rng(10007 * lid)
-            multipliers.append(generator.integers(0, bound, size=self.order, dtype=np.int64) * 2 + 1)
+            multipliers.append(generator.integers(0, bound, size=order, dtype=np.int64) * 2 + 1)
             layer_primes = []
-            for _ in range(self.order - 1):
+            for _ in range(order - 1):
                 prime = config["engram_vocab_size"] - 1
                 for _ in range(config["engram_n_heads"]):
                     prime += 1
@@ -69,10 +82,39 @@ class EngramHasher:
                     layer_primes.append(prime)
             primes.append(layer_primes)
             offsets.append(np.cumsum([0, *layer_primes[:-1]]))
-        self.primes = torch.tensor(primes, device="cuda")
-        self.offsets = torch.tensor(np.asarray(offsets), device="cuda")
-        self.multipliers = torch.tensor(np.asarray(multipliers), device="cuda")
-        self.heads = config["engram_n_heads"]
+        return tuple(np.asarray(value, dtype=np.int64) for value in (mapping, primes, offsets, multipliers))
+
+    @classmethod
+    def _load_cpu_metadata(cls, config, tokenizer):
+        cache_root = os.environ.get("LIGHTLLM_ENGRAM_CACHE_DIR")
+        if not cache_root:
+            return cls._build_cpu_metadata(config, tokenizer)
+        import tokenizers
+
+        identity = hashlib.sha256(Path(__file__).read_bytes())
+        identity.update(tokenizer.backend_tokenizer.to_str().encode())
+        identity.update(str((len(tokenizer), tokenizers.__version__, np.__version__)).encode())
+        identity.update(
+            json.dumps({k: v for k, v in config.items() if k.startswith("engram_")}, sort_keys=True).encode()
+        )
+        root = Path(cache_root)
+        root.mkdir(parents=True, exist_ok=True)
+        path = root / f"{identity.hexdigest()}.npz"
+        names = ("mapping", "primes", "offsets", "multipliers")
+        with FileLock(str(path) + ".lock"):
+            if path.exists():
+                with np.load(path, allow_pickle=False) as data:
+                    result = tuple(data[name] for name in names)
+                logger.info(f"Loaded Engram CPU metadata: {path}")
+                return result
+            started = time.monotonic()
+            result = cls._build_cpu_metadata(config, tokenizer)
+            temporary = path.with_suffix(f".{os.getpid()}.tmp")
+            with temporary.open("wb") as file:
+                np.savez(file, **dict(zip(names, result)))
+            os.replace(temporary, path)
+            logger.info(f"Cached Engram CPU metadata in {time.monotonic() - started:.3f}s: {path}")
+            return result
 
     def _map_token_ids(self, ids):
         if self.has_vision:
@@ -217,8 +259,6 @@ class EngramEmbeddingWeight(BaseWeightTpl):
         self._create_weight()
 
     def _create_weight(self):
-        from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
-
         weight_bytes = self.part_rows * self.dim
         scale_bytes = self.part_rows * (self.dim // 32)
         logger.info(
@@ -237,20 +277,41 @@ class EngramEmbeddingWeight(BaseWeightTpl):
             self.loaded = [False, False]
             self._load_lock = nullcontext()
         self._host_mapping.madvise(mmap.MADV_HUGEPAGE)
+        from lightllm.utils.kv_cache_utils import interleave_pages_across_numa_nodes
+        import ctypes
+
+        interleave_pages_across_numa_nodes(
+            ctypes.CDLL(None, use_errno=True),
+            ctypes.addressof(ctypes.c_uint8.from_buffer(self._host_mapping)),
+            table_bytes,
+            use_hugetlb=False,
+        )
         storage = torch.frombuffer(self._host_mapping, dtype=torch.uint8, count=table_bytes)
-        # Prefault the exact-sized mapping before registration; the pinned allocator rounds
-        # each 23.6 GiB table up to 32 GiB, increasing the host-registration footprint.
-        # Read faults are safe when another DP rank has already started populating the table.
-        np.frombuffer(self._host_mapping, dtype=np.uint8)[:: mmap.PAGESIZE].sum()
-        runtime = torch.cuda.cudart()
-        error = runtime.cudaHostRegister(storage.data_ptr(), storage.numel(), 3)
-        if error != 0:
-            raise RuntimeError(f"Registering {self.prefix} host table failed: {error}")
-        self._host_registration = weakref.finalize(self, runtime.cudaHostUnregister, storage.data_ptr())
         self.weight = storage[:weight_bytes].view(torch.float8_e4m3fn).view(self.part_rows, self.dim)
         self.scale = storage[weight_bytes:].view(torch.float8_e8m0fnu).view(self.part_rows, self.dim // 32)
-        self.device_weight = get_accelerator_view_from_cpu_tensor(self.weight)
-        self.device_scale = get_accelerator_view_from_cpu_tensor(self.scale)
+        self._host_registration = None
+
+    def finalize_host_registration(self):
+        """Map this process's table only after the shared checkpoint data is complete."""
+        from vllm.utils.torch_utils import get_accelerator_view_from_cpu_tensor
+
+        assert self.verify_load(), f"Engram table {self.prefix} is not fully loaded"
+        if self._host_registration is not None:
+            return
+        started = time.monotonic()
+        table_bytes = self.weight.numel() + self.scale.numel()
+        from lightllm.utils.host_memory import HostMemoryRegistration
+
+        registration = HostMemoryRegistration(self.weight.data_ptr(), table_bytes, table_bytes, workers=1)
+        try:
+            device_weight = get_accelerator_view_from_cpu_tensor(self.weight)
+            device_scale = get_accelerator_view_from_cpu_tensor(self.scale)
+        except BaseException:
+            registration.close()
+            raise
+        self.device_weight, self.device_scale = device_weight, device_scale
+        self._host_registration = registration
+        logger.info(f"Engram {self.prefix}: registered {table_bytes} bytes in {time.monotonic() - started:.3f}s")
 
     def load_hf_weights(self, weights):
         for i, (suffix, target) in enumerate((("weight", self.weight), ("scale", self.scale))):
@@ -258,8 +319,10 @@ class EngramEmbeddingWeight(BaseWeightTpl):
             if name in weights:
                 with self._load_lock:
                     if not self.loaded[i]:
+                        started = time.monotonic()
                         target[: self.end - self.start].copy_(weights[name][self.start : self.end])
                         self.loaded[i] = True
+                        logger.info(f"Engram {name}: populated shared data in {time.monotonic() - started:.3f}s")
 
     def verify_load(self):
         return all(self.loaded)

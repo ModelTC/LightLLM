@@ -1837,10 +1837,17 @@ def test_engram_host_embedding_uses_fp8_scales_and_zeroes_other_tp_rows(monkeypa
     for key in ("GLOBAL_WORLD_SIZE", "DP_WORLD_SIZE"):
         monkeypatch.setenv("LIGHTLLM_" + key, "2")
     embedding = EngramEmbeddingWeight("layers.1.engram.embed", rows=8, dim=64)
+    assert embedding._host_registration is None
+    with pytest.raises(AssertionError, match="not fully loaded"):
+        embedding.finalize_host_registration()
     raw = torch.randn(8, 64).to(torch.float8_e4m3fn)
     scale = torch.exp2(torch.randint(-4, 0, (8, 2)).float()).to(torch.float8_e8m0fnu)
     embedding.load_hf_weights({embedding.prefix + ".weight": raw, embedding.prefix + ".scale": scale})
     assert embedding.verify_load()
+    embedding.finalize_host_registration()
+    registration = embedding._host_registration
+    embedding.finalize_host_registration()
+    assert embedding._host_registration is registration
     # Inspect this rank's contribution before the normal TP sum.
     embedding.tp_world_size_ = 1
     ids = torch.zeros(1, 2, 8, dtype=torch.int64, device="cuda")[:, 1, ::2]
@@ -1861,6 +1868,7 @@ def test_engram_prefetch_graph_reads_new_hashes_and_reduces_on_consumer_stream(m
     raw = torch.randn(8, 64).to(torch.float8_e4m3fn)
     scale = torch.full((8, 2), 0.5).to(torch.float8_e8m0fnu)
     embedding.load_hf_weights({embedding.prefix + ".weight": raw, embedding.prefix + ".scale": scale})
+    embedding.finalize_host_registration()
     state = DeepseekV41InferStateInfo()
     state.engram_stream = torch.cuda.Stream()
     state.engram_hashes = torch.zeros(2, 2, 2, dtype=torch.int64, device="cuda")
@@ -1910,6 +1918,9 @@ def test_engram_dp_ranks_share_host_table_and_load_once(monkeypatch):
         first.load_hf_weights({first.prefix + ".weight": raw, first.prefix + ".scale": scales})
         assert first._host_shm.name == second._host_shm.name
         assert second.verify_load()
+        assert first._host_registration is None and second._host_registration is None
+        first.finalize_host_registration()
+        second.finalize_host_registration()
         # A later rank must neither zero nor reload a table already used by another rank.
         second.load_hf_weights({second.prefix + ".weight": torch.zeros_like(raw)})
         indices = torch.tensor([[0, 3, 7]], dtype=torch.int64, device="cuda")
@@ -1917,8 +1928,9 @@ def test_engram_dp_ranks_share_host_table_and_load_once(monkeypatch):
         torch.testing.assert_close(first.lookup(indices), expected, atol=0, rtol=0)
         torch.testing.assert_close(second.lookup(indices), expected, atol=0, rtol=0)
     finally:
-        first._host_registration()
-        second._host_registration()
+        torch.cuda.synchronize()
+        first._host_registration.close()
+        second._host_registration.close()
         first._host_shm.unlink()
         get_unique_server_name.cache_clear()
 
@@ -2080,6 +2092,7 @@ def test_engram_bounded_prefill_matches_serial_and_reuses_two_buffers(monkeypatc
             embedding.prefix + ".scale": torch.ones(64, 2).to(torch.float8_e8m0fnu),
         }
     )
+    embedding.finalize_host_registration()
     dim, heads = 128, 24
     projection = torch.randn(heads * 64, 5 * dim, device="cuda", dtype=torch.bfloat16) * 0.01
     weight = SimpleNamespace(

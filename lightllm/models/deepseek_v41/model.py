@@ -52,6 +52,16 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
     post_layer_infer_class = DeepseekV41PostLayerInfer
     infer_state_class = DeepseekV41InferStateInfo
 
+    def load_weights(self, weight_dict):
+        super().load_weights(weight_dict)
+        if self.is_mtp_draft_model:
+            return
+        # Loading writes each physical table once. Every rank then maps the completed
+        # table in its own CUDA context, before any warmup or graph can read it.
+        for layer in self.trans_layers_weight:
+            if layer.has_engram:
+                layer.engram_embed_.finalize_host_registration()
+
     @property
     def prefill_replay_window(self):
         return 0 if self.return_all_prompt_logics or self.is_mtp_draft_model else self.config["sliding_window"]
