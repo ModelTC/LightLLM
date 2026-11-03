@@ -538,29 +538,33 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
     def _ffn_tp(self, input, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         input = input.view(-1, self.embed_dim_)
         gate_up = layer_weight.gate_up_proj.mm(input)
-        down_proj = layer_weight.down_proj
-        quant_method = down_proj.quant_method
         if (
-            isinstance(quant_method, DeepGEMMFP8w8a8B128QuantizationMethod)
-            and quant_method.use_ue8m0_scales
-            and not quant_method.use_packed_ue8m0
+            isinstance(layer_weight.down_proj.quant_method, DeepGEMMFP8w8a8B128QuantizationMethod)
+            and layer_weight.down_proj.quant_method.use_ue8m0_scales
+            and not layer_weight.down_proj.quant_method.use_packed_ue8m0
         ):
             shared, scale = silu_and_mul_quant_fp8(
                 gate_up,
-                quant_method.block_size,
-                down_proj.mm_param.weight.dtype,
+                layer_weight.down_proj.quant_method.block_size,
+                layer_weight.down_proj.mm_param.weight.dtype,
                 limit=self.swiglu_limit,
                 alloc_func=self.alloc_tensor,
             )
             shared.scale = scale
             del gate_up
             # FP8 输入不再携带原始激活 dtype，由调用方保留浮点输出类型。
-            out = self.alloc_tensor((input.size(0), down_proj.mm_param.weight.shape[0]), input.dtype)
-            return down_proj.mm(shared, out=out)
+            out = self.alloc_tensor((input.size(0), layer_weight.down_proj.mm_param.weight.shape[0]), input.dtype)
+            return layer_weight.down_proj.mm(shared, out=out)
         shared = self.alloc_tensor((input.size(0), gate_up.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(gate_up, shared, alpha=1.0, limit=self.swiglu_limit, clamp_up_add_one=False)
+        silu_and_mul_fwd(
+            gate_up,
+            shared,
+            alpha=1.0,
+            limit=self.swiglu_limit,
+            clamp_up_add_one=False,
+        )
         del gate_up
-        return down_proj.mm(shared)
+        return layer_weight.down_proj.mm(shared)
 
     def _ffn(self, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight):
         x = x.view(-1, self.embed_dim_)

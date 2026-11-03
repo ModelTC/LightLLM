@@ -98,8 +98,10 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
         input_scale = getattr(input_tensor, "scale", None)
+        alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
+        m, k = input_tensor.shape
+        n = qweight.shape[0]
         if input_scale is None:
-            alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
             qinput_tensor, input_scale = per_token_group_quant_fp8(
                 input_tensor,
                 self.block_size,
@@ -115,9 +117,7 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
             qinput_tensor = input_tensor
 
         if out is None:
-            out = alloc_func(
-                (input_tensor.shape[0], qweight.shape[0]), dtype=input_tensor.dtype, device=input_tensor.device
-            )
+            out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
         _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out)
         return out
 
