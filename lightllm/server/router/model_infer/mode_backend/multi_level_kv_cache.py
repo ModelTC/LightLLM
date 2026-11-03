@@ -42,7 +42,6 @@ class MultiLevelKvCacheModule(object):
         self.cpu_cache_client.wait_registration()
         if backend.is_deepseek_v4:
             self.dsv4_sessions = {}
-            self.dsv4_load_tasks = deque()
             self.dsv4_store_tasks = deque()
             self.dsv4_staging_slots = [Dsv4StagingSlot(), Dsv4StagingSlot()]
             self.dsv4_max_pages_per_task = get_dsv4_cpu_cache_max_pages_per_task()
@@ -166,11 +165,10 @@ class MultiLevelKvCacheModule(object):
                         req=req,
                     )
                     if self.backend.is_deepseek_v4:
-                        for pool, page_ids in checkpoint_leases:
-                            pool.retain_state_cache(page_ids)
                         load_event = torch.cuda.Event()
                         load_event.record()
-                        self.dsv4_load_tasks.append(Dsv4LoadTask(load_event, checkpoint_leases))
+                        for pool, page_ids in checkpoint_leases:
+                            pool.retain_state_cache_until_event(page_ids, load_event)
                         if is_master_in_dp:
                             self.dsv4_sessions[req.req_id].load_event = load_event
 
@@ -191,10 +189,6 @@ class MultiLevelKvCacheModule(object):
         return
 
     def _poll_dsv4_store_tasks(self, wait_for_one=False):
-        while self.dsv4_load_tasks and self.dsv4_load_tasks[0].load_event.query():
-            task = self.dsv4_load_tasks.popleft()
-            for pool, page_ids in task.checkpoint_leases:
-                pool.free_state_cache(page_ids)
         if wait_for_one:
             self.dsv4_store_tasks[0].store_event.synchronize()
         while self.dsv4_store_tasks and self.dsv4_store_tasks[0].store_event.query():
@@ -204,8 +198,6 @@ class MultiLevelKvCacheModule(object):
                 self.cpu_cache_client.update_pages_status_to_ready(page_list=task.owner_pages, deref=False)
             finally:
                 self.cpu_cache_client.lock.release()
-            for pool, page_ids in task.checkpoint_leases:
-                pool.free_state_cache(page_ids)
             task.slot.in_use = False
             for session in task.sessions:
                 session.pending_tasks -= 1
@@ -278,9 +270,6 @@ class MultiLevelKvCacheModule(object):
                         checkpoint_id = (
                             shared_ids[index] if index < len(shared_ids) else req.hybrid_len_to_big_page_id[end]
                         )
-                    # Checkpoints are shared pinned CPU pages. CUDA stream ordering
-                    # alone cannot protect them from reuse by another DP rank.
-                    pool.retain_state_cache([checkpoint_id])
                     store_pages.append(
                         Dsv4StorePage(
                             session=session,
@@ -337,6 +326,10 @@ class MultiLevelKvCacheModule(object):
             )
             pack_event = torch.cuda.Event()
             pack_event.record()
+        # The request still owns every source here. Once packed, only staging
+        # remains live through the longer staging-to-CPU copy.
+        for page in pages:
+            page.checkpoint_pool.retain_state_cache_until_event([page.checkpoint_id], pack_event)
         torch.cuda.current_stream().wait_event(pack_event)
         cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
         with torch.cuda.stream(cpu_stream):
@@ -360,7 +353,6 @@ class MultiLevelKvCacheModule(object):
                 sessions=sessions,
                 slot=slot,
                 store_event=store_event,
-                checkpoint_leases=[(page.checkpoint_pool, [page.checkpoint_id]) for page in pages],
             )
         )
 
@@ -606,12 +598,6 @@ class Dsv4StagingSlot:
 
 
 @dataclasses.dataclass
-class Dsv4LoadTask:
-    load_event: torch.cuda.Event
-    checkpoint_leases: list
-
-
-@dataclasses.dataclass
 class Dsv4StorePage:
     session: Dsv4CpuCacheSession
     cpu_page_index: int
@@ -626,7 +612,6 @@ class Dsv4StoreTask:
     sessions: list
     slot: Dsv4StagingSlot
     store_event: torch.cuda.Event
-    checkpoint_leases: list
 
 
 @dataclasses.dataclass

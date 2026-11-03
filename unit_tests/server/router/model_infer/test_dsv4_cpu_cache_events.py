@@ -8,7 +8,6 @@ from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClie
 from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as cache_module
 from lightllm.server.router.model_infer.mode_backend.multi_level_kv_cache import (
     Dsv4CpuCacheSession,
-    Dsv4LoadTask,
     Dsv4StagingSlot,
     Dsv4StorePage,
     Dsv4StoreTask,
@@ -63,7 +62,6 @@ def module():
     result.backend = NS(is_deepseek_v4=True, is_master_in_dp=True)
     result.cpu_cache_client = Client()
     result.dsv4_sessions = {}
-    result.dsv4_load_tasks = deque()
     result.dsv4_store_tasks = deque()
     result.dsv4_staging_slots = [Dsv4StagingSlot(), Dsv4StagingSlot()]
     result.dsv4_max_pages_per_task = 4
@@ -88,38 +86,21 @@ def test_finished_request_does_not_wait_for_store_or_survive_inside_task():
     obj = module()
     session = Dsv4CpuCacheSession(7, leased_pages=[11], pending_tasks=1)
     obj.dsv4_sessions[7] = session
-    event, released = Event(), []
-    pool = NS(free_state_cache=lambda ids: released.extend(ids))
+    event = Event()
     slot = Dsv4StagingSlot(in_use=True)
-    obj.dsv4_store_tasks.append(Dsv4StoreTask([11], [session], slot, event, [(pool, [3])]))
+    obj.dsv4_store_tasks.append(Dsv4StoreTask([11], [session], slot, event))
     req = NS(req_id=7)
     assert obj.offload_finished_reqs_to_cpu_cache([req]) == [req]
     # Teardown/reuse of the request object cannot change the offload metadata.
     req.req_id = 99
-    assert not obj.cpu_cache_client.published and not released
+    assert not obj.cpu_cache_client.published
     event.done = True
     obj.update_cpu_cache_task_states()
     obj.update_cpu_cache_task_states()
     assert obj.cpu_cache_client.published == [([11], {"deref": False})]
     assert obj.cpu_cache_client.released == [11]
-    assert released == [3] and not slot.in_use
+    assert not slot.in_use
     assert obj.dsv4_sessions == {}
-
-
-def test_nonmaster_abort_cannot_recycle_a_loading_checkpoint():
-    obj = module()
-    obj.backend.is_master_in_dp = False
-    event, released = Event(), []
-    pool = NS(free_state_cache=lambda ids: released.extend(ids))
-    obj.dsv4_load_tasks.append(Dsv4LoadTask(event, [(pool, [4])]))
-    req = NS(req_id=7)
-    assert obj.offload_finished_reqs_to_cpu_cache([req]) == [req]
-    obj.update_cpu_cache_task_states()
-    assert released == []
-    event.done = True
-    obj.update_cpu_cache_task_states()
-    obj.update_cpu_cache_task_states()
-    assert released == [4] and obj.cpu_cache_client.released == []
 
 
 def test_disk_publication_waits_for_other_owner_and_preserves_prefix_order():
@@ -175,9 +156,11 @@ def test_loader_uses_events_for_dsv4_and_keeps_other_models_synchronous(monkeypa
             input_len=4096,
         ),
     )
+    leases = []
+    pool = NS(retain_state_cache_until_event=lambda ids, event: leases.append((ids, event)))
     obj.backend.model = NS(
         req_manager=NS(req_to_token_indexs=torch.arange(4096).view(1, -1)),
-        mem_manager=NS(operator=NS(load_cpu_cache_to_gpu=lambda **kwargs: calls.append("load") or [])),
+        mem_manager=NS(operator=NS(load_cpu_cache_to_gpu=lambda **kwargs: calls.append("load") or [(pool, [3])])),
     )
     obj.backend._alloc_req_kv_mem = lambda req, count: torch.arange(count, dtype=torch.int32)
     monkeypatch.setattr(cache_module.g_infer_context, "get_can_alloc_token_num", lambda: 4096)
@@ -190,14 +173,16 @@ def test_loader_uses_events_for_dsv4_and_keeps_other_models_synchronous(monkeypa
     assert calls == (["load", "barrier"] if is_dsv4 else ["load", "sync", "barrier"])
     assert obj.cpu_cache_client.released == ([] if is_dsv4 else [11])
     if is_dsv4:
-        assert obj.dsv4_sessions[7].load_event is not None
+        assert leases == [([3], obj.dsv4_sessions[7].load_event)]
+    else:
+        assert leases == []
 
 
 @pytest.mark.parametrize("owners", [[False, True, False], [True, True, True]])
-def test_incremental_store_only_packs_new_owners_and_pins_checkpoints(monkeypatch, owners):
+def test_incremental_store_only_passes_new_owners_to_pack(monkeypatch, owners):
     obj = module()
-    retained, submitted = [], []
-    pool = NS(retain_state_cache=lambda ids: retained.extend(ids))
+    submitted = []
+    pool = object()
     obj.backend.model = NS(
         mem_manager=NS(big_page_buffers=pool), req_manager=NS(req_to_token_indexs=torch.arange(8192).view(1, -1))
     )
@@ -235,7 +220,6 @@ def test_incremental_store_only_packs_new_owners_and_pins_checkpoints(monkeypatc
     for page in submitted:
         offset = (page.cpu_page_index - 11) * 2048
         assert page.source_mem_indexes.tolist() == list(range(offset, offset + 2048))
-    assert retained == [2 * (i + 1) for i, owner in enumerate(owners) if owner]
     assert session.pending_tasks == sum(owners) and session.leased_pages == [11, 12, 13]
     assert session.token_num == 6144 and session.closing
 
@@ -258,7 +242,6 @@ def test_staging_separates_gpu_request_lifetime_and_handles_two_small_pages(cach
         pool = manager.big_page_buffers if length == page_tokens else requests.small_page_buffers
         state_id = pool.alloc_one_state_cache()
         pool.buffer[state_id].fill_(value)
-        pool.retain_state_cache([state_id])
         session = Dsv4CpuCacheSession(req_id, leased_pages=[cpu_id])
         obj.dsv4_sessions[req_id] = session
         indexes = torch.arange(req_id * page_tokens, req_id * page_tokens + length, dtype=torch.int32, device="cuda")
@@ -271,8 +254,6 @@ def test_staging_separates_gpu_request_lifetime_and_handles_two_small_pages(cach
     obj.update_cpu_cache_task_states()
     client.published.clear()
     client.ready.clear()
-    for page in pages:
-        page.checkpoint_pool.retain_state_cache([page.checkpoint_id])
     with torch.cuda.stream(cpu_stream):
         torch.cuda._sleep(500_000_000)
     obj._submit_dsv4_store_batch(pages, producer)
@@ -281,10 +262,18 @@ def test_staging_separates_gpu_request_lifetime_and_handles_two_small_pages(cach
     assert obj.offload_finished_reqs_to_cpu_cache(reqs) == reqs
     assert client.published == []
     # Return the original request-owned references and immediately reuse GPU KV.
-    # Only the staging task's checkpoint reference must remain until completion.
+    # Checkpoints become reusable as soon as packing completes, even while
+    # staging-to-CPU is blocked. The source request no longer pins their slots.
+    producer.synchronize()
+    import time
+
+    deadline = time.monotonic() + 10
     for page in pages:
-        page.checkpoint_pool.free_state_cache([page.checkpoint_id])
+        while page.checkpoint_pool.refs[page.checkpoint_id] != 1 and time.monotonic() < deadline:
+            time.sleep(0.001)
         assert page.checkpoint_pool.refs[page.checkpoint_id] == 1
+        page.checkpoint_pool.free_state_cache([page.checkpoint_id])
+        assert page.checkpoint_pool.refs[page.checkpoint_id] == 0
     for buffer in manager.kv_buffer:
         buffer.zero_()
     cpu_stream.synchronize()

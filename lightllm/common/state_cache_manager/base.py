@@ -1,6 +1,8 @@
 import numpy as np
 from abc import ABC, abstractmethod
-from contextlib import nullcontext
+import queue
+import threading
+import time
 from typing import List, Optional
 
 from lightllm.utils.log_utils import init_logger
@@ -21,6 +23,8 @@ class StateCacheManager(ABC):
         0,          # 队头位置
         0, 1, 2,    # 空闲编号表
         0, 0, 0,    # 槽位 0、1、2 的引用计数
+        0,          # 尚未完成的异步复制引用数（跨 DP 共享）
+        0,          # CUDA 事件回收失败标记
     ]
     """
 
@@ -64,25 +68,29 @@ class StateCacheManager(ABC):
         capacity = size - keep_num
         assert capacity > 0
         self.metadata_shm = None
+        self._event_queue = queue.SimpleQueue()
+        self._event_reaper = None
         if shm_name is None:
-            self.metadata = np.empty((2 + 2 * capacity,), dtype=np.int64)
-            self.lock = nullcontext()
+            self.metadata = np.empty((4 + 2 * capacity,), dtype=np.int64)
+            self.lock = threading.RLock()
         else:
             from lightllm.utils.shm_utils import create_or_link_shm
             from lightllm.server.core.objs.atomic_lock import AtomicShmLock
 
             self.metadata_shm = create_or_link_shm(
-                shm_name + "_metadata", (2 + 2 * capacity) * 8, force_mode="create" if shm_create else "link"
+                shm_name + "_metadata", (4 + 2 * capacity) * 8, force_mode="create" if shm_create else "link"
             )
-            self.metadata = np.ndarray((2 + 2 * capacity,), dtype=np.int64, buffer=self.metadata_shm.buf)
+            self.metadata = np.ndarray((4 + 2 * capacity,), dtype=np.int64, buffer=self.metadata_shm.buf)
             self.lock = AtomicShmLock(shm_name + "_lock")
         self.free_ids = self.metadata[2 : 2 + capacity]
-        self.refs = self.metadata[2 + capacity :]
+        self.refs = self.metadata[2 + capacity : 2 + 2 * capacity]
         if shm_name is None or shm_create:
             self.metadata[0] = capacity
             self.metadata[1] = 0
             self.free_ids[:] = np.arange(capacity)
             self.refs.fill(0)
+            # Shared across DP owners: outstanding event leases and release failure.
+            self.metadata[-2:] = 0
 
     @abstractmethod
     def get_state_cache(self, buffer_idx: int):
@@ -95,20 +103,27 @@ class StateCacheManager(ABC):
     def alloc_state_cache(self, need_size: int) -> Optional[List[int]]:
         if need_size == 0:
             return []
-        with self.lock:
-            free_num = int(self.metadata[0])
-            if need_size > free_num:
-                logger.error(f"warn no enough cache need_size {need_size} free_size {free_num}")
-                return None
-            capacity = self.size - self.keep_num
-            head = int(self.metadata[1])
-            first_size = min(need_size, capacity - head)
-            indexes = self.free_ids[head : head + first_size].tolist()
-            indexes.extend(self.free_ids[: need_size - first_size].tolist())
-            self.metadata[0] = free_num - need_size
-            self.metadata[1] = (head + need_size) % capacity
-            self.refs[indexes] = 1
-            return indexes
+        capacity = self.size - self.keep_num
+        while True:
+            with self.lock:
+                free_num = int(self.metadata[0])
+                if need_size <= free_num:
+                    head = int(self.metadata[1])
+                    first_size = min(need_size, capacity - head)
+                    indexes = self.free_ids[head : head + first_size].tolist()
+                    indexes.extend(self.free_ids[: need_size - first_size].tolist())
+                    self.metadata[0] = free_num - need_size
+                    self.metadata[1] = (head + need_size) % capacity
+                    self.refs[indexes] = 1
+                    return indexes
+                if self.metadata[-1]:
+                    raise RuntimeError("checkpoint copy failed; cannot safely reclaim event leases")
+                if need_size > capacity or self.metadata[-2] == 0:
+                    logger.error(f"warn no enough cache need_size {need_size} free_size {free_num}")
+                    return None
+            # The event owner may be another DP process. Its independent reaper
+            # progresses even when every infer thread is waiting for a slot.
+            time.sleep(0.001)
 
     def free_state_cache(self, free_indexes: List[int]):
         alloc_upper_bound = self.size - self.keep_num
@@ -135,6 +150,36 @@ class StateCacheManager(ABC):
         with self.lock:
             for idx in indexes:
                 self.refs[idx] += 1
+
+    def retain_state_cache_until_event(self, indexes: List[int], event):
+        """Keep copy sources alive; release independently of infer-thread progress."""
+        indexes = list(indexes)
+        if not indexes:
+            return
+        with self.lock:
+            for idx in indexes:
+                assert self.refs[idx] > 0, f"checkpoint {idx} has no owner"
+                self.refs[idx] += 1
+            self.metadata[-2] += len(indexes)
+        self._event_queue.put((indexes, event))
+        if self._event_reaper is None:
+            self._event_reaper = threading.Thread(target=self._release_event_leases, daemon=True)
+            self._event_reaper.start()
+
+    def _release_event_leases(self):
+        while True:
+            indexes, event = self._event_queue.get()
+            try:
+                event.synchronize()
+            except Exception:
+                # A failed CUDA event is not proof that its source can be reused.
+                with self.lock:
+                    self.metadata[-1] = 1
+                logger.exception("checkpoint copy failed; retaining source slots")
+                return
+            self.free_state_cache(indexes)
+            with self.lock:
+                self.metadata[-2] -= len(indexes)
 
     def get_used_cache_num(self):
         # Preserve the existing accounting: reserved slots count as used.

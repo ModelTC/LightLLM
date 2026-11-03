@@ -226,3 +226,124 @@ def test_aborted_request_releases_only_its_adopted_reference(pool):
     assert pool.refs[slot] == 1
     pool.free_state_cache([slot])
     assert pool.get_free_cache_num() == 8
+
+
+class CopyEvent:
+    def __init__(self, ready):
+        self.ready = ready
+
+    def synchronize(self):
+        assert self.ready.wait(30), "copy did not complete"
+
+
+def test_checkpoint_snapshot_waits_for_copy_without_infer_polling():
+    import threading
+    from lightllm.server.router.model_infer.infer_batch import InferenceContext
+
+    manager = SlotPool(6, keep_num=2)
+    slots = manager.alloc_state_cache(4)
+    ready = threading.Event()
+    manager.retain_state_cache_until_event([slots[0]], CopyEvent(ready))
+    manager.free_state_cache([slots[0]])
+    assert manager.get_free_cache_num() == 0
+    saved, done = [], threading.Event()
+    context = InferenceContext()
+    context.is_hybrid_att_model = True
+    context.args = NS(linear_att_hash_page_size=256, linear_att_page_block_num=1, disable_chunked_prefill=False)
+    context.radix_cache = NS(big_page_buffers=manager)
+    context.req_manager = NS(save_big_page_states=lambda **kwargs: saved.append(kwargs))
+    req = NS(
+        cur_kv_len=0,
+        hybrid_cache_len=512,
+        hybrid_len_to_big_page_id={},
+        get_chuncked_input_token_len=lambda: 256,
+    )
+
+    def allocate():
+        context.save_hybrid_state_to_cache(torch.tensor([0]), [req])
+        done.set()
+
+    waiter = threading.Thread(target=allocate)
+    waiter.start()
+    try:
+        assert not done.wait(0.05)
+        ready.set()
+        assert done.wait(10)
+        assert req.hybrid_len_to_big_page_id == {256: slots[0]}
+        assert len(saved) == 1
+        assert manager.refs[slots[0]] == 1
+    finally:
+        ready.set()
+        waiter.join(10)
+    manager.free_state_cache(slots)
+    assert manager.get_free_cache_num() == 4
+
+
+def _copy_owner(service_name, ready, copy_done, finish):
+    _service_name(service_name)
+    manager = _attach("pool")
+    slots = manager.alloc_state_cache(8)
+    manager.retain_state_cache_until_event([slots[0]], CopyEvent(copy_done))
+    manager.free_state_cache([slots[0]])
+    ready.put(slots[0])
+    # No polling on this infer thread: another DP must still reclaim the slot.
+    assert finish.wait(30)
+    manager.free_state_cache(slots[1:])
+
+
+def test_remote_dp_copy_releases_checkpoint_while_owner_infer_is_blocked(pool):
+    import threading
+
+    context = mp.get_context("spawn")
+    ready, copy_done, finish = context.Queue(), context.Event(), context.Event()
+    owner = context.Process(target=_copy_owner, args=(get_unique_server_name(), ready, copy_done, finish))
+    done, result = threading.Event(), []
+
+    def allocate():
+        result.append(pool.alloc_one_state_cache())
+        done.set()
+
+    waiter = threading.Thread(target=allocate)
+    try:
+        owner.start()
+        slot = ready.get(timeout=60)
+        assert pool.get_free_cache_num() == 0
+        waiter.start()
+        assert not done.wait(0.05)
+        copy_done.set()
+        assert done.wait(10)
+        assert result == [slot]
+        pool.free_state_cache(result)
+    finally:
+        copy_done.set()
+        finish.set()
+        owner.join(30)
+        if owner.is_alive():
+            owner.terminate()
+            owner.join(10)
+        if waiter.ident is not None:
+            waiter.join(10)
+    assert owner.exitcode == 0
+    assert pool.get_free_cache_num() == 8
+
+
+def test_failed_copy_keeps_source_and_reports_error_instead_of_waiting_forever():
+    import threading
+
+    manager = SlotPool(2)
+    slots = manager.alloc_state_cache(2)
+    failed = threading.Event()
+
+    class FailedCopy:
+        def synchronize(self):
+            failed.set()
+            raise RuntimeError("CUDA copy failed")
+
+    manager.retain_state_cache_until_event([slots[0]], FailedCopy())
+    manager.free_state_cache([slots[0]])
+    assert failed.wait(10)
+    manager._event_reaper.join(10)
+    with pytest.raises(RuntimeError, match="cannot safely reclaim"):
+        manager.alloc_one_state_cache()
+    assert manager.refs[slots[0]] == 1
+    assert manager.get_free_cache_num() == 0

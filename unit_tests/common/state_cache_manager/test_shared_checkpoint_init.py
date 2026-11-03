@@ -81,7 +81,7 @@ def test_shared_pool_constructor_never_allocates_private_storage(monkeypatch, cr
     zeros, share_memory = Mock(), Mock()
     monkeypatch.setattr(torch, "zeros", zeros)
     monkeypatch.setattr(LayerCache, "init_share_memory", share_memory)
-    metadata = np.array([15, 1, *range(16), 1, *([0] * 15)], dtype=np.int64)
+    metadata = np.array([15, 1, *range(16), 1, *([0] * 15), 0, 0], dtype=np.int64)
     original_metadata = metadata.copy()
     metadata_shm = NS(buf=metadata.data)
     create_or_link_shm = Mock(return_value=metadata_shm)
@@ -92,7 +92,7 @@ def test_shared_pool_constructor_never_allocates_private_storage(monkeypatch, cr
     zeros.assert_not_called()
     assert pool.metadata_shm is metadata_shm
     create_or_link_shm.assert_called_once_with(
-        "checkpoints_metadata", 34 * 8, force_mode="create" if create else "link"
+        "checkpoints_metadata", 36 * 8, force_mode="create" if create else "link"
     )
     shared_lock.assert_called_once_with("checkpoints_lock")
     if create:

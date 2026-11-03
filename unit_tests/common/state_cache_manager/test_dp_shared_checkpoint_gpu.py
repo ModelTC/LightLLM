@@ -85,7 +85,9 @@ def _gpu_rank(rank, rendezvous, service_name):
             # Exercise the real fused Triton checkpoint save into registered shared storage.
             stream = torch.cuda.Stream()
             with torch.cuda.stream(stream):
-                req_manager.save_big_page_states(torch.tensor([0], device="cuda", dtype=torch.int32), [0], [slot], [4])
+                req_manager.save_big_page_states(
+                    torch.tensor([0], device="cuda", dtype=torch.int32), [NS(req_idx=0)], [slot]
+                )
             torch.cuda.synchronize()
             assert all(state.is_pinned() for state in big.get_state_cache(slot))
         # Test harness exchanges only an ID; no production DP-fetch flow is involved.
@@ -105,12 +107,12 @@ def _gpu_rank(rank, rendezvous, service_name):
         assert big.refs[slot] == 1
         if rank == 0:
             req = NS(req_idx=0)
-            req_manager.restore_state(req, big, slot, checkpoint_len=4)
+            req_manager.restore_state(req, big, slot)
             torch.cuda.synchronize()
             assert torch.all(req_manager.req_to_conv_state.buffer == 19)
             assert torch.all(req_manager.req_to_ssm_state.buffer == 23)
             # Small checkpoints remain private and use the original restore interface.
-            req_manager.restore_state(req, small, small_slot, checkpoint_len=2)
+            req_manager.restore_state(req, small, small_slot)
             torch.cuda.synchronize()
             assert torch.all(req_manager.req_to_conv_state.buffer == 37)
             assert torch.all(req_manager.req_to_ssm_state.buffer == 37)
@@ -121,6 +123,35 @@ def _gpu_rank(rank, rendezvous, service_name):
         small.free_state_cache([small_slot])
         assert small.get_free_cache_num() == 2
         dist.barrier()
+
+        # A remote DP may need a slot while this infer thread is blocked in a
+        # collective. CUDA-event reclamation must progress without local polls.
+        if rank == 0:
+            slots = big.alloc_state_cache(4)
+            source = big.get_state_cache(slots[0])[0]
+            source.fill_(71)
+            packed = torch.empty_like(source, device="cuda")
+            copy_stream = torch.cuda.Stream()
+            with torch.cuda.stream(copy_stream):
+                torch.cuda._sleep(500_000_000)
+                packed.copy_(source, non_blocking=True)
+                packed_event = torch.cuda.Event()
+                packed_event.record()
+            big.retain_state_cache_until_event([slots[0]], packed_event)
+            big.free_state_cache([slots[0]])
+        dist.barrier()
+        if rank == 1:
+            reused = big.alloc_one_state_cache()
+            assert reused is not None
+            big.get_state_cache(reused)[0].fill_(99)
+            big.free_state_cache([reused])
+        dist.barrier()
+        if rank == 0:
+            copy_stream.synchronize()
+            assert torch.all(packed == 71)
+            big.free_state_cache(slots[1:])
+        dist.barrier()
+        assert big.get_free_cache_num() == 4
     except BaseException:
         traceback.print_exc()
         raise

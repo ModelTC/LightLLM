@@ -1543,7 +1543,6 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     module.cpu_cache_client = client
     module.cpu_cache_handle_queue = deque()
     module.dsv4_sessions = {42: common.Dsv4CpuCacheSession(42)}
-    module.dsv4_load_tasks = deque()
     module.dsv4_store_tasks = deque()
     module.dsv4_staging_slots = [common.Dsv4StagingSlot(), common.Dsv4StagingSlot()]
     module.dsv4_max_pages_per_task = 4
