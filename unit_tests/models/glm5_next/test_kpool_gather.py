@@ -4,6 +4,7 @@ import pytest
 import torch
 import triton
 
+from lightllm.models.glm5_next.triton_kernel import kpool
 from lightllm.models.glm5_next.triton_kernel.kpool import gather_paged_pools, gather_pools
 
 
@@ -116,6 +117,22 @@ def test_paged_partial_groups_keep_valid_per_query_pages(batch):
     if batch < 4:
         expected = torch.arange(block_table.numel(), device="cuda", dtype=torch.int32).view_as(block_table)
         torch.testing.assert_close(block_table, expected, rtol=0, atol=0)
+
+
+def test_paged_batch_sizes_reuse_compiled_kernel():
+    packed, table, locations, source_keys, source_scales = _inputs(4097)
+    req = torch.ones(16, device="cuda", dtype=torch.int32)
+    lengths = torch.arange(4097, 4081, -1, device="cuda", dtype=torch.int32)
+    kernel = kpool._gather_paged_pools
+    cache = kernel.device_caches[torch.cuda.current_device()][0]
+    # Warm the shared-group specialization, then vary both complete and partial
+    # groups. Grid dimensions must not create additional compiled variants.
+    gather_paged_pools(packed, table, req[:4], lengths[:4], 4097)
+    variants = len(cache)
+    for batch in (5, 8, 12, 16):
+        pages, block_table = gather_paged_pools(packed, table, req[:batch], lengths[:batch], 4097)
+        _check_paged(pages, block_table, req[:batch], lengths[:batch], locations, source_keys, source_scales)
+        assert len(cache) == variants
 
 
 @pytest.mark.parametrize("reuse_group", [0, 3, 16])

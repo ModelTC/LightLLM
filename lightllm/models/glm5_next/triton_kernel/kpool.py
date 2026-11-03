@@ -283,10 +283,11 @@ def _gather_paged_pools(
     PACKED_STRIDE: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
     MAX_PAGES,
-    BATCH: tl.constexpr,
     REUSE_GROUP: tl.constexpr,
 ):
     batch = tl.program_id(1)
+    # Grid Y already carries the row count; keep it out of the JIT cache key.
+    batch_size = tl.num_programs(1)
     req = tl.load(ReqIdx + batch)
     length = tl.load(PoolLengths + batch)
     # MTP verification commonly has four adjacent queries for the same request.
@@ -297,10 +298,10 @@ def _gather_paged_pools(
     if REUSE_GROUP > 1:
         group_start = batch // REUSE_GROUP * REUSE_GROUP
         members = group_start + tl.arange(0, REUSE_GROUP)
-        requests = tl.load(ReqIdx + members, members < BATCH, -1)
-        lengths = tl.load(PoolLengths + members, members < BATCH, 0)
+        requests = tl.load(ReqIdx + members, members < batch_size, -1)
+        lengths = tl.load(PoolLengths + members, members < batch_size, 0)
         same_request = (
-            (group_start + REUSE_GROUP <= BATCH)
+            (group_start + REUSE_GROUP <= batch_size)
             & (tl.min(requests, 0) == tl.max(requests, 0))
             & (tl.max(lengths, 0) >= 4096)
         )
@@ -354,7 +355,6 @@ def gather_paged_pools(packed_buffer, req_table, req_idx, pool_lengths, max_pool
         packed_buffer.stride(0),
         req_table.stride(0),
         max_pages,
-        BATCH=batch,
         REUSE_GROUP=reuse_group if batch >= reuse_group else 1,
         num_warps=4,
     )
