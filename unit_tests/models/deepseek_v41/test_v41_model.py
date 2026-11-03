@@ -1423,6 +1423,25 @@ def test_text_model_constructs_and_chunked_prefill_matches_full(
             assert [weight.n_routed_experts for weight in draft.trans_layers_weight] == [4, 4, 4]
             assert all(layer.num_experts_per_tok == 2 for layer in draft.layers_infer)
             assert draft.pre_post_weight.markov_w1_weight_.weight_name == "mtp.2.markov_head.embed.weight"
+            # Sample the real eager KV-only entry point at target verify sizes.
+            from lightllm.common.basemodel import TpPartBaseModel
+            from lightllm.models.deepseek_v4_dspark.model import DeepseekV4DSparkModel
+
+            with monkeypatch.context() as sampling:
+                sampling.setattr(TpPartBaseModel, "_init_cudagraph", lambda self: None)
+                sampling.setattr(draft.args, "mtp_dynamic_verify", True)
+                sampling.setattr(
+                    model,
+                    "graph",
+                    SimpleNamespace(infer_cost_ms_by_batch_size={4: 1.0, 8: 1.1}, graph_max_len_in_batch=512),
+                )
+                sampling.setattr(
+                    draft, "_token_forward", lambda _: pytest.fail("Commit sampling must not run proposal")
+                )
+                DeepseekV4DSparkModel._init_cudagraph(draft)
+                costs = draft.get_mtp_kv_commit_infer_costs()
+                assert set(costs) == {4, 8}
+                assert all(0 < value < 1000 for value in costs.values())
             assert not hasattr(draft.pre_post_weight, "hc_head_fn_")
             commit = prefill_input(128, 256)
             commit.mtp_draft_input_hiddens = out.mtp_collector.spec_hidden

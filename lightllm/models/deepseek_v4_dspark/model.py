@@ -200,6 +200,51 @@ class DeepseekV4DSparkModel(DeepseekV4TpPartModel):
             "mtp_draft_input_hiddens": None,
         }
 
+    def _init_cudagraph(self):
+        super()._init_cudagraph()
+        self.kv_commit_infer_cost_ms_by_batch_size = {}
+        target_graph = self.main_model.graph
+        if not self.args.mtp_dynamic_verify or target_graph is None:
+            return
+
+        # Commit is eager and has no MoE/attention collectives. Measure the
+        # actual entry point at target verify sizes, independently of proposal.
+        for batch_size in sorted(target_graph.infer_cost_ms_by_batch_size):
+            zeros = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
+            model_input = ModelInput(
+                batch_size=batch_size,
+                total_token_num=batch_size * 2,
+                max_q_seq_len=1,
+                max_kv_seq_len=target_graph.graph_max_len_in_batch,
+                input_ids=torch.ones(batch_size, dtype=torch.int64, device="cuda"),
+                b_req_idx=torch.full_like(zeros, self.req_manager.HOLD_REQUEST_ID),
+                b_seq_len=torch.full_like(zeros, 2),
+                b_mtp_index=zeros,
+                b_position_delta=zeros,
+                b_shared_seq_len=zeros,
+                b_shared_radix_node_id=torch.full((batch_size,), -1, dtype=torch.int64, device="cuda"),
+                multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
+                mtp_draft_input_hiddens=torch.zeros(
+                    (batch_size, self.pre_post_weight.main_proj_weight_.in_dim), dtype=self.data_type, device="cuda"
+                ),
+            )
+            self._commit_kv(model_input)
+            torch.distributed.barrier()
+            start = torch.cuda.Event(enable_timing=True)
+            end = torch.cuda.Event(enable_timing=True)
+            start.record()
+            self._commit_kv(model_input)
+            end.record()
+            end.synchronize()
+            cost = torch.tensor([start.elapsed_time(end)], dtype=torch.float32, device="cuda")
+            # Preserve the existing graph cost aggregation policy.
+            torch.distributed.all_reduce(cost, op=torch.distributed.ReduceOp.MIN)
+            self.kv_commit_infer_cost_ms_by_batch_size[batch_size] = float(cost.item())
+        logger.info("DSpark KV-only commit costs (ms): %s", self.kv_commit_infer_cost_ms_by_batch_size)
+
+    def get_mtp_kv_commit_infer_costs(self):
+        return self.kv_commit_infer_cost_ms_by_batch_size
+
     def _token_forward(self, infer_state):
         output = super()._token_forward(infer_state)
         if self.args.enable_ep_moe and self.config["n_routed_experts"] != self.main_model.config["n_routed_experts"]:

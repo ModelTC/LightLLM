@@ -29,6 +29,7 @@ class DSparkPlanner(BaseMtpPlanner):
         self.block_size = int(backend.draft_models[0].block_size)
         self.target_infer_costs = _InferCostMsTable()
         self.draft_infer_costs = _InferCostMsTable()
+        self.kv_commit_infer_costs = _InferCostMsTable()
         self._register_cuda_graph_costs()
         self._pending_verify_batch_sizes = deque(maxlen=2)
 
@@ -66,7 +67,7 @@ class DSparkPlanner(BaseMtpPlanner):
     def _get_draft_cost_ms(self, req_num: int, verify_batch_size: int, draft_step: int) -> float:
         """Return the cost of committing verify rows and generating one complete block."""
 
-        extend_cost_ms = self.draft_infer_costs.estimate(verify_batch_size)
+        extend_cost_ms = self.kv_commit_infer_costs.estimate(verify_batch_size)
         block_cost_ms = self.draft_infer_costs.estimate(req_num * self.block_size)
         return extend_cost_ms + block_cost_ms
 
@@ -77,6 +78,8 @@ class DSparkPlanner(BaseMtpPlanner):
                 self.target_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
 
         for draft_model in self.backend.draft_models:
+            for batch_size, infer_cost_ms in draft_model.get_mtp_kv_commit_infer_costs().items():
+                self.kv_commit_infer_costs.update(batch_size=batch_size, infer_cost_ms=infer_cost_ms)
             draft_graph = draft_model.graph
             if draft_graph is None:
                 continue

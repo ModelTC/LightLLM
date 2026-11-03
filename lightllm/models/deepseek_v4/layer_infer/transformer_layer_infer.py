@@ -645,5 +645,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             tid2eid=tid2eid,
             bias_vl=bias_vl,
             image_token_start=image_token_start,
+            valid_rows=infer_state.dsv4_moe_valid_rows if not infer_state.is_prefill and self.enable_ep_moe else None,
         )
         return topk_weights, topk_indices

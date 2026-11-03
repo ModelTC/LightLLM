@@ -402,6 +402,10 @@ class TpPartBaseModel:
             else:
                 self.prefill_graph.warmup(self)
 
+    def get_mtp_kv_commit_infer_costs(self):
+        # Ordinary draft models commit target rows with a full forward pass.
+        return self.graph.infer_cost_ms_by_batch_size if self.graph is not None else {}
+
     def _init_custom(self):
         pass
 

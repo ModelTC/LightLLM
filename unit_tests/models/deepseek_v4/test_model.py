@@ -301,3 +301,49 @@ def test_output_projection_matches_bf16_reference(monkeypatch, tp_size, rank):
     state = SimpleNamespace(position_cos_sliding=cos, position_sin_sliding=sin)
     torch.testing.assert_close(infer_layer._get_o(attention, state, layer), expected, rtol=0.01, atol=0.01)
     assert padded[:, heads:].eq(9).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("kv_commit", [False, True])
+@pytest.mark.parametrize("capture", [False, True])
+@pytest.mark.parametrize("request_ids", [[7, 99, 7, 99, 3], [99] * 5])
+def test_decode_moe_mask_uses_row_request_ids_and_stages_on_replay(monkeypatch, capture, request_ids, kv_commit):
+    from lightllm.common.basemodel.infer_struct import InferStateInfo
+    from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
+
+    monkeypatch.setattr(InferStateInfo, "init_some_extra_state", lambda self, model: None)
+    monkeypatch.setattr(DeepseekV4InferStateInfo, "_init_swa_metadata", lambda self, model: None)
+    req_manager = SimpleNamespace(HOLD_REQUEST_ID=99, cache_config=SimpleNamespace(long_compress_ratio=0))
+    model = SimpleNamespace(
+        args=SimpleNamespace(enable_ep_moe=True),
+        dsv4_workspace=None,
+        graph=None,
+        _cos_cached_sliding=torch.ones(1, 32, device="cuda"),
+        _sin_cached_sliding=torch.zeros(1, 32, device="cuda"),
+        _cos_cached_compress=torch.ones(1, 32, device="cuda"),
+        _sin_cached_compress=torch.zeros(1, 32, device="cuda"),
+    )
+
+    def make_state(is_capture):
+        state = DeepseekV4InferStateInfo()
+        state.req_manager = req_manager
+        state.is_prefill = False
+        state.is_cuda_graph_capture = is_capture
+        state.b_req_idx = torch.tensor(request_ids, device="cuda", dtype=torch.int32)
+        state.position_ids = torch.zeros(len(request_ids), device="cuda", dtype=torch.int64)
+        state.max_kv_seq_len = 2
+        state.mtp_draft_input_hiddens = torch.zeros(len(request_ids), 3, device="cuda") if kv_commit else None
+        state.decode_att_state = SimpleNamespace(copy_for_decode_cuda_graph=lambda _: None)
+        state.init_some_extra_state(model)
+        return state
+
+    state = make_state(capture)
+    if kv_commit:
+        assert state.dsv4_moe_valid_rows is None
+        return
+    expected = state.b_req_idx != 99
+    torch.testing.assert_close(state.dsv4_moe_valid_rows, torch.ones_like(expected) if capture else expected)
+    staged = state.dsv4_moe_valid_rows
+    state.copy_for_cuda_graph(make_state(False))
+    assert state.dsv4_moe_valid_rows is staged
+    torch.testing.assert_close(staged, expected)

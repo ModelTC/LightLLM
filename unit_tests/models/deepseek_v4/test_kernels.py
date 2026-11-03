@@ -319,3 +319,39 @@ def test_topk_uses_configured_output_capacity(topk, width):
     raw = torch.empty_like(out)
     indexer_topk.indexer_topk(scores, lengths, pages, out, 64, raw)
     assert_topk(scores, lengths, pages, out, raw, 64)
+
+
+@pytest.mark.parametrize("mode", ["bias", "hash", "vision", "hash_vision"])
+@pytest.mark.parametrize("rows", [1, 17, 513])
+def test_router_masks_dummy_rows_and_replays_changed_masks(mode, rows):
+    torch.manual_seed(43)
+    experts, topk = 384, 6
+    logits = torch.randn(rows, experts, device="cuda")
+    bias = torch.randn(experts, device="cuda") * 0.1
+    image_bias = torch.randn_like(bias) if "vision" in mode else None
+    tokens = torch.randint(0, 32, (rows,), device="cuda")
+    table = torch.stack([torch.randperm(experts, device="cuda")[:topk] for _ in range(32)]) if "hash" in mode else None
+    if image_bias is not None:
+        tokens[::2] = 100_000
+    correction = None if table is not None else bias
+    weights = torch.empty(rows, topk, device="cuda")
+    indices = torch.empty(rows, topk, device="cuda", dtype=torch.int64)
+    active = torch.ones(rows, device="cuda", dtype=torch.bool)
+
+    def route():
+        topk_softplus_sqrt.topk_softplus_sqrt(
+            weights, indices, logits, 2.5, correction, tokens, table, image_bias, 32, valid_rows=active
+        )
+
+    route()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        route()
+    ref_weights, ref_indices = router_reference(logits, 2.5, correction, tokens, table, image_bias, 32)
+    for pattern in [torch.zeros_like(active), torch.arange(rows, device="cuda") % 3 == 1, torch.ones_like(active)]:
+        active.copy_(pattern)
+        graph.replay()
+        torch.testing.assert_close(indices[active], ref_indices[active], rtol=0, atol=0)
+        torch.testing.assert_close(weights[active], ref_weights[active], rtol=5e-6, atol=1e-6)
+        assert (indices[~active] == -1).all()
+        assert (weights[~active] == 0).all()

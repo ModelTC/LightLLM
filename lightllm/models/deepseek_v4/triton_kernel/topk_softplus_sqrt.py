@@ -39,12 +39,14 @@ def _topk_softplus_sqrt_kernel(
     input_ids,
     tid2eid,
     bias_vl,
+    valid_rows,
     num_tokens,
     NUM_EXPERTS: tl.constexpr,
     ROUTED_SCALING_FACTOR: tl.constexpr,
     IMAGE_TOKEN_START: tl.constexpr,
     HAS_HASH_ROUTING: tl.constexpr,
     HAS_VISION_BIAS: tl.constexpr,
+    HAS_VALID_ROWS: tl.constexpr,
     TOP_K: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_E: tl.constexpr,
@@ -53,19 +55,22 @@ def _topk_softplus_sqrt_kernel(
 ):
     rows = tl.program_id(0) * BLOCK_R + tl.arange(0, BLOCK_R)
     valid = rows < num_tokens
+    active = valid
+    if HAS_VALID_ROWS:
+        active = valid & tl.load(valid_rows + rows, mask=valid, other=False)
     slots = tl.arange(0, BLOCK_K)
     if USE_PDL:
         tl.extra.cuda.gdc_wait()
     if HAS_HASH_ROUTING and not HAS_VISION_BIAS:
-        ids, selected = _hash_route(logits, input_ids, tid2eid, rows, valid, slots, NUM_EXPERTS, TOP_K)
+        ids, selected = _hash_route(logits, input_ids, tid2eid, rows, active, slots, NUM_EXPERTS, TOP_K)
     else:
         image = tl.full((BLOCK_R,), False, tl.int1)
         if HAS_VISION_BIAS:
-            tokens = tl.load(input_ids + rows, mask=valid, other=0)
+            tokens = tl.load(input_ids + rows, mask=active, other=0)
             image = tokens >= IMAGE_TOKEN_START
-        dense = valid
+        dense = active
         if HAS_HASH_ROUTING:
-            dense = valid & image
+            dense = active & image
         experts = tl.arange(0, BLOCK_E)
         logit_values = tl.load(
             logits + rows[:, None] * NUM_EXPERTS + experts[None, :],
@@ -89,12 +94,15 @@ def _topk_softplus_sqrt_kernel(
             remaining = tl.where(experts[None, :] == expert[:, None], -float("inf"), remaining)
         if HAS_HASH_ROUTING:
             hash_ids, hash_weights = _hash_route(
-                logits, input_ids, tid2eid, rows, valid & ~image, slots, NUM_EXPERTS, TOP_K
+                logits, input_ids, tid2eid, rows, active & ~image, slots, NUM_EXPERTS, TOP_K
             )
             ids = tl.where(image[:, None], ids, hash_ids)
             selected = tl.where(image[:, None], selected, hash_weights)
     total = tl.sum(selected, axis=1)
     selected = selected * ROUTED_SCALING_FACTOR / tl.where(total[:, None] > 0, total[:, None], 1)
+    if HAS_VALID_ROWS:
+        ids = tl.where(active[:, None], ids, -1)
+        selected = tl.where(active[:, None], selected, 0)
     if USE_PDL:
         tl.extra.cuda.gdc_launch_dependents()
     mask = valid[:, None] & (slots[None, :] < TOP_K)
@@ -113,11 +121,13 @@ def topk_softplus_sqrt(
     tid2eid=None,
     bias_vl=None,
     image_token_start=0,
+    valid_rows=None,
 ):
     """Route FP32 logits [T, experts] to the configured top-k experts, writing weights and int64 IDs.
 
     Hash layers use tid2eid [vocab, top-k]. Vision tokens select by bias_vl; other
     dense rows use correction_bias. Selected scores normalize to routed_scaling_factor.
+    Inactive valid_rows entries write expert ID -1 and weight zero for DeepEP.
     """
     rows = logits.shape[0]
     if rows == 0:
@@ -132,6 +142,7 @@ def topk_softplus_sqrt(
         input_ids,
         tid2eid,
         bias_vl,
+        valid_rows,
         rows,
         NUM_EXPERTS=logits.shape[1],
         TOP_K=topk_indices.shape[1],
@@ -140,6 +151,7 @@ def topk_softplus_sqrt(
         IMAGE_TOKEN_START=image_token_start,
         HAS_HASH_ROUTING=tid2eid is not None,
         HAS_VISION_BIAS=bias_vl is not None,
+        HAS_VALID_ROWS=valid_rows is not None,
         BLOCK_E=triton.next_power_of_2(logits.shape[1]),
         BLOCK_R=block_r,
         num_warps=warps,

@@ -39,6 +39,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.position_sin_compress = None
         # Layer-independent indices are built once per forward in init_some_extra_state.
         self.dsv4_sparse_req_idx = None
+        self.dsv4_moe_valid_rows = None
         self.dsv4_swa_indices = None
         self.dsv4_swa_lengths = None
         self.dsv4_swa_write_slots = None
@@ -84,6 +85,15 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         else:
             self.dsv4_sparse_req_idx = self.b_req_idx
             self._dsv4_token_to_batch_idx = None
+            if model.args.enable_ep_moe and self.mtp_draft_input_hiddens is None:
+                # Capture/tuning uses HOLD requests for safe cache accesses, but
+                # must retain expert work for meaningful GEMM tuning and costs.
+                # Replay stages the real mask through copy_for_cuda_graph.
+                self.dsv4_moe_valid_rows = (
+                    torch.ones_like(self.b_req_idx, dtype=torch.bool)
+                    if self.is_cuda_graph_capture
+                    else self.b_req_idx != self.req_manager.HOLD_REQUEST_ID
+                )
         self._init_swa_metadata(model)
 
         from lightllm.models.deepseek_v4.triton_kernel.build_compressed_kv_indices import build_compressed_kv_indices

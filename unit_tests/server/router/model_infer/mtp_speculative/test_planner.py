@@ -99,7 +99,9 @@ def build_dspark_planner(max_draft_step: int = 3, block_size: int = 3):
     backend = SimpleNamespace(
         max_draft_step=max_draft_step,
         model=SimpleNamespace(graph=None),
-        draft_models=[SimpleNamespace(block_size=block_size, graph=None)],
+        draft_models=[
+            SimpleNamespace(block_size=block_size, graph=None, get_mtp_kv_commit_infer_costs=lambda: {8: 0.01})
+        ],
     )
     return DSparkPlanner(backend=backend)
 
@@ -119,7 +121,7 @@ def build_planner(spec_mode: str, enable_dynmaic_mtp: bool = True):
         enable_decode_microbatch_overlap=False,
         max_draft_step=3,
         model=SimpleNamespace(graph=None),
-        draft_models=[SimpleNamespace(block_size=3, graph=None)],
+        draft_models=[SimpleNamespace(block_size=3, graph=None, get_mtp_kv_commit_infer_costs=lambda: {})],
     )
     return engine._build_mtp_planner(
         spec_mode=spec_mode,
@@ -793,6 +795,7 @@ def test_block_planner_prices_commit_and_complete_block(spec_mode, block_size, e
 def test_dspark_planner_prices_commit_and_complete_block():
     planner = build_dspark_planner(max_draft_step=3, block_size=3)
     planner.draft_infer_costs.update(batch_size=8, infer_cost_ms=0.8)
+    planner.kv_commit_infer_costs.update(batch_size=8, infer_cost_ms=0.05)
 
     draft_cost_ms = planner._get_draft_cost_ms(
         req_num=4,
@@ -800,7 +803,7 @@ def test_dspark_planner_prices_commit_and_complete_block():
         draft_step=3,
     )
 
-    assert np.isclose(draft_cost_ms, 2.0)
+    assert np.isclose(draft_cost_ms, 1.25)
 
 
 def test_lightspec_records_one_batch_observation_per_configuration():
@@ -962,3 +965,33 @@ def test_topk_prefix_sums_only_computes_requested_counts():
 
     assert set(result) == {0, 2, 4}
     np.testing.assert_allclose([result[0], result[2], result[4]], [0.0, 1.6, 2.1])
+
+
+def test_dspark_registers_kv_only_costs_separately_from_proposal_graph():
+    backend = SimpleNamespace(
+        max_draft_step=3,
+        model=SimpleNamespace(graph=SimpleNamespace(infer_cost_ms_by_batch_size={4: 1.0, 8: 1.2})),
+        draft_models=[
+            SimpleNamespace(
+                block_size=3,
+                graph=SimpleNamespace(infer_cost_ms_by_batch_size={6: 0.5, 8: 2.0}),
+                get_mtp_kv_commit_infer_costs=lambda: {4: 0.03, 8: 0.04},
+            )
+        ],
+    )
+    planner = DSparkPlanner(backend)
+    assert planner._get_draft_cost_ms(2, 8, 3) == pytest.approx(0.54)
+    survival = np.cumprod(np.full((2, 3), 0.9), axis=1)
+    assert planner._select_dynamic_batch_size_from_survival_scores(2, survival) == 8
+    # The former full-proposal proxy overprices the larger verify capacity.
+    planner.kv_commit_infer_costs = planner.draft_infer_costs
+    assert planner._select_dynamic_batch_size_from_survival_scores(2, survival) < 8
+
+
+def test_ordinary_draft_kv_commit_uses_its_full_forward_costs():
+    from lightllm.common.basemodel import TpPartBaseModel
+
+    draft = SimpleNamespace(graph=SimpleNamespace(infer_cost_ms_by_batch_size={4: 0.3}))
+    assert TpPartBaseModel.get_mtp_kv_commit_infer_costs(draft) == {4: 0.3}
+    draft.graph = None
+    assert TpPartBaseModel.get_mtp_kv_commit_infer_costs(draft) == {}
