@@ -50,7 +50,7 @@ from lightllm.server.pd_io_struct import PDChunckedTransTaskRet
 from lightllm.server.multi_level_kv_cache import create_cache_placement_controller
 from .multi_level_kv_cache import MultiLevelKvCacheModule
 from .prefill_queue_strategy import create_prefill_queue_strategy
-from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd
+from lightllm.utils.profiler import ProcessProfiler, ProfilerCmd, DecodeTimeLog
 
 
 class ModeBackend:
@@ -69,6 +69,7 @@ class ModeBackend:
         self.enable_decode_microbatch_overlap = get_env_start_args().enable_decode_microbatch_overlap
         self.enable_prefill_microbatch_overlap = get_env_start_args().enable_prefill_microbatch_overlap
         self.spec_engine = None
+        self.decode_timelog = None
 
         # 控制 _get_classed_reqs 分类的参数变量，不同的 backend 具有可能需要不同的分类运行条件。
         self.classed_req_no_decode = False
@@ -269,6 +270,16 @@ class ModeBackend:
         prof_name = f"lightllm-model_backend-node{self.node_rank}_dev{get_current_device_id()}"
         prof_mode = self.args.enable_profiling
         self.profiler = ProcessProfiler(mode=prof_mode, name=prof_name, use_multi_thread=True) if prof_mode else None
+        timelog_every = int(os.getenv("LIGHTLLM_D_DECODE_TIMELOG_EVERY", "0"))
+        if timelog_every:
+            if (
+                self.run_mode != "decode"
+                or self.args.mtp_mode != "dspark"
+                or self.dp_size <= 1
+                or self.enable_decode_microbatch_overlap
+            ):
+                raise ValueError("Decode timelog requires non-overlap DP DSpark decode")
+            self.decode_timelog = DecodeTimeLog(every=timelog_every, rank=get_global_rank())
         if self.args.enable_prefill_eplb:
             from lightllm.server.router.model_infer.mode_backend.eplb_manager import EPLBManager
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from contextlib import nullcontext
 
 import torch
 
@@ -99,7 +100,14 @@ class DSparkProposer(BaseSpecProposer):
         # DSpark KV cache；浅副本保证 target_model_input 本身不被修改。
         verify_draft_input = copy.copy(target_model_input)
         verify_draft_input.mtp_draft_input_hiddens = target_model_output.mtp_collector.spec_hidden
-        draft_model.forward(verify_draft_input)
+        timelog = self.backend.decode_timelog
+        if timelog is not None:
+            timelog.mark("kv_commit_start")
+        profiler = self.backend.profiler
+        with profiler.phase("dspark.kv_commit") if profiler is not None else nullcontext():
+            draft_model.forward(verify_draft_input)
+        if timelog is not None:
+            timelog.mark("kv_commit_end")
 
         # DSpark 每个请求固定展开一个完整 block。block 第一行是
         # accepted-tail anchor，其余行使用 mask token，由 parallel backbone
@@ -152,7 +160,12 @@ class DSparkProposer(BaseSpecProposer):
             .contiguous()
         )
         draft_input.multimodal_params = [{"images": [], "audios": []} for _ in range(draft_input.batch_size)]
-        draft_output = draft_model.forward(draft_input)
+        if timelog is not None:
+            timelog.mark("draft_start")
+        with profiler.phase("dspark.draft_proposal") if profiler is not None else nullcontext():
+            draft_output = draft_model.forward(draft_input)
+        if timelog is not None:
+            timelog.mark("draft_end")
 
         if draft_output.mtp_collector.draft_token_ids is None:
             flat_draft_token_ids = self.backend._gen_argmax_token_ids(draft_output)

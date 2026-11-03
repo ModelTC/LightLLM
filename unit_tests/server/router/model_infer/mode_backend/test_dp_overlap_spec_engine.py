@@ -277,6 +277,8 @@ def test_dp_decode_mtp_runs_common_engine_for_empty_batch(monkeypatch):
 
     backend = DPChunkedPrefillBackend.__new__(DPChunkedPrefillBackend)
     backend.spec_engine = _CommonEngine()
+    backend.decode_timelog = None
+    backend.profiler = None
     backend.args = SimpleNamespace(penalty_counter_mode="gpu_counter")
     backend.model = SimpleNamespace(forward=lambda _: model_output)
     event_pack = SimpleNamespace(

@@ -1,5 +1,8 @@
 from dataclasses import dataclass
+from contextlib import nullcontext
 import os
+import json
+import time
 import threading
 import traceback
 from typing import Any, Literal, Optional
@@ -22,6 +25,53 @@ def _get_thread_id() -> int:
     return threading.get_ident()
 
 
+class DecodeTimeLog:
+    """Sample DSpark phases; finish only after the caller's normal CUDA sync."""
+
+    def __init__(self, every: int, rank: int):
+        assert every > 0
+        self.every = every
+        self.rank = rank
+        self.steps = 0
+        self.active = False
+        self.events = {}
+        self.samples = []
+        self.last_report = time.monotonic()
+
+    def begin(self):
+        self.active = self.steps % self.every == 0
+        self.steps += 1
+        if self.active:
+            self.wall_start = time.perf_counter()
+
+    def mark(self, name: str):
+        if self.active:
+            if name not in self.events:
+                self.events[name] = torch.cuda.Event(enable_timing=True)
+            self.events[name].record()
+
+    def finish(self, requests: int, verify_rows: int, accepted_tokens: int):
+        if not self.active:
+            return
+        phases = ("target", "kv_commit", "draft")
+        sample = {
+            name + "_ms": self.events[name + "_start"].elapsed_time(self.events[name + "_end"]) for name in phases
+        }
+        sample["gpu_round_ms"] = self.events["round_start"].elapsed_time(self.events["round_end"])
+        sample["wall_round_ms"] = (time.perf_counter() - self.wall_start) * 1000
+        sample.update(requests=requests, verify_rows=verify_rows, accepted_tokens=accepted_tokens)
+        self.samples.append(sample)
+        now = time.monotonic()
+        if now - self.last_report < 60:
+            return
+        report = dict(rank=self.rank, steps=self.steps, sampled_steps=len(self.samples), sample_every=self.every)
+        report["mean"] = {key: sum(row[key] for row in self.samples) / len(self.samples) for key in sample}
+        report["max"] = {key: max(row[key] for row in self.samples) for key in sample}
+        logger.info("decode_timelog %s", json.dumps(report, separators=(",", ":")))
+        self.samples.clear()
+        self.last_report = now
+
+
 class ProcessProfiler:
     def __init__(
         self,
@@ -38,7 +88,10 @@ class ProcessProfiler:
         self.mode = mode
         self.name = name or "unnamed"
         self.use_multi_thread = use_multi_thread
-        self.torch_profiler_with_stack = torch_profiler_with_stack
+        self.torch_profiler_with_stack = (
+            torch_profiler_with_stack and os.getenv("LIGHTLLM_PROFILER_WITH_STACK", "1") == "1"
+        )
+        self.torch_profiler_record_shapes = os.getenv("LIGHTLLM_PROFILER_RECORD_SHAPES", "1") == "1"
 
         self.is_active: bool = False  # Process-level logical state
         self._threadlocal = threading.local()
@@ -116,7 +169,7 @@ class ProcessProfiler:
             ],
             schedule=None,
             with_stack=self.torch_profiler_with_stack,
-            record_shapes=True,
+            record_shapes=self.torch_profiler_record_shapes,
             on_trace_ready=trace_handler,
         )
 
@@ -217,6 +270,11 @@ class ProcessProfiler:
                 self._thread_stop()
         except Exception:
             pass
+
+    def phase(self, name: str):
+        if self.is_active and self.mode == "torch_profiler":
+            return torch.profiler.record_function(name)
+        return nullcontext()
 
     def cmd(self, cmd_obj: ProfilerCmd) -> None:
         if cmd_obj.cmd == "start":

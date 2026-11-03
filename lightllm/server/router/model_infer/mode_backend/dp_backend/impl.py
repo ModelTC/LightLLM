@@ -1,4 +1,5 @@
 import torch
+from contextlib import nullcontext
 import time
 from typing import List, Tuple
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
@@ -526,11 +527,16 @@ class DPChunkedPrefillBackend(ModeBackend):
     def decode_mtp(self, event_pack: OverlapEventPack, decode_reqs: List[InferReq]):
         """复用普通 SpecEngine 执行 DP speculative draft-and-verify。"""
 
+        timelog = self.decode_timelog
+        if timelog is not None:
+            timelog.begin()
         model_input, run_reqs = prepare_decode_inputs(req_objs=decode_reqs)
         spec_engine = self.spec_engine
         req_num = len(decode_reqs)
 
         with torch.cuda.stream(g_infer_context.get_overlap_stream()):
+            if timelog is not None:
+                timelog.mark("round_start")
             spec_plan = spec_engine.plan_decode(
                 model_input=model_input,
                 decode_reqs=decode_reqs,
@@ -540,7 +546,12 @@ class DPChunkedPrefillBackend(ModeBackend):
                 req_num=req_num,
                 plan=spec_plan,
             )
-            model_output = self.model.forward(model_input)
+            if timelog is not None:
+                timelog.mark("target_start")
+            with self.profiler.phase("dspark.target_verify") if self.profiler is not None else nullcontext():
+                model_output = self.model.forward(model_input)
+            if timelog is not None:
+                timelog.mark("target_end")
 
             if async_selected_row_mask_cpu is not None:
                 async_selected_row_mask_cpu.wait()
@@ -629,6 +640,8 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ranks=next_token_ranks,
                 )
 
+            if timelog is not None:
+                timelog.mark("round_end")
             sync_event = torch.cuda.Event()
             sync_event.record()
 
@@ -674,6 +687,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             event_pack.notify_forward_and_wait_post_handle()
             sync_event.synchronize()
             event_pack.notify_pre_post_handle()
+        if timelog is not None and timelog.active:
+            timelog.finish(
+                requests=req_num,
+                verify_rows=model_input.batch_size,
+                accepted_tokens=sum(mtp_accept_len_cpu.tolist()) if req_num else 0,
+            )
         return
 
     def prefill_overlap_mtp(self, event_pack: OverlapEventPack, prefill_reqs: List[InferReq]):

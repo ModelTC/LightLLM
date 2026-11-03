@@ -15,7 +15,7 @@ def test_dspark_prefill_commits_suffix_without_proposal(lengths, ready):
     req_num = len(lengths)
     draft_model = SimpleNamespace(config={"sliding_window": 3}, forward=forwarded_inputs.append)
     proposer = DSparkProposer(
-        backend=SimpleNamespace(draft_models=[draft_model]),
+        backend=SimpleNamespace(draft_models=[draft_model], decode_timelog=None, profiler=None),
         enable_dynmaic_mtp=False,
     )
     seq_lens = torch.tensor(lengths, dtype=torch.int32)
@@ -87,7 +87,7 @@ def test_dspark_commits_verify_kv_and_builds_parallel_block(monkeypatch):
         forward=forward,
     )
     proposer = DSparkProposer(
-        backend=SimpleNamespace(draft_models=[draft_model]),
+        backend=SimpleNamespace(draft_models=[draft_model], decode_timelog=None, profiler=None),
         enable_dynmaic_mtp=True,
     )
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, non_blocking=False: self)
