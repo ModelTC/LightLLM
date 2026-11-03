@@ -62,6 +62,21 @@ class DeepseekV41TpPartModel(DeepseekV4TpPartModel):
             if layer.has_engram:
                 layer.engram_embed_.finalize_host_registration()
 
+    def _filter_hf_weight_keys(self, keys):
+        if not self.args.enable_ep_moe or self.is_mtp_draft_model:
+            return keys
+        # Ownership includes initial EPLB replicas. Filter before get_tensor so
+        # nonlocal FP8 expert scales never reach the conversion/loading path.
+        owners = {layer.experts.weight_prefix: layer.experts.get_hf_expert_ids() for layer in self.trans_layers_weight}
+        local_keys = []
+        for key in keys:
+            prefix, separator, remainder = key.partition(".experts.")
+            owned = owners.get(prefix + ".experts") if separator else None
+            expert = remainder.partition(".")[0]
+            if owned is None or not expert.isdigit() or int(expert) in owned:
+                local_keys.append(key)
+        return local_keys
+
     @property
     def prefill_replay_window(self):
         return 0 if self.return_all_prompt_logics or self.is_mtp_draft_model else self.config["sliding_window"]

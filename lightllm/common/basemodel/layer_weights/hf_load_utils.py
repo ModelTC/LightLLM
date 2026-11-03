@@ -7,15 +7,25 @@ import lightllm.utils.petrel_helper as utils
 from lightllm.utils.dist_utils import get_current_device_id
 
 
-def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_layer_list=None, weight_dir=None):
+def load_func(
+    file_,
+    use_safetensors=False,
+    pre_post_layer=None,
+    transformer_layer_list=None,
+    weight_dir=None,
+    weight_key_filter=None,
+):
     # fix bug for 多线程加载的时候，每个线程内部的cuda device 会切回 0， 修改后来保证不会出现bug
     import torch.distributed as dist
 
     torch.cuda.set_device(get_current_device_id())
 
     if use_safetensors:
-        weights = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")
-        weights = {k: weights.get_tensor(k) for k in weights.keys()}
+        with safe_open(os.path.join(weight_dir, file_), "pt", "cpu") as checkpoint:
+            keys = checkpoint.keys()
+            if weight_key_filter is not None:
+                keys = weight_key_filter(keys)
+            weights = {key: checkpoint.get_tensor(key) for key in keys}
     else:
         weights = utils.PetrelHelper.load(os.path.join(weight_dir, file_), map_location="cpu")
 
@@ -28,7 +38,9 @@ def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_lay
     gc.collect()
 
 
-def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None):
+def load_hf_weights(
+    data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None, weight_key_filter=None
+):
     if isinstance(data_type, str):
         data_type = torch.float16 if data_type == "fp16" else torch.float32
     if pre_post_layer is not None:
@@ -59,6 +71,7 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
         pre_post_layer=pre_post_layer,
         transformer_layer_list=transformer_layer_list,
         weight_dir=weight_dir,
+        weight_key_filter=weight_key_filter,
     )  # noqa
     worker = int(os.environ.get("LOADWORKER", 1))
     with Pool(worker) as p:

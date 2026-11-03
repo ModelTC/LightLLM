@@ -387,6 +387,10 @@ class FusedMoeWeight(BaseWeightTpl):
         if self._initial_redundant_expert_idx_to_local_idx:
             self._load_weight(self._initial_redundant_expert_idx_to_local_idx, weights)
 
+    def get_hf_expert_ids(self):
+        """Checkpoint experts needed by both primary and initial redundant slots."""
+        return self.expert_idx_to_local_idx.keys() | self._initial_redundant_expert_idx_to_local_idx.keys()
+
     def verify_load(self):
         weight_load_ok = all(all(_weight_pack.load_ok) for _weight_pack in self.w1_list + self.w2_list + self.w3_list)
         per_expert_scale_load_ok = (
