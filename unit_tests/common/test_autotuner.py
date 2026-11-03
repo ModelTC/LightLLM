@@ -248,7 +248,7 @@ def test_excluded_kernel_does_not_enter_distributed_tuning(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("level", [0, 1, 2, 3])
-@pytest.mark.parametrize("kernel_type", [AutotuneKernelType.GENERAL, AutotuneKernelType.DECODE_ATTENTION])
+@pytest.mark.parametrize("kernel_type", list(AutotuneKernelType))
 def test_matching_phase_respects_kernel_autotune_policy(tmp_path, monkeypatch, level, kernel_type):
     monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: level)
     kernel, _, benchmarks, cache_file = make_kernel(tmp_path, monkeypatch, kernel_type.value, kernel_type)
@@ -279,6 +279,18 @@ def test_force_autotune_reuses_decode_configs_across_layers(tmp_path, monkeypatc
                 assert kernel(size) == {"block": 2}
             assert len(benchmarks) == (2 if kernel_type == AutotuneKernelType.DECODE_ATTENTION else 8)
     assert json.loads(cache_file.read_text()) == {"8": {"block": 2}, "16": {"block": 2}}
+
+
+@pytest.mark.parametrize("kernel_type", list(AutotuneKernelType))
+def test_decode_graph_phase_tunes_each_shape_once(tmp_path, monkeypatch, kernel_type):
+    monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: AutotuneLevel.FORCE_AUTOTUNE)
+    kernel, _, benchmarks, cache_file = make_kernel(tmp_path, monkeypatch, kernel_type.value, kernel_type)
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE):
+        for size in [32, 64, 128, 384]:
+            for _ in range(3):
+                assert kernel(size) == {"block": 2}
+    assert len(benchmarks) == 8
+    assert set(json.loads(cache_file.read_text())) == {"32", "64", "128", "384"}
 
 
 def test_history_is_warmed_on_load_or_during_autotune_warmup(tmp_path, monkeypatch):

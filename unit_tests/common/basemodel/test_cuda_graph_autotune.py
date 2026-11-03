@@ -50,10 +50,11 @@ def capture_env(monkeypatch):
 
 @pytest.mark.parametrize("overlap", [False, True])
 @pytest.mark.parametrize("level", [0, 1, 2, 3])
-def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monkeypatch, overlap, level):
+@pytest.mark.parametrize("phase", [AutotuneKernelType.DECODE_ATTENTION, AutotuneKernelType.DECODE])
+def test_decode_kernels_tune_before_capture_only(capture_env, tmp_path, monkeypatch, overlap, level, phase):
     monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: level)
     capture_env.args.enable_decode_microbatch_overlap = overlap
-    graph = CudaGraph(1, 2, 1, max_batch_size=2)
+    graph = CudaGraph(1, 2, 1, max_batch_size=2, max_len_in_batch=262144, autotune_kernel_type=phase)
     benchmarks = []
 
     def make_kernel(kernel_type):
@@ -68,7 +69,7 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
             return size
 
         def bench(size, run_config):
-            assert kernel_type == AutotuneKernelType.DECODE_ATTENTION
+            assert phase == AutotuneKernelType.DECODE or kernel_type == AutotuneKernelType.DECODE_ATTENTION
             assert Autotuner.is_kernel_autotune_warmup(kernel_type)
             assert not capture_env.capturing
             benchmarks.append(run_config)
@@ -91,6 +92,8 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
         assert Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION) == (not capture_env.capturing)
         for original, state in zip(states, infer_states):
             assert (state is original) == capture_env.capturing
+            assert state.max_kv_seq_len == 262144
+            assert state.total_token_num == 262144 * state.input_ids.shape[0]
             assert not hasattr(state, "temporary_buffer")
             state.temporary_buffer = object()
             general(state.input_ids.shape[0])
@@ -105,16 +108,17 @@ def test_decode_attention_tunes_before_capture_only(capture_env, tmp_path, monke
     assert capture_env.graphs[0].replays == 1
     expected_benchmarks = 0
     if level in [AutotuneLevel.ADAPTIVE_AUTOTUNE, AutotuneLevel.FORCE_AUTOTUNE]:
-        expected_benchmarks = 2
+        expected_benchmarks = 4 if phase == AutotuneKernelType.DECODE else 2
     assert len(benchmarks) == expected_benchmarks
     assert attention_cache.exists() == (expected_benchmarks > 0)
-    assert not general_cache.exists()
+    assert general_cache.exists() == (expected_benchmarks == 4)
 
 
 @pytest.mark.parametrize("overlap", [False, True])
-def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap):
+@pytest.mark.parametrize("phase", [AutotuneKernelType.DECODE_ATTENTION, AutotuneKernelType.DECODE])
+def test_warmup_failure_restores_phase_without_capturing(capture_env, overlap, phase):
     capture_env.args.enable_decode_microbatch_overlap = overlap
-    graph = CudaGraph(1, 2, 1, max_batch_size=2)
+    graph = CudaGraph(1, 2, 1, max_batch_size=2, autotune_kernel_type=phase)
     states = [SimpleNamespace(input_ids=torch.ones(2, dtype=torch.int64)) for _ in range(2 if overlap else 1)]
 
     def decode_func(*infer_states):

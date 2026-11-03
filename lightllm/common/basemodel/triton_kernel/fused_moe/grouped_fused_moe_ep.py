@@ -27,7 +27,7 @@ from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
 )
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
+from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, autotune
 from lightllm.utils.device_utils import is_sm100_gpu
 from lightllm.utils.sgl_utils import HAS_SGL_KERNEL
 from lightllm.utils.tensor_buffer_manager import TensorBufferManager
@@ -750,13 +750,50 @@ def chunked_expanded_moe_forward(
     return gather_out
 
 
+def _masked_gemm_configs():
+    # expected_m changes native tiling heuristics; masked_m remains the work bound.
+    return [{"expected_m_scale": scale} for scale in [0.5, 1.0, 2.0, 4.0]]
+
+
+def _masked_gemm_key(input_tuple, w_tuple, out):
+    return {
+        "groups": out.shape[0],
+        "padded_m": out.shape[1],
+        "n": out.shape[2],
+        "k": input_tuple[0].shape[2],
+        "a": (str(input_tuple[0].dtype), str(input_tuple[1].dtype), tuple(input_tuple[1].stride())),
+        "b": (str(w_tuple[0].dtype), str(w_tuple[1].dtype), tuple(w_tuple[1].stride())),
+        "out": str(out.dtype),
+        "num_sms": deep_gemm.get_num_sms(),
+    }
+
+
+def _masked_gemm_tuning_inputs(input_tuple, w_tuple, out, masked_m, expected_m, run_config=None):
+    # Graph warmup repeats one dummy token, concentrating routing in a few experts.
+    # Benchmark average per-expert work without changing the live dispatch counts.
+    counts = torch.full_like(masked_m, min(expected_m, out.shape[1]))
+    return (input_tuple, w_tuple, out, counts, expected_m), {}
+
+
+@autotune(
+    kernel_name="deepgemm_grouped_fp8_nt_masked:v1",
+    configs_gen_func=_masked_gemm_configs,
+    static_key_func=_masked_gemm_key,
+    run_key_func=lambda expected_m: expected_m,
+    kernel_type=AutotuneKernelType.DECODE,
+    rebuild_input_func=_masked_gemm_tuning_inputs,
+    warmup_all_exist_config=False,
+)
 def _deepgemm_grouped_fp8_nt_masked(
     input_tuple: Tuple[torch.Tensor, torch.Tensor],
     w_tuple: Tuple[torch.Tensor, torch.Tensor],
     out: torch.Tensor,
     masked_m: torch.Tensor,
     expected_m: int,
+    run_config=None,
 ):
+    if run_config is not None:
+        expected_m = max(1, min(input_tuple[0].shape[1], int(expected_m * run_config["expected_m_scale"])))
     if HAS_DEEPGEMM:
         if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_masked"):
             return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)

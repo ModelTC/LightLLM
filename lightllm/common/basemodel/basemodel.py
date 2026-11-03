@@ -62,6 +62,7 @@ class TpPartBaseModel:
     is_mtp_draft_model = False
     token_lookback_depth = 0
     prefill_replay_window = 0
+    decode_autotune_kernel_type = AutotuneKernelType.DECODE_ATTENTION
 
     # weight class
     pre_and_post_weight_class = None
@@ -334,6 +335,7 @@ class TpPartBaseModel:
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
                 capture_infer_cost=self.args.mtp_dynamic_verify,
+                autotune_kernel_type=self.decode_autotune_kernel_type,
                 # Target logits/hidden are consumed before the DSpark graph reuses its pool.
                 mempool=(
                     self.main_model.graph.mempool

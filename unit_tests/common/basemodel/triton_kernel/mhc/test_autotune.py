@@ -4,11 +4,12 @@
 import pytest
 import torch
 import triton
+from collections import defaultdict
 
 from lightllm.common.basemodel.triton_kernel.mhc import head, post, pre_norm
 from lightllm.common.basemodel.triton_kernel.mhc.configs import post_projection_configs
 from lightllm.common.triton_utils import autotuner as autotuner_module
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneLevel
+from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneLevel, AutotuneKernelType
 from unit_tests.common.basemodel.triton_kernel.mhc.test_mhc import _hc_post_reference, _hc_pre_reference
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 
@@ -20,6 +21,55 @@ def tuning_environment(monkeypatch):
     monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: AutotuneLevel.CLOSE_AUTOTUNE)
     if torch.cuda.is_available():
         triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("tokens", [32, 64, 128, 384])
+def test_shifted_decode_cold_tuning_and_graph_replay(tmp_path, monkeypatch, tokens):
+    hidden = 5120
+    for kernel in [post.hc_post, pre_norm._hc_prenorm_projection, pre_norm._finish_pre_norm]:
+        cache = tmp_path / kernel.kernel_name
+        cache.mkdir()
+        monkeypatch.setattr(kernel, "_cache_dir", str(cache), raising=False)
+        monkeypatch.setattr(kernel, "cached_configs", {})
+        monkeypatch.setattr(kernel, "fast_match_configs", defaultdict(dict))
+        monkeypatch.setattr(kernel, "_missing_config_keys", set())
+        monkeypatch.setattr(kernel, "warmuped_configs_set", set())
+    y = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+    residual = torch.randn(tokens, 4 * hidden, device="cuda", dtype=torch.bfloat16)
+    before = residual.clone()
+    mix = torch.randn(tokens, 4, 4, device="cuda").softmax(-1)
+    post_mix, previous = torch.rand(tokens, 4, device="cuda"), torch.rand(tokens, 4, device="cuda")
+    fn = torch.randn(24, 4 * hidden, device="cuda") * 0.005
+    scale, base = torch.randn(3, device="cuda"), torch.randn(24, device="cuda")
+    norm = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+
+    def run():
+        return pre_norm.hc_post_pre_norm(
+            y, residual, mix, post_mix, fn, scale, base, norm, 4, 1e-6, 1e-6, 1e-6, 20, previous_pre=previous
+        )
+
+    def check(actual):
+        updated = post.hc_post(y, residual, mix, post_mix, 4)
+        ref = pre_norm.hc_pre_norm_shifted(updated, previous, fn, scale, base, norm, 1e-6, 1e-6, 1e-6, 20)
+        for i, (a, b) in enumerate(zip(actual, (ref[0], updated, *ref[1:]))):
+            torch.testing.assert_close(a, b, atol=0.04 if i < 2 else 2e-4, rtol=0.03 if i < 2 else 2e-3)
+        torch.testing.assert_close(residual, before, atol=0, rtol=0)
+
+    monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: AutotuneLevel.ADAPTIVE_AUTOTUNE)
+    with Autotuner.autotune_warmup(AutotuneKernelType.DECODE):
+        actual = run()
+    check(actual)
+    assert pre_norm._hc_prenorm_projection.cached_configs
+    if tokens > 128:
+        assert post.hc_post.cached_configs and pre_norm._finish_pre_norm.cached_configs
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = run()
+    y.normal_()
+    previous.uniform_()
+    graph.replay()
+    check(actual)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

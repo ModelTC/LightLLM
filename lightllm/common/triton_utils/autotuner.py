@@ -44,6 +44,8 @@ class AutotuneKernelType(str, Enum):
     GENERAL = "general"
     # Includes full-attention and linear-attention decode kernels.
     DECODE_ATTENTION = "decode_attention"
+    # Decode-only kernels and a graph warmup phase that also tunes GENERAL/attention.
+    DECODE = "decode"
 
 
 def autotune(
@@ -78,6 +80,7 @@ def autotune(
         mutates_args (List[str], optional): Names of arguments that can be mutated by the kernel.
             During benchmarking, defensive clones are made to avoid side effects. Defaults to ``[]``.
         kernel_type (AutotuneKernelType, optional): Only a matching warmup phase benchmarks this kernel.
+            The DECODE graph phase includes GENERAL and DECODE_ATTENTION kernels as well.
             Other phases still execute it using cached configurations or its default configuration.
         rebuild_input_func (Callable, optional): 调优输入重建回调，主要供 decode attention 算子使用。
             CUDA Graph 初始化时，输入的真实请求长度通常很短，无法代表实际 decode 场景的计算量，
@@ -144,6 +147,8 @@ class Autotuner:
     @staticmethod
     def is_kernel_autotune_warmup(kernel_type: AutotuneKernelType) -> bool:
         """Report whether this kernel category is selected for warmup."""
+        if Autotuner._autotune_warmup_kernel_type == AutotuneKernelType.DECODE:
+            return True
         return Autotuner._autotune_warmup_kernel_type == AutotuneKernelType(kernel_type)
 
     @staticmethod
@@ -218,12 +223,15 @@ class Autotuner:
         if autotune_level == AutotuneLevel.CLOSE_AUTOTUNE:
             return self.fn(*args, **kwargs)
 
-        # decode attention 在多层中会重复调用，相同配置只需调优一次，避免强制调优拖慢启动。
-        if self.kernel_type == AutotuneKernelType.DECODE_ATTENTION and autotune_level == AutotuneLevel.FORCE_AUTOTUNE:
+        # Graph warmup traverses every layer. Tune each shape once, including GENERAL kernels.
+        if autotune_level == AutotuneLevel.FORCE_AUTOTUNE and (
+            self.kernel_type == AutotuneKernelType.DECODE_ATTENTION
+            or Autotuner._autotune_warmup_kernel_type == AutotuneKernelType.DECODE
+        ):
             autotune_level = AutotuneLevel.ADAPTIVE_AUTOTUNE
             if not getattr(self, "_decode_force_autotune_logged", False):
                 logger.info(
-                    f"Decode attention kernel {self.kernel_name}: FORCE_AUTOTUNE is treated as ADAPTIVE_AUTOTUNE "
+                    f"Decode kernel {self.kernel_name}: FORCE_AUTOTUNE is treated as ADAPTIVE_AUTOTUNE "
                     "to avoid repeated tuning across layers and reduce startup time. Existing configs are reused. "
                     f"To retune, delete the cached config files in '{self.cache_dir}' before restarting "
                     "with LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 or 2."

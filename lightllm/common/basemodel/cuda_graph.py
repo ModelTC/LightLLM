@@ -64,6 +64,7 @@ class CudaGraph:
         tp_world_size: int = 1,
         capture_infer_cost: bool = False,
         mempool=None,
+        autotune_kernel_type: AutotuneKernelType = AutotuneKernelType.DECODE_ATTENTION,
     ):
         self.graph = {}
         self.tp_world_size = tp_world_size
@@ -76,6 +77,7 @@ class CudaGraph:
         self.enable_decode_microbatch_overlap = self.args.enable_decode_microbatch_overlap
         self.torch_memory_saver = TorchMemorySaverWrapper(self.args.enable_torch_memory_saver)
         self.capture_infer_cost = capture_infer_cost
+        self.autotune_kernel_type = autotune_kernel_type
         self.infer_cost_ms_by_batch_size = {}
 
         self.cuda_graph_batch_sizes = self.gen_cuda_graph_batch_sizes(
@@ -124,8 +126,8 @@ class CudaGraph:
             # 记录原始存在的变量
             pure_para_set = set(vars(infer_state).keys())
             torch.cuda.synchronize()
-            # 在正式捕获前调优 decode attention，退出作用域后再捕获选定的配置。
-            with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+            # Use the graph's padded rows and length capacity; leave tuning before capture.
+            with Autotuner.autotune_warmup(self.autotune_kernel_type):
                 decode_func(copy.copy(infer_state))
             torch.cuda.synchronize()
             for param_name in set(vars(infer_state).keys()):
@@ -158,7 +160,7 @@ class CudaGraph:
             pure_para_set = set(vars(infer_state).keys())
             pure_para_set1 = set(vars(infer_state1).keys())
             torch.cuda.synchronize()
-            with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
+            with Autotuner.autotune_warmup(self.autotune_kernel_type):
                 decode_func(copy.copy(infer_state), copy.copy(infer_state1))
             torch.cuda.synchronize()
             for para_name in set(vars(infer_state).keys()):

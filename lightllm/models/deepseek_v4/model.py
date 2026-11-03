@@ -27,6 +27,7 @@ from lightllm.common.basemodel.attention.nsa.dsv4_fp8_flashmla_sparse import (
 )
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
 from lightllm.common.basemodel.triton_kernel.mhc import hc_contract, hc_post
+from lightllm.common.triton_utils.autotuner import AutotuneKernelType
 from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
 from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
 from lightllm.models.llama.yarn_rotary_utils import (
@@ -65,6 +66,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
     mem_manager: DeepseekV4MemoryManager
     has_vision = False
     has_bidirectional_image_attention = False
+    decode_autotune_kernel_type = AutotuneKernelType.DECODE
 
     pre_and_post_weight_class = DeepseekV4PreAndPostLayerWeight
     transformer_weight_class = DeepseekV4TransformerLayerWeight
@@ -182,6 +184,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
             super()._init_prefill_cuda_graph()
 
     def _autotune_warmup(self):
+        # Decode tunes GENERAL kernels with its padded graph rows instead of synthetic prefill requests.
         if self.args.run_mode != "decode":
             super()._autotune_warmup()
 
