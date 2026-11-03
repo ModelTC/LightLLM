@@ -89,6 +89,11 @@ def test_persistent_scratch_regions_do_not_alias(overlap):
     model = SimpleNamespace(
         batch_max_tokens=8,
         tp_world_size_=1,
+        max_req_num=1,
+        mtp_manager=SimpleNamespace(get_decode_tokens_per_request=lambda draft: 1),
+        is_mtp_draft_model=False,
+        _align_decode_batch_size=lambda rows: rows,
+        disable_cudagraph=True,
         max_seq_length=16384,
         run_mode="prefill",
         args=SimpleNamespace(enable_decode_microbatch_overlap=overlap, enable_prefill_microbatch_overlap=False),
@@ -103,8 +108,9 @@ def test_persistent_scratch_regions_do_not_alias(overlap):
     workspace = DeepseekV4Workspace(model)
     workspace.init_persistent_scratch(model)
     assert workspace.c128_compress_scratch.shape == (1 + int(overlap), 8, 512)
-    assert workspace.c4_prefill_aux.logits(4, 4160).stride() == (4352, 1)
-    assert workspace.c4_prefill_aux.logits(4, 4160).data_ptr() == workspace.c4_prefill_aux.scratch.data_ptr()
+    if workspace.c4_prefill_aux.logits_out_supported:
+        assert workspace.c4_prefill_aux.logits(4, 4160).stride() == (4352, 1)
+        assert workspace.c4_prefill_aux.logits(4, 4160).data_ptr() == workspace.c4_prefill_aux.scratch.data_ptr()
     if workspace.flashmla_prefill_o_accum is not None:
         splits = workspace.token_capacity + torch.cuda.get_device_properties().multi_processor_count
         assert workspace.flashmla_prefill_o_accum.shape == (1 + int(overlap), splits, 1, 64, 512)

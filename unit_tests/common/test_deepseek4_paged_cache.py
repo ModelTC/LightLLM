@@ -770,7 +770,10 @@ def test_compressor_checkpoint_continuation_matches_full_prefill(cache, ratio, l
     sin = torch.zeros_like(cos)
     weight = torch.ones(head_dim, dtype=torch.float32, device="cuda")
 
-    scratch = SimpleNamespace(c128_compress_scratch=torch.empty((1, length, head_dim), device="cuda"))
+    from lightllm.models.deepseek_v4.workspace import DeepseekV4Workspace
+
+    scratch = DeepseekV4Workspace.__new__(DeepseekV4Workspace)
+    scratch.c128_compress_scratch = torch.empty((1, length, head_dim), device="cuda")
 
     def compress(req_idx, slots, start, end, decode=False):
         positions = torch.arange(start, end, dtype=torch.int32, device="cuda")

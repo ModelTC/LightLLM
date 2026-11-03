@@ -87,8 +87,16 @@ class DeepseekV4Workspace:
         # Allocate after the KV pool, using the remaining runtime headroom.
         overlap = model.args.enable_decode_microbatch_overlap or model.args.enable_prefill_microbatch_overlap
         regions = 1 + int(overlap)
+        decode_requests = model.max_req_num
+        if model.args.enable_decode_microbatch_overlap:
+            decode_requests = (decode_requests + 1) // 2
+        decode_tokens = decode_requests * model.mtp_manager.get_decode_tokens_per_request(model.is_mtp_draft_model)
+        # Request limits precede MTP expansion, TP/SP alignment and graph padding.
+        token_capacity = max(self.token_capacity, model._align_decode_batch_size(max(1, decode_tokens)))
+        if not model.disable_cudagraph:
+            token_capacity = max(token_capacity, model.graph_max_batch_size)
         self.c128_compress_scratch = torch.empty(
-            (regions, self.token_capacity, model.config["head_dim"]), dtype=torch.float32, device="cuda"
+            (regions, token_capacity, model.config["head_dim"]), dtype=torch.float32, device="cuda"
         )
         if model.run_mode == "decode":
             return
@@ -117,6 +125,14 @@ class DeepseekV4Workspace:
             else:
                 self.flashmla_prefill_o_accum = torch.empty(o_shape, dtype=torch.float32, device="cuda")
                 self.flashmla_prefill_lse_accum = torch.empty(shape, dtype=torch.float32, device="cuda")
+
+    def get_c128_compress_scratch(self, token_num: int, microbatch_index: int):
+        regions, capacity, _ = self.c128_compress_scratch.shape
+        if not 0 <= microbatch_index < regions:
+            raise ValueError(f"DeepSeek-V4 C128 workspace has {regions} regions, got region {microbatch_index}")
+        if not 0 <= token_num <= capacity:
+            raise ValueError(f"DeepSeek-V4 C128 workspace capacity {capacity} cannot cover {token_num} tokens")
+        return self.c128_compress_scratch[microbatch_index, :token_num]
 
     def init_c4_prefill_aux(self, model):
         self.c4_prefill_aux = DeepseekV4C4PrefillWorkspace(
