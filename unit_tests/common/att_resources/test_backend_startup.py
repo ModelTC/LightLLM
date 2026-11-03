@@ -43,7 +43,7 @@ def test_backend_rejects_more_than_36_drafts_before_loading():
 @pytest.mark.parametrize("draft_full", [False, True])
 @pytest.mark.parametrize("draft_count", [1, 2])
 @pytest.mark.parametrize("encoding", ["None", "fp8kv_sph", "fp8kv_spt"])
-@pytest.mark.parametrize("via_backend", [False, True])
+@pytest.mark.parametrize("via_backend,cpu_sync", [(False, None), (True, None), (True, False), (True, True)])
 def test_backend_allocates_all_roles_before_warmup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -52,9 +52,11 @@ def test_backend_allocates_all_roles_before_warmup(
     draft_count: int,
     encoding: str,
     via_backend: bool,
+    cpu_sync: bool | None,
 ):
     args = StartArgs(
         model_dir=str(tmp_path),
+        enable_cpu_cache=cpu_sync is not None,
         data_type="bfloat16",
         llm_kv_type=encoding,
         page_size=4,
@@ -162,7 +164,9 @@ def test_backend_allocates_all_roles_before_warmup(
                             )
                             is state
                         )
-        model.prefill_att_backend = model.decode_att_backend = object()
+        model.prefill_att_backend = model.decode_att_backend = SimpleNamespace(
+            requires_cpu_cache_sync=bool(cpu_sync and model.is_mtp_draft_model)
+        )
         model.prefill_att_backend1 = model.decode_att_backend1 = None
         model.backends_bound = True
 
@@ -221,7 +225,14 @@ def test_backend_allocates_all_roles_before_warmup(
         assert manager.draft0_gdn_conv_bf16_ssm_fp32_state.big_pages_pool is None
         assert manager.full_att_allocator is None
         assert not warmed
-        return manager.get_full_att_token_bytes() * (32 + args.page_size), 0
+        staging_bytes = 0
+        if args.enable_cpu_cache:
+            assert all(item.backends_bound for item in models)
+            operator = manager.get_cpu_cache_operator()
+            assert operator.async_cache is (not cpu_sync)
+            staging_bytes = operator.get_staging_bytes()
+            assert (staging_bytes == 0) is cpu_sync
+        return manager.get_full_att_token_bytes() * (32 + args.page_size) + staging_bytes, 0
 
     monkeypatch.setattr(torch.cuda, "mem_get_info", memory_info)
     monkeypatch.setattr("lightllm.utils.envs_utils.set_model_init_status", ready.append)
