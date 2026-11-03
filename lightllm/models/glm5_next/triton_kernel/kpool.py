@@ -178,7 +178,7 @@ def compress_pools(
     )
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["TOKENS", "MAX_POOLS"])
 def _get_pool_ranges(
     Lengths,
     CuQLens,
