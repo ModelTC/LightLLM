@@ -1,3 +1,4 @@
+import os
 import torch
 import triton
 from lightllm.common.basemodel import TransformerLayerInferTpl
@@ -52,6 +53,11 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.flashmla_q_head_num_ = self.tp_q_head_num_
         self.tp_groups = self.o_groups // self.tp_world_size_
         self.enable_ep_moe = get_env_start_args().enable_ep_moe
+        self.enable_shared_expert_overlap = os.getenv("LIGHTLLM_DSV4_SHARED_EXPERT_OVERLAP", "1").upper() in (
+            "1",
+            "TRUE",
+            "ON",
+        )
         self.compressor = CompressorInfer(
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
@@ -550,23 +556,17 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         x = self._tpsp_allgather(input=x, infer_state=infer_state)
 
         topk_weights, topk_indices = self._select_experts(x, infer_state, layer_weight)
-        if not infer_state.is_prefill and layer_weight.experts.fuse_moe_impl.supports_decode_shared_expert_overlap:
-            out = layer_weight.experts.experts_with_topk(
-                input_tensor=x,
-                topk_weights=topk_weights,
-                topk_ids=topk_indices,
-                is_prefill=False,
-                infer_state=infer_state,
-                alpha=1.0,
-                limit=self.swiglu_limit,
-                clamp_up_add_one=False,
-                shared_expert_func=lambda: self._ffn_tp(x, infer_state, layer_weight),
-            )
-            return out if self.enable_ep_moe else self._tpsp_reduce(input=out, infer_state=infer_state)
-
-        # Routed experts can overwrite x in place, so compute the shared expert first.
-        shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
-        routed = layer_weight.experts.experts_with_topk(
+        if (
+            self.enable_shared_expert_overlap
+            and not infer_state.is_prefill
+            and layer_weight.experts.supports_decode_shared_expert_overlap
+        ):
+            shared_expert_func = lambda: self._ffn_tp(x, infer_state, layer_weight)
+        else:
+            # Routed experts can overwrite x in place, so compute shared first.
+            shared = self._ffn_tp(input=x, infer_state=infer_state, layer_weight=layer_weight)
+            shared_expert_func = None
+        out = layer_weight.experts.experts_with_topk(
             input_tensor=x,
             topk_weights=topk_weights,
             topk_ids=topk_indices,
@@ -575,8 +575,10 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
+            shared_expert_func=shared_expert_func,
         )
-        out = routed + shared
+        if shared_expert_func is None:
+            out = out + shared
         if self.enable_ep_moe:
             return out
         return self._tpsp_reduce(input=out, infer_state=infer_state)

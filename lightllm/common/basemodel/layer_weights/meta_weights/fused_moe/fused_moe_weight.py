@@ -164,6 +164,11 @@ class FusedMoeWeight(BaseWeightTpl):
             clamp_up_add_one=clamp_up_add_one,
         )
 
+    @property
+    def supports_decode_shared_expert_overlap(self) -> bool:
+        """Backend capability, independent of the model's overlap enable switch."""
+        return self.fuse_moe_impl.supports_decode_shared_expert_overlap
+
     def experts_with_topk(
         self,
         input_tensor: torch.Tensor,
@@ -176,6 +181,15 @@ class FusedMoeWeight(BaseWeightTpl):
         clamp_up_add_one: bool = True,
         shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
     ) -> torch.Tensor:
+        """Run routed experts, optionally including the shared expert in the result.
+
+        The callback requires decode overlap capability. It must treat input_tensor
+        as read-only and return a matching shared output without modifying routed
+        state. On successful eager/capture calls it runs exactly once on the current
+        compute stream, after combine SEND and before RECV. Graph replay executes
+        the captured GPU work rather than calling Python again. A callback result
+        is already added to the returned tensor; without one the result is routed-only.
+        """
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
             moe_capture_callback(topk_ids)

@@ -416,7 +416,8 @@ def fused_experts_impl(
             return_recv_hook=shared_expert_func is not None,
         )
         if shared_expert_func is not None:
-            # Launch shared computation while the combine send is in flight.
+            # SEND, shared work, RECV and the final add use the current compute
+            # stream. The callback is read-only on hidden_states and runs once.
             shared = shared_expert_func()
             hook()
             return combined_x + shared
