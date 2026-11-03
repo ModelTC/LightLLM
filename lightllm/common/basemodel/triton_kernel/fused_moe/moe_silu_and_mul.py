@@ -14,7 +14,7 @@ def _silu_and_mul_quant_fp8(
     input_stride: tl.constexpr,
     size_n: tl.constexpr,
     groups,
-    scale_stride_n: tl.constexpr,
+    scale_stride_n,
     limit,
     fp8_max: tl.constexpr,
     GROUP_SIZE: tl.constexpr,

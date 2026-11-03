@@ -97,11 +97,9 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
     ) -> torch.Tensor:
         qweight = weight_pack.weight
         weight_scale = weight_pack.weight_scale
-        input_scale = None
-        alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
-        m, k = input_tensor.shape
-        n = qweight.shape[0]
+        input_scale = getattr(input_tensor, "scale", None)
         if input_scale is None:
+            alloc_func = torch.empty if not use_custom_tensor_mananger else self.cache_manager.empty
             qinput_tensor, input_scale = per_token_group_quant_fp8(
                 input_tensor,
                 self.block_size,
@@ -112,32 +110,15 @@ class DeepGEMMFP8w8a8B128QuantizationMethod(DeepGEMMBaseQuantizationMethod):
                 use_ue8m0_scales=self.use_ue8m0_scales,
                 use_packed_ue8m0=self.use_packed_ue8m0,
             )
+        else:
+            assert out is not None, "prequantized input requires an explicit floating-point output"
+            qinput_tensor = input_tensor
 
-        if out is None:
-            out = alloc_func((m, n), dtype=input_tensor.dtype, device=input_tensor.device)
-        _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out)
-        return out
-
-    def apply_swiglu(self, input_tensor, weight_pack, limit=None, out=None, use_custom_tensor_mananger=True, bias=None):
-        from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_quant_fp8
-
-        if self.use_packed_ue8m0 or not self.use_ue8m0_scales:
-            return super().apply_swiglu(input_tensor, weight_pack, limit, out, use_custom_tensor_mananger, bias)
-        alloc_func = self.cache_manager.empty if use_custom_tensor_mananger else torch.empty
-        quant, scale = silu_and_mul_quant_fp8(
-            input_tensor,
-            self.block_size,
-            weight_pack.weight.dtype,
-            limit=limit,
-            alloc_func=alloc_func,
-        )
         if out is None:
             out = alloc_func(
-                (input_tensor.shape[0], weight_pack.weight.shape[0]),
-                dtype=input_tensor.dtype,
-                device=input_tensor.device,
+                (input_tensor.shape[0], qweight.shape[0]), dtype=input_tensor.dtype, device=input_tensor.device
             )
-        _deepgemm_fp8_nt((quant, scale), (weight_pack.weight, weight_pack.weight_scale), out)
+        _deepgemm_fp8_nt((qinput_tensor, input_scale), (qweight, weight_scale), out)
         return out
 
     def _create_weight(
