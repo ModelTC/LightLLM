@@ -28,6 +28,7 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.device_utils import has_nvlink
 from lightllm.utils.envs_utils import (
     get_env_start_args,
+    get_deepep_num_max_dispatch_tokens_per_rank,
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
     get_redundancy_expert_num,
@@ -112,6 +113,7 @@ class DistributeGroupManager:
         self.ep_low_latency_buffer = None
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
+        self.ep_non_overlap_num_sms = None
 
     def __len__(self):
         return len(self.groups)
@@ -167,7 +169,7 @@ class DistributeGroupManager:
 
         ``expert_quant_method_names`` 是各 MoE 层最终绑定的 quant method 名称集合。
         同一个模型可能逐层混用 FP4 和 FP8：SM100 FP4 层走 Mega MoE，其他层走
-        DeepEP legacy low-latency 路径。这里只为实际存在的执行路径分配 buffer，
+        DeepEP Elastic 路径。这里只为实际存在的执行路径分配 buffer，
         避免为未使用的路径长期占用显存。
         """
         enable_ep_moe = get_env_start_args().enable_ep_moe
@@ -178,8 +180,16 @@ class DistributeGroupManager:
             self.ep_low_latency_buffer = None
             self.ep_mega_moe_buffer = None
             self.ep_num_sms = None
+            self.ep_non_overlap_num_sms = None
             return
         assert HAS_DEEPEP, "deep_ep is required for expert parallelism"
+
+        from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep
+
+        # LightLLM 的 expanded layout 按 128 行构造 expert 分段。初始化阶段同步
+        # 设置 DeepGEMM 的全局 M 对齐值，后续 prefill 和 decode 都通过 getter
+        # 读取它，避免通信布局与 GEMM 分块不一致。
+        grouped_fused_moe_ep.set_mk_alignment_for_contiguous_layout(128)
 
         global_world_size = get_global_world_size()
         deepep_group = dist.new_group(list(range(global_world_size)))
@@ -190,7 +200,7 @@ class DistributeGroupManager:
             group=deepep_group,
             device_ids=[torch.cuda.current_device()],
         )
-        self.ll_num_tokens = prefill_num_max_dispatch_tokens_per_rank
+        self.ll_num_tokens = get_deepep_num_max_dispatch_tokens_per_rank()
         self.ll_decode_num_tokens = decode_num_max_dispatch_tokens_per_rank
         self.ll_hidden = hidden_size
         self.ll_num_experts = n_routed_experts + get_redundancy_expert_num() * global_world_size
@@ -212,13 +222,14 @@ class DistributeGroupManager:
         is_sm100 = is_sm100_gpu()
 
         # Buffer 选择规则：
-        # 1. 非 SM100 不支持 Mega MoE，只初始化 legacy low-latency buffer；
+        # 1. 非 SM100 不支持 Mega MoE，只保留 prefill workspace 用的 RDMA buffer；
         # 2. SM100 全部 MoE 层为 FP4，只初始化 Mega MoE buffer；
-        # 3. SM100 全部 MoE 层为 FP8，只初始化 legacy low-latency buffer；
+        # 3. SM100 全部 MoE 层为 FP8，只保留 prefill workspace buffer；
         # 4. SM100 逐层混合 FP4/FP8，两套 buffer 都要初始化。
+        # Decode 计算走 ElasticBuffer 的 expanded 布局，不再调用 low-latency dispatch。
         if is_sm100:
             # 只要存在一个 FP4 MoE 层，就需要 Mega MoE buffer；只要存在一个非 FP4
-            # MoE 层，就需要 legacy low-latency buffer。FP4/FP8 逐层混用时两者都会初始化。
+            # MoE 层，prefill 就需要复用 RDMA workspace。FP4/FP8 逐层混用时两者都会初始化。
             has_mega_moe_layer = mega_moe_quant_method in expert_quant_method_names
             has_legacy_moe_layer = any(
                 method_name != mega_moe_quant_method for method_name in expert_quant_method_names
@@ -230,8 +241,9 @@ class DistributeGroupManager:
             enable_low_latency_buffer = True
 
         if enable_low_latency_buffer:
-            # FP8 MoE 的 decode 使用 legacy low-latency buffer；prefill 阶段还会将其
-            # 空闲的本地 RDMA storage 复用为分块 grouped GEMM 的临时 workspace。
+            # Prefill expanded grouped GEMM 复用这块 RDMA storage 作为 workspace。
+            # Decode 不再走 low-latency kernel，容量仍取 decode hint 与 prefill
+            # workspace 的较大值，避免后续若再次使用该 buffer 时容量不足。
             decode_size_hint = deep_ep.Buffer.get_low_latency_rdma_size_hint(
                 self.ll_decode_num_tokens, self.ll_hidden, global_world_size, self.ll_num_experts
             )
@@ -281,6 +293,25 @@ class DistributeGroupManager:
         )
         theoretical_sms = self.ep_buffer.get_theoretical_num_sms(self.ll_num_experts, num_experts_per_tok)
         self._set_num_sms_for_deep_gemm(theoretical_sms)
+
+        # 串行路径会在通信后立即等待，不需要为并行计算预留大部分 SM。
+        # DeepEP 要求 num_sms 为偶数，因此将设备总 SM 数的 60% 向下取偶数。
+        device_sms = get_device_sm_count()
+        non_overlap_num_sms = int(device_sms * 0.6) // 2 * 2
+        self.set_ep_num_sms_for_non_overlap(non_overlap_num_sms)
+        logger.info(
+            "DeepEP SM allocation: overlap=%s, non_overlap=%s, device=%s",
+            self.ep_num_sms,
+            self.ep_non_overlap_num_sms,
+            device_sms,
+        )
+
+    def set_ep_num_sms_for_non_overlap(self, num_sms: int) -> None:
+        """设置非 overlap 通信使用的 SM 数量，不改变 DeepGEMM 的 SM 配额。"""
+        device_sms = get_device_sm_count()
+        assert 4 <= num_sms <= device_sms
+        assert num_sms % 2 == 0
+        self.ep_non_overlap_num_sms = num_sms
 
     def _set_num_sms_for_deep_gemm(self, deepep_sms: int):
         try:

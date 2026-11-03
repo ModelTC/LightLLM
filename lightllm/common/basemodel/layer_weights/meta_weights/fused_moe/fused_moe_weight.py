@@ -209,16 +209,17 @@ class FusedMoeWeight(BaseWeightTpl):
             **extra,
         )
 
-    def low_latency_dispatch(
+    def decode_dispatch(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
     ):
-        assert self.enable_ep_moe, "low_latency_dispatch is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.low_latency_dispatch(
+        assert self.enable_ep_moe, "decode_dispatch requires enable_ep_moe"
+        return self.fuse_moe_impl.decode_dispatch(
             hidden_states=hidden_states,
             router_logits=router_logits,
             e_score_correction_bias=self.e_score_correction_bias,
+            w13=self.w13,
             use_grouped_topk=self.use_grouped_topk,
             num_experts_per_tok=self.num_experts_per_tok,
             norm_topk_prob=self.norm_topk_prob,
@@ -227,15 +228,16 @@ class FusedMoeWeight(BaseWeightTpl):
             scoring_func=self.scoring_func,
         )
 
-    def low_latency_dispatch_with_topk(
+    def decode_dispatch_with_topk(
         self,
         hidden_states: torch.Tensor,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
-        assert self.enable_ep_moe, "low_latency_dispatch_with_topk is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.low_latency_dispatch_with_topk(
+        assert self.enable_ep_moe, "decode_dispatch_with_topk requires enable_ep_moe"
+        return self.fuse_moe_impl.decode_dispatch_with_topk(
             hidden_states=hidden_states,
+            w13=self.w13,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
         )
@@ -263,37 +265,37 @@ class FusedMoeWeight(BaseWeightTpl):
             scoring_func=self.scoring_func,
         )
 
-    def dispatch(
+    def prefill_dispatch(
         self,
         qinput_tensor: Tuple[torch.Tensor],
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
         overlap_event: Optional[Any] = None,
     ):
-        assert self.enable_ep_moe, "dispatch is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.dispatch(
+        assert self.enable_ep_moe, "prefill_dispatch is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.prefill_dispatch(
             qinput_tensor=qinput_tensor,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
             overlap_event=overlap_event,
         )
 
-    def masked_group_gemm(
+    def decode_masked_group_gemm(
         self,
         recv_x: Tuple[torch.Tensor],
-        masked_m: torch.Tensor,
+        ep_handle: Any,
         dtype: torch.dtype,
         expected_m: int,
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
     ):
-        assert self.enable_ep_moe, "masked_group_gemm is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.masked_group_gemm(
+        assert self.enable_ep_moe, "decode_masked_group_gemm is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.decode_masked_group_gemm(
             recv_x=recv_x,
             w13=self.w13,
             w2=self.w2,
-            masked_m=masked_m,
+            ep_handle=ep_handle,
             dtype=dtype,
             expected_m=expected_m,
             alpha=alpha,
@@ -332,29 +334,27 @@ class FusedMoeWeight(BaseWeightTpl):
             clamp_up_add_one=clamp_up_add_one,
         )
 
-    def low_latency_combine(
+    def decode_combine(
         self,
-        gemm_out_b: torch.Tensor,
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-        handle: Any,
+        expert_output: torch.Tensor,
+        ep_handle: Any,
+        recv_topk_weights: torch.Tensor,
     ):
-        assert self.enable_ep_moe, "low_latency_combine is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.low_latency_combine(
-            gemm_out_b=gemm_out_b,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            handle=handle,
+        assert self.enable_ep_moe, "decode_combine is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.decode_combine(
+            expert_output=expert_output,
+            ep_handle=ep_handle,
+            recv_topk_weights=recv_topk_weights,
         )
 
-    def combine(
+    def prefill_combine(
         self,
         gemm_out_b: torch.Tensor,
         handle: Any,
         overlap_event: Optional[Any] = None,
     ):
-        assert self.enable_ep_moe, "combine is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.combine(
+        assert self.enable_ep_moe, "prefill_combine is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.prefill_combine(
             gemm_out_b=gemm_out_b,
             handle=handle,
             overlap_event=overlap_event,

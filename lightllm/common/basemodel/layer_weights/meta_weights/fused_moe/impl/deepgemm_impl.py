@@ -6,14 +6,17 @@ from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.utils.envs_utils import (
     get_deepep_num_max_dispatch_tokens_per_rank_prefill,
     get_deepep_num_max_dispatch_tokens_per_rank_decode,
-    get_env_use_ue8m0_scales,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import (
     fused_experts,
     get_ep_num_sms,
-    masked_group_gemm,
+    decode_masked_group_gemm,
     chunked_expanded_moe_forward,
     quantize_fused_experts_input,
+    get_mk_alignment_for_contiguous_layout,
+)
+from lightllm.common.basemodel.triton_kernel.fused_moe.deepep_expanded_layout_kernels import (
+    ep_reduce_decode_output,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
@@ -98,11 +101,12 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             shared_expert_func=shared_expert_func,
         )
 
-    def low_latency_dispatch(
+    def decode_dispatch(
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
         e_score_correction_bias: torch.Tensor,
+        w13: WeightPack,
         use_grouped_topk: bool,
         num_experts_per_tok: int,
         norm_topk_prob: bool,
@@ -121,33 +125,45 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
-
-        return self.low_latency_dispatch_with_topk(
+        return self.decode_dispatch_with_topk(
             hidden_states=hidden_states,
+            w13=w13,
             topk_idx=topk_idx,
             topk_weights=topk_weights,
         )
 
-    def low_latency_dispatch_with_topk(
+    def decode_dispatch_with_topk(
         self,
         hidden_states: torch.Tensor,
+        w13: WeightPack,
         topk_idx: torch.Tensor,
         topk_weights: torch.Tensor,
     ):
         topk_idx = topk_idx.to(torch.long)
-        num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
-        use_fp8_w8a8 = self.quant_method.method_name != "none"
-        recv_x, masked_m, handle, event, hook = dist_group_manager.ep_low_latency_buffer.low_latency_dispatch(
+        qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
+        recv_x, _, recv_topk_weights, ep_handle, event = dist_group_manager.ep_buffer.dispatch(
+            qinput_tensor,
             topk_idx=topk_idx,
-            x=hidden_states,
-            num_max_dispatch_tokens_per_rank=num_max_dispatch_tokens_per_rank,
+            topk_weights=topk_weights,
             num_experts=self.total_expert_num_contain_redundancy,
-            use_fp8=use_fp8_w8a8,
-            round_scale=get_env_use_ue8m0_scales(),
-            async_finish=False,
-            return_recv_hook=True,
+            num_max_tokens_per_rank=get_deepep_num_max_dispatch_tokens_per_rank_decode(),
+            expert_alignment=get_mk_alignment_for_contiguous_layout(),
+            num_sms=get_ep_num_sms(overlap_with_compute=True),
+            async_with_compute_stream=True,
+            # Decode 不传 previous_event，输出直接归属计算流；DeepEP 会为
+            # 通信流的异步访问登记 allocator 生命周期。
+            allocate_on_comm_stream=False,
+            do_cpu_sync=False,
+            do_handle_copy=False,
+            do_expand=True,
+            do_zero_padding=True,
+            use_tma_aligned_col_major_sf=True,
         )
-        return recv_x, masked_m, topk_idx, topk_weights, handle, hook
+
+        def hook():
+            event.current_stream_wait()
+
+        return recv_x, ep_handle, recv_topk_weights, hook
 
     def quantize_dispatch_input(self, hidden_states: torch.Tensor, w13: WeightPack):
         return quantize_fused_experts_input(hidden_states, w13, self.quant_method)
@@ -179,7 +195,7 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
 
-    def dispatch(
+    def prefill_dispatch(
         self,
         qinput_tensor: Tuple[torch.Tensor],
         topk_idx: torch.Tensor,
@@ -194,8 +210,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             topk_weights=topk_weights,
             num_experts=self.total_expert_num_contain_redundancy,
             num_max_tokens_per_rank=num_max_tokens_per_rank,
-            expert_alignment=128,
-            num_sms=get_ep_num_sms(),
+            expert_alignment=get_mk_alignment_for_contiguous_layout(),
+            num_sms=get_ep_num_sms(overlap_with_compute=True),
             previous_event=overlap_event,
             async_with_compute_stream=True,
             allocate_on_comm_stream=True,
@@ -210,12 +226,12 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
 
         return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
-    def masked_group_gemm(
+    def decode_masked_group_gemm(
         self,
         recv_x: Tuple[torch.Tensor],
         w13: WeightPack,
         w2: WeightPack,
-        masked_m: torch.Tensor,
+        ep_handle: Any,
         dtype: torch.dtype,
         expected_m: int,
         alpha: Optional[float] = None,
@@ -224,14 +240,15 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
     ):
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
-        return masked_group_gemm(
-            recv_x,
-            masked_m,
-            dtype,
-            w13_weight,
-            w13_scale,
-            w2_weight,
-            w2_scale,
+        return decode_masked_group_gemm(
+            recv_x=recv_x,
+            expert_token_psum=ep_handle.psum_num_recv_tokens_per_expert,
+            expert_alignment=ep_handle.expert_alignment,
+            dtype=dtype,
+            w1=w13_weight,
+            w1_scale=w13_scale,
+            w2=w2_weight,
+            w2_scale=w2_scale,
             expected_m=expected_m,
             alpha=alpha,
             limit=limit,
@@ -298,33 +315,60 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
                     clamp_up_add_one=clamp_up_add_one,
                 )
                 _gemm_out_a, _silu_out = None, None
+        # 只为占显存主体的 recv_x 登记计算流；较小的路由 metadata 继续由
+        # handle 和当前调用栈维持生命周期。
+        compute_stream = torch.cuda.current_stream()
+        recv_x[0].record_stream(compute_stream)
+        recv_x[1].record_stream(compute_stream)
         del recv_x
         return gather_out
 
-    def low_latency_combine(
+    def decode_combine(
         self,
-        gemm_out_b: torch.Tensor,
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-        handle: Any,
+        expert_output: torch.Tensor,
+        ep_handle: Any,
+        recv_topk_weights: torch.Tensor,
     ):
-        combined_x, event_overlap, hook = dist_group_manager.ep_low_latency_buffer.low_latency_combine(
-            gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=True
+        # 阶段 1：把按 expert 展开的输出归约回去重接收 token 布局。
+        # psum_num_recv_tokens_per_scaleup_rank 的最后一项是去重接收 token 数，
+        # 不是按 expert 展开后的有效行数。
+        dense_output, compact_metadata = ep_reduce_decode_output(
+            expert_output=expert_output,
+            route_weights=recv_topk_weights,
+            recv_src_metadata=ep_handle.recv_src_metadata,
+            num_valid_recv_tokens=ep_handle.psum_num_recv_tokens_per_scaleup_rank[-1:],
         )
+        ep_handle.recv_src_metadata = compact_metadata
+
+        # 阶段 2：compact metadata 的第一个 top-k 槽位指向同序 dense row，
+        # 其余槽位置为 -1。异步 combine 返回 event，由调用方在消费输出前等待。
+        combined_x, _, event = dist_group_manager.ep_buffer.combine(
+            dense_output,
+            ep_handle,
+            topk_weights=None,
+            num_sms=get_ep_num_sms(overlap_with_compute=True),
+            async_with_compute_stream=True,
+            # Decode combine 没有 previous_event，输出归属计算流；通信流的异步
+            # 生命周期由 DeepEP 内部统一登记。
+            allocate_on_comm_stream=False,
+        )
+
+        def hook():
+            event.current_stream_wait()
+
         return combined_x, hook
 
-    def combine(
+    def prefill_combine(
         self,
         gemm_out_b: torch.Tensor,
         handle: Any,
         overlap_event: Optional[Any] = None,
     ):
-        # normal combine
         combined_x, _, event = dist_group_manager.ep_buffer.combine(
             gemm_out_b,
             handle,
             topk_weights=None,
-            num_sms=get_ep_num_sms(),
+            num_sms=get_ep_num_sms(overlap_with_compute=True),
             previous_event=overlap_event,
             async_with_compute_stream=True,
             allocate_on_comm_stream=True,

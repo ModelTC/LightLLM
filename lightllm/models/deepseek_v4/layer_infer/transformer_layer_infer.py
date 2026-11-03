@@ -181,24 +181,26 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         x1 = self._tpsp_allgather(x1.view(-1, self.embed_dim_), infer_state1)
         weights1, indices1 = self._select_experts(x1, infer_state1, layer_weight)
 
-        recv_x0, recv_indices0, recv_weights0, recv_count0, handle0, dispatch_hook0 = experts.dispatch(
+        recv_x0, recv_indices0, recv_weights0, recv_count0, handle0, dispatch_hook0 = experts.prefill_dispatch(
             qinput0,
             indices0,
             weights0,
             overlap_event=dispatch_event0,
         )
+        del qinput0, indices0, weights0
         dispatch_hook0()
 
         indices1 = indices1.to(torch.long)
         qinput1 = experts.quantize_dispatch_input(x1)
 
         dispatch_event1 = ElasticBuffer.capture()
-        recv_x1, recv_indices1, recv_weights1, recv_count1, handle1, dispatch_hook1 = experts.dispatch(
+        recv_x1, recv_indices1, recv_weights1, recv_count1, handle1, dispatch_hook1 = experts.prefill_dispatch(
             qinput1,
             indices1,
             weights1,
             overlap_event=dispatch_event1,
         )
+        del qinput1, indices1, weights1
 
         moe_out0 = experts.prefilled_group_gemm(
             recv_count0,
@@ -213,9 +215,11 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
+        del recv_x0
 
         combine_event0 = ElasticBuffer.capture()
-        routed0, combine_hook0 = experts.combine(moe_out0, handle0, overlap_event=combine_event0)
+        routed0, combine_hook0 = experts.prefill_combine(moe_out0, handle0, overlap_event=combine_event0)
+        del moe_out0
 
         dispatch_hook1()
         moe_out1 = experts.prefilled_group_gemm(
@@ -231,9 +235,11 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
+        del recv_x1
 
         combine_event1 = ElasticBuffer.capture()
-        routed1, combine_hook1 = experts.combine(moe_out1, handle1, overlap_event=combine_event1)
+        routed1, combine_hook1 = experts.prefill_combine(moe_out1, handle1, overlap_event=combine_event1)
+        del moe_out1
 
         shared0 = self._ffn_shared_expert(x0, infer_state, layer_weight)
         combine_hook0()
@@ -277,9 +283,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         infer_state1.call_overlap_hook()
 
         shared0 = self._ffn_shared_expert(x0, infer_state, layer_weight)
-        recv_x0, masked_m0, indices0, weights0, handle0, dispatch_hook0 = experts.low_latency_dispatch_with_topk(
-            x0, indices0, weights0
-        )
+        recv_x0, handle0, recv_weights0, dispatch_hook0 = experts.decode_dispatch_with_topk(x0, indices0, weights0)
 
         x1, residual1, residual_mix1, post_mix1 = self._hc_attn_in(input_embdings1, layer_weight)
         x1 = self.token_attention_forward(x1, infer_state1, layer_weight)
@@ -289,42 +293,44 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         dispatch_hook0()
 
         shared1 = self._ffn_shared_expert(x1, infer_state1, layer_weight)
-        recv_x1, masked_m1, indices1, weights1, handle1, dispatch_hook1 = experts.low_latency_dispatch_with_topk(
-            x1, indices1, weights1
-        )
+        recv_x1, handle1, recv_weights1, dispatch_hook1 = experts.decode_dispatch_with_topk(x1, indices1, weights1)
 
         expected_m = triton.cdiv(
             x0.shape[0] * get_global_world_size() * self.num_experts_per_tok,
             layer_weight.n_routed_experts,
         )
-        moe_out0 = experts.masked_group_gemm(
+        moe_out0 = experts.decode_masked_group_gemm(
             recv_x0,
-            masked_m0,
+            handle0,
             x0.dtype,
             expected_m,
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
+        del recv_x0
 
         dispatch_hook1()
-        routed0, combine_hook0 = experts.low_latency_combine(moe_out0, indices0, weights0, handle0)
+        routed0, combine_hook0 = experts.decode_combine(moe_out0, handle0, recv_weights0)
+        del moe_out0
 
-        moe_out1 = experts.masked_group_gemm(
+        moe_out1 = experts.decode_masked_group_gemm(
             recv_x1,
-            masked_m1,
+            handle1,
             x1.dtype,
             expected_m,
             alpha=1.0,
             limit=self.swiglu_limit,
             clamp_up_add_one=False,
         )
+        del recv_x1
 
         combine_hook0()
         routed0.add_(shared0)
         output0 = self._hc_ffn_out(routed0, residual0, residual_mix0, post_mix0)
 
-        routed1, combine_hook1 = experts.low_latency_combine(moe_out1, indices1, weights1, handle1)
+        routed1, combine_hook1 = experts.decode_combine(moe_out1, handle1, recv_weights1)
+        del moe_out1
         if self.is_last_layer:
             combine_hook1()
             routed1.add_(shared1)

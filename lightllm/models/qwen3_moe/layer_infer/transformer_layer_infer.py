@@ -160,14 +160,10 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state1.hook = None
 
         # 0 dispatch
-        (
-            _0_recv_x,
-            _0_masked_m,
-            _0_topk_idx,
-            _0_topk_weight,
-            _0_handle,
-            _0_hook,
-        ) = layer_weight.experts.low_latency_dispatch(_0_input1, _0_router_logits)
+        _0_recv_x, _0_handle, _0_recv_topk_weights, _0_hook = layer_weight.experts.decode_dispatch(
+            _0_input1, _0_router_logits
+        )
+        del _0_input1, _0_router_logits
         infer_state.hook = _0_hook
 
         # 1 attention
@@ -190,21 +186,20 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state.hook = None
 
         # 1 dispatch
-        (
-            _1_recv_x,
-            _1_masked_m,
-            _1_topk_idx,
-            _1_topk_weight,
-            _1_handle,
-            _1_hook,
-        ) = layer_weight.experts.low_latency_dispatch(_1_input1, _1_router_logits)
+        _1_recv_x, _1_handle, _1_recv_topk_weights, _1_hook = layer_weight.experts.decode_dispatch(
+            _1_input1, _1_router_logits
+        )
+        del _1_input1, _1_router_logits
         infer_state1.hook = _1_hook
 
         # moe calu
         expected_m = triton.cdiv(
             input_embdings.shape[0] * get_global_world_size() * self.num_experts_per_tok, self.n_routed_experts
         )
-        _0_moe_out = layer_weight.experts.masked_group_gemm(_0_recv_x, _0_masked_m, input_embdings.dtype, expected_m)
+        _0_moe_out = layer_weight.experts.decode_masked_group_gemm(
+            _0_recv_x, _0_handle, input_embdings.dtype, expected_m
+        )
+        del _0_recv_x
 
         # 1 hook
         if getattr(infer_state1, "hook", None) is not None:
@@ -212,25 +207,27 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             infer_state1.hook = None
 
         # 0 combine
-        _0_ffn_out, _0_hook = layer_weight.experts.low_latency_combine(
-            _0_moe_out, _0_topk_idx, _0_topk_weight, _0_handle
-        )
+        _0_ffn_out, _0_hook = layer_weight.experts.decode_combine(_0_moe_out, _0_handle, _0_recv_topk_weights)
+        del _0_moe_out
 
         infer_state.hook = _0_hook
 
         # to do moe caclue
-        _1_moe_out = layer_weight.experts.masked_group_gemm(_1_recv_x, _1_masked_m, input_embdings1.dtype, expected_m)
+        _1_moe_out = layer_weight.experts.decode_masked_group_gemm(
+            _1_recv_x, _1_handle, input_embdings1.dtype, expected_m
+        )
+        del _1_recv_x
 
         # 0 hook
         if getattr(infer_state, "hook", None) is not None:
             infer_state.hook()
             input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
+            del _0_ffn_out
             infer_state.hook = None
 
         # 1 combine
-        _1_ffn_out, _1_hook = layer_weight.experts.low_latency_combine(
-            _1_moe_out, _1_topk_idx, _1_topk_weight, _1_handle
-        )
+        _1_ffn_out, _1_hook = layer_weight.experts.decode_combine(_1_moe_out, _1_handle, _1_recv_topk_weights)
+        del _1_moe_out
 
         def _1_hook_post():
             _1_hook()
@@ -275,6 +272,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         _0_topk_weight, _0_topk_idx, _0_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
             _0_input1, _0_router_logits
         )
+        del _0_router_logits, _0_input1
         from deep_ep import ElasticBuffer
 
         _0_overlap_event = ElasticBuffer.capture()
@@ -302,7 +300,10 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_num_recv_tokens_per_expert_list,
             _0_handle,
             _0_hook,
-        ) = layer_weight.experts.dispatch(_0_qinput_tensor, _0_topk_idx, _0_topk_weight, overlap_event=_0_overlap_event)
+        ) = layer_weight.experts.prefill_dispatch(
+            _0_qinput_tensor, _0_topk_idx, _0_topk_weight, overlap_event=_0_overlap_event
+        )
+        del _0_qinput_tensor, _0_topk_idx, _0_topk_weight
         infer_state.hook = _0_hook
 
         # wait 0 dispatch
@@ -313,6 +314,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         _1_topk_weight, _1_topk_idx, _1_qinput_tensor = layer_weight.experts.select_experts_and_quant_input(
             _1_input1, _1_router_logits
         )
+        del _1_router_logits, _1_input1
         _1_overlap_event = ElasticBuffer.capture()
 
         # 0 moe calu
@@ -325,6 +327,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_recv_topk_weight,
             microbatch_index=0,
         )
+        del _0_recv_x
 
         # 1 dispatch execute
         (
@@ -334,7 +337,10 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_num_recv_tokens_per_expert_list,
             _1_handle,
             _1_hook,
-        ) = layer_weight.experts.dispatch(_1_qinput_tensor, _1_topk_idx, _1_topk_weight, overlap_event=_1_overlap_event)
+        ) = layer_weight.experts.prefill_dispatch(
+            _1_qinput_tensor, _1_topk_idx, _1_topk_weight, overlap_event=_1_overlap_event
+        )
+        del _1_qinput_tensor, _1_topk_idx, _1_topk_weight
         infer_state1.hook = _1_hook
 
         # wait 1 dispatch
@@ -344,7 +350,8 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
 
         _0_combine_event = ElasticBuffer.capture()
         # 0 combine execute
-        _0_ffn_out, _0_hook = layer_weight.experts.combine(_0_moe_out, _0_handle, _0_combine_event)
+        _0_ffn_out, _0_hook = layer_weight.experts.prefill_combine(_0_moe_out, _0_handle, _0_combine_event)
+        del _0_moe_out
         infer_state.hook = _0_hook
 
         # 1 moe calc
@@ -357,6 +364,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_recv_topk_weight,
             microbatch_index=1,
         )
+        del _1_recv_x
 
         # wait 0 combine
         if getattr(infer_state, "hook", None) is not None:
@@ -368,7 +376,7 @@ class Qwen3MOETransformerLayerInfer(LlamaTransformerLayerInfer):
         input_embdings.add_(_0_ffn_out.view(-1, self.embed_dim_))
 
         # 1 combine execute
-        _1_ffn_out, _1_hook = layer_weight.experts.combine(_1_moe_out, _1_handle, _1_combine_event)
+        _1_ffn_out, _1_hook = layer_weight.experts.prefill_combine(_1_moe_out, _1_handle, _1_combine_event)
 
         def _1_hook_post():
             _1_hook()
