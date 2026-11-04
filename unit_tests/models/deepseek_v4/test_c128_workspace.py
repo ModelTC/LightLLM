@@ -536,9 +536,7 @@ def test_two_stages_match_fused_kernel_and_reference(scenario):
             q_start = token - int(spec.b_mtp[token])
             seq_len = int(spec.b_seq_len[token])
             req_idx = int(spec.b_req_idx[token])
-        expected = reference_window(
-            spec.values, history, int(positions[token]), seq_len, ready, q_start, req_idx
-        )
+        expected = reference_window(spec.values, history, int(positions[token]), seq_len, ready, q_start, req_idx)
         torch.testing.assert_close(compressed[token], expected, rtol=1e-5, atol=1e-6)
         normed = reference_norm(compressed[token], spec.norm, spec.eps)
         slot = int(spec.mem_index[token] // 128)
