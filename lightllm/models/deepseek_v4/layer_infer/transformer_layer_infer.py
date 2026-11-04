@@ -17,6 +17,15 @@ from lightllm.models.deepseek_v4.triton_kernel.topk_softplus_sqrt import topk_so
 
 
 class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
+    @classmethod
+    def get_prefill_aux_stream(cls: type["DeepseekV4TransformerLayerInfer"]) -> torch.cuda.Stream:
+        """Return the single C4 prefill auxiliary stream shared by every layer in this process."""
+        stream: torch.cuda.Stream | None = getattr(cls, "_prefill_aux_stream", None)
+        if stream is None:
+            stream = torch.cuda.Stream()
+            setattr(cls, "_prefill_aux_stream", stream)
+        return stream
+
     def __init__(self, layer_num, network_config):
         super().__init__(layer_num, network_config)
         self.eps_ = network_config["rms_norm_eps"]
@@ -58,7 +67,6 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
         self.index_infer = DeepseekV4IndexInfer(
             layer_idx=self.layer_num_, network_config=self.network_config_, tp_world_size=self.tp_world_size_
         )
-        self.dsv4_prefill_aux_stream = None
 
     def _hc_attn_in(self, input_embdings, layer_weight: DeepseekV4TransformerLayerWeight):
         """Run attention pre + norm. Later layers also finish the previous FFN post.
@@ -430,13 +438,14 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
 
     def _compress_and_index(self, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
         cos_table, sin_table = self.cos_compress_table, self.sin_compress_table
-        aux_stream = self.dsv4_prefill_aux_stream
+        c4_aux = infer_state.dsv4_workspace.c4_prefill_aux if infer_state.dsv4_workspace is not None else None
         if (
             infer_state.is_prefill
             and self.compress_ratio == 4
-            and aux_stream is not None
+            and c4_aux is not None
             and not torch.cuda.is_current_stream_capturing()
         ):
+            aux_stream = self.get_prefill_aux_stream()
             main_stream = torch.cuda.current_stream()
             aux_stream.wait_stream(main_stream)  # aux waits for x / q_lora produced on main
             with torch.cuda.stream(aux_stream):
@@ -450,7 +459,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                     cos_table,
                     sin_table,
                     use_custom_tensor_manager=False,
-                    c4_aux_workspace=infer_state.dsv4_workspace.c4_prefill_aux,
+                    c4_aux_workspace=c4_aux,
                 )
                 meta = self.index_infer.build_metadata(
                     x,
@@ -458,7 +467,7 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
                     infer_state,
                     layer_weight,
                     use_custom_tensor_manager=False,
-                    c4_aux_workspace=infer_state.dsv4_workspace.c4_prefill_aux,
+                    c4_aux_workspace=c4_aux,
                 )
             self.compressor.compress(x, infer_state, layer_weight, cos_table, sin_table)
             main_stream.wait_stream(aux_stream)  # join before prefill_att reads the indices / latent KV

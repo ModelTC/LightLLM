@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import os
 from typing import TYPE_CHECKING
 
 import torch
@@ -236,16 +235,10 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
 
     def _init_custom(self):
         self._init_to_get_rotary()
-        prefill_aux_stream = None
-        if os.getenv("LIGHTLLM_DSV4_PREFILL_OVERLAP", "1") == "1" and not self.args.enable_prefill_microbatch_overlap:
-            prefill_aux_stream = torch.cuda.Stream()
         self.dsv4_workspace = DeepseekV4Workspace(self)
         self.dsv4_workspace.init_c128_compress_scratch(self)
-        if prefill_aux_stream is not None and self.run_mode == "prefill" and 4 in self.config["compress_ratios"]:
-            with torch.cuda.stream(prefill_aux_stream):
-                self.dsv4_workspace.init_c4_prefill_aux(self)
-        for layer in self.layers_infer:
-            layer.dsv4_prefill_aux_stream = prefill_aux_stream
+        if self.run_mode != "decode" and 4 in self.config["compress_ratios"]:
+            self.dsv4_workspace.init_c4_prefill_aux(self)
         dist_group_manager.new_deepep_group(
             n_routed_experts=self.config["n_routed_experts"],
             hidden_size=self.config["hidden_size"],
