@@ -84,11 +84,16 @@ class NsaFlashMlaFp8SparsePrefillAttState(BasePrefillAttState):
             # 当前推理生成的token kv部分从 prefill_cache_kv 中获取，历史
             # 部分kv 从 packed_kv 中获取, 并进行反量化，这样可以避免 prefill_cache_kv
             # 部分的数据进行重复的反量化操作，提升整体的性能。
-            kv, topk_indices = self.infer_state.mem_manager.get_prefill_kv_cache_and_remap_indices(
+            from lightllm.common.basemodel.triton_kernel.kv_copy.prefill_compact_kv_flashmla_fp8 import (
+                get_prefill_kv_cache_and_remap_indices_triton,
+            )
+
+            kv, topk_indices = get_prefill_kv_cache_and_remap_indices_triton(
                 packed_kv=packed_kv,
-                topk_indices=topk_mem_indices,
+                topk_mem_indices=topk_mem_indices,
                 prefill_mem_index=self.infer_state.mem_index,
                 prefill_cache_kv=prefill_cache_kv,
+                prefill_dtype=prefill_cache_kv.dtype,
             )
         else:
             kv = prefill_cache_kv

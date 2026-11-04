@@ -270,6 +270,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
             "qwen",
             "deepseekv31",
             "deepseekv32",
+            "deepseekv4",
             "glm47",
             "kimi_k2",
             "qwen3_coder",
@@ -283,6 +284,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         choices=[
             "deepseek-r1",
             "deepseek-v3",
+            "deepseek-v4",
             "glm45",
             "gpt-oss",
             "kimi",
@@ -545,7 +547,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--llm_prefill_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer", "flashqla"],
         default=["auto"],
         help="""prefill attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
@@ -557,7 +558,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--llm_decode_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer"],
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
@@ -593,8 +593,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
                 quant way is static per head kv quant.
                 fp8kv_spt: use float8_e4m3fn to store kv cache for inference,
                 quant way is static per tensor kv quant.
-                fp8kv_dsa: use DeepSeek-V3.2 DSA-specific FlashMLA FP8 sparse KV cache,
-                intended for the deepseek_v32 model path.
+                fp8kv_dsa: use dynamic per-token/group FlashMLA FP8 sparse KV cache
+                for DeepSeek-V3.2 or GLM-5.3 Flash.
                 fp8kv_sph and fp8kv_spt requires --kv_quant_calibration_config_path
                 to load pre-computed FP8 scales.
                 Note: fp8kv_spt requires flashinfer-python>=0.6.5 (default is 0.6.3,
@@ -954,8 +954,10 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--cpu_cache_token_page_size",
         type=int,
-        default=256,
-        help="""The token page size of cpu cache""",
+        default=None,
+        help="""The token page size of cpu cache. Non-hybrid models default to 256.
+        Hybrid models use linear_att_hash_page_size * linear_att_page_block_num;
+        configure --linear_att_page_block_num to set their checkpoint interval.""",
     )
     parser.add_argument(
         "--cache_placement_strategy",
@@ -1041,8 +1043,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--hardware_platform",
         type=str,
         default="cuda",
-        choices=["cuda", "musa"],
-        help="""Hardware platform: cuda | musa""",
+        help="""Hardware platform. Non-CUDA platforms provide LIGHTLLM_EXECUTION_FACTORY=module:factory.""",
     )
     parser.add_argument(
         "--enable_torch_fallback",

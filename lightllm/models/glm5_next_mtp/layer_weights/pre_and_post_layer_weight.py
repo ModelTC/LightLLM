@@ -7,7 +7,7 @@ class Glm5NextMTPPreAndPostLayerWeight(PreAndPostLayerWeight):
     def __init__(self, data_type, network_config, quant_cfg):
         super().__init__(data_type, network_config)
         hidden_size = network_config["hidden_size"]
-        prefix = f"model.layers.{network_config['num_hidden_layers']}"
+        prefix = f"model.layers.{network_config['mtp_checkpoint_layer_start']}"
         self.eh_proj_weight_ = ROWMMWeight(
             in_dim=2 * hidden_size,
             out_dims=[hidden_size],

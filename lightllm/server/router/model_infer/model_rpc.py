@@ -28,7 +28,7 @@ from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBac
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.log_utils import init_logger, set_log_context, log_info_on_leader
 from lightllm.utils.graceful_utils import graceful_registry
-from lightllm.utils.process_check import start_parent_check_thread
+from lightllm.utils.process_check import install_fatal_thread_excepthook, start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name, get_model_infer_recursion_limit
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 from lightllm.server.io_struct import RlOpReq, RlOpRsp
@@ -47,10 +47,19 @@ class ModelRpcServer(rpyc.Service):
         self.rank_in_node = rank_in_node
         self.backend = None
         self.rl_backend_ops = None
+        self.redundancy_expert_manager = None
+        self._model_lock = threading.Lock()
+        self._closing = False
         logger.debug(f"Initialized RPC server for rank {self.rank}.")
         return
 
     def exposed_init_model(self, kvargs):
+        with self._model_lock:
+            if self._closing:
+                raise RuntimeError("model worker is shutting down")
+            return self._init_model(kvargs)
+
+    def _init_model(self, kvargs):
         # 填充真正的 rank_id 参数
         kvargs = obtain(kvargs)
         kvargs["rank_id"] = self.rank
@@ -103,6 +112,12 @@ class ModelRpcServer(rpyc.Service):
         return self.backend.get_max_total_token_num()
 
     def exposed_rl_op(self, req: RlOpReq) -> RlOpRsp:
+        with self._model_lock:
+            if self._closing:
+                raise RuntimeError("model worker is shutting down")
+            return self._rl_op(req)
+
+    def _rl_op(self, req):
         try:
             req = obtain(req)
             if self.rl_backend_ops is None:
@@ -114,6 +129,16 @@ class ModelRpcServer(rpyc.Service):
         except BaseException as e:
             logger.exception(f"rl op failed: {str(e)}")
             return RlOpRsp(success=False, msg=f"rl op failed: {str(e)}", op_name=req.op_name)
+
+    def close(self):
+        with self._model_lock:
+            self._closing = True
+            if self.redundancy_expert_manager is not None:
+                thread = self.redundancy_expert_manager.load_thread
+                if thread is not None:
+                    thread.join()
+            if self.backend is not None:
+                self.backend.shutdown()
 
 
 class ModelRpcClient:
@@ -181,6 +206,7 @@ def _init_env(
         dp_rank=rank // tp_size,
     )
     setproctitle.setproctitle(f"lightllm::{get_unique_server_name()}::model_infer:RANK{rank}")
+    install_fatal_thread_excepthook()
     start_parent_check_thread()
 
     model_rpc_server = ModelRpcServer(args, rank, rank_in_node, node_world_size, info_queue)
@@ -188,7 +214,11 @@ def _init_env(
     t = ThreadedServer(model_rpc_server, socket_path=socket_path, protocol_config={"allow_pickle": True})
 
     success_event.set()
-    t.start()
+    try:
+        t.start()
+    finally:
+        t.close()
+        model_rpc_server.close()
     return
 
 

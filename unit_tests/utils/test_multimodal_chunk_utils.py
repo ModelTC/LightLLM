@@ -9,8 +9,9 @@ from lightllm.utils.multimodal_chunk_utils import (
 
 class MultimodalChunkTests(unittest.TestCase):
     def test_embedding_position_locates_a_qwen_image(self):
-        params = {"images": [{"start_idx": 3, "token_num": 4}], "audios": []}
-        self.assertEqual(get_mm_input_spans(params), [(3, 7)])
+        params = {"images": [{"start_idx": 3, "token_id": 100, "token_num": 4}], "audios": []}
+        input_ids = [7, 8, 9, 100, 101, 102, 103]
+        self.assertEqual(get_mm_input_spans(input_ids, params), [(3, 7)])
 
     def test_adjacent_images_audio_and_reused_embeddings_remain_separate(self):
         params = {
@@ -20,7 +21,8 @@ class MultimodalChunkTests(unittest.TestCase):
             ],
             "audios": [{"start_idx": 4, "token_id": 200, "token_num": 2}],
         }
-        self.assertCountEqual(get_mm_input_spans(params), [(1, 4), (4, 6), (6, 9)])
+        input_ids = [7, 100, 101, 102, 200, 201, 100, 101, 102]
+        self.assertCountEqual(get_mm_input_spans(input_ids, params), [(1, 4), (4, 6), (6, 9)])
 
     def test_text_before_and_after_image_can_still_be_chunked(self):
         spans = [(1800, 2100)]

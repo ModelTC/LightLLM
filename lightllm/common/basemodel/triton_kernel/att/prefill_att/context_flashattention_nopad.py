@@ -43,6 +43,16 @@ def _fwd_kernel(
     BLOCK_N: tl.constexpr,
     USE_SLIDING_WINDOW: tl.constexpr,
     SLIDING_WINDOW_LEFT: tl.constexpr,
+    K_scale,
+    V_scale,
+    stride_ks_token,
+    stride_ks_head,
+    stride_ks_group,
+    stride_vs_token,
+    stride_vs_head,
+    stride_vs_group,
+    KV_BITS: tl.constexpr,
+    QUANT_GROUP_SIZE: tl.constexpr,
 ):
     start_m = tl.program_id(0)
     cur_bh = tl.program_id(1)
@@ -97,8 +107,21 @@ def _fwd_kernel(
             mask=k_pos < block_end_loc,
             other=0,
         ).to(tl.int64)
-        off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + offs_d[:, None] * stride_kd
+        storage_d = offs_d // 2 if KV_BITS == 4 else offs_d
+        off_k = kv_loc[None, :] * stride_kbs + cur_kv_head * stride_kh + storage_d[:, None] * stride_kd
         k = tl.load(K + off_k, mask=k_pos[None, :] < block_end_loc, other=0.0)
+        if KV_BITS:
+            if KV_BITS == 4:
+                k = ((k.to(tl.int32) >> ((offs_d[:, None] % 2) * 4)) & 15) - 7
+            k_scale = tl.load(
+                K_scale
+                + kv_loc[None, :] * stride_ks_token
+                + cur_kv_head * stride_ks_head
+                + (offs_d[:, None] // QUANT_GROUP_SIZE) * stride_ks_group,
+                mask=k_pos[None, :] < block_end_loc,
+                other=0.0,
+            )
+            k = (k.to(tl.float32) * k_scale.to(tl.float32)).to(q.dtype)
         qk = tl.dot(q, k)
 
         if USE_SLIDING_WINDOW:
@@ -118,8 +141,20 @@ def _fwd_kernel(
         # -- update output accumulator --
         acc = acc * alpha[:, None]
         # update acc
-        off_v = kv_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + offs_d[None, :] * stride_vd
+        off_v = kv_loc[:, None] * stride_vbs + cur_kv_head * stride_vh + storage_d[None, :] * stride_vd
         v = tl.load(V + off_v, mask=k_pos[:, None] < block_end_loc, other=0.0)
+        if KV_BITS:
+            if KV_BITS == 4:
+                v = ((v.to(tl.int32) >> ((offs_d[None, :] % 2) * 4)) & 15) - 7
+            v_scale = tl.load(
+                V_scale
+                + kv_loc[:, None] * stride_vs_token
+                + cur_kv_head * stride_vs_head
+                + (offs_d[None, :] // QUANT_GROUP_SIZE) * stride_vs_group,
+                mask=k_pos[:, None] < block_end_loc,
+                other=0.0,
+            )
+            v = (v.to(tl.float32) * v_scale.to(tl.float32)).to(q.dtype)
         p = p.to(v.dtype)
         acc = tl.dot(p, v, acc)
         # update m_i and l_i
@@ -148,11 +183,23 @@ def context_attention_fwd(
     max_input_len,
     req_to_token_indexs,
     sliding_window=(-1, -1),
+    *,
+    k_scale=None,
+    v_scale=None,
+    kv_bits=0,
+    quant_group_size=1,
 ):
     BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
-    Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
+    factor = 2 if kv_bits == 4 else 1
+    Lq, Lk, Lv = q.shape[-1], k.shape[-1] * factor, v.shape[-1] * factor
     assert Lq == Lk and Lk == Lv
+    assert kv_bits in (0, 4, 8)
+    if kv_bits:
+        assert k_scale is not None and v_scale is not None and Lq % quant_group_size == 0
+        assert k.dtype == v.dtype == torch.int8
+        assert k_scale.shape == (*k.shape[:2], Lq // quant_group_size)
+        assert v_scale.shape == (*v.shape[:2], Lq // quant_group_size)
     assert Lk in {16, 32, 64, 128, 256, 512}
     # Larger head_dim needs smaller tiles to fit in SM shared memory.
     # H100/H200 has ~228KB shared memory per SM; a 128x512 bf16 tile already
@@ -214,6 +261,16 @@ def context_attention_fwd(
         BLOCK_N=BLOCK_N,
         USE_SLIDING_WINDOW=use_sliding_window,
         SLIDING_WINDOW_LEFT=sliding_window_left,
+        K_scale=k_scale,
+        V_scale=v_scale,
+        stride_ks_token=k_scale.stride(0) if kv_bits else 0,
+        stride_ks_head=k_scale.stride(1) if kv_bits else 0,
+        stride_ks_group=k_scale.stride(2) if kv_bits else 0,
+        stride_vs_token=v_scale.stride(0) if kv_bits else 0,
+        stride_vs_head=v_scale.stride(1) if kv_bits else 0,
+        stride_vs_group=v_scale.stride(2) if kv_bits else 0,
+        KV_BITS=kv_bits,
+        QUANT_GROUP_SIZE=quant_group_size,
         num_warps=num_warps,
         num_stages=num_stages,
     )
@@ -329,7 +386,6 @@ def _fwd_kernel_no_prompt_cache(
 
 @torch.no_grad()
 def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, max_input_len):
-
     BLOCK_M = 128 if not is_tesla() else 64
     # shape constraints
     Lq, Lk, Lv = q.shape[-1], k.shape[-1], v.shape[-1]
@@ -566,7 +622,6 @@ def context_attention_fwd_contiguous_kv(
 
 
 def torch_context_attention_fwd(q, k, v, o, b_req_idx, b_start_loc, b_seq_len, b_prompt_cache_len, req_to_token_indexs):
-
     batch = b_start_loc.shape[0]
     print(q.shape)
     for i in range(batch):

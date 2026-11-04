@@ -27,6 +27,8 @@ from lightllm.utils.config_utils import (
     has_vision_module,
     is_hybrid_att_model,
     auto_set_max_req_total_len,
+    auto_set_page_size,
+    auto_set_cpu_cache_token_page_size,
     auto_set_fused_shared_experts,
     auto_set_response_parsers,
     get_running_max_req_size_per_dp,
@@ -71,6 +73,7 @@ def _launch_subprocesses(args: StartArgs):
         return
 
     _auto_set_prefill_queue_strategy(args)
+    auto_set_page_size(args)
 
     # 通过模型的参数判断是否是多模态模型，包含哪几种模态, 并设置是否启动相应得模块
     if args.disable_vision is None:
@@ -318,9 +321,7 @@ def _launch_subprocesses(args: StartArgs):
         # 避免请求释放时将不完整的大页 state 写入 radix cache 并触发断言。
         args.linear_att_page_block_num = 10000000
 
-    if args.enable_cpu_cache and is_hybrid_att_model(args.model_dir):
-        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
-        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    auto_set_cpu_cache_token_page_size(args, is_hybrid_model)
     if args.enable_cpu_cache:
         assert (
             args.cpu_cache_token_page_size % args.page_size == 0

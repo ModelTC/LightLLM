@@ -13,23 +13,13 @@ def _skip_without_cuda():
         pytest.skip("CUDA is required for moe route info capture.")
 
 
-def test_get_moe_capture_callback_uses_global_manager(monkeypatch):
-    calls = []
-
-    class _Manager:
-        def is_buffer_initialized(self):
-            return True
-
-        def get_moe_capture_callback(self, layer_index, mem_indexes):
-            calls.append((layer_index, mem_indexes))
-            return "callback"
-
-    mem_indexes = object()
-    infer_state = SimpleNamespace(mem_index=mem_indexes)
-    monkeypatch.setattr(MoeRouteInfoManager, "_instance", _Manager())
-
-    assert get_moe_capture_callback(infer_state, 7) == "callback"
-    assert calls == [(7, mem_indexes)]
+def test_get_moe_capture_callback_uses_bound_batch(monkeypatch):
+    monkeypatch.setattr(MoeRouteInfoManager, "get_instance", lambda: pytest.fail("runtime manager lookup"))
+    callback = object()
+    infer_state = SimpleNamespace(moe_capture_callbacks={7: callback})
+    assert get_moe_capture_callback(infer_state, 7) is callback
+    assert get_moe_capture_callback(infer_state, 3) is None
+    assert get_moe_capture_callback(InferStateInfo(), 7) is None
 
 
 class TestMoeRouteInfoManager:

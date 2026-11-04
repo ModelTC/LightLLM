@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import pytest
 
 import lightllm.common.basemodel.basemodel as basemodel_module
-import lightllm.common.basemodel.cuda_graph as cuda_graph_module
+import lightllm.core.runner.decode_graph as cuda_graph_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.core.runner.decode_graph import CudaGraph
 from lightllm.common.basemodel.mtp_manager import MtpManager
 
 
@@ -100,6 +100,7 @@ def test_mtp_tpsp_layout(monkeypatch, _graph_args, tp_size, mtp_step, dynamic, i
     monkeypatch.setattr(basemodel_module, "get_env_start_args", lambda: args)
     monkeypatch.setattr(basemodel_module, "get_llm_data_type", lambda: None)
     monkeypatch.setattr(basemodel_module, "get_dp_world_size", lambda: tp_size)
+    monkeypatch.setattr(basemodel_module, "get_current_rank_in_dp", lambda: 0)
     monkeypatch.setattr(MtpManager, "_instance", MtpManager())
 
     class StopBeforeWeights(Exception):

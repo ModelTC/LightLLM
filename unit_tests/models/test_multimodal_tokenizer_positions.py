@@ -57,7 +57,7 @@ def test_images_record_positions_even_when_embeddings_are_reused(tokenizer_class
     else:
         assert input_ids == [1, 10, 100, 101, 11, 2, 10, 100, 101, 11, 3]
         expected_spans = [(2, 4), (7, 9)]
-    assert get_mm_input_spans(params.to_dict()) == expected_spans
+    assert get_mm_input_spans(input_ids, params.to_dict()) == expected_spans
 
 
 @pytest.mark.parametrize("tokenizer_class", [InternvlTokenizer, QWen3OmniTokenizer])
@@ -89,7 +89,7 @@ def test_positions_refer_to_final_input_after_both_modalities_expand(
     assert input_ids == expected_ids
     assert [image.start_idx for image in params.images] == image_starts
     assert [audio.start_idx for audio in params.audios] == audio_starts
-    spans = get_mm_input_spans(params.to_dict())
+    spans = get_mm_input_spans(input_ids, params.to_dict())
     assert len(spans) == 4
     for item in params.images + params.audios:
         assert (item.start_idx, item.start_idx + item.token_num) in spans

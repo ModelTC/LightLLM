@@ -64,6 +64,20 @@ class SymmMemAllreduce:
         if getattr(handle, "multicast_ptr", 0) == 0:
             logger.warning("SymmMemAllreduce: multicast pointer unavailable; disabling.")
             return
+        # A successful BF16 environment probe does not establish support for the
+        # model's dtype or the operation selected for this TP group.
+        operation = "multimem_all_reduce_" if self.use_multimem else "two_shot_all_reduce_"
+        try:
+            self._reduce = getattr(torch.ops.symm_mem, operation)
+            probe = self.buffer[:32]
+            probe.zero_()
+            self._reduce(probe, "sum", self.group.group_name)
+            torch.cuda.synchronize(self.device)
+        except (AttributeError, NotImplementedError) as error:
+            torch.cuda.synchronize(self.device)
+            self.buffer = None
+            logger.warning("SymmMemAllreduce: %s unavailable for %s (%s). Disabling.", operation, dtype, error)
+            return
         self.disabled = False
         logger.info(
             "SymmMemAllreduce enabled: world_size=%d, max_size=%d, multimem=%s",
@@ -85,8 +99,5 @@ class SymmMemAllreduce:
     def all_reduce(self, inp: torch.Tensor) -> None:
         n = inp.numel()
         self.buffer[:n].copy_(inp.view(-1))
-        if self.use_multimem:
-            torch.ops.symm_mem.multimem_all_reduce_(self.buffer[:n], "sum", self.group.group_name)
-        else:
-            torch.ops.symm_mem.two_shot_all_reduce_(self.buffer[:n], "sum", self.group.group_name)
+        self._reduce(self.buffer[:n], "sum", self.group.group_name)
         inp.view(-1).copy_(self.buffer[:n])

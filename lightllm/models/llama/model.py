@@ -1,3 +1,5 @@
+from lightllm.models.llama.adapter import LlamaModelAdapter
+from typing import TYPE_CHECKING
 import os
 import json
 import torch
@@ -9,23 +11,27 @@ from lightllm.models.llama.layer_weights.pre_and_post_layer_weight import LlamaP
 from lightllm.models.llama.layer_weights.transformer_layer_weight import LlamaTransformerLayerWeight
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.common.kv_cache_mem_manager.mem_utils import select_mem_manager_class
-from lightllm.utils.envs_utils import get_added_mtp_kv_layer_num
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.models.base.adapter import DenseModelAdapter
 
 logger = init_logger(__name__)
 
 
-class LlamaTpPartModel(TpPartBaseModel):
-    # weight class
-    pre_and_post_weight_class = LlamaPreAndPostLayerWeight
-    transformer_weight_class = LlamaTransformerLayerWeight
+if TYPE_CHECKING:
+    from easydict import EasyDict
+    from lightllm.server.core.objs.start_args_type import StartArgs
+    from lightllm.common.attention_state.full_att import FullAttentionState
 
-    # infer class
-    pre_layer_infer_class = LlamaPreLayerInfer
-    post_layer_infer_class = LlamaPostLayerInfer
-    transformer_layer_infer_class = LlamaTransformerLayerInfer
+
+class LlamaTpPartModel(TpPartBaseModel):
+    model_adapter_class = LlamaModelAdapter
+    # Compatibility factories for subclasses that have not migrated their recipes.
+    pre_and_post_weight_class = LlamaModelAdapter.pre_and_post_weight_class
+    transformer_weight_class = LlamaModelAdapter.transformer_weight_class
+    pre_layer_infer_class = LlamaModelAdapter.pre_layer_infer_class
+    post_layer_infer_class = LlamaModelAdapter.post_layer_infer_class
+    transformer_layer_infer_class = LlamaModelAdapter.transformer_layer_infer_class
 
     # infer state class
     infer_state_class = LlamaInferStateInfo
@@ -33,6 +39,40 @@ class LlamaTpPartModel(TpPartBaseModel):
     def __init__(self, kvargs):
         super().__init__(kvargs)
         return
+
+    @classmethod
+    def create_full_att_states(
+        cls,
+        model_config: dict[str, object],
+        args: "StartArgs | EasyDict",
+        *,
+        model_logical_layer_ids: tuple[int, ...],
+        tp_rank: int = 0,
+        tp_world_size: int = 1,
+    ) -> list["FullAttentionState"]:
+        """按本模型的全局逻辑层创建 GQA 布局，量化存储由算法入口选择。"""
+        from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
+        from lightllm.utils.torch_dtype_utils import get_torch_dtype
+
+        config = cls.normalize_model_config(model_config)
+        logical_layer_groups = tuple((layer_id,) for layer_id in model_logical_layer_ids)
+        if not logical_layer_groups:
+            return []
+        state = create_gqa_state(
+            config=GQAAttentionConfig(
+                logical_layer_groups=logical_layer_groups,
+                global_head_num=config.get("num_key_value_heads", config["num_attention_heads"]),
+                head_dim=config.get("head_dim", config["hidden_size"] // config["num_attention_heads"]),
+                dtype=get_torch_dtype(args.data_type),
+                tp_rank=tp_rank,
+                tp_world_size=tp_world_size,
+            ),
+            kv_type=args.llm_kv_type,
+            group_size=args.llm_kv_quant_group_size,
+            page_size=args.page_size,
+            device="meta",
+        )
+        return [state]
 
     def _init_config(self):
         super()._init_config()
@@ -50,19 +90,6 @@ class LlamaTpPartModel(TpPartBaseModel):
         assert self.load_way in ["HF", "DS"], "llama only supports HF and DS format to load Now!"
         assert self.config["num_key_value_heads"] % self.tp_world_size_ == 0
         assert self.config["num_attention_heads"] % self.tp_world_size_ == 0
-        return
-
-    def _init_mem_manager(self):
-        head_dim_ = self.config["hidden_size"] // self.config["num_attention_heads"]
-        head_dim_ = self.config.get("head_dim", head_dim_)
-        self.mem_manager = select_mem_manager_class()(
-            self.max_total_token_num,
-            dtype=self.data_type,
-            head_num=self.config["num_key_value_heads"] // self.tp_world_size_,
-            head_dim=head_dim_,
-            layer_num=self.config["num_hidden_layers"] + get_added_mtp_kv_layer_num(),
-            mem_fraction=self.mem_fraction,
-        )
         return
 
     def _init_custom(self):
@@ -134,8 +161,8 @@ class LlamaTpPartModel(TpPartBaseModel):
         )
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = torch.cos(freqs).to(self.data_type).to(self.execution_torch_device)
+        self._sin_cached = torch.sin(freqs).to(self.data_type).to(self.execution_torch_device)
         return
 
     def _init_to_get_dynamic_ntk_rotary(self):
@@ -147,16 +174,24 @@ class LlamaTpPartModel(TpPartBaseModel):
         else:
             scaling_factor = self.config.get("rope_scaling", {}).get("factor", 1.0)
         max_seq_len = max(self.max_seq_length, max_position_embeddings)
-        self._cos_cached = torch.zeros((max_seq_len, partial_head_dim // 2), dtype=self.data_type, device="cuda")
-        self._sin_cached = torch.zeros((max_seq_len, partial_head_dim // 2), dtype=self.data_type, device="cuda")
+        self._cos_cached = torch.zeros(
+            (max_seq_len, partial_head_dim // 2), dtype=self.data_type, device=self.execution_torch_device
+        )
+        self._sin_cached = torch.zeros(
+            (max_seq_len, partial_head_dim // 2), dtype=self.data_type, device=self.execution_torch_device
+        )
 
         inv_freq = 1.0 / (
             base ** (torch.arange(0, partial_head_dim, 2, device="cpu", dtype=torch.float32) / partial_head_dim)
         )
         t = torch.arange(max_position_embeddings, device="cpu", dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
-        self._cos_cached[0:max_position_embeddings, :] = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached[0:max_position_embeddings, :] = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached[0:max_position_embeddings, :] = (
+            torch.cos(freqs).to(self.data_type).to(self.execution_torch_device)
+        )
+        self._sin_cached[0:max_position_embeddings, :] = (
+            torch.sin(freqs).to(self.data_type).to(self.execution_torch_device)
+        )
 
         for seq_loc_index in range(max_position_embeddings, max_seq_len, 1):
             new_base = base * (
@@ -173,8 +208,12 @@ class LlamaTpPartModel(TpPartBaseModel):
                 dtype=torch.float32,
             )
             freqs = torch.outer(t, inv_freq)
-            self._cos_cached[seq_loc_index : seq_loc_index + 1, :] = torch.cos(freqs).to(self.data_type).cuda()
-            self._sin_cached[seq_loc_index : seq_loc_index + 1, :] = torch.sin(freqs).to(self.data_type).cuda()
+            self._cos_cached[seq_loc_index : seq_loc_index + 1, :] = (
+                torch.cos(freqs).to(self.data_type).to(self.execution_torch_device)
+            )
+            self._sin_cached[seq_loc_index : seq_loc_index + 1, :] = (
+                torch.sin(freqs).to(self.data_type).to(self.execution_torch_device)
+            )
         return
 
     def _init_to_get_yarn_rotary(self):
@@ -191,23 +230,28 @@ class LlamaTpPartModel(TpPartBaseModel):
         original_max_position_embeddings = rope_config.get("original_max_position_embeddings", 2048)
         extrapolation_factor = 1.0
         attn_factor = 1.0
-        beta_fast = 32.0
-        beta_slow = 1.0
+        beta_fast = rope_config.get("beta_fast") or 32.0
+        beta_slow = rope_config.get("beta_slow") or 1.0
 
-        pos_freqs = base ** (torch.arange(0, dim, 2).float().cuda() / dim)
+        pos_freqs = base ** (torch.arange(0, dim, 2).float().to(self.execution_torch_device) / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scale * pos_freqs)
-        low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_max_position_embeddings)
+        low, high = find_correction_range(
+            beta_fast, beta_slow, dim, base, original_max_position_embeddings, rope_config.get("truncate", True)
+        )
         inv_freq_mask = (
-            1 - linear_ramp_mask(low, high, dim // 2).float().cuda()
+            1 - linear_ramp_mask(low, high, dim // 2).float().to(self.execution_torch_device)
         ) * extrapolation_factor  # Get n-d rotational scaling corrected for extrapolation
         inv_freq = inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
 
-        mscale = float(get_mscale(scale) * attn_factor)  # Get n-d magnitude scaling corrected for interpolation
+        attention_factor = rope_config.get("attention_factor")
+        mscale = float(get_mscale(scale) * attn_factor if attention_factor is None else attention_factor)
 
         # Build here to make `torch.jit.trace` work.
         max_seq_len_cached = max_position_embeddings
-        t = torch.arange(max(max_seq_len_cached, self.max_seq_length), device="cuda", dtype=torch.float32)
+        t = torch.arange(
+            max(max_seq_len_cached, self.max_seq_length), device=self.execution_torch_device, dtype=torch.float32
+        )
         freqs = torch.einsum("i,j->ij", t, inv_freq)
         # Rotary kernels reuse each frequency for a pair of channels, so cache only half the rotary dimension.
         self._cos_cached = (freqs.cos() * mscale).to(self.data_type)
@@ -232,8 +276,12 @@ class LlamaTpPartModel(TpPartBaseModel):
             rope_scaling_factor = math.sqrt(1 + math.log(scale) / math.log(original_max_position_embeddings))
 
         max_seq_len = max(self.max_seq_length, max_position_embeddings)
-        self._cos_cached = torch.zeros((max_seq_len, self.head_dim_ // 2), dtype=self.data_type, device="cuda")
-        self._sin_cached = torch.zeros((max_seq_len, self.head_dim_ // 2), dtype=self.data_type, device="cuda")
+        self._cos_cached = torch.zeros(
+            (max_seq_len, self.head_dim_ // 2), dtype=self.data_type, device=self.execution_torch_device
+        )
+        self._sin_cached = torch.zeros(
+            (max_seq_len, self.head_dim_ // 2), dtype=self.data_type, device=self.execution_torch_device
+        )
 
         inv_freq = 1.0 / (
             short_factor
@@ -242,10 +290,10 @@ class LlamaTpPartModel(TpPartBaseModel):
         t = torch.arange(original_max_position_embeddings, device="cpu", dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
         self._cos_cached[0:original_max_position_embeddings, :] = (
-            (torch.cos(freqs) * rope_scaling_factor).to(self.data_type).cuda()
+            (torch.cos(freqs) * rope_scaling_factor).to(self.data_type).to(self.execution_torch_device)
         )
         self._sin_cached[0:original_max_position_embeddings, :] = (
-            (torch.sin(freqs) * rope_scaling_factor).to(self.data_type).cuda()
+            (torch.sin(freqs) * rope_scaling_factor).to(self.data_type).to(self.execution_torch_device)
         )
 
         inv_freq = 1.0 / (
@@ -255,10 +303,10 @@ class LlamaTpPartModel(TpPartBaseModel):
         t = torch.arange(original_max_position_embeddings, max_seq_len, device="cpu", dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
         self._cos_cached[original_max_position_embeddings:, :] = (
-            (torch.cos(freqs) * rope_scaling_factor).to(self.data_type).cuda()
+            (torch.cos(freqs) * rope_scaling_factor).to(self.data_type).to(self.execution_torch_device)
         )
         self._sin_cached[original_max_position_embeddings:, :] = (
-            (torch.sin(freqs) * rope_scaling_factor).to(self.data_type).cuda()
+            (torch.sin(freqs) * rope_scaling_factor).to(self.data_type).to(self.execution_torch_device)
         )
 
         return
@@ -296,6 +344,6 @@ class LlamaTpPartModel(TpPartBaseModel):
         t = torch.arange(max(max_seq_len, self.max_seq_length), device="cpu", dtype=torch.float32)
         freqs = torch.outer(t, inv_freq)
 
-        self._cos_cached = torch.cos(freqs).to(self.data_type).cuda()
-        self._sin_cached = torch.sin(freqs).to(self.data_type).cuda()
+        self._cos_cached = torch.cos(freqs).to(self.data_type).to(self.execution_torch_device)
+        self._sin_cached = torch.sin(freqs).to(self.data_type).to(self.execution_torch_device)
         return

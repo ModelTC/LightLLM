@@ -45,6 +45,92 @@ def make_kernel(tmp_path, monkeypatch, name, kernel_type=None, warmup_all_exist_
     return kernel, calls, benchmarks, cache_dir / "configs.json"
 
 
+@pytest.mark.parametrize("repeat_override,retry_override", [(None, None), (8, 2)])
+def test_short_kernel_benchmark_sampling_options(monkeypatch, repeat_override, retry_override):
+    calls, replays = [], []
+
+    @autotune(
+        kernel_name="short_kernel_sampling",
+        configs_gen_func=lambda: [],
+        static_key_func=lambda: {},
+        run_key_func=lambda size: size,
+        benchmark_repeats=32,
+        benchmark_retries=5,
+    )
+    def kernel(size, run_config=None):
+        calls.append(size)
+
+    class Stream:
+        def synchronize(self):
+            pass
+
+    class Graph:
+        def replay(self):
+            replays.append(None)
+
+    class Event:
+        def record(self):
+            pass
+
+        def synchronize(self):
+            pass
+
+        def elapsed_time(self, other):
+            return 0.032
+
+    monkeypatch.setattr(torch.cuda, "current_stream", Stream)
+    monkeypatch.setattr(torch.cuda, "Stream", Stream)
+    monkeypatch.setattr(torch.cuda, "CUDAGraph", Graph)
+    monkeypatch.setattr(torch.cuda, "graph", lambda *args, **kwargs: nullcontext())
+    monkeypatch.setattr(torch.cuda, "Event", lambda **kwargs: Event())
+    actual = kernel._bench(16, n_repeat=repeat_override, n_retries=retry_override)
+    repeats = 32 if repeat_override is None else repeat_override
+    retries = 5 if retry_override is None else retry_override
+    assert len(calls) == repeats + 1  # Initial warmup plus calls captured in the graph.
+    assert len(replays) == retries
+    assert actual == pytest.approx(0.032 / repeats)
+
+
+@pytest.mark.parametrize("repeats,retries", [(0, 3), (3, 0)])
+def test_benchmark_sampling_requires_positive_counts(repeats, retries):
+    with pytest.raises(ValueError, match="must be positive"):
+        autotune(
+            kernel_name="invalid_sampling",
+            configs_gen_func=lambda: [],
+            static_key_func=lambda: {},
+            run_key_func=lambda size: size,
+            benchmark_repeats=repeats,
+            benchmark_retries=retries,
+        )(lambda size, run_config=None: None)
+
+
+def test_key_defaults_survive_execution_wrapper(monkeypatch):
+    @autotune(
+        kernel_name="wrapped_key_defaults",
+        configs_gen_func=lambda: [],
+        static_key_func=lambda rounded: {"rounded": rounded},
+        run_key_func=lambda size: size,
+    )
+    def kernel(size, rounded=False, run_config=None):
+        return size, rounded
+
+    original = kernel.fn
+    calls = []
+
+    def wrapped(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(kernel, "fn", wrapped)
+    assert kernel._static_key(8) == {"rounded": False}
+    assert kernel._static_key(8, True) == {"rounded": True}
+    assert kernel._static_key(8, rounded=True) == {"rounded": True}
+    with pytest.raises(KeyError, match="Missing argument 'size'"):
+        kernel._run_key()
+    assert kernel(8, run_config={"block": 1}) == (8, False)
+    assert calls == [((8,), {"run_config": {"block": 1}})]
+
+
 def test_key_defaults_preserve_explicit_arguments_and_required_checks():
     @autotune(
         kernel_name="key_defaults",

@@ -53,28 +53,31 @@ class ModelInput:
     mtp_draft_input_hiddens: Optional[torch.Tensor] = None
 
     def to_cuda(self):
+        return self.to_device("cuda")
+
+    def to_device(self, device):
         self.check_input()
 
         # Prefill 和 decode 都必须提供的公共张量。
-        self.b_req_idx = self.b_req_idx.cuda(non_blocking=True)
-        self.b_seq_len = self.b_seq_len.cuda(non_blocking=True)
-        self.b_mtp_index = self.b_mtp_index.cuda(non_blocking=True)
+        self.b_req_idx = self.b_req_idx.to(device=device, non_blocking=True)
+        self.b_seq_len = self.b_seq_len.to(device=device, non_blocking=True)
+        self.b_mtp_index = self.b_mtp_index.to(device=device, non_blocking=True)
 
         if self.is_prefill:
             # Prefill 必须提供的张量。
-            self.input_ids = self.input_ids.cuda(non_blocking=True)
-            self.b_ready_cache_len = self.b_ready_cache_len.cuda(non_blocking=True)
-            self.b_prefill_start_loc = self.b_prefill_start_loc.cuda(non_blocking=True)
-            self.b_is_decode_req = self.b_is_decode_req.cuda(non_blocking=True)
+            self.input_ids = self.input_ids.to(device=device, non_blocking=True)
+            self.b_ready_cache_len = self.b_ready_cache_len.to(device=device, non_blocking=True)
+            self.b_prefill_start_loc = self.b_prefill_start_loc.to(device=device, non_blocking=True)
+            self.b_is_decode_req = self.b_is_decode_req.to(device=device, non_blocking=True)
         else:
             # Decode 必须提供的张量。
-            self.b_position_delta = self.b_position_delta.cuda(non_blocking=True)
-            self.b_shared_seq_len = self.b_shared_seq_len.cuda(non_blocking=True)
-            self.b_shared_radix_node_id = self.b_shared_radix_node_id.cuda(non_blocking=True)
+            self.b_position_delta = self.b_position_delta.to(device=device, non_blocking=True)
+            self.b_shared_seq_len = self.b_shared_seq_len.to(device=device, non_blocking=True)
+            self.b_shared_radix_node_id = self.b_shared_radix_node_id.to(device=device, non_blocking=True)
 
             # Decode 可以显式提供 input_ids；未提供时会在模型内部按请求索引收集。
             if self.input_ids is not None:
-                self.input_ids = self.input_ids.cuda(non_blocking=True)
+                self.input_ids = self.input_ids.to(device=device, non_blocking=True)
 
     def __post_init__(self):
         self.check_input()
@@ -144,13 +147,14 @@ class ModelMtpOutputCollector:
     # - Vanilla MTP、EAGLE、EAGLE3、DFlash 以及未启用 MTP 的模型均不使用该字段。
     confidence_logits: Optional[torch.Tensor] = None
 
-    def to_no_ref_tensor(self) -> None:
+    def to_no_ref_tensor(self, borrow=None) -> None:
+        borrow = tensor_to_no_ref_tensor if borrow is None else borrow
         if self.spec_hidden is not None:
-            self.spec_hidden = tensor_to_no_ref_tensor(self.spec_hidden)
+            self.spec_hidden = borrow(self.spec_hidden)
         if self.draft_token_ids is not None:
-            self.draft_token_ids = tensor_to_no_ref_tensor(self.draft_token_ids)
+            self.draft_token_ids = borrow(self.draft_token_ids)
         if self.confidence_logits is not None:
-            self.confidence_logits = tensor_to_no_ref_tensor(self.confidence_logits)
+            self.confidence_logits = borrow(self.confidence_logits)
 
     def unpad_decode(self, padded_batch_size: int, origin_batch_size: int) -> "ModelMtpOutputCollector":
         collector = copy.copy(self)
@@ -206,8 +210,9 @@ class ModelOutput:
         if self.mtp_collector is None:
             self.mtp_collector = ModelMtpOutputCollector()
 
-    def to_no_ref_tensor(self):
-        self.logits = tensor_to_no_ref_tensor(self.logits)
+    def to_no_ref_tensor(self, borrow=None):
+        borrow = tensor_to_no_ref_tensor if borrow is None else borrow
+        self.logits = borrow(self.logits)
         if self.logits_token_ids is not None:
-            self.logits_token_ids = tensor_to_no_ref_tensor(self.logits_token_ids)
-        self.mtp_collector.to_no_ref_tensor()
+            self.logits_token_ids = borrow(self.logits_token_ids)
+        self.mtp_collector.to_no_ref_tensor(borrow)

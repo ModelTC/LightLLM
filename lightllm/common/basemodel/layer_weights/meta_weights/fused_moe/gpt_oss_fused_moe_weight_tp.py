@@ -1,241 +1,128 @@
-import os
-import torch
 import threading
-from typing import Optional, Tuple, List, Dict, Any
 
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
-from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
-from lightllm.utils.dist_utils import get_current_rank_in_dp, get_current_device_id
-from lightllm.common.quantization import Quantcfg
-from lightllm.common.quantization.quantize_method import QuantizationMethod
-from lightllm.utils.log_utils import init_logger
+import torch
 
-logger = init_logger(__name__)
-
-FP4_VALUES = [
-    +0.0,
-    +0.5,
-    +1.0,
-    +1.5,
-    +2.0,
-    +3.0,
-    +4.0,
-    +6.0,
-    -0.0,
-    -0.5,
-    -1.0,
-    -1.5,
-    -2.0,
-    -3.0,
-    -4.0,
-    -6.0,
-]
+from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 
 
-class GPTOSSFusedMoeWeightTP(FusedMoeWeight):
-    def __init__(
-        self,
-        gate_up_proj_name: str,
-        down_proj_name: str,
-        e_score_correction_bias_name: str,
-        weight_prefix: str,
-        n_routed_experts: int,
-        hidden_size: int,
-        moe_intermediate_size: int,
-        data_type: torch.dtype,
-        quant_method: QuantizationMethod = None,
-        num_fused_shared_experts: int = 0,
-        layer_num: int = 0,
-        network_config: Dict[str, Any] = None,
-    ) -> None:
-        network_config["norm_topk_prob"] = None
-        super().__init__(
-            gate_proj_name=gate_up_proj_name,
-            down_proj_name=down_proj_name,
-            up_proj_name=gate_up_proj_name,
-            e_score_correction_bias_name=e_score_correction_bias_name,
-            weight_prefix=weight_prefix,
-            n_routed_experts=n_routed_experts,
-            hidden_size=hidden_size,
-            moe_intermediate_size=moe_intermediate_size,
-            data_type=data_type,
-            quant_method=quant_method,
-            num_fused_shared_experts=num_fused_shared_experts,
-            layer_num=layer_num,
-            network_config=network_config,
-        )
+class GPTOSSFusedMoeWeightTP(BaseWeightTpl):
+    """Load GPT-OSS expert tensors; execution is bound separately by the Planner."""
 
-        self.hidden_size = network_config["hidden_size"]
-
-        self.alpha = 1.702
-        self.limit = 7.0
-
-        self.w1_bias = None
-        self.w2_bias = None
-
-        self._down_bias_name = f"{weight_prefix}.{down_proj_name}_bias"
-        self._down_blocks_name = f"{weight_prefix}.{down_proj_name}_blocks"
-        self._down_scales_name = f"{weight_prefix}.{down_proj_name}_scales"
-        self._gate_up_bias_name = f"{weight_prefix}.{gate_up_proj_name}_bias"
-        self._gate_up_blocks_name = f"{weight_prefix}.{gate_up_proj_name}_blocks"
-        self._gate_up_scales_name = f"{weight_prefix}.{gate_up_proj_name}_scales"
-        return
+    def __init__(self, weight_prefix, n_routed_experts, hidden_size, moe_intermediate_size, data_type):
+        super().__init__(data_type=data_type)
+        if moe_intermediate_size % self.tp_world_size_:
+            raise ValueError("GPT-OSS expert width requires complete TP shards")
+        self.weight_prefix = weight_prefix
+        self.n_routed_experts = n_routed_experts
+        self.hidden_size = hidden_size
+        self.moe_intermediate_size = moe_intermediate_size
+        self.split_inter_size = moe_intermediate_size // self.tp_world_size_
+        self.enable_ep_moe = False
+        self.lock = threading.Lock()
+        self.pending = {}
+        self._create_weight()
 
     def _create_weight(self):
-        """
-        因为加载方式比较特殊，不在这里创建weight。
-        """
-        pass
+        count, width, hidden = self.n_routed_experts, self.split_inter_size, self.hidden_size
+        self.fields = {
+            name: torch.empty(shape, dtype=self.data_type_, device=self.device_id_)
+            for name, shape in (
+                ("gate_up", (count, width * 2, hidden)),
+                ("down", (count, hidden, width)),
+                ("gate_up_bias", (count, width * 2)),
+                ("down_bias", (count, hidden)),
+            )
+        }
+        self.loaded = set()
 
-    def _fuse_weight_scale(self):
-        assert False, "Not implemented for GPT-OSS."
-
-    def _fuse(self):
-        assert False, "Not implemented for GPT-OSS."
+    @staticmethod
+    def _unpack(blocks, scales, dtype):
+        if blocks.dtype != torch.uint8 or scales.dtype != torch.uint8:
+            raise ValueError("MXFP4 blocks and E8M0 scales must be uint8")
+        if blocks.shape[:-1] != scales.shape or blocks.shape[-1] != 16:
+            raise ValueError("MXFP4 requires one scale per 32 packed values")
+        lut = torch.tensor(
+            [0, 0.5, 1, 1.5, 2, 3, 4, 6, -0.0, -0.5, -1, -1.5, -2, -3, -4, -6],
+            dtype=torch.float32,
+            device=blocks.device,
+        )
+        shape = (*blocks.shape[:-2], blocks.shape[-2] * 32)
+        blocks, scales = blocks.reshape(-1, 16), scales.reshape(-1, 1)
+        output = torch.empty((blocks.shape[0], 32), dtype=dtype, device=blocks.device)
+        for start in range(0, blocks.shape[0], 32768):
+            chunk = blocks[start : start + 32768]
+            values = torch.stack((lut[(chunk & 15).long()], lut[(chunk >> 4).long()]), dim=-1).flatten(-2)
+            output[start : start + 32768].copy_(torch.ldexp(values, scales[start : start + 32768].int() - 127))
+        return output.reshape(shape)
 
     def load_hf_weights(self, weights):
-        if (
-            weights.get(self._down_blocks_name, None) is not None
-            and weights.get(self._down_scales_name, None) is not None
-        ):
-            w2 = self._convert_moe_packed_tensors(
-                blocks=weights[self._down_blocks_name],
-                scales=weights[self._down_scales_name],
-                dtype=torch.bfloat16,
-            )[:, self.split_inter_size * self.tp_rank_ : self.split_inter_size * (self.tp_rank_ + 1), :]
-            self.w2 = (self._cuda(w2.transpose(1, 2)), None)
-
-        if (
-            weights.get(self._gate_up_blocks_name, None) is not None
-            and weights.get(self._gate_up_scales_name, None) is not None
-        ):
-            w1 = self._convert_moe_packed_tensors(
-                blocks=weights[self._gate_up_blocks_name],
-                scales=weights[self._gate_up_scales_name],
-                dtype=torch.bfloat16,
-            )[:, :, self.split_inter_size * self.tp_rank_ * 2 : self.split_inter_size * (self.tp_rank_ + 1) * 2]
-            self.w1 = (self._cuda(w1.transpose(1, 2)), None)
-
-        if weights.get(self._gate_up_bias_name, None) is not None:
-            w1_bias = weights[self._gate_up_bias_name][
-                :, self.split_inter_size * self.tp_rank_ * 2 : self.split_inter_size * (self.tp_rank_ + 1) * 2
-            ]
-            self.w1_bias = self._cuda(w1_bias)
-
-        if weights.get(self._down_bias_name, None) is not None:
-            w2_bias = weights[self._down_bias_name]
-            self.w2_bias = self._cuda(w2_bias)
+        with self.lock:
+            start = self.tp_rank_ * self.split_inter_size
+            stop = start + self.split_inter_size
+            for field, checkpoint in (("gate_up", "gate_up_proj"), ("down", "down_proj")):
+                name = f"{self.weight_prefix}.{checkpoint}"
+                tensor = weights.get(name)
+                if tensor is not None:
+                    shape = (
+                        (self.n_routed_experts, self.hidden_size, 2 * self.moe_intermediate_size)
+                        if field == "gate_up"
+                        else (self.n_routed_experts, self.moe_intermediate_size, self.hidden_size)
+                    )
+                    if tensor.shape != shape:
+                        raise ValueError(f"GPT-OSS checkpoint shape mismatch: {name}")
+                    tensor = tensor[:, :, start * 2 : stop * 2] if field == "gate_up" else tensor[:, start:stop]
+                else:
+                    for suffix in ("_blocks", "_scales"):
+                        if name + suffix in weights:
+                            self.pending[name + suffix] = weights[name + suffix]
+                    if name + "_blocks" in self.pending and name + "_scales" in self.pending:
+                        blocks, scales = (self.pending.pop(name + suffix) for suffix in ("_blocks", "_scales"))
+                        shape = (
+                            (self.n_routed_experts, self.hidden_size, self.moe_intermediate_size // 16, 16)
+                            if field == "gate_up"
+                            else (self.n_routed_experts, self.moe_intermediate_size, self.hidden_size // 32, 16)
+                        )
+                        if blocks.shape != shape or scales.shape != blocks.shape[:-1]:
+                            raise ValueError(f"GPT-OSS MXFP4 checkpoint shape mismatch: {name}")
+                        if field == "gate_up":
+                            if start % 16 or stop % 16:
+                                raise ValueError("MXFP4 gate/up TP shards must align to 32 packed values")
+                            blocks, scales = (
+                                blocks[:, :, start // 16 : stop // 16],
+                                scales[:, :, start // 16 : stop // 16],
+                            )
+                        else:
+                            blocks, scales = blocks[:, start:stop], scales[:, start:stop]
+                        device = self.fields[field].device
+                        tensor = self._unpack(blocks.to(device), scales.to(device), self.data_type_)
+                if tensor is not None:
+                    self.fields[field].copy_(tensor.transpose(1, 2))
+                    self.loaded.add(field)
+                bias = weights.get(name + "_bias")
+                if bias is not None:
+                    size = 2 * self.moe_intermediate_size if field == "gate_up" else self.hidden_size
+                    if bias.shape != (self.n_routed_experts, size):
+                        raise ValueError(f"GPT-OSS bias shape mismatch: {name}")
+                    bias = bias[:, start * 2 : stop * 2] if field == "gate_up" else bias / self.tp_world_size_
+                    self.fields[field + "_bias"].copy_(bias)
+                    self.loaded.add(field + "_bias")
 
     def verify_load(self):
-        assert self.w1 is not None and self.w2 is not None
-        return True
+        return self.loaded == set(self.fields) and not self.pending
 
-    def _router(self, router_logits, top_k):
-        router_top_value, router_indices = torch.topk(router_logits, top_k, dim=-1)
-        router_top_value = torch.nn.functional.softmax(router_top_value, dim=1, dtype=router_top_value.dtype)
-        return router_top_value, router_indices
+    def native_moe_view(self):
+        from lightllm.core.contracts.state import FormatSpec
 
-    def experts(
-        self,
-        input_tensor: torch.Tensor,
-        router_logits: torch.Tensor,
-        top_k: int,
-        renormalize: bool,
-        use_grouped_topk: bool,
-        topk_group: int,
-        num_expert_group: int,
-        is_prefill: Optional[bool] = None,
-        infer_state=None,
-        shared_expert_gate: Optional[torch.Tensor] = None,
-    ):
-        assert shared_expert_gate is None, "shared_expert_gate is not supported by GPT-OSS fused MoE"
-
-        topk_weights, topk_ids = self._router(router_logits, top_k)
-
-        # Captures MoE topk expert ids for routed-experts metadata when enabled.
-        moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
-        if moe_capture_callback is not None:
-            moe_capture_callback(topk_ids)
-
-        w1, w1_scale = self.w1
-        w2, w2_scale = self.w2
-        use_fp8_w8a8 = self.quant_method is not None
-        use_fp8_w8a8 = False  # TODO: disable fp8 for GPT-OSS for now
-
-        from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe import fused_experts
-
-        output_tensor = fused_experts(
-            hidden_states=input_tensor.to(w1.dtype),
-            w1=w1,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            inplace=True,
-            use_fp8_w8a8=use_fp8_w8a8,
-            w1_bias=self.w1_bias,
-            w2_bias=self.w2_bias / self.tp_world_size_,
-            w1_scale=w1_scale,
-            w2_scale=w2_scale,
-            layout="interleaved",
-            alpha=self.alpha,
-            limit=self.limit,
-            clamp_up_add_one=True,
+        if not self.verify_load():
+            raise ValueError("GPT-OSS expert weights and biases must be fully loaded before binding")
+        return (
+            FormatSpec(
+                "plain",
+                self.data_type_,
+                "expert_output_input_interleaved",
+                tuple(self.fields),
+                1,
+                (self.tp_rank_, self.tp_world_size_),
+            ),
+            self.fields.copy(),
         )
-        return output_tensor
-
-    def _convert_moe_packed_tensors(
-        self,
-        blocks,
-        scales,
-        *,
-        dtype: torch.dtype = torch.bfloat16,
-        rows_per_chunk: int = 32768 * 1024,
-    ) -> torch.Tensor:
-        """
-        Convert the mxfp4 weights again, dequantizing and makes them compatible with the forward
-        pass of GPT_OSS.
-        """
-        import math
-
-        # Check if blocks and scales are on CPU, and move to GPU if so
-        if not blocks.is_cuda and torch.cuda.is_available():
-            blocks = blocks.cuda()
-            scales = scales.cuda()
-
-        scales = scales.to(torch.int32) - 127  # that's because 128=2**7
-
-        assert blocks.shape[:-1] == scales.shape, f"{blocks.shape[:-1]=} does not match {scales.shape=}"
-
-        lut = torch.tensor(FP4_VALUES, dtype=dtype, device=blocks.device)
-
-        *prefix_shape, G, B = blocks.shape
-        rows_total = math.prod(prefix_shape) * G
-
-        blocks = blocks.reshape(rows_total, B)
-        scales = scales.reshape(rows_total, 1)
-
-        out = torch.empty(rows_total, B * 2, dtype=dtype, device=blocks.device)
-
-        for r0 in range(0, rows_total, rows_per_chunk):
-            r1 = min(r0 + rows_per_chunk, rows_total)
-
-            blk = blocks[r0:r1]
-            exp = scales[r0:r1]
-
-            # nibble indices -> int64
-            idx_lo = (blk & 0x0F).to(torch.long)
-            idx_hi = (blk >> 4).to(torch.long)
-
-            sub = out[r0:r1]
-            sub[:, 0::2] = lut[idx_lo]
-            sub[:, 1::2] = lut[idx_hi]
-
-            torch.ldexp(sub, exp, out=sub)
-            del idx_lo, idx_hi, blk, exp, sub
-
-        out = out.reshape(*prefix_shape, G, B * 2).view(*prefix_shape, G * B * 2)
-        del blocks, scales, lut
-        return out.transpose(1, 2).contiguous()
-
-    def _cuda(self, cpu_tensor):
-        return cpu_tensor.contiguous().to(self.data_type_).cuda(get_current_device_id())

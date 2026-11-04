@@ -528,6 +528,7 @@ def grouped_matmul_kernel(
     TOKEN_INPUT_USE_TMA: tl.constexpr = False,
     WEIGHT_USE_TMA: tl.constexpr = False,
     USE_PACKED_UE8M0: tl.constexpr = False,
+    ROUND_INTERMEDIATES: tl.constexpr = False,
 ):
     pid = tl.program_id(0)
 
@@ -703,12 +704,17 @@ def grouped_matmul_kernel(
         if not (block_size_k > 0 and block_size_n > 0):
             accumulator *= ab_scale
 
+    if ROUND_INTERMEDIATES:
+        accumulator = accumulator.to(compute_type).to(tl.float32)
+
     # Apply bias if requested
     if ADD_BIAS:
         offs_bn_bias = offs_bn  # [BLOCK_SIZE_N]
         bias_ptrs = bias_ptr + expert_id * bias_stride_0 + offs_bn_bias
         bias_vals = tl.load(bias_ptrs)  # [BLOCK_SIZE_N]
         accumulator += bias_vals[None, :]  # broadcast across M dimension
+        if ROUND_INTERMEDIATES:
+            accumulator = accumulator.to(compute_type).to(tl.float32)
 
     if MUL_ROUTED_WEIGHT:
         a_m_scale = tl.load(
@@ -796,6 +802,8 @@ def grouped_matmul(
     reused_mblock_infos=None,
     run_config: Optional[dict] = None,
     bias: Optional[torch.Tensor] = None,  # per-expert bias [expert_num, N]
+    quantize_input=None,
+    round_intermediates=False,
 ):
     """
     token_num_mul_topk_num is int equal token_num * topk_num,
@@ -809,7 +817,7 @@ def grouped_matmul(
     when use_fp8_w8a8 is False, it must be None
     out is tensor shape [token_num * topk_num, out_dim]
     """
-    compute_type = tl.bfloat16 if out.dtype == torch.bfloat16 else tl.float16
+    compute_type = {torch.float16: tl.float16, torch.bfloat16: tl.bfloat16, torch.float32: tl.float32}[out.dtype]
     expert_num, n, k = expert_weights.shape
     assert token_inputs.shape[1] == k
     assert expert_to_token_index.shape == expert_to_weights.shape
@@ -878,9 +886,8 @@ def grouped_matmul(
             # input 使用 per group quant 量化
             _m, _k = token_inputs.shape
             assert _k % block_size_k == 0
-            token_inputs, token_input_scale = per_token_group_quant_fp8(
-                token_inputs, block_size_k, dtype=expert_weights.dtype
-            )
+            quantize = per_token_group_quant_fp8 if quantize_input is None else quantize_input
+            token_inputs, token_input_scale = quantize(token_inputs, block_size_k, dtype=expert_weights.dtype)
 
     if reused_mblock_infos is None:
         mblocks_to_tuple_info = moe_align2(token_num_mul_topk_num, expert_to_token_num, BLOCK_SIZE_M)
@@ -994,6 +1001,7 @@ def grouped_matmul(
         TOKEN_INPUT_USE_TMA=TOKEN_INPUT_USE_TMA,
         WEIGHT_USE_TMA=WEIGHT_USE_TMA,
         USE_PACKED_UE8M0=use_packed_ue8m0,
+        ROUND_INTERMEDIATES=round_intermediates,
     )
     return (mblocks_to_tuple_info, BLOCK_SIZE_M)
 
@@ -1019,6 +1027,10 @@ def fused_experts_impl(
     limit=None,
     alpha=None,
     clamp_up_add_one=True,
+    use_tanh_approximate_gelu=None,
+    quantize_input=None,
+    round_intermediates=False,
+    routed_top_k=None,
 ):
     # Check constraints.
     assert hidden_states.shape[1] == w1.shape[2], "Hidden size mismatch"
@@ -1090,6 +1102,8 @@ def fused_experts_impl(
             alloc_tensor_func=alloc_tensor_func,
             run_config=run_config,
             bias=w1_bias,
+            quantize_input=quantize_input,
+            round_intermediates=round_intermediates,
         )
 
         silu_and_mul_fwd(
@@ -1099,6 +1113,8 @@ def fused_experts_impl(
             alpha=alpha,
             clamp_up_add_one=clamp_up_add_one,
             layout=layout,
+            use_tanh_approximate_gelu=use_tanh_approximate_gelu,
+            round_intermediates=round_intermediates,
         )
 
         grouped_matmul(
@@ -1118,10 +1134,14 @@ def fused_experts_impl(
             reused_mblock_infos=reused_mblock_infos,
             run_config=run_config,
             bias=w2_bias,
+            quantize_input=quantize_input,
+            round_intermediates=round_intermediates,
         )
 
         moe_sum_reduce(
-            intermediate_cache3.view(*intermediate_cache3.shape), out_hidden_states[begin_chunk_idx:end_chunk_idx]
+            intermediate_cache3.view(*intermediate_cache3.shape),
+            out_hidden_states[begin_chunk_idx:end_chunk_idx],
+            routed_top_k=routed_top_k,
         )
     return out_hidden_states
 

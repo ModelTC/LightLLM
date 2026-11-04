@@ -19,10 +19,12 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
                 weights,
                 self.layer_num_,
                 self.network_config_["moe_intermediate_size"],
+                expert_prefix=self.experts.weight_prefix,
             )
         return super().load_hf_weights(weights)
 
     def _init_weight_names(self):
+        super()._init_weight_names()
         self._q_weight_name = f"model.layers.{self.layer_num_}.self_attn.q_proj.weight"
         self._q_norm_name = f"model.layers.{self.layer_num_}.self_attn.q_norm.weight"
         self._q_bias_name = None
@@ -89,22 +91,22 @@ class Qwen3MOETransformerLayerWeight(Qwen3TransformerLayerWeight):
         )
 
 
-def split_fused_expert_weights(weights: dict, layer_num: int, moe_intermediate_size: int):
+def split_fused_expert_weights(weights: dict, layer_num: int, moe_intermediate_size: int, *, expert_prefix=None):
     """将 HF 打包的 fused MoE expert 权重拆成按 expert 索引的独立权重。
 
     部分 checkpoint（如 Qwen3-MoE）把所有 expert 的 gate/up/down 压成
     ``mlp.experts.{gate_up,gate,up,down}_proj`` 的打包张量
-    （首维为 expert 数）。本函数只处理 ``model.layers.{layer_num}`` 下的这类
+    （首维为 expert 数）。本函数只处理 ``expert_prefix`` 下的这类
     key：弹出打包权重，再写入
     ``mlp.experts.{expert_idx}.{gate,up,down}_proj.weight``，供后续按 expert
     加载。若存在 fused ``gate_up_proj``，还会按 ``moe_intermediate_size``
     沿 intermediate 维切成 gate / up。
     """
-    layer_prefix = f"model.layers.{layer_num}."
+    expert_prefix = expert_prefix or f"model.layers.{layer_num}.mlp.experts"
     keys = list(weights.keys())
 
     for k in keys:
-        if not k.startswith(layer_prefix):
+        if not k.startswith(expert_prefix + "."):
             continue
 
         if "mlp.experts.gate_up_proj" in k:

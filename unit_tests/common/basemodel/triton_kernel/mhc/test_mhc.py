@@ -8,7 +8,14 @@ import torch
 import torch.nn.functional as F
 import triton
 
-from lightllm.common.basemodel.triton_kernel.mhc import hc_post, hc_pre_norm
+from lightllm.common.basemodel.triton_kernel.mhc import (
+    hc_contract,
+    hc_expand,
+    hc_head,
+    hc_post,
+    hc_post_pre_norm,
+    hc_pre_norm,
+)
 from lightllm.common.basemodel.triton_kernel.mhc import pre_norm
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 
@@ -86,6 +93,13 @@ def test_mhc_matches_reference(tokens, disable_deepgemm, monkeypatch):
     )
 
 
+def test_empty_stream_expansion_and_contraction():
+    embeddings = torch.empty(0, 4096, device="cuda", dtype=torch.bfloat16)
+    expanded = hc_expand(embeddings, 4)
+    assert expanded.shape == (0, 16384)
+    torch.testing.assert_close(hc_contract(expanded, 4), embeddings)
+
+
 @pytest.mark.parametrize("missing", ["module", "kernel"])
 def test_mhc_reports_missing_deepgemm(monkeypatch, missing):
     monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", False)
@@ -98,3 +112,92 @@ def test_mhc_reports_missing_deepgemm(monkeypatch, missing):
 
     with pytest.raises(ImportError, match="deep_gemm"):
         hc_pre_norm(x, fn, scale, base, norm, 4, 1e-5, 1e-5, 1e-6, 20)
+
+
+@pytest.mark.parametrize("tokens,hidden", [(1, 4096), (8, 4096), (16, 6144), (17, 4096), (129, 4096), (3073, 4096)])
+@pytest.mark.parametrize("disable_deepgemm", [False, True], ids=["fused", "torch"])
+def test_hc_post_pre_norm_matches_reference(tokens, hidden, disable_deepgemm, monkeypatch):
+    monkeypatch.setattr(pre_norm, "LIGHTLLM_DISABLE_DEEPGEMM_MHC", disable_deepgemm)
+    streams = 4
+    residual = torch.randn(tokens, streams * hidden, device="cuda", dtype=torch.bfloat16)
+    layer_output = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+    # Deliberately asymmetric mixing checks input/output stream orientation.
+    residual_mix = torch.randn(tokens, streams, streams, device="cuda").softmax(-1)
+    post_mix = torch.rand(tokens, streams, device="cuda") * 2
+    fn = torch.randn(24, streams * hidden, device="cuda") * 0.005
+    scale = torch.randn(3, device="cuda")
+    base = torch.randn(24, device="cuda")
+    norm = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+    residual_before = residual.clone()
+    expected_residual = _hc_post_reference(layer_output, residual, residual_mix, post_mix, streams)
+    expected_pre = _hc_pre_reference(expected_residual, fn, scale, base, streams, 1e-6, 1e-6, 20)
+    actual = hc_post_pre_norm(
+        layer_output, residual, residual_mix, post_mix, fn, scale, base, norm, streams, 1e-6, 1e-5, 1e-6, 20
+    )
+    torch.testing.assert_close(residual, residual_before, atol=0, rtol=0)
+    torch.testing.assert_close(actual[1], expected_residual, atol=0.04, rtol=0.02)
+    torch.testing.assert_close(actual[0], rmsnorm_forward(expected_pre[0], norm, 1e-5), atol=0.04, rtol=0.03)
+    for a, b in zip(actual[2:], expected_pre[1:]):
+        torch.testing.assert_close(a, b, atol=2e-4, rtol=2e-3)
+
+
+@pytest.mark.parametrize("tokens,hidden", [(1, 4096), (9, 6144), (129, 4096), (3073, 4096)])
+@pytest.mark.parametrize("zeros", [False, True])
+def test_hc_head_learned_gates_and_preallocated_output(tokens, hidden, zeros):
+    streams = 4
+    residual = torch.randn(tokens, streams * hidden, device="cuda", dtype=torch.bfloat16)
+    if zeros:
+        residual.zero_()
+    fn = torch.randn(streams, streams * hidden, device="cuda") * 0.005
+    scale = torch.randn(1, device="cuda")
+    base = torch.randn(streams, device="cuda")
+    inv_rms = torch.rsqrt(residual.float().square().mean(-1, keepdim=True) + 1e-5)
+    gates = torch.sigmoid(F.linear(residual.float(), fn) * inv_rms * scale + base) + 1e-6
+    expected = (residual.view(tokens, streams, hidden).float() * gates.unsqueeze(-1)).sum(1).bfloat16()
+    output = torch.full((tokens, hidden), float("nan"), device="cuda", dtype=torch.bfloat16)
+    actual = hc_head(residual, fn, scale, base, streams, 1e-5, 1e-6, out=output)
+    assert actual is output
+    torch.testing.assert_close(actual, expected, atol=0.04, rtol=0.02)
+
+
+@pytest.mark.parametrize("tokens", [1, 16, 17, 129])
+def test_shared_mhc_cuda_graph_replay(tokens):
+    streams, hidden = 4, 4096
+    residual = torch.randn(tokens, streams * hidden, device="cuda", dtype=torch.bfloat16)
+    fn = torch.randn(24, streams * hidden, device="cuda") * 0.005
+    scale = torch.randn(3, device="cuda")
+    base = torch.randn(24, device="cuda")
+    norm = torch.randn(hidden, device="cuda", dtype=torch.bfloat16)
+    layer_output = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+    head_fn, head_scale, head_base = fn[:streams].contiguous(), scale[:1].contiguous(), base[:streams].contiguous()
+    output = torch.empty(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+
+    def run():
+        x, mix, post = hc_pre_norm(residual, fn, scale, base, norm, streams, 1e-6, 1e-5, 1e-6, 20)
+        assert x.shape == (tokens, hidden) and post.shape == (tokens, streams)
+        x, updated, mix, post = hc_post_pre_norm(
+            layer_output, residual, mix, post, fn, scale, base, norm, streams, 1e-6, 1e-5, 1e-6, 20
+        )
+        final = hc_post(x, updated, mix, post, streams)
+        return hc_head(final, head_fn, head_scale, head_base, streams, 1e-6, 1e-6, out=output)
+
+    def reference():
+        _, mix, post = _hc_pre_reference(residual, fn, scale, base, streams, 1e-6, 1e-6, 20)
+        updated = _hc_post_reference(layer_output, residual, mix, post, streams)
+        x, mix, post = _hc_pre_reference(updated, fn, scale, base, streams, 1e-6, 1e-6, 20)
+        x = rmsnorm_forward(x, norm, 1e-5)
+        final = _hc_post_reference(x, updated, mix, post, streams)
+        inv_rms = torch.rsqrt(final.float().square().mean(-1, keepdim=True) + 1e-6)
+        gates = torch.sigmoid(F.linear(final.float(), head_fn) * inv_rms * head_scale + head_base) + 1e-6
+        return (final.view(tokens, streams, hidden).float() * gates.unsqueeze(-1)).sum(1).bfloat16()
+
+    run()
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        actual = run()
+    for _ in range(2):
+        residual.normal_()
+        layer_output.normal_()
+        graph.replay()
+        torch.testing.assert_close(actual, reference(), atol=0.06, rtol=0.04)

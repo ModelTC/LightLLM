@@ -28,7 +28,7 @@ from lightllm.utils.log_utils import init_logger, log_time_ready, PeriodicStatsL
 from lightllm.utils.profiler import ProfilerCmd
 from lightllm.server.router.token_load import TokenLoad
 from lightllm.server.metrics.manager import MetricClient
-from lightllm.common.kv_cache_mem_manager import ReadOnlyStaticsMemoryManager
+from lightllm.common.attention_state.allocators import KVCapacityReader
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.utils.process_check import start_parent_check_thread
 from lightllm.utils.envs_utils import get_unique_server_name
@@ -72,7 +72,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         self.service_ready.set_value(0)
         self.engine_counters = EngineCounters(self.dp_size_in_node, owner=True)
         # 用共享内存进行共享，router 模块读取进行精确的调度估计
-        self.read_only_statics_mem_manager = ReadOnlyStaticsMemoryManager()
+        self.kv_capacity_reader = KVCapacityReader()
         # 初始化 radix_cache_client 用于读取 prompt cache 的管理信息
         self.radix_cache_client = None
 
@@ -123,7 +123,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         # 初始化模型
         self.model_rpc_servers = []
         # 用于 kv move 管理进程 和 推理进程进行task信息的交互。
-        self.info_queue: mp.Queue = mp.Queue()
+        self.info_queue: mp.Queue = mp.Queue() if self.is_pd_run_mode else None
 
         assert (self.world_size % self.nnodes) == 0
         node_world_size = self.world_size // self.nnodes
@@ -448,11 +448,11 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         if not self.args.disable_dynamic_prompt_cache:
             return (
                 self.max_total_token_num
-                - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
+                - self.kv_capacity_reader.get_available_tokens(dp_index)
                 - self.radix_cache_client.get_unrefed_tokens_num(dp_index)
             )
         else:
-            return self.max_total_token_num - self.read_only_statics_mem_manager.get_unrefed_token_num(dp_index)
+            return self.max_total_token_num - self.kv_capacity_reader.get_available_tokens(dp_index)
 
     def _add_req(self, group_req_indexes: GroupReqIndexes):
         req_group = []

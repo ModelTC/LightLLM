@@ -1,12 +1,10 @@
 import torch
 import triton
 import collections
-from lightllm.common.kv_cache_mem_manager import MemoryManager
+from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.req_manager import ReqManager
 from lightllm.distributed import CustomProcessGroup
 from typing import Tuple, Any, Optional, List
-from .triton_kernel.gen_prefill_params import gen_prefill_params
-from .triton_kernel.gen_decode_params import gen_decode_params
 from .triton_kernel.multimodal_emb import mark_multimodal_obj
 from .batch_objs import ModelInput
 from lightllm.utils.envs_utils import get_env_start_args
@@ -20,6 +18,9 @@ class InferStateInfo:
     """
 
     def __init__(self):
+        self.execution_runner = None
+        self.prefill_program = None
+        self.execution_metadata = {}
         # prefill 和 decode 使用的 att 状态对象
         self.prefill_att_state: BasePrefillAttState = None
         self.decode_att_state: BaseDecodeAttState = None
@@ -47,10 +48,13 @@ class InferStateInfo:
         self.is_prefill: bool = None
         self.is_draft_model: bool = False
 
-        self.mem_manager: MemoryManager = None
+        self.att_state_manager: AttentionStateManager = None
+        self.att_state_role: str = "main"  # main 或 draft0 .. draft35，区分共享管理器中的 State。
         self.req_manager: ReqManager = None
 
         self.mem_index: torch.Tensor = None
+        self.moe_capture_callbacks = {}
+        self.route_capture = None
 
         self.return_all_prompt_logics: bool = False
         # 在开启 return_all_prompt_logics 模式时，保存整个 prefill 阶段每一个
@@ -58,6 +62,7 @@ class InferStateInfo:
         # 仅在 prefill 阶段且需要返回 prompt logprobs 时才会被填充。
         self.prompt_logics: Optional[torch.Tensor] = None
         self.multimodal_params: dict = None
+        self.cpu_embed_cache_tensor: torch.Tensor = None
         self.is_cuda_graph_capture: bool = False  # 标记是否用于 decode CUDA Graph 捕获
         self.is_cuda_graph_replay: bool = False  # 标记是否为 decode CUDA Graph 回放准备输入
         self.dist_group: CustomProcessGroup = None
@@ -108,37 +113,24 @@ class InferStateInfo:
         self.dp_output_split_sizes: List[List[int]] = None
         self.dp_input_split_sizes: List[List[int]] = None
 
-    def init_some_extra_state(self, model):
-        if self.is_prefill:
-            (
-                self.b_q_seq_len,
-                self.b1_cu_q_seq_len,
-                self.b_kv_seq_len,
-                self.b1_cu_kv_seq_len,
-                self.position_ids,
-            ) = gen_prefill_params(
-                input_token_num=self.input_ids.shape[0],
-                b_ready_cache_len=self.b_ready_cache_len,
-                b_seq_len=self.b_seq_len,
-            )
-            self.b_q_start_loc = self.b1_cu_q_seq_len[0:-1]
-        else:
-            (
-                self.b_q_seq_len,
-                self.b1_cu_q_seq_len,
-                self.b_kv_seq_len,
-                self.b1_cu_kv_seq_len,
-                self.position_ids,
-            ) = gen_decode_params(self.b_seq_len)
-            self.b_kv_start_loc = self.b1_cu_kv_seq_len[0:-1]
+    @classmethod
+    def bind_metadata(cls, model):
+        from lightllm.core.runner.batch_metadata import prepare_sequence_metadata
+
+        return prepare_sequence_metadata
 
     def init_att_state(self):
+        if self.execution_runner is not None:
+            self.execution_metadata = self.execution_runner.prepare_batch(self)
+            return
         if self.is_prefill:
-            self.prefill_att_state.init_state()
+            if self.prefill_att_state is not None:
+                self.prefill_att_state.init_state()
             if self.prefill_att_state1 is not None:
                 self.prefill_att_state1.init_state()
         else:
-            self.decode_att_state.init_state()
+            if self.decode_att_state is not None:
+                self.decode_att_state.init_state()
             if self.decode_att_state1 is not None:
                 self.decode_att_state1.init_state()
         self.check_att_states()
@@ -171,14 +163,26 @@ class InferStateInfo:
             if state is not None:
                 state.check_no_infer_state()
 
+    def _check_graph_bindings(self, new_infer_state):
+        if self.route_capture is not new_infer_state.route_capture:
+            raise ValueError("Graph route recording binding changed")
+        if self.cpu_embed_cache_tensor is not new_infer_state.cpu_embed_cache_tensor:
+            raise ValueError("Graph embedding storage binding changed")
+
     def copy_for_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        self._check_graph_bindings(new_infer_state)
+        if self.execution_metadata.keys() != new_infer_state.execution_metadata.keys():
+            raise ValueError("Graph attention bindings changed")
+        for name, metadata in self.execution_metadata.items():
+            metadata.copy_for_graph(new_infer_state.execution_metadata[name])
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)
                 if attr_ is not None and attr_.data_ptr() != attr_value.data_ptr():
                     attr_.copy_(attr_value, non_blocking=True)
 
-        self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
+        if self.decode_att_state is not None:
+            self.decode_att_state.copy_for_decode_cuda_graph(new_infer_state.decode_att_state)
         if self.decode_att_state1 is not None:
             self.decode_att_state1.copy_for_decode_cuda_graph(new_infer_state.decode_att_state1)
         return
@@ -209,8 +213,8 @@ class InferStateInfo:
 
         args = get_env_start_args()
 
-        dp_input_lens = torch.empty(size=(args.dp,), device="cuda", dtype=torch.int32)
-        input_len = torch.empty(size=(1,), device="cuda", dtype=torch.int32)
+        dp_input_lens = torch.empty(size=(args.dp,), device=input_ids.device, dtype=torch.int32)
+        input_len = torch.empty(size=(1,), device=input_ids.device, dtype=torch.int32)
         input_len.fill_(len(input_ids))
         dist.all_gather_into_tensor(
             output_tensor=dp_input_lens,
@@ -339,7 +343,7 @@ class InferStateInfo:
         dest_data = g_cache_manager.alloc_tensor(
             shape=(handle_len * scale_size,),
             data_type=data.dtype,
-            device="cuda",
+            device=data.device,
         )
         dist.all_to_all_single(
             output=dest_data.view(-1),
@@ -369,7 +373,7 @@ class InferStateInfo:
         origin_data = g_cache_manager.alloc_tensor(
             shape=(origin_len * scale_size,),
             data_type=data.dtype,
-            device="cuda",
+            device=data.device,
         )
         dist.all_to_all_single(
             output=origin_data.view(-1),
@@ -381,45 +385,8 @@ class InferStateInfo:
         )
         return origin_data.view(-1, *old_shape[1:])
 
-    # 用于 prefill cuda graph 的专用功能接口
-    def prefill_cuda_graph_create_graph_obj(self):
-        if not hasattr(self, "prefill_cuda_graph_exe_list"):
-            self.prefill_cuda_graph_exe_list = []
-        graph_obj = torch.cuda.CUDAGraph()
-        capture_graph = torch.cuda.graph(graph_obj, pool=self.mem_pool)
-        self.prefill_cuda_graph_exe_list.append((graph_obj, capture_graph))
-        return
-
-    def prefill_cuda_graph_get_current_capture_graph(self) -> torch.cuda.graph:
-        assert len(self.prefill_cuda_graph_exe_list) > 0, "no cuda graph exe obj found"
-        if isinstance(self.prefill_cuda_graph_exe_list[-1], tuple):
-            return self.prefill_cuda_graph_exe_list[-1][1]
-        else:
-            return self.prefill_cuda_graph_exe_list[-2][1]
-
-    def prefill_cuda_graph_add_cpu_runnning_func(self, func, after_graph: torch.cuda.graph):
-        if not hasattr(self, "prefill_cuda_graph_exe_list"):
-            self.prefill_cuda_graph_exe_list = []
-        if after_graph is None:
-            self.prefill_cuda_graph_exe_list.append(func)
-            return
-
-        for i, e in enumerate(self.prefill_cuda_graph_exe_list):
-            if isinstance(e, tuple) and e[1] == after_graph:
-                self.prefill_cuda_graph_exe_list.insert(i + 1, func)
-                return
-        assert False, "after_graph not found in prefill_cuda_graph_exe_list"
-
-    def prefill_replay(self, new_infer_state: "InferStateInfo"):
-        for func in self.prefill_cuda_graph_exe_list:
-            if isinstance(func, tuple):
-                graph_obj, _ = func
-                graph_obj.replay()
-            else:
-                func(new_infer_state)
-        return
-
     def copy_for_prefill_cuda_graph(self, new_infer_state: "InferStateInfo"):
+        self._check_graph_bindings(new_infer_state)
         for attr_name, attr_value in vars(new_infer_state).items():
             if isinstance(attr_value, torch.Tensor):
                 attr_ = getattr(self, attr_name, None)

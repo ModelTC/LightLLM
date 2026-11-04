@@ -1,6 +1,4 @@
 import logging
-import os
-
 import numpy as np
 import torch
 import time
@@ -17,7 +15,6 @@ from lightllm.server.router.token_load import TokenLoad
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.logprobs_manager import PromptLogprobsCaptureManager
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager
-from lightllm.common.req_manager import HybridAttentionReqManager
 from lightllm.server.router.dynamic_prompt.hybrid_att_radix_cache import HybridAttPagedRadixCache
 from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
 from lightllm.common.basemodel.batch_objs import ModelOutput, ModelInput
@@ -60,6 +57,8 @@ class ModeBackend:
         self.shm_req_manager = ShmReqManager()
 
         self.overlap_event_manager = OverlapEventManager()
+        self._shutdown_requested = threading.Event()
+        self._inference_stopped = False
         # Backend-specific scheduling; output constraints preserve overlap.
         self.support_overlap = True
 
@@ -114,7 +113,18 @@ class ModeBackend:
         self.weight_dir = kvargs["weight_dir"]
         max_total_token_num = kvargs["max_total_token_num"]
 
-        init_distributed_env(kvargs)
+        from lightllm.core.device.context import create_context
+
+        device_index = kvargs["rank_id"] % (self.world_size // self.nnodes)
+        self.execution_context = create_context(
+            device_index,
+            device=kvargs.get("execution_device"),
+            providers=kvargs.get("execution_providers"),
+            formats=kvargs.get("execution_formats"),
+            config=self.args,
+        )
+        self.execution_device = self.execution_context.device
+        init_distributed_env(kvargs, runtime=self.execution_device)
         self.init_rank_infos()
         self.engine_counters = (
             EngineCounters(self.dp_size_in_node, self.dp_rank_in_node) if self.is_master_in_dp else None
@@ -122,7 +132,9 @@ class ModeBackend:
         group_size = (
             2 if (self.args.enable_decode_microbatch_overlap or self.args.enable_prefill_microbatch_overlap) else 1
         )
-        dist_group_manager.create_groups(group_size=group_size)  # set the default group
+        dist_group_manager.create_groups(group_size=group_size, runtime=self.execution_device)  # set the default group
+
+        self.execution_context.communication = tuple(dist_group_manager.groups)
 
         self.shared_token_load = TokenLoad("shared_token_load", self.dp_size_in_node)
 
@@ -133,6 +145,9 @@ class ModeBackend:
 
         model_kvargs = {
             "weight_dir": self.weight_dir,
+            "multimodal_embedding_cache": (
+                g_infer_context.cpu_embed_cache_client.cpu_embed_cache_tensor if self.args.enable_multimodal else None
+            ),
             "max_total_token_num": max_total_token_num,
             "load_way": self.load_way,
             "max_req_num": kvargs.get("max_req_num", 1000),
@@ -149,42 +164,76 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "expert_dtype": kvargs.get("expert_dtype", None),
             "run_mode": self.run_mode,
+            "execution_providers": self.execution_context.providers,
+            "execution_device": self.execution_device,
+            "execution_formats": self.execution_context.formats,
+            "execution_communication": self.execution_context.communication,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
-        set_random_seed(2147483647)
-        self.is_hybrid_att_model = isinstance(self.model.req_manager, HybridAttentionReqManager)
+        self.draft_models = []
+        if self.args.mtp_mode is not None:
+            self.init_mtp_draft_model(model_kvargs)
+        from lightllm.utils.envs_utils import set_model_init_status
+        from lightllm.utils.torch_memory_saver_utils import MemoryTag
+        from lightllm.common.attention_state import AttentionStateManager
+        from lightllm.common.req_manager import ReqManager
 
-        if self.is_hybrid_att_model:
-            self.small_page_buffers = self.model.req_manager.create_small_page_cache_manager(
-                size=self.args.linear_att_cache_size,
+        models = (self.model, *self.draft_models)
+        assert all(getattr(item, "att_state_manager", None) is None for item in models), "resources already initialized"
+        assert all(
+            item.max_req_num == self.model.max_req_num for item in models
+        ), "models must share the request domain"
+        # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
+        max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
+        with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            req_manager = ReqManager(
+                max_request_num=self.model.max_req_num,
+                max_sequence_length=max_seq_len,
+                device=self.execution_device.device,
             )
-        else:
-            self.small_page_buffers = None
+        for item in models:
+            item.bind_req_manager(req_manager=req_manager)
+        for item in models:
+            item.prepare_attention_states()
+        manager: AttentionStateManager = self.model.att_state_manager
+        assert all(item.att_state_manager is manager for item in models), "models must share one resource manager"
+        with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
+            manager.finish_state_registration()
+            manager.load_full_att_calibration(args=self.model.args)
+            manager.initialize_storage(
+                self.model.args,
+                token_capacity=self.model.max_total_token_num,
+                mem_fraction=self.model.mem_fraction,
+                runtime=self.execution_device,
+            )
+        # Capture writes must be present when warmup records CUDA Graphs.
+        self._init_route_capture()
+        for item in models:
+            item.init_runtime()
+        self.execution_device.empty_cache()
+        set_model_init_status(True)
+        set_random_seed(2147483647)
+        self.is_hybrid_att_model = bool(self.model.att_state_manager.get_bounded_attention_states())
 
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
             if self.is_hybrid_att_model:
                 self.radix_cache = HybridAttPagedRadixCache(
-                    total_token_num=self.model.mem_manager.size,
+                    total_token_num=self.model.att_state_manager.full_att_allocator.size,
                     rank_in_node=self.rank_in_node,
                     hash_page_size=self.args.linear_att_hash_page_size,
                     big_page_num=self.args.linear_att_page_block_num,
-                    kv_cache_mem_manager=self.model.mem_manager,
-                    small_page_buffers=self.small_page_buffers,
+                    att_state_manager=self.model.att_state_manager,
                 )
             else:
                 self.radix_cache = RadixCache(
-                    total_token_num=self.model.mem_manager.size,
+                    total_token_num=self.model.att_state_manager.full_att_allocator.size,
                     rank_in_node=self.rank_in_node,
-                    mem_manager=self.model.mem_manager,
+                    att_state_manager=self.model.att_state_manager,
                     page_size=self.args.page_size,
                 )
-
-        if "prompt_cache_kv_buffer" in model_cfg:
-            assert self.use_dynamic_prompt_cache
-            self.preload_prompt_cache_kv_buffer(model_cfg)
 
         self.logger.info("event=model.initialized model_class=%s", self.model.__class__.__name__)
 
@@ -203,43 +252,67 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
-            self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+            self.dp_reduce_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=self.execution_device.device, requires_grad=False
+            )
+            self.dp_gather_item_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=self.execution_device.device, requires_grad=False
+            )
             self.dp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+                [0 for _ in range(self.global_world_size)],
+                dtype=torch.int32,
+                device=self.execution_device.device,
+                requires_grad=False,
             )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
-        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+        self.node_broadcast_tensor = torch.tensor(
+            [0], dtype=torch.int32, device=self.execution_device.device, requires_grad=False
+        )
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         if self.is_multinode_tp:
-            self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
+            self.multinode_tp_gather_item_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=self.execution_device.device
+            )
             self.multinode_tp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+                [0 for _ in range(self.global_world_size)],
+                dtype=torch.int32,
+                device=self.execution_device.device,
+                requires_grad=False,
             )
             self.multinode_tp_nccl_group = dist.new_group(
                 [rank for rank in range(self.global_world_size)], backend="nccl"
             )
 
         if self.args.run_mode in ["prefill", "decode"] or self.args.enable_dp_prompt_cache_fetch:
-            # 如果存在需要跨进程使用mem manger的特性，则将mem manager写入到 shm中，方便
-            # 读取
-            self.model.mem_manager.write_to_shm(req_manager=self.model.req_manager)
-            dist.barrier(group=self.node_nccl_group, device_ids=[torch.cuda.current_device()])
+            from lightllm.server.router.model_infer.shared_att_resources_utils import publish_att_resources
+
+            # PD 和 DP 使用独立导出，避免 PD 读者收到大小页池或 DP 读者丢失页池。
+            if self.args.run_mode in ("prefill", "decode"):
+                publish_att_resources(
+                    self.model.att_state_manager,
+                    self.model.req_manager.req_to_token_indexs,
+                    kind="pd",
+                    reader_count=self.node_world_size,
+                )
+            if self.args.enable_dp_prompt_cache_fetch:
+                publish_att_resources(
+                    self.model.att_state_manager,
+                    self.model.req_manager.req_to_token_indexs,
+                    kind="dp",
+                    reader_count=self.dp_size_in_node - 1,
+                )
+            dist.barrier(group=self.node_nccl_group)
 
         # 同一 DP 组内只需主 rank 初始化真实的 capture buffer 并执行后续相关操作；
         # 非主 rank 不需要分配 buffer，避免重复占用内存。
         if self.is_master_in_dp:
             # Capture 只保存 allocator 管理的真实 KV 槽位，HOLD 页对应的 padding 写入由 kernel 过滤。
-            kv_cache_size = self.model.mem_manager.size
+            kv_cache_size = self.model.att_state_manager.full_att_allocator.size
             if self.args.enable_prompt_logprobs:
                 mgr = PromptLogprobsCaptureManager.get_instance()
-                if mgr is not None:
-                    mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
-            if self.args.enable_return_routed_experts:
-                mgr = MoeRouteInfoManager.get_instance()
                 if mgr is not None:
                     mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
 
@@ -253,7 +326,6 @@ class ModeBackend:
         self.shm_pd_trans_io_buffer = ShmObjsIOBuffer(tail_str="pd")
 
         if self.args.mtp_mode is not None:
-            self.init_mtp_draft_model(model_kvargs)
             self.init_spec_engine()
 
         if self.args.enable_cpu_cache:
@@ -279,9 +351,9 @@ class ModeBackend:
 
     def init_dp_kv_shared(self):
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
-        from lightllm.common.kv_cache_mem_manager import MemoryManager
+        from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
 
-        torch.cuda.set_device(get_current_device_id())
+        self.execution_device.set_device(get_current_device_id())
 
         self.dp_kv_shared_module = DPKVSharedMoudle(
             max_req_num=self.args.running_max_req_size,
@@ -289,17 +361,48 @@ class ModeBackend:
             backend=self,
         )
 
-        # Collect mem_managers from all ranks
-        self.mem_managers = []
-        for rank_idx in range(self.node_world_size):
+        # 每个 DP 只保留对应 TP 分片，统一以节点内 DP rank 索引。
+        self.dp_att_state_managers = {}
+        self.dp_req_to_token_indices = {}
+        # 取节点内的 TP 起点，兼容单个 TP 组跨节点、rank_in_dp 超过本节点 rank 范围的情况。
+        for dp_rank, rank_idx in enumerate(
+            range(self.rank_in_node % self.dp_world_size, self.node_world_size, self.dp_world_size)
+        ):
             if rank_idx != self.rank_in_node:
-                self.mem_managers.append(MemoryManager.loads_from_shm(rank_idx))
+                att_state_manager, req_to_token_indices = load_att_resources(rank_idx, kind="dp")
+                att_state_manager.get_dp_shared_operator().register_page_pools_pin_memory()
             else:
-                self.mem_managers.append(self.model.mem_manager)
+                att_state_manager = self.model.att_state_manager
+                req_to_token_indices = self.model.req_manager.req_to_token_indexs
+            self.dp_att_state_managers[dp_rank] = att_state_manager
+            self.dp_req_to_token_indices[dp_rank] = req_to_token_indices
         return
 
     def get_max_total_token_num(self):
-        return self.model.mem_manager.size
+        return self.model.att_state_manager.full_att_allocator.size
+
+    def shutdown(self):
+        self._shutdown_requested.set()
+        for name in ("infer_loop_thread", "infer_loop_thread1"):
+            thread = getattr(self, name, None)
+            if thread is not None:
+                thread.join()
+        if not dist.is_initialized():
+            return
+        # No inference thread can enqueue work or replay a Graph after this point.
+        self.execution_device.synchronize()
+        for model in (getattr(self, "model", None), *getattr(self, "draft_models", ())):
+            if model is not None:
+                model.graph_runner.close()
+        dist_group_manager.close()
+        dist.destroy_process_group()
+        self.logger.info("Inference threads, Graphs and communication groups have stopped")
+
+    def _finish_inference(self, event_pack):
+        self._inference_stopped = True
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+        event_pack.notify_forward_and_wait_post_handle()
+        event_pack.notify_pre_post_handle()
 
     def infer_loop(self):
         raise NotImplementedError()
@@ -316,9 +419,10 @@ class ModeBackend:
         spec_mode = self.args.mtp_mode
         is_chained_draft = spec_mode in ("vanilla_with_att", "vanilla_no_att")
 
-        os.environ["DISABLE_CHECK_MAX_LEN_INFER"] = "1"
-
         draft_model_count = self.max_draft_step if is_chained_draft else 1
+        from lightllm.common.attention_state.utils import MAX_DRAFT_MODELS
+
+        assert 0 < draft_model_count <= MAX_DRAFT_MODELS, "at most 36 draft models are supported"
         draft_model_dirs = self.args.mtp_draft_model_dir
         assert draft_model_dirs is not None
         assert len(draft_model_dirs) >= draft_model_count
@@ -327,7 +431,8 @@ class ModeBackend:
             draft_model_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[i])
             draft_model_kvargs = {
                 "weight_dir": draft_model_dirs[i],
-                "max_total_token_num": self.model.mem_manager.size,
+                "multimodal_embedding_cache": main_kvargs.get("multimodal_embedding_cache"),
+                "max_total_token_num": main_kvargs["max_total_token_num"],
                 "load_way": main_kvargs["load_way"],
                 "max_req_num": main_kvargs.get("max_req_num", 1000),
                 "max_seq_length": main_kvargs.get("max_seq_length", 1024 * 5),
@@ -344,6 +449,10 @@ class ModeBackend:
                 "expert_dtype": main_kvargs.get("expert_dtype", None),
                 "run_mode": "normal",
                 "main_model": self.model,
+                "execution_providers": main_kvargs.get("execution_providers"),
+                "execution_device": main_kvargs.get("execution_device"),
+                "execution_formats": main_kvargs.get("execution_formats"),
+                "execution_communication": main_kvargs.get("execution_communication"),
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
@@ -405,6 +514,13 @@ class ModeBackend:
         selected_logits = logits.gather(1, next_token_ids.long().view(-1, 1))
         return (logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
 
+    def _init_route_capture(self):
+        self.model.route_capture = None
+        if self.args.enable_return_routed_experts and self.is_master_in_dp:
+            manager = MoeRouteInfoManager.get_instance()
+            manager.init_capture_buffer(kv_cache_size=self.model.att_state_manager.full_att_allocator.size)
+            self.model.route_capture = manager.bind_capture()
+
     def _capture_prompt_logprobs_if_needed(
         self,
         model_input: ModelInput,
@@ -461,18 +577,23 @@ class ModeBackend:
 
     def _try_read_new_reqs(self):
         if self.is_multinode_tp:
-            self._try_read_new_reqs_multinode_tp()
+            stopping = self._try_read_new_reqs_multinode_tp()
         else:
-            self._try_read_new_reqs_normal()
+            stopping = self._try_read_new_reqs_normal()
+
+        if stopping:
+            return True
 
         # on each loop thread
         if self.profiler is not None:
             self.profiler.multi_thread_helper()
-        return
+        return False
 
     def _try_read_new_reqs_normal(self):
         if self.is_master_in_node:
-            if self.shm_reqs_io_buffer.is_ready():
+            if self._shutdown_requested.is_set():
+                self.node_broadcast_tensor.fill_(-1)
+            elif self.shm_reqs_io_buffer.is_ready():
                 self.node_broadcast_tensor.fill_(1)
             else:
                 self.node_broadcast_tensor.fill_(0)
@@ -480,6 +601,8 @@ class ModeBackend:
         src_rank_id = self.args.node_rank * self.node_world_size
         broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
         new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+        if new_buffer_is_ready == -1:
+            return True
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
@@ -496,13 +619,15 @@ class ModeBackend:
             new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
             if new_buffer_is_ready:
                 self._read_pd_trans_io_buffer_and_update_req_status()
-        return
+        return False
 
     def _try_read_new_reqs_multinode_tp(self):
         """
         多节点tp模式下,需要协调所有rank的行为同步。
         """
-        if self.shm_reqs_io_buffer.is_ready():
+        if self._shutdown_requested.is_set():
+            self.multinode_tp_gather_item_tensor.fill_(-1)
+        elif self.shm_reqs_io_buffer.is_ready():
             self.multinode_tp_gather_item_tensor.fill_(1)
         else:
             self.multinode_tp_gather_item_tensor.fill_(0)
@@ -513,13 +638,15 @@ class ModeBackend:
             async_op=False,
         )
         new_buffer_is_readys = self.multinode_tp_all_gather_tensor.detach().cpu().numpy()
+        if np.any(new_buffer_is_readys == -1):
+            return True
         new_buffer_is_ready = np.all(new_buffer_is_readys == 1)
 
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
         assert self.is_pd_mode is False
-        return
+        return False
 
     def _read_reqs_buffer_and_init_reqs(self):
         cmds: List = self.shm_reqs_io_buffer.read_obj()
@@ -564,7 +691,7 @@ class ModeBackend:
                                 )
                                 # to do 这个地方是否需要加流同步
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                torch.cuda.current_stream().synchronize()
+                                self.execution_device.current_stream().synchronize()
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
@@ -638,7 +765,7 @@ class ModeBackend:
 
         old_hold_kv_len = req_obj.hold_kv_len
         new_hold_kv_len = old_hold_kv_len + alloc_token_num
-        mem_indexes = g_infer_context.req_manager.mem_manager.alloc(alloc_token_num)
+        mem_indexes = g_infer_context.att_state_manager.full_att_allocator.alloc(alloc_token_num)
         # 高频调度路径允许异步写入请求索引表，其他调用方默认保持原有的同步拷贝语义。
         g_infer_context.req_manager.req_to_token_indexs[req_obj.req_idx, old_hold_kv_len:new_hold_kv_len].copy_(
             mem_indexes, non_blocking=no_blcoking_copy
@@ -972,7 +1099,7 @@ class ModeBackend:
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(
                 key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
-            ).cuda(non_blocking=True)
+            ).to(logits.device, non_blocking=True)
 
         scatter_token(
             next_token_ids=next_token_ids,
@@ -998,15 +1125,17 @@ class ModeBackend:
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
     def _dp_all_gather_prefill_and_decode_req_num(
-        self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
+        self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq], stopping=False
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Gather the number of prefill requests across all DP ranks.
         """
-        current_dp_prefill_num = len(prefill_reqs)
+        current_dp_prefill_num = -1 if stopping else len(prefill_reqs)
         self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
         all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
         dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
+        if np.any(dp_prefill_req_nums == -1):
+            return None, None
 
         current_dp_decode_num = len(decode_reqs)
         self.dp_gather_item_tensor.fill_(current_dp_decode_num)
@@ -1024,27 +1153,6 @@ class ModeBackend:
         all_reduce(self.dp_reduce_tensor, op=dist.ReduceOp.MAX, group=None, async_op=False)
         max_decode_num = self.dp_reduce_tensor.item()
         return max_decode_num
-
-    def preload_prompt_cache_kv_buffer(self, model_cfg):
-        self.logger.info("Preload prompt cache kv buffer.")
-        cur_rank = dist.get_rank()
-        prompt_cache_kv_buffer_path = os.path.join(
-            self.weight_dir, model_cfg["prompt_cache_kv_buffer"][f"rank_{cur_rank}"]
-        )
-        page_size = self.args.page_size
-        intact_kv_len = len(model_cfg["prompt_cache_token_ids"]) // page_size * page_size
-        if intact_kv_len == 0:
-            return
-
-        prompt_cache_kv_buffer = torch.load(prompt_cache_kv_buffer_path, weights_only=True, map_location="cpu")
-        prompt_cache_kv_buffer = {name: buffer[:, :intact_kv_len] for name, buffer in prompt_cache_kv_buffer.items()}
-        intact_kv_index = self.radix_cache.mem_manager.alloc(intact_kv_len)
-        self.radix_cache.mem_manager.load_index_kv_buffer(intact_kv_index, prompt_cache_kv_buffer)
-        intact_token_ids = torch.tensor(
-            model_cfg["prompt_cache_token_ids"][:intact_kv_len], dtype=torch.int64, device="cpu"
-        )
-        self.radix_cache.insert(intact_token_ids, intact_kv_index)
-        self.radix_cache.match_prefix(intact_token_ids, update_refs=True)
 
     def init_rank_infos(self):
         self.node_world_size = get_node_world_size()

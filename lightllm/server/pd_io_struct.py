@@ -104,7 +104,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)
@@ -137,6 +136,7 @@ class PDDecodeNodeInfo:
 
     request_id: int
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
+    kv_calibration: Optional[dict] = None
 
 
 @dataclass
@@ -184,6 +184,7 @@ class PDChunckedTransTask:
 
     # xfer_handle
     xfer_handle: Optional[int] = None
+    local_completion: object = None
 
     create_time: float = None
     start_trans_time: float = None  # 用于标记传输开始的时间。同时标记是否正在传输中
@@ -192,11 +193,14 @@ class PDChunckedTransTask:
     transfer_time_out_secs: int = 66
     # kv: 通过 mem_indexes 传输 [start_kv_index, end_kv_index) 的 token KV。
     # att_state: 混合注意力模型的请求运行态 buffer（如 linear attention 的 conv/SSM 状态）。
-    # start_kv_index == end_kv_index 标记状态对应的 token 位置，mem_indexes 为空。
-    # 通过本地 req_idx 定位运行态 buffer，具体打包和恢复由模型 mem_manager 负责。
+    # start_kv_index == end_kv_index 标记 prefill 状态对应的 token 位置，mem_indexes 为空。
+    # tail PD 读写用该位置在固定逻辑窗口与本地 MTP ring 之间转换，不另存长度字段。
+    # 通过本地 req_idx 定位运行态 buffer，具体打包和恢复由模型 AttentionStateManager 负责。
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
+    prefill_kv_calibration: Optional[dict] = None
+    decode_kv_calibration: Optional[dict] = None
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
@@ -235,6 +239,7 @@ class PDChunckedTransTask:
         task.__dict__.pop("shared_time_out_mark", None)
         task.mem_indexes = None
         task.xfer_handle = None
+        task.local_completion = None
         return task
 
     def get_key(self) -> str:

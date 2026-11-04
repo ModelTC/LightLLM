@@ -50,7 +50,7 @@ class HiddenCollector(ABC):
         """
         return
 
-    def release_graph_tensor_ownership(self) -> tuple[int, int]:
+    def release_graph_tensor_ownership(self, borrow=None) -> tuple[int, int]:
         """将 Prefill CUDA Graph capture 状态转换为不持有显存所有权的引用。
 
         普通 collector 不应调用该接口。完成 CUDA Graph capture 后，graph memory
@@ -193,10 +193,11 @@ class LayerHiddenCollector(HiddenCollector):
         assert isinstance(graph_collector, LayerHiddenCollector)
         self.layer_hiddens = graph_collector.layer_hiddens.copy()
 
-    def release_graph_tensor_ownership(self) -> tuple[int, int]:
+    def release_graph_tensor_ownership(self, borrow=None) -> tuple[int, int]:
+        borrow = tensor_to_no_ref_tensor if borrow is None else borrow
         tensor_count = len(self.layer_hiddens)
         total_nbytes = sum(hidden.numel() * hidden.element_size() for hidden in self.layer_hiddens)
-        self.layer_hiddens = [tensor_to_no_ref_tensor(hidden) for hidden in self.layer_hiddens]
+        self.layer_hiddens = [borrow(hidden) for hidden in self.layer_hiddens]
         return tensor_count, total_nbytes
 
     def _load_layer_ids(self) -> frozenset[int]:

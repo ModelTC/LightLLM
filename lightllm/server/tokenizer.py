@@ -55,8 +55,25 @@ def get_tokenizer(
     model_cfg, _ = PretrainedConfig.get_config_dict(tokenizer_name)
     model_type = model_cfg.get("model_type", "")
     if model_type == "deepseek_v32":
-        # Register the custom config before AutoTokenizer tries to resolve it.
+        # Register the custom config for HuggingFace metadata loading.
         from ..models import deepseek3_2  # noqa: F401
+        from ..models.deepseek3_2.tokenizer import DeepSeekV32Tokenizer
+
+        if tokenizer_mode == "slow":
+            raise ValueError("DeepSeek-V3.2 requires a fast tokenizer loaded from tokenizer.json")
+        # checkpoint 声明 LlamaTokenizerFast，但实际使用 ByteLevel；部分 Transformers
+        # 版本会按 Llama 类重建 SentencePiece 规则，丢失空格和换行，故直接保留 JSON 中的规则。
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
+        logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
+        return DeepSeekV32Tokenizer(tokenizer)
+    if model_type == "deepseek_v4":
+        from ..models.deepseek_v4.tokenizer import DeepSeekV4Tokenizer
+
+        if tokenizer_mode == "slow":
+            raise ValueError("DeepSeek-V4 requires a fast tokenizer loaded from tokenizer.json")
+        tokenizer = PreTrainedTokenizerFast.from_pretrained(tokenizer_name, *args, **kwargs)
+        logger.info("Using DeepSeek-V4 tokenizer mode with Python-based chat template encoding.")
+        return DeepSeekV4Tokenizer(tokenizer, tokenizer_name, model_cfg)
 
     try:
         tokenizer = AutoTokenizer.from_pretrained(tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs)
@@ -72,17 +89,6 @@ def get_tokenizer(
             "Using a slow tokenizer. This might cause a significant "
             "slowdown. Consider using a fast tokenizer instead."
         )
-
-    # DeepSeek-V3.2 custom tokenizer mode: wraps the HF tokenizer with
-    # a Python-based apply_chat_template that uses encoding_dsv32.py.
-    if model_type == "deepseek_v32":
-        from ..models.deepseek3_2.model import DeepSeekV32Tokenizer
-
-        hf_tokenizer = AutoTokenizer.from_pretrained(
-            tokenizer_name, trust_remote_code=trust_remote_code, *args, **kwargs
-        )
-        logger.info("Using DeepSeek-V3.2 tokenizer mode with Python-based chat template encoding.")
-        return DeepSeekV32Tokenizer(hf_tokenizer)
 
     if model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
         from ..models.tarsier2.model import Tarsier2Tokenizer
@@ -118,14 +124,12 @@ def get_tokenizer(
         tokenizer = QWen3VLTokenizer(
             tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
         )
-    elif model_type in ["qwen3_5", "qwen3_5_moe"] and "vision_config" in model_cfg:
-        from transformers import AutoProcessor
+    elif model_type in ["qwen3_5", "sensenova_loop", "qwen3_5_moe"] and "vision_config" in model_cfg:
         from ..models.qwen3_5.model import QWen3_5Tokenizer
+        from transformers import AutoImageProcessor
 
-        processor = AutoProcessor.from_pretrained(tokenizer_name)
-        tokenizer = QWen3_5Tokenizer(
-            tokenizer=tokenizer, image_processor=processor.image_processor, model_cfg=model_cfg
-        )
+        image_processor = AutoImageProcessor.from_pretrained(tokenizer_name)
+        tokenizer = QWen3_5Tokenizer(tokenizer=tokenizer, image_processor=image_processor, model_cfg=model_cfg)
     elif model_cfg.get("thinker_config") is not None:
         from ..models.qwen3_omni_moe_thinker.model import QWen3OmniTokenizer
         from transformers import AutoProcessor

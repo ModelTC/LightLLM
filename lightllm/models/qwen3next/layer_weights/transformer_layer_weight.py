@@ -13,14 +13,18 @@ from lightllm.common.basemodel.layer_weights.meta_weights import (
     FusedMoeWeight,
 )
 from lightllm.models.qwen3next.layer_weights.qkv_gated_rowmm_weight import QKVGatedROWNMMWeight
+from lightllm.models.qwen3next.config import is_linear_attention_layer
 
 
 class Qwen3NextTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
     def __init__(self, layer_num, data_type, network_config, quant_cfg=None):
-        num_full_attention_layers = network_config["full_attention_interval"]
-        self.is_linear_attention_layer = (layer_num + 1) % num_full_attention_layers != 0
+        self.is_linear_attention_layer = self.is_linear_layer(network_config, layer_num)
         super().__init__(layer_num, data_type, network_config, quant_cfg)
         return
+
+    @staticmethod
+    def is_linear_layer(config, layer):
+        return is_linear_attention_layer(config, layer)
 
     def _init_qkv(self):
         in_dim = self.n_embed

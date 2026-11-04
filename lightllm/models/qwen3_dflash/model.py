@@ -1,12 +1,13 @@
+from lightllm.models.qwen3_dflash.adapter import Qwen3DFlashModelAdapter
 import torch
+from dataclasses import replace
 
-from lightllm.common.basemodel.attention import (
-    Fa3AttBackend,
-    Fp8Fa3AttBackend,
-)
+from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
+from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama.adapter import LlamaModelAdapter
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
 from lightllm.models.qwen3_dflash.layer_infer.pre_layer_infer import Qwen3DFlashPreLayerInfer
@@ -19,6 +20,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 
     is_mtp_draft_model = True
+    model_adapter_class = Qwen3DFlashModelAdapter
 
     pre_and_post_weight_class = Qwen3DFlashPreAndPostLayerWeight
     transformer_weight_class = Qwen3DFlashTransformerLayerWeight
@@ -48,13 +50,6 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         self.block_size = int(self.config["block_size"])
         self.mask_token_id = int(self.config["mask_token_id"])
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
-    def _init_mem_manager(self):
-        # Draft KV uses target-owned cache slots.
-        self.mem_manager = self.main_model.mem_manager
-
     def _init_att_backend(self):
         super()._init_att_backend()
         # FA3 is currently the only backend that supports non-causal block decode.
@@ -62,7 +57,22 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         if not isinstance(self.decode_att_backend, (Fa3AttBackend, Fp8Fa3AttBackend)):
             raise NotImplementedError("Qwen3 DFlash decode requires FA3")
 
+    def _create_model_adapter(self, adapter_class):
+        self.draft_layer_start = len(self.main_model.layers_infer) + sum(
+            len(model.layers_infer) for model in self.mtp_previous_draft_models
+        )
+        return adapter_class(
+            self.config,
+            role=self.att_state_role,
+            dtype=self.data_type,
+            tp_world_size=self.tp_world_size_,
+            layer_ids=range(self.draft_layer_start, self.draft_layer_start + self.config["num_hidden_layers"]),
+            main_weights=self.main_model.pre_post_weight,
+        )
+
     def _init_infer_layer(self, start_layer_index=None):
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_infer_layer(self)
         self.draft_layer_start = len(self.main_model.layers_infer)
         self.draft_layer_start += sum(
             len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models
@@ -70,6 +80,8 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         super()._init_infer_layer(start_layer_index=self.draft_layer_start)
 
     def _init_weights(self, start_layer_index=None):
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_weights(self)
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type,
             network_config=self.config,
@@ -100,7 +112,10 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
-        infer_state.mem_manager = self.mem_manager
+        if getattr(self, "execution_runner", None) is None:
+            infer_state.att_state_manager = self.att_state_manager
+            infer_state.att_state_role = self.att_state_role
+            infer_state.is_draft_model = True
         infer_state.mem_index = self._select_mem_indexes(model_input)
 
         # 这里调用的是 DFlash 覆写后的 context_forward：pre layer 只投影 target hidden，

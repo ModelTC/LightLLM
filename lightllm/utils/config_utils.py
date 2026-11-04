@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Optional, List
+from typing import Any, Dict, Optional, List
 from functools import lru_cache
 from .envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
@@ -14,6 +14,33 @@ def get_config_json(model_path: str):
     return json_obj
 
 
+def get_generation_config_dict(model_path: str) -> Dict[str, Any]:
+    from transformers import GenerationConfig
+
+    generation_cfg = GenerationConfig.from_pretrained(model_path, trust_remote_code=True)
+    if get_model_type(model_path) == "deepseek_v4":
+        return {key: value for key, value in generation_cfg.to_diff_dict().items() if value is not None}
+    return generation_cfg.to_dict()
+
+
+def auto_set_page_size(args) -> None:
+    """Select the model's default KV page size."""
+    if args.page_size == 1 and get_model_type(args.model_dir) == "deepseek_v4":
+        args.page_size = 256
+
+
+def auto_set_cpu_cache_token_page_size(args, is_hybrid_model: bool) -> None:
+    """Align CPU cache pages with the model's checkpoint boundaries."""
+    if not args.enable_cpu_cache:
+        return
+
+    if is_hybrid_model:
+        args.cpu_cache_token_page_size = args.linear_att_hash_page_size * args.linear_att_page_block_num
+        logger.info(f"set cpu_cache_token_page_size to {args.cpu_cache_token_page_size} for hybrid att model")
+    elif args.cpu_cache_token_page_size is None:
+        args.cpu_cache_token_page_size = 256
+
+
 def get_running_max_req_size_per_dp(args) -> int:
     """Return the request capacity for one local DP rank."""
     if args.running_max_req_size < 1:
@@ -22,7 +49,7 @@ def get_running_max_req_size_per_dp(args) -> int:
     local_dp_size = max(1, args.dp // args.nnodes)
     # Cache fetch and beam groups need the full capacity.
     requires_global_capacity = args.enable_dp_prompt_cache_fetch or args.diverse_mode
-    if local_dp_size > 1 and not requires_global_capacity:
+    if local_dp_size > 1 and not requires_global_capacity and is_hybrid_att_model(args.model_dir):
         return (args.running_max_req_size + local_dp_size - 1) // local_dp_size
     return args.running_max_req_size
 
@@ -228,42 +255,6 @@ def get_hidden_size(model_path: str) -> Optional[int]:
     return None
 
 
-@lru_cache(maxsize=None)
-def get_num_key_value_heads(model_path: str) -> int:
-    num_key_value_heads = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_key_value_heads"])
-    if isinstance(num_key_value_heads, int):
-        return num_key_value_heads
-    return None
-
-
-@lru_cache(maxsize=None)
-def get_num_attention_heads(model_path: str) -> int:
-    num_attention_heads = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_attention_heads"])
-    if isinstance(num_attention_heads, int):
-        return num_attention_heads
-    return None
-
-
-@lru_cache(maxsize=None)
-def get_head_dim(model_path: str) -> int:
-    head_dim = _get_config_llm_keyvalue(model_path=model_path, key_name=["head_dim"])
-    if isinstance(head_dim, int):
-        return head_dim
-
-    # calcu head_dim
-    head_dim = get_hidden_size(model_path=model_path) // get_num_attention_heads(model_path=model_path)
-
-    return head_dim
-
-
-@lru_cache(maxsize=None)
-def get_layer_num(model_path: str) -> int:
-    num_hidden_layers = _get_config_llm_keyvalue(model_path=model_path, key_name=["num_hidden_layers"])
-    if isinstance(num_hidden_layers, int):
-        return num_hidden_layers
-    return None
-
-
 def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
     # gemma4 special eos_token_id
     try:
@@ -296,7 +287,7 @@ def get_eos_token_ids(model_path: str) -> Optional[List[int]]:
     try:
         config_json = get_config_json(model_path)
         model_type = config_json.get("model_type") or config_json.get("text_config", {}).get("model_type")
-        if model_type in {"qwen3_5", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}:
+        if model_type in {"qwen3_5", "sensenova_loop", "qwen3_5_text", "qwen3_5_moe", "qwen3_5_moe_text"}:
             from transformers import AutoTokenizer
 
             eos_token_ids = []
@@ -382,19 +373,6 @@ def get_dtype(model_path: str):
 
 
 @lru_cache(maxsize=None)
-def get_fixed_kv_len():
-    start_args = get_env_start_args()
-    model_cfg = get_config_json(start_args.model_dir)
-    if "prompt_cache_token_ids" in model_cfg:
-        fixed_kv_len = len(model_cfg["prompt_cache_token_ids"])
-        # 固定 KV 最终会插入 radix cache，只加载完整的模型 KV 页面；不足一页
-        # 的尾部直接截断，因此 router 也只扣除实际常驻的页面容量。
-        return fixed_kv_len // start_args.page_size * start_args.page_size
-    else:
-        return 0
-
-
-@lru_cache(maxsize=None)
 def has_vision_module(model_path: str) -> bool:
     try:
         from transformers.configuration_utils import PretrainedConfig
@@ -417,6 +395,8 @@ def has_vision_module(model_path: str) -> bool:
             # Qwen3VisionTransformerPretrainedModel
             model_cfg["vision_config"]
             return True
+        elif model_type == "deepseek_v4":
+            return model_cfg.get("vision_n_layers", 0) > 0
         elif model_cfg["architectures"][0] == "TarsierForConditionalGeneration":
             # TarsierVisionTransformerPretrainedModel
             return True
@@ -438,7 +418,7 @@ def has_vision_module(model_path: str) -> bool:
             return True
         elif model_type == "neo_chat":
             return True
-        elif model_type in ["qwen3_5", "qwen3_5_moe"]:
+        elif model_type in ["qwen3_5", "sensenova_loop", "qwen3_5_moe"]:
             return True
         else:
             raise Exception("unknown vision model type")
@@ -477,10 +457,15 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
         model_cfg, _ = PretrainedConfig.get_config_dict(model_path)
         model_type = model_cfg["model_type"]
-        if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text", "glm5_next", "glm5_next_text"]:
-            return True
-        else:
-            return False
+        return model_type in [
+            "qwen3_5",
+            "sensenova_loop",
+            "qwen3_5_moe",
+            "qwen3_5_text",
+            "qwen3_5_moe_text",
+            "glm5_next",
+            "glm5_next_text",
+        ]
     except:
         logger.debug(f"model path: {model_path} does not has linear hybrid attention")
         return False
@@ -488,7 +473,7 @@ def is_linear_att_mixed_model(model_path: str) -> bool:
 
 def is_hybrid_att_model(model_path: str) -> bool:
     """Models whose non-full attention state follows hybrid checkpoint pages."""
-    return is_linear_att_mixed_model(model_path)
+    return get_model_type(model_path) == "deepseek_v4" or is_linear_att_mixed_model(model_path)
 
 
 def get_model_type(model_path: str) -> Optional[str]:
@@ -519,7 +504,7 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
         return None
 
     # Qwen3.5 series
-    if model_type in ["qwen3_5", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
+    if model_type in ["qwen3_5", "sensenova_loop", "qwen3_5_moe", "qwen3_5_text", "qwen3_5_moe_text"]:
         return "qwen3_coder"
 
     # Qwen3 series
@@ -546,6 +531,10 @@ def get_tool_call_parser_for_model(model_path: str) -> Optional[str]:
     if model_type == "deepseek_v32":
         return "deepseekv32"
 
+    # DeepSeek V4
+    if model_type == "deepseek_v4":
+        return "deepseekv4"
+
     return None
 
 
@@ -565,11 +554,16 @@ def get_reasoning_parser_for_model(model_path: str) -> Optional[str]:
         "qwen3_vl_moe_text",
         "qwen3_omni_moe",
         "qwen3_5",
+        "sensenova_loop",
         "qwen3_5_moe",
         "qwen3_5_text",
         "qwen3_5_moe_text",
     ]:
         return "qwen3"
+
+    # DeepSeek V4
+    if model_type == "deepseek_v4":
+        return "deepseek-v4"
 
     # DeepSeek V3
     if model_type in ["deepseek_v3", "deepseek_v31", "deepseek_v32"]:

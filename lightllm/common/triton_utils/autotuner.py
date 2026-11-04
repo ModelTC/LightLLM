@@ -9,7 +9,7 @@ import collections
 from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
-from tqdm import tqdm
+from lightllm.utils.progress import ThreadProgress as tqdm
 from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger, progress_enabled
@@ -48,6 +48,8 @@ def autotune(
     kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
     rebuild_input_func: Optional[Callable] = None,
     warmup_all_exist_config: bool = True,
+    benchmark_repeats: int = 3,
+    benchmark_retries: int = 3,
 ):
     """Decorator that constructs and returns an Autotuner wrapper for a Triton kernel.
 
@@ -85,6 +87,8 @@ def autotune(
             查询实现、调用位置和缓存配置目录。
             此开关只控制已有配置的额外预热，不关闭新配置的搜索、benchmark 内部的预热/计时和
             最终正式执行；实际搜索仍需由调用方保证状态可以被反复更新，或提供相应的状态保护。
+        benchmark_repeats (int): 每次 CUDA Graph 内重复调用的次数；微秒级短算子可增加以降低计时噪声。
+        benchmark_retries (int): CUDA Graph 计时采样次数，默认 3。
 
     Returns:
         Callable: A callable object that wraps the original function and performs autotuning
@@ -103,6 +107,8 @@ def autotune(
             kernel_type=kernel_type,
             rebuild_input_func=rebuild_input_func,
             warmup_all_exist_config=warmup_all_exist_config,
+            benchmark_repeats=benchmark_repeats,
+            benchmark_retries=benchmark_retries,
         )
 
     return decorator
@@ -156,12 +162,18 @@ class Autotuner:
         kernel_type: AutotuneKernelType = AutotuneKernelType.GENERAL,
         rebuild_input_func: Optional[Callable] = None,
         warmup_all_exist_config: bool = True,
+        benchmark_repeats: int = 3,
+        benchmark_retries: int = 3,
     ):
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
         self.rebuild_input_func = rebuild_input_func
         self.warmup_all_exist_config = warmup_all_exist_config
+        if benchmark_repeats < 1 or benchmark_retries < 1:
+            raise ValueError("autotune benchmark repeats and retries must be positive")
+        self.benchmark_repeats = benchmark_repeats
+        self.benchmark_retries = benchmark_retries
         self.fn = fn
         self.static_key_func = static_key_func
         self.run_key_func = run_key_func
@@ -169,7 +181,8 @@ class Autotuner:
         self.cached_configs = {}
         self.fast_match_configs = collections.defaultdict(dict)
         self.warmuped_configs_set = set()
-        self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
+        self._fn_parameters = inspect.signature(fn).parameters
+        self.arg_names = list(self._fn_parameters)
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
 
@@ -224,22 +237,6 @@ class Autotuner:
                 _copy_kwargs = kwargs.copy()
                 _copy_kwargs["run_config"] = run_config
                 self.kernel_warmup(static_key, *args, **_copy_kwargs)
-
-        if static_key not in self.cached_configs and autotune_level == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
-            if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
-                if not Autotuner._defaults_warning_emitted:
-                    logger.warning(
-                        "event=kernel.defaults_used reason=tuned_configs_missing action=use_default_configs "
-                        "performance=may_be_suboptimal hint=LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 "
-                        "details=DEBUG"
-                    )
-                    Autotuner._defaults_warning_emitted = True
-                logger.debug(
-                    "event=kernel.config_missing kernel=%s config=%s",
-                    self.kernel_name,
-                    KernelConfigs.get_config_file_name(static_key),
-                )
-            self.cached_configs[static_key] = {}
 
         if Autotuner.is_kernel_autotune_warmup(self.kernel_type) and autotune_level in [
             AutotuneLevel.ADAPTIVE_AUTOTUNE,
@@ -305,6 +302,22 @@ class Autotuner:
             logger.debug(f"Loading cached configs for {self.kernel_name} - {static_key}")
             with open(cache_file, "rb") as f:
                 self.cached_configs[static_key] = orjson.loads(f.read())
+        else:
+            # Cache misses too: repeated checks can block every layer on a remote filesystem.
+            self.cached_configs[static_key] = {}
+            if get_triton_autotune_level() == AutotuneLevel.USE_AUTOTUNE_HIS_CONFIG:
+                if (dist.is_initialized() and get_current_rank_in_node() == 0) or not dist.is_initialized():
+                    if not Autotuner._defaults_warning_emitted:
+                        logger.warning(
+                            "event=kernel.defaults_used reason=tuned_configs_missing action=use_default_configs "
+                            "performance=may_be_suboptimal hint=LIGHTLLM_TRITON_AUTOTUNE_LEVEL=1 details=DEBUG"
+                        )
+                        Autotuner._defaults_warning_emitted = True
+                    logger.debug(
+                        "event=kernel.config_missing kernel=%s config=%s",
+                        self.kernel_name,
+                        KernelConfigs.get_config_file_name(static_key),
+                    )
         return True
 
     def kernel_warmup(self, static_key, *args, **kwargs):
@@ -322,10 +335,12 @@ class Autotuner:
             self._recover_mutated_args(origin_list=origin_list, new_list=new_list)
         return
 
-    def _bench(self, *args, n_repeat=3, n_retries=3, **kwargs):
+    def _bench(self, *args, n_repeat=None, n_retries=None, **kwargs):
         from triton.compiler.errors import CompileTimeAssertionFailure
         from triton.runtime.errors import OutOfResources, PTXASError
 
+        n_repeat = self.benchmark_repeats if n_repeat is None else n_repeat
+        n_retries = self.benchmark_retries if n_retries is None else n_retries
         new_args, new_kwargs, origin_list, new_list = self._mutate_args_clone(args, kwargs)
 
         def kernel_call():
@@ -492,7 +507,7 @@ class Autotuner:
                 values.append(args[pos])
             else:
                 # 可选参数也能参与 key；调用方省略时使用算子函数声明的默认值。
-                parameter = inspect.signature(self.fn).parameters.get(name)
+                parameter = self._fn_parameters.get(name)
                 if parameter is None or parameter.default is inspect.Parameter.empty:
                     raise KeyError(f"Missing argument '{name}' required by key function")
                 values.append(parameter.default)

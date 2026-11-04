@@ -1,7 +1,17 @@
 import pytest
 import time
+import sys
+import uuid
+import weakref
 from multiprocessing import Process
-from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AtomicLockItem
+from lightllm.server.core.objs.atomic_array_lock import AtomicShmArrayLock, AtomicLockItem, AsyncLock
+from lightllm.utils import shm_utils
+
+
+@pytest.fixture(autouse=True)
+def service_name(monkeypatch):
+    name = f"test_atomic_array_{uuid.uuid4().hex}"
+    monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: name)
 
 
 @pytest.fixture
@@ -58,6 +68,29 @@ def test_lock_exceeding_index(setup_shared_memory):
     lock = setup_shared_memory
     with pytest.raises(AssertionError):
         lock.get_lock_context(lock.lock_num)  # Should raise an error for invalid index
+
+
+@pytest.mark.parametrize("asynchronous", [False, True])
+def test_last_lock_item_releases_mapping_without_exported_views(asynchronous, monkeypatch):
+    errors = []
+    monkeypatch.setattr(sys, "unraisablehook", lambda error: errors.append(str(error.exc_value)))
+    pool = AtomicShmArrayLock(f"lock_lifetime_{uuid.uuid4().hex}", 1)
+    pool.shm.unlink()
+    mapping = weakref.ref(pool.shm)
+    item = pool.get_lock_context(0)
+    wrapper = AsyncLock(item) if asynchronous else item
+    del pool
+    assert mapping() is not None
+    assert item.try_acquire()
+    assert not item.try_acquire()
+    item.release()
+    with pytest.raises(ValueError, match="request failed"), item:
+        raise ValueError("request failed")
+    assert item.try_acquire()
+    item.release()
+    del item, wrapper
+    assert mapping() is None
+    assert errors == []
 
 
 if __name__ == "__main__":

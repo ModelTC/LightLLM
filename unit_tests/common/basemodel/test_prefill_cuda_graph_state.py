@@ -4,7 +4,7 @@ import torch
 
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
-from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
+from lightllm.core.runner.prefill_graph import PrefillCudaGraph
 
 
 class _GraphInferState:
@@ -13,6 +13,7 @@ class _GraphInferState:
         self.input_ids = torch.empty(4, dtype=torch.int64)
         self.copied_from = None
         self.replayed_with = None
+        self.prefill_program = SimpleNamespace(replay=self.prefill_replay)
 
     def copy_for_prefill_cuda_graph(self, new_infer_state):
         self.copied_from = new_infer_state

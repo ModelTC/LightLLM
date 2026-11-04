@@ -38,8 +38,13 @@ def _fwd_kernel_destindex_copy_quantize_kv(
         other=0.0,
     )
     abs_data = tl.abs(src_data)
-    data_scale = (tl.max(abs_data, axis=1) / 127.0).to(Out_scale.dtype.element_ty)
-    q_src_data = (src_data / data_scale[:, None]).to(tl.int8)
+    data_scale = tl.div_rn(tl.max(abs_data, axis=1).to(tl.float32), 127.0).to(Out_scale.dtype.element_ty)
+    if Out_scale.dtype.element_ty == tl.bfloat16:
+        # Keep stored scale semantics independent of compiler BF16 subnormal conversion.
+        data_scale = tl.where(data_scale.to(tl.float32) < 1.1754943508222875e-38, 0.0, data_scale).to(tl.bfloat16)
+    divisor = tl.where(data_scale == 0, 1.0, data_scale.to(tl.float32))[:, None]
+    quantized = tl.div_rn(src_data.to(tl.float32), divisor)
+    q_src_data = tl.minimum(tl.maximum(quantized, -127.0), 127.0).to(tl.int8)
 
     o_ptrs = Out + dest_index * stride_o_bs + cur_head * stride_o_h + offs_g[:, None] * stride_o_g + offs_d[None, :]
     os_ptrs = Out_scale + dest_index * stride_os_bs + cur_head * stride_os_h + offs_g

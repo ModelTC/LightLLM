@@ -13,17 +13,19 @@ from lightllm.utils import log_utils
 @pytest.mark.parametrize("progress", [False, True])
 def test_weight_loading_events_and_progress(monkeypatch, caplog, rank, progress):
     from lightllm.common.basemodel.layer_weights import hf_load_utils as module
-    import multiprocessing.pool
+    import concurrent.futures
 
     pool = Mock()
     pool.__enter__ = Mock(return_value=pool)
     pool.__exit__ = Mock(return_value=False)
-    pool.imap_unordered.return_value = iter([None, None])
-    monkeypatch.setattr(multiprocessing.pool, "ThreadPool", Mock(return_value=pool))
+    future = Mock()
+    pool.submit.return_value = future
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", Mock(return_value=pool))
+    monkeypatch.setattr(concurrent.futures, "as_completed", lambda futures: iter(futures))
     monkeypatch.setattr(module.utils.PetrelHelper, "list", lambda *a, **k: ["a.bin", "b.bin"])
     monkeypatch.setattr(module, "progress_enabled", lambda: progress)
     bar = Mock(side_effect=lambda iterator, **kw: iterator)
-    monkeypatch.setattr(module, "tqdm", bar)
+    monkeypatch.setattr(module, "ThreadProgress", bar)
     logger = logging.getLogger("weight-regression")
     monkeypatch.setattr(module, "logger", logger)
     monkeypatch.setattr(log_utils, "_context", {"tp_rank": rank})
@@ -153,8 +155,11 @@ def test_dp_shared_kv_transfer_stats(monkeypatch, caplog, master, level):
     copy = Mock()
     worker.backend = SimpleNamespace(
         is_master_in_dp=master,
-        model=SimpleNamespace(mem_manager=SimpleNamespace(operator=SimpleNamespace(copy_kv_from_other_dp_ranks=copy))),
-        mem_managers=[],
+        model=SimpleNamespace(
+            att_state_manager=SimpleNamespace(get_dp_shared_operator=lambda: SimpleNamespace(copy_from_dp=copy))
+        ),
+        dp_att_state_managers=[None, object()],
+        node_nccl_group=object(),
         dp_size_in_node=2,
         rank_in_dp=0,
     )
@@ -165,12 +170,16 @@ def test_dp_shared_kv_transfer_stats(monkeypatch, caplog, master, level):
     original_to, original_tensor = torch.Tensor.to, torch.tensor
     monkeypatch.setattr(torch.Tensor, "to", lambda tensor, **kw: original_to(tensor, **dict(kw, device="cpu")))
     monkeypatch.setattr(module.torch, "tensor", lambda *a, **kw: original_tensor(*a, **dict(kw, device="cpu")))
-    req = SimpleNamespace(cur_kv_len=0, hold_kv_len=6, shm_req=SimpleNamespace())
+    monkeypatch.setattr(module.dist, "barrier", Mock())
+    req = SimpleNamespace(req_idx=0, cur_kv_len=0, hold_kv_len=6, shm_req=SimpleNamespace())
     task = SimpleNamespace(
-        max_kv_len_mem_indexes=original_tensor([1, 2]),
-        max_kv_len_dp_rank=1,
-        mem_indexes=original_tensor([3, 4]),
-        req=req,
+        src_token_indices=original_tensor([1, 2]),
+        src_dp_rank=1,
+        src_req_idx=2,
+        dst_token_indices=original_tensor([3, 4]),
+        src_big_page_ids=[],
+        dst_big_page_ids=[],
+        dst_req=req,
     )
     with caplog.at_level(level, logger=logger.name):
         worker.kv_trans([task])
@@ -204,7 +213,7 @@ def test_router_opens_launcher_readiness_key(monkeypatch, dp, nnodes, local_dp):
     monkeypatch.setattr(module, "ShmReqManager", Mock())
     counters = Mock()
     monkeypatch.setattr(module, "EngineCounters", counters)
-    monkeypatch.setattr(module, "ReadOnlyStaticsMemoryManager", Mock(side_effect=StopInit))
+    monkeypatch.setattr(module, "KVCapacityReader", Mock(side_effect=StopInit))
     args = StartArgs()
     args.tp = 8
     args.dp, args.nnodes = dp, nnodes
@@ -218,34 +227,31 @@ def test_router_opens_launcher_readiness_key(monkeypatch, dp, nnodes, local_dp):
 
 @pytest.mark.parametrize("progress", [False, True])
 def test_model_warmup_progress_and_rank_events(monkeypatch, caplog, progress):
-    from lightllm.common.basemodel import basemodel as module
+    from contextlib import nullcontext
+    from lightllm.core.runner import warmup as module
+    from lightllm.core.device.cuda import CudaRuntime
 
-    model = module.TpPartBaseModel.__new__(module.TpPartBaseModel)
-    model.batch_max_tokens = 4
-    model.layers_num = 8
-    model.config = {}
+    runner = module.WarmupRunner.__new__(module.WarmupRunner)
+    runner.runtime = CudaRuntime
     logger = logging.getLogger("warmup-regression")
     monkeypatch.setattr(module, "logger", logger)
     monkeypatch.setattr(module, "progress_enabled", lambda: progress)
     bar = Mock(return_value=[])
-    monkeypatch.setattr(module, "tqdm", bar)
+    monkeypatch.setattr(module, "ThreadProgress", bar)
     barrier = Mock()
     monkeypatch.setattr(module.torch.distributed, "barrier", barrier)
     monkeypatch.setattr(module.torch.cuda, "current_device", lambda: 3)
-    monkeypatch.setattr(module.torch.cuda, "empty_cache", Mock())
-    monkeypatch.setattr(module.Autotuner, "start_autotune_warmup", Mock())
-    monkeypatch.setattr(module.Autotuner, "end_autotune_warmup", Mock())
+    monkeypatch.setattr(module.Autotuner, "autotune_warmup", lambda *args: nullcontext())
     monkeypatch.setattr(log_utils, "_context", {"tp_rank": 0})
     monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
     with caplog.at_level(logging.DEBUG, logger=logger.name):
-        model._autotune_warmup()
+        runner.autotune(4, nullcontext)
     assert bar.call_args.args[0] == [4, 1]
     assert bar.call_args.kwargs["disable"] is (not progress)
     assert [c.kwargs for c in barrier.call_args_list] == [{"device_ids": [3]}] * 2
     records = [r for r in caplog.records if r.name == logger.name]
     assert [r.event for r in records] == ["model.warmup_started", "model.warmup_completed"]
     assert records[-1].duration_s >= 0
-    assert model.layers_num == 8
 
 
 def test_graceful_registry_sets_component_without_replacing_other_context(monkeypatch):
@@ -379,10 +385,11 @@ def test_decode_status_connection_errors_are_deduplicated_and_cancel_is_debug(mo
 
 @pytest.mark.parametrize("overlap", [False, True])
 def test_cuda_graph_replay_cost_barrier_uses_current_device(monkeypatch, overlap):
-    from lightllm.common.basemodel import cuda_graph as module
+    from lightllm.core.runner import decode_graph as module
 
     graph = module.CudaGraph.__new__(module.CudaGraph)
     graph.capture_infer_cost = True
+    graph.runtime = module.CudaRuntime
     graph.enable_decode_microbatch_overlap = overlap
     graph.infer_cost_ms_by_batch_size = {}
     barrier = Mock()
@@ -396,31 +403,30 @@ def test_cuda_graph_replay_cost_barrier_uses_current_device(monkeypatch, overlap
     monkeypatch.setattr(module.torch, "tensor", lambda *a, **kw: original_tensor(*a, **dict(kw, device="cpu")))
     replay = Mock()
     graph._measure_replay_cost(replay, 4)
-    barrier.assert_called_once_with(group=module.dist.group.WORLD, device_ids=[3])
+    barrier.assert_called_once_with(device_ids=[3])
     assert graph.infer_cost_ms_by_batch_size == {8 if overlap else 4: 2.5}
     assert replay.replay.call_count == 2
     end.synchronize.assert_called_once()
 
 
 @pytest.mark.parametrize("rank", [0, 1])
-def test_memory_manager_selection_logs_only_on_leader(monkeypatch, caplog, rank):
-    from lightllm.common.kv_cache_mem_manager import mem_utils as module
+def test_execution_selection_logs_only_on_leader(monkeypatch, caplog, rank):
+    from lightllm.common.basemodel import basemodel as module
 
-    logger = logging.getLogger("memory-selection-regression")
+    logger = logging.getLogger("execution-selection-regression")
     monkeypatch.setattr(module, "logger", logger)
-    monkeypatch.setattr(module, "get_llm_model_class", lambda: object)
-    monkeypatch.setattr(module, "get_env_start_args", lambda: SimpleNamespace(llm_kv_type="None"))
     monkeypatch.setattr(log_utils, "_context", {"tp_rank": rank})
     monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
-    module.select_mem_manager_class.cache_clear()
-    try:
-        with caplog.at_level(logging.DEBUG, logger=logger.name):
-            assert module.select_mem_manager_class() is module.MemoryManager
-        records = [r for r in caplog.records if r.name == logger.name]
-        assert len(records) == 2
-        assert all(r.levelno == (logging.INFO if rank == 0 else logging.DEBUG) for r in records)
-    finally:
-        module.select_mem_manager_class.cache_clear()
+    plan = SimpleNamespace(bindings=[SimpleNamespace(backend="dense.test")], workspace_bytes=32)
+    model = SimpleNamespace(
+        execution_runner=SimpleNamespace(bind=lambda layers: plan), layers_infer=(), att_state_role="main"
+    )
+    with caplog.at_level(logging.DEBUG, logger=logger.name):
+        module.TpPartBaseModel._init_execution_plan(model)
+    records = [r for r in caplog.records if r.name == logger.name]
+    assert len(records) == 1
+    assert records[0].event == "backend.selected" and records[0].backends == ["dense.test"]
+    assert records[0].levelno == (logging.INFO if rank == 0 else logging.DEBUG)
 
 
 def test_idle_prefill_selection_records_decision_metadata(monkeypatch):
@@ -510,6 +516,7 @@ def test_router_ready_event_uses_agreed_model_capacity(monkeypatch):
     router.args = StartArgs()
     router.args.disable_dynamic_prompt_cache = True
     router.args.run_mode = "normal"
+    router.is_pd_run_mode = False
     router.args.max_req_total_len = 1024
     router.args.mtp_step = 0
     router.world_size = router.dp_size = router.dp_size_in_node = 2

@@ -68,6 +68,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
 
    GLM-4.7-Flash 部署 <cookbook/glm4_deployment>
    Qwen3.5 部署 <cookbook/qwen35_deployment>
+   SenseNova Loop 部署 <cookbook/sensenova_loop_deployment>
 
 .. toctree::
    :maxdepth: 1
@@ -81,6 +82,7 @@ Lightllm 整合了众多的开源方案的优点，包括但不限于 FasterTran
    :caption: 架构介绍
 
    架构介绍 <framework/framework>
+   Attention Resources 架构设计 <framework/cache_manager_design>
    token attention介绍 <framework/token_attention>
    峰值显存调度器介绍 <framework/router>
    

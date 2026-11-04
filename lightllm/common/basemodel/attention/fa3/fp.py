@@ -11,6 +11,7 @@ from lightllm.common.basemodel.triton_kernel.fa3_utils import (
 )
 from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
 from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
+from lightllm.utils.dist_utils import get_current_device_id
 
 
 class Fa3AttBackend(BaseAttBackend):
@@ -51,12 +52,12 @@ class Fa3AttBackend(BaseAttBackend):
         buffer_count = 2 if args.enable_decode_microbatch_overlap else 1
         workspace_size = self.page_table_max_batch_size * triton.cdiv(self.supported_max_seq_len, self.infer_page_size)
         self.page_table_buffers = [
-            self.get_gpu_workspace_buffer(
-                key_name=f"fa3_page_table_{buffer_index}",
-                workspace_size=workspace_size,
+            torch.empty(
+                workspace_size,
                 dtype=torch.int32,
+                device=get_current_device_id(),
             )
-            for buffer_index in range(buffer_count)
+            for _ in range(buffer_count)
         ]
 
     def get_page_table_view(self, att_batch_size, max_kv_len, microbatch_index):
@@ -262,7 +263,7 @@ class Fa3DecodeAttState(BaseDecodeAttState):
 
         page_table_copy(
             page_table=self.page_table[:, :actual_max_page_len],
-            req_to_token_indexs=model.req_manager.req_to_token_indexs,
+            req_to_token_indexs=self.infer_state.req_manager.req_to_token_indexs,
             b_req_idx=b_att_req_idx,
             page_size=self.backend.infer_page_size,
         )

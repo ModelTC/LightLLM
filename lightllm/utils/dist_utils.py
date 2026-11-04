@@ -130,7 +130,7 @@ def init_audio_distributed_env(kvargs):
     del _a
 
 
-def init_distributed_env(kvargs):
+def init_distributed_env(kvargs, runtime=None):
     assert kvargs["world_size"] % kvargs["args"].nnodes == 0, "world_size should be divided by nnodes"
     node_world_size = kvargs["world_size"] // kvargs["args"].nnodes
 
@@ -148,18 +148,25 @@ def init_distributed_env(kvargs):
     dp_size_in_node = max(1, get_dp_size() // nnodes)
     set_dp_rank_in_node(get_global_dp_rank() % dp_size_in_node)
 
-    _init_nccl_env()
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
-    torch.cuda.set_device(device_id)
+    if runtime is None:
+        from lightllm.core.device.cuda import CudaRuntime
+
+        runtime = CudaRuntime(device_id)
+    if runtime.distributed_backend == "nccl":
+        _init_nccl_env()
+    runtime.set_device(device_id)
+    set_environ("LIGHTLLM_TORCH_DEVICE_TYPE", runtime.device.type)
     dist.init_process_group(
-        "nccl",
+        runtime.distributed_backend,
         init_method=f'tcp://{kvargs["nccl_host"]}:{kvargs["nccl_port"]}',
         rank=kvargs["rank_id"],
         world_size=kvargs["world_size"],
+        **runtime.process_group_options(),
     )
     # warmup nccl communicator
-    _a = torch.zeros([1]).to(f"cuda:{device_id}")
+    _a = torch.zeros([1], device=runtime.device)
     dist.all_reduce(_a)
     del _a
 
@@ -229,6 +236,14 @@ def set_current_device_id(device_id: int):
 
 def get_current_device_id():
     return int(get_environ("LIGHTLLM_CURRENT_DEVICE_ID"))
+
+
+def get_current_device(index=None):
+    if isinstance(index, (str, torch.device)):
+        return torch.device(index)
+    return torch.device(
+        os.environ.get("LIGHTLLM_TORCH_DEVICE_TYPE", "cuda"), get_current_device_id() if index is None else index
+    )
 
 
 def set_current_rank_in_node(rank: int):

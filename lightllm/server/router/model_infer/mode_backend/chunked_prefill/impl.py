@@ -59,8 +59,14 @@ class ChunkedPrefillBackend(ModeBackend):
                     event_pack._close_overlap()
 
                 event_pack.wait_to_forward()
+                if self._inference_stopped:
+                    # Release the last forward thread's post-processing wait.
+                    event_pack.notify_post_handle_event.set()
+                    return
 
-                self._try_read_new_reqs()
+                if self._try_read_new_reqs():
+                    self._finish_inference(event_pack)
+                    return
 
                 prefill_reqs, decode_reqs, prefill_tokens = self._get_classed_reqs(
                     no_decode=self.classed_req_no_decode,

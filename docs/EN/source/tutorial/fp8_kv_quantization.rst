@@ -1,102 +1,98 @@
 .. _tutorial/fp8_kv_quantization_en:
 
-FP8 KV Quantization and Calibration Guide
-=========================================
+FP8 KV Quantization Guide
+=========================
 
-This chapter describes FP8 KV inference in LightLLM, including:
+Select an FP8 KV cache quantization mode with ``--llm_kv_type``.
+Prepare the environment using the :doc:`installation guide <../getting_started/installation>`.
 
-- Running inference with calibration data (``fp8kv_sph`` or ``fp8kv_spt``)
-- FP8 static per-head and per-tensor quantization modes
-- Common errors and troubleshooting
+Choose a Mode
+-------------
 
-Overview
---------
+.. list-table::
+   :header-rows: 1
 
-LightLLM FP8 KV inference requires a prepared calibration file (``kv_cache_calib.json``),
-which is loaded by ``--kv_quant_calibration_config_path``.
-You can use calibration files provided in ``test/advanced_config/``,
-export one with `LightCompress <https://github.com/ModelTC/LightCompress>`_, or use your own compatible file.
+   * - Mode
+     - Use case
+     - Calibration file
+   * - ``fp8kv_sph``
+     - Static per-head quantization; requires a Hopper GPU
+     - ``per_head``, including Q calibration data
+   * - ``fp8kv_spt``
+     - Static per-tensor quantization; requires FlashInfer
+     - ``per_tensor``
+   * - ``fp8kv_dsa``
+     - DeepSeek-V3.2 and GLM-5.3 Flash
+     - Not required
 
-Quantization Modes and Backend Mapping
-------------------------------------------
+Static FP8 KV
+-------------
 
-LightLLM supports two FP8 KV quantization modes:
+Prepare a ``kv_cache_calib.json`` compatible with your model and quantization mode,
+then pass its path at startup. Export one with
+`LightCompress <https://github.com/ModelTC/LightCompress>`_ or use an existing compatible file.
 
-- ``fp8kv_sph``: FP8 Static Per-Head quantization, independent scale per head, uses ``fa3`` backend
-- ``fp8kv_spt``: FP8 Static Per-Tensor quantization, one scalar for K and one scalar for V, uses ``flashinfer`` backend
-
-Calibration files are mode-dependent:
-
-- ``fp8kv_sph`` corresponds to ``per_head`` calibration files
-- ``fp8kv_spt`` corresponds to ``per_tensor`` calibration files
-
-Avoid mixing calibration files across different modes.
-
-Start FP8 Inference with Calibration
-------------------------------------
-
-Inference mode example:
+Per-head quantization:
 
 .. code-block:: console
 
     $ python -m lightllm.server.api_server \
         --model_dir /path/to/model \
         --llm_kv_type fp8kv_sph \
-        --kv_quant_calibration_config_path /path/to/kv_cache_calib.json
+        --kv_quant_calibration_config_path /path/to/per_head/kv_cache_calib.json
+
+Per-tensor quantization:
 
 .. code-block:: console
 
     $ python -m lightllm.server.api_server \
         --model_dir /path/to/model \
         --llm_kv_type fp8kv_spt \
-        --kv_quant_calibration_config_path /path/to/kv_cache_calib.json
+        --kv_quant_calibration_config_path /path/to/per_tensor/kv_cache_calib.json
 
-Notes:
+Both modes select the attention backend automatically.
+For multiple GPUs, add ``--tp <gpu_count>`` and provide one complete calibration file.
 
-- ``fp8kv_sph`` and ``fp8kv_spt`` require ``--kv_quant_calibration_config_path``.
-- The attention backend will be automatically selected based on the quantization mode, no need to manually specify.
-
-.. note::
-
-   When using ``fp8kv_spt`` mode (FP8 static per-tensor quantization with flashinfer backend), 
-   you must install ``flashinfer-python==0.6.5``. The default installed version is 0.6.3, 
-   which may cause runtime issues. Install the correct version with:
-
-   .. code-block:: console
-
-       $ pip install flashinfer-python==0.6.5
-
-Calibration File Schema
------------------------
-
-Key fields in ``kv_cache_calib.json``:
-
-- ``quant_type``: ``per_head`` or ``per_tensor``
-- ``num_layers``: number of layers
-- ``num_head``: total number of heads
-- ``scales_shape``: shape of the scale tensor
-- ``scales``: actual scale values
-- ``qmin`` / ``qmax``: FP8 numeric range parameters
-
-At load time, LightLLM validates architecture, layer count, head count, and quantization type.
-
-Multi-GPU Note
+Dynamic FP8 KV
 --------------
 
-In multi-GPU (TP) setups, LightLLM slices the global scales to local rank heads automatically.
-You only need to provide one full ``kv_cache_calib.json`` file.
+For DeepSeek-V3.2 and GLM-5.3 Flash, use ``--llm_kv_type fp8kv_dsa`` without a calibration file.
+A compatible FlashMLA installation is required. You can build an image from this repository's
+Dockerfile as described in the installation guide. When installing from source, install
+FlashMLA separately; ``requirements.txt`` alone is insufficient.
 
-Common Issues
--------------
+The following example uses GLM-5.3 Flash, which requires ``bfloat16`` and supports only
+``fp8kv_dsa`` for FP8 KV quantization:
 
-1. Error says ``--kv_quant_calibration_config_path`` is required
+.. code-block:: console
 
-   You are using ``--llm_kv_type fp8kv_sph`` or ``fp8kv_spt`` without a calibration file path.
+    $ python -m lightllm.server.api_server \
+        --model_dir /path/to/GLM-5.3-Flash --tp 4 \
+        --data_type bfloat16 --llm_kv_type fp8kv_dsa
 
-2. ``quant_type not match`` error
+Disaggregated P/D Deployment
+----------------------------
 
-   Usually caused by quantization mode/file mismatch (for example, using a ``per_tensor`` file with ``fp8kv_sph``).
+For dynamic FP8 KV in a disaggregated deployment, set ``--llm_kv_type fp8kv_dsa``
+on both Prefill and Decode services.
+For GLM-5.3 Flash on a single host with 8 GPUs, the following script uses 4 GPUs per service:
 
-3. Abnormal quality after mode switch
+.. code-block:: console
 
-   Use a calibration file that matches the target quantization mode instead of reusing an incompatible file.
+    $ LLM_KV_TYPE=fp8kv_dsa bash test/start_scripts/glm53/glm53_pd_1p1d.sh \
+        8088 <node_ip> /path/to/GLM-5.3-Flash
+
+Replace ``<node_ip>`` with a reachable IP address of the host. The script configures the
+quantization mode and transfer page size for both services. When starting services manually,
+use the same quantization mode and ``--pd_kv_page_size`` on both sides.
+
+Troubleshooting
+---------------
+
+- **Missing calibration file or calibration type mismatch:** Static modes require
+  ``--kv_quant_calibration_config_path`` with a file matching the model and mode.
+  Files for ``fp8kv_sph`` must also include Q calibration data.
+- **Missing dependencies:** Follow the current installation guide. Dynamic mode also
+  requires a compatible FlashMLA installation.
+- **Insufficient P/D transfer page capacity:** Increase ``--pd_kv_page_size`` on both
+  services and keep it a multiple of ``--page_size``.

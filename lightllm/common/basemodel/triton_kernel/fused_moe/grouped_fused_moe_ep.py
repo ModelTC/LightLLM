@@ -35,12 +35,11 @@ SUPPORTED_EP_EXPERT_DTYPES = ("fp8w8a8-b128-deepgemm", "fp4fp8-b32-deepgemm")
 
 
 try:
-    from deep_ep import Buffer, EventOverlap
     import deep_gemm
 
     HAS_DEEPGEMM = True
 except:
-    logger.debug("no deepep or deep_gemm")
+    logger.debug("no deep_gemm")
     HAS_DEEPGEMM = False
 
 
@@ -79,6 +78,9 @@ def masked_group_gemm(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    use_ue8m0_scales: Optional[bool] = None,
+    use_tanh_approximate_gelu: Optional[bool] = None,
+    round_intermediates: bool = False,
 ):
     padded_m = recv_x[0].shape[1]
     E, N, _ = w1.shape
@@ -99,6 +101,9 @@ def masked_group_gemm(
         alpha=alpha,
         limit=limit,
         clamp_up_add_one=clamp_up_add_one,
+        use_ue8m0_scales=use_ue8m0_scales,
+        use_tanh_approximate_gelu=use_tanh_approximate_gelu,
+        round_intermediates=round_intermediates,
     )
     del gemm_out_a
     gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
@@ -521,6 +526,10 @@ def chunked_expanded_moe_forward(
     alpha: Optional[float] = None,
     limit: Optional[float] = None,
     clamp_up_add_one: bool = True,
+    use_ue8m0_scales: Optional[bool] = None,
+    use_tanh_approximate_gelu: Optional[bool] = None,
+    use_triton_quant: bool = False,
+    round_intermediates: bool = False,
 ):
     """Run bounded expanded MoE and rewrite metadata for dense DeepEP combine."""
     alignment = 128
@@ -544,10 +553,11 @@ def chunked_expanded_moe_forward(
     del padding_mask
 
     gather_rows = recv_src_metadata.shape[0]
+    contributions = recv_src_metadata.shape[1] - 2 if round_intermediates else 1
     scale_cols = intermediate_size // block_size_k
     max_chunk_rows = _get_max_chunk_rows(
         workspace=workspace,
-        gather_rows=gather_rows,
+        gather_rows=contributions * gather_rows,
         hidden_size=hidden_size,
         intermediate_size=intermediate_size,
         intermediate_twice=intermediate_twice,
@@ -565,7 +575,10 @@ def chunked_expanded_moe_forward(
     max_chunk_rows = min(all_tokens, max_chunk_rows)
 
     workspace_manager = TensorBufferManager(workspace)
-    gather_out = workspace_manager.alloc((gather_rows, hidden_size), hidden_dtype)
+    gather_shape = (gather_rows, hidden_size)
+    if round_intermediates:
+        gather_shape = (contributions, *gather_shape)
+    gather_out = workspace_manager.alloc(gather_shape, hidden_dtype)
     gather_out.zero_()
 
     # 不同 rank 接收到的 token 数不同，因此实际 chunk 数也可能不同。Autotuner warmup
@@ -588,7 +601,15 @@ def chunked_expanded_moe_forward(
                 gemm_out_a,
                 m_indices[chunk_start:chunk_end],
             )
-            silu_and_mul_fwd(gemm_out_a, silu_out, alpha=alpha, limit=limit, clamp_up_add_one=clamp_up_add_one)
+            silu_and_mul_fwd(
+                gemm_out_a,
+                silu_out,
+                alpha=alpha,
+                limit=limit,
+                clamp_up_add_one=clamp_up_add_one,
+                use_tanh_approximate_gelu=use_tanh_approximate_gelu,
+                round_intermediates=round_intermediates,
+            )
             workspace_manager.free(gemm_out_a)
             del gemm_out_a
 
@@ -608,7 +629,8 @@ def chunked_expanded_moe_forward(
                 column_major_scales=True,
                 scale_tma_aligned=True,
                 alloc_func=workspace_quant_alloc,
-                use_ue8m0_scales=get_env_use_ue8m0_scales(),
+                use_ue8m0_scales=get_env_use_ue8m0_scales() if use_ue8m0_scales is None else use_ue8m0_scales,
+                use_triton=use_triton_quant,
             )
             workspace_manager.free(silu_out)
             del silu_out

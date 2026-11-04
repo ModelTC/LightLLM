@@ -6,16 +6,18 @@ from lightllm.utils.log_utils import init_logger, log_info_on_leader, progress_e
 
 logger = init_logger(__name__)
 from safetensors import safe_open
-from tqdm import tqdm
 import lightllm.utils.petrel_helper as utils
-from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.dist_utils import get_current_device
+from lightllm.utils.progress import ThreadProgress
 
 
 def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_layer_list=None, weight_dir=None):
     # fix bug for 多线程加载的时候，每个线程内部的cuda device 会切回 0， 修改后来保证不会出现bug
     import torch.distributed as dist
 
-    torch.cuda.set_device(get_current_device_id())
+    device = get_current_device()
+    if device.type not in ("cpu", "meta"):
+        getattr(torch, device.type).set_device(device)
 
     if use_safetensors:
         weights = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")
@@ -30,6 +32,32 @@ def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_lay
             layer.load_hf_weights(weights)
     del weights
     gc.collect()
+
+
+def checkpoint_files(weight_dir):
+    files = utils.PetrelHelper.list(weight_dir, extension="all")
+    candidates = [name for name in files if name.endswith(".safetensors")]
+    use_safetensors = bool(candidates)
+    if not candidates:
+        candidates = [name for name in files if name.endswith(".bin")]
+    assert candidates, "can only support pytorch tensor and safetensors format for weights."
+    return use_safetensors, candidates
+
+
+def checkpoint_weight_names(weight_dir, weight_dict=None):
+    """Inspect the selected checkpoint layout before allocating model weights."""
+    if weight_dict:
+        return frozenset(weight_dict)
+    use_safetensors, files = checkpoint_files(weight_dir)
+    names = set()
+    for name in files:
+        path = os.path.join(weight_dir, name)
+        if use_safetensors:
+            with safe_open(path, "pt", "cpu") as weights:
+                names.update(weights.keys())
+        else:
+            names.update(utils.PetrelHelper.load(path, map_location="meta"))
+    return frozenset(names)
 
 
 def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_layer_list=None, weight_dict=None):
@@ -47,15 +75,9 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
                 layer.load_hf_weights(weight_dict)
         del weight_dict
         return
-    use_safetensors = True
-    files = utils.PetrelHelper.list(weight_dir, extension="all")
-    candidate_files = list(filter(lambda x: x.endswith(".safetensors"), files))
-    if len(candidate_files) == 0:
-        use_safetensors = False
-        candidate_files = list(filter(lambda x: x.endswith(".bin"), files))
-    assert len(candidate_files) != 0, "can only support pytorch tensor and safetensors format for weights."
+    use_safetensors, candidate_files = checkpoint_files(weight_dir)
     from functools import partial
-    from multiprocessing.pool import ThreadPool as Pool
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     partial_func = partial(
         load_func,
@@ -73,13 +95,13 @@ def load_hf_weights(data_type, weight_dir, pre_post_layer=None, transformer_laye
         worker,
         extra={"event": "model.weights_loading"},
     )
-    with Pool(worker) as p:
-        iterator = p.imap_unordered(partial_func, candidate_files, chunksize=1)
+    with ThreadPoolExecutor(max_workers=worker) as pool:
+        futures = [pool.submit(partial_func, file) for file in candidate_files]
         desc_str = f"pid {os.getpid()} Loading model weights with {worker} workers"
-        iterator = tqdm(iterator, total=len(candidate_files), desc=desc_str, disable=not progress_enabled())
-
-        for _ in iterator:
-            pass
+        for future in ThreadProgress(
+            as_completed(futures), total=len(candidate_files), desc=desc_str, disable=not progress_enabled()
+        ):
+            future.result()
 
     duration_s = round(time.monotonic() - started, 3)
     log_info_on_leader(

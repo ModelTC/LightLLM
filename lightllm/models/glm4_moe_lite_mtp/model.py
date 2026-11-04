@@ -1,6 +1,11 @@
+from lightllm.models.glm4_moe_lite_mtp.adapter import Glm4MoeLiteMTPModelAdapter
 from typing import List
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
+from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.models.deepseek_mtp.adapter import Deepseek3MTPModelAdapter
+from lightllm.models.glm4_moe_lite.layer_weights.transformer_layer_weight import Glm4MoeLiteTransformerLayerWeight
+from lightllm.models.glm4_moe_lite.layer_infer.transformer_layer_infer import Glm4MoeLiteTransformerLayerInfer
 from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight import (
     Glm4MoeLiteMTPPreAndPostLayerWeight,
 )
@@ -9,6 +14,7 @@ from lightllm.common.basemodel.basemodel import load_hf_weights
 
 
 class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
+    model_adapter_class = Glm4MoeLiteMTPModelAdapter
 
     # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
     is_mtp_draft_model = True
@@ -24,20 +30,28 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
 
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        config = super().normalize_model_config(model_config)
+        # checkpoint 中 MTP 权重接在 main 层之后；重复规范化不能覆盖这个起点。
+        config.setdefault("mtp_checkpoint_layer_start", config["num_hidden_layers"])
+        count = config.get("num_nextn_predict_layers", 1)
+        config.update(num_hidden_layers=count, n_layer=count)
+        return config
+
     def _init_custom(self):
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
+    def _create_model_adapter(self, adapter_class):
+        return Deepseek3MTPModel._create_model_adapter(self, adapter_class)
 
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_weights(self)
 
-        mtp_layer_start = self.config["num_hidden_layers"]
+        mtp_layer_start = self.config["mtp_checkpoint_layer_start"]
         num_mtp_layers = self.config.get("num_nextn_predict_layers", 1)
 
         self.pre_post_weight = self.pre_and_post_weight_class(
@@ -70,6 +84,8 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_infer_layer(self)
 
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)

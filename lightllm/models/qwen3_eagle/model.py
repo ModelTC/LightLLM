@@ -1,3 +1,4 @@
+from lightllm.models.qwen3_eagle.adapter import Qwen3EagleModelAdapter
 import copy
 from typing import List
 
@@ -6,6 +7,7 @@ import torch
 from lightllm.common.basemodel.batch_objs import ModelInput
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama.adapter import LlamaModelAdapter
 from lightllm.models.qwen3_eagle.layer_infer.pre_layer_infer import Qwen3EaglePreLayerInfer
 from lightllm.models.qwen3_eagle.layer_infer.transformer_layer_infer import Qwen3EagleTransformerLayerInfer
 from lightllm.models.qwen3_eagle.layer_weights.pre_and_post_layer_weight import Qwen3EaglePreAndPostLayerWeight
@@ -14,12 +16,7 @@ from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Q
 
 class Qwen3EagleModel(LlamaTpPartModel):
     is_mtp_draft_model = True
-
-    pre_and_post_weight_class = Qwen3EaglePreAndPostLayerWeight
-    pre_layer_infer_class = Qwen3EaglePreLayerInfer
-
-    transformer_weight_class = Qwen3EagleTransformerLayerWeight
-    transformer_layer_infer_class = Qwen3EagleTransformerLayerInfer
+    model_adapter_class = Qwen3EagleModelAdapter
 
     def __init__(self, kvargs: dict):
         self._pre_init(kvargs)
@@ -29,14 +26,14 @@ class Qwen3EagleModel(LlamaTpPartModel):
         self.main_model: TpPartBaseModel = kvargs.pop("main_model")
         self.mtp_previous_draft_models: List[TpPartBaseModel] = kvargs.pop("mtp_previous_draft_models")
 
-    def _init_config(self):
-        super()._init_config()
-        draft_vocab_size = self.config.get("draft_vocab_size")
+    @classmethod
+    def normalize_model_config(cls, model_config):
+        config = super().normalize_model_config(model_config)
+        draft_vocab_size = config.get("draft_vocab_size")
         if draft_vocab_size is not None:
-            # Inherited model setup reads vocab_size, while EAGLE3's vocabulary
-            # maps still need the original target vocabulary size.
-            self.config["target_vocab_size"] = self.config["vocab_size"]
-            self.config["vocab_size"] = draft_vocab_size
+            config.setdefault("target_vocab_size", config["vocab_size"])
+            config["vocab_size"] = draft_vocab_size
+        return config
 
     def _verify_params(self):
         super()._verify_params()
@@ -46,38 +43,18 @@ class Qwen3EagleModel(LlamaTpPartModel):
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
-
-    def _init_weights(self, start_layer_index=None):
-        self.pre_post_weight = self.pre_and_post_weight_class(
-            self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
+    def _create_model_adapter(self, adapter_class):
+        start = len(self.main_model.layers_infer) + sum(
+            len(model.layers_infer) for model in self.mtp_previous_draft_models
         )
-        self.trans_layers_weight = [
-            self.transformer_weight_class(
-                i,
-                self.data_type,
-                network_config=self.config,
-                quant_cfg=self.quant_cfg,
-            )
-            for i in range(self.config["n_layer"])
-        ]
-        # Compressed-vocabulary EAGLE3 checkpoints store a draft lm_head and
-        # vocabulary maps, but their input ids still belong to the target
-        # vocabulary. Reuse the target embedding instead of requiring a draft
-        # embed_tokens.weight that these checkpoints do not contain.
-        if self.config.get("draft_vocab_size") is not None:
-            self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
-
-    def _init_infer_layer(self, start_layer_index=None):
-        total_pre_layers_num = len(self.main_model.layers_infer)
-        total_pre_layers_num += sum(
-            len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models
+        return adapter_class(
+            self.config,
+            role=self.att_state_role,
+            dtype=self.data_type,
+            tp_world_size=self.tp_world_size_,
+            layer_ids=range(start, start + self.config["num_hidden_layers"]),
+            shared_embedding=self.main_model.pre_post_weight.wte_weight_,
         )
-        super()._init_infer_layer(start_layer_index=total_pre_layers_num)
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
         """在进入模型主体和 CUDA Graph 前统一 EAGLE3 hidden 的宽度。

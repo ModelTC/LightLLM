@@ -9,6 +9,12 @@ fi
 PORT="$1"
 NODE_IP="$2"
 MODEL_DIR="${3:-/nvme/models/GLM-5.3-Flash}"
+# Set LLM_KV_TYPE=fp8kv_dsa to quantize sparse MLA KV on both P and D.
+LLM_KV_TYPE="${LLM_KV_TYPE:-None}"
+PD_KV_PAGE_SIZE=16384
+if [[ "${LLM_KV_TYPE}" == "fp8kv_dsa" ]]; then
+  PD_KV_PAGE_SIZE=32768
+fi
 
 # P/D must advertise an address reachable by the master and the other node.
 export NO_PROXY="${NO_PROXY:+${NO_PROXY},}127.0.0.1,localhost,${NODE_IP}"
@@ -18,6 +24,7 @@ export LOADWORKER="${LOADWORKER:-8}"
 COMMON_ARGS=(
   --model_dir "${MODEL_DIR}"
   --model_name glm53
+  --llm_kv_type "${LLM_KV_TYPE}"
   --tp 4
   --batch_max_tokens 8192
   --running_max_req_size 64
@@ -28,7 +35,7 @@ COMMON_ARGS=(
   --linear_att_ssm_data_type float32
   --pd_trans_mode nccl
   # One transfer page must also fit the global Conv/SSM/indexer-tail state.
-  --pd_kv_page_size 16384
+  --pd_kv_page_size "${PD_KV_PAGE_SIZE}"
   --pd_kv_page_num 2
   --pd_master_ip 127.0.0.1
   --pd_master_port "${PORT}"

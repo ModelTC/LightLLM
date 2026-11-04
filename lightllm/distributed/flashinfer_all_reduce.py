@@ -102,6 +102,9 @@ class FlashInferAllReduce:
                 hidden_dim=hidden_dim,
                 dtype=dtype,
                 comm_backend=TorchDistBackend(group=self.group),
+                # TRT-LLM symmetric-memory rendezvous must use the same TP
+                # subgroup as world_size/rank; otherwise it defaults to WORLD.
+                group=self.group,
             )
         except Exception as e:
             logger.warning(
@@ -118,6 +121,12 @@ class FlashInferAllReduce:
         self._ws_dtype = dtype
         self._ws_max_token_num = max_token_num
         return True
+
+    def close(self):
+        self.disabled = True
+        if self._workspace is not None:
+            self._workspace.destroy()
+            self._workspace = None
 
     def should_use(self, inp: torch.Tensor) -> bool:
         if self.disabled or not inp.is_cuda or not inp.is_contiguous():

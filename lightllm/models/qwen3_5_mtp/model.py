@@ -1,7 +1,10 @@
+from lightllm.models.qwen3_5_mtp.adapter import Qwen35MTPModelAdapter
 from typing import List
 
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+from lightllm.models.qwen3_5.adapter import Qwen35ModelAdapter
+from lightllm.models.base.adapter import DenseModelAdapter
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
 from lightllm.models.qwen3_5_mtp.layer_weights.pre_and_post_layer_weight import Qwen3_5MTPPreAndPostLayerWeight
 from lightllm.models.qwen3_5_mtp.layer_weights.transformer_layer_weight import Qwen3_5MTPTransformerLayerWeight
@@ -9,12 +12,13 @@ from lightllm.models.qwen3_5_mtp.layer_infer.pre_layer_infer import Qwen3_5MTPPr
 
 
 class Qwen3_5MTPModel(Qwen3_5TpPartModel):
+    model_adapter_class = Qwen35MTPModelAdapter
     pre_and_post_weight_class = Qwen3_5MTPPreAndPostLayerWeight
     pre_layer_infer_class = Qwen3_5MTPPreLayerInfer
     transformer_weight_class = Qwen3_5MTPTransformerLayerWeight
     transformer_layer_infer_class = Qwen35TransformerLayerInfer
 
-    # MTP draft model: reuses the main model's req/mem managers and rope caches, and is
+    # MTP draft model: reuses the main model's request/attention resources and rope caches, and is
     # marked so the decode CUDA-graph / padding paths detect it (is_mtp_draft_model).
     is_mtp_draft_model = True
 
@@ -29,30 +33,35 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
         self._sin_cached = self.main_model._sin_cached
         return
 
-    def _init_req_manager(self):
-        self.req_manager = self.main_model.req_manager
-        return
-
-    def _init_mem_manager(self):
-        self.mem_manager = self.main_model.mem_manager
-        return
-
-    def _init_config(self):
-        super()._init_config()
-        # MTP draft model: reuses the main model's config, but overrides the following:
-        # 因为 qwen3.5 的 mtp 和 main 是存储在一起的，所以需要进行修复。
-        self.config["full_attention_interval"] = 1
-        self.config["num_hidden_layers"] = 1
-        self.config["n_layer"] = 1
-        return
+    @classmethod
+    def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
+        """原生 MTP 只包含一个 full-attention 层，与 main 共用 checkpoint。"""
+        config = super().normalize_model_config(model_config)
+        config.update(full_attention_interval=1, num_hidden_layers=1, n_layer=1, layer_types=["full_attention"])
+        return config
 
     def _init_some_value(self):
         super()._init_some_value()
         self.layers_num = 1
         return
 
+    def _create_model_adapter(self, adapter_class):
+        main_weights = self.main_model.pre_post_weight
+        return adapter_class(
+            self.config,
+            role=self.att_state_role,
+            dtype=self.data_type,
+            tp_world_size=self.tp_world_size_,
+            layer_id=len(self.main_model.layers_infer)
+            + sum(len(m.layers_infer) for m in self.mtp_previous_draft_models),
+            checkpoint_layer_id=len(self.mtp_previous_draft_models),
+            shared_weights=(main_weights.wte_weight_, main_weights.lm_head_weight_, main_weights.final_norm_weight_),
+        )
+
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_weights(self)
         mtp_index = len(self.mtp_previous_draft_models)
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type, network_config=self.config, quant_cfg=self.quant_cfg
@@ -74,6 +83,8 @@ class Qwen3_5MTPModel(Qwen3_5TpPartModel):
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_infer_layer(self)
         total_pre_layers_num = len(self.main_model.layers_infer)
         total_pre_layers_num += sum(
             [len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models]

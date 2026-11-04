@@ -1,6 +1,11 @@
+from lightllm.models.gpt_oss.adapter import GptOssModelAdapter
 from lightllm.models.gpt_oss.layer_infer.transformer_layer_infer import GptOssTransformerLayerInfer
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
+from dataclasses import replace
+
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama.adapter import LlamaModelAdapter
+from lightllm.core.compute.moe.spec import MoeSpec
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.attention import get_prefill_att_backend_class, get_decode_att_backend_class
@@ -10,6 +15,7 @@ logger = init_logger(__name__)
 
 
 class GptOssTpPartModel(LlamaTpPartModel):
+    model_adapter_class = GptOssModelAdapter
     # weight class
     transformer_weight_class = GptOssTransformerLayerWeight
 

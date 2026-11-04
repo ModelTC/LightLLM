@@ -1,16 +1,25 @@
+from lightllm.models.internvl.adapter import (
+    InternVLLlamaModelAdapter,
+    InternVLQwen2ModelAdapter,
+    InternVLDeepSeek2ModelAdapter,
+)
 import os
 import json
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.build_utils import repair_config
+from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.models.internlm2.model import Internlm2TpPartModel
 from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama.adapter import LlamaModelAdapter
 from lightllm.models.phi3.model import Phi3TpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
+from lightllm.models.qwen2.adapter import Qwen2ModelAdapter
 from lightllm.models.qwen3.model import Qwen3TpPartModel
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 from lightllm.models.deepseek2.model import Deepseek2TpPartModel
+from lightllm.models.deepseek2.adapter import Deepseek2ModelAdapter
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import (
     InternVLLlamaPreAndPostLayerWeight,
@@ -106,7 +115,7 @@ class InternvlTokenizer(BaseMultiModalTokenizer):
             mel_len = chunk_len // 160
             dilation = 1
             L_in = mel_len
-            for (padding, kernel_size, stride) in eval("[(1,3,1)] + [(1,3,2)] "):
+            for padding, kernel_size, stride in eval("[(1,3,1)] + [(1,3,2)] "):
                 L_out = L_in + 2 * padding - dilation * (kernel_size - 1) - 1
                 L_out = 1 + L_out // stride
                 L_in = L_out
@@ -238,73 +247,24 @@ class InternVLInternlm2TpPartModel(Internlm2TpPartModel):
 
 
 class InternVLLlamaTpPartModel(LlamaTpPartModel):
-    # weight class
-    pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
-
-    # infer class
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-
-    def __init__(self, kvargs):
-        super().__init__(kvargs)
-        return
-
-    def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-        if self.finetune_config:
-            self.config["vocab_size"] = self.finetune_config.vocab_size
-        return
+    model_adapter_class = InternVLLlamaModelAdapter
+    pre_and_post_weight_class = InternVLLlamaModelAdapter.pre_and_post_weight_class
+    pre_layer_infer_class = InternVLLlamaModelAdapter.pre_layer_infer_class
 
 
 class InternVLQwen2TpPartModel(Qwen2TpPartModel):
-    # weight class
-    pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
-
-    # infer class
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-
-    def __init__(self, kvargs):
-        super().__init__(kvargs)
-        return
+    model_adapter_class = InternVLQwen2ModelAdapter
+    pre_and_post_weight_class = InternVLQwen2ModelAdapter.pre_and_post_weight_class
+    pre_layer_infer_class = InternVLQwen2ModelAdapter.pre_layer_infer_class
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-        if self.finetune_config:
-            self.config["vocab_size"] = self.finetune_config.vocab_size
-        return
+        TpPartBaseModel._init_config(self)
 
 
 class InternVLDeepSeek2TpPartModel(Deepseek2TpPartModel):
-    # support Deepseek2,3,R1
-    # weight class
-    pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
-
-    # infer class
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-
-    def __init__(self, kvargs):
-        super().__init__(kvargs)
-        return
-
-    def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["llm_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-        if self.finetune_config:
-            self.config["vocab_size"] = self.finetune_config.vocab_size
-        return
+    model_adapter_class = InternVLDeepSeek2ModelAdapter
+    pre_and_post_weight_class = InternVLDeepSeek2ModelAdapter.pre_and_post_weight_class
+    pre_layer_infer_class = InternVLDeepSeek2ModelAdapter.pre_layer_infer_class
 
 
 class InternVLQwen3TpPartModel(Qwen3TpPartModel):

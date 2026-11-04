@@ -36,6 +36,7 @@ class Qwen3TransformerLayerInfer(LlamaTransformerLayerInfer):
             cache_kv[:, : self.tp_k_head_num_, :],
             infer_state.position_cos,
             infer_state.position_sin,
+            round_intermediates=True,
         )
         if infer_state.need_dp_prefill_balance:
             q = infer_state._all_to_all_unbalance_get(data=q)

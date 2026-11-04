@@ -53,6 +53,7 @@ def make_task(page_kind):
 @pytest.mark.parametrize("with_mark", [False, True])
 def test_copy_for_notify_preserves_local_task(page_kind, with_mark):
     task = make_task(page_kind)
+    task.local_completion = lambda: None
     if with_mark:
         task.shared_time_out_mark = _SharedTimeOutMark()
         time_mark = task.shared_time_out_mark.time_mark
@@ -69,6 +70,7 @@ def test_copy_for_notify_preserves_local_task(page_kind, with_mark):
         **{key: value for key, value in original.items() if key != "shared_time_out_mark"},
         "mem_indexes": None,
         "xfer_handle": None,
+        "local_completion": None,
     }
     assert vars(task) == original
     assert all(vars(task)[key] is value for key, value in original.items())
@@ -95,6 +97,7 @@ assert isinstance(task, PDChunckedTransTask)
 assert not hasattr(task, 'shared_time_out_mark')
 assert task.mem_indexes is None
 assert task.xfer_handle is None
+assert task.local_completion is None
 assert not any('decode_node_impl' in name for name in sys.modules)
 """
 
@@ -113,6 +116,7 @@ assert not any('decode_node_impl' in name for name in sys.modules)
 )
 def test_notification_payload(backend, page_kind, method, stage, destination):
     task = make_task(page_kind)
+    task.local_completion = lambda: None
     task.error_info = "transfer failed" if stage == "error" else None
     task.shared_time_out_mark = _SharedTimeOutMark()
     original = vars(task).copy()
@@ -124,8 +128,7 @@ def test_notification_payload(backend, page_kind, method, stage, destination):
     if backend is NcclKVTransporter:
         transporter.host_ip = "127.0.0.1"
         transporter.control_channel = SimpleNamespace(port=1234, send_notif=Mock())
-        transporter.kv_move_buffer = SimpleNamespace(dtype="float16")
-        transporter.page_size = transporter.num_layers = transporter.kv_head_num = transporter.head_dims = 1
+        transporter.kv_move_buffer = SimpleNamespace(dtype="uint8", shape=(12, 128))
         transporter._get_remote_metadata = Mock(return_value=SimpleNamespace(host_ip="127.0.0.2", control_port=4321))
         transporter._get_peer = Mock(return_value=SimpleNamespace(start_recv=Mock()))
     else:
@@ -162,7 +165,7 @@ def test_notification_payload(backend, page_kind, method, stage, destination):
     notify = pickle.loads(payload)
     sender = "prefill" if destination == "decode" else "decode"
     expected = {key: value for key, value in original.items() if key != "shared_time_out_mark"}
-    expected.update(mem_indexes=None, xfer_handle=None, write_stage=stage)
+    expected.update(mem_indexes=None, xfer_handle=None, local_completion=None, write_stage=stage)
     expected.update(
         {
             f"{sender}_agent_name": transporter.agent_name,
@@ -190,3 +193,35 @@ def test_receiver_rejects_payload_with_decode_local_mark():
     )
     assert result.returncode != 0
     assert b"decode modules are unavailable to the receiver" in result.stderr
+
+
+def test_nixl_rejects_different_peer_page_capacity_before_registering_handles():
+    transporter = NixlKVTransporter.__new__(NixlKVTransporter)
+    transporter.page_bytes = 128
+    transporter.nixl_agent = SimpleNamespace(get_xfer_descs=Mock(), prep_xfer_dlist=Mock())
+    with pytest.raises(AssertionError, match="same page byte capacity"):
+        transporter._create_paged_xfer_handles([(4096, 512, 0, None)], 2, "peer")
+    transporter.nixl_agent.get_xfer_descs.assert_not_called()
+    transporter._create_paged_xfer_handles([(4096, 256, 0, None)], 2, "peer")
+    transporter.nixl_agent.get_xfer_descs.assert_called_once_with([(4096, 128, 0), (4224, 128, 0)], "VRAM")
+
+
+def test_nccl_checks_peer_page_bytes_before_accepting_agent():
+    from lightllm.server.router.model_infer.mode_backend.pd.nccl_kv_transporter import NcclAgentMetadata
+
+    transporter = NcclKVTransporter.__new__(NcclKVTransporter)
+    transporter.remote_agents = {}
+    transporter.kv_move_buffer = SimpleNamespace(shape=(2, 128))
+    transporter.num_pages = 2
+    assert pickle.loads(transporter.local_page_mem_desc) == {"num_pages": 2, "page_bytes": 128}
+    peer = SimpleNamespace(
+        agent_name="peer",
+        agent_metadata=pickle.dumps(NcclAgentMetadata("peer", "127.0.0.1", 1234, 0)),
+        page_reg_desc=pickle.dumps({"page_bytes": 256}),
+    )
+    with pytest.raises(AssertionError, match="same page byte capacity"):
+        transporter.connect_add_remote_agent(peer)
+    assert not transporter.remote_agents
+    peer.page_reg_desc = transporter.local_page_mem_desc
+    transporter.connect_add_remote_agent(peer)
+    assert transporter.remote_agents["peer"] is peer

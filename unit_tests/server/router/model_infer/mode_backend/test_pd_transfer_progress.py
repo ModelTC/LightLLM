@@ -53,6 +53,7 @@ def make_module(*tasks):
     module = decode_trans_process._DecodeTransModule.__new__(decode_trans_process._DecodeTransModule)
     module.device_id = 0
     module.args = SimpleNamespace(pd_node_id=2, pd_detail_log=False)
+    module.kv_calibration = {}
     module.waiting_dict_lock = threading.Lock()
     module.waiting_dict = {task.get_key(): task for task in tasks}
     module.transporter = SimpleNamespace(
@@ -70,6 +71,7 @@ def make_module(*tasks):
         "up_status_in_queue",
     ):
         setattr(module, name, queue.Queue())
+    module.page_reclaimer = decode_trans_process.PDPageReclaimer(queue.Queue(), module.transporter)
     return module
 
 
@@ -118,6 +120,59 @@ def test_waiting_pages_timeout_from_shared_progress_and_initial_deadline(monkeyp
     assert not module.waiting_dict
 
 
+@pytest.mark.parametrize("remote_identity", [None, {"main_fp8": "wrong"}, {"main_fp8": "expected"}])
+def test_decode_checks_calibration_before_allocating_a_destination_page(monkeypatch, remote_identity):
+    monkeypatch.setattr(decode_trans_process.torch.cuda, "set_device", lambda _device: None)
+    local, remote = make_task(1, 0), make_task(1, 0)
+    local.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
+    module = make_module(local)
+    module.kv_calibration = {"main_fp8": "expected"}
+    remote.prefill_kv_calibration = remote_identity
+    remote.write_stage = "request"
+    module.transporter.get_new_notifs = lambda: {"prefill": [pickle.dumps(remote)]}
+    monkeypatch.setattr(module, "_check_tasks_time_out", Mock(side_effect=_StopLoop))
+    with pytest.raises(_StopLoop):
+        module.accept_peer_task_loop()
+    if remote_identity == module.kv_calibration:
+        assert module.request_page_task_queue.get_nowait() is local
+        assert module.failed_queue.empty()
+    else:
+        assert module.failed_queue.get_nowait() is local
+        assert "calibration mismatch" in local.error_info
+        assert module.request_page_task_queue.empty()
+    assert local.dst_page_index is None
+
+
+@pytest.mark.parametrize("remote_identity", [None, {"main_fp8": "wrong"}, {"main_fp8": "expected"}])
+def test_prefill_checks_calibration_before_allocating_or_copying_a_page(monkeypatch, remote_identity):
+    from lightllm.server.router.model_infer.mode_backend.pd.prefill_node_impl import prefill_trans_process
+
+    monkeypatch.setattr(prefill_trans_process.torch.cuda, "set_device", lambda _device: None)
+    task = make_task(1, 0)
+    task.decode_kv_calibration = remote_identity
+    module = prefill_trans_process._PrefillTransModule.__new__(prefill_trans_process._PrefillTransModule)
+    module.device_id = 0
+    module.kv_calibration = {"main_fp8": "expected"}
+    module.task_in_queue = _SequenceQueue(task)
+    module.failed_queue = queue.Queue()
+    module.local_copy_kv_queue = queue.Queue()
+    module.page_index_queue = queue.Queue()
+    module.page_index_queue.put(7)
+    with pytest.raises(_StopLoop):
+        module.recv_task_loop()
+    assert task.prefill_kv_calibration == module.kv_calibration
+    if remote_identity == module.kv_calibration:
+        assert module.local_copy_kv_queue.get_nowait() is task
+        assert task.src_page_index == 7
+        assert module.failed_queue.empty()
+    else:
+        assert module.failed_queue.get_nowait() is task
+        assert "calibration mismatch" in task.error_info
+        assert module.local_copy_kv_queue.empty()
+        assert module.page_index_queue.get_nowait() == 7
+        assert task.src_page_index is None
+
+
 @pytest.mark.parametrize("stage", ["request", "done"])
 def test_matched_notifications_refresh_local_siblings_only(monkeypatch, stage):
     now = [100.0]
@@ -127,6 +182,7 @@ def test_matched_notifications_refresh_local_siblings_only(monkeypatch, stage):
     first.shared_time_out_mark = sibling.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
     unrelated.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
     module = make_module(first, sibling, unrelated)
+    module.page_reclaimer.expect_remote_write(first.get_key())
     remote = make_task(1, 0)
     remote.write_stage = stage
     remote.shared_time_out_mark = decode_trans_process._SharedTimeOutMark()
@@ -138,6 +194,7 @@ def test_matched_notifications_refresh_local_siblings_only(monkeypatch, stage):
         patch.setattr(module, "_check_tasks_time_out", Mock(side_effect=_StopLoop))
         with pytest.raises(_StopLoop):
             module.accept_peer_task_loop()
+    assert (first.get_key() in module.page_reclaimer.remote_done) is (stage == "done")
 
     assert sibling.shared_time_out_mark.time_mark == 109.0
     assert unrelated.shared_time_out_mark.time_mark == 100.0
@@ -150,6 +207,7 @@ def test_matched_notifications_refresh_local_siblings_only(monkeypatch, stage):
         patch.setattr(module, "_check_tasks_time_out", Mock(side_effect=_StopLoop))
         with pytest.raises(_StopLoop):
             module.accept_peer_task_loop()
+    assert (first.get_key() in module.page_reclaimer.remote_done) is (stage == "done")
     assert sibling.shared_time_out_mark.time_mark == 109.0
     module.transporter.send_error_info_to_prefill_node.assert_called_once()
 

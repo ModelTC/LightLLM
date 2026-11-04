@@ -1,10 +1,10 @@
+from functools import partial
 from typing import Optional, List
 import torch
-import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.common.req_manager import ReqManager
 from lightllm.models.neo_chat_moe.triton_kernel.get_neo_position import get_neo_position_triton
-from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.core.runner import batch_metadata
+from lightllm.core.runner.batch_metadata import RotaryTables
 
 
 class NeoChatInferStateInfo(LlamaInferStateInfo):
@@ -19,11 +19,20 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
         self.b_image_token_end = None
         self.position_ids = None
 
-    def init_some_extra_state(self, model: LlamaTpPartModel):
-        LlamaInferStateInfo.init_some_extra_state(self, model)
+    @classmethod
+    def bind_metadata(cls, model):
+        return partial(
+            cls.prepare_metadata,
+            temporal=RotaryTables(model._cos_cached, model._sin_cached),
+            spatial=RotaryTables(model._hw_cos_cached, model._hw_sin_cached),
+        )
+
+    def prepare_metadata(self, *, temporal, spatial):
+        batch_metadata.prepare_sequence_metadata(self)
         if self.is_prefill:
-            self.b_image_token_end = torch.zeros([self.position_ids.size(0)], dtype=torch.int32, device="cpu").cuda(
-                non_blocking=True
+            self.max_seq_len = self.max_kv_seq_len
+            self.b_image_token_end = torch.zeros(
+                self.position_ids.size(0), dtype=torch.int32, device=self.position_ids.device
             )
             self.position_ids = self.get_neo_position(self.multimodal_params)
         else:
@@ -38,12 +47,9 @@ class NeoChatInferStateInfo(LlamaInferStateInfo):
             self.position_ids[1:].zero_()
 
         self.position_ids = self.position_ids.contiguous()
-        self.position_cos = model._cos_cached[self.position_ids[0]]
-        self.position_sin = model._sin_cached[self.position_ids[0]]
-        self.position_cos_h = model._hw_cos_cached[self.position_ids[1]]
-        self.position_sin_h = model._hw_sin_cached[self.position_ids[1]]
-        self.position_cos_w = model._hw_cos_cached[self.position_ids[2]]
-        self.position_sin_w = model._hw_sin_cached[self.position_ids[2]]
+        self.position_cos, self.position_sin = temporal.gather(self.position_ids[0])
+        self.position_cos_h, self.position_sin_h = spatial.gather(self.position_ids[1])
+        self.position_cos_w, self.position_sin_w = spatial.gather(self.position_ids[2])
         return
 
     def get_neo_position(self, multimodal_params: List[dict]) -> torch.Tensor:

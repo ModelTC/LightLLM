@@ -3,16 +3,16 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.core.runner import batch_metadata as batch_metadata
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 
 
 def _patch_base_position_ids(monkeypatch):
-    def init_positions(self, model):
+    def init_positions(self):
         self.position_ids = torch.tensor([9, 19], dtype=torch.int32)
         self.b_q_seq_len = torch.ones(2, dtype=torch.int32)
 
-    monkeypatch.setattr(InferStateInfo, "init_some_extra_state", init_positions)
+    monkeypatch.setattr(batch_metadata, "prepare_sequence_metadata", init_positions)
 
 
 def _make_model():
@@ -37,7 +37,7 @@ def test_normal_prompt_prefill_builds_multimodal_positions(monkeypatch):
     infer_state.b_position_delta = None
     infer_state.multimodal_params = [{"images": [], "audios": []}] * 2
 
-    infer_state.init_some_extra_state(_make_model())
+    Qwen2VLInferStateInfo.bind_metadata(_make_model())(infer_state)
 
     assert torch.equal(infer_state.position_ids, expected_position_ids)
 
@@ -50,7 +50,7 @@ def test_normal_decode_applies_position_delta(monkeypatch):
     infer_state.b_position_delta = torch.tensor([3, 5], dtype=torch.int32)
     infer_state.multimodal_params = [{"images": [], "audios": []}] * 2
 
-    infer_state.init_some_extra_state(_make_model())
+    Qwen2VLInferStateInfo.bind_metadata(_make_model())(infer_state)
 
     expected_position_ids = torch.tensor([[12, 24]] * 3, dtype=torch.int32)
     assert torch.equal(infer_state.position_ids, expected_position_ids)
@@ -65,4 +65,4 @@ def test_prefill_rejects_position_delta(monkeypatch):
     infer_state.multimodal_params = [{"images": [], "audios": []}] * 2
 
     with pytest.raises(AssertionError, match="prefill must not provide b_position_delta"):
-        infer_state.init_some_extra_state(_make_model())
+        Qwen2VLInferStateInfo.bind_metadata(_make_model())(infer_state)

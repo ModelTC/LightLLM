@@ -1,4 +1,5 @@
 import ctypes
+import torch
 from lightllm.utils.envs_utils import get_env_start_args, get_disk_cache_prompt_limit_length
 from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
@@ -27,14 +28,11 @@ class CpuKvCacheClient(object):
             tensor_spec = CpuCacheTensorSpec(
                 shm_key=self.args.cpu_kv_cache_shm_id,
                 shape=(
-                    self.kv_cache_tensor_meta.page_num,
-                    self.kv_cache_tensor_meta.layer_num,
-                    self.kv_cache_tensor_meta.token_page_size,
-                    self.kv_cache_tensor_meta.num_heads,
-                    self.kv_cache_tensor_meta.get_merged_head_dim(),
+                    self.page_num,
+                    self.kv_cache_tensor_meta.page_bytes,
                 ),
-                dtype=self.kv_cache_tensor_meta.data_type,
-                size_bytes=self.kv_cache_tensor_meta.calcu_size(),
+                dtype=torch.uint8,
+                size_bytes=self.kv_cache_tensor_meta.size_bytes,
             )
             tensor_creator = CpuCacheCreator(tensor_spec=tensor_spec)
             self.cpu_kv_cache_tensor = tensor_creator.create_or_attach(

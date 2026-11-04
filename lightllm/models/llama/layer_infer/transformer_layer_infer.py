@@ -1,3 +1,6 @@
+from lightllm.core.compute.attention.dense.inputs import DenseInputs
+from lightllm.common.attention_state.full_att import FullAttentionState
+from lightllm.common.basemodel.attention import AttControl
 import torch
 import triton
 import torch.distributed as dist
@@ -23,10 +26,56 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self.tp_k_head_num_ = max(network_config["num_key_value_heads"] // self.tp_world_size_, 1)
         self.tp_v_head_num_ = max(network_config["num_key_value_heads"] // self.tp_world_size_, 1)
         self.tp_o_head_num_ = self.tp_q_head_num_
-        self.head_dim_ = network_config["hidden_size"] // network_config["num_attention_heads"]
+        self.head_dim_ = network_config.get(
+            "head_dim", network_config["hidden_size"] // network_config["num_attention_heads"]
+        )
         self.embed_dim_ = network_config["hidden_size"]
         self._bind_func()
         return
+
+    def bind_operations(self, providers, weight, device, communication):
+        from lightllm.core.compute.pointwise.spec import RMSNormSpec, RotarySpec, SwiGLUSpec
+        from lightllm.core.compute.linear.spec import LinearSpec
+
+        self.bound_rope = providers.bind_operation("rope", RotarySpec(self.head_dim_), {}, device, communication)
+        for name, norm in (("attention_norm", weight.att_norm_weight_), ("ffn_norm", weight.ffn_norm_weight_)):
+            operation = providers.bind_operation(
+                "rms_norm", RMSNormSpec(self.embed_dim_, self.eps_), {"weight": norm.weight}, device, communication
+            )
+            setattr(self, "bound_" + name, operation)
+        self.bound_projection = providers.bind_operation(
+            "linear_reduce",
+            LinearSpec(self.tp_o_head_num_ * self.head_dim_, self.embed_dim_, weight.o_proj.data_type_),
+            {"linear": getattr(weight.o_proj, "bound_mm", None)},
+            device,
+            communication,
+        )
+        if hasattr(weight, "gate_up_proj") and hasattr(weight, "down_proj"):
+            spec = SwiGLUSpec(self.embed_dim_, weight.down_proj.in_dim)
+            self.bound_activation = providers.bind_operation("swiglu", spec, {}, device, communication)
+            self.bound_ffn = providers.bind_operation(
+                "swiglu_ffn",
+                spec,
+                {
+                    "gate_up": getattr(weight.gate_up_proj, "bound_mm", None),
+                    "down": getattr(weight.down_proj, "bound_mm", None),
+                },
+                device,
+                communication,
+            )
+
+    def _finish_compute(self, result, infer_state):
+        from lightllm.core.contracts.compute import ComputeResult
+        from lightllm.utils.envs_utils import get_env_start_args
+
+        if isinstance(result, ComputeResult):
+            expected = (
+                "sequence_shard"
+                if self.tp_world_size_ > 1 and get_env_start_args().enable_tpsp_mix_mode
+                else "replicated"
+            )
+            return result.finish(lambda tensor: self._tpsp_reduce(tensor, infer_state), expected)
+        return self._tpsp_reduce(result, infer_state)
 
     def _bind_func(self):
         self._bind_norm()
@@ -44,12 +93,27 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        bound = getattr(self, "bound_prefill_attention", None)
+        if bound is not None:
+            inputs = DenseInputs(
+                q.view(-1, self.tp_q_head_num_, self.head_dim_),
+                kv[:, : self.tp_k_head_num_, :] if kv is not None else None,
+                kv[:, self.tp_k_head_num_ :, :] if kv is not None else None,
+            )
+            return bound.run(inputs, bound.prepare_batch(infer_state)).view(q.shape)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
         o_tensor = infer_state.prefill_att_state.prefill_att(
             q=_q,
             k=_k,
             v=_v,
+            att_control=AttControl(logical_layer_id=self.layer_num_),
             alloc_func=self.alloc_tensor,
         )
         o_tensor = o_tensor.view(q.shape)
@@ -61,19 +125,41 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
-        _k, _v = infer_state.mem_manager.get_att_input_params(layer_index=self.layer_num_)
+        bound = getattr(self, "bound_decode_attention", None)
+        if bound is not None:
+            inputs = DenseInputs(q.view(-1, self.tp_q_head_num_, self.head_dim_))
+            return bound.run(inputs, bound.prepare_batch(infer_state)).view(q.shape)
+        state = infer_state.att_state_manager.get_state(
+            model_role=infer_state.att_state_role,
+            state_type_filter="gqa",
+            logical_layer_id=self.layer_num_,
+            state_class=FullAttentionState,
+        )
+        _k, _v = state.get_layer_view(logical_layer_id=self.layer_num_)
         _q = q.view(-1, self.tp_q_head_num_, self.head_dim_)
-        o_tensor = infer_state.decode_att_state.decode_att(q=_q, k=_k, v=_v, alloc_func=self.alloc_tensor)
+        o_tensor = infer_state.decode_att_state.decode_att(
+            q=_q,
+            k=_k,
+            v=_v,
+            att_control=AttControl(logical_layer_id=self.layer_num_),
+            alloc_func=self.alloc_tensor,
+        )
         return o_tensor.view(q.shape)
 
     def _att_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
+        operation = getattr(self, "bound_attention_norm", None)
+        if operation is not None:
+            return operation(input)
         return layer_weight.att_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def _ffn_norm(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
     ) -> torch.Tensor:
+        operation = getattr(self, "bound_ffn_norm", None)
+        if operation is not None:
+            return operation(input)
         return layer_weight.ffn_norm_weight_(input=input, eps=self.eps_, alloc_func=self.alloc_tensor)
 
     def _get_qkv(
@@ -83,7 +169,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         q = layer_weight.q_proj.mm(input)
         cache_kv = layer_weight.kv_proj.mm(input).view(-1, (self.tp_k_head_num_ + self.tp_v_head_num_), self.head_dim_)
 
-        rotary_emb_fwd(
+        (getattr(self, "bound_rope", None) or rotary_emb_fwd)(
             q.view(-1, self.tp_q_head_num_, self.head_dim_),
             cache_kv[:, 0 : self.tp_k_head_num_, :],
             infer_state.position_cos,
@@ -103,17 +189,31 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             input = infer_state._all_to_all_balance_get(data=input)
 
         input = input.view(-1, self.tp_o_head_num_ * self.head_dim_)
-        o_tensor = layer_weight.o_proj.mm(input)
+        operation = getattr(self, "bound_projection", None)
+        if operation is None:
+            return self._tpsp_reduce(layer_weight.o_proj.mm(input), infer_state)
+        else:
+            from lightllm.core.contracts.compute import ComputeBatch
 
-        o_tensor = self._tpsp_reduce(input=o_tensor, infer_state=infer_state)
-        return o_tensor
+            result = operation(
+                input, ComputeBatch("prefill" if infer_state.is_prefill else "decode", infer_state.microbatch_index)
+            )
+        return self._finish_compute(result, infer_state)
 
     def _ffn(self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight) -> torch.Tensor:
         input = input.view(-1, self.embed_dim_)
         input = self._tpsp_allgather(input=input, infer_state=infer_state)
-        ffn2_out = self._ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
-        ffn2_out = self._tpsp_reduce(input=ffn2_out, infer_state=infer_state)
-        return ffn2_out
+        operation = getattr(self, "bound_ffn", None)
+        if operation is None:
+            result = self._ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
+            return self._tpsp_reduce(result, infer_state)
+        else:
+            from lightllm.core.contracts.compute import ComputeBatch
+
+            result = operation(
+                input, ComputeBatch("prefill" if infer_state.is_prefill else "decode", infer_state.microbatch_index)
+            )
+        return self._finish_compute(result, infer_state)
 
     def _ffn_tp(
         self, input, infer_state: LlamaInferStateInfo, layer_weight: LlamaTransformerLayerWeight
@@ -121,7 +221,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         input = input.view(-1, self.embed_dim_)
         up_gate_out = layer_weight.gate_up_proj.mm(input)
         ffn1_out = self.alloc_tensor((input.size(0), up_gate_out.size(1) // 2), input.dtype)
-        silu_and_mul_fwd(up_gate_out, ffn1_out)
+        (getattr(self, "bound_activation", None) or silu_and_mul_fwd)(up_gate_out, ffn1_out)
         input = None
         up_gate_out = None
         ffn2_out = layer_weight.down_proj.mm(ffn1_out)

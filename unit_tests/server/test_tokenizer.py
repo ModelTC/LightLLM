@@ -1,5 +1,6 @@
 """Tokenizer entry points must not eagerly load unrelated model implementations."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -13,7 +14,48 @@ import pytest
 ROOT = Path(__file__).resolve().parents[2]
 
 
-@pytest.mark.parametrize("model_type", ["llama", "deepseek_v32"])
+@pytest.mark.parametrize("model_type", ["deepseek_v32", "deepseek_v3"])
+def test_deepseek_bytelevel_checkpoint_preserves_whitespace(tmp_path: Path, model_type: str) -> None:
+    from tokenizers import Tokenizer, decoders, pre_tokenizers, trainers
+    from tokenizers.models import BPE
+    from transformers import PreTrainedTokenizerFast
+    from lightllm.server.tokenizer import get_tokenizer
+
+    text = "Question: What is 2 + 3?\nAnswer: #### 5"
+    backend = Tokenizer(BPE(unk_token="<unk>"))
+    backend.pre_tokenizer = pre_tokenizers.ByteLevel(add_prefix_space=False, use_regex=False)
+    backend.decoder = decoders.ByteLevel()
+    backend.train_from_iterator(
+        [text],
+        trainers.BpeTrainer(
+            vocab_size=300,
+            initial_alphabet=pre_tokenizers.ByteLevel.alphabet(),
+            special_tokens=["<unk>"],
+        ),
+    )
+    fast = PreTrainedTokenizerFast(tokenizer_object=backend, unk_token="<unk>")
+    fast.save_pretrained(tmp_path)
+    # 真实 DeepSeek checkpoint 声明 LlamaTokenizerFast，但实际编码和解码均为 ByteLevel。
+    config_path = tmp_path / "tokenizer_config.json"
+    config = json.loads(config_path.read_text())
+    config.update(tokenizer_class="LlamaTokenizerFast", legacy=True)
+    config_path.write_text(json.dumps(config))
+    (tmp_path / "config.json").write_text(
+        json.dumps(
+            {
+                "model_type": model_type,
+                "architectures": ["DeepseekV3ForCausalLM"],
+            }
+        )
+    )
+
+    tokenizer = get_tokenizer(str(tmp_path))
+    expected_ids = backend.encode(text).ids
+    assert tokenizer.encode(text, add_special_tokens=False) == expected_ids
+    assert tokenizer.decode(expected_ids, skip_special_tokens=True) == text
+
+
+@pytest.mark.parametrize("model_type", ["llama", "deepseek_v32", "deepseek_v4"])
 def test_tokenizer_imports_are_isolated(model_type):
     result = subprocess.run(
         [
@@ -25,7 +67,6 @@ import json
 from pathlib import Path
 import sys
 import tempfile
-from types import ModuleType
 from tokenizers import Tokenizer
 from tokenizers.models import WordLevel
 from transformers import AutoConfig, PreTrainedTokenizerFast
@@ -36,23 +77,18 @@ class RejectUnrelatedModels(importlib.abc.MetaPathFinder):
         if fullname.startswith("lightllm.models."):
             allowed = {"lightllm.models.registry", "lightllm.models.draft_registry", "lightllm.models.builtin"}
             if model_type == "deepseek_v32":
-                allowed.add("lightllm.models.deepseek3_2")
+                allowed.update({
+                    "lightllm.models.deepseek3_2",
+                    "lightllm.models.deepseek3_2.tokenizer",
+                    "lightllm.models.deepseek3_2.encoding_dsv32",
+                })
+            if model_type == "deepseek_v4":
+                allowed.update({"lightllm.models.deepseek_v4", "lightllm.models.deepseek_v4.tokenizer"})
             if fullname not in allowed:
                 raise AssertionError("Unexpected model import: " + fullname)
 sys.meta_path.insert(0, RejectUnrelatedModels())
 from lightllm.server import tokenizer as module
 assert not any(name.startswith("lightllm.models.") for name in sys.modules)
-
-if model_type == "deepseek_v32":
-    # Keep the real HF config registration, replacing only the implementation wrapper.
-    wrapper = ModuleType("lightllm.models.deepseek3_2.model")
-    wrapper.DeepSeekV32Tokenizer = lambda tokenizer: tokenizer
-    sys.modules[wrapper.__name__] = wrapper
-    original = module.AutoTokenizer.from_pretrained
-    def load(*args, **kwargs):
-        assert AutoConfig.for_model("deepseek_v32").model_type == "deepseek_v32"
-        return original(*args, **kwargs)
-    module.AutoTokenizer.from_pretrained = load
 
 with tempfile.TemporaryDirectory() as directory:
     fast = PreTrainedTokenizerFast(tokenizer_object=Tokenizer(WordLevel({"hello": 0, "[UNK]": 1}, unk_token="[UNK]")))
@@ -62,6 +98,21 @@ with tempfile.TemporaryDirectory() as directory:
     }))
     tokenizer = module.get_tokenizer(directory)
     assert tokenizer.encode("hello") == [0]
+    if model_type == "deepseek_v32":
+        assert AutoConfig.for_model("deepseek_v32").model_type == "deepseek_v32"
+        assert tokenizer.__class__.__module__ == "lightllm.models.deepseek3_2.tokenizer"
+        prompt = tokenizer.apply_chat_template(messages=[{"role": "user", "content": "hello"}])
+        assert "hello" in prompt
+        thinking_prompt = tokenizer.apply_chat_template(
+            messages=[{"role": "user", "content": "hello"}], thinking=True
+        )
+        assert "<think>" in thinking_prompt
+        tool_prompt = tokenizer.apply_chat_template(
+            messages=[{"role": "user", "content": "hello"}],
+            tools=[{"name": "echo", "description": "Echo text", "parameters": {"type": "object"}}],
+        )
+        assert "<functions>" in tool_prompt and "echo" in tool_prompt
+        assert "lightllm.models.deepseek3_2.model" not in sys.modules
 """,
             model_type,
         ],
@@ -90,6 +141,7 @@ with tempfile.TemporaryDirectory() as directory:
         ({"model_type": "qwen3_vl", "vision_config": {}}, "qwen3_vl.model", "QWen3VLTokenizer"),
         ({"model_type": "qwen3_vl_moe", "vision_config": {}}, "qwen3_vl.model", "QWen3VLTokenizer"),
         ({"model_type": "qwen3_5", "vision_config": {}}, "qwen3_5.model", "QWen3_5Tokenizer"),
+        ({"model_type": "sensenova_loop", "vision_config": {}}, "qwen3_5.model", "QWen3_5Tokenizer"),
         ({"model_type": "qwen3_5_moe", "vision_config": {}}, "qwen3_5.model", "QWen3_5Tokenizer"),
         ({"thinker_config": {}}, "qwen3_omni_moe_thinker.model", "QWen3OmniTokenizer"),
         ({"model_type": "internvl_chat"}, "internvl.model", "InternvlTokenizer"),
@@ -109,6 +161,7 @@ def test_selected_multimodal_tokenizer_is_loaded(monkeypatch, config, module_nam
     monkeypatch.setattr(module.AutoTokenizer, "from_pretrained", lambda *a, **kw: base_tokenizer)
     processor = SimpleNamespace(image_processor=object())
     monkeypatch.setattr(transformers.AutoProcessor, "from_pretrained", lambda *a, **kw: processor)
+    monkeypatch.setattr(transformers.AutoImageProcessor, "from_pretrained", lambda *a, **kw: processor.image_processor)
     vision = ModuleType("lightllm.models.qwen2_vl.vision_process")
     vision.Qwen2VLImageProcessor = SimpleNamespace(from_pretrained=lambda *a, **kw: processor.image_processor)
     monkeypatch.setitem(sys.modules, vision.__name__, vision)

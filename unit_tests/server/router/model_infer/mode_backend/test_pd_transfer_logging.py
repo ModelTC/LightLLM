@@ -17,7 +17,7 @@ def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side
     transporter._create_paged_xfer_handles = Mock()
     buffer = torch.empty((2, 3, 4, 5, 6), dtype=torch.float16)
     transporter._register_kv_move_buffer(buffer)
-    assert transporter.page_len == buffer[0].numel() * buffer.element_size()
+    assert transporter.page_bytes == buffer[0].numel() * buffer.element_size()
     transporter.release_xfer_handle = Mock()
     module = prefill_trans_process if side == "prefill" else decode_trans_process
     cls = module._PrefillTransModule if side == "prefill" else module._DecodeTransModule
@@ -25,6 +25,9 @@ def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side
     worker.device_id = 0
     worker.transporter = transporter
     worker.page_index_queue = queue.Queue()
+    worker.page_reclaimer = SimpleNamespace(
+        retire=Mock(side_effect=lambda task, index, **kwargs: worker.page_index_queue.put(index))
+    )
     worker.task_out_queue = queue.Queue()
     stats = Mock(interval=1)
     monkeypatch.setattr(module, "DebugStatsLogger", lambda *args: stats)
@@ -37,6 +40,7 @@ def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side
         request_id=123,
         page_kind="kv",
         create_time=0,
+        local_completion=SimpleNamespace(destination_ready=Mock()),
         transfer_kv_num=lambda: tokens,
         createRetObj=lambda: SimpleNamespace(),
     )
@@ -57,10 +61,10 @@ def test_nixl_success_logging_keeps_processing_completed_pages(monkeypatch, side
         worker.success_loop()
     assert worker.task_out_queue.qsize() == 2
     assert worker.page_index_queue.qsize() == 2
-    assert transporter.release_xfer_handle.call_count == 2
+    assert worker.page_reclaimer.retire.call_count == 2
     assert stats.add.call_count == (2 if tokens else 0)
     if tokens:
-        assert stats.add.call_args.kwargs["bytes_total"] == transporter.page_len
+        assert stats.add.call_args.kwargs["bytes_total"] == transporter.page_bytes
     stats.flush.assert_called_once()
 
 
@@ -72,6 +76,9 @@ def test_transfer_cancellation_is_debug_and_failures_are_error(monkeypatch, erro
     worker = cls.__new__(cls)
     worker.device_id = 0
     worker.page_index_queue = queue.Queue()
+    worker.page_reclaimer = SimpleNamespace(
+        retire=Mock(side_effect=lambda task, index, **kwargs: worker.page_index_queue.put(index))
+    )
     worker.task_out_queue = queue.Queue()
     worker.transporter = Mock()
     worker._abort = Mock()
@@ -141,6 +148,9 @@ def test_decode_success_real_debug_window(monkeypatch, caplog, level, kind, toke
     worker = module._DecodeTransModule.__new__(module._DecodeTransModule)
     worker.device_id = 0
     worker.page_index_queue = queue.Queue()
+    worker.page_reclaimer = SimpleNamespace(
+        retire=Mock(side_effect=lambda task, index, **kwargs: worker.page_index_queue.put(index))
+    )
     worker.task_out_queue = queue.Queue()
     worker.transporter = Mock(kv_move_buffer=torch.empty((1, 4), dtype=torch.float16))
     logger = logging.getLogger("decode-transfer-regression")
@@ -157,6 +167,7 @@ def test_decode_success_real_debug_window(monkeypatch, caplog, level, kind, toke
         dst_page_index=1,
         xfer_handle=None,
         create_time=0,
+        local_completion=SimpleNamespace(destination_ready=Mock()),
         createRetObj=lambda: "done",
     )
     start, end = Mock(), Mock()

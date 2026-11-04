@@ -595,6 +595,7 @@ async def profiler_stop() -> Response:
 async def shutdown():
     logger.info("Received signal to shutdown. Performing graceful shutdown...")
     await asyncio.sleep(3)
+    await g_objs.httpserver_manager.close()
 
     # 杀掉所有子进程
     import psutil
@@ -611,8 +612,7 @@ async def shutdown():
 @app.on_event("startup")
 async def startup_event():
     set_log_context(component="http")
-    loop = asyncio.get_event_loop()
     g_objs.set_args(get_env_start_args())
-    loop.create_task(g_objs.httpserver_manager.handle_loop())
+    g_objs.httpserver_manager.background_tasks.create(g_objs.httpserver_manager.handle_loop())
     logger.info("event=http.initialized", extra={"event": "http.initialized"})
     return

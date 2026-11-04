@@ -1,3 +1,5 @@
+from lightllm.common.transfer import CopyOperation, CopyPlan, Transfer
+from unit_tests.common.transfer.helpers import Runtime
 from types import SimpleNamespace
 from collections import deque
 
@@ -97,7 +99,7 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
         offload_calls.append((req.shm_req.request_id, CacheTier.DISK in req.cache_tiers))
         return SimpleNamespace(req=req)
 
-    module._start_kv_cache_offload_task = start_offload
+    module.write_req_to_cpu = start_offload
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(
         multi_level_kv_cache_impl.g_infer_context,
@@ -137,9 +139,9 @@ def test_non_gpu_linear_cache_tiers_release_pending_state_pages():
     context = InferenceContext()
     context.is_hybrid_att_model = True
     context.req_manager = SimpleNamespace(req_to_token_indexs=torch.tensor([[10, 11, 12]]))
-    context.radix_cache = SimpleNamespace(
-        small_page_buffers=SimpleNamespace(free_state_cache=freed_small_pages.extend),
-        big_page_buffers=SimpleNamespace(free_state_cache=freed_big_pages.extend),
+    context.att_state_manager = SimpleNamespace(
+        bounded_att_small_page_allocator=SimpleNamespace(free=freed_small_pages.extend),
+        bounded_att_big_page_allocator=SimpleNamespace(free=freed_big_pages.extend),
     )
     req = SimpleNamespace(
         req_idx=0,
@@ -181,14 +183,20 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         req.hold_kv_len = new_hold_kv_len
         return mem_indexes
 
-    operator = SimpleNamespace(
-        load_cpu_cache_to_gpu=lambda mem_indexes, **kwargs: loaded_indexes.extend(mem_indexes.tolist())
+    resources = SimpleNamespace(
+        get_cpu_cache_operator=lambda: SimpleNamespace(
+            get_page_layouts=lambda: {},
+            plan_read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: CopyPlan(
+                "unpack", (CopyOperation("kv", None, lambda: loaded_indexes.extend(token_indices.tolist())),)
+            ),
+        ),
     )
     backend = SimpleNamespace(
         is_master_in_dp=False,
+        is_hybrid_att_model=False,
         radix_cache=None,
         model=SimpleNamespace(
-            mem_manager=SimpleNamespace(operator=operator),
+            att_state_manager=resources,
             req_manager=SimpleNamespace(req_to_token_indexs=table),
         ),
         _alloc_req_kv_mem=alloc_req_kv_mem,
@@ -198,7 +206,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     module.backend = backend
     module.init_sync_group = object()
     module.need_sync_compute_stream = lambda: False
-    module.cpu_cache_client = SimpleNamespace()
+    module.cpu_cache_client = SimpleNamespace(cpu_kv_cache_tensor=None)
     context = SimpleNamespace(
         req_manager=SimpleNamespace(req_to_token_indexs=table, mem_manager=SimpleNamespace(alloc=alloc)),
         get_can_alloc_token_num=lambda: 200,
@@ -216,6 +224,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         ),
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
     )
+    monkeypatch.setattr(multi_level_kv_cache_impl, "Transfer", lambda **kwargs: Transfer(Runtime()))
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
@@ -227,3 +236,37 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     assert req.hold_kv_len == 132
     assert loaded_indexes == list(range(132))
     assert table[0, :132].tolist() == list(range(132))
+
+
+def test_standard_load_releases_skipped_and_matched_pages_once_after_barrier(monkeypatch):
+    module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
+    module.backend = SimpleNamespace(is_master_in_dp=True)
+    module.init_sync_group = object()
+    events = []
+    module.cpu_cache_client = SimpleNamespace(
+        lock=SimpleNamespace(
+            acquire_sleep1ms=lambda: events.append("lock"),
+            release=lambda: events.append("unlock"),
+        ),
+        deref_pages=lambda page_list: events.append(("deref", list(page_list))),
+    )
+    reqs = [
+        SimpleNamespace(
+            cur_kv_len=0,
+            mm_input_spans=[],
+            sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=logprobs)),
+            shm_req=SimpleNamespace(
+                input_len=64,
+                disk_prompt_cache_len=0,
+                cpu_cache_match_page_indexes=SimpleNamespace(get_all=lambda page=page: [page]),
+                token_hash_page_len_list=SimpleNamespace(get_all=lambda: [64]),
+            ),
+        )
+        for page, logprobs in ((4, 0), (7, -1))
+    ]
+    monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "get_can_alloc_token_num", lambda: 128)
+    monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: events.append("barrier"))
+
+    module.load_cpu_cache_to_reqs(reqs)
+
+    assert events == ["barrier", "lock", ("deref", [4, 7]), "unlock"]

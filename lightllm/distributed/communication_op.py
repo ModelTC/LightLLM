@@ -54,19 +54,23 @@ except:
 
 
 class CustomProcessGroup:
-    def __init__(self):
+    def __init__(self, runtime=None):
+        self.runtime = runtime
         self.symm_mem_reduce = None
         self.flashinfer_reduce = None
         self.dp_world_size = get_dp_world_size()
-        self.device_group = create_new_group_for_current_dp("nccl")
+        backend = runtime.distributed_backend if runtime is not None else "nccl"
+        self.device_group = create_new_group_for_current_dp(backend)
         if get_env_start_args().enable_dp_prefill_balance:
-            self.dp_prefill_balance_group = create_dp_special_inter_group("nccl")
+            self.dp_prefill_balance_group = create_dp_special_inter_group(backend)
         else:
             self.dp_prefill_balance_group = None
 
         self.autotune_group = dist.new_group([i for i in range(get_global_world_size())], backend="gloo")
 
     def _support_custom_allreduce(self) -> bool:
+        if self.runtime is not None and not self.runtime.caps.is_nvidia:
+            return False
         return has_nvlink() and self.dp_world_size in [2, 4, 6, 8]
 
     def init_symm_mem_reduce(self) -> None:
@@ -113,13 +117,23 @@ class DistributeGroupManager:
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
 
+    def close(self):
+        for group in self.groups:
+            if group.flashinfer_reduce is not None:
+                group.flashinfer_reduce.close()
+        for name in ("ep_buffer", "ep_low_latency_buffer", "ep_mega_moe_buffer"):
+            buffer = getattr(self, name, None)
+            if buffer is not None:
+                buffer.destroy()
+                setattr(self, name, None)
+
     def __len__(self):
         return len(self.groups)
 
-    def create_groups(self, group_size: int):
+    def create_groups(self, group_size: int, runtime=None):
         args = get_env_start_args()
         for i in range(group_size):
-            group = CustomProcessGroup()
+            group = CustomProcessGroup(runtime)
             if not args.disable_symm_mem_allreduce:
                 group.init_symm_mem_reduce()
             if not args.disable_flashinfer_allreduce:

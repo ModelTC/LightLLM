@@ -197,6 +197,9 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
             p_ht = ht + (bos + i_t) * stride_final_state_token
         p_ht = p_ht + i_hv * K * V + o_k[:, None] * V + o_v[None, :]
         tl.store(p_ht, b_h.to(p_ht.dtype.element_ty), mask=mask_h)
+        if IS_SPEC_DECODING:
+            # 后续 token 必须从可接受、可恢复的持久状态继续递推。
+            b_h = b_h.to(p_ht.dtype.element_ty).to(tl.float32)
 
         p_q += stride_q_tok
         p_k += stride_k_tok

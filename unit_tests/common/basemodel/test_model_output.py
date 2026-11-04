@@ -80,24 +80,6 @@ def test_prefill_unpad_restores_empty_output():
     assert unpadded.prompt_logics.shape == (0, 4)
 
 
-def _create_empty_decode_input():
-    return ModelInput(
-        batch_size=0,
-        total_token_num=0,
-        max_q_seq_len=1,
-        max_kv_seq_len=0,
-        input_ids=torch.empty((0,), dtype=torch.int64),
-        b_req_idx=torch.empty((0,), dtype=torch.int32),
-        b_mtp_index=torch.empty((0,), dtype=torch.int32),
-        b_seq_len=torch.empty((0,), dtype=torch.int32),
-        b_position_delta=torch.empty((0,), dtype=torch.int32),
-        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
-        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
-        is_prefill=False,
-        multimodal_params=[],
-    )
-
-
 @torch.no_grad()
 def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
     execution_configs = (
@@ -118,11 +100,13 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         expected_batch_size,
     ) in execution_configs:
         model = TpPartBaseModel.__new__(TpPartBaseModel)
-        model.args = SimpleNamespace(enable_tpsp_mix_mode=enable_tpsp_mix_mode, page_size=1)
+        model.args = SimpleNamespace(
+            enable_tpsp_mix_mode=enable_tpsp_mix_mode, enable_prefill_decode_mixed=False, page_size=1
+        )
         model.tp_world_size_ = tp_world_size
         model.is_mtp_draft_model = False
         model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
-        model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1)
+        model._initialize_batch_state = lambda state: None
         model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
 
         pad_batch_sizes = []
@@ -136,12 +120,11 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
         graph_flags_at_att_init = []
         executions = []
 
-        def create_infer_state(model_input):
+        def create_infer_state(model_input, microbatch_index=0):
             infer_state = SimpleNamespace(
                 b_req_idx=model_input.b_req_idx,
                 b_seq_len=model_input.b_seq_len,
                 mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32),
-                init_some_extra_state=lambda _: None,
                 is_cuda_graph_capture=False,
                 is_cuda_graph_replay=False,
             )
@@ -191,11 +174,11 @@ def test_decode_pads_only_once_after_selecting_execution_path(monkeypatch):
 )
 def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(lengths, graph_mode, expected_mode):
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1)
+    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, enable_prefill_decode_mixed=False, page_size=1)
     model.tp_world_size_ = 2
     model.is_mtp_draft_model = False
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
-    model.mem_manager = SimpleNamespace(HOLD_TOKEN_MEMINDEXES=(99,), page_size=1)
+    model._initialize_batch_state = lambda state: None
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88)
     initializations = []
     executions = []
@@ -224,7 +207,6 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
         state.b_seq_len = model_input.b_seq_len
         state.microbatch_index = microbatch_index
         state.decode_att_state = DecodeState(_infer_state_weak_ref=weakref.ref(state))
-        state.init_some_extra_state = lambda _: None
         return state
 
     def outputs(state, state1):
@@ -285,10 +267,11 @@ def test_overlap_decode_initializes_attention_for_the_selected_execution_mode(le
 @pytest.mark.parametrize("rows", [0, 3, 9, 24, 27])
 def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode, rows):
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_tpsp_mix_mode=True)
+    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, enable_prefill_decode_mixed=False)
     model.tp_world_size_ = 8
     model.is_mtp_draft_model = False
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1 if dynamic else 3)
+    model._initialize_batch_state = lambda state: None
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88)
     seen_sizes = []
 
@@ -302,7 +285,6 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
         return SimpleNamespace(
             b_req_idx=model_input.b_req_idx,
             b_seq_len=model_input.b_seq_len,
-            init_some_extra_state=lambda _: None,
             init_att_state=check_layout,
         )
 
@@ -344,3 +326,21 @@ def test_mtp_decode_preserves_groups_and_real_rows(overlap, dynamic, graph_mode,
     assert seen_sizes == [expected_size] * (2 if overlap else 1)
     torch.testing.assert_close(output.logits, expected)
     torch.testing.assert_close(torch.stack((model_input.b_req_idx, model_input.b_seq_len), dim=1), expected)
+
+
+def _create_empty_decode_input():
+    return ModelInput(
+        batch_size=0,
+        total_token_num=0,
+        max_q_seq_len=1,
+        max_kv_seq_len=0,
+        input_ids=torch.empty((0,), dtype=torch.int64),
+        b_req_idx=torch.empty((0,), dtype=torch.int32),
+        b_mtp_index=torch.empty((0,), dtype=torch.int32),
+        b_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_position_delta=torch.empty((0,), dtype=torch.int32),
+        b_shared_seq_len=torch.empty((0,), dtype=torch.int32),
+        b_shared_radix_node_id=torch.empty((0,), dtype=torch.int64),
+        is_prefill=False,
+        multimodal_params=[],
+    )

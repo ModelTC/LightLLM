@@ -324,6 +324,9 @@ def test_init_model_attaches_only_the_dp_leaders_counter_row(monkeypatch, counte
         worker.init_model(
             {
                 "args": StartArgs(dp=2),
+                "rank_id": 2 + tp_rank,
+                "execution_device": SimpleNamespace(device=torch.device("cpu")),
+                "execution_providers": object(),
                 "world_size": 4,
                 "load_way": "HF",
                 "weight_dir": "unused",

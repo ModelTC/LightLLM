@@ -5,6 +5,20 @@ import triton.language as tl
 
 
 @triton.jit
+def _rotate_pair(x0, x1, cos, sin, ROUND_INTERMEDIATES: tl.constexpr):
+    if ROUND_INTERMEDIATES:
+        dtype: tl.constexpr = x0.dtype
+        x0, x1, cos, sin = x0.to(tl.float32), x1.to(tl.float32), cos.to(tl.float32), sin.to(tl.float32)
+        x0_cos = (x0 * cos).to(dtype).to(tl.float32)
+        x1_sin = (x1 * sin).to(dtype).to(tl.float32)
+        x0_sin = (x0 * sin).to(dtype).to(tl.float32)
+        x1_cos = (x1 * cos).to(dtype).to(tl.float32)
+        return (x0_cos - x1_sin).to(dtype), (x0_sin + x1_cos).to(dtype)
+    else:
+        return x0 * cos - x1 * sin, x0 * sin + x1 * cos
+
+
+@triton.jit
 def _rotary_kernel(
     Q,
     K,
@@ -27,6 +41,7 @@ def _rotary_kernel(
     BLOCK_HEAD: tl.constexpr,
     BLOCK_SEQ: tl.constexpr,
     BLOCK_DMODEL: tl.constexpr,
+    ROUND_INTERMEDIATES: tl.constexpr,
 ):
     cur_head_index = tl.program_id(0)
     cur_seq_index = tl.program_id(1)
@@ -64,8 +79,7 @@ def _rotary_kernel(
     cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
     sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
 
-    out0 = q0 * cos - q1 * sin
-    out1 = q0 * sin + q1 * cos
+    out0, out1 = _rotate_pair(q0, q1, cos, sin, ROUND_INTERMEDIATES)
 
     tl.store(
         Q + off_q0, out0, mask=(cur_seq_range[:, None, None] < max_total_len) & (cur_head_range[None, :, None] < HEAD_Q)
@@ -101,8 +115,7 @@ def _rotary_kernel(
         cos = tl.load(Cos + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
         sin = tl.load(Sin + off_dimcos_sin, mask=cur_seq_range[:, None, None] < max_total_len, other=0.0)
 
-        out_k0 = k0 * cos - k1 * sin
-        out_k1 = k0 * sin + k1 * cos
+        out_k0, out_k1 = _rotate_pair(k0, k1, cos, sin, ROUND_INTERMEDIATES)
 
         tl.store(
             K + off_k0,
@@ -118,7 +131,7 @@ def _rotary_kernel(
 
 
 @torch.no_grad()
-def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.0):
+def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.0, *, round_intermediates=False):
     total_len = q.shape[0]
     has_k = k is not None
     head_num_q = q.shape[1]
@@ -158,8 +171,10 @@ def rotary_emb_fwd(q, k, cos, sin, partial_rotary_factor=1.0):
         BLOCK_HEAD=BLOCK_HEAD,
         BLOCK_SEQ=BLOCK_SEQ,
         BLOCK_DMODEL=head_dim,
+        ROUND_INTERMEDIATES=round_intermediates,
         num_warps=num_warps,
         num_stages=1,
+        enable_fp_fusion=not round_intermediates,
     )
     return
 

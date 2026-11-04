@@ -1,4 +1,3 @@
-import threading
 import torch.distributed as dist
 import torch
 import dataclasses
@@ -6,13 +5,13 @@ import bisect
 from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
+from lightllm.core.transfer import Transfer, TransferCompletion, TransferFailure
+from lightllm.core.device.cuda import CudaRuntime
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
-from lightllm.utils.config_utils import is_hybrid_att_model
 from lightllm.utils.envs_utils import get_env_start_args
 from ..infer_batch import InferReq
 from lightllm.utils.dist_utils import create_new_group_for_current_dp
-from lightllm.common.basemodel.triton_kernel.kv_cache_offload import offload_gpu_kv_to_cpu, load_cpu_kv_to_gpu
 from lightllm.server.router.model_infer.infer_batch import g_infer_context
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.multimodal_chunk_utils import clamp_mm_cache_len
@@ -29,17 +28,29 @@ class MultiLevelKvCacheModule(object):
         self.backend: ModeBackend = backend
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
-        self.init_sync_group = create_new_group_for_current_dp("nccl")
+        self.init_sync_group = create_new_group_for_current_dp(self.runtime.distributed_backend)
         dist.barrier(group=self.init_sync_group)
-        self.offload_sync_group = create_new_group_for_current_dp("nccl")
+        self.offload_sync_group = create_new_group_for_current_dp(self.runtime.distributed_backend)
         dist.barrier(group=self.offload_sync_group)
-        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
-
-        self.page_index_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.int32, device="cuda")
-        self.page_ready_buffer = torch.empty((1024 * 1024 * 4,), dtype=torch.bool, device="cuda")
+        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device=self.runtime.device)
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
+        resources = self.backend.model.att_state_manager
+        self.cpu_cache_operator = resources.get_cpu_cache_operator()
+        meta = self.cpu_cache_client.kv_cache_tensor_meta
+        if meta.page_bytes != self.cpu_cache_operator.get_page_bytes():
+            raise ValueError("CPU cache service and model resource page sizes differ")
+
+    @property
+    def runtime(self):
+        return getattr(self.backend, "execution_device", None) or CudaRuntime()
+
+    def transfer(self):
+        return Transfer(
+            runtime=getattr(self.backend, "execution_device", None),
+            providers=getattr(self.backend.model, "execution_providers", None),
+        )
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -48,6 +59,9 @@ class MultiLevelKvCacheModule(object):
         """
 
         model = self.backend.model
+        plan = getattr(model, "execution_plan", None)
+        if plan is not None:
+            return any(binding.execution.transfer_requires_compute_sync for binding in plan.bindings)
         att_backends = [
             model.prefill_att_backend,
             model.decode_att_backend,
@@ -77,7 +91,6 @@ class MultiLevelKvCacheModule(object):
                 continue
 
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
-            page_len_start_list = [0] + page_len_list
             assert len(page_list) <= len(page_len_list)
 
             matched_page_num = len(page_list)
@@ -113,45 +126,13 @@ class MultiLevelKvCacheModule(object):
                     assert ready_page_num <= matched_page_num
                     need_pages = page_list[ready_page_num:matched_page_num]
 
-                    mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
-                    assert mem_indexes is not None
-
-                    if self.need_sync_compute_stream():
-                        # TODO fa3 现在必须使用同步模式, 未来需要移除
-                        torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
-                        # g_infer_context.get_overlap_stream().synchronize()
-
-                    mem_manager = self.backend.model.mem_manager
-                    req_manager = self.backend.model.req_manager
-
-                    mem_indexes_cuda = mem_indexes.cuda(non_blocking=True)
-                    page_indexes_cuda = torch.tensor(need_pages, dtype=torch.int32, device="cpu").cuda(
-                        non_blocking=True
-                    )
-                    # hybrid 页面加载必须按完整 page 处理，否则可能缺失恢复运行态所需的 checkpoint，所以
-                    # 这里需要进行pad操作，使操作的页面是完整的。
-                    _start = page_len_start_list[ready_page_num]
-
-                    _end = req.cur_kv_len
-                    assert 0 <= _start <= _end, f"invalid pad range [{_start}, {_end}]"
-                    mem_indexes_cuda = torch.cat(
-                        [req_manager.req_to_token_indexs[req.req_idx, _start:_end], mem_indexes_cuda]
-                    )
-
-                    assert len(mem_indexes_cuda) == match_tokens - page_len_start_list[ready_page_num]
-
-                    # 更新 req 状态。
-                    idle_token_num -= need_token_num
-                    req.cur_kv_len = req.cur_kv_len + need_token_num
-
-                    mem_manager.operator.load_cpu_cache_to_gpu(
-                        mem_indexes=mem_indexes_cuda,
-                        page_indexes=page_indexes_cuda,
-                        cpu_cache_client=self.cpu_cache_client,
+                    self.read_req_from_cpu(
                         req=req,
+                        cpu_page_indices=need_pages,
+                        page_lengths=page_len_list[ready_page_num:matched_page_num],
+                        start_token_len=page_len_list[ready_page_num - 1] if ready_page_num else 0,
                     )
-
-                torch.cuda.current_stream().synchronize()
+                    idle_token_num -= need_token_num
 
                 if self.backend.is_master_in_dp:
                     req.shm_req.shm_cur_kv_len = req.cur_kv_len
@@ -165,6 +146,79 @@ class MultiLevelKvCacheModule(object):
             self.cpu_cache_client.deref_pages(page_list=all_page_list)
             self.cpu_cache_client.lock.release()
         return
+
+    def read_req_from_cpu(
+        self,
+        req: InferReq,
+        cpu_page_indices: List[int],
+        page_lengths: List[int],
+        start_token_len: int,
+    ) -> Optional[TransferCompletion]:
+        """恢复已选定的请求前缀页面，分配资源并登记完整大页引用。
+
+        start_token_len 是首个 CPU 页的逻辑起点，可能早于已有 GPU 命中长度。
+        调用方负责选择命中范围、确认容量以及搬运完成后的 CPU 页引用释放。
+        """
+        if not cpu_page_indices:
+            return
+        resources = self.backend.model.att_state_manager
+        cpu_cache_operator = resources.get_cpu_cache_operator()
+        req_manager = self.backend.model.req_manager
+        need_token_num = page_lengths[-1] - req.cur_kv_len
+
+        original_hold_len = req.hold_kv_len
+        mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
+        assert mem_indexes is not None
+        big_page_slot_ids = None
+        try:
+            if self.need_sync_compute_stream():
+                self.runtime.current_stream().wait_stream(g_infer_context.get_overlap_stream())
+            assert 0 <= start_token_len <= req.cur_kv_len, "invalid CPU page start"
+            token_indices = torch.cat(
+                [
+                    req_manager.req_to_token_indexs[req.req_idx, start_token_len : req.cur_kv_len],
+                    mem_indexes.to(req_manager.req_to_token_indexs.device, non_blocking=True),
+                ]
+            )
+            assert token_indices.numel() == page_lengths[-1] - start_token_len
+
+            if self.backend.is_hybrid_att_model:
+                page_tokens = self.args.cpu_cache_token_page_size
+                complete_page_lengths = [length for length in page_lengths if length % page_tokens == 0]
+                assert len(complete_page_lengths) == len(page_lengths) - int(
+                    page_lengths[-1] % page_tokens != 0
+                ), "only the final CPU page may be partial"
+                big_page_slot_ids = resources.bounded_att_big_page_allocator.alloc(len(complete_page_lengths))
+                assert big_page_slot_ids is not None, "not enough bounded state slots for CPU cache load"
+
+            plan = cpu_cache_operator.plan_read_req(
+                cpu_page_buffers=self.cpu_cache_client.cpu_kv_cache_tensor,
+                cpu_page_indices=cpu_page_indices,
+                token_indices=token_indices,
+                layouts=cpu_cache_operator.get_page_layouts(),
+                big_page_slot_ids=big_page_slot_ids,
+                req_idx=req.req_idx if self.backend.is_hybrid_att_model else None,
+                state_token_len=page_lengths[-1],
+            )
+            completion = self.transfer().submit(plan)
+        except Exception as exc:
+            # Partial copies must stop touching newly allocated resources before reuse.
+            fence = exc.quiesced if isinstance(exc, TransferFailure) else self.runtime.record_event()
+            resources.retire(
+                fence,
+                token_indices=mem_indexes,
+                big_pages=big_page_slot_ids or (),
+                keepalive=exc,
+            )
+            req.hold_kv_len = original_hold_len
+            raise
+
+        # KV and bounded runtime must both represent this prefix before it is published.
+        completion.destination_ready.synchronize()
+        if big_page_slot_ids is not None:
+            req.hybrid_len_to_big_page_id.update(zip(complete_page_lengths, big_page_slot_ids))
+        req.cur_kv_len = page_lengths[-1]
+        return completion
 
     def offload_finished_reqs_to_cpu_cache(self, finished_reqs: List[InferReq]) -> List[InferReq]:
         """
@@ -208,7 +262,7 @@ class MultiLevelKvCacheModule(object):
                 g_infer_context.get_overlap_stream().synchronize()
 
             # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
-            trans_task = self._start_kv_cache_offload_task(req=req, cpu_kv_cache_stream=cpu_stream)
+            trans_task = self.write_req_to_cpu(req=req, cpu_kv_cache_stream=cpu_stream)
 
             # 根据是否成功创建了卸载任务，决定是否将请求加入到处理队列中
             if trans_task is not None:
@@ -222,19 +276,19 @@ class MultiLevelKvCacheModule(object):
 
         return true_finished_reqs
 
-    def _start_kv_cache_offload_task(
-        self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream
-    ) -> Optional["TransTask"]:
+    def write_req_to_cpu(self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream) -> Optional["TransTask"]:
+        """选择请求可缓存的前缀，分配 CPU 页并提交写出，返回待确认完成的任务。"""
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
-        with torch.cuda.stream(cpu_kv_cache_stream):
+        # KV 和 bounded 快照均在搬运流上复制，由后续完成事件统一确认就绪。
+        with self.runtime.use_stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
             assert len(token_hash_list) == len(page_len_list)
 
+            # 阶段一：确定本次可写出范围，申请 CPU 页。
             if self.backend.is_master_in_dp:
-
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 
@@ -257,6 +311,12 @@ class MultiLevelKvCacheModule(object):
                 finally:
                     self.cpu_cache_client.lock.release()
 
+                # 分配不足时返回 -1 并补齐剩余位置，只保留成功分配的连续前缀。
+                # 第一个 -1 及后续页面（包括可能的尾部碎页）均不参与本次写出。
+                if -1 in page_list:
+                    allocated_page_count = page_list.index(-1)
+                    page_list = page_list[:allocated_page_count]
+                    ready_list = ready_list[:allocated_page_count]
                 item_size = len(page_list)
                 if item_size == 0:
                     dist.broadcast_object_list([0], group=self.gloo_group, group_src=0)
@@ -276,44 +336,78 @@ class MultiLevelKvCacheModule(object):
                 page_list = broadcast_data["page_list"]
                 ready_list = broadcast_data["ready_list"]
 
-            page_indexes = torch.tensor(page_list, dtype=torch.int32, device="cpu", pin_memory=True)
-            page_readies = torch.tensor(ready_list, dtype=torch.bool, device="cpu", pin_memory=True)
-            assert len(page_indexes) <= self.page_index_buffer.shape[0]
-            cuda_page_indexes = self.page_index_buffer[: len(page_indexes)]
-            cuda_page_readies = self.page_ready_buffer[: len(page_readies)]
-            cuda_page_indexes.copy_(page_indexes, non_blocking=True)
-            cuda_page_readies.copy_(page_readies, non_blocking=True)
+            resources = self.backend.model.att_state_manager
+            try:
+                page_indexes = torch.tensor(page_list, dtype=torch.int32)
+                page_readies = torch.tensor(ready_list, dtype=torch.bool)
 
-            move_token_num = page_len_list[item_size - 1]
-            assert req.cur_kv_len >= move_token_num
-            token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
+                move_token_num = page_len_list[item_size - 1]
+                assert req.cur_kv_len >= move_token_num
+                token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
-            mem_manager = self.backend.model.mem_manager
+                # 阶段二：只查找实际分配的 CPU 页所需快照；完整大页必须存在，不做缺失回退。
+                big_page_slot_ids, small_page_slot_ids = None, None
+                if self.backend.is_hybrid_att_model:
+                    page_tokens = self.args.cpu_cache_token_page_size
+                    radix_cache = g_infer_context.radix_cache
+                    shared_slots = (
+                        radix_cache.get_big_page_ids_by_node(req.shared_kv_node) if radix_cache is not None else []
+                    )
+                    big_slots = {(i + 1) * page_tokens: slot for i, slot in enumerate(shared_slots)}
+                    big_slots.update(req.hybrid_len_to_big_page_id)
+                    big_page_slot_ids = [
+                        big_slots[length] for length in page_len_list[:item_size] if length % page_tokens == 0
+                    ]
+                    small_page_slot_ids = []
+                    # 只有实际分配的前缀包含原始尾页，才可能使用小页快照。
+                    # 若分配遇到 -1，item_size 已截短，尾页不会进入此分支。
+                    includes_tail_page = item_size == len(page_len_list)
+                    if includes_tail_page and page_len_list[-1] % page_tokens != 0:
+                        small_page_slot_ids.append(req.tail_small_page_buffer_id)
+                # 整批提交并保留 token/page 对齐，由资源层跳过 ready 页。
+                plan = resources.get_cpu_cache_operator().plan_write_req(
+                    token_indices=token_indexes,
+                    cpu_page_buffers=self.cpu_cache_client.cpu_kv_cache_tensor,
+                    cpu_page_indices=page_list,
+                    layouts=resources.get_cpu_cache_operator().get_page_layouts(),
+                    cpu_page_ready_flags=ready_list,
+                    big_page_slot_ids=big_page_slot_ids,
+                    small_page_slot_ids=small_page_slot_ids,
+                )
 
-            mem_manager.operator.offload_gpu_kv_to_cpu_cache(
-                mem_indexes=token_indexes,
-                page_indexes=cuda_page_indexes,
-                page_readies=cuda_page_readies,
-                cpu_cache_client=self.cpu_cache_client,
-                req=req,
-            )
+                # Local source reuse and globally visible CPU pages have distinct fences.
+                def destination_barrier():
+                    if self.backend.dp_world_size > 1:
+                        dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
 
-            # 这个操作只是为了在offload 对应的cuda stream中，同步标记下对应的kv cache offload 操作已经完成，
-            if self.backend.dp_world_size > 1:
-                dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
-
-            sync_event = torch.cuda.Event()
-            sync_event.record()
-            req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
-            trans_task = TransTask(
-                move_token_num=move_token_num,
-                page_indexes=page_indexes,
-                page_readies=page_readies,
-                req_obj=req,
-                sync_event=sync_event,
-            )
+                completion = self.transfer().submit(plan, destination_barrier=destination_barrier)
+                req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
+                trans_task = TransTask(
+                    move_token_num=move_token_num,
+                    page_indexes=page_indexes,
+                    page_readies=page_readies,
+                    req_obj=req,
+                    completion=completion,
+                )
+            except Exception as exc:
+                if self.backend.dp_world_size == 1 and self.backend.is_master_in_dp:
+                    fence = exc.quiesced if isinstance(exc, TransferFailure) else self.runtime.record_event()
+                    resources.reclaimer.defer(
+                        fence,
+                        lambda: self._deref_cpu_pages(page_list),
+                        keepalive=(exc, req),
+                    )
+                # A local failure cannot prove the other TP writers have stopped.
+                raise
 
         return trans_task
+
+    def _deref_cpu_pages(self, pages):
+        try:
+            self.cpu_cache_client.lock.acquire_sleep1ms()
+            self.cpu_cache_client.deref_pages(page_list=pages)
+        finally:
+            self.cpu_cache_client.lock.release()
 
     def _handle_hybrid_att_last_page(self, req: InferReq, move_block_size: int, page_len_list: List[int]) -> int:
         if not g_infer_context.is_hybrid_att_model:
@@ -338,7 +432,7 @@ class MultiLevelKvCacheModule(object):
             trans_ok_tasks = []
             while len(self.cpu_cache_handle_queue) != 0:
                 task: TransTask = self.cpu_cache_handle_queue.popleft()
-                if task.sync_event.query():
+                if task.completion.destination_ready.query():
                     trans_ok_tasks.append(task)
                 else:
                     self.cpu_cache_handle_queue.appendleft(task)
@@ -376,4 +470,4 @@ class TransTask:
     page_indexes: torch.Tensor
     page_readies: torch.Tensor
     req_obj: InferReq
-    sync_event: torch.cuda.Event
+    completion: TransferCompletion

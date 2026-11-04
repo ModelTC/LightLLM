@@ -1,18 +1,19 @@
-import json
+from lightllm.models.qwen2_vl.adapter import Qwen2VLModelAdapter
 import numpy as np
+from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
-from lightllm.common.build_utils import repair_config
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
 from .vision_process import smart_resize
 from lightllm.models.qwen2.model import Qwen2TpPartModel
-import os
+from lightllm.models.qwen2.adapter import Qwen2ModelAdapter
 from typing import Union, List
 from lightllm.utils.error_utils import InvalidRequestError
+
 
 # Warp of the origal tokenizer
 class QWen2VLTokenizer(BaseMultiModalTokenizer):
@@ -101,23 +102,10 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
 
 
 class Qwen2VLTpPartModel(Qwen2TpPartModel):
-
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-    transformer_layer_infer_class = Qwen2VLTransformerLayerInfer
-
+    model_adapter_class = Qwen2VLModelAdapter
+    pre_layer_infer_class = Qwen2VLModelAdapter.pre_layer_infer_class
+    transformer_layer_infer_class = Qwen2VLModelAdapter.transformer_layer_infer_class
     infer_state_class = Qwen2VLInferStateInfo
 
-    def __init__(self, kvargs):
-        super().__init__(kvargs)
-        return
-
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-        if self.finetune_config:
-            self.config["vocab_size"] = self.finetune_config.vocab_size
-        return
+        TpPartBaseModel._init_config(self)

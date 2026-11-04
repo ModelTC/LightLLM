@@ -55,6 +55,9 @@ def validate_ports(ports: list):
 
     for port in ports:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+            # Match the HTTP listener: closed connections in TIME_WAIT do not
+            # prevent a restart, while an active listener still rejects bind.
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
                 sock.bind(("", port))
             except OSError as e:

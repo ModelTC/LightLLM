@@ -162,6 +162,8 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
 
         if self.markov_rank_ > 0:
             normed_input = self._norm(last_input, infer_state, layer_weight)
+            if getattr(self, "heads_use_final_norm_", False):
+                block_hidden = normed_input.reshape(num_reqs, self.block_size_, -1)
             lm_head_input = normed_input.permute(1, 0).reshape(-1, token_num)
             local_logits = layer_weight.lm_head_weight_(input=lm_head_input, alloc_func=self.alloc_tensor)
             sampled_tokens = self._sample_markov(
@@ -185,6 +187,8 @@ class Qwen3DSparkPostLayerInfer(Qwen3DFlashPostLayerInfer):
             return PostLayerOutput(logits=local_logits.new_empty((token_num, 1)))
 
         post_output = self._draft_lm_head_and_gather(last_input, token_num, layer_weight, infer_state)
+        if getattr(self, "heads_use_final_norm_", False):
+            block_hidden = self._norm(last_input, infer_state, layer_weight).reshape(num_reqs, self.block_size_, -1)
         confidence_logits = self.predict_confidence_logits(
             block_hidden,
             anchor_token_ids=anchor_token_ids,

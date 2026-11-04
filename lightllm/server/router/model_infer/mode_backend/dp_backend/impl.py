@@ -32,10 +32,12 @@ class DPChunkedPrefillBackend(ModeBackend):
         # 在 mtp 模式下切换绑定的prefill 和 decode 函数
         spec_mode = get_env_start_args().mtp_mode
         if spec_mode is not None:
-            if spec_mode in ("dspark", "dflash", "dflash2"):
-                raise NotImplementedError(
-                    "DP backend does not support DFlash/DFlash2/DSpark parallel block drafting yet."
-                )
+            if spec_mode in ("dflash", "dflash2"):
+                raise NotImplementedError("DP backend does not support DFlash/DFlash2 parallel block drafting yet.")
+            if spec_mode == "dspark" and (
+                self.enable_prefill_microbatch_overlap or self.enable_decode_microbatch_overlap
+            ):
+                raise NotImplementedError("DP DSpark does not support prefill/decode microbatch overlap yet.")
             if self.enable_prefill_microbatch_overlap:
                 self.prefill = self.prefill_overlap_mtp
             else:
@@ -71,10 +73,12 @@ class DPChunkedPrefillBackend(ModeBackend):
             enable_dynmaic_mtp=self.args.mtp_dynamic_verify,
         )
 
-        self.dp_overlap_spec_engine = DPOverlapSpecEngine(
-            **engine_kwargs,
-            common_engine=self.spec_engine,
-        )
+        self.dp_overlap_spec_engine = None
+        if self.enable_prefill_microbatch_overlap or self.enable_decode_microbatch_overlap:
+            self.dp_overlap_spec_engine = DPOverlapSpecEngine(
+                **engine_kwargs,
+                common_engine=self.spec_engine,
+            )
         self.prefill_draft_engine = (
             self.dp_overlap_spec_engine if self.enable_prefill_microbatch_overlap else self.spec_engine
         )
@@ -94,8 +98,10 @@ class DPChunkedPrefillBackend(ModeBackend):
         infer_reqs = g_infer_context.add_reqs(reqs, init_prefix_cache=True)
         req_dp_ranks = [req[3] for req in reqs]
         self.dp_kv_shared_module.fill_reqs_info(reqs=infer_reqs)
-        trans_taskes = self.dp_kv_shared_module.build_shared_kv_trans_tasks(reqs=infer_reqs, req_dp_ranks=req_dp_ranks)
-        self.dp_kv_shared_module.kv_trans(trans_tasks=trans_taskes)
+        transfer_tasks = self.dp_kv_shared_module.build_shared_kv_trans_tasks(
+            reqs=infer_reqs, req_dp_ranks=req_dp_ranks
+        )
+        self.dp_kv_shared_module.kv_trans(trans_tasks=transfer_tasks)
 
         # other_dp_reqs 只是为本 DP 做完 prefix cache / KV 拉取后的临时本地对象，
         # 真正推理仍在其归属 DP 上进行。这里仅清理本 DP 的 InferReq 与 KV 引用，
@@ -122,18 +128,27 @@ class DPChunkedPrefillBackend(ModeBackend):
                     event_pack._close_overlap()
 
                 event_pack.wait_to_forward()
+                if self._inference_stopped:
+                    event_pack.notify_post_handle_event.set()
+                    return
 
-                self._try_read_new_reqs()
+                stopping = self._try_read_new_reqs()
 
-                prefill_reqs, decode_reqs, prefill_tokens = self._get_classed_reqs(
-                    no_decode=self.classed_req_no_decode,
-                    strict_prefill=self.classed_req_strict_prefill,
-                    recover_paused=self.control_state_machine.try_recover_paused_reqs(),
-                )
+                if stopping:
+                    prefill_reqs, decode_reqs, prefill_tokens = [], [], 0
+                else:
+                    prefill_reqs, decode_reqs, prefill_tokens = self._get_classed_reqs(
+                        no_decode=self.classed_req_no_decode,
+                        strict_prefill=self.classed_req_strict_prefill,
+                        recover_paused=self.control_state_machine.try_recover_paused_reqs(),
+                    )
 
                 dp_prefill_req_nums, dp_decode_req_nums = self._dp_all_gather_prefill_and_decode_req_num(
-                    prefill_reqs=prefill_reqs, decode_reqs=decode_reqs
+                    prefill_reqs=prefill_reqs, decode_reqs=decode_reqs, stopping=stopping
                 )
+                if dp_prefill_req_nums is None:
+                    self._finish_inference(event_pack)
+                    return
 
                 run_way = self.control_state_machine.select_run_way(
                     dp_prefill_req_nums=dp_prefill_req_nums,

@@ -308,7 +308,7 @@ def mtp_diverse_stage1_single_token(
 
     Lq, Lk = int(q.shape[2]), int(k.shape[2])
     assert Lq == Lk
-    assert Lk in {16, 32, 64, 128}
+    assert Lk in {16, 32, 64, 128, 256}
     batch = int(B_req_idx.shape[0])
     kv_head_num = int(k.shape[1])
     q_head_num = int(q.shape[1])
