@@ -4,7 +4,8 @@ from dataclasses import replace
 
 import torch
 
-from lightllm.core.compute.moe.backend import MoeRouter, MoeBackend
+from lightllm.core.compute.moe.backend import MoeBackend
+from lightllm.core.compute.moe.routing import MoeRouter
 from lightllm.core.contracts.device import DeviceCaps
 from lightllm.core.contracts.provider import MoeOffer, ProbeResult
 

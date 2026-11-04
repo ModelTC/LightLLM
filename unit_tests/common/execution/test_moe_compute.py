@@ -12,6 +12,10 @@ from lightllm.core.planner.planner import Planner
 from lightllm.core.contracts.device import DeviceCaps
 from lightllm.core.contracts.state import FormatSpec
 from lightllm.core.compute.moe.spec import MoeSpec
+from lightllm.core.contracts.provider import MoeOffer, ProbeResult
+from lightllm.core.formats.weights.view import WeightView
+from lightllm.core.planner.weights import bind_compute
+from lightllm.core.registry import ProviderRegistry
 
 
 def format_for(dtype, quantized=False, shard=(0, 1)):
@@ -36,6 +40,7 @@ def test_moe_contracts_reject_unsupported_semantics_and_formats():
     spec = MoeSpec(256, 256, 8, 2, torch.bfloat16)
     backend, fmt, caps = MoeBackend(), format_for(spec.dtype, True), DeviceCaps("cuda", 0, (9, 0))
     assert backend.probe(spec, fmt, caps).offers
+    assert not backend.probe(object(), fmt, caps).offers
     for changed, format, device, shared in (
         (spec, fmt, DeviceCaps("cpu"), 0),
         (spec, fmt, DeviceCaps("cuda", 0, (8, 0)), 0),
@@ -422,3 +427,61 @@ def test_moe_non_power_of_two_experts_and_concurrent_graphs(group_score_topk):
         error = out.float() - expected.float()
         assert error.square().mean().sqrt() / expected.float().square().mean().sqrt() < 0.01
         assert error.abs().max() < expected.abs().max() / 32
+
+
+def test_provider_selection_preserves_explicit_choice_and_weight_owner():
+    spec, owner = MoeSpec(256, 256, 8, 2, torch.bfloat16), object()
+    view = WeightView(format_for(spec.dtype), {}, owner=owner)
+
+    class Unsupported:
+        name = "triton.moe"
+
+        def probe(self, *args):
+            pytest.fail("explicit backend silently fell back")
+
+    class External:
+        name = "external.moe"
+        implementation = "external"
+
+        def probe(self, spec, format, device):
+            return ProbeResult(offers=(MoeOffer(self.name, spec, format),))
+
+        def bind(self, offer):
+            return SimpleNamespace(offer=offer)
+
+    bound = bind_compute(spec, view, DeviceCaps("cpu"), (Unsupported, External), requested="external")
+    assert bound.weight_view.owner is owner
+    with pytest.raises(ValueError, match="not registered"):
+        bind_compute(spec, view, DeviceCaps("cpu"), (Unsupported,), requested="missing")
+
+
+def test_service_binding_reaches_registered_moe_provider():
+    from argparse import ArgumentParser
+    from lightllm.common.basemodel.weight_binding import bind_moe
+    from lightllm.server.api_cli import add_cli_args
+
+    args = add_cli_args(ArgumentParser()).parse_args(["--moe_runner_backend", "external.moe"])
+    spec = MoeSpec(256, 256, 8, 2, torch.bfloat16)
+    view = WeightView(format_for(spec.dtype), {"gate_up": torch.empty(0)})
+    recipe = SimpleNamespace(layer_num_=0, is_moe=True)
+    received = []
+
+    class External:
+        name = "external.moe"
+
+        def probe(self, declared, format, caps):
+            received.append((declared, caps))
+            return ProbeResult(offers=(MoeOffer(self.name, declared, format),))
+
+        def bind(self, offer, **fields):
+            return SimpleNamespace(offer=offer)
+
+    bind_moe(
+        {0: spec},
+        [SimpleNamespace(experts=SimpleNamespace(native_moe_view=lambda: view))],
+        [recipe],
+        providers=ProviderRegistry(moe=(External,)),
+        requested=args.moe_runner_backend,
+    )
+    assert received == [(spec, DeviceCaps("cpu"))]
+    assert recipe.bound_moe.weight_view is view

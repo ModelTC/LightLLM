@@ -850,6 +850,12 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--moe_runner_backend",
+        type=str,
+        default="auto",
+        help="MoE compute provider: auto or a registered provider name.",
+    )
+    parser.add_argument(
         "--enable_ep_moe",
         action="store_true",
         help="""Whether to enable ep moe for deepseekv3 model.""",

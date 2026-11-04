@@ -4,7 +4,7 @@ def bind_compute(spec, view, device, factories, *, requested="auto", probe_kwarg
     failures = []
     for create in factories:
         backend = create()
-        if requested not in ("auto", backend.name):
+        if requested not in ("auto", backend.name, getattr(backend, "implementation", backend.name)):
             continue
         result = backend.probe(spec, view.format, device, **(probe_kwargs or {}))
         if result.offers:

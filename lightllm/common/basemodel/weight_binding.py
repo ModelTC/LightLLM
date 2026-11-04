@@ -32,7 +32,7 @@ def finalize_weights(layers, runtime, providers):
                 finalize(runtime)
 
 
-def bind_moe(specs, layers, recipes, *, providers=None, runtime=None):
+def bind_moe(specs, layers, recipes, *, providers=None, runtime=None, requested="auto"):
     import torch
 
     providers = providers if providers is not None else default_providers()
@@ -60,7 +60,7 @@ def bind_moe(specs, layers, recipes, *, providers=None, runtime=None):
             if not isinstance(view, WeightView):
                 view = WeightView(*view)
             caps = weight_device_caps(view.fields["gate_up"].device, runtime)
-            pending.append((layer_id, bind_compute(spec, view, caps, providers.moe)))
+            pending.append((layer_id, bind_compute(spec, view, caps, providers.moe, requested=requested)))
             continue
         if type(weight) is not FusedMoeWeight:
             raise ValueError(f"layer {layer_id}: model declared MoE without matching expert weights")
@@ -96,6 +96,8 @@ def bind_moe(specs, layers, recipes, *, providers=None, runtime=None):
         ):
             raise ValueError(f"layer {layer_id}: loaded MoE dimensions/routing disagree with model semantics")
         if weight.enable_ep_moe:
+            if requested != "auto":
+                raise ValueError(f"layer {layer_id}: {requested} does not provide expert-parallel execution")
             if (
                 method != "fp8w8a8-b128-deepgemm"
                 or spec.dtype != torch.bfloat16
@@ -130,11 +132,18 @@ def bind_moe(specs, layers, recipes, *, providers=None, runtime=None):
             ),
         )
         bound = bind_compute(
-            spec, view, caps, providers.moe, probe_kwargs={"fused_shared_experts": weight.num_fused_shared_experts}
+            spec,
+            view,
+            caps,
+            providers.moe,
+            requested=requested,
+            probe_kwargs={"fused_shared_experts": weight.num_fused_shared_experts},
         )
         pending.append((layer_id, bound))
+    if legacy and requested != "auto":
+        raise ValueError(f"{requested} cannot bind legacy MoE weights: {legacy}")
     for layer_id, bound in pending:
-        if weights[layer_id].experts.enable_ep_moe:
+        if getattr(weights[layer_id].experts, "enable_ep_moe", False):
             recipes[layer_id].bound_ep = bound
         else:
             recipes[layer_id].bound_moe = bound

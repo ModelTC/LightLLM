@@ -487,8 +487,11 @@ class TpPartBaseModel:
                 self.layers_infer,
                 providers=self.execution_providers,
                 runtime=self.execution_device,
+                requested=getattr(getattr(self, "args", None), "moe_runner_backend", "auto"),
             )
             return
+        if getattr(getattr(self, "args", None), "moe_runner_backend", "auto") != "auto":
+            raise ValueError("explicit MoE backend selection requires a ModelAdapter")
         assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
             data_type=self.data_type,
