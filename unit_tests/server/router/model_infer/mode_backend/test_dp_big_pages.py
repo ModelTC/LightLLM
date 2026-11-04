@@ -25,6 +25,7 @@ def test_dp_page_ids_use_separate_shared_array(monkeypatch: pytest.MonkeyPatch, 
     monkeypatch.setattr(dp_shared_kv_trans, "get_dp_rank_in_node", lambda: 0)
     monkeypatch.setattr(dp_shared_kv_trans, "get_env_start_args", lambda: SimpleNamespace(diverse_mode=False))
     backend = SimpleNamespace(
+        logger=Mock(),
         is_hybrid_att_model=hybrid,
         args=SimpleNamespace(linear_att_hash_page_size=4, linear_att_page_block_num=2, max_req_total_len=max_req_len),
     )
@@ -39,6 +40,7 @@ def test_dp_page_ids_use_separate_shared_array(monkeypatch: pytest.MonkeyPatch, 
 
 def test_fill_orders_radix_and_owned_pages_and_clears_reused_rows(monkeypatch: pytest.MonkeyPatch):
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
+    module._debug_transfers = Mock()
     module.backend = SimpleNamespace(is_master_in_dp=True, node_nccl_group=None)
     module.dp_rank_in_node = 0
     module.big_page_tokens = 8
@@ -127,7 +129,9 @@ def test_local_longest_prefix_skips_copy_but_keeps_barriers(
         get_dp_shared_operator=lambda: SimpleNamespace(copy_from_dp=copy_resources),
     )
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
+    module._debug_transfers = Mock()
     module.backend = SimpleNamespace(
+        logger=Mock(),
         is_hybrid_att_model=hybrid,
         is_master_in_dp=True,
         node_nccl_group="node",
@@ -189,6 +193,7 @@ def _build_fixture(monkeypatch: pytest.MonkeyPatch, capacity: int, src_kv_len: i
         return torch.arange(100, 100 + count, dtype=torch.int32)
 
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
+    module._debug_transfers = Mock()
     module.backend = SimpleNamespace(
         is_hybrid_att_model=True,
         dp_world_size=2,

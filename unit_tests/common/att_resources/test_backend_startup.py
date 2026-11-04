@@ -237,7 +237,10 @@ def test_backend_allocates_all_roles_before_warmup(
 
     if via_backend:
         backend = ModeBackend.__new__(ModeBackend)
+        backend.is_master_in_dp = True
+        backend.dp_rank_in_node = 0
         backend.init_rank_infos = lambda: None
+        monkeypatch.setattr(base_backend, "EngineCounters", lambda *_: None)
         backend.init_mtp_draft_model = lambda _: backend.draft_models.extend(models[1:])
         monkeypatch.setattr(base_backend, "init_distributed_env", lambda _, runtime: None)
         monkeypatch.setattr(base_backend.dist_group_manager, "create_groups", lambda **_: None)
