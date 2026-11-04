@@ -107,17 +107,13 @@ def is_nvidia():
 
 @lru_cache(maxsize=None)
 def get_current_device_name():
-    if torch.cuda.is_available() or is_musa():
-        device = torch.cuda.current_device()
-        gpu_name = torch.cuda.get_device_name(device)
-        # 4090 trans to 4090 D
-        if "4090" in gpu_name and "4090 D" not in gpu_name:
-            gpu_name = gpu_name.replace("4090", "4090 D")
-
-        gpu_name = gpu_name.replace(" ", "_")
-        return gpu_name
-    else:
+    api = getattr(torch, os.environ.get("LIGHTLLM_TORCH_DEVICE_TYPE", "cuda"), None)
+    if api is None or not hasattr(api, "get_device_name") or not api.is_available():
         return None
+    name = api.get_device_name(api.current_device())
+    if "4090" in name and "4090 D" not in name:
+        name = name.replace("4090", "4090 D")
+    return name.replace(" ", "_")
 
 
 @lru_cache(maxsize=None)

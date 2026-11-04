@@ -142,11 +142,11 @@ class GQAFullAttentionState(FullAttentionState):
 
     def write_full_att_kv(self, logical_layer_id: int, token_indices: torch.Tensor, kv: torch.Tensor) -> None:
         """通过 CUDA 算子将形状匹配的 K/V 数据写入指定物理 token 位置。"""
-        assert token_indices.is_cuda, "token indices must reside on CUDA"
+        assert token_indices.device == self.k_storage.device, "token indices must reside on the storage device"
         storage_layer_index = self.get_storage_layer_index(logical_layer_id=logical_layer_id)
         if not len(token_indices):
             return
-        assert self.k_storage.is_cuda, "KV writes require CUDA storage"
+        assert self.k_storage.device.type not in ("cpu", "meta"), "KV writes require device storage"
         from lightllm.common.basemodel.triton_kernel.destindex_copy_kv import destindex_copy_kv
 
         # TODO：将同一层 K/V 的两次索引写入融合到一个 kernel，直接写入独立 K/V 存储。
@@ -159,7 +159,7 @@ class GQAFullAttentionState(FullAttentionState):
 
     def copy_full_att_tokens(self, src_indices: torch.Tensor, dst_indices: torch.Tensor) -> None:
         """复制完整 token 数据；索引使用 Tensor，源与目标位置由调用方保证不重叠。"""
-        assert src_indices.is_cuda and dst_indices.is_cuda, "token indices must reside on CUDA"
+        assert src_indices.device == dst_indices.device == self.k_storage.device, "token indices must match storage"
         assert (
             src_indices.ndim == dst_indices.ndim == 1 and src_indices.numel() == dst_indices.numel()
         ), "token copies require equal one-dimensional index tensors"
@@ -167,7 +167,7 @@ class GQAFullAttentionState(FullAttentionState):
             torch.int32,
             torch.int64,
         ), "token indices must be integer tensors"
-        assert self.k_storage.is_cuda, "token copies require CUDA storage"
+        assert self.k_storage.device.type not in ("cpu", "meta"), "token copies require device storage"
         if not src_indices.numel():
             return
         from lightllm.common.basemodel.triton_kernel.kv_move import copy_kv_buffer_to_kv_buffer

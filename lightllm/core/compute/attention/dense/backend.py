@@ -300,13 +300,16 @@ class DenseAttentionBackend:
         self.implementation, self.phase = name, phase
         self.name = f"{name}.{phase}"
 
+    def supports_device(self, caps):
+        return caps.is_nvidia
+
     def probe(self, attention_spec, format_spec, device_caps, limits):
         if not isinstance(attention_spec, DenseAttentionSpec):
             return ProbeResult(reason="requires Dense attention semantics")
         if attention_spec.attention_sink and self.implementation != "fa3":
             return ProbeResult(reason="attention sinks require a supporting backend")
-        if not device_caps.is_nvidia:
-            return ProbeResult(reason="requires CUDA")
+        if not self.supports_device(device_caps):
+            return ProbeResult(reason=f"device is not supported by {self.implementation}")
         if self.implementation == "fa3" and (device_caps.capability is None or device_caps.capability[0] != 9):
             return ProbeResult(reason="FA3 requires Hopper capability")
         if self.implementation == "fa3":

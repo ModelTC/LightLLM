@@ -14,6 +14,49 @@ from lightllm.core.formats.weights.view import WeightView
 from lightllm.core.registry import ProviderRegistry
 
 
+def test_sampling_buffers_and_events_use_the_execution_device(monkeypatch):
+    from lightllm.server.router.model_infer.mode_backend.generic_post_process import _top_p_top_k
+    from lightllm.server.router.model_infer.pin_mem_manager import PinMemTensorManager
+
+    probs = torch.tensor([[0.1, 0.6, 0.3], [0.2, 0.3, 0.5]])
+    filtered, indices = _top_p_top_k(probs, torch.tensor([0.8, 1.0]), torch.tensor([2, 1]))
+    torch.testing.assert_close(filtered, torch.tensor([[0.6, 0.3, 0.0], [0.5, 0.0, 0.0]]))
+    assert indices.device == probs.device
+    events = []
+    runtime = SimpleNamespace(
+        device=torch.device("cpu"),
+        create_event=lambda: SimpleNamespace(
+            record=lambda: events.append("record"), synchronize=lambda: events.append("wait")
+        ),
+    )
+    manager = PinMemTensorManager(runtime)
+    monkeypatch.setattr(manager, "alloc_pin_tensor", lambda key, size, dtype: torch.empty(size, dtype=dtype))
+    copied = manager.async_copy_from_gpu_tensor_with_event("output", probs)
+    copied.wait()
+    torch.testing.assert_close(copied.tensor, probs)
+    assert events == ["record", "wait"]
+    assert manager.get_const_gpu_tensor("rank", (2,), -1, torch.int64).device.type == "cpu"
+
+
+def test_device_discovery_and_triton_capability_use_platform_identity(monkeypatch):
+    from lightllm.utils.device_utils import get_current_device_name
+    from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend
+
+    api = SimpleNamespace(
+        is_available=lambda: True,
+        current_device=lambda: 2,
+        get_device_name=lambda index: "External Device" if index == 2 else None,
+    )
+    monkeypatch.setattr(torch, "external_test", api, raising=False)
+    monkeypatch.setenv("LIGHTLLM_TORCH_DEVICE_TYPE", "external_test")
+    get_current_device_name.cache_clear()
+    try:
+        assert get_current_device_name() == "External_Device"
+    finally:
+        get_current_device_name.cache_clear()
+    assert not DenseAttentionBackend("triton", "decode").supports_device(DeviceCaps("cuda", 0, (9, 0), "other"))
+
+
 def test_execution_factory_keeps_injected_platform_and_rejects_cuda_defaults(monkeypatch):
     runtime = SimpleNamespace(caps=DeviceCaps("cuda", 0, (9, 0), "other"))
     providers = ProviderRegistry()
