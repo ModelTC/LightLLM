@@ -1,22 +1,19 @@
 """FlashInfer's batch planning is explicit and separate from bound kernel execution."""
 
-from lightllm.core.compute.attention.workspace import lane_workspace
-
-
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from importlib.util import find_spec
 from typing import TYPE_CHECKING
-from lightllm.core.compute.attention.batch import AttentionBatch
 
 if TYPE_CHECKING:
-    from flashinfer import BatchPrefillWithPagedKVCacheWrapper, BatchDecodeWithPagedKVCacheWrapper, replace
-from importlib.util import find_spec
+    from flashinfer import BatchPrefillWithPagedKVCacheWrapper, BatchDecodeWithPagedKVCacheWrapper
 
 import torch
 
 from lightllm.core.compute.attention.dense.inputs import query_tensor
 
 from lightllm.core.compute.attention.dense.backend import BoundDenseAttention
-from lightllm.core.compute.attention.batch import group_verify_batch
+from lightllm.core.compute.attention.batch import AttentionBatch, group_verify_batch
+from lightllm.core.compute.attention.workspace import lane_workspace
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 

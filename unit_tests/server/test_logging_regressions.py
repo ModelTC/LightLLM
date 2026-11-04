@@ -412,17 +412,20 @@ def test_cuda_graph_replay_cost_barrier_uses_current_device(monkeypatch, overlap
 @pytest.mark.parametrize("rank", [0, 1])
 def test_execution_selection_logs_only_on_leader(monkeypatch, caplog, rank):
     from lightllm.common.basemodel import basemodel as module
+    from lightllm.models.base import build
 
     logger = logging.getLogger("execution-selection-regression")
     monkeypatch.setattr(module, "logger", logger)
     monkeypatch.setattr(log_utils, "_context", {"tp_rank": rank})
     monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
     plan = SimpleNamespace(bindings=[SimpleNamespace(backend="dense.test")], workspace_bytes=32)
-    model = SimpleNamespace(
-        attention_execution=SimpleNamespace(bind=lambda layers: plan), layers_infer=(), att_state_role="main"
-    )
+    resources = object()
+    model = SimpleNamespace(_attention_resources=resources, layers_infer=(), att_state_role="main")
+    bind = Mock(return_value=SimpleNamespace(plan=plan))
+    monkeypatch.setattr(build, "bind_attention_execution", bind)
     with caplog.at_level(logging.DEBUG, logger=logger.name):
         module.TpPartBaseModel._init_execution_plan(model)
+    bind.assert_called_once_with(resources, model.layers_infer)
     records = [r for r in caplog.records if r.name == logger.name]
     assert len(records) == 1
     assert records[0].event == "backend.selected" and records[0].backends == ["dense.test"]

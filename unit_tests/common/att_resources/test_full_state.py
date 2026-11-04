@@ -101,7 +101,10 @@ def test_full_attention_write_copy_and_pd(
         state.write_full_att_kv(2, ids, data)
         state.write_full_att_kv(5, ids, data + 100)
     else:
-        with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+        write_device_error = (
+            "KV writes require device storage" if cls is GQAFullAttentionState else "token indices must reside on CUDA"
+        )
+        with pytest.raises(AssertionError, match=write_device_error):
             state.write_full_att_kv(2, ids, data)
         # CPU 仅构造复制和传输测试的数据，不执行推理 KV 写入。
         for layer, values in ((0, data), (1, data + 100)):
@@ -120,7 +123,12 @@ def test_full_attention_write_copy_and_pd(
             state.copy_full_att_tokens(ids, torch.tensor([8, 9], dtype=torch.int32, device=device))
         assert torch.equal(read_kv_storage(state)[:, [1, 3]], read_kv_storage(state)[:, [8, 9]])
     else:
-        with pytest.raises(AssertionError, match="token indices must reside on CUDA"):
+        copy_device_error = (
+            "token copies require device storage"
+            if cls is GQAFullAttentionState
+            else "token indices must reside on CUDA"
+        )
+        with pytest.raises(AssertionError, match=copy_device_error):
             state.copy_full_att_tokens(ids, torch.tensor([8, 9], dtype=torch.int32, device=device))
     layout = layout_for(state)
     pages = torch.full(
