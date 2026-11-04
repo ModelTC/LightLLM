@@ -29,8 +29,7 @@ def test_threaded_checkpoint_loading_does_not_create_process_semaphores(tmp_path
         )
     monkeypatch.delattr(tqdm, "_lock", raising=False)
     monkeypatch.setattr(multiprocessing.synchronize.SemLock, "__init__", unexpected_semaphore)
-    monkeypatch.setattr(hf_load_utils, "get_current_device_id", lambda: 0)
-    monkeypatch.setattr(torch.cuda, "set_device", lambda device: None)
+    monkeypatch.setattr(hf_load_utils, "get_current_device", lambda: torch.device("cpu"))
     monkeypatch.setenv("LOADWORKER", "2")
     if load_failure:
         with pytest.raises(RuntimeError, match="invalid checkpoint shard"):
