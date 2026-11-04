@@ -62,9 +62,10 @@ def test_overlap_handoff_completes_postprocessing_before_sampling(
             "overlap_prepare_decode_inputs",
             lambda req_objs: (model_input if req_objs else empty_input, req_objs, req_objs, empty_input, [], []),
         )
+    monkeypatch.setattr(impl.torch.cuda, "current_stream", lambda: None)
     monkeypatch.setattr(impl.torch.cuda, "stream", lambda stream: nullcontext())
     monkeypatch.setattr(
-        impl.torch.cuda, "Event", lambda: SimpleNamespace(record=lambda: None, synchronize=lambda: None)
+        impl.torch.cuda, "Event", lambda **kwargs: SimpleNamespace(record=lambda: None, synchronize=lambda: None)
     )
     monkeypatch.setattr(impl.g_infer_context, "get_overlap_stream", lambda: None)
     monkeypatch.setattr(impl.g_infer_context, "save_hybrid_state_to_cache", lambda **kwargs: None)

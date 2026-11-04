@@ -77,8 +77,10 @@ class PromptSelectedLogprobsExt:
         ranks_cpu = torch.empty(ranks.shape, dtype=ranks.dtype, device="cpu", pin_memory=True)
         logprobs_cpu.copy_(logprobs, non_blocking=True)
         ranks_cpu.copy_(ranks, non_blocking=True)
-        event = torch.cuda.Event()
-        event.record(torch.cuda.current_stream())
+        from lightllm.server.router.model_infer.infer_batch import g_infer_context
+
+        event = g_infer_context.runtime.create_event()
+        event.record(g_infer_context.runtime.current_stream())
         self._chunks.append((target_start, target_end, logprobs_cpu, ranks_cpu, event))
 
     def flush(self) -> None:

@@ -94,8 +94,9 @@ class CudaRuntime:
 
         return g_cache_manager.alloc_tensor(shape, dtype, device=self.device)
 
-    def use_stream(self, stream=None):
-        return torch.cuda.stream(stream or torch.cuda.current_stream(self.device))
+    @staticmethod
+    def use_stream(stream=None):
+        return torch.cuda.stream(stream or torch.cuda.current_stream())
 
     def record_event(self):
         event = self.create_event()

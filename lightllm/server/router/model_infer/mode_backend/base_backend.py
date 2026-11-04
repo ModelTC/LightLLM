@@ -122,6 +122,7 @@ class ModeBackend:
             config=self.args,
         )
         self.execution_device = self.execution_context.device
+        g_pin_mem_manager.runtime = self.execution_device
         init_distributed_env(kvargs, runtime=self.execution_device)
         self.init_rank_infos()
         group_size = (

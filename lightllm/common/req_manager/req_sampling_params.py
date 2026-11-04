@@ -109,11 +109,12 @@ class ReqSamplingParamsManager:
                     key="prompt_ids_for_penalty",
                     data=req.shm_req.get_prompt_ids_numpy(),
                     dtype=torch.int32,
-                ).cuda(non_blocking=True)
+                ).to(self.req_to_next_token_ids.device, non_blocking=True)
                 token_id_counter(
                     prompt_ids=prompt_ids, out_token_id_counter=self.req_to_out_token_id_counter[req.req_idx]
                 )
-                torch.cuda.current_stream().synchronize()
+                if prompt_ids.device.type != "cpu":
+                    getattr(torch, prompt_ids.device.type).current_stream().synchronize()
 
         return
 
@@ -123,7 +124,8 @@ class ReqSamplingParamsManager:
         if self.penalty_counter_mode not in ["gpu_counter", "pin_mem_counter"]:
             return
 
-        assert b_req_idx.is_cuda and next_token_ids.is_cuda and b_req_idx.shape[0] == next_token_ids.shape[0]
+        assert b_req_idx.device == next_token_ids.device == self.req_to_next_token_ids.device
+        assert b_req_idx.shape[0] == next_token_ids.shape[0]
 
         update_req_to_token_id_counter(
             b_req_idx=b_req_idx,
@@ -169,7 +171,7 @@ class ReqSamplingParamsManager:
         )
 
         return (
-            p_token_ids_tensor.cuda(non_blocking=True),
-            p_token_counts_tensor.cuda(non_blocking=True),
-            p_cumsum_seq_len_tensor.cuda(non_blocking=True),
+            p_token_ids_tensor.to(self.req_to_next_token_ids.device, non_blocking=True),
+            p_token_counts_tensor.to(self.req_to_next_token_ids.device, non_blocking=True),
+            p_cumsum_seq_len_tensor.to(self.req_to_next_token_ids.device, non_blocking=True),
         )
