@@ -1,9 +1,7 @@
-from lightllm.common.attention_state.commit import StateCommitBatch
+import torch
 import time
 from typing import List
-
-import torch
-
+from lightllm.common.attention_state.commit import StateCommitBatch
 from lightllm.common.basemodel.triton_kernel.mtp_utils import gen_b_req_mtp_start_loc
 from lightllm.server.router.model_infer.mode_backend.base_backend import ModeBackend
 from lightllm.server.router.model_infer.mode_backend.overlap_events import OverlapEventPack

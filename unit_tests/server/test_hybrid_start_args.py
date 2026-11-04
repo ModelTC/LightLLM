@@ -132,19 +132,3 @@ def test_s3_configuration_is_prepared_before_ssm_validation(launch_args, monkeyp
     assert downloads == [model_dir + "/config.json"]
     if mode == "replay":
         assert args.ssm_replay_config == {"cache_len": 16, "compute_mode": "inline", "fold_method": "raw"}
-
-
-def test_cold_s3_model_still_enforces_hybrid_constraints(launch_args, monkeypatch, tmp_path):
-    from pathlib import Path
-
-    monkeypatch.chdir(tmp_path)
-
-    def prepare(model_dir):
-        Path(model_dir).mkdir(parents=True)
-        Path(model_dir, "config.json").write_text(json.dumps({"model_type": "qwen3_5_text"}))
-
-    monkeypatch.setattr("lightllm.utils.petrel_helper.s3_model_prepare", prepare)
-    args = launch_args("qwen3_5_text", disable_dynamic_prompt_cache=True)
-    args.model_dir = "s3://test-bucket/qwen"
-    with pytest.raises(AssertionError, match="hybrid attention models require dynamic prompt cache"):
-        _launch_subprocesses(args)

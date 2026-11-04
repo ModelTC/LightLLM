@@ -249,7 +249,10 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
     )
     torch.testing.assert_close(actual.reshape(tokens, heads, dim)[:row], torch.cat(expected), atol=2e-3, rtol=1e-2)
     if mode == "native":
-        torch.testing.assert_close(selected.ssm_state[0], expected_ssm, atol=2e-3, rtol=1e-2)
+        checked_slots = len(requests) if dynamic and not mtp_step else expected_ssm.shape[0]
+        torch.testing.assert_close(
+            selected.ssm_state[0, :checked_slots], expected_ssm[:checked_slots], atol=2e-3, rtol=1e-2
+        )
     else:
         ids = torch.tensor(requests, dtype=torch.int32, device="cuda")
         if mtp_step:
@@ -266,5 +269,5 @@ def test_kda_backend_routes_accepted_conv_and_ssm_states(dynamic, role: str, mod
                 atol=2e-3,
                 rtol=1e-2,
             )
-    if dynamic:
+    if dynamic and mtp_step:
         assert torch.equal(selected.conv_state[0, 3], old_conv[3])

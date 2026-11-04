@@ -1,13 +1,11 @@
 import os
+import torch
+import torch.distributed as dist
 import copy
 import bisect
 import math
-from typing import Optional
-
-import torch
-import torch.distributed as dist
 import triton
-
+from typing import Optional
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import dist_group_manager
