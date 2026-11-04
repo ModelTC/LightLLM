@@ -64,3 +64,9 @@ class StateView:
     def __post_init__(self):
         if len(self.fields) != len(self.format.fields):
             raise ValueError("view fields must match its format")
+
+
+@dataclass(frozen=True)
+class LayerStates:
+    primary: StateSpec
+    auxiliary: tuple[tuple[str, StateSpec], ...] = ()

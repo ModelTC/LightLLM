@@ -3,6 +3,7 @@ from typing import Callable
 
 from lightllm.core.contracts.model import ModelAdapter
 from lightllm.core.contracts.device import ExecutionLimits
+from lightllm.core.contracts.state import LayerStates
 from lightllm.core.contracts.state import FormatSpec
 from lightllm.core.planner import AttentionRequest, Planner
 from lightllm.core.registry import ProviderRegistry, default_providers
@@ -43,23 +44,47 @@ class PreparedExecution:
         self.layers = tuple(layers)
         self.specs = specs = adapter.attention_specs()
         declarations = adapter.state_specs()
-        primary = [state for state in declarations if state.retention != "window"]
-        windows = [state for state in declarations if state.retention == "window"]
-        states = {consumer: state for state in primary for consumer in state.consumers}
-        tails = {consumer: state for state in windows for consumer in state.consumers}
-        if len(states) != sum(len(state.consumers) for state in primary):
-            raise ValueError("a layer must have exactly one primary attention resource")
-        if len(tails) != sum(len(state.consumers) for state in windows):
-            raise ValueError("a pooled layer must have one indexer tail")
+        describe = getattr(adapter, "attention_states", None)
+        if describe is None:
+            primary = [state for state in declarations if state.retention != "window"]
+            windows = [state for state in declarations if state.retention == "window"]
+            states = {consumer: state for state in primary for consumer in state.consumers}
+            tails = {consumer: state for state in windows for consumer in state.consumers}
+            if len(states) != sum(len(state.consumers) for state in primary):
+                raise ValueError("a layer must have exactly one primary attention resource")
+            if len(tails) != sum(len(state.consumers) for state in windows):
+                raise ValueError("a pooled layer must have one indexer tail")
+            resources = {
+                i: LayerStates(state, (("indexer_tail", tails[i]),) if i in tails else ())
+                for i, state in states.items()
+            }
+        else:
+            resources = describe()
+        declared = {state.key: state for state in declarations}
+        if len(declared) != len(declarations):
+            raise ValueError("state resource identities must be unique")
+        if set(resources) != set(specs):
+            raise ValueError("state inputs must describe exactly the declared attention layers")
+        for inputs in resources.values():
+            for state in (inputs.primary,) + tuple(state for _, state in inputs.auxiliary):
+                if declared.get(state.key) != state:
+                    raise ValueError("attention input refers to an undeclared state resource")
         formats = {"history": format, "recurrent": recurrent_format, "window": window_format}
-        selections = {"history": requested, "recurrent": recurrent_requested}
+        selections = {"history": requested, "recurrent": recurrent_requested, "window": requested}
         requests = []
         for layer in self.layers:
             i = layer.layer_num_
-            state = states[i]
+            inputs = resources[i]
+            state = inputs.primary
             params = static_params[i] if static_params is not None else self.providers.static_params(specs[i], runtime)
-            if formats[state.retention] is None or not selections[state.retention]:
+            if formats.get(state.retention) is None or not selections.get(state.retention):
                 raise ValueError(f"missing format or execution phases for {state.retention} state")
+            auxiliary = []
+            for name, resource in inputs.auxiliary:
+                fmt = formats.get(resource.retention)
+                if fmt is None:
+                    raise ValueError(f"missing format for auxiliary {name}: {resource.retention}")
+                auxiliary.append((name, resource, fmt))
             for phase, name in selections[state.retention].items():
                 requests.append(
                     AttentionRequest(
@@ -70,7 +95,7 @@ class PreparedExecution:
                         formats[state.retention],
                         params,
                         name,
-                        (("indexer_tail", tails[i], window_format),) if i in tails else (),
+                        tuple(auxiliary),
                     )
                 )
         backends = self.providers.attention_backends(tuple(dict.fromkeys(r.phase for r in requests)))
