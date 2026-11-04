@@ -184,7 +184,11 @@ def test_ffn_draft_checkpoint_and_graph(mode, layout, monkeypatch, tmp_path):
         state.device = torch.device("cuda")
         state.allocate_storage(64)
     main._init_execution_plan()
-    target_fields = [tensor for view in main.execution_runner.store.views().values() for tensor in view.fields]
+    target_fields = [
+        tensor
+        for view in main.attention_execution.resources.stores.get("history").views().values()
+        for tensor in view.fields
+    ]
     for tensor in target_fields:
         tensor.zero_()
     monkeypatch.setattr(manager, "get_state", lambda *a, **kw: pytest.fail("runtime manager lookup"))

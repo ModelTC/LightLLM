@@ -1,6 +1,11 @@
 from dataclasses import dataclass
 from math import isfinite
-from typing import Any, Literal
+from typing import Any, Protocol
+
+
+class StateParams(Protocol):
+    def validate(self) -> None:
+        ...
 
 
 @dataclass(frozen=True)
@@ -9,7 +14,7 @@ class StateSpec:
     resource: str
     producer: int
     consumers: tuple[int, ...]
-    shape: tuple[int, ...]
+    params: StateParams
     retention: str = "history"
 
     def __post_init__(self):
@@ -17,8 +22,9 @@ class StateSpec:
             raise ValueError("state identity and consumers are required")
         if self.producer not in self.consumers or len(set(self.consumers)) != len(self.consumers):
             raise ValueError("state consumers must be unique and include the producer")
-        if min(self.consumers) < 0 or not self.shape or min(self.shape) <= 0:
-            raise ValueError("state needs nonnegative layer IDs and positive logical dimensions")
+        if min(self.consumers) < 0:
+            raise ValueError("state needs nonnegative layer IDs")
+        self.params.validate()
 
     @property
     def key(self):

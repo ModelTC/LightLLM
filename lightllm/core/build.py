@@ -1,199 +1,162 @@
 from dataclasses import dataclass, field
-from typing import Callable
+from typing import Mapping, Hashable, Protocol
 
 from lightllm.core.contracts.model import ModelAdapter
-from lightllm.core.contracts.device import ExecutionLimits
-from lightllm.core.contracts.state import LayerStates
-from lightllm.core.contracts.state import FormatSpec
-from lightllm.core.planner import AttentionRequest, Planner
-from lightllm.core.registry import ProviderRegistry, default_providers
+from lightllm.core.contracts.device import DeviceRuntime, ExecutionLimits
+from lightllm.core.contracts.provider import Phase
+from lightllm.core.contracts.state import StateSpec, StateView, FormatSpec
+from lightllm.core.compute.attention.backend import AttentionParams, AttentionSpec
+from lightllm.core.planner import AttentionRequest, Planner, AttentionSelectionPlan, BoundAttentionPlan
+from lightllm.core.registry import ProviderRegistry, StateProvider
+from lightllm.core.runner.attention import AttentionMetadataRunner
+
+
+class StateStore(Protocol):
+    def views(self) -> Mapping[tuple[str, str], StateView]:
+        ...
 
 
 @dataclass(frozen=True)
 class BuildConfig:
-    layers: object
-    manager: object
     limits: ExecutionLimits
-    format: FormatSpec | None = None
-    requested: dict = field(default_factory=dict)
-    recurrent_format: FormatSpec | None = None
-    recurrent_requested: dict | None = None
-    static_params: dict | None = None
-    window_format: FormatSpec | None = None
-    allocate_storage: Callable | None = None
+    formats: Mapping[str, FormatSpec]
+    requested: Mapping[str, Mapping[Phase, str]]
+    static_params: Mapping[int, AttentionParams]
 
 
-class PreparedExecution:
-    def __init__(
-        self,
-        adapter,
-        layers,
-        manager,
-        runtime,
-        limits,
-        format,
-        requested,
-        recurrent_format=None,
-        recurrent_requested=None,
-        static_params=None,
-        window_format=None,
-        *,
-        providers=None,
-    ):
-        self.providers = providers if providers is not None else default_providers()
-        self.layers = tuple(layers)
-        self.specs = specs = adapter.attention_specs()
-        declarations = adapter.state_specs()
-        describe = getattr(adapter, "attention_states", None)
-        if describe is None:
-            primary = [state for state in declarations if state.retention != "window"]
-            windows = [state for state in declarations if state.retention == "window"]
-            states = {consumer: state for state in primary for consumer in state.consumers}
-            tails = {consumer: state for state in windows for consumer in state.consumers}
-            if len(states) != sum(len(state.consumers) for state in primary):
-                raise ValueError("a layer must have exactly one primary attention resource")
-            if len(tails) != sum(len(state.consumers) for state in windows):
-                raise ValueError("a pooled layer must have one indexer tail")
-            resources = {
-                i: LayerStates(state, (("indexer_tail", tails[i]),) if i in tails else ())
-                for i, state in states.items()
-            }
-        else:
-            resources = describe()
-        declared = {state.key: state for state in declarations}
-        if len(declared) != len(declarations):
-            raise ValueError("state resource identities must be unique")
-        if set(resources) != set(specs):
-            raise ValueError("state inputs must describe exactly the declared attention layers")
-        for inputs in resources.values():
-            for state in (inputs.primary,) + tuple(state for _, state in inputs.auxiliary):
-                if declared.get(state.key) != state:
-                    raise ValueError("attention input refers to an undeclared state resource")
-        formats = {"history": format, "recurrent": recurrent_format, "window": window_format}
-        selections = {"history": requested, "recurrent": recurrent_requested, "window": requested}
-        requests = []
-        for layer in self.layers:
-            i = layer.layer_num_
-            inputs = resources[i]
-            state = inputs.primary
-            params = static_params[i] if static_params is not None else self.providers.static_params(specs[i], runtime)
-            if formats.get(state.retention) is None or not selections.get(state.retention):
-                raise ValueError(f"missing format or execution phases for {state.retention} state")
-            auxiliary = []
-            for name, resource in inputs.auxiliary:
-                fmt = formats.get(resource.retention)
-                if fmt is None:
-                    raise ValueError(f"missing format for auxiliary {name}: {resource.retention}")
-                auxiliary.append((name, resource, fmt))
-            for phase, name in selections[state.retention].items():
-                requests.append(
-                    AttentionRequest(
-                        i,
-                        phase,
-                        specs[i],
-                        state,
-                        formats[state.retention],
-                        params,
-                        name,
-                        tuple(auxiliary),
-                    )
-                )
-        backends = self.providers.attention_backends(tuple(dict.fromkeys(r.phase for r in requests)))
-        self.providers.validate_attention_requests(requests, backends)
-        planner = Planner(backends, runtime.caps, limits)
-        self.prepared = planner.prepare(requests)
-        allocations = []
-        self.state_providers = {}
-        for retention, fmt in formats.items():
-            group = [state for state in declarations if state.retention == retention]
-            if not group:
-                continue
-            if fmt is None:
-                raise ValueError(f"missing format for {retention} state")
-            provider = self.providers.state_provider(fmt, retention)
-            self.state_providers[retention] = provider
-            allocations.append((retention, group, fmt, provider))
-        self.workspaces = self.prepared.reserve(runtime.allocate_workspace)
-        self.stores = {
-            retention: provider.create_store(group, fmt, manager, runtime, specs)
-            for retention, group, fmt, provider in allocations
+@dataclass(frozen=True)
+class StateAllocation:
+    retention: str
+    declarations: tuple[StateSpec, ...]
+    format: FormatSpec
+    provider: StateProvider
+
+
+@dataclass(frozen=True)
+class AttentionBuild:
+    """Selection only: no workspace, storage or model recipe has been mutated."""
+
+    selection: AttentionSelectionPlan
+    allocations: tuple[StateAllocation, ...]
+    specs: Mapping[int, AttentionSpec]
+    decode_phase: Phase
+
+    def allocate(self, *, manager, device: DeviceRuntime) -> "AttentionResources":
+        workspaces = self.selection.reserve(device.allocate_workspace)
+        stores = {
+            item.retention: item.provider.create_store(item.declarations, item.format, manager, device, self.specs)
+            for item in self.allocations
         }
-        self.store = self.stores.get("history")
-        self.recurrent_store = self.stores.get("recurrent")
-        self.window_store = self.stores.get("window")
-        self.plan = None
-        self.runner = None
-        self.decode_phase = "verify" if any(r.phase == "verify" for r in requests) else "decode"
+        return AttentionResources(self, stores, workspaces)
 
-    def bind(self, layers=None):
-        if self.plan is not None:
+
+@dataclass
+class AttentionResources:
+    """Own reservations; shared managers must finalize storage before bind reads native views."""
+
+    build: AttentionBuild
+    stores: Mapping[str, StateStore]
+    workspaces: Mapping[Hashable, object]
+    _bound: bool = field(default=False, init=False)
+
+    def bind(self) -> "AttentionExecution":
+        if self._bound:
             raise RuntimeError("bound execution plans cannot be replaced while resources or Graphs may be in use")
-        layers = self.layers if layers is None else tuple(layers)
-        if tuple(layer.layer_num_ for layer in layers) != tuple(layer.layer_num_ for layer in self.layers):
-            raise ValueError("binding must use the planned layer identities and order")
         views = {}
         for store in self.stores.values():
-            views.update(store.views())
-        plan = self.prepared.bind(views, self.workspaces)
-        writers, requires_writer = {}, set()
-        for view in views.values():
-            provider = self.state_providers[view.state.retention]
-            if provider.create_writer is not None:
-                writers[view.state.producer] = provider.create_writer(view)
-                requires_writer.update(view.state.consumers)
-        bindings = {(item.layer_id, item.phase): item.execution for item in plan.bindings}
-        for layer in layers:
-            if layer.layer_num_ in requires_writer and layer.layer_num_ not in writers:
-                raise ValueError("this model recipe does not support a read-only shared KV consumer")
-        for layer in layers:
-            layer.bound_prefill_attention = bindings.get((layer.layer_num_, "prefill"))
-            layer.bound_decode_attention = bindings.get((layer.layer_num_, self.decode_phase))
-            if layer.layer_num_ in writers:
-                layer.bound_kv_writer = writers[layer.layer_num_]
-        from lightllm.core.runner.attention import Runner
-
-        self.plan = plan
-        self.runner = Runner(plan, self.decode_phase)
-        return plan
-
-    @property
-    def metadata_sources(self):
-        return self.runner.metadata_sources
-
-    def prepare_batch(self, batch):
-        if self.runner is None:
-            raise RuntimeError("execution must be bound before preparing a batch")
-        return self.runner.prepare_batch(batch)
-
-    def bind_graph(self, metadata, runtime):
-        if self.runner is None:
-            raise RuntimeError("execution must be bound before capturing a Graph")
-        return self.runner.bind_graph(metadata, runtime)
+            for key, view in store.views().items():
+                if key in views:
+                    raise ValueError("a resource must resolve to exactly one native view")
+                views[key] = view
+        plan = self.build.selection.bind(views, self.workspaces)
+        writers = {}
+        providers = {item.retention: item.provider for item in self.build.allocations}
+        for key, view in views.items():
+            create_writer = providers[view.state.retention].create_writer
+            if create_writer is not None:
+                writers[key] = create_writer(view)
+        metadata = AttentionMetadataRunner(plan, self.build.decode_phase)
+        self._bound = True
+        return AttentionExecution(plan, metadata, views, writers, self)
 
 
-def prepare(*, model_adapter: ModelAdapter, providers: ProviderRegistry, device, config: BuildConfig):
-    return PreparedExecution(
-        model_adapter,
-        config.layers,
-        config.manager,
-        device,
-        config.limits,
-        config.format,
-        config.requested,
-        config.recurrent_format,
-        config.recurrent_requested,
-        config.static_params,
-        config.window_format,
-        providers=providers,
-    )
+@dataclass(frozen=True)
+class AttentionExecution:
+    """Fully bound execution. Resources stay owned for the lifetime of execution and Graphs."""
+
+    plan: BoundAttentionPlan
+    metadata: AttentionMetadataRunner
+    views: Mapping[tuple[str, str], StateView]
+    writers: Mapping[tuple[str, str], object]
+    resources: AttentionResources
 
 
-def build(*, model_adapter: ModelAdapter, providers: ProviderRegistry, device, config: BuildConfig):
-    execution = prepare(model_adapter=model_adapter, providers=providers, device=device, config=config)
-    if config.allocate_storage is not None:
-        config.allocate_storage(execution)
-    execution.bind()
-    return execution
+def prepare(
+    *, model_adapter: ModelAdapter, providers: ProviderRegistry, device: DeviceRuntime, config: BuildConfig
+) -> AttentionBuild:
+    specs = model_adapter.attention_specs()
+    declarations = model_adapter.state_specs()
+    resources = model_adapter.attention_states()
+    declared = {state.key: state for state in declarations}
+    if len(declared) != len(declarations):
+        raise ValueError("state resource identities must be unique")
+    if set(resources) != set(specs):
+        raise ValueError("state inputs must describe exactly the declared attention layers")
+    for inputs in resources.values():
+        for state in (inputs.primary,) + tuple(state for _, state in inputs.auxiliary):
+            if declared.get(state.key) != state:
+                raise ValueError("attention input refers to an undeclared state resource")
+    requests = []
+    for i, spec in specs.items():
+        inputs = resources[i]
+        state = inputs.primary
+        if state.retention not in config.formats or not config.requested.get(state.retention):
+            raise ValueError(f"missing format or execution phases for {state.retention} state")
+        auxiliary = []
+        for name, resource in inputs.auxiliary:
+            if resource.retention not in config.formats:
+                raise ValueError(f"missing format for auxiliary {name}: {resource.retention}")
+            auxiliary.append((name, resource, config.formats[resource.retention]))
+        for phase, name in config.requested[state.retention].items():
+            requests.append(
+                AttentionRequest(
+                    i,
+                    phase,
+                    spec,
+                    state,
+                    config.formats[state.retention],
+                    config.static_params[i],
+                    name,
+                    tuple(auxiliary),
+                )
+            )
+    backends = providers.attention_backends(tuple(dict.fromkeys(r.phase for r in requests)))
+    providers.validate_attention_requests(requests, backends)
+    selection = Planner(backends, device.caps, config.limits).prepare(requests)
+    groups = {}
+    for state in declarations:
+        groups.setdefault(state.retention, []).append(state)
+    allocations = []
+    for retention, group in groups.items():
+        if retention not in config.formats:
+            raise ValueError(f"missing format for {retention} state")
+        fmt = config.formats[retention]
+        allocations.append(StateAllocation(retention, tuple(group), fmt, providers.state_provider(fmt, retention)))
+    decode_phase = "verify" if any(r.phase == "verify" for r in requests) else "decode"
+    return AttentionBuild(selection, tuple(allocations), specs, decode_phase)
+
+
+def build(
+    *,
+    model_adapter: ModelAdapter,
+    providers: ProviderRegistry,
+    device: DeviceRuntime,
+    config: BuildConfig,
+    manager=None,
+) -> AttentionExecution:
+    """Build with self-allocating stores; shared allocation uses prepare, allocate, then bind."""
+    prepared = prepare(model_adapter=model_adapter, providers=providers, device=device, config=config)
+    return prepared.allocate(manager=manager, device=device).bind()
 
 
 @dataclass(frozen=True)

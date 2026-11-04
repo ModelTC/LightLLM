@@ -1,3 +1,5 @@
+from lightllm.core.compute.attention.workspace import lane_workspace
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -10,7 +12,7 @@ from lightllm.core.compute.attention.dense.backend import DenseStaticParams
 from lightllm.core.compute.attention.dense.group_quantized import GroupQuantizedAttentionBackend
 from lightllm.core.formats.kv.group_quantized import GroupQuantizedKVWriter
 from lightllm.core.planner.planner import Planner
-from lightllm.common.execution.runner import attention_batch
+from lightllm.models.base.attention_batch import attention_batch
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
 from lightllm.core.contracts.state import FormatSpec, StateSpec
@@ -31,7 +33,7 @@ def make_format(bits, dtype=torch.float16, group=8, page=4):
 
 def make_bound(bits, dtype, group, phase, window=(-1, -1), device="cuda"):
     manager = AttentionStateManager(2)
-    state_spec = StateSpec("main", "kv", 0, (0,), (2, 64))
+    state_spec = StateSpec("main", "kv", 0, (0,), DenseKVStateSpec(kv_heads=2, head_dim=64))
     spec = DenseAttentionSpec(8, 2, 64, window=window, dtype=dtype)
     store = DenseStateStore((state_spec,), make_format(bits, dtype, group), manager)
     manager.finish_state_registration()
@@ -58,7 +60,10 @@ def test_group_format_is_bound_without_model_specific_registration(bits):
     assert bound.k.data_ptr() == state.k_storage[0].data_ptr()
     assert bound.k_scale.data_ptr() == state.k_scales[0].data_ptr()
     assert writer.k_scale.data_ptr() == bound.k_scale.data_ptr()
-    assert bound._lane_workspace(0).data_ptr() != bound._lane_workspace(1).data_ptr()
+    assert (
+        lane_workspace(bound.workspace, bound.limits, 0).data_ptr()
+        != lane_workspace(bound.workspace, bound.limits, 1).data_ptr()
+    )
 
 
 def test_probe_checks_quantization_and_query_dtype_before_allocation():

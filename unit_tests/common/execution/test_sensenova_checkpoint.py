@@ -121,7 +121,10 @@ def test_loop_checkpoint_reference_graph_and_state_restore(monkeypatch, dtype, r
 
         indices = native.loop_layer_indices
         assert len(native.physical_layer_weights) == len(set(indices)) < len(native.layers_infer)
-        views = {**native.execution_runner.store.views(), **native.execution_runner.recurrent_store.views()}
+        views = {
+            **native.attention_execution.resources.stores.get("history").views(),
+            **native.attention_execution.resources.stores.get("recurrent").views(),
+        }
         by_layer = {view.state.producer: view for view in views.values()}
         for physical in set(indices):
             visits = [i for i, p in enumerate(indices) if p == physical]

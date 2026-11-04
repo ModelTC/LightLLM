@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Callable
+from lightllm.core.runner.attention import AttentionMetadataRunner
 
 import torch
 
@@ -39,7 +40,7 @@ class BatchStateFactory:
     is_draft: bool
     return_all_prompt_logics: bool
     group_for_lane: Callable
-    execution_runner: object = None
+    attention_metadata: AttentionMetadataRunner | None = None
     prefill_states: tuple = ()
     decode_states: tuple = ()
     select_indices: Callable = None
@@ -54,7 +55,7 @@ class BatchStateFactory:
         state.return_all_prompt_logics = self.return_all_prompt_logics
         state.req_manager = self.requests
         state.att_state_manager = self.state_store
-        state.execution_runner = self.execution_runner
+        state.attention_metadata = self.attention_metadata
         state.microbatch_index = microbatch_index
         state.dist_group = self.group_for_lane(microbatch_index)
         assert batch.b_req_idx.shape[0] == batch.b_seq_len.shape[0]

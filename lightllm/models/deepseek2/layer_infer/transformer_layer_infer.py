@@ -84,7 +84,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
     ) -> torch.Tensor:
         if getattr(self, "bound_prefill_attention", None) is not None:
             bound = self.bound_prefill_attention
-            return bound.run(q, bound.prepare_batch(infer_state), out)
+            return bound.run(q, infer_state.execution_metadata[bound.metadata_key], out)
         k_nope, k_rope, v = self._decompress_kv(
             infer_state=infer_state,
             layer_weight=layer_weight,
@@ -110,7 +110,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         if getattr(self, "bound_decode_attention", None) is not None:
             bound = self.bound_decode_attention
-            return bound.run((q_nope, q_rope), bound.prepare_batch(infer_state), out)
+            return bound.run((q_nope, q_rope), infer_state.execution_metadata[bound.metadata_key], out)
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="mla",

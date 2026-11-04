@@ -5,6 +5,14 @@ from collections import defaultdict
 import torch
 
 from lightllm.core.contracts.state import StateView
+from lightllm.core.formats.kv.spec import (
+    DenseKVStateSpec,
+    MLAKVStateSpec,
+    SparseMLAKVStateSpec,
+    PooledKVStateSpec,
+    IndexerWindowStateSpec,
+)
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
 
 
 class DenseStateStore:
@@ -19,18 +27,19 @@ class DenseStateStore:
         groups = defaultdict(list)
         self.resources = {}
         for spec in declarations:
-            if spec.retention != "history" or len(spec.shape) != 2:
+            if spec.retention != "history" or not isinstance(spec.params, DenseKVStateSpec):
                 raise ValueError("Dense storage requires two-dimensional full-history states")
             if spec.key in self.resources:
                 raise ValueError(f"duplicate resource: {spec.key}")
             self.resources[spec.key] = None
-            groups[spec.role, spec.shape].append(spec)
-        for (_, shape), specs in groups.items():
+            groups[spec.role, spec.params].append(spec)
+        for (_, params), specs in groups.items():
             state = create_gqa_state(
                 config=GQAAttentionConfig(
                     tuple(s.consumers for s in specs),
-                    *shape,
-                    format.scale_dtype if format.encoding != "plain" else format.dtype,
+                    global_head_num=params.kv_heads,
+                    head_dim=params.head_dim,
+                    dtype=format.scale_dtype if format.encoding != "plain" else format.dtype,
                     tp_rank=format.shard[0],
                     tp_world_size=format.shard[1],
                 ),
@@ -42,7 +51,7 @@ class DenseStateStore:
             # Preserve existing CPU/PD identities for a uniform model. Different
             # shapes in one role need separate storage, even with the same dtype.
             count = sum(role == specs[0].role for role, _ in groups)
-            resource_id = f"h{shape[0]}_d{shape[1]}" if count > 1 else None
+            resource_id = f"h{params.kv_heads}_d{params.head_dim}" if count > 1 else None
             manager.register_state(specs[0].role, state, resource_id=resource_id)
             for spec in specs:
                 self.resources[spec.key] = (spec, state)
@@ -72,19 +81,21 @@ class MLAStateStore:
             raise ValueError("MLA storage requires a plain latent format")
         groups, self.resources = defaultdict(list), {}
         for spec in declarations:
-            if spec.retention != "history" or len(spec.shape) != 2:
+            if spec.retention != "history" or type(spec.params) is not MLAKVStateSpec:
                 raise ValueError("MLA requires full-history latent and rotary dimensions")
             if spec.key in self.resources:
                 raise ValueError(f"duplicate resource: {spec.key}")
             self.resources[spec.key] = None
-            groups[spec.role, spec.shape].append(spec)
-        for (role, shape), specs in groups.items():
+            groups[spec.role, spec.params].append(spec)
+        for (role, params), specs in groups.items():
             state = create_mla_state(
-                MLAConfig(tuple(s.consumers for s in specs), sum(shape), format.dtype, *format.shard),
+                MLAConfig(
+                    tuple(s.consumers for s in specs), params.latent_dim + params.rope_dim, format.dtype, *format.shard
+                ),
                 page_size=format.page_size,
                 device="meta",
             )
-            resource_id = "_".join(map(str, shape)) if sum(r == role for r, _ in groups) > 1 else None
+            resource_id = f"{params.latent_dim}_{params.rope_dim}" if sum(r == role for r, _ in groups) > 1 else None
             manager.register_state(role, state, resource_id=resource_id)
             for spec in specs:
                 self.resources[spec.key] = (spec, state)
@@ -113,12 +124,16 @@ class PackedMLAStateStore:
             raise ValueError("packed MLA requires an explicit latent and indexer format")
         groups, self.resources = defaultdict(list), {}
         for spec in declarations:
-            if spec.retention != "history" or len(spec.shape) != (2 if pooled else 3) or spec.key in self.resources:
+            if (
+                spec.retention != "history"
+                or not isinstance(spec.params, PooledKVStateSpec if pooled else SparseMLAKVStateSpec)
+                or spec.key in self.resources
+            ):
                 raise ValueError("packed MLA requires exclusive latent, rotary and indexer declarations")
             self.resources[spec.key] = None
-            groups[spec.role, spec.shape].append(spec)
-        for (role, shape), specs in groups.items():
-            latent, rope, indexer = (shape[0], 0, shape[1]) if pooled else shape
+            groups[spec.role, spec.params].append(spec)
+        for (role, params), specs in groups.items():
+            latent, rope, indexer = params.latent_dim, 0 if pooled else params.rope_dim, params.index_dim
             state = create_packed_mla_state(
                 PackedMLALogicalConfig(
                     tuple(s.consumers for s in specs),
@@ -131,7 +146,11 @@ class PackedMLAStateStore:
                 page_size=format.page_size,
                 device="meta",
             )
-            resource_id = "_".join(map(str, shape)) if sum(r == role for r, _ in groups) > 1 else None
+            resource_id = (
+                (f"{latent}_{indexer}" if pooled else f"{latent}_{rope}_{indexer}")
+                if sum(r == role for r, _ in groups) > 1
+                else None
+            )
             manager.register_state(role, state, resource_id=resource_id)
             for spec in specs:
                 self.resources[spec.key] = (spec, state)
@@ -159,18 +178,27 @@ class ConvSSMStateStore:
             raise ValueError("unsupported recurrent candidate storage")
         groups, self.resources = defaultdict(list), {}
         for spec in declarations:
-            if spec.retention != "recurrent" or len(spec.shape) != 5 or spec.consumers != (spec.producer,):
+            if (
+                spec.retention != "recurrent"
+                or not isinstance(spec.params, ConvSSMStateSpec)
+                or spec.consumers != (spec.producer,)
+            ):
                 raise ValueError("Conv/SSM storage requires an exclusive recurrent state for each producer")
             if spec.key in self.resources:
                 raise ValueError(f"duplicate resource: {spec.key}")
             self.resources[spec.key] = None
-            groups[spec.role, spec.shape].append(spec)
-        for (role, shape), specs in groups.items():
+            groups[spec.role, spec.params].append(spec)
+        for (role, params), specs in groups.items():
             state = create_state(
                 ConvSSMStateConfig(
                     tuple(s.producer for s in specs),
-                    *shape,
-                    *format.field_dtypes[:2],
+                    global_k_heads=params.key_heads,
+                    global_v_heads=params.value_heads,
+                    key_dim=params.key_dim,
+                    value_dim=params.value_dim,
+                    conv_width=params.conv_history_length,
+                    conv_dtype=format.field_dtypes[0],
+                    ssm_dtype=format.field_dtypes[1],
                     tp_rank=format.shard[0],
                     tp_world_size=format.shard[1],
                 ),
@@ -178,7 +206,12 @@ class ConvSSMStateStore:
                 mtp_step=format.candidate_slots - 1,
                 device=device,
             )
-            resource_id = "_".join(map(str, shape)) if sum(r == role for r, _ in groups) > 1 else None
+            resource_id = (
+                f"{params.key_heads}_{params.value_heads}_{params.key_dim}_"
+                f"{params.value_dim}_{params.conv_history_length}"
+                if sum(r == role for r, _ in groups) > 1
+                else None
+            )
             manager.register_state(role, state, resource_id=resource_id)
             for spec in specs:
                 self.resources[spec.key] = (spec, state)
@@ -207,17 +240,23 @@ class IndexerWindowStateStore:
             raise ValueError("indexer window requires a separate candidate/gate tail format")
         groups, self.resources = defaultdict(list), {}
         for spec in declarations:
-            if spec.retention != "window" or len(spec.shape) != 3 or spec.consumers != (spec.producer,):
+            if (
+                spec.retention != "window"
+                or not isinstance(spec.params, IndexerWindowStateSpec)
+                or spec.consumers != (spec.producer,)
+            ):
                 raise ValueError("indexer window must have an exclusive producer and explicit window/stride/dimension")
             if spec.key in self.resources:
                 raise ValueError(f"duplicate resource: {spec.key}")
             self.resources[spec.key] = None
-            groups[spec.role, spec.shape].append(spec)
-        for (role, shape), specs in groups.items():
+            groups[spec.role, spec.params].append(spec)
+        for (role, params), specs in groups.items():
             state = create_window_compressor_state(
                 WindowCompressorStateConfig(
                     tuple(s.producer for s in specs),
-                    *shape,
+                    window_size=params.window,
+                    compress_stride=params.stride,
+                    candidate_dim=params.index_dim,
                     target="indexer",
                     dtype=format.dtype,
                     tp_rank=format.shard[0],

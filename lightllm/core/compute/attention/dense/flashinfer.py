@@ -1,13 +1,22 @@
 """FlashInfer's batch planning is explicit and separate from bound kernel execution."""
 
-from dataclasses import dataclass, replace
+from lightllm.core.compute.attention.workspace import lane_workspace
+
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+from lightllm.core.compute.attention.batch import AttentionBatch
+
+if TYPE_CHECKING:
+    from flashinfer import BatchPrefillWithPagedKVCacheWrapper, BatchDecodeWithPagedKVCacheWrapper, replace
 from importlib.util import find_spec
 
 import torch
 
 from lightllm.core.compute.attention.dense.inputs import query_tensor
 
-from lightllm.core.compute.attention.dense.backend import BoundAttention, group_verify_batch
+from lightllm.core.compute.attention.dense.backend import BoundDenseAttention
+from lightllm.core.compute.attention.batch import group_verify_batch
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 
@@ -17,12 +26,12 @@ INT_WORKSPACE_BYTES = 8 * 1024 ** 2
 
 @dataclass
 class FlashInferBatchMetadata:
-    owner: object
-    batch: object
+    owner: "BoundFlashInferAttention"
+    batch: AttentionBatch
     indptr: torch.Tensor
     indices: torch.Tensor
     last_page_len: torch.Tensor
-    wrapper: object
+    wrapper: "BatchPrefillWithPagedKVCacheWrapper | BatchDecodeWithPagedKVCacheWrapper"
 
     def plan(self):
         owner, spec = self.owner, self.owner.spec
@@ -61,13 +70,13 @@ class FlashInferBatchMetadata:
         self.plan()
 
 
-class BoundFlashInferAttention(BoundAttention):
+class BoundFlashInferAttention(BoundDenseAttention):
     @property
     def metadata_key(self):
         return self.name, self.spec, self.view.format
 
     def __init__(self, offer, state_view, static_params, workspace):
-        super().__init__(offer, state_view, static_params, workspace)
+        super().__init__(offer, state_view, static_params, workspace, implementation="flashinfer")
         self.scales = (None, None)
         if state_view.format.encoding == "fp8_per_tensor":
             self.page_size = 1
@@ -83,7 +92,7 @@ class BoundFlashInferAttention(BoundAttention):
             raise ValueError("batch exceeds the planned attention capacity")
         if self.phase == "verify":
             batch = group_verify_batch(batch, self.limits.max_verify_tokens)
-        scratch = self._lane_workspace(batch.microbatch_index)
+        scratch = lane_workspace(self.workspace, self.limits, batch.microbatch_index)
         float_workspace = scratch[:FLOAT_WORKSPACE_BYTES]
         int_workspace = scratch[FLOAT_WORKSPACE_BYTES : FLOAT_WORKSPACE_BYTES + INT_WORKSPACE_BYTES]
         batch = replace(batch, cu_q=batch.cu_q.int(), cu_k=batch.cu_k.int())
@@ -140,6 +149,7 @@ class BoundFlashInferAttention(BoundAttention):
 
 
 class FlashInferAttentionBackend:
+    supports_auxiliary_states = False
     implementation = "flashinfer"
 
     def __init__(self, phase):
@@ -147,7 +157,7 @@ class FlashInferAttentionBackend:
             raise ValueError("FlashInfer Dense supports prefill, decode and verify")
         self.phase, self.name = phase, f"flashinfer.{phase}"
 
-    def probe(self, attention_spec, format_spec, device_caps, limits):
+    def probe(self, attention_spec, format_spec, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(attention_spec, DenseAttentionSpec):
             return ProbeResult(reason="requires Dense attention semantics")
         if attention_spec.attention_sink:
@@ -197,7 +207,7 @@ class FlashInferAttentionBackend:
             )
         )
 
-    def bind(self, offer, state_view, static_params, workspace):
+    def bind(self, offer, state_view, static_params, workspace, *, auxiliary_views=None):
         if offer.backend != self.name or offer.phase != self.phase or offer.format != state_view.format:
             raise ValueError("offer does not match the backend and state view")
         k, v = state_view.fields[:2]

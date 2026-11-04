@@ -73,7 +73,7 @@ def test_state_factory_binds_resources_and_preserves_lane_and_model_fields(monke
         True,
         True,
         groups.__getitem__,
-        execution_runner=execution,
+        attention_metadata=execution,
         prefill_states=factories if prefill else (),
         decode_states=factories if not prefill else (),
         select_indices=lambda value: indices,
@@ -83,7 +83,7 @@ def test_state_factory_binds_resources_and_preserves_lane_and_model_fields(monke
     assert state.mtp_draft_input_hiddens is batch.mtp_draft_input_hiddens
     assert state.multimodal_params is batch.multimodal_params
     assert state.att_state_role == "draft1" and state.is_draft_model and state.return_all_prompt_logics
-    assert state.execution_runner is execution and state.att_state_manager is allocator
+    assert state.attention_metadata is execution and state.att_state_manager is allocator
     assert state.dist_group is groups[1] and state.microbatch_index == 1
     assert state.mem_index is indices
     assert len(created) == (2 if legacy else 0)

@@ -15,7 +15,7 @@ def test_graph_module_can_be_imported_before_the_model(module):
         [
             sys.executable,
             "-c",
-            f"import lightllm.common.execution.{module}; from lightllm.common.basemodel import TpPartBaseModel",
+            f"import lightllm.core.runner.{module}; from lightllm.common.basemodel import TpPartBaseModel",
         ],
         capture_output=True,
         text=True,

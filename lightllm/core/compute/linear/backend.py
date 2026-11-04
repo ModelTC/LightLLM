@@ -1,5 +1,8 @@
 """Linear compute binds native weights independently of checkpoint loading."""
 
+from dataclasses import dataclass
+from functools import partial
+from typing import Callable
 from importlib import import_module
 from importlib.util import find_spec
 
@@ -8,21 +11,28 @@ import torch
 from lightllm.core.contracts.provider import LinearOffer, ProbeResult
 
 
+@dataclass(frozen=True)
+class LinearConfig:
+    encoding: str
+    execute: Callable
+    activation_group_size: int | None = None
+    output_block_size: int = 1
+    allocates_output: bool = False
+    per_output_scale: bool = False
+    min_capability: tuple[int, int] = (8, 9)
+    alignment: int = 1
+    dependency: str | None = None
+
+
 class BoundLinear:
-    def __init__(self, offer, weight, scale, bias, allocate):
+    def __init__(self, offer, weight, scale, bias, allocate, config):
         self.name, self.spec, self.format = offer.backend, offer.spec, offer.format
         self.weight, self.scale, self.bias = weight, scale, bias
         self.allocate = allocate
         self.matrix = weight if self.spec.batches is not None else weight.t()
-        self.allocates_output = self.name == "sgl.linear.fp8_tensor"
-        self._execute = {
-            "torch.linear": self._plain,
-            "triton.linear.fp8_tensor": self._fp8_tensor,
-            "sgl.linear.fp8_tensor": self._fp8_sgl,
-            "triton.linear.fp8_channel_g64": self._fp8_group,
-            "triton.linear.fp8_channel_g128": self._fp8_group,
-            "triton.linear.fp8_block128": self._fp8_block,
-        }[self.name]
+        self.config = config
+        self.allocates_output = config.allocates_output
+        self._execute = partial(config.execute, self)
 
     def run(self, input_tensor, out=None, use_custom_tensor_mananger=True):
         spec, x = self.spec, input_tensor
@@ -41,7 +51,7 @@ class BoundLinear:
         if (
             out is not None
             and out.dtype != x.dtype
-            and (self.name != "torch.linear" or self.bias is not None or spec.batches is not None)
+            and (self.config.encoding != "plain" or self.bias is not None or spec.batches is not None)
         ):
             raise ValueError("this linear implementation requires output and input dtypes to match")
         if x.numel() == 0:
@@ -87,7 +97,7 @@ class BoundLinear:
             scaled_mm_act_per_group_w_perchannel,
         )
 
-        group = 64 if self.name.endswith("g64") else 128
+        group = self.config.activation_group_size
         q, scale = self._quantize(x, allocate, group)
         return scaled_mm_act_per_group_w_perchannel(q, self.matrix, scale, self.scale, group, out)
 
@@ -103,26 +113,48 @@ class BoundLinear:
 
 
 class LinearBackend:
-    encodings = {
-        "torch.linear": "plain",
-        "triton.linear.fp8_tensor": "fp8_per_tensor",
-        "sgl.linear.fp8_tensor": "fp8_per_tensor",
-        "triton.linear.fp8_channel_g64": "fp8_per_channel",
-        "triton.linear.fp8_channel_g128": "fp8_per_channel",
-        "triton.linear.fp8_block128": "fp8_block128",
+    implementations = {
+        "torch.linear": LinearConfig("plain", BoundLinear._plain),
+        "triton.linear.fp8_tensor": LinearConfig("fp8_per_tensor", BoundLinear._fp8_tensor),
+        "sgl.linear.fp8_tensor": LinearConfig(
+            "fp8_per_tensor",
+            BoundLinear._fp8_sgl,
+            allocates_output=True,
+            per_output_scale=True,
+            min_capability=(9, 0),
+            alignment=16,
+            dependency="sgl_kernel",
+        ),
+        "triton.linear.fp8_channel_g64": LinearConfig(
+            "fp8_per_channel",
+            BoundLinear._fp8_group,
+            activation_group_size=64,
+            per_output_scale=True,
+        ),
+        "triton.linear.fp8_channel_g128": LinearConfig(
+            "fp8_per_channel",
+            BoundLinear._fp8_group,
+            activation_group_size=128,
+            per_output_scale=True,
+        ),
+        "triton.linear.fp8_block128": LinearConfig(
+            "fp8_block128",
+            BoundLinear._fp8_block,
+            activation_group_size=128,
+            output_block_size=128,
+        ),
     }
 
     def __init__(self, name):
-        if name not in self.encodings:
-            raise ValueError(f"unknown linear implementation: {name}")
         self.name = name
+        self.config = self.implementations[name]
 
     def probe(self, spec, fmt, caps):
-        quantized = self.name != "torch.linear"
+        quantized = self.config.encoding != "plain"
         layout = "batch_input_output" if spec.batches is not None else "output_input"
         fields = ("weight", "scale") if quantized else ("weight",)
         if (
-            fmt.encoding != self.encodings[self.name]
+            fmt.encoding != self.config.encoding
             or fmt.layout != layout
             or fmt.fields != fields
             or fmt.version != 1
@@ -135,17 +167,17 @@ class LinearBackend:
         if quantized:
             if spec.batches is not None or not caps.is_nvidia or spec.dtype == torch.float32:
                 return ProbeResult(reason="FP8 linear requires CUDA FP16/BF16 matrices")
-            if caps.capability is None or caps.capability < (8, 9):
+            if caps.capability is None or caps.capability < self.config.min_capability:
                 return ProbeResult(reason="FP8 linear requires SM89 or newer")
             if fmt.scale_dtype != torch.float32:
                 return ProbeResult(reason="FP8 linear requires FP32 scales")
-            group = 64 if self.name.endswith("g64") else 128
-            if ("channel" in self.name or "block128" in self.name) and spec.in_features % group:
+            group = self.config.activation_group_size
+            if group is not None and spec.in_features % group:
                 return ProbeResult(reason="linear input dimension must contain complete quantization groups")
-            if "block128" in self.name and spec.out_features % 128:
+            if spec.out_features % self.config.output_block_size:
                 return ProbeResult(reason="block128 weight storage requires complete output blocks")
-            if self.name.startswith("sgl."):
-                if caps.capability < (9, 0) or spec.in_features % 16 or spec.out_features % 16:
+            if self.config.dependency is not None:
+                if spec.in_features % self.config.alignment or spec.out_features % self.config.alignment:
                     return ProbeResult(reason="SGL FP8 linear requires Hopper and dimensions aligned to 16")
                 if find_spec("sgl_kernel") is None:
                     return ProbeResult(reason="SGL linear requires sgl_kernel")
@@ -161,14 +193,14 @@ class LinearBackend:
         if offer.backend != self.name or weight.shape != shape or weight.dtype != fmt.dtype:
             raise ValueError("linear weight view does not match its selected offer")
         if bias is not None and (
-            self.name != "torch.linear"
+            self.config.encoding != "plain"
             or spec.batches is not None
             or bias.shape != (spec.out_features,)
             or bias.dtype != spec.dtype
             or bias.device != weight.device
         ):
             raise ValueError("linear bias is incompatible with its selected implementation")
-        if self.name == "torch.linear":
+        if self.config.encoding == "plain":
             if scale is not None:
                 raise ValueError("plain linear cannot consume quantization scales")
         else:
@@ -177,10 +209,10 @@ class LinearBackend:
             expected = (spec.out_features // 128, spec.in_features // 128)
             if fmt.encoding == "fp8_block128":
                 valid = scale.shape == expected
-            elif fmt.encoding == "fp8_per_channel" or self.name.startswith("sgl."):
+            elif self.config.per_output_scale:
                 valid = scale.shape == (spec.out_features,)
             else:
                 valid = scale.numel() == 1
             if not valid or not weight.is_contiguous() or not scale.is_contiguous():
                 raise ValueError("FP8 weight or scale layout does not match its declared format")
-        return BoundLinear(offer, weight, scale, bias, allocate)
+        return BoundLinear(offer, weight, scale, bias, allocate, self.config)

@@ -1,3 +1,4 @@
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Literal
@@ -28,14 +29,13 @@ class GatedDeltaNetSpec:
         return self.conv_channels + self.v_heads * self.value_dim + 2 * self.v_heads
 
     def validate_state(self, request):
-        shape, spec = request.state.shape, request.spec
-
         tp = request.format.shard[1]
-
-        expected = (spec.k_heads, spec.v_heads, spec.key_dim, spec.value_dim, spec.conv_size - 1)
-
-        if len(shape) != 5 or (shape[0] // tp, shape[1] // tp, *shape[2:]) != expected:
-            raise ValueError(f"layer {request.layer_id}: recurrent state shape disagrees with semantics")
-
-        if getattr(request.params, "spec", request.spec) != request.spec:
-            raise ValueError("static recurrent parameters differ from the probed semantics")
+        expected = ConvSSMStateSpec(
+            key_heads=self.k_heads * tp,
+            value_heads=self.v_heads * tp,
+            key_dim=self.key_dim,
+            value_dim=self.value_dim,
+            conv_history_length=self.conv_size - 1,
+        )
+        if request.state.params != expected or request.params.spec != self:
+            raise ValueError("GDN state or static parameters disagree with attention semantics")

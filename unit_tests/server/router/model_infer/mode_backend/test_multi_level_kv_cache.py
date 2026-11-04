@@ -1,4 +1,4 @@
-from lightllm.common.transfer import CopyOperation, CopyPlan, Transfer
+from lightllm.core.transfer import CopyOperation, CopyPlan, Transfer
 from unit_tests.common.transfer.helpers import Runtime
 from types import SimpleNamespace
 from collections import deque

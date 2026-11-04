@@ -1,5 +1,9 @@
 """Small real-kernel checks; no checkpoint, service or distributed group required."""
 
+from lightllm.models.base.attention_batch import attention_batch
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
+
+
 from types import SimpleNamespace
 
 import pytest
@@ -49,10 +53,12 @@ def test_bound_attention_matches_sdpa_and_graph(phase, implementation, monkeypat
     batch.microbatch_index = 0
     layer._post_cache_kv(kv, batch, None)
     batch.is_prefill = phase == "prefill"
-    batch.execution_metadata = model.execution_runner.prepare_batch(batch)
+    batch.execution_metadata = model.attention_execution.metadata.prepare_batch(
+        attention_batch(batch), phase="prefill" if batch.is_prefill else model.attention_execution.metadata.decode_phase
+    )
     q = torch.randn(5 if phase == "prefill" else 2, 4, 64, device="cuda", dtype=torch.float16)
     bound = getattr(layer, f"bound_{phase}_attention")
-    metadata = bound.prepare_batch(batch)
+    metadata = batch.execution_metadata[bound.metadata_key]
     output = bound.run(q, metadata)
     expected = []
     for row, start, length in [(0, 0, 3), (1, 3, 2)]:
@@ -88,24 +94,22 @@ def test_bound_attention_matches_sdpa_and_graph(phase, implementation, monkeypat
 @pytest.mark.parametrize("q_heads", [2, 8])
 @pytest.mark.parametrize("phase", ["prefill", "decode", "verify"])
 def test_paged_long_sequences_and_concurrent_lanes(implementation, dtype, q_heads, phase):
-    from lightllm.common.execution import (
-        DenseAttentionSpec,
-        DeviceCaps,
-        ExecutionLimits,
-        FormatSpec,
-        Planner,
-        StateSpec,
-        StateView,
-    )
+    from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+    from lightllm.core.contracts.device import DeviceCaps
+    from lightllm.core.contracts.device import ExecutionLimits
+    from lightllm.core.contracts.state import FormatSpec
+    from lightllm.core.planner.planner import Planner
+    from lightllm.core.contracts.state import StateSpec
+    from lightllm.core.contracts.state import StateView
     from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
     from lightllm.core.compute.attention.dense.flashinfer import FlashInferAttentionBackend
-    from lightllm.common.execution.runner import attention_batch
+    from lightllm.models.base.attention_batch import attention_batch
 
     torch.manual_seed(29)
     spec = DenseAttentionSpec(q_heads, 2, 64, dtype=dtype)
     format = FormatSpec("plain", dtype, "token_head_dim", ("k", "v"), 4)
     k, v = [torch.randn(2304, 2, 64, dtype=dtype, device="cuda") for _ in range(2)]
-    view = StateView(StateSpec("main", "kv", 0, (0,), (2, 64)), format, (k, v))
+    view = StateView(StateSpec("main", "kv", 0, (0,), DenseKVStateSpec(kv_heads=2, head_dim=64)), format, (k, v))
     limits = ExecutionLimits((512 if implementation == "flashinfer" else 8) * 1024 * 1024, 3, 768, 2)
     backend = (
         FlashInferAttentionBackend(phase)

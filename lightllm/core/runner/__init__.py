@@ -1,3 +1,3 @@
-from .attention import Runner
+from .attention import AttentionMetadataRunner
 
-__all__ = ["Runner"]
+__all__ = ["AttentionMetadataRunner"]

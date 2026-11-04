@@ -1,12 +1,18 @@
 """Model declarations contain semantics, not allocated storage or backend objects."""
 
+from lightllm.core.contracts.model import ModelWeights
+from lightllm.core.contracts.model import ModelRecipe
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
+
+
 from copy import deepcopy
 from typing import Any, Protocol
 
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
 from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
-from lightllm.core.contracts.state import StateSpec
+from lightllm.core.contracts.state import StateSpec, LayerStates
 from lightllm.core.compute.moe.spec import MoeSpec
 
 
@@ -27,30 +33,41 @@ class RecipeModelAdapter:
     def state_specs(self) -> tuple[StateSpec, ...]:
         return self._states
 
-    def build_weights(self, quant_config):
+    def attention_states(self) -> dict[int, LayerStates]:
+        inputs = {}
+        for state in self._states:
+            for consumer in state.consumers:
+                if consumer in inputs:
+                    raise ValueError("models with multiple state inputs must declare their roles explicitly")
+                inputs[consumer] = LayerStates(state)
+        return inputs
+
+    def attention_params(self, weights, device):
+        return {i: self.layer_attention_params(spec, weights[i], device) for i, spec in self._attention.items()}
+
+    def build_weights(self, quant_config) -> ModelWeights:
         """Weight classes own checkpoint names, TP mapping, quantization and tied weights."""
         pre_post = self.pre_and_post_weight_class(self.dtype, network_config=self.config)
         layers = [
             self.transformer_weight_class(i, self.dtype, network_config=self.config, quant_cfg=quant_config)
             for i in self.layer_ids
         ]
-        return pre_post, layers
+        return ModelWeights(pre_post, tuple(layers))
 
-    def build_recipe(self):
-        """Keep model-specific projection, normalization, RoPE and residual code executable."""
+    def build_recipe(self) -> ModelRecipe:
         pre = self.pre_layer_infer_class(network_config=self.config)
         post = self.post_layer_infer_class(network_config=self.config)
         layers = [self.transformer_layer_infer_class(i, network_config=self.config) for i in self.layer_ids]
         for layer in layers:
             self.validate_layer(layer)
-        return pre, post, layers
+        return ModelRecipe(pre, post, tuple(layers))
 
     def load_weights(self, weights, directory, weight_dict=None):
         from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 
         if weight_dict is not None and not isinstance(weight_dict, dict):
             raise TypeError("weight_dict must be a dict or None")
-        pre_post, layers = weights
+        pre_post, layers = weights.pre_post, weights.layers
         layers = list({id(layer): layer for layer in layers}.values())
         load_hf_weights(
             data_type=self.dtype,
@@ -109,10 +126,15 @@ class DenseModelAdapter(RecipeModelAdapter):
                 f"kv.{layer}",
                 layer,
                 (layer,),
-                (kv_heads, spec.head_dim),
+                DenseKVStateSpec(kv_heads=kv_heads, head_dim=spec.head_dim),
             )
             for layer, spec in self._attention.items()
         )
+
+    def layer_attention_params(self, spec, weight, device):
+        from lightllm.models.base.attention_params import dense_params
+
+        return dense_params(spec, weight, device)
 
     def validate_layer(self, layer):
         spec = self._attention[layer.layer_num_]
@@ -158,11 +180,24 @@ class GDNModelAdapter(DenseModelAdapter):
                     f"gdn.{state.producer}",
                     state.producer,
                     state.consumers,
-                    (kh, vh, spec.key_dim, spec.value_dim, spec.conv_size - 1),
+                    ConvSSMStateSpec(
+                        key_heads=kh,
+                        value_heads=vh,
+                        key_dim=spec.key_dim,
+                        value_dim=spec.value_dim,
+                        conv_history_length=spec.conv_size - 1,
+                    ),
                     "recurrent",
                 )
             states.append(state)
         self._states = tuple(states)
+
+    def layer_attention_params(self, spec, weight, device):
+        if isinstance(spec, GatedDeltaNetSpec):
+            from lightllm.models.base.attention_params import gdn_params
+
+            return gdn_params(spec, weight, device)
+        return super().layer_attention_params(spec, weight, device)
 
 
 def grouped_moe_specs(config, dtype, *, limit=None, clamp_up_add_one=True, layer_ids=None, group_score_topk=1):

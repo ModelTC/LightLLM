@@ -1,5 +1,8 @@
 """Sparse MLA and its FP8 indexer using bound packed State views."""
 
+from typing import Callable
+from lightllm.core.compute.attention.batch import AttentionBatch
+
 from dataclasses import dataclass
 from importlib import import_module
 from importlib.util import find_spec
@@ -7,7 +10,7 @@ import inspect
 
 import torch
 
-from lightllm.core.compute.attention.dense.backend import BoundAttention
+from lightllm.core.compute.attention.workspace import lane_workspace
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
 
@@ -19,11 +22,7 @@ def indexer_capacity(limits):
 @dataclass(frozen=True)
 class SparseMLAStaticParams:
     spec: SparseMLAAttentionSpec
-    alloc_tensor: object
-
-    @classmethod
-    def from_weights(cls, spec, weight, *, device):
-        return cls(spec, device.allocate_tensor)
+    alloc_tensor: Callable
 
 
 @dataclass
@@ -39,7 +38,7 @@ class SparseMLAInputs:
 
 @dataclass
 class SparseMLAMetadata:
-    batch: object
+    batch: AttentionBatch
     ks: torch.Tensor
     ke: torch.Tensor
     lengths: torch.Tensor
@@ -60,13 +59,13 @@ class SparseMLAMetadata:
                 target.copy_(source, non_blocking=True)
 
 
-class BoundSparseMLA(BoundAttention):
+class BoundSparseMLA:
     flash_mla = None
     requires_dynamic_prefill = False
 
-    def __init__(self, offer, view, params, workspace):
+    def __init__(self, offer, view, params, workspace, *, implementation):
         self.name, self.phase = offer.backend, offer.phase
-        self.implementation = self.name.split(".")[0]
+        self.implementation = implementation
         self.spec, self.view = params.spec, view
         self.alloc_tensor = params.alloc_tensor
         self.workspace, self.limits = workspace, offer.execution_limits
@@ -108,7 +107,7 @@ class BoundSparseMLA(BoundAttention):
         if count is None or count <= 0:
             raise ValueError("sparse prefill requires the query token count")
         size = indexer_capacity(self.limits)
-        ragged = self._lane_workspace(batch.microbatch_index)[: size * 4].view(torch.int32)
+        ragged = lane_workspace(self.workspace, self.limits, batch.microbatch_index)[: size * 4].view(torch.int32)
         tensors = [torch.empty(count, dtype=torch.int32, device=self.cache.device) for _ in range(5)]
         prepare_sparse_metadata[(batch.batch_size,)](
             batch.req_to_tokens,
@@ -312,13 +311,15 @@ class BoundSparseMLA(BoundAttention):
 
 
 class SparseMLAAttentionBackend:
+    supports_auxiliary_states = False
+
     def __init__(self, implementation, phase):
         if implementation not in ("triton", "flashmla_sparse") or phase not in ("prefill", "decode"):
             raise ValueError("unsupported sparse MLA implementation or phase")
         self.implementation, self.phase = implementation, phase
         self.name = f"{implementation}.sparse_mla.{phase}"
 
-    def probe(self, attention_spec, format_spec, device_caps, limits):
+    def probe(self, attention_spec, format_spec, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(attention_spec, SparseMLAAttentionSpec):
             return ProbeResult(reason="requires sparse MLA semantics")
         spec, fmt = attention_spec, format_spec
@@ -378,7 +379,7 @@ class SparseMLAAttentionBackend:
             )
         )
 
-    def bind(self, offer, state_view, static_params, workspace):
+    def bind(self, offer, state_view, static_params, workspace, *, auxiliary_views=None):
         if offer.backend != self.name or offer.phase != self.phase or offer.format != state_view.format:
             raise ValueError("offer does not match sparse MLA binding")
         kv, indexer = state_view.fields
@@ -402,7 +403,4 @@ class SparseMLAAttentionBackend:
             or not workspace.is_contiguous()
         ):
             raise ValueError("sparse MLA workspace does not satisfy the selected offer")
-        return BoundSparseMLA(offer, state_view, static_params, workspace)
-
-
-from lightllm.core.formats.kv.packed_mla import PackedMLAKVWriter
+        return BoundSparseMLA(offer, state_view, static_params, workspace, implementation=self.implementation)

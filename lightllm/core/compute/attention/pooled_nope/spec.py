@@ -1,3 +1,4 @@
+from lightllm.core.formats.kv.spec import PooledKVStateSpec, IndexerWindowStateSpec
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Literal
@@ -23,7 +24,7 @@ class PooledNoPEAttentionSpec:
             raise ValueError("NoPE score scale must be finite and positive")
 
     def validate_state(self, request):
-        if request.state.shape != (request.spec.latent_dim, request.spec.index_dim):
+        if request.state.params != PooledKVStateSpec(latent_dim=self.latent_dim, index_dim=self.index_dim):
             raise ValueError("pooled latent state shape disagrees with attention semantics")
 
         if request.params.spec != request.spec:
@@ -37,6 +38,7 @@ class PooledNoPEAttentionSpec:
         if (
             name != "indexer_tail"
             or tail.retention != "window"
-            or tail.shape != (request.spec.pool_size, request.spec.pool_size, request.spec.index_dim)
+            or tail.params
+            != IndexerWindowStateSpec(window=self.pool_size, stride=self.pool_size, index_dim=self.index_dim)
         ):
             raise ValueError("indexer tail window disagrees with pooled semantics")

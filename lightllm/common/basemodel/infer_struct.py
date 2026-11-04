@@ -18,7 +18,7 @@ class InferStateInfo:
     """
 
     def __init__(self):
-        self.execution_runner = None
+        self.attention_metadata = None
         self.prefill_program = None
         self.execution_metadata = {}
         # prefill 和 decode 使用的 att 状态对象
@@ -120,8 +120,11 @@ class InferStateInfo:
         return prepare_sequence_metadata
 
     def init_att_state(self):
-        if self.execution_runner is not None:
-            self.execution_metadata = self.execution_runner.prepare_batch(self)
+        if self.attention_metadata is not None:
+            from lightllm.models.base.attention_batch import attention_batch
+
+            phase = "prefill" if self.is_prefill else self.attention_metadata.decode_phase
+            self.execution_metadata = self.attention_metadata.prepare_batch(attention_batch(self), phase=phase)
             return
         if self.is_prefill:
             if self.prefill_att_state is not None:

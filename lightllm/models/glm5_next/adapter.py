@@ -1,3 +1,6 @@
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.core.formats.kv.spec import IndexerWindowStateSpec
+from lightllm.core.formats.kv.spec import PooledKVStateSpec
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.glm5_next.layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
@@ -6,7 +9,7 @@ from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm
 from lightllm.models.base.adapter import RecipeModelAdapter
 from lightllm.core.compute.attention.kda.spec import KimiDeltaAttentionSpec
 from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
-from lightllm.core.contracts.state import StateSpec
+from lightllm.core.contracts.state import StateSpec, LayerStates
 from copy import deepcopy
 
 
@@ -37,7 +40,7 @@ class Glm5NextModelAdapter(RecipeModelAdapter):
         self.layer_ids = tuple(range(depth)) if layer_ids is None else tuple(layer_ids)
         if len(self.layer_ids) != depth or len(set(self.layer_ids)) != depth or min(self.layer_ids) < 0:
             raise ValueError("GLM execution layer IDs must uniquely describe every model layer")
-        self._attention, states = {}, []
+        self._attention, self._state_inputs, states = {}, {}, []
         for i, kind in zip(self.layer_ids, kinds, strict=True):
             if kind == "linear_attention":
                 spec = KimiDeltaAttentionSpec(
@@ -47,8 +50,16 @@ class Glm5NextModelAdapter(RecipeModelAdapter):
                     dtype,
                     linear.get("gate_lower_bound", -5.0),
                 )
-                shape = (linear["num_heads"], linear["num_heads"], spec.head_dim, spec.head_dim, spec.conv_size - 1)
-                states.append(StateSpec(role, f"kda.{i}", i, (i,), shape, "recurrent"))
+                params = ConvSSMStateSpec(
+                    key_heads=linear["num_heads"],
+                    value_heads=linear["num_heads"],
+                    key_dim=spec.head_dim,
+                    value_dim=spec.head_dim,
+                    conv_history_length=spec.conv_size - 1,
+                )
+                states.append(StateSpec(role, f"kda.{i}", i, (i,), params, "recurrent"))
+                self._state_inputs[i] = LayerStates(states[-1])
+
             elif kind == "deepseek_sparse_attention":
                 spec = PooledNoPEAttentionSpec(
                     config["num_attention_heads"] // tp_world_size,
@@ -60,12 +71,26 @@ class Glm5NextModelAdapter(RecipeModelAdapter):
                     config["index_kpool"],
                     dtype,
                 )
-                states.append(StateSpec(role, f"pooled_kv.{i}", i, (i,), (spec.latent_dim, spec.index_dim)))
                 states.append(
                     StateSpec(
-                        role, f"indexer_tail.{i}", i, (i,), (spec.pool_size, spec.pool_size, spec.index_dim), "window"
+                        role,
+                        f"pooled_kv.{i}",
+                        i,
+                        (i,),
+                        PooledKVStateSpec(latent_dim=spec.latent_dim, index_dim=spec.index_dim),
                     )
                 )
+                states.append(
+                    StateSpec(
+                        role,
+                        f"indexer_tail.{i}",
+                        i,
+                        (i,),
+                        IndexerWindowStateSpec(window=spec.pool_size, stride=spec.pool_size, index_dim=spec.index_dim),
+                        "window",
+                    )
+                )
+                self._state_inputs[i] = LayerStates(states[-2], (("indexer_tail", states[-1]),))
             else:
                 raise ValueError(f"unsupported GLM attention semantics: {kind}")
             self._attention[i] = spec
@@ -81,3 +106,13 @@ class Glm5NextModelAdapter(RecipeModelAdapter):
             actual, expected = (layer.tp_q_head_num_, layer.kv_lora_rank), (spec.q_heads, spec.latent_dim)
         if actual != expected:
             raise ValueError("GLM recipe dimensions differ from the declared semantics")
+
+    def attention_states(self):
+        return self._state_inputs.copy()
+
+    def layer_attention_params(self, spec, weight, device):
+        from lightllm.models.base.attention_params import kda_params, pooled_nope_params
+
+        if isinstance(spec, KimiDeltaAttentionSpec):
+            return kda_params(spec, weight, device)
+        return pooled_nope_params(spec, weight, device)

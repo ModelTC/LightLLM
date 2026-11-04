@@ -5,7 +5,10 @@ from typing import Callable
 
 import torch
 
-from lightllm.core.compute.attention.dense.backend import BoundAttention
+from dataclasses import replace
+from lightllm.core.compute.attention.batch import group_verify_batch
+from lightllm.core.compute.attention.paged_metadata import prepare_page_table
+from lightllm.core.compute.attention.workspace import lane_workspace
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
 
@@ -20,21 +23,21 @@ class MLAStaticParams:
     alloc_tensor: Callable
     expand_kv: Callable
 
-    @classmethod
-    def from_weights(cls, spec, weight, *, device):
-        return cls(spec, device.allocate_tensor, weight.cc_kv_b_proj_.mm)
 
-
-class BoundMLAAttention(BoundAttention):
-    def __init__(self, offer, view, params, workspace):
+class BoundMLAAttention:
+    def __init__(self, offer, view, params, workspace, *, implementation):
         self.name, self.phase = offer.backend, offer.phase
-        self.implementation = self.name.split(".")[0]
+        self.implementation = implementation
         self.spec, self.latent = params.spec, view.fields[0]
         self.alloc_tensor, self.expand_kv = params.alloc_tensor, params.expand_kv
         self.limits, self.workspace = offer.execution_limits, workspace
         self.transfer_requires_compute_sync = offer.transfer_requires_compute_sync
         # Inference uses one-token pages, independent of allocator page geometry.
         self.page_size = 1
+
+    @property
+    def metadata_key(self):
+        return self.name
 
     def create_metadata(self, batch):
         if self.phase != "prefill" and batch.max_q_len != 1:
@@ -44,7 +47,15 @@ class BoundMLAAttention(BoundAttention):
             or not 0 < batch.total_kv_tokens <= self.limits.max_batch_size * self.limits.max_seq_len
         ):
             raise ValueError("MLA prefill requires the total number of KV tokens")
-        return super().create_metadata(batch)
+        if batch.batch_size > self.limits.max_batch_size or batch.max_kv_len > self.limits.max_seq_len:
+            raise ValueError("batch exceeds the planned attention capacity")
+        scratch = lane_workspace(self.workspace, self.limits, batch.microbatch_index)
+        if self.phase == "verify" and self.implementation == "fa3":
+            batch = group_verify_batch(batch, self.limits.max_verify_tokens)
+        metadata = replace(batch, cu_q=batch.cu_q.int(), cu_k=batch.cu_k.int())
+        if self.implementation == "fa3":
+            prepare_page_table(metadata, batch, self.limits, scratch, self.page_size)
+        return metadata
 
     def run(self, inputs, metadata, out=None):
         if self.phase == "prefill":
@@ -157,7 +168,7 @@ class BoundMLAAttention(BoundAttention):
             flash_decode_stage2,
         )
 
-        scratch = self._lane_workspace(batch.microbatch_index)
+        scratch = lane_workspace(self.workspace, self.limits, batch.microbatch_index)
         index_bytes = (self.limits.max_batch_size + 1) * 8
         indices = scratch[:index_bytes].view(torch.int64)
         block_seq, starts = indices[:1], indices[1 : batch.batch_size + 1]
@@ -223,6 +234,7 @@ class BoundMLAAttention(BoundAttention):
 
 
 class MLAAttentionBackend:
+    supports_auxiliary_states = False
     bound_class = BoundMLAAttention
 
     def __init__(self, implementation, phase):
@@ -231,7 +243,7 @@ class MLAAttentionBackend:
         self.implementation, self.phase = implementation, phase
         self.name = f"{implementation}.mla.{phase}"
 
-    def probe(self, attention_spec, format_spec, device_caps, limits):
+    def probe(self, attention_spec, format_spec, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(attention_spec, MLAAttentionSpec):
             return ProbeResult(reason="requires MLA semantics")
         spec, fmt = attention_spec, format_spec
@@ -284,7 +296,7 @@ class MLAAttentionBackend:
             )
         )
 
-    def bind(self, offer, state_view, static_params, workspace):
+    def bind(self, offer, state_view, static_params, workspace, *, auxiliary_views=None):
         if offer.backend != self.name or offer.phase != self.phase or offer.format != state_view.format:
             raise ValueError("offer does not match MLA binding")
         (latent,) = state_view.fields
@@ -303,7 +315,4 @@ class MLAAttentionBackend:
             or not workspace.is_contiguous()
         ):
             raise ValueError("MLA workspace does not satisfy the selected offer")
-        return self.bound_class(offer, state_view, static_params, workspace)
-
-
-from lightllm.core.formats.kv.mla import MLAKVWriter
+        return self.bound_class(offer, state_view, static_params, workspace, implementation=self.implementation)

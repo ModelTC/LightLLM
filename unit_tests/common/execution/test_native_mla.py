@@ -1,13 +1,21 @@
 """Latent MLA binding, explicit TP replicas and independent attention references."""
 
+from lightllm.core.formats.kv.spec import MLAKVStateSpec
+
+
 from dataclasses import replace
 
 import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution import DeviceCaps, ExecutionLimits, FormatSpec, MLAAttentionSpec, Planner, StateSpec
-from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata
+from lightllm.core.contracts.device import DeviceCaps
+from lightllm.core.contracts.device import ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec
+from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
+from lightllm.core.planner.planner import Planner
+from lightllm.core.contracts.state import StateSpec
+from lightllm.core.compute.attention.batch import AttentionBatch
 from lightllm.core.compute.attention.mla.backend import MLAAttentionBackend, MLAStaticParams
 from lightllm.core.formats.kv.mla import MLAKVWriter
 from lightllm.core.compute.attention.mla.flashinfer import FlashInferMLABackend
@@ -30,7 +38,7 @@ def test_mla_declarations_and_tp_replicas():
     adapter = Deepseek2ModelAdapter(config, role="main", dtype=torch.bfloat16, tp_world_size=4)
     spec = adapter.attention_specs()[0]
     assert spec.q_heads == 4 and spec.scale > 192 ** -0.5
-    assert all(s.shape == (512, 64) for s in adapter.state_specs())
+    assert all(s.params == MLAKVStateSpec(latent_dim=512, rope_dim=64) for s in adapter.state_specs())
     fmt = FormatSpec("plain", torch.bfloat16, "token_latent", ("latent",), 4, (2, 4))
     manager = AttentionStateManager(2)
     store = MLAStateStore(adapter.state_specs(), fmt, manager)
@@ -56,7 +64,7 @@ def test_flashinfer_mla_plans_have_separate_semantic_reservations(monkeypatch):
             i,
             "decode",
             spec,
-            StateSpec("main", f"mla.{i}", i, (i,), (512, 64)),
+            StateSpec("main", f"mla.{i}", i, (i,), MLAKVStateSpec(latent_dim=512, rope_dim=64)),
             fmt,
             MLAStaticParams(spec, torch.empty, None),
         )
@@ -74,13 +82,15 @@ def test_flashinfer_mla_plans_have_separate_semantic_reservations(monkeypatch):
 @pytest.mark.parametrize("latent_dim", [256, 512])
 @torch.no_grad()
 def test_mla_verify_dynamic_groups_and_graph(implementation, dtype, latent_dim):
-    from lightllm.common.execution import StateView
+    from lightllm.core.contracts.state import StateView
 
     torch.manual_seed(83)
     spec = MLAAttentionSpec(5, latent_dim, 128, 64, 128, dtype, 0.07)
     fmt = FormatSpec("plain", dtype, "token_latent", ("latent",), 4)
     cache = torch.randn(192, 1, latent_dim + 64, dtype=dtype, device="cuda") * 0.2
-    view = StateView(StateSpec("main", "mla.0", 0, (0,), (latent_dim, 64)), fmt, (cache,))
+    view = StateView(
+        StateSpec("main", "mla.0", 0, (0,), MLAKVStateSpec(latent_dim=latent_dim, rope_dim=64)), fmt, (cache,)
+    )
     backend = (
         FlashInferMLABackend("verify")
         if implementation == "flashinfer"
@@ -103,7 +113,7 @@ def test_mla_verify_dynamic_groups_and_graph(implementation, dtype, latent_dim):
 
     def metadata(rows, lengths, lane):
         return bound.create_metadata(
-            DenseBatchMetadata(
+            AttentionBatch(
                 6,
                 1,
                 max(lengths),
@@ -161,7 +171,7 @@ def test_mla_prefix_graph_and_concurrent_lanes(
     torch.manual_seed(63)
     spec = MLAAttentionSpec(q_heads, latent_dim, 128, 64, 128, dtype, 0.07)
     fmt = FormatSpec("plain", dtype, "token_latent", ("latent",), 4)
-    declaration = StateSpec("main", "mla.0", 0, (0,), (latent_dim, 64))
+    declaration = StateSpec("main", "mla.0", 0, (0,), MLAKVStateSpec(latent_dim=latent_dim, rope_dim=64))
     manager = AttentionStateManager(3)
     store = MLAStateStore((declaration,), fmt, manager)
     manager.finish_state_registration()
@@ -210,7 +220,7 @@ def test_mla_prefix_graph_and_concurrent_lanes(
 
     def metadata(lengths, rows, lane):
         qcu = tensor([0] + query_lengths).cumsum(0).int()
-        batch = DenseBatchMetadata(
+        batch = AttentionBatch(
             3,
             max(query_lengths),
             max(lengths),
@@ -299,7 +309,7 @@ def test_flashinfer_mla_long_multi_cluster_graph(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @torch.no_grad()
 def test_flashinfer_mla_distinct_layers_preserve_plans():
-    from lightllm.common.execution import StateView
+    from lightllm.core.contracts.state import StateView
 
     torch.manual_seed(67)
     dtype = torch.bfloat16
@@ -309,7 +319,9 @@ def test_flashinfer_mla_distinct_layers_preserve_plans():
     allocate = lambda shape, dtype: torch.empty(shape, dtype=dtype, device="cuda")
     requests = []
     for i, spec in enumerate(specs):
-        view = StateView(StateSpec("main", f"mla.{i}", i, (i,), (512, 64)), fmt, (cache.clone(),))
+        view = StateView(
+            StateSpec("main", f"mla.{i}", i, (i,), MLAKVStateSpec(latent_dim=512, rope_dim=64)), fmt, (cache.clone(),)
+        )
         requests.append((i, "decode", spec, view, MLAStaticParams(spec, allocate, None), "auto"))
     planner = Planner(
         (FlashInferMLABackend("decode"),), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024 ** 2, 2, 64)
@@ -317,7 +329,7 @@ def test_flashinfer_mla_distinct_layers_preserve_plans():
     bound = [b.execution for b in planner.bind(requests, lambda n: allocate((n,), torch.uint8)).bindings]
     tensor = lambda values: torch.tensor(values, dtype=torch.int32, device="cuda")
     table = torch.arange(128, dtype=torch.int32, device="cuda").view(2, 64)
-    batch = DenseBatchMetadata(
+    batch = AttentionBatch(
         2,
         1,
         31,

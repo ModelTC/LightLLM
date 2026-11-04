@@ -1,5 +1,10 @@
 """Pooled history/window contracts and independent KDA/NoPE numerical checks."""
 
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.core.formats.kv.spec import IndexerWindowStateSpec
+from lightllm.core.formats.kv.spec import PooledKVStateSpec
+
+
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -8,7 +13,7 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata
+from lightllm.core.compute.attention.batch import AttentionBatch
 from lightllm.core.compute.attention.kda.backend import KDAInputs, KDAStaticParams, KimiDeltaAttentionBackend
 from lightllm.core.planner.planner import AttentionRequest, Planner
 from lightllm.core.compute.attention.pooled_nope.backend import (
@@ -26,8 +31,10 @@ from lightllm.core.storage.attention import ConvSSMStateStore, IndexerWindowStat
 
 def pooled_contracts(quantized=False, dtype=torch.bfloat16):
     spec = PooledNoPEAttentionSpec(4, 512, 128 ** -0.5, 4, 128, 256, 4, dtype)
-    state = StateSpec("main", "pooled_kv.3", 3, (3,), (512, 128))
-    tail = StateSpec("main", "indexer_tail.3", 3, (3,), (4, 4, 128), "window")
+    state = StateSpec("main", "pooled_kv.3", 3, (3,), PooledKVStateSpec(latent_dim=512, index_dim=128))
+    tail = StateSpec(
+        "main", "indexer_tail.3", 3, (3,), IndexerWindowStateSpec(window=4, stride=4, index_dim=128), "window"
+    )
     stored = torch.uint8 if quantized else dtype
     fmt = FormatSpec(
         "fp8_group64_e8m0" if quantized else "plain",
@@ -49,7 +56,7 @@ def make_batch(lengths, rows, ready, table=None, lane=0, device="cuda"):
     for q, k in zip(lengths, seq):
         cuq.append(cuq[-1] + q)
         cuk.append(cuk[-1] + k)
-    return DenseBatchMetadata(
+    return AttentionBatch(
         len(rows),
         max(lengths),
         max(seq),
@@ -111,7 +118,14 @@ def test_kda_fresh_prefix_checkpoint_and_graph(dtype, monkeypatch):
     dim = 128
     torch.manual_seed(117)
     spec = KimiDeltaAttentionSpec(2, dim, 4, dtype)
-    state = StateSpec("main", "kda.0", 0, (0,), (2, 2, dim, dim, 3), "recurrent")
+    state = StateSpec(
+        "main",
+        "kda.0",
+        0,
+        (0,),
+        ConvSSMStateSpec(key_heads=2, value_heads=2, key_dim=dim, value_dim=dim, conv_history_length=3),
+        "recurrent",
+    )
     fmt = FormatSpec("conv_ssm", dtype, "request_conv_ssm", ("conv", "ssm"), 1, field_dtypes=(dtype, torch.float32))
     manager = AttentionStateManager(4)
     store = ConvSSMStateStore((state,), fmt, manager, 4, "cuda", kind="kda")
@@ -726,9 +740,9 @@ def test_glm_model_binding_prefix_and_graph(
 
         def snapshot():
             views = {
-                **native.execution_runner.store.views(),
-                **native.execution_runner.recurrent_store.views(),
-                **native.execution_runner.window_store.views(),
+                **native.attention_execution.resources.stores.get("history").views(),
+                **native.attention_execution.resources.stores.get("recurrent").views(),
+                **native.attention_execution.resources.stores.get("window").views(),
             }
             return [(t, t.clone()) for view in views.values() for t in view.fields]
 

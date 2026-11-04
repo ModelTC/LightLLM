@@ -1,3 +1,4 @@
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
 from dataclasses import replace
 
 import pytest
@@ -125,7 +126,9 @@ def exercise_glm_drafts(main, drafts, references, monkeypatch):
     from unit_tests.common.execution.test_model_cuda import prepare_model_batch
 
     histories = [torch.randn(64, 128, dtype=main.data_type, device="cuda") * 0.3 for _ in range(2)]
-    main_fields = [t for view in main.execution_runner.store.views().values() for t in view.fields]
+    main_fields = [
+        t for view in main.attention_execution.resources.stores.get("history").views().values() for t in view.fields
+    ]
     for value in main_fields:
         value.zero_()
 
@@ -151,7 +154,10 @@ def exercise_glm_drafts(main, drafts, references, monkeypatch):
         )
         fields = [
             t
-            for store in (draft.execution_runner.store, draft.execution_runner.window_store)
+            for store in (
+                draft.attention_execution.resources.stores.get("history"),
+                draft.attention_execution.resources.stores.get("window"),
+            )
             for view in store.views().values()
             for t in view.fields
         ]
@@ -212,7 +218,14 @@ def exercise_glm_drafts(main, drafts, references, monkeypatch):
 
 def kda_contracts(dtype, ssm_dtype, slots=3):
     spec = KimiDeltaAttentionSpec(2, 128, 4, dtype)
-    state = StateSpec("main", "kda.0", 0, (0,), (2, 2, 128, 128, 3), "recurrent")
+    state = StateSpec(
+        "main",
+        "kda.0",
+        0,
+        (0,),
+        ConvSSMStateSpec(key_heads=2, value_heads=2, key_dim=128, value_dim=128, conv_history_length=3),
+        "recurrent",
+    )
     fmt = FormatSpec(
         "conv_ssm",
         dtype,

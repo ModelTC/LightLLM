@@ -1,3 +1,4 @@
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -7,7 +8,9 @@ import torch
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend
 from lightllm.models.base.adapter import DenseModelAdapter
-from lightllm.core.build import PreparedExecution as Runner
+from lightllm.core.build import BuildConfig, prepare
+from lightllm.core.registry import default_providers
+from lightllm.models.base.build import bind_attention_execution
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
 from lightllm.core.contracts.state import FormatSpec
@@ -120,23 +123,27 @@ def test_writer_only_prefill_has_no_attention_binding_or_metadata():
         allocate_workspace=lambda size: torch.empty(size, dtype=torch.uint8),
         allocate_tensor=torch.empty,
     )
-    runner = Runner(
-        adapter,
-        [layer],
-        manager,
-        runtime,
-        ExecutionLimits(1024 * 1024, 2, 16),
-        FormatSpec("plain", torch.float16, "token_head_dim", ("k", "v"), 1),
-        {"decode": "triton"},
+    prepared = prepare(
+        model_adapter=adapter,
+        providers=default_providers(),
+        device=runtime,
+        config=BuildConfig(
+            limits=ExecutionLimits(1024 * 1024, 2, 16),
+            formats={"history": FormatSpec("plain", torch.float16, "token_head_dim", ("k", "v"), 1)},
+            requested={"history": {"decode": "triton"}},
+            static_params=adapter.attention_params({3: None}, runtime),
+        ),
     )
+    resources = prepared.allocate(manager=manager, device=runtime)
     manager.finish_state_registration()
     state = manager.get_full_attention_states()[0]
     state.device = torch.device("cpu")
     state.allocate_storage(32)
-    plan = runner.bind([layer])
+    execution = bind_attention_execution(resources, [layer])
+    plan = execution.plan
     assert [(item.layer_id, item.phase) for item in plan.bindings] == [(3, "decode")]
     assert layer.bound_prefill_attention is None and layer.bound_kv_writer is not None
-    assert runner.prepare_batch(SimpleNamespace(is_prefill=True)) == {}
+    assert execution.metadata.prepare_batch(None, phase="prefill") == {}
 
 
 def test_noncausal_backend_support_is_selected_from_semantics():
@@ -400,15 +407,15 @@ def _check_block_checkpoint(model_class, block_size, monkeypatch, tmp_path, shar
         model.prefill_att_backend1 = model.decode_att_backend1 = None
         model._init_execution_plan()
         model._init_hidden_collector()
-        for view in model.execution_runner.store.views().values():
+        for view in model.attention_execution.resources.stores.get("history").views().values():
             for value in view.fields:
                 value.zero_()
     phase = "decode" if block_size == 1 else "verify"
     assert {item.phase for item in draft.execution_plan.bindings} == {phase}
     assert all(layer.bound_prefill_attention is None for layer in draft.layers_infer)
-    main_views = tuple(main.execution_runner.store.views().values())
+    main_views = tuple(main.attention_execution.resources.stores.get("history").views().values())
     main_snapshots = [(value, value.clone()) for view in main_views for value in view.fields]
-    draft_views = tuple(draft.execution_runner.store.views().values())
+    draft_views = tuple(draft.attention_execution.resources.stores.get("history").views().values())
     monkeypatch.setattr(manager, "get_state", lambda *a, **kw: pytest.fail("runtime manager lookup"))
     monkeypatch.setattr(NoQuantization, "apply", lambda *a, **kw: pytest.fail("legacy weight compute"))
     observed_hidden = []
@@ -647,7 +654,8 @@ def _check_block_checkpoint(model_class, block_size, monkeypatch, tmp_path, shar
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_fp8_noncausal_block_matches_decoded_reference_and_graph(per_head, static_q, dtype):
     import torch.nn.functional as F
-    from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata, DenseStaticParams
+    from lightllm.core.compute.attention.batch import AttentionBatch
+    from lightllm.core.compute.attention.dense.backend import DenseStaticParams
     from lightllm.core.planner.planner import Planner
     from lightllm.core.contracts.state import StateSpec
     from lightllm.core.storage.attention import DenseStateStore
@@ -657,7 +665,7 @@ def test_fp8_noncausal_block_matches_decoded_reference_and_graph(per_head, stati
 
     torch.manual_seed(80)
     spec = DenseAttentionSpec(8, 2, 64, dtype=dtype, causal=False)
-    declaration = StateSpec("draft0", "kv.0", 0, (0,), (2, 64))
+    declaration = StateSpec("draft0", "kv.0", 0, (0,), DenseKVStateSpec(kv_heads=2, head_dim=64))
     manager = AttentionStateManager(3)
     store = DenseStateStore((declaration,), fp8_format(per_head), manager)
     manager.finish_state_registration()
@@ -695,7 +703,7 @@ def test_fp8_noncausal_block_matches_decoded_reference_and_graph(per_head, stati
     def metadata():
         tensor = lambda values: torch.tensor(values, dtype=torch.int32, device="cuda")
         return bound.create_metadata(
-            DenseBatchMetadata(
+            AttentionBatch(
                 6,
                 1,
                 max(lengths),

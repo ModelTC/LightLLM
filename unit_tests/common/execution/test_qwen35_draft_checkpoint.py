@@ -120,7 +120,7 @@ def test_qwen35_draft_checkpoint_prefix_and_graph(backend, monkeypatch, moe=Fals
         model.prefill_att_backend1 = model.decode_att_backend1 = None
         model._init_execution_plan()
         model._init_hidden_collector()
-        for view in model.execution_runner.store.views().values():
+        for view in model.attention_execution.resources.stores.get("history").views().values():
             for tensor in view.fields:
                 tensor.zero_()
     monkeypatch.setattr(manager, "get_state", lambda *a, **k: pytest.fail("runtime manager lookup"))
@@ -199,7 +199,11 @@ def test_qwen35_draft_checkpoint_prefix_and_graph(backend, monkeypatch, moe=Fals
         assert torch.equal(output.logits.argmax(-1), target.argmax(-1))
 
     def snapshot():
-        return [(t, t.clone()) for view in draft.execution_runner.store.views().values() for t in view.fields]
+        return [
+            (t, t.clone())
+            for view in draft.attention_execution.resources.stores.get("history").views().values()
+            for t in view.fields
+        ]
 
     def restore(saved):
         for tensor, value in saved:
@@ -258,7 +262,7 @@ def test_qwen35_draft_checkpoint_prefix_and_graph(backend, monkeypatch, moe=Fals
         draft.batch_metadata(batch)
         batch.init_att_state()
         check(draft._token_forward(batch), expanded, requests)
-        for view in main.execution_runner.store.views().values():
+        for view in main.attention_execution.resources.stores.get("history").views().values():
             assert all(torch.count_nonzero(t).item() == 0 for t in view.fields)
     finally:
         torch.cuda.synchronize()

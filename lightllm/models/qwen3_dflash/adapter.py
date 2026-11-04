@@ -1,3 +1,4 @@
+from lightllm.core.contracts.model import ModelWeights
 from dataclasses import replace
 from lightllm.models.llama.adapter import LlamaModelAdapter
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
@@ -21,7 +22,7 @@ class Qwen3DFlashModelAdapter(LlamaModelAdapter):
         self._attention = {i: replace(spec, causal=False) for i, spec in self._attention.items()}
         self.main_weights = main_weights
 
-    def build_weights(self, quant_config):
+    def build_weights(self, quant_config) -> ModelWeights:
         pre_post = self.pre_and_post_weight_class(self.dtype, network_config=self.config, quant_cfg=quant_config)
         if self.share_main_weights:
             pre_post.wte_weight_ = self.main_weights.wte_weight_
@@ -30,4 +31,4 @@ class Qwen3DFlashModelAdapter(LlamaModelAdapter):
             self.transformer_weight_class(i, self.dtype, network_config=self.config, quant_cfg=quant_config)
             for i in range(len(self.layer_ids))
         ]
-        return pre_post, layers
+        return ModelWeights(pre_post, tuple(layers))

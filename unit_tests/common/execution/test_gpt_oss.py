@@ -1,3 +1,4 @@
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from concurrent.futures import ThreadPoolExecutor
 
@@ -181,7 +182,7 @@ def test_gpt_oss_all_experts_prefill_decode_prefix_and_graph(monkeypatch, tmp_pa
 def test_bound_sink_attention_matches_torch_and_updates_graph(fp8, phase, window):
     from types import SimpleNamespace
     from lightllm.core.planner.planner import Planner
-    from lightllm.common.execution.runner import attention_batch
+    from lightllm.models.base.attention_batch import attention_batch
     from lightllm.core.contracts.state import StateSpec, StateView
     from lightllm.core.compute.attention.dense.static_fp8 import StaticFP8AttentionBackend
 
@@ -203,7 +204,7 @@ def test_bound_sink_attention_matches_torch_and_updates_graph(fp8, phase, window
         fmt = FormatSpec("plain", spec.dtype, "token_head_dim", ("k", "v"), 1)
         reference_k, reference_v = [t.float() for t in tensors]
         backend = DenseAttentionBackend("fa3", phase)
-    view = StateView(StateSpec("main", "kv", 0, (0,), (2, 64)), fmt, fields)
+    view = StateView(StateSpec("main", "kv", 0, (0,), DenseKVStateSpec(kv_heads=2, head_dim=64)), fmt, fields)
     sinks = torch.tensor([-1, 0, 1, 2], device="cuda", dtype=torch.bfloat16)
     alloc = lambda shape, dtype: torch.empty(shape, dtype=dtype, device="cuda")
     bound = (

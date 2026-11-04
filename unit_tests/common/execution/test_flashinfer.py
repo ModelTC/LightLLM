@@ -1,9 +1,11 @@
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 
 import pytest
 import torch
 
-from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata, DenseStaticParams
+from lightllm.core.compute.attention.batch import AttentionBatch
+from lightllm.core.compute.attention.dense.backend import DenseStaticParams
 from lightllm.core.compute.attention.dense.flashinfer import FlashInferAttentionBackend
 from lightllm.core.planner.planner import AttentionRequest, Planner
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
@@ -16,7 +18,14 @@ def test_distinct_formats_require_separate_plan_reservations(monkeypatch):
     spec = DenseAttentionSpec(8, 2, 64, dtype=torch.float16)
     format = FormatSpec("plain", torch.float16, "token_head_dim", ("k", "v"), 1)
     requests = [
-        AttentionRequest(i, "decode", spec, StateSpec("main", f"kv.{i}", i, (i,), (2, 64)), fmt, None)
+        AttentionRequest(
+            i,
+            "decode",
+            spec,
+            StateSpec("main", f"kv.{i}", i, (i,), DenseKVStateSpec(kv_heads=2, head_dim=64)),
+            fmt,
+            DenseStaticParams(spec, torch.empty),
+        )
         for i, fmt in enumerate((format, replace(format, page_size=4)))
     ]
     planner = Planner(
@@ -47,7 +56,7 @@ def test_mixed_formats_keep_independent_plans_and_score_semantics(phase):
     scales = torch.tensor([0.015625, 0.0078125], dtype=torch.float32, device="cuda")
     encoded = tuple((t.float() / scale).clamp(-448, 448).to(fp8.dtype) for t, scale in zip((k, v), scales))
     views = [
-        StateView(StateSpec("main", f"kv.{i}", i, (i,), (2, 64)), fmt, fields)
+        StateView(StateSpec("main", f"kv.{i}", i, (i,), DenseKVStateSpec(kv_heads=2, head_dim=64)), fmt, fields)
         for i, (fmt, fields) in enumerate(((plain, (k, v)), (fp8, (*encoded, scales, None))))
     ]
     planner = Planner(
@@ -64,7 +73,7 @@ def test_mixed_formats_keep_independent_plans_and_score_semantics(phase):
     def prepare(lengths):
         seq = torch.tensor(lengths, device="cuda", dtype=torch.int32)
         cu_q = torch.arange(3, device="cuda", dtype=torch.int32) * q_len
-        batch = DenseBatchMetadata(
+        batch = AttentionBatch(
             2,
             q_len,
             max(lengths),

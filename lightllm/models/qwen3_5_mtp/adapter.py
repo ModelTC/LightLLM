@@ -1,3 +1,4 @@
+from lightllm.core.contracts.model import ModelWeights
 from lightllm.models.qwen3_5.adapter import Qwen35ModelAdapter
 from lightllm.models.base.adapter import DenseModelAdapter
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
@@ -18,10 +19,10 @@ class Qwen35MTPModelAdapter(DenseModelAdapter):
         self.checkpoint_layer_id = checkpoint_layer_id
         self.shared_weights = shared_weights
 
-    def build_weights(self, quant_config):
+    def build_weights(self, quant_config) -> ModelWeights:
         pre_post = self.pre_and_post_weight_class(self.dtype, network_config=self.config, quant_cfg=quant_config)
         pre_post.wte_weight_, pre_post.lm_head_weight_, pre_post.main_norm_weight_ = self.shared_weights
         weight = self.transformer_weight_class(
             self.checkpoint_layer_id, self.dtype, network_config=self.config, quant_cfg=quant_config
         )
-        return pre_post, [weight]
+        return ModelWeights(pre_post, (weight,))

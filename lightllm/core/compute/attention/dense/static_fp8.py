@@ -4,14 +4,14 @@ import torch
 
 from lightllm.core.compute.attention.dense.inputs import query_tensor
 
-from lightllm.core.compute.attention.dense.backend import BoundAttention
+from lightllm.core.compute.attention.dense.backend import BoundDenseAttention
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 
 
-class BoundStaticFP8Attention(BoundAttention):
+class BoundStaticFP8Attention(BoundDenseAttention):
     def __init__(self, offer, state_view, static_params, workspace):
-        super().__init__(offer, state_view, static_params, workspace)
+        super().__init__(offer, state_view, static_params, workspace, implementation="fa3")
         # FA3 FP8 uses single-token inference pages, independently of allocator pages.
         self.page_size = 1
         scales, self.q_scale = state_view.fields[2:]
@@ -61,6 +61,7 @@ class BoundStaticFP8Attention(BoundAttention):
 
 
 class StaticFP8AttentionBackend:
+    supports_auxiliary_states = False
     implementation = "fa3"
 
     def __init__(self, phase):
@@ -68,7 +69,7 @@ class StaticFP8AttentionBackend:
             raise ValueError("FP8 attention supports prefill and decode")
         self.phase, self.name = phase, f"fa3.fp8.{phase}"
 
-    def probe(self, attention_spec, format_spec, device_caps, limits):
+    def probe(self, attention_spec, format_spec, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(attention_spec, DenseAttentionSpec):
             return ProbeResult(reason="requires Dense attention semantics")
         if not device_caps.is_nvidia or device_caps.capability is None or device_caps.capability[0] != 9:
@@ -111,7 +112,7 @@ class StaticFP8AttentionBackend:
             )
         )
 
-    def bind(self, offer, state_view, static_params, workspace):
+    def bind(self, offer, state_view, static_params, workspace, *, auxiliary_views=None):
         if offer.backend != self.name or offer.phase != self.phase or offer.format != state_view.format:
             raise ValueError("offer does not match the backend and state view")
         k, v, scales, q_scale = state_view.fields
@@ -144,6 +145,3 @@ class StaticFP8AttentionBackend:
         ):
             raise ValueError("workspace does not satisfy the selected offer")
         return BoundStaticFP8Attention(offer, state_view, static_params, workspace)
-
-
-from lightllm.core.formats.kv.static_fp8 import StaticFP8KVWriter

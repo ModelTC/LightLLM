@@ -1,3 +1,5 @@
+from lightllm.core.contracts.model import ModelWeights
+from lightllm.core.contracts.model import ModelRecipe
 from copy import deepcopy
 from lightllm.models.glm5_next_mtp.layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
 from lightllm.models.glm5_next_mtp.layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerWeight
@@ -32,17 +34,17 @@ class Glm5NextMTPModelAdapter(Glm5NextModelAdapter):
         )
         return {self.layer_ids[0]: specs[self.checkpoint_layer_id]} if specs else {}
 
-    def build_weights(self, quant_config):
+    def build_weights(self, quant_config) -> ModelWeights:
         pre_post = self.pre_and_post_weight_class(self.dtype, self.config, quant_config)
         pre_post.wte_weight_, pre_post.lm_head_weight_, pre_post.main_norm_weight_ = self.shared_weights
         layer = self.transformer_weight_class(self.checkpoint_layer_id, self.dtype, self.config, quant_config)
-        return pre_post, [layer]
+        return ModelWeights(pre_post, (layer,))
 
-    def build_recipe(self):
+    def build_recipe(self) -> ModelRecipe:
         pre = self.pre_layer_infer_class(self.config)
         post = self.post_layer_infer_class(self.config)
         layer = self.transformer_layer_infer_class(self.checkpoint_layer_id, self.config)
         layer.layer_num_ = self.layer_ids[0]
         layer.indexer.layer_idx = layer.layer_num_
         self.validate_layer(layer)
-        return pre, post, [layer]
+        return ModelRecipe(pre, post, (layer,))

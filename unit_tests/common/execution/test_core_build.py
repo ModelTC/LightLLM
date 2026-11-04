@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 import ast
 import subprocess
 import sys
@@ -7,22 +9,40 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.core import BuildConfig, ProviderRegistry, AttentionProvider, StateProvider, build
+from lightllm.core import BuildConfig, ProviderRegistry, AttentionProvider, StateProvider, build, prepare
 from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
-from lightllm.core.contracts.state import FormatSpec, StateSpec, StateView
+from lightllm.core.contracts.state import FormatSpec, StateSpec, StateView, LayerStates
+
+
+@dataclass(frozen=True)
+class CounterState:
+    size: int = 1
+
+    def validate(self):
+        assert self.size > 0
+
+
+@dataclass(frozen=True)
+class CounterAttention:
+    def validate_state(self, request):
+        assert isinstance(request.state.params, CounterState)
 
 
 def _build_with_external_provider(retention):
     events = []
-    declaration = StateSpec("offline", "counter", 3, (3,), (1,), retention=retention)
+    declaration = StateSpec("offline", "counter", 3, (3,), CounterState(), retention=retention)
     format = FormatSpec("custom", torch.float32, "counter", ("value",), 1)
     layer = SimpleNamespace(layer_num_=3)
-    adapter = SimpleNamespace(attention_specs=lambda: {3: "add-state"}, state_specs=lambda: (declaration,))
+    adapter = SimpleNamespace(
+        attention_specs=lambda: {3: CounterAttention()},
+        state_specs=lambda: (declaration,),
+        attention_states=lambda: {3: LayerStates(declaration)},
+    )
 
     class Store:
         def __init__(self, declarations, format, manager, device, specs):
-            assert declarations == [declaration] and specs == {3: "add-state"}
+            assert declarations == (declaration,) and specs == {3: CounterAttention()}
             self.value = None
             events.append("declare")
 
@@ -31,17 +51,18 @@ def _build_with_external_provider(retention):
             return {declaration.key: StateView(declaration, format, (self.value,))}
 
     class Backend:
+        supports_auxiliary_states = False
         implementation = "external"
 
         def __init__(self, phase):
             self.phase = phase
             self.name = f"external.{phase}"
 
-        def probe(self, spec, format, device, limits):
-            assert spec == "add-state" and device.device_type == "cpu"
+        def probe(self, spec, format, device, limits, *, auxiliary_formats=None):
+            assert spec == CounterAttention() and device.device_type == "cpu"
             return ProbeResult((AttentionOffer(self.name, self.phase, format, 16, execution_limits=limits),))
 
-        def bind(self, offer, view, params, workspace):
+        def bind(self, offer, view, params, workspace, *, auxiliary_views=None):
             events.append("bind")
             assert len(workspace) == 16
             return SimpleNamespace(
@@ -56,38 +77,36 @@ def _build_with_external_provider(retention):
         events.append("workspace")
         return bytearray(size)
 
-    def allocate_storage(execution):
-        events.append("allocate")
-        execution.stores[retention].value = torch.tensor([4.0])
-
     providers = ProviderRegistry(
         (AttentionProvider(Backend),),
         (StateProvider("counter", retention, Store, lambda view: view),),
     )
-    engine = build(
+    prepared = prepare(
         model_adapter=adapter,
         providers=providers,
-        device=SimpleNamespace(caps=DeviceCaps("cpu"), allocate_workspace=allocate_workspace),
+        device=SimpleNamespace(caps=DeviceCaps("cpu")),
         config=BuildConfig(
-            [layer],
-            None,
-            ExecutionLimits(32),
-            format if retention == "history" else None,
-            {"prefill": "external", "decode": "external"} if retention == "history" else {},
-            recurrent_format=format if retention == "recurrent" else None,
-            recurrent_requested={"prefill": "external", "decode": "external"} if retention == "recurrent" else None,
-            static_params={3: None},
-            allocate_storage=allocate_storage,
+            limits=ExecutionLimits(32),
+            formats={retention: format},
+            requested={retention: {"prefill": "external", "decode": "external"}},
+            static_params={3: SimpleNamespace(spec=CounterAttention())},
         ),
     )
-    assert events == ["workspace", "workspace", "declare", "allocate", "bind", "bind"]
-    assert layer.bound_decode_attention.view.fields[0] is engine.stores[retention].value
-    assert layer.bound_kv_writer.fields[0] is engine.stores[retention].value
-    torch.testing.assert_close(layer.bound_decode_attention.run(torch.tensor([2.0])), torch.tensor([6.0]))
-    assert engine.runner.plan is engine.plan
-    assert set(engine.stores) == {retention}
+    assert events == []
+    resources = prepared.allocate(manager=None, device=SimpleNamespace(allocate_workspace=allocate_workspace))
+    assert events == ["workspace", "workspace", "declare"]
+    resources.stores[retention].value = torch.tensor([4.0])
+    engine = resources.bind()
+    execution = engine.plan.bindings[1].execution
+    assert not hasattr(layer, "bound_decode_attention")
+    assert execution.view.fields[0] is resources.stores[retention].value
+    assert engine.writers[declaration.key].fields[0] is resources.stores[retention].value
+    torch.testing.assert_close(execution.run(torch.tensor([2.0])), torch.tensor([6.0]))
+    assert engine.metadata.plan is engine.plan
+    assert set(resources.stores) == {retention}
+    assert events == ["workspace", "workspace", "declare", "bind", "bind"]
     with pytest.raises(RuntimeError, match="cannot be replaced"):
-        engine.bind()
+        resources.bind()
 
 
 def test_build_with_external_provider_and_native_state():
@@ -135,34 +154,25 @@ def test_core_dependencies_and_compatibility_direction():
             elif isinstance(node, ast.Import):
                 modules = [alias.name for alias in node.names]
             assert not any(
-                module.startswith(("lightllm.models", "lightllm.server", "lightllm.common.execution"))
+                module.startswith(
+                    (
+                        "lightllm.models",
+                        "lightllm.server",
+                        "lightllm.common.execution",
+                        "lightllm.common.basemodel.weight_binding",
+                    )
+                )
                 for module in modules
             ), path
-    for directory in (root / "common/execution", root / "common/transfer"):
-        for path in directory.glob("*.py"):
-            assert not any(
-                isinstance(node, (ast.ClassDef, ast.FunctionDef)) for node in ast.parse(path.read_text()).body
-            ), path
+    assert not list((root / "common/execution").glob("*.py"))
 
 
-def test_legacy_paths_share_implementation_objects():
-    from lightllm.common.execution.specs import DenseAttentionSpec as OldSpec
-    from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
-    from lightllm.common.execution.runner import Runner as OldRunner
-    from lightllm.core.build import PreparedExecution
-    from lightllm.common.execution.dense import DenseKVWriter as OldWriter
-    from lightllm.core.formats.kv.dense import DenseKVWriter
-    from lightllm.models.llama.model import LlamaModelAdapter as OldAdapter
-    from lightllm.models.llama.adapter import LlamaModelAdapter
+def test_existing_graph_paths_share_implementation_objects():
     from lightllm.common.basemodel.cuda_graph import CudaGraph as OldGraph
     from lightllm.core.runner.decode_graph import CudaGraph
     from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph as OldPrefillGraph
     from lightllm.core.runner.prefill_graph import PrefillCudaGraph
 
-    assert OldSpec is DenseAttentionSpec
-    assert OldRunner is PreparedExecution
-    assert OldWriter is DenseKVWriter
-    assert OldAdapter is LlamaModelAdapter
     assert OldGraph is CudaGraph
     assert OldPrefillGraph is PrefillCudaGraph
 
@@ -198,23 +208,24 @@ def test_production_state_preparation_uses_injected_registry_and_device(requeste
 
     args = add_cli_args(ArgumentParser()).parse_args(["--llm_decode_att_backend", requested])
     spec = DenseAttentionSpec(1, 1, 2, dtype=torch.float32)
-    state = StateSpec("main", "kv", 0, (0,), (1, 2))
+    state = StateSpec("main", "kv", 0, (0,), DenseKVStateSpec(kv_heads=1, head_dim=2))
     fmt = FormatSpec("custom", torch.float32, "token_head_dim", ("k", "v"), 1)
     events = []
 
     class Backend:
+        supports_auxiliary_states = False
         implementation = "foo"
 
         def __init__(self, phase):
             self.phase, self.name = phase, f"foo.{phase}"
 
-        def probe(self, attention, format, device, limits):
+        def probe(self, attention, format, device, limits, *, auxiliary_formats=None):
             assert attention == spec and format == fmt and device == DeviceCaps("cpu")
             events.append("probe")
             return ProbeResult((AttentionOffer(self.name, self.phase, format, 0, execution_limits=limits),))
 
-        def bind(self, offer, view, params, workspace):
-            assert params == (spec, "static")
+        def bind(self, offer, view, params, workspace, *, auxiliary_views=None):
+            assert params.spec == spec
             events.append("bind")
             return SimpleNamespace(
                 metadata_key=self.name,
@@ -225,7 +236,7 @@ def test_production_state_preparation_uses_injected_registry_and_device(requeste
 
     class Store:
         def __init__(self, declarations, format, manager, device, specs):
-            assert declarations == [state] and manager is model.att_state_manager and device is runtime
+            assert declarations == (state,) and manager is model.att_state_manager and device is runtime
             events.append("store")
             self.value = torch.tensor([3.0])
 
@@ -243,7 +254,6 @@ def test_production_state_preparation_uses_injected_registry_and_device(requeste
             *state_providers(),
             StateProvider("token_head_dim", "history", Store, lambda view: view, supports=lambda value: value == fmt),
         ),
-        static_params=lambda spec, device: (spec, "static"),
     )
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args, model.max_req_num, model.graph_max_batch_size, model.mem_fraction = args, 1, 2, 0.9
@@ -251,7 +261,11 @@ def test_production_state_preparation_uses_injected_registry_and_device(requeste
     model.tp_world_size_ = 1
     model.layers_infer, model.trans_layers_weight = [SimpleNamespace(layer_num_=0)], [object()]
     model.model_adapter = SimpleNamespace(
-        attention_phases=("decode",), attention_specs=lambda: {0: spec}, state_specs=lambda: (state,)
+        attention_phases=("decode",),
+        attention_specs=lambda: {0: spec},
+        state_specs=lambda: (state,),
+        attention_states=lambda: {0: LayerStates(state)},
+        attention_params=lambda weights, device: {0: SimpleNamespace(spec=spec)},
     )
     model.execution_providers, model.execution_device, model.execution_formats = registry, runtime, {"history": fmt}
     model.mtp_manager = SimpleNamespace(get_decode_tokens_per_request=lambda draft: 1)
@@ -262,10 +276,13 @@ def test_production_state_preparation_uses_injected_registry_and_device(requeste
         assert events == []
         return
     model.prepare_attention_states()
-    assert model.execution_runner.providers is registry
+    assert model.execution_providers is registry
     assert model.execution_device is runtime
-    model.execution_runner.bind()
-    assert model.layers_infer[0].bound_kv_writer.fields[0] is model.execution_runner.store.value
+    model._init_execution_plan()
+    assert (
+        model.layers_infer[0].bound_kv_writer.fields[0]
+        is model.attention_execution.resources.stores.get("history").value
+    )
     torch.testing.assert_close(
         model.layers_infer[0].bound_decode_attention.run(torch.tensor([2.0])), torch.tensor([5.0])
     )
@@ -284,7 +301,7 @@ def test_storage_fixture_patches_the_production_lookup():
     model.create_full_att_states = model.create_bounded_att_states = lambda **kwargs: ()
     model.torch_memory_saver = SimpleNamespace(region=lambda **kwargs: nullcontext())
     prepare_model_states(model)
-    assert model.execution_runner is None
+    assert model.attention_execution is None
 
 
 def test_native_weight_binding_uses_registered_compute_without_loader_objects():
@@ -317,13 +334,13 @@ def test_native_weight_binding_uses_registered_compute_without_loader_objects():
 def test_named_state_inputs_share_history_and_keep_private_windows():
     from lightllm.core.contracts.state import LayerStates
 
-    kv = StateSpec("main", "kv", 0, (0, 1), (1,))
-    index = StateSpec("main", "index", 0, (0, 1), (1,))
-    windows = tuple(StateSpec("main", f"window{i}", i, (i,), (1,), "window") for i in range(2))
+    kv = StateSpec("main", "kv", 0, (0, 1), CounterState())
+    index = StateSpec("main", "index", 0, (0, 1), CounterState())
+    windows = tuple(StateSpec("main", f"window{i}", i, (i,), CounterState(), "window") for i in range(2))
     declarations = (kv, index, *windows)
     inputs = {i: LayerStates(kv, (("index", index), ("window", windows[i]))) for i in range(2)}
     adapter = SimpleNamespace(
-        attention_specs=lambda: {0: "shared", 1: "shared"},
+        attention_specs=lambda: {0: CounterAttention(), 1: CounterAttention()},
         state_specs=lambda: declarations,
         attention_states=lambda: inputs,
     )
@@ -337,6 +354,7 @@ def test_named_state_inputs_share_history_and_keep_private_windows():
             return self.native
 
     class Backend:
+        implementation = "shared"
         name, phase, supports_auxiliary_states = "shared.decode", "decode", True
 
         def probe(self, spec, format, caps, limits, *, auxiliary_formats):
@@ -358,13 +376,10 @@ def test_named_state_inputs_share_history_and_keep_private_windows():
             providers=providers,
             device=SimpleNamespace(caps=DeviceCaps("cpu"), allocate_workspace=bytearray),
             config=BuildConfig(
-                layers=[SimpleNamespace(layer_num_=i) for i in range(2)],
-                manager=None,
                 limits=ExecutionLimits(0),
-                format=fmt,
-                requested={"decode": "auto"},
-                window_format=fmt,
-                static_params={0: None, 1: None},
+                formats={"history": fmt, "window": fmt},
+                requested={"history": {"decode": "auto"}, "window": {"decode": "auto"}},
+                static_params={i: SimpleNamespace(spec=CounterAttention()) for i in range(2)},
             ),
         )
 
@@ -381,6 +396,6 @@ def test_named_state_inputs_share_history_and_keep_private_windows():
     first, second = [b.execution for b in window_engine.plan.bindings]
     assert first.view.fields[0] is not second.view.fields[0]
     assert first.auxiliary["kv"].fields[0] is second.auxiliary["kv"].fields[0]
-    inputs[1] = LayerStates(kv, (("index", StateSpec("main", "missing", 1, (1,), (1,))),))
+    inputs[1] = LayerStates(kv, (("index", StateSpec("main", "missing", 1, (1,), CounterState())),))
     with pytest.raises(ValueError, match="undeclared state"):
         build_engine()

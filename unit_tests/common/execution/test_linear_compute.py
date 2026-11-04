@@ -1,5 +1,8 @@
 """Bound matrix execution, independent quantized references, and loading/TP separation."""
 
+from lightllm.common.basemodel.weight_binding import bind_linears
+
+
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -15,7 +18,7 @@ from lightllm.core.compute.linear.spec import LinearSpec
 
 def contracts(name, dtype=torch.bfloat16, batches=None):
     backend = LinearBackend(name)
-    encoding = backend.encodings[name]
+    encoding = backend.config.encoding
     quantized = encoding != "plain"
     spec = LinearSpec(256, 256, dtype, batches)
     fmt = FormatSpec(
@@ -178,11 +181,11 @@ def test_linear_planner_binds_loaded_tp_views_without_loader_calls(method, monke
     gate, up = (torch.randn(256, 128, dtype=torch.bfloat16) * 0.1 for _ in range(2))
     weight.load_hf_weights({"gate.weight": gate})
     with pytest.raises(ValueError, match="fully loaded"):
-        Planner.bind_linears((layer,), torch.empty)
+        bind_linears((layer,), torch.empty)
     weight.load_hf_weights({"up.weight": up})
     x = torch.randn(5, 128, dtype=torch.bfloat16, device="cuda") * 0.2
     expected = weight.mm(x, use_custom_tensor_mananger=False)
-    plan = Planner.bind_linears((layer,), torch.empty)
+    plan = bind_linears((layer,), torch.empty)
     assert len(plan.bindings) == 1 and not plan.legacy
     bound = plan.bindings[0][1]
     assert bound.weight.data_ptr() == weight.mm_param.weight.data_ptr()

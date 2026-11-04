@@ -1,13 +1,16 @@
 from dataclasses import dataclass
+from lightllm.core.contracts.device import DeviceRuntime
+from lightllm.core.contracts.state import FormatSpec
+from lightllm.core.registry import ProviderRegistry
 from importlib import import_module
 import os
 
 
 @dataclass
 class ExecutionContext:
-    device: object
-    providers: object
-    formats: dict | None = None
+    device: DeviceRuntime
+    providers: ProviderRegistry
+    formats: dict[str, FormatSpec] | None = None
     communication: object = None
 
 

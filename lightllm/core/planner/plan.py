@@ -1,20 +1,20 @@
 from dataclasses import dataclass
-from typing import Any
-from lightllm.core.contracts.provider import AttentionOffer
+from typing import Any, Hashable, Mapping
+from lightllm.core.contracts.provider import AttentionOffer, Phase
 from lightllm.core.contracts.state import StateSpec, FormatSpec
-from lightllm.core.compute.attention.backend import AttentionBackend
+from lightllm.core.compute.attention.backend import AttentionBackend, AttentionSpec, AttentionParams, BoundAttention
 
 
 @dataclass(frozen=True)
 class AttentionBinding:
     layer_id: int
-    phase: str
+    phase: Phase
     backend: str
-    execution: Any
+    execution: BoundAttention
 
 
 @dataclass(frozen=True)
-class ExecutionPlan:
+class BoundAttentionPlan:
     bindings: tuple[AttentionBinding, ...]
     workspace_bytes: int
 
@@ -34,11 +34,11 @@ class MoePlan:
 @dataclass(frozen=True)
 class AttentionRequest:
     layer_id: int
-    phase: str
-    spec: Any
-    state: Any
-    format: Any
-    params: Any
+    phase: Phase
+    spec: AttentionSpec
+    state: StateSpec
+    format: FormatSpec
+    params: AttentionParams
     requested: str = "auto"
     auxiliary_states: tuple[tuple[str, StateSpec, FormatSpec], ...] = ()
 
@@ -48,13 +48,13 @@ class SelectedAttention:
     request: AttentionRequest
     backend: AttentionBackend
     offer: AttentionOffer
-    workspace_key: Any
+    workspace_key: Hashable
 
 
 @dataclass(frozen=True)
-class PreparedPlan:
+class AttentionSelectionPlan:
     selections: tuple[SelectedAttention, ...]
-    workspace_sizes: dict
+    workspace_sizes: Mapping[Hashable, int]
 
     @property
     def workspace_bytes(self):
@@ -76,7 +76,8 @@ class PreparedPlan:
                 if native.state != state or native.format != format:
                     raise ValueError("allocated auxiliary state does not match the prepared plan")
                 auxiliary[name] = native
-            kwargs = {"auxiliary_views": auxiliary} if auxiliary else {}
-            execution = backend.bind(offer, view, request.params, workspaces.get(selection.workspace_key), **kwargs)
+            execution = backend.bind(
+                offer, view, request.params, workspaces.get(selection.workspace_key), auxiliary_views=auxiliary
+            )
             bindings.append(AttentionBinding(request.layer_id, request.phase, backend.name, execution))
-        return ExecutionPlan(tuple(bindings), self.workspace_bytes)
+        return BoundAttentionPlan(tuple(bindings), self.workspace_bytes)

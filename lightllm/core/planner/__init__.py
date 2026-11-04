@@ -2,10 +2,10 @@ from .planner import (
     AttentionBackend,
     AttentionBinding,
     AttentionRequest,
-    ExecutionPlan,
+    BoundAttentionPlan,
     LinearPlan,
     MoePlan,
     Planner,
-    PreparedPlan,
+    AttentionSelectionPlan,
     SelectedAttention,
 )

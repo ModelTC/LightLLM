@@ -1,3 +1,5 @@
+from lightllm.core.contracts.model import ModelWeights
+from lightllm.core.contracts.model import ModelRecipe
 from lightllm.models.deepseek2.adapter import Deepseek2ModelAdapter
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.deepseek_mtp.layer_weights.pre_and_post_layer_weight import Deepseek3MTPPreAndPostLayerWeight
@@ -27,16 +29,16 @@ class Deepseek3MTPModelAdapter(Deepseek2ModelAdapter):
             if checkpoint in specs
         }
 
-    def build_weights(self, quant_config):
+    def build_weights(self, quant_config) -> ModelWeights:
         pre_post = self.pre_and_post_weight_class(self.dtype, network_config=self.config, quant_cfg=quant_config)
         pre_post.wte_weight_, pre_post.lm_head_weight_ = self.shared_weights
         layers = [
             self.transformer_weight_class(i, self.dtype, network_config=self.config, quant_cfg=quant_config)
             for i in self.checkpoint_layer_ids
         ]
-        return pre_post, layers
+        return ModelWeights(pre_post, tuple(layers))
 
-    def build_recipe(self):
+    def build_recipe(self) -> ModelRecipe:
         pre = self.pre_layer_infer_class(network_config=self.config)
         post = self.post_layer_infer_class(network_config=self.config)
         layers = []
@@ -46,4 +48,4 @@ class Deepseek3MTPModelAdapter(Deepseek2ModelAdapter):
             layer.layer_num_ = layer_id
             self.validate_layer(layer)
             layers.append(layer)
-        return pre, post, layers
+        return ModelRecipe(pre, post, tuple(layers))

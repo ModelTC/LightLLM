@@ -259,7 +259,7 @@ class Qwen3NextTransformerLayerInfer(LlamaTransformerLayerInfer):
     def _gdn_attention(self, inputs, batch, weight, phase):
         bound = getattr(self, f"bound_{phase}_attention", None)
         if bound is not None:
-            return bound.run(inputs, bound.prepare_batch(batch))
+            return bound.run(inputs, batch.execution_metadata[bound.metadata_key])
         state = getattr(batch, f"{phase}_att_state1")
         return getattr(state, f"{phase}_att")(
             q=None,

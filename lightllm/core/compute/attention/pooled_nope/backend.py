@@ -1,5 +1,11 @@
 """Pooled NoPE attention consumes history and a separately retained indexer tail."""
 
+from lightllm.core.compute.attention.workspace import lane_workspace
+
+
+from typing import Callable
+from lightllm.core.compute.attention.batch import AttentionBatch
+
 from dataclasses import dataclass, replace
 from importlib import import_module
 from importlib.util import find_spec
@@ -53,12 +59,8 @@ def fp8_scratch_bytes(fields):
 @dataclass(frozen=True)
 class PooledNoPEStaticParams:
     spec: PooledNoPEAttentionSpec
-    alloc_tensor: object
+    alloc_tensor: Callable
     pool_position_bias: torch.Tensor
-
-    @classmethod
-    def from_weights(cls, spec, weight, *, device):
-        return cls(spec, device.allocate_tensor, weight.index_kpool_compress_ape.weight)
 
 
 @dataclass(frozen=True)
@@ -72,9 +74,9 @@ class PooledNoPEInputs:
 
 
 class BoundPooledNoPE(BoundSparseMLA):
-    def __init__(self, offer, view, params, workspace, tail):
+    def __init__(self, offer, view, params, workspace, tail, *, implementation):
         self.name, self.phase = offer.backend, offer.phase
-        self.implementation = self.name.split(".")[0]
+        self.implementation = implementation
         self.spec, self.view = params.spec, view
         self.alloc_tensor = params.alloc_tensor
         self.pool_position_bias = params.pool_position_bias
@@ -94,7 +96,7 @@ class BoundPooledNoPE(BoundSparseMLA):
                     (self.cache.shape[0], 1, 1, 584), (self.cache.stride(0), 584, 584, 1)
                 )
             for lane in range(self.limits.microbatch_count):
-                buffer = self._lane_workspace(lane)
+                buffer = lane_workspace(self.workspace, self.limits, lane)
                 offset, fields = indexer_capacity(self.limits) * 4, {}
                 for name, (shape, dtype) in fp8_scratch_fields(self.spec, self.phase, self.limits).items():
                     size = prod(shape) * dtype.itemsize
@@ -114,9 +116,9 @@ class BoundPooledNoPE(BoundSparseMLA):
                 raise ValueError("FP8 pooled prefill requires the bounded total KV token count")
             # HOLD spans leave gaps in CU_K. Gather may visit those rows even
             # though no attention index selects them; use the reserved HOLD row.
-            self._lane_workspace(batch.microbatch_index)[: batch.total_kv_tokens * 4].view(torch.int32).fill_(
-                self.cache.shape[0] - 1
-            )
+            lane_workspace(self.workspace, self.limits, batch.microbatch_index)[: batch.total_kv_tokens * 4].view(
+                torch.int32
+            ).fill_(self.cache.shape[0] - 1)
         # HOLD consumes no history even when the runner pads it with query tokens.
         safe_batch = replace(
             batch, seq_lengths=batch.seq_lengths.masked_fill(batch.req_indices == self.tail.shape[0] - 1, 0)
@@ -467,7 +469,4 @@ class PooledNoPEAttentionBackend:
             or not params.pool_position_bias.is_contiguous()
         ):
             raise ValueError("pooled NoPE views or static pool parameters disagree with semantics")
-        return BoundPooledNoPE(offer, view, params, workspace, tail)
-
-
-from lightllm.core.formats.kv.pooled_nope import PooledNoPEKVWriter
+        return BoundPooledNoPE(offer, view, params, workspace, tail, implementation=self.implementation)

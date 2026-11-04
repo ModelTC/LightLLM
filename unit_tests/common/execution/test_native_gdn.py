@@ -1,11 +1,14 @@
 """Native GDN contracts, independent recurrence and restored-state execution."""
 
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+
+
 import pytest
 import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata
+from lightllm.core.compute.attention.batch import AttentionBatch
 from lightllm.core.compute.attention.gdn.backend import GatedDeltaNetBackend, GDNStaticParams
 from lightllm.models.base.adapter import GDNModelAdapter
 from lightllm.core.planner.planner import Planner
@@ -33,7 +36,9 @@ def test_hybrid_declarations_follow_explicit_layers_and_tp():
     specs = adapter.attention_specs()
     assert isinstance(specs[1], GatedDeltaNetSpec)
     assert (specs[1].k_heads, specs[1].v_heads) == (2, 4)
-    assert adapter.state_specs()[1].shape == (4, 8, 64, 128, 3)
+    assert adapter.state_specs()[1].params == ConvSSMStateSpec(
+        key_heads=4, value_heads=8, key_dim=64, value_dim=128, conv_history_length=3
+    )
     assert [s.retention for s in adapter.state_specs()] == ["history", "recurrent", "history"]
     assert all(s.role == "draft0" for s in adapter.state_specs())
     config["layer_types"][1] = "full_attention"
@@ -107,7 +112,14 @@ def test_gdn_prefix_state_restore_and_graph(implementation, dim, dtype, ssm_dtyp
     torch.manual_seed(47)
     spec = GatedDeltaNetSpec(2, 4, dim, dim, 4, dtype)
     fmt = FormatSpec("conv_ssm", dtype, "request_conv_ssm", ("conv", "ssm"), 1, field_dtypes=(dtype, ssm_dtype))
-    declaration = StateSpec("main", "gdn.1", 1, (1,), (2, 4, dim, dim, 3), "recurrent")
+    declaration = StateSpec(
+        "main",
+        "gdn.1",
+        1,
+        (1,),
+        ConvSSMStateSpec(key_heads=2, value_heads=4, key_dim=dim, value_dim=dim, conv_history_length=3),
+        "recurrent",
+    )
     manager = AttentionStateManager(4)
     store = ConvSSMStateStore((declaration,), fmt, manager, 4, "cuda")
     view = store.views()[declaration.key]
@@ -139,7 +151,7 @@ def test_gdn_prefix_state_restore_and_graph(implementation, dim, dtype, ssm_dtyp
         for n in lengths:
             cu.append(cu[-1] + n)
         tensor = lambda v: torch.tensor(v, device="cuda", dtype=torch.int32)
-        batch = DenseBatchMetadata(
+        batch = AttentionBatch(
             len(rows),
             max(lengths),
             max(lengths),

@@ -120,7 +120,7 @@ def _check_dspark_checkpoint(dtype, monkeypatch, record_testsuite_property):
             model.prefill_att_backend1 = model.decode_att_backend1 = None
             model._init_execution_plan()
             model._init_hidden_collector()
-            for view in model.execution_runner.store.views().values():
+            for view in model.attention_execution.resources.stores.get("history").views().values():
                 for tensor in view.fields:
                     tensor.zero_()
         monkeypatch.setattr(manager, "get_state", lambda *a, **kw: pytest.fail("runtime manager lookup"))

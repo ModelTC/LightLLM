@@ -112,7 +112,7 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
-        if getattr(self, "execution_runner", None) is None:
+        if getattr(self, "attention_execution", None) is None:
             infer_state.att_state_manager = self.att_state_manager
             infer_state.att_state_role = self.att_state_role
             infer_state.is_draft_model = True

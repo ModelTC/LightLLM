@@ -1,3 +1,4 @@
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -8,7 +9,7 @@ import torch.nn.functional as F
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.core.compute.attention.dense.backend import DenseStaticParams
 from lightllm.core.planner.planner import Planner
-from lightllm.common.execution.runner import attention_batch
+from lightllm.models.base.attention_batch import attention_batch
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
 from lightllm.core.contracts.state import FormatSpec, StateSpec
@@ -67,7 +68,7 @@ def test_bound_fp8_matches_decoded_sdpa_and_replays_graph(
 
     torch.manual_seed(40)
     spec = DenseAttentionSpec(8, 2, 64, dtype=dtype, window=window)
-    state_spec = StateSpec("main", "kv.0", 0, (0,), (2, 64))
+    state_spec = StateSpec("main", "kv.0", 0, (0,), DenseKVStateSpec(kv_heads=2, head_dim=64))
     manager = AttentionStateManager(2)
     store = DenseStateStore((state_spec,), fp8_format(per_head, page), manager)
     manager.finish_state_registration()

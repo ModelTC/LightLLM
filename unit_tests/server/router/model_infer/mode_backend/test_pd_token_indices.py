@@ -1,6 +1,6 @@
 """PD 索引由普通 CPU Tensor 上传，使用实际拷贝流并跳过运行态任务。"""
 
-from lightllm.common.transfer import CopyPlan, Transfer
+from lightllm.core.transfer import CopyPlan, Transfer
 from types import SimpleNamespace
 from unittest.mock import Mock
 from queue import Queue

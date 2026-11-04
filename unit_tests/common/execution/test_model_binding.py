@@ -5,7 +5,8 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState
-from lightllm.core.build import PreparedExecution as Runner
+from lightllm.core.build import BuildConfig, prepare
+from lightllm.core.registry import default_providers
 from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
 from lightllm.core.contracts.state import FormatSpec
 from lightllm.models.llama.model import LlamaTpPartModel
@@ -35,15 +36,18 @@ def make_model(model_class, device="cpu", implementation="triton", microbatches=
         allocate_workspace=lambda size: torch.empty(size, dtype=torch.uint8, device=device),
         allocate_tensor=lambda shape, dtype: torch.empty(shape, dtype=dtype, device=device),
     )
-    model.execution_runner = Runner(
-        model.model_adapter,
-        model.layers_infer,
-        model.att_state_manager,
-        runtime,
-        ExecutionLimits((512 if implementation == "flashinfer" else 16) * 1024 * 1024, 2, 8, microbatches),
-        FormatSpec("plain", torch.float16, "token_head_dim", ("k", "v"), 1),
-        {"prefill": implementation, "decode": implementation},
+    prepared = prepare(
+        model_adapter=model.model_adapter,
+        providers=default_providers(),
+        device=runtime,
+        config=BuildConfig(
+            limits=ExecutionLimits((512 if implementation == "flashinfer" else 16) * 1024 * 1024, 2, 8, microbatches),
+            formats={"history": FormatSpec("plain", torch.float16, "token_head_dim", ("k", "v"), 1)},
+            requested={"history": {"prefill": implementation, "decode": implementation}},
+            static_params=model.model_adapter.attention_params({i: None for i in range(2)}, runtime),
+        ),
     )
+    model._attention_resources = prepared.allocate(manager=model.att_state_manager, device=runtime)
     model.att_state_manager.finish_state_registration()
     state = model.att_state_manager.get_full_attention_states()[0]
     state.device = torch.device(device)
@@ -66,7 +70,7 @@ def test_model_startup_binds_layers_and_writer(model_class, monkeypatch):
     model, state = make_model(model_class)
     writes = []
     monkeypatch.setattr(
-        "lightllm.common.execution.dense.DenseKVWriter.__call__",
+        "lightllm.core.formats.kv.dense.DenseKVWriter.__call__",
         lambda self, **kw: writes.append(dict(kw, view=self.view)),
     )
     model._init_execution_plan()
@@ -75,7 +79,10 @@ def test_model_startup_binds_layers_and_writer(model_class, monkeypatch):
     layer = model.layers_infer[1]
     q = torch.randn(2, 256, dtype=torch.float16)
     batch = SimpleNamespace(
-        execution_metadata={"triton.prefill": object(), "triton.decode": object()}, mem_index=torch.tensor([0, 1])
+        execution_metadata={
+            bound.metadata_key: object() for bound in (layer.bound_prefill_attention, layer.bound_decode_attention)
+        },
+        mem_index=torch.tensor([0, 1]),
     )
     for phase in ("prefill", "decode"):
         bound = getattr(layer, f"bound_{phase}_attention")
@@ -243,11 +250,11 @@ def test_qwen3_moe_declares_selected_expert_layers(renormalize, expert_field):
 
 
 def test_mtp_cohort_keeps_existing_execution_path():
-    from lightllm.models.base.build import prepare_runner
+    from lightllm.models.base.build import prepare_attention_execution
 
     model = LlamaTpPartModel.__new__(LlamaTpPartModel)
     model.args = SimpleNamespace(mtp_mode="vanilla_with_att")
-    assert prepare_runner(model) is None
+    assert prepare_attention_execution(model) is None
 
 
 @pytest.mark.parametrize("nested", [False, True])

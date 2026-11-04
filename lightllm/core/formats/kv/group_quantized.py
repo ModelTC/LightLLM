@@ -6,7 +6,7 @@ class GroupQuantizedKVWriter:
         self.k, self.v, self.k_scale, self.v_scale = view.fields
         self.group_size = view.format.group_size
         self.bits = 4 if view.format.encoding == "int4" else 8
-        self.head_dim = view.state.shape[-1]
+        self.head_dim = view.state.params.head_dim
 
     def __call__(self, *, token_indices, kv):
         heads = self.k.shape[1]

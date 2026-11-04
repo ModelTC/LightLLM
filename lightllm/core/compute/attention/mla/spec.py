@@ -1,3 +1,4 @@
+from lightllm.core.formats.kv.spec import MLAKVStateSpec
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Literal
@@ -24,13 +25,7 @@ class MLAAttentionSpec:
         return (self.nope_dim + self.rope_dim) ** -0.5 if self.score_scale is None else self.score_scale
 
     def validate_state(self, request):
-        shape = (request.spec.latent_dim, request.spec.rope_dim)
-
-        if hasattr(request.spec, "index_dim"):
-            shape += (request.spec.index_dim,)
-
-        if request.state.shape != shape:
-            raise ValueError("MLA latent state shape disagrees with attention semantics")
-
-        if request.params.spec != request.spec:
+        if request.state.params != MLAKVStateSpec(latent_dim=self.latent_dim, rope_dim=self.rope_dim):
+            raise ValueError("MLA latent state dimensions disagree with attention semantics")
+        if request.params.spec != self:
             raise ValueError("static MLA parameters differ from the probed semantics")

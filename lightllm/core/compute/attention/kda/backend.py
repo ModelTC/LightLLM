@@ -17,10 +17,6 @@ class KDAStaticParams:
     a_log: torch.Tensor
     dt_bias: torch.Tensor
 
-    @classmethod
-    def from_weights(cls, spec, weight, *, device=None):
-        return cls(spec, weight.get_merged_kda_conv_weight(), weight.linear_A_log.weight, weight.linear_dt_bias.weight)
-
 
 @dataclass(frozen=True)
 class KDAInputs:
@@ -41,9 +37,6 @@ class BoundKimiDeltaAttention:
             (self.name, self.accepted_index.data_ptr()) if self.accepted_index is not None else self.name
         )
         self.params, self.limits = params, offer.execution_limits
-
-    def prepare_batch(self, batch):
-        return batch.execution_metadata[self.metadata_key]
 
     def create_metadata(self, batch):
         if batch.batch_size > self.limits.max_batch_size or batch.max_q_len > self.limits.max_seq_len:
@@ -178,6 +171,7 @@ class BoundKimiDeltaAttention:
 
 
 class KimiDeltaAttentionBackend:
+    supports_auxiliary_states = False
     implementation = "triton"
 
     def __init__(self, phase):
@@ -186,7 +180,7 @@ class KimiDeltaAttentionBackend:
         self.phase = phase
         self.name = f"triton.kda.{phase}"
 
-    def probe(self, spec, fmt, device_caps, limits):
+    def probe(self, spec, fmt, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(spec, KimiDeltaAttentionSpec):
             return ProbeResult(reason="requires Kimi Delta Attention semantics")
         if not device_caps.is_nvidia or spec.dtype not in (torch.float16, torch.bfloat16):
@@ -215,7 +209,7 @@ class KimiDeltaAttentionBackend:
             return ProbeResult(reason="KDA verification requires distinct state candidate slots")
         return ProbeResult(offers=(AttentionOffer(self.name, self.phase, fmt, execution_limits=limits),))
 
-    def bind(self, offer, view, params, workspace):
+    def bind(self, offer, view, params, workspace, *, auxiliary_views=None):
         spec, conv, ssm = params.spec, *view.fields[:2]
         slots = view.format.candidate_slots
         if offer.backend != self.name or offer.phase != self.phase or offer.format != view.format:

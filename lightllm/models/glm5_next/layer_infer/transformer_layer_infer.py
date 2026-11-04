@@ -265,7 +265,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             index_query = weight.wq_b_proj_.mm(latent_query).view(-1, bound.spec.index_heads, bound.spec.index_dim)
             index_weights = weight.weights_proj_.mm(hidden.float())
         inputs = PooledNoPEInputs(query, key, gate, index_query, index_weights, kv)
-        return bound.run(inputs, bound.prepare_batch(batch), out)
+        return bound.run(inputs, batch.execution_metadata[bound.metadata_key], out)
 
     def _get_o(self, input, infer_state, layer_weight):
         if infer_state.need_dp_prefill_balance:
@@ -334,7 +334,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         if bound is not None:
             from lightllm.core.compute.attention.kda.backend import KDAInputs
 
-            return bound.run(KDAInputs(qkv, gate, beta), bound.prepare_batch(batch))
+            return bound.run(KDAInputs(qkv, gate, beta), batch.execution_metadata[bound.metadata_key])
         state = getattr(batch, f"{phase}_att_state1")
         return getattr(state, f"{phase}_att")(
             q=None,

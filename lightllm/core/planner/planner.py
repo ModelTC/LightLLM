@@ -3,10 +3,10 @@ from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
 from .plan import (
     AttentionBinding,
     AttentionRequest,
-    ExecutionPlan,
+    BoundAttentionPlan,
     LinearPlan,
     MoePlan,
-    PreparedPlan,
+    AttentionSelectionPlan,
     SelectedAttention,
 )
 
@@ -22,13 +22,12 @@ class Planner:
     def select(self, spec, format, phase: str, requested: str = "auto", auxiliary_formats=None):
         failures = []
         for backend in self.backends:
-            if requested not in ("auto", backend.name, getattr(backend, "implementation", None)):
+            if requested not in ("auto", backend.name, backend.implementation):
                 continue
-            if auxiliary_formats and not getattr(backend, "supports_auxiliary_states", False):
+            if auxiliary_formats and not backend.supports_auxiliary_states:
                 failures.append(f"{backend.name}: does not consume auxiliary state")
                 continue
-            kwargs = {"auxiliary_formats": auxiliary_formats} if auxiliary_formats else {}
-            result = backend.probe(spec, format, self.device, self.limits, **kwargs)
+            result = backend.probe(spec, format, self.device, self.limits, auxiliary_formats=auxiliary_formats)
             for offer in result.offers:
                 if offer.backend != backend.name:
                     raise ValueError("backend returned an offer with another backend's identity")
@@ -39,7 +38,7 @@ class Planner:
             failures.append(f"{backend.name}: {result.reason or 'no compatible phase/format within workspace budget'}")
         raise ValueError(f"{phase} attention ({requested}): " + ("; ".join(failures) or "backend is not registered"))
 
-    def prepare(self, requests) -> PreparedPlan:
+    def prepare(self, requests) -> AttentionSelectionPlan:
         selections, sizes, identities, states = [], {}, set(), {}
         for request in requests:
             identity = request.layer_id, request.phase
@@ -48,9 +47,7 @@ class Planner:
             identities.add(identity)
             if request.layer_id not in request.state.consumers:
                 raise ValueError(f"layer {request.layer_id} is not a declared consumer of {request.state.key}")
-            validate = getattr(request.spec, "validate_state", None)
-            if validate is not None:
-                validate(request)
+            request.spec.validate_state(request)
             names, keys = set(), {request.state.key}
             for name, state, _ in request.auxiliary_states:
                 if not name or name in names or state.key in keys:
@@ -81,9 +78,9 @@ class Planner:
         total = sum(sizes.values())
         if total > self.limits.workspace_bytes:
             raise ValueError(f"plan workspace {total} exceeds budget {self.limits.workspace_bytes}")
-        return PreparedPlan(tuple(selections), sizes)
+        return AttentionSelectionPlan(tuple(selections), sizes)
 
-    def bind(self, layers, allocate_workspace) -> ExecutionPlan:
+    def bind(self, layers, allocate_workspace) -> BoundAttentionPlan:
         requests, views = [], {}
         for layer, phase, spec, view, params, requested in layers:
             if view.state.key in views and views[view.state.key] is not view:
@@ -92,21 +89,3 @@ class Planner:
             requests.append(AttentionRequest(layer, phase, spec, view.state, view.format, params, requested))
         prepared = self.prepare(requests)
         return prepared.bind(views, prepared.reserve(allocate_workspace))
-
-    @staticmethod
-    def bind_linears(layers, allocate):
-        from lightllm.common.basemodel.weight_binding import bind_linears
-
-        return bind_linears(layers, allocate)
-
-    @staticmethod
-    def bind_moe(specs, layers, recipes):
-        from lightllm.common.basemodel.weight_binding import bind_moe
-
-        return bind_moe(specs, layers, recipes)
-
-    @staticmethod
-    def bind_experts(spec, weight, transfers=None):
-        from lightllm.common.basemodel.weight_binding import bind_experts
-
-        return bind_experts(spec, weight, transfers)

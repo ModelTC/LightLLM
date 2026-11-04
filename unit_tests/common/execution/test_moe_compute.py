@@ -1,5 +1,8 @@
 """Native MoE contracts, independent routing/math, graph updates and TP loading."""
 
+from lightllm.common.basemodel.weight_binding import bind_moe
+
+
 from dataclasses import replace, asdict
 import json
 from types import SimpleNamespace
@@ -337,7 +340,7 @@ def test_moe_planner_binds_tp_weights_and_survives_loader_replacement(method, sh
     assert weight.tp_rank_ == 1 and weight.tp_world_size_ == 2
     layer, recipe = SimpleNamespace(layer_num_=3, experts=weight), SimpleNamespace(layer_num_=3, is_moe=True)
     with pytest.raises(ValueError, match="fully loaded"):
-        Planner.bind_moe({3: spec}, [layer], [recipe])
+        bind_moe({3: spec}, [layer], [recipe])
     weights = {}
     for i in range(4):
         for name, shape in (("gate_proj", (512, 256)), ("up_proj", (512, 256)), ("down_proj", (256, 512))):
@@ -347,7 +350,7 @@ def test_moe_planner_binds_tp_weights_and_survives_loader_replacement(method, sh
     logits = torch.randn(7, 4, device="cuda")
     expected = weight.experts(x.clone(), logits, 2, True, False, 0, 0)
     recipes = [recipe, SimpleNamespace(layer_num_=9, is_moe=True)] if shared else [recipe]
-    plan = Planner.bind_moe({r.layer_num_: spec for r in recipes}, [layer] * len(recipes), recipes)
+    plan = bind_moe({r.layer_num_: spec for r in recipes}, [layer] * len(recipes), recipes)
     assert len(plan.bindings) == len(recipes) and not plan.legacy
     for item in recipes:
         assert item.bound_moe.gate_up.data_ptr() == weight.w13.weight.data_ptr()

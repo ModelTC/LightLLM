@@ -168,7 +168,7 @@ def test_eagle_checkpoint_prefix_and_graph(backend, compressed, head_dim, monkey
         model.prefill_att_backend1 = model.decode_att_backend1 = None
         model._init_execution_plan()
         model._init_hidden_collector()
-        for view in model.execution_runner.store.views().values():
+        for view in model.attention_execution.resources.stores.get("history").views().values():
             for tensor in view.fields:
                 tensor.zero_()
     monkeypatch.setattr(manager, "get_state", lambda *a, **kw: pytest.fail("runtime manager lookup"))
@@ -268,7 +268,7 @@ def test_eagle_checkpoint_prefix_and_graph(backend, compressed, head_dim, monkey
         target_hidden[0][6:8].mul_(0.7)
         target_hidden[1][5:7].mul_(1.3)
         check(draft.forward(make_input(sequences, [6, 5], True)), sequences)
-        for view in main.execution_runner.store.views().values():
+        for view in main.attention_execution.resources.stores.get("history").views().values():
             assert all(torch.count_nonzero(t).item() == 0 for t in view.fields)
     finally:
         torch.cuda.synchronize()

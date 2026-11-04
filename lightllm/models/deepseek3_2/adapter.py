@@ -1,3 +1,4 @@
+from lightllm.core.formats.kv.spec import SparseMLAKVStateSpec
 from lightllm.models.deepseek2.adapter import Deepseek2ModelAdapter
 from dataclasses import asdict, replace
 from lightllm.core.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
@@ -25,4 +26,19 @@ class Deepseek3_2ModelAdapter(Deepseek2ModelAdapter):
             )
             for layer, spec in self._attention.items()
         }
-        self._states = tuple(replace(state, shape=state.shape + (config["index_head_dim"],)) for state in self._states)
+        self._states = tuple(
+            replace(
+                state,
+                params=SparseMLAKVStateSpec(
+                    latent_dim=state.params.latent_dim,
+                    rope_dim=state.params.rope_dim,
+                    index_dim=config["index_head_dim"],
+                ),
+            )
+            for state in self._states
+        )
+
+    def layer_attention_params(self, spec, weight, device):
+        from lightllm.models.base.attention_params import sparse_mla_params
+
+        return sparse_mla_params(spec, weight, device)

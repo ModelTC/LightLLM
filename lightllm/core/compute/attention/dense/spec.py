@@ -1,3 +1,4 @@
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Literal
@@ -30,12 +31,11 @@ class DenseAttentionSpec:
         return self.head_dim ** -0.5 if self.score_scale is None else self.score_scale
 
     def validate_state(self, request):
-        shape = request.state.shape
-
-        local_heads = max(1, shape[0] // request.format.shard[1])
-
-        if len(shape) != 2 or (local_heads, shape[-1]) != (request.spec.kv_heads, request.spec.head_dim):
-            raise ValueError(f"layer {request.layer_id}: state shape disagrees with attention semantics")
-
-        if getattr(request.params, "spec", request.spec) != request.spec:
+        params = request.state.params
+        if not isinstance(params, DenseKVStateSpec):
+            raise ValueError("Dense attention requires a Dense KV state declaration")
+        local_heads = max(1, params.kv_heads // request.format.shard[1])
+        if (local_heads, params.head_dim) != (self.kv_heads, self.head_dim):
+            raise ValueError(f"layer {request.layer_id}: state dimensions disagree with attention semantics")
+        if request.params.spec != self:
             raise ValueError("static attention parameters differ from the probed semantics")

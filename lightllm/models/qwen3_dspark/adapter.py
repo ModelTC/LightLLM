@@ -1,3 +1,4 @@
+from lightllm.core.contracts.model import ModelRecipe
 from lightllm.models.qwen3_dflash.adapter import Qwen3DFlashModelAdapter
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
 from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import (
@@ -10,10 +11,10 @@ class Qwen3DSparkModelAdapter(Qwen3DFlashModelAdapter):
     pre_and_post_weight_class = Qwen3DSparkPreAndPostLayerWeight
     post_layer_infer_class = Qwen3DSparkPostLayerInfer
 
-    def build_recipe(self):
-        pre, post, layers = super().build_recipe()
-        post.heads_use_final_norm_ = "DSparkDraftModel" in self.config.get("architectures", ())
-        return pre, post, layers
+    def build_recipe(self) -> ModelRecipe:
+        recipe = super().build_recipe()
+        recipe.post.heads_use_final_norm_ = "DSparkDraftModel" in self.config.get("architectures", ())
+        return recipe
 
     def declare_weight_layout(self, names):
         vocab_weights = {"embed_tokens.weight", "lm_head.weight"}

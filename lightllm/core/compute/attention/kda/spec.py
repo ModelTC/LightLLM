@@ -1,3 +1,4 @@
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
 from dataclasses import dataclass
 from math import isfinite
 from typing import Any, Literal
@@ -18,9 +19,13 @@ class KimiDeltaAttentionSpec:
             raise ValueError("KDA gate lower bound must be finite and negative")
 
     def validate_state(self, request):
-        spec, tp = request.spec, request.format.shard[1]
-
-        expected = (spec.heads * tp, spec.heads * tp, spec.head_dim, spec.head_dim, spec.conv_size - 1)
-
-        if request.state.shape != expected or request.params.spec != spec:
+        tp = request.format.shard[1]
+        expected = ConvSSMStateSpec(
+            key_heads=self.heads * tp,
+            value_heads=self.heads * tp,
+            key_dim=self.head_dim,
+            value_dim=self.head_dim,
+            conv_history_length=self.conv_size - 1,
+        )
+        if request.state.params != expected or request.params.spec != self:
             raise ValueError("KDA state or static parameters disagree with attention semantics")

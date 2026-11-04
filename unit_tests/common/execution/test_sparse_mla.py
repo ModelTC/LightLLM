@@ -1,18 +1,17 @@
+from lightllm.core.formats.kv.spec import SparseMLAKVStateSpec
 from dataclasses import replace
 
 import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution import (
-    DeviceCaps,
-    ExecutionLimits,
-    FormatSpec,
-    Planner,
-    StateSpec,
-    SparseMLAAttentionSpec,
-)
-from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata
+from lightllm.core.contracts.device import DeviceCaps
+from lightllm.core.contracts.device import ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec
+from lightllm.core.planner.planner import Planner
+from lightllm.core.contracts.state import StateSpec
+from lightllm.core.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
+from lightllm.core.compute.attention.batch import AttentionBatch
 from lightllm.core.formats.kv.packed_mla import PackedMLAKVWriter
 from lightllm.core.compute.attention.sparse_mla.backend import (
     SparseMLAAttentionBackend,
@@ -117,7 +116,9 @@ def create_bound(
         index_scale_fmt=scale_fmt,
     )
     fmt = format_spec(quantized)
-    declaration = StateSpec("main", "sparse.0", 0, (0,), (512, 64, 128))
+    declaration = StateSpec(
+        "main", "sparse.0", 0, (0,), SparseMLAKVStateSpec(latent_dim=512, rope_dim=64, index_dim=128)
+    )
     manager = AttentionStateManager(2)
     store = PackedMLAStateStore((declaration,), fmt, manager)
     manager.finish_state_registration()
@@ -145,7 +146,7 @@ def create_bound(
 def metadata(bound, table, lengths, rows, counts, lane=0):
     tensor = lambda values: torch.tensor(values, dtype=torch.int32, device="cuda")
     cuq = tensor([0] + counts).cumsum(0).int()
-    batch = DenseBatchMetadata(
+    batch = AttentionBatch(
         2,
         max(counts),
         max(lengths),
@@ -366,32 +367,46 @@ def test_flashmla_fp8_indexer_long_decode_graph(monkeypatch):
 @torch.no_grad()
 def test_flashmla_fp8_scheduler_groups_and_lanes():
     from types import SimpleNamespace
-    from lightllm.core.build import PreparedExecution as Runner
+    from lightllm.core.build import BuildConfig, prepare as prepare_execution
+    from lightllm.core.registry import default_providers
+    from lightllm.models.base.build import bind_attention_execution
+    from lightllm.models.base.attention_batch import attention_batch
+    from lightllm.core.contracts.state import LayerStates
     from lightllm.core.device.cuda import CudaRuntime
 
     specs = {
         i: SparseMLAAttentionSpec(heads, 512, 128, 64, 128, torch.bfloat16, index_topk=256)
         for i, heads in enumerate((16, 64, 128))
     }
-    declarations = tuple(StateSpec("main", f"sparse.{i}", i, (i,), (512, 64, 128)) for i in specs)
-    adapter = SimpleNamespace(attention_specs=lambda: specs, state_specs=lambda: declarations)
+    declarations = tuple(
+        StateSpec("main", f"sparse.{i}", i, (i,), SparseMLAKVStateSpec(latent_dim=512, rope_dim=64, index_dim=128))
+        for i in specs
+    )
+    adapter = SimpleNamespace(
+        attention_specs=lambda: specs,
+        state_specs=lambda: declarations,
+        attention_states=lambda: {s.producer: LayerStates(s) for s in declarations},
+    )
     layers = [SimpleNamespace(layer_num_=i) for i in specs]
     manager, runtime = AttentionStateManager(2), CudaRuntime()
-    runner = Runner(
-        adapter,
-        layers,
-        manager,
-        runtime,
-        ExecutionLimits(10 ** 7, 2, 512, 2),
-        format_spec(True),
-        {"prefill": "triton", "decode": "flashmla_sparse"},
-        static_params={i: SparseMLAStaticParams(spec, runtime.allocate_tensor) for i, spec in specs.items()},
+    prepared = prepare_execution(
+        model_adapter=adapter,
+        providers=default_providers(),
+        device=runtime,
+        config=BuildConfig(
+            limits=ExecutionLimits(10 ** 7, 2, 512, 2),
+            formats={"history": format_spec(True)},
+            requested={"history": {"prefill": "triton", "decode": "flashmla_sparse"}},
+            static_params={i: SparseMLAStaticParams(spec, runtime.allocate_tensor) for i, spec in specs.items()},
+        ),
     )
+    resources = prepared.allocate(manager=manager, device=runtime)
     manager.finish_state_registration()
     for state in manager.get_full_attention_states():
         state.device = torch.device("cuda")
         state.allocate_storage(1024)
-    runner.bind(layers)
+    execution = bind_attention_execution(resources, layers)
+    runner = execution.metadata
     bounds = [layer.bound_decode_attention for layer in layers]
     assert sum(source.phase == "decode" for source in runner.metadata_sources.values()) == 2
     table = torch.arange(1024, device="cuda", dtype=torch.int32).view(2, 512)
@@ -414,14 +429,14 @@ def test_flashmla_fp8_scheduler_groups_and_lanes():
             total_token_num=sum(lengths),
             input_ids=tensor([1, 2]),
         )
-        batch.execution_metadata = runner.prepare_batch(batch)
+        batch.execution_metadata = runner.prepare_batch(attention_batch(batch), phase="decode")
         return batch
 
     batch = prepare([8, 7], [0, 1])
-    first = bounds[0].prepare_batch(batch)
-    assert bounds[1].prepare_batch(batch) is first
-    assert bounds[2].prepare_batch(batch).scheduler is not first.scheduler
-    other = bounds[0].prepare_batch(prepare([12, 13], [1, 0], lane=1))
+    first = batch.execution_metadata[bounds[0].metadata_key]
+    assert batch.execution_metadata[bounds[1].metadata_key] is first
+    assert batch.execution_metadata[bounds[2].metadata_key].scheduler is not first.scheduler
+    other = prepare([12, 13], [1, 0], lane=1).execution_metadata[bounds[0].metadata_key]
     assert first.scheduler is not other.scheduler
     assert first.ragged.data_ptr() != other.ragged.data_ptr()
     for bound in bounds:
@@ -430,7 +445,7 @@ def test_flashmla_fp8_scheduler_groups_and_lanes():
         query = torch.zeros((2, bound.spec.q_heads, 576), device="cuda", dtype=torch.bfloat16)
         indices = torch.full((2, 256), -1, device="cuda", dtype=torch.int32)
         indices[:, 0] = 0
-        meta = bound.prepare_batch(batch)
+        meta = batch.execution_metadata[bound.metadata_key]
         output = bound.attend(query, indices, indices, meta)
         assert torch.equal(output, torch.zeros_like(output))
         scheduler = meta.scheduler

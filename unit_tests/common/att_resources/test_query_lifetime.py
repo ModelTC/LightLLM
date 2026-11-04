@@ -79,7 +79,7 @@ def test_export_excludes_unpicklable_local_query_results():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_bound_transfer_keeps_native_storage_without_manager(pd_args):
     from lightllm.common.attention_state import AttentionStateManager
-    from lightllm.common.transfer import Transfer
+    from lightllm.core.transfer import Transfer
     from unit_tests.common.att_resources.model_helpers import rebuild_full_state
     from unit_tests.common.att_resources.test_capacity import definition
 

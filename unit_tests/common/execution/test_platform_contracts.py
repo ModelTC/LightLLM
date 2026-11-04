@@ -128,9 +128,9 @@ def test_dense_prefill_receives_current_unquantized_kv():
         received.append(inputs)
         return inputs.q
 
-    layer.bound_prefill_attention = SimpleNamespace(run=run, prepare_batch=lambda batch: None)
+    layer.bound_prefill_attention = SimpleNamespace(run=run, metadata_key="test")
     q, kv = torch.randn(3, 8), torch.randn(3, 2, 4)
-    result = layer._context_attention_kernel(q, kv, None, None)
+    result = layer._context_attention_kernel(q, kv, SimpleNamespace(execution_metadata={"test": None}), None)
     assert result.data_ptr() == q.data_ptr()
     assert received[0].current_k.data_ptr() == kv[:, :1].data_ptr()
     assert received[0].current_v.data_ptr() == kv[:, 1:].data_ptr()
@@ -210,10 +210,10 @@ def test_transfer_matches_encoding_and_memory_path_before_submission():
 
 
 def test_host_lengths_are_ready_before_graph_buffer_copy():
-    from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata
+    from lightllm.core.compute.attention.batch import AttentionBatch
 
     value = torch.zeros(1, dtype=torch.int32)
-    captured = DenseBatchMetadata(
+    captured = AttentionBatch(
         1, 1, 8, 0, value, value, value, value, value, value, value, host_seq_lengths=torch.zeros(1, dtype=torch.int32)
     )
     host = torch.empty_like(value)

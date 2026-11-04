@@ -1,24 +1,23 @@
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.execution import (
-    DenseAttentionSpec,
-    DeviceCaps,
-    ExecutionLimits,
-    FormatSpec,
-    Planner,
-    StateSpec,
-    StateView,
-)
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.contracts.device import DeviceCaps
+from lightllm.core.contracts.device import ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec
+from lightllm.core.planner.planner import Planner
+from lightllm.core.contracts.state import StateSpec
+from lightllm.core.contracts.state import StateView
 from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 
 
 def view(layer=0, role="main", heads=2, dim=64):
-    spec = StateSpec(role, f"kv.{layer}", layer, (layer,), (heads, dim))
+    spec = StateSpec(role, f"kv.{layer}", layer, (layer,), DenseKVStateSpec(kv_heads=heads, head_dim=dim))
     format = FormatSpec("plain", torch.float16, "token_head_dim", ("k", "v"), 1)
     k = torch.randn(8, heads, dim, dtype=torch.float16)
     return StateView(spec, format, (k, torch.randn_like(k)))
@@ -44,8 +43,8 @@ def test_bound_execution_uses_native_views_without_manager(implementation, phase
     assert not hasattr(bound, "model")
     assert not hasattr(bound, "control")
     metadata = object()
-    batch = SimpleNamespace(execution_metadata={backend.name: metadata})
-    assert bound.prepare_batch(batch) is metadata
+    batch = SimpleNamespace(execution_metadata={bound.metadata_key: metadata})
+    assert batch.execution_metadata[bound.metadata_key] is metadata
     assert plan.workspace_bytes >= 0
 
 
@@ -93,12 +92,14 @@ def test_no_implicit_format_conversion_between_phases():
 
 
 class WorkspaceBackend:
+    implementation = "workspace"
+    supports_auxiliary_states = False
     name = "workspace"
 
-    def probe(self, spec, format, device, limits):
+    def probe(self, spec, format, device, limits, *, auxiliary_formats=None):
         return ProbeResult(offers=(AttentionOffer(self.name, "decode", format, 8),))
 
-    def bind(self, offer, view, params, workspace):
+    def bind(self, offer, view, params, workspace, *, auxiliary_views=None):
         return workspace
 
 
@@ -106,7 +107,7 @@ def test_aggregate_budget_is_checked_before_allocating():
     spec, state_view = DenseAttentionSpec(4, 2, 64), view()
     shared = replace(state_view.state, consumers=(0, 1))
     state_view = replace(state_view, state=shared)
-    requests = [(i, "decode", spec, state_view, None, "auto") for i in (0, 1)]
+    requests = [(i, "decode", spec, state_view, DenseStaticParams(spec, torch.empty), "auto") for i in (0, 1)]
     allocated = []
     with pytest.raises(ValueError, match="plan workspace 16 exceeds budget 8"):
         planner(WorkspaceBackend(), budget=8).bind(requests, allocated.append)
@@ -126,7 +127,7 @@ def test_shared_spec_does_not_authorize_undeclared_consumer():
 def test_binding_rejects_shape_mismatch():
     backend = DenseAttentionBackend("triton", "decode")
     spec = DenseAttentionSpec(4, 2, 128)
-    with pytest.raises(ValueError, match="shape disagrees"):
+    with pytest.raises(ValueError, match="dimensions disagree"):
         planner(backend).bind(
             [(0, "decode", spec, view(), DenseStaticParams(spec, torch.empty), "auto")],
             lambda size: torch.empty(size, dtype=torch.uint8),

@@ -100,7 +100,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
                 kv[:, : self.tp_k_head_num_, :] if kv is not None else None,
                 kv[:, self.tp_k_head_num_ :, :] if kv is not None else None,
             )
-            return bound.run(inputs, bound.prepare_batch(infer_state)).view(q.shape)
+            return bound.run(inputs, infer_state.execution_metadata[bound.metadata_key]).view(q.shape)
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="gqa",
@@ -128,7 +128,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         bound = getattr(self, "bound_decode_attention", None)
         if bound is not None:
             inputs = DenseInputs(q.view(-1, self.tp_q_head_num_, self.head_dim_))
-            return bound.run(inputs, bound.prepare_batch(infer_state)).view(q.shape)
+            return bound.run(inputs, infer_state.execution_metadata[bound.metadata_key]).view(q.shape)
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="gqa",

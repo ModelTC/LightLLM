@@ -407,21 +407,25 @@ def test_tiny_model_prefill_decode_prefix_and_graph(
     for spec in model.model_adapter.attention_specs().values():
         if hasattr(spec, "head_dim"):
             assert spec.head_dim == config.head_dim
-    assert model.execution_runner is not None
-    assert model.execution_runner.prepared.workspace_bytes > 0
+    assert model.attention_execution is None
+    assert model._attention_resources.build.selection.workspace_bytes > 0
     if kv_type.startswith("fp8") and not sparse:
         from lightllm.core.formats.kv.calibration import calibration_table_identity
 
         expected_identity = calibration_table_identity(calibration, calibration["quant_type"])
-        assert model.execution_runner.store.format.calibration == expected_identity
+        assert model._attention_resources.stores["history"].format.calibration == expected_identity
     model.att_state_manager.finish_state_registration()
     model.att_state_manager.load_full_att_calibration(args)
     for state in model.att_state_manager.get_full_attention_states():
         state.device = torch.device("cuda")
         state.allocate_storage(64)
     model._init_execution_plan()
+    assert model.attention_execution is not None
     if loop:
-        views = {**model.execution_runner.store.views(), **model.execution_runner.recurrent_store.views()}
+        views = {
+            **model.attention_execution.resources.stores.get("history").views(),
+            **model.attention_execution.resources.stores.get("recurrent").views(),
+        }
         by_layer = {view.state.producer: view for view in views.values()}
         for a, b in ((1, 3), (2, 4)):
             assert by_layer[a].state.key != by_layer[b].state.key
@@ -487,10 +491,10 @@ def test_tiny_model_prefill_decode_prefix_and_graph(
             assert error.abs().max().item() < (0.075 if low_precision else 0.015)
 
     def snapshot():
-        if model.execution_runner.recurrent_store is None:
+        if model.attention_execution.resources.stores.get("recurrent") is None:
             return []
-        views = list(model.execution_runner.store.views().values())
-        views += list(model.execution_runner.recurrent_store.views().values())
+        views = list(model.attention_execution.resources.stores.get("history").views().values())
+        views += list(model.attention_execution.resources.stores.get("recurrent").views().values())
         return [(tensor, tensor.clone()) for view in views for tensor in view.fields[:2]]
 
     def restore(saved):
@@ -579,19 +583,27 @@ def exercise_verification(model, prepare, check, layout):
     from lightllm.core.runner.prefill_graph import PrefillCudaGraph
 
     assert {item.phase for item in model.execution_plan.bindings} == {"prefill", "verify"}
-    assert model.execution_runner.prepared.selections[0].offer.execution_limits.max_batch_size >= 9
+    assert model.attention_execution.resources.build.selection.selections[0].offer.execution_limits.max_batch_size >= 9
     model.req_manager.req_to_token_indexs = torch.arange(48, dtype=torch.int32, device="cuda").view(3, 16)
     model.req_manager.HOLD_REQUEST_ID = 2
     prompts = [[11, 12, 13], [21, 22]]
     check(model._context_forward(prepare(prompts, [0, 0], True)), prompts)
-    store = model.execution_runner.recurrent_store
+    store = model.attention_execution.resources.stores.get("recurrent")
     states = list({id(state): state for _, state in store.resources.values()}.values()) if store else []
 
     def snapshot():
-        tensors = [tensor for view in model.execution_runner.store.views().values() for tensor in view.fields]
+        tensors = [
+            tensor
+            for view in model.attention_execution.resources.stores.get("history").views().values()
+            for tensor in view.fields
+        ]
         tensors += [t for state in states for t in (state.conv_state, state.ssm_state, state.mtp_state_index)]
-        if model.execution_runner.window_store is not None:
-            tensors += [t for view in model.execution_runner.window_store.views().values() for t in view.fields]
+        if model.attention_execution.resources.stores.get("window") is not None:
+            tensors += [
+                t
+                for view in model.attention_execution.resources.stores.get("window").views().values()
+                for t in view.fields
+            ]
         return [(tensor, tensor.clone()) for tensor in tensors] if states else []
 
     def restore(saved):

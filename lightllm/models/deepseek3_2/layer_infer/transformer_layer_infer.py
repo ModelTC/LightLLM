@@ -197,7 +197,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         weights = layer_weight.weights_proj_.mm(hidden) * self.indexer.index_n_heads_scale
         return attention.run(
             SparseMLAInputs(q, index_q, index_k, weights, infer_state.mem_index, kv, infer_state.dist_group),
-            attention.prepare_batch(infer_state),
+            infer_state.execution_metadata[attention.metadata_key],
             out,
         )
 

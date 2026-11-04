@@ -1,5 +1,8 @@
 """Expert shard math and real two-rank DeepEP transfers."""
 
+from lightllm.common.basemodel.weight_binding import bind_moe
+
+
 from dataclasses import replace
 from datetime import timedelta
 import importlib.util
@@ -347,7 +350,7 @@ def _ep_worker(rank, rendezvous, round_scales, round_intermediates=False):
         original_scale_policy = envs_utils.get_env_use_ue8m0_scales
         envs_utils.get_env_use_ue8m0_scales = lambda: round_scales
         second_recipe = SimpleNamespace(layer_num_=7, is_moe=True)
-        plan = Planner.bind_moe({3: spec, 7: spec}, [SimpleNamespace(experts=weight)] * 2, [recipe, second_recipe])
+        plan = bind_moe({3: spec, 7: spec}, [SimpleNamespace(experts=weight)] * 2, [recipe, second_recipe])
         assert second_recipe.bound_ep.transfer is recipe.bound_ep.transfer
         envs_utils.get_env_use_ue8m0_scales = original_scale_policy
         assert not plan.legacy and recipe.bound_ep is plan.bindings[0][1]

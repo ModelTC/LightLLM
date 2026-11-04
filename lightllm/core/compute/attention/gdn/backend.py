@@ -17,16 +17,6 @@ class GDNStaticParams:
     a_log: torch.Tensor
     dt_bias: torch.Tensor
 
-    @classmethod
-    def from_weights(cls, spec, weight, *, device=None):
-        return cls(
-            spec,
-            weight.linear_conv1d.mm_param.weight,
-            weight.linear_conv1d.bias,
-            weight.linear_A_log.weight,
-            weight.linear_dt_bias.weight,
-        )
-
 
 @dataclass
 class GDNBatchMetadata:
@@ -50,7 +40,7 @@ class GDNBatchMetadata:
 class BoundGatedDeltaNet:
     transfer_requires_compute_sync = False
 
-    def __init__(self, offer, view, params):
+    def __init__(self, offer, view, params, *, implementation):
         self.name, self.phase, self.spec = offer.backend, offer.phase, params.spec
         self.conv, self.ssm = view.fields[:2]
         self.candidate_slots = view.format.candidate_slots
@@ -60,14 +50,11 @@ class BoundGatedDeltaNet:
         )
         self.params, self.limits = params, offer.execution_limits
         if self.phase == "prefill":
-            if self.name.startswith("flashqla."):
+            if implementation == "flashqla":
                 from flash_qla import chunk_gated_delta_rule
             else:
                 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops import chunk_gated_delta_rule
             self.prefill_kernel = chunk_gated_delta_rule
-
-    def prepare_batch(self, batch):
-        return batch.execution_metadata[self.metadata_key]
 
     def create_metadata(self, batch):
         if batch.batch_size > self.limits.max_batch_size or batch.max_q_len > self.limits.max_seq_len:
@@ -215,13 +202,15 @@ class BoundGatedDeltaNet:
 
 
 class GatedDeltaNetBackend:
+    supports_auxiliary_states = False
+
     def __init__(self, implementation, phase):
         if implementation not in ("triton", "flashqla") or phase not in ("prefill", "decode", "verify"):
             raise ValueError("unsupported GDN backend or phase")
         self.implementation, self.phase = implementation, phase
         self.name = f"{implementation}.gdn.{phase}"
 
-    def probe(self, attention_spec, format_spec, device_caps, limits):
+    def probe(self, attention_spec, format_spec, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(attention_spec, GatedDeltaNetSpec):
             return ProbeResult(reason="requires Gated DeltaNet semantics")
         spec, fmt = attention_spec, format_spec
@@ -260,7 +249,7 @@ class GatedDeltaNetBackend:
                 return ProbeResult(reason="FlashQLA requires 128-dimensional key and value heads")
         return ProbeResult(offers=(AttentionOffer(self.name, self.phase, fmt, execution_limits=limits),))
 
-    def bind(self, offer, state_view, static_params, workspace):
+    def bind(self, offer, state_view, static_params, workspace, *, auxiliary_views=None):
         if offer.backend != self.name or offer.phase != self.phase or offer.format != state_view.format:
             raise ValueError("offer does not match GDN binding")
         spec = static_params.spec
@@ -295,4 +284,4 @@ class GatedDeltaNetBackend:
         for tensor, shape, dtype in tensors:
             if tensor.shape != shape or tensor.dtype != dtype or tensor.device != conv.device:
                 raise ValueError("GDN static parameters disagree with the bound semantics")
-        return BoundGatedDeltaNet(offer, state_view, static_params)
+        return BoundGatedDeltaNet(offer, state_view, static_params, implementation=self.implementation)

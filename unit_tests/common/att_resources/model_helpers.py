@@ -148,7 +148,7 @@ def prepare_model_states(model: TpPartBaseModel, logical_layer_ids: Sequence[int
     if not hasattr(model, "torch_memory_saver"):
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
     # These storage fixtures have no execution layers, weights or Runner limits.
-    with patch("lightllm.models.base.build.prepare_runner", return_value=None):
+    with patch("lightllm.models.base.build.prepare_attention_execution", return_value=None):
         model.prepare_attention_states()
 
 

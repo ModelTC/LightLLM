@@ -6,7 +6,7 @@ from lightllm.core.build import BuildConfig, prepare
 from lightllm.core.registry import default_providers
 
 
-def prepare_runner(model, *, providers=None, device=None, formats=None):
+def prepare_attention_execution(model, *, providers=None, device=None, formats=None):
     # Explicit opt-in keeps inherited recipes with different semantics on their
     # existing path until their adapters declare those differences.
     adapter = getattr(model, "model_adapter", None)
@@ -117,20 +117,41 @@ def prepare_runner(model, *, providers=None, device=None, formats=None):
     weights = {
         recipe.layer_num_: weight for recipe, weight in zip(model.layers_infer, model.trans_layers_weight, strict=True)
     }
-    params = {i: providers.static_params(spec, runtime, weights[i]) for i, spec in specs.items()}
+    params = adapter.attention_params(weights, runtime)
     return prepare(
         model_adapter=adapter,
         providers=providers,
         device=runtime,
         config=BuildConfig(
-            layers=model.layers_infer,
-            manager=model.att_state_manager,
             limits=limits,
-            format=format,
-            requested=requested,
-            recurrent_format=recurrent_format,
-            recurrent_requested=recurrent_requested,
+            formats={
+                key: value
+                for key, value in (("history", format), ("recurrent", recurrent_format), ("window", window_format))
+                if value is not None
+            },
+            requested={"history": requested, "recurrent": recurrent_requested or {}, "window": requested},
             static_params=params,
-            window_format=window_format,
         ),
     )
+
+
+def bind_attention_execution(resources, layers):
+    identities = tuple(layer.layer_num_ for layer in layers)
+    if len(identities) != len(resources.build.specs) or set(identities) != set(resources.build.specs):
+        raise ValueError("binding must describe the declared layer identities exactly once")
+    execution = resources.bind()
+    writers = {}
+    for key, writer in execution.writers.items():
+        state = execution.views[key].state
+        if state.consumers != (state.producer,):
+            raise ValueError("this model recipe does not support a read-only shared KV consumer")
+        if state.producer in writers:
+            raise ValueError("this model recipe requires one writer per producer")
+        writers[state.producer] = writer
+    bindings = {(item.layer_id, item.phase): item.execution for item in execution.plan.bindings}
+    for layer in layers:
+        layer.bound_prefill_attention = bindings.get((layer.layer_num_, "prefill"))
+        layer.bound_decode_attention = bindings.get((layer.layer_num_, resources.build.decode_phase))
+        if layer.layer_num_ in writers:
+            layer.bound_kv_writer = writers[layer.layer_num_]
+    return execution

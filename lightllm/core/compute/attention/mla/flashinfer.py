@@ -1,6 +1,15 @@
 """FlashInfer MLA plans use explicit, separately reserved buffers for each semantic group."""
 
+from lightllm.core.compute.attention.workspace import lane_workspace
+
+
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+from lightllm.core.compute.attention.batch import AttentionBatch
+
+if TYPE_CHECKING:
+    from flashinfer import BatchPrefillWithRaggedKVCacheWrapper
+    from flashinfer.mla import BatchMLAPagedAttentionWrapper
 from importlib.util import find_spec
 
 import torch
@@ -13,10 +22,10 @@ from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
 
 @dataclass
 class FlashInferMLAMetadata:
-    owner: object
-    batch: object
+    owner: "BoundFlashInferMLA"
+    batch: AttentionBatch
     indices: torch.Tensor | None
-    wrapper: object
+    wrapper: "BatchPrefillWithRaggedKVCacheWrapper | BatchMLAPagedAttentionWrapper"
     plan_layout: tuple | None = None
 
     def plan(self):
@@ -69,8 +78,8 @@ class FlashInferMLAMetadata:
 
 
 class BoundFlashInferMLA(BoundMLAAttention):
-    def __init__(self, offer, view, params, workspace):
-        super().__init__(offer, view, params, workspace)
+    def __init__(self, offer, view, params, workspace, *, implementation):
+        super().__init__(offer, view, params, workspace, implementation=implementation)
         self.view = view
         self.cache = (
             self.latent[..., : self.spec.latent_dim],
@@ -86,7 +95,7 @@ class BoundFlashInferMLA(BoundMLAAttention):
         from lightllm.common.basemodel.triton_kernel.repack_kv_index import repack_kv_index
 
         batch = super().create_metadata(batch)
-        scratch = self._lane_workspace(batch.microbatch_index)
+        scratch = lane_workspace(self.workspace, self.limits, batch.microbatch_index)
         float_workspace = scratch[:FLOAT_WORKSPACE_BYTES]
         int_workspace = scratch[FLOAT_WORKSPACE_BYTES : FLOAT_WORKSPACE_BYTES + INT_WORKSPACE_BYTES]
         indices = None
@@ -155,6 +164,7 @@ class BoundFlashInferMLA(BoundMLAAttention):
 
 
 class FlashInferMLABackend(MLAAttentionBackend):
+    supports_auxiliary_states = False
     bound_class = BoundFlashInferMLA
     implementation = "flashinfer"
 
@@ -163,7 +173,7 @@ class FlashInferMLABackend(MLAAttentionBackend):
             raise ValueError("FlashInfer MLA supports prefill, decode and verify")
         self.phase, self.name = phase, f"flashinfer.mla.{phase}"
 
-    def probe(self, attention_spec, format_spec, device_caps, limits):
+    def probe(self, attention_spec, format_spec, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(attention_spec, MLAAttentionSpec):
             return ProbeResult(reason="requires MLA semantics")
         if not device_caps.is_nvidia or device_caps.capability is None or device_caps.capability[0] < 8:

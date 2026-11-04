@@ -1,3 +1,4 @@
+from lightllm.core.formats.kv.spec import MLAKVStateSpec
 from lightllm.models.deepseek2.layer_infer.transformer_layer_infer import Deepseek2TransformerLayerInfer
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.models.base.adapter import RecipeModelAdapter
@@ -47,7 +48,8 @@ class Deepseek2ModelAdapter(RecipeModelAdapter):
             raise ValueError("MLA execution layer IDs must uniquely describe every model layer")
         self._attention = {i: spec for i in self.layer_ids}
         self._states = tuple(
-            StateSpec(role, f"mla.{i}", i, (i,), (spec.latent_dim, spec.rope_dim)) for i in self.layer_ids
+            StateSpec(role, f"mla.{i}", i, (i,), MLAKVStateSpec(latent_dim=spec.latent_dim, rope_dim=spec.rope_dim))
+            for i in self.layer_ids
         )
 
     def validate_layer(self, layer):
@@ -61,3 +63,8 @@ class Deepseek2ModelAdapter(RecipeModelAdapter):
             layer.softmax_scale,
         ) != (spec.q_heads, spec.latent_dim, spec.nope_dim, spec.rope_dim, spec.value_dim, spec.scale):
             raise ValueError("MLA recipe projections disagree with the declared semantics")
+
+    def layer_attention_params(self, spec, weight, device):
+        from lightllm.models.base.attention_params import mla_params
+
+        return mla_params(spec, weight, device)

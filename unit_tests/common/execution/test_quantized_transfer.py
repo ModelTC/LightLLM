@@ -1,5 +1,8 @@
 """Native quantized state must agree with the separate CPU service's byte layout."""
 
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
+
+
 from dataclasses import asdict
 import json
 
@@ -10,7 +13,7 @@ from lightllm.common.attention_state import AttentionStateManager
 from lightllm.core.formats.kv.group_quantized import GroupQuantizedKVWriter
 from lightllm.core.contracts.state import StateSpec
 from lightllm.core.storage.attention import DenseStateStore
-from lightllm.common.transfer import Transfer
+from lightllm.core.transfer import Transfer
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
@@ -41,7 +44,9 @@ def test_native_quantized_cpu_service_and_pd_round_trip(bits, group, dtype, monk
     get_env_start_args.cache_clear()
     try:
         stores, managers = [], []
-        declarations = tuple(StateSpec("main", f"kv.{i}", i, (i,), (2, 64)) for i in range(2))
+        declarations = tuple(
+            StateSpec("main", f"kv.{i}", i, (i,), DenseKVStateSpec(kv_heads=2, head_dim=64)) for i in range(2)
+        )
         for _ in range(2):
             manager = AttentionStateManager(2)
             store = DenseStateStore(declarations, make_format(bits, dtype, group), manager)

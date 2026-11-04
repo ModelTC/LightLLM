@@ -33,7 +33,7 @@ class GraphExecution:
 def bind_graph(graph, states=(), runtime=None):
     bindings = []
     for state in states:
-        runner = getattr(state, "execution_runner", None)
+        runner = getattr(state, "attention_metadata", None)
         if runner is not None:
             bindings.extend(runner.bind_graph(state.execution_metadata, runtime))
     return GraphExecution(graph, states, bindings)

@@ -1,17 +1,20 @@
 """Grouped INT4/INT8 attention consumes payload and scale views bound at startup."""
 
+from lightllm.core.compute.attention.workspace import lane_workspace
+
+
 import torch
 
 from lightllm.core.compute.attention.dense.inputs import query_tensor
 
-from lightllm.core.compute.attention.dense.backend import BoundAttention, decode_blocks, scratch_elements
+from lightllm.core.compute.attention.dense.backend import BoundDenseAttention, decode_blocks, scratch_elements
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 
 
-class BoundGroupQuantizedAttention(BoundAttention):
+class BoundGroupQuantizedAttention(BoundDenseAttention):
     def __init__(self, offer, state_view, static_params, workspace):
-        super().__init__(offer, state_view, static_params, workspace)
+        super().__init__(offer, state_view, static_params, workspace, implementation="triton")
         self.k_scale, self.v_scale = state_view.fields[2:]
         self.bits = 4 if state_view.format.encoding == "int4" else 8
         self.dtype = self.spec.dtype or state_view.format.scale_dtype
@@ -52,7 +55,7 @@ class BoundGroupQuantizedAttention(BoundAttention):
             flash_decode_stage2,
         )
 
-        scratch = self._lane_workspace(metadata.microbatch_index)
+        scratch = lane_workspace(self.workspace, self.limits, metadata.microbatch_index)
         blocks = decode_blocks(metadata.batch_size)
         elements = metadata.batch_size * self.spec.q_heads * blocks
         value_bytes = elements * self.spec.head_dim * q.element_size()
@@ -100,6 +103,7 @@ class BoundGroupQuantizedAttention(BoundAttention):
 
 
 class GroupQuantizedAttentionBackend:
+    supports_auxiliary_states = False
     implementation = "triton"
 
     def __init__(self, phase):
@@ -108,7 +112,7 @@ class GroupQuantizedAttentionBackend:
         self.phase = phase
         self.name = f"triton.intkv.{phase}"
 
-    def probe(self, attention_spec, format_spec, device_caps, limits):
+    def probe(self, attention_spec, format_spec, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(attention_spec, DenseAttentionSpec):
             return ProbeResult(reason="requires Dense attention semantics")
         if attention_spec.attention_sink:
@@ -155,7 +159,7 @@ class GroupQuantizedAttentionBackend:
             )
         )
 
-    def bind(self, offer, state_view, static_params, workspace):
+    def bind(self, offer, state_view, static_params, workspace, *, auxiliary_views=None):
         if offer.backend != self.name or offer.phase != self.phase or offer.format != state_view.format:
             raise ValueError("offer does not match the backend and state view")
         k, v, k_scale, v_scale = state_view.fields
@@ -186,6 +190,3 @@ class GroupQuantizedAttentionBackend:
         ):
             raise ValueError("workspace does not satisfy the selected offer")
         return BoundGroupQuantizedAttention(offer, state_view, static_params, workspace)
-
-
-from lightllm.core.formats.kv.group_quantized import GroupQuantizedKVWriter

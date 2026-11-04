@@ -96,7 +96,9 @@ class TpPartBaseModel:
                 is_draft=self.is_mtp_draft_model,
                 return_all_prompt_logics=self.return_all_prompt_logics,
                 group_for_lane=dist_group_manager.get_group,
-                execution_runner=getattr(self, "execution_runner", None),
+                attention_metadata=self.attention_execution.metadata
+                if getattr(self, "attention_execution", None) is not None
+                else None,
                 prefill_states=tuple(prefill),
                 decode_states=tuple(decode),
                 select_indices=select,
@@ -297,10 +299,15 @@ class TpPartBaseModel:
             if self.is_mtp_draft_model and self.args.mtp_mode in ("vanilla_no_att", "eagle_no_att"):
                 return
 
-            from lightllm.models.base.build import prepare_runner
+            from lightllm.models.base.build import prepare_attention_execution
 
-            self.execution_runner = prepare_runner(self)
-            if self.execution_runner is not None:
+            prepared = prepare_attention_execution(self)
+            self.attention_execution = None
+            self._attention_resources = None
+            if prepared is not None:
+                self._attention_resources = prepared.allocate(
+                    manager=self.att_state_manager, device=self.execution_runtime
+                )
                 return
 
             # 当前模型拥有的全局逻辑层 ID，按模型内部层顺序排列；各工厂自行选择参与层及共享分组。
@@ -328,7 +335,7 @@ class TpPartBaseModel:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
-        if getattr(self, "execution_runner", None) is None:
+        if getattr(self, "_attention_resources", None) is None:
             self._init_att_backend()
             self._init_att_backend1()
         else:
@@ -361,8 +368,13 @@ class TpPartBaseModel:
     def _init_execution_plan(self):
         if getattr(self, "execution_plan", None) is not None:
             raise RuntimeError("bound execution plans cannot be replaced while resources or Graphs may be in use")
-        runner = getattr(self, "execution_runner", None)
-        self.execution_plan = runner.bind(self.layers_infer) if runner is not None else None
+        from lightllm.models.base.build import bind_attention_execution
+
+        resources = getattr(self, "_attention_resources", None)
+        self.attention_execution = (
+            bind_attention_execution(resources, self.layers_infer) if resources is not None else None
+        )
+        self.execution_plan = self.attention_execution.plan if self.attention_execution is not None else None
         if self.execution_plan is not None:
             backends = sorted({item.backend for item in self.execution_plan.bindings})
             log_info_on_leader(
@@ -442,7 +454,8 @@ class TpPartBaseModel:
     def _init_weights(self, start_layer_index=0):
         if getattr(self, "model_adapter", None) is not None:
             assert start_layer_index == 0, "adapter declares its own layer ordering"
-            self.pre_post_weight, self.trans_layers_weight = self.model_adapter.build_weights(self.quant_cfg)
+            weights = self.model_adapter.build_weights(self.quant_cfg)
+            self.pre_post_weight, self.trans_layers_weight = weights.pre_post, weights.layers
             return
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
         self.trans_layers_weight = [
@@ -458,8 +471,10 @@ class TpPartBaseModel:
 
     def load_weights(self, weight_dict: dict):
         if getattr(self, "model_adapter", None) is not None:
+            from lightllm.core.contracts.model import ModelWeights
+
             self.model_adapter.load_weights(
-                (self.pre_post_weight, self.trans_layers_weight), self.weight_dir_, weight_dict
+                ModelWeights(self.pre_post_weight, tuple(self.trans_layers_weight)), self.weight_dir_, weight_dict
             )
             from lightllm.common.basemodel.weight_binding import bind_linears, bind_moe, finalize_weights
             from lightllm.core.registry import default_providers
@@ -563,7 +578,8 @@ class TpPartBaseModel:
     def _init_infer_layer(self, start_layer_index=0):
         if getattr(self, "model_adapter", None) is not None:
             assert start_layer_index == 0, "adapter declares its own layer ordering"
-            self.pre_infer, self.post_infer, self.layers_infer = self.model_adapter.build_recipe()
+            recipe = self.model_adapter.build_recipe()
+            self.pre_infer, self.post_infer, self.layers_infer = recipe.pre, recipe.post, recipe.layers
             return
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)

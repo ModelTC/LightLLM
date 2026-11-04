@@ -241,11 +241,15 @@ def test_mla_draft_checkpoint_prefix_and_graph(model_class, backend, mode, monke
         model.prefill_att_backend1 = model.decode_att_backend1 = None
         model._init_execution_plan()
         model._init_hidden_collector()
-        for view in model.execution_runner.store.views().values():
+        for view in model.attention_execution.resources.stores.get("history").views().values():
             for value in view.fields:
                 value.zero_()
     assert {b.phase for b in main.execution_plan.bindings} == {"prefill", "verify"}
-    main_fields = [value for view in main.execution_runner.store.views().values() for value in view.fields]
+    main_fields = [
+        value
+        for view in main.attention_execution.resources.stores.get("history").views().values()
+        for value in view.fields
+    ]
     monkeypatch.setattr(manager, "get_state", lambda *a, **kw: pytest.fail("runtime manager lookup"))
     monkeypatch.setattr(NoQuantization, "apply", lambda *a, **kw: pytest.fail("legacy weight compute"))
     histories = [torch.randn(16, 256, dtype=torch.float16, device="cuda") * 0.3 for _ in range(2)]

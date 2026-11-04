@@ -419,7 +419,7 @@ def test_execution_selection_logs_only_on_leader(monkeypatch, caplog, rank):
     monkeypatch.setattr(log_utils, "_context_pid", log_utils.os.getpid())
     plan = SimpleNamespace(bindings=[SimpleNamespace(backend="dense.test")], workspace_bytes=32)
     model = SimpleNamespace(
-        execution_runner=SimpleNamespace(bind=lambda layers: plan), layers_infer=(), att_state_role="main"
+        attention_execution=SimpleNamespace(bind=lambda layers: plan), layers_infer=(), att_state_role="main"
     )
     with caplog.at_level(logging.DEBUG, logger=logger.name):
         module.TpPartBaseModel._init_execution_plan(model)

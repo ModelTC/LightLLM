@@ -1,6 +1,9 @@
 """Dense attention implementations consuming bound tensors and batch metadata."""
 
-from dataclasses import dataclass, fields, replace
+from lightllm.core.compute.attention.paged_metadata import prepare_page_table
+
+
+from dataclasses import dataclass, replace
 from typing import Callable
 
 import torch
@@ -9,6 +12,8 @@ from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
 from lightllm.core.compute.attention.dense.inputs import query_tensor
 from lightllm.core.contracts.state import StateView
+from lightllm.core.compute.attention.batch import group_verify_batch
+from lightllm.core.compute.attention.workspace import lane_workspace
 
 
 def decode_blocks(batch_size):
@@ -26,10 +31,6 @@ class DenseStaticParams:
     alloc_tensor: Callable
     sinks: torch.Tensor | None = None
 
-    @classmethod
-    def from_weights(cls, spec, weight, *, device):
-        return cls(spec, device.allocate_tensor, weight.attn_sinks.weight if spec.attention_sink else None)
-
     def validate_sinks(self, device):
         if not self.spec.attention_sink:
             if self.sinks is not None:
@@ -44,73 +45,10 @@ class DenseStaticParams:
             raise ValueError("FA3 attention requires one bound BF16 sink per query head")
 
 
-@dataclass
-class DenseBatchMetadata:
-    batch_size: int
-    max_q_len: int
-    max_kv_len: int
-    microbatch_index: int
-    req_to_tokens: torch.Tensor
-    req_indices: torch.Tensor
-    seq_lengths: torch.Tensor
-    q_starts: torch.Tensor | None
-    ready_lengths: torch.Tensor | None
-    cu_q: torch.Tensor
-    cu_k: torch.Tensor
-    page_table: torch.Tensor | None = None
-    total_kv_tokens: int | None = None
-    total_q_tokens: int | None = None
-    hold_request_id: int | None = None
-    shared_groups: torch.Tensor | None = None
-    mtp_indices: torch.Tensor | None = None
-    host_seq_lengths: torch.Tensor | None = None
-    host_cu_q: torch.Tensor | None = None
-    host_cu_k: torch.Tensor | None = None
-    host_ready: object = None
-
-    def copy_for_graph(self, new):
-        if self.batch_size != new.batch_size or self.microbatch_index != new.microbatch_index:
-            raise ValueError("decode Graph metadata must retain its batch size and execution lane")
-        if new.host_ready is not None:
-            new.host_ready.synchronize()
-        for field in fields(self):
-            old, value = getattr(self, field.name), getattr(new, field.name)
-            if isinstance(value, torch.Tensor):
-                if old is None or old.shape != value.shape or old.dtype != value.dtype:
-                    raise ValueError(f"Graph metadata shape/dtype changed: {field.name}")
-                if old.data_ptr() != value.data_ptr():
-                    old.copy_(value, non_blocking=True)
-
-
-def group_verify_batch(batch, max_tokens):
-    """Coalesce consecutive query rows while keeping Graph metadata shapes fixed."""
-    from lightllm.common.basemodel.triton_kernel.mtp_utils import build_mtp_shared_group_markers
-    from lightllm.common.basemodel.triton_kernel.fa3_utils import build_dynamic_spec_fa3_decode_params
-    from lightllm.common.basemodel.triton_kernel.gen_prefill_params import gen_cumsum_pad0_tensor
-
-    if batch.hold_request_id is None:
-        raise ValueError("verification requires an explicit padding request identity")
-    groups = build_mtp_shared_group_markers(batch.req_indices, batch.hold_request_id)
-    q_lengths, kv_lengths, requests, lengths = build_dynamic_spec_fa3_decode_params(
-        batch.req_indices, batch.seq_lengths, groups, batch.batch_size, batch.hold_request_id
-    )
-    cu_q, cu_k = gen_cumsum_pad0_tensor(q_lengths, kv_lengths)
-    return replace(
-        batch,
-        req_indices=requests,
-        seq_lengths=lengths,
-        cu_q=cu_q.int(),
-        cu_k=cu_k.int(),
-        q_starts=cu_q[:-1].int(),
-        ready_lengths=lengths - q_lengths,
-        max_q_len=max_tokens,
-    )
-
-
-class BoundAttention:
-    def __init__(self, offer, state_view, static_params, workspace):
+class BoundDenseAttention:
+    def __init__(self, offer, state_view, static_params, workspace, *, implementation):
         self.name, self.phase = offer.backend, offer.phase
-        self.implementation = self.name.split(".")[0]
+        self.implementation = implementation
         self.view, self.spec = state_view, static_params.spec
         self.alloc_tensor = static_params.alloc_tensor
         self.sinks = static_params.sinks
@@ -122,20 +60,13 @@ class BoundAttention:
 
     @property
     def metadata_key(self):
-        return self.name
-
-    def _lane_workspace(self, index):
-        if not 0 <= index < self.limits.microbatch_count:
-            raise ValueError("microbatch exceeds reserved execution lanes")
-        if self.workspace is None:
-            return None
-        size = self.workspace.numel() // self.limits.microbatch_count
-        return self.workspace[index * size : (index + 1) * size]
+        grouped = self.phase == "verify" and self.implementation == "triton" and self.spec.window == (-1, -1)
+        return self.name, self.page_size, grouped
 
     def create_metadata(self, batch):
         if batch.batch_size > self.limits.max_batch_size or batch.max_kv_len > self.limits.max_seq_len:
             raise ValueError("batch exceeds the planned attention capacity")
-        scratch = self._lane_workspace(batch.microbatch_index)
+        scratch = lane_workspace(self.workspace, self.limits, batch.microbatch_index)
         if self.phase == "verify":
             if self.implementation == "fa3":
                 batch = group_verify_batch(batch, self.limits.max_verify_tokens)
@@ -149,19 +80,8 @@ class BoundAttention:
                 )
         metadata = replace(batch, cu_q=batch.cu_q.int(), cu_k=batch.cu_k.int())
         if self.implementation == "fa3":
-            from lightllm.common.basemodel.triton_kernel.fa3_utils import page_table_copy
-
-            page_size = self.page_size
-            width = (self.limits.max_seq_len + page_size - 1) // page_size
-            metadata.page_table = scratch.view(torch.int32)[: batch.batch_size * width].view(batch.batch_size, width)
-            active_width = (batch.max_kv_len + page_size - 1) // page_size
-            page_table_copy(
-                metadata.page_table[:, :active_width], metadata.req_to_tokens, metadata.req_indices, page_size
-            )
+            prepare_page_table(metadata, batch, self.limits, scratch, self.page_size)
         return metadata
-
-    def prepare_batch(self, batch):
-        return batch.execution_metadata[self.metadata_key]
 
     def run(self, inputs, metadata, out=None):
         inputs = query_tensor(inputs)
@@ -200,7 +120,7 @@ class BoundAttention:
             gqa_flash_decoding_stage2 as stage2,
         )
 
-        scratch = self._lane_workspace(metadata.microbatch_index)
+        scratch = lane_workspace(self.workspace, self.limits, metadata.microbatch_index)
         blocks = decode_blocks(metadata.batch_size)
         elements = metadata.batch_size * self.spec.q_heads * blocks
         value_bytes = elements * self.spec.head_dim * q.element_size()
@@ -294,6 +214,8 @@ class BoundAttention:
 
 
 class DenseAttentionBackend:
+    supports_auxiliary_states = False
+
     def __init__(self, name: str, phase: str):
         if name not in ("triton", "fa3") or phase not in ("prefill", "decode", "verify"):
             raise ValueError("Dense supports Triton/FA3 prefill, decode and verify")
@@ -303,7 +225,7 @@ class DenseAttentionBackend:
     def supports_device(self, caps):
         return caps.is_nvidia
 
-    def probe(self, attention_spec, format_spec, device_caps, limits):
+    def probe(self, attention_spec, format_spec, device_caps, limits, *, auxiliary_formats=None):
         if not isinstance(attention_spec, DenseAttentionSpec):
             return ProbeResult(reason="requires Dense attention semantics")
         if attention_spec.attention_sink and self.implementation != "fa3":
@@ -373,7 +295,7 @@ class DenseAttentionBackend:
             )
         )
 
-    def bind(self, offer, state_view: StateView, static_params: DenseStaticParams, workspace):
+    def bind(self, offer, state_view: StateView, static_params: DenseStaticParams, workspace, *, auxiliary_views=None):
         if offer.backend != self.name or offer.phase != self.phase or offer.format != state_view.format:
             raise ValueError("offer does not match the backend and state view")
         k, v = state_view.fields
@@ -395,7 +317,4 @@ class DenseAttentionBackend:
             or not workspace.is_contiguous()
         ):
             raise ValueError("workspace does not satisfy the selected offer")
-        return BoundAttention(offer, state_view, static_params, workspace)
-
-
-from lightllm.core.formats.kv.dense import DenseKVWriter
+        return BoundDenseAttention(offer, state_view, static_params, workspace, implementation=self.implementation)
