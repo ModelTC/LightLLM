@@ -106,7 +106,7 @@ class StaticFP8AttentionBackend:
             spec.dtype not in (torch.float16, torch.bfloat16)
             or spec.head_dim not in (64, 128, 256)
             or spec.softcap
-            or spec.scale != spec.head_dim**-0.5
+            or spec.scale != spec.head_dim ** -0.5
             or (spec.window != (-1, -1) and not (spec.window[0] >= 0 and spec.window[1] == 0))
         ):
             return ProbeResult(reason="requires FP16/BF16 Dense with supported head size and optional window")

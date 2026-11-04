@@ -39,7 +39,7 @@ def make_bound(bits, dtype, group, phase, window=(-1, -1), device="cuda"):
     planner = Planner(
         (GroupQuantizedAttentionBackend(phase),),
         DeviceCaps("cuda", 0, (9, 0)),
-        ExecutionLimits(8 * 1024**2, 2, 768, 2),
+        ExecutionLimits(8 * 1024 ** 2, 2, 768, 2),
     )
     alloc = lambda shape, dtype: torch.empty(shape, dtype=dtype, device=device)
     plan = planner.bind(

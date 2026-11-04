@@ -342,7 +342,7 @@ class DenseAttentionBackend:
                 )
             )
             or attention_spec.softcap != 0
-            or attention_spec.scale != attention_spec.head_dim**-0.5
+            or attention_spec.scale != attention_spec.head_dim ** -0.5
         ):
             return ProbeResult(
                 reason="requires default scale and no softcap; non-causal attention and right windows require FA3"

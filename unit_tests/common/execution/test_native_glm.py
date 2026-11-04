@@ -30,7 +30,7 @@ from lightllm.common.execution.state_store import ConvSSMStateStore, IndexerWind
 
 
 def pooled_contracts(quantized=False, dtype=torch.bfloat16):
-    spec = PooledNoPEAttentionSpec(4, 512, 128**-0.5, 4, 128, 256, 4, dtype)
+    spec = PooledNoPEAttentionSpec(4, 512, 128 ** -0.5, 4, 128, 256, 4, dtype)
     state = StateSpec("main", "pooled_kv.3", 3, (3,), (512, 128))
     tail = StateSpec("main", "indexer_tail.3", 3, (3,), (4, 4, 128), "window")
     stored = torch.uint8 if quantized else dtype
@@ -172,7 +172,7 @@ def test_kda_fresh_prefix_checkpoint_and_graph(dtype, monkeypatch):
                 memory = memory * decay[:, :, None]
                 delta = (v - torch.einsum("hkv,hk->hv", memory, k)) * data.beta[t].float().sigmoid()[:, None]
                 memory = memory + k[:, :, None] * delta[:, None, :]
-                outputs.append(torch.einsum("hkv,hk->hv", memory, q) * dim**-0.5)
+                outputs.append(torch.einsum("hkv,hk->hv", memory, q) * dim ** -0.5)
             expected_conv[row].copy_(history)
             expected_ssm[row].copy_(memory)
             offset += length
@@ -315,8 +315,8 @@ def test_pooled_nope_dense_and_sparse_prefix_graph(
     # Same pooled scores must select the independent FP32 weighted-ReLU top-k set.
     from lightllm.models.glm5_next.triton_kernel.index_quant import hadamard_transform_quant_fp8
 
-    q, scale = hadamard_transform_quant_fp8(inputs.index_query, scale=128**-0.5)
-    weights = inputs.index_weights * (4**-0.5 * 128**-0.5) * scale.squeeze(-1)
+    q, scale = hadamard_transform_quant_fp8(inputs.index_query, scale=128 ** -0.5)
+    weights = inputs.index_weights * (4 ** -0.5 * 128 ** -0.5) * scale.squeeze(-1)
     indexer = prefill.indexer
     for row in [258, 526 - 1]:
         length = int(meta.lengths[row])
@@ -386,7 +386,7 @@ def test_pooled_nope_dense_and_sparse_prefix_graph(
                 for end in range((prefix // 4 + 1) * 4, prefix + width + 1, 4):
                     raw = raw_history[row][end - 4 : end].float()
                     pooled = (raw[:, :128] * (raw[:, 128:] + params.pool_position_bias).softmax(0)).sum(0).bfloat16()
-                    key, scale = hadamard_transform_quant_fp8(pooled[None], 128**-0.5)
+                    key, scale = hadamard_transform_quant_fp8(pooled[None], 128 ** -0.5)
                     packed = decode.indexer[table[row, end - 1].long()]
                     torch.testing.assert_close(
                         packed[:128].view(torch.float8_e4m3fn).float(), key[0].float(), rtol=0, atol=0
@@ -772,10 +772,10 @@ def test_pooled_index_quant_matches_torch_hadamard(dtype):
     matrix = torch.ones(1, 1, device="cuda")
     for _ in range(7):
         matrix = torch.cat((torch.cat((matrix, matrix), 1), torch.cat((matrix, -matrix), 1)), 0)
-    transformed = (x.float() @ matrix * 128**-0.5).bfloat16().float()
+    transformed = (x.float() @ matrix * 128 ** -0.5).bfloat16().float()
     scale = torch.exp2(torch.ceil(torch.log2(transformed.abs().amax(-1, keepdim=True).clamp_min(1e-4) / 448)))
     expected = (transformed / scale).clamp(-448, 448).to(torch.float8_e4m3fn)
-    actual, actual_scale = hadamard_transform_quant_fp8(x, 128**-0.5)
+    actual, actual_scale = hadamard_transform_quant_fp8(x, 128 ** -0.5)
     assert torch.equal(actual.view(torch.uint8), expected.view(torch.uint8))
     assert torch.equal(actual_scale, scale)
 
@@ -827,8 +827,8 @@ def test_pooled_long_decode_topk_and_lane_graph(quantized, implementation):
     )
 
     def check(output, rows, lengths):
-        q, scale = hadamard_transform_quant_fp8(inputs.index_query, scale=128**-0.5)
-        weights = inputs.index_weights * (64**-0.5 * 128**-0.5) * scale.squeeze(-1)
+        q, scale = hadamard_transform_quant_fp8(inputs.index_query, scale=128 ** -0.5)
+        weights = inputs.index_weights * (64 ** -0.5 * 128 ** -0.5) * scale.squeeze(-1)
         physical, _ = decode.select_indices(inputs, meta)
         for i, (row, length) in enumerate(zip(rows, lengths)):
             closed = length // 4

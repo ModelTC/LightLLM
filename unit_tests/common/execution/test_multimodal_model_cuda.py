@@ -144,7 +144,7 @@ def test_image_features_prefill_decode_prefix_and_graph(family, backend, monkeyp
     )
     monkeypatch.setattr(model.att_state_manager, "get_state", lambda **_: pytest.fail("runtime resource lookup"))
     monkeypatch.setattr(g_infer_context, "cpu_embed_cache_client", None)
-    virtual = 2**62
+    virtual = 2 ** 62
     images = [
         dict(token_id=virtual, token_num=4, start_index_in_embed_cache=0, start_idx=2, grid_thwd=(1, 2, 2, -2)),
         dict(token_id=virtual + 8, token_num=2, start_index_in_embed_cache=4, start_idx=1, grid_thwd=(1, 1, 2, 0)),

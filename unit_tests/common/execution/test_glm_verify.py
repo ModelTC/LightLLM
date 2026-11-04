@@ -299,7 +299,7 @@ def test_kda_verify_accept_reject_suffix_and_graph(dtype, ssm_dtype, monkeypatch
                 memory = memory * decay[:, :, None]
                 delta = (v - torch.einsum("hkv,hk->hv", memory, k)) * data.beta[t].float().sigmoid()[:, None]
                 memory = memory + k[:, :, None] * delta[:, None, :]
-                outputs.append(torch.einsum("hkv,hk->hv", memory, q) * 128**-0.5)
+                outputs.append(torch.einsum("hkv,hk->hv", memory, q) * 128 ** -0.5)
                 if candidates:
                     memory = memory.to(ssm_dtype).float()
                     states.append((history.clone(), memory.clone()))

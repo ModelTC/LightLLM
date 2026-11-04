@@ -1005,7 +1005,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     params = dict(
         compress_ratio=0,
         head_dim_v=512,
-        softmax_scale=512**-0.5,
+        softmax_scale=512 ** -0.5,
         swa_indices=indices.unsqueeze(1),
         swa_lengths=lengths,
         attn_sink=torch.zeros(64, device="cuda"),
@@ -1852,7 +1852,7 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
         SimpleNamespace(convert_tokens_to_ids=lambda token: 99), "/unused", {"vision_n_layers": 1}
     )
     params = MultimodalParams(images=[{"type": "url", "data": "unused"} for _ in range(3)])
-    token_base, canonical_length = 2**62, 13
+    token_base, canonical_length = 2 ** 62, 13
     for image in params.images:
         image.token_id, image.token_num, image.start_index_in_embed_cache = token_base, canonical_length, 0
     input_ids = tokenizer.encode([7] * prefix_len + [99, 99, 8, 99, 8], params)

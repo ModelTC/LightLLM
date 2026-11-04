@@ -25,7 +25,7 @@ def test_distinct_formats_require_separate_plan_reservations(monkeypatch):
         for i, fmt in enumerate((format, replace(format, page_size=4)))
     ]
     planner = Planner(
-        (FlashInferAttentionBackend("decode"),), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(200 * 1024**2, 2, 768)
+        (FlashInferAttentionBackend("decode"),), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(200 * 1024 ** 2, 2, 768)
     )
     with pytest.raises(ValueError, match="plan workspace .* exceeds budget"):
         planner.prepare(requests)
@@ -56,7 +56,7 @@ def test_mixed_formats_keep_independent_plans_and_score_semantics(phase):
         for i, (fmt, fields) in enumerate(((plain, (k, v)), (fp8, (*encoded, scales, None))))
     ]
     planner = Planner(
-        (FlashInferAttentionBackend(phase),), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024**2, 2, 768)
+        (FlashInferAttentionBackend(phase),), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024 ** 2, 2, 768)
     )
     bindings = planner.bind(
         [(i, phase, spec, view, DenseStaticParams(spec, allocate), "auto") for i, view in enumerate(views)],

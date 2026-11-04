@@ -42,7 +42,7 @@ def test_auto_per_tensor_selects_native_flashinfer_on_other_devices(monkeypatch)
     planner = Planner(
         (StaticFP8AttentionBackend("decode"), FlashInferAttentionBackend("decode")),
         DeviceCaps("cuda", 0, (8, 9)),
-        ExecutionLimits(256 * 1024**2, 2, 128),
+        ExecutionLimits(256 * 1024 ** 2, 2, 128),
     )
     backend, _ = planner.select(DenseAttentionSpec(8, 2, 64, dtype=torch.bfloat16), fp8_format(False), "decode")
     assert isinstance(backend, FlashInferAttentionBackend)
@@ -78,7 +78,7 @@ def test_bound_fp8_matches_decoded_sdpa_and_replays_graph(
     state.allocate_storage(2048)
     view = store.views()[state_spec.key]
     backend = FlashInferAttentionBackend(phase) if implementation == "flashinfer" else StaticFP8AttentionBackend(phase)
-    planner = Planner((backend,), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024**2, 2, 768, 2))
+    planner = Planner((backend,), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024 ** 2, 2, 768, 2))
     alloc = lambda shape, dtype: torch.empty(shape, dtype=dtype, device="cuda")
     bound = (
         planner.bind(

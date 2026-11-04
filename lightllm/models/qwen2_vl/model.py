@@ -43,7 +43,7 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
             height=height, width=width, factor=factor, min_pixels=self.min_pixel, max_pixels=self.max_pixel
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
-        token_num = (grid_h * grid_w) // (self.merge_size**2)
+        token_num = (grid_h * grid_w) // (self.merge_size ** 2)
         position_delta = max(grid_h // self.merge_size, grid_w // self.merge_size) - token_num
         # delta 是为了mrope准备的，记录由于图片引入，position_id 产生的偏移量
         img.grid_thwd = (1, grid_h // self.merge_size, grid_w // self.merge_size, position_delta)

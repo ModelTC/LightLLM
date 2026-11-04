@@ -8,8 +8,8 @@ import torch
 from .dense import BoundAttention, group_verify_batch
 from .specs import AttentionOffer, DenseAttentionSpec, ProbeResult
 
-FLOAT_WORKSPACE_BYTES = 128 * 1024**2
-INT_WORKSPACE_BYTES = 8 * 1024**2
+FLOAT_WORKSPACE_BYTES = 128 * 1024 ** 2
+INT_WORKSPACE_BYTES = 8 * 1024 ** 2
 
 
 @dataclass

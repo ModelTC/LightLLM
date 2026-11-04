@@ -39,7 +39,7 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
         self.merge_size = self.image_processor.merge_size
         grid_t = 1
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
-        merge_length = self.merge_size**2
+        merge_length = self.merge_size ** 2
         self.token_num = (grid_t * grid_h * grid_w) // merge_length
         self.image_length = self.token_num
         return self.image_length

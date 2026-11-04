@@ -153,13 +153,13 @@ def test_moe_float32_preserves_projection_range_and_graph(round_intermediates):
     bound = backend.bind(offer, gate_up, down)
     x, logits = torch.ones(1, 128, device="cuda"), torch.zeros(1, 1, device="cuda")
     # The up projection is 65536; every operation stays in the FP32 range.
-    torch.testing.assert_close(bound.run(x.clone(), logits), torch.full_like(x, 2**23), rtol=0, atol=0)
+    torch.testing.assert_close(bound.run(x.clone(), logits), torch.full_like(x, 2 ** 23), rtol=0, atol=0)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         output = bound.run(x.clone(), logits)
     x.fill_(2)
     graph.replay()
-    torch.testing.assert_close(output, torch.full_like(x, 2**25), rtol=0, atol=0)
+    torch.testing.assert_close(output, torch.full_like(x, 2 ** 25), rtol=0, atol=0)
 
 
 def quantized_activations(x):

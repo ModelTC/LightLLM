@@ -25,7 +25,7 @@ def test_image_canvas_and_token_expansion(tmp_path, width, height, canvas):
     image.image_w, image.image_h = width, height
     image.token_id = 1000
     image.token_num = tokenizer.get_image_token_length(image)
-    assert image.token_num == canvas[0] * canvas[1] // 28**2
+    assert image.token_num == canvas[0] * canvas[1] // 28 ** 2
     multi = MultimodalParams()
     multi.images = [image]
     ids = tokenizer.encode([1, 100, 102, 101, 2], multi)
@@ -167,7 +167,7 @@ def test_vision_batch_preserves_independent_image_attention():
         .eval()
     )
     grid = torch.tensor([[1, 4, 6], [1, 6, 4]])
-    x = torch.randn(48, 3 * 2 * 14**2, device="cuda")
+    x = torch.randn(48, 3 * 2 * 14 ** 2, device="cuda")
     with torch.inference_mode():
         batch = model(x, grid)
         individual = torch.cat([model(x[:24], grid[:1]), model(x[24:], grid[1:])])

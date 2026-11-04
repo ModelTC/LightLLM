@@ -361,14 +361,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             _0_shared_output = LlamaTransformerLayerInfer._ffn_tp(self, _0_input1, infer_state, layer_weight)
 
         # 0 dispatch
-        (
-            _0_recv_x,
-            _0_masked_m,
-            _0_topk_idx,
-            _0_topk_weight,
-            _0_handle,
-            _0_hook,
-        ) = ep.low_latency_dispatch(
+        (_0_recv_x, _0_masked_m, _0_topk_idx, _0_topk_weight, _0_handle, _0_hook,) = ep.low_latency_dispatch(
             _0_input1, _0_router_logits, capture=get_moe_capture_callback(infer_state, self.layer_num_)
         )
         infer_state.hook = _0_hook
@@ -398,14 +391,7 @@ class Deepseek2TransformerLayerInfer(LlamaTransformerLayerInfer):
             _1_shared_output = LlamaTransformerLayerInfer._ffn_tp(self, _1_input1, infer_state1, layer_weight)
 
         # 1 dispatch
-        (
-            _1_recv_x,
-            _1_masked_m,
-            _1_topk_idx,
-            _1_topk_weight,
-            _1_handle,
-            _1_hook,
-        ) = ep.low_latency_dispatch(
+        (_1_recv_x, _1_masked_m, _1_topk_idx, _1_topk_weight, _1_handle, _1_hook,) = ep.low_latency_dispatch(
             _1_input1, _1_router_logits, capture=get_moe_capture_callback(infer_state1, self.layer_num_)
         )
         infer_state1.hook = _1_hook

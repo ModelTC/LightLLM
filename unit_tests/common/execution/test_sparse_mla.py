@@ -70,7 +70,7 @@ def test_sparse_model_declares_indexer_and_tp_replicated_storage():
 
 def test_flashmla_rejects_unsupported_native_layout_and_kernel_alignment():
     spec = SparseMLAAttentionSpec(64, 512, 128, 64, 128, torch.bfloat16, index_topk=256)
-    caps, limits = DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(10**7, 2, 512)
+    caps, limits = DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(10 ** 7, 2, 512)
     backend = SparseMLAAttentionBackend("flashmla_sparse", "prefill")
     assert backend.probe(spec, format_spec(False), caps, limits).offers
     for other, fmt in (
@@ -85,7 +85,7 @@ def test_fp8_flashmla_checks_library_api_before_binding(monkeypatch):
     from lightllm.common.execution import sparse_mla
 
     spec = SparseMLAAttentionSpec(16, 512, 128, 64, 128, torch.bfloat16, index_topk=256)
-    caps, limits = DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(10**7, 2, 512)
+    caps, limits = DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(10 ** 7, 2, 512)
     backend = SparseMLAAttentionBackend("flashmla_sparse", "decode")
     monkeypatch.setattr(sparse_mla, "find_spec", lambda name: None if name == "flash_mla" else object())
     assert "standalone" in backend.probe(spec, format_spec(True), caps, limits).reason
@@ -129,7 +129,7 @@ def create_bound(
     planner = Planner(
         (SparseMLAAttentionBackend(implementation, phase),),
         DeviceCaps("cuda", 0, (9, 0)),
-        ExecutionLimits(10**7, 2, max_seq, 2),
+        ExecutionLimits(10 ** 7, 2, max_seq, 2),
     )
     bound = (
         planner.bind(
@@ -382,7 +382,7 @@ def test_flashmla_fp8_scheduler_groups_and_lanes():
         layers,
         manager,
         runtime,
-        ExecutionLimits(10**7, 2, 512, 2),
+        ExecutionLimits(10 ** 7, 2, 512, 2),
         format_spec(True),
         {"prefill": "triton", "decode": "flashmla_sparse"},
         static_params={i: SparseMLAStaticParams(spec, runtime.allocate_tensor) for i, spec in specs.items()},

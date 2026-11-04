@@ -28,7 +28,7 @@ def test_mla_declarations_and_tp_replicas():
     )
     adapter = Deepseek2ModelAdapter(config, role="main", dtype=torch.bfloat16, tp_world_size=4)
     spec = adapter.attention_specs()[0]
-    assert spec.q_heads == 4 and spec.scale > 192**-0.5
+    assert spec.q_heads == 4 and spec.scale > 192 ** -0.5
     assert all(s.shape == (512, 64) for s in adapter.state_specs())
     fmt = FormatSpec("plain", torch.bfloat16, "token_latent", ("latent",), 4, (2, 4))
     manager = AttentionStateManager(2)
@@ -47,7 +47,7 @@ def test_flashinfer_mla_plans_have_separate_semantic_reservations(monkeypatch):
     first = MLAAttentionSpec(32, 512, 128, 64, 128, torch.float16)
     second = replace(first, q_heads=128)
     backend = FlashInferMLABackend("decode")
-    caps, limits = DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024**2, 3, 1024, 2)
+    caps, limits = DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024 ** 2, 3, 1024, 2)
     size = backend.probe(first, fmt, caps, limits).offers[0].workspace_bytes
     planner = Planner((backend,), caps, replace(limits, workspace_bytes=size))
     requests = [
@@ -87,7 +87,7 @@ def test_mla_verify_dynamic_groups_and_graph(implementation, dtype, latent_dim):
     )
     allocate = lambda shape, dtype: torch.empty(shape, dtype=dtype, device="cuda")
     planner = Planner(
-        (backend,), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024**2, 6, 64, 2, max_verify_tokens=3)
+        (backend,), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024 ** 2, 6, 64, 2, max_verify_tokens=3)
     )
     bound = (
         planner.bind(
@@ -311,7 +311,7 @@ def test_flashinfer_mla_distinct_layers_preserve_plans():
         view = StateView(StateSpec("main", f"mla.{i}", i, (i,), (512, 64)), fmt, (cache.clone(),))
         requests.append((i, "decode", spec, view, MLAStaticParams(spec, allocate, None), "auto"))
     planner = Planner(
-        (FlashInferMLABackend("decode"),), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024**2, 2, 64)
+        (FlashInferMLABackend("decode"),), DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(512 * 1024 ** 2, 2, 64)
     )
     bound = [b.execution for b in planner.bind(requests, lambda n: allocate((n,), torch.uint8)).bindings]
     tensor = lambda values: torch.tensor(values, dtype=torch.int32, device="cuda")

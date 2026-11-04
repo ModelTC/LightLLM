@@ -268,8 +268,8 @@ class BoundPooledNoPE(BoundSparseMLA):
         q, weights = inputs.index_query, inputs.index_weights
         if q.shape != (count, spec.index_heads, spec.index_dim) or weights.shape != (count, spec.index_heads):
             raise ValueError("pooled indexer query/weights disagree with the bound semantics")
-        q_fp8, q_scale = hadamard_transform_quant_fp8(q, scale=spec.index_dim**-0.5)
-        weights = weights * (spec.index_heads**-0.5 * spec.index_dim**-0.5) * q_scale.squeeze(-1)
+        q_fp8, q_scale = hadamard_transform_quant_fp8(q, scale=spec.index_dim ** -0.5)
+        weights = weights * (spec.index_heads ** -0.5 * spec.index_dim ** -0.5) * q_scale.squeeze(-1)
         width = triton.cdiv(self.limits.max_seq_len, spec.pool_size)
         logits = self.alloc_tensor((count, width), torch.float32)
         keys = self.indexer[:, :128].view(torch.float8_e4m3fn)

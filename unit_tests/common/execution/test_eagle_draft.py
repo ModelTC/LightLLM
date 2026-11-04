@@ -220,7 +220,7 @@ def test_eagle_checkpoint_prefix_and_graph(backend, compressed, head_dim, monkey
                 q = rope(norm(q, "self_attn.q_norm")).transpose(0, 1)
                 k = rope(norm(k, "self_attn.k_norm")).repeat_interleave(2, dim=1).transpose(0, 1)
                 v = v.repeat_interleave(2, dim=1).transpose(0, 1)
-                score = q @ k.transpose(-1, -2) / head_dim**0.5
+                score = q @ k.transpose(-1, -2) / head_dim ** 0.5
                 score.masked_fill_(torch.ones(length, length, dtype=torch.bool, device="cuda").triu(1), -float("inf"))
                 attention = (score.softmax(-1) @ v).transpose(0, 1).reshape(length, 4 * head_dim)
                 hidden = hidden + F.linear(attention, reference[prefix + "self_attn.o_proj.weight"])

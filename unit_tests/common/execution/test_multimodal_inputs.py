@@ -121,7 +121,7 @@ def test_bound_embedding_and_deepstack_use_current_chunk_without_global_context(
     weight = SimpleNamespace(wte_weight_=SimpleNamespace(weight=weights, tp_vocab_start_id=0, tp_vocab_end_id=8))
     prepare = embedding.bind_inputs(weight, cache)
     build = factory(prepare.__self__)
-    virtual = 2**62
+    virtual = 2 ** 62
     image, audio = item(virtual, 3, 1), item(virtual + 20, 2, 4)
     program = GraphProgram(torch.cuda.graph_pool_handle())
     layer = Qwen3VLTransformerLayerInfer.__new__(Qwen3VLTransformerLayerInfer)

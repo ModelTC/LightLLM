@@ -172,7 +172,7 @@ def test_gdn_prefix_state_restore_and_graph(implementation, dim, dtype, ssm_dtyp
                 state = state * decay[:, None, None]
                 residual = v.view(4, dim) - (state * k[:, :, None]).sum(1)
                 state = state + k[:, :, None] * (residual * b.float().sigmoid()[:, None])[:, None, :]
-                outputs.append((state * (q * dim**-0.5)[:, :, None]).sum(1))
+                outputs.append((state * (q * dim ** -0.5)[:, :, None]).sum(1))
             pos += length
             expected_conv[row] = history.to(dtype)
             expected_ssm[row] = state.to(ssm_dtype)

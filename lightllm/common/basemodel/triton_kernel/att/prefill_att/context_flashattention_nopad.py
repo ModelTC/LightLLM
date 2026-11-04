@@ -211,7 +211,7 @@ def context_attention_fwd(
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
-    sm_scale = 1.0 / (Lq**0.5) * 1.4426950408889634
+    sm_scale = 1.0 / (Lq ** 0.5) * 1.4426950408889634
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
@@ -401,7 +401,7 @@ def context_attention_fwd_no_prompt_cache(q, k, v, o, b_start_loc, b_seq_len, ma
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
-    sm_scale = 1.0 / (Lq**0.5) * 1.4426950408889634
+    sm_scale = 1.0 / (Lq ** 0.5) * 1.4426950408889634
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
@@ -580,7 +580,7 @@ def context_attention_fwd_contiguous_kv(
 
     # 计算scale系数, 并乘以 1/log(2) = 1.4426950408889634,
     # 算子内部使用 tl.math.exp2 来使计算与标准attention等价。
-    sm_scale = 1.0 / (Lq**0.5) * 1.4426950408889634
+    sm_scale = 1.0 / (Lq ** 0.5) * 1.4426950408889634
     batch, head = b_seq_len.shape[0], q.shape[1]
     kv_group_num = q.shape[1] // k.shape[1]
 
