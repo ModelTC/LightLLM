@@ -367,7 +367,9 @@ def test_mtp_decode_handoff_compaction_and_accepted_commits(compiler, monkeypatc
         )
         monkeypatch.setattr(impl, "overlap_prepare_decode_inputs", lambda req_objs: layout)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())
-    monkeypatch.setattr(torch.cuda, "Event", lambda: SimpleNamespace(record=lambda: None, synchronize=lambda: None))
+    monkeypatch.setattr(
+        torch.cuda, "Event", lambda **kwargs: SimpleNamespace(record=lambda: None, synchronize=lambda: None)
+    )
     monkeypatch.setattr(impl.g_infer_context, "get_overlap_stream", lambda: None)
     monkeypatch.setattr(
         impl.g_infer_context,
