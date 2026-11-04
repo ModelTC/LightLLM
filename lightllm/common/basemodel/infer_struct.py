@@ -115,7 +115,7 @@ class InferStateInfo:
 
     @classmethod
     def bind_metadata(cls, model):
-        from lightllm.common.execution.batch_metadata import prepare_sequence_metadata
+        from lightllm.core.runner.batch_metadata import prepare_sequence_metadata
 
         return prepare_sequence_metadata
 

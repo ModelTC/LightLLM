@@ -1,7 +1,9 @@
+from lightllm.models.glm4_moe_lite_mtp.adapter import Glm4MoeLiteMTPModelAdapter
 from typing import List
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
-from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel, Deepseek3MTPModelAdapter
+from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel
+from lightllm.models.deepseek_mtp.adapter import Deepseek3MTPModelAdapter
 from lightllm.models.glm4_moe_lite.layer_weights.transformer_layer_weight import Glm4MoeLiteTransformerLayerWeight
 from lightllm.models.glm4_moe_lite.layer_infer.transformer_layer_infer import Glm4MoeLiteTransformerLayerInfer
 from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight import (
@@ -9,12 +11,6 @@ from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight i
 )
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.basemodel import load_hf_weights
-
-
-class Glm4MoeLiteMTPModelAdapter(Deepseek3MTPModelAdapter):
-    pre_and_post_weight_class = Glm4MoeLiteMTPPreAndPostLayerWeight
-    transformer_weight_class = Glm4MoeLiteTransformerLayerWeight
-    transformer_layer_infer_class = Glm4MoeLiteTransformerLayerInfer
 
 
 class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):

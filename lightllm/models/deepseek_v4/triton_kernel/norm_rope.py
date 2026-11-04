@@ -7,7 +7,7 @@ import torch
 import triton
 import triton.language as tl
 
-from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import _butterfly_stage
+from lightllm.core.formats.kv.kernels.hadamard import _butterfly_stage
 from lightllm.utils.custom_kernel_utis import get_pdl_launch_kwargs
 
 

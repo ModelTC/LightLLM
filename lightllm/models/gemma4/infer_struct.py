@@ -1,7 +1,7 @@
 from functools import partial
 import torch
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.common.execution.batch_metadata import RotaryMetadata, RotaryTables
+from lightllm.core.runner.batch_metadata import RotaryMetadata, RotaryTables
 from lightllm.models.gemma4.triton_kernel.build_b_image_token_end import build_b_image_token_end
 
 

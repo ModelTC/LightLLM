@@ -13,12 +13,12 @@ from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.common.execution.decode_graph import CudaGraph
-from lightllm.common.execution.prefill_graph import PrefillCudaGraph
-from lightllm.common.execution.graph_runner import GraphRunner
-from lightllm.common.execution.batch_state import BatchStateFactory, select_token_indices
-from lightllm.common.execution.warmup import WarmupRunner
-from lightllm.common.execution.batch_runner import (
+from lightllm.core.runner.decode_graph import CudaGraph
+from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+from lightllm.core.runner.graph import GraphRunner
+from lightllm.core.runner.state import BatchStateFactory, select_token_indices
+from lightllm.core.runner.warmup import WarmupRunner
+from lightllm.core.runner.batch import (
     BatchPolicy,
     BatchProgram,
     BatchRunner,
@@ -278,7 +278,7 @@ class TpPartBaseModel:
             if self.is_mtp_draft_model and self.args.mtp_mode in ("vanilla_no_att", "eagle_no_att"):
                 return
 
-            from lightllm.common.execution.runner import prepare_runner
+            from lightllm.models.base.build import prepare_runner
 
             self.execution_runner = prepare_runner(self)
             if self.execution_runner is not None:
@@ -386,13 +386,11 @@ class TpPartBaseModel:
         if adapter_class is not None:
             adapter = self._create_model_adapter(adapter_class)
             if self.args.mtp_mode is not None:
-                from lightllm.common.execution.specs import (
-                    DenseAttentionSpec,
-                    GatedDeltaNetSpec,
-                    KimiDeltaAttentionSpec,
-                    MLAAttentionSpec,
-                    PooledNoPEAttentionSpec,
-                )
+                from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+                from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
+                from lightllm.core.compute.attention.kda.spec import KimiDeltaAttentionSpec
+                from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
+                from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
 
                 # Other recurrent/sparse families still need their own verify bindings.
                 if not all(
@@ -432,15 +430,11 @@ class TpPartBaseModel:
             self.model_adapter.load_weights(
                 (self.pre_post_weight, self.trans_layers_weight), self.weight_dir_, weight_dict
             )
-            from lightllm.common.execution.planner import Planner
+            from lightllm.core.formats.weights.binding import bind_linears, bind_moe
             from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
-            self.linear_plan = Planner.bind_linears(
-                (self.pre_post_weight, *self.trans_layers_weight), g_cache_manager.empty
-            )
-            self.moe_plan = Planner.bind_moe(
-                self.model_adapter.moe_specs(), self.trans_layers_weight, self.layers_infer
-            )
+            self.linear_plan = bind_linears((self.pre_post_weight, *self.trans_layers_weight), g_cache_manager.empty)
+            self.moe_plan = bind_moe(self.model_adapter.moe_specs(), self.trans_layers_weight, self.layers_infer)
             return
         assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(

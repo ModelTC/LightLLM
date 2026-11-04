@@ -1,4 +1,5 @@
-from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel, Qwen3DSparkModelAdapter
+from lightllm.models.qwen3_dspark.model import Qwen3DSparkModel
+from lightllm.models.qwen3_dspark.adapter import Qwen3DSparkModelAdapter
 
 
 class Qwen3_5DSparkModel(Qwen3DSparkModel):

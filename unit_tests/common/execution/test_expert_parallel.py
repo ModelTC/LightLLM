@@ -10,10 +10,12 @@ import torch
 import torch.distributed as dist
 import torch.multiprocessing as mp
 
-from lightllm.common.execution.expert_compute import ExpertComputeBackend
-from lightllm.common.execution.expert_runner import ExpertRunner
-from lightllm.common.execution.specs import DeviceCaps, FormatSpec, MoeSpec
-from lightllm.common.transfer.expert import ExpertDispatch, ExpertTransfer
+from lightllm.core.compute.moe.expert import ExpertComputeBackend
+from lightllm.core.runner.expert import ExpertRunner
+from lightllm.core.contracts.device import DeviceCaps
+from lightllm.core.contracts.state import FormatSpec
+from lightllm.core.compute.moe.spec import MoeSpec
+from lightllm.core.transfer.expert import ExpertDispatch, ExpertTransfer
 
 
 def ep_format(rank=0):
@@ -254,7 +256,7 @@ def _run_ep_workers(round_scales, tmp_path, round_intermediates=False):
 @torch.no_grad()
 def _ep_worker(rank, rendezvous, round_scales, round_intermediates=False):
     import deep_ep
-    from lightllm.common.execution.planner import Planner
+    from lightllm.core.planner.planner import Planner
     from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
     from lightllm.common.quantization.quantize_method import WeightPack
     from lightllm.distributed import dist_group_manager

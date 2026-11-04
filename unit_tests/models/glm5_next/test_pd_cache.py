@@ -17,7 +17,7 @@ from lightllm.common.attention_state.full_att import (
 )
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
 from lightllm.models.glm5_next.config import Glm5NextResourceConfig
-from lightllm.models.glm5_next.triton_kernel.kpool import compress_pools
+from lightllm.core.compute.attention.pooled_nope.kpool import compress_pools
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.envs_utils import get_env_start_args, set_env_start_args, set_unique_server_name
 

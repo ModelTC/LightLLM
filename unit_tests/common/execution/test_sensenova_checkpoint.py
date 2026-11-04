@@ -21,8 +21,8 @@ def test_loop_checkpoint_reference_graph_and_state_restore(monkeypatch, dtype, r
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from transformers.models.qwen3_5 import modeling_qwen3_5 as hf
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.common.execution.decode_graph import CudaGraph
-    from lightllm.common.execution.prefill_graph import PrefillCudaGraph
+    from lightllm.core.runner.decode_graph import CudaGraph
+    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
     from lightllm.server.core.objs.start_args_type import StartArgs

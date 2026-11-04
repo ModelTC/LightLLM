@@ -1,3 +1,4 @@
+from lightllm.models.qwen2_vl.adapter import Qwen2VLModelAdapter
 import numpy as np
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
@@ -8,7 +9,8 @@ from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
 from .vision_process import smart_resize
-from lightllm.models.qwen2.model import Qwen2TpPartModel, Qwen2ModelAdapter
+from lightllm.models.qwen2.model import Qwen2TpPartModel
+from lightllm.models.qwen2.adapter import Qwen2ModelAdapter
 from typing import Union, List
 from lightllm.utils.error_utils import InvalidRequestError
 
@@ -97,11 +99,6 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
                     raise InvalidRequestError("invalid image token sequence")
             spans.append((start, end))
             offset = end + 1
-
-
-class Qwen2VLModelAdapter(Qwen2ModelAdapter):
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-    transformer_layer_infer_class = Qwen2VLTransformerLayerInfer
 
 
 class Qwen2VLTpPartModel(Qwen2TpPartModel):

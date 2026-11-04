@@ -4,8 +4,8 @@ from typing import Literal
 
 import torch
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.common.execution import batch_metadata
-from lightllm.common.execution.batch_metadata import RotaryTables
+from lightllm.core.runner import batch_metadata
+from lightllm.core.runner.batch_metadata import RotaryTables
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, WindowCompressorState
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
     CompressedAttentionState,

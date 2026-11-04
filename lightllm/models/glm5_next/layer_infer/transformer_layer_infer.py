@@ -251,7 +251,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     def _bound_nope_attention(self, q, kv, batch, weight, phase, out):
-        from lightllm.common.execution.pooled_sparse import PooledNoPEInputs
+        from lightllm.core.compute.attention.pooled_nope.backend import PooledNoPEInputs
 
         bound = getattr(self, f"bound_{phase}_attention")
         params = batch.get_topk_indices_params
@@ -332,7 +332,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
     def _kda_attention(self, qkv, gate, beta, batch, weight, phase):
         bound = getattr(self, f"bound_{phase}_attention", None)
         if bound is not None:
-            from lightllm.common.execution.kda import KDAInputs
+            from lightllm.core.compute.attention.kda.backend import KDAInputs
 
             return bound.run(KDAInputs(qkv, gate, beta), bound.prepare_batch(batch))
         state = getattr(batch, f"{phase}_att_state1")

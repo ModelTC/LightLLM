@@ -97,8 +97,8 @@ def test_paged_long_sequences_and_concurrent_lanes(implementation, dtype, q_head
         StateSpec,
         StateView,
     )
-    from lightllm.common.execution.dense import DenseAttentionBackend, DenseStaticParams
-    from lightllm.common.execution.flashinfer import FlashInferAttentionBackend
+    from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
+    from lightllm.core.compute.attention.dense.flashinfer import FlashInferAttentionBackend
     from lightllm.common.execution.runner import attention_batch
 
     torch.manual_seed(29)

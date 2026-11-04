@@ -7,8 +7,8 @@ from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import D
 from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
-from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
+from lightllm.core.formats.kv.kernels.act_quant import act_quant
+from lightllm.core.formats.kv.kernels.indexer_copy import destindex_copy_indexer_ks
 from lightllm.models.deepseek3_2.triton_kernel.extract_indexer_ks import extract_indexer_ks
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.distributed import all_gather_into_tensor
@@ -186,7 +186,7 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         return None
 
     def _bound_sparse_attention(self, q, kv, infer_state, layer_weight, attention, out, extra_inputs=None):
-        from lightllm.common.execution.sparse_mla import SparseMLAInputs
+        from lightllm.core.compute.attention.sparse_mla.backend import SparseMLAInputs
 
         if extra_inputs is None:
             params = infer_state.get_topk_indices_params
@@ -316,7 +316,7 @@ class NsaInfer:
     @staticmethod
     def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
         assert x.dtype == torch.bfloat16
-        from lightllm.models.deepseek3_2.triton_kernel.hadamard_transform import hadamard_transform
+        from lightllm.core.formats.kv.kernels.hadamard import hadamard_transform
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."

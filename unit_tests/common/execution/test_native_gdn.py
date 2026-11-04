@@ -5,12 +5,14 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.dense import DenseBatchMetadata
-from lightllm.common.execution.gdn import GatedDeltaNetBackend, GDNStaticParams
-from lightllm.common.execution.model_adapter import GDNModelAdapter
-from lightllm.common.execution.planner import Planner
-from lightllm.common.execution.specs import DeviceCaps, ExecutionLimits, FormatSpec, GatedDeltaNetSpec, StateSpec
-from lightllm.common.execution.state_store import ConvSSMStateStore
+from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata
+from lightllm.core.compute.attention.gdn.backend import GatedDeltaNetBackend, GDNStaticParams
+from lightllm.models.base.adapter import GDNModelAdapter
+from lightllm.core.planner.planner import Planner
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec, StateSpec
+from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
+from lightllm.core.storage.attention import ConvSSMStateStore
 
 
 def test_hybrid_declarations_follow_explicit_layers_and_tp():
@@ -55,7 +57,7 @@ def test_draft_and_loop_layers_keep_their_own_numbering():
 
 @pytest.mark.parametrize("bits", [4, 8])
 def test_hybrid_quantized_storage_matches_external_declaration(bits, monkeypatch):
-    from lightllm.common.execution.state_store import DenseStateStore
+    from lightllm.core.storage.attention import DenseStateStore
     from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
     from lightllm.server.core.objs.start_args_type import StartArgs
     from unit_tests.common.execution.test_group_quantized import make_format

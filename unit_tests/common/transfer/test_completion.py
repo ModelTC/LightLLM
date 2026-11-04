@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state.manager import AttentionStateManager
-from lightllm.common.attention_state.lifetime import DeferredReclaimer
+from lightllm.core.storage.lifetime import DeferredReclaimer
 from lightllm.common.transfer import CopyOperation, CopyPlan, Transfer, TransferFailure
 from unit_tests.common.transfer.helpers import Event, Runtime
 

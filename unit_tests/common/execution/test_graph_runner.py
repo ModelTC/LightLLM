@@ -5,7 +5,7 @@ import sys
 import pytest
 import torch
 
-from lightllm.common.execution.graph_runner import GraphRunner
+from lightllm.core.runner.graph import GraphRunner
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
 
@@ -42,9 +42,9 @@ def test_eager_prefill_failure_releases_temporary_tensor_cache():
 
 
 def test_close_resets_decode_and_prefill_segments_before_releasing_bindings():
-    from lightllm.common.execution.decode_graph import CudaGraph
-    from lightllm.common.execution.prefill_graph import PrefillCudaGraph
-    from lightllm.common.execution.graph_program import GraphProgram
+    from lightllm.core.runner.decode_graph import CudaGraph
+    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.core.runner.graph_program import GraphProgram
 
     resets = []
     runner = GraphRunner()

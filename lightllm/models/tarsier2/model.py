@@ -1,8 +1,16 @@
+from lightllm.models.tarsier2.adapter import (
+    Tarsier2Qwen2ModelAdapter,
+    Tarsier2Qwen2VLModelAdapter,
+    Tarsier2LlamaModelAdapter,
+)
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.common.basemodel import TpPartBaseModel
-from lightllm.models.llama.model import LlamaTpPartModel, LlamaModelAdapter
-from lightllm.models.qwen2.model import Qwen2TpPartModel, Qwen2ModelAdapter
-from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel, Qwen2VLModelAdapter
+from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama.adapter import LlamaModelAdapter
+from lightllm.models.qwen2.model import Qwen2TpPartModel
+from lightllm.models.qwen2.adapter import Qwen2ModelAdapter
+from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
+from lightllm.models.qwen2_vl.adapter import Qwen2VLModelAdapter
 from lightllm.models.qwen2_vl.vision_process import smart_resize
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.tarsier2.layer_weights.pre_and_post_layer_weight import (
@@ -83,11 +91,6 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-class Tarsier2Qwen2ModelAdapter(Qwen2ModelAdapter):
-    pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-
-
 class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):
     model_adapter_class = Tarsier2Qwen2ModelAdapter
     pre_and_post_weight_class = Tarsier2Qwen2ModelAdapter.pre_and_post_weight_class
@@ -97,20 +100,10 @@ class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):
         TpPartBaseModel._init_config(self)
 
 
-class Tarsier2Qwen2VLModelAdapter(Qwen2VLModelAdapter):
-    pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-
-
 class Tarsier2Qwen2VLTpPartModel(Qwen2VLTpPartModel):
     model_adapter_class = Tarsier2Qwen2VLModelAdapter
     pre_and_post_weight_class = Tarsier2Qwen2VLModelAdapter.pre_and_post_weight_class
     pre_layer_infer_class = Tarsier2Qwen2VLModelAdapter.pre_layer_infer_class
-
-
-class Tarsier2LlamaModelAdapter(LlamaModelAdapter):
-    pre_and_post_weight_class = Tarsier2LlamaPreAndPostLayerWeight
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
 
 
 class Tarsier2LlamaTpPartModel(LlamaTpPartModel):

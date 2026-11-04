@@ -111,7 +111,7 @@ class GPTOSSFusedMoeWeightTP(BaseWeightTpl):
         return self.loaded == set(self.fields) and not self.pending
 
     def native_moe_view(self):
-        from lightllm.common.execution.specs import FormatSpec
+        from lightllm.core.contracts.state import FormatSpec
 
         if not self.verify_load():
             raise ValueError("GPT-OSS expert weights and biases must be fully loaded before binding")

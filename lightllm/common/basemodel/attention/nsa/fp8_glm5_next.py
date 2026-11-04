@@ -14,7 +14,7 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
         self._prefill_workspaces = [{"smallq": None, "generic": None} for _ in self.ragged_mem_buffers]
 
     def get_smallq_workspace(self, infer_state, q):
-        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
+        from lightllm.core.compute.attention.pooled_nope.prefill_fp8 import (
             allocate_direct_smallq_workspace,
             allocate_selected_prefill_workspace,
         )
@@ -40,9 +40,7 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
         }
 
     def get_generic_prefill_workspace(self, infer_state, q, packed_kv, topk_indices):
-        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-            allocate_generic_prefill_workspace,
-        )
+        from lightllm.core.compute.attention.pooled_nope.prefill_fp8 import allocate_generic_prefill_workspace
 
         slot = self._prefill_workspaces[infer_state.microbatch_index]
         entry = slot["generic"]
@@ -92,9 +90,7 @@ class Fp8Glm5NextSparseAttBackend(NsaFlashMlaFp8SparseAttBackend):
 @dataclasses.dataclass
 class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
     def _nsa_prefill_att(self, q, kv, att_control):
-        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
-            context_attention_fwd_fp8,
-        )
+        from lightllm.core.compute.attention.pooled_nope.prefill_fp8 import context_attention_fwd_fp8
 
         params = att_control.nsa_prefill_dict
         # Only H64 uses the small-Q workspace paths.
@@ -110,7 +106,7 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
                 params["softmax_scale"],
             )
 
-        from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
+        from lightllm.core.compute.attention.pooled_nope.prefill_fp8 import (
             can_use_direct_smallq,
             can_use_selected_prefill,
         )
@@ -169,7 +165,7 @@ class Fp8Glm5NextSparseDecodeState(NsaFlashMlaFp8SparseDecodeAttState):
     def _nsa_decode_att(self, q, packed_kv, att_control):
         import flash_mla
 
-        from lightllm.models.glm5_next.triton_kernel import fp8_sparse_decode
+        from lightllm.core.compute.attention.pooled_nope import decode_fp8 as fp8_sparse_decode
         from lightllm.models.glm5_next.triton_kernel.pad_query_heads import pad_query_heads
 
         params = att_control.nsa_decode_dict

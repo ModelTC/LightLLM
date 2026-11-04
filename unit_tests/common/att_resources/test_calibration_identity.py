@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.attention_state.calibration import calibration_table_identity
+from lightllm.core.formats.kv.calibration import calibration_table_identity
 from lightllm.common.attention_state.full_att.gqa.static_fp8_state import (
     StaticFP8AttentionConfig,
     StaticFP8FullAttentionState,

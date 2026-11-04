@@ -7,9 +7,9 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.group_quantized import GroupQuantizedKVWriter
-from lightllm.common.execution.specs import StateSpec
-from lightllm.common.execution.state_store import DenseStateStore
+from lightllm.core.formats.kv.group_quantized import GroupQuantizedKVWriter
+from lightllm.core.contracts.state import StateSpec
+from lightllm.core.storage.attention import DenseStateStore
 from lightllm.common.transfer import Transfer
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs

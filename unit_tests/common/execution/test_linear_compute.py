@@ -6,9 +6,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.execution.linear import LinearBackend
-from lightllm.common.execution.planner import Planner
-from lightllm.common.execution.specs import DeviceCaps, FormatSpec, LinearSpec
+from lightllm.core.compute.linear.backend import LinearBackend
+from lightllm.core.planner.planner import Planner
+from lightllm.core.contracts.device import DeviceCaps
+from lightllm.core.contracts.state import FormatSpec
+from lightllm.core.compute.linear.spec import LinearSpec
 
 
 def contracts(name, dtype=torch.bfloat16, batches=None):

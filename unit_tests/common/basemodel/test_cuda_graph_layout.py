@@ -4,10 +4,10 @@ from types import SimpleNamespace
 import pytest
 
 import lightllm.common.basemodel.basemodel as basemodel_module
-import lightllm.common.execution.decode_graph as cuda_graph_module
+import lightllm.core.runner.decode_graph as cuda_graph_module
 import lightllm.common.basemodel.mtp_manager as mtp_manager_module
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
-from lightllm.common.execution.decode_graph import CudaGraph
+from lightllm.core.runner.decode_graph import CudaGraph
 from lightllm.common.basemodel.mtp_manager import MtpManager
 
 

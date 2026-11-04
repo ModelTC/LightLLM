@@ -1,3 +1,4 @@
+from lightllm.models.qwen3next.adapter import Qwen3NextModelAdapter
 import torch
 from typing import Optional, TYPE_CHECKING
 import triton
@@ -12,8 +13,8 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
-from lightllm.common.execution.model_adapter import GDNModelAdapter
-from lightllm.models.llama.model import LlamaModelAdapter
+from lightllm.models.base.adapter import GDNModelAdapter
+from lightllm.models.llama.adapter import LlamaModelAdapter
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -22,38 +23,6 @@ if TYPE_CHECKING:
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
 
 logger = init_logger(__name__)
-
-
-class Qwen3NextModelAdapter(GDNModelAdapter):
-    pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
-    transformer_weight_class = Qwen3NextTransformerLayerWeight
-    pre_layer_infer_class = LlamaModelAdapter.pre_layer_infer_class
-    post_layer_infer_class = LlamaModelAdapter.post_layer_infer_class
-    transformer_layer_infer_class = Qwen3NextTransformerLayerInfer
-
-    def moe_specs(self):
-        from lightllm.common.execution.specs import MoeSpec
-
-        config = self.config
-        experts = config.get("num_experts", 0)
-        if not experts:
-            return {}
-        spec = MoeSpec(
-            config["hidden_size"],
-            config["moe_intermediate_size"],
-            experts,
-            config["num_experts_per_tok"],
-            self.dtype,
-            renormalize=config.get("norm_topk_prob", False),
-            shared_experts=1,
-            gated_shared=True,
-        )
-        return {
-            layer: spec
-            for layer in self.layer_ids
-            if layer not in config.get("mlp_only_layers", [])
-            and (layer + 1) % config.get("decoder_sparse_step", 1) == 0
-        }
 
 
 class Qwen3NextTpPartModel(Qwen3MOEModel):

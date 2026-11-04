@@ -5,8 +5,8 @@ import bisect
 from functools import lru_cache
 from typing import Optional, List, Deque
 from collections import deque
-from lightllm.common.transfer import Transfer, TransferCompletion, TransferFailure
-from lightllm.common.execution.device_runtime import CudaRuntime
+from lightllm.core.transfer import Transfer, TransferCompletion, TransferFailure
+from lightllm.core.device.cuda import CudaRuntime
 from lightllm.server.multi_level_kv_cache import CacheTier
 from lightllm.server.multi_level_kv_cache.cpu_cache_client import CpuKvCacheClient
 from lightllm.utils.envs_utils import get_env_start_args

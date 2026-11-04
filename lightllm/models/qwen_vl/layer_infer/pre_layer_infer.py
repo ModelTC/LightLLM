@@ -6,7 +6,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.llama.layer_infer.pre_layer_infer import LlamaPreLayerInfer
 from lightllm.common.basemodel.triton_kernel.multimodal_emb import multimodal_emb
 from lightllm.distributed.communication_op import all_reduce
-from lightllm.common.execution.multimodal import MultimodalInputs
+from lightllm.core.runner.multimodal import MultimodalInputs
 
 
 """

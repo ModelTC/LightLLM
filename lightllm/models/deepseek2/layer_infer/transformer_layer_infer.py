@@ -5,7 +5,7 @@ import torch
 import triton
 from lightllm.models.deepseek2.layer_weights.transformer_layer_weight import Deepseek2TransformerLayerWeight
 from lightllm.common.basemodel.attention.base_att import AttControl
-from lightllm.models.deepseek2.triton_kernel.sample_kv import sample_kv
+from lightllm.core.compute.attention.mla.sample_kv import sample_kv
 from lightllm.models.llama.layer_infer.transformer_layer_infer import LlamaTransformerLayerInfer
 from lightllm.models.deepseek2.triton_kernel.rotary_emb import rotary_emb_fwd
 from lightllm.models.deepseek2.infer_struct import Deepseek2InferStateInfo

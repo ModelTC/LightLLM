@@ -1,3 +1,4 @@
+from lightllm.models.qwen3_omni_moe_thinker.adapter import Qwen3OmniMoEModelAdapter
 import librosa
 import copy
 from functools import lru_cache
@@ -13,7 +14,8 @@ from lightllm.models.qwen3_omni_moe_thinker.layer_weights.transformers_layer_wei
     Qwen3OmniMOEThinkerTransformerLayerWeight,
 )
 
-from lightllm.models.qwen3_vl_moe.model import Qwen3VLMOETpPartModel, Qwen3VLMoEModelAdapter
+from lightllm.models.qwen3_vl_moe.model import Qwen3VLMOETpPartModel
+from lightllm.models.qwen3_vl_moe.adapter import Qwen3VLMoEModelAdapter
 from lightllm.models.qwen3_omni_moe_thinker.audio_process import MAX_AUDIO_DURATION_SECONDS
 from lightllm.models.qwen3_omni_moe_thinker.infer_struct import Qwen3OmniMOEInferStateInfo
 from lightllm.models.qwen3_vl.model import QWen3VLTokenizer
@@ -147,12 +149,6 @@ class QWen3OmniTokenizer(QWen3VLTokenizer):
         input_ids.extend(origin_ids)
 
         return input_ids
-
-
-class Qwen3OmniMoEModelAdapter(Qwen3VLMoEModelAdapter):
-    transformer_layer_infer_class = Qwen3OmniMOETransformerLayerInfer
-    pre_and_post_weight_class = Qwen3OmniMOEThinkerPreAndPostLayerWeight
-    transformer_weight_class = Qwen3OmniMOEThinkerTransformerLayerWeight
 
 
 class Qwen3OmniMOETpPartModel(Qwen3VLMOETpPartModel):

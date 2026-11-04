@@ -12,14 +12,14 @@ from lightllm.common.execution import (
     StateSpec,
     SparseMLAAttentionSpec,
 )
-from lightllm.common.execution.dense import DenseBatchMetadata
-from lightllm.common.execution.sparse_mla import (
-    PackedMLAKVWriter,
+from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata
+from lightllm.core.formats.kv.packed_mla import PackedMLAKVWriter
+from lightllm.core.compute.attention.sparse_mla.backend import (
     SparseMLAAttentionBackend,
     SparseMLAStaticParams,
     SparseMLAInputs,
 )
-from lightllm.common.execution.state_store import PackedMLAStateStore
+from lightllm.core.storage.attention import PackedMLAStateStore
 
 
 def format_spec(quantized, shard=(0, 1)):
@@ -38,7 +38,7 @@ def format_spec(quantized, shard=(0, 1)):
 
 
 def test_sparse_model_declares_indexer_and_tp_replicated_storage():
-    from lightllm.models.deepseek3_2.model import Deepseek3_2ModelAdapter
+    from lightllm.models.deepseek3_2.adapter import Deepseek3_2ModelAdapter
 
     adapter = Deepseek3_2ModelAdapter(
         dict(
@@ -82,7 +82,7 @@ def test_flashmla_rejects_unsupported_native_layout_and_kernel_alignment():
 
 def test_fp8_flashmla_checks_library_api_before_binding(monkeypatch):
     from types import SimpleNamespace
-    from lightllm.common.execution import sparse_mla
+    from lightllm.core.compute.attention.sparse_mla import backend as sparse_mla
 
     spec = SparseMLAAttentionSpec(16, 512, 128, 64, 128, torch.bfloat16, index_topk=256)
     caps, limits = DeviceCaps("cuda", 0, (9, 0)), ExecutionLimits(10 ** 7, 2, 512)
@@ -239,7 +239,7 @@ def test_sparse_attention_matches_torch_with_prefix_and_graph(
             bound.attend(query, physical, logical, meta, current)
     torch.cuda.current_stream().wait_stream(stream)
     if bound.requires_dynamic_prefill:
-        from lightllm.common.execution.graph_program import GraphProgram
+        from lightllm.core.runner.graph_program import GraphProgram
 
         graph = GraphProgram(torch.cuda.graph_pool_handle())
         with graph.capture():
@@ -285,8 +285,8 @@ def test_flashmla_fp8_native_packed_attention(monkeypatch, phase, heads):
 def test_sparse_indexer_selection_and_decode_graph(
     monkeypatch, max_seq, topk, index_heads, scale_fmt, implementation="triton"
 ):
-    from lightllm.models.deepseek3_2.triton_kernel.act_quant import act_quant
-    from lightllm.models.deepseek3_2.triton_kernel.destindex_copy_indexer_ks import destindex_copy_indexer_ks
+    from lightllm.core.formats.kv.kernels.act_quant import act_quant
+    from lightllm.core.formats.kv.kernels.indexer_copy import destindex_copy_indexer_ks
 
     torch.manual_seed(89)
     bound, view, manager = create_bound(
@@ -366,8 +366,8 @@ def test_flashmla_fp8_indexer_long_decode_graph(monkeypatch):
 @torch.no_grad()
 def test_flashmla_fp8_scheduler_groups_and_lanes():
     from types import SimpleNamespace
-    from lightllm.common.execution.runner import Runner
-    from lightllm.common.execution.device_runtime import CudaRuntime
+    from lightllm.core.build import PreparedExecution as Runner
+    from lightllm.core.device.cuda import CudaRuntime
 
     specs = {
         i: SparseMLAAttentionSpec(heads, 512, 128, 64, 128, torch.bfloat16, index_topk=256)

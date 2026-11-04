@@ -58,7 +58,7 @@ def test_mla_draft_declares_checkpoint_semantics_and_global_state(model_class, p
     [(None, 2, 2, 2), ("noaux_tc", 1, 2, 2), ("group_limited_greedy", 2, 2, 1), ("greedy", 2, 1, 1)],
 )
 def test_mla_routing_method_declares_group_score(method, default, expected_groups, expected_topk):
-    from lightllm.common.execution.model_adapter import grouped_moe_specs
+    from lightllm.models.base.adapter import grouped_moe_specs
 
     config = dict(
         num_hidden_layers=1,
@@ -84,8 +84,8 @@ def test_mla_draft_checkpoint_prefix_and_graph(model_class, backend, mode, monke
     from safetensors.torch import save_file
     from transformers import DeepseekV3Config, DeepseekV3ForCausalLM
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.common.execution.decode_graph import CudaGraph
-    from lightllm.common.execution.prefill_graph import PrefillCudaGraph
+    from lightllm.core.runner.decode_graph import CudaGraph
+    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.models.deepseek2.model import Deepseek2TpPartModel

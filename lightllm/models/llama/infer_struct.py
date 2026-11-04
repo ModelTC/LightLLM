@@ -1,5 +1,5 @@
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.common.execution.batch_metadata import RotaryMetadata, RotaryTables
+from lightllm.core.runner.batch_metadata import RotaryMetadata, RotaryTables
 
 
 class LlamaInferStateInfo(InferStateInfo):

@@ -1,3 +1,4 @@
+from lightllm.models.llama.adapter import LlamaModelAdapter
 from typing import TYPE_CHECKING
 import os
 import json
@@ -12,7 +13,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.common.execution.model_adapter import DenseModelAdapter
+from lightllm.models.base.adapter import DenseModelAdapter
 
 logger = init_logger(__name__)
 
@@ -21,15 +22,6 @@ if TYPE_CHECKING:
     from easydict import EasyDict
     from lightllm.server.core.objs.start_args_type import StartArgs
     from lightllm.common.attention_state.full_att import FullAttentionState
-
-
-class LlamaModelAdapter(DenseModelAdapter):
-    pre_and_post_weight_class = LlamaPreAndPostLayerWeight
-    transformer_weight_class = LlamaTransformerLayerWeight
-
-    pre_layer_infer_class = LlamaPreLayerInfer
-    post_layer_infer_class = LlamaPostLayerInfer
-    transformer_layer_infer_class = LlamaTransformerLayerInfer
 
 
 class LlamaTpPartModel(TpPartBaseModel):

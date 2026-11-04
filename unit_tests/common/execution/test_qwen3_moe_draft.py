@@ -12,7 +12,7 @@ from unit_tests.common.execution.test_model_cuda import prepare_model_batch
 
 
 def test_ffn_draft_declarations_use_checkpoint_coordinates():
-    from lightllm.models.qwen3_moe_mtp.model import Qwen3MoEMTPModelAdapter
+    from lightllm.models.qwen3_moe_mtp.adapter import Qwen3MoEMTPModelAdapter
 
     config = dict(
         num_hidden_layers=2,
@@ -32,7 +32,7 @@ def test_ffn_draft_declarations_use_checkpoint_coordinates():
 
 @pytest.mark.parametrize("layer_ids,checkpoint_ids", [((4,), (1, 2)), ((4, 4), (1, 2)), ((4, 5), (-1, 0))])
 def test_ffn_draft_rejects_incomplete_layer_mapping(layer_ids, checkpoint_ids):
-    from lightllm.models.qwen3_moe_mtp.model import Qwen3MoEMTPModelAdapter
+    from lightllm.models.qwen3_moe_mtp.adapter import Qwen3MoEMTPModelAdapter
 
     with pytest.raises(ValueError, match="draft layer IDs"):
         Qwen3MoEMTPModelAdapter(
@@ -52,8 +52,8 @@ def test_ffn_draft_checkpoint_and_graph(mode, layout, monkeypatch, tmp_path):
     from safetensors.torch import save_file
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.common.execution.decode_graph import CudaGraph
-    from lightllm.common.execution.prefill_graph import PrefillCudaGraph
+    from lightllm.core.runner.decode_graph import CudaGraph
+    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.models.qwen3_moe.model import Qwen3MOEModel

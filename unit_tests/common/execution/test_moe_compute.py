@@ -7,9 +7,11 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.execution.moe import MoeBackend
-from lightllm.common.execution.planner import Planner
-from lightllm.common.execution.specs import DeviceCaps, FormatSpec, MoeSpec
+from lightllm.core.compute.moe.backend import MoeBackend
+from lightllm.core.planner.planner import Planner
+from lightllm.core.contracts.device import DeviceCaps
+from lightllm.core.contracts.state import FormatSpec
+from lightllm.core.compute.moe.spec import MoeSpec
 
 
 def format_for(dtype, quantized=False, shard=(0, 1)):
@@ -26,7 +28,7 @@ def format_for(dtype, quantized=False, shard=(0, 1)):
 
 
 def test_moe_contracts_reject_unsupported_semantics_and_formats():
-    from lightllm.common.execution.model_adapter import grouped_moe_specs
+    from lightllm.models.base.adapter import grouped_moe_specs
 
     assert (
         grouped_moe_specs(dict(n_routed_experts=4, num_hidden_layers=2, first_k_dense_replace=2), torch.bfloat16) == {}

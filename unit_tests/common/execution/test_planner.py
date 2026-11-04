@@ -13,8 +13,8 @@ from lightllm.common.execution import (
     StateSpec,
     StateView,
 )
-from lightllm.common.execution.dense import DenseAttentionBackend, DenseStaticParams
-from lightllm.common.execution.specs import AttentionOffer, ProbeResult
+from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
+from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 
 
 def view(layer=0, role="main", heads=2, dim=64):

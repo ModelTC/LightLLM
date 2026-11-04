@@ -1,3 +1,8 @@
+from lightllm.models.internvl.adapter import (
+    InternVLLlamaModelAdapter,
+    InternVLQwen2ModelAdapter,
+    InternVLDeepSeek2ModelAdapter,
+)
 import os
 import json
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
@@ -6,12 +11,15 @@ from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.server.core.objs import SamplingParams
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.models.internlm2.model import Internlm2TpPartModel
-from lightllm.models.llama.model import LlamaTpPartModel, LlamaModelAdapter
+from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama.adapter import LlamaModelAdapter
 from lightllm.models.phi3.model import Phi3TpPartModel
-from lightllm.models.qwen2.model import Qwen2TpPartModel, Qwen2ModelAdapter
+from lightllm.models.qwen2.model import Qwen2TpPartModel
+from lightllm.models.qwen2.adapter import Qwen2ModelAdapter
 from lightllm.models.qwen3.model import Qwen3TpPartModel
 from lightllm.models.qwen3_moe.model import Qwen3MOEModel
-from lightllm.models.deepseek2.model import Deepseek2TpPartModel, Deepseek2ModelAdapter
+from lightllm.models.deepseek2.model import Deepseek2TpPartModel
+from lightllm.models.deepseek2.adapter import Deepseek2ModelAdapter
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.internvl.layer_weights.pre_and_post_layer_weight import (
     InternVLLlamaPreAndPostLayerWeight,
@@ -238,20 +246,10 @@ class InternVLInternlm2TpPartModel(Internlm2TpPartModel):
         return
 
 
-class InternVLLlamaModelAdapter(LlamaModelAdapter):
-    pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-
-
 class InternVLLlamaTpPartModel(LlamaTpPartModel):
     model_adapter_class = InternVLLlamaModelAdapter
     pre_and_post_weight_class = InternVLLlamaModelAdapter.pre_and_post_weight_class
     pre_layer_infer_class = InternVLLlamaModelAdapter.pre_layer_infer_class
-
-
-class InternVLQwen2ModelAdapter(Qwen2ModelAdapter):
-    pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
 
 
 class InternVLQwen2TpPartModel(Qwen2TpPartModel):
@@ -261,11 +259,6 @@ class InternVLQwen2TpPartModel(Qwen2TpPartModel):
 
     def _init_config(self):
         TpPartBaseModel._init_config(self)
-
-
-class InternVLDeepSeek2ModelAdapter(Deepseek2ModelAdapter):
-    pre_and_post_weight_class = InternVLLlamaPreAndPostLayerWeight
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
 
 
 class InternVLDeepSeek2TpPartModel(Deepseek2TpPartModel):

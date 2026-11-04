@@ -4,8 +4,10 @@ from concurrent.futures import ThreadPoolExecutor
 import pytest
 import torch
 
-from lightllm.common.execution.dense import DenseAttentionBackend, DenseStaticParams
-from lightllm.common.execution.specs import DenseAttentionSpec, DeviceCaps, ExecutionLimits, FormatSpec
+from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec
 from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.gpt_oss_fused_moe_weight_tp import (
     GPTOSSFusedMoeWeightTP,
 )
@@ -89,7 +91,7 @@ def test_gpt_oss_checkpoint_shards_preserve_interleaving_and_bias(monkeypatch, t
 
 
 def test_gpt_oss_declares_sink_window_and_routing():
-    from lightllm.models.gpt_oss.model import GptOssModelAdapter
+    from lightllm.models.gpt_oss.adapter import GptOssModelAdapter
 
     adapter = GptOssModelAdapter(
         dict(
@@ -178,10 +180,10 @@ def test_gpt_oss_all_experts_prefill_decode_prefix_and_graph(monkeypatch, tmp_pa
 @torch.no_grad()
 def test_bound_sink_attention_matches_torch_and_updates_graph(fp8, phase, window):
     from types import SimpleNamespace
-    from lightllm.common.execution.planner import Planner
+    from lightllm.core.planner.planner import Planner
     from lightllm.common.execution.runner import attention_batch
-    from lightllm.common.execution.specs import StateSpec, StateView
-    from lightllm.common.execution.static_fp8 import StaticFP8AttentionBackend
+    from lightllm.core.contracts.state import StateSpec, StateView
+    from lightllm.core.compute.attention.dense.static_fp8 import StaticFP8AttentionBackend
 
     torch.manual_seed(13)
     spec = DenseAttentionSpec(4, 2, 64, dtype=torch.bfloat16, window=window, attention_sink=True)

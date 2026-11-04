@@ -4,8 +4,8 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelMtpOutputCollector, ModelOutput
-from lightllm.common.execution.batch_runner import BatchPolicy, BatchProgram, BatchRunner
-from lightllm.common.execution.graph_runner import GraphRunner
+from lightllm.core.runner.batch import BatchPolicy, BatchProgram, BatchRunner
+from lightllm.core.runner.graph import GraphRunner
 
 
 def prefill_input(tokens):

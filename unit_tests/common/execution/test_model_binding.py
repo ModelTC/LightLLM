@@ -5,8 +5,9 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState
-from lightllm.common.execution.runner import Runner
-from lightllm.common.execution.specs import DeviceCaps, ExecutionLimits, FormatSpec
+from lightllm.core.build import PreparedExecution as Runner
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.models.qwen3.model import Qwen3TpPartModel
@@ -97,7 +98,7 @@ def test_unmigrated_subclass_does_not_inherit_opt_in():
 
 
 def test_dense_semantics_use_model_positions_with_external_layer_ids():
-    from lightllm.common.execution.model_adapter import DenseModelAdapter
+    from lightllm.models.base.adapter import DenseModelAdapter
 
     adapter = DenseModelAdapter(
         dict(
@@ -214,7 +215,8 @@ def test_vl_startup_normalizes_rope_and_expert_config(model_class, nested, tmp_p
 @pytest.mark.parametrize("renormalize", [None, False, True])
 @pytest.mark.parametrize("expert_field", ["num_experts", "num_local_experts"])
 def test_qwen3_moe_declares_selected_expert_layers(renormalize, expert_field):
-    from lightllm.models.qwen3_moe.model import Qwen3MoEModelAdapter, Qwen3MOEModel
+    from lightllm.models.qwen3_moe.adapter import Qwen3MoEModelAdapter
+    from lightllm.models.qwen3_moe.model import Qwen3MOEModel
 
     config = dict(
         num_hidden_layers=6,
@@ -241,7 +243,7 @@ def test_qwen3_moe_declares_selected_expert_layers(renormalize, expert_field):
 
 
 def test_mtp_cohort_keeps_existing_execution_path():
-    from lightllm.common.execution.runner import prepare_runner
+    from lightllm.models.base.build import prepare_runner
 
     model = LlamaTpPartModel.__new__(LlamaTpPartModel)
     model.args = SimpleNamespace(mtp_mode="vanilla_with_att")
@@ -250,9 +252,11 @@ def test_mtp_cohort_keeps_existing_execution_path():
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_qwen35_moe_declares_hybrid_state_and_gated_experts(nested):
-    from lightllm.common.execution.specs import DenseAttentionSpec, GatedDeltaNetSpec
+    from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+    from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
     from lightllm.models.registry import ModelRegistry
-    from lightllm.models.qwen3_5_moe.model import Qwen3_5MOETpPartModel, Qwen35MoEModelAdapter
+    from lightllm.models.qwen3_5_moe.model import Qwen3_5MOETpPartModel
+    from lightllm.models.qwen3_5_moe.adapter import Qwen35MoEModelAdapter
     from lightllm.models.qwen3_5_moe.layer_weights.transformer_layer_weight import Qwen35MOETransformerLayerWeight
 
     text = dict(

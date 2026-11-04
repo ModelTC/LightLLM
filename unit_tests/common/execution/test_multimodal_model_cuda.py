@@ -23,8 +23,8 @@ def test_image_features_prefill_decode_prefix_and_graph(family, backend, monkeyp
     from lightllm.models.qwen3_vl.model import Qwen3VLTpPartModel
     from lightllm.models.qwen3_vl_moe.model import Qwen3VLMOETpPartModel
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.common.execution.decode_graph import CudaGraph
-    from lightllm.common.execution.prefill_graph import PrefillCudaGraph
+    from lightllm.core.runner.decode_graph import CudaGraph
+    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.server.core.objs.start_args_type import StartArgs

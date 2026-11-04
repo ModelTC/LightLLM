@@ -45,7 +45,7 @@ def test_copies_rebuild_queries_and_operators_without_source_references(copy_res
 
 
 def test_invalidating_one_layout_does_not_drop_another_resources_cache():
-    from lightllm.common.attention_state.query_cache import CachedQueries, cached_query
+    from lightllm.core.storage.query_cache import CachedQueries, cached_query
 
     calls = []
 

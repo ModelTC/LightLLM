@@ -5,11 +5,13 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.dense import DenseAttentionBackend, DenseStaticParams
-from lightllm.common.execution.model_adapter import DenseModelAdapter
-from lightllm.common.execution.planner import AttentionRequest, Planner
-from lightllm.common.execution.specs import DenseAttentionSpec, DeviceCaps, ExecutionLimits, FormatSpec, StateSpec
-from lightllm.common.execution.state_store import DenseStateStore
+from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
+from lightllm.models.base.adapter import DenseModelAdapter
+from lightllm.core.planner.planner import AttentionRequest, Planner
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec, StateSpec
+from lightllm.core.storage.attention import DenseStateStore
 from lightllm.models.llama.model import LlamaTpPartModel
 from unit_tests.common.execution.test_model_binding import make_model
 

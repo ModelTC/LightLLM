@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from lightllm.common.attention_state.query_cache import ResourceOperator, cached_query
+from lightllm.core.storage.query_cache import ResourceOperator, cached_query
 
 from collections.abc import Mapping
 from dataclasses import replace
 from functools import partial
 
-from lightllm.common.transfer import CopyOperation, CopyPlan, Transfer
+from lightllm.core.transfer import CopyOperation, CopyPlan, Transfer
 from typing import TYPE_CHECKING, List
 
 import torch

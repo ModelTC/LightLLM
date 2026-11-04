@@ -99,7 +99,8 @@ def test_physical_weights_are_created_and_loaded_once(monkeypatch):
 
 
 def test_loop_adapter_loads_shared_weights_once_with_independent_state_declarations(monkeypatch):
-    from lightllm.models.sensenova_loop.model import SenseNovaLoopModelAdapter, SenseNovaLoopTpPartModel
+    from lightllm.models.sensenova_loop.adapter import SenseNovaLoopModelAdapter
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
 
     config = _config(layers=4, start=1, end=3, count=2)
     config["text_config"].update(hidden_size=256, num_attention_heads=4)

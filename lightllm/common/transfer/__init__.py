@@ -1,2 +1,2 @@
-from .completion import Completion, Transfer, TransferCompletion, TransferFailure
-from .plan import CopyOperation, CopyPlan
+from lightllm.core.transfer.completion import Completion, Transfer, TransferCompletion, TransferFailure
+from lightllm.core.transfer.plan import CopyOperation, CopyPlan

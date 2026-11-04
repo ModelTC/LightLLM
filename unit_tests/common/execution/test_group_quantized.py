@@ -6,12 +6,15 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.dense import DenseStaticParams
-from lightllm.common.execution.group_quantized import GroupQuantizedAttentionBackend, GroupQuantizedKVWriter
-from lightllm.common.execution.planner import Planner
+from lightllm.core.compute.attention.dense.backend import DenseStaticParams
+from lightllm.core.compute.attention.dense.group_quantized import GroupQuantizedAttentionBackend
+from lightllm.core.formats.kv.group_quantized import GroupQuantizedKVWriter
+from lightllm.core.planner.planner import Planner
 from lightllm.common.execution.runner import attention_batch
-from lightllm.common.execution.specs import DenseAttentionSpec, DeviceCaps, ExecutionLimits, FormatSpec, StateSpec
-from lightllm.common.execution.state_store import DenseStateStore
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec, StateSpec
+from lightllm.core.storage.attention import DenseStateStore
 
 
 def make_format(bits, dtype=torch.float16, group=8, page=4):

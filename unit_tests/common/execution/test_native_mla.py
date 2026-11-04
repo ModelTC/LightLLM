@@ -7,15 +7,16 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.execution import DeviceCaps, ExecutionLimits, FormatSpec, MLAAttentionSpec, Planner, StateSpec
-from lightllm.common.execution.dense import DenseBatchMetadata
-from lightllm.common.execution.mla import MLAAttentionBackend, MLAKVWriter, MLAStaticParams
-from lightllm.common.execution.flashinfer_mla import FlashInferMLABackend
-from lightllm.common.execution.state_store import MLAStateStore
-from lightllm.common.execution.planner import AttentionRequest
+from lightllm.core.compute.attention.dense.backend import DenseBatchMetadata
+from lightllm.core.compute.attention.mla.backend import MLAAttentionBackend, MLAStaticParams
+from lightllm.core.formats.kv.mla import MLAKVWriter
+from lightllm.core.compute.attention.mla.flashinfer import FlashInferMLABackend
+from lightllm.core.storage.attention import MLAStateStore
+from lightllm.core.planner.planner import AttentionRequest
 
 
 def test_mla_declarations_and_tp_replicas():
-    from lightllm.models.deepseek2.model import Deepseek2ModelAdapter
+    from lightllm.models.deepseek2.adapter import Deepseek2ModelAdapter
 
     config = dict(
         num_hidden_layers=2,
@@ -42,7 +43,7 @@ def test_mla_declarations_and_tp_replicas():
 
 
 def test_flashinfer_mla_plans_have_separate_semantic_reservations(monkeypatch):
-    monkeypatch.setattr("lightllm.common.execution.flashinfer_mla.find_spec", lambda _: object())
+    monkeypatch.setattr("lightllm.core.compute.attention.mla.flashinfer.find_spec", lambda _: object())
     fmt = FormatSpec("plain", torch.float16, "token_latent", ("latent",), 1)
     first = MLAAttentionSpec(32, 512, 128, 64, 128, torch.float16)
     second = replace(first, q_heads=128)

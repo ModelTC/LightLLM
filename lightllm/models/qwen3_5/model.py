@@ -1,6 +1,8 @@
+from lightllm.models.qwen3_5.adapter import Qwen35ModelAdapter
 import os
 import json
-from lightllm.models.qwen3next.model import Qwen3NextTpPartModel, Qwen3NextModelAdapter
+from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
+from lightllm.models.qwen3next.adapter import Qwen3NextModelAdapter
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
     Qwen35TransformerLayerWeight,
 )
@@ -30,13 +32,6 @@ class QWen3_5Tokenizer(QWen3VLTokenizer):
 
     def __init__(self, tokenizer=None, image_processor=None, **kwargs):
         super().__init__(tokenizer, image_processor, **kwargs)
-
-
-class Qwen35ModelAdapter(Qwen3NextModelAdapter):
-    transformer_weight_class = Qwen35TransformerLayerWeight
-    pre_and_post_weight_class = Qwen35PreAndPostLayerWeight
-    pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
-    transformer_layer_infer_class = Qwen35TransformerLayerInfer
 
 
 class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
