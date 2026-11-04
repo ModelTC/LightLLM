@@ -1,4 +1,4 @@
-"""C128 capacity, compression reference and graph replay regressions."""
+"""C128 capacity, two-stage compression alignment and graph replay regressions."""
 
 import bisect
 from types import SimpleNamespace as NS, MethodType
@@ -298,6 +298,253 @@ def test_short_scratch_is_rejected_before_any_compression_launch(monkeypatch, bo
         def __getitem__(self, grid):
             pytest.fail("unsafe compression kernel was launched")
 
-    monkeypatch.setattr(compressor, "_fused_compress_norm_rope_kernel", RejectLaunch())
+    for name in ("_compress_window_kernel", "_compress_norm_rope_pack_kernel"):
+        monkeypatch.setattr(compressor, name, RejectLaunch())
     with pytest.raises(ValueError, match="capacity"):
         case.run()
+
+
+def reference_window(values, state, position, seq_len, ready_len, q_start, req_idx):
+    """Per-channel window softmax, matching the compress stage one boundary row at a time."""
+    start = position - 127
+    kv_rows = []
+    score_rows = []
+    for pos in range(start, start + 128):
+        if pos < 0 or pos >= seq_len:
+            kv_rows.append(torch.zeros(512, device=values.device))
+            score_rows.append(torch.full((512,), float("-inf"), device=values.device))
+        elif pos >= ready_len:
+            row = values[q_start + (pos - ready_len)]
+            kv_rows.append(row[:512])
+            score_rows.append(row[512:])
+        else:
+            row = state[req_idx, pos % state.shape[1]]
+            kv_rows.append(row[:512])
+            score_rows.append(row[512:])
+    kv = torch.stack(kv_rows)
+    weight = torch.softmax(torch.stack(score_rows), dim=0)
+    return (kv * weight).sum(dim=0)
+
+
+def reference_norm(compressed, weight, eps):
+    variance = compressed.square().sum() / compressed.numel()
+    return compressed * torch.rsqrt(variance + eps) * weight.float()
+
+
+def reference_rope(normed, position, cos, sin):
+    rope = normed[-64:].float().view(32, 2)
+    even, odd = rope[:, 0], rope[:, 1]
+    row = (position // 128) * 128
+    rotated = torch.stack((even * cos[row] - odd * sin[row], odd * cos[row] + even * sin[row]), dim=-1)
+    return rotated.reshape(-1).to(torch.bfloat16)
+
+
+def packed_rope(packed, slot):
+    page, token_in_page = divmod(int(slot), 2)
+    start = token_in_page * 576 + 448
+    return packed[page, start : start + 128].contiguous().view(torch.bfloat16)
+
+
+def stage_spec(scenario):
+    """Decode and prefill layouts whose boundary rows exercise the window scratch and both page slots."""
+    cos = torch.randn(256, 32, device="cuda")
+    sin = torch.randn(256, 32, device="cuda")
+    norm = torch.randn(512, device="cuda").to(torch.bfloat16)
+    prefill = scenario.startswith("prefill")
+    if scenario == "decode":
+        batch = 2
+        steps = torch.arange(4, device="cuda", dtype=torch.int32).repeat(batch)
+        positions = 124 + steps
+        request_ids = torch.arange(batch, device="cuda", dtype=torch.int32).repeat_interleave(4)
+        mem_index = request_ids * 256 + steps
+        runtime = torch.randn(batch + 1, 131, 1024, device="cuda")
+        values = torch.randn(batch * 4, 1024, device="cuda")
+        b_req_idx, b_seq_len, b_mtp = request_ids, positions + 1, steps
+        token_to_batch = b_ready = b_q_start = None
+    elif scenario == "decode_second_slot":
+        batch = 2
+        steps = torch.arange(4, device="cuda", dtype=torch.int32).repeat(batch)
+        positions = 124 + steps
+        request_ids = torch.arange(batch, device="cuda", dtype=torch.int32).repeat_interleave(4)
+        mem_index = request_ids * 256 + 128 + steps
+        runtime = torch.randn(batch + 1, 131, 1024, device="cuda")
+        values = torch.randn(batch * 4, 1024, device="cuda")
+        b_req_idx, b_seq_len, b_mtp = request_ids, positions + 1, steps
+        token_to_batch = b_ready = b_q_start = None
+    elif scenario == "prefill_current":
+        positions = torch.arange(128, device="cuda", dtype=torch.int32)
+        mem_index = positions
+        runtime = torch.randn(1, 131, 1024, device="cuda")
+        values = torch.randn(128, 1024, device="cuda")
+        token_to_batch = torch.zeros(128, dtype=torch.int32, device="cuda")
+        b_req_idx = torch.zeros(1, dtype=torch.int32, device="cuda")
+        b_seq_len = torch.tensor([128], dtype=torch.int32, device="cuda")
+        b_ready = torch.zeros(1, dtype=torch.int32, device="cuda")
+        b_q_start = torch.zeros(1, dtype=torch.int32, device="cuda")
+        b_mtp = torch.zeros(1, dtype=torch.int32, device="cuda")
+    else:
+        positions = torch.arange(64, 192, device="cuda", dtype=torch.int32)
+        mem_index = 256 + positions
+        runtime = torch.randn(1, 131, 1024, device="cuda")
+        values = torch.randn(128, 1024, device="cuda")
+        token_to_batch = torch.zeros(128, dtype=torch.int32, device="cuda")
+        b_req_idx = torch.zeros(1, dtype=torch.int32, device="cuda")
+        b_seq_len = torch.tensor([192], dtype=torch.int32, device="cuda")
+        b_ready = torch.tensor([64], dtype=torch.int32, device="cuda")
+        b_q_start = torch.zeros(1, dtype=torch.int32, device="cuda")
+        b_mtp = torch.zeros(1, dtype=torch.int32, device="cuda")
+    packed = torch.full((int(mem_index.max()) // 128 + 2, 1168), 85, dtype=torch.uint8, device="cuda")
+    return NS(
+        positions=positions,
+        mem_index=mem_index,
+        runtime=runtime,
+        values=values,
+        packed=packed,
+        cos=cos,
+        sin=sin,
+        norm=norm,
+        eps=1e-6,
+        prefill=prefill,
+        token_to_batch=token_to_batch,
+        b_req_idx=b_req_idx,
+        b_seq_len=b_seq_len,
+        b_mtp=b_mtp,
+        b_ready=b_ready,
+        b_q_start=b_q_start,
+    )
+
+
+def attach_stage_case(workspace, spec, runtime, packed):
+    from lightllm.models.deepseek_v4.layer_infer.compressor import fused_compress
+
+    state = NS(config=NS(window_size=128), get_layer_view=lambda **_: runtime)
+    compressed = NS(config=NS(block_token_size=256), get_layer_view=lambda **_: NS(kv=packed))
+    infer = NS(
+        position_ids=spec.positions,
+        mem_index=spec.mem_index,
+        b_req_idx=spec.b_req_idx,
+        b_mtp_index=spec.b_mtp,
+        b_seq_len=spec.b_seq_len,
+        b_ready_cache_len=spec.b_ready,
+        b_q_start_loc=spec.b_q_start,
+        _dsv4_token_to_batch_idx=spec.token_to_batch,
+        is_prefill=spec.prefill,
+        microbatch_index=0,
+        dsv4_workspace=workspace,
+        get_compressor_state=lambda **_: state,
+        get_compressed_kv_state=lambda **_: compressed,
+    )
+
+    def run():
+        return fused_compress(
+            kv_score=spec.values,
+            infer_state=infer,
+            layer_idx=0,
+            norm_weight=spec.norm,
+            eps=spec.eps,
+            head_dim=512,
+            qk_rope_head_dim=64,
+            compress_ratio=128,
+            cos_table=spec.cos,
+            sin_table=spec.sin,
+        )
+
+    return run
+
+
+def launch_fused_oracle(spec, runtime, packed):
+    import triton
+    from lightllm.models.deepseek_v4.triton_kernel.compressor import _fused_compress_norm_rope_kernel
+
+    slots = torch.where((spec.positions + 1) % 128 == 0, spec.mem_index.reshape(-1) // 128, -1)
+    _fused_compress_norm_rope_kernel[(spec.positions.shape[0],)](
+        spec.values,
+        spec.values.stride(0),
+        spec.values.stride(1),
+        runtime.flatten(0, 1),
+        spec.positions,
+        spec.token_to_batch,
+        spec.b_req_idx,
+        spec.b_mtp,
+        spec.b_seq_len,
+        spec.b_ready,
+        spec.b_q_start,
+        slots,
+        spec.norm,
+        spec.eps,
+        spec.cos,
+        spec.cos.stride(0),
+        spec.cos.stride(1),
+        spec.sin,
+        spec.sin.stride(0),
+        spec.sin.stride(1),
+        packed,
+        HEAD_DIM=512,
+        CANDIDATE_DIM=512,
+        STATE_DIM=1024,
+        COMPRESS_RATIO=128,
+        WINDOW_SIZE=128,
+        IS_C4=False,
+        IS_PREFILL=spec.prefill,
+        STATE_CAPACITY_TOKENS=runtime.shape[1],
+        ROPE_HEAD_DIM=64,
+        FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
+        AMAX_MIN=1e-4,
+        NOPE_DIM=448,
+        QUANT_BLOCK=64,
+        SCALE_BYTES=8,
+        PAGE_SIZE=2,
+        BYTES_PER_PAGE=packed.stride(0),
+        BLOCK=triton.next_power_of_2(512),
+        IS_IN_INDEXER=False,
+        num_warps=4,
+    )
+
+
+@pytest.mark.parametrize("scenario", ["decode", "decode_second_slot", "prefill_current", "prefill_split"])
+def test_two_stages_match_fused_kernel_and_reference(scenario):
+    torch.manual_seed(1013)
+    spec = stage_spec(scenario)
+    model = model_for(graph=False)
+    workspace = DeepseekV4Workspace(model)
+    workspace.init_c128_compress_scratch(model)
+    staged_runtime, oracle_runtime = spec.runtime.clone(), spec.runtime.clone()
+    staged_packed, oracle_packed = spec.packed.clone(), spec.packed.clone()
+    history = spec.runtime.clone()
+    workspace.c128_compress_scratch.fill_(17)
+
+    attach_stage_case(workspace, spec, staged_runtime, staged_packed)()
+    launch_fused_oracle(spec, oracle_runtime, oracle_packed)
+    torch.cuda.synchronize()
+    assert torch.equal(staged_packed, oracle_packed)
+
+    positions = spec.positions
+    boundary = (positions + 1) % 128 == 0
+    rows = positions.shape[0]
+    compressed = workspace.get_c128_compress_scratch(rows, 0)
+    assert torch.equal(compressed[~boundary], torch.full_like(compressed[~boundary], 17))
+    assert torch.equal(workspace.c128_compress_scratch[0, rows], torch.full((512,), 17, device="cuda"))
+
+    for token in boundary.nonzero(as_tuple=False).flatten().tolist():
+        if spec.prefill:
+            ready = int(spec.b_ready[int(spec.token_to_batch[token])])
+            q_start = int(spec.b_q_start[int(spec.token_to_batch[token])])
+            seq_len = int(spec.b_seq_len[int(spec.token_to_batch[token])])
+            req_idx = int(spec.b_req_idx[int(spec.token_to_batch[token])])
+        else:
+            ready = int(positions[token] - spec.b_mtp[token])
+            q_start = token - int(spec.b_mtp[token])
+            seq_len = int(spec.b_seq_len[token])
+            req_idx = int(spec.b_req_idx[token])
+        expected = reference_window(
+            spec.values, history, int(positions[token]), seq_len, ready, q_start, req_idx
+        )
+        torch.testing.assert_close(compressed[token], expected, rtol=1e-5, atol=1e-6)
+        normed = reference_norm(compressed[token], spec.norm, spec.eps)
+        slot = int(spec.mem_index[token] // 128)
+        torch.testing.assert_close(
+            packed_rope(staged_packed, slot).float(),
+            reference_rope(normed, int(positions[token]), spec.cos, spec.sin).float(),
+            rtol=0,
+            atol=0,
+        )
