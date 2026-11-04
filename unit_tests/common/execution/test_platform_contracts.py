@@ -193,6 +193,7 @@ def test_decode_warmup_uses_platform_length_requirement():
 
 def test_plain_weight_loader_uses_worker_target_device(monkeypatch):
     from lightllm.common.quantization.no_quant import NoQuantization
+    from lightllm.common.basemodel.layer_weights import hf_load_utils
 
     monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
     monkeypatch.setenv("LIGHTLLM_TORCH_DEVICE_TYPE", "cpu")
@@ -200,3 +201,8 @@ def test_plain_weight_loader_uses_worker_target_device(monkeypatch):
     packed, split = NoQuantization().create_weight(in_dim=3, out_dims=[2, 4], dtype=torch.float32, device_id=0)
     assert packed.weight.device.type == "cpu"
     assert split[1].weight.untyped_storage().data_ptr() == packed.weight.untyped_storage().data_ptr()
+    monkeypatch.setattr(torch.cuda, "set_device", lambda *args: pytest.fail("CUDA loader thread"))
+    monkeypatch.setattr(hf_load_utils.utils.PetrelHelper, "load", lambda *args, **kwargs: {"weight": packed.weight})
+    loaded = []
+    hf_load_utils.load_func("unused.bin", pre_post_layer=SimpleNamespace(load_hf_weights=loaded.append), weight_dir=".")
+    assert loaded[0]["weight"] is packed.weight

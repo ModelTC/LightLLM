@@ -3,7 +3,7 @@ import os
 import gc
 from safetensors import safe_open
 import lightllm.utils.petrel_helper as utils
-from lightllm.utils.dist_utils import get_current_device_id
+from lightllm.utils.dist_utils import get_current_device
 from lightllm.utils.progress import ThreadProgress
 
 
@@ -11,7 +11,9 @@ def load_func(file_, use_safetensors=False, pre_post_layer=None, transformer_lay
     # fix bug for 多线程加载的时候，每个线程内部的cuda device 会切回 0， 修改后来保证不会出现bug
     import torch.distributed as dist
 
-    torch.cuda.set_device(get_current_device_id())
+    device = get_current_device()
+    if device.type not in ("cpu", "meta"):
+        getattr(torch, device.type).set_device(device)
 
     if use_safetensors:
         weights = safe_open(os.path.join(weight_dir, file_), "pt", "cpu")
