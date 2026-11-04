@@ -1,7 +1,7 @@
 import pytest
 import torch
 
-from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
@@ -11,7 +11,7 @@ def test_derived_fold_commits_only_accepted_history(capacity):
     torch.manual_seed(731)
     state = torch.randn(2, 5, 4, 128, 128, device="cuda", dtype=torch.bfloat16) * 0.02
     initial = state.clone()
-    ssm_backend = ReplaySSMState(state, capacity, 5, num_key_heads=2, compute_mode="parallel", fold_method="derived")
+    ssm_backend = ReplaySSMExecutor(state, capacity, 5, num_key_heads=2, compute_mode="parallel", fold_method="derived")
     ssm_backend.keys.fill_(float("nan"))
     ssm_backend.deltas.fill_(float("nan"))
     ssm_backend.gates.fill_(float("nan"))
@@ -46,13 +46,13 @@ def test_derived_fold_commits_only_accepted_history(capacity):
 def test_parallel_rejects_unsupported_shapes(fold):
     state = torch.zeros(1, 3, 4, 32, 64, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(AssertionError, match="128x128"):
-        ReplaySSMState(state, 16, 5, num_key_heads=2, compute_mode="parallel", fold_method=fold)
+        ReplaySSMExecutor(state, 16, 5, num_key_heads=2, compute_mode="parallel", fold_method=fold)
 
 
 def test_derived_fold_requires_parallel_solver():
     state = torch.zeros(1, 3, 4, 128, 128, device="cuda", dtype=torch.bfloat16)
     with pytest.raises(AssertionError):
-        ReplaySSMState(state, 16, 5, num_key_heads=2, fold_method="derived")
+        ReplaySSMExecutor(state, 16, 5, num_key_heads=2, fold_method="derived")
 
 
 @pytest.mark.parametrize("width", [2, 3, 5, 8, 16])
@@ -79,7 +79,7 @@ def test_parallel_derived_continuous_state(capacity, width, capture):
     torch.manual_seed(731)
     state = torch.randn(2, 4, 4, 128, 128, device="cuda", dtype=torch.bfloat16) * 0.02
     initial = state.clone()
-    ssm_backend = ReplaySSMState(
+    ssm_backend = ReplaySSMExecutor(
         state, capacity, width, num_key_heads=2, compute_mode="parallel", fold_method="derived"
     )
     for history in (

@@ -531,7 +531,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     b_req_idx=model_input.b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    b_mtp_index=model_input.b_mtp_index,
                     state_commit_batches=(StateCommitBatch(req_num, model_output.state_commits),),
                 )
                 accepted_index_cpu = g_pin_mem_manager.async_copy_from_gpu_tensor(
@@ -806,7 +805,6 @@ class DPChunkedPrefillBackend(ModeBackend):
                     next_token_ids=next_token_ids,
                     b_req_idx=b_req_idx,
                     b_req_mtp_start_loc=b_req_mtp_start_loc,
-                    b_mtp_index=b_mtp_index,
                     state_commit_batches=(
                         StateCommitBatch(real_request_num0, model_output0.state_commits),
                         StateCommitBatch(real_request_num1, model_output1.state_commits),

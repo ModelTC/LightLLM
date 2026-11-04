@@ -141,7 +141,7 @@ def test_linear_config_is_local_to_capture_state(capture_env, overlap, kda):
     from lightllm.common.basemodel.batch_objs import PostLayerOutput
     from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
     from lightllm.common.basemodel.infer_struct import InferStateInfo
-    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
+    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
     from lightllm.common.ssm_types import SSMRunConfig
     from lightllm.common.attention_state.bounded_att import GDNState, KDAState
 

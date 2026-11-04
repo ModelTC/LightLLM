@@ -10,10 +10,10 @@ from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
     _replay,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import resolve_run_config
-from .base import SSMState, update_accepted_indices
+from .base import SSMExecutor, update_accepted_indices
 
 
-class ReplaySSMState(SSMState):
+class ReplaySSMExecutor(SSMExecutor):
     """Request-owned scratch; canonical CPU/PD checkpoints never include it."""
 
     def __init__(
@@ -169,8 +169,8 @@ class ReplaySSMState(SSMState):
 
     def _materialize_accepted_state(self, reqs, output, snapshot):
         layers, slots, hv, k, v = self.state.shape
-        config = self.run_config or {"BV": 32, "num_warps": 4}
-        bv = config["BV"]
+        config = self.run_config or SSMRunConfig(32, 4)
+        bv = config.BV
         _materialize[(triton.cdiv(v, bv), reqs.numel(), layers * hv)](
             self.state,
             output,
@@ -191,8 +191,8 @@ class ReplaySSMState(SSMState):
             bv,
             snapshot,
             self.kda,
-            num_warps=config["num_warps"],
-            num_stages=config.get("num_stages", 3),
+            num_warps=config.num_warps,
+            num_stages=config.num_stages,
         )
 
     def get_accepted_state(self, req_idx, accepted_index=None):
@@ -205,10 +205,10 @@ class ReplaySSMState(SSMState):
 
     def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None) -> SSMRunConfig:
         if self.compute_mode == "parallel":
-            config = self.run_config or {"BV": 128, "num_warps": 2, "num_stages": 1}
+            config = self.run_config or SSMRunConfig(128, 2, 1)
         else:
             config = resolve_run_config(self, "replay", q, k, v, a, b, a_log, bias, cu_seqlens)
-        return SSMRunConfig(**config)
+        return config
 
     def forward(
         self,
@@ -228,8 +228,6 @@ class ReplaySSMState(SSMState):
         accepted_token_counts=None,
     ):
         config = run_config or self.get_run_config(q, k, v, a, b, a_log, bias, cu_seqlens)
-        if not isinstance(config, SSMRunConfig):
-            config = SSMRunConfig(**config)
         hv, kd, vd = self.state.shape[-3:]
         assert self.num_key_heads in (q.shape[-2], hv)
         axis = 1 if cu_seqlens is not None else 0
@@ -277,7 +275,6 @@ class ReplaySSMState(SSMState):
             cu_seqlens is not None,
             precompute_projections,
             bw,
-            reqs.numel() > 12 and self.compute_mode != "parallel",
             self.kda,
             self.gate_lower_bound,
             self.compute_mode == "parallel",
@@ -292,9 +289,9 @@ class ReplaySSMState(SSMState):
 
         self.accept_updates(reqs)
 
-    def commit(self, reqs, accepted_steps, indices, context, state_name):
-        if context is not None and self.verify_width > 1:
-            update_accepted_indices(reqs, accepted_steps, indices, context, replay_cursors=self.cursors)
+    def commit(self, acceptance, indices, state_name):
+        if self.verify_width > 1:
+            update_accepted_indices(acceptance, indices, replay_cursors=self.cursors)
         else:
-            update_accepted_indices(reqs, accepted_steps, indices, context)
-            self.accept_updates(reqs, indices)
+            update_accepted_indices(acceptance, indices)
+            self.accept_updates(acceptance.req_indices, indices)

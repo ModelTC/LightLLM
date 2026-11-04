@@ -25,24 +25,20 @@ class StateCommitBatch:
 
 
 @dataclass(frozen=True)
-class MtpCommitContext:
+class StateAcceptance:
+    """One accepted prefix per distinct request, in forward order, including the base input token."""
 
-    b_req_mtp_start_loc: torch.Tensor
-    b_req_idx: torch.Tensor
-    b_mtp_index: torch.Tensor
-    accepted_index: torch.Tensor
-    verify_width: int
+    req_indices: torch.Tensor
+    accepted_lengths: torch.Tensor
     batches: Tuple[StateCommitBatch, ...] = ()
 
-    def validate(self, request_count: int, state_names=None):
-        if type(self.verify_width) is not int or self.verify_width <= 0:
-            raise ValueError("verification width must be positive")
-        rows = (self.b_req_idx, self.b_mtp_index, self.accepted_index)
-        if any(row.ndim != 1 or row.numel() != self.b_req_idx.numel() for row in rows):
-            raise ValueError("verification row tensors must have the same one-dimensional layout")
-        if self.b_req_mtp_start_loc.numel() != request_count:
-            raise ValueError("verification and logical request counts differ")
-        if self.batches and sum(batch.request_count for batch in self.batches) != request_count:
+    def validate(self, state_names=None):
+        if self.req_indices.ndim != 1 or self.accepted_lengths.shape != self.req_indices.shape:
+            raise ValueError("request indices and accepted lengths must share one-dimensional layout")
+        for value in (self.req_indices, self.accepted_lengths):
+            if value.dtype not in (torch.int32, torch.int64) or value.device != self.req_indices.device:
+                raise ValueError("acceptance tensors must be integer tensors on the same device")
+        if self.batches and sum(batch.request_count for batch in self.batches) != self.req_indices.numel():
             raise ValueError("commit batches must partition all unpadded requests")
         for batch in self.batches:
             for commit in batch.commits:
@@ -55,5 +51,5 @@ class MtpCommitContext:
             end = start + batch.request_count
             if end > start:
                 payload = next((c.payload for c in batch.commits if c.state_name == state_name), None)
-                yield slice(start, end), payload
+                yield self.req_indices[start:end], payload
             start = end

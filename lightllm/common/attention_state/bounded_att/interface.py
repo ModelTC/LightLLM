@@ -8,6 +8,8 @@ from typing import Any, List
 
 import torch
 
+from ..commit import StateAcceptance
+
 from ..utils import deepcopy_result
 from lightllm.common.attention_state.types import PageKind, StateTransferLayout, TransferRegion
 
@@ -98,13 +100,7 @@ class CoreInterface(ABC):
         ...
 
     @abstractmethod
-    def commit_bounded_att_state(
-        self,
-        req_indices: torch.Tensor,
-        accepted_steps: torch.Tensor,
-        *,
-        context=None,
-    ) -> None:
+    def commit_bounded_att_state(self, acceptance: StateAcceptance) -> None:
         ...
 
 

@@ -5,7 +5,7 @@ from typing import TYPE_CHECKING, List, Tuple
 
 import torch
 
-from lightllm.common.attention_state.commit import MtpCommitContext
+from lightllm.common.attention_state.commit import StateAcceptance
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils import (
     mtp_scatter_next_token_ids,
@@ -23,7 +23,6 @@ def verify_mtp_tokens(
     next_token_ids: torch.Tensor,
     b_req_idx: torch.Tensor,
     b_req_mtp_start_loc: torch.Tensor,
-    b_mtp_index: torch.Tensor,
     state_commit_batches=(),
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     """Verify target tokens and update recurrent MTP state when required."""
@@ -34,20 +33,8 @@ def verify_mtp_tokens(
         new_next_token_ids=next_token_ids,
         b_req_idx=b_req_idx,
     )
-    context = MtpCommitContext(
-        b_req_mtp_start_loc=b_req_mtp_start_loc,
-        b_req_idx=b_req_idx,
-        b_mtp_index=b_mtp_index,
-        accepted_index=accepted_index,
-        verify_width=backend.max_draft_step + 1,
-        batches=state_commit_batches,
-    )
-    backend.model.att_state_manager.commit_bounded_att_state(
-        b_req_idx[b_req_mtp_start_loc.long()],
-        accept_lengths,
-        role="main",
-        context=context,
-    )
+    acceptance = StateAcceptance(b_req_idx[b_req_mtp_start_loc.long()], accept_lengths, state_commit_batches)
+    backend.model.att_state_manager.commit_bounded_att_state(acceptance, role="main")
     return accept_lengths, accepted_index
 
 

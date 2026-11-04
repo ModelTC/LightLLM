@@ -6,6 +6,8 @@ from typing import List
 
 import torch
 
+from .commit import StateAcceptance
+
 from lightllm.common.attention_state.types import PageKind
 
 from lightllm.utils.dist_utils import get_current_device_id
@@ -392,24 +394,16 @@ class AttentionStateManager:
             )
 
     # MTP 推测解码：只提交指定角色的已接受运行态，由具体 State 管理候选区和游标。
-    def commit_bounded_att_state(
-        self,
-        req_indices: torch.Tensor,
-        accepted_steps: torch.Tensor,
-        role: str,
-        *,
-        context=None,
-    ) -> None:
-        """传入 CUDA 请求索引和 int32 接受步数，包含基准输入步；无参与 State 时为空操作。"""
-        assert req_indices.is_cuda and accepted_steps.is_cuda, "commit inputs must be CUDA tensors"
+    def commit_bounded_att_state(self, acceptance: StateAcceptance, role: str) -> None:
+        """提交按请求排列的已接受前缀；无参与 State 时为空操作。"""
+        assert acceptance.req_indices.is_cuda, "commit inputs must be CUDA tensors"
         assert role in MODEL_ROLES, f"unknown model role {role}"
         states = self.get_bounded_attention_states(role)
-        if context is not None:
-            context.validate(req_indices.numel(), {state.state_name for state in states})
+        acceptance.validate({state.state_name for state in states})
         for state in states:
-            state.validate_bounded_att_commit(context)
+            state.validate_bounded_att_commit(acceptance)
         for state in states:
-            state.commit_bounded_att_state(req_indices, accepted_steps, context=context)
+            state.commit_bounded_att_state(acceptance)
 
     # ========================================================================
     # 四、CPU/DP/PD 操作均由对应 Operator 提供。

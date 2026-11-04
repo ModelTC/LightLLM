@@ -7,12 +7,14 @@ from lightllm.common.attention_state.commit import StateCommit
 from lightllm.common.ssm_types import SSMRunConfig
 
 if TYPE_CHECKING:
+    from .base import SSMExecutor
     from ..conv_ssm_state import ConvSSMState
 
 
 @dataclass
 class SSMForward:
     resource: "ConvSSMState"
+    executor: "SSMExecutor"
     req_indices: torch.Tensor
     state_indices: torch.Tensor
     cu_seqlens: Optional[torch.Tensor]
@@ -20,7 +22,7 @@ class SSMForward:
     run_config: Optional[SSMRunConfig] = None
 
     def run_layer(self, logical_layer, q, k, v, a, b, a_log, bias):
-        output, self.run_config = self.resource._ssm.forward(
+        output, self.run_config = self.executor.forward(
             self.resource.get_storage_layer_index(logical_layer),
             q,
             k,
@@ -38,7 +40,7 @@ class SSMForward:
         return output
 
     def finish(self):
-        payload = self.resource._ssm.create_commit(self.run_config)
+        payload = self.executor.create_commit(self.run_config)
         if payload is None:
             return None
         if self.resource.state_name is None:
@@ -46,8 +48,8 @@ class SSMForward:
         return StateCommit(self.resource.state_name, payload)
 
     def copy_inputs(self, source: "SSMForward"):
-        if self.resource is not source.resource:
-            raise ValueError("cannot copy a forward for a different resource")
+        if self.resource is not source.resource or self.executor is not source.executor:
+            raise ValueError("cannot copy a forward for a different resource or executor")
         copies = []
         for name in ("req_indices", "state_indices", "cu_seqlens", "accepted_token_counts"):
             target, value = getattr(self, name), getattr(source, name)

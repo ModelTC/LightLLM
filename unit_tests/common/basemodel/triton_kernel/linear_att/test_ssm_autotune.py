@@ -4,11 +4,12 @@ from dataclasses import asdict
 
 import pytest
 import torch
+from lightllm.common.ssm_types import SSMRunConfig
 
 from lightllm.common.basemodel.triton_kernel.linear_att import ssm_autotune as tuning
-from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
-from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
-from lightllm.common.attention_state.commit import MtpCommitContext, StateCommitBatch
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
+from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
+from lightllm.common.attention_state.commit import StateAcceptance, StateCommitBatch
 from lightllm.common.attention_state.bounded_att.ssm.forward import SSMForward
 from lightllm.common.kernel_config import KernelConfigs
 from lightllm.common import kernel_config as kernel_config_module
@@ -20,9 +21,9 @@ def make_inputs(mode, dtype=torch.bfloat16, device="cpu", width=4, compute_mode=
     layers, slots, batch, h, hv, kd, vd = 2, 9, 3, 2, 4, 32, 64
     state = torch.randn(layers, slots, hv, kd, vd, dtype=dtype, device=device) * 0.01
     if mode == "replay":
-        ssm_backend = ReplaySSMState(state, 8, width, num_key_heads=h, compute_mode=compute_mode, kda=kda)
+        ssm_backend = ReplaySSMExecutor(state, 8, width, num_key_heads=h, compute_mode=compute_mode, kda=kda)
     else:
-        ssm_backend = CompactSSMState(state, width, torch.bfloat16, num_key_heads=h, kda=kda)
+        ssm_backend = CompactSSMExecutor(state, width, torch.bfloat16, num_key_heads=h, kda=kda)
     tokens = batch * width
     packed = torch.randn(1, tokens, 2 * h * kd + hv * vd, dtype=torch.bfloat16, device=device)
     q, k, v = [
@@ -124,13 +125,13 @@ def test_layout_is_fixed_before_graph_capture_and_cached_configs_do_not_execute(
     tuner.cached_configs[key] = {str(tuner._run_key(**inputs)): config}
     monkeypatch.setattr(autotuner_module, "get_triton_autotune_level", lambda: level)
     monkeypatch.setattr(tuner, "_bench", lambda *args, **kwargs: pytest.fail("cached layout must not benchmark"))
-    default = ssm_backend.run_config.copy()
+    default = ssm_backend.run_config
     with Autotuner.autotune_warmup(AutotuneKernelType.GENERAL):
         tuning.resolve_run_config(**inputs)
     assert ssm_backend.run_config == default and not ssm_backend._config_is_fixed
     with Autotuner.autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
         selected = tuning.resolve_run_config(**inputs)
-    assert selected == (default if level == 3 else config)
+    assert selected == (default if level == 3 else SSMRunConfig(**config))
     assert ssm_backend.run_config == default and not ssm_backend._config_is_fixed
     # Reusing the same bucket must not tune again.
     monkeypatch.setattr(tuning, "select_config", lambda *args, **kwargs: pytest.fail("layout changed after capture"))
@@ -302,7 +303,7 @@ def test_batch_configs_survive_other_warmups_and_preserve_padding(monkeypatch):
         assert tuning.resolve_run_config(**inputs) is large_config
     assert len(selected) == 2 and large_config != small_config
     assert tuning.resolve_run_config(**small) is small_config
-    assert ssm_backend.run_config == {"BV": 8, "num_warps": 1}
+    assert ssm_backend.run_config == SSMRunConfig(8, 1)
     _, rebuilt = tuning.rebuild_inputs(**small)
     assert rebuilt["workload"][0].tolist() == [0, rebuilt["ssm_backend"].hold_req_id]
     assert rebuilt["cu_seqlens"].tolist() == [0, 4, 4]
@@ -378,7 +379,7 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
         att_class = KDALinearAttDecodeAttState if kda else GDNLinearAttDecodeAttState
         state.decode_att_state1 = att_class(
             _infer_state_weak_ref=weakref.ref(state),
-            forwards={manager.state_name: SSMForward(manager, reqs, reqs, cu, None, config)},
+            forwards={manager.state_name: SSMForward(manager, manager._ssm, reqs, reqs, cu, None, config)},
         )
         output = TpPartBaseModel._create_model_output(
             None, PostLayerOutput(logits=outputs[0].view(count * 4, -1)), state
@@ -397,7 +398,6 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
         ssm_backend.cursors.zero_()
     req_order = [0, 1, 3]
     rows = torch.tensor([r for r in req_order for _ in range(4)], dtype=torch.int32, device="cuda")
-    mtp = torch.arange(4, dtype=torch.int32, device="cuda").repeat(3)
     starts = torch.arange(3, dtype=torch.int32, device="cuda") * 4
     for iteration in range(24):
         # Alternate replay order; neither Graph replay executes Python config selection.
@@ -409,11 +409,12 @@ def test_two_verify_graphs_accept_with_their_own_configs(monkeypatch, mode, proj
                 expected = ref.forward(layer, *args, reqs, cu)[0]
                 torch.testing.assert_close(outputs[layer], expected, atol=0, rtol=0)
         counts = [1 + (iteration + i) % 4 for i in range(3)]
-        flags = torch.tensor([int(j < n) for n in counts for j in range(4)], dtype=torch.int32, device="cuda")
-        context = MtpCommitContext(
-            starts, rows, mtp, flags, 4, tuple(StateCommitBatch(len(b[-1]), b[2].state_commits) for b in buckets)
+        acceptance = StateAcceptance(
+            rows[starts.long()],
+            torch.tensor(counts, device="cuda"),
+            tuple(StateCommitBatch(len(b[-1]), b[2].state_commits) for b in buckets),
         )
-        manager.commit_bounded_att_state(rows[starts.long()], torch.tensor(counts, device="cuda"), context=context)
+        manager.commit_bounded_att_state(acceptance)
         for _, _, _, ref, _, reqs, _, ids in buckets:
             ref.accept_updates(reqs[:-1], manager.mtp_state_index)
             torch.testing.assert_close(ssm_backend.state[:, ids], ref.state[:, ids], atol=0, rtol=0)

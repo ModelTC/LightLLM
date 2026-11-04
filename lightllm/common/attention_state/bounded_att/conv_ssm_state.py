@@ -8,7 +8,7 @@ import torch
 
 from lightllm.utils.log_utils import init_logger
 
-from .ssm import create_ssm_state
+from .ssm import create_ssm_executor
 from .ssm.forward import SSMForward
 
 from ..utils import deepcopy_result, dtype_name
@@ -57,7 +57,7 @@ class ConvSSMState(BoundedAttentionState):
             dtype=config.conv_dtype,
             device=device,
         )
-        self._ssm = create_ssm_state(
+        self._ssm = create_ssm_executor(
             config,
             request_capacity,
             mtp_step,
@@ -104,7 +104,7 @@ class ConvSSMState(BoundedAttentionState):
         self._ssm.prepare_decode(reqs, cu_seqlens)
         if not speculative:
             self._ssm.accept_single_token(reqs)
-        return SSMForward(self, reqs, self._ssm.decode_indices(reqs, speculative), cu_seqlens, accepted)
+        return SSMForward(self, self._ssm, reqs, self._ssm.decode_indices(reqs, speculative), cu_seqlens, accepted)
 
     def get_accepted_state(self, req_idx):
 
@@ -230,15 +230,18 @@ class ConvSSMState(BoundedAttentionState):
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
 
-    def validate_bounded_att_commit(self, context):
+    def validate_bounded_att_commit(self, acceptance):
+        assert (
+            acceptance.req_indices.device == self.ssm_state.device
+        ), "commit inputs must match the state device; CUDA states require CUDA tensors"
         if self.mtp_state_index is not None:
-            self._ssm.validate_commit(context, self.state_name)
+            self._ssm.validate_commit(acceptance, self.state_name)
 
-    def commit_bounded_att_state(self, req_indices, accepted_steps, *, context=None):
-        if context is not None:
-            context.validate(req_indices.numel())
+    def commit_bounded_att_state(self, acceptance):
+        acceptance.validate()
+        self.validate_bounded_att_commit(acceptance)
         if self.mtp_state_index is not None:
-            self._ssm.commit(req_indices, accepted_steps, self.mtp_state_index, context, self.state_name)
+            self._ssm.commit(acceptance, self.mtp_state_index, self.state_name)
 
     # ========================================================================
     # 三、CPU Cache 数据交换

@@ -1,7 +1,7 @@
 import torch
 
 
-def create_ssm_state(config, request_capacity, mtp_step, device, mode, replay_config, *, kda, gate_lower_bound):
+def create_ssm_executor(config, request_capacity, mtp_step, device, mode, replay_config, *, kda, gate_lower_bound):
     if mode not in ("native", "compact", "replay"):
         raise ValueError(f"unknown SSM state mode: {mode}")
     slots = mtp_step + 1 if mode == "native" else 1
@@ -12,18 +12,18 @@ def create_ssm_state(config, request_capacity, mtp_step, device, mode, replay_co
     )
     kwargs = dict(kda=kda, gate_lower_bound=gate_lower_bound)
     if mode == "native":
-        from .native import NativeSSMState
+        from .native import NativeSSMExecutor
 
-        return NativeSSMState(state, mtp_step + 1, **kwargs)
+        return NativeSSMExecutor(state, mtp_step + 1, **kwargs)
     kwargs.update(num_key_heads=config.num_k_heads)
     if mode == "compact":
-        from .compact import CompactSSMState
+        from .compact import CompactSSMExecutor
 
-        return CompactSSMState(state, mtp_step + 1, config.conv_dtype, **kwargs)
-    from .replay import ReplaySSMState
+        return CompactSSMExecutor(state, mtp_step + 1, config.conv_dtype, **kwargs)
+    from .replay import ReplaySSMExecutor
 
     replay_config = replay_config or {}
-    return ReplaySSMState(
+    return ReplaySSMExecutor(
         state,
         replay_config.get("cache_len", 16),
         mtp_step + 1,

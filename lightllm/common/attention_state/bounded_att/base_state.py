@@ -8,6 +8,6 @@ from .interface import CoreInterface, CpuCacheInterface, DpCopyInterface, PdInte
 class BoundedAttentionState(CoreInterface, CpuCacheInterface, DpCopyInterface, PdInterface):
     """单种 bounded-attention 方案的数据操作，索引和槽位由调用方分配。"""
 
-    def validate_bounded_att_commit(self, context):
+    def validate_bounded_att_commit(self, acceptance):
 
         pass

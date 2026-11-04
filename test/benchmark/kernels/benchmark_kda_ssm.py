@@ -4,6 +4,7 @@ This synthetic kernel benchmark excludes convolutions, model projections and
 HTTP scheduling. Use a matched service workload for end-to-end conclusions.
 """
 
+from dataclasses import asdict
 import argparse
 import gc
 import json
@@ -14,8 +15,8 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
-from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
+from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import get_configs
 
 
@@ -37,9 +38,9 @@ def workload(args, batch, width, dtype, mode, acceptance):
     state = torch.randn(layers, slots, heads, dim, dim, dtype=dtype, device="cuda") * 0.01
     ssm_backend = None
     if mode == "compact":
-        ssm_backend = CompactSSMState(state, width, q.dtype, kda=True)
+        ssm_backend = CompactSSMExecutor(state, width, q.dtype, kda=True)
     elif mode != "native":
-        ssm_backend = ReplaySSMState(state, 8, width, q.dtype, kda=True, compute_mode=mode)
+        ssm_backend = ReplaySSMExecutor(state, 8, width, q.dtype, kda=True, compute_mode=mode)
     if ssm_backend is not None:
         ssm_backend._config_is_fixed = True
     indexes = reqs[:, None] * width + torch.arange(width, device="cuda", dtype=torch.int32)
@@ -76,7 +77,7 @@ def workload(args, batch, width, dtype, mode, acceptance):
                     ssm_backend.forward(layer, q, k, v, gate, beta, alog, bias, reqs, cu)
             if ssm_backend is not None:
                 ssm_backend.accept_updates(reqs, accepted)
-        if isinstance(ssm_backend, ReplaySSMState):
+        if isinstance(ssm_backend, ReplaySSMExecutor):
             ssm_backend._materialize_accepted_state(reqs[:1], snapshot, snapshot=True)
             ssm_backend.merge_accepted_updates(reqs)
         else:
@@ -135,7 +136,7 @@ def main():
                             state_history_bytes=size,
                             ms_per_round=statistics.median(samples),
                             samples_ms=samples,
-                            config=ssm_backend.run_config if ssm_backend else None,
+                            config=asdict(ssm_backend.run_config) if ssm_backend else None,
                             candidates=candidates,
                         )
                         rows.append(row)

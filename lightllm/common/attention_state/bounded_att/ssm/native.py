@@ -1,9 +1,9 @@
 import torch
 
-from .base import SSMState
+from .base import SSMExecutor
 
 
-class NativeSSMState(SSMState):
+class NativeSSMExecutor(SSMExecutor):
     def __init__(self, state, verify_width, *, kda=False, gate_lower_bound=-5.0):
         self.state = state
         self.slots_per_request = verify_width

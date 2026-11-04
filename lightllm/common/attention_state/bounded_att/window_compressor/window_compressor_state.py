@@ -210,9 +210,7 @@ class WindowCompressorState(BoundedAttentionState):
                 write=False,
             )
 
-    def commit_bounded_att_state(
-        self, req_indices: torch.Tensor, accepted_steps: torch.Tensor, *, context=None
-    ) -> None:
+    def commit_bounded_att_state(self, acceptance) -> None:
         """按绝对位置寻址；接受后继续覆盖 ring，不维护额外 MTP 游标。"""
         pass
 

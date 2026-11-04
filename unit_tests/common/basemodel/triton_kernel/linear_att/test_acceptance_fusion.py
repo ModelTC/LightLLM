@@ -3,10 +3,10 @@ import torch
 import triton
 
 from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update as update
-from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
+from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
 from types import SimpleNamespace
-from lightllm.common.attention_state.commit import MtpCommitContext
-from lightllm.common.attention_state.bounded_att.ssm.native import NativeSSMState
+from lightllm.common.attention_state.commit import StateAcceptance
+from lightllm.common.attention_state.bounded_att.ssm.native import NativeSSMExecutor
 
 
 def make(n, width):
@@ -22,7 +22,7 @@ def make(n, width):
         mtps.extend(range(l))
     tensor = lambda x: torch.tensor(x, device="cuda", dtype=torch.int32)
     args = [tensor(starts), tensor(reqs), tensor(mtps), tensor([1] * len(reqs)), width]
-    ssm_backend = ReplaySSMState.__new__(ReplaySSMState)
+    ssm_backend = ReplaySSMExecutor.__new__(ReplaySSMExecutor)
     ssm_backend.cursors = tensor([7] * (hold + 1))
     ssm_backend.hold_req_id = hold
     ssm_backend.capacity = max(4, triton.next_power_of_2(width))
@@ -40,7 +40,10 @@ def accept_unfused(m, args):
 
 def accept_fused(m, args):
     reqs = args[1][args[0].long()]
-    m._ssm.commit(reqs, None, m.mtp_state_index, MtpCommitContext(*args), "main")
+    ends = torch.cat((args[0][1:], args[0].new_full((1,), args[3].numel())))
+    cumulative = torch.cat((args[3].new_zeros(1), args[3].cumsum(0)))
+    lengths = cumulative[ends.long()] - cumulative[args[0].long()]
+    m._ssm.commit(StateAcceptance(reqs, lengths), m.mtp_state_index, "main")
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
@@ -83,7 +86,7 @@ def test_acceptance_fusion_matches_original_and_cpu_under_graph():
                 assert m._ssm.cursors.tolist() == expected_cursor
                 checks += 1
 
-            m._ssm = NativeSSMState(torch.empty(0), width)
+            m._ssm = NativeSSMExecutor(torch.empty(0), width)
             accept_fused(m, args)
             assert m.mtp_state_index.tolist() == expected_index
 
@@ -97,7 +100,7 @@ def test_fused_acceptance_preserves_folds_snapshots_and_slot_reuse(dtype, comput
     torch.manual_seed(93)
     initial = torch.randn(2, 8, 4, 32, 32, device="cuda").to(dtype) * 0.01
     ssm_backends = [
-        ReplaySSMState(
+        ReplaySSMExecutor(
             initial.clone(),
             8,
             4,

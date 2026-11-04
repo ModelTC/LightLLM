@@ -1,23 +1,25 @@
-from lightllm.common.basemodel.triton_kernel.mtp_utils import linear_att_mtp_state_index_update
+from lightllm.common.ssm_types import SSMRunConfig
+
+from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
 
 
-def update_accepted_indices(reqs, accepted_steps, indices, context, *, replay_cursors=None):
-    if context is None:
-        indices[reqs] = accepted_steps - 1
-    else:
-        linear_att_mtp_state_index_update(
-            req_to_mtp_state_index=indices,
-            b_req_mtp_start_loc=context.b_req_mtp_start_loc,
-            b_req_idx=context.b_req_idx,
-            b_mtp_index=context.b_mtp_index,
-            accepted_index=context.accepted_index,
-            verify_width=context.verify_width,
-            replay_cursors=replay_cursors,
-        )
+def update_accepted_indices(acceptance, indices, *, replay_cursors=None):
+    commit_ssm_prefix(indices, acceptance.req_indices, acceptance.accepted_lengths, replay_cursors)
 
 
-class SSMState:
+class SSMExecutor:
+    """Decode execution and storage for one SSM mode; prefill stays in the attention backend."""
+
     slots_per_request = 1
+    _run_config: SSMRunConfig | None = None
+
+    @property
+    def run_config(self) -> SSMRunConfig | None:
+        return self._run_config
+
+    @run_config.setter
+    def run_config(self, config: SSMRunConfig | dict | None):
+        self._run_config = config if config is None or isinstance(config, SSMRunConfig) else SSMRunConfig(**config)
 
     def clear_history(self, req):
         pass
@@ -40,11 +42,11 @@ class SSMState:
     def create_commit(self, run_config):
         return None
 
-    def validate_commit(self, context, state_name):
+    def validate_commit(self, acceptance, state_name):
         pass
 
-    def commit(self, reqs, accepted_steps, indices, context, state_name):
-        update_accepted_indices(reqs, accepted_steps, indices, context)
+    def commit(self, acceptance, indices, state_name):
+        update_accepted_indices(acceptance, indices)
 
     def forward(
         self,

@@ -7,6 +7,7 @@ import triton
 
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType, autotune
 from lightllm.utils.log_utils import init_logger
+from lightllm.common.ssm_types import SSMRunConfig
 
 logger = init_logger(__name__)
 
@@ -170,7 +171,7 @@ def select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens=None
 
 
 def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens):
-    default = ssm_backend.run_config or {"BV": 32, "num_warps": 1}
+    default = ssm_backend.run_config or SSMRunConfig(32, 1)
     if ssm_backend._config_is_fixed:
         return default
     key = (tuple(static_key(ssm_backend, mode, q, k, v, a, b, cu_seqlens).items()), run_key(ssm_backend, q, cu_seqlens))
@@ -179,7 +180,7 @@ def resolve_run_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens
     if not Autotuner.is_kernel_autotune_warmup(AutotuneKernelType.DECODE_ATTENTION):
         return default
     config = select_config(ssm_backend, mode, q, k, v, a, b, a_log, bias, cu_seqlens)
-    config = dict(config or default)
+    config = SSMRunConfig(**config) if config else default
     # Each captured graph keeps its own layout, even after other buckets warm up.
     ssm_backend.batch_configs[key] = config
     logger.info(f"SSM {mode} update-cycle config: {config}, warmup batch: {key[1]}")

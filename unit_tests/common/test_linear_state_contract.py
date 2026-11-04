@@ -6,7 +6,7 @@ import pytest
 import torch
 
 from lightllm.common.ssm_types import SSMRunConfig
-from lightllm.common.attention_state.commit import MtpCommitContext, StateCommit, StateCommitBatch
+from lightllm.common.attention_state.commit import StateAcceptance, StateCommit, StateCommitBatch
 from lightllm.common.attention_state.bounded_att import KDAState
 from unit_tests.common.test_linear_state import make_state
 from lightllm.common.attention_state.bounded_att import ConvSSMStateConfig, GDNState
@@ -93,10 +93,10 @@ def test_kda_backend_receives_gate_bound_at_construction(linear_config, mode):
 
 @pytest.mark.parametrize("mode", ["compact", "replay", "parallel"])
 def test_ssm_backend_publishes_detached_run_config(mode):
-    from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMState
-    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMState
+    from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
+    from lightllm.common.attention_state.bounded_att.ssm.compact import CompactSSMExecutor
 
-    ssm_backend = object.__new__(CompactSSMState if mode == "compact" else ReplaySSMState)
+    ssm_backend = object.__new__(CompactSSMExecutor if mode == "compact" else ReplaySSMExecutor)
     tuning = {"BV": 32, "num_warps": 2}
     ssm_backend.run_config = tuning
     ssm_backend._config_is_fixed = True
@@ -110,15 +110,8 @@ def test_ssm_backend_publishes_detached_run_config(mode):
         config.BV = 128
 
 
-def make_commit_context(batches):
-    return MtpCommitContext(
-        torch.tensor([0, 4, 8]),
-        torch.tensor([2] * 4 + [0] * 4 + [1] * 4),
-        torch.arange(4).repeat(3),
-        torch.ones(12, dtype=torch.int32),
-        4,
-        batches,
-    )
+def make_acceptance(batches=()):
+    return StateAcceptance(torch.tensor([2, 0, 1]), torch.tensor([1, 2, 3]), batches)
 
 
 def test_compact_commits_each_unpadded_partition_with_its_verify_config(monkeypatch):
@@ -134,31 +127,31 @@ def test_compact_commits_each_unpadded_partition_with_its_verify_config(monkeypa
         commits.append(forward.finish())
     owner._ssm.run_config = {"BV": 128, "num_warps": 4}
     calls = []
-    monkeypatch.setattr(base, "linear_att_mtp_state_index_update", lambda **kwargs: None)
     monkeypatch.setattr(
         owner._ssm,
         "accept_updates",
         lambda reqs, accepted, run_config: calls.append((reqs.tolist(), accepted, run_config)),
     )
-    context = make_commit_context(
+    acceptance = make_acceptance(
         (StateCommitBatch(1, (commits[0],)), StateCommitBatch(0), StateCommitBatch(2, (commits[1],)))
     )
-    owner.commit_bounded_att_state(reqs, torch.tensor([1, 2, 3]), context=context)
+    owner.commit_bounded_att_state(acceptance)
+    assert owner.mtp_state_index.tolist() == [1, 2, 0, 0]
     assert [reqs for reqs, _, _ in calls] == [[2], [0, 1]]
     assert all(accepted is owner.mtp_state_index for _, accepted, _ in calls)
     assert [config for _, _, config in calls] == configs
 
 
-@pytest.mark.parametrize("failure", ["missing", "wrong_owner", "mutable_config", "no_context"])
+@pytest.mark.parametrize("failure", ["missing", "wrong_owner", "mutable_config", "no_batches"])
 def test_invalid_compact_receipt_rejected_before_state_changes(monkeypatch, failure):
     owner, _, _ = make_state(mode="compact", step=3, device="cpu")
     owner.mtp_state_index.fill_(2)
     name = "draft0_other_state" if failure == "wrong_owner" else owner.state_name
     config = {"BV": 8, "num_warps": 1} if failure == "mutable_config" else SSMRunConfig(8, 1)
     commits = () if failure == "missing" else (StateCommit(name, config),)
-    context = None if failure == "no_context" else make_commit_context((StateCommitBatch(3, commits),))
+    acceptance = make_acceptance(() if failure == "no_batches" else (StateCommitBatch(3, commits),))
     with pytest.raises(ValueError, match="compact"):
-        owner.commit_bounded_att_state(torch.tensor([2, 0, 1]), torch.tensor([1, 2, 3]), context=context)
+        owner.commit_bounded_att_state(acceptance)
     assert owner.mtp_state_index.tolist() == [2] * 4
 
 
@@ -168,13 +161,13 @@ def test_commit_partitions_and_resource_identity_are_validated():
     commit = StateCommit("main", SSMRunConfig(8, 1))
     with pytest.raises(ValueError, match="duplicate"):
         StateCommitBatch(1, (commit, commit))
-    context = make_commit_context((StateCommitBatch(3, (commit,)),))
+    acceptance = make_acceptance((StateCommitBatch(3, (commit,)),))
     with pytest.raises(ValueError, match="unknown state"):
-        context.validate(3, {"draft0"})
-    with pytest.raises(ValueError, match="counts differ"):
-        context.validate(2, {"main"})
+        acceptance.validate({"draft0"})
+    with pytest.raises(ValueError, match="layout"):
+        StateAcceptance(torch.tensor([1, 2]), torch.tensor([1])).validate()
     with pytest.raises(ValueError, match="partition"):
-        make_commit_context((StateCommitBatch(2),)).validate(3, {"main"})
+        make_acceptance((StateCommitBatch(2),)).validate({"main"})
 
 
 @pytest.mark.parametrize("cls", [GDNState, KDAState])
@@ -184,7 +177,7 @@ def test_native_accept_restore_and_reuse_preserve_other_requests(cls):
     for slot in range(owner.ssm_state.shape[1]):
         owner.ssm_state[:, slot].fill_(slot)
     before = owner.ssm_state.clone()
-    owner.commit_bounded_att_state(torch.tensor([1]), torch.tensor([3], dtype=torch.int32))
+    owner.commit_bounded_att_state(StateAcceptance(torch.tensor([1]), torch.tensor([3], dtype=torch.int32)))
     accepted = owner.get_accepted_state(1)
     assert torch.equal(accepted.conv[0, 0], torch.tensor([2, 3, 4], dtype=accepted.conv.dtype))
     assert torch.all(accepted.ssm == 5)
@@ -205,15 +198,15 @@ def test_replay_fused_acceptance_keeps_cursors_inside_mode(monkeypatch, cls):
 
     owner, _, _ = make_state(cls, mode="replay", step=3, device="cpu")
     calls = []
-    monkeypatch.setattr(base, "linear_att_mtp_state_index_update", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(base, "commit_ssm_prefix", lambda *args: calls.append(args))
     monkeypatch.setattr(owner._ssm, "accept_updates", lambda *a: pytest.fail("unfused acceptance"))
-    owner.commit_bounded_att_state(torch.tensor([2, 0, 1]), torch.tensor([1, 2, 3]), context=make_commit_context(()))
+    owner.commit_bounded_att_state(make_acceptance())
     assert len(calls) == 1
-    assert calls[0]["replay_cursors"] is owner._ssm.cursors
-    assert calls[0]["req_to_mtp_state_index"] is owner.mtp_state_index
+    assert calls[0][3] is owner._ssm.cursors
+    assert calls[0][0] is owner.mtp_state_index
 
 
-@pytest.mark.parametrize("change", ["owner", "shape", "optional", "dtype"])
+@pytest.mark.parametrize("change", ["owner", "executor", "shape", "optional", "dtype"])
 def test_graph_layout_mismatch_rejected_before_copy(change):
     from copy import copy
 
@@ -222,6 +215,8 @@ def test_graph_layout_mismatch_rejected_before_copy(change):
     source = owner.prepare_decode(torch.tensor([1, 2], dtype=torch.int32), torch.tensor([0, 2, 5]))
     if change == "owner":
         source.resource = copy(owner)
+    elif change == "executor":
+        source.executor = copy(owner._ssm)
     elif change == "shape":
         source.state_indices = source.state_indices[:1]
     elif change == "optional":
@@ -327,3 +322,17 @@ def test_native_forward_preserves_algorithm_inputs(monkeypatch, kda, speculative
     else:
         assert call["a_raw"] is gate and call["b_raw"] is beta
     assert forward.finish() is None
+
+
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_acceptance_keeps_request_order_with_strided_inputs(device):
+    if device == "cuda" and not torch.cuda.is_available():
+        pytest.skip("CUDA required")
+    owner, _, _ = make_state(mode="replay", step=3, device=device)
+    owner.mtp_state_index.fill_(2)
+    owner._ssm.cursors.fill_(8)
+    reqs = torch.tensor([2, -99, 0, -99, 3, -99], device=device)[::2]
+    lengths = torch.tensor([1, -99, 3, -99, 2, -99], dtype=torch.int32, device=device)[::2]
+    owner.commit_bounded_att_state(StateAcceptance(reqs, lengths))
+    assert owner.mtp_state_index.tolist() == [2, 2, 0, 1]
+    assert owner._ssm.cursors.tolist() == [11, 8, 9, 8]
