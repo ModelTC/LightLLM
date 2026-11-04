@@ -13,12 +13,12 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _accept_updates(
     cursors,
     reqs,
     accepted_state_indices,
-    N: tl.constexpr,
+    N,
     HOLD: tl.constexpr,
     WIDTH: tl.constexpr,
     BLOCK: tl.constexpr,
@@ -32,22 +32,21 @@ def _accept_updates(
 
 
 @triton.jit
-def _use_separate_fold(
-    valid, length, count, N: tl.constexpr, L: tl.constexpr, WIDTH: tl.constexpr, FORCE: tl.constexpr
-):
+def _use_separate_fold(valid, length, count, N, L: tl.constexpr, WIDTH: tl.constexpr, FORCE: tl.constexpr):
     small_batch: tl.constexpr = 12
     dense_batch: tl.constexpr = 256
     live = tl.sum((valid & (length > 0)).to(tl.int32), axis=0)
     split = (count > 0) & ((live <= small_batch) | (2 * count <= live))
-    if N >= dense_batch and L == 8 and WIDTH == 4:
-        short = tl.sum((valid & (length > 0) & (length < WIDTH)).to(tl.int32), axis=0)
-        split = split & ((live < dense_batch) | (short > 0))
+    if L == 8 and WIDTH == 4:
+        if N >= dense_batch:
+            short = tl.sum((valid & (length > 0) & (length < WIDTH)).to(tl.int32), axis=0)
+            split = split & ((live < dense_batch) | (short > 0))
     if FORCE:
         split = count > 0
     return split
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _prepare_fold(
     Reqs,
     Cursors,
@@ -55,7 +54,7 @@ def _prepare_fold(
     ForwardCursors,
     Cu,
     Active,
-    N: tl.constexpr,
+    N,
     HOLD: tl.constexpr,
     L: tl.constexpr,
     VARLEN: tl.constexpr,
@@ -100,7 +99,7 @@ def _replay_update(state, raw_k, raw_v, g, beta, KDA: tl.constexpr):
     return state
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _fold_history(
     State,
     RawKeys,
@@ -110,7 +109,7 @@ def _fold_history(
     Reqs,
     Cursors,
     Active,
-    N: tl.constexpr,
+    N,
     LAYERS: tl.constexpr,
     HV: tl.constexpr,
     KH: tl.constexpr,

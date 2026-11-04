@@ -668,7 +668,9 @@ def test_kda_tuning_candidates_match_reference(config, mode):
     [
         (12, 12, 12, 4, True),
         (13, 13, 13, 4, False),
+        (255, 255, 127, 4, True),
         (256, 256, 128, 4, False),
+        (257, 257, 128, 4, False),
         (256, 256, 128, 3, True),
         (256, 12, 12, 4, True),
         (256, 13, 4, 4, True),

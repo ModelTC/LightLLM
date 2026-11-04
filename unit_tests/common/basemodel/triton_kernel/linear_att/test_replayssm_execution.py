@@ -1,5 +1,6 @@
 import pytest
 import torch
+import triton
 
 from lightllm.common.attention_state.bounded_att.ssm.replay import ReplaySSMExecutor
 from lightllm.common.basemodel.triton_kernel.linear_att.mtp_state_params import (
@@ -9,6 +10,74 @@ from types import SimpleNamespace
 from lightllm.common.attention_state.commit import StateAcceptance
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+
+
+@pytest.mark.parametrize("kda", [False, True], ids=["gdn", "kda"])
+def test_decode_compilation_uses_shape_buckets(monkeypatch, kda):
+    from lightllm.common.basemodel.triton_kernel.linear_att import replayssm
+
+    kernels = ("_prepare_fold", "_fold_history", "_replay", "_accept_updates")
+    hashes = {name: set() for name in kernels}
+    launches = []
+    for name in kernels:
+        kernel = getattr(replayssm, name)
+
+        def record(*args, run=kernel.run, name=name, **kwargs):
+            compiled = run(*args, **kwargs)
+            hashes[name].add(compiled.hash)
+            launches.append(name)
+            return compiled
+
+        monkeypatch.setattr(kernel, "run", record)
+
+    torch.manual_seed(137)
+    initial = torch.randn(1, 513, 1, 32, 32, device="cuda") * 0.01
+    eager, captured = [
+        ReplaySSMExecutor(initial.clone(), 8, 1, torch.float32, kda=kda, run_config={"BV": 32, "num_warps": 1})
+        for _ in range(2)
+    ]
+    reqs = torch.arange(512, device="cuda", dtype=torch.int32)
+    q = torch.randn(512, 1, 32, device="cuda") * 0.2
+    k, v = torch.randn_like(q), torch.randn_like(q)
+    a = torch.full((512, 32 if kda else 1), -3.0, device="cuda")
+    beta = torch.randn(512, 1, device="cuda")
+    alog, bias = torch.zeros(1, device="cuda"), torch.zeros(a.shape[-1], device="cuda")
+
+    def cycle(backend, ids):
+        count = ids.numel()
+        backend.prepare_decode(ids)
+        out = backend.forward(0, q[:count], k[:count], v[:count], a[:count], beta[:count], alog, bias, ids)[0]
+        backend.accept_single_token(ids)
+        return out
+
+    graphs = {}
+    for bucket in (32, 512):
+        ids = reqs[:bucket].clone()
+        cycle(captured, ids)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = cycle(captured, ids)
+        graphs[bucket] = graph, ids, out
+    captured.state.copy_(initial)
+    captured.cursors.zero_()
+    counts = (1, 2, 7, 16, 23, 24, 25, 31, 32, 33, 255, 256, 257, 511)
+    for count in counts:
+        graph, ids, output = graphs[32 if count <= 32 else 512]
+        ids.fill_(captured.hold_req_id)
+        ids[:count].copy_(reqs[:count])
+        for _ in range(9):
+            expected = cycle(eager, reqs[:count])
+            calls = len(launches)
+            graph.replay()
+            assert len(launches) == calls
+            torch.testing.assert_close(output[:count], expected, atol=3e-5, rtol=3e-5)
+        assert torch.equal(captured.cursors, eager.cursors)
+        torch.testing.assert_close(captured.state, eager.state, atol=3e-5, rtol=3e-5)
+    assert len(hashes["_prepare_fold"]) == len({triton.next_power_of_2(n) for n in counts})
+    for name in kernels[1:]:
+        assert len(hashes[name]) == 1, (name, hashes[name])
+    assert captured.cursors[-1] == 0
+    assert torch.equal(captured.state[:, -1], initial[:, -1])
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
