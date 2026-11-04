@@ -76,7 +76,7 @@ class InferenceContext:
 
         self.vocab_size = vocab_size
 
-        self.is_hybrid_att_model = backend.is_hybrid_att_model
+        self.is_hybrid_att_model = backend.is_hybrid_att_model and radix_cache is not None
         self.output_constraint_state_factory = self._init_output_constraint_state_factory()
 
         return
@@ -678,6 +678,8 @@ class InferReq:
                 assert self.hold_kv_len % self.args.page_size == 0
                 self.shm_req.prompt_cache_len = self.cur_kv_len  # 记录 prompt cache 的命中长度
 
+        if g_infer_context.radix_cache is None and self.cur_kv_len == 0:
+            g_infer_context.att_state_manager.reset_bounded_att_state([self.req_idx])
         self.shm_req.shm_cur_kv_len = self.cur_kv_len
         return
 
