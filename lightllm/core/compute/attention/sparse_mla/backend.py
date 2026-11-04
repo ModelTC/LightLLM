@@ -21,6 +21,10 @@ class SparseMLAStaticParams:
     spec: SparseMLAAttentionSpec
     alloc_tensor: object
 
+    @classmethod
+    def from_weights(cls, spec, weight, *, device):
+        return cls(spec, device.allocate_tensor)
+
 
 @dataclass
 class SparseMLAInputs:

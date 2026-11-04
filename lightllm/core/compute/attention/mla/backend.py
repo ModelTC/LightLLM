@@ -20,6 +20,10 @@ class MLAStaticParams:
     alloc_tensor: Callable
     expand_kv: Callable
 
+    @classmethod
+    def from_weights(cls, spec, weight, *, device):
+        return cls(spec, device.allocate_tensor, weight.cc_kv_b_proj_.mm)
+
 
 class BoundMLAAttention(BoundAttention):
     def __init__(self, offer, view, params, workspace):

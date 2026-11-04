@@ -56,6 +56,10 @@ class PooledNoPEStaticParams:
     alloc_tensor: object
     pool_position_bias: torch.Tensor
 
+    @classmethod
+    def from_weights(cls, spec, weight, *, device):
+        return cls(spec, device.allocate_tensor, weight.index_kpool_compress_ape.weight)
+
 
 @dataclass(frozen=True)
 class PooledNoPEInputs:

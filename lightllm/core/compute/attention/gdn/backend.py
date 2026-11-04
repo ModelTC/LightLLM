@@ -18,7 +18,7 @@ class GDNStaticParams:
     dt_bias: torch.Tensor
 
     @classmethod
-    def from_weights(cls, spec, weight):
+    def from_weights(cls, spec, weight, *, device=None):
         return cls(
             spec,
             weight.linear_conv1d.mm_param.weight,

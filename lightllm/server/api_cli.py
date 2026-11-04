@@ -494,7 +494,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--llm_prefill_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer", "flashqla"],
         default=["auto"],
         help="""prefill attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages
@@ -506,7 +505,6 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--llm_decode_att_backend",
         type=str,
         nargs="+",
-        choices=["auto", "triton", "fa3", "flashinfer"],
         default=["auto"],
         help="""decode attention kernel used in llm.
                 auto: automatically select best backend based on GPU and available packages

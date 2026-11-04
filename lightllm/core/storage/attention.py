@@ -8,18 +8,13 @@ from lightllm.core.contracts.state import StateView
 
 
 class DenseStateStore:
-    def __init__(self, declarations, format, manager):
+    def __init__(self, declarations, format, manager, *, kv_type=None):
         from lightllm.common.attention_state.full_att import GQAAttentionConfig, create_gqa_state
 
-        encodings = {
-            "plain": "None",
-            "int4": "int4kv",
-            "int8": "int8kv",
-            "fp8_per_head": "fp8kv_sph",
-            "fp8_per_tensor": "fp8kv_spt",
-        }
-        if format.encoding not in encodings:
-            raise ValueError(f"unsupported Dense storage encoding: {format.encoding}")
+        if kv_type is None:
+            from lightllm.core.formats.providers import dense_kv_type
+
+            kv_type = dense_kv_type(format)
 
         groups = defaultdict(list)
         self.resources = {}
@@ -39,7 +34,7 @@ class DenseStateStore:
                     tp_rank=format.shard[0],
                     tp_world_size=format.shard[1],
                 ),
-                kv_type=encodings[format.encoding],
+                kv_type=kv_type,
                 group_size=format.group_size or 8,
                 page_size=format.page_size,
                 device="meta",

@@ -95,18 +95,18 @@ class Planner:
 
     @staticmethod
     def bind_linears(layers, allocate):
-        from lightllm.core.formats.weights.binding import bind_linears
+        from lightllm.common.basemodel.weight_binding import bind_linears
 
         return bind_linears(layers, allocate)
 
     @staticmethod
     def bind_moe(specs, layers, recipes):
-        from lightllm.core.formats.weights.binding import bind_moe
+        from lightllm.common.basemodel.weight_binding import bind_moe
 
         return bind_moe(specs, layers, recipes)
 
     @staticmethod
     def bind_experts(spec, weight, transfers=None):
-        from lightllm.core.formats.weights.binding import bind_experts
+        from lightllm.common.basemodel.weight_binding import bind_experts
 
         return bind_experts(spec, weight, transfers)

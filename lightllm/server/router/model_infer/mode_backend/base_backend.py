@@ -146,6 +146,9 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "expert_dtype": kvargs.get("expert_dtype", None),
             "run_mode": self.run_mode,
+            "execution_providers": kvargs.get("execution_providers"),
+            "execution_device": kvargs.get("execution_device"),
+            "execution_formats": kvargs.get("execution_formats"),
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -406,6 +409,9 @@ class ModeBackend:
                 "expert_dtype": main_kvargs.get("expert_dtype", None),
                 "run_mode": "normal",
                 "main_model": self.model,
+                "execution_providers": main_kvargs.get("execution_providers"),
+                "execution_device": main_kvargs.get("execution_device"),
+                "execution_formats": main_kvargs.get("execution_formats"),
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 

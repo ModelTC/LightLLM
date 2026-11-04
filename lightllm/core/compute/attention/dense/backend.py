@@ -25,6 +25,10 @@ class DenseStaticParams:
     alloc_tensor: Callable
     sinks: torch.Tensor | None = None
 
+    @classmethod
+    def from_weights(cls, spec, weight, *, device):
+        return cls(spec, device.allocate_tensor, weight.attn_sinks.weight if spec.attention_sink else None)
+
     def validate_sinks(self, device):
         if not self.spec.attention_sink:
             if self.sinks is not None:

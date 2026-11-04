@@ -18,7 +18,7 @@ class KDAStaticParams:
     dt_bias: torch.Tensor
 
     @classmethod
-    def from_weights(cls, spec, weight):
+    def from_weights(cls, spec, weight, *, device=None):
         return cls(spec, weight.get_merged_kda_conv_weight(), weight.linear_A_log.weight, weight.linear_dt_bias.weight)
 
 

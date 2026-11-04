@@ -201,6 +201,9 @@ class TpPartBaseModel:
         self.load_way = kvargs.get("load_way", "HF")
         self.weight_dict = kvargs.get("weight_dict", None)
         self.multimodal_embedding_cache = kvargs.get("multimodal_embedding_cache")
+        self.execution_providers = kvargs.get("execution_providers")
+        self.execution_device = kvargs.get("execution_device")
+        self.execution_formats = kvargs.get("execution_formats")
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
@@ -430,11 +433,23 @@ class TpPartBaseModel:
             self.model_adapter.load_weights(
                 (self.pre_post_weight, self.trans_layers_weight), self.weight_dir_, weight_dict
             )
-            from lightllm.core.formats.weights.binding import bind_linears, bind_moe
+            from lightllm.common.basemodel.weight_binding import bind_linears, bind_moe
+            from lightllm.core.registry import default_providers
             from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
-            self.linear_plan = bind_linears((self.pre_post_weight, *self.trans_layers_weight), g_cache_manager.empty)
-            self.moe_plan = bind_moe(self.model_adapter.moe_specs(), self.trans_layers_weight, self.layers_infer)
+            if getattr(self, "execution_providers", None) is None:
+                self.execution_providers = default_providers()
+            self.linear_plan = bind_linears(
+                (self.pre_post_weight, *self.trans_layers_weight),
+                g_cache_manager.empty,
+                providers=self.execution_providers,
+            )
+            self.moe_plan = bind_moe(
+                self.model_adapter.moe_specs(),
+                self.trans_layers_weight,
+                self.layers_infer,
+                providers=self.execution_providers,
+            )
             return
         assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(

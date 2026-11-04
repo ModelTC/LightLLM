@@ -1,29 +1,23 @@
-from lightllm.core.compute.attention.dense.backend import DenseStaticParams
 from lightllm.core.contracts.device import ExecutionLimits
-from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
 from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
 from lightllm.core.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
-from lightllm.core.compute.attention.gdn.backend import GDNStaticParams
-from lightllm.core.compute.attention.mla.backend import MLAStaticParams
-from lightllm.core.compute.attention.sparse_mla.backend import SparseMLAStaticParams
-from lightllm.core.compute.attention.kda.spec import KimiDeltaAttentionSpec
 from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
-from lightllm.core.compute.attention.kda.backend import KDAStaticParams
-from lightllm.core.compute.attention.pooled_nope.backend import PooledNoPEStaticParams
 from lightllm.core.build import BuildConfig, prepare
 from lightllm.core.registry import default_providers
 
-RECURRENT_SPECS = (GatedDeltaNetSpec, KimiDeltaAttentionSpec)
 
-
-def prepare_runner(model):
+def prepare_runner(model, *, providers=None, device=None, formats=None):
     # Explicit opt-in keeps inherited recipes with different semantics on their
     # existing path until their adapters declare those differences.
     adapter = getattr(model, "model_adapter", None)
     if adapter is None:
         return None
-    if model.args.llm_kv_type not in ("None", "int4kv", "int8kv", "fp8kv_sph", "fp8kv_spt", "fp8kv_dsa"):
-        return None
+    providers = providers if providers is not None else getattr(model, "execution_providers", None)
+    if providers is None:
+        providers = default_providers()
+    model.execution_providers = providers
+    device = device if device is not None else getattr(model, "execution_device", None)
+    formats = formats if formats is not None else getattr(model, "execution_formats", None)
     phases = adapter.attention_phases
     if len(set(phases)) != len(phases) or any(phase not in ("prefill", "decode") for phase in phases):
         raise ValueError("model attention phases must be unique prefill/decode stages")
@@ -31,30 +25,31 @@ def prepare_runner(model):
     verify_tokens = model.mtp_manager.get_decode_tokens_per_request(model.is_mtp_draft_model)
     if verify_tokens > 1 and "decode" in requested:
         requested["verify"] = requested.pop("decode")
-    if any(name not in ("auto", "triton", "fa3", "flashinfer", "flashmla_sparse") for name in requested.values()):
-        return None
     specs = adapter.attention_specs()
-    mla = any(isinstance(spec, MLAAttentionSpec) for spec in specs.values())
-    sparse = any(isinstance(spec, SparseMLAAttentionSpec) for spec in specs.values())
-    pooled = any(isinstance(spec, PooledNoPEAttentionSpec) for spec in specs.values())
-    if sparse and model.args.llm_kv_type not in ("None", "fp8kv_dsa"):
-        raise ValueError("sparse MLA requires plain or fp8kv_dsa storage")
-    if not sparse and not pooled and model.args.llm_kv_type == "fp8kv_dsa":
-        return None
-    if pooled and model.args.llm_kv_type not in ("None", "fp8kv_dsa"):
-        raise ValueError("pooled NoPE requires plain or group64/E8M0 packed KV")
-    if (
-        mla
-        and not sparse
-        and (
-            model.args.llm_kv_type != "None"
-            or any(not hasattr(weight, "cc_kv_b_proj_") for weight in model.trans_layers_weight)
-        )
-    ):
-        return None
-    from lightllm.core.device.cuda import CudaRuntime
+    if formats is None:
+        mla = any(isinstance(spec, MLAAttentionSpec) for spec in specs.values())
+        sparse = any(isinstance(spec, SparseMLAAttentionSpec) for spec in specs.values())
+        pooled = any(isinstance(spec, PooledNoPEAttentionSpec) for spec in specs.values())
+        if sparse and model.args.llm_kv_type not in ("None", "fp8kv_dsa"):
+            raise ValueError("sparse MLA requires plain or fp8kv_dsa storage")
+        if not sparse and not pooled and model.args.llm_kv_type == "fp8kv_dsa":
+            return None
+        if pooled and model.args.llm_kv_type not in ("None", "fp8kv_dsa"):
+            raise ValueError("pooled NoPE requires plain or group64/E8M0 packed KV")
+        if (
+            mla
+            and not sparse
+            and (
+                model.args.llm_kv_type != "None"
+                or any(not hasattr(weight, "cc_kv_b_proj_") for weight in model.trans_layers_weight)
+            )
+        ):
+            return None
+    if device is None:
+        from lightllm.core.device.cuda import CudaRuntime
 
-    runtime = CudaRuntime()
+        device = CudaRuntime()
+    runtime = model.execution_device = device
     # Draft KV catch-up also consumes the target's expanded verification rows.
     capacity_tokens = max(verify_tokens, model.mtp_manager.get_decode_tokens_per_request(False))
     batch_capacity = max((model.max_req_num + 1) * capacity_tokens, model.graph_max_batch_size)
@@ -67,39 +62,43 @@ def prepare_runner(model):
         2 if model.args.enable_decode_microbatch_overlap or model.args.enable_prefill_microbatch_overlap else 1,
         max_verify_tokens=verify_tokens,
     )
-    import torch
-
     from lightllm.core.formats.kv.config import history_formats
     from lightllm.core.formats.recurrent.conv_ssm import recurrent_format as make_recurrent_format
 
-    calibration = None
-    if model.args.llm_kv_type in ("fp8kv_sph", "fp8kv_spt"):
-        from lightllm.core.formats.kv.calibration import calibration_table_identity
+    if formats is not None:
+        format, window_format = formats.get("history"), formats.get("window")
+    else:
+        calibration = None
+        if model.args.llm_kv_type in ("fp8kv_sph", "fp8kv_spt"):
+            from lightllm.core.formats.kv.calibration import calibration_table_identity
 
-        calibration = calibration_table_identity(
-            model.att_state_manager.read_full_att_calibration(model.args),
-            "per_head" if model.args.llm_kv_type == "fp8kv_sph" else "per_tensor",
+            calibration = calibration_table_identity(
+                model.att_state_manager.read_full_att_calibration(model.args),
+                "per_head" if model.args.llm_kv_type == "fp8kv_sph" else "per_tensor",
+            )
+        format, window_format = history_formats(
+            specs,
+            kv_type=model.args.llm_kv_type,
+            model_dtype=model.data_type,
+            page_size=model.args.page_size,
+            shard=(model.tp_rank_, model.tp_world_size_),
+            group_size=model.args.llm_kv_quant_group_size,
+            calibration=calibration,
+            capacity_tokens=capacity_tokens,
         )
-    format, window_format = history_formats(
-        specs,
-        kv_type=model.args.llm_kv_type,
-        model_dtype=model.data_type,
-        page_size=model.args.page_size,
-        shard=(model.tp_rank_, model.tp_world_size_),
-        group_size=model.args.llm_kv_quant_group_size,
-        calibration=calibration,
-        capacity_tokens=capacity_tokens,
-    )
     recurrent_format, recurrent_requested = None, None
-    if any(isinstance(spec, RECURRENT_SPECS) for spec in specs.values()):
+    if any(state.retention == "recurrent" for state in adapter.state_specs()):
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
-        recurrent_format = make_recurrent_format(
-            model.data_type,
-            get_torch_dtype(model.args.linear_att_ssm_data_type),
-            (model.tp_rank_, model.tp_world_size_),
-            verify_tokens,
-        )
+        if formats is not None:
+            recurrent_format = formats.get("recurrent")
+        else:
+            recurrent_format = make_recurrent_format(
+                model.data_type,
+                get_torch_dtype(model.args.linear_att_ssm_data_type),
+                (model.tp_rank_, model.tp_world_size_),
+                verify_tokens,
+            )
         recurrent_requested = {}
         for phase in requested:
             names = getattr(model.args, f"llm_{'decode' if phase == 'verify' else phase}_att_backend")
@@ -107,25 +106,10 @@ def prepare_runner(model):
     weights = {
         recipe.layer_num_: weight for recipe, weight in zip(model.layers_infer, model.trans_layers_weight, strict=True)
     }
-    params = {
-        i: GDNStaticParams.from_weights(spec, weights[i])
-        if isinstance(spec, GatedDeltaNetSpec)
-        else KDAStaticParams.from_weights(spec, weights[i])
-        if isinstance(spec, KimiDeltaAttentionSpec)
-        else PooledNoPEStaticParams(spec, runtime.allocate_tensor, weights[i].index_kpool_compress_ape.weight)
-        if isinstance(spec, PooledNoPEAttentionSpec)
-        else SparseMLAStaticParams(spec, runtime.allocate_tensor)
-        if isinstance(spec, SparseMLAAttentionSpec)
-        else MLAStaticParams(spec, runtime.allocate_tensor, weights[i].cc_kv_b_proj_.mm)
-        if isinstance(spec, MLAAttentionSpec)
-        else DenseStaticParams(
-            spec, runtime.allocate_tensor, weights[i].attn_sinks.weight if spec.attention_sink else None
-        )
-        for i, spec in specs.items()
-    }
+    params = {i: providers.static_params(spec, runtime, weights[i]) for i, spec in specs.items()}
     return prepare(
         model_adapter=adapter,
-        providers=default_providers(),
+        providers=providers,
         device=runtime,
         config=BuildConfig(
             layers=model.layers_infer,
