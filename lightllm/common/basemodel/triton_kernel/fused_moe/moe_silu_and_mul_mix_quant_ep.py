@@ -33,6 +33,7 @@ def _silu_and_mul_post_quant_kernel(
     limit: tl.constexpr = None,
     CLAMP_UP_ADD_ONE: tl.constexpr = True,
     USE_UE8M0_SCALE: tl.constexpr = False,
+    ROUND_INTERMEDIATES: tl.constexpr = False,
 ):
     expert_id = tl.program_id(2)
     token_id = tl.program_id(1)
@@ -60,9 +61,16 @@ def _silu_and_mul_post_quant_kernel(
         if USE_LIMIT_AND_ALPHA:
             gate = tl.minimum(gate, limit)
             up = tl.minimum(tl.maximum(up, -limit), limit)
-            gate = gate / (1 + tl.exp(-gate * alpha))
+            if ROUND_INTERMEDIATES:
+                scaled = (gate * alpha).to(input_ptr.dtype.element_ty).to(tl.float32)
+                sigmoid = (1 / (1 + tl.exp(-scaled))).to(input_ptr.dtype.element_ty).to(tl.float32)
+                gate = sigmoid * gate
+            else:
+                gate = gate / (1 + tl.exp(-gate * alpha))
             if CLAMP_UP_ADD_ONE:
                 up += 1
+                if ROUND_INTERMEDIATES:
+                    up = up.to(input_ptr.dtype.element_ty)
         elif USE_TANH_APPROXIMATE_GELU:
             gate_cubed = gate * gate * gate
             tanh_arg = 0.7978845608028654 * (gate + 0.044715 * gate_cubed)
@@ -72,7 +80,7 @@ def _silu_and_mul_post_quant_kernel(
             gate = gate / (1 + tl.exp(-gate))
         gate = gate.to(input_ptr.dtype.element_ty)
         gate_up = up * gate
-        if USE_LIMIT_AND_ALPHA:
+        if USE_LIMIT_AND_ALPHA or ROUND_INTERMEDIATES:
             # Match the BF16/FP16 activation stored before prefill's FP8 quantization.
             gate_up = gate_up.to(input_ptr.dtype.element_ty).to(tl.float32)
         _absmax = tl.maximum(tl.max(tl.abs(gate_up)), 1e-10)
@@ -100,6 +108,9 @@ def silu_and_mul_masked_post_quant_fwd(
     alpha=None,
     limit=None,
     clamp_up_add_one=True,
+    use_ue8m0_scales=None,
+    use_tanh_approximate_gelu=None,
+    round_intermediates=False,
 ):
     """
     input shape [expert_num, token_num_padded, hidden_dim]
@@ -156,12 +167,15 @@ def silu_and_mul_masked_post_quant_fwd(
         fp8_min,
         BLOCK_N=BLOCK_N,
         NUM_STAGE=NUM_STAGES,
-        USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu(),
+        USE_TANH_APPROXIMATE_GELU=ffn_use_tanh_approximate_gelu()
+        if use_tanh_approximate_gelu is None
+        else use_tanh_approximate_gelu,
         USE_LIMIT_AND_ALPHA=limit is not None,
         alpha=alpha,
         limit=limit,
         CLAMP_UP_ADD_ONE=clamp_up_add_one,
-        USE_UE8M0_SCALE=get_env_use_ue8m0_scales(),
+        USE_UE8M0_SCALE=get_env_use_ue8m0_scales() if use_ue8m0_scales is None else use_ue8m0_scales,
+        ROUND_INTERMEDIATES=round_intermediates,
         num_warps=num_warps,
     )
     return

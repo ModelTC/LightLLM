@@ -151,6 +151,58 @@ def test_mla_loading_preserves_replicated_qkv_and_sharded_bmm(config, monkeypatc
     torch.testing.assert_close(actual, expected)
 
 
+def test_sparse_prefill_graph_rebinds_indexer_inputs_and_request_state(config):
+    from lightllm.common.execution.graph_program import GraphProgram
+
+    layer = Glm5NextTransformerLayerInfer(3, config)
+    weight = Glm5NextTransformerLayerWeight(3, torch.bfloat16, config, Quantcfg(config))
+    kv_b = random_weight(1024, 512)
+    weight.load_hf_weights({"model.layers.3.self_attn.kv_b_proj.weight": kv_b})
+    query = random_weight(3, 4, 128)
+    kv = random_weight(8, 1, 512)
+    calls = []
+
+    def select(*, infer_state, hidden_states, q_lora, **kwargs):
+        assert hidden_states is not None and q_lora is not None
+        calls.append(infer_state)
+        return infer_state.indices, infer_state.indices
+
+    layer.indexer = SimpleNamespace(_get_indices=select)
+
+    def request(slots):
+        state = InferStateInfo()
+        state.att_state_role = "main"
+        state.att_state_manager = SimpleNamespace(
+            get_state=lambda **kwargs: SimpleNamespace(get_layer_view=lambda logical_layer_id: SimpleNamespace(kv=kv))
+        )
+        state.prefill_att_state = Glm5NextSparsePrefillState()
+        state.indices = torch.full((3, 256), -1, dtype=torch.int32, device="cuda")
+        state.indices[:, : len(slots)] = torch.tensor(slots, dtype=torch.int32, device="cuda")
+        return state
+
+    program = GraphProgram(torch.cuda.graph_pool_handle())
+    warmup = request([1, 3])
+    warmup.get_topk_indices_params = {"hidden_states": query.flatten(1), "q_lora": query.flatten(1)}
+    layer._context_attention_wrapper_run(query, kv[:3], warmup, weight)
+    initial = request([1, 3])
+    initial.prefill_program = program
+    with program.capture():
+        q = query.clone()
+        initial.get_topk_indices_params = {"hidden_states": q.flatten(1), "q_lora": q.flatten(1)}
+        output = layer._context_attention_wrapper_run(q, kv[:3], initial, weight)
+        result = output * 2
+    for slots in ([7, 0, 4], [1]):
+        query.mul_(1.25)
+        state = request(slots)
+        program.replay(state)
+        assert calls[-1] is state and not hasattr(state, "get_topk_indices_params")
+        projected = torch.bmm(query.transpose(0, 1), kv_b.view(4, 256, 512)[:, :128]).transpose(0, 1)
+        keys = kv[slots, 0].float()
+        scores = projected.float() @ keys.T * config["qk_nope_head_dim"] ** -0.5
+        expected = (scores.softmax(-1) @ keys).bfloat16() * 2
+        torch.testing.assert_close(result, expected, atol=1e-3, rtol=0.015)
+
+
 def test_sparse_layer_prefill_and_decode_match_dense_nope_attention(config):
     if torch.cuda.get_device_capability()[0] != 9:
         pytest.skip("GLM sparse attention kernels require Hopper")
@@ -444,7 +496,7 @@ def test_native_drafts_share_weights_and_prepare_their_own_state(config):
         state.input_ids = torch.zeros(3, device="cuda", dtype=torch.int64)
         state.b_ready_cache_len = torch.tensor([2], device="cuda", dtype=torch.int32)
         state.b_seq_len = torch.tensor([5], device="cuda", dtype=torch.int32)
-        state.init_some_extra_state(model)
+        model.batch_metadata(state)
         torch.testing.assert_close(
             state.position_ids, torch.arange(2, 5, device="cuda", dtype=state.position_ids.dtype)
         )

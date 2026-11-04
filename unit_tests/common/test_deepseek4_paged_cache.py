@@ -1,6 +1,8 @@
 import json
 from types import SimpleNamespace
 
+from lightllm.common.execution.graph_runner import GraphRunner
+
 import pytest
 import torch
 
@@ -247,6 +249,7 @@ def _test_backend(requests, token_capacity=8192):
 
     model = type("TestModel", (), {})()
     model.req_manager = requests
+    model.graph_runner = GraphRunner()
     model.att_state_manager = requests.memory.manager
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(requests.cache_config.layer_num)]
     model.tp_rank_ = 0
@@ -1002,7 +1005,7 @@ def test_swa_ring_attention_matches_full_cache_after_speculative_retries(cache, 
     params = dict(
         compress_ratio=0,
         head_dim_v=512,
-        softmax_scale=512 ** -0.5,
+        softmax_scale=512**-0.5,
         swa_indices=indices.unsqueeze(1),
         swa_lengths=lengths,
         attn_sink=torch.zeros(64, device="cuda"),
@@ -1324,11 +1327,13 @@ def test_forward_indices_are_isolated_and_graph_inputs_refresh(cache, is_prefill
     model = backend.model
     model.layers_infer = [layer for layer in model.layers_infer if layer.layer_num_ in owned_layer_ids]
     has_c128_layer = 1 in owned_layer_ids
-    model.graph = SimpleNamespace(can_run=lambda *args: True, graph_max_len_in_batch=16384)
     model.dsv4_workspace = DeepseekV4Workspace(model)
     rope = torch.zeros((1024, 32), device="cuda")
     model._cos_cached_sliding = model._sin_cached_sliding = rope
     model._cos_cached_compress = model._sin_cached_compress = rope
+
+    prepare_metadata = DeepseekV4InferStateInfo.bind_metadata(model)
+    model.graph_runner.decode = SimpleNamespace(can_run=lambda *args: True, graph_max_len_in_batch=16384)
 
     def make_state(lengths, microbatch_index):
         state = DeepseekV4InferStateInfo()
@@ -1348,7 +1353,7 @@ def test_forward_indices_are_isolated_and_graph_inputs_refresh(cache, is_prefill
             state.prefill_att_state = backend.create_att_prefill_state(state)
         else:
             state.decode_att_state = backend.create_att_decode_state(state)
-        state.init_some_extra_state(model)
+        prepare_metadata(state)
         return state
 
     captured_state = make_state([130, 258], 0)
@@ -1420,7 +1425,8 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
         batch_max_tokens=3,
         max_req_num=requests.max_request_num,
         max_seq_length=4096,
-        graph=None,
+        graph_runner=GraphRunner(),
+        att_state_manager=requests.memory.manager,
         has_vision=False,
         args=args,
         req_manager=requests,
@@ -1465,7 +1471,7 @@ def test_dspark_swa_metadata_is_built_once(cache, monkeypatch, microbatch_index,
     draft_builder = Mock(wraps=dspark_state.build_dspark_swa_indices)
     monkeypatch.setattr(swa_kernel, "build_swa_indices", causal_builder)
     monkeypatch.setattr(dspark_state, "build_dspark_swa_indices", draft_builder)
-    state.init_some_extra_state(model)
+    type(state).bind_metadata(model)(state)
     proposal = mode == "proposal"
     assert causal_builder.call_count == int(not proposal)
     assert draft_builder.call_count == int(proposal)
@@ -1846,7 +1852,7 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
         SimpleNamespace(convert_tokens_to_ids=lambda token: 99), "/unused", {"vision_n_layers": 1}
     )
     params = MultimodalParams(images=[{"type": "url", "data": "unused"} for _ in range(3)])
-    token_base, canonical_length = 2 ** 62, 13
+    token_base, canonical_length = 2**62, 13
     for image in params.images:
         image.token_id, image.token_num, image.start_index_in_embed_cache = token_base, canonical_length, 0
     input_ids = tokenizer.encode([7] * prefix_len + [99, 99, 8, 99, 8], params)
@@ -1882,7 +1888,7 @@ def test_image_metadata_and_embeddings_preserve_canonical_cache(cache, prefix_le
     state.max_kv_seq_len = len(input_ids)
     state.multimodal_params = [params.to_dict()]
     state.prefill_att_state = backend.create_att_prefill_state(state)
-    state.init_some_extra_state(model)
+    type(state).bind_metadata(model)(state)
     assert state.dsv4_image_left.cpu().tolist() == expected_left[ready:]
     assert state.dsv4_image_right.cpu().tolist() == expected_right[ready:]
 
@@ -1944,12 +1950,13 @@ def test_prefill_metadata_does_not_read_cuda_scalars(cache, padding_tokens):
     infer_state.b_ready_cache_len = torch.zeros_like(infer_state.b_seq_len)
     infer_state.max_kv_seq_len = max(lengths)
     infer_state.prefill_att_state = backend.create_att_prefill_state(infer_state)
-    infer_state.init_some_extra_state(model)
+    prepare_metadata = DeepseekV4InferStateInfo.bind_metadata(model)
+    prepare_metadata(infer_state)
 
     previous_debug_mode = torch.cuda.get_sync_debug_mode()
     torch.cuda.set_sync_debug_mode("error")
     try:
-        infer_state.init_some_extra_state(model)
+        prepare_metadata(infer_state)
     finally:
         torch.cuda.set_sync_debug_mode(previous_debug_mode)
     assert infer_state.dsv4_sparse_req_idx.shape == (5,)

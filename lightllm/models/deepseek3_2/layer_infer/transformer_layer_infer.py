@@ -71,11 +71,17 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         infer_state: Deepseek2InferStateInfo,
         layer_weight: Deepseek3_2TransformerLayerWeight,
         out=None,
+        extra_inputs=None,
     ) -> torch.Tensor:
         # Model-specific q projection (uses layer weights)
         q_nope, q_rope = torch.split(q, [self.qk_nope_head_dim, self.qk_rope_head_dim], dim=-1)
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
         q_all = torch.cat([q_nope, q_rope], dim=-1)
+
+        if getattr(self, "bound_prefill_attention", None) is not None:
+            return self._bound_sparse_attention(
+                q_all, kv, infer_state, layer_weight, self.bound_prefill_attention, out, extra_inputs
+            )
 
         # 计算 topk indices
         att_state = infer_state.prefill_att_state
@@ -125,6 +131,11 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         q_nope, q_rope = q[:, :, : -self.qk_rope_head_dim], q[:, :, -self.qk_rope_head_dim :]
         q_nope = layer_weight.k_b_proj_.bmm(q_nope.transpose(0, 1)).transpose(0, 1)
 
+        if getattr(self, "bound_decode_attention", None) is not None:
+            return self._bound_sparse_attention(
+                torch.cat((q_nope, q_rope), dim=-1), None, infer_state, layer_weight, self.bound_decode_attention, out
+            )
+
         # 计算 topk mem indices
         att_state = infer_state.decode_att_state
         topk_mem_indices, _ = self.indexer._get_indices(
@@ -162,6 +173,34 @@ class Deepseek3_2TransformerLayerInfer(Deepseek2TransformerLayerInfer):
         )
         return o_tensor
 
+    def _context_attention_extra_inputs(self, infer_state):
+        if getattr(self, "bound_prefill_attention", None) is None:
+            return ()
+        params = infer_state.get_topk_indices_params
+        del infer_state.get_topk_indices_params
+        return params["hidden_states"], params["q_lora"]
+
+    def _context_attention_output_specs(self, q):
+        if getattr(getattr(self, "bound_prefill_attention", None), "requires_dynamic_prefill", False):
+            return (((q.shape[0], self.tp_q_head_num_, self.kv_lora_rank), q.dtype, q.device),)
+        return None
+
+    def _bound_sparse_attention(self, q, kv, infer_state, layer_weight, attention, out, extra_inputs=None):
+        from lightllm.common.execution.sparse_mla import SparseMLAInputs
+
+        if extra_inputs is None:
+            params = infer_state.get_topk_indices_params
+            del infer_state.get_topk_indices_params
+            extra_inputs = params["hidden_states"], params["q_lora"]
+        hidden, q_lora = extra_inputs
+        index_q, index_k = self.indexer._get_q_k_bf16(hidden, q_lora, infer_state, layer_weight)
+        weights = layer_weight.weights_proj_.mm(hidden) * self.indexer.index_n_heads_scale
+        return attention.run(
+            SparseMLAInputs(q, index_q, index_k, weights, infer_state.mem_index, kv, infer_state.dist_group),
+            attention.prepare_batch(infer_state),
+            out,
+        )
+
 
 class NsaInfer:
     def __init__(self, layer_idx: int, network_config: dict, tp_world_size: int):
@@ -173,11 +212,12 @@ class NsaInfer:
         self.qk_rope_head_dim = network_config["qk_rope_head_dim"]
         self.index_head_dim = network_config["index_head_dim"]
         self.eps = network_config["rms_norm_eps"]
-        self.block_size = network_config["quantization_config"]["weight_block_size"][0]
-        self.scale_fmt = network_config["quantization_config"]["scale_fmt"]
+        quant = network_config.get("quantization_config") or {}
+        self.block_size = quant.get("weight_block_size", [128])[0]
+        self.scale_fmt = quant.get("scale_fmt")
         self.softmax_scale = (self.index_head_dim) ** (-0.5)
         self.index_n_heads = network_config["index_n_heads"]
-        self.index_n_heads_scale = (self.index_n_heads ** -0.5) * self.softmax_scale
+        self.index_n_heads_scale = (self.index_n_heads**-0.5) * self.softmax_scale
         self.tp_world_size_ = tp_world_size
         self.tp_index_n_heads = self.index_n_heads // self.tp_world_size_
 
@@ -189,7 +229,6 @@ class NsaInfer:
         att_state: Any,
         layer_weight: Deepseek3_2TransformerLayerWeight,
     ):
-
         q, k = self._get_q_k_bf16(hidden_states, q_lora, infer_state, layer_weight)
 
         if self.tp_world_size_ > 1:
@@ -281,7 +320,7 @@ class NsaInfer:
 
         hidden_size = x.size(-1)
         assert (hidden_size & (hidden_size - 1)) == 0, "Hidden size must be a power of 2 for Hadamard transform."
-        return hadamard_transform(x, scale=hidden_size ** -0.5)
+        return hadamard_transform(x, scale=hidden_size**-0.5)
 
     def _get_q_k_bf16(
         self,

@@ -108,8 +108,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_group: int,
         n_group: int,
         scoring_func: str,
+        capture=None,
     ):
-        topk_weights, topk_idx, _ = self._select_experts(
+        topk_weights, topk_idx, logical_ids = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
@@ -120,6 +121,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
+        if capture is not None:
+            capture(logical_ids)
 
         return self.low_latency_dispatch_with_topk(
             hidden_states=hidden_states,
@@ -163,8 +166,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         topk_group: int,
         n_group: int,
         scoring_func: str,
+        capture=None,
     ):
-        topk_weights, topk_idx, _ = self._select_experts(
+        topk_weights, topk_idx, logical_ids = self._select_experts(
             input_tensor=hidden_states,
             router_logits=router_logits,
             correction_bias=e_score_correction_bias,
@@ -175,6 +179,8 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             num_expert_group=n_group,
             scoring_func=scoring_func,
         )
+        if capture is not None:
+            capture(logical_ids)
         qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
         return topk_weights, topk_idx.to(torch.long), qinput_tensor
 

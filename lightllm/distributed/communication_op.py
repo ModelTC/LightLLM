@@ -113,6 +113,16 @@ class DistributeGroupManager:
         self.ep_mega_moe_buffer = None
         self.ep_num_sms = None
 
+    def close(self):
+        for group in self.groups:
+            if group.flashinfer_reduce is not None:
+                group.flashinfer_reduce.close()
+        for name in ("ep_buffer", "ep_low_latency_buffer", "ep_mega_moe_buffer"):
+            buffer = getattr(self, name, None)
+            if buffer is not None:
+                buffer.destroy()
+                setattr(self, name, None)
+
     def __len__(self):
         return len(self.groups)
 

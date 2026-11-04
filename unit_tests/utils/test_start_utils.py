@@ -193,6 +193,42 @@ def test_setup_signal_handlers_uses_configured_graceful_shutdown_signal(monkeypa
     assert http_server_process.wait_timeouts == [60]
 
 
+def test_shutdown_notifies_all_workers_before_waiting(monkeypatch):
+    manager = start_utils.SubmoduleManager()
+    events = []
+    workers = [FakeProcess(pid=1000 + i, name=f"lightllm::rank{i}") for i in range(2)]
+    other = FakeProcess(pid=2000, name="compiler")
+    manager.processes = [*workers, other]
+    for worker in workers:
+        worker.send_signal = lambda sig, pid=worker.pid: events.append((pid, sig))
+    other.send_signal = lambda sig: pytest.fail("unregistered helper must not receive the internal exit signal")
+    monkeypatch.setattr(start_utils.psutil, "wait_procs", lambda processes, timeout: events.append(("wait", timeout)))
+    monkeypatch.setattr(manager, "terminate_all_processes", lambda: events.append("fallback"))
+    manager.shutdown_all_processes()
+    assert events == [
+        (1001, start_utils.signal.SIGUSR2),
+        (1000, start_utils.signal.SIGUSR2),
+        ("wait", 30),
+        "fallback",
+    ]
+
+
+def test_shutdown_continues_if_worker_exits_before_signal(monkeypatch):
+    manager = start_utils.SubmoduleManager()
+    exited = FakeProcess(pid=1000, name="lightllm::rank0")
+
+    def disappeared(sig):
+        raise start_utils.psutil.NoSuchProcess(exited.pid)
+
+    exited.send_signal = disappeared
+    manager.processes = [exited]
+    monkeypatch.setattr(start_utils.psutil, "wait_procs", lambda processes, timeout: None)
+    calls = []
+    monkeypatch.setattr(manager, "terminate_all_processes", lambda: calls.append("fallback"))
+    manager.shutdown_all_processes()
+    assert calls == ["fallback"]
+
+
 def test_setup_exit_controller_starts_cleanup_process_without_registering_signals(monkeypatch):
     process_manager = start_utils.SubmoduleManager()
     cleanup_process_calls = []
@@ -248,7 +284,9 @@ def test_supervisor_fails_and_cleans_up_when_submodule_exits(monkeypatch):
     ):
         process_manager.supervise_processes(http_server_process)
 
-    assert kill_calls == [http_server_process]
+    assert kill_calls == []
+    assert http_server_process.sent_signals == [start_utils.signal.SIGTERM]
+    assert http_server_process.wait_timeouts == [10]
     assert terminate_calls == [True]
 
 
@@ -270,8 +308,30 @@ def test_supervisor_treats_zombie_submodule_as_dead(monkeypatch):
     ):
         process_manager.supervise_processes(http_server_process)
 
-    assert kill_calls == [http_server_process]
+    assert kill_calls == []
+    assert http_server_process.sent_signals == [start_utils.signal.SIGTERM]
+    assert http_server_process.wait_timeouts == [10]
     assert terminate_calls == [True]
+
+
+@pytest.mark.parametrize("exit_race", [False, True])
+def test_failure_cleanup_bounds_http_shutdown_and_always_stops_workers(exit_race, monkeypatch):
+    manager = start_utils.SubmoduleManager()
+    http = FakeHttpServerProcess()
+    calls = []
+
+    def wait(timeout):
+        assert timeout == 10
+        if exit_race:
+            raise ProcessLookupError()
+        raise start_utils.subprocess.TimeoutExpired("http", timeout)
+
+    http.wait = wait
+    monkeypatch.setattr(start_utils, "kill_recursive", lambda process: calls.append(process))
+    monkeypatch.setattr(manager, "terminate_all_processes", lambda: calls.append("workers"))
+    manager._cleanup_after_process_failure(http)
+    assert http.sent_signals == [start_utils.signal.SIGTERM]
+    assert calls == (["workers"] if exit_race else [http, "workers"])
 
 
 def test_supervisor_keeps_polling_while_all_processes_are_alive(monkeypatch):

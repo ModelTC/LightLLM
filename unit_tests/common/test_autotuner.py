@@ -104,6 +104,33 @@ def test_benchmark_sampling_requires_positive_counts(repeats, retries):
         )(lambda size, run_config=None: None)
 
 
+def test_key_defaults_survive_execution_wrapper(monkeypatch):
+    @autotune(
+        kernel_name="wrapped_key_defaults",
+        configs_gen_func=lambda: [],
+        static_key_func=lambda rounded: {"rounded": rounded},
+        run_key_func=lambda size: size,
+    )
+    def kernel(size, rounded=False, run_config=None):
+        return size, rounded
+
+    original = kernel.fn
+    calls = []
+
+    def wrapped(*args, **kwargs):
+        calls.append((args, kwargs))
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(kernel, "fn", wrapped)
+    assert kernel._static_key(8) == {"rounded": False}
+    assert kernel._static_key(8, True) == {"rounded": True}
+    assert kernel._static_key(8, rounded=True) == {"rounded": True}
+    with pytest.raises(KeyError, match="Missing argument 'size'"):
+        kernel._run_key()
+    assert kernel(8, run_config={"block": 1}) == (8, False)
+    assert calls == [((8,), {"run_config": {"block": 1}})]
+
+
 def test_key_defaults_preserve_explicit_arguments_and_required_checks():
     @autotune(
         kernel_name="key_defaults",

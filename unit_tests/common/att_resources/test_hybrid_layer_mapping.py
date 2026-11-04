@@ -10,6 +10,7 @@ from lightllm.server.core.objs.start_args_type import StartArgs
 
 
 @pytest.mark.parametrize("draft_layers", [0, 1, 3])
+@pytest.mark.parametrize("interval", [None, 4])
 @pytest.mark.parametrize(
     "layer_types,expected_indices,linear_layers",
     [
@@ -41,6 +42,7 @@ def test_hybrid_layer_mapping_and_mtp_states(
     expected_indices: tuple[int, ...],
     linear_layers: int,
     draft_layers: int,
+    interval: int | None,
 ) -> None:
     model_config = dict(
         num_hidden_layers=len(layer_types),
@@ -53,9 +55,10 @@ def test_hybrid_layer_mapping_and_mtp_states(
         linear_key_head_dim=128,
         linear_value_head_dim=128,
         linear_conv_kernel_dim=4,
-        full_attention_interval=4,
         layer_types=layer_types,
     )
+    if interval is not None:
+        model_config["full_attention_interval"] = interval
     args = StartArgs(data_type="bfloat16", linear_att_ssm_data_type="float32")
     config = Qwen3NextResourceConfig.from_model_config(model_config, args)
     logical_layer_ids = tuple(range(len(layer_types)))

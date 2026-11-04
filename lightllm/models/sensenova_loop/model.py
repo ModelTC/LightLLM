@@ -1,9 +1,25 @@
 """SenseNova Loop: shared checkpoint weights and independent execution caches."""
 
-from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+import math
+
+from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel, Qwen35ModelAdapter
 from .config import get_loop_layer_indices, get_loop_layer_types
 from .layer_infer.transformer_layer_infer import SenseNovaLoopTransformerLayerInfer
 from .layer_weights.transformer_layer_weight import SenseNovaLoopTransformerLayerWeight
+
+
+class SenseNovaLoopModelAdapter(Qwen35ModelAdapter):
+    transformer_weight_class = SenseNovaLoopTransformerLayerWeight
+    transformer_layer_infer_class = SenseNovaLoopTransformerLayerInfer
+
+    def build_weights(self, quant_config):
+        indices = self.config["loop_physical_indices"]
+        pre_post = self.pre_and_post_weight_class(self.dtype, network_config=self.config)
+        physical = {
+            i: self.transformer_weight_class(i, self.dtype, network_config=self.config, quant_cfg=quant_config)
+            for i in dict.fromkeys(indices)
+        }
+        return pre_post, [physical[i] for i in indices]
 
 
 class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
@@ -11,6 +27,7 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
 
     transformer_weight_class = SenseNovaLoopTransformerLayerWeight
     transformer_layer_infer_class = SenseNovaLoopTransformerLayerInfer
+    model_adapter_class = SenseNovaLoopModelAdapter
 
     @classmethod
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
@@ -26,6 +43,13 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
             )
         if model_config.get("mhc") is not None:
             config["mhc"] = model_config["mhc"]
+        if config.get("mhc") is not None:
+            mhc = config["mhc"]
+            if type(mhc.get("fixed_identity", False)) is not bool:
+                raise ValueError("mHC fixed_identity must be a boolean")
+            scale = mhc.get("pre_scale", 1.0)
+            if not isinstance(scale, (int, float)) or not math.isfinite(scale) or scale <= 0:
+                raise ValueError("mHC pre_scale must be finite and positive")
         return config
 
     def _init_config(self):
@@ -34,6 +58,10 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
         self.num_physical_layers = max(self.loop_layer_indices) + 1
 
     def _init_weights(self, start_layer_index=0):
+        if getattr(self, "model_adapter", None) is not None:
+            super()._init_weights(start_layer_index)
+            self.physical_layer_weights = list({id(layer): layer for layer in self.trans_layers_weight}.values())
+            return
         # Allocate and preprocess each checkpoint layer once, then alias weights.
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
         self.physical_layer_weights = [
@@ -48,6 +76,8 @@ class SenseNovaLoopTpPartModel(Qwen3_5TpPartModel):
         self.trans_layers_weight = [self.physical_layer_weights[i] for i in self.loop_layer_indices]
 
     def load_weights(self, weight_dict):
+        if getattr(self, "model_adapter", None) is not None:
+            return super().load_weights(weight_dict)
         execution_weights = self.trans_layers_weight
         self.trans_layers_weight = self.physical_layer_weights
         try:

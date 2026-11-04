@@ -1,5 +1,5 @@
 import torch
-from lightllm.models.deepseek2.model import Deepseek2TpPartModel
+from lightllm.models.deepseek2.model import Deepseek2TpPartModel, Deepseek2ModelAdapter
 from lightllm.models.glm4_moe_lite.layer_infer.transformer_layer_infer import Glm4MoeLiteTransformerLayerInfer
 from lightllm.models.glm4_moe_lite.layer_weights.transformer_layer_weight import Glm4MoeLiteTransformerLayerWeight
 from lightllm.models.glm4_moe_lite.infer_struct import Glm4MoeLiteInferStateInfo
@@ -7,7 +7,14 @@ from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.utils.envs_utils import get_env_start_args
 
 
+class Glm4MoeLiteModelAdapter(Deepseek2ModelAdapter):
+    moe_group_score_topk = 2
+    transformer_weight_class = Glm4MoeLiteTransformerLayerWeight
+    transformer_layer_infer_class = Glm4MoeLiteTransformerLayerInfer
+
+
 class Glm4MoeLiteTpPartModel(Deepseek2TpPartModel):
+    model_adapter_class = Glm4MoeLiteModelAdapter
 
     transformer_weight_class = Glm4MoeLiteTransformerLayerWeight
     transformer_layer_infer_class = Glm4MoeLiteTransformerLayerInfer

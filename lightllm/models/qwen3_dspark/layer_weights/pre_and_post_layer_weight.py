@@ -81,3 +81,7 @@ class Qwen3DSparkPreAndPostLayerWeight(Qwen3DFlashPreAndPostLayerWeight):
                 tp_rank=0,
                 tp_world_size=1,
             )
+
+
+class Qwen3DSparkSharedPreAndPostLayerWeight(Qwen3DSparkPreAndPostLayerWeight):
+    owns_vocab_weights = False

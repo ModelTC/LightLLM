@@ -10,7 +10,9 @@ from typing import List, Dict, Optional, Union
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
+from lightllm.server.router.model_infer.mode_backend.pd.page_lifetime import PDPageReclaimer
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import allocate_transfer_buffer, copy_page
+from lightllm.server.router.model_infer.mode_backend.pd.resource_io import calibration_identities, check_calibration
 from lightllm.server.pd_io_struct import PDAbortReq, PDChunckedTransTask
 from lightllm.utils.graceful_utils import graceful_registry
 from lightllm.server.core.objs import StartArgs
@@ -103,6 +105,7 @@ class _PrefillTransModule:
         self.task_in_queue = task_in_queue
         self.task_out_queue = task_out_queue
         self.resource_managers = resource_managers
+        self.kv_calibration = calibration_identities(resource_managers)
 
         kv_move_buffer = allocate_transfer_buffer(
             self.resource_managers[device_id], self.args.pd_kv_page_num, device=f"cuda:{device_id}"
@@ -125,6 +128,7 @@ class _PrefillTransModule:
         self.failed_queue = queue.Queue()
 
         self.page_index_queue = queue.Queue()
+        self.page_reclaimer = PDPageReclaimer(self.page_index_queue, self.transporter)
         for page_index in range(self.args.pd_kv_page_num):
             self.page_index_queue.put(page_index)
 
@@ -189,6 +193,14 @@ class _PrefillTransModule:
 
             assert isinstance(obj, PDChunckedTransTask), f"unsupported prefill transfer task type: {type(obj)}"
 
+            obj.prefill_kv_calibration = self.kv_calibration
+            try:
+                check_calibration(self.kv_calibration, obj.decode_kv_calibration)
+            except ValueError as exc:
+                obj.error_info = str(exc)
+                self.failed_queue.put(obj)
+                continue
+
             page_index = self.page_index_queue.get()
             trans_task = obj
             trans_task.src_page_index = page_index
@@ -207,39 +219,44 @@ class _PrefillTransModule:
             trans_task: PDChunckedTransTask = self.local_copy_kv_queue.get()
 
             # 将kv 数据拷贝到 page 上，然后传输给 decode node，让其进行读取。
-            with torch.cuda.stream(stream=self.copy_cuda_stream):
-                # 只有 KV 页使用 token 索引；att_state 直接按请求槽位搬运运行态。
-                token_indices = None
-                if trans_task.page_kind == "kv":
-                    cpu_token_indices = torch.tensor(trans_task.mem_indexes, dtype=torch.long, device="cpu")
-                    # 索引上传和后续页拷贝使用同一流，保证执行顺序。
-                    token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
-                copy_page(
-                    node_att_managers=self.resource_managers,
-                    pd_page_buffers=self.kv_move_buffer,
-                    write_to_pd_page=True,
-                    token_indices=token_indices,
-                    pd_page_index=trans_task.src_page_index,
-                    dp_rank_in_node=trans_task.prefill_dp_index,
-                    tp_world_size=self.dp_world_size,
-                    task_kind=trans_task.page_kind,
-                    req_idx=trans_task.req_idx,
-                    state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
-                )
-                sync_event = torch.cuda.Event()
-                sync_event.record()
+            try:
+                with torch.cuda.stream(stream=self.copy_cuda_stream):
+                    # 只有 KV 页使用 token 索引；att_state 直接按请求槽位搬运运行态。
+                    token_indices = None
+                    if trans_task.page_kind == "kv":
+                        cpu_token_indices = torch.tensor(trans_task.mem_indexes, dtype=torch.long, device="cpu")
+                        # 索引上传和后续页拷贝使用同一流，保证执行顺序。
+                        token_indices = cpu_token_indices.cuda(device=self.kv_move_buffer.device, non_blocking=True)
+                    completion = copy_page(
+                        node_att_managers=self.resource_managers,
+                        pd_page_buffers=self.kv_move_buffer,
+                        write_to_pd_page=True,
+                        token_indices=token_indices,
+                        pd_page_index=trans_task.src_page_index,
+                        dp_rank_in_node=trans_task.prefill_dp_index,
+                        tp_world_size=self.dp_world_size,
+                        task_kind=trans_task.page_kind,
+                        req_idx=trans_task.req_idx,
+                        state_token_len=trans_task.end_kv_index if trans_task.page_kind == "att_state" else None,
+                    )
+                    trans_task.local_completion = completion
+            except Exception as exc:
+                # Even validation failures may follow index uploads on this stream.
+                self.copy_cuda_stream.synchronize()
+                trans_task.error_info = f"local page copy failed: {exc}"
+                self.failed_queue.put(trans_task)
+                continue
 
-            self.ready_transfer_queue.put((sync_event, trans_task))
+            self.ready_transfer_queue.put((completion, trans_task))
         return
 
     @log_exception
     def ready_transfer_loop(self):
         torch.cuda.set_device(self.device_id)
         while True:
-            sync_event, trans_task = self.ready_transfer_queue.get()
+            completion, trans_task = self.ready_transfer_queue.get()
             trans_task: PDChunckedTransTask = trans_task
-            sync_event: torch.cuda.Event = sync_event
-            sync_event.synchronize()
+            completion.destination_ready.synchronize()
             key = trans_task.get_key()
             try:
                 with self.waiting_dict_lock:
@@ -346,7 +363,8 @@ class _PrefillTransModule:
             except BaseException as e:
                 logger.error(f"write_blocks_paged failed: {trans_task.to_str()}")
                 logger.exception(str(e))
-                self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
+                if trans_task.xfer_handle is None:
+                    self.transporter.remove_remote_agent(peer_name=trans_task.decode_agent_name)
                 trans_task.error_info = f"write_blocks_paged failed: {str(e)}"
                 self.failed_queue.put(trans_task)
                 continue
@@ -356,7 +374,9 @@ class _PrefillTransModule:
     def update_task_status_loop(
         self,
     ):
+        torch.cuda.set_device(self.device_id)
         while True:
+            self.page_reclaimer.collect()
             if len(self.waiting_dict) == 0:
                 time.sleep(0.001)
                 continue
@@ -440,10 +460,7 @@ class _PrefillTransModule:
         while True:
             trans_task: PDChunckedTransTask = self.success_queue.get()
             # 写回后，回收页面
-            if trans_task.src_page_index is not None:
-                self.page_index_queue.put(trans_task.src_page_index)
-            if trans_task.xfer_handle is not None:
-                self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            self.page_reclaimer.retire(trans_task, trans_task.src_page_index, source=True)
 
             ret = trans_task.createRetObj()
             ret.first_gen_token_id = None
@@ -463,10 +480,7 @@ class _PrefillTransModule:
             trans_task: PDChunckedTransTask = self.failed_queue.get()
 
             # 回收页面
-            if trans_task.src_page_index is not None:
-                self.page_index_queue.put(trans_task.src_page_index)
-            if trans_task.xfer_handle is not None:
-                self.transporter.release_xfer_handle(trans_task.xfer_handle)
+            self.page_reclaimer.retire(trans_task, trans_task.src_page_index, source=True)
 
             ret = trans_task.createRetObj()
             self.task_out_queue.put(ret)

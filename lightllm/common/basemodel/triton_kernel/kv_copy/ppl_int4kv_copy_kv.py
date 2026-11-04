@@ -54,16 +54,23 @@ def _fwd_kernel_destindex_copy_quantize_int4_kv(
             abs_data_0 = tl.abs(src_data_0)
             abs_data_1 = tl.abs(src_data_1)
 
-            data_scale = (tl.maximum(tl.max(abs_data_0, axis=1), tl.max(abs_data_1, axis=1)) / 7.0).to(
-                Out_scale.dtype.element_ty
-            )
-            q_src_data_0 = (src_data_0 / data_scale[:, None]).to(tl.int8)
+            data_scale = tl.div_rn(
+                tl.maximum(tl.max(abs_data_0, axis=1), tl.max(abs_data_1, axis=1)).to(tl.float32), 7.0
+            ).to(Out_scale.dtype.element_ty)
+            if Out_scale.dtype.element_ty == tl.bfloat16:
+                # Keep stored scale semantics independent of compiler BF16 subnormal conversion.
+                data_scale = tl.where(data_scale.to(tl.float32) < 1.1754943508222875e-38, 0.0, data_scale).to(
+                    tl.bfloat16
+                )
+            divisor = tl.where(data_scale == 0, 1.0, data_scale.to(tl.float32))[:, None]
+            # Approximate division can turn an exact integer into the previous quantization bin.
+            q_src_data_0 = tl.div_rn(src_data_0.to(tl.float32), divisor).to(tl.int8)
             q_src_data_0 = tl.where(q_src_data_0 > 7, 7, q_src_data_0)
             q_src_data_0 = tl.where(q_src_data_0 < -7, -7, q_src_data_0)
             q_src_data_0 += 7
             q_src_data_0 = q_src_data_0.to(tl.uint8, bitcast=True)
 
-            q_src_data_1 = (src_data_1 / data_scale[:, None]).to(tl.int8)
+            q_src_data_1 = tl.div_rn(src_data_1.to(tl.float32), divisor).to(tl.int8)
             q_src_data_1 = tl.where(q_src_data_1 > 7, 7, q_src_data_1)
             q_src_data_1 = tl.where(q_src_data_1 < -7, -7, q_src_data_1)
             q_src_data_1 += 7

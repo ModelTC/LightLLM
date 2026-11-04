@@ -194,11 +194,14 @@ class FusedMoeWeight(BaseWeightTpl):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        *,
+        capture=None,
     ):
         assert self.enable_ep_moe, "low_latency_dispatch is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.low_latency_dispatch(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            capture=capture,
             e_score_correction_bias=self.e_score_correction_bias,
             use_grouped_topk=self.use_grouped_topk,
             num_experts_per_tok=self.num_experts_per_tok,
@@ -229,11 +232,14 @@ class FusedMoeWeight(BaseWeightTpl):
         self,
         hidden_states: torch.Tensor,
         router_logits: torch.Tensor,
+        *,
+        capture=None,
     ):
         assert self.enable_ep_moe, "select_experts_and_quant_input is only supported when enable_ep_moe is True"
         return self.fuse_moe_impl.select_experts_and_quant_input(
             hidden_states=hidden_states,
             router_logits=router_logits,
+            capture=capture,
             e_score_correction_bias=self.e_score_correction_bias,
             w13=self.w13,
             use_grouped_topk=self.use_grouped_topk,

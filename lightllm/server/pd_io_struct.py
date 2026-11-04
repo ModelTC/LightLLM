@@ -104,7 +104,6 @@ class PDUpKVStatus:
     pd_kv_trans_params: bytes  # pd kv 传输建立连接所使用的元数据对象
 
     def __post_init__(self):
-
         if not isinstance(self.group_request_id, int):
             error_info = "group_request_id only can be int"
             logger.error(error_info)
@@ -137,6 +136,7 @@ class PDDecodeNodeInfo:
 
     request_id: int
     ready_kv_len: int  # decode 节点上已经准备好的kv长度
+    kv_calibration: Optional[dict] = None
 
 
 @dataclass
@@ -184,6 +184,7 @@ class PDChunckedTransTask:
 
     # xfer_handle
     xfer_handle: Optional[int] = None
+    local_completion: object = None
 
     create_time: float = None
     start_trans_time: float = None  # 用于标记传输开始的时间。同时标记是否正在传输中
@@ -198,6 +199,8 @@ class PDChunckedTransTask:
     page_kind: str = "kv"
     # Only valid for the local task owner; remote notify copies may carry the sender-local req_idx.
     req_idx: Optional[int] = None
+    prefill_kv_calibration: Optional[dict] = None
+    decode_kv_calibration: Optional[dict] = None
 
     def __post_init__(self):
         if self.start_kv_index < 0 or self.end_kv_index < self.start_kv_index:
@@ -236,6 +239,7 @@ class PDChunckedTransTask:
         task.__dict__.pop("shared_time_out_mark", None)
         task.mem_indexes = None
         task.xfer_handle = None
+        task.local_completion = None
         return task
 
     def get_key(self) -> str:

@@ -1,5 +1,7 @@
+from functools import partial
 import torch
 from lightllm.common.basemodel import InferStateInfo
+from lightllm.common.execution.batch_metadata import RotaryMetadata, RotaryTables
 from lightllm.models.gemma4.triton_kernel.build_b_image_token_end import build_b_image_token_end
 
 
@@ -22,25 +24,20 @@ class Gemma4InferStateInfo(InferStateInfo):
         # image token 可以看到自己当前这个token以及后面的 image token。
         self.b_image_token_end = None
 
-    def init_some_extra_state(self, model):
-        super().init_some_extra_state(model)
-        position_ids = self.position_ids
-        self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, position_ids).view(
-            position_ids.shape[0], -1
+    @classmethod
+    def bind_metadata(cls, model):
+        rotary = RotaryMetadata(
+            (
+                ("_sliding", RotaryTables(model._cos_cached_sliding, model._sin_cached_sliding)),
+                ("_full", RotaryTables(model._cos_cached_full, model._sin_cached_full)),
+            )
         )
-        self.position_sin_sliding = torch.index_select(model._sin_cached_sliding, 0, position_ids).view(
-            position_ids.shape[0], -1
-        )
-        self.position_cos_full = torch.index_select(model._cos_cached_full, 0, position_ids).view(
-            position_ids.shape[0], -1
-        )
-        self.position_sin_full = torch.index_select(model._sin_cached_full, 0, position_ids).view(
-            position_ids.shape[0], -1
-        )
+        return partial(cls.prepare_metadata, rotary=rotary)
+
+    def prepare_metadata(self, *, rotary):
+        rotary(self)
         if self.is_prefill:
-            self.max_seq_len = self.max_kv_seq_len
             self._build_b_image_token_end()
-        return
 
     def _build_b_image_token_end(self):
         device = self.position_ids.device

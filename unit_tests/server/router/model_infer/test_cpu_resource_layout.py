@@ -356,13 +356,13 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
     client.update_pages_status_to_ready([pages[0]], deref=False)
     slots = resources.bounded_att_big_page_allocator.alloc(2) if hybrid else None
     write_batches = []
-    write_to_cpu = resources.get_cpu_cache_operator().write_req
+    write_to_cpu = resources.get_cpu_cache_operator().plan_write_req
 
     def capture_write(*args: object, **kwargs: object) -> None:
         write_batches.append((kwargs["cpu_page_indices"], kwargs["cpu_page_ready_flags"]))
-        write_to_cpu(*args, **kwargs)
+        return write_to_cpu(*args, **kwargs)
 
-    monkeypatch.setattr(resources.get_cpu_cache_operator(), "write_req", capture_write)
+    monkeypatch.setattr(resources.get_cpu_cache_operator(), "plan_write_req", capture_write)
     if hybrid:
         # 当前 bounded 页仍由主机复制，测试先准备好源快照。
         # TODO：CPU→CPU kernel 落地后，再覆盖尚未完成 D2H 的快照依赖。
@@ -427,7 +427,7 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
             patch.setattr(torch.cuda.Stream, "wait_stream", record_wait)
             task = module.write_req_to_cpu(req, copy_stream)
         assert waited_streams == []
-    task.sync_event.synchronize()
+    task.completion.destination_ready.synchronize()
     assert write_batches == [(pages, [True, False])]
     assert req.cpu_cache_task_status.is_running()
     assert (client.cpu_kv_cache_tensor[pages[0]] == 123).all()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 import torch
+from lightllm.common.transfer import CopyPlan, Transfer, TransferCompletion
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -17,6 +18,18 @@ def allocate_transfer_buffer(resources: AttentionStateManager, page_count: int, 
     return torch.empty((page_count, resources.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device=device)
 
 
+def calibration_identities(node_att_managers: Sequence[AttentionStateManager]) -> dict:
+    identities = [manager.get_pd_operator().get_calibration_identities() for manager in node_att_managers]
+    if not identities or any(identity != identities[0] for identity in identities[1:]):
+        raise ValueError("node ranks disagree on static KV calibration")
+    return identities[0]
+
+
+def check_calibration(local: dict, remote: dict | None) -> None:
+    if local != (remote or {}):
+        raise ValueError("P/D static KV calibration mismatch; explicit format conversion is required")
+
+
 def copy_page(
     node_att_managers: Sequence[AttentionStateManager],
     pd_page_buffers: torch.Tensor,
@@ -28,7 +41,7 @@ def copy_page(
     task_kind: Literal["kv", "att_state"] = "kv",
     req_idx: int | None = None,
     state_token_len: int | None = None,
-) -> None:
+) -> TransferCompletion:
     """选择节点内指定 DP 的 TP 组，检查整组布局后提交 PD 页面读写。
 
     node_att_managers 按节点内 DP 编号、组内 TP rank 顺序平铺。
@@ -58,42 +71,18 @@ def copy_page(
         ), "PD page layout does not match this group"
         tp_transfer_layouts.append(state_layouts)
 
+    operations = []
     for att_manager, state_layouts in zip(tp_att_managers, tp_transfer_layouts):
         pd_operator = att_manager.get_pd_operator()
-        match task_kind:
-            case "kv":
-                if write_to_pd_page:
-                    pd_operator.write_page(
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        kind=task_kind,
-                        layouts=state_layouts,
-                        token_indices=token_indices,
-                    )
-                else:
-                    pd_operator.read_page(
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        kind=task_kind,
-                        layouts=state_layouts,
-                        token_indices=token_indices,
-                    )
-            case "att_state":
-                if write_to_pd_page:
-                    pd_operator.write_page(
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        kind=task_kind,
-                        layouts=state_layouts,
-                        req_idx=req_idx,
-                        state_token_len=state_token_len,
-                    )
-                else:
-                    pd_operator.read_page(
-                        pd_page_buffers=pd_page_buffers,
-                        pd_page_index=pd_page_index,
-                        kind=task_kind,
-                        layouts=state_layouts,
-                        req_idx=req_idx,
-                        state_token_len=state_token_len,
-                    )
+        build = pd_operator.plan_write_page if write_to_pd_page else pd_operator.plan_read_page
+        plan = build(
+            pd_page_buffers=pd_page_buffers,
+            pd_page_index=pd_page_index,
+            kind=task_kind,
+            layouts=state_layouts,
+            token_indices=token_indices,
+            req_idx=req_idx,
+            state_token_len=state_token_len,
+        )
+        operations.extend(plan.operations)
+    return Transfer().submit(CopyPlan("pack" if write_to_pd_page else "unpack", tuple(operations)))

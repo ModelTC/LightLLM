@@ -1,8 +1,12 @@
 from __future__ import annotations
 
+from lightllm.common.attention_state.query_cache import ResourceOperator, cached_query
+
 from collections.abc import Mapping
 from dataclasses import replace
-from functools import lru_cache
+from functools import partial
+
+from lightllm.common.transfer import CopyOperation, CopyPlan, Transfer
 from typing import TYPE_CHECKING, List
 
 import torch
@@ -14,17 +18,14 @@ if TYPE_CHECKING:
     from lightllm.common.attention_state.manager import AttentionStateManager
 
 
-class CpuCacheOperator:
+class CpuCacheOperator(ResourceOperator):
     """实现 CPU cache 的联合布局和 State 搬运。
 
     AttentionStateManager 通过该 Operator 提供 CPU 页操作；这里集中处理 CPU 页如何组织，
     以及 full-attention token 与 bounded 运行态快照如何写回/读回。
     """
 
-    def __init__(self, owner: AttentionStateManager):
-        self.owner = owner
-
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_page_layouts(self) -> Mapping[str, StateTransferLayout]:
         page_tokens = get_env_start_args().cpu_cache_token_page_size
         assert page_tokens > 0, "CPU pages require a positive token capacity"
@@ -51,17 +52,16 @@ class CpuCacheOperator:
             offset = state_end
         return layouts
 
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_page_bytes(self) -> int:
         layouts = self.get_page_layouts()
         page_bytes = max((layout.byte_end for layout in layouts.values()), default=0)
         return (page_bytes + 15) // 16 * 16
 
     def clear_layout_cache(self) -> None:
-        self.get_page_layouts.cache_clear()
-        self.get_page_bytes.cache_clear()
+        self.clear_query_cache()
 
-    def write_req(
+    def plan_write_req(
         self,
         token_indices: torch.Tensor,
         cpu_page_buffers: torch.Tensor,
@@ -70,13 +70,16 @@ class CpuCacheOperator:
         cpu_page_ready_flags: List[bool] | None = None,
         big_page_slot_ids: List[int] | None = None,
         small_page_slot_ids: List[int] | None = None,
-    ) -> None:
+    ) -> CopyPlan:
         """写出单个请求的 full-attention token 和 bounded 页快照。"""
         if cpu_page_ready_flags is not None:
             assert len(cpu_page_ready_flags) == len(cpu_page_indices), "CPU page and ready counts differ"
             if all(cpu_page_ready_flags):
-                return
+                return CopyPlan("pack", ())
 
+        assert token_indices.is_cuda, "CPU cache transfers require CUDA State storage and token indices"
+        assert cpu_page_buffers.device.type == "cpu", "CPU pages must reside on CPU"
+        operations = []
         full_states = self.owner.get_full_attention_states()
         bounded_states = self.owner.get_bounded_attention_states()
         if bounded_states:
@@ -92,12 +95,19 @@ class CpuCacheOperator:
             small_page_readies = cpu_page_ready_flags[big_page_count:] if cpu_page_ready_flags is not None else None
 
         for state in full_states:
-            state.write_to_cpu(
-                token_indices=token_indices,
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                layout=layouts[state.state_name],
-                cpu_page_ready_flags=cpu_page_ready_flags,
+            operations.append(
+                CopyOperation(
+                    state.state_name,
+                    layouts[state.state_name],
+                    partial(
+                        state.write_to_cpu,
+                        token_indices=token_indices,
+                        cpu_page_buffers=cpu_page_buffers,
+                        cpu_page_indices=cpu_page_indices,
+                        layout=layouts[state.state_name],
+                        cpu_page_ready_flags=cpu_page_ready_flags,
+                    ),
+                )
             )
 
         for state in bounded_states:
@@ -107,25 +117,41 @@ class CpuCacheOperator:
                 assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
                 continue
             if big_page_slot_ids:
-                state.write_state_pages_to_cpu(
-                    page_kind="big",
-                    page_slot_ids=big_page_slot_ids,
-                    cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=big_cpu_page_indices,
-                    layout=layout,
-                    cpu_page_ready_flags=big_page_readies,
+                operations.append(
+                    CopyOperation(
+                        state.state_name,
+                        layout,
+                        partial(
+                            state.write_state_pages_to_cpu,
+                            page_kind="big",
+                            page_slot_ids=big_page_slot_ids,
+                            cpu_page_buffers=cpu_page_buffers,
+                            cpu_page_indices=big_cpu_page_indices,
+                            layout=layout,
+                            cpu_page_ready_flags=big_page_readies,
+                        ),
+                    )
                 )
             if small_page_slot_ids:
-                state.write_state_pages_to_cpu(
-                    page_kind="small",
-                    page_slot_ids=small_page_slot_ids,
-                    cpu_page_buffers=cpu_page_buffers,
-                    cpu_page_indices=small_cpu_page_indices,
-                    layout=layout,
-                    cpu_page_ready_flags=small_page_readies,
+                operations.append(
+                    CopyOperation(
+                        state.state_name,
+                        layout,
+                        partial(
+                            state.write_state_pages_to_cpu,
+                            page_kind="small",
+                            page_slot_ids=small_page_slot_ids,
+                            cpu_page_buffers=cpu_page_buffers,
+                            cpu_page_indices=small_cpu_page_indices,
+                            layout=layout,
+                            cpu_page_ready_flags=small_page_readies,
+                        ),
+                    )
                 )
 
-    def read_req(
+        return CopyPlan("pack", tuple(operations))
+
+    def plan_read_req(
         self,
         cpu_page_buffers: torch.Tensor,
         cpu_page_indices: List[int],
@@ -134,8 +160,11 @@ class CpuCacheOperator:
         big_page_slot_ids: List[int] | None = None,
         req_idx: int | None = None,
         state_token_len: int | None = None,
-    ) -> None:
+    ) -> CopyPlan:
         """读回请求页面，并从末页恢复 bounded 运行态。"""
+        assert token_indices.is_cuda, "CPU cache transfers require CUDA State storage and token indices"
+        assert cpu_page_buffers.device.type == "cpu", "CPU pages must reside on CPU"
+        operations = []
         full_states = self.owner.get_full_attention_states()
         bounded_states = self.owner.get_bounded_attention_states()
         if bounded_states:
@@ -152,28 +181,56 @@ class CpuCacheOperator:
                 load_big_page_slot_ids.append(self.owner.bounded_att_cpu_load_big_page_slot)
 
         for state in full_states:
-            state.read_from_cpu(
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                token_indices=token_indices,
-                layout=layouts[state.state_name],
+            operations.append(
+                CopyOperation(
+                    state.state_name,
+                    layouts[state.state_name],
+                    partial(
+                        state.read_from_cpu,
+                        cpu_page_buffers=cpu_page_buffers,
+                        cpu_page_indices=cpu_page_indices,
+                        token_indices=token_indices,
+                        layout=layouts[state.state_name],
+                    ),
+                )
             )
 
         for state in bounded_states:
             if state.state_name not in layouts:
                 assert not state.get_cpu_transfer_regions(), f"missing CPU layout for {state.state_name}"
                 continue
-            state.read_state_pages_from_cpu(
-                cpu_page_buffers=cpu_page_buffers,
-                cpu_page_indices=cpu_page_indices,
-                big_page_slot_ids=load_big_page_slot_ids,
-                layout=layouts[state.state_name],
+            operations.append(
+                CopyOperation(
+                    state.state_name,
+                    layouts[state.state_name],
+                    partial(
+                        state.read_state_pages_from_cpu,
+                        cpu_page_buffers=cpu_page_buffers,
+                        cpu_page_indices=cpu_page_indices,
+                        big_page_slot_ids=load_big_page_slot_ids,
+                        layout=layouts[state.state_name],
+                    ),
+                )
             )
 
-        if bounded_states:
-            self.owner.restore_bounded_att_runtime_from_pages(
-                req_indices=[req_idx],
-                state_token_lens=[state_token_len],
-                page_kind="big",
-                page_slot_ids=[load_big_page_slot_ids[-1]],
+        for state in bounded_states:
+            operations.append(
+                CopyOperation(
+                    state.state_name,
+                    layouts.get(state.state_name),
+                    partial(
+                        state.restore_bounded_att_runtime_from_pages,
+                        req_indices=[req_idx],
+                        state_token_lens=[state_token_len],
+                        page_kind="big",
+                        page_slot_ids=[load_big_page_slot_ids[-1]],
+                    ),
+                )
             )
+        return CopyPlan("unpack", tuple(operations))
+
+    def write_req(self, *args, **kwargs):
+        return Transfer().submit(self.plan_write_req(*args, **kwargs))
+
+    def read_req(self, *args, **kwargs):
+        return Transfer().submit(self.plan_read_req(*args, **kwargs))

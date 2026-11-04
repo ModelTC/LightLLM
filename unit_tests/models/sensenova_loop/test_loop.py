@@ -98,6 +98,39 @@ def test_physical_weights_are_created_and_loaded_once(monkeypatch):
     assert model.config["n_layer"] == 80
 
 
+def test_loop_adapter_loads_shared_weights_once_with_independent_state_declarations(monkeypatch):
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopModelAdapter, SenseNovaLoopTpPartModel
+
+    config = _config(layers=4, start=1, end=3, count=2)
+    config["text_config"].update(hidden_size=256, num_attention_heads=4)
+    normalized = SenseNovaLoopTpPartModel.normalize_model_config(config)
+    adapter = SenseNovaLoopModelAdapter(normalized, role="main", dtype=torch.bfloat16)
+    created, verified, loaded = [], [], []
+
+    def weight(index, *args, **kwargs):
+        value = SimpleNamespace(layer_num_=index, verify_load=lambda: verified.append(index))
+        created.append(value)
+        return value
+
+    monkeypatch.setattr(adapter, "pre_and_post_weight_class", lambda *a, **k: weight("pre_post"))
+    monkeypatch.setattr(adapter, "transformer_weight_class", weight)
+    monkeypatch.setattr(
+        "lightllm.common.basemodel.layer_weights.hf_load_utils.load_hf_weights",
+        lambda **kwargs: loaded.extend(kwargs["transformer_layer_list"]),
+    )
+    weights = adapter.build_weights(None)
+    adapter.load_weights(weights, "unused", {})
+    assert len(created) == 5 and len(loaded) == 4
+    assert verified == ["pre_post", 0, 1, 2, 3]
+    assert len(weights[1]) == 6
+    assert weights[1][1] is weights[1][3] and weights[1][2] is weights[1][4]
+    states = adapter.state_specs()
+    assert [s.producer for s in states] == list(range(6))
+    assert all(s.consumers == (s.producer,) for s in states)
+    assert len({s.key for s in states}) == 6
+    assert normalized["num_hidden_layers"] == 6 and config["text_config"]["num_hidden_layers"] == 4
+
+
 @pytest.mark.parametrize("streams,count", [(2, 2), (4, 3)])
 def test_mhc_registry_and_embedded_mtp_reuse_existing_qwen_draft(tmp_path, streams, count):
     from lightllm.models.draft_registry import get_draft_model_class
@@ -186,6 +219,26 @@ def test_model_and_worker_use_the_same_loop_cache_layout(monkeypatch, custom_lay
     assert config == original
 
 
+@pytest.mark.parametrize(
+    "settings,match",
+    [
+        ({"fixed_identity": 1}, "fixed_identity"),
+        ({"fixed_identity": "false"}, "fixed_identity"),
+        ({"pre_scale": 0}, "pre_scale"),
+        ({"pre_scale": -1}, "pre_scale"),
+        ({"pre_scale": float("nan")}, "pre_scale"),
+        ({"pre_scale": float("inf")}, "pre_scale"),
+    ],
+)
+def test_invalid_mhc_options_fail_during_config_normalization(settings, match):
+    from lightllm.models.sensenova_loop.model import SenseNovaLoopTpPartModel
+
+    config = _config()
+    config["mhc"] = dict(start=4, end=28, streams=2, iterations=20, **settings)
+    with pytest.raises(ValueError, match=match):
+        SenseNovaLoopTpPartModel.normalize_model_config(config)
+
+
 def test_plain_loop_registry_does_not_enable_mhc():
     registration = ModelRegistry.get_model_config(_config())
     assert registration.model_class == "lightllm.models.sensenova_loop.model:SenseNovaLoopTpPartModel"
@@ -231,11 +284,12 @@ def layer_runtime(monkeypatch):
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("mhc_enabled", [False, True])
-def test_loop_layer_types_are_local_to_sensenova(layer_runtime, tmp_path, mhc_enabled):
+def test_explicit_layer_types_preserve_loop_and_draft_mapping(layer_runtime, tmp_path, mhc_enabled):
     from lightllm.common.quantization import Quantcfg
     from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer
     from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import Qwen35TransformerLayerWeight
     from lightllm.models.qwen3_5_mtp.model import Qwen3_5MTPModel
+    from lightllm.models.qwen3_5_mtp.layer_weights.transformer_layer_weight import Qwen3_5MTPTransformerLayerWeight
     from lightllm.models.sensenova_loop.layer_infer.transformer_layer_infer import SenseNovaLoopTransformerLayerInfer
     from lightllm.models.sensenova_loop.layer_weights.transformer_layer_weight import (
         SenseNovaLoopTransformerLayerWeight,
@@ -261,6 +315,8 @@ def test_loop_layer_types_are_local_to_sensenova(layer_runtime, tmp_path, mhc_en
     indices = get_loop_layer_indices(config["loop_settings"], 8)
     execution_config = {
         **text,
+        "num_hidden_layers": len(indices),
+        "n_layer": len(indices),
         "loop_physical_indices": indices,
         "layer_types": get_loop_layer_types(config["loop_settings"], text),
     }
@@ -275,10 +331,10 @@ def test_loop_layer_types_are_local_to_sensenova(layer_runtime, tmp_path, mhc_en
         assert hasattr(weights[physical], "linear_in_proj") == expected_linear
         assert hasattr(weights[physical], "qkvo_gate_proj") != expected_linear
 
-    # The base model still uses its original periodic layout, even with layer_types present.
+    # Explicit layer types also govern the base model, independently of the periodic fallback.
     base_layer = Qwen35TransformerLayerInfer(0, text)
     base_weight = Qwen35TransformerLayerWeight(0, torch.bfloat16, text, Quantcfg(text))
-    assert base_layer.is_linear_attention_layer and base_weight.is_linear_attention_layer
+    assert not base_layer.is_linear_attention_layer and not base_weight.is_linear_attention_layer
 
     (tmp_path / "config.json").write_text(json.dumps(config))
     draft = object.__new__(Qwen3_5MTPModel)
@@ -286,3 +342,6 @@ def test_loop_layer_types_are_local_to_sensenova(layer_runtime, tmp_path, mhc_en
     draft._init_config()
     for global_index in (len(indices), len(indices) + 1):
         assert not Qwen35TransformerLayerInfer(global_index, draft.config).is_linear_attention_layer
+    for draft_index in (0, 1):
+        weight = Qwen3_5MTPTransformerLayerWeight(draft_index, torch.bfloat16, draft.config, Quantcfg(draft.config))
+        assert not weight.is_linear_attention_layer

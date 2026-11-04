@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from lightllm.common.basemodel.moe_route_info_manager import get_moe_capture_callback
+
 from lightllm.common.attention_state.full_att import FullAttentionState
 
 import torch
@@ -20,7 +22,6 @@ from lightllm.common.basemodel.triton_kernel.mhc import (
 from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.models.glm5_next.indexer import Glm5NextNsaInfer
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
@@ -60,7 +61,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
             self.q_lora_rank = network_config["q_lora_rank"]
             self.kv_lora_rank = network_config["kv_lora_rank"]
             self.v_head_dim = network_config["v_head_dim"]
-            self.softmax_scale = self.qk_nope_head_dim ** -0.5
+            self.softmax_scale = self.qk_nope_head_dim**-0.5
             self.indexer = Glm5NextNsaInfer(
                 layer_idx=self.layer_num_,
                 network_config=self.network_config_,
@@ -109,20 +110,32 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
 
         moe_gate_dtype = layer_weight.moe_gate.data_type_
         router_logits = layer_weight.moe_gate.mm(hidden_states.to(moe_gate_dtype))
-        output = layer_weight.experts.experts(
-            hidden_states,
-            router_logits=router_logits,
-            top_k=self.num_experts_per_tok,
-            renormalize=self.norm_topk_prob,
-            use_grouped_topk=self.n_group,
-            topk_group=self.topk_group,
-            num_expert_group=self.n_group,
-            is_prefill=infer_state.is_prefill,
-            infer_state=infer_state,
-            alpha=1.0,
-            limit=self.swiglu_limit,
-            clamp_up_add_one=False,
-        )
+        if getattr(self, "bound_ep", None) is not None:
+            output = self.bound_ep.run(
+                hidden_states,
+                router_logits,
+                is_prefill=infer_state.is_prefill,
+                capture=get_moe_capture_callback(infer_state, self.layer_num_),
+            )
+        elif getattr(self, "bound_moe", None) is not None:
+            output = self.bound_moe.run(
+                hidden_states, router_logits, capture=get_moe_capture_callback(infer_state, self.layer_num_)
+            )
+        else:
+            output = layer_weight.experts.experts(
+                hidden_states,
+                router_logits=router_logits,
+                top_k=self.num_experts_per_tok,
+                renormalize=self.norm_topk_prob,
+                use_grouped_topk=self.n_group,
+                topk_group=self.topk_group,
+                num_expert_group=self.n_group,
+                is_prefill=infer_state.is_prefill,
+                infer_state=infer_state,
+                alpha=1.0,
+                limit=self.swiglu_limit,
+                clamp_up_add_one=False,
+            )
 
         if self.n_shared_experts is not None and layer_weight.num_fused_shared_experts == 0:
             output.add_(shared_output)
@@ -152,6 +165,8 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         return q, cache_kv
 
     def _context_attention_kernel(self, q, kv, infer_state, layer_weight, out=None):
+        if getattr(self, "bound_prefill_attention", None) is not None:
+            return self._bound_nope_attention(q, kv, infer_state, layer_weight, "prefill", out)
         q = layer_weight.k_b_proj_.bmm(q.transpose(0, 1)).transpose(0, 1).contiguous()
         topk_mem_indices, topk_indices = self.indexer._get_indices(
             hidden_states=infer_state.get_topk_indices_params["hidden_states"],
@@ -184,58 +199,23 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         )
 
     def _context_attention_wrapper_run(self, q, cache_kv, infer_state, layer_weight):
-        """Capture GLM sparse attention with the indexer's graph inputs.
-
-        Sparse attention is replayed as a CPU-side step because the indexer
-        performs runtime request-state updates.  Besides Q and KV, it needs
-        the hidden state and Q-LoRA projection saved by ``_get_qkv``.  Python
-        assignments made during capture do not run during graph replay, so
-        preserve those tensors explicitly and restore them for every replay.
-        """
-        if not torch.cuda.is_current_stream_capturing():
+        program = infer_state.prefill_program
+        if program is None or not program.is_capturing:
             return self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+        indexer = infer_state.get_topk_indices_params
+        inputs = tuple(value.contiguous() for value in (q, cache_kv, indexer["hidden_states"], indexer["q_lora"]))
 
-        q = q.contiguous()
-        cache_kv = cache_kv.contiguous()
-        indexer_inputs = infer_state.get_topk_indices_params
-        hidden_states = indexer_inputs["hidden_states"].contiguous()
-        q_lora = indexer_inputs["q_lora"].contiguous()
-        _q = tensor_to_no_ref_tensor(q)
-        _cache_kv = tensor_to_no_ref_tensor(cache_kv)
-        _hidden_states = tensor_to_no_ref_tensor(hidden_states)
-        _q_lora = tensor_to_no_ref_tensor(q_lora)
-        pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
-        pre_capture_graph.__exit__(None, None, None)
+        def attention(tensors, batch):
+            query, kv, hidden, latent_query = tensors
+            batch.get_topk_indices_params = {"hidden_states": hidden, "q_lora": latent_query}
+            return (self._context_attention_kernel(query, kv, batch, layer_weight),)
 
-        def restore_indexer_inputs(state):
-            state.get_topk_indices_params = {"hidden_states": _hidden_states, "q_lora": _q_lora}
-
-        def get_o_shape_dtype_device():
-            restore_indexer_inputs(infer_state)
-            with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
-                output = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
-                output_shape, output_dtype, output_device = output.shape, output.dtype, output.device
-            return output_shape, output_dtype, output_device
-
-        output_shape, output_dtype, output_device = get_o_shape_dtype_device()
-        infer_state.prefill_cuda_graph_create_graph_obj()
-        infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-        output = torch.empty(output_shape, dtype=output_dtype, device=output_device)
-        _output = tensor_to_no_ref_tensor(output)
-
-        def sparse_att_func(new_infer_state):
-            restore_indexer_inputs(new_infer_state)
-            tmp_output = self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight)
-            assert tmp_output.shape == _output.shape
-            _output.copy_(tmp_output)
-
-        infer_state.prefill_cuda_graph_add_cpu_runnning_func(
-            func=sparse_att_func,
-            after_graph=pre_capture_graph,
-        )
-        return output
+        spec = ((q.shape[0], self.tp_q_head_num_, self.kv_lora_rank), q.dtype, q.device)
+        return program.call(attention, inputs, infer_state, (spec,))[0]
 
     def _token_attention_kernel(self, q, infer_state, layer_weight, out=None):
+        if getattr(self, "bound_decode_attention", None) is not None:
+            return self._bound_nope_attention(q, None, infer_state, layer_weight, "decode", out)
         if self.is_linear_attention_layer:
             raise AssertionError("KDA uses its dedicated backend")
         q_nope = layer_weight.k_b_proj_.bmm(q.transpose(0, 1)).transpose(0, 1)
@@ -269,6 +249,23 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 },
             ),
         )
+
+    def _bound_nope_attention(self, q, kv, batch, weight, phase, out):
+        from lightllm.common.execution.pooled_sparse import PooledNoPEInputs
+
+        bound = getattr(self, f"bound_{phase}_attention")
+        params = batch.get_topk_indices_params
+        del batch.get_topk_indices_params
+        hidden, latent_query = params["hidden_states"], params["q_lora"]
+        query = weight.k_b_proj_.bmm(q.transpose(0, 1)).transpose(0, 1).contiguous()
+        key = weight.k_norm_(weight.wk_proj_.mm(hidden), eps=self.eps_)
+        gate = weight.index_kpool_compress_gate.mm(hidden)
+        index_query = index_weights = None
+        if bound.requires_indexer(batch.max_kv_seq_len):
+            index_query = weight.wq_b_proj_.mm(latent_query).view(-1, bound.spec.index_heads, bound.spec.index_dim)
+            index_weights = weight.weights_proj_.mm(hidden.float())
+        inputs = PooledNoPEInputs(query, key, gate, index_query, index_weights, kv)
+        return bound.run(inputs, bound.prepare_batch(batch), out)
 
     def _get_o(self, input, infer_state, layer_weight):
         if infer_state.need_dp_prefill_balance:
@@ -310,68 +307,53 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         output = layer_weight.linear_o_proj.mm(output.view(tokens, -1))
         return self._tpsp_reduce(input=output, infer_state=infer_state)
 
-    def _kda_prefill_cuda_graph_wrapper(
-        self,
-        mixed_qkv: torch.Tensor,
-        raw_decay_gate: torch.Tensor,
-        beta_logits: torch.Tensor,
-        infer_state,
-        layer_weight,
-    ) -> torch.Tensor:
-        """Run KDA prefill between CUDA-graph segments.
+    def _kda_prefill_cuda_graph_wrapper(self, mixed_qkv, raw_decay_gate, beta_logits, infer_state, layer_weight):
+        bound = getattr(self, "bound_prefill_attention", None)
+        if bound is not None:
+            heads, dim = bound.spec.heads, bound.spec.head_dim
+        else:
+            backend = infer_state.prefill_att_state1.backend
+            heads, dim = backend.tp_num_heads, backend.head_dim
+        shape = (1, mixed_qkv.shape[0], heads, dim)
+        spec = (shape, mixed_qkv.dtype, mixed_qkv.device)
 
-        KDA updates request-owned convolution and SSM state, so its prefill
-        kernel must use the attention state constructed for the request being
-        replayed rather than the one used while capturing.  Keep its inputs and
-        output at stable addresses, then register it as a CPU-side replay step
-        between the surrounding CUDA-graph segments.
-        """
-        backend = infer_state.prefill_att_state1.backend
-        mixed_qkv = mixed_qkv.contiguous()
-        raw_decay_gate = raw_decay_gate.contiguous()
-        beta_logits = beta_logits.contiguous()
-        _mixed_qkv = tensor_to_no_ref_tensor(mixed_qkv)
-        _raw_decay_gate = tensor_to_no_ref_tensor(raw_decay_gate)
-        _beta_logits = tensor_to_no_ref_tensor(beta_logits)
+        def attention(tensors, batch):
+            qkv, gate, beta = tensors
+            output = self._kda_attention(qkv, gate, beta, batch, layer_weight, "prefill")
+            return (output,)
 
-        pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
-        pre_capture_graph.__exit__(None, None, None)
+        return infer_state.prefill_program.call(
+            attention,
+            tuple(value.contiguous() for value in (mixed_qkv, raw_decay_gate, beta_logits)),
+            infer_state,
+            (spec,),
+        )[0]
 
-        # chunk_kda_with_fused_gate returns [1, tokens, heads, head_dim].
-        # Construct this shape directly instead of dry-running the kernel:
-        # kernel setup may synchronize with the host, which is illegal while a
-        # CUDA graph capture is active.
-        output_shape = (1, mixed_qkv.shape[0], backend.tp_num_heads, backend.head_dim)
-        infer_state.prefill_cuda_graph_create_graph_obj()
-        infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-        output = torch.empty(output_shape, dtype=mixed_qkv.dtype, device=mixed_qkv.device)
-        _output = tensor_to_no_ref_tensor(output)
+    def _kda_attention(self, qkv, gate, beta, batch, weight, phase):
+        bound = getattr(self, f"bound_{phase}_attention", None)
+        if bound is not None:
+            from lightllm.common.execution.kda import KDAInputs
 
-        def kda_prefill_func(new_infer_state):
-            tmp_output = new_infer_state.prefill_att_state1.prefill_att(
-                q=None,
-                k=None,
-                v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkv": _mixed_qkv,
-                        "raw_gate": _raw_decay_gate,
-                        "raw_beta": _beta_logits,
-                        "layer_weight": layer_weight,
+            return bound.run(KDAInputs(qkv, gate, beta), bound.prepare_batch(batch))
+        state = getattr(batch, f"{phase}_att_state1")
+        return getattr(state, f"{phase}_att")(
+            q=None,
+            k=None,
+            v=None,
+            att_control=AttControl(
+                **{
+                    f"linear_att_{phase}": True,
+                    f"linear_att_{phase}_dict": {
+                        "mixed_qkv": qkv,
+                        "raw_gate": gate,
+                        "raw_beta": beta,
+                        "layer_weight": weight,
                         "layer_num": self.layer_num_,
                     },
-                ),
-                alloc_func=self.alloc_tensor,
-            )
-            assert tmp_output.shape == _output.shape
-            _output.copy_(tmp_output)
-
-        infer_state.prefill_cuda_graph_add_cpu_runnning_func(
-            func=kda_prefill_func,
-            after_graph=pre_capture_graph,
+                }
+            ),
+            alloc_func=self.alloc_tensor,
         )
-        return output
 
     def context_attention_forward(self, input_embeddings, infer_state, layer_weight):
         if not self.is_linear_attention_layer:
@@ -388,22 +370,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
                 layer_weight,
             )
         else:
-            core_output = infer_state.prefill_att_state1.prefill_att(
-                q=None,
-                k=None,
-                v=None,
-                att_control=AttControl(
-                    linear_att_prefill=True,
-                    linear_att_prefill_dict={
-                        "mixed_qkv": qkv,
-                        "raw_gate": raw_decay_gate,
-                        "raw_beta": beta_logits,
-                        "layer_weight": layer_weight,
-                        "layer_num": self.layer_num_,
-                    },
-                ),
-                alloc_func=self.alloc_tensor,
-            )
+            core_output = self._kda_attention(qkv, raw_decay_gate, beta_logits, infer_state, layer_weight, "prefill")
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
     def token_attention_forward(self, input_embeddings, infer_state, layer_weight):
@@ -412,22 +379,7 @@ class Glm5NextTransformerLayerInfer(TransformerLayerInferTpl):
         qkv, raw_decay_gate, beta_logits, raw_output_gate = self._kda_projections(
             input_embeddings, infer_state, layer_weight
         )
-        core_output = infer_state.decode_att_state1.decode_att(
-            q=None,
-            k=None,
-            v=None,
-            att_control=AttControl(
-                linear_att_decode=True,
-                linear_att_decode_dict={
-                    "mixed_qkv": qkv,
-                    "raw_gate": raw_decay_gate,
-                    "raw_beta": beta_logits,
-                    "layer_weight": layer_weight,
-                    "layer_num": self.layer_num_,
-                },
-            ),
-            alloc_func=self.alloc_tensor,
-        )
+        core_output = self._kda_attention(qkv, raw_decay_gate, beta_logits, infer_state, layer_weight, "decode")
         return self._kda_post(core_output, raw_output_gate, infer_state, layer_weight)
 
     def _hc_pre(self, streams, layer_weight, prefix, norm_weight):

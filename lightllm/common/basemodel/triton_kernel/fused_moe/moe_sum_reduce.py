@@ -20,6 +20,7 @@ def _moe_sum_reduce_kernel(
     BLOCK_M: tl.constexpr,
     BLOCK_DIM: tl.constexpr,
     NUM_STAGE: tl.constexpr,
+    ROUTED_TOP_K: tl.constexpr,
 ):
     input_stride_0 = tl.cast(input_stride_0, dtype=tl.int64)
     input_stride_1 = tl.cast(input_stride_1, dtype=tl.int64)
@@ -39,15 +40,29 @@ def _moe_sum_reduce_kernel(
     for token_index in range(token_start, token_end):
         accumulator = tl.zeros((BLOCK_DIM,), dtype=tl.float32)
         input_t_ptr = input_ptr + token_index * input_stride_0 + offs_dim
-        for i in tl.range(0, topk_num, num_stages=NUM_STAGE):
-            tmp = tl.load(input_t_ptr + i * input_stride_1, mask=offs_dim < dim_end, other=0.0)
-            accumulator += tmp
+        if ROUTED_TOP_K:
+            for i in tl.range(0, ROUTED_TOP_K, num_stages=NUM_STAGE):
+                tmp = tl.load(input_t_ptr + i * input_stride_1, mask=offs_dim < dim_end, other=0.0)
+                accumulator += tmp
+            shared = tl.zeros((BLOCK_DIM,), dtype=tl.float32)
+            for i in tl.range(ROUTED_TOP_K, topk_num, num_stages=NUM_STAGE):
+                tmp = tl.load(input_t_ptr + i * input_stride_1, mask=offs_dim < dim_end, other=0.0)
+                shared += tmp
+            accumulator = accumulator.to(input_ptr.dtype.element_ty).to(tl.float32)
+            accumulator += shared.to(input_ptr.dtype.element_ty).to(tl.float32)
+        else:
+            for i in tl.range(0, topk_num, num_stages=NUM_STAGE):
+                tmp = tl.load(input_t_ptr + i * input_stride_1, mask=offs_dim < dim_end, other=0.0)
+                accumulator += tmp
         store_t_ptr = output_ptr + token_index * output_stride_0 + offs_dim
         tl.store(store_t_ptr, accumulator.to(input_ptr.dtype.element_ty), mask=offs_dim < dim_end)
 
 
-def _get_moe_sum_reduce_static_key(input: torch.Tensor, output: torch.Tensor):
-    return {"topk_num": input.shape[1], "hidden_dim": input.shape[2], "out_dtype": str(output.dtype)}
+def _get_moe_sum_reduce_static_key(input: torch.Tensor, output: torch.Tensor, routed_top_k=None):
+    key = {"topk_num": input.shape[1], "hidden_dim": input.shape[2], "out_dtype": str(output.dtype)}
+    if routed_top_k is not None:
+        key["routed_top_k"] = routed_top_k
+    return key
 
 
 def _get_moe_sum_reduce_configs():
@@ -67,11 +82,12 @@ def _get_moe_sum_reduce_configs():
     run_key_func=lambda input: input.shape[0],
     mutates_args=["output"],
 )
-def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None):
+def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict = None, routed_top_k=None):
     assert input.is_contiguous()
     assert output.is_contiguous()
 
     token_num, topk_num, hidden_dim = input.shape
+    assert routed_top_k is None or 0 < routed_top_k < topk_num
     assert output.shape[0] == token_num and output.shape[1] == hidden_dim
 
     if not run_config:
@@ -103,6 +119,7 @@ def moe_sum_reduce(input: torch.Tensor, output: torch.Tensor, run_config: Dict =
         BLOCK_M=BLOCK_M,
         BLOCK_DIM=BLOCK_DIM,
         NUM_STAGE=NUM_STAGE,
+        ROUTED_TOP_K=0 if routed_top_k is None else routed_top_k,
         num_warps=num_warps,
     )
     return

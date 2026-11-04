@@ -271,11 +271,9 @@ class DeepseekV4MemoryManager:
                 if hasattr(self, field):
                     state.buffer = getattr(self, field)
             setattr(self.manager, state.state_name, state)
-        self.manager._get_states.cache_clear()
+        self.manager.clear_query_cache()
         get_env_start_args().pd_kv_page_size = page_size
-        self.manager.get_pd_operator().get_pd_full_att_page_layouts.cache_clear()
-        self.manager.get_pd_operator().get_pd_bounded_att_page_layouts.cache_clear()
-        self.manager.get_pd_operator().get_page_bytes.cache_clear()
+        self.manager.get_pd_operator().clear_layout_cache()
         self.kv_move_buffer = torch.empty(
             (count, self.manager.get_pd_operator().get_page_bytes()), dtype=torch.uint8, device="cuda"
         )

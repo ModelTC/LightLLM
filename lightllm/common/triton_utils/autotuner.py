@@ -9,7 +9,7 @@ import collections
 from contextlib import contextmanager
 from enum import Enum
 from pathlib import Path
-from tqdm import tqdm
+from lightllm.utils.progress import ThreadProgress as tqdm
 from frozendict import frozendict
 from lightllm.utils.device_utils import get_current_device_name
 from lightllm.utils.log_utils import init_logger
@@ -164,7 +164,6 @@ class Autotuner:
         benchmark_repeats: int = 3,
         benchmark_retries: int = 3,
     ):
-
         self.configs_gen_func = configs_gen_func
         self.kernel_name = kernel_name
         self.kernel_type = AutotuneKernelType(kernel_type)
@@ -181,7 +180,8 @@ class Autotuner:
         self.cached_configs = {}
         self.fast_match_configs = collections.defaultdict(dict)
         self.warmuped_configs_set = set()
-        self.arg_names = [param.name for param in inspect.signature(self.fn).parameters.values()]
+        self._fn_parameters = inspect.signature(fn).parameters
+        self.arg_names = list(self._fn_parameters)
         self._argname_to_pos = {name: idx for idx, name in enumerate(self.arg_names)}
         self._pos_to_argname = {idx: name for idx, name in enumerate(self.arg_names)}
 
@@ -499,7 +499,7 @@ class Autotuner:
                 values.append(args[pos])
             else:
                 # 可选参数也能参与 key；调用方省略时使用算子函数声明的默认值。
-                parameter = inspect.signature(self.fn).parameters.get(name)
+                parameter = self._fn_parameters.get(name)
                 if parameter is None or parameter.default is inspect.Parameter.empty:
                     raise KeyError(f"Missing argument '{name}' required by key function")
                 values.append(parameter.default)

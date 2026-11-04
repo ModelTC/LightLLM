@@ -1,6 +1,9 @@
 from typing import List
 from lightllm.models.deepseek_mtp.layer_infer.pre_layer_infer import Deepseek3MTPPreLayerInfer
 from lightllm.models.glm4_moe_lite.model import Glm4MoeLiteTpPartModel
+from lightllm.models.deepseek_mtp.model import Deepseek3MTPModel, Deepseek3MTPModelAdapter
+from lightllm.models.glm4_moe_lite.layer_weights.transformer_layer_weight import Glm4MoeLiteTransformerLayerWeight
+from lightllm.models.glm4_moe_lite.layer_infer.transformer_layer_infer import Glm4MoeLiteTransformerLayerInfer
 from lightllm.models.glm4_moe_lite_mtp.layer_weights.pre_and_post_layer_weight import (
     Glm4MoeLiteMTPPreAndPostLayerWeight,
 )
@@ -8,7 +11,14 @@ from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.basemodel import load_hf_weights
 
 
+class Glm4MoeLiteMTPModelAdapter(Deepseek3MTPModelAdapter):
+    pre_and_post_weight_class = Glm4MoeLiteMTPPreAndPostLayerWeight
+    transformer_weight_class = Glm4MoeLiteTransformerLayerWeight
+    transformer_layer_infer_class = Glm4MoeLiteTransformerLayerInfer
+
+
 class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
+    model_adapter_class = Glm4MoeLiteMTPModelAdapter
 
     # MTP draft model marker (consumed by the decode CUDA-graph / padding paths).
     is_mtp_draft_model = True
@@ -37,8 +47,13 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
         self._cos_cached = self.main_model._cos_cached
         self._sin_cached = self.main_model._sin_cached
 
+    def _create_model_adapter(self, adapter_class):
+        return Deepseek3MTPModel._create_model_adapter(self, adapter_class)
+
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_weights(self)
 
         mtp_layer_start = self.config["mtp_checkpoint_layer_start"]
         num_mtp_layers = self.config.get("num_nextn_predict_layers", 1)
@@ -73,6 +88,8 @@ class Glm4MoeLiteMTPModel(Glm4MoeLiteTpPartModel):
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_infer_layer(self)
 
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)

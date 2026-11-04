@@ -8,9 +8,11 @@ def find_correction_dim(num_rotations, dim, base=10000, max_position_embeddings=
 
 
 # Find dim range bounds based on rotations
-def find_correction_range(low_rot, high_rot, dim, base=10000, max_position_embeddings=2048):
-    low = math.floor(find_correction_dim(low_rot, dim, base, max_position_embeddings))
-    high = math.ceil(find_correction_dim(high_rot, dim, base, max_position_embeddings))
+def find_correction_range(low_rot, high_rot, dim, base=10000, max_position_embeddings=2048, truncate=True):
+    low = find_correction_dim(low_rot, dim, base, max_position_embeddings)
+    high = find_correction_dim(high_rot, dim, base, max_position_embeddings)
+    if truncate:
+        low, high = math.floor(low), math.ceil(high)
     return max(low, 0), min(high, dim - 1)  # Clamp values just in case
 
 

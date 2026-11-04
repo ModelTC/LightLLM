@@ -361,7 +361,6 @@ class InferenceContext:
     @torch.no_grad()
     def pause_reqs(self, pause_reqs: List["InferReq"], is_master_in_dp: bool):
         if pause_reqs:
-
             free_token_index = []
             for req in pause_reqs:
                 if self.args.diverse_mode:
@@ -406,6 +405,7 @@ class InferenceContext:
         return
 
     def get_can_alloc_token_num(self):
+        self.att_state_manager.reclaimer.collect()
         radix_cache_unref_token_num = 0
         if self.radix_cache is not None:
             radix_cache_unref_token_num = (

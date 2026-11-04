@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.query_cache import cached_query
+
 from typing import TYPE_CHECKING, List
 from math import prod
 
@@ -189,7 +190,7 @@ class KDAState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回已接受 Conv/SSM 快照的字段区间与切片，供 CPU 页布局和容量计算使用。
 
@@ -329,7 +330,7 @@ class KDAState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回 PD 传输字段与切片，交由管理器安排其在联合页中的位置。"""
         return self._get_transfer_regions()

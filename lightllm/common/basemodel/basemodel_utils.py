@@ -11,4 +11,11 @@ def normalize_model_config(model_config: dict[str, object]) -> dict[str, object]
     repair_config(config, same_names=["num_attention_heads", "n_head"])
     repair_config(config, same_names=["hidden_size", "n_embd", "n_embed"])
     repair_config(config, same_names=["num_hidden_layers", "n_layer"])
+    rope = config.get("rope_parameters")
+    if isinstance(rope, dict) and "rope_type" in rope:
+        if config.get("rope_scaling") is None:
+            config["rope_scaling"] = rope.copy()
+        for name in ("rope_theta", "partial_rotary_factor"):
+            if name in rope:
+                config.setdefault(name, rope[name])
     return config

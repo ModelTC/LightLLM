@@ -12,6 +12,18 @@ if TYPE_CHECKING:
     from lightllm.server.core.objs.start_args_type import StartArgs
 
 
+def is_linear_attention_layer(config, layer):
+    kinds = config.get("layer_types")
+    if kinds is not None:
+        if len(kinds) != config["num_hidden_layers"] or any(
+            kind not in ("linear_attention", "full_attention") for kind in kinds
+        ):
+            raise ValueError("Qwen hybrid layer_types must describe every layer")
+        # A one-layer draft retains its global logical ID in the shared request domain.
+        return kinds[0 if len(kinds) == 1 else layer] == "linear_attention"
+    return (layer + 1) % config["full_attention_interval"] != 0
+
+
 @dataclasses.dataclass
 class Qwen3NextResourceConfig:
     # 单个模型的 TP 组大小，通常为 args.tp // args.dp，不包含其他 DP 组。
@@ -39,7 +51,7 @@ class Qwen3NextResourceConfig:
     # SSM 运行态和大小页快照的元素 dtype，可独立于 Conv 精度配置。
     ssm_state_dtype: torch.dtype
     # 混合层排列周期：每隔这么多层放一个 full-attention 层，零起始层号为 interval - 1。
-    full_attention_interval: int
+    full_attention_interval: int | None
     # 当前模型总层数，包含线性与 full-attention 两类层，不合并其他模型的层。
     all_layer_num: int
     # 显式执行层类型，支持 Loop 等非周期排列；为空时沿用周期配置。
@@ -53,6 +65,8 @@ class Qwen3NextResourceConfig:
         """
         if self.layer_types:
             return tuple(index for index, kind in enumerate(self.layer_types) if kind != "linear_attention")
+        if self.full_attention_interval is None or self.full_attention_interval <= 0:
+            raise ValueError("hybrid attention requires layer_types or a positive full_attention_interval")
         return tuple(range(self.full_attention_interval - 1, self.all_layer_num, self.full_attention_interval))
 
     @classmethod
@@ -87,7 +101,7 @@ class Qwen3NextResourceConfig:
             conv_kernel_size=llm_config["linear_conv_kernel_dim"],
             conv_state_dtype=get_torch_dtype(args.data_type),
             ssm_state_dtype=get_torch_dtype(args.linear_att_ssm_data_type),
-            full_attention_interval=llm_config["full_attention_interval"],
+            full_attention_interval=llm_config.get("full_attention_interval"),
             all_layer_num=n_layer,
             layer_types=tuple(llm_config.get("layer_types", ())),
         )

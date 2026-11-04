@@ -1,10 +1,11 @@
 import torch
+from dataclasses import replace
 
 from lightllm.common.basemodel.attention.fa3.fp import Fa3AttBackend
 from lightllm.common.basemodel.attention.fa3.fp8 import Fp8Fa3AttBackend
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
-from lightllm.models.llama.model import LlamaTpPartModel
+from lightllm.models.llama.model import LlamaTpPartModel, LlamaModelAdapter
 from lightllm.models.qwen3_dflash.infer_struct import Qwen3DFlashInferStateInfo
 from lightllm.models.qwen3_dflash.layer_infer.post_layer_infer import Qwen3DFlashPostLayerInfer
 from lightllm.models.qwen3_dflash.layer_infer.pre_layer_infer import Qwen3DFlashPreLayerInfer
@@ -13,10 +14,37 @@ from lightllm.models.qwen3_dflash.layer_weights.pre_and_post_layer_weight import
 from lightllm.models.qwen3_dflash.layer_weights.transformer_layer_weight import Qwen3DFlashTransformerLayerWeight
 
 
+class Qwen3DFlashModelAdapter(LlamaModelAdapter):
+    attention_phases = ("decode",)
+    pre_and_post_weight_class = Qwen3DFlashPreAndPostLayerWeight
+    transformer_weight_class = Qwen3DFlashTransformerLayerWeight
+    pre_layer_infer_class = Qwen3DFlashPreLayerInfer
+    post_layer_infer_class = Qwen3DFlashPostLayerInfer
+    transformer_layer_infer_class = Qwen3DFlashTransformerLayerInfer
+    share_main_weights = False
+
+    def __init__(self, *args, main_weights, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._attention = {i: replace(spec, causal=False) for i, spec in self._attention.items()}
+        self.main_weights = main_weights
+
+    def build_weights(self, quant_config):
+        pre_post = self.pre_and_post_weight_class(self.dtype, network_config=self.config, quant_cfg=quant_config)
+        if self.share_main_weights:
+            pre_post.wte_weight_ = self.main_weights.wte_weight_
+            pre_post.lm_head_weight_ = self.main_weights.lm_head_weight_
+        layers = [
+            self.transformer_weight_class(i, self.dtype, network_config=self.config, quant_cfg=quant_config)
+            for i in range(len(self.layer_ids))
+        ]
+        return pre_post, layers
+
+
 class Qwen3DFlashModel(LlamaTpPartModel):
     """Qwen3 DFlash draft model."""
 
     is_mtp_draft_model = True
+    model_adapter_class = Qwen3DFlashModelAdapter
 
     pre_and_post_weight_class = Qwen3DFlashPreAndPostLayerWeight
     transformer_weight_class = Qwen3DFlashTransformerLayerWeight
@@ -53,7 +81,22 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         if not isinstance(self.decode_att_backend, (Fa3AttBackend, Fp8Fa3AttBackend)):
             raise NotImplementedError("Qwen3 DFlash decode requires FA3")
 
+    def _create_model_adapter(self, adapter_class):
+        self.draft_layer_start = len(self.main_model.layers_infer) + sum(
+            len(model.layers_infer) for model in self.mtp_previous_draft_models
+        )
+        return adapter_class(
+            self.config,
+            role=self.att_state_role,
+            dtype=self.data_type,
+            tp_world_size=self.tp_world_size_,
+            layer_ids=range(self.draft_layer_start, self.draft_layer_start + self.config["num_hidden_layers"]),
+            main_weights=self.main_model.pre_post_weight,
+        )
+
     def _init_infer_layer(self, start_layer_index=None):
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_infer_layer(self)
         self.draft_layer_start = len(self.main_model.layers_infer)
         self.draft_layer_start += sum(
             len(previous_model.layers_infer) for previous_model in self.mtp_previous_draft_models
@@ -61,6 +104,8 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         super()._init_infer_layer(start_layer_index=self.draft_layer_start)
 
     def _init_weights(self, start_layer_index=None):
+        if getattr(self, "model_adapter", None) is not None:
+            return TpPartBaseModel._init_weights(self)
         self.pre_post_weight = self.pre_and_post_weight_class(
             self.data_type,
             network_config=self.config,
@@ -91,9 +136,10 @@ class Qwen3DFlashModel(LlamaTpPartModel):
         infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
         infer_state.position_cos = torch.index_select(self._cos_cached, 0, position_ids)
         infer_state.position_sin = torch.index_select(self._sin_cached, 0, position_ids)
-        infer_state.att_state_manager = self.att_state_manager
-        infer_state.att_state_role = self.att_state_role
-        infer_state.is_draft_model = True
+        if getattr(self, "execution_runner", None) is None:
+            infer_state.att_state_manager = self.att_state_manager
+            infer_state.att_state_role = self.att_state_role
+            infer_state.is_draft_model = True
         infer_state.mem_index = self._select_mem_indexes(model_input)
 
         # 这里调用的是 DFlash 覆写后的 context_forward：pre layer 只投影 target hidden，

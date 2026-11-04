@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.query_cache import cached_query
+
 from typing import TYPE_CHECKING, List
 from math import prod
 
@@ -136,18 +137,17 @@ class GDNState(BoundedAttentionState):
         page_kind: PageKind,
         page_slot_ids: List[int],
     ) -> None:
-        """保存各请求指定绝对 token 长度处的基准状态；Conv/SSM 不依赖长度定位。"""
+        """保存已接受位置的 Conv 窗口和 SSM，不包含被拒绝的候选。"""
         assert isinstance(req_indices, list) and isinstance(
             page_slot_ids, list
         ), "request and slot indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
-        # TODO：大小页仅在 prefill 阶段保存，mtp_state_index 始终为 0，可直接复制基准状态。
-        # 若以后支持 decode/MTP 后保存，需要按已接受游标选择 Conv 窗口和 SSM 槽位。
         conv_copies, ssm_copies = [], []
         for req_idx, slot_id in zip(req_indices, page_slot_ids):
-            conv_copies.append((self.conv_state[:, req_idx, :, : self.config.conv_width], pool.conv_state[slot_id]))
-            ssm_copies.append((self.ssm_state[:, req_idx * (self.mtp_step + 1)], pool.ssm_state[slot_id]))
+            conv, ssm = self._accepted_runtime_tensors(req_idx)
+            conv_copies.append((conv, pool.conv_state[slot_id]))
+            ssm_copies.append((ssm, pool.ssm_state[slot_id]))
         copy_bounded_att_tensors(copies=conv_copies)
         copy_bounded_att_tensors(copies=ssm_copies)
 
@@ -189,7 +189,7 @@ class GDNState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回已接受 Conv/SSM 快照的字段区间与切片，供 CPU 页布局和容量计算使用。
 
@@ -295,26 +295,25 @@ class GDNState(BoundedAttentionState):
         dst_req_indices: List[int],
         remote_dp_bounded_state: GDNState,
     ) -> None:
-        """复制同一 TP 分片的 prefill 基准运行态并重置目标游标，不写入页池。"""
+        """复制同一 TP 分片的已接受运行态并重置目标游标，不写入页池。"""
         assert isinstance(src_req_indices, list) and isinstance(dst_req_indices, list), "request indices must be lists"
         assert len(src_req_indices) == len(dst_req_indices), "source and destination request counts differ"
         assert (
             type(remote_dp_bounded_state) is type(self) and remote_dp_bounded_state.config == self.config
         ), "DP copy requires the same algorithm and equivalent TP state configurations"
-        # TODO：当前 DP fetch 只复制 prefill 基准状态，源 MTP 游标为 0；
-        # 若以后支持 decode/MTP 后迁移，需按已接受游标选择源 Conv 窗口及 SSM 槽位。
         # 跨设备源存储必须已通过 peer/IPC 映射，批量复制不改变双方页池。
         conv_copies, ssm_copies = [], []
         for src_req, dst_req in zip(src_req_indices, dst_req_indices):
+            conv, ssm = remote_dp_bounded_state._accepted_runtime_tensors(src_req)
             conv_copies.append(
                 (
-                    remote_dp_bounded_state.conv_state[:, src_req, :, : self.config.conv_width],
+                    conv,
                     self.conv_state[:, dst_req, :, : self.config.conv_width],
                 )
             )
             ssm_copies.append(
                 (
-                    remote_dp_bounded_state.ssm_state[:, src_req * (remote_dp_bounded_state.mtp_step + 1)],
+                    ssm,
                     self.ssm_state[:, dst_req * (self.mtp_step + 1)],
                 )
             )
@@ -329,7 +328,7 @@ class GDNState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回 PD 传输字段与切片，交由管理器安排其在联合页中的位置。"""
         return self._get_transfer_regions()
@@ -342,10 +341,10 @@ class GDNState(BoundedAttentionState):
         state_token_len: int,
         layout: StateTransferLayout,
     ) -> None:
-        """写出 state_token_len 处的 prefill 基准状态；Conv/SSM 不依赖长度，源 MTP 游标须为 0。"""
+        """写出 state_token_len 处已接受的 Conv/SSM 状态。"""
         assert layout.state_name == self.state_name, "transfer layout does not describe this resource"
         assert 0 <= layout.byte_start < layout.byte_end, "invalid State byte interval"
-        fields = self._runtime_fields(req_idx)
+        fields = self._fields(*self._accepted_runtime_tensors(req_idx))
         for copies in bounded_att_buffer_copies(
             page_fields=[fields],
             page_buffers=pd_page_buffers,
@@ -508,11 +507,18 @@ class GDNState(BoundedAttentionState):
 
     def _runtime_fields(self, req: int):
         """返回请求基准位置的 Conv/SSM 视图，供恢复和传输使用。"""
-        # TODO：当前 DP/PD 不会发生在 MTP 提交后，源状态游标为 0。
-        # 若以后支持该场景，需要按已接受游标选取 Conv 窗口及 SSM 槽位。
         return self._fields(
             self.conv_state[:, req, :, : self.config.conv_width], self.ssm_state[:, req * (self.mtp_step + 1)]
         )
+
+    def _accepted_runtime_tensors(self, req: int):
+        if self.mtp_state_index is None:
+            return self.conv_state[:, req], self.ssm_state[:, req]
+        offset = self.mtp_state_index[req : req + 1].long()
+        columns = offset + torch.arange(self.config.conv_width, device=offset.device)
+        conv = self.conv_state[:, req].index_select(-1, columns)
+        ssm = self.ssm_state.index_select(1, req * (self.mtp_step + 1) + offset).squeeze(1)
+        return conv, ssm
 
     @staticmethod
     def _fields(conv: torch.Tensor, ssm: torch.Tensor):

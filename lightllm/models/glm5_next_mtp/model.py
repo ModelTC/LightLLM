@@ -10,6 +10,8 @@ from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from .layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerWeight
+from lightllm.models.glm5_next.model import Glm5NextModelAdapter
+from lightllm.common.execution.model_adapter import grouped_moe_specs
 
 
 if TYPE_CHECKING:
@@ -19,7 +21,51 @@ if TYPE_CHECKING:
     from lightllm.common.attention_state.bounded_att import BoundedAttentionState
 
 
+class Glm5NextMTPModelAdapter(Glm5NextModelAdapter):
+    pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
+    pre_layer_infer_class = Glm5NextMTPPreLayerInfer
+
+    def __init__(self, config, *, shared_weights, **kwargs):
+        config = deepcopy(config)
+        if config["num_hidden_layers"] != 1 or config.get("num_nextn_predict_layers") != 1:
+            raise ValueError("GLM NextN requires one native MTP block")
+        config["layer_types"] = ["deepseek_sparse_attention"]
+        config["mhc"] = False
+        super().__init__(config, **kwargs)
+        self.checkpoint_layer_id = config["mtp_checkpoint_layer_start"]
+        if self.checkpoint_layer_id < 0:
+            raise ValueError("GLM MTP checkpoint layer must be nonnegative")
+        self.shared_weights = shared_weights
+
+    def moe_specs(self):
+        specs = grouped_moe_specs(
+            self.config,
+            self.dtype,
+            layer_ids=(self.checkpoint_layer_id,),
+            group_score_topk=2,
+            limit=self.config["swiglu_limit"],
+            clamp_up_add_one=False,
+        )
+        return {self.layer_ids[0]: specs[self.checkpoint_layer_id]} if specs else {}
+
+    def build_weights(self, quant_config):
+        pre_post = self.pre_and_post_weight_class(self.dtype, self.config, quant_config)
+        pre_post.wte_weight_, pre_post.lm_head_weight_, pre_post.main_norm_weight_ = self.shared_weights
+        layer = self.transformer_weight_class(self.checkpoint_layer_id, self.dtype, self.config, quant_config)
+        return pre_post, [layer]
+
+    def build_recipe(self):
+        pre = self.pre_layer_infer_class(self.config)
+        post = self.post_layer_infer_class(self.config)
+        layer = self.transformer_layer_infer_class(self.checkpoint_layer_id, self.config)
+        layer.layer_num_ = self.layer_ids[0]
+        layer.indexer.layer_idx = layer.layer_num_
+        self.validate_layer(layer)
+        return pre, post, [layer]
+
+
 class Glm5NextMTPModel(TpPartBaseModel):
+    model_adapter_class = Glm5NextMTPModelAdapter
     is_mtp_draft_model = True
     pre_and_post_weight_class = Glm5NextMTPPreAndPostLayerWeight
     transformer_weight_class = Glm5NextTransformerLayerWeight
@@ -39,6 +85,8 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     def _init_weights(self, start_layer_index=None):
         assert start_layer_index is None
+        if getattr(self, "model_adapter", None) is not None:
+            return super()._init_weights()
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, self.config, self.quant_cfg)
         self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
         self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_
@@ -54,11 +102,25 @@ class Glm5NextMTPModel(TpPartBaseModel):
 
     def _init_infer_layer(self, start_layer_index=None):
         assert start_layer_index is None
+        if getattr(self, "model_adapter", None) is not None:
+            return super()._init_infer_layer()
         self.pre_infer = self.pre_layer_infer_class(self.config)
         self.post_infer = self.post_layer_infer_class(self.config)
         # Chained modules reuse the native weights but own distinct cache layers.
         layer_index = len(self.main_model.layers_infer) + len(self.mtp_previous_draft_models)
         self.layers_infer = [self.transformer_layer_infer_class(layer_index, self.config)]
+
+    def _create_model_adapter(self, adapter_class):
+        layer = len(self.main_model.layers_infer) + sum(len(m.layers_infer) for m in self.mtp_previous_draft_models)
+        weights = self.main_model.pre_post_weight
+        return adapter_class(
+            self.config,
+            role=self.att_state_role,
+            dtype=self.data_type,
+            tp_world_size=self.tp_world_size_,
+            layer_ids=(layer,),
+            shared_weights=(weights.wte_weight_, weights.lm_head_weight_, weights.final_norm_weight_),
+        )
 
     def _init_some_value(self):
         self.layers_num = 1
@@ -93,6 +155,7 @@ class Glm5NextMTPModel(TpPartBaseModel):
             config=PackedMLALogicalConfig(
                 logical_layer_groups=logical_layer_groups,
                 latent_dim=config["kv_lora_rank"],
+                rope_dim=0,
                 tp_rank=tp_rank,
                 tp_world_size=tp_world_size,
                 format="packed_group64_e8m0"

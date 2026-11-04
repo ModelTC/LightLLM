@@ -1,14 +1,20 @@
 from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel
+from lightllm.models.qwen3_dflash.model import Qwen3DFlashModel, Qwen3DFlashModelAdapter
 from lightllm.models.qwen3_5_dflash.layer_weights.pre_and_post_layer_weight import (
     Qwen35DFlashPreAndPostLayerWeight,
 )
+
+
+class Qwen35DFlashModelAdapter(Qwen3DFlashModelAdapter):
+    pre_and_post_weight_class = Qwen35DFlashPreAndPostLayerWeight
+    share_main_weights = True
 
 
 class Qwen3_5DFlashModel(Qwen3DFlashModel):
     """Adapter for a Qwen3 DFlash checkpoint paired with a Qwen3.5 target."""
 
     pre_and_post_weight_class = Qwen35DFlashPreAndPostLayerWeight
+    model_adapter_class = Qwen35DFlashModelAdapter
 
     @classmethod
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
@@ -32,8 +38,3 @@ class Qwen3_5DFlashModel(Qwen3DFlashModel):
         LlamaTpPartModel._init_custom(self)
         self.block_size = self.config["block_size"]
         self.mask_token_id = self.config["mask_token_id"]
-
-    def _init_weights(self, start_layer_index=None):
-        super()._init_weights(start_layer_index=start_layer_index)
-        self.pre_post_weight.wte_weight_ = self.main_model.pre_post_weight.wte_weight_
-        self.pre_post_weight.lm_head_weight_ = self.main_model.pre_post_weight.lm_head_weight_

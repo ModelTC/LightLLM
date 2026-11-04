@@ -12,7 +12,6 @@ import pytest
 @pytest.fixture
 def kv_allocator_environment(monkeypatch: pytest.MonkeyPatch):
     """Provide a service identity and reclaim the allocator's real shared counters."""
-    from lightllm.common.attention_state import AttentionStateManager
     from lightllm.common.attention_state.allocators import full_att_kv_allocator
     from lightllm.utils.envs_utils import get_unique_server_name
 
@@ -29,7 +28,6 @@ def kv_allocator_environment(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(full_att_kv_allocator, "SharedInt", track_counter)
     yield
-    AttentionStateManager._get_states.cache_clear()
     names = set()
     for counter in counters:
         if counter.shm.name not in names:

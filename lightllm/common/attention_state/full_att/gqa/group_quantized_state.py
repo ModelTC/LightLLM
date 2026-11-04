@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.query_cache import cached_query
+
 from typing import TYPE_CHECKING, List
 from dataclasses import dataclass
 from math import prod
@@ -242,7 +243,7 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小返回字段区间与 TP 切片，作为 CPU 页容量计算依据。
 
@@ -333,7 +334,7 @@ class GroupQuantizedFullAttentionState(FullAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 PD 页大小返回字段与切片，交由管理器安排其在联合页中的位置。"""
         page_tokens = get_env_start_args().pd_kv_page_size

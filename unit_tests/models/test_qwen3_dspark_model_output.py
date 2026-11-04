@@ -63,6 +63,7 @@ def test_dspark_without_block_size_uses_mtp_step(model_class, mtp_step):
 )
 def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     model = model_class.__new__(model_class)
+    model.mtp_previous_draft_models = []
     model._cos_cached = torch.arange(24).view(6, 4)
     model._sin_cached = model._cos_cached + 100
     model.att_state_manager = object()
@@ -106,6 +107,7 @@ def test_parallel_block_decode_commits_target_hiddens_directly(model_class):
     infer_state = observed_states[0]
     assert not hasattr(infer_state, "full_att_state")
     assert infer_state.att_state_manager is model.att_state_manager
+    assert infer_state.att_state_role == "draft0"
     assert infer_state.is_draft_model
     assert infer_state.mem_index is mem_indexes
     assert torch.equal(infer_state.position_cos, model._cos_cached[[2, 4]])

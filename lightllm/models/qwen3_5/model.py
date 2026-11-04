@@ -1,6 +1,6 @@
 import os
 import json
-from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
+from lightllm.models.qwen3next.model import Qwen3NextTpPartModel, Qwen3NextModelAdapter
 from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import (
     Qwen35TransformerLayerWeight,
 )
@@ -32,6 +32,13 @@ class QWen3_5Tokenizer(QWen3VLTokenizer):
         super().__init__(tokenizer, image_processor, **kwargs)
 
 
+class Qwen35ModelAdapter(Qwen3NextModelAdapter):
+    transformer_weight_class = Qwen35TransformerLayerWeight
+    pre_and_post_weight_class = Qwen35PreAndPostLayerWeight
+    pre_layer_infer_class = Qwen3VLMultimodalPreLayerInfer
+    transformer_layer_infer_class = Qwen35TransformerLayerInfer
+
+
 class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
     """
     Qwen3.5 Multimodal Model (Dense Variant)
@@ -48,6 +55,7 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         - Multimodal embeddings merged with text embeddings
     """
 
+    model_adapter_class = Qwen35ModelAdapter
     transformer_weight_class = Qwen35TransformerLayerWeight
     pre_and_post_weight_class = Qwen35PreAndPostLayerWeight
 
@@ -62,12 +70,12 @@ class Qwen3_5TpPartModel(Qwen3NextTpPartModel):
         config = super().normalize_model_config(model_config)
         rope_parameters = config.get("rope_parameters")
         if isinstance(rope_parameters, dict):
-            if "rope_theta" in rope_parameters and "rope_theta" not in config:
-                config["rope_theta"] = rope_parameters["rope_theta"]
-            if "partial_rotary_factor" in rope_parameters and "partial_rotary_factor" not in config:
-                config["partial_rotary_factor"] = rope_parameters["partial_rotary_factor"]
-            if "rope_scaling" not in config:
-                config["rope_scaling"] = rope_parameters
+            # New checkpoints may also serialize legacy top-level defaults.
+            # The text model reads the explicit rope_parameters values.
+            for name in ("rope_theta", "partial_rotary_factor"):
+                if name in rope_parameters:
+                    config[name] = rope_parameters[name]
+            config["rope_scaling"] = rope_parameters.copy()
 
         # MoE routing parameters - set defaults for Qwen3.5 compatibility
         if "norm_topk_prob" not in config:

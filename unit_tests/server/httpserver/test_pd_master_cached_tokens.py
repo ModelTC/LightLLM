@@ -1,6 +1,7 @@
 import asyncio
 import copy
 import pickle
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -14,6 +15,17 @@ from lightllm.server.httpserver_for_pd_master.pd_selector import PDSelectionExtr
 from lightllm.server.pd_io_struct import PD_Client_Obj
 
 pytestmark = pytest.mark.usefixtures("single_http_worker_start_args")
+
+
+@pytest.fixture(autouse=True)
+def capture_pd_logs(caplog):
+    # LightLLM loggers do not propagate to pytest's root capture handler.
+    logger = logging.getLogger("lightllm.server.httpserver_for_pd_master.manager")
+    logger.addHandler(caplog.handler)
+    try:
+        yield
+    finally:
+        logger.removeHandler(caplog.handler)
 
 
 def _make_manager(monkeypatch):
@@ -361,7 +373,6 @@ def test_pd_raw_stop_does_not_use_configured_reasoning_parser(monkeypatch):
 
 @pytest.mark.parametrize("in_reasoning", [False, True])
 def test_pd_continuation_uses_local_reasoning_state(monkeypatch, in_reasoning):
-
     manager = _make_manager(monkeypatch)
     manager.args.reasoning_parser = "qwen3"
     manager.tokenizer = SimpleNamespace(

@@ -5,6 +5,11 @@ from lightllm.models.qwen3_5.layer_weights.transformer_layer_weight import Qwen3
 
 
 class SenseNovaLoopTransformerLayerWeight(Qwen35TransformerLayerWeight):
+    @staticmethod
+    def is_linear_layer(config, layer):
+        index = config["loop_physical_indices"].index(layer)
+        return config["layer_types"][index] == "linear_attention"
+
     def _init_weight(self):
         execution_index = self.network_config_["loop_physical_indices"].index(self.layer_num_)
         self.is_linear_attention_layer = self.network_config_["layer_types"][execution_index] == "linear_attention"
@@ -16,7 +21,7 @@ class SenseNovaLoopTransformerLayerWeight(Qwen35TransformerLayerWeight):
     def _init_mhc(self):
         prefix = f"model.layers.{self.layer_num_}"
         streams = self.mhc["streams"]
-        mix_size = (2 + streams) * streams
+        mix_size = 2 * streams + (0 if self.mhc.get("fixed_identity", False) else streams * streams)
         flattened_hidden = streams * self.n_embed
         self.mhc_attn = ParameterWeight(
             weight_name=f"{prefix}.mhc_attn.weight",

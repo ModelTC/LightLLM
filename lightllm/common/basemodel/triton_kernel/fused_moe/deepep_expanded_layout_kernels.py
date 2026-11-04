@@ -169,10 +169,12 @@ def _ep_gather_chunk_kernel(
     output,
     output_stride_m,
     output_stride_k,
+    output_stride_slot: tl.constexpr,
     hidden_size,
     TOPK: tl.constexpr,
     BLOCK_D: tl.constexpr,
     NEED_HIDDEN_MASK: tl.constexpr,
+    SEPARATE_CONTRIBUTIONS: tl.constexpr,
 ):
     hidden_block_id = tl.program_id(0)
     start_recv_token_id = tl.program_id(1)
@@ -183,10 +185,11 @@ def _ep_gather_chunk_kernel(
 
     for recv_token_id in range(start_recv_token_id, total_recv_tokens, recv_token_grid_size):
         output_ptrs = output + recv_token_id * output_stride_m + hidden_offsets * output_stride_k
-        if NEED_HIDDEN_MASK:
-            accumulator = tl.load(output_ptrs, mask=hidden_mask, other=0.0).to(tl.float32)
-        else:
-            accumulator = tl.load(output_ptrs).to(tl.float32)
+        if not SEPARATE_CONTRIBUTIONS:
+            if NEED_HIDDEN_MASK:
+                accumulator = tl.load(output_ptrs, mask=hidden_mask, other=0.0).to(tl.float32)
+            else:
+                accumulator = tl.load(output_ptrs).to(tl.float32)
         for topk_id in range(TOPK):
             slot = tl.load(recv_src_metadata + recv_token_id * metadata_stride_m + (topk_id + 2) * metadata_stride_k)
             if slot >= chunk_start and slot < chunk_end:
@@ -197,11 +200,20 @@ def _ep_gather_chunk_kernel(
                 else:
                     value = tl.load(chunk_ptrs)
                 weight = tl.load(weights + slot)
-                accumulator += value.to(tl.float32) * weight
-        if NEED_HIDDEN_MASK:
-            tl.store(output_ptrs, accumulator, mask=hidden_mask)
-        else:
-            tl.store(output_ptrs, accumulator)
+                weighted = value.to(tl.float32) * weight
+                if SEPARATE_CONTRIBUTIONS:
+                    slot_ptrs = output_ptrs + topk_id * output_stride_slot
+                    if NEED_HIDDEN_MASK:
+                        tl.store(slot_ptrs, weighted, mask=hidden_mask)
+                    else:
+                        tl.store(slot_ptrs, weighted)
+                else:
+                    accumulator += weighted
+        if not SEPARATE_CONTRIBUTIONS:
+            if NEED_HIDDEN_MASK:
+                tl.store(output_ptrs, accumulator, mask=hidden_mask)
+            else:
+                tl.store(output_ptrs, accumulator)
 
 
 @torch.no_grad()
@@ -221,11 +233,12 @@ def ep_gather_chunk(
     """
     topk = recv_src_metadata.shape[1] - 2
     block_d = 1024
-    hidden_size = output.shape[1]
+    hidden_size = output.shape[-1]
     assert chunk.shape[1] == hidden_size
-    grid = (triton.cdiv(output.shape[1], block_d), min(output.shape[0], 1024))
+    assert output.ndim == 2 or (output.ndim == 3 and output.shape[0] == topk)
+    grid = (triton.cdiv(hidden_size, block_d), min(output.shape[-2], 1024))
     _ep_gather_chunk_kernel[grid](
-        total_recv_tokens=output.shape[0],
+        total_recv_tokens=output.shape[-2],
         chunk=chunk,
         chunk_stride_m=chunk.stride(0),
         chunk_stride_k=chunk.stride(1),
@@ -236,13 +249,15 @@ def ep_gather_chunk(
         metadata_stride_m=recv_src_metadata.stride(0),
         metadata_stride_k=recv_src_metadata.stride(1),
         output=output,
-        output_stride_m=output.stride(0),
-        output_stride_k=output.stride(1),
+        output_stride_m=output.stride(-2),
+        output_stride_k=output.stride(-1),
+        output_stride_slot=output.stride(0) if output.ndim == 3 else 0,
         hidden_size=hidden_size,
         TOPK=topk,
         BLOCK_D=block_d,
         # 常见整块 hidden size 保持原来的无 mask kernel；仅尾块不完整时启用边界保护。
         NEED_HIDDEN_MASK=hidden_size % block_d != 0,
+        SEPARATE_CONTRIBUTIONS=output.ndim == 3,
         num_warps=2,
     )
 

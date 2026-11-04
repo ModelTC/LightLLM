@@ -1,3 +1,5 @@
+from functools import cached_property
+from ..httpserver.task_group import HttpServerTasks
 import sys
 import os
 import asyncio
@@ -40,6 +42,13 @@ logger = init_logger(__name__)
 
 
 class HttpServerManagerForPDMaster:
+    @cached_property
+    def background_tasks(self):
+        return HttpServerTasks()
+
+    async def close(self):
+        await self.background_tasks.close()
+
     def __init__(
         self,
         args: StartArgs,
@@ -834,16 +843,16 @@ class HttpServerManagerForPDMaster:
 
     async def handle_loop(self):
         self.infos_queues = AsyncQueue()
-        asyncio.create_task(self.timer_log())
+        self.background_tasks.create(self.timer_log())
 
         use_config_server = self.args.config_server_host and self.args.config_server_port
 
         if use_config_server:
             from lightllm.server.httpserver_for_pd_master.register_loop import register_loop
 
-            asyncio.create_task(register_loop(self))
+            self.background_tasks.create(register_loop(self))
 
-        while True:
+        while not self.background_tasks.closing:
             objs = await self.infos_queues.wait_to_get_all_data()
 
             try:
@@ -897,6 +906,8 @@ class HttpServerManagerForPDMaster:
                             await req_status.set_error(error_info, is_server_busy=True)
                     else:
                         logger.error(f"recevie error obj {obj}")
+            except asyncio.CancelledError:
+                raise
             except BaseException as e:
                 logger.exception(str(e))
         return

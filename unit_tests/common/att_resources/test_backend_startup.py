@@ -147,6 +147,8 @@ def test_backend_allocates_all_roles_before_warmup(
     monkeypatch.setattr("lightllm.common.req_manager.ReqManager", create_req_manager)
 
     def mark_backends(model: TpPartBaseModel):
+        if via_backend:
+            assert models[0].route_capture is None
         # 第一个模型初始化 backend 前，全部 State 已创建完成，可通过缓存查询取得资源。
         for item in models:
             for state in item.att_state_manager.get_full_attention_states(item.att_state_role):
@@ -168,6 +170,7 @@ def test_backend_allocates_all_roles_before_warmup(
 
     def warmup(model: TpPartBaseModel):
         assert model.backends_bound
+        assert model._batch_metadata.tables[0][1].cos is model._cos_cached
         assert all(item.req_manager is mapping for item in models)
         assert all(item.att_state_manager is models[0].att_state_manager for item in models)
         assert model.att_state_manager.full_att_allocator.size == 32
@@ -197,6 +200,8 @@ def test_backend_allocates_all_roles_before_warmup(
         model.max_req_num, model.max_total_token_num, model.mem_fraction = 2, None, 0.9
         model.max_seq_length, model.batch_max_tokens = (32 if index else 24), 16
         model.tp_world_size_, model.tp_rank_ = 1, 0
+        model._cos_cached = torch.zeros((model.max_seq_length, model.config["head_dim"] // 2), device="cuda")
+        model._sin_cached = torch.zeros_like(model._cos_cached)
         model.layers_infer = [SimpleNamespace(layer_num_=i) for i in range(offset, offset + model.config["n_layer"])]
         offset += len(model.layers_infer)
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())

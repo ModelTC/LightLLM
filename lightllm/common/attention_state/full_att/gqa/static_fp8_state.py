@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.query_cache import cached_query
+
 
 from typing import TYPE_CHECKING, List
 from collections.abc import Mapping
@@ -14,6 +15,7 @@ from lightllm.utils.log_utils import init_logger
 
 from ...utils import deepcopy_result
 from ...types import AxisMapping, TransferRegion
+from ...calibration import kv_scale_identity
 from ..base_state import FullAttentionState
 from .static_fp8_transfer import transfer_static_fp8_pages
 from ..dp_transfer import copy_gqa_tokens
@@ -85,6 +87,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
         """只准备静态 FP8 布局；标定参数由后续 bind_calibration 统一绑定。"""
         self.scales: torch.Tensor | None = None
         self.q_scales: torch.Tensor | None = None
+        self.calibration_identity: str | None = None
         self.cpu_scales = None  # 实际存储初始化时准备计算 backend 使用的 CPU 标定值。
         self.config = layout_config
         self.state_name: str | None = None  # 由 manager 绑定模型角色时设置。
@@ -121,6 +124,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
         if calibration is None:
             assert config.scale_mode == "per_tensor", "per-head FP8 requires a KV calibration file"
             scales = torch.ones(size=(storage_layer_count, 2), dtype=torch.float32)
+            global_scales = scales
             q_scales = None
         else:
             # 阶段一：检查文件编码和物理行覆盖范围。
@@ -147,17 +151,20 @@ class StaticFP8FullAttentionState(FullAttentionState):
 
             def shard(tensor: torch.Tensor, calibrated_heads: int) -> torch.Tensor:
                 heads = config.head_num
+                rank, size = (0, 1) if config.replicated else (config.tp_rank, config.tp_world_size)
                 assert (
-                    calibrated_heads > 0 and (heads * config.tp_world_size) % calibrated_heads == 0
+                    calibrated_heads > 0 and (heads * size) % calibrated_heads == 0
                 ), "calibration heads do not cover the model's KV heads"
-                expanded = tensor.repeat_interleave(repeats=heads * config.tp_world_size // calibrated_heads, dim=-1)
-                return expanded[:, config.tp_rank * heads : (config.tp_rank + 1) * heads].contiguous()
+                expanded = tensor.repeat_interleave(repeats=heads * size // calibrated_heads, dim=-1)
+                return expanded[:, rank * heads : (rank + 1) * heads].contiguous()
 
             # 阶段二：先按物理层取行，再分别切分 K、V、Q 的 head；标定 Tensor 暂留 CPU。
             if config.scale_mode == "per_head":
                 calibrated_heads = calibration["num_head"]
                 all_scales = scale_tensor(calibration, (calibrated_layer_count, 2 * calibrated_heads))
                 k, v = all_scales.split(split_size=calibrated_heads, dim=-1)
+                assert config.global_head_num % calibrated_heads == 0, "calibration heads exceed model KV heads"
+                global_scales = all_scales.repeat_interleave(config.global_head_num // calibrated_heads, dim=-1)
                 scales = torch.cat(tensors=(shard(k, calibrated_heads), shard(v, calibrated_heads)), dim=-1)
                 q_config = calibration.get("q_calibration")
                 q_scales = None
@@ -168,11 +175,13 @@ class StaticFP8FullAttentionState(FullAttentionState):
                     )
             else:
                 scales = scale_tensor(calibration, (calibrated_layer_count, 2))
+                global_scales = scales
                 q_scales = None
 
         # 阶段三：绑定标定数值；后续 allocate_storage 将其迁移到实际设备。
         self.scales = scales
         self.q_scales = q_scales
+        self.calibration_identity = kv_scale_identity(global_scales, config.scale_mode)
 
     def get_state_type(self) -> str:
         """返回包含 per-tensor 或 per-head 标定方式的 FP8 方案标记。"""
@@ -269,7 +278,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 CPU 页大小返回字段区间与 TP 切片，作为 CPU 页容量计算依据。
 
@@ -348,7 +357,7 @@ class StaticFP8FullAttentionState(FullAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 PD 页大小返回字段与切片，交由管理器安排其在联合页中的位置。"""
         page_tokens = get_env_start_args().pd_kv_page_size

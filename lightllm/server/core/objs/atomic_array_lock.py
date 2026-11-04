@@ -27,23 +27,30 @@ class AtomicLockItem:
     def __init__(self, context: AtomicShmArrayLock, index: int):
         self.context = context
         self.index = index
-        self._buf = context.shm.buf[index * 4 : (index + 1) * 4]
 
     def try_acquire(self) -> bool:
-        with atomics.atomicview(self._buf, atype=atomics.INT) as a:
+        with self.context.shm.buf[self.index * 4 : (self.index + 1) * 4] as buf, atomics.atomicview(
+            buf, atype=atomics.INT
+        ) as a:
             return a.cmpxchg_weak(0, 1)
 
     def release(self):
-        with atomics.atomicview(self._buf, atype=atomics.INT) as a:
+        with self.context.shm.buf[self.index * 4 : (self.index + 1) * 4] as buf, atomics.atomicview(
+            buf, atype=atomics.INT
+        ) as a:
             a.store(0)
 
     def __enter__(self):
-        with atomics.atomicview(buffer=self._buf, atype=atomics.INT) as a:
+        with self.context.shm.buf[self.index * 4 : (self.index + 1) * 4] as buf, atomics.atomicview(
+            buf, atype=atomics.INT
+        ) as a:
             while not a.cmpxchg_weak(0, 1):
                 pass
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        with atomics.atomicview(buffer=self._buf, atype=atomics.INT) as a:
+        with self.context.shm.buf[self.index * 4 : (self.index + 1) * 4] as buf, atomics.atomicview(
+            buf, atype=atomics.INT
+        ) as a:
             while not a.cmpxchg_weak(1, 0):
                 pass
         return False

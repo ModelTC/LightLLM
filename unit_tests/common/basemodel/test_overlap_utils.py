@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel import basemodel
+from lightllm.common.execution import batch_runner
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.batch_objs import ModelInput, ModelOutput
 
@@ -24,10 +24,14 @@ def test_base_model_prefill_accepts_two_prebuilt_inputs(monkeypatch):
         events.append("gather")
         kwargs["input_ids"][-1] = 90 + events.count("gather")
 
-    monkeypatch.setattr(basemodel, "gather_token_prefill_decode_mixed", fake_gather)
+    monkeypatch.setattr(batch_runner, "gather_token_prefill_decode_mixed", fake_gather)
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_prefill_decode_mixed=True, page_size=1)
+    model.args = SimpleNamespace(enable_prefill_decode_mixed=True, enable_tpsp_mix_mode=True, page_size=1)
+    model.tp_world_size_ = 2
+    model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
+    model._initialize_batch_state = lambda state: None
+    model._create_inferstate = lambda *args: pytest.fail("token preparation must not construct execution state")
     model.req_manager = SimpleNamespace(
         req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=object()),
     )
@@ -75,10 +79,14 @@ def test_base_model_decode_accepts_two_inputs_and_skips_empty_gather(monkeypatch
             device="cuda",
         )
 
-    monkeypatch.setattr(basemodel, "gather_token", fake_gather)
+    monkeypatch.setattr(batch_runner, "gather_token", fake_gather)
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(page_size=1)
+    model.args = SimpleNamespace(enable_prefill_decode_mixed=False, enable_tpsp_mix_mode=True, page_size=1)
+    model.tp_world_size_ = 2
+    model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
+    model._initialize_batch_state = lambda state: None
+    model._create_inferstate = lambda *args: pytest.fail("token preparation must not construct execution state")
     model.req_manager = SimpleNamespace(
         req_sampling_params_manager=SimpleNamespace(req_to_next_token_ids=object()),
     )
@@ -122,9 +130,10 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
     model_input1.to_cuda()
 
     model = TpPartBaseModel.__new__(TpPartBaseModel)
-    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, page_size=1)
+    model.args = SimpleNamespace(enable_tpsp_mix_mode=True, enable_prefill_decode_mixed=False, page_size=1)
     model.tp_world_size_ = 2
     model.mtp_manager = SimpleNamespace(get_decode_batch_alignment=lambda _: 1)
+    model._initialize_batch_state = lambda state: None
     model.graph = None
     model.req_manager = SimpleNamespace(HOLD_REQUEST_ID=88, req_to_token_indexs=object())
     infer_batch_sizes = []
@@ -135,7 +144,6 @@ def test_overlap_decode_cuda_pads_empty_side_and_unpads_outputs(monkeypatch):
             b_req_idx=model_input.b_req_idx,
             b_seq_len=model_input.b_seq_len,
             mem_index=torch.empty((model_input.batch_size,), dtype=torch.int32, device="cuda"),
-            init_some_extra_state=lambda _: None,
             init_att_state=lambda: None,
         )
 

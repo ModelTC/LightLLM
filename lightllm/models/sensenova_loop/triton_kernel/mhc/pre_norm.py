@@ -42,6 +42,7 @@ def _hc_prepare_prenorm_kernel(
     RMS_EPS: tl.constexpr,
     STREAMS: tl.constexpr,
     SINKHORN_ITERS: tl.constexpr,
+    FIXED_IDENTITY: tl.constexpr,
     N_SPLITS: tl.constexpr,
 ):
     """归并分片并准备混合权重：[P, T, M] / [P, T] -> [T, S] / [T, S, S]。
@@ -61,7 +62,8 @@ def _hc_prepare_prenorm_kernel(
         partial_base = gemm_partial + split * gemm_stride_s + token * gemm_stride_m
         pre_raw += tl.load(partial_base + stream_offsets)
         post_raw += tl.load(partial_base + STREAMS + stream_offsets)
-        matrix_raw += tl.load(partial_base + 2 * STREAMS + matrix_offsets)
+        if not FIXED_IDENTITY:
+            matrix_raw += tl.load(partial_base + 2 * STREAMS + matrix_offsets)
         sqrsum += tl.load(sqrsum_partial + split * sqrsum_stride_s + token * sqrsum_stride_m)
     inv_rms = tl.rsqrt(sqrsum / FLATTENED_HIDDEN + RMS_EPS)
     pre_raw *= inv_rms
@@ -71,14 +73,17 @@ def _hc_prepare_prenorm_kernel(
     pre_values = tl.sigmoid(pre_raw + tl.load(base + stream_offsets))
     post_values = 2.0 * tl.sigmoid(post_raw + tl.load(base + STREAMS + stream_offsets))
 
-    residual_logits = matrix_raw + tl.load(base + 2 * STREAMS + matrix_offsets)
-    residual_logits = tl.reshape(residual_logits, (STREAMS, STREAMS))
-    for _ in range(SINKHORN_ITERS):
-        residual_logits -= tl.max(residual_logits, axis=1)[:, None]
-        residual_logits -= tl.log(tl.sum(tl.exp(residual_logits), axis=1))[:, None]
-        residual_logits -= tl.max(residual_logits, axis=0)[None, :]
-        residual_logits -= tl.log(tl.sum(tl.exp(residual_logits), axis=0))[None, :]
-    matrix = tl.exp(residual_logits)
+    if FIXED_IDENTITY:
+        matrix = (stream_offsets[:, None] == stream_offsets[None, :]).to(tl.float32)
+    else:
+        residual_logits = matrix_raw + tl.load(base + 2 * STREAMS + matrix_offsets)
+        residual_logits = tl.reshape(residual_logits, (STREAMS, STREAMS))
+        for _ in range(SINKHORN_ITERS):
+            residual_logits -= tl.max(residual_logits, axis=1)[:, None]
+            residual_logits -= tl.log(tl.sum(tl.exp(residual_logits), axis=1))[:, None]
+            residual_logits -= tl.max(residual_logits, axis=0)[None, :]
+            residual_logits -= tl.log(tl.sum(tl.exp(residual_logits), axis=0))[None, :]
+        matrix = tl.exp(residual_logits)
 
     tl.store(pre + token * pre_stride_m + stream_offsets, pre_values)
     tl.store(post + token * pre_stride_m + stream_offsets, post_values)
@@ -100,6 +105,7 @@ def _hc_pre_combine_norm_kernel(
     out_stride_m: tl.constexpr,
     STREAMS: tl.constexpr,
     NORM_EPS: tl.constexpr,
+    PRE_SCALE: tl.constexpr,
     BLOCK_H: tl.constexpr,
 ):
     """融合 stream 合并与子层 RMSNorm：[T, S, H] -> [T, H]。
@@ -124,6 +130,8 @@ def _hc_pre_combine_norm_kernel(
 
     # Preserve the checkpoint's bf16 rounding between stream mixing and RMSNorm.
     rounded = accumulator.to(x.dtype.element_ty).to(tl.float32)
+    if PRE_SCALE != 1.0:
+        rounded = (rounded * PRE_SCALE).to(x.dtype.element_ty).to(tl.float32)
     variance = tl.sum(rounded * rounded, axis=0) / hidden
     inv_rms = tl.rsqrt(variance + NORM_EPS)
     weight = tl.load(norm_weight + hidden_offsets, mask=hidden_mask, other=0.0)
@@ -158,6 +166,8 @@ def hc_pre_norm(
     sinkhorn_iters: int,
     *,
     use_deepgemm: bool = True,
+    pre_scale: float = 1.0,
+    fixed_identity: bool = False,
 ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """将 mHC pre-mixing 与紧随其后的子层 RMSNorm 融合。
 
@@ -174,6 +184,8 @@ def hc_pre_norm(
         sinkhorn_iters: Sinkhorn 迭代次数。
         use_deepgemm: 四 stream 可使用 DeepGEMM 投影；两 stream 或 false 使用 PyTorch 投影。
             两条路径共用融合的 Triton Sinkhorn / stream 合并 / RMSNorm。
+        pre_scale: stream 合并后、RMSNorm 前的缩放，保留激活 dtype 的舍入。
+        fixed_identity: 使用恒等残差映射，router 权重仅包含 pre/post 两组字段。
 
     Returns:
         (layer_input, residual_mix, post_mix)：分别为 bf16 [T, H]、fp32 [T, S, S]、fp32 [T, S]。
@@ -189,11 +201,12 @@ def hc_pre_norm(
     assert streams in (2, 4)
     assert x.dtype in (torch.bfloat16, torch.float16, torch.float32) and fn.dtype == torch.float32
     assert x.is_contiguous() and fn.is_contiguous() and norm_weight.is_contiguous()
-    assert fn.shape == (2 * streams + streams * streams, x.shape[1])
+    mix_size = 2 * streams + (0 if fixed_identity else streams * streams)
+    assert fn.shape == (mix_size, x.shape[1]) and base.shape == (mix_size,)
     tokens, flattened_hidden = x.shape
     hidden = flattened_hidden // streams
 
-    if streams == 2 or not use_deepgemm or LIGHTLLM_DISABLE_DEEPGEMM_MHC or x.dtype != torch.bfloat16:
+    if fixed_identity or streams == 2 or not use_deepgemm or LIGHTLLM_DISABLE_DEEPGEMM_MHC or x.dtype != torch.bfloat16:
         # PyTorch produces one complete partition: [1, T, M] and [1, T].
         x_fp32 = x.float()
         gemm_partial = (x_fp32 @ fn.T).unsqueeze(0)
@@ -228,6 +241,7 @@ def hc_pre_norm(
         RMS_EPS=rms_eps,
         STREAMS=streams,
         SINKHORN_ITERS=sinkhorn_iters,
+        FIXED_IDENTITY=fixed_identity,
         N_SPLITS=n_splits,
         num_warps=1,
     )
@@ -245,6 +259,7 @@ def hc_pre_norm(
         out_stride_m=layer_input.stride(0),
         STREAMS=streams,
         NORM_EPS=norm_eps,
+        PRE_SCALE=pre_scale,
         BLOCK_H=block_h,
         num_warps=8,
     )

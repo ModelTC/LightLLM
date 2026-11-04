@@ -151,6 +151,16 @@ class ShmReqManager:
     async def async_put_back_req_obj(self, req: Req):
         return self.put_back_req_obj(req)
 
+    def close(self):
+        """Detach local mappings after consumers stop; leave shared leases intact."""
+        self.reqs = None
+        self.reqs_shm.close()
+        self.reqs_lock.shm.close()
+        self.manager_lock.shm.close()
+        self.linked_req_manager._values = None
+        self.linked_req_manager._shm_array.detach_shm()
+        self.alloc_state_shm.detach_shm()
+
     def __del__(self):
         self.reqs = None
 

@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LightLLM · 模型与 Attention 扩展入口</title>
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
+  <style>
+    * { box-sizing: border-box; }
+    :root {
+      color-scheme: light;
+      --paper: #f5f5f5;
+      --ink: #2d3142;
+      --muted: #4f5d75;
+      --soft: #5a6580;
+      --accent: #bf4520;
+      --rule: #bfc0c0;
+      --sans: 'Geist', 'Noto Sans SC', 'Noto Sans CJK SC', 'PingFang SC', 'Microsoft YaHei', system-ui, sans-serif;
+      --serif: 'Instrument Serif', 'Noto Serif SC', 'Noto Serif CJK SC', serif;
+      --mono: 'Geist Mono', ui-monospace, monospace;
+    }
+    body { margin: 0; background: var(--paper); color: var(--ink); font-family: var(--sans); }
+    main { width: 100%; max-width: 1648px; min-width: 0; margin: 0 auto; padding: 24px; }
+    a { color: #2e5aa8; text-underline-offset: 3px; }
+    .figure-link { margin: 0 0 16px; font-size: 14px; line-height: 1.8; }
+    .diagram-container { width: 100%; overflow-x: auto; border: 1px solid #dedfe2; border-radius: 8px; }
+    svg { display: block; width: 100%; min-width: 1600px; font-family: var(--sans); }
+    svg text { fill: var(--ink); }
+    .figure-title { font-family: var(--serif); font-size: 28px; font-weight: 400; }
+    .subtitle { fill: var(--muted); font-size: 16px; }
+    .section { fill: var(--soft); font-size: 14px; font-weight: 600; }
+    .name { font-size: 16px; font-weight: 600; }
+    .body { font-size: 12px; }
+    .secondary { fill: var(--muted); font-size: 12px; }
+    .tech { font-family: var(--mono); font-size: 12px; }
+    .accent-text { fill: var(--accent); }
+    .zone { fill: #f1f1f2; stroke: var(--rule); stroke-width: 1; stroke-dasharray: 5 5; }
+    .node { fill: #fff; stroke: var(--ink); stroke-width: 1.4; }
+    .focal { fill: #f4e7e2; stroke: var(--accent); stroke-width: 1.6; }
+    .store { fill: #eaeaec; stroke: var(--muted); stroke-width: 1.4; }
+    .edge { fill: none; stroke: var(--muted); stroke-width: 1.6; marker-end: url(#attention-arrow); }
+    .binding { stroke-dasharray: 5 4; }
+    .edge-label rect { fill: var(--paper); }
+    .edge-label text { fill: var(--muted); font-size: 12px; font-weight: 500; }
+    .rule { stroke: var(--rule); stroke-width: 1; }
+    .details { padding: 32px 24px 16px; }
+    .details h2 { margin: 0 0 16px; font-size: 18px; font-weight: 600; }
+    table { width: 100%; border-collapse: collapse; font-size: 14px; line-height: 1.8; }
+    th, td { text-align: left; vertical-align: top; padding: 12px 16px; border-bottom: 1px solid #dedfe2; overflow-wrap: anywhere; }
+    th { font-weight: 600; border-top: 1px solid var(--rule); }
+    td { color: var(--muted); }
+    .notes { display: grid; grid-template-columns: 1fr 1fr; gap: 24px 40px; margin-top: 32px; }
+    .notes section { border-top: 1px solid var(--rule); padding-top: 12px; }
+    .notes h2 { font-size: 15px; margin: 0 0 8px; }
+    .notes p { margin: 0; color: var(--muted); font-size: 14px; line-height: 1.8; }
+    code { font-family: var(--mono); font-size: .9em; overflow-wrap: anywhere; }
+    footer { padding: 16px 24px 8px; color: var(--soft); font-size: 12px; line-height: 1.8; }
+    @media (max-width: 680px) {
+      main { padding: 12px; }
+      .details { padding: 24px 8px 8px; }
+      th, td { padding: 10px 8px; }
+      .notes { grid-template-columns: 1fr; }
+      footer { padding: 16px 8px; }
+    }
+    @media print {
+      main { max-width: none; padding: 0; }
+      .diagram-container { overflow-x: visible; border: 0; }
+      svg { min-width: 0; }
+      .figure-link, footer { display: none; }
+      .notes section, tr { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <p class="figure-link"><a href="inference-architecture.html">← 七模块架构总览</a> · 本图展开 Model 与 Compute 的 Attention 族</p>
+  <div class="diagram-container" tabindex="0" aria-label="模型与 Attention 扩展入口；窄屏可横向滚动查看">
+    <svg viewBox="0 0 1600 1200" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="attention-extension-title attention-extension-desc">
+      <title id="attention-extension-title">LightLLM · 模型与 Attention 扩展入口</title>
+      <desc id="attention-extension-desc">ModelAdapter 声明模型的语义与状态需求，AttentionBackend 声明实现能力与资源要求，Planner 匹配并绑定为 Compute 内的 BoundAttention，后者接收 StateStore 的原生视图并由 Runner 调度批次准备与执行。</desc>
+      <defs>
+        <marker id="attention-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse">
+          <path d="M 0 0 L 8 4 L 0 8 Z" fill="#4f5d75"/>
+        </marker>
+      </defs>
+      <rect width="1600" height="1200" fill="#f5f5f5"/>
+      <text class="figure-title" x="48" y="64">LightLLM · 模型与 Attention 扩展入口</text>
+      <text class="subtitle" x="48" y="104">模型声明需求，backend 声明能力，Planner 完成匹配与绑定。</text>
+      <text class="secondary" x="1552" y="64" text-anchor="end">七模块架构 · 扩展详图</text>
+      <line class="rule" x1="48" y1="128" x2="1552" y2="128"/>
+
+      <rect class="zone" x="48" y="148" width="1504" height="600" rx="8"/>
+      <text class="section" x="80" y="180">01　启动装配 · 两个入口独立注册</text>
+      <rect class="zone" x="48" y="796" width="1504" height="308" rx="8"/>
+      <text class="section" x="80" y="828">02　推理执行 · Runner 调度，已绑定实现直接执行</text>
+
+      <g data-edge="M-P" data-kind="binding">
+        <path class="edge binding" d="M 400 448 V 488 Q 400 496 408 496 H 672 Q 680 496 680 504 V 552"/>
+        <g class="edge-label"><rect x="456" y="460" width="168" height="24" rx="2"/><text x="540" y="477" text-anchor="middle">计算语义与状态需求</text></g>
+      </g>
+      <g data-edge="A-P" data-kind="binding">
+        <path class="edge binding" d="M 1200 448 V 488 Q 1200 496 1192 496 H 928 Q 920 496 920 504 V 552"/>
+        <g class="edge-label"><rect x="976" y="460" width="168" height="24" rx="2"/><text x="1060" y="477" text-anchor="middle">支持条件与资源需求</text></g>
+      </g>
+      <g data-edge="P-B" data-kind="binding">
+        <path class="edge binding" d="M 800 720 V 856"/>
+        <g class="edge-label"><rect x="812" y="756" width="112" height="24" rx="2"/><text x="868" y="773" text-anchor="middle">选定并绑定</text></g>
+      </g>
+      <g data-edge="S-B" data-kind="binding">
+        <path class="edge binding" d="M 400 976 H 560"/>
+        <g class="edge-label"><rect x="416" y="940" width="128" height="24" rx="2"/><text x="480" y="957" text-anchor="middle">原生状态视图</text></g>
+      </g>
+      <g data-edge="R-B" data-kind="runtime">
+        <path class="edge" d="M 1200 976 H 1040"/>
+        <g class="edge-label"><rect x="1056" y="940" width="128" height="24" rx="2"/><text x="1120" y="957" text-anchor="middle">准备批次、执行</text></g>
+      </g>
+
+      <g data-node="M" data-owner="Model" data-extension="model">
+        <rect class="focal" x="80" y="200" width="640" height="248" rx="6"/>
+        <text class="secondary" x="104" y="228">Model 模块 · 扩展入口 01</text>
+        <text class="name accent-text" x="104" y="260">ModelAdapter · 模型需求</text>
+        <line class="rule" x1="104" y1="280" x2="696" y2="280"/>
+        <text class="section" x="104" y="312">权重映射</text>
+        <text class="body" x="256" y="312">checkpoint 名称 / 权重转换 / TP 分片 / 共享权重</text>
+        <text class="section" x="104" y="348">计算结构</text>
+        <text class="body" x="256" y="348">层顺序 / projection / norm / 位置编码 / 残差 / MLP / MoE</text>
+        <text class="section" x="104" y="384">AttentionSpec</text>
+        <text class="body" x="256" y="384">每层的 head / 维度 / mask / window / score scale / softcap</text>
+        <text class="section" x="104" y="420">StateSpec</text>
+        <text class="body" x="256" y="420">状态需求 / 共享关系 / 保留策略 / 恢复要求</text>
+      </g>
+      <g data-node="A" data-owner="Compute.Attention" data-extension="backend">
+        <rect class="focal" x="880" y="200" width="640" height="248" rx="6"/>
+        <text class="secondary" x="904" y="228">Compute → Attention · 扩展入口 02</text>
+        <text class="name accent-text" x="904" y="260">AttentionBackend · 实现能力</text>
+        <line class="rule" x1="904" y1="280" x2="1496" y2="280"/>
+        <text class="section" x="904" y="312">支持条件</text>
+        <text class="body" x="1040" y="312">运算语义 / 形状 / 格式 / 设备 / prefill / decode / verify</text>
+        <text class="section" x="904" y="348">资源需求</text>
+        <text class="body" x="1040" y="348">workspace / metadata buffer / Graph / 并发约束</text>
+        <text class="section" x="904" y="384">批次准备</text>
+        <text class="body" x="1040" y="384">页表 / 长度 / 调度元数据 / 必要的动态 planning</text>
+        <text class="section" x="904" y="420">绑定与执行</text>
+        <text class="body" x="1040" y="420">probe() 声明能力 → bind() 绑定实际资源与 kernel</text>
+      </g>
+      <g data-node="P" data-owner="Planner">
+        <rect class="node" x="560" y="552" width="480" height="168" rx="6"/>
+        <text class="name" x="584" y="588">Planner · 匹配、预算、绑定</text>
+        <text class="section" x="584" y="620">运算语义 × 数据格式 × 设备能力</text>
+        <text class="body" x="584" y="652">联合检查 prefill / decode / verify / writer 的兼容表示</text>
+        <text class="secondary" x="584" y="688">probe() → 选择与内存预算 → bind()</text>
+      </g>
+      <g data-node="B" data-owner="Compute.Attention" data-bound="true">
+        <rect class="node" x="560" y="856" width="480" height="224" rx="6"/>
+        <text class="secondary" x="584" y="884">Compute → Attention · 绑定产物</text>
+        <text class="name" x="584" y="916">BoundAttention · 已绑定执行</text>
+        <text class="body" x="584" y="948">已绑定：状态视图 / 静态参数 / workspace / kernel</text>
+        <line class="rule" x1="584" y1="964" x2="1016" y2="964"/>
+        <text class="tech" x="584" y="992">prepare_batch(batch)</text>
+        <text class="secondary" x="824" y="992">更新 metadata / Graph 输入</text>
+        <text class="tech" x="584" y="1028">run(inputs, metadata, out)</text>
+        <text class="secondary" x="824" y="1028">直接调用已绑定的实现</text>
+        <text class="secondary" x="584" y="1056">Dense / MLA / recurrent 各自定义合适的 inputs</text>
+      </g>
+      <g data-node="S" data-owner="StateStore">
+        <rect class="store" x="80" y="896" width="320" height="144" rx="6"/>
+        <text class="name" x="104" y="932">StateStore · 状态存储</text>
+        <text class="body" x="104" y="968">原生张量 / 设备句柄 / 本地分片</text>
+        <text class="secondary" x="104" y="1004">提供零拷贝 StateView</text>
+      </g>
+      <g data-node="R" data-owner="Runner">
+        <rect class="node" x="1200" y="896" width="320" height="144" rx="6"/>
+        <text class="name" x="1224" y="932">Runner · 批次与执行协调</text>
+        <text class="body" x="1224" y="968">调度 prepare_batch() 与 run()</text>
+        <text class="secondary" x="1224" y="1004">执行依赖 / Graph / 缓存生命周期</text>
+      </g>
+
+      <line class="rule" x1="48" y1="1128" x2="1552" y2="1128"/>
+      <path class="edge" d="M 80 1160 H 132"/>
+      <text class="secondary" x="148" y="1164">实线：运行时调用</text>
+      <path class="edge binding" d="M 352 1160 H 404"/>
+      <text class="secondary" x="420" y="1164">虚线：声明、装配或视图绑定</text>
+      <text class="secondary" x="1552" y="1164" text-anchor="end">两个独立入口 · 按能力匹配 · 所有满足条件的模型自动受益</text>
+    </svg>
+  </div>
+
+  <div class="details">
+    <h2>扩展边界 · 改动发生在哪里</h2>
+    <table>
+      <thead><tr><th scope="col">扩展场景</th><th scope="col">主要修改位置</th><th scope="col">继续复用</th></tr></thead>
+      <tbody>
+        <tr><td>新模型，沿用已有 attention 和格式</td><td>ModelAdapter、权重映射、模型计算结构</td><td>现有 backend、状态存储与传输</td></tr>
+        <tr><td>新模型，引入新的 attention 机制</td><td>模型适配、新运算语义与计算实现；按需增加状态格式与恢复能力</td><td>已有能力与生命周期机制</td></tr>
+        <tr><td>新 backend，直接消费已有格式</td><td>probe、批次准备、bind、run 及注册</td><td>ModelAdapter、存储与传输</td></tr>
+        <tr><td>新 backend，需要特殊物理格式</td><td>backend、FormatSpec；按需增加 writer、视图适配、CopyPlan</td><td>通用 allocator、缓存生命周期与网络驱动</td></tr>
+        <tr><td>已有模型切换 attention backend</td><td>Planner 重新选择与绑定兼容实现</td><td>模型实现保持稳定</td></tr>
+      </tbody>
+    </table>
+    <div class="notes">
+      <section>
+        <h2>每层声明需求，模型保留计算 recipe</h2>
+        <p>ModelAdapter 可提供专门的计算结构，每层独立声明 AttentionSpec。不同 head 数、维度和 mask 分别匹配；条件相同的层可共享 metadata 与执行实现。</p>
+      </section>
+      <section>
+        <h2>按能力注册与匹配</h2>
+        <p><code>probe(attention_spec, format_spec, device_caps, limits)</code> 返回支持的执行候选与资源要求，或明确的不支持原因。backend 使用每层规格，避免从整个 <code>model.config</code> 猜测。</p>
+      </section>
+      <section>
+        <h2>绑定时传资源，执行时直接使用</h2>
+        <p><code>bind(offer, state_view, static_params, workspace)</code> 返回 BoundAttention。静态 scale、常量和 cache view 在此传入；执行不反查 manager。批次适配由 backend 实现，调用时机由 Runner 协调。</p>
+      </section>
+      <section>
+        <h2>布局与阶段约束显式声明</h2>
+        <p>backend 可提出原生布局要求，也可只支持部分阶段。Planner 选择兼容的 prefill、decode、verify 和独立或融合 writer；backend 明确 Graph 固定 buffer、更新规则及必要的动态 planning。</p>
+      </section>
+    </div>
+  </div>
+  <footer>保留所给详图全部 6 个节点与 5 条关系；按架构总览统一线型，并标明模块归属。ModelAdapter 与 AttentionBackend 是扩展接口，BoundAttention 是绑定产物，七个顶层模块保持不变。<a href="attention-extension.mmd">Mermaid 源码</a> · <a href="inference-architecture.html">架构总览</a></footer>
+</main>
+</body>
+</html>

@@ -12,6 +12,7 @@ from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
+from lightllm.common.execution.model_adapter import DenseModelAdapter
 
 logger = init_logger(__name__)
 
@@ -22,15 +23,23 @@ if TYPE_CHECKING:
     from lightllm.common.attention_state.full_att import FullAttentionState
 
 
-class LlamaTpPartModel(TpPartBaseModel):
-    # weight class
+class LlamaModelAdapter(DenseModelAdapter):
     pre_and_post_weight_class = LlamaPreAndPostLayerWeight
     transformer_weight_class = LlamaTransformerLayerWeight
 
-    # infer class
     pre_layer_infer_class = LlamaPreLayerInfer
     post_layer_infer_class = LlamaPostLayerInfer
     transformer_layer_infer_class = LlamaTransformerLayerInfer
+
+
+class LlamaTpPartModel(TpPartBaseModel):
+    model_adapter_class = LlamaModelAdapter
+    # Compatibility factories for subclasses that have not migrated their recipes.
+    pre_and_post_weight_class = LlamaModelAdapter.pre_and_post_weight_class
+    transformer_weight_class = LlamaModelAdapter.transformer_weight_class
+    pre_layer_infer_class = LlamaModelAdapter.pre_layer_infer_class
+    post_layer_infer_class = LlamaModelAdapter.post_layer_infer_class
+    transformer_layer_infer_class = LlamaModelAdapter.transformer_layer_infer_class
 
     # infer state class
     infer_state_class = LlamaInferStateInfo
@@ -67,6 +76,7 @@ class LlamaTpPartModel(TpPartBaseModel):
                 tp_world_size=tp_world_size,
             ),
             kv_type=args.llm_kv_type,
+            group_size=args.llm_kv_quant_group_size,
             page_size=args.page_size,
             device="meta",
         )
@@ -216,19 +226,22 @@ class LlamaTpPartModel(TpPartBaseModel):
         original_max_position_embeddings = rope_config.get("original_max_position_embeddings", 2048)
         extrapolation_factor = 1.0
         attn_factor = 1.0
-        beta_fast = 32.0
-        beta_slow = 1.0
+        beta_fast = rope_config.get("beta_fast") or 32.0
+        beta_slow = rope_config.get("beta_slow") or 1.0
 
         pos_freqs = base ** (torch.arange(0, dim, 2).float().cuda() / dim)
         inv_freq_extrapolation = 1.0 / pos_freqs
         inv_freq_interpolation = 1.0 / (scale * pos_freqs)
-        low, high = find_correction_range(beta_fast, beta_slow, dim, base, original_max_position_embeddings)
+        low, high = find_correction_range(
+            beta_fast, beta_slow, dim, base, original_max_position_embeddings, rope_config.get("truncate", True)
+        )
         inv_freq_mask = (
             1 - linear_ramp_mask(low, high, dim // 2).float().cuda()
         ) * extrapolation_factor  # Get n-d rotational scaling corrected for extrapolation
         inv_freq = inv_freq_interpolation * (1 - inv_freq_mask) + inv_freq_extrapolation * inv_freq_mask
 
-        mscale = float(get_mscale(scale) * attn_factor)  # Get n-d magnitude scaling corrected for interpolation
+        attention_factor = rope_config.get("attention_factor")
+        mscale = float(get_mscale(scale) * attn_factor if attention_factor is None else attention_factor)
 
         # Build here to make `torch.jit.trace` work.
         max_seq_len_cached = max_position_embeddings

@@ -1,8 +1,11 @@
+from functools import partial
 import dataclasses
 from typing import Literal
 
 import torch
 from lightllm.common.basemodel import InferStateInfo
+from lightllm.common.execution import batch_metadata
+from lightllm.common.execution.batch_metadata import RotaryTables
 from lightllm.common.attention_state.bounded_att import FP8E8M0SlidingWindowState, WindowCompressorState
 from lightllm.common.attention_state.full_att.compressed_att.compressed_att_state import (
     CompressedAttentionState,
@@ -67,7 +70,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.position_sin_sliding = None
         self.position_cos_compress = None
         self.position_sin_compress = None
-        # Layer-independent indices are built once per forward in init_some_extra_state.
+        # Layer-independent indices are built once per forward in prepare_metadata.
         self.dsv4_sparse_req_idx = None
         self.dsv4_swa_indices = None
         self.dsv4_swa_lengths = None
@@ -80,37 +83,60 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         self.dsv4_c4_indices = None
         self.dsv4_c4_lengths = None
         self.dsv4_workspace = None
-        # token -> batch-position map for the compressor; built per prefill forward in init_some_extra_state.
+        # token -> batch-position map for the compressor; built per prefill forward in prepare_metadata.
         self._dsv4_token_to_batch_idx = None
         # The first C4 layer builds metadata and later layers reuse it within this forward.
         # During CUDA Graph capture its tensor producers become graph nodes. Replay updates
         # those captured buffers from staged inputs; copy_for_cuda_graph skips this container.
         self.c4_indexer_metadata: C4IndexerMetadata | None = None
 
-    def init_some_extra_state(self, model):
-        self.first_logical_layer_id = model.layers_infer[0].layer_num_
-        self.first_c4_logical_layer_id = None
-        has_c128_layer = False
+    @classmethod
+    def bind_metadata(cls, model):
+        layer_ids = tuple(layer.layer_num_ for layer in model.layers_infer)
         ratios = model.config["compress_ratios"]
-        for layer in model.layers_infer:
-            compress_ratio = ratios[layer.layer_num_] if layer.layer_num_ < len(ratios) else 0
-            if compress_ratio == 4 and self.first_c4_logical_layer_id is None:
-                self.first_c4_logical_layer_id = layer.layer_num_
-            if compress_ratio == 128:
-                has_c128_layer = True
+        c4_layers = tuple(layer for layer in layer_ids if layer < len(ratios) and ratios[layer] == 4)
+        return partial(
+            cls.prepare_metadata,
+            first_layer=layer_ids[0],
+            first_c4_layer=c4_layers[0] if c4_layers else None,
+            has_c128_layer=any(layer < len(ratios) and ratios[layer] == 128 for layer in layer_ids),
+            sliding=RotaryTables(model._cos_cached_sliding, model._sin_cached_sliding),
+            compress=RotaryTables(model._cos_cached_compress, model._sin_cached_compress),
+            workspace=model.dsv4_workspace,
+            prepare_swa=cls.bind_swa_metadata(model),
+            graph_capacity=model.graph_runner.decode_metadata_capacity,
+        )
+
+    @classmethod
+    def bind_swa_metadata(cls, model):
+        swa_state = model.att_state_manager.get_state(
+            model_role=model.att_state_role,
+            state_type_filter="swa_",
+            logical_layer_id=model.layers_infer[0].layer_num_,
+            state_class=FP8E8M0SlidingWindowState,
+        )
+        return partial(
+            DeepseekV4InferStateInfo._init_swa_metadata,
+            swa_state=swa_state,
+            vision_tokens=model.config["vision_max_n_token"] if model.has_vision else None,
+        )
+
+    def prepare_metadata(
+        self, *, first_layer, first_c4_layer, has_c128_layer, sliding, compress, workspace, prepare_swa, graph_capacity
+    ):
+        self.first_logical_layer_id = first_layer
+        self.first_c4_logical_layer_id = first_c4_layer
         self.c4_indexer_metadata = None  # Rebuild for each eager forward or graph capture.
         self.dsv4_c4_indices = None
         self.dsv4_c4_lengths = None
         self.dsv4_c128_indices = None
         self.dsv4_c128_lengths = None
-        super().init_some_extra_state(model)  # sets position_ids, b_q_seq_len, b_q_start_loc (prefill)
+        batch_metadata.prepare_sequence_metadata(self)
         if self.is_prefill:
             self.prefill_att_state.prepare_swa_workspace(self)
         pos = self.position_ids
-        self.position_cos_sliding = torch.index_select(model._cos_cached_sliding, 0, pos)  # [T, rope_dim//2]
-        self.position_sin_sliding = torch.index_select(model._sin_cached_sliding, 0, pos)
-        self.position_cos_compress = torch.index_select(model._cos_cached_compress, 0, pos)
-        self.position_sin_compress = torch.index_select(model._sin_cached_compress, 0, pos)
+        self.position_cos_sliding, self.position_sin_sliding = sliding.gather(pos)
+        self.position_cos_compress, self.position_sin_compress = compress.gather(pos)
         # Per-token request id (decode: one token per req; prefill: ragged -> repeat by q-len).
         # Layer-independent; the swa kernel + build_metadata's c4/c128 readers all reuse it.
         if self.is_prefill:
@@ -125,8 +151,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         else:
             self.dsv4_sparse_req_idx = self.b_req_idx
             self._dsv4_token_to_batch_idx = None
-        self.dsv4_workspace = model.dsv4_workspace
-        self._init_swa_metadata(model)
+        self.dsv4_workspace = workspace
+        prepare_swa(self)
 
         # 当前模型没有 C128 层时，不分配或构建这组索引；draft 只检查自身拥有的层。
         if not has_c128_layer:
@@ -137,8 +163,8 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         c128_compress_ratio = 128
         max_kv_seq_len = self.max_kv_seq_len
         # Replay copies C128 indices into the captured state, so their widths must match.
-        if not self.is_prefill and model.graph is not None and model.graph.can_run(self.batch_size, max_kv_seq_len):
-            max_kv_seq_len = model.graph.graph_max_len_in_batch
+        if not self.is_prefill:
+            max_kv_seq_len = graph_capacity(self.batch_size, max_kv_seq_len)
         c128_entries = max(1, max_kv_seq_len // c128_compress_ratio)
         c128_cap = ((c128_entries + 63) // 64) * 64
         self.dsv4_c128_indices = torch.empty((pos.numel(), c128_cap), dtype=torch.int32, device=pos.device)
@@ -152,7 +178,7 @@ class DeepseekV4InferStateInfo(InferStateInfo):
             self.dsv4_c128_lengths,
         )
 
-    def _init_swa_metadata(self, model):
+    def _init_swa_metadata(self, *, swa_state, vision_tokens):
         """Build the sliding-window metadata once for this forward."""
         from lightllm.models.deepseek_v4.triton_kernel.build_swa_indices import (
             build_image_visibility,
@@ -160,13 +186,12 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         )
 
         pos = self.position_ids
-        has_vision = model.has_vision
-        swa_width = self.swa_state.config.window_size
-        if has_vision and self.is_prefill:
-            swa_width += model.config["vision_max_n_token"]
+        swa_width = swa_state.config.window_size
+        if vision_tokens is not None and self.is_prefill:
+            swa_width += vision_tokens
         self.dsv4_swa_indices = torch.empty((pos.numel(), swa_width), dtype=torch.int32, device=pos.device)
         self.dsv4_swa_lengths = torch.empty_like(pos, dtype=torch.int32)
-        if has_vision and self.is_prefill:
+        if vision_tokens is not None and self.is_prefill:
             self.dsv4_image_left = torch.zeros_like(pos, dtype=torch.int32)
             self.dsv4_image_right = torch.zeros_like(pos, dtype=torch.int32)
             image_spans = []
@@ -189,11 +214,11 @@ class DeepseekV4InferStateInfo(InferStateInfo):
         build_swa_indices(
             token_req_idx=self.dsv4_sparse_req_idx,
             position_ids=self.position_ids,
-            swa_state=self.swa_state,
+            swa_state=swa_state,
             swa_indices=self.dsv4_swa_indices,
             swa_lengths=self.dsv4_swa_lengths,
             swa_write_slots=self.dsv4_swa_write_slots,
-            sliding_window=self.swa_state.config.window_size,
+            sliding_window=swa_state.config.window_size,
             image_left=self.dsv4_image_left,
             image_right=self.dsv4_image_right,
             prefill_state=self.prefill_att_state if self.is_prefill else None,

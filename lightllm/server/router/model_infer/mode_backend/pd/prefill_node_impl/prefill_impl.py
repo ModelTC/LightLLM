@@ -153,6 +153,7 @@ class PDChunkedPrefillForPrefillNode(ChunkedPrefillBackend):
             decode_agent_metadata=pd_decode_node_info.agent_metadata,
             decode_num_pages=pd_decode_node_info.num_pages,
             decode_page_reg_desc=pd_decode_node_info.page_reg_desc,
+            decode_kv_calibration=pd_decode_node_info.kv_calibration,
             first_gen_token_id=None,
             first_gen_token_logprob=None,
             page_kind=page_kind,

@@ -1,29 +1,34 @@
 import os
 
 # os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
-import gc
-import copy
+from contextlib import contextmanager
 import math
 import json
 import torch
-import torch.nn.functional as F
 import triton
 from typing import final, List, TYPE_CHECKING
-from tqdm import tqdm
 
 from lightllm.common.basemodel.layer_weights.hf_load_utils import load_hf_weights
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.req_manager import ReqManager
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.basemodel.triton_kernel.copy_kv_index_to_req import (
-    select_kv_index_from_req,
-    select_kv_index_from_req_prefill,
-)
 from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
-from lightllm.common.basemodel.cuda_graph import CudaGraph
-from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph
+from lightllm.common.execution.decode_graph import CudaGraph
+from lightllm.common.execution.prefill_graph import PrefillCudaGraph
+from lightllm.common.execution.graph_runner import GraphRunner
+from lightllm.common.execution.batch_state import BatchStateFactory, select_token_indices
+from lightllm.common.execution.warmup import WarmupRunner
+from lightllm.common.execution.batch_runner import (
+    BatchPolicy,
+    BatchProgram,
+    BatchRunner,
+    pad_decode,
+    pad_prefill,
+    make_output,
+    unpad_decode,
+    unpad_prefill,
+)
 from lightllm.common.quantization import Quantcfg
-from lightllm.common.basemodel.triton_kernel.gather_token_id import gather_token, gather_token_prefill_decode_mixed
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.dist_utils import get_dp_world_size, get_current_rank_in_dp
 from lightllm.utils.envs_utils import (
@@ -36,9 +41,7 @@ from lightllm.common.basemodel.hidden_collector import (
     NoopHiddenCollector,
 )
 from lightllm.common.basemodel.mtp_manager import MtpManager
-from lightllm.utils.custom_kernel_utis import pad2dim_tensor_to_new_batch
-from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
-from lightllm.utils.infer_utils import post_empty_cache
+from lightllm.common.triton_utils.autotuner import Autotuner
 from lightllm.utils.torch_memory_saver_utils import (
     TorchMemorySaverWrapper,
     MemoryTag,
@@ -59,6 +62,122 @@ torch.backends.cudnn.enabled = True
 
 class TpPartBaseModel:
     is_mtp_draft_model = False
+
+    @property
+    def graph_runner(self):
+        if not hasattr(self, "_graph_runner"):
+            self._graph_runner = GraphRunner()
+        return self._graph_runner
+
+    @property
+    def batch_state_factory(self):
+        if not hasattr(self, "_batch_state_factory"):
+            prefill, decode = [], []
+            for suffix in ("", "1"):
+                backend = getattr(self, "prefill_att_backend" + suffix)
+                if backend is not None:
+                    prefill.append(("prefill_att_state" + suffix, backend.create_att_prefill_state))
+                backend = getattr(self, "decode_att_backend" + suffix)
+                if backend is not None:
+                    decode.append(("decode_att_state" + suffix, backend.create_att_decode_state))
+            select = self._select_mem_indexes
+            if getattr(select, "__func__", None) is TpPartBaseModel._select_mem_indexes:
+                select = None
+            bind_inputs = getattr(self.pre_infer, "bind_inputs", None)
+            prepare_inputs = (
+                bind_inputs(self.pre_post_weight, self.multimodal_embedding_cache) if bind_inputs is not None else None
+            )
+            self._batch_state_factory = BatchStateFactory(
+                state_type=self.infer_state_class,
+                hidden_collector=self.hidden_collector_prototype,
+                requests=self.req_manager,
+                state_store=self.att_state_manager,
+                role=self.att_state_role,
+                is_draft=self.is_mtp_draft_model,
+                return_all_prompt_logics=self.return_all_prompt_logics,
+                group_for_lane=dist_group_manager.get_group,
+                execution_runner=getattr(self, "execution_runner", None),
+                prefill_states=tuple(prefill),
+                decode_states=tuple(decode),
+                select_indices=select,
+                route_capture=getattr(self, "route_capture", None),
+                prepare_inputs=prepare_inputs,
+            )
+        return self._batch_state_factory
+
+    @property
+    def batch_metadata(self):
+        if not hasattr(self, "_batch_metadata"):
+            self._batch_metadata = self.infer_state_class.bind_metadata(self)
+        return self._batch_metadata
+
+    @property
+    def warmup_runner(self):
+        if not hasattr(self, "_warmup_runner"):
+            self._warmup_runner = WarmupRunner(
+                self.req_manager,
+                self.att_state_manager.full_att_allocator,
+                self.forward,
+                self._gen_special_model_input,
+                self.vocab_size,
+                overlap_prefill=self.microbatch_overlap_prefill,
+                overlap_decode=self.microbatch_overlap_decode,
+            )
+        return self._warmup_runner
+
+    @property
+    def batch_runner(self):
+        if not hasattr(self, "_batch_runner"):
+            policy = BatchPolicy(
+                decode_alignment=self.mtp_manager.get_decode_batch_alignment(self.is_mtp_draft_model),
+                sequence_parallel_alignment=self.tp_world_size_ if self.args.enable_tpsp_mix_mode else 1,
+                mixed_prefill=self.args.enable_prefill_decode_mixed,
+            )
+            create_state = self._create_inferstate
+            if getattr(create_state, "__func__", None) is TpPartBaseModel._create_inferstate:
+                create_state = self.batch_state_factory.create
+            initialize_state = self._initialize_batch_state
+            if getattr(initialize_state, "__func__", None) is TpPartBaseModel._initialize_batch_state:
+                initialize_state = self.batch_metadata
+            program = BatchProgram(
+                create_state=create_state,
+                initialize_state=initialize_state,
+                prefill=self._context_forward,
+                decode=self._token_forward,
+                overlap_prefill=self._overlap_tpsp_context_forward,
+                overlap_decode=self._overlap_tpsp_token_forward,
+            )
+            padding = self._create_padded_decode_model_input
+            if getattr(padding, "__func__", None) is TpPartBaseModel._create_padded_decode_model_input:
+                padding = None
+            self._batch_runner = BatchRunner(
+                policy,
+                program,
+                self.req_manager,
+                self.graph_runner,
+                decode_padding=padding,
+                clear_transfer=dist_group_manager.clear_deepep_buffer,
+            )
+        return self._batch_runner
+
+    def _initialize_batch_state(self, state):
+        self.batch_metadata(state)
+
+    @property
+    def graph(self):
+        return self.graph_runner.decode
+
+    @graph.setter
+    def graph(self, value):
+        self.graph_runner.decode = value
+
+    @property
+    def prefill_graph(self):
+        return self.graph_runner.prefill
+
+    @prefill_graph.setter
+    def prefill_graph(self, value):
+        self.graph_runner.prefill = value
 
     # weight class
     pre_and_post_weight_class = None
@@ -81,6 +200,7 @@ class TpPartBaseModel:
         self.batch_max_tokens = kvargs.get("batch_max_tokens", None)
         self.load_way = kvargs.get("load_way", "HF")
         self.weight_dict = kvargs.get("weight_dict", None)
+        self.multimodal_embedding_cache = kvargs.get("multimodal_embedding_cache")
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
         self.max_seq_length = kvargs.get("max_seq_length", 1024 * 5)
@@ -110,6 +230,7 @@ class TpPartBaseModel:
         self._verify_must()
         self._verify_params()
         self._init_quant()
+        self._init_model_adapter()
 
         enable_weight_cpu_backup = self.args.enable_weight_cpu_backup
         with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
@@ -157,6 +278,12 @@ class TpPartBaseModel:
             if self.is_mtp_draft_model and self.args.mtp_mode in ("vanilla_no_att", "eagle_no_att"):
                 return
 
+            from lightllm.common.execution.runner import prepare_runner
+
+            self.execution_runner = prepare_runner(self)
+            if self.execution_runner is not None:
+                return
+
             # 当前模型拥有的全局逻辑层 ID，按模型内部层顺序排列；各工厂自行选择参与层及共享分组。
             logical_layer_ids = tuple(layer.layer_num_ for layer in self.layers_infer)
             full_states = self.create_full_att_states(
@@ -182,14 +309,21 @@ class TpPartBaseModel:
         """Initialize this model's backends, warmup and graphs after shared allocation."""
         self.req_manager.bind_hold_page(self.att_state_manager.full_att_allocator.hold_token_indices)
         self._check_mem_size()
-        self._init_att_backend()
-        self._init_att_backend1()
+        if getattr(self, "execution_runner", None) is None:
+            self._init_att_backend()
+            self._init_att_backend1()
+        else:
+            self.prefill_att_backend = self.decode_att_backend = None
+            self.prefill_att_backend1 = self.decode_att_backend1 = None
+        self._init_execution_plan()
         self._init_hidden_collector()
+        self._batch_metadata = self.infer_state_class.bind_metadata(self)
         role = self.att_state_role
-        logger.info(
-            f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
-            f"{type(self.decode_att_backend).__name__}"
-        )
+        if self.execution_plan is None:
+            logger.info(
+                f"{role} prefill/decode attention: {type(self.prefill_att_backend).__name__} / "
+                f"{type(self.decode_att_backend).__name__}"
+            )
         if self.prefill_att_backend1 is not None:
             logger.info(
                 f"{role} prefill/decode attention1: {type(self.prefill_att_backend1).__name__} / "
@@ -202,6 +336,16 @@ class TpPartBaseModel:
         self._init_prefill_cuda_graph()
         if not self.is_mtp_draft_model:
             self._check_max_len_infer()
+
+    def _init_execution_plan(self):
+        if getattr(self, "execution_plan", None) is not None:
+            raise RuntimeError("bound execution plans cannot be replaced while resources or Graphs may be in use")
+        runner = getattr(self, "execution_runner", None)
+        self.execution_plan = runner.bind(self.layers_infer) if runner is not None else None
+        logger.info(f"{self.att_state_role} attention execution: {'bound' if self.execution_plan else 'legacy'}")
+        if self.execution_plan is not None:
+            backends = sorted({item.backend for item in self.execution_plan.bindings})
+            logger.info(f"Bound attention: {backends}; workspace: {self.execution_plan.workspace_bytes} bytes")
 
     @classmethod
     def normalize_model_config(cls, model_config: dict[str, object]) -> dict[str, object]:
@@ -235,7 +379,42 @@ class TpPartBaseModel:
         self.quant_cfg = Quantcfg(self.config, self.quant_type, self.quant_cfg_path, self.expert_dtype)
         logger.info(f"Initial quantization. " f"The default quantization method is {self.quant_cfg.quant_type}")
 
+    def _init_model_adapter(self):
+        # Subclasses with different recipes opt in explicitly as they migrate.
+        adapter_class = type(self).__dict__.get("model_adapter_class")
+        self.model_adapter = None
+        if adapter_class is not None:
+            adapter = self._create_model_adapter(adapter_class)
+            if self.args.mtp_mode is not None:
+                from lightllm.common.execution.specs import (
+                    DenseAttentionSpec,
+                    GatedDeltaNetSpec,
+                    KimiDeltaAttentionSpec,
+                    MLAAttentionSpec,
+                    PooledNoPEAttentionSpec,
+                )
+
+                # Other recurrent/sparse families still need their own verify bindings.
+                if not all(
+                    isinstance(
+                        spec, (DenseAttentionSpec, GatedDeltaNetSpec, KimiDeltaAttentionSpec, PooledNoPEAttentionSpec)
+                    )
+                    or type(spec) is MLAAttentionSpec
+                    for spec in adapter.attention_specs().values()
+                ):
+                    return
+            self.model_adapter = adapter
+
+    def _create_model_adapter(self, adapter_class):
+        return adapter_class(
+            self.config, role=self.att_state_role, dtype=self.data_type, tp_world_size=self.tp_world_size_
+        )
+
     def _init_weights(self, start_layer_index=0):
+        if getattr(self, "model_adapter", None) is not None:
+            assert start_layer_index == 0, "adapter declares its own layer ordering"
+            self.pre_post_weight, self.trans_layers_weight = self.model_adapter.build_weights(self.quant_cfg)
+            return
         self.pre_post_weight = self.pre_and_post_weight_class(self.data_type, network_config=self.config)
         self.trans_layers_weight = [
             self.transformer_weight_class(
@@ -249,6 +428,20 @@ class TpPartBaseModel:
         return
 
     def load_weights(self, weight_dict: dict):
+        if getattr(self, "model_adapter", None) is not None:
+            self.model_adapter.load_weights(
+                (self.pre_post_weight, self.trans_layers_weight), self.weight_dir_, weight_dict
+            )
+            from lightllm.common.execution.planner import Planner
+            from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
+
+            self.linear_plan = Planner.bind_linears(
+                (self.pre_post_weight, *self.trans_layers_weight), g_cache_manager.empty
+            )
+            self.moe_plan = Planner.bind_moe(
+                self.model_adapter.moe_specs(), self.trans_layers_weight, self.layers_infer
+            )
+            return
         assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
         load_hf_weights(
             data_type=self.data_type,
@@ -318,6 +511,10 @@ class TpPartBaseModel:
         return
 
     def _init_infer_layer(self, start_layer_index=0):
+        if getattr(self, "model_adapter", None) is not None:
+            assert start_layer_index == 0, "adapter declares its own layer ordering"
+            self.pre_infer, self.post_infer, self.layers_infer = self.model_adapter.build_recipe()
+            return
         self.pre_infer = self.pre_layer_infer_class(network_config=self.config)
         self.post_infer = self.post_layer_infer_class(network_config=self.config)
         self.layers_infer = [
@@ -379,10 +576,7 @@ class TpPartBaseModel:
             )
         )
         if self.graph is not None:
-            if get_env_start_args().enable_decode_microbatch_overlap:
-                self.graph.warmup_overlap(self)
-            else:
-                self.graph.warmup(self)
+            self.warmup_runner.capture_decode(self.graph, overlap=self.args.enable_decode_microbatch_overlap)
 
     def _init_prefill_cuda_graph(self):
         self.prefill_graph = (
@@ -391,10 +585,7 @@ class TpPartBaseModel:
             else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
         )
         if self.prefill_graph is not None:
-            if get_env_start_args().enable_prefill_microbatch_overlap:
-                self.prefill_graph.warmup_overlap(self)
-            else:
-                self.prefill_graph.warmup(self)
+            self.warmup_runner.capture_prefill(self.prefill_graph, overlap=self.args.enable_prefill_microbatch_overlap)
 
     def _init_custom(self):
         pass
@@ -412,317 +603,36 @@ class TpPartBaseModel:
             return self._decode(model_input)
 
     def _select_mem_indexes(self, model_input: ModelInput):
-        if model_input.is_prefill:
-            return select_kv_index_from_req_prefill(
-                req_to_token_indexs=self.req_manager.req_to_token_indexs,
-                b_req_idx=model_input.b_req_idx,
-                b_seq_len=model_input.b_seq_len,
-                b_ready_cache_len=model_input.b_ready_cache_len,
-                b_start_loc=model_input.b_prefill_start_loc,
-                max_q_seq_len=model_input.max_q_seq_len,
-                token_num=model_input.input_ids.shape[0],
-            )
-        return select_kv_index_from_req(
-            req_to_token_indexs=self.req_manager.req_to_token_indexs,
-            b_req_idx=model_input.b_req_idx,
-            b_seq_len=model_input.b_seq_len,
-        )
+        return select_token_indices(self.req_manager.req_to_token_indexs, model_input)
 
     def _create_inferstate(self, model_input: ModelInput, microbatch_index: int = 0):
-        infer_state = self.infer_state_class()
-        infer_state.hidden_collector = self.hidden_collector_prototype.new_instance()
-        infer_state.input_ids = model_input.input_ids
-        infer_state.is_prefill = model_input.is_prefill
-        infer_state.is_draft_model = self.is_mtp_draft_model
-        infer_state.att_state_role = self.att_state_role
-        infer_state.return_all_prompt_logics = self.return_all_prompt_logics
-        infer_state.batch_size = model_input.batch_size
-        infer_state.total_token_num = model_input.total_token_num
-        infer_state.max_q_seq_len = model_input.max_q_seq_len
-        infer_state.max_kv_seq_len = model_input.max_kv_seq_len
-        infer_state.max_cache_len = model_input.max_cache_len
-        assert model_input.b_req_idx.shape[0] == model_input.b_seq_len.shape[0]
-        infer_state.b_req_idx = model_input.b_req_idx
-        infer_state.b_seq_len = model_input.b_seq_len
-        infer_state.b_mtp_index = model_input.b_mtp_index
-        infer_state.b_position_delta = model_input.b_position_delta
-        if model_input.is_prefill:
-            if model_input.b_ready_cache_len is not None:
-                infer_state.b_ready_cache_len = model_input.b_ready_cache_len
-            else:
-                infer_state.b_ready_cache_len = torch.zeros_like(input=infer_state.b_seq_len)
-        else:
-            infer_state.b_shared_seq_len = model_input.b_shared_seq_len
-            infer_state.b_shared_radix_node_id = model_input.b_shared_radix_node_id
-
-        infer_state.multimodal_params = model_input.multimodal_params
-
-        infer_state.req_manager = self.req_manager
-        infer_state.att_state_manager = self.att_state_manager
-
-        infer_state.mem_index = self._select_mem_indexes(model_input)
-        infer_state.microbatch_index = microbatch_index
-        infer_state.dist_group = dist_group_manager.get_group(microbatch_index)
-
-        # 特殊模型，特殊模式的特定变量初始化操作。
-        infer_state.mtp_draft_input_hiddens = model_input.mtp_draft_input_hiddens
-
-        if infer_state.is_prefill:
-            infer_state.prefill_att_state = (
-                self.prefill_att_backend.create_att_prefill_state(infer_state=infer_state)
-                if self.prefill_att_backend is not None
-                else None
-            )
-            if self.prefill_att_backend1 is not None:
-                infer_state.prefill_att_state1 = self.prefill_att_backend1.create_att_prefill_state(
-                    infer_state=infer_state
-                )
-        else:
-            infer_state.decode_att_state = (
-                self.decode_att_backend.create_att_decode_state(infer_state=infer_state)
-                if self.decode_att_backend is not None
-                else None
-            )
-            if self.decode_att_backend1 is not None:
-                infer_state.decode_att_state1 = self.decode_att_backend1.create_att_decode_state(
-                    infer_state=infer_state
-                )
-
-        return infer_state
+        return self.batch_state_factory.create(model_input, microbatch_index)
 
     def _create_padded_decode_model_input(self, model_input: ModelInput, new_batch_size: int):
-        if model_input.batch_size == new_batch_size:
-            return model_input
-
-        assert model_input.batch_size <= new_batch_size
-
-        padded_batch_size = new_batch_size - model_input.batch_size
-        new_model_input = copy.copy(model_input)
-        new_model_input.batch_size = new_batch_size
-        new_model_input.total_token_num += padded_batch_size * 2
-        new_model_input.max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_batch_size), mode="constant", value=1)
-        new_model_input.b_req_idx = F.pad(
-            new_model_input.b_req_idx, (0, padded_batch_size), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
-        )
-        new_model_input.b_mtp_index = F.pad(
-            new_model_input.b_mtp_index, (0, padded_batch_size), mode="constant", value=0
-        )
-        new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, padded_batch_size), mode="constant", value=2)
-        if new_model_input.b_position_delta is not None:
-            new_model_input.b_position_delta = F.pad(
-                new_model_input.b_position_delta, (0, padded_batch_size), mode="constant", value=0
-            )
-        new_model_input.multimodal_params = new_model_input.multimodal_params + [
-            {"images": [], "audios": []} for _ in range(padded_batch_size)
-        ]
-
-        new_model_input.b_shared_seq_len = F.pad(
-            new_model_input.b_shared_seq_len, (0, padded_batch_size), mode="constant", value=0
-        )
-        new_model_input.b_shared_radix_node_id = F.pad(
-            new_model_input.b_shared_radix_node_id, (0, padded_batch_size), mode="constant", value=-1
-        )
-
-        # 特殊模型，特殊模式的特殊变量的特殊 padding
-        if new_model_input.mtp_draft_input_hiddens is not None:
-            new_model_input.mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
-                input=new_model_input.mtp_draft_input_hiddens,
-                new_batch_size=new_batch_size,
-            )
-
-        new_model_input.check_input()
-        return new_model_input
+        return pad_decode(model_input, new_batch_size, self.req_manager.HOLD_REQUEST_ID)
 
     def _create_padded_prefill_model_input(self, model_input: ModelInput, new_handle_token_num: int):
-        handle_token_num = model_input.input_ids.shape[0]
-        if handle_token_num == new_handle_token_num:
-            return model_input
-
-        assert handle_token_num < new_handle_token_num
-
-        padded_token_num = new_handle_token_num - handle_token_num
-        assert padded_token_num > 0
-        new_model_input = copy.copy(model_input)
-        new_model_input.batch_size = model_input.batch_size + 1
-        new_model_input.total_token_num += padded_token_num
-        new_model_input.max_q_seq_len = max(padded_token_num, model_input.max_q_seq_len)
-        new_model_input.max_kv_seq_len = max(padded_token_num, model_input.max_kv_seq_len)
-        new_model_input.max_cache_len = max(0, model_input.max_cache_len)
-        new_model_input.input_ids = F.pad(new_model_input.input_ids, (0, padded_token_num), mode="constant", value=1)
-        new_model_input.b_req_idx = F.pad(
-            new_model_input.b_req_idx, (0, 1), mode="constant", value=self.req_manager.HOLD_REQUEST_ID
-        )
-        new_model_input.b_mtp_index = F.pad(new_model_input.b_mtp_index, (0, 1), mode="constant", value=0)
-        new_model_input.b_seq_len = F.pad(new_model_input.b_seq_len, (0, 1), mode="constant", value=padded_token_num)
-        new_model_input.b_ready_cache_len = F.pad(new_model_input.b_ready_cache_len, (0, 1), mode="constant", value=0)
-        new_model_input.b_is_decode_req = F.pad(new_model_input.b_is_decode_req, (0, 1), mode="constant", value=False)
-        b_q_seq_len = new_model_input.b_seq_len - new_model_input.b_ready_cache_len
-        new_model_input.b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
-        # 构建新的list, 使用 append 可能会让外面使用的数组引用发生变化，导致错误。
-        new_model_input.b_prefill_has_output_cpu = [e for e in new_model_input.b_prefill_has_output_cpu] + [False]
-
-        new_model_input.multimodal_params = [e for e in new_model_input.multimodal_params] + [
-            {"images": [], "audios": []}
-        ]
-
-        # 特殊模型，特殊模式的特殊变量的特殊 padding
-        if new_model_input.mtp_draft_input_hiddens is not None:
-            new_model_input.mtp_draft_input_hiddens = pad2dim_tensor_to_new_batch(
-                input=new_model_input.mtp_draft_input_hiddens,
-                new_batch_size=new_handle_token_num,
-            )
-
-        new_model_input.check_input()
-        return new_model_input
+        return pad_prefill(model_input, new_handle_token_num, self.req_manager.HOLD_REQUEST_ID)
 
     def _create_model_output(self, post_output: PostLayerOutput, infer_state: InferStateInfo) -> ModelOutput:
-        output = ModelOutput(
-            logits=post_output.logits.contiguous(),
-            mtp_collector=infer_state.hidden_collector.finish_output(infer_state=infer_state),
-            prompt_logics=infer_state.prompt_logics,
-            logits_token_ids=post_output.logits_token_ids,
-        )
-        return output
+        return make_output(post_output, infer_state)
 
     def _create_unpad_decode_model_output(self, model_output: ModelOutput, origin_batch_size: int):
-        padded_batch_size = model_output.logits.shape[0]
-        if padded_batch_size == origin_batch_size:
-            return model_output
-        new_model_output = copy.copy(model_output)
-        new_model_output.logits = new_model_output.logits[0:origin_batch_size]
-        if new_model_output.logits_token_ids is not None:
-            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
-        new_model_output.mtp_collector = model_output.mtp_collector.unpad_decode(
-            padded_batch_size=padded_batch_size,
-            origin_batch_size=origin_batch_size,
-        )
-        return new_model_output
+        return unpad_decode(model_output, origin_batch_size)
 
     def _create_unpad_prefill_model_output(
         self, padded_model_output: ModelOutput, origin_handle_token_num: int, origin_batch_size: int
     ):
-        new_model_output = copy.copy(padded_model_output)
-        # logits 始终只对应每个请求最后一个位置，移除 padding 的 req 对应的行。
-        new_model_output.logits = new_model_output.logits[0:origin_batch_size]
-        if new_model_output.logits_token_ids is not None:
-            new_model_output.logits_token_ids = new_model_output.logits_token_ids[:origin_batch_size]
-        new_model_output.mtp_collector = padded_model_output.mtp_collector.unpad_prefill(
-            origin_handle_token_num=origin_handle_token_num
-        )
-        # prompt_logics 保存整个 prefill 阶段所有 token 位置的 logits，
-        # 按实际处理的 token 数量裁剪掉 padding 部分（仅 return_all_prompt_logics 模式下非空）。
-        if new_model_output.prompt_logics is not None:
-            new_model_output.prompt_logics = new_model_output.prompt_logics[0:origin_handle_token_num]
+        return unpad_prefill(padded_model_output, origin_handle_token_num, origin_batch_size)
 
-        return new_model_output
+    def _prefill(self, model_input: ModelInput):
+        return self.batch_runner.run_prefill(model_input)
 
-    def _prefill(
-        self,
-        model_input: ModelInput,
-    ):
-        if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
-            gather_token_prefill_decode_mixed(
-                input_ids=model_input.input_ids,
-                req_to_next_token_ids=self.req_manager.req_sampling_params_manager.req_to_next_token_ids,
-                b_req_idx=model_input.b_req_idx,
-                b_mtp_index=model_input.b_mtp_index,
-                b_is_decode_req=model_input.b_is_decode_req,
-                b_prefill_start_loc=model_input.b_prefill_start_loc,
-            )
-
-        origin_handle_token_num = model_input.input_ids.shape[0]
-        origin_batch_size = model_input.batch_size
-
-        # 即使当前 DP rank 没有实际 token，也需要补出一个 dummy token 执行模型；
-        # TPSP 模式再将这个实际推理数量向上对齐到 TP world size 的整数倍。
-        infer_handle_token_num = max(1, origin_handle_token_num)
-        if self.args.enable_tpsp_mix_mode:
-            infer_handle_token_num = triton.cdiv(infer_handle_token_num, self.tp_world_size_) * self.tp_world_size_
-
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=infer_handle_token_num):
-            infer_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=infer_handle_token_num
-            )
-
-        model_input = self._create_padded_prefill_model_input(
-            model_input=model_input, new_handle_token_num=infer_handle_token_num
-        )
-
-        infer_state = self._create_inferstate(model_input)
-        prefill_mem_indexes_ready_event = torch.cuda.Event()
-        prefill_mem_indexes_ready_event.record()
-
-        infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
-        model_output = self._context_forward(infer_state=infer_state)
-
-        model_output = self._create_unpad_prefill_model_output(
-            padded_model_output=model_output,
-            origin_handle_token_num=origin_handle_token_num,
-            origin_batch_size=origin_batch_size,
-        )
-        model_output.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
-        return model_output
-
-    def _decode(
-        self,
-        model_input: ModelInput,
-    ) -> ModelOutput:
-        if model_input.input_ids is None:
-            if model_input.batch_size > 0:
-                model_input.input_ids = gather_token(
-                    req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
-                    b_req_idx=model_input.b_req_idx,
-                    b_mtp_index=model_input.b_mtp_index,
-                )
-            else:
-                # 空 DP rank 不启动 gather kernel，但仍将 input_ids 规范化为
-                # CUDA 空 tensor；后续内部 padding 会为 dummy request 填入 token id 1。
-                model_input.input_ids = torch.empty(
-                    (0,),
-                    dtype=torch.int64,
-                    device=model_input.b_req_idx.device,
-                )
-
-        origin_batch_size = model_input.batch_size
-        # 空 DP rank 也需要完整的 dummy verify group；TP/SP 切分不能破坏 MTP 分组。
-        infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size))
-
-        # CUDA Graph 可能继续向上对齐 batch size，并因此加入 seq_len=2 的
-        # dummy request。先用最终可能出现的 KV 长度判断 graph，再统一 padding 一次。
-        infer_max_kv_seq_len = max(2, model_input.max_kv_seq_len)
-        use_cuda_graph = self.graph is not None and self.graph.can_run(
-            batch_size=infer_batch_size,
-            max_len_in_batch=infer_max_kv_seq_len,
-        )
-        need_capture = False
-        if use_cuda_graph:
-            infer_batch_size = self.graph.find_closest_graph_batch_size(batch_size=infer_batch_size)
-            need_capture = self.graph.need_capture(infer_batch_size)
-
-        model_input = self._create_padded_decode_model_input(model_input=model_input, new_batch_size=infer_batch_size)
-        infer_state = self._create_inferstate(model_input)
-        # attention backend 会根据执行方式准备 capture、replay 或 eager 状态，
-        # 因此必须在 init_att_state 之前完成赋值。
-        infer_state.is_cuda_graph_capture = need_capture
-        infer_state.is_cuda_graph_replay = use_cuda_graph and not need_capture
-        infer_state.init_some_extra_state(self)
-        infer_state.init_att_state()
-
-        if use_cuda_graph:
-            if need_capture:
-                model_output: ModelOutput = self.graph.capture_decode(self._token_forward, infer_state)
-            else:
-                model_output: ModelOutput = self.graph.replay(infer_state)
-        else:
-            model_output = self._token_forward(infer_state)
-
-        return self._create_unpad_decode_model_output(model_output, origin_batch_size=origin_batch_size)
+    def _decode(self, model_input: ModelInput) -> ModelOutput:
+        return self.batch_runner.run_decode(model_input)
 
     @final
     def _context_forward(self, infer_state: InferStateInfo):
-
         input_embs = self.pre_infer.context_forward(infer_state.input_ids, infer_state, self.pre_post_weight)
         if self.args.enable_dp_prefill_balance:
             assert not self.args.enable_prefill_cudagraph, "not support now"
@@ -747,28 +657,7 @@ class TpPartBaseModel:
 
             return [_input_embs]
 
-        handle_token_num = infer_state.input_ids.shape[0]
-
-        if self.prefill_graph is not None and self.prefill_graph.can_run(handle_token_num=handle_token_num):
-            finded_handle_token_num = self.prefill_graph.find_closest_graph_handle_token_num(
-                handle_token_num=handle_token_num
-            )
-            assert finded_handle_token_num == handle_token_num
-            if self.prefill_graph.need_capture(handle_token_num=finded_handle_token_num):
-                output_tensors: List[torch.Tensor] = self.prefill_graph.capture_prefill(
-                    prefill_func=prefill_func,
-                    input_tensors=input_tensors,
-                    infer_state=infer_state,
-                )
-            else:
-                output_tensors: List[torch.Tensor] = self.prefill_graph.replay(
-                    input_tensors=input_tensors, infer_state=infer_state
-                )
-
-        else:
-            g_cache_manager.cache_env_in()
-            output_tensors: List[torch.Tensor] = prefill_func(input_tensors, infer_state)
-            g_cache_manager.cache_env_out()
+        output_tensors = self.graph_runner.run_prefill(prefill_func, input_tensors, infer_state)
 
         input_embs = output_tensors[0]
 
@@ -816,149 +705,23 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def microbatch_overlap_prefill(self, model_input0: ModelInput, model_input1: ModelInput):
-        """执行由调用方提前构建好的两个 prefill microbatch。"""
-
         for model_input in (model_input0, model_input1):
-            model_input.to_cuda()
-            if self.args.enable_prefill_decode_mixed and model_input.input_ids.shape[0] > 0:
-                gather_token_prefill_decode_mixed(
-                    input_ids=model_input.input_ids,
-                    req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
-                    b_req_idx=model_input.b_req_idx,
-                    b_mtp_index=model_input.b_mtp_index,
-                    b_is_decode_req=model_input.b_is_decode_req,
-                    b_prefill_start_loc=model_input.b_prefill_start_loc,
-                )
+            self.batch_runner.prepare_input(model_input, move_to_device=True)
         return self._microbatch_overlap_prefill_cuda(model_input0, model_input1)
 
     def _microbatch_overlap_prefill_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
         assert self.args.enable_tpsp_mix_mode
-        origin_handle_token_num0 = model_input0.input_ids.shape[0]
-        origin_handle_token_num1 = model_input1.input_ids.shape[0]
-        infer_handle_token_num0 = max(
-            self.tp_world_size_,
-            triton.cdiv(origin_handle_token_num0, self.tp_world_size_) * self.tp_world_size_,
-        )
-        infer_handle_token_num1 = max(
-            self.tp_world_size_,
-            triton.cdiv(origin_handle_token_num1, self.tp_world_size_) * self.tp_world_size_,
-        )
-        origin_batch_size0 = model_input0.batch_size
-        origin_batch_size1 = model_input1.batch_size
-
-        model_input0 = self._create_padded_prefill_model_input(
-            model_input=model_input0, new_handle_token_num=infer_handle_token_num0
-        )
-        model_input1 = self._create_padded_prefill_model_input(
-            model_input=model_input1, new_handle_token_num=infer_handle_token_num1
-        )
-
-        infer_state0 = self._create_inferstate(model_input0, 0)
-        infer_state0.init_some_extra_state(self)
-        infer_state0.init_att_state()
-
-        infer_state1 = self._create_inferstate(model_input1, 1)
-        infer_state1.init_some_extra_state(self)
-        infer_state1.init_att_state()
-
-        prefill_mem_indexes_ready_event = torch.cuda.Event()
-        prefill_mem_indexes_ready_event.record()
-
-        model_output0, model_output1 = self._overlap_tpsp_context_forward(infer_state0, infer_state1=infer_state1)
-
-        model_output0 = self._create_unpad_prefill_model_output(
-            padded_model_output=model_output0,
-            origin_handle_token_num=origin_handle_token_num0,
-            origin_batch_size=origin_batch_size0,
-        )
-        model_output1 = self._create_unpad_prefill_model_output(
-            padded_model_output=model_output1,
-            origin_handle_token_num=origin_handle_token_num1,
-            origin_batch_size=origin_batch_size1,
-        )
-        # 在开启使用deepep的时候，需要调用clear_deepep_buffer做资源清理，没有启用的时候
-        # 该调用没有实际意义
-        dist_group_manager.clear_deepep_buffer()
-        model_output0.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
-        model_output1.prefill_mem_indexes_ready_event = prefill_mem_indexes_ready_event
-        return model_output0, model_output1
+        return self.batch_runner.run_prefill(model_input0, model_input1, prepared=True)
 
     @torch.no_grad()
     def microbatch_overlap_decode(self, model_input0: ModelInput, model_input1: ModelInput):
-        """执行由调用方提前构建好的两个 decode microbatch。"""
-
         for model_input in (model_input0, model_input1):
-            model_input.to_cuda()
-            if model_input.input_ids is None:
-                if model_input.batch_size > 0:
-                    model_input.input_ids = gather_token(
-                        req_to_next_token_ids=(self.req_manager.req_sampling_params_manager.req_to_next_token_ids),
-                        b_req_idx=model_input.b_req_idx,
-                        b_mtp_index=model_input.b_mtp_index,
-                    )
-                else:
-                    model_input.input_ids = torch.empty(
-                        (0,),
-                        dtype=torch.int64,
-                        device=model_input.b_req_idx.device,
-                    )
+            self.batch_runner.prepare_input(model_input, move_to_device=True)
         return self._microbatch_overlap_decode_cuda(model_input0, model_input1)
 
     def _microbatch_overlap_decode_cuda(self, model_input0: ModelInput, model_input1: ModelInput):
         assert self.args.enable_tpsp_mix_mode
-
-        origin_batch_size0 = model_input0.batch_size
-        origin_batch_size1 = model_input1.batch_size
-        max_len_in_batch = max(2, model_input0.max_kv_seq_len, model_input1.max_kv_seq_len)
-        infer_batch_size = self._align_decode_batch_size(max(1, origin_batch_size0, origin_batch_size1))
-
-        if self.graph is not None and self.graph.can_run(infer_batch_size, max_len_in_batch):
-            infer_batch_size = self.graph.find_closest_graph_batch_size(infer_batch_size)
-            need_capture = self.graph.need_capture(infer_batch_size)
-            padded_model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
-            padded_model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            infer_state0 = self._create_inferstate(padded_model_input0, 0)
-            infer_state0.is_cuda_graph_capture = need_capture
-            infer_state0.is_cuda_graph_replay = not need_capture
-            infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
-
-            infer_state1 = self._create_inferstate(padded_model_input1, 1)
-            infer_state1.is_cuda_graph_capture = need_capture
-            infer_state1.is_cuda_graph_replay = not need_capture
-            infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
-
-            if need_capture:
-                model_output0, model_output1 = self.graph.capture_decode(
-                    self._overlap_tpsp_token_forward,
-                    infer_state0,
-                    infer_state1=infer_state1,
-                )
-            else:
-                model_output0, model_output1 = self.graph.replay(
-                    infer_state0,
-                    infer_state1=infer_state1,
-                )
-
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
-        else:
-            model_input0 = self._create_padded_decode_model_input(model_input0, infer_batch_size)
-            model_input1 = self._create_padded_decode_model_input(model_input1, infer_batch_size)
-            infer_state0 = self._create_inferstate(model_input0, 0)
-            infer_state0.init_some_extra_state(self)
-            infer_state0.init_att_state()
-
-            infer_state1 = self._create_inferstate(model_input1, 1)
-            infer_state1.init_some_extra_state(self)
-            infer_state1.init_att_state()
-
-            model_output0, model_output1 = self._overlap_tpsp_token_forward(infer_state0, infer_state1=infer_state1)
-            model_output0 = self._create_unpad_decode_model_output(model_output0, origin_batch_size=origin_batch_size0)
-            model_output1 = self._create_unpad_decode_model_output(model_output1, origin_batch_size=origin_batch_size1)
-
-        return model_output0, model_output1
+        return self.batch_runner.run_decode(model_input0, model_input1, prepared=True)
 
     @final
     def _overlap_tpsp_context_forward(self, infer_state: InferStateInfo, infer_state1: InferStateInfo):
@@ -1064,208 +827,29 @@ class TpPartBaseModel:
         return model_output, model_output1
 
     @final
-    @torch.no_grad()
     def _check_max_len_infer(self):
-        disable_check_max_len_infer = os.getenv("DISABLE_CHECK_MAX_LEN_INFER", None) is not None
-        if disable_check_max_len_infer:
-            logger.info("disable_check_max_len_infer is true")
-            return
-
-        # 做一次 同步
-        torch.distributed.barrier()
-
-        # 模拟最大长度进行 prefill，观察是否出现 OOM
-        try:
-            logger.info("begin check max_len infer")
-            dummy_input_ids = torch.ones(self.batch_max_tokens, dtype=torch.int64, device="cuda")
-            b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-            page_size = self.att_state_manager.full_att_allocator.page_size
-            alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-            mem_indexes = self.att_state_manager.full_att_allocator.alloc(alloc_token_num).cuda()
-            self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-            b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
-            b_seq_len[:] = self.batch_max_tokens
-            b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
-            total_token_num = self.batch_max_tokens
-            b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-            b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
-            model_input = ModelInput(
-                batch_size=1,
-                total_token_num=total_token_num,
-                max_q_seq_len=self.batch_max_tokens,
-                max_kv_seq_len=self.batch_max_tokens,
-                max_cache_len=0,
-                input_ids=dummy_input_ids,
-                b_req_idx=b_req_idx,
-                b_seq_len=b_seq_len,
-                b_mtp_index=b_mtp_index,
-                b_is_decode_req=b_is_decode_req,
-                is_prefill=True,
-                b_ready_cache_len=b_ready_cache_len,
-                b_prefill_start_loc=b_prefill_start_loc,
-                b_prefill_has_output_cpu=[False],
-                multimodal_params=[{"images": [], "audios": []}],
-            )
-            model_output = self.forward(
-                model_input,
-            )
-            prob_out = torch.softmax(model_output.logits, dim=-1)
-            del model_output
-            torch.argmax(prob_out, dim=1, keepdim=True)
-            prob_out = None
-            self.req_manager.free_all()
-            self.att_state_manager.full_att_allocator.free_all()
-            logger.info(f"check max_len {self.batch_max_tokens} infer ok")
-        except (RuntimeError, torch.OutOfMemoryError) as e:
-            logger.exception(str(e))
-            exception_str = (
-                "check max len infer fail, you can try:"
-                "1.Set the --mem_fraction or --max_total_token_num startup parameter to a smaller value."
-                "2.Set the --max_req_total_len to a smaller value."
-                "3.Set the --batch_max_tokens startup parameter to a smaller value."
-            )
-            logger.error(exception_str)
-            raise Exception(exception_str)
-        torch.cuda.empty_cache()
-        return
+        return self.warmup_runner.check_max_length(self.batch_max_tokens)
 
     def autotune_layers(self):
         # 控制autotune的层数，用于适配不同模型
         return self.config.get("first_k_dense_replace", 0) + 1
 
     @final
-    @torch.no_grad()
-    @post_empty_cache
     def _autotune_warmup(self):
-        Autotuner.start_autotune_warmup(AutotuneKernelType.GENERAL)
-        torch.distributed.barrier()
+        return self.warmup_runner.autotune(self.batch_max_tokens, self._autotune_recipe)
 
-        warmup_lengths = [1, 4, 8, 16, 32, 64, 128, 256, 1024, 2048, 4096]
-
-        if self.batch_max_tokens not in warmup_lengths:
-            warmup_lengths.append(self.batch_max_tokens)
-
-        warmup_lengths = [e for e in warmup_lengths if e <= self.batch_max_tokens]
-
-        warmup_lengths.sort(reverse=True)
-
-        layer_num_bak = self.layers_num
-        self.layers_num = self.autotune_layers()
-        for input_len in tqdm(warmup_lengths, desc="warming up"):
-            try:
-                rand_gen = torch.Generator(device="cuda")
-                rand_gen.manual_seed(input_len)
-                dummy_input_ids = torch.randint(
-                    0, 10000, (input_len,), dtype=torch.int64, device="cuda", generator=rand_gen
-                )
-                b_req_idx = torch.tensor([self.req_manager.alloc()], dtype=torch.int32, device="cuda")
-                page_size = self.att_state_manager.full_att_allocator.page_size
-                alloc_token_num = triton.cdiv(len(dummy_input_ids), page_size) * page_size
-                mem_indexes = self.att_state_manager.full_att_allocator.alloc(alloc_token_num).cuda()
-                self.req_manager.req_to_token_indexs[b_req_idx[0], : len(mem_indexes)] = mem_indexes
-                b_seq_len = torch.ones(1, dtype=torch.int32, device="cuda")
-                b_seq_len[:] = input_len
-                b_ready_cache_len = torch.zeros(1, dtype=torch.int32, device="cuda")
-                b_prefill_start_loc = torch.zeros(1, dtype=torch.int32, device="cuda")
-                total_token_num = input_len
-                b_mtp_index = torch.zeros(1, dtype=torch.int32, device="cuda")
-                b_is_decode_req = torch.zeros(1, dtype=torch.bool, device="cuda")
-                model_input = ModelInput(
-                    batch_size=1,
-                    total_token_num=total_token_num,
-                    max_q_seq_len=input_len,
-                    max_kv_seq_len=input_len,
-                    max_cache_len=0,
-                    input_ids=dummy_input_ids,
-                    b_req_idx=b_req_idx,
-                    b_seq_len=b_seq_len,
-                    b_mtp_index=b_mtp_index,
-                    b_is_decode_req=b_is_decode_req,
-                    is_prefill=True,
-                    b_ready_cache_len=b_ready_cache_len,
-                    b_prefill_start_loc=b_prefill_start_loc,
-                    b_prefill_has_output_cpu=[
-                        False,
-                    ],
-                    multimodal_params=[{"images": [], "audios": []}],
-                    **self._gen_special_model_input(total_token_num),
-                )
-                model_output = self.forward(
-                    model_input,
-                )
-                del model_output
-                self.req_manager.free_all()
-                self.att_state_manager.full_att_allocator.free_all()
-                gc.collect()
-                torch.cuda.empty_cache()
-            except Exception as e:
-                logger.warning(f"autotune warmup for length {input_len} failed: {str(e)}")
-                logger.exception(str(e))
-                self.req_manager.free_all()
-                self.att_state_manager.full_att_allocator.free_all()
-                gc.collect()
-                torch.cuda.empty_cache()
-        self.layers_num = layer_num_bak
-        torch.distributed.barrier()
-        Autotuner.end_autotune_warmup()
+    @contextmanager
+    def _autotune_recipe(self):
+        layers = self.layers_num
+        self.layers_num = min(layers, self.autotune_layers())
+        try:
+            yield
+        finally:
+            self.layers_num = layers
 
     @final
-    @torch.no_grad()
     def _init_padded_req(self):
-        """
-        对 padded 所使用的req 进行初始化， 目前有非常多的地方需要使用，所以将其初始化固定为固定流程
-        """
-        # 做一次 同步
-        torch.distributed.barrier()
-
-        # prefill init padding req.
-        prefill_input_len = 1
-        batch_size = 1
-        dummy_input_ids = torch.ones((batch_size,), dtype=torch.int64, device="cuda")
-        b_req_idx = torch.tensor(
-            [self.req_manager.HOLD_REQUEST_ID for _ in range(batch_size)], dtype=torch.int32, device="cuda"
-        )
-        b_seq_len = torch.ones(batch_size, dtype=torch.int32, device="cuda")
-        b_ready_cache_len = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        b_q_seq_len = b_seq_len - b_ready_cache_len
-        b_prefill_start_loc = b_q_seq_len.cumsum(dim=0, dtype=torch.int32) - b_q_seq_len
-        total_token_num = prefill_input_len * batch_size
-        b_mtp_index = torch.zeros(batch_size, dtype=torch.int32, device="cuda")
-        b_is_decode_req = torch.zeros(batch_size, dtype=torch.bool, device="cuda")
-        model_input = ModelInput(
-            batch_size=batch_size,
-            total_token_num=total_token_num,
-            max_q_seq_len=prefill_input_len,
-            max_kv_seq_len=prefill_input_len,
-            max_cache_len=0,
-            input_ids=dummy_input_ids,
-            b_req_idx=b_req_idx,
-            b_mtp_index=b_mtp_index,
-            b_seq_len=b_seq_len,
-            b_is_decode_req=b_is_decode_req,
-            b_ready_cache_len=b_ready_cache_len,
-            b_prefill_start_loc=b_prefill_start_loc,
-            b_prefill_has_output_cpu=[
-                False,
-            ],
-            is_prefill=True,
-            multimodal_params=[{"images": [], "audios": []} for _ in range(batch_size)],
-            **self._gen_special_model_input(total_token_num),
-        )
-
-        model_output: ModelOutput = self.forward(model_input)
-        del model_input
-        del dummy_input_ids
-        del b_req_idx
-        del b_seq_len
-        del b_ready_cache_len
-        del model_output
-        del b_mtp_index
-        del b_prefill_start_loc
-        del b_q_seq_len
-        torch.cuda.empty_cache()
-        return
+        return self.warmup_runner.initialize_hold()
 
     def _gen_special_model_input(self, token_num: int):
         special_model_input = {}

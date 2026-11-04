@@ -4,8 +4,8 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.basemodel import cuda_graph as cuda_graph_module
-from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.common.execution import decode_graph as cuda_graph_module
+from lightllm.common.execution.decode_graph import CudaGraph
 from lightllm.common.triton_utils import autotuner as autotuner_module
 from lightllm.common.triton_utils.autotuner import AutotuneKernelType, AutotuneLevel, Autotuner, autotune
 

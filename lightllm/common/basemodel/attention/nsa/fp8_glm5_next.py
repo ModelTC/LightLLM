@@ -141,7 +141,7 @@ class Fp8Glm5NextSparsePrefillState(Glm5NextSparsePrefillState):
             graph_guard = (
                 self.infer_state.is_cuda_graph_capture
                 or self.backend.model.prefill_graph is not None
-                or hasattr(self.infer_state, "prefill_cuda_graph_exe_list")
+                or self.infer_state.prefill_program is not None
             )
             if not graph_guard and not torch.cuda.is_current_stream_capturing():
                 generic_workspace = self.backend.get_generic_prefill_workspace(

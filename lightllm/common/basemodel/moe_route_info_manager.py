@@ -46,6 +46,8 @@ API 返回。
   routed experts 布局，不分配 capture buffer。
 - **Infer 进程（通常 dp_rank==0）**：在 phase-1 之后调用
   ``init_capture_buffer(kv_cache_size)``，再参与 capture / extract。
+  启动时通过 ``bind_capture()`` 绑定原生存储，在 warmup / Graph 捕获之前交给 Runner；
+  计算路径只读取批次回调，不查询本模块的进程单例。
 
 数据流简图::
 
@@ -216,6 +218,18 @@ class MoeRouteInfoManager:
             f"routing_buffer(cpu)={buffer_bytes / 1024 / 1024:.2f}MB, dtype={torch_dtype}"
         )
 
+    def bind_capture(self):
+        from lightllm.common.execution.route_capture import RouteCapture
+
+        if not self.is_buffer_initialized():
+            return None
+        return RouteCapture(
+            self.routing_buffer,
+            self.routing_buffer_ptr,
+            tuple(self.layer_index_to_moe_index.items()),
+            self.dtype_id,
+        )
+
     def get_moe_capture_callback(self, layer_index: int, mem_indexes: torch.Tensor):
         """Return a callback that captures MoE topk expert ids into the routing buffer."""
         if not self.is_buffer_initialized():
@@ -257,8 +271,5 @@ class MoeRouteInfoManager:
 
 
 def get_moe_capture_callback(infer_state, layer_index: int):
-    """Return a callback that captures MoE topk expert ids, or None if capture is disabled."""
-    mgr = MoeRouteInfoManager.get_instance()
-    if mgr is None or not mgr.is_buffer_initialized():
-        return None
-    return mgr.get_moe_capture_callback(layer_index=layer_index, mem_indexes=infer_state.mem_index)
+    """Read the callback prepared for this batch, without querying global resources."""
+    return getattr(infer_state, "moe_capture_callbacks", {}).get(layer_index)

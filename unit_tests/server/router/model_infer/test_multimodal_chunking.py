@@ -1,3 +1,5 @@
+from lightllm.common.transfer import CopyOperation, CopyPlan, Transfer
+from unit_tests.common.transfer.helpers import Runtime
 from types import SimpleNamespace
 
 import pytest
@@ -225,7 +227,9 @@ def test_mm_chunking_keeps_the_original_state_cache_position(monkeypatch, disabl
     )
     monkeypatch.setattr(infer_batch.g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(
-        infer_batch.g_infer_context, "shm_req_manager", SimpleNamespace(get_req_obj_by_index=lambda index: shm_req)
+        infer_batch.g_infer_context,
+        "shm_req_manager",
+        SimpleNamespace(get_req_obj_by_index=lambda index: shm_req),
     )
     monkeypatch.setattr(
         infer_batch.g_infer_context,
@@ -331,8 +335,8 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
                     get_page_layouts=lambda: {},
-                    read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded.append(
-                        req.hold_kv_len
+                    plan_read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: CopyPlan(
+                        "unpack", (CopyOperation("kv", None, lambda: loaded.append(req.hold_kv_len)),)
                     ),
                 ),
                 bounded_att_big_page_allocator=SimpleNamespace(alloc=lambda count: list(range(count))),
@@ -342,6 +346,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
+    monkeypatch.setattr(common, "Transfer", lambda: Transfer(Runtime()))
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
     monkeypatch.setattr(common.g_infer_context, "is_hybrid_att_model", hybrid)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)

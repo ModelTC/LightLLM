@@ -12,6 +12,8 @@ from lightllm.models.qwen3next.layer_infer.transformer_layer_infer import (
 from lightllm.models.qwen3next.infer_struct import Qwen3NextInferStateInfo
 from lightllm.utils.log_utils import init_logger
 from lightllm.models.qwen3next.config import Qwen3NextResourceConfig
+from lightllm.common.execution.model_adapter import GDNModelAdapter
+from lightllm.models.llama.model import LlamaModelAdapter
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -22,7 +24,40 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
+class Qwen3NextModelAdapter(GDNModelAdapter):
+    pre_and_post_weight_class = Qwen3NextPreAndPostLayerWeight
+    transformer_weight_class = Qwen3NextTransformerLayerWeight
+    pre_layer_infer_class = LlamaModelAdapter.pre_layer_infer_class
+    post_layer_infer_class = LlamaModelAdapter.post_layer_infer_class
+    transformer_layer_infer_class = Qwen3NextTransformerLayerInfer
+
+    def moe_specs(self):
+        from lightllm.common.execution.specs import MoeSpec
+
+        config = self.config
+        experts = config.get("num_experts", 0)
+        if not experts:
+            return {}
+        spec = MoeSpec(
+            config["hidden_size"],
+            config["moe_intermediate_size"],
+            experts,
+            config["num_experts_per_tok"],
+            self.dtype,
+            renormalize=config.get("norm_topk_prob", False),
+            shared_experts=1,
+            gated_shared=True,
+        )
+        return {
+            layer: spec
+            for layer in self.layer_ids
+            if layer not in config.get("mlp_only_layers", [])
+            and (layer + 1) % config.get("decoder_sparse_step", 1) == 0
+        }
+
+
 class Qwen3NextTpPartModel(Qwen3MOEModel):
+    model_adapter_class = Qwen3NextModelAdapter
     is_hybrid_att_model = True
 
     # weight class
@@ -95,7 +130,8 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         return
 
     def autotune_layers(self):
-        return self.config["full_attention_interval"]
+        kinds = [(layer.is_linear_attention_layer, layer.is_moe) for layer in self.layers_infer]
+        return max((kinds.index(kind) for kind in set(kinds)), default=-1) + 1
 
     def _init_config(self):
         super()._init_config()
@@ -115,7 +151,6 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
         from lightllm.utils.torch_dtype_utils import get_torch_dtype
 
         config = cls.normalize_model_config(model_config)
-        assert args.llm_kv_type in ("None", "fp8kv_sph", "fp8kv_spt"), "unsupported Qwen3Next KV encoding"
         cfg = Qwen3NextResourceConfig.from_model_config(config, args)
         logical_layer_groups = tuple((model_logical_layer_ids[index],) for index in cfg.get_full_att_layer_indices())
         if not logical_layer_groups:
@@ -130,6 +165,7 @@ class Qwen3NextTpPartModel(Qwen3MOEModel):
                 tp_world_size=tp_world_size,
             ),
             kv_type=args.llm_kv_type,
+            group_size=args.llm_kv_quant_group_size,
             page_size=args.page_size,
             device="meta",
         )

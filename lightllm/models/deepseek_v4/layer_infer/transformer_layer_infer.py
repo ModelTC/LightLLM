@@ -8,7 +8,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import s
 from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.dist_utils import get_global_world_size
-from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from .compressor import CompressorInfer
 from .indexer import DeepseekV4IndexInfer
 from ..triton_kernel.rotary_emb import inverse_rotary_emb
@@ -404,29 +403,18 @@ class DeepseekV4TransformerLayerInfer(TransformerLayerInferTpl):
     def _context_attention_wrapper_run(
         self, q, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight: DeepseekV4TransformerLayerWeight
     ):
-        if torch.cuda.is_current_stream_capturing():
-            _q = tensor_to_no_ref_tensor(q)
-            _q_lora = tensor_to_no_ref_tensor(q_lora)
-            _x = tensor_to_no_ref_tensor(x)
+        program = infer_state.prefill_program
+        if program is None or not program.is_capturing:
+            return self._context_attention_kernel(q, q_lora, x, infer_state, layer_weight)
+        # The compressor mutates cache state, so use its declared output shape.
+        output = self.alloc_tensor((q.shape[0], q.shape[1], self.head_dim_), dtype=q.dtype, device=q.device)
 
-            pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
-            pre_capture_graph.__exit__(None, None, None)
+        def attention(tensors, batch):
+            query, latent_query, hidden, out = tensors
+            self._context_attention_kernel(query, latent_query, hidden, batch, layer_weight, out=out)
 
-            infer_state.prefill_cuda_graph_create_graph_obj()
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            # Same graph-split output handoff as the template, but avoid its dry-run because
-            # DSV4 attention mutates compressor/cache state before returning.
-            o = self.alloc_tensor((q.shape[0], q.shape[1], self.head_dim_), dtype=q.dtype, device=q.device)
-            _o = tensor_to_no_ref_tensor(o)
-
-            def att_func(new_infer_state: DeepseekV4InferStateInfo):
-                self._context_attention_kernel(_q, _q_lora, _x, new_infer_state, layer_weight, out=_o)
-                return
-
-            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func, after_graph=pre_capture_graph)
-            return o[:, : self.tp_q_head_num_]
-
-        return self._context_attention_kernel(q, q_lora, x, infer_state, layer_weight)
+        program.defer(attention, (q, q_lora, x, output))
+        return output[:, : self.tp_q_head_num_]
 
     def _compress_and_index(self, q_lora, x, infer_state: DeepseekV4InferStateInfo, layer_weight):
         cos_table, sin_table = self.cos_compress_table, self.sin_compress_table

@@ -149,8 +149,9 @@ def per_token_group_quant_fp8(
     alloc_func: Callable = torch.empty,
     use_ue8m0_scales: bool = False,
     use_packed_ue8m0: bool = False,
+    use_triton: bool = False,
 ):
-    use_sgl = HAS_SGL_KERNEL and (not use_ue8m0_scales or use_packed_ue8m0)
+    use_sgl = not use_triton and HAS_SGL_KERNEL and (not use_ue8m0_scales or use_packed_ue8m0)
     x_q = alloc_func(x.shape, dtype=dtype, device=x.device)
     # Packed UE8M0 uses SGL's INT32, column-major TMA-aligned scale layout.
     if use_packed_ue8m0:

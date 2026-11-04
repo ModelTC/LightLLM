@@ -1,10 +1,8 @@
-import json
-import os
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
-from lightllm.common.build_utils import repair_config
-from lightllm.models.llama.model import LlamaTpPartModel
-from lightllm.models.qwen2.model import Qwen2TpPartModel
-from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel
+from lightllm.common.basemodel import TpPartBaseModel
+from lightllm.models.llama.model import LlamaTpPartModel, LlamaModelAdapter
+from lightllm.models.qwen2.model import Qwen2TpPartModel, Qwen2ModelAdapter
+from lightllm.models.qwen2_vl.model import Qwen2VLTpPartModel, Qwen2VLModelAdapter
 from lightllm.models.qwen2_vl.vision_process import smart_resize
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.models.tarsier2.layer_weights.pre_and_post_layer_weight import (
@@ -41,7 +39,7 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
         self.merge_size = self.image_processor.merge_size
         grid_t = 1
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
-        merge_length = self.merge_size ** 2
+        merge_length = self.merge_size**2
         self.token_num = (grid_t * grid_h * grid_w) // merge_length
         self.image_length = self.token_num
         return self.image_length
@@ -50,7 +48,6 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
         raise NotImplementedError
 
     def encode(self, prompt, multimodal_params: MultimodalParams = None, **kwargs):
-
         origin_ids = self.tokenizer.encode(prompt)
 
         # <img><image_pad></img> -> <img></img>
@@ -86,64 +83,37 @@ class Tarsier2Tokenizer(BaseMultiModalTokenizer):
         return input_ids
 
 
-class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):
-    # weight class
+class Tarsier2Qwen2ModelAdapter(Qwen2ModelAdapter):
     pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
-
-    # infer class
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
 
-    def __init__(self, kvargs):
-        super().__init__(kvargs)
-        return
+
+class Tarsier2Qwen2TpPartModel(Qwen2TpPartModel):
+    model_adapter_class = Tarsier2Qwen2ModelAdapter
+    pre_and_post_weight_class = Tarsier2Qwen2ModelAdapter.pre_and_post_weight_class
+    pre_layer_infer_class = Tarsier2Qwen2ModelAdapter.pre_layer_infer_class
 
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["text_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-        return
+        TpPartBaseModel._init_config(self)
+
+
+class Tarsier2Qwen2VLModelAdapter(Qwen2VLModelAdapter):
+    pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
+    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
 
 
 class Tarsier2Qwen2VLTpPartModel(Qwen2VLTpPartModel):
-    # weight class
-    pre_and_post_weight_class = Tarsier2Qwen2PreAndPostLayerWeight
+    model_adapter_class = Tarsier2Qwen2VLModelAdapter
+    pre_and_post_weight_class = Tarsier2Qwen2VLModelAdapter.pre_and_post_weight_class
+    pre_layer_infer_class = Tarsier2Qwen2VLModelAdapter.pre_layer_infer_class
 
-    # infer class
+
+class Tarsier2LlamaModelAdapter(LlamaModelAdapter):
+    pre_and_post_weight_class = Tarsier2LlamaPreAndPostLayerWeight
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-
-    def __init__(self, kvargs):
-        super().__init__(kvargs)
-        return
-
-    def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["text_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-        return
 
 
 class Tarsier2LlamaTpPartModel(LlamaTpPartModel):
-
-    pre_and_post_weight_class = Tarsier2LlamaPreAndPostLayerWeight
-
-    # infer class
-    pre_layer_infer_class = LlamaMultimodalPreLayerInfer
-
-    def __init__(self, kvargs):
-        super().__init__(kvargs)
-        return
-
-    def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)["text_config"]
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-        return
+    model_adapter_class = Tarsier2LlamaModelAdapter
+    pre_and_post_weight_class = Tarsier2LlamaModelAdapter.pre_and_post_weight_class
+    pre_layer_infer_class = Tarsier2LlamaModelAdapter.pre_layer_infer_class

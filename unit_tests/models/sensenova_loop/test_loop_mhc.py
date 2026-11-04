@@ -10,18 +10,23 @@ from lightllm.common.basemodel.triton_kernel.norm.rmsnorm import rmsnorm_forward
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
-def _route_reference(x, weight, bias, streams, iterations):
+def _route_reference(x, weight, bias, streams, iterations, pre_scale=1.0, fixed_identity=False):
     # Training normalizes the residual before the FP32 router projection.
     flat = x.float()
     logits = F.linear(flat * torch.rsqrt(flat.square().mean(-1, keepdim=True) + 1e-6), weight, bias)
     pre = logits[:, :streams].sigmoid()
     post = 2 * logits[:, streams : 2 * streams].sigmoid()
-    logits = logits[:, 2 * streams :].reshape(-1, streams, streams)
-    for _ in range(iterations):
-        logits = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
-        logits = logits - torch.logsumexp(logits, dim=-2, keepdim=True)
-    mix = logits.exp()
+    if fixed_identity:
+        mix = torch.eye(streams, device=x.device).expand(x.shape[0], -1, -1)
+    else:
+        logits = logits[:, 2 * streams :].reshape(-1, streams, streams)
+        for _ in range(iterations):
+            logits = logits - torch.logsumexp(logits, dim=-1, keepdim=True)
+            logits = logits - torch.logsumexp(logits, dim=-2, keepdim=True)
+        mix = logits.exp()
     branch = (pre.to(x.dtype).unsqueeze(1) @ x.view(-1, streams, x.shape[1] // streams)).squeeze(1)
+    if pre_scale != 1.0:
+        branch = branch * pre_scale
     return branch, mix, post
 
 
@@ -55,6 +60,54 @@ def test_loop_mhc_matches_training_routing_and_rounding(tokens, streams):
     expected_out += expected[2].to(x.dtype).unsqueeze(-1) * layer_out.unsqueeze(1)
     actual_out = hc_post(layer_out, x, actual[1].transpose(1, 2), actual[2], streams)
     torch.testing.assert_close(actual_out.view_as(expected_out), expected_out, atol=0.02, rtol=0.01)
+
+
+@pytest.mark.parametrize("streams", [2, 4])
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+@pytest.mark.parametrize("pre_scale,fixed_identity", [(0.125, False), (3.0, True)])
+def test_loop_mhc_options_preserve_scale_and_identity(streams, dtype, pre_scale, fixed_identity):
+    torch.manual_seed(72)
+    hidden, tokens = 256, 3
+    # Small activations make the pre-RMSNorm scale observable through epsilon.
+    x = torch.randn(tokens, streams * hidden, device="cuda", dtype=dtype) * 1e-4
+    rows = 2 * streams + (0 if fixed_identity else streams * streams)
+    weight = torch.randn(rows, streams * hidden, device="cuda") * 0.008
+    bias = torch.randn(rows, device="cuda")
+    norm = torch.randn(hidden, device="cuda")
+
+    def forward():
+        return hc_pre_norm(
+            x,
+            weight,
+            bias,
+            norm,
+            streams,
+            1e-6,
+            1e-6,
+            20,
+            pre_scale=pre_scale,
+            fixed_identity=fixed_identity,
+        )
+
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        for _ in range(3):
+            forward()
+    torch.cuda.current_stream().wait_stream(stream)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = forward()
+    x.normal_(std=1e-4)
+    eager = forward()
+    graph.replay()
+    for actual, expected in zip(captured, eager):
+        torch.testing.assert_close(actual, expected, atol=0, rtol=0)
+    branch, mix, post = _route_reference(x, weight, bias, streams, 20, pre_scale, fixed_identity)
+    normalized = branch.float() * torch.rsqrt(branch.float().square().mean(-1, keepdim=True) + 1e-6)
+    torch.testing.assert_close(eager[0], (normalized * norm).to(dtype), atol=1e-3, rtol=0.02)
+    torch.testing.assert_close(eager[1], mix, atol=2e-6, rtol=2e-5)
+    torch.testing.assert_close(eager[2], post, atol=2e-6, rtol=2e-5)
 
 
 @pytest.mark.skipif(not has_deepgemm_mhc(), reason="DeepGEMM mHC projection unavailable")

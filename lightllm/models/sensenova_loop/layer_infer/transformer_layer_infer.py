@@ -37,6 +37,8 @@ class SenseNovaLoopTransformerLayerInfer(Qwen35TransformerLayerInfer):
             norm_eps=self.eps_,
             sinkhorn_iters=self.mhc["iterations"],
             use_deepgemm=self.use_deepgemm_mhc,
+            pre_scale=self.mhc.get("pre_scale", 1.0),
+            fixed_identity=self.mhc.get("fixed_identity", False),
         )
 
     def _mhc_post(self, residual, branch, mix, post):

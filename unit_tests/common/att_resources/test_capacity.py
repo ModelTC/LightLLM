@@ -12,7 +12,8 @@ from unit_tests.common.att_resources.model_helpers import rebuild_full_state
 
 from typing import TYPE_CHECKING
 from dataclasses import replace
-from functools import lru_cache, partial
+from functools import partial
+from lightllm.common.attention_state.query_cache import cached_query
 from math import prod
 
 import pytest
@@ -490,7 +491,7 @@ def test_pd_runtime_capacity_includes_field_padding(
 ):
     class PaddedGDNState(GDNState):
         @deepcopy_result
-        @lru_cache(maxsize=None)
+        @cached_query
         def get_pd_transfer_regions(self):
             return tuple(
                 replace(region, byte_start=region.byte_start + 64, byte_end=region.byte_end + 64)
@@ -766,7 +767,7 @@ def test_cpu_page_bytes_derive_from_cached_transfer_layouts(
 def test_cpu_bounded_capacity_includes_state_field_padding(cpu_args: EasyDict):
     class PaddedGDNState(GDNState):
         @deepcopy_result
-        @lru_cache(maxsize=None)
+        @cached_query
         def get_cpu_transfer_regions(self):
             return tuple(
                 replace(region, byte_start=region.byte_start + 64, byte_end=region.byte_end + 64)
@@ -904,7 +905,7 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
     )
     pages = torch.full((2, manager.get_cpu_cache_operator().get_page_bytes()), 87, dtype=torch.uint8, pin_memory=True)
     manager.get_cpu_cache_operator().write_req(
-        token_indices=torch.tensor([], dtype=torch.long),
+        token_indices=torch.tensor([], dtype=torch.long, device="cuda"),
         cpu_page_buffers=pages,
         cpu_page_indices=[1],
         layouts=layouts,
@@ -918,7 +919,7 @@ def test_cpu_bounded_snapshots_reserve_independent_aligned_regions(cpu_args: Eas
     manager.get_cpu_cache_operator().read_req(
         cpu_page_buffers=pages,
         cpu_page_indices=[1],
-        token_indices=torch.tensor([], dtype=torch.long),
+        token_indices=torch.tensor([], dtype=torch.long, device="cuda"),
         state_token_len=8,
         layouts=layouts,
         big_page_slot_ids=target_slots,
@@ -1016,7 +1017,7 @@ def test_manager_uses_state_regions_and_adds_each_resource_offset(transfer: str,
 
     class ReversedCpuRegionsState(GQAFullAttentionState):
         @deepcopy_result
-        @lru_cache(maxsize=None)
+        @cached_query
         def get_cpu_transfer_regions(self):
             regions = super().get_cpu_transfer_regions()
             # 本实现的 CPU 页先保存 V 再保存 K，PD 仍沿用 K/V 顺序。

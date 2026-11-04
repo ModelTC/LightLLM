@@ -118,7 +118,7 @@ class RouterManager(RouterMultiNodeTpHelper, RouterRlOpHelper, object):
         # 初始化模型
         self.model_rpc_servers = []
         # 用于 kv move 管理进程 和 推理进程进行task信息的交互。
-        self.info_queue: mp.Queue = mp.Queue()
+        self.info_queue: mp.Queue = mp.Queue() if self.is_pd_run_mode else None
 
         assert (self.world_size % self.nnodes) == 0
         node_world_size = self.world_size // self.nnodes

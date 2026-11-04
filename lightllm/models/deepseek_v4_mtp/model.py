@@ -4,7 +4,7 @@ from typing import List
 
 import torch
 from safetensors import safe_open
-from tqdm import tqdm
+from lightllm.utils.progress import ThreadProgress as tqdm
 
 from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.models.deepseek_v4.model import DeepseekV4TpPartModel

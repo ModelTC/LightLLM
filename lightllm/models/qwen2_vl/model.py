@@ -1,18 +1,17 @@
-import json
 import numpy as np
+from lightllm.common.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.multimodal_tokenizer import BaseMultiModalTokenizer
 from lightllm.models.qwen_vl.layer_infer.pre_layer_infer import LlamaMultimodalPreLayerInfer
 from lightllm.server.multimodal_params import AudioItem, MultimodalParams, ImageItem
 from lightllm.server.core.objs import SamplingParams
-from lightllm.common.build_utils import repair_config
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 from lightllm.models.qwen2_vl.layer_infer.transformer_layer_infer import Qwen2VLTransformerLayerInfer
 
 from .vision_process import smart_resize
-from lightllm.models.qwen2.model import Qwen2TpPartModel
-import os
+from lightllm.models.qwen2.model import Qwen2TpPartModel, Qwen2ModelAdapter
 from typing import Union, List
 from lightllm.utils.error_utils import InvalidRequestError
+
 
 # Warp of the origal tokenizer
 class QWen2VLTokenizer(BaseMultiModalTokenizer):
@@ -44,7 +43,7 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
             height=height, width=width, factor=factor, min_pixels=self.min_pixel, max_pixels=self.max_pixel
         )
         grid_h, grid_w = resized_height // self.patch_size, resized_width // self.patch_size
-        token_num = (grid_h * grid_w) // (self.merge_size ** 2)
+        token_num = (grid_h * grid_w) // (self.merge_size**2)
         position_delta = max(grid_h // self.merge_size, grid_w // self.merge_size) - token_num
         # delta 是为了mrope准备的，记录由于图片引入，position_id 产生的偏移量
         img.grid_thwd = (1, grid_h // self.merge_size, grid_w // self.merge_size, position_delta)
@@ -100,24 +99,16 @@ class QWen2VLTokenizer(BaseMultiModalTokenizer):
             offset = end + 1
 
 
-class Qwen2VLTpPartModel(Qwen2TpPartModel):
-
+class Qwen2VLModelAdapter(Qwen2ModelAdapter):
     pre_layer_infer_class = LlamaMultimodalPreLayerInfer
     transformer_layer_infer_class = Qwen2VLTransformerLayerInfer
 
+
+class Qwen2VLTpPartModel(Qwen2TpPartModel):
+    model_adapter_class = Qwen2VLModelAdapter
+    pre_layer_infer_class = Qwen2VLModelAdapter.pre_layer_infer_class
+    transformer_layer_infer_class = Qwen2VLModelAdapter.transformer_layer_infer_class
     infer_state_class = Qwen2VLInferStateInfo
 
-    def __init__(self, kvargs):
-        super().__init__(kvargs)
-        return
-
     def _init_config(self):
-        with open(os.path.join(self.weight_dir_, "config.json"), "r") as json_file:
-            self.config = json.load(json_file)
-        # rename keys
-        repair_config(self.config, same_names=["num_attention_heads", "n_head"])
-        repair_config(self.config, same_names=["hidden_size", "n_embd", "n_embed"])
-        repair_config(self.config, same_names=["num_hidden_layers", "n_layer"])
-        if self.finetune_config:
-            self.config["vocab_size"] = self.finetune_config.vocab_size
-        return
+        TpPartBaseModel._init_config(self)

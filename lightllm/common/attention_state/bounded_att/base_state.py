@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+from ..query_cache import CachedQueries
 from .interface import CoreInterface, CpuCacheInterface, DpCopyInterface, PdInterface
 
 
-class BoundedAttentionState(CoreInterface, CpuCacheInterface, DpCopyInterface, PdInterface):
+class BoundedAttentionState(CachedQueries, CoreInterface, CpuCacheInterface, DpCopyInterface, PdInterface):
     """单种 bounded-attention 方案的数据操作，索引和槽位由调用方分配。"""

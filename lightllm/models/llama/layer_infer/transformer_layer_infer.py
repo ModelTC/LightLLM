@@ -25,7 +25,9 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         self.tp_k_head_num_ = max(network_config["num_key_value_heads"] // self.tp_world_size_, 1)
         self.tp_v_head_num_ = max(network_config["num_key_value_heads"] // self.tp_world_size_, 1)
         self.tp_o_head_num_ = self.tp_q_head_num_
-        self.head_dim_ = network_config["hidden_size"] // network_config["num_attention_heads"]
+        self.head_dim_ = network_config.get(
+            "head_dim", network_config["hidden_size"] // network_config["num_attention_heads"]
+        )
         self.embed_dim_ = network_config["hidden_size"]
         self._bind_func()
         return
@@ -46,6 +48,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
+        bound = getattr(self, "bound_prefill_attention", None)
+        if bound is not None:
+            inputs = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+            return bound.run(inputs, bound.prepare_batch(infer_state)).view(q.shape)
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="gqa",
@@ -70,6 +76,10 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         infer_state: LlamaInferStateInfo,
         layer_weight: LlamaTransformerLayerWeight,
     ) -> torch.Tensor:
+        bound = getattr(self, "bound_decode_attention", None)
+        if bound is not None:
+            inputs = q.view(-1, self.tp_q_head_num_, self.head_dim_)
+            return bound.run(inputs, bound.prepare_batch(infer_state)).view(q.shape)
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="gqa",

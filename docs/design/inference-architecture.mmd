@@ -1,0 +1,26 @@
+flowchart TB
+    subgraph INIT["启动装配"]
+        M["模型定义 Model<br/>扩展入口：ModelAdapter"]
+        P["规划与绑定 Planner"]
+        M -. "计算语义与状态需求" .-> P
+    end
+
+    P -. "已绑定的执行计划" .-> R
+
+    subgraph RUN["推理执行"]
+        R["执行与缓存协调 Runner"]
+        C["计算后端 Compute<br/>Attention / Linear / MoE<br/>AttentionBackend → BoundAttention"]
+        S["状态存储 StateStore"]
+        T["数据搬运 Transfer"]
+        R -->|"批次准备与计算"| C
+        R -->|"分配、提交、释放"| S
+        R -->|"加载、卸载、迁移"| T
+        S -. "原生视图" .-> C
+        S -. "原生视图" .-> T
+    end
+
+    H["硬件运行时 DeviceRuntime"]
+    R -->|"执行依赖与 Graph"| H
+    C -->|"算子执行"| H
+    S -->|"物理内存"| H
+    T -->|"拷贝与通信"| H

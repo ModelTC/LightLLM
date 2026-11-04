@@ -6,6 +6,7 @@ from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
 from typing import TYPE_CHECKING
 from dataclasses import replace
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -156,7 +157,8 @@ def test_cpu_restore_forwards_absolute_length_for_partial_prefix(monkeypatch: py
     ) -> None:
         restored.append((req_indices, state_token_lens, page_kind, page_slot_ids))
 
-    monkeypatch.setattr(manager, "restore_bounded_att_runtime_from_pages", record_restore)
+    for state in manager.get_bounded_attention_states():
+        monkeypatch.setattr(state, "restore_bounded_att_runtime_from_pages", record_restore)
     # 只加载绝对位置 [64, 70)，本批长度 6；恢复位置必须是 70，且末尾碎页使用 LOAD。
     manager.get_cpu_cache_operator().read_req(
         cpu_page_buffers=torch.empty((2, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8),
@@ -167,7 +169,7 @@ def test_cpu_restore_forwards_absolute_length_for_partial_prefix(monkeypatch: py
         req_idx=1,
         state_token_len=70,
     )
-    assert restored == [([1], [70], "big", [2])]
+    assert restored == [([1], [70], "big", [2])] * len(manager.get_bounded_attention_states())
 
 
 @pytest.mark.parametrize("operation", ["write_to_pd_page", "read_from_pd_page"])
@@ -187,14 +189,17 @@ def test_pd_bounded_only_forwards_prefix_length(operation: str, monkeypatch: pyt
 
     for state in manager.get_bounded_attention_states():
         monkeypatch.setattr(state, operation, record_length)
-    getattr(manager.get_pd_operator(), "write_page" if operation == "write_to_pd_page" else "read_page")(
-        pd_page_buffers=torch.empty((1, max(layout.byte_end for layout in layouts.values())), dtype=torch.uint8),
+    plan = getattr(
+        manager.get_pd_operator(), "plan_write_page" if operation == "write_to_pd_page" else "plan_read_page"
+    )(
+        pd_page_buffers=SimpleNamespace(is_cuda=True),
         pd_page_index=0,
         kind="att_state",
         layouts=layouts,
         req_idx=2,
         state_token_len=29,
     )
+    plan.run()
     assert lengths == [(2, 29)] * len(manager.get_bounded_attention_states())
 
 

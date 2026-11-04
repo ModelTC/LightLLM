@@ -118,6 +118,12 @@ class FlashInferAllReduce:
         self._ws_max_token_num = max_token_num
         return True
 
+    def close(self):
+        self.disabled = True
+        if self._workspace is not None:
+            self._workspace.destroy()
+            self._workspace = None
+
     def should_use(self, inp: torch.Tensor) -> bool:
         if self.disabled or not inp.is_cuda or not inp.is_contiguous():
             return False

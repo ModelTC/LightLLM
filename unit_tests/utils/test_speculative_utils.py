@@ -1,5 +1,6 @@
 import weakref
 import json
+import os
 from importlib import import_module
 from types import SimpleNamespace
 
@@ -16,6 +17,19 @@ from lightllm.common.basemodel.attention.triton.fp import TritonDecodeAttState
 from lightllm.models import get_draft_model_class
 from lightllm.models.qwen3_eagle.layer_weights.transformer_layer_weight import Qwen3EagleTransformerLayerWeight
 from lightllm.utils import envs_utils
+
+
+@pytest.fixture(autouse=True)
+def restore_start_args(monkeypatch):
+    previous = os.environ.get("LIGHTLLM_START_ARGS")
+    caches = (envs_utils.get_env_start_args, envs_utils.get_added_mtp_kv_layer_num, envs_utils.get_llm_data_type)
+    yield
+    if previous is None:
+        os.environ.pop("LIGHTLLM_START_ARGS", None)
+    else:
+        os.environ["LIGHTLLM_START_ARGS"] = previous
+    for function in caches:
+        function.cache_clear()
 
 
 @pytest.mark.parametrize(

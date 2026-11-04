@@ -56,6 +56,7 @@ def test_ffn_only_draft_has_no_state_or_attention_backend(monkeypatch: pytest.Mo
     draft.infer_state_class = InferStateInfo
     draft.return_all_prompt_logics = False
     draft.hidden_collector_prototype = SimpleNamespace(new_instance=lambda: None)
+    draft.pre_infer = SimpleNamespace()
     draft.req_manager = object()
     draft._select_mem_indexes = lambda value: torch.zeros(value.batch_size, dtype=torch.int32)
     monkeypatch.setattr("lightllm.common.basemodel.basemodel.dist_group_manager.get_group", lambda index: None)

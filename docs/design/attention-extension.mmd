@@ -1,0 +1,13 @@
+flowchart TB
+    M["ModelAdapter<br/>Model 模块 · 模型需求"]
+    A["AttentionBackend<br/>Compute 的 Attention 族 · 实现能力"]
+    P["Planner<br/>匹配、预算、绑定"]
+    S["StateStore<br/>状态存储"]
+    B["BoundAttention<br/>Compute 的 Attention 族 · 已绑定执行"]
+    R["Runner<br/>批次与执行协调"]
+
+    M -. "计算语义与状态需求" .-> P
+    A -. "支持条件与资源需求" .-> P
+    P -. "选定并绑定" .-> B
+    S -. "原生状态视图" .-> B
+    R -->|"准备批次、执行"| B

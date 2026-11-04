@@ -16,7 +16,7 @@ from lightllm.utils.envs_utils import (
 from lightllm.utils.log_utils import init_logger
 
 from typing import List, Tuple, Optional
-from tqdm import tqdm
+from lightllm.utils.progress import ThreadProgress as tqdm
 from lightllm.utils.dist_utils import get_current_device_id
 
 logger = init_logger(__name__)

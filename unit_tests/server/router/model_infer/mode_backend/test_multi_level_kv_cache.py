@@ -1,3 +1,5 @@
+from lightllm.common.transfer import CopyOperation, CopyPlan, Transfer
+from unit_tests.common.transfer.helpers import Runtime
 from types import SimpleNamespace
 from collections import deque
 
@@ -184,8 +186,8 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
     resources = SimpleNamespace(
         get_cpu_cache_operator=lambda: SimpleNamespace(
             get_page_layouts=lambda: {},
-            read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: loaded_indexes.extend(
-                token_indices.tolist()
+            plan_read_req=lambda cpu_page_buffers, cpu_page_indices, token_indices, **kwargs: CopyPlan(
+                "unpack", (CopyOperation("kv", None, lambda: loaded_indexes.extend(token_indices.tolist())),)
             ),
         ),
     )
@@ -222,6 +224,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         ),
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
     )
+    monkeypatch.setattr(multi_level_kv_cache_impl, "Transfer", lambda: Transfer(Runtime()))
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)

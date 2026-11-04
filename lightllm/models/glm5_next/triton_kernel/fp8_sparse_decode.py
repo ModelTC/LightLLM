@@ -115,7 +115,7 @@ def can_use_fp8_sparse_direct_decode(q_nope, packed_kv, topk, kv_lora_rank, boun
     )
 
 
-def fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale):
+def fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale, workspace=None):
     from lightllm.models.glm5_next.triton_kernel.context_flashattention_nopad_fp8 import (
         reduce_direct_smallq_kernel,
     )
@@ -125,9 +125,12 @@ def fp8_sparse_direct_decode(q_nope, packed_kv, topk, softmax_scale):
     block_h = 16 if batch * heads <= 64 else min(32, max(16, triton.next_power_of_2(heads)))
     block_k = 16 if batch == 1 and heads <= 16 else 64
     splits = 2112 // block_k
-    partial_o = torch.empty((batch, splits, heads, 512), device=q_nope.device, dtype=torch.float32)
-    partial_lse = torch.empty((batch, splits, heads), device=q_nope.device, dtype=torch.float32)
-    out = torch.empty(q_nope.shape, device=q_nope.device, dtype=q_nope.dtype)
+    if workspace is None:
+        partial_o = torch.empty((batch, splits, heads, 512), device=q_nope.device, dtype=torch.float32)
+        partial_lse = torch.empty((batch, splits, heads), device=q_nope.device, dtype=torch.float32)
+        out = torch.empty(q_nope.shape, device=q_nope.device, dtype=q_nope.dtype)
+    else:
+        partial_o, partial_lse, out = workspace["partial_o"], workspace["partial_lse"], workspace["output"]
     launch_grid = (batch, splits) if heads <= block_h else (batch, splits, triton.cdiv(heads, block_h))
     _fp8_sparse_direct_decode_kernel[launch_grid](
         q_nope,

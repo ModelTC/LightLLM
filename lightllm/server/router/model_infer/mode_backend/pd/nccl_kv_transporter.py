@@ -317,6 +317,8 @@ class _NcclPeer:
         comm = self._ensure_comm(is_server=True)
         stream = self._get_stream()
 
+        handle = _NcclXferHandle(peer_name=self.peer_name, mode="send")
+        trans_task.xfer_handle = handle
         comm.send(page_tensor, dst=1, stream=stream)
         send_finish_cuda_event = torch.cuda.Event()
         send_finish_cuda_event.record(stream)
@@ -326,11 +328,8 @@ class _NcclPeer:
                 f"NCCL send page posted request_id={trans_task.request_id} "
                 f"src_page={trans_task.src_page_index} dst_agent={self.peer_name}"
             )
-        return _NcclXferHandle(
-            peer_name=self.peer_name,
-            mode="send",
-            finish_cuda_event=send_finish_cuda_event,
-        )
+        handle.finish_cuda_event = send_finish_cuda_event
+        return handle
 
     def start_recv(self, trans_task: PDChunckedTransTask):
         trans_task.xfer_handle = _NcclXferHandle(peer_name=self.peer_name, mode="recv")

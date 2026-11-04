@@ -50,10 +50,11 @@ def bind_test_fp8_calibration(
     if config.scale_mode == "per_head":
         heads = config.head_num
         k, v = scales.split(heads, dim=-1)
-        scales = torch.cat((k.repeat(1, config.tp_world_size), v.repeat(1, config.tp_world_size)), dim=-1)
+        copies = config.global_head_num // heads
+        scales = torch.cat((k.repeat(1, copies), v.repeat(1, copies)), dim=-1)
         assert q_scales is not None
-        q_scales = q_scales.repeat(1, config.tp_world_size)
-        calibration["num_head"] = heads * config.tp_world_size
+        q_scales = q_scales.repeat(1, copies)
+        calibration["num_head"] = config.global_head_num
         calibration["q_calibration"] = {
             "num_head": q_scales.shape[1],
             "scales_shape": list(q_scales.shape),
@@ -138,13 +139,17 @@ def main_linear_state(resources: AttentionStateManager):
 
 
 def prepare_model_states(model: TpPartBaseModel, logical_layer_ids: Sequence[int] | None = None):
+    from unittest.mock import patch
+
     config = model.config.get("text_config", model.config)
     if logical_layer_ids is None:
         logical_layer_ids = range(config.get("num_hidden_layers", config.get("n_layer")))
     model.layers_infer = [SimpleNamespace(layer_num_=i) for i in logical_layer_ids]
     if not hasattr(model, "torch_memory_saver"):
         model.torch_memory_saver = SimpleNamespace(region=lambda **_: nullcontext())
-    model.prepare_attention_states()
+    # These storage fixtures have no execution layers, weights or Runner limits.
+    with patch("lightllm.common.execution.runner.prepare_runner", return_value=None):
+        model.prepare_attention_states()
 
 
 def create_full_attention_roles(

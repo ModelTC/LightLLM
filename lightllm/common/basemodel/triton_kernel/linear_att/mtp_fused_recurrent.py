@@ -47,6 +47,7 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
     BK: tl.constexpr,
     BV: tl.constexpr,
     NUM_STAGES: tl.constexpr,
+    ROUND_INTERMEDIATES: tl.constexpr,
     stride_q_tok: tl.constexpr,  # token stride in q/k/v/a/b
     stride_k_tok: tl.constexpr,
     stride_v_tok: tl.constexpr,
@@ -104,6 +105,9 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
 
         b_q = b_q / tl.sqrt(tl.sum(b_q * b_q) + 1e-6)
         b_k = b_k / tl.sqrt(tl.sum(b_k * b_k) + 1e-6)
+        if ROUND_INTERMEDIATES:
+            b_q = b_q.to(q.dtype.element_ty).to(tl.float32)
+            b_k = b_k.to(k.dtype.element_ty).to(tl.float32)
         b_q = b_q * scale
         b_a = tl.load(p_a_raw).to(tl.float32)
         x = b_a + b_dt_bias
@@ -116,6 +120,8 @@ def _fused_recurrent_gated_delta_rule_fwd_kernel(
         b_h *= tl.exp(b_g)
         b_b = tl.load(p_b_raw).to(tl.float32)
         b_beta = tl.sigmoid(b_b)
+        if ROUND_INTERMEDIATES:
+            b_beta = b_beta.to(b_raw.dtype.element_ty).to(tl.float32)
         b_v -= tl.sum(b_h * b_k[:, None], 0)
         b_v *= b_beta
         b_h += b_k[:, None] * b_v[None, :]
@@ -152,8 +158,8 @@ def get_test_configs():
     ]
 
 
-def get_static_key(q, v, initial_state, ssm_state_write_indices):
-    return {
+def get_static_key(q, v, initial_state, ssm_state_write_indices, round_intermediates=False):
+    key = {
         "head_k_dim": q.shape[-1],
         "head_v_dim": v.shape[-1],
         "num_v_heads": v.shape[2],
@@ -162,6 +168,9 @@ def get_static_key(q, v, initial_state, ssm_state_write_indices):
         "q_dtype": str(q.dtype),
         "state_dtype": str(initial_state.dtype),
     }
+    if round_intermediates:
+        key["round_intermediates"] = True
+    return key
 
 
 def get_run_key(q, ssm_state_write_indices):
@@ -269,6 +278,7 @@ def mtp_fused_recurrent_gated_delta_rule(
     a_raw: torch.Tensor,
     b_raw: torch.Tensor,
     run_config: Optional[dict] = None,
+    round_intermediates: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Fused recurrent gated delta rule with fused gating (GDN layer).
 
@@ -290,6 +300,8 @@ def mtp_fused_recurrent_gated_delta_rule(
         a_raw: ``[T, HV]`` raw alpha.
         b_raw: ``[T, HV]`` raw beta.
         run_config: Optional ``BV``, ``num_warps`` and ``num_stages`` configuration.
+        round_intermediates: Materialize normalized Q/K and sigmoid beta in their
+            input dtype, matching the separate normalization and gating operators.
 
     Returns:
         ``(o, final_state)`` where ``o`` is ``[1, T, HV, V]`` and
@@ -357,6 +369,7 @@ def mtp_fused_recurrent_gated_delta_rule(
         BK=BK,
         BV=BV,
         NUM_STAGES=num_stages,
+        ROUND_INTERMEDIATES=round_intermediates,
         stride_q_tok=stride_q_tok,
         stride_k_tok=stride_k_tok,
         stride_v_tok=stride_v_tok,

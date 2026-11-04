@@ -145,7 +145,9 @@ def transfer_gqa_pages(
             ELEMENT_BYTES=local.element_size(),
             WRITE=write,
             BLOCK=1024,
-            NUM_STAGES=num_stages,
+            # cp.async cannot pipeline a transfer unit smaller than four bytes.
+            # Unaligned/strided fields may prevent widening the original dtype.
+            NUM_STAGES=num_stages if local.element_size() >= 4 else 1,
             num_warps=num_warps,
         )
 

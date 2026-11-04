@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.query_cache import cached_query
+
 
 from dataclasses import dataclass
 from math import prod
@@ -219,7 +220,7 @@ class WindowCompressorState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """校验缓存页对齐产出步长；无重叠历史的窗口不占 CPU 页，也不创建大小页池。"""
         args = get_env_start_args()
@@ -323,7 +324,7 @@ class WindowCompressorState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回完整逻辑窗口，不包含本地 MTP 候选区。"""
         return self._get_transfer_regions(runtime=True)

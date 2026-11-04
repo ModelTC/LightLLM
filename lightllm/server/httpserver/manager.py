@@ -1,3 +1,5 @@
+from functools import cached_property
+from .task_group import HttpServerTasks
 import sys
 import zmq
 import zmq.asyncio
@@ -51,6 +53,22 @@ logger = init_logger(__name__)
 
 
 class HttpServerManager(HttpRlManagerHelper, object):
+    @cached_property
+    def background_tasks(self):
+        return HttpServerTasks()
+
+    async def close(self):
+        await self.background_tasks.close()
+        # The HTTP server has drained/cancelled its handlers. Drop local views
+        # without recycling slots that another process may still be using.
+        for req_status in self.req_id_to_out_inf.values():
+            reqs = req_status.group_req_objs.shm_req_objs
+            while reqs:
+                reqs[-1].detach_shm_arrays()
+                reqs.pop()
+        self.req_id_to_out_inf.clear()
+        self.shm_req_manager.close()
+
     def __init__(
         self,
         args: StartArgs,
@@ -283,7 +301,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
     async def loop_for_request(self):
         assert self.args.node_rank > 0
-        while True:
+        while not self.background_tasks.closing:
             (
                 prompt,
                 sampling_params,
@@ -295,7 +313,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
                 async for _, _, _, _ in results_generator:
                     pass
 
-            asyncio.create_task(generate_wrapper(results_generator))
+            self.background_tasks.create(generate_wrapper(results_generator))
         return
 
     def alloc_req_id(self, sampling_params):
@@ -344,7 +362,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         # 用于等待 pd_master 下发的交换信息
         pd_event: asyncio.Event = None,
     ) -> AsyncGenerator[Tuple[int, str, dict, FinishStatus], None]:
-
         start_time = time.time()
         # 在请求登记、编码和 PD 握手前获取语法；缓存未命中时先完成编译，避免后续流程等待或校验失败。
         compiled_grammar = await sampling_params.get_compiled_grammar(self.output_grammar_compiler)
@@ -756,7 +773,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         self,
         group_req_objs: Optional[GroupReqObjs] = None,
     ):
-
         if self.pd_mode.is_P_or_NORMAL():
             if not self.args.disable_vision:
                 self.send_to_visual.send_pyobj(group_req_objs.to_group_req_index(), protocol=pickle.HIGHEST_PROTOCOL)
@@ -799,7 +815,6 @@ class HttpServerManager(HttpRlManagerHelper, object):
         req_status: "ReqStatus",
         request: Request,
     ):
-
         event = req_status.event
         unfinished_count = sampling_params.best_of
         out_token_counter = 0
@@ -977,7 +992,7 @@ class HttpServerManager(HttpRlManagerHelper, object):
     async def recycle_resource_loop(self):
         pre_time_mark = time.time()
 
-        while True:
+        while not self.background_tasks.closing:
             try:
                 await asyncio.wait_for(self.recycle_event.wait(), timeout=0.02)
             except asyncio.TimeoutError:
@@ -1016,24 +1031,24 @@ class HttpServerManager(HttpRlManagerHelper, object):
 
     async def handle_loop(self):
         self.recycle_event = asyncio.Event()
-        asyncio.create_task(self.recycle_resource_loop())
+        self.background_tasks.create(self.recycle_resource_loop())
 
         # 多节点tp模式下的slave节点，需要开启一个协程task用来接收
         # master 转发过来的请求对象。
         if self.is_multinode_tp_slave:
-            asyncio.create_task(self.loop_for_request())
+            self.background_tasks.create(self.loop_for_request())
 
         if self.pd_mode.is_P_or_D():
             from lightllm.server.httpserver.pd_loop import pd_handle_loop, timer_log
 
-            asyncio.create_task(timer_log(self))
+            self.background_tasks.create(timer_log(self))
             if self.pd_mode.is_P() and self.args.use_dp_split_mode_connect_pd_master:
                 for dp_index in range(max(1, self.args.dp // self.args.nnodes)):
-                    asyncio.create_task(pd_handle_loop(self, dp_index))
+                    self.background_tasks.create(pd_handle_loop(self, dp_index))
             else:
-                asyncio.create_task(pd_handle_loop(self))
+                self.background_tasks.create(pd_handle_loop(self))
 
-        while True:
+        while not self.background_tasks.closing:
             try:
                 await asyncio.wait_for(self.zmq_recv_socket.recv_pyobj(), timeout=0.05)
             except asyncio.TimeoutError:

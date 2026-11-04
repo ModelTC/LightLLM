@@ -21,6 +21,8 @@ class Qwen3DFlashPreAndPostLayerWeight(PreAndPostLayerWeight):
     - lm_head.weight: [vocab_size, hidden_size]
     """
 
+    owns_vocab_weights = True
+
     def __init__(self, data_type, network_config, quant_cfg: Quantcfg):
         super().__init__(data_type, network_config)
         self.quant_cfg = quant_cfg
@@ -29,11 +31,15 @@ class Qwen3DFlashPreAndPostLayerWeight(PreAndPostLayerWeight):
         vocab_size = network_config["vocab_size"]
         target_layer_num = len(network_config["target_layer_ids"])
 
-        self.wte_weight_ = EmbeddingWeight(
-            dim=hidden_size,
-            vocab_size=vocab_size,
-            weight_name="embed_tokens.weight",
-            data_type=self.data_type_,
+        self.wte_weight_ = (
+            EmbeddingWeight(
+                dim=hidden_size,
+                vocab_size=vocab_size,
+                weight_name="embed_tokens.weight",
+                data_type=self.data_type_,
+            )
+            if self.owns_vocab_weights
+            else None
         )
         self.fc_weight_ = ROWMMWeight(
             in_dim=hidden_size * target_layer_num,
@@ -54,9 +60,13 @@ class Qwen3DFlashPreAndPostLayerWeight(PreAndPostLayerWeight):
             weight_name="norm.weight",
             data_type=self.data_type_,
         )
-        self.lm_head_weight_ = LMHeadWeight(
-            dim=hidden_size,
-            vocab_size=vocab_size,
-            weight_name="lm_head.weight",
-            data_type=self.data_type_,
+        self.lm_head_weight_ = (
+            LMHeadWeight(
+                dim=hidden_size,
+                vocab_size=vocab_size,
+                weight_name="lm_head.weight",
+                data_type=self.data_type_,
+            )
+            if self.owns_vocab_weights
+            else None
         )

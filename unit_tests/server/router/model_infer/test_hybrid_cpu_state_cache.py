@@ -1,4 +1,5 @@
 from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
+from lightllm.common.transfer import CopyPlan
 import dataclasses
 import json
 from types import SimpleNamespace
@@ -179,7 +180,7 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
     task = module.write_req_to_cpu(req, torch.cuda.Stream())
     assert task is not None
-    task.sync_event.synchronize()
+    task.completion.destination_ready.synchronize()
     pages = task.page_indexes.tolist()
     client.update_pages_status_to_ready(pages, deref=False)
     resources.bounded_att_big_page_allocator.free(list(big_states.values()))
@@ -303,6 +304,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         writes.append(
             (token_indices.numel(), cpu_page_indices, kwargs["big_page_slot_ids"], kwargs["small_page_slot_ids"])
         )
+        return CopyPlan("pack", ())
 
     module = MultiLevelKvCacheModule.__new__(MultiLevelKvCacheModule)
     module.args = get_env_start_args()
@@ -318,7 +320,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         allocate_pages=allocate_pages,
         cpu_kv_cache_tensor=torch.empty((2, 1), dtype=torch.uint8),
     )
-    monkeypatch.setattr(resources.get_cpu_cache_operator(), "write_req", write_to_cpu)
+    monkeypatch.setattr(resources.get_cpu_cache_operator(), "plan_write_req", write_to_cpu)
     broadcasts = []
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda data, **kwargs: broadcasts.append(data))
     task = module.write_req_to_cpu(req, torch.cuda.Stream())
@@ -329,7 +331,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
         assert broadcasts == [[0]]
         assert writes == []
         return
-    task.sync_event.synchronize()
+    task.completion.destination_ready.synchronize()
     assert broadcasts == [
         [
             {

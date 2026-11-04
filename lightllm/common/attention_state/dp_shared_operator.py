@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import copy
+from .query_cache import ResourceOperator
 from typing import TYPE_CHECKING, List
 
 import torch
@@ -9,11 +10,8 @@ if TYPE_CHECKING:
     from lightllm.common.attention_state.manager import AttentionStateManager
 
 
-class DPSharedOperator:
+class DPSharedOperator(ResourceOperator):
     """封装 DP shared 的跨副本复制、IPC 导出和共享页注册。"""
-
-    def __init__(self, owner: AttentionStateManager):
-        self.owner = owner
 
     def create_ipc_copy(self) -> AttentionStateManager:
         """保留共享运行态和共享 CPU 页池，排除本地 allocator。"""
@@ -29,7 +27,6 @@ class DPSharedOperator:
         ipc_copy.full_att_allocator = None
         ipc_copy.bounded_att_big_page_allocator = None
         ipc_copy.bounded_att_small_page_allocator = None
-        ipc_copy._reset_operators()
         return ipc_copy
 
     def register_page_pools_pin_memory(self) -> None:

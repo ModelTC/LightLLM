@@ -55,6 +55,8 @@ class ModeBackend:
         self.shm_req_manager = ShmReqManager()
 
         self.overlap_event_manager = OverlapEventManager()
+        self._shutdown_requested = threading.Event()
+        self._inference_stopped = False
         # Backend-specific scheduling; output constraints preserve overlap.
         self.support_overlap = True
 
@@ -125,6 +127,9 @@ class ModeBackend:
 
         model_kvargs = {
             "weight_dir": self.weight_dir,
+            "multimodal_embedding_cache": (
+                g_infer_context.cpu_embed_cache_client.cpu_embed_cache_tensor if self.args.enable_multimodal else None
+            ),
             "max_total_token_num": max_total_token_num,
             "load_way": self.load_way,
             "max_req_num": kvargs.get("max_req_num", 1000),
@@ -173,6 +178,8 @@ class ModeBackend:
             manager.initialize_storage(
                 self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
             )
+        # Capture writes must be present when warmup records CUDA Graphs.
+        self._init_route_capture()
         for item in models:
             item.init_runtime()
         torch.cuda.empty_cache()
@@ -265,10 +272,6 @@ class ModeBackend:
                 mgr = PromptLogprobsCaptureManager.get_instance()
                 if mgr is not None:
                     mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
-            if self.args.enable_return_routed_experts:
-                mgr = MoeRouteInfoManager.get_instance()
-                if mgr is not None:
-                    mgr.init_capture_buffer(kv_cache_size=kv_cache_size)
 
         self.init_custom()
 
@@ -335,6 +338,29 @@ class ModeBackend:
     def get_max_total_token_num(self):
         return self.model.att_state_manager.full_att_allocator.size
 
+    def shutdown(self):
+        self._shutdown_requested.set()
+        for name in ("infer_loop_thread", "infer_loop_thread1"):
+            thread = getattr(self, name, None)
+            if thread is not None:
+                thread.join()
+        if not dist.is_initialized():
+            return
+        # No inference thread can enqueue work or replay a Graph after this point.
+        torch.cuda.synchronize()
+        for model in (getattr(self, "model", None), *getattr(self, "draft_models", ())):
+            if model is not None:
+                model.graph_runner.close()
+        dist_group_manager.close()
+        dist.destroy_process_group()
+        self.logger.info("Inference threads, Graphs and communication groups have stopped")
+
+    def _finish_inference(self, event_pack):
+        self._inference_stopped = True
+        event_pack.notify_post_handle_and_wait_pre_post_handle()
+        event_pack.notify_forward_and_wait_post_handle()
+        event_pack.notify_pre_post_handle()
+
     def infer_loop(self):
         raise NotImplementedError()
 
@@ -362,6 +388,7 @@ class ModeBackend:
             draft_model_cfg, _ = PretrainedConfig.get_config_dict(draft_model_dirs[i])
             draft_model_kvargs = {
                 "weight_dir": draft_model_dirs[i],
+                "multimodal_embedding_cache": main_kvargs.get("multimodal_embedding_cache"),
                 "max_total_token_num": main_kvargs["max_total_token_num"],
                 "load_way": main_kvargs["load_way"],
                 "max_req_num": main_kvargs.get("max_req_num", 1000),
@@ -440,6 +467,13 @@ class ModeBackend:
         selected_logits = logits.gather(1, next_token_ids.long().view(-1, 1))
         return (logits > selected_logits).sum(dim=-1, dtype=torch.int32) + 1
 
+    def _init_route_capture(self):
+        self.model.route_capture = None
+        if self.args.enable_return_routed_experts and self.is_master_in_dp:
+            manager = MoeRouteInfoManager.get_instance()
+            manager.init_capture_buffer(kv_cache_size=self.model.att_state_manager.full_att_allocator.size)
+            self.model.route_capture = manager.bind_capture()
+
     def _capture_prompt_logprobs_if_needed(
         self,
         model_input: ModelInput,
@@ -496,18 +530,23 @@ class ModeBackend:
 
     def _try_read_new_reqs(self):
         if self.is_multinode_tp:
-            self._try_read_new_reqs_multinode_tp()
+            stopping = self._try_read_new_reqs_multinode_tp()
         else:
-            self._try_read_new_reqs_normal()
+            stopping = self._try_read_new_reqs_normal()
+
+        if stopping:
+            return True
 
         # on each loop thread
         if self.profiler is not None:
             self.profiler.multi_thread_helper()
-        return
+        return False
 
     def _try_read_new_reqs_normal(self):
         if self.is_master_in_node:
-            if self.shm_reqs_io_buffer.is_ready():
+            if self._shutdown_requested.is_set():
+                self.node_broadcast_tensor.fill_(-1)
+            elif self.shm_reqs_io_buffer.is_ready():
                 self.node_broadcast_tensor.fill_(1)
             else:
                 self.node_broadcast_tensor.fill_(0)
@@ -515,6 +554,8 @@ class ModeBackend:
         src_rank_id = self.args.node_rank * self.node_world_size
         broadcast(self.node_broadcast_tensor, src=src_rank_id, group=self.node_nccl_group, async_op=False)
         new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
+        if new_buffer_is_ready == -1:
+            return True
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
@@ -531,13 +572,15 @@ class ModeBackend:
             new_buffer_is_ready = self.node_broadcast_tensor.detach().item()
             if new_buffer_is_ready:
                 self._read_pd_trans_io_buffer_and_update_req_status()
-        return
+        return False
 
     def _try_read_new_reqs_multinode_tp(self):
         """
         多节点tp模式下,需要协调所有rank的行为同步。
         """
-        if self.shm_reqs_io_buffer.is_ready():
+        if self._shutdown_requested.is_set():
+            self.multinode_tp_gather_item_tensor.fill_(-1)
+        elif self.shm_reqs_io_buffer.is_ready():
             self.multinode_tp_gather_item_tensor.fill_(1)
         else:
             self.multinode_tp_gather_item_tensor.fill_(0)
@@ -548,13 +591,15 @@ class ModeBackend:
             async_op=False,
         )
         new_buffer_is_readys = self.multinode_tp_all_gather_tensor.detach().cpu().numpy()
+        if np.any(new_buffer_is_readys == -1):
+            return True
         new_buffer_is_ready = np.all(new_buffer_is_readys == 1)
 
         if new_buffer_is_ready:
             self._read_reqs_buffer_and_init_reqs()
 
         assert self.is_pd_mode is False
-        return
+        return False
 
     def _read_reqs_buffer_and_init_reqs(self):
         cmds: List = self.shm_reqs_io_buffer.read_obj()
@@ -762,7 +807,6 @@ class ModeBackend:
         can_alloc_token_num = g_infer_context.get_can_alloc_token_num()
 
         for req_obj in ready_reqs:
-
             if req_obj.filter_mark:
                 finished_reqs.append(req_obj)
                 continue
@@ -1022,15 +1066,17 @@ class ModeBackend:
         return next_token_ids, next_token_ids_cpu, next_token_logprobs_cpu, next_token_ranks_cpu
 
     def _dp_all_gather_prefill_and_decode_req_num(
-        self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq]
+        self, prefill_reqs: List[InferReq], decode_reqs: List[InferReq], stopping=False
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Gather the number of prefill requests across all DP ranks.
         """
-        current_dp_prefill_num = len(prefill_reqs)
+        current_dp_prefill_num = -1 if stopping else len(prefill_reqs)
         self.dp_gather_item_tensor.fill_(current_dp_prefill_num)
         all_gather_into_tensor(self.dp_all_gather_tensor, self.dp_gather_item_tensor, group=None, async_op=False)
         dp_prefill_req_nums = self.dp_all_gather_tensor.cpu().numpy()
+        if np.any(dp_prefill_req_nums == -1):
+            return None, None
 
         current_dp_decode_num = len(decode_reqs)
         self.dp_gather_item_tensor.fill_(current_dp_decode_num)

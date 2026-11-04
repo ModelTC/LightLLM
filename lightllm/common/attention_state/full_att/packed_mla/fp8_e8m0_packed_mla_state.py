@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.query_cache import cached_query
+
 
 from dataclasses import dataclass
 from typing import ClassVar
@@ -156,7 +157,7 @@ class FP8E8M0PackedMLAState(FullAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回 CPU 页中的完整有效 token 编码，包含 indexer，不包含 GPU 行尾 padding。"""
         return self._get_transfer_regions(page_tokens=get_env_start_args().cpu_cache_token_page_size)
@@ -226,7 +227,7 @@ class FP8E8M0PackedMLAState(FullAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回固定 FP8/E8M0 格式的 PD 页描述，由管理器安排联合页偏移。"""
         return self._get_transfer_regions(page_tokens=get_env_start_args().pd_kv_page_size)

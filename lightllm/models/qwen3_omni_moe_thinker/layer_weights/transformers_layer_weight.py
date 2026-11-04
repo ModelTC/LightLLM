@@ -9,6 +9,11 @@ class Qwen3OmniMOEThinkerTransformerLayerWeight(Qwen3MOETransformerLayerWeight):
         return
 
     def _init_weight_names(self):
+        super()._init_weight_names()
+        self._gate_weight_name = f"thinker.model.layers.{self.layer_num_}.mlp.gate_proj.weight"
+        self._up_weight_name = f"thinker.model.layers.{self.layer_num_}.mlp.up_proj.weight"
+        self._gate_up_weight_name = f"thinker.model.layers.{self.layer_num_}.mlp.gate_up_proj.weight"
+        self._down_weight_name = f"thinker.model.layers.{self.layer_num_}.mlp.down_proj.weight"
         self._q_weight_name = f"thinker.model.layers.{self.layer_num_}.self_attn.q_proj.weight"
         self._q_norm_name = f"thinker.model.layers.{self.layer_num_}.self_attn.q_norm.weight"
         self._q_bias_name = None

@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from lightllm.common.attention_state.query_cache import cached_query
+
 from abc import ABC, abstractmethod
-from functools import lru_cache
 from typing import Any, List
 
 import torch
@@ -92,7 +93,7 @@ class CpuCacheInterface(ABC):
 
     @abstractmethod
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 cpu_cache_token_page_size 返回 CPU 字段、全局形状和 TP 切片。
 
@@ -156,7 +157,7 @@ class PdInterface(ABC):
 
     @abstractmethod
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """按全局 pd_kv_page_size 返回 PD 字段、全局形状和 TP 切片，区域偏移相对本 State 起点。
 

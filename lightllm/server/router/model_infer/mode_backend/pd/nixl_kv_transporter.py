@@ -263,6 +263,7 @@ class NixlKVTransporter:
         if not handle:
             raise RuntimeError(f"make_prepped_xfer failed for task: {trans_task.to_str()}")
 
+        trans_task.xfer_handle = handle
         self.nixl_agent.transfer(handle)
 
         return handle

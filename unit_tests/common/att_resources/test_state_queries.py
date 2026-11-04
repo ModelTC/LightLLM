@@ -5,7 +5,6 @@ from __future__ import annotations
 from unit_tests.common.att_resources.model_helpers import read_kv_storage
 
 
-import gc
 import pickle
 import weakref
 from functools import partial
@@ -40,7 +39,7 @@ def test_created_state_queries_keep_the_same_objects_through_storage_initializat
         ):
             with pytest.raises(AssertionError, match="State registration"):
                 query()
-        assert manager._get_states.cache_info().currsize == 0
+        assert not manager.__dict__.get("_query_cache")
 
     cached = []
     allocate_storage = AttentionStateManager.allocate_storage
@@ -74,7 +73,6 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
     manager = MainDraftTestResourceManager()
     queries = (manager.get_full_attention_states, manager.get_bounded_attention_states)
     results = {(query.__name__, role): query(role) for query in queries for role in (None, "main", "draft0")}
-    assert manager._get_states.cache_info().currsize == 6
     assert manager.get_full_attention_states() == (
         manager.draft0_mla_fp32_state,
         manager.main_gqa_fp32_state,
@@ -82,13 +80,11 @@ def test_cached_role_queries_reuse_instance_references_and_keep_stable_order():
     assert manager.get_bounded_attention_states("main") == (manager.main_kda_conv_fp32_ssm_fp32_state,)
     assert manager.get_bounded_attention_states("draft0") == (manager.draft0_gdn_conv_fp32_ssm_fp32_state,)
 
-    hits = manager._get_states.cache_info().hits
     for query in queries:
         for role in (None, "main", "draft0"):
             assert query(role) is results[(query.__name__, role)]
         with pytest.raises(AssertionError, match="unknown model role"):
             query("target")
-    assert manager._get_states.cache_info().hits == hits + 6
     manager.main_kda_conv_fp32_ssm_fp32_state.conv_state.fill_(7)
     assert (manager.get_bounded_attention_states("main")[0].conv_state == 7).all()
 
@@ -164,7 +160,7 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
     assert imported.full_att_allocator is None
     assert imported.bounded_att_big_page_allocator is None
     assert imported.bounded_att_small_page_allocator is None
-    misses = source._get_states.cache_info().misses
+    assert not imported.__dict__.get("_query_cache")
     for query in (
         imported.get_full_attention_states,
         imported.get_bounded_attention_states,
@@ -172,18 +168,14 @@ def test_ipc_rebuilds_queries_from_imported_members_without_allocators():
         for state in query():
             name = state.state_name
             assert state is getattr(imported, name) and state is not getattr(source, name)
-    assert imported._get_states.cache_info().misses == misses + 2
+    assert source.get_full_attention_states() is not imported.get_full_attention_states()
 
 
-def test_clearing_query_cache_releases_manager_and_states():
+def test_query_cache_does_not_keep_manager_and_states_alive():
     manager = MainDraftTestResourceManager()
     manager.get_full_attention_states()
     manager.get_bounded_attention_states()
     manager_ref = weakref.ref(manager)
     state_ref = weakref.ref(manager.main_kda_conv_fp32_ssm_fp32_state)
     del manager
-    gc.collect()
-    assert manager_ref() is not None and state_ref() is not None
-    AttentionStateManager._get_states.cache_clear()
-    gc.collect()
     assert manager_ref() is None and state_ref() is None

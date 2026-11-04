@@ -9,6 +9,11 @@ from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class, get_mla_prefill_att_backend_class
+from lightllm.common.execution.model_adapter import RecipeModelAdapter
+from lightllm.common.execution.specs import MLAAttentionSpec, StateSpec
+from lightllm.models.llama.model import LlamaModelAdapter
+from lightllm.models.llama.yarn_rotary_utils import get_deepseek_mscale
+from copy import deepcopy
 
 logger = init_logger(__name__)
 
@@ -19,7 +24,63 @@ if TYPE_CHECKING:
     from lightllm.common.attention_state.full_att import FullAttentionState
 
 
+class Deepseek2ModelAdapter(RecipeModelAdapter):
+    moe_group_score_topk = 1
+    pre_and_post_weight_class = LlamaModelAdapter.pre_and_post_weight_class
+    pre_layer_infer_class = LlamaModelAdapter.pre_layer_infer_class
+    post_layer_infer_class = LlamaModelAdapter.post_layer_infer_class
+    transformer_weight_class = Deepseek2TransformerLayerWeight
+    transformer_layer_infer_class = Deepseek2TransformerLayerInfer
+
+    def moe_specs(self):
+        from lightllm.common.execution.model_adapter import grouped_moe_specs
+
+        return grouped_moe_specs(self.config, self.dtype, group_score_topk=self.moe_group_score_topk)
+
+    def __init__(self, config, *, role, dtype, tp_world_size=1, layer_ids=None):
+        self.config, self.dtype = deepcopy(config), dtype
+        if config.get("model_type") in ("deepseek_v3", "deepseek_v32"):
+            self.moe_group_score_topk = 2
+        heads, depth = config["num_attention_heads"], config["num_hidden_layers"]
+        if depth <= 0 or tp_world_size <= 0 or heads <= 0 or heads % tp_world_size:
+            raise ValueError("MLA requires layers and whole query-head TP shards")
+        scale = (config["qk_nope_head_dim"] + config["qk_rope_head_dim"]) ** -0.5
+        rope = config.get("rope_scaling") or {}
+        if rope.get("mscale_all_dim", 0):
+            mscale = get_deepseek_mscale(rope["factor"], rope["mscale_all_dim"])
+            scale = scale * mscale * mscale
+        spec = MLAAttentionSpec(
+            heads // tp_world_size,
+            config["kv_lora_rank"],
+            config["qk_nope_head_dim"],
+            config["qk_rope_head_dim"],
+            config["v_head_dim"],
+            dtype,
+            scale,
+        )
+        self.layer_ids = tuple(range(depth)) if layer_ids is None else tuple(layer_ids)
+        if len(self.layer_ids) != depth or len(set(self.layer_ids)) != depth or min(self.layer_ids) < 0:
+            raise ValueError("MLA execution layer IDs must uniquely describe every model layer")
+        self._attention = {i: spec for i in self.layer_ids}
+        self._states = tuple(
+            StateSpec(role, f"mla.{i}", i, (i,), (spec.latent_dim, spec.rope_dim)) for i in self.layer_ids
+        )
+
+    def validate_layer(self, layer):
+        spec = self._attention[layer.layer_num_]
+        if (
+            layer.tp_q_head_num_,
+            layer.kv_lora_rank,
+            layer.qk_nope_head_dim,
+            layer.qk_rope_head_dim,
+            layer.v_head_dim,
+            layer.softmax_scale,
+        ) != (spec.q_heads, spec.latent_dim, spec.nope_dim, spec.rope_dim, spec.value_dim, spec.scale):
+            raise ValueError("MLA recipe projections disagree with the declared semantics")
+
+
 class Deepseek2TpPartModel(LlamaTpPartModel):
+    model_adapter_class = Deepseek2ModelAdapter
     # weight class
     transformer_weight_class = Deepseek2TransformerLayerWeight
 
@@ -100,13 +161,10 @@ class Deepseek2TpPartModel(LlamaTpPartModel):
         dim = self.qk_rope_head_dim
         max_position_embeddings = self.config.get("max_position_embeddings", 2048)
         base = self.config.get("rope_theta", 10000.0)
-        if self.config.get("rope_scaling", {}) is None:
-            scale = 1.0
-        else:
-            rope_scaling = self.config.get("rope_scaling", {})
-            scale = rope_scaling.get("factor", 1.0)
-            mscale = rope_scaling.get("mscale", 1)
-            mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
+        rope_scaling = self.config.get("rope_scaling") or {}
+        scale = rope_scaling.get("factor", 1.0)
+        mscale = rope_scaling.get("mscale", 1)
+        mscale_all_dim = rope_scaling.get("mscale_all_dim", 0)
         original_max_position_embeddings = rope_scaling.get("original_max_position_embeddings", 2048)
         extrapolation_factor = 1.0
         beta_fast = rope_scaling.get("beta_fast", 32.0)

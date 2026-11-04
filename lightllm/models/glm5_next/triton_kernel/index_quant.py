@@ -43,7 +43,7 @@ def hadamard_transform_quant_fp8(x: torch.Tensor, scale: float = 1.0) -> tuple[t
     """Fuse Hadamard-128 with the following ue8m0 FP8 quantization."""
 
     assert x.is_cuda, "hadamard_transform_quant_fp8 only supports CUDA tensors"
-    assert x.dtype == torch.bfloat16, "Hadamard transform expects bfloat16 input"
+    assert x.dtype in (torch.float16, torch.bfloat16), "Hadamard transform expects FP16 or BF16 input"
     assert x.size(-1) == 128, "Hadamard transform expects hidden size 128"
     if not x.is_contiguous():
         x = x.contiguous()

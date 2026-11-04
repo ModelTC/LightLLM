@@ -25,7 +25,7 @@ def test_image_canvas_and_token_expansion(tmp_path, width, height, canvas):
     image.image_w, image.image_h = width, height
     image.token_id = 1000
     image.token_num = tokenizer.get_image_token_length(image)
-    assert image.token_num == canvas[0] * canvas[1] // 28 ** 2
+    assert image.token_num == canvas[0] * canvas[1] // 28**2
     multi = MultimodalParams()
     multi.images = [image]
     ids = tokenizer.encode([1, 100, 102, 101, 2], multi)
@@ -167,7 +167,7 @@ def test_vision_batch_preserves_independent_image_attention():
         .eval()
     )
     grid = torch.tensor([[1, 4, 6], [1, 6, 4]])
-    x = torch.randn(48, 3 * 2 * 14 ** 2, device="cuda")
+    x = torch.randn(48, 3 * 2 * 14**2, device="cuda")
     with torch.inference_mode():
         batch = model(x, grid)
         individual = torch.cat([model(x[:24], grid[:1]), model(x[24:], grid[1:])])
@@ -179,7 +179,6 @@ def test_vision_batch_preserves_independent_image_attention():
 def test_target_and_mtp_prefill_embed_images_before_hidden_fusion(monkeypatch):
     from lightllm.models.glm5_next.layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
     from lightllm.models.glm5_next_mtp.layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
-    from lightllm.server.router.model_infer.infer_batch import g_infer_context
 
     set_env_start_args(dataclasses.asdict(StartArgs(mtp_mode="eagle_with_att", mtp_step=2)))
     monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
@@ -187,14 +186,15 @@ def test_target_and_mtp_prefill_embed_images_before_hidden_fusion(monkeypatch):
     hidden = 128
     config = {"hidden_size": hidden, "rms_norm_eps": 1e-5, "hc_mult": 4}
     image_cache = torch.randn(3, 1, hidden, pin_memory=True)
-    monkeypatch.setattr(g_infer_context, "cpu_embed_cache_client", SimpleNamespace(cpu_embed_cache_tensor=image_cache))
     text = torch.randn(8, hidden, device="cuda")
     ids = torch.tensor([1, 1000, 1001, 2], device="cuda")
     metadata = {"token_id": 1000, "token_num": 2, "start_index_in_embed_cache": 1}
-    state = SimpleNamespace(multimodal_params=[{"images": [metadata], "audios": []}])
+    state = SimpleNamespace(is_prefill=True, input_ids=ids, multimodal_params=[{"images": [metadata], "audios": []}])
     weight = SimpleNamespace(wte_weight_=SimpleNamespace(weight=text, tp_vocab_start_id=0, tp_vocab_end_id=8))
     expected = torch.cat((text[1:2], image_cache[1:, 0].cuda(), text[2:3]))
-    expanded = Glm5NextPreLayerInfer(config).context_forward(ids, state, weight)
+    target = Glm5NextPreLayerInfer(config)
+    target.bind_inputs(weight, image_cache)(state)
+    expanded = target.context_forward(ids, state, weight)
     torch.testing.assert_close(expanded.reshape(4, 4, hidden), expected[:, None].expand(-1, 4, -1))
 
     def norm(input, eps, out):
@@ -210,7 +210,9 @@ def test_target_and_mtp_prefill_embed_images_before_hidden_fusion(monkeypatch):
         torch.nn.functional.rms_norm(input, (hidden,), main_norm_weight, eps)
     )
     weight.eh_proj_weight_ = SimpleNamespace(mm=lambda x: x @ projection)
-    actual = Glm5NextMTPPreLayerInfer(config).context_forward(ids, state, weight)
+    draft = Glm5NextMTPPreLayerInfer(config)
+    draft.bind_inputs(weight, image_cache)(state)
+    actual = draft.context_forward(ids, state, weight)
     old_hidden = torch.nn.functional.rms_norm(old_hidden, (hidden,), main_norm_weight, 1e-5)
     normalized = [x * torch.rsqrt(x.square().mean(-1, keepdim=True) + 1e-5) for x in (expected, old_hidden)]
     torch.testing.assert_close(actual, torch.cat(normalized, -1) @ projection)

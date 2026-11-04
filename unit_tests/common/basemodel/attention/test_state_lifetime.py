@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.attention.base_att import BaseDecodeAttState, BasePrefillAttState
-from lightllm.common.basemodel.cuda_graph import CudaGraph
+from lightllm.common.execution.decode_graph import CudaGraph
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 

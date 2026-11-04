@@ -1,4 +1,5 @@
 import dataclasses
+import inspect
 from typing import TYPE_CHECKING, Optional, Tuple
 
 import torch
@@ -18,6 +19,7 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
 
     def __init__(self, model):
         super().__init__(model=model)
+        self.flashmla_has_out = "out" in inspect.signature(flashmla.flash_mla_with_kvcache).parameters
         from lightllm.models.deepseek_v4.config import create_attention_config
 
         config = create_attention_config(
@@ -120,8 +122,11 @@ class DeepseekV4FlashMlaFp8SparseAttBackend(BaseAttBackend):
             extra_k_cache=compressed_cache,
             extra_indices_in_kvcache=nsa_dict.get("extra_indices"),
             extra_topk_length=nsa_dict.get("extra_lengths"),
-            out=out.unsqueeze(1),
+            **({"out": out.unsqueeze(1)} if self.flashmla_has_out else {}),
         )
+        if not self.flashmla_has_out:
+            out.copy_(padded_out[:, 0])
+            return out
         return padded_out[:, 0]
 
     def create_att_prefill_state(self, infer_state: "InferStateInfo") -> "_PrefillAttState":

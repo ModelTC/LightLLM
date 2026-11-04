@@ -53,6 +53,7 @@ def make_task(page_kind):
 @pytest.mark.parametrize("with_mark", [False, True])
 def test_copy_for_notify_preserves_local_task(page_kind, with_mark):
     task = make_task(page_kind)
+    task.local_completion = lambda: None
     if with_mark:
         task.shared_time_out_mark = _SharedTimeOutMark()
         time_mark = task.shared_time_out_mark.time_mark
@@ -69,6 +70,7 @@ def test_copy_for_notify_preserves_local_task(page_kind, with_mark):
         **{key: value for key, value in original.items() if key != "shared_time_out_mark"},
         "mem_indexes": None,
         "xfer_handle": None,
+        "local_completion": None,
     }
     assert vars(task) == original
     assert all(vars(task)[key] is value for key, value in original.items())
@@ -95,6 +97,7 @@ assert isinstance(task, PDChunckedTransTask)
 assert not hasattr(task, 'shared_time_out_mark')
 assert task.mem_indexes is None
 assert task.xfer_handle is None
+assert task.local_completion is None
 assert not any('decode_node_impl' in name for name in sys.modules)
 """
 
@@ -113,6 +116,7 @@ assert not any('decode_node_impl' in name for name in sys.modules)
 )
 def test_notification_payload(backend, page_kind, method, stage, destination):
     task = make_task(page_kind)
+    task.local_completion = lambda: None
     task.error_info = "transfer failed" if stage == "error" else None
     task.shared_time_out_mark = _SharedTimeOutMark()
     original = vars(task).copy()
@@ -161,7 +165,7 @@ def test_notification_payload(backend, page_kind, method, stage, destination):
     notify = pickle.loads(payload)
     sender = "prefill" if destination == "decode" else "decode"
     expected = {key: value for key, value in original.items() if key != "shared_time_out_mark"}
-    expected.update(mem_indexes=None, xfer_handle=None, write_stage=stage)
+    expected.update(mem_indexes=None, xfer_handle=None, local_completion=None, write_stage=stage)
     expected.update(
         {
             f"{sender}_agent_name": transporter.agent_name,

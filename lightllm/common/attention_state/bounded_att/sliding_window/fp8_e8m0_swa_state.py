@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from functools import lru_cache
+from lightllm.common.attention_state.query_cache import cached_query
+
 
 from dataclasses import dataclass
 from math import prod
@@ -188,7 +189,7 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_cpu_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """CPU 快照保存完整近期窗口。"""
         return self._get_transfer_regions()
@@ -282,7 +283,7 @@ class FP8E8M0SlidingWindowState(BoundedAttentionState):
     # ========================================================================
 
     @deepcopy_result
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_pd_transfer_regions(self) -> tuple[TransferRegion, ...]:
         """返回完整逻辑窗口，不包含本地 MTP 候选区。"""
         return self._get_transfer_regions()

@@ -120,7 +120,7 @@ def _case(heads, ratio):
     params = dict(
         compress_ratio=ratio,
         head_dim_v=512,
-        softmax_scale=512 ** -0.5,
+        softmax_scale=512**-0.5,
         swa_indices=indices,
         swa_lengths=lengths,
         attn_sink=attn_sink.weight,
@@ -166,7 +166,7 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
     kernel = attention.flashmla.flash_mla_with_kvcache
 
     def flashmla_with_out(**kwargs):
-        assert kwargs["out"] is not None
+        assert (kwargs.get("out") is not None) == backend.flashmla_has_out
         return kernel(**kwargs)
 
     monkeypatch.setattr(attention.flashmla, "flash_mla_with_kvcache", flashmla_with_out)
@@ -194,7 +194,7 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
 @pytest.mark.parametrize("ratio", [0, 4, 128])
 @pytest.mark.parametrize("overlap", [False, True])
 def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, ratio, overlap):
-    from lightllm.common.basemodel import cuda_graph as cuda_graph_module
+    from lightllm.common.execution import decode_graph as cuda_graph_module
 
     args = SimpleNamespace(
         enable_decode_microbatch_overlap=overlap, enable_tpsp_mix_mode=False, enable_torch_memory_saver=False
@@ -279,7 +279,7 @@ def test_prefill_out_supports_strided_scratch_buffer(heads):
 @pytest.mark.parametrize("heads", [16, 64])
 @pytest.mark.parametrize("ratio", [0, 4, 128])
 def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
-    from lightllm.common.basemodel import prefill_cuda_graph as cuda_graph_module
+    from lightllm.common.execution import prefill_graph as cuda_graph_module
     from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
     from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
     from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
@@ -358,7 +358,7 @@ def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
         rtol=0.02,
         atol=5e-4,
     )
-    assert len(infer_state.prefill_cuda_graph_exe_list) == 3
+    assert len(infer_state.prefill_program.steps) == 3
     previous_meta = infer_state.prefill_att_state.sched_meta_by_ratio[ratio]
     for length in (128, 64, 1, 64):
         q.mul_(1.25)

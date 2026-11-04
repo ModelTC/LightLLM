@@ -45,10 +45,7 @@ def test_pd_region_cache_returns_independent_snapshots(kind: str, pd_args: EasyD
         state = make_atomic_state("swa" if kind == "swa" else "kv_w8")
 
     getter = state.get_pd_transfer_regions
-    before = getter.cache_info()
     first, second = getter(), getter()
-    after = getter.cache_info()
-    assert after.misses == before.misses + 1 and after.hits == before.hits + 1
     assert first == second and first is not second
     for first_region, second_region in zip(first, second):
         assert first_region is not second_region

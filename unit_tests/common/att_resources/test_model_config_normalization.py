@@ -19,6 +19,39 @@ from lightllm.models.qwen3_dflash2.model import Qwen3DFlash2Model
 from lightllm.server.core.objs.start_args_type import StartArgs
 
 
+def test_flat_rope_parameters_preserve_scaling_and_explicit_legacy_values():
+    raw = {"rope_parameters": {"rope_type": "yarn", "factor": 2.0, "rope_theta": 1000000.0, "mscale_all_dim": 1.0}}
+    original = deepcopy(raw)
+    config = TpPartBaseModel.normalize_model_config(raw)
+    assert config["rope_scaling"] == raw["rope_parameters"]
+    assert config["rope_theta"] == 1000000.0
+    assert TpPartBaseModel.normalize_model_config(config) == config
+    config["rope_scaling"]["factor"] = 4.0
+    assert raw == original
+    raw.update(rope_scaling={"rope_type": "linear", "factor": 3.0}, rope_theta=10000.0)
+    config = TpPartBaseModel.normalize_model_config(raw)
+    assert config["rope_scaling"] == raw["rope_scaling"]
+    assert config["rope_theta"] == 10000.0
+
+
+def test_qwen35_explicit_rope_parameters_override_serialized_legacy_defaults():
+    from lightllm.models.qwen3_5.model import Qwen3_5TpPartModel
+
+    raw = dict(
+        rope_theta=10000000.0,
+        partial_rotary_factor=0.25,
+        rope_scaling={"rope_type": "default", "partial_rotary_factor": 0.25},
+        rope_parameters={"rope_type": "default", "rope_theta": 10000.0, "partial_rotary_factor": 1.0},
+    )
+    original = deepcopy(raw)
+    config = Qwen3_5TpPartModel.normalize_model_config(raw)
+    assert config["rope_theta"] == 10000.0 and config["partial_rotary_factor"] == 1.0
+    assert config["rope_scaling"] == raw["rope_parameters"]
+    assert Qwen3_5TpPartModel.normalize_model_config(config) == config
+    config["rope_scaling"]["rope_theta"] = 5000.0
+    assert raw == original
+
+
 @pytest.mark.parametrize("model_class", [Qwen3DFlash2Model, Qwen3_5DFlashModel, Qwen3_5DSparkModel])
 @pytest.mark.parametrize("nested", [False, True])
 def test_dflash_runtime_and_cpu_state_use_overridden_config(

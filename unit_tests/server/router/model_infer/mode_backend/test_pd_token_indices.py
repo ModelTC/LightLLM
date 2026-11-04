@@ -1,5 +1,6 @@
 """PD 索引由普通 CPU Tensor 上传，使用实际拷贝流并跳过运行态任务。"""
 
+from lightllm.common.transfer import CopyPlan, Transfer
 from types import SimpleNamespace
 from unittest.mock import Mock
 from queue import Queue
@@ -21,7 +22,9 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
     module_class = implementation._PrefillTransModule if prefill else implementation._DecodeTransModule
     device_id = torch.cuda.current_device()
     args = SimpleNamespace(tp=2, dp=2, nnodes=1, pd_kv_page_num=2, pd_kv_page_size=4, pd_node_id=1)
-    resource = SimpleNamespace(get_pd_operator=lambda: SimpleNamespace(get_page_bytes=lambda: 64))
+    resource = SimpleNamespace(
+        get_pd_operator=lambda: SimpleNamespace(get_page_bytes=lambda: 64, get_calibration_identities=lambda: {})
+    )
     uploads = []
     copies = []
     original_cuda = torch.Tensor.cuda
@@ -35,6 +38,7 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
     def capture_copy(**kwargs: object) -> None:
         indices = kwargs["token_indices"]
         copies.append((kwargs, None if indices is None else indices.clone()))
+        return Transfer().submit(CopyPlan("copy", ()))
 
     monkeypatch.setattr(torch.Tensor, "cuda", track_upload)
     monkeypatch.setattr(implementation, "copy_page", capture_copy)
@@ -100,6 +104,17 @@ def test_pd_uploads_cpu_indices_on_copy_stream_and_skips_runtime_pages(
     )
     assert all(kwargs["write_to_pd_page"] is prefill for kwargs, _ in copies)
     assert all(indices is None or indices.is_cuda and indices.dtype == torch.long for _, indices in copies)
+
+    def fail_copy(**kwargs):
+        raise RuntimeError("injected partial page copy failure")
+
+    monkeypatch.setattr(implementation, "copy_page", fail_copy)
+    monkeypatch.setattr(task_queue, "get", Mock(side_effect=[tasks[0], _StopLoop()]))
+    with pytest.raises(_StopLoop):
+        copy_loop()
+    failed = module.failed_queue.get_nowait()
+    assert failed is tasks[0]
+    assert "partial page copy failure" in failed.error_info
 
 
 class _StopLoop(Exception):

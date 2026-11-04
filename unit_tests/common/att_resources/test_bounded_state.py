@@ -27,6 +27,45 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required for aggregated copies")
 
 
+@pytest.mark.parametrize("cursor", [0, 1, 2])
+@pytest.mark.parametrize("path", ["page", "dp", "pd"])
+def test_gdn_transfers_only_the_accepted_candidate(cursor, path):
+    source = make_state(GDNState, device="cuda", mtp_step=2)
+    target = make_state(GDNState, device="cuda", mtp_step=1)
+    source.conv_state.copy_(torch.arange(source.conv_state.numel(), device="cuda").view_as(source.conv_state))
+    source.ssm_state.copy_(torch.arange(source.ssm_state.numel(), device="cuda").view_as(source.ssm_state))
+    source.mtp_state_index[2] = cursor
+    original = [t.clone() for t in (source.conv_state, source.ssm_state, source.mtp_state_index)]
+    target.conv_state.fill_(-1)
+    target.ssm_state.fill_(-2)
+    target.mtp_state_index.fill_(1)
+    expected_conv = source.conv_state[:, 2, :, cursor : cursor + 2].clone()
+    expected_ssm = source.ssm_state[:, 6 + cursor].clone()
+    if path == "page":
+        source.save_bounded_att_runtime_to_pages([2], [11], "big", [1])
+        layout = page_layout(source)
+        buffer = torch.full((2, layout.byte_end), 255, dtype=torch.uint8, pin_memory=True)
+        source.write_state_pages_to_cpu("big", [1], buffer, [0], layout)
+        target.read_state_pages_from_cpu(buffer, [0], [2], layout)
+        target.restore_bounded_att_runtime_from_pages([0], [11], "big", [2])
+    elif path == "dp":
+        target.copy_runtime_state_from_dp([2], [0], source)
+    else:
+        layout = page_layout(source)
+        buffer = torch.full((2, layout.byte_end), 255, dtype=torch.uint8, device="cuda")
+        source.write_to_pd_page(2, buffer, 1, 11, layout)
+        target.read_from_pd_page(buffer, 0, 1, 11, layout)
+    torch.cuda.synchronize()
+    torch.testing.assert_close(target.conv_state[:, 0, :, :2], expected_conv, rtol=0, atol=0)
+    torch.testing.assert_close(target.ssm_state[:, 0], expected_ssm, rtol=0, atol=0)
+    assert target.mtp_state_index.tolist() == [0, 1, 1]
+    assert (target.conv_state[:, 0, :, 2:] == -1).all()
+    assert (target.ssm_state[:, 1:] == -2).all()
+    assert (target.conv_state[:, 1:] == -1).all()
+    for tensor, value in zip((source.conv_state, source.ssm_state, source.mtp_state_index), original):
+        torch.testing.assert_close(tensor, value, rtol=0, atol=0)
+
+
 def make_state(
     cls: type[KDAState] | type[GDNState] = KDAState,
     device: str | torch.device | int = "cpu",
@@ -51,7 +90,9 @@ def make_state(
     )
     manager = AttentionStateManager(request_capacity=3)
     manager.register_state("main", state)
-    state.initialize_page_pools(big_page_capacity=3, small_page_capacity=2, pin_memory=device != "cpu")
+    state.initialize_page_pools(
+        big_page_capacity=3, small_page_capacity=2, pin_memory=torch.device(device).type == "cuda"
+    )
     return state
 
 

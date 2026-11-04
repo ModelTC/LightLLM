@@ -7,6 +7,36 @@ from lightllm.common.basemodel.triton_kernel.norm.qk_norm import (
 )
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
+def test_offset_norm_weights_preserve_fp32_addition(dtype, monkeypatch):
+    from lightllm.common.basemodel.layer_weights.meta_weights.norm_weight import NoTpGEMMANormWeight, QKGEMMANormWeight
+    from lightllm.common.basemodel.layer_weights.meta_weights import platform_op
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    monkeypatch.setenv("LIGHTLLM_CURRENT_DEVICE_ID", "0")
+    monkeypatch.setattr(platform_op, "get_env_start_args", StartArgs)
+    torch.manual_seed(75)
+    offsets = torch.linspace(-0.003, 0.003, 64, dtype=dtype, device="cuda")
+    x = torch.randn(3, 64, dtype=dtype, device="cuda")
+
+    def reference(value, weight):
+        normalized = value.float() * torch.rsqrt(value.float().square().mean(-1, keepdim=True) + 1e-6)
+        return (normalized * (1.0 + weight.float())).to(dtype)
+
+    norm = NoTpGEMMANormWeight(64, "weight", dtype)
+    norm.load_hf_weights({"weight": offsets})
+    torch.testing.assert_close(norm.weight, offsets.float() + 1, rtol=0, atol=0)
+    torch.testing.assert_close(norm(x, 1e-6), reference(x, offsets), rtol=0, atol=torch.finfo(dtype).eps)
+    assert norm._native_forward(x, 1e-6).dtype == dtype
+    qk = QKGEMMANormWeight(64, "q", "k", dtype)
+    qk.load_hf_weights({"q": offsets, "k": -offsets})
+    q, k = x.clone(), x.clone()
+    qk(q, k, 1e-6)
+    torch.testing.assert_close(q, reference(x, offsets), rtol=0, atol=torch.finfo(dtype).eps)
+    torch.testing.assert_close(k, reference(x, -offsets), rtol=0, atol=torch.finfo(dtype).eps)
+
+
 def torch_qk_rmsnorm(q, w_q, eps=1e-6):
     input_dtype = q.dtype
     head_dim = w_q.shape[0]

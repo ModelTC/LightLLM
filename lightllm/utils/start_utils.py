@@ -97,7 +97,22 @@ class SubmoduleManager:
 
             stop_mps()
         if not alive_pids:
-            logger.info("All processes terminated gracefully.")
+            logger.info("All managed processes have stopped.")
+
+    def shutdown_all_processes(self):
+        # Internal workers register SIGUSR2 as an exit request; SIGTERM remains
+        # deferred until the launcher has finished draining the HTTP server.
+        for proc in reversed(self.processes):
+            try:
+                if proc.is_running() and proc.name().startswith("lightllm::"):
+                    proc.send_signal(signal.SIGUSR2)
+            except psutil.NoSuchProcess:
+                continue
+        # Notify every rank before waiting so one rank cannot strand another.
+        # Model workers release captured communicators before their parent can
+        # finish multiprocessing joins and its own interpreter finalizers.
+        psutil.wait_procs(self.processes, timeout=30)
+        self.terminate_all_processes()
 
     def setup_exit_controller(self):
         """启动 launcher 的独立资源清理进程。
@@ -142,8 +157,7 @@ class SubmoduleManager:
                     logger.warning("HTTP server did not exit in time, killing it...")
                     kill_recursive(http_server_process)
 
-            self.terminate_all_processes()
-            logger.info("All processes have been terminated gracefully.")
+            self.shutdown_all_processes()
             sys.exit(0)
 
         signal.signal(signal.SIGTERM, signal_handler)
@@ -197,7 +211,15 @@ class SubmoduleManager:
         """Best-effort cleanup before the launcher exits with a failure."""
         if http_server_process is not None and http_server_process.poll() is None:
             try:
-                kill_recursive(http_server_process)
+                # Let the HTTP supervisor stop its workers and unlink its own
+                # multiprocessing semaphores before forcing a stuck process down.
+                http_server_process.send_signal(signal.SIGTERM)
+                try:
+                    http_server_process.wait(timeout=10)
+                except subprocess.TimeoutExpired:
+                    kill_recursive(http_server_process)
+            except ProcessLookupError:
+                pass
             except Exception:
                 logger.exception("Failed to terminate the HTTP server process tree")
 

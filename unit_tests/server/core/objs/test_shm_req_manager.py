@@ -3,6 +3,7 @@ import asyncio
 import pytest
 import time
 import uuid
+import ctypes
 import numpy as np
 from unittest.mock import MagicMock
 from types import SimpleNamespace
@@ -113,14 +114,84 @@ def batch_req_manager(monkeypatch):
     service_name = f"test_batch_req_manager_{uuid.uuid4().hex}"
     monkeypatch.setattr(shm_utils, "get_unique_server_name", lambda: service_name)
     manager = ShmReqManager()
+    mappings = [
+        manager.reqs_shm,
+        manager.reqs_lock.shm,
+        manager.manager_lock.shm,
+        manager.linked_req_manager._shm_array.shm,
+        manager.alloc_state_shm.shm,
+    ]
     yield manager
-    manager.reqs = None
-    manager.linked_req_manager._values = None
-    manager.linked_req_manager._shm_array.close_shm()
-    manager.alloc_state_shm.close_shm()
-    for shm in (manager.reqs_shm, manager.reqs_lock.shm, manager.manager_lock.shm):
-        shm.close()
+    manager.close()
+    for shm in mappings:
         shm.unlink()
+
+
+def test_http_shutdown_detaches_views_without_recycling_peer_slots(batch_req_manager):
+    from lightllm.server.httpserver.manager import HttpServerManager, ReqStatus
+
+    async def run():
+        manager = HttpServerManager.__new__(HttpServerManager)
+        manager.shm_req_manager = batch_req_manager
+        index = batch_req_manager.alloc_req_index()
+        req = batch_req_manager.get_req_obj_by_index(index)
+        req.ref_count = 2  # The inference process still owns its shared lease.
+        req.alloc_shm_numpy_len = 4
+        req.create_prompt_ids_shm_array()
+        req.create_logprobs_shm_array()
+        mappings = [req.shm_prompt_ids.shm, req.shm_logprobs.shm]
+        manager.req_id_to_out_inf = {1: ReqStatus(1, None, [req], 0)}
+        del req
+
+        peer = shm_utils.ServiceSharedMemory(batch_req_manager.reqs_shm.name)
+        peer_req = batch_req_manager.req_class.from_buffer(peer.buf, index * ctypes.sizeof(batch_req_manager.req_class))
+        allocation = shm_utils.ServiceSharedMemory(batch_req_manager.alloc_state_shm.shm.name)
+        allocated = np.ndarray((batch_req_manager.max_req_num,), dtype=np.int32, buffer=allocation.buf)
+        stopped = []
+        entered = asyncio.Event()
+
+        async def reader():
+            req = manager.req_id_to_out_inf[1].group_req_objs.shm_req_objs[0]
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                assert req.ref_count == 2
+                stopped.append(True)
+
+        reader_task = manager.background_tasks.create(reader())
+        await entered.wait()
+        try:
+            await manager.close()
+            await manager.close()
+            assert stopped == [True]
+            assert reader_task.cancelled()
+            assert not manager.req_id_to_out_inf
+            assert peer_req.ref_count == 2
+            assert allocated[index] == 1
+            assert batch_req_manager.proc_private_get_state[index] == 1
+            assert all(shm.buf is None for shm in mappings)
+            peer_req.shm_cur_output_len = 3
+            assert peer_req.shm_cur_output_len == 3
+        finally:
+            del peer_req, allocated
+            peer.close()
+            allocation.close()
+            for shm in mappings:
+                shm.unlink()
+
+    asyncio.run(run())
+
+
+def test_close_rejects_a_live_exported_request_view(batch_req_manager):
+    index = batch_req_manager.alloc_req_index()
+    req = batch_req_manager.get_req_obj_by_index(index)
+    with pytest.raises(BufferError):
+        batch_req_manager.close()
+    assert req.ref_count == 1
+    assert batch_req_manager.alloc_state_shm.arr[index] == 1
+    del req
+    batch_req_manager.close()
 
 
 def test_batch_allocation_and_reuse(batch_req_manager):

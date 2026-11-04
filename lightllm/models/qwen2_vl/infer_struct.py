@@ -1,10 +1,10 @@
+from functools import partial
 from typing import Optional, List
 import torch
-import numpy as np
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.common.basemodel.infer_struct import InferStateInfo
+from lightllm.common.execution import batch_metadata
+from lightllm.common.execution.batch_metadata import RotaryTables
 from lightllm.models.qwen2_vl.triton_kernel.get_mrope_position_ids import get_mrope_position_triton
-from lightllm.utils.envs_utils import get_env_start_args
 
 
 class Qwen2VLInferStateInfo(LlamaInferStateInfo):
@@ -13,10 +13,18 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
         self.position_cos = None
         self.position_sin = None
 
-    def init_some_extra_state(self, model):
+    @classmethod
+    def bind_metadata(cls, model):
         rope_scaling = model.config.get("rope_scaling", {})
-        self.rope_type = rope_scaling.get("rope_type", rope_scaling.get("type", None))
-        InferStateInfo.init_some_extra_state(self, model)
+        return partial(
+            cls.prepare_metadata,
+            tables=RotaryTables(model._cos_cached, model._sin_cached),
+            rope_type=rope_scaling.get("rope_type", rope_scaling.get("type", None)),
+        )
+
+    def prepare_metadata(self, *, tables, rope_type):
+        self.rope_type = rope_type
+        batch_metadata.prepare_sequence_metadata(self)
 
         # Prefill builds complete 3-axis MRoPE positions from the prompt's
         # image/video layout. Request-level position deltas are decode-only.
@@ -32,8 +40,7 @@ class Qwen2VLInferStateInfo(LlamaInferStateInfo):
             self._apply_mrope_position_delta()
 
         self.position_ids = self.position_ids.contiguous()
-        self.position_cos = model._cos_cached[self.position_ids]
-        self.position_sin = model._sin_cached[self.position_ids]
+        self.position_cos, self.position_sin = tables.gather(self.position_ids)
         return
 
     def _apply_mrope_position_delta(self):

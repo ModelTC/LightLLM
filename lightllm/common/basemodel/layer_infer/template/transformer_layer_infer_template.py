@@ -6,7 +6,6 @@ from ..transformer_layer_infer import TransformerLayerInfer
 from ...infer_struct import InferStateInfo
 from lightllm.distributed import all_reduce
 from typing import Tuple
-from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 
 
 class TransformerLayerInferTpl(TransformerLayerInfer):
@@ -34,6 +33,9 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         raise Exception("need to impl")
 
     def _post_cache_kv(self, cache_kv, infer_state: InferStateInfo, layer_weight):
+        if getattr(self, "bound_kv_writer", None) is not None:
+            self.bound_kv_writer(token_indices=infer_state.mem_index, kv=cache_kv)
+            return
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="",
@@ -104,50 +106,24 @@ class TransformerLayerInferTpl(TransformerLayerInfer):
         input_embdings.add_(ffn_out.view(-1, self.embed_dim_))
         return input_embdings
 
+    def _context_attention_extra_inputs(self, infer_state):
+        return ()
+
+    def _context_attention_output_specs(self, q):
+        return None
+
     def _context_attention_wrapper_run(
         self, q: torch.Tensor, cache_kv: torch.Tensor, infer_state: InferStateInfo, layer_weight
     ) -> torch.Tensor:
-        if torch.cuda.is_current_stream_capturing():
-            q = q.contiguous()
-            # cache_kv is None for layers that own no K/V slot (e.g. gemma4
-            # KV-shared layers, which read K/V from a prior layer's cache and
-            # ignore this arg in _context_attention_kernel). Skip the
-            # graph-input plumbing for it instead of crashing on None.
-            cache_kv = cache_kv.contiguous() if cache_kv is not None else None
-            _q = tensor_to_no_ref_tensor(q)
-            _cache_kv = tensor_to_no_ref_tensor(cache_kv) if cache_kv is not None else None
-            pre_capture_graph = infer_state.prefill_cuda_graph_get_current_capture_graph()
-            pre_capture_graph.__exit__(None, None, None)
+        program = infer_state.prefill_program
+        if program is None or not program.is_capturing:
+            return self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
+        inputs = (q.contiguous(), cache_kv.contiguous() if cache_kv is not None else None)
+        inputs += self._context_attention_extra_inputs(infer_state)
 
-            def get_o_shape_dtype_device():
-                # 在一个新的 graph 中尝试运行，并不是为了捕获图，是为了尝试得到 o 的形状等信息
-                with torch.cuda.graph(cuda_graph=torch.cuda.CUDAGraph()):
-                    __o = self._context_attention_kernel(_q, _cache_kv, infer_state, layer_weight)
-                    o_shape = __o.shape
-                    o_dtype = __o.dtype
-                    o_device = __o.device
-                    del __o
+        def attention(tensors, batch):
+            query, kv, *extra = tensors
+            kwargs = {"extra_inputs": tuple(extra)} if extra else {}
+            return (self._context_attention_kernel(query, kv, batch, layer_weight, **kwargs),)
 
-                    import gc
-
-                    gc.collect()
-                    torch.cuda.empty_cache()
-                return o_shape, o_dtype, o_device
-
-            o_shape, o_dtype, o_device = get_o_shape_dtype_device()
-            infer_state.prefill_cuda_graph_create_graph_obj()
-            infer_state.prefill_cuda_graph_get_current_capture_graph().__enter__()
-            o = torch.empty(o_shape, dtype=o_dtype, device=o_device)
-            _o = tensor_to_no_ref_tensor(o)
-
-            def att_func(new_infer_state: InferStateInfo):
-                tmp_o = self._context_attention_kernel(_q, _cache_kv, new_infer_state, layer_weight)
-                assert tmp_o.shape == _o.shape
-                _o.copy_(tmp_o)
-                return
-
-            infer_state.prefill_cuda_graph_add_cpu_runnning_func(func=att_func, after_graph=pre_capture_graph)
-        else:
-            o = self._context_attention_kernel(q, cache_kv, infer_state, layer_weight)
-
-        return o
+        return program.call(attention, inputs, infer_state, self._context_attention_output_specs(q))[0]

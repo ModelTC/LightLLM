@@ -43,18 +43,11 @@ class GptOssTransformerLayerWeight(LlamaTransformerLayerWeight):
         )
 
         self.experts = GPTOSSFusedMoeWeightTP(
-            gate_up_proj_name="gate_up_proj",  # diff with FusedMoeWeightTP
-            down_proj_name="down_proj",
-            e_score_correction_bias_name="",
             weight_prefix=f"model.layers.{self.layer_num_}.mlp.experts",
             n_routed_experts=n_routed_experts,
             hidden_size=self.n_embed,
             moe_intermediate_size=moe_intermediate_size,
             data_type=self.data_type_,
-            quant_method=self.quant_cfg.get_quant_method(self.layer_num_, "fused_moe"),
-            num_fused_shared_experts=0,
-            layer_num=self.layer_num_,
-            network_config=self.network_config_,
         )
 
     def _init_weight_names(self):

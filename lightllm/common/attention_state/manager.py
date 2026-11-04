@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from lightllm.common.attention_state.query_cache import CachedQueries, cached_query
+
 from typing import TYPE_CHECKING
-from functools import lru_cache
 from typing import List
 
 import torch
@@ -19,6 +20,7 @@ from .full_att import FullAttentionState
 from .bounded_att import BoundedAttentionState
 from .pd_operator import PDOperator
 from .utils import MODEL_ROLES
+from .lifetime import DeferredReclaimer
 
 if TYPE_CHECKING:
     from easydict import EasyDict
@@ -28,7 +30,7 @@ if TYPE_CHECKING:
 logger = init_logger(__name__)
 
 
-class AttentionStateManager:
+class AttentionStateManager(CachedQueries):
     """管理模型组合的注意力资源，提供缓存复用及 CPU/DP/PD 传输所需的聚合操作。
 
     通过聚合查询操作各类 State；模型通过两类创建接口决定资源组合，main/draft 共享本管理器。
@@ -55,15 +57,27 @@ class AttentionStateManager:
         self.bounded_att_big_page_allocator = None
         self.bounded_att_small_page_allocator = None
         self._request_capacity = request_capacity
+        self.reclaimer = DeferredReclaimer()
         self._cpu_cache_operator = CpuCacheOperator(self)
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
 
     def _reset_operators(self) -> None:
         """让浅拷贝后的 Operator 指向新的资源管理器副本。"""
+        self.reclaimer = DeferredReclaimer()
         self._cpu_cache_operator = CpuCacheOperator(self)
         self._dp_shared_operator = DPSharedOperator(self)
         self._pd_operator = PDOperator(self)
+
+    def __getstate__(self):
+        state = super().__getstate__()
+        for name in ("_cpu_cache_operator", "_dp_shared_operator", "_pd_operator"):
+            state.pop(name, None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self._reset_operators()
 
     def get_cpu_cache_operator(self) -> CpuCacheOperator:
         """返回当前资源管理器唯一的 CPU cache 操作对象。"""
@@ -77,18 +91,49 @@ class AttentionStateManager:
         """返回当前资源管理器唯一的 PD 操作对象。"""
         return self._pd_operator
 
-    def register_state(self, model_role: str, state: FullAttentionState | BoundedAttentionState) -> None:
+    def retire(self, completion, *, token_indices=None, big_pages=(), small_pages=(), keepalive=None):
+        """Return resources only after their last asynchronous access completes."""
+        # Allocator index buffers are reused; retain an independent CPU snapshot.
+        tokens = None if token_indices is None else token_indices.detach().cpu().clone()
+        big_pages, small_pages = list(big_pages), list(small_pages)
+        if tokens is not None and self.full_att_allocator is None:
+            raise ValueError("token retirement requires a KV allocator")
+        if big_pages and self.bounded_att_big_page_allocator is None:
+            raise ValueError("big page retirement requires an allocator")
+        if small_pages and self.bounded_att_small_page_allocator is None:
+            raise ValueError("small page retirement requires an allocator")
+
+        def release():
+            if tokens is not None:
+                self.full_att_allocator.free(tokens)
+            if big_pages:
+                self.bounded_att_big_page_allocator.free(big_pages)
+            if small_pages:
+                self.bounded_att_small_page_allocator.free(small_pages)
+
+        self.reclaimer.defer(completion, release, keepalive)
+
+    def register_state(
+        self,
+        model_role: str,
+        state: FullAttentionState | BoundedAttentionState,
+        resource_id: str | None = None,
+    ) -> None:
         """按模型角色和具体方案注册 State，保留原对象及其存储。
 
         成员名和 state_name 均为 {model_role}_{state.get_state_type()}_state。
         model_role 为 main 或 draft0..draft35；State 只返回中间的算法/存储方案标记，
         不自行添加角色或 _state。各 State 基类的 get_state_type 注释规定具体命名格式。
+        同角色、同方案的异构资源可提供 resource_id，追加在方案名后；默认保持原命名。
         同角色、同标记不能重复注册；成员名是资源身份，不代表完整布局兼容性。
         """
         assert not self._state_registration_finished, "State registration is already finished"
         assert model_role in MODEL_ROLES, f"unknown model role {model_role}"
         state_type = state.get_state_type()
         assert state_type.isidentifier() and state_type.islower(), f"invalid State type {state_type}"
+        if resource_id is not None:
+            assert resource_id.isidentifier() and resource_id.islower(), f"invalid resource ID {resource_id}"
+            state_type = f"{state_type}_{resource_id}"
         name = f"{model_role}_{state_type}_state"
         assert name not in self.__dict__, f"State {name} is already bound"
         assert all(
@@ -98,7 +143,7 @@ class AttentionStateManager:
         state.state_name = name
         setattr(self, name, state)
 
-    @lru_cache(maxsize=None)
+    @cached_query
     def get_state(
         self,
         model_role: str,
@@ -131,6 +176,22 @@ class AttentionStateManager:
         )
         return matches[0]
 
+    def read_full_att_calibration(self, args: StartArgs | EasyDict):
+        """Read one startup snapshot shared by format planning and State binding."""
+        path = args.kv_quant_calibration_config_path
+        if not hasattr(self, "_calibration_snapshot"):
+            import json
+
+            calibration = None
+            if path is not None:
+                with open(path) as file:
+                    calibration = json.load(file)
+            self._calibration_snapshot = (path, calibration)
+        previous_path, calibration = self._calibration_snapshot
+        if path != previous_path:
+            raise ValueError("calibration source cannot change during startup")
+        return calibration
+
     def load_full_att_calibration(self, args: StartArgs | EasyDict) -> None:
         """全部 main/draft State 就绪后统一读取静态标定，并交给具体 State 绑定。
 
@@ -138,7 +199,6 @@ class AttentionStateManager:
         排序，State 内保留 logical_layer_groups 顺序。非静态 FP8 的 full State 同样占用
         对应物理行区间，共享逻辑层只占一行；CPU 布局创建不需要调用本流程。
         """
-        import json
         from .full_att.gqa.static_fp8_state import StaticFP8FullAttentionState
 
         full_states = self.get_full_attention_states()
@@ -147,11 +207,9 @@ class AttentionStateManager:
             return
 
         # 阶段一：只读取一次文件；无文件时由 per_tensor State 绑定单位 scale。
-        calibration = None
+        calibration = self.read_full_att_calibration(args)
         path = args.kv_quant_calibration_config_path
         if path is not None:
-            with open(path) as file:
-                calibration = json.load(file)
             if any(state.config.scale_mode == "per_tensor" for state in calibration_states):
                 from lightllm.utils.config_utils import get_model_architectures
 
@@ -177,7 +235,9 @@ class AttentionStateManager:
                     )
                 storage_layer_start += len(state.config.logical_layer_groups)
         logger.info(
-            "Full-attention calibration bound: states=%d, source=%s", len(calibration_states), path or "unit scales"
+            "Full-attention calibration bound: states=%d, source=%s",
+            len(calibration_states),
+            path or "unit scales",
         )
 
     def initialize_storage(
@@ -293,8 +353,7 @@ class AttentionStateManager:
 
         # 存储分配可能改变物理页规格，清除 State 的 CPU/PD 区域和管理器的派生布局缓存。
         for state in (*full_states, *bounded_states):
-            state.get_cpu_transfer_regions.cache_clear()
-            state.get_pd_transfer_regions.cache_clear()
+            state.clear_query_cache()
         # Layout cache 归属于各 Operator；State 存储规格变化后统一失效。
         self.get_cpu_cache_operator().clear_layout_cache()
         self.get_pd_operator().clear_layout_cache()
@@ -413,7 +472,7 @@ class AttentionStateManager:
     # ========================================================================
 
     # 私有实现：缓存创建完成后的成员集合，模型逐层计算直接访问具体 State 成员。
-    @lru_cache(maxsize=None)
+    @cached_query
     def _get_states(
         self,
         state_class: type[FullAttentionState] | type[BoundedAttentionState],

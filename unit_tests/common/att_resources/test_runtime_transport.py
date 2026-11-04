@@ -567,5 +567,4 @@ def _ipc_worker(connection: Connection, ipc_kinds: tuple[str, ...]) -> None:
     except BaseException:
         connection.send(traceback.format_exc())
     finally:
-        AttentionStateManager._get_states.cache_clear()
         connection.close()

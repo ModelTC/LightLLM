@@ -197,8 +197,7 @@ def _context_attention_fwd_fp8_direct_smallq(
     # Q1 uses 34 64-key splits; H64 uses two H32 head tiles per split.
     splits, blocks, slots = (34, 1, 64) if qn == 1 else (17, 2, 128)
     block_h = 32 if heads == 64 else 16
-    if heads == 8:
-        # H8 uses local buffers because its direct path has no reusable workspace.
+    if heads == 8 and direct_workspace is None:
         partial_o = torch.empty((qn, splits, 8, 512), dtype=torch.float32, device=q.device)
         partial_lse = torch.empty((qn, splits, 8), dtype=torch.float32, device=q.device)
         output = torch.empty(q.shape, dtype=q.dtype, device=q.device)
@@ -208,7 +207,7 @@ def _context_attention_fwd_fp8_direct_smallq(
         partial_o = workspace["partial_o"]
         partial_lse = workspace["partial_lse"]
         output = workspace["output"]
-        launch_grid = (qn, splits, triton.cdiv(heads, block_h))
+        launch_grid = (qn, splits) if heads == 8 else (qn, splits, triton.cdiv(heads, block_h))
     _direct_smallq_packed_kernel[launch_grid](
         q,
         packed_kv,

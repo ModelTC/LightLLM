@@ -295,7 +295,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         dim = cfg["qk_rope_head_dim"]
         # The rope tables MUST span every absolute position any request can produce (the served
         # max_req_total_len / max_position_embeddings, up to 1M). Capping them shorter makes
-        # init_some_extra_state's index_select(cos/sin, position_ids) read OOB past the table at
+        # prepare_metadata's index_select(cos/sin, position_ids) read OOB past the table at
         # contexts beyond the cap (device-side assert / crash). ~268MB total at 1M, fp32x32 x4 views.
         max_seq = max(self.max_seq_length, cfg["max_position_embeddings"])
         freq_exponents = torch.arange(0, dim, 2, dtype=torch.float32, device="cuda") / dim
@@ -305,7 +305,7 @@ class DeepseekV4TpPartModel(LlamaTpPartModel):
         orig_max = rs.get("original_max_position_embeddings", 0)
 
         def build_inv_freq(base):
-            freqs = 1.0 / (base ** freq_exponents)
+            freqs = 1.0 / (base**freq_exponents)
             if rope_type == "yarn" and orig_max > 0:
                 beta_fast = rs.get("beta_fast", 32)
                 beta_slow = rs.get("beta_slow", 1)

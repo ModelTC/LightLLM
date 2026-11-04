@@ -14,6 +14,8 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         self.sliding_window_ = int(network_config.get("sliding_window", 0) or 0)
 
     def _token_attention_kernel(self, q, infer_state, layer_weight):
+        if getattr(self, "bound_decode_attention", None) is not None:
+            return super()._token_attention_kernel(q, infer_state, layer_weight)
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="gqa",
@@ -42,6 +44,8 @@ class Qwen3DFlash2TransformerLayerInfer(Qwen3DFlashTransformerLayerInfer):
         return output.view(-1, self.tp_q_head_num_ * self.head_dim_)
 
     def _post_cache_kv(self, cache_kv, infer_state, layer_weight):
+        if getattr(self, "bound_kv_writer", None) is not None:
+            return super()._post_cache_kv(cache_kv, infer_state, layer_weight)
         state = infer_state.att_state_manager.get_state(
             model_role=infer_state.att_state_role,
             state_type_filter="gqa",
