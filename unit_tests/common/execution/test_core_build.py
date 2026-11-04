@@ -312,3 +312,75 @@ def test_native_weight_binding_uses_registered_compute_without_loader_objects():
     bound = bind_compute(spec, view, device, providers.linear, requested="external.linear")
     torch.testing.assert_close(bound.run(torch.tensor([[1.0, 2.0]])), torch.tensor([[1.0, 2.0]]))
     assert calls == [(spec, view.format, device)]
+
+
+def test_named_state_inputs_share_history_and_keep_private_windows():
+    from lightllm.core.contracts.state import LayerStates
+
+    kv = StateSpec("main", "kv", 0, (0, 1), (1,))
+    index = StateSpec("main", "index", 0, (0, 1), (1,))
+    windows = tuple(StateSpec("main", f"window{i}", i, (i,), (1,), "window") for i in range(2))
+    declarations = (kv, index, *windows)
+    inputs = {i: LayerStates(kv, (("index", index), ("window", windows[i]))) for i in range(2)}
+    adapter = SimpleNamespace(
+        attention_specs=lambda: {0: "shared", 1: "shared"},
+        state_specs=lambda: declarations,
+        attention_states=lambda: inputs,
+    )
+    fmt = FormatSpec("plain", torch.float32, "value", ("value",), 1)
+
+    class Store:
+        def __init__(self, declarations, format, *args):
+            self.native = {s.key: StateView(s, format, (torch.zeros(1),)) for s in declarations}
+
+        def views(self):
+            return self.native
+
+    class Backend:
+        name, phase, supports_auxiliary_states = "shared.decode", "decode", True
+
+        def probe(self, spec, format, caps, limits, *, auxiliary_formats):
+            assert set(auxiliary_formats) in ({"index", "window"}, {"kv", "index"})
+            assert all(value == fmt for value in auxiliary_formats.values())
+            return ProbeResult((AttentionOffer(self.name, self.phase, fmt, execution_limits=limits),))
+
+        def bind(self, offer, view, params, workspace, *, auxiliary_views):
+            return SimpleNamespace(metadata_key=self.name, phase=self.phase, view=view, auxiliary=auxiliary_views)
+
+    providers = ProviderRegistry(
+        attention=(AttentionProvider(lambda phase: Backend(), ("decode",)),),
+        storage=tuple(StateProvider("value", retention, Store) for retention in ("history", "window")),
+    )
+
+    def build_engine():
+        return build(
+            model_adapter=adapter,
+            providers=providers,
+            device=SimpleNamespace(caps=DeviceCaps("cpu"), allocate_workspace=bytearray),
+            config=BuildConfig(
+                layers=[SimpleNamespace(layer_num_=i) for i in range(2)],
+                manager=None,
+                limits=ExecutionLimits(0),
+                format=fmt,
+                requested={"decode": "auto"},
+                window_format=fmt,
+                static_params={0: None, 1: None},
+            ),
+        )
+
+    engine = build_engine()
+    first, second = [b.execution for b in engine.plan.bindings]
+    first.view.fields[0].fill_(7)
+    first.auxiliary["index"].fields[0].fill_(3)
+    first.auxiliary["window"].fields[0].fill_(1)
+    assert second.view.fields[0].item() == 7
+    assert second.auxiliary["index"].fields[0].item() == 3
+    assert second.auxiliary["window"].fields[0].item() == 0
+    inputs.update({i: LayerStates(windows[i], (("kv", kv), ("index", index))) for i in range(2)})
+    window_engine = build_engine()
+    first, second = [b.execution for b in window_engine.plan.bindings]
+    assert first.view.fields[0] is not second.view.fields[0]
+    assert first.auxiliary["kv"].fields[0] is second.auxiliary["kv"].fields[0]
+    inputs[1] = LayerStates(kv, (("index", StateSpec("main", "missing", 1, (1,), (1,))),))
+    with pytest.raises(ValueError, match="undeclared state"):
+        build_engine()
