@@ -370,3 +370,33 @@ def test_cpu_offload_requires_tail_state(monkeypatch, state_slot, expected):
     module.args = SimpleNamespace(cpu_cache_token_page_size=512, disable_linear_att_small_page_cpu_cache=False)
     req = SimpleNamespace(tail_small_page_buffer_id=state_slot)
     assert module._handle_hybrid_att_last_page(req, 2, [512, 960]) == expected
+
+
+def test_bounded_requests_without_prefix_cache(monkeypatch):
+    from lightllm.server.router.model_infer import infer_batch
+
+    values = torch.ones(2, 3)
+    resets = []
+
+    def reset(slots):
+        values[slots] = 0
+        resets.extend(slots)
+
+    resources = SimpleNamespace(reset_bounded_att_state=reset)
+    backend = SimpleNamespace(is_hybrid_att_model=True, model=SimpleNamespace(att_state_manager=resources))
+    context = infer_batch.InferenceContext()
+    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: SimpleNamespace(output_constraint_mode=None))
+    context.register(backend, SimpleNamespace(req_sampling_params_manager=None), None, None, 64)
+    assert not context.is_hybrid_att_model
+    monkeypatch.setattr(infer_batch, "g_infer_context", context)
+    req = infer_batch.InferReq.__new__(infer_batch.InferReq)
+    req.req_idx, req.cur_kv_len = 0, 0
+    req.sampling_param = SimpleNamespace(disable_prompt_cache=False)
+    req.shm_req = SimpleNamespace()
+    req._match_radix_cache()
+    assert resets == [0] and not values[0].any() and values[1].all()
+    values[0].fill_(2)
+    req.cur_kv_len = 4
+    req._match_radix_cache()
+    context.save_hybrid_state_to_cache(torch.tensor([0]), [req])
+    assert resets == [0] and (values[0] == 2).all()
