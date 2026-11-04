@@ -4,7 +4,13 @@ import triton
 from lightllm.common.basemodel import BaseLayerInfer
 from ..infer_struct import DeepseekV4InferStateInfo
 from ..layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
-from ..triton_kernel.compressor import apply_ape, _fused_compress_norm_rope_kernel, _save_compressor_state_kernel
+from ..triton_kernel.compressor import (
+    apply_ape,
+    _compress_norm_rope_pack_kernel,
+    _compress_window_kernel,
+    _fused_compress_norm_rope_kernel,
+    _save_compressor_state_kernel,
+)
 
 
 class CompressorInfer(BaseLayerInfer):
@@ -117,7 +123,7 @@ def fused_compress(
     if kv_score.shape[0] == 0:
         return out_buffer
 
-    # 三种 compressor 共用算子，分别对应 req_to_c4_state / req_to_c4_indexer_state / req_to_c128_state。
+    # C4 与 indexer 仍走融合算子。C128 分两次 launch：窗口压缩，然后 norm 与 RoPE 打包。
     state_capacity_tokens = req_to_compressor_state.shape[1]
     req_to_compressor_state = req_to_compressor_state.flatten(0, 1)
     candidate_dim = kv_score.shape[-1] // 2
@@ -125,49 +131,106 @@ def fused_compress(
     is_c4 = compress_ratio == 4
     block_state = triton.next_power_of_2(candidate_dim)
     block_head = triton.next_power_of_2(head_dim)
+    token_num = kv_score.shape[0]
 
-    _fused_compress_norm_rope_kernel[(kv_score.shape[0],)](
-        kv_score,
-        kv_score.stride(0),
-        kv_score.stride(1),
-        req_to_compressor_state,
-        infer_state.position_ids,
-        infer_state._dsv4_token_to_batch_idx,
-        infer_state.b_req_idx,
-        infer_state.b_mtp_index,
-        infer_state.b_seq_len,
-        infer_state.b_ready_cache_len,
-        infer_state.b_q_start_loc,
-        compressed_kv_slots,
-        norm_weight,
-        eps,
-        cos_table,
-        cos_table.stride(0),
-        cos_table.stride(1),
-        sin_table,
-        sin_table.stride(0),
-        sin_table.stride(1),
-        out_buffer,
-        HEAD_DIM=head_dim,
-        CANDIDATE_DIM=candidate_dim,
-        STATE_DIM=state_dim,
-        COMPRESS_RATIO=compress_ratio,
-        WINDOW_SIZE=state.config.window_size,
-        IS_C4=is_c4,
-        IS_PREFILL=infer_state.is_prefill,
-        STATE_CAPACITY_TOKENS=state_capacity_tokens,
-        ROPE_HEAD_DIM=qk_rope_head_dim,
-        FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
-        AMAX_MIN=1e-4,
-        NOPE_DIM=head_dim - qk_rope_head_dim,
-        QUANT_BLOCK=64,
-        SCALE_BYTES=(head_dim - qk_rope_head_dim) // 64 + 1,
-        PAGE_SIZE=out_page_size,
-        BYTES_PER_PAGE=out_buffer.stride(0),
-        BLOCK=block_head,
-        IS_IN_INDEXER=is_in_indexer,
-        num_warps=4,
-    )
+    if compress_ratio == 128:
+        compress_scratch = infer_state.dsv4_workspace.get_c128_compress_scratch(token_num, infer_state.microbatch_index)
+        window_block = 64
+        _compress_window_kernel[(token_num, triton.cdiv(head_dim, window_block))](
+            kv_score,
+            kv_score.stride(0),
+            kv_score.stride(1),
+            req_to_compressor_state,
+            infer_state.position_ids,
+            infer_state._dsv4_token_to_batch_idx,
+            infer_state.b_req_idx,
+            infer_state.b_mtp_index,
+            infer_state.b_seq_len,
+            infer_state.b_ready_cache_len,
+            infer_state.b_q_start_loc,
+            compressed_kv_slots,
+            compress_scratch,
+            HEAD_DIM=head_dim,
+            CANDIDATE_DIM=candidate_dim,
+            STATE_DIM=state_dim,
+            COMPRESS_RATIO=compress_ratio,
+            WINDOW_SIZE=state.config.window_size,
+            IS_C4=is_c4,
+            IS_PREFILL=infer_state.is_prefill,
+            STATE_CAPACITY_TOKENS=state_capacity_tokens,
+            BLOCK=window_block,
+            num_warps=8,
+        )
+        _compress_norm_rope_pack_kernel[(token_num,)](
+            compress_scratch,
+            norm_weight,
+            eps,
+            infer_state.position_ids,
+            compressed_kv_slots,
+            cos_table,
+            cos_table.stride(0),
+            cos_table.stride(1),
+            sin_table,
+            sin_table.stride(0),
+            sin_table.stride(1),
+            out_buffer,
+            HEAD_DIM=head_dim,
+            COMPRESS_RATIO=compress_ratio,
+            ROPE_HEAD_DIM=qk_rope_head_dim,
+            FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
+            AMAX_MIN=1e-4,
+            NOPE_DIM=head_dim - qk_rope_head_dim,
+            QUANT_BLOCK=64,
+            SCALE_BYTES=(head_dim - qk_rope_head_dim) // 64 + 1,
+            PAGE_SIZE=out_page_size,
+            BYTES_PER_PAGE=out_buffer.stride(0),
+            BLOCK=block_head,
+            IS_IN_INDEXER=is_in_indexer,
+            num_warps=4,
+        )
+    else:
+        _fused_compress_norm_rope_kernel[(token_num,)](
+            kv_score,
+            kv_score.stride(0),
+            kv_score.stride(1),
+            req_to_compressor_state,
+            infer_state.position_ids,
+            infer_state._dsv4_token_to_batch_idx,
+            infer_state.b_req_idx,
+            infer_state.b_mtp_index,
+            infer_state.b_seq_len,
+            infer_state.b_ready_cache_len,
+            infer_state.b_q_start_loc,
+            compressed_kv_slots,
+            norm_weight,
+            eps,
+            cos_table,
+            cos_table.stride(0),
+            cos_table.stride(1),
+            sin_table,
+            sin_table.stride(0),
+            sin_table.stride(1),
+            out_buffer,
+            HEAD_DIM=head_dim,
+            CANDIDATE_DIM=candidate_dim,
+            STATE_DIM=state_dim,
+            COMPRESS_RATIO=compress_ratio,
+            WINDOW_SIZE=state.config.window_size,
+            IS_C4=is_c4,
+            IS_PREFILL=infer_state.is_prefill,
+            STATE_CAPACITY_TOKENS=state_capacity_tokens,
+            ROPE_HEAD_DIM=qk_rope_head_dim,
+            FP8_MAX=torch.finfo(torch.float8_e4m3fn).max,
+            AMAX_MIN=1e-4,
+            NOPE_DIM=head_dim - qk_rope_head_dim,
+            QUANT_BLOCK=64,
+            SCALE_BYTES=(head_dim - qk_rope_head_dim) // 64 + 1,
+            PAGE_SIZE=out_page_size,
+            BYTES_PER_PAGE=out_buffer.stride(0),
+            BLOCK=block_head,
+            IS_IN_INDEXER=is_in_indexer,
+            num_warps=4,
+        )
 
     _save_compressor_state_kernel[(kv_score.shape[0],)](
         kv_score,
