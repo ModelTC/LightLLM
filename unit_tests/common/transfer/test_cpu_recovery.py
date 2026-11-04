@@ -48,7 +48,7 @@ def test_failed_cpu_load_retires_new_resources_without_publishing_prefix(monkeyp
     )
     module.cpu_cache_client = SimpleNamespace(cpu_kv_cache_tensor=None)
     module.need_sync_compute_stream = lambda: False
-    monkeypatch.setattr(implementation, "Transfer", lambda: Transfer(runtime))
+    monkeypatch.setattr(implementation, "Transfer", lambda **kwargs: Transfer(runtime))
     monkeypatch.setattr(implementation, "CudaRuntime", lambda: runtime)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)
 
@@ -111,7 +111,7 @@ def test_failed_cpu_offload_waits_before_dereferencing_pages(monkeypatch, tp_siz
         cur_kv_len=4,
         cpu_cache_task_status=InferReq._CpuCacheTaskStatus.NOT_STARTED,
     )
-    monkeypatch.setattr(implementation, "Transfer", lambda: Transfer(runtime))
+    monkeypatch.setattr(implementation, "Transfer", lambda **kwargs: Transfer(runtime))
     monkeypatch.setattr(implementation.g_infer_context, "is_hybrid_att_model", False)
     monkeypatch.setattr(implementation.dist, "broadcast_object_list", lambda *args, **kwargs: None)
     monkeypatch.setattr(torch.cuda, "stream", lambda stream: nullcontext())

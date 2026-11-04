@@ -28,12 +28,13 @@ class TransferFailure(RuntimeError):
 
 
 class Transfer:
-    def __init__(self, runtime=None):
+    def __init__(self, runtime=None, providers=None):
         if runtime is None:
             from lightllm.core.device.cuda import CudaRuntime
 
             runtime = CudaRuntime()
         self.runtime = runtime
+        self.providers = providers
 
     def submit(self, plan, *, stream=None, destination_barrier=None):
         """A barrier may publish a destination only after all TP shards arrive.
@@ -41,6 +42,11 @@ class Transfer:
         On partial submission failure there is no ready destination. The failure's
         fence must complete before either side's resources may be recycled.
         """
+        if plan.request is not None:
+            if self.providers is None:
+                raise ValueError("an explicit transfer request requires registered transport providers")
+            driver = self.providers.transfer_driver(plan.request, self.runtime)
+            return driver.submit(plan, stream=stream, destination_barrier=destination_barrier)
         with self.runtime.use_stream(stream):
             try:
                 plan.run()

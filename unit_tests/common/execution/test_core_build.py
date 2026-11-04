@@ -248,6 +248,7 @@ def test_production_state_preparation_uses_injected_registry_and_device(requeste
     model = TpPartBaseModel.__new__(TpPartBaseModel)
     model.args, model.max_req_num, model.graph_max_batch_size, model.mem_fraction = args, 1, 2, 0.9
     model.max_seq_length, model.batch_max_tokens = 8, None
+    model.tp_world_size_ = 1
     model.layers_infer, model.trans_layers_weight = [SimpleNamespace(layer_num_=0)], [object()]
     model.model_adapter = SimpleNamespace(
         attention_phases=("decode",), attention_specs=lambda: {0: spec}, state_specs=lambda: (state,)

@@ -7,7 +7,6 @@ from typing import List, Tuple
 from typing import Optional, TYPE_CHECKING
 from lightllm.utils.log_utils import init_logger
 from lightllm.utils.envs_utils import get_env_start_args
-from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.core.device.cuda import CudaRuntime
 from lightllm.core.runner.graph_program import GraphProgram
 from lightllm.core.runner.decode_graph import CudaGraph
@@ -94,11 +93,13 @@ class PrefillCudaGraph:
             graph_out_tensors = prefill_func(graph_input_tensors, infer_state)
             graph_out_tensors = [e.contiguous() for e in graph_out_tensors]
 
-        graph_input_tensors = [tensor_to_no_ref_tensor(e) for e in graph_input_tensors]
-        graph_out_tensors = [tensor_to_no_ref_tensor(e) for e in graph_out_tensors]
+        graph_input_tensors = [self.runtime.borrow_tensor(e) for e in graph_input_tensors]
+        graph_out_tensors = [self.runtime.borrow_tensor(e) for e in graph_out_tensors]
 
         graph_hidden_collector = infer_state.hidden_collector
-        hidden_tensor_count, hidden_tensor_nbytes = graph_hidden_collector.release_graph_tensor_ownership()
+        hidden_tensor_count, hidden_tensor_nbytes = graph_hidden_collector.release_graph_tensor_ownership(
+            self.runtime.borrow_tensor
+        )
         logger.info(
             f"Prefill CUDA Graph hidden collector 已完成 capture 状态托管："
             f"handle_token_num={handle_token_num}, "

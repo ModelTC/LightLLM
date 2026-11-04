@@ -990,8 +990,7 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--hardware_platform",
         type=str,
         default="cuda",
-        choices=["cuda", "musa"],
-        help="""Hardware platform: cuda | musa""",
+        help="""Hardware platform. Non-CUDA platforms provide LIGHTLLM_EXECUTION_FACTORY=module:factory.""",
     )
     parser.add_argument(
         "--enable_torch_fallback",

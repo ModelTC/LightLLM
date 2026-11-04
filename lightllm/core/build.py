@@ -140,6 +140,11 @@ class PreparedExecution:
             raise RuntimeError("execution must be bound before preparing a batch")
         return self.runner.prepare_batch(batch)
 
+    def bind_graph(self, metadata, runtime):
+        if self.runner is None:
+            raise RuntimeError("execution must be bound before capturing a Graph")
+        return self.runner.bind_graph(metadata, runtime)
+
 
 def prepare(*, model_adapter: ModelAdapter, providers: ProviderRegistry, device, config: BuildConfig):
     return PreparedExecution(

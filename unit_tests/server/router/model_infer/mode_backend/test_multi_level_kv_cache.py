@@ -224,7 +224,7 @@ def test_cpu_cache_load_uses_exact_aligned_size(monkeypatch):
         ),
         sampling_param=SimpleNamespace(shm_param=SimpleNamespace(prompt_logprobs=-1)),
     )
-    monkeypatch.setattr(multi_level_kv_cache_impl, "Transfer", lambda: Transfer(Runtime()))
+    monkeypatch.setattr(multi_level_kv_cache_impl, "Transfer", lambda **kwargs: Transfer(Runtime()))
     monkeypatch.setattr(multi_level_kv_cache_impl, "g_infer_context", context)
     monkeypatch.setattr(multi_level_kv_cache_impl.dist, "barrier", lambda group: None)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self, **kwargs: self)

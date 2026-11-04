@@ -7,6 +7,7 @@ import torch
 
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.compute.attention.dense.inputs import query_tensor
 from lightllm.core.contracts.state import StateView
 
 
@@ -62,10 +63,16 @@ class DenseBatchMetadata:
     hold_request_id: int | None = None
     shared_groups: torch.Tensor | None = None
     mtp_indices: torch.Tensor | None = None
+    host_seq_lengths: torch.Tensor | None = None
+    host_cu_q: torch.Tensor | None = None
+    host_cu_k: torch.Tensor | None = None
+    host_ready: object = None
 
     def copy_for_graph(self, new):
         if self.batch_size != new.batch_size or self.microbatch_index != new.microbatch_index:
             raise ValueError("decode Graph metadata must retain its batch size and execution lane")
+        if new.host_ready is not None:
+            new.host_ready.synchronize()
         for field in fields(self):
             old, value = getattr(self, field.name), getattr(new, field.name)
             if isinstance(value, torch.Tensor):
@@ -157,6 +164,7 @@ class BoundAttention:
         return batch.execution_metadata[self.metadata_key]
 
     def run(self, inputs, metadata, out=None):
+        inputs = query_tensor(inputs)
         if self.implementation == "fa3":
             result = self._fa3(inputs, metadata)
             if out is not None:
@@ -297,7 +305,7 @@ class DenseAttentionBackend:
             return ProbeResult(reason="requires Dense attention semantics")
         if attention_spec.attention_sink and self.implementation != "fa3":
             return ProbeResult(reason="attention sinks require a supporting backend")
-        if device_caps.device_type != "cuda":
+        if not device_caps.is_nvidia:
             return ProbeResult(reason="requires CUDA")
         if self.implementation == "fa3" and (device_caps.capability is None or device_caps.capability[0] != 9):
             return ProbeResult(reason="FA3 requires Hopper capability")

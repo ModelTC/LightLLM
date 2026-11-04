@@ -180,7 +180,7 @@ class BatchRunner:
 
     def prepare_input(self, batch, *, move_to_device=False):
         if move_to_device:
-            batch.to_cuda()
+            batch.to_device(self.requests.req_to_token_indexs.device)
         if batch.is_prefill:
             if self.policy.mixed_prefill and batch.input_ids.numel():
                 gather_token_prefill_decode_mixed(

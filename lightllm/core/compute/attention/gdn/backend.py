@@ -225,7 +225,7 @@ class GatedDeltaNetBackend:
         if not isinstance(attention_spec, GatedDeltaNetSpec):
             return ProbeResult(reason="requires Gated DeltaNet semantics")
         spec, fmt = attention_spec, format_spec
-        if device_caps.device_type != "cuda":
+        if not device_caps.is_nvidia:
             return ProbeResult(reason="GDN requires CUDA")
         if (
             spec.dtype not in (torch.float16, torch.bfloat16)

@@ -41,6 +41,8 @@ def copy_page(
     task_kind: Literal["kv", "att_state"] = "kv",
     req_idx: int | None = None,
     state_token_len: int | None = None,
+    runtime=None,
+    providers=None,
 ) -> TransferCompletion:
     """选择节点内指定 DP 的 TP 组，检查整组布局后提交 PD 页面读写。
 
@@ -85,4 +87,6 @@ def copy_page(
             state_token_len=state_token_len,
         )
         operations.extend(plan.operations)
-    return Transfer().submit(CopyPlan("pack" if write_to_pd_page else "unpack", tuple(operations)))
+    return Transfer(runtime=runtime, providers=providers).submit(
+        CopyPlan("pack" if write_to_pd_page else "unpack", tuple(operations))
+    )

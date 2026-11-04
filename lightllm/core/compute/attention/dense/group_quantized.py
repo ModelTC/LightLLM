@@ -2,6 +2,8 @@
 
 import torch
 
+from lightllm.core.compute.attention.dense.inputs import query_tensor
+
 from lightllm.core.compute.attention.dense.backend import BoundAttention, decode_blocks, scratch_elements
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
@@ -15,6 +17,7 @@ class BoundGroupQuantizedAttention(BoundAttention):
         self.dtype = self.spec.dtype or state_view.format.scale_dtype
 
     def run(self, inputs, metadata, out=None):
+        inputs = query_tensor(inputs)
         if inputs.dtype != self.dtype:
             raise ValueError("query dtype differs from the planned execution dtype")
         out = self.alloc_tensor(inputs.shape, inputs.dtype) if out is None else out
@@ -110,7 +113,7 @@ class GroupQuantizedAttentionBackend:
             return ProbeResult(reason="requires Dense attention semantics")
         if attention_spec.attention_sink:
             return ProbeResult(reason="grouped attention does not implement attention sinks")
-        if device_caps.device_type != "cuda":
+        if not device_caps.is_nvidia:
             return ProbeResult(reason="requires CUDA")
         spec, format = attention_spec, format_spec
         if (

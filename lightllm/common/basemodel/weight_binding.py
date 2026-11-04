@@ -7,7 +7,32 @@ from lightllm.core.planner.weights import bind_compute
 from lightllm.core.registry import default_providers
 
 
-def bind_moe(specs, layers, recipes, *, providers=None):
+def weight_device_caps(device, runtime=None):
+    if runtime is not None:
+        if device != runtime.device:
+            raise ValueError("weight view and execution device differ")
+        return runtime.caps
+    import torch
+
+    return DeviceCaps(
+        device.type, device.index, torch.cuda.get_device_capability(device) if device.type == "cuda" else None
+    )
+
+
+def finalize_weights(layers, runtime, providers):
+    layers = tuple(layers)
+    for prepare in providers.weight_finalizers:
+        prepare(layers, runtime)
+    seen = set()
+    for layer in layers:
+        for weight in vars(layer).values():
+            finalize = getattr(weight, "finalize_weight", None)
+            if id(weight) not in seen and callable(finalize):
+                seen.add(id(weight))
+                finalize(runtime)
+
+
+def bind_moe(specs, layers, recipes, *, providers=None, runtime=None):
     import torch
 
     providers = providers if providers is not None else default_providers()
@@ -31,10 +56,11 @@ def bind_moe(specs, layers, recipes, *, providers=None):
             raise ValueError(f"layer {layer_id}: recipe disagrees with the declared MoE semantics")
         native_view = getattr(weight, "native_moe_view", None)
         if callable(native_view):
-            fmt, fields = native_view()
-            device = fields["gate_up"].device
-            caps = DeviceCaps(device.type, device.index, torch.cuda.get_device_capability(device))
-            pending.append((layer_id, bind_compute(spec, WeightView(fmt, fields), caps, providers.moe)))
+            view = native_view()
+            if not isinstance(view, WeightView):
+                view = WeightView(*view)
+            caps = weight_device_caps(view.fields["gate_up"].device, runtime)
+            pending.append((layer_id, bind_compute(spec, view, caps, providers.moe)))
             continue
         if type(weight) is not FusedMoeWeight:
             raise ValueError(f"layer {layer_id}: model declared MoE without matching expert weights")
@@ -91,7 +117,7 @@ def bind_moe(specs, layers, recipes, *, providers=None):
             scale_dtype=torch.float32 if quantized else None,
         )
         device = weight.w13.weight.device
-        caps = DeviceCaps(device.type, device.index, torch.cuda.get_device_capability(device))
+        caps = weight_device_caps(device, runtime)
         view = WeightView(
             fmt,
             dict(
@@ -160,7 +186,7 @@ def bind_experts(spec, weight, transfers=None, *, providers=None):
     return build_experts(spec, view, caps, resources, providers, transfers)
 
 
-def bind_linears(layers, allocate, *, providers=None):
+def bind_linears(layers, allocate, *, providers=None, runtime=None):
     import torch
     from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_weight import MMWeightTpl, BMMWeightTpl
 
@@ -177,10 +203,21 @@ def bind_linears(layers, allocate, *, providers=None):
     pending, legacy, seen = [], [], set()
     for layer in layers:
         for name, weight in vars(layer).items():
-            if not isinstance(weight, (MMWeightTpl, BMMWeightTpl)) or id(weight) in seen:
+            if id(weight) in seen:
+                continue
+            native_view = getattr(weight, "native_linear_view", None)
+            if not isinstance(weight, (MMWeightTpl, BMMWeightTpl)) and not callable(native_view):
                 continue
             seen.add(id(weight))
             label = f"{getattr(layer, 'layer_num_', 'pre_post')}.{name}"
+            if callable(native_view):
+                spec, view, entry = native_view()
+                if entry not in ("mm", "bmm"):
+                    raise ValueError(f"{label}: unknown linear entry point {entry}")
+                caps = weight_device_caps(view.fields["weight"].device, runtime)
+                bound = bind_compute(spec, view, caps, providers.linear, bind_kwargs={"allocate": allocate})
+                pending.append((label, weight, entry, bound))
+                continue
             batched = isinstance(weight, BMMWeightTpl)
             method = "none" if batched else weight.quant_method.method_name
             if method not in implementations:
@@ -208,11 +245,7 @@ def bind_linears(layers, allocate, *, providers=None):
                 group_size=128 if encoding == "fp8_block128" else None,
                 scale_dtype=None if scale is None else scale.dtype,
             )
-            caps = DeviceCaps(
-                tensor.device.type,
-                tensor.device.index,
-                torch.cuda.get_device_capability(tensor.device) if tensor.is_cuda else None,
-            )
+            caps = weight_device_caps(tensor.device, runtime)
             view = WeightView(fmt, {"weight": tensor, "scale": scale, "bias": bias})
             bound = bind_compute(
                 spec, view, caps, providers.linear, requested=requested, bind_kwargs={"allocate": allocate}
@@ -221,4 +254,5 @@ def bind_linears(layers, allocate, *, providers=None):
     # Install only after every selected format and native view has been checked.
     for _, weight, entry, bound in pending:
         setattr(weight, entry, bound.run)
+        setattr(weight, "bound_" + entry, bound)
     return LinearPlan(tuple((label, bound) for label, _, _, bound in pending), tuple(legacy))

@@ -235,7 +235,7 @@ class MLAAttentionBackend:
         if not isinstance(attention_spec, MLAAttentionSpec):
             return ProbeResult(reason="requires MLA semantics")
         spec, fmt = attention_spec, format_spec
-        if device_caps.device_type != "cuda":
+        if not device_caps.is_nvidia:
             return ProbeResult(reason="MLA requires CUDA")
         if (
             fmt.encoding != "plain"

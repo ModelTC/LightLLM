@@ -23,19 +23,19 @@ class ReqSamplingParamsManager:
     输出约束使用固定的 pinned bitmask buffer，由通用采样准备阶段按 req_idx / mtp_index 填充。
     """
 
-    def __init__(self, max_request_num):
+    def __init__(self, max_request_num, device="cuda"):
         # mode ["cpu_counter", "pin_mem_counter", "gpu_counter"]
         self.penalty_counter_mode = get_env_start_args().penalty_counter_mode
         self.vocab_size = get_vocab_size(get_env_start_args().model_dir)
         self.mtp_verify_width = get_env_start_args().mtp_step + 1
-        self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
-        self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
-        self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device="cuda")
+        self.req_to_presence_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device=device)
+        self.req_to_frequency_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device=device)
+        self.req_to_repetition_penalty = torch.zeros(max_request_num + 1, dtype=torch.float32, device=device)
         # GPU 主表供 scatter、gather 和 MTP verify 使用。
         self.req_to_next_token_ids = torch.zeros(
             (max_request_num + 1, self.mtp_verify_width),
             dtype=torch.int64,
-            device="cuda",
+            device=device,
         )
         # 常驻 CPU 快照，由 MTP scatter 后的异步拷贝更新；读取前复用已有 CUDA event 等待完成。
         self.req_to_next_token_ids_cpu = torch.zeros(
@@ -45,7 +45,7 @@ class ReqSamplingParamsManager:
             pin_memory=True,
         )
         self.req_to_next_token_scores = (
-            torch.zeros_like(self.req_to_next_token_ids, dtype=torch.float32, device="cuda")
+            torch.zeros_like(self.req_to_next_token_ids, dtype=torch.float32, device=device)
             if get_env_start_args().mtp_dynamic_verify
             else None
         )
@@ -66,12 +66,12 @@ class ReqSamplingParamsManager:
             )
 
         self.req_to_exponential_decay_length_penalty = torch.zeros(
-            max_request_num + 1, dtype=torch.float32, device="cuda"
+            max_request_num + 1, dtype=torch.float32, device=device
         )
 
         if self.penalty_counter_mode == "gpu_counter":
             self.req_to_out_token_id_counter = torch.zeros(
-                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device="cuda"
+                (max_request_num + 1, self.vocab_size), dtype=torch.int32, device=device
             )
         elif self.penalty_counter_mode == "pin_mem_counter":
             self.req_to_out_token_id_counter = torch.zeros(

@@ -2,6 +2,8 @@
 
 import torch
 
+from lightllm.core.compute.attention.dense.inputs import query_tensor
+
 from lightllm.core.compute.attention.dense.backend import BoundAttention
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
@@ -18,6 +20,7 @@ class BoundStaticFP8Attention(BoundAttention):
         self.v_scale = scales[width:].expand(self.spec.kv_heads)
 
     def run(self, inputs, metadata, out=None):
+        inputs = query_tensor(inputs)
         from lightllm.common.basemodel.triton_kernel.quantization.q_per_head_fp8_quant import (
             q_per_head_fp8_quant,
             q_per_head_static_fp8_quant,
@@ -68,7 +71,7 @@ class StaticFP8AttentionBackend:
     def probe(self, attention_spec, format_spec, device_caps, limits):
         if not isinstance(attention_spec, DenseAttentionSpec):
             return ProbeResult(reason="requires Dense attention semantics")
-        if device_caps.device_type != "cuda" or device_caps.capability is None or device_caps.capability[0] != 9:
+        if not device_caps.is_nvidia or device_caps.capability is None or device_caps.capability[0] != 9:
             return ProbeResult(reason="FP8 FA3 requires Hopper")
         from lightllm.utils.sgl_utils import flash_attn_with_kvcache
 

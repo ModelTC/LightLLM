@@ -61,6 +61,17 @@ def prepare_runner(model, *, providers=None, device=None, formats=None):
         model.get_req_manager_max_seq_len(),
         2 if model.args.enable_decode_microbatch_overlap or model.args.enable_prefill_microbatch_overlap else 1,
         max_verify_tokens=verify_tokens,
+        graph_phases=(
+            (("prefill",) if getattr(model.args, "enable_prefill_cudagraph", False) else ())
+            + (("verify" if verify_tokens > 1 else "decode",) if not getattr(model, "disable_cudagraph", True) else ())
+        ),
+        dynamic_verify=getattr(model.args, "mtp_dynamic_verify", False),
+        tp_world_size=model.tp_world_size_,
+        expert_parallel=getattr(model.args, "enable_ep_moe", False),
+        transfer_paths=(
+            (("pd",) if getattr(model.args, "run_mode", None) in ("prefill", "decode") else ())
+            + (("cpu_cache",) if getattr(model.args, "enable_cpu_cache", False) else ())
+        ),
     )
     from lightllm.core.formats.kv.config import history_formats
     from lightllm.core.formats.recurrent.conv_ssm import recurrent_format as make_recurrent_format

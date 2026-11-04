@@ -222,7 +222,11 @@ class PDOperator(ResourceOperator):
         return CopyPlan("unpack", tuple(operations))
 
     def write_page(self, *args, **kwargs):
-        return Transfer().submit(self.plan_write_page(*args, **kwargs))
+        return Transfer(runtime=getattr(self.owner, "execution_device", None)).submit(
+            self.plan_write_page(*args, **kwargs)
+        )
 
     def read_page(self, *args, **kwargs):
-        return Transfer().submit(self.plan_read_page(*args, **kwargs))
+        return Transfer(runtime=getattr(self.owner, "execution_device", None)).submit(
+            self.plan_read_page(*args, **kwargs)
+        )

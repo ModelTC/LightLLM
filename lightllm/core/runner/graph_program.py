@@ -5,7 +5,6 @@ import sys
 
 import torch
 
-from lightllm.utils.tensor_utils import tensor_to_no_ref_tensor
 from lightllm.core.device.cuda import CudaRuntime
 
 
@@ -59,7 +58,7 @@ class GraphProgram:
     def _pause(self, inputs):
         if not self.is_capturing:
             raise RuntimeError("dynamic Graph steps require an active capture")
-        views = tuple(tensor_to_no_ref_tensor(value) if value is not None else None for value in inputs)
+        views = tuple(self.runtime.borrow_tensor(value) if value is not None else None for value in inputs)
         self._end_segment()
         return views
 
@@ -83,7 +82,7 @@ class GraphProgram:
                 del outputs
         self._start_segment()
         outputs = tuple(torch.empty(shape, dtype=dtype, device=device) for shape, dtype, device in output_specs)
-        targets = tuple(tensor_to_no_ref_tensor(value) for value in outputs)
+        targets = tuple(self.runtime.borrow_tensor(value) for value in outputs)
 
         def execute(current_batch):
             values = function(views, current_batch)

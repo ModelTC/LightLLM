@@ -18,6 +18,10 @@ def attention_batch(batch):
         total_q_tokens=batch.input_ids.numel() if getattr(batch, "input_ids", None) is not None else None,
         hold_request_id=getattr(batch.req_manager, "HOLD_REQUEST_ID", None),
         mtp_indices=getattr(batch, "b_mtp_index", None),
+        host_seq_lengths=getattr(batch, "host_seq_lengths", None),
+        host_cu_q=getattr(batch, "host_cu_q", None),
+        host_cu_k=getattr(batch, "host_cu_k", None),
+        host_ready=getattr(batch, "host_metadata_ready", None),
     )
 
 
@@ -36,3 +40,11 @@ class Runner:
             return {}
         inputs = attention_batch(batch)
         return {execution.metadata_key: execution.create_metadata(inputs) for execution in executions}
+
+    def bind_graph(self, metadata, runtime):
+        bindings = []
+        for key, value in metadata.items():
+            bind = getattr(self.metadata_sources[key], "bind_graph", None)
+            if bind is not None:
+                bindings.append(bind(value, runtime))
+        return bindings

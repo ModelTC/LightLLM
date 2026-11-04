@@ -134,7 +134,8 @@ def test_shutdown_retains_graphs_and_groups_until_execution_has_finished(sync_fa
         if sync_failure:
             raise RuntimeError("in-flight work failed")
 
-    monkeypatch.setattr(torch.cuda, "synchronize", sync)
+    backend.execution_device = SimpleNamespace(synchronize=sync)
+    monkeypatch.setattr(torch.cuda, "synchronize", lambda: pytest.fail("default CUDA synchronization"))
     monkeypatch.setattr(base_backend.dist_group_manager, "close", lambda: calls.append("buffers"))
     monkeypatch.setattr(base_backend.dist, "is_initialized", lambda: True)
     monkeypatch.setattr(base_backend.dist, "destroy_process_group", lambda: calls.append("groups"))

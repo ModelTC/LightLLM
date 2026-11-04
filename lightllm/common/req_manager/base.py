@@ -51,7 +51,7 @@ class _ReqLinkedList:
 
 
 class ReqManager:
-    def __init__(self, max_request_num, max_sequence_length):
+    def __init__(self, max_request_num, max_sequence_length, device="cuda"):
         from .req_sampling_params import ReqSamplingParamsManager
 
         # 这里对最大请求数量的管理在默认上多申请了一个，主要是 index 为 max_request_num 代表
@@ -62,9 +62,9 @@ class ReqManager:
         self.page_size = page_size = get_env_start_args().page_size
         max_sequence_length = (max_sequence_length + page_size - 1) // page_size * page_size
         self.req_to_token_indexs = torch.zeros(
-            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device="cuda"
+            (max_request_num + 1, max_sequence_length), dtype=torch.int32, device=device
         )
-        self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num)
+        self.req_sampling_params_manager = ReqSamplingParamsManager(max_request_num, device=device)
         self.max_request_num = max_request_num
         self.HOLD_REQUEST_ID = max_request_num
 

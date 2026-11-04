@@ -166,7 +166,7 @@ class FlashInferMLABackend(MLAAttentionBackend):
     def probe(self, attention_spec, format_spec, device_caps, limits):
         if not isinstance(attention_spec, MLAAttentionSpec):
             return ProbeResult(reason="requires MLA semantics")
-        if device_caps.device_type != "cuda" or device_caps.capability is None or device_caps.capability[0] < 8:
+        if not device_caps.is_nvidia or device_caps.capability is None or device_caps.capability[0] < 8:
             return ProbeResult(reason="FlashInfer MLA requires SM80 or newer CUDA devices")
         if find_spec("flashinfer") is None:
             return ProbeResult(reason="FlashInfer is not installed")

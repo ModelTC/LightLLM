@@ -15,6 +15,7 @@ from lightllm.utils.torch_memory_saver_utils import (
     MemoryTag,
 )
 from lightllm.core.device.cuda import CudaRuntime
+from lightllm.core.device.graph import bind_graph
 
 if TYPE_CHECKING:
     from lightllm.common.basemodel.infer_struct import InferStateInfo
@@ -141,6 +142,7 @@ class CudaGraph:
 
         with self.runtime.capture_graph(graph_obj, pool=self.mempool, memory_saver=self.torch_memory_saver):
             model_output = decode_func(infer_state)
+        graph_obj = bind_graph(graph_obj, (infer_state,), self.runtime)
         self.graph[batch_size] = (graph_obj, infer_state, model_output)
         graph_obj.replay()
         self._measure_replay_cost(graph_obj=graph_obj, batch_size=batch_size)
@@ -177,6 +179,7 @@ class CudaGraph:
 
         with self.runtime.capture_graph(graph_obj, pool=self.mempool, memory_saver=self.torch_memory_saver):
             model_output, model_output1 = decode_func(infer_state, infer_state1)
+        graph_obj = bind_graph(graph_obj, (infer_state, infer_state1), self.runtime)
         self.graph[batch_size] = (
             graph_obj,
             infer_state,
@@ -203,7 +206,7 @@ class CudaGraph:
         infer_cost_ms_tensor = torch.tensor(
             [start_event.elapsed_time(end_event)],
             dtype=torch.float32,
-            device="cuda",
+            device=getattr(self.runtime, "device", "cuda"),
         )
         dist.all_reduce(infer_cost_ms_tensor, op=dist.ReduceOp.MIN, group=dist.group.WORLD)
         if self.enable_decode_microbatch_overlap:
@@ -230,8 +233,7 @@ class CudaGraph:
     def _replay(self, infer_state: InferStateInfo):
         batch_size = infer_state.input_ids.shape[0]
         graph_obj, graph_infer_state, graph_output = self.graph[batch_size]
-        graph_infer_state.copy_for_cuda_graph(infer_state)
-        graph_obj.replay()
+        graph_obj.replay(infer_state)
         return graph_output
 
     def _replay_overlap(
@@ -247,9 +249,7 @@ class CudaGraph:
             graph_model_output,
             graph_model_output1,
         ) = self.graph[batch_size]
-        graph_infer_state.copy_for_cuda_graph(infer_state)
-        graph_infer_state1.copy_for_cuda_graph(infer_state1)
-        graph_obj.replay()
+        graph_obj.replay(infer_state, infer_state1)
         return graph_model_output, graph_model_output1
 
     def replay(self, infer_state, infer_state1=None):

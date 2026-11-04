@@ -111,12 +111,25 @@ class ModeBackend:
         self.weight_dir = kvargs["weight_dir"]
         max_total_token_num = kvargs["max_total_token_num"]
 
-        init_distributed_env(kvargs)
+        from lightllm.core.device.context import create_context
+
+        device_index = kvargs["rank_id"] % (self.world_size // self.nnodes)
+        self.execution_context = create_context(
+            device_index,
+            device=kvargs.get("execution_device"),
+            providers=kvargs.get("execution_providers"),
+            formats=kvargs.get("execution_formats"),
+            config=self.args,
+        )
+        self.execution_device = self.execution_context.device
+        init_distributed_env(kvargs, runtime=self.execution_device)
         self.init_rank_infos()
         group_size = (
             2 if (self.args.enable_decode_microbatch_overlap or self.args.enable_prefill_microbatch_overlap) else 1
         )
-        dist_group_manager.create_groups(group_size=group_size)  # set the default group
+        dist_group_manager.create_groups(group_size=group_size, runtime=self.execution_device)  # set the default group
+
+        self.execution_context.communication = tuple(dist_group_manager.groups)
 
         self.shared_token_load = TokenLoad("shared_token_load", self.dp_size_in_node)
 
@@ -146,9 +159,10 @@ class ModeBackend:
             "quant_cfg": kvargs.get("quant_cfg", None),
             "expert_dtype": kvargs.get("expert_dtype", None),
             "run_mode": self.run_mode,
-            "execution_providers": kvargs.get("execution_providers"),
-            "execution_device": kvargs.get("execution_device"),
-            "execution_formats": kvargs.get("execution_formats"),
+            "execution_providers": self.execution_context.providers,
+            "execution_device": self.execution_device,
+            "execution_formats": self.execution_context.formats,
+            "execution_communication": self.execution_context.communication,
         }
         self.model, self.is_multimodal = get_model(model_cfg, model_kvargs)
         self.model: TpPartBaseModel = self.model  # for easy typing
@@ -168,7 +182,11 @@ class ModeBackend:
         # main/draft 共用请求映射；按所有模型的最大需求分配，再逐模型绑定。
         max_seq_len = max(item.get_req_manager_max_seq_len() for item in models)
         with self.model.torch_memory_saver.region(tag=MemoryTag.KV_CACHE):
-            req_manager = ReqManager(max_request_num=self.model.max_req_num, max_sequence_length=max_seq_len)
+            req_manager = ReqManager(
+                max_request_num=self.model.max_req_num,
+                max_sequence_length=max_seq_len,
+                device=self.execution_device.device,
+            )
         for item in models:
             item.bind_req_manager(req_manager=req_manager)
         for item in models:
@@ -179,13 +197,16 @@ class ModeBackend:
             manager.finish_state_registration()
             manager.load_full_att_calibration(args=self.model.args)
             manager.initialize_storage(
-                self.model.args, token_capacity=self.model.max_total_token_num, mem_fraction=self.model.mem_fraction
+                self.model.args,
+                token_capacity=self.model.max_total_token_num,
+                mem_fraction=self.model.mem_fraction,
+                runtime=self.execution_device,
             )
         # Capture writes must be present when warmup records CUDA Graphs.
         self._init_route_capture()
         for item in models:
             item.init_runtime()
-        torch.cuda.empty_cache()
+        self.execution_device.empty_cache()
         set_model_init_status(True)
         set_random_seed(2147483647)
         self.is_hybrid_att_model = bool(self.model.att_state_manager.get_bounded_attention_states())
@@ -226,21 +247,35 @@ class ModeBackend:
         )
         # 初始化 dp 模式使用的通信 tensor, 对于非dp模式，不会使用到
         if self.dp_size > 1:
-            self.dp_reduce_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
-            self.dp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+            self.dp_reduce_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=self.execution_device.device, requires_grad=False
+            )
+            self.dp_gather_item_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=self.execution_device.device, requires_grad=False
+            )
             self.dp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+                [0 for _ in range(self.global_world_size)],
+                dtype=torch.int32,
+                device=self.execution_device.device,
+                requires_grad=False,
             )
 
         # 用于协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
-        self.node_broadcast_tensor = torch.tensor([0], dtype=torch.int32, device="cuda", requires_grad=False)
+        self.node_broadcast_tensor = torch.tensor(
+            [0], dtype=torch.int32, device=self.execution_device.device, requires_grad=False
+        )
         self.node_nccl_group = create_new_group_for_current_node("nccl")
 
         # 用于在多节点tp模式下协同读取 ShmObjsIOBuffer 中的请求信息的通信tensor和通信组对象。
         if self.is_multinode_tp:
-            self.multinode_tp_gather_item_tensor = torch.tensor([0], dtype=torch.int32, device="cuda")
+            self.multinode_tp_gather_item_tensor = torch.tensor(
+                [0], dtype=torch.int32, device=self.execution_device.device
+            )
             self.multinode_tp_all_gather_tensor = torch.tensor(
-                [0 for _ in range(self.global_world_size)], dtype=torch.int32, device="cuda", requires_grad=False
+                [0 for _ in range(self.global_world_size)],
+                dtype=torch.int32,
+                device=self.execution_device.device,
+                requires_grad=False,
             )
             self.multinode_tp_nccl_group = dist.new_group(
                 [rank for rank in range(self.global_world_size)], backend="nccl"
@@ -313,7 +348,7 @@ class ModeBackend:
         from lightllm.server.router.model_infer.mode_backend.dp_backend.dp_shared_kv_trans import DPKVSharedMoudle
         from lightllm.server.router.model_infer.shared_att_resources_utils import load_att_resources
 
-        torch.cuda.set_device(get_current_device_id())
+        self.execution_device.set_device(get_current_device_id())
 
         self.dp_kv_shared_module = DPKVSharedMoudle(
             max_req_num=self.args.running_max_req_size,
@@ -350,7 +385,7 @@ class ModeBackend:
         if not dist.is_initialized():
             return
         # No inference thread can enqueue work or replay a Graph after this point.
-        torch.cuda.synchronize()
+        self.execution_device.synchronize()
         for model in (getattr(self, "model", None), *getattr(self, "draft_models", ())):
             if model is not None:
                 model.graph_runner.close()
@@ -412,6 +447,7 @@ class ModeBackend:
                 "execution_providers": main_kvargs.get("execution_providers"),
                 "execution_device": main_kvargs.get("execution_device"),
                 "execution_formats": main_kvargs.get("execution_formats"),
+                "execution_communication": main_kvargs.get("execution_communication"),
                 "mtp_previous_draft_models": self.draft_models.copy(),
             }
 
@@ -650,7 +686,7 @@ class ModeBackend:
                                 )
                                 # to do 这个地方是否需要加流同步
                                 req_to_next_token_ids[req.req_idx, 0:1].fill_(obj.first_gen_token_id)
-                                torch.cuda.current_stream().synchronize()
+                                self.execution_device.current_stream().synchronize()
                                 InferReqUpdatePack(req_obj=req, output_len=req.cur_output_len).handle(
                                     next_token_id=obj.first_gen_token_id,
                                     next_token_logprob=obj.first_gen_token_logprob,
@@ -1046,7 +1082,7 @@ class ModeBackend:
         if is_prefill:
             b_has_out = g_pin_mem_manager.gen_from_list(
                 key="b_has_out", data=b_prefill_has_output_cpu, dtype=torch.bool
-            ).cuda(non_blocking=True)
+            ).to(logits.device, non_blocking=True)
 
         scatter_token(
             next_token_ids=next_token_ids,

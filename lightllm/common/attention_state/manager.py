@@ -246,6 +246,7 @@ class AttentionStateManager(CachedQueries):
         token_capacity: int | None,
         mem_fraction: float,
         device: str | torch.device | int = "cuda",
+        runtime=None,
     ) -> None:
         """全部模型完成资源准备后，规划共享容量并初始化缓存存储。
 
@@ -254,6 +255,9 @@ class AttentionStateManager(CachedQueries):
         依次执行各模型的运行时初始化，由模型读取 allocator 中的最终容量。
         """
         assert self._state_registration_finished, "State registration must finish before resource initialization"
+        if runtime is not None:
+            self.execution_device = runtime
+            device = runtime.device
 
         # 阶段一：规划共享 token 容量，并向下对齐到完整 KV 页。
         # 未指定容量时，根据剩余显存评估；固定运行态的显存已经在前面占用。
@@ -264,9 +268,16 @@ class AttentionStateManager(CachedQueries):
             pd_reserved_bytes = self.get_pd_operator().get_page_bytes() * args.pd_kv_page_num
         if token_capacity is None:
             # 权重和固定运行态已分配，用当前设备剩余显存扣除保留比例及 PD buffer。
-            torch.cuda.empty_cache()
-            gpu_device = torch.device("cuda", get_current_device_id())
-            free_bytes, total_bytes = torch.cuda.mem_get_info(gpu_device)
+            if runtime is None:
+                from lightllm.core.device.cuda import CudaRuntime
+
+                CudaRuntime.empty_cache()
+                gpu_device = torch.device("cuda", get_current_device_id())
+                free_bytes, total_bytes = CudaRuntime.available_memory(gpu_device)
+            else:
+                runtime.empty_cache()
+                gpu_device = runtime.device
+                free_bytes, total_bytes = runtime.memory_info()
             budget = int(free_bytes - total_bytes * (1 - mem_fraction)) - pd_reserved_bytes
 
             # 按每页开销直接计算容量，预留一个 HOLD 页；静态量化参数占比较小，不单独扣减。

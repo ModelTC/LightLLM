@@ -70,14 +70,17 @@ class WarmupRunner:
         )
 
     def decode_input(self, rows, max_kv_length):
+        length = getattr(self.runtime, "decode_warmup_length", lambda maximum: 2)(max_kv_length)
+        if not 1 <= length <= max_kv_length:
+            raise ValueError("decode warmup length exceeds the Graph capacity")
         return ModelInput(
             batch_size=rows,
-            total_token_num=rows * 2,
+            total_token_num=rows * length,
             max_q_seq_len=1,
             max_kv_seq_len=max_kv_length,
             input_ids=torch.ones(rows, dtype=torch.int64, device=self.device),
             b_req_idx=torch.full((rows,), self.requests.HOLD_REQUEST_ID, dtype=torch.int32, device=self.device),
-            b_seq_len=torch.full((rows,), 2, dtype=torch.int32, device=self.device),
+            b_seq_len=torch.full((rows,), length, dtype=torch.int32, device=self.device),
             b_mtp_index=torch.zeros(rows, dtype=torch.int32, device=self.device),
             b_shared_seq_len=torch.zeros(rows, dtype=torch.int32, device=self.device),
             b_shared_radix_node_id=torch.full((rows,), -1, dtype=torch.int64, device=self.device),

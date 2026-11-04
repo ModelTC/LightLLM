@@ -138,7 +138,7 @@ def test_backend_allocates_all_roles_before_warmup(
 
     monkeypatch.setattr("lightllm.common.basemodel.basemodel.AttentionStateManager", create_empty_manager)
 
-    def create_req_manager(max_request_num: int, max_sequence_length: int):
+    def create_req_manager(max_request_num: int, max_sequence_length: int, device="cuda"):
         assert len(models) == 1 + draft_count
         assert all(not hasattr(item, "req_manager") for item in models)
         request_allocations.append((max_request_num, max_sequence_length))
@@ -239,7 +239,7 @@ def test_backend_allocates_all_roles_before_warmup(
         backend = ModeBackend.__new__(ModeBackend)
         backend.init_rank_infos = lambda: None
         backend.init_mtp_draft_model = lambda _: backend.draft_models.extend(models[1:])
-        monkeypatch.setattr(base_backend, "init_distributed_env", lambda _: None)
+        monkeypatch.setattr(base_backend, "init_distributed_env", lambda _, runtime: None)
         monkeypatch.setattr(base_backend.dist_group_manager, "create_groups", lambda **_: None)
         monkeypatch.setattr(base_backend, "TokenLoad", lambda *_: None)
         monkeypatch.setattr(base_backend, "get_model", lambda *_: (models[0], False))
@@ -257,6 +257,7 @@ def test_backend_allocates_all_roles_before_warmup(
                     dict(
                         args=args,
                         world_size=1,
+                        rank_id=0,
                         load_way="HF",
                         weight_dir=str(tmp_path),
                         max_total_token_num=None,

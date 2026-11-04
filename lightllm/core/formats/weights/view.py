@@ -8,3 +8,5 @@ from lightllm.core.contracts.state import FormatSpec
 class WeightView:
     format: FormatSpec
     fields: dict[str, Any]
+    finalized: bool = True
+    owner: Any = None

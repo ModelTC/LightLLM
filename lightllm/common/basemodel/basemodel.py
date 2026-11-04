@@ -112,6 +112,17 @@ class TpPartBaseModel:
         return self._batch_metadata
 
     @property
+    def execution_torch_device(self):
+        runtime = getattr(self, "execution_device", None)
+        return runtime.device if runtime is not None else torch.device("cuda")
+
+    @property
+    def execution_runtime(self):
+        from lightllm.core.device.cuda import CudaRuntime
+
+        return getattr(self, "execution_device", None) or CudaRuntime
+
+    @property
     def warmup_runner(self):
         if not hasattr(self, "_warmup_runner"):
             self._warmup_runner = WarmupRunner(
@@ -122,6 +133,7 @@ class TpPartBaseModel:
                 self.vocab_size,
                 overlap_prefill=self.microbatch_overlap_prefill,
                 overlap_decode=self.microbatch_overlap_decode,
+                runtime=self.execution_runtime,
             )
         return self._warmup_runner
 
@@ -157,6 +169,7 @@ class TpPartBaseModel:
                 self.graph_runner,
                 decode_padding=padding,
                 clear_transfer=dist_group_manager.clear_deepep_buffer,
+                runtime=self.execution_runtime,
             )
         return self._batch_runner
 
@@ -203,6 +216,7 @@ class TpPartBaseModel:
         self.multimodal_embedding_cache = kvargs.get("multimodal_embedding_cache")
         self.execution_providers = kvargs.get("execution_providers")
         self.execution_device = kvargs.get("execution_device")
+        self.execution_communication = kvargs.get("execution_communication", ())
         self.execution_formats = kvargs.get("execution_formats")
         self.finetune_config = kvargs.get("finetune_config", None)
         self.max_req_num = kvargs.get("max_req_num", 1000)
@@ -239,6 +253,8 @@ class TpPartBaseModel:
         with self.torch_memory_saver.region(tag=MemoryTag.WEIGHT, enable_cpu_backup=enable_weight_cpu_backup):
             self._init_weights()
         self._init_infer_layer()
+        for recipe in (self.pre_infer, self.post_infer, *self.layers_infer):
+            recipe.execution_device = self.execution_device
         self._init_some_value()
         self._init_custom()
         self.load_weights(self.weight_dict)
@@ -303,7 +319,7 @@ class TpPartBaseModel:
                 request_capacity=self.max_req_num + 1,
                 tp_rank=self.tp_rank_,
                 tp_world_size=self.tp_world_size_,
-                device="cuda",
+                device=self.execution_torch_device,
             )
             for state in (*full_states, *bounded_states):
                 self.att_state_manager.register_state(self.att_state_role, state)
@@ -433,22 +449,32 @@ class TpPartBaseModel:
             self.model_adapter.load_weights(
                 (self.pre_post_weight, self.trans_layers_weight), self.weight_dir_, weight_dict
             )
-            from lightllm.common.basemodel.weight_binding import bind_linears, bind_moe
+            from lightllm.common.basemodel.weight_binding import bind_linears, bind_moe, finalize_weights
             from lightllm.core.registry import default_providers
             from lightllm.common.basemodel.layer_infer.cache_tensor_manager import g_cache_manager
 
             if getattr(self, "execution_providers", None) is None:
                 self.execution_providers = default_providers()
+            finalize_weights(
+                (self.pre_post_weight, *self.trans_layers_weight), self.execution_device, self.execution_providers
+            )
             self.linear_plan = bind_linears(
                 (self.pre_post_weight, *self.trans_layers_weight),
                 g_cache_manager.empty,
                 providers=self.execution_providers,
+                runtime=self.execution_device,
             )
+            if self.execution_providers.operations:
+                for recipe, weight in zip(self.layers_infer, self.trans_layers_weight, strict=True):
+                    bind = getattr(recipe, "bind_operations", None)
+                    if bind is not None:
+                        bind(self.execution_providers, weight, self.execution_device, self.execution_communication)
             self.moe_plan = bind_moe(
                 self.model_adapter.moe_specs(),
                 self.trans_layers_weight,
                 self.layers_infer,
                 providers=self.execution_providers,
+                runtime=self.execution_device,
             )
             return
         assert weight_dict is None or isinstance(weight_dict, dict), "weight_dict must be a dict or None"
@@ -582,6 +608,7 @@ class TpPartBaseModel:
                 max_len_in_batch=self.graph_max_len_in_batch,
                 tp_world_size=self.tp_world_size_,
                 capture_infer_cost=self.args.mtp_dynamic_verify,
+                runtime=self.execution_runtime,
             )
         )
         if self.graph is not None:
@@ -591,7 +618,9 @@ class TpPartBaseModel:
         self.prefill_graph = (
             None
             if not get_env_start_args().enable_prefill_cudagraph
-            else PrefillCudaGraph(decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_)
+            else PrefillCudaGraph(
+                decode_cuda_graph=self.graph, tp_world_size=self.tp_world_size_, runtime=self.execution_runtime
+            )
         )
         if self.prefill_graph is not None:
             self.warmup_runner.capture_prefill(self.prefill_graph, overlap=self.args.enable_prefill_microbatch_overlap)
@@ -604,7 +633,7 @@ class TpPartBaseModel:
 
     @torch.no_grad()
     def forward(self, model_input: ModelInput):
-        model_input.to_cuda()
+        model_input.to_device(self.req_manager.req_to_token_indexs.device)
 
         if model_input.is_prefill:
             return self._prefill(model_input=model_input)
@@ -708,7 +737,7 @@ class TpPartBaseModel:
 
         # 在 cuda graph 模式下，输出需要转为 no ref tensor, 加强mem pool 的复用，降低显存的使用。
         if infer_state.is_cuda_graph_capture:
-            model_output.to_no_ref_tensor()
+            model_output.to_no_ref_tensor(self.execution_runtime.borrow_tensor)
 
         return model_output
 
@@ -830,8 +859,8 @@ class TpPartBaseModel:
         del post_output, post_output1
 
         if infer_state.is_cuda_graph_capture:
-            model_output.to_no_ref_tensor()
-            model_output1.to_no_ref_tensor()
+            model_output.to_no_ref_tensor(self.execution_runtime.borrow_tensor)
+            model_output1.to_no_ref_tensor(self.execution_runtime.borrow_tensor)
 
         return model_output, model_output1
 
@@ -865,7 +894,7 @@ class TpPartBaseModel:
 
         if self.is_mtp_draft_model:
             special_model_input["mtp_draft_input_hiddens"] = torch.randn(
-                token_num, self.config["hidden_size"], dtype=self.data_type, device="cuda"
+                token_num, self.config["hidden_size"], dtype=self.data_type, device=self.execution_torch_device
             )
         else:
             special_model_input["mtp_draft_input_hiddens"] = None

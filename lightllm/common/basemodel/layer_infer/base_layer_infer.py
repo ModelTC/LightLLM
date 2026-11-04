@@ -25,10 +25,13 @@ class BaseLayerInfer:
         self,
         shape: Union[torch.Size, Iterable[int]],
         dtype: torch.dtype,
-        device: str = "cuda",
+        device=None,
     ) -> torch.Tensor:
         """ """
-        return g_cache_manager.alloc_tensor(shape, dtype, device=device)
+        runtime = getattr(self, "execution_device", None)
+        if runtime is not None and device is None:
+            return runtime.allocate_tensor(shape, dtype)
+        return g_cache_manager.alloc_tensor(shape, dtype, device=device or "cuda")
 
     def overlap_tpsp_token_forward(
         self,

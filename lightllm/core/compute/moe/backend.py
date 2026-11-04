@@ -9,7 +9,7 @@ class MoeBackend:
     name = "triton.moe"
 
     def probe(self, spec, format, device, *, fused_shared_experts=0):
-        if device.device_type != "cuda" or spec.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+        if not device.is_nvidia or spec.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return ProbeResult(reason="Triton MoE requires CUDA floating-point inputs")
         if format.encoding not in ("plain", "fp8_block128"):
             return ProbeResult(reason="unsupported MoE weight encoding")

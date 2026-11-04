@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from unit_tests.common.att_resources.model_helpers import bind_test_fp8_calibration
 
 from unit_tests.common.att_resources.model_helpers import full_state_test_fields
@@ -154,7 +156,11 @@ def test_budget_matches_token_stores_including_hold_and_padding(
     for budget, expected in ((actual, 20), (actual - 1, 16), (minimum, 0), (minimum - 1, None)):
         resources = AttentionStateManager(request_capacity=1)
         resources.register_state("main", rebuild_full_state(template, config=template.config))
-        monkeypatch.setattr(torch.cuda, "mem_get_info", lambda _: (budget + reserve, budget + reserve))
+        runtime = SimpleNamespace(
+            device=torch.device("cpu"),
+            empty_cache=lambda: None,
+            memory_info=lambda: (budget + reserve, budget + reserve),
+        )
         resources.finish_state_registration()
         if expected is None:
             with pytest.raises(MemoryError, match="HOLD"):
@@ -163,6 +169,7 @@ def test_budget_matches_token_stores_including_hold_and_padding(
                     token_capacity=None,
                     mem_fraction=1.0,
                     device="cpu",
+                    runtime=runtime,
                 )
         elif expected == 0:
             with pytest.raises(AssertionError, match="at least one complete page"):
@@ -171,6 +178,7 @@ def test_budget_matches_token_stores_including_hold_and_padding(
                     token_capacity=None,
                     mem_fraction=1.0,
                     device="cpu",
+                    runtime=runtime,
                 )
         else:
             resources.initialize_storage(
@@ -178,6 +186,7 @@ def test_budget_matches_token_stores_including_hold_and_padding(
                 token_capacity=None,
                 mem_fraction=1.0,
                 device="cpu",
+                runtime=runtime,
             )
             assert resources.full_att_allocator.size == expected
             assert resources.get_pd_operator().get_page_bytes() == manager.get_pd_operator().get_page_bytes()

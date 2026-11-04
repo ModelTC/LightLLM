@@ -133,7 +133,7 @@ class LinearBackend:
         if spec.dtype not in (torch.float16, torch.bfloat16, torch.float32):
             return ProbeResult(reason="linear requires FP16, BF16 or FP32 inputs")
         if quantized:
-            if spec.batches is not None or caps.device_type != "cuda" or spec.dtype == torch.float32:
+            if spec.batches is not None or not caps.is_nvidia or spec.dtype == torch.float32:
                 return ProbeResult(reason="FP8 linear requires CUDA FP16/BF16 matrices")
             if caps.capability is None or caps.capability < (8, 9):
                 return ProbeResult(reason="FP8 linear requires SM89 or newer")

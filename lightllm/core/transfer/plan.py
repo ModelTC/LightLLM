@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from typing import Callable, Literal
+from lightllm.core.contracts.transfer import TransferRequest
 
 
 @dataclass(frozen=True)
@@ -15,6 +16,7 @@ class CopyOperation:
 class CopyPlan:
     direction: Literal["pack", "unpack", "copy"]
     operations: tuple[CopyOperation, ...]
+    request: TransferRequest | None = None
 
     def __post_init__(self):
         if self.direction not in ("pack", "unpack", "copy"):

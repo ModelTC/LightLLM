@@ -111,7 +111,12 @@ if torch.__version__ >= "2.1.0" and (not _disable_gpu_tensor_cache):
             else:
                 size = self.calcu_shape_cache[shape]
 
-            key = (size, data_type)
+            target = torch.device(device)
+            if target.type not in ("cpu", "meta") and target.index is None:
+                current_device = getattr(getattr(torch, target.type, None), "current_device", None)
+                if current_device is not None:
+                    target = torch.device(target.type, current_device())
+            key = (size, data_type, target)
             buf_node_list = self.free_shape_dtype_to_bufs[key]
             if buf_node_list:
                 buf_node = buf_node_list.pop()

@@ -17,13 +17,47 @@ class StateProvider:
     supports: Callable | None = None
 
 
+@dataclass(frozen=True)
+class TransferProvider:
+    supports: Callable
+    bind: Callable
+
+
 class ProviderRegistry:
-    def __init__(self, attention=(), storage=(), *, static_params=None, parameters=(), linear=(), moe=(), expert=()):
+    def __init__(
+        self,
+        attention=(),
+        storage=(),
+        *,
+        static_params=None,
+        parameters=(),
+        linear=(),
+        moe=(),
+        expert=(),
+        weight_finalizers=(),
+        operations=(),
+        transfers=(),
+    ):
+        self.transfers = tuple(transfers)
+        self.operations = dict(operations)
+        self.weight_finalizers = tuple(weight_finalizers)
         self.attention = tuple(attention)
         self.storage = tuple(storage)
         self.parameters = dict(parameters)
         self._static_params = static_params
         self.linear, self.moe, self.expert = tuple(linear), tuple(moe), tuple(expert)
+
+    def bind_operation(self, name, spec, resources, device, communication=()):
+        bind = self.operations.get(name)
+        return None if bind is None else bind(spec, resources, device, communication)
+
+    def transfer_driver(self, request, runtime):
+        matches = [provider for provider in self.transfers if provider.supports(request, runtime.caps)]
+        if not matches:
+            raise ValueError(f"unsupported transfer path: {request}")
+        if len(matches) != 1:
+            raise ValueError(f"ambiguous transfer providers: {request}")
+        return matches[0].bind(request, runtime)
 
     def static_params(self, spec, device, weight=None):
         for kind in type(spec).__mro__:

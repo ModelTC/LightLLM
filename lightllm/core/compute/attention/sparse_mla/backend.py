@@ -322,7 +322,7 @@ class SparseMLAAttentionBackend:
         if not isinstance(attention_spec, SparseMLAAttentionSpec):
             return ProbeResult(reason="requires sparse MLA semantics")
         spec, fmt = attention_spec, format_spec
-        if device_caps.device_type != "cuda" or device_caps.capability is None or device_caps.capability[0] != 9:
+        if not device_caps.is_nvidia or device_caps.capability is None or device_caps.capability[0] != 9:
             return ProbeResult(reason="the FP8 sparse indexer requires Hopper")
         if find_spec("sgl_kernel") is None:
             return ProbeResult(reason="requires SGL top-k kernels")

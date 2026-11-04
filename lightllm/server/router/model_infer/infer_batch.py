@@ -102,14 +102,20 @@ class InferenceContext:
         self.cpu_embed_cache_client = CpuEmbedCacheClient(create_meta_data=False, init_shm_data=False)
         return
 
+    @property
+    def runtime(self):
+        from lightllm.core.device.cuda import CudaRuntime
+
+        return getattr(self.backend, "execution_device", None) or CudaRuntime
+
     def get_overlap_stream(self) -> torch.cuda.Stream:
         if self.overlap_stream is None:
-            self.overlap_stream = torch.cuda.Stream()
+            self.overlap_stream = self.runtime.create_stream()
         return self.overlap_stream
 
     def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
         if self.cpu_kv_cache_stream is None:
-            self.cpu_kv_cache_stream = torch.cuda.Stream()
+            self.cpu_kv_cache_stream = self.runtime.create_stream()
         return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
@@ -597,7 +603,7 @@ class InferReq:
 
         self.generator = None
         if self.sampling_param.shm_param.seed != -1:
-            self.generator = torch.Generator(device="cuda")
+            self.generator = torch.Generator(device=g_infer_context.req_manager.req_to_token_indexs.device)
             self.generator.manual_seed(self.sampling_param.shm_param.seed)
 
         if init_prefix_cache:
@@ -753,8 +759,12 @@ class InferReq:
 
                             # 将 对应的 value_tensors 中的 kv 数据 拷贝到 tail_mems 中对应的数据去
                             g_infer_context.att_state_manager.copy_full_att_tokens(
-                                value_tensor[cur_big_page_tokens:shared_kv_len].to(device="cuda", non_blocking=True),
-                                tail_mems.to(device="cuda", non_blocking=True),
+                                value_tensor[cur_big_page_tokens:shared_kv_len].to(
+                                    device=g_infer_context.req_manager.req_to_token_indexs.device, non_blocking=True
+                                ),
+                                tail_mems.to(
+                                    device=g_infer_context.req_manager.req_to_token_indexs.device, non_blocking=True
+                                ),
                             )
                             # 尾部 KV 换到新 mem 后，同步拷贝已捕获的 top-k prompt logprobs。
                             self.prompt_selected_logprobs.copy_capture_slots_if_needed(

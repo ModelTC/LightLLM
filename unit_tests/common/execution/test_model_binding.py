@@ -80,7 +80,7 @@ def test_model_startup_binds_layers_and_writer(model_class, monkeypatch):
     for phase in ("prefill", "decode"):
         bound = getattr(layer, f"bound_{phase}_attention")
         assert bound.k.data_ptr() == state.k_storage[1].data_ptr()
-        monkeypatch.setattr(bound, "run", lambda q, metadata: q)
+        monkeypatch.setattr(bound, "run", lambda inputs, metadata: inputs.q)
     assert layer._context_attention_kernel(q, None, batch, None).shape == q.shape
     assert layer._token_attention_kernel(q, batch, None).shape == q.shape
     layer._post_cache_kv(q, batch, None)

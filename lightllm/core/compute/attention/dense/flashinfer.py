@@ -5,6 +5,8 @@ from importlib.util import find_spec
 
 import torch
 
+from lightllm.core.compute.attention.dense.inputs import query_tensor
+
 from lightllm.core.compute.attention.dense.backend import BoundAttention, group_verify_batch
 from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
@@ -129,6 +131,7 @@ class BoundFlashInferAttention(BoundAttention):
         return metadata
 
     def run(self, inputs, metadata, out=None):
+        inputs = query_tensor(inputs)
         if inputs.dtype != self.spec.dtype or metadata.owner.metadata_key != self.metadata_key:
             raise ValueError("FlashInfer inputs or metadata differ from the bound semantics")
         out = self.alloc_tensor(inputs.shape, inputs.dtype) if out is None else out
@@ -149,7 +152,7 @@ class FlashInferAttentionBackend:
             return ProbeResult(reason="requires Dense attention semantics")
         if attention_spec.attention_sink:
             return ProbeResult(reason="this FlashInfer implementation does not implement attention sinks")
-        if device_caps.device_type != "cuda" or device_caps.capability is None or device_caps.capability[0] < 8:
+        if not device_caps.is_nvidia or device_caps.capability is None or device_caps.capability[0] < 8:
             return ProbeResult(reason="FlashInfer requires SM80 or newer CUDA devices")
         if find_spec("flashinfer") is None:
             return ProbeResult(reason="FlashInfer is not installed")

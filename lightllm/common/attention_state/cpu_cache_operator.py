@@ -230,7 +230,11 @@ class CpuCacheOperator(ResourceOperator):
         return CopyPlan("unpack", tuple(operations))
 
     def write_req(self, *args, **kwargs):
-        return Transfer().submit(self.plan_write_req(*args, **kwargs))
+        return Transfer(runtime=getattr(self.owner, "execution_device", None)).submit(
+            self.plan_write_req(*args, **kwargs)
+        )
 
     def read_req(self, *args, **kwargs):
-        return Transfer().submit(self.plan_read_req(*args, **kwargs))
+        return Transfer(runtime=getattr(self.owner, "execution_device", None)).submit(
+            self.plan_read_req(*args, **kwargs)
+        )

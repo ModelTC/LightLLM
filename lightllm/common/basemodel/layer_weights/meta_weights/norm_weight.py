@@ -18,7 +18,7 @@ class RMSNormWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_)
         self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
@@ -150,8 +150,8 @@ class LayerNormWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        self.bias: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_)
+        self.bias: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_)
         self.weight.load_ok = False
         self.bias.load_ok = False
 
@@ -260,7 +260,7 @@ class NoTpGEMMANormWeight(RMSNormWeight):
 
     def _create_weight(self):
         # The checkpoint stores an offset; adding one in BF16 loses small offsets.
-        self.weight = torch.empty(self.dim, dtype=torch.float32, device=self.device_id_)
+        self.weight = torch.empty(self.dim, dtype=torch.float32, device=self.device_)
         self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
@@ -280,8 +280,8 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
         self._create_weight()
 
     def _create_weight(self):
-        self.q_weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
-        self.k_weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.q_weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_)
+        self.k_weight: torch.Tensor = torch.empty(self.dim, dtype=self.data_type_, device=self.device_)
         self.q_weight.load_ok = False
         self.k_weight.load_ok = False
 
@@ -355,8 +355,8 @@ class QKRMSNORMWeight(BaseWeightTpl, PlatformAwareOp):
 
 class QKGEMMANormWeight(QKRMSNORMWeight):
     def _create_weight(self):
-        self.q_weight = torch.empty(self.dim, dtype=torch.float32, device=self.device_id_)
-        self.k_weight = torch.empty(self.dim, dtype=torch.float32, device=self.device_id_)
+        self.q_weight = torch.empty(self.dim, dtype=torch.float32, device=self.device_)
+        self.k_weight = torch.empty(self.dim, dtype=torch.float32, device=self.device_)
         self.q_weight.load_ok = self.k_weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):

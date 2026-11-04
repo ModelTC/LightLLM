@@ -189,7 +189,7 @@ class KimiDeltaAttentionBackend:
     def probe(self, spec, fmt, device_caps, limits):
         if not isinstance(spec, KimiDeltaAttentionSpec):
             return ProbeResult(reason="requires Kimi Delta Attention semantics")
-        if device_caps.device_type != "cuda" or spec.dtype not in (torch.float16, torch.bfloat16):
+        if not device_caps.is_nvidia or spec.dtype not in (torch.float16, torch.bfloat16):
             return ProbeResult(reason="KDA requires CUDA and FP16/BF16 inputs")
         if find_spec("sgl_kernel") is None:
             return ProbeResult(reason="KDA convolution requires sgl_kernel")

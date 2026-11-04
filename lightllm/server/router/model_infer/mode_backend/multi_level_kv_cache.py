@@ -28,11 +28,11 @@ class MultiLevelKvCacheModule(object):
         self.backend: ModeBackend = backend
         self.gloo_group = create_new_group_for_current_dp("gloo")
         self.filter_group = create_new_group_for_current_dp("gloo")
-        self.init_sync_group = create_new_group_for_current_dp("nccl")
+        self.init_sync_group = create_new_group_for_current_dp(self.runtime.distributed_backend)
         dist.barrier(group=self.init_sync_group)
-        self.offload_sync_group = create_new_group_for_current_dp("nccl")
+        self.offload_sync_group = create_new_group_for_current_dp(self.runtime.distributed_backend)
         dist.barrier(group=self.offload_sync_group)
-        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device="cuda")
+        self.offload_sync_tensor = torch.empty((1,), dtype=torch.int32, device=self.runtime.device)
 
         self.cpu_cache_handle_queue: Deque[TransTask] = deque()
         self.cpu_cache_client = CpuKvCacheClient(only_create_meta_data=False, init_shm_data=False)
@@ -41,6 +41,16 @@ class MultiLevelKvCacheModule(object):
         meta = self.cpu_cache_client.kv_cache_tensor_meta
         if meta.page_bytes != self.cpu_cache_operator.get_page_bytes():
             raise ValueError("CPU cache service and model resource page sizes differ")
+
+    @property
+    def runtime(self):
+        return getattr(self.backend, "execution_device", None) or CudaRuntime()
+
+    def transfer(self):
+        return Transfer(
+            runtime=getattr(self.backend, "execution_device", None),
+            providers=getattr(self.backend.model, "execution_providers", None),
+        )
 
     @lru_cache()
     def need_sync_compute_stream(self) -> bool:
@@ -162,12 +172,12 @@ class MultiLevelKvCacheModule(object):
         big_page_slot_ids = None
         try:
             if self.need_sync_compute_stream():
-                torch.cuda.current_stream().wait_stream(g_infer_context.get_overlap_stream())
+                self.runtime.current_stream().wait_stream(g_infer_context.get_overlap_stream())
             assert 0 <= start_token_len <= req.cur_kv_len, "invalid CPU page start"
             token_indices = torch.cat(
                 [
                     req_manager.req_to_token_indexs[req.req_idx, start_token_len : req.cur_kv_len],
-                    mem_indexes.cuda(non_blocking=True),
+                    mem_indexes.to(req_manager.req_to_token_indexs.device, non_blocking=True),
                 ]
             )
             assert token_indices.numel() == page_lengths[-1] - start_token_len
@@ -190,10 +200,10 @@ class MultiLevelKvCacheModule(object):
                 req_idx=req.req_idx if self.backend.is_hybrid_att_model else None,
                 state_token_len=page_lengths[-1],
             )
-            completion = Transfer().submit(plan)
+            completion = self.transfer().submit(plan)
         except Exception as exc:
             # Partial copies must stop touching newly allocated resources before reuse.
-            fence = exc.quiesced if isinstance(exc, TransferFailure) else CudaRuntime().record_event()
+            fence = exc.quiesced if isinstance(exc, TransferFailure) else self.runtime.record_event()
             resources.retire(
                 fence,
                 token_indices=mem_indexes,
@@ -271,7 +281,7 @@ class MultiLevelKvCacheModule(object):
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
         # KV 和 bounded 快照均在搬运流上复制，由后续完成事件统一确认就绪。
-        with torch.cuda.stream(cpu_kv_cache_stream):
+        with self.runtime.use_stream(cpu_kv_cache_stream):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
@@ -370,7 +380,7 @@ class MultiLevelKvCacheModule(object):
                     if self.backend.dp_world_size > 1:
                         dist.all_reduce(self.offload_sync_tensor, op=dist.ReduceOp.MAX, group=self.offload_sync_group)
 
-                completion = Transfer().submit(plan, destination_barrier=destination_barrier)
+                completion = self.transfer().submit(plan, destination_barrier=destination_barrier)
                 req.cpu_cache_task_status = InferReq._CpuCacheTaskStatus.RUNNING
                 trans_task = TransTask(
                     move_token_num=move_token_num,
@@ -381,7 +391,7 @@ class MultiLevelKvCacheModule(object):
                 )
             except Exception as exc:
                 if self.backend.dp_world_size == 1 and self.backend.is_master_in_dp:
-                    fence = exc.quiesced if isinstance(exc, TransferFailure) else CudaRuntime().record_event()
+                    fence = exc.quiesced if isinstance(exc, TransferFailure) else self.runtime.record_event()
                     resources.reclaimer.defer(
                         fence,
                         lambda: self._deref_cpu_pages(page_list),

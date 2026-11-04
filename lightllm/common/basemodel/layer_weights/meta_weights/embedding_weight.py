@@ -29,7 +29,7 @@ class EmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
 
     def _create_weight(self):
         tp_vocab_size = self.tp_vocab_end_id - self.tp_vocab_start_id
-        self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_id_)
+        self.weight: torch.Tensor = torch.empty(tp_vocab_size, self.dim, dtype=self.data_type_, device=self.device_)
         self.weight.load_ok = False
 
     def load_hf_weights(self, weights: Dict[str, torch.Tensor]):
@@ -166,7 +166,7 @@ class NoTpPosEmbeddingWeight(BaseWeightTpl, PlatformAwareOp):
 
     def _create_weight(self):
         self.weight: torch.Tensor = torch.empty(
-            self.max_position_embeddings, self.dim, dtype=self.data_type_, device=self.device_id_
+            self.max_position_embeddings, self.dim, dtype=self.data_type_, device=self.device_
         )
         self.weight.load_ok = False
 

@@ -346,7 +346,7 @@ def test_cpu_cache_match_and_load_use_a_complete_restore_point(
     module.cpu_cache_client = client
     module.init_sync_group = None
     module.need_sync_compute_stream = lambda: False
-    monkeypatch.setattr(common, "Transfer", lambda: Transfer(Runtime()))
+    monkeypatch.setattr(common, "Transfer", lambda **kwargs: Transfer(Runtime()))
     monkeypatch.setattr(common.g_infer_context, "get_can_alloc_token_num", lambda: 8192)
     monkeypatch.setattr(common.g_infer_context, "is_hybrid_att_model", hybrid)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)

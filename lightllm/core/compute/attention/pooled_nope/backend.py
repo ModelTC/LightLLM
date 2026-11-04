@@ -373,7 +373,7 @@ class PooledNoPEAttentionBackend:
         if not isinstance(spec, PooledNoPEAttentionSpec):
             return ProbeResult(reason="requires pooled NoPE semantics")
         if (
-            device_caps.device_type != "cuda"
+            not device_caps.is_nvidia
             or spec.dtype not in (torch.float16, torch.bfloat16)
             or spec.latent_dim != 512
             or spec.index_dim != 128
