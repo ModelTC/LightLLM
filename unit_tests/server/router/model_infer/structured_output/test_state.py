@@ -25,7 +25,7 @@ from lightllm.server.router.model_infer import infer_batch
 
 def test_sampling_preparation_without_constraint_buffers():
     req = make_req()
-    manager = SimpleNamespace(req_to_bitmask=None, req_to_bitmask_enabled=None)
+    manager = SimpleNamespace(req_to_bitmask=None, req_to_bitmask_enabled=None, req_to_next_token_ids=torch.empty(0))
     tensors = prepare_sampling_tensors([req, req], manager)
     assert tensors[0].tolist() == [req.req_idx, req.req_idx]
     assert tensors[1].tolist() == [1.0, 1.0]
@@ -48,7 +48,9 @@ def test_context_initializes_state_factory_with_resolved_eos_at_startup(monkeypa
         patch.object(xgr, "GrammarCompiler", side_effect=AssertionError("Inference must not compile")),
     ):
         context.register(
-            backend=SimpleNamespace(dp_rank_in_node=0),
+            backend=SimpleNamespace(
+                dp_rank_in_node=0, is_hybrid_att_model=False, model=SimpleNamespace(att_state_manager=None)
+            ),
             req_manager=SimpleNamespace(req_sampling_params_manager=None),
             radix_cache=None,
             shm_req_manager=None,
@@ -163,7 +165,11 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
         )
         requests.append((req_id, index, SimpleNamespace(to_dict=lambda: {}), owner_dp_rank))
     monkeypatch.setattr(compiler, "_compile", lambda *args: pytest.fail("Inference must not compile"))
-    monkeypatch.setattr(infer_batch, "get_env_start_args", lambda: SimpleNamespace(diverse_mode=False, mtp_step=0))
+    monkeypatch.setattr(
+        infer_batch,
+        "get_env_start_args",
+        lambda: SimpleNamespace(diverse_mode=False, mtp_step=0, disable_chunked_mm_input=False),
+    )
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(
             alloc=count().__next__,
@@ -241,6 +247,7 @@ def test_constraint_state_lifetime_follows_request_cleanup(compiler):
     grammar = compiler.output_constraint_state_factory.get_grammar(payload)
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(free=lambda *args: None),
+        att_state_manager=SimpleNamespace(full_att_allocator=SimpleNamespace(free=lambda *args: None)),
         requests_mapping={1: req},
         shm_req_manager=SimpleNamespace(put_back_req_obj=lambda req: None),
     )
@@ -310,6 +317,7 @@ def test_pd_first_token_updates_constraint_before_sampling(
     backend = SimpleNamespace(
         shm_pd_trans_io_buffer=SimpleNamespace(read_obj=lambda: [transfer], sub_state=lambda: None),
         is_pd_decode_mode=True,
+        execution_device=SimpleNamespace(current_stream=lambda: SimpleNamespace(synchronize=lambda: None)),
         model=SimpleNamespace(req_manager=SimpleNamespace(req_sampling_params_manager=sampling_params)),
         eos_id=[256],
         is_master_in_dp=is_master_in_dp,
