@@ -10,6 +10,7 @@ from lightllm.utils.log_utils import init_logger
 
 from .ssm import create_ssm_executor
 from .ssm.forward import SSMForward
+from .ssm.export import export_indexed_state
 
 from ..utils import deepcopy_result, dtype_name
 from ..types import AxisMapping, StateTransferLayout, TensorField, TransferRegion
@@ -107,7 +108,7 @@ class ConvSSMState(BoundedAttentionState):
         return SSMForward(self, self._ssm, reqs, self._ssm.decode_indices(reqs, speculative), cu_seqlens, accepted)
 
     def get_accepted_state(self, req_idx):
-
+        """Return canonical tensors; native MTP gathers and replay materialization allocate snapshots."""
         width = self.config.conv_width
         accepted = self.mtp_state_index[req_idx] if self.mtp_state_index is not None else None
         conv = self.conv_state[:, req_idx, ..., :width]
@@ -115,6 +116,11 @@ class ConvSSMState(BoundedAttentionState):
             offsets = torch.arange(width, device=conv.device) + accepted
             conv = self.conv_state[:, req_idx].index_select(-1, offsets)
         return ConvSSMTensors(conv, self._ssm.get_accepted_state(req_idx, accepted))
+
+    def export_accepted_state(self, req_indices, targets):
+        """Write disjoint targets on the current stream without full-state scratch or changing source history."""
+        export_indexed_state(self.conv_state, req_indices, [t.conv for t in targets], self.mtp_state_index)
+        self._ssm.export_accepted_state(req_indices, [t.ssm for t in targets], self.mtp_state_index)
 
     def prepare_restore(self, req_idx):
 
@@ -201,13 +207,9 @@ class ConvSSMState(BoundedAttentionState):
         ), "request and slot indices must be lists"
         assert len(req_indices) == len(state_token_lens) == len(page_slot_ids), "request, length and page counts differ"
         pool = self._pool(page_kind)
-        conv_copies, ssm_copies = [], []
-        for req_idx, slot_id in zip(req_indices, page_slot_ids):
-            accepted = self.get_accepted_state(req_idx)
-            conv_copies.append((accepted.conv, pool.conv_state[slot_id]))
-            ssm_copies.append((accepted.ssm, pool.ssm_state[slot_id]))
-        copy_bounded_att_tensors(copies=conv_copies)
-        copy_bounded_att_tensors(copies=ssm_copies)
+        self.export_accepted_state(
+            req_indices, [ConvSSMTensors(pool.conv_state[slot], pool.ssm_state[slot]) for slot in page_slot_ids]
+        )
 
     def restore_bounded_att_runtime_from_pages(
         self,
@@ -360,14 +362,9 @@ class ConvSSMState(BoundedAttentionState):
         assert (
             type(remote_dp_bounded_state) is type(self) and remote_dp_bounded_state.config == self.config
         ), "DP copy requires the same algorithm and equivalent TP state configurations"
-        conv_copies, ssm_copies = [], []
-        for src_req, dst_req in zip(src_req_indices, dst_req_indices):
-            source = remote_dp_bounded_state.get_accepted_state(src_req)
-            target = self.prepare_restore(dst_req)
-            conv_copies.append((source.conv, target.conv))
-            ssm_copies.append((source.ssm, target.ssm))
-        copy_bounded_att_tensors(copies=conv_copies)
-        copy_bounded_att_tensors(copies=ssm_copies)
+        remote_dp_bounded_state.export_accepted_state(
+            src_req_indices, [self.prepare_restore(req) for req in dst_req_indices]
+        )
 
     # ========================================================================
     # 五、PD 分离传输

@@ -1,6 +1,7 @@
 from lightllm.common.ssm_types import SSMRunConfig
 
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import commit_ssm_prefix
+from .export import export_indexed_state
 
 
 def update_accepted_indices(acceptance, indices, *, replay_cursors=None):
@@ -38,6 +39,9 @@ class SSMExecutor:
 
     def get_accepted_state(self, req_idx, accepted_index=None):
         return self.state[:, req_idx]
+
+    def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+        export_indexed_state(self.state, req_indices, targets)
 
     def create_commit(self, run_config):
         return None

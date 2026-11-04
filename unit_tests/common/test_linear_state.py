@@ -92,6 +92,82 @@ def copy_on_cpu(*, copies):
         destination.copy_(source)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("cls", [GDNState, KDAState])
+@pytest.mark.parametrize("mode", ["native", "compact", "replay"])
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("destination", ["cpu", "cuda"])
+def test_checkpoint_batch_export(runtime_start_args, monkeypatch, cls, mode, dtype, destination):
+    state, _, _ = make_state(cls, mode, 2, dtype)
+    state.initialize_page_pools(3, device=destination)
+    state.conv_state.copy_(torch.arange(5, device="cuda").to(torch.bfloat16))
+    for slot in range(state.ssm_state.shape[1]):
+        state.ssm_state[:, slot].fill_(slot + 1)
+    state.mtp_state_index.copy_(torch.tensor([0, 2, 1, 0], device="cuda"))
+    if mode == "replay":
+        state._ssm.raw_keys.zero_()
+        state._ssm.raw_values.zero_()
+        state._ssm.gates.fill_(-0.5)
+        state._ssm.betas.zero_()
+        state._ssm.cursors.copy_(torch.tensor([1, 2, 3, 0], device="cuda"))
+    requests = [2, 0, 1]
+    expected = [(s.conv.clone(), s.ssm.clone()) for s in map(state.get_accepted_state, requests)]
+    before = state.ssm_state.clone()
+    cursors = state._ssm.cursors.clone() if mode == "replay" else None
+
+    def no_snapshot(*args):
+        raise AssertionError("batch export must write directly to the destination")
+
+    monkeypatch.setattr(state, "get_accepted_state", no_snapshot)
+    monkeypatch.setattr(state._ssm, "get_accepted_state", no_snapshot)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        state.save_bounded_att_runtime_to_pages(requests, [8] * 3, "big", [1, 2, 0])
+    stream.synchronize()
+    pool = state.big_pages_pool
+    for slot, (conv, ssm) in zip([1, 2, 0], expected):
+        torch.testing.assert_close(pool.conv_state[slot].cpu(), conv.cpu(), atol=0, rtol=0)
+        torch.testing.assert_close(pool.ssm_state[slot].cpu(), ssm.cpu(), atol=0, rtol=0)
+    assert torch.equal(state.ssm_state, before)
+    if cursors is not None:
+        assert torch.equal(state._ssm.cursors, cursors)
+    target, _, _ = make_state(cls, "native", 2, dtype)
+    target.mtp_state_index.fill_(2)
+    target.copy_runtime_state_from_dp(requests, [0, 1, 2], state)
+    for req, (conv, ssm) in enumerate(expected):
+        actual = target.get_accepted_state(req)
+        torch.testing.assert_close(actual.conv, conv, atol=0, rtol=0)
+        torch.testing.assert_close(actual.ssm, ssm, atol=0, rtol=0)
+    assert torch.equal(state.ssm_state, before)
+    if cursors is not None:
+        assert torch.equal(state._ssm.cursors, cursors)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+def test_native_checkpoint_scratch_is_bounded(runtime_start_args):
+    config = ConvSSMStateConfig(
+        logical_layer_ids=(0, 1, 2, 3),
+        global_k_heads=1,
+        global_v_heads=2,
+        key_dim=128,
+        value_dim=128,
+        conv_width=3,
+        conv_dtype=torch.bfloat16,
+        ssm_dtype=torch.float32,
+    )
+    state = GDNState(config, 65, mtp_step=2, device="cuda")
+    state.initialize_page_pools(64)
+    requests = list(range(64))
+    state.save_bounded_att_runtime_to_pages(requests, [128] * 64, "big", requests)
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_allocated()
+    torch.cuda.reset_peak_memory_stats()
+    state.save_bounded_att_runtime_to_pages(requests, [128] * 64, "big", requests)
+    torch.cuda.synchronize()
+    assert torch.cuda.max_memory_allocated() - before < 1024 * 1024
+
+
 def test_pd_block_roundtrip_preserves_replicated_heads_and_accepted_mtp_state(monkeypatch):
     # Exercise layout and accepted-state selection independently of the CUDA copy kernel.
     monkeypatch.setattr(

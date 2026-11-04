@@ -1,6 +1,7 @@
 import torch
 
 from .base import SSMExecutor
+from .export import export_indexed_state
 
 
 class NativeSSMExecutor(SSMExecutor):
@@ -21,6 +22,16 @@ class NativeSSMExecutor(SSMExecutor):
             return self.state[:, req_idx]
         index = req_idx * self.slots_per_request + accepted_index
         return self.state.index_select(1, index.long().view(1))[:, 0]
+
+    def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+        export_indexed_state(
+            self.state,
+            req_indices,
+            targets,
+            accepted_indices if self.slots_per_request > 1 else None,
+            slots_per_request=self.slots_per_request,
+            index_stride=self.state.stride(1),
+        )
 
     def forward(
         self,

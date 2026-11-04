@@ -33,6 +33,37 @@ def make(n, width):
     return manager, args, (ids, lengths, starts)
 
 
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
+@pytest.mark.parametrize("replay", [False, True])
+def test_request_counts_share_compiled_kernel(monkeypatch, replay):
+    from lightllm.common.basemodel.triton_kernel.linear_att.ssm_acceptance import _commit_prefix, commit_ssm_prefix
+
+    reqs = torch.arange(512, dtype=torch.int32, device="cuda")
+    lengths = reqs % 4 + 1
+    indices = torch.zeros(513, dtype=torch.int32, device="cuda")
+    cursors = torch.zeros_like(indices) if replay else None
+    hashes = set()
+    run = _commit_prefix.run
+
+    def record(*args, **kwargs):
+        kernel = run(*args, **kwargs)
+        hashes.add(kernel.hash)
+        return kernel
+
+    monkeypatch.setattr(_commit_prefix, "run", record)
+    for count in (1, 2, 7, 16, 23, 24, 25, 31, 32, 33, 255, 256, 257, 511):
+        indices.fill_(-1)
+        if replay:
+            cursors.zero_()
+        commit_ssm_prefix(indices, reqs[:count], lengths[:count], cursors)
+        assert torch.equal(indices[:count], lengths[:count] - 1)
+        assert (indices[count:] == -1).all()
+        if replay:
+            assert torch.equal(cursors[:count], lengths[:count])
+            assert not cursors[count:].any()
+    assert len(hashes) == 1
+
+
 def accept_unfused(m, args):
     update(m.mtp_state_index, *args)
     m._ssm.accept_updates(args[1][args[0].long()], m.mtp_state_index)

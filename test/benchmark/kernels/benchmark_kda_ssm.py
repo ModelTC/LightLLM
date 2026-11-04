@@ -40,7 +40,8 @@ def workload(args, batch, width, dtype, mode, acceptance):
     if mode == "compact":
         ssm_backend = CompactSSMExecutor(state, width, q.dtype, kda=True)
     elif mode != "native":
-        ssm_backend = ReplaySSMExecutor(state, 8, width, q.dtype, kda=True, compute_mode=mode)
+        capacity = max(8, triton.next_power_of_2(width))
+        ssm_backend = ReplaySSMExecutor(state, capacity, width, q.dtype, kda=True, compute_mode=mode)
     if ssm_backend is not None:
         ssm_backend._config_is_fixed = True
     indexes = reqs[:, None] * width + torch.arange(width, device="cuda", dtype=torch.int32)
@@ -118,6 +119,8 @@ def main():
                         candidates = []
                         if ssm_backend is not None:
                             for config in get_configs() if args.tune else [{"BV": 32, "num_warps": 2, "num_stages": 1}]:
+                                if mode == "precompute" and config["BV"] < 16:
+                                    continue
                                 ssm_backend.run_config = config
                                 cycle()
                                 ms = triton.testing.do_bench_cudagraph(cycle, rep=50)
@@ -133,6 +136,7 @@ def main():
                             dtype=dtype_name,
                             acceptance=acceptance,
                             mode=mode,
+                            cache_len=getattr(ssm_backend, "capacity", None),
                             state_history_bytes=size,
                             ms_per_round=statistics.median(samples),
                             samples_ms=samples,

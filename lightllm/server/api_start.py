@@ -74,7 +74,8 @@ def _validate_and_normalize_ssm_config(args: StartArgs):
         logger.info(f"SSM mode: {args.ssm_state_mode}")
     from lightllm.utils.config_utils import get_model_type
 
-    is_gdn_or_kda = get_model_type(args.model_dir) in (
+    model_type = get_model_type(args.model_dir)
+    is_gdn_or_kda = model_type in (
         "glm5_next",
         "glm5_next_text",
         "qwen3_next",
@@ -82,6 +83,7 @@ def _validate_and_normalize_ssm_config(args: StartArgs):
         "qwen3_5_moe",
         "qwen3_5_text",
         "qwen3_5_moe_text",
+        "sensenova_loop",
     )
     if is_gdn_or_kda:
         assert args.mtp_step <= 15, (
@@ -100,6 +102,8 @@ def _validate_and_normalize_ssm_config(args: StartArgs):
         assert args.mtp_step >= 0, "ssm_state_mode=replay requires mtp_step >= 0"
         capacity = config["cache_len"]
         assert capacity >= args.mtp_step + 1, "ReplaySSM capacity must cover the verify width"
+        if config["compute_mode"] == "parallel":
+            assert model_type not in ("glm5_next", "glm5_next_text"), "Parallel ReplaySSM requires GDN, not KDA"
 
 
 def _launch_subprocesses(args: StartArgs):

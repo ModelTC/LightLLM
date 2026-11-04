@@ -2,13 +2,13 @@ import triton
 import triton.language as tl
 
 
-@triton.jit
+@triton.jit(do_not_specialize=["N"])
 def _commit_prefix(
     Indices,
     Reqs,
     Lengths,
     Cursors,
-    N: tl.constexpr,
+    N,
     HOLD: tl.constexpr,
     REQ_STRIDE: tl.constexpr,
     LENGTH_STRIDE: tl.constexpr,

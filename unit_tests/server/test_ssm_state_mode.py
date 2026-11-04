@@ -13,6 +13,9 @@ from lightllm.server.core.objs.start_args_type import StartArgs
         ("native", "bfloat16", 0, "llama", 16, None),
         ("native", "bfloat16", 32, "llama", 16, None),
         ("compact", "bfloat16", 2, "qwen3_5", 16, None),
+        ("compact", "bfloat16", 2, "sensenova_loop", 16, None),
+        ("replay", "float32", 0, "sensenova_loop", 16, None),
+        ("replay", "bfloat16", 2, "sensenova_loop", 8, None),
         ("compact", "float32", 2, "qwen3_5", 16, None),
         ("compact", "float32", 15, "qwen3_5", 16, None),
         ("compact", "float32", 16, "qwen3_5", 16, "mtp_step <= 15"),
@@ -135,6 +138,19 @@ def test_parallel_replay_configuration(monkeypatch, fold):
     _validate_and_normalize_ssm_config(args)
     args.mtp_step = 0
     with pytest.raises(AssertionError, match="requires MTP"):
+        _validate_and_normalize_ssm_config(args)
+
+
+@pytest.mark.parametrize("model", ["glm5_next", "glm5_next_text"])
+def test_kda_rejects_parallel_at_startup(monkeypatch, model):
+    monkeypatch.setattr("lightllm.utils.config_utils.get_model_type", lambda _: model)
+    args = StartArgs(
+        ssm_state_mode="replay",
+        ssm_replay_config={"compute_mode": "parallel"},
+        mtp_step=2,
+        linear_att_ssm_data_type="bfloat16",
+    )
+    with pytest.raises(AssertionError, match="requires GDN, not KDA"):
         _validate_and_normalize_ssm_config(args)
 
 

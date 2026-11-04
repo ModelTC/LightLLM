@@ -11,6 +11,7 @@ from lightllm.common.basemodel.triton_kernel.linear_att.replayssm import (
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.ssm_autotune import resolve_run_config
 from .base import SSMExecutor, update_accepted_indices
+from .export import upload_indices
 
 
 class ReplaySSMExecutor(SSMExecutor):
@@ -167,7 +168,7 @@ class ReplaySSMExecutor(SSMExecutor):
         self._materialize_accepted_state(reqs, self.state, snapshot=False)
         self.cursors.index_fill_(0, reqs.long(), 0)
 
-    def _materialize_accepted_state(self, reqs, output, snapshot):
+    def _materialize_accepted_state(self, reqs, output, snapshot, output_strides=None):
         layers, slots, hv, k, v = self.state.shape
         config = self.run_config or SSMRunConfig(32, 4)
         bv = config.BV
@@ -191,6 +192,7 @@ class ReplaySSMExecutor(SSMExecutor):
             bv,
             snapshot,
             self.kda,
+            OUTPUT_STRIDES=output_strides,
             num_warps=config.num_warps,
             num_stages=config.num_stages,
         )
@@ -202,6 +204,20 @@ class ReplaySSMExecutor(SSMExecutor):
         reqs = torch.tensor([req_idx], dtype=torch.int32, device=self.state.device)
         self._materialize_accepted_state(reqs, output, snapshot=True)
         return output
+
+    def export_accepted_state(self, req_indices, targets, accepted_indices=None):
+        if not req_indices:
+            return
+        shape = (self.state.shape[0], *self.state.shape[2:])
+        strides = targets[0].stride()
+        assert len(req_indices) == len(targets)
+        assert all(t.shape == shape and t.stride() == strides and t.dtype == self.state.dtype for t in targets)
+        self._materialize_accepted_state(
+            upload_indices(req_indices, self.state.device, torch.int32),
+            upload_indices([t.data_ptr() for t in targets], self.state.device),
+            snapshot=True,
+            output_strides=strides,
+        )
 
     def get_run_config(self, q, k, v, a, b, a_log, bias, cu_seqlens=None) -> SSMRunConfig:
         if self.compute_mode == "parallel":
