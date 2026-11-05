@@ -31,11 +31,11 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
     w2_scale = torch.ones(2, 1, 1, device="cuda")
     counts = torch.tensor([3, 2], device="cuda", dtype=torch.int32)
     activation_args = dict(alpha=alpha, limit=limit, clamp_up_add_one=add_one)
-    recv = torch.zeros(2, padded, dim, device="cuda", dtype=torch.float8_e4m3fn)
-    recv[0, :3] = x[:3]
-    recv[1, :2] = x[3:]
 
     if is_prefill:
+        recv = torch.zeros(2, padded, dim, device="cuda", dtype=torch.float8_e4m3fn)
+        recv[0, :3] = x[:3]
+        recv[1, :2] = x[3:]
         metadata = torch.zeros(5, 3, device="cuda", dtype=torch.int32)
         metadata[:, 2] = torch.tensor([0, 1, 2, padded, padded + 1], device="cuda")
         actual = ep.chunked_expanded_moe_forward(
@@ -53,9 +53,25 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
             **activation_args,
         )
     else:
-        output = ep.masked_group_gemm(
-            (recv, torch.ones(2, padded, 1, device="cuda")),
-            counts,
+        alignment = ep.get_mk_alignment_for_contiguous_layout()
+        starts = []
+        psum_values = []
+        cursor = 0
+        for count in counts.tolist():
+            if starts:
+                cursor = (cursor + alignment - 1) // alignment * alignment
+            starts.append(cursor)
+            cursor += count
+            psum_values.append(cursor)
+        psum = torch.tensor(psum_values, device="cuda", dtype=torch.int32)
+        max_rows = (int(psum[-1]) + alignment - 1) // alignment * alignment
+        recv = torch.zeros(max_rows, dim, device="cuda", dtype=torch.float8_e4m3fn)
+        recv[starts[0] : starts[0] + 3] = x[:3]
+        recv[starts[1] : starts[1] + 2] = x[3:]
+        output = ep.decode_masked_group_gemm(
+            (recv, torch.ones(max_rows, 1, device="cuda")),
+            psum,
+            alignment,
             torch.bfloat16,
             w1,
             w1_scale,
@@ -64,7 +80,7 @@ def test_grouped_gemm_activation_matches_reference(monkeypatch, is_prefill, use_
             expected_m=3,
             **activation_args,
         )
-        actual = torch.cat([output[0, :3], output[1, :2]])
+        actual = torch.cat([output[starts[0] : starts[0] + 3], output[starts[1] : starts[1] + 2]])
 
     gate = (x.float() * 2).bfloat16().float()
     up = (x.float() * 3).bfloat16().float()

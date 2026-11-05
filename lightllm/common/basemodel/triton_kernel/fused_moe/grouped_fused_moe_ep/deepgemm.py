@@ -5,7 +5,6 @@ from typing import List, Optional, Tuple
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul_mix_quant_ep import (
-    silu_and_mul_masked_post_quant_fwd,
     silu_and_mul_psum_post_quant_fwd,
 )
 from lightllm.common.basemodel.triton_kernel.quantization.fp8act_quant_kernel import (
@@ -162,45 +161,6 @@ def decode_masked_group_gemm(
     return gemm_out_b
 
 
-def masked_group_gemm(
-    recv_x: Tuple[torch.Tensor, torch.Tensor],
-    masked_m: torch.Tensor,
-    dtype: torch.dtype,
-    w1: torch.Tensor,
-    w1_scale: torch.Tensor,
-    w2: torch.Tensor,
-    w2_scale: torch.Tensor,
-    expected_m: int,
-    alpha: Optional[float] = None,
-    limit: Optional[float] = None,
-    clamp_up_add_one: bool = True,
-):
-    padded_m = recv_x[0].shape[1]
-    E, N, _ = w1.shape
-    block_size = 128
-    # groupgemm (masked layout)
-    gemm_out_a = torch.empty((E, padded_m, N), device=recv_x[0].device, dtype=dtype)
-    expected_m = min(expected_m, padded_m)
-    qsilu_out_scale = torch.empty((E, padded_m, N // 2 // block_size), device=recv_x[0].device, dtype=torch.float32)
-    qsilu_out = torch.empty((E, padded_m, N // 2), dtype=w1.dtype, device=recv_x[0].device)
-    _deepgemm_grouped_fp8_nt_masked(recv_x, (w1, w1_scale), gemm_out_a, masked_m, expected_m)
-
-    silu_and_mul_masked_post_quant_fwd(
-        gemm_out_a,
-        qsilu_out,
-        qsilu_out_scale,
-        block_size,
-        masked_m,
-        alpha=alpha,
-        limit=limit,
-        clamp_up_add_one=clamp_up_add_one,
-    )
-    del gemm_out_a
-    gemm_out_b = torch.empty_like(recv_x[0], device=recv_x[0].device, dtype=dtype)
-    _deepgemm_grouped_fp8_nt_masked((qsilu_out, qsilu_out_scale), (w2, w2_scale), gemm_out_b, masked_m, expected_m)
-    return gemm_out_b
-
-
 def chunked_expanded_moe_forward(
     num_recv_tokens_per_expert_list: List[int],  # [num_local_experts], alignment-padded token counts
     num_unaligned_recv_tokens_per_expert: torch.Tensor,  # [num_local_experts], actual token counts
@@ -309,21 +269,6 @@ def chunked_expanded_moe_forward(
 
     ep_compact_metadata(recv_src_metadata)
     return gather_out
-
-
-def _deepgemm_grouped_fp8_nt_masked(
-    input_tuple: Tuple[torch.Tensor, torch.Tensor],
-    w_tuple: Tuple[torch.Tensor, torch.Tensor],
-    out: torch.Tensor,
-    masked_m: torch.Tensor,
-    expected_m: int,
-):
-    if HAS_DEEPGEMM:
-        if hasattr(deep_gemm, "m_grouped_fp8_gemm_nt_masked"):
-            return deep_gemm.m_grouped_fp8_gemm_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
-        if hasattr(deep_gemm, "m_grouped_gemm_fp8_fp8_bf16_nt_masked"):
-            return deep_gemm.m_grouped_gemm_fp8_fp8_bf16_nt_masked(input_tuple, w_tuple, out, masked_m, expected_m)
-    raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
 
 
 def deepgemm_grouped_fp8_fp4_nt_contiguous(
