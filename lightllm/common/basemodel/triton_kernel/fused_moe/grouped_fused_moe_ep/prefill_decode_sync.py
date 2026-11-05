@@ -106,8 +106,8 @@ def fused_experts_impl(
     # qaunt hidden_states
     assert use_fp8_w8a8 and use_fp8_all2all, "use_fp8_w8a8 and use_fp8_all2all must be True"
     assert block_size_k == 128, "block_size_k must be 128"
-    # The whole shared expert currently overlaps only combine. Splitting it would
-    # also cover the idle time during dispatch.
+    # TODO: 共享专家目前整段只和 combine 重叠。可以拆开：dispatch 期间算 up，
+    # combine 期间算 down，把两段通信的空闲都盖住。
 
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(
@@ -288,6 +288,10 @@ def _combine_with_optional_shared_expert(
         async_with_compute_stream=overlap,
         allocate_on_comm_stream=allocate_on_comm_stream,
     )
+    if allocate_on_comm_stream and combined_x.is_cuda:
+        # 输出在通信流上分配，后续在计算流上使用。再登记一次计算流，
+        # 引用归零时分配器才会等这条流上已经排队的 kernel 结束。
+        combined_x.record_stream(torch.cuda.current_stream())
     if overlap:
         shared = shared_expert_func()
         event.current_stream_wait()
