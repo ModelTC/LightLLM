@@ -24,7 +24,6 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
         cur_kv_len=512 if role == "prefill" else 0,
         hold_kv_len=0,
         pd_trans_kv_start_index=0,
-        _kv_cache_alloc_need=lambda end: end,
     )
 
     def create(**kwargs):
@@ -41,7 +40,10 @@ def test_hybrid_pd_uses_the_shared_att_state_task_without_model_flags(monkeypatc
         backend._prefill_chuncked_handle_func(req, next_token_id=17, next_token_prob=-0.2, output_len=1)
         assert tasks[-1].first_gen_token_id == 17
     else:
-        backend._alloc_req_kv_mem = lambda req, count: torch.arange(count)
+        backend.radix_cache = None
+        backend.model = SimpleNamespace(
+            req_manager=SimpleNamespace(alloc_token_indexes=lambda req, end, radix_cache: torch.arange(end)),
+        )
         backend._decode_node_gen_trans_tasks(req)
         assert len(groups) == 1
     assert [task.page_kind for task in tasks] == ["kv", "kv", "att_state"]

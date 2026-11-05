@@ -268,9 +268,9 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
     )
     table = torch.arange(8192, dtype=torch.int32).view(1, -1)
 
-    def allocate(req, count):
-        req.hold_kv_len += count
-        return torch.arange(req.cur_kv_len, req.cur_kv_len + count, dtype=torch.int32)
+    def allocate(req, end, radix_cache):
+        req.hold_kv_len = end
+        return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
 
     from collections import deque
 
@@ -281,9 +281,10 @@ def test_common_cpu_cache_load_never_splits_an_image(monkeypatch, loaded_start, 
         is_master_in_dp=True,
         dp_world_size=1,
         is_hybrid_att_model=False,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=table),
+            req_manager=SimpleNamespace(
+                req_to_token_indexs=table, alloc_token_indexes=allocate, wait_token_indexes=lambda: None
+            ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
                     get_page_layouts=lambda: {},

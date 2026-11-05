@@ -85,6 +85,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         big_page_capacity=5,
         small_page_capacity=2,
     )
+    requests.full_att_allocator = resources.full_att_allocator
     monkeypatch.setattr(g_infer_context, "att_state_manager", resources)
     monkeypatch.setattr(g_infer_context, "is_hybrid_att_model", True)
     monkeypatch.setattr(g_infer_context, "req_manager", requests)
@@ -94,6 +95,7 @@ def linear_cache(monkeypatch, tmp_path, request):
         SimpleNamespace(
             get_big_page_ids_by_node=lambda node: [],
             free_one_small_page_buffer=lambda: None,
+            free_radix_cache_to_get_enough_token=lambda need: None,
         ),
     )
     yield full, resources, requests, config
@@ -196,17 +198,10 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
     big.conv_state.zero_()
     big.ssm_state.zero_()
 
-    def allocate(req, count):
-        allocated = resources.full_att_allocator.alloc(count)
-        requests.req_to_token_indexs[req.req_idx, :count] = allocated.cuda()
-        req.hold_kv_len = count
-        return allocated
-
     module.args = get_env_start_args()
     module.backend = SimpleNamespace(
         is_master_in_dp=True,
         dp_world_size=1,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(req_manager=requests, att_state_manager=resources),
         is_hybrid_att_model=True,
     )

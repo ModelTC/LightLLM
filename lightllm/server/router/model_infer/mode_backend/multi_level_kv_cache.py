@@ -127,7 +127,6 @@ class MultiLevelKvCacheModule(object):
             if need_token_num >= 128 and req.shm_req.input_len >= 256 and need_token_num <= idle_token_num:
                 assert req.cur_kv_len % self.args.page_size == 0
                 assert match_tokens % self.args.page_size == 0
-                assert need_token_num % self.args.page_size == 0
                 assert req.hold_kv_len == req.cur_kv_len
                 # 计算需要加载的页面（只加载未匹配的部分）
                 ready_page_num = bisect.bisect_right(page_len_list, req.cur_kv_len)
@@ -186,16 +185,16 @@ class MultiLevelKvCacheModule(object):
         resources = self.backend.model.att_state_manager
         cpu_cache_operator = resources.get_cpu_cache_operator()
         req_manager = self.backend.model.req_manager
-        need_token_num = page_lengths[-1] - req.cur_kv_len
 
         # 阶段一：分配新增 KV，并补齐首个 CPU 页在 GPU 上已经命中的 token 索引。
-        mem_indexes = self.backend._alloc_req_kv_mem(req, need_token_num)
+        mem_indexes = req_manager.alloc_token_indexes(req, page_lengths[-1], g_infer_context.radix_cache)
+        req_manager.wait_token_indexes()
         assert mem_indexes is not None
         assert 0 <= start_token_len <= req.cur_kv_len, "invalid CPU page start"
         token_indices = torch.cat(
             [
                 req_manager.req_to_token_indexs[req.req_idx, start_token_len : req.cur_kv_len],
-                mem_indexes.cuda(non_blocking=True),
+                mem_indexes.pin_memory().cuda(non_blocking=True),
             ]
         )
         assert token_indices.numel() == page_lengths[-1] - start_token_len
@@ -298,7 +297,6 @@ class MultiLevelKvCacheModule(object):
 
             # 阶段一：确定本次可写出范围，申请 CPU 页。
             if self.backend.is_master_in_dp:
-
                 find_index = bisect.bisect_right(page_len_list, req.cur_kv_len)
                 move_block_size = find_index
 
@@ -351,6 +349,7 @@ class MultiLevelKvCacheModule(object):
 
             move_token_num = page_len_list[item_size - 1]
             assert req.cur_kv_len >= move_token_num
+            self.backend.model.req_manager.wait_token_indexes()
             token_indexes = self.backend.model.req_manager.req_to_token_indexs[req.req_idx, 0:move_token_num]
 
             # 阶段二：只查找实际分配的 CPU 页所需快照；完整大页必须存在，不做缺失回退。

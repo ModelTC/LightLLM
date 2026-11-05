@@ -1,29 +1,6 @@
 from types import SimpleNamespace
 
-import torch
 from lightllm.server.router.model_infer.mode_backend import generic_pre_process
-
-
-def _patch_empty_input_context(monkeypatch):
-    mem_manager = SimpleNamespace(
-        HOLD_TOKEN_MEMINDEXES=(-1,),
-        alloc=lambda size: torch.empty((size,), dtype=torch.int32),
-    )
-    infer_context = SimpleNamespace(
-        args=SimpleNamespace(page_size=1),
-        req_manager=SimpleNamespace(
-            HOLD_REQUEST_ID=-1,
-            mem_manager=mem_manager,
-            req_to_token_indexs=torch.zeros((16, 32), dtype=torch.int32),
-        ),
-        radix_cache=None,
-    )
-    monkeypatch.setattr(generic_pre_process, "g_infer_context", infer_context)
-    return infer_context
-
-
-def _patch_overlap_input_context(monkeypatch):
-    return _patch_empty_input_context(monkeypatch)
 
 
 def _make_prefill_req(req_idx: int, token_num: int):
@@ -53,8 +30,6 @@ def _make_decode_req(req_idx: int):
 
 
 def test_prepare_prefill_inputs_allows_empty_batch(monkeypatch):
-    _patch_empty_input_context(monkeypatch)
-
     model_input, run_reqs = generic_pre_process.prepare_prefill_inputs([], is_chuncked_mode=True)
 
     assert run_reqs == []
@@ -68,8 +43,6 @@ def test_prepare_prefill_inputs_allows_empty_batch(monkeypatch):
 
 
 def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):
-    _patch_empty_input_context(monkeypatch)
-
     model_input, run_reqs = generic_pre_process.prepare_decode_inputs([])
 
     assert run_reqs == []
@@ -84,7 +57,6 @@ def test_prepare_decode_inputs_allows_empty_batch(monkeypatch):
 
 
 def test_overlap_prefill_balances_request_token_load_without_padding(monkeypatch):
-    _patch_overlap_input_context(monkeypatch)
     reqs = [
         _make_prefill_req(req_idx=0, token_num=8),
         _make_prefill_req(req_idx=1, token_num=7),
@@ -111,7 +83,6 @@ def test_overlap_prefill_balances_request_token_load_without_padding(monkeypatch
 
 
 def test_overlap_prefill_balances_single_token_request_normally(monkeypatch):
-    _patch_overlap_input_context(monkeypatch)
     req = _make_prefill_req(req_idx=7, token_num=1)
 
     (
@@ -132,7 +103,6 @@ def test_overlap_prefill_balances_single_token_request_normally(monkeypatch):
 
 
 def test_overlap_decode_builds_two_unpadded_inputs(monkeypatch):
-    _patch_overlap_input_context(monkeypatch)
     reqs = [_make_decode_req(req_idx=index) for index in range(3)]
 
     (
@@ -155,7 +125,6 @@ def test_overlap_decode_builds_two_unpadded_inputs(monkeypatch):
 
 
 def test_overlap_decode_preserves_empty_microbatch(monkeypatch):
-    _patch_overlap_input_context(monkeypatch)
     req = _make_decode_req(req_idx=7)
 
     (

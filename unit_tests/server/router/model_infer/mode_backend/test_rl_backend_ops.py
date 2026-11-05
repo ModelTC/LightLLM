@@ -1,12 +1,13 @@
 from types import SimpleNamespace
 from unittest.mock import Mock
 
+import numpy as np
 import pytest
 import torch
 
 from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from lightllm.common.req_manager import ReqManager
-from lightllm.common.req_manager.base import _ReqLinkedList
+from lightllm.common.req_manager.base import _ReqIndexPool
 from lightllm.server.router.model_infer.mode_backend.rl_backend_ops import RlBackendOps
 from lightllm.utils.torch_memory_saver_utils import MemoryTag
 
@@ -26,9 +27,10 @@ def test_resume_memory_initializes_hold_indexes_only_for_kv_cache(
 ):
     allocator = FullAttKVAllocator(16, page_size=4, pin_memory=False)
     req_manager = ReqManager.__new__(ReqManager)
-    req_manager.req_list = _ReqLinkedList(2)
+    req_manager.req_list = _ReqIndexPool(2)
     req_manager.HOLD_REQUEST_ID = 2
     req_manager.page_size = allocator.page_size
+    req_manager._cpu_token_index_blocks = np.empty((3, 2), dtype=np.int32)
     req_manager.req_to_token_indexs = torch.full((3, 8), -1, dtype=torch.int32)
     resumed = []
 

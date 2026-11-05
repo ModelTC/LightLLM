@@ -24,13 +24,8 @@ def test_pd_decode_reserves_model_pages_but_transfers_only_logical_kv(monkeypatc
     backend.args = SimpleNamespace(pd_kv_page_size=4, page_size=4)
     backend.model = SimpleNamespace(req_manager=SimpleNamespace(req_to_token_indexs=table))
     backend.is_master_in_dp = False
-    backend._alloc_req_kv_mem = lambda req, size: _reserve_into_table(
-        table=table,
-        req=req,
-        alloc_sizes=alloc_sizes,
-        next_index=next_index,
-        alloc_token_num=size,
-    )
+    backend.radix_cache = None
+    backend.model.req_manager = _make_req_manager(table, alloc_sizes, next_index)
 
     def create_task(**kwargs):
         tasks.append(
@@ -118,19 +113,14 @@ def test_dp_cache_fetch_reserves_pages_and_keeps_logical_transfer_size(monkeypat
         dp_req_to_token_indices={0: source_table, 1: source_table},
         is_hybrid_att_model=False,
     )
-    backend._alloc_req_kv_mem = lambda cur_req, size: _reserve_into_table(
-        table=table,
-        req=cur_req,
-        alloc_sizes=alloc_sizes,
-        next_index=next_index,
-        alloc_token_num=size,
-    )
+
     module = dp_shared_kv_trans.DPKVSharedMoudle.__new__(dp_shared_kv_trans.DPKVSharedMoudle)
     module.backend = backend
     module.dp_rank_in_node = 0
     module.shared_req_infos = SimpleNamespace(arr=np.array([[[4, 0], [10, 0]]], dtype=np.int64))
     context = SimpleNamespace(
-        req_manager=SimpleNamespace(req_to_token_indexs=table),
+        req_manager=_make_req_manager(table, alloc_sizes, next_index),
+        radix_cache=None,
         get_can_alloc_token_num=lambda: 100,
     )
     monkeypatch.setattr(dp_shared_kv_trans, "g_infer_context", context)
@@ -215,7 +205,6 @@ def test_dp_imports_only_matching_tp_shards(
 
 def _bind_alloc_need(req, page_size):
     req.args = SimpleNamespace(page_size=page_size)
-    req._kv_cache_alloc_need = lambda target_len: InferReq._kv_cache_alloc_need(req, target_len)
     return req
 
 
@@ -235,3 +224,15 @@ def _reserve_into_table(
     next_index[0] += alloc_token_num
     req.hold_kv_len = new_hold_kv_len
     return mem_indexes
+
+
+def _make_req_manager(table, alloc_sizes, next_index):
+    def need(req, end):
+        page_size = req.args.page_size
+        return max(0, (end + page_size - 1) // page_size * page_size - req.hold_kv_len)
+
+    def allocate(req, end, radix_cache):
+        _reserve_into_table(table, req, alloc_sizes, next_index, need(req, end))
+        return table[req.req_idx, req.cur_kv_len : end].clone()
+
+    return SimpleNamespace(req_to_token_indexs=table, alloc_token_indexes=allocate, get_need_alloc_token_num=need)

@@ -64,9 +64,9 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
         ),
     )
 
-    def allocate(req, count):
-        req.hold_kv_len = count
-        return torch.arange(count, dtype=torch.int32)
+    def allocate(req, end, radix_cache):
+        req.hold_kv_len = end
+        return torch.arange(req.cur_kv_len, end, dtype=torch.int32)
 
     from collections import deque
 
@@ -80,9 +80,12 @@ def test_disk_roundtrip_preserves_raw_pages_before_mm_boundary_trim(cpu_cache_fa
         is_master_in_dp=True,
         dp_world_size=1,
         is_hybrid_att_model=False,
-        _alloc_req_kv_mem=allocate,
         model=SimpleNamespace(
-            req_manager=SimpleNamespace(req_to_token_indexs=torch.arange(1024).view(1, -1)),
+            req_manager=SimpleNamespace(
+                req_to_token_indexs=torch.arange(1024).view(1, -1),
+                alloc_token_indexes=allocate,
+                wait_token_indexes=lambda: None,
+            ),
             att_state_manager=SimpleNamespace(
                 get_cpu_cache_operator=lambda: SimpleNamespace(
                     get_page_layouts=lambda: {},

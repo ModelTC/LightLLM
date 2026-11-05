@@ -167,6 +167,7 @@ def test_request_admission_loads_shared_artifacts_without_compilation(
     context = infer_batch.InferenceContext(
         req_manager=SimpleNamespace(
             alloc=count().__next__,
+            copy_token_index_prefixes_to_gpu=lambda req_prefix_lens: None,
             req_sampling_params_manager=SimpleNamespace(init_req_sampling_params=lambda req: None),
         ),
         shm_req_manager=SimpleNamespace(get_req_obj_by_index=lambda index: shared_reqs[index]),

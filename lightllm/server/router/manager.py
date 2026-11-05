@@ -10,10 +10,9 @@ import zmq
 import zmq.asyncio
 import torch.multiprocessing as mp
 import torch.distributed as dist
-import multiprocessing
 from typing import List
 from .batch import Batch, Req
-from .model_infer.model_rpc import start_model_process, ModelRpcClient
+from .model_infer.model_rpc import start_model_process
 from .req_queue import build_req_queue
 from lightllm.server.core.objs.io_objs import (
     GroupReqIndexes,

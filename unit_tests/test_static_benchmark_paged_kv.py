@@ -39,6 +39,18 @@ def make_executor(page_size: int = 4):
     req_manager = SimpleNamespace(
         req_to_token_indexs=torch.full((4, 32), -1, dtype=torch.int32),
     )
+    req_manager.page_size = page_size
+
+    def allocate_requests(allocations):
+        indexes = allocator.alloc(sum(size for _, size in allocations))
+        offset = 0
+        for req, size in allocations:
+            start = req.hold_kv_len
+            req_manager.req_to_token_indexs[req.req_idx, start : start + size] = indexes[offset : offset + size]
+            req.hold_kv_len += size
+            offset += size
+
+    req_manager.alloc_req_token_indexes = allocate_requests
     model = SimpleNamespace(att_state_manager=SimpleNamespace(full_att_allocator=allocator), req_manager=req_manager)
     args = SimpleNamespace(mtp_mode=None, mtp_step=0)
     executor = StaticBenchmarkExecutor(args=args, model=model, draft_models=[], token_source=None)
@@ -61,7 +73,7 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
         ready_cache_len=0,
     )
 
-    assert allocator.alloc_sizes == [4, 4]
+    assert allocator.alloc_sizes == [8]
     assert model_input.b_is_decode_req.tolist() == [False, False]
     assert executor._hold_kv_len_by_req == {0: 4, 1: 4}
     assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :4], page_size=4)
@@ -76,7 +88,7 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
         input_ids=torch.tensor([1, 2], dtype=torch.int64),
         max_kv_seq_len=4,
     )
-    assert allocator.alloc_sizes == [4, 4]
+    assert allocator.alloc_sizes == [8]
 
     # 跨过页边界后，每个请求分别追加一整页。
     executor._make_decode_input(
@@ -87,7 +99,7 @@ def test_prefill_allocates_and_reuses_complete_pages_per_request():
         input_ids=torch.tensor([3, 4], dtype=torch.int64),
         max_kv_seq_len=5,
     )
-    assert allocator.alloc_sizes == [4, 4, 4, 4]
+    assert allocator.alloc_sizes == [8, 8]
     assert executor._hold_kv_len_by_req == {0: 8, 1: 8}
     assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :8], page_size=4)
     assert_complete_physical_pages(req_manager.req_to_token_indexs[1, :8], page_size=4)
@@ -109,7 +121,7 @@ def test_mtp_expanded_rows_allocate_once_per_request():
     )
 
     assert model_input.batch_size == 4
-    assert allocator.alloc_sizes == [8, 8]
+    assert allocator.alloc_sizes == [16]
     assert executor._hold_kv_len_by_req == {0: 8, 1: 8}
     assert_complete_physical_pages(req_manager.req_to_token_indexs[0, :8], page_size=4)
     assert_complete_physical_pages(req_manager.req_to_token_indexs[1, :8], page_size=4)

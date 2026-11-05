@@ -1,6 +1,7 @@
 import json
 from types import SimpleNamespace
 
+import numpy as np
 import pytest
 import torch
 
@@ -363,8 +364,9 @@ def _request_pages(requests, req):
 def _reserve(manager, requests, length):
     req_idx = requests.alloc()
     held = (length + manager.page_size - 1) // manager.page_size * manager.page_size
-    slots = manager.alloc(held).cuda()
-    requests.req_to_token_indexs[req_idx, :held] = slots
+    req = SimpleNamespace(req_idx=req_idx, hold_kv_len=0)
+    requests.alloc_req_token_indexes([(req, held)])
+    slots = requests.get_cpu_token_indexes(req_idx, 0, held).cuda()
     return req_idx, slots
 
 
@@ -1152,13 +1154,15 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     req.cur_kv_len = tail_len + 1
     freed = []
     g_infer_context.free_a_req_mem(freed, req)
-    manager.free(torch.cat(freed))
+    requests.free_token_index_blocks(np.concatenate(freed))
     requests.free_req(source)
     assert radix.get_tree_total_tokens_num() == tail_len
 
     forks = [request(requests.alloc(), hit_len + 1) for _ in range(2)]
     for fork in forks:
-        fork._hybrid_match_radix_cache()
+        req_prefix_lens = {}
+        fork._hybrid_match_radix_cache(req_prefix_lens)
+        requests.copy_token_index_prefixes_to_gpu(req_prefix_lens)
         assert fork.cur_kv_len == hit_len
         assert fork.hold_kv_len == hit_len
         assert fork.shared_kv_node.node_prefix_total_len == big_page_tokens
@@ -1176,7 +1180,7 @@ def test_hybrid_radix_hit_fork_pause_abort_and_eviction(cache, monkeypatch, hash
     for fork in forks:
         freed = []
         g_infer_context.free_a_req_mem(freed, fork)
-        manager.free(torch.cat(freed))
+        requests.free_token_index_blocks(np.concatenate(freed))
         requests.free_req(fork.req_idx)
     radix.free_radix_cache_to_get_enough_token(manager.size)
     assert manager.allocator.can_use_mem_size == manager.size
@@ -1591,7 +1595,9 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         context,
         "radix_cache",
         SimpleNamespace(
-            get_big_page_ids_by_node=lambda node: shared_page_ids.copy(), free_one_small_page_buffer=lambda: None
+            get_big_page_ids_by_node=lambda node: shared_page_ids.copy(),
+            free_one_small_page_buffer=lambda: None,
+            free_radix_cache_to_get_enough_token=lambda need: None,
         ),
     )
     monkeypatch.setattr(context, "is_hybrid_att_model", True)
@@ -1673,13 +1679,6 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
         manager.big_page_buffers.buffer[slot].copy_(expected_checkpoints[0])
         restored.hybrid_len_to_big_page_id[page_tokens] = slot
 
-    def allocate(req, count):
-        slots = manager.alloc(count)
-        requests.req_to_token_indexs[req.req_idx, req.hold_kv_len : req.hold_kv_len + count].copy_(slots)
-        req.hold_kv_len += count
-        return slots
-
-    module.backend._alloc_req_kv_mem = allocate
     busy_small_slots = []
     if exhaust_small_pool:
         busy_small_slots = requests.small_page_buffers.alloc_state_cache(

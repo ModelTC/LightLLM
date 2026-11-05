@@ -92,7 +92,9 @@ class DPKVSharedMoudle:
             # 计算需要传输的 kv 长度， 不能超过 req.get_cur_total_len() - 1
             trans_size = min(max_available_kv_len, req.get_cur_total_len() - 1) - req.cur_kv_len
             target_kv_len = req.cur_kv_len + trans_size
-            alloc_token_num = req._kv_cache_alloc_need(target_kv_len) if trans_size > 0 else 0
+            alloc_token_num = (
+                g_infer_context.req_manager.get_need_alloc_token_num(req, target_kv_len) if trans_size > 0 else 0
+            )
 
             if is_local_dp_request and trans_size > 0 and alloc_token_num <= g_infer_context.get_can_alloc_token_num():
                 assert req.hold_kv_len == req.cur_kv_len
@@ -111,7 +113,9 @@ class DPKVSharedMoudle:
                         assert all(
                             page_id >= 0 for page_id in src_big_page_ids
                         ), "DP source is missing prefix big pages"
-                dst_token_indices = self.backend._alloc_req_kv_mem(req, alloc_token_num)
+                dst_token_indices = g_infer_context.req_manager.alloc_token_indexes(
+                    req, target_kv_len, g_infer_context.radix_cache
+                )
                 assert dst_token_indices is not None
                 if src_big_page_ids:
                     allocator = self.backend.model.att_state_manager.bounded_att_big_page_allocator
