@@ -1,6 +1,6 @@
 import torch
 import threading
-from typing import Dict, Any, Optional, Tuple, List, Callable
+from typing import Dict, Any, Optional, Tuple, List
 from lightllm.common.basemodel.layer_weights.meta_weights.base_weight import BaseWeightTpl
 from lightllm.common.quantization.quantize_method import WeightPack
 from lightllm.common.basemodel.layer_weights.meta_weights.mm_weight.mm_slicer import (
@@ -164,11 +164,6 @@ class FusedMoeWeight(BaseWeightTpl):
             clamp_up_add_one=clamp_up_add_one,
         )
 
-    @property
-    def supports_decode_shared_expert_overlap(self) -> bool:
-        """Backend capability, independent of the model's overlap enable switch."""
-        return self.fuse_moe_impl.supports_decode_shared_expert_overlap
-
     def experts_with_topk(
         self,
         input_tensor: torch.Tensor,
@@ -179,21 +174,29 @@ class FusedMoeWeight(BaseWeightTpl):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
-        shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
+        shared_expert_func=None,
     ) -> torch.Tensor:
-        """Run routed experts, optionally including the shared expert in the result.
-
-        The callback requires decode overlap capability. It must treat input_tensor
-        as read-only and return a matching shared output without modifying routed
-        state. On successful eager/capture calls it runs exactly once on the current
-        compute stream, after combine SEND and before RECV. Graph replay executes
-        the captured GPU work rather than calling Python again. A callback result
-        is already added to the returned tensor; without one the result is routed-only.
-        """
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
             moe_capture_callback(topk_ids)
-        return self.fuse_moe_impl.fused_experts_with_topk(
+        if self.num_fused_shared_experts > 0:
+            from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import (
+                append_fused_shared_experts,
+            )
+
+            topk_weights, topk_ids = append_fused_shared_experts(
+                topk_weights=topk_weights,
+                topk_ids=topk_ids,
+                shared_expert_start_id=self.n_routed_experts,
+                num_fused_shared_experts=self.num_fused_shared_experts,
+            )
+        # The shared-expert callback is only implemented on the DeepGEMM path.
+        run = self.fuse_moe_impl.fused_experts_with_topk
+        extra = {}
+        if shared_expert_func is not None:
+            run = self.fuse_moe_impl._fused_experts
+            extra["shared_expert_func"] = shared_expert_func
+        return run(
             input_tensor=input_tensor,
             w13=self.w13,
             w2=self.w2,
@@ -203,7 +206,7 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-            shared_expert_func=shared_expert_func,
+            **extra,
         )
 
     def low_latency_dispatch(

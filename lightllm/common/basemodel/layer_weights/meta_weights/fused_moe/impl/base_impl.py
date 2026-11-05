@@ -12,8 +12,6 @@ from lightllm.utils.dist_utils import (
 
 
 class FuseMoeBaseImpl:
-    supports_decode_shared_expert_overlap = False
-
     def __init__(
         self,
         n_routed_experts: int,

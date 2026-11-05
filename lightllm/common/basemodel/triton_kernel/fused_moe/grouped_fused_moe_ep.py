@@ -224,13 +224,14 @@ def fused_experts(
     shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
 ):
     assert (limit is None and alpha is None) or (limit is not None and alpha is not None)
-    assert shared_expert_func is None or is_prefill is False
     check_ep_expert_dtype(quant_method)
     if use_sm100_mega_moe(quant_method):
-        assert shared_expert_func is None, "Mega MoE does not support shared expert overlap"
         if limit is not None:
             raise NotImplementedError("FP4 Mega MoE does not support clamped SwiGLU")
-        return mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
+        # Mega MoE has no split combine, so the shared expert cannot overlap it.
+        shared = shared_expert_func() if shared_expert_func is not None else None
+        routed = mega_moe_impl(hidden_states, w13, w2, topk_weights, topk_idx, quant_method)
+        return routed if shared is None else routed + shared
 
     buffer = dist_group_manager.ep_buffer if is_prefill else dist_group_manager.ep_low_latency_buffer
     return fused_experts_impl(
@@ -290,6 +291,8 @@ def fused_experts_impl(
 
     assert block_size_k == 128, "block_size_k must be 128"
 
+    # TODO: split the shared expert into up and down. Overlap up with dispatch and down
+    # with combine. Folding the whole expert into combine leaves the dispatch transfer idle.
     combined_x = None
     if is_prefill:
         qinput_tensor, input_scale = per_token_group_quant_fp8(
@@ -370,14 +373,25 @@ def fused_experts_impl(
                 _gemm_out_a, _silu_out = None, None
         del recv_x
 
-        # normal combine
+        overlap = shared_expert_func is not None
+        if overlap:
+            # Combine waits for the routed GEMM, then the shared expert overlaps the transfer.
+            from deep_ep import ElasticBuffer
+
+            previous_event = ElasticBuffer.capture()
+            allocate_on_comm_stream = True
         combined_x, _, event = buffer.combine(
             gather_out,
             handle,
             topk_weights=None,
             previous_event=previous_event,
+            async_with_compute_stream=overlap,
             allocate_on_comm_stream=allocate_on_comm_stream,
         )
+        if overlap:
+            shared = shared_expert_func()
+            event.current_stream_wait()
+            combined_x.add_(shared)
     else:
         # low latency dispatch
         num_max_dispatch_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_decode()
@@ -406,21 +420,16 @@ def fused_experts_impl(
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
         )
-        # low latency combine
+        overlap = shared_expert_func is not None
         combined_x, event_overlap, hook = buffer.low_latency_combine(
-            gemm_out_b,
-            topk_idx,
-            topk_weights,
-            handle,
-            async_finish=False,
-            return_recv_hook=shared_expert_func is not None,
+            gemm_out_b, topk_idx, topk_weights, handle, async_finish=False, return_recv_hook=overlap
         )
-        if shared_expert_func is not None:
-            # SEND, shared work, RECV and the final add use the current compute
-            # stream. The callback is read-only on hidden_states and runs once.
+        # The send is queued on this stream. The shared expert reuses its buffer, then the recv runs.
+        if overlap:
+            del gemm_out_b
             shared = shared_expert_func()
             hook()
-            return combined_x + shared
+            combined_x = combined_x + shared
     return combined_x
 
 

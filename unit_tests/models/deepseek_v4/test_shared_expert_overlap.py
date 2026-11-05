@@ -1,193 +1,224 @@
-"""Shared-expert callback, dispatch and model fallback contracts."""
+"""Shared-expert overlap on the EP prefill and decode paths."""
 
 from types import SimpleNamespace
-from unittest.mock import Mock
 import pytest
 import torch
-from lightllm.common.basemodel.triton_kernel.fused_moe import grouped_fused_moe_ep as ep
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl import base_impl, deepgemm_impl
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.impl.triton_impl import FuseMoeTriton
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
-from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe import fused_moe_weight as weight_module
+import lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep as ep_module
+from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep import fused_experts_impl
+from lightllm.models.deepseek_v4.layer_infer import transformer_layer_infer as layer_module
 from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer
+from lightllm.models.deepseek_v4.layer_weights.transformer_layer_weight import DeepseekV4TransformerLayerWeight
 
 
-@pytest.mark.parametrize("overlap", [False, True])
-def test_real_decode_pipeline_waits_after_shared_computation(monkeypatch, overlap):
-    events = []
-    x = torch.ones(3, 4, dtype=torch.bfloat16)
-    routed = torch.full_like(x, float("nan"))
-
-    class Buffer:
-        group_size = 8
-
-        def low_latency_dispatch(self, *args, **kwargs):
-            assert kwargs["return_recv_hook"] is False
-            events.append("dispatch")
-            return x, None, "handle", None, None
-
-        def low_latency_combine(self, *args, **kwargs):
-            events.append("combine_send")
-            assert kwargs["return_recv_hook"] is overlap
-
-            def receive():
-                events.append("combine_recv")
-                routed.fill_(3)
-
-            if not overlap:
-                receive()
-            return routed, None, receive
-
-    def gemm(*args, **kwargs):
-        assert args[7] == 3  # ceil(3 requests * 8 ranks * topk2 / 16 experts)
-        events.append("gemm")
-        return x
-
-    def shared():
-        assert torch.isnan(routed).all()
-        assert torch.all(x == 1)
-        events.append("shared")
-        return x * 2
-
-    monkeypatch.setattr(ep, "masked_group_gemm", gemm)
-    monkeypatch.setattr(ep, "get_env_use_ue8m0_scales", lambda: False)
-    monkeypatch.setattr(ep, "get_deepep_num_max_dispatch_tokens_per_rank_decode", lambda: 64)
-    out = ep.fused_experts_impl(
-        x,
-        torch.ones(2, 8, 4),
-        torch.ones(2, 4, 4),
-        torch.ones(3, 2),
-        torch.zeros(3, 2, dtype=torch.int64),
-        16,
-        Buffer(),
-        False,
-        use_fp8_w8a8=True,
-        use_fp8_all2all=True,
-        shared_expert_func=shared if overlap else None,
-    )
-    expected = ["dispatch", "gemm", "combine_send"] + (["shared", "combine_recv"] if overlap else ["combine_recv"])
-    assert events == expected
-    assert torch.all(out == (5 if overlap else 3))
-
-
-@pytest.mark.parametrize("mega", [False, True])
-def test_capability_is_selected_at_backend_construction(monkeypatch, mega):
-    monkeypatch.setattr(base_impl, "get_global_rank", lambda: 0)
-    monkeypatch.setattr(base_impl, "get_global_world_size", lambda: 8)
-    monkeypatch.setattr(deepgemm_impl, "use_sm100_mega_moe", lambda _: mega)
-    backend = deepgemm_impl.FuseMoeDeepGEMM(16, 0, 1.0, SimpleNamespace(), 0, None, None, False)
-    assert backend.supports_decode_shared_expert_overlap is (not mega)
-    assert base_impl.FuseMoeBaseImpl.supports_decode_shared_expert_overlap is False
-
-
-def test_weight_preserves_route_capture_and_callback(monkeypatch):
-    owner = FusedMoeWeight.__new__(FusedMoeWeight)
-    owner.layer_num_ = 0
-    owner.w13 = owner.w2 = None
-    backend = deepgemm_impl.FuseMoeDeepGEMM.__new__(deepgemm_impl.FuseMoeDeepGEMM)
-    backend.supports_decode_shared_expert_overlap = True
-    backend._fused_experts = Mock(return_value="output")
-    owner.fuse_moe_impl = backend
-    capture = Mock()
-    monkeypatch.setattr(weight_module, "get_moe_capture_callback", lambda *_: capture)
-    ids = torch.zeros(3, 2, dtype=torch.int64)
-    shared = Mock()
-    assert (
-        owner.experts_with_topk(torch.ones(3, 4), torch.ones(3, 2), ids, is_prefill=False, shared_expert_func=shared)
-        == "output"
-    )
-    capture.assert_called_once_with(ids)
-    assert backend._fused_experts.call_args.kwargs["shared_expert_func"] is shared
-
-
-def test_existing_inplace_backends_receive_no_new_keyword():
-    backend = FuseMoeTriton.__new__(FuseMoeTriton)
-    backend._fused_experts = Mock(return_value="old-output")
-    assert backend.fused_experts_with_topk(None, None, None, None, None) == "old-output"
-    assert "shared_expert_func" not in backend._fused_experts.call_args.kwargs
-    with pytest.raises(AssertionError):
-        backend.fused_experts_with_topk(None, None, None, None, None, shared_expert_func=lambda: None)
-
-
-@pytest.mark.parametrize("enabled", [False, True])
-@pytest.mark.parametrize("ep_mode", [False, True])
-@pytest.mark.parametrize("prefill,supports", [(False, True), (False, False), (True, True)])
-def test_model_keeps_shared_before_inplace_fallback(prefill, supports, enabled, ep_mode):
+def _layer(ep_mode):
     layer = DeepseekV4TransformerLayerInfer.__new__(DeepseekV4TransformerLayerInfer)
     layer.embed_dim_ = 4
+    layer.layer_num_ = 0
     layer.enable_ep_moe = ep_mode
     layer.swiglu_limit = 7
-    layer.enable_shared_expert_overlap = enabled
     layer._tpsp_allgather = lambda input, infer_state: input
     ids = torch.zeros(3, 2, dtype=torch.int64)
     layer._select_experts = lambda *args: (torch.ones(3, 2), ids)
-    events = []
+    return layer, ids
 
-    def shared(x=None, *args, **kwargs):
-        if x is None:
-            x = kwargs["input"]
+
+def _shared_recorder(events, scale=2):
+    def shared(*args, **kwargs):
+        x = kwargs["input"] if "input" in kwargs else args[0]
         events.append("shared")
-        return x * 2
+        return x * scale
 
-    layer._ffn_tp = shared
+    return shared
+
+
+def _moe_inputs():
+    hidden = torch.ones(3, 4)
+    topk_weights = torch.ones(3, 2)
+    topk_idx = torch.zeros(3, 2, dtype=torch.int64)
+    w1 = torch.ones(2, 8, 4)
+    w2 = torch.ones(2, 4, 4)
+    return hidden, topk_weights, topk_idx, w1, w2
+
+
+def test_ep_ffn_passes_the_shared_expert_callback(monkeypatch):
+    monkeypatch.setattr(layer_module, "use_sm100_mega_moe", lambda method: False)
+    layer, _ids = _layer(True)
+    events = []
+    layer._ffn_shared_expert = _shared_recorder(events)
 
     def routed(**kwargs):
         events.append("routed")
-        if kwargs.get("shared_expert_func") is not None:
-            return kwargs["shared_expert_func"]() + 3
+        return torch.full((3, 4), 3.0) + kwargs["shared_expert_func"]()
+
+    experts = SimpleNamespace(quant_method=None, experts_with_topk=routed)
+    result = layer._ffn(
+        torch.ones(3, 4),
+        SimpleNamespace(is_prefill=False),
+        SimpleNamespace(experts=experts),
+    )
+    assert events == ["routed", "shared"]
+    assert torch.all(result == 5)
+
+
+def test_decode_runs_shared_expert_between_combine_send_and_recv(monkeypatch):
+    events = []
+    hidden, topk_weights, topk_idx, w1, w2 = _moe_inputs()
+
+    def dispatch(*args, **kwargs):
+        events.append("dispatch")
+        return (hidden, hidden), torch.ones(2, dtype=torch.int32), "handle", None, None
+
+    def gemm(*args, **kwargs):
+        assert args[7] == 3  # ceil(3 tokens * group 8 * topk 2 / 16 experts)
+        events.append("gemm")
+        return hidden
+
+    def combine(*args, **kwargs):
+        assert kwargs["return_recv_hook"] is True
+        events.append("combine_send")
+
+        def receive():
+            events.append("combine_recv")
+
+        return torch.full((3, 4), 3.0), None, receive
+
+    monkeypatch.setattr(ep_module, "masked_group_gemm", gemm)
+    result = fused_experts_impl(
+        hidden,
+        w1,
+        w2,
+        topk_weights,
+        topk_idx,
+        num_experts=16,
+        buffer=SimpleNamespace(group_size=8, low_latency_dispatch=dispatch, low_latency_combine=combine),
+        is_prefill=False,
+        use_fp8_w8a8=True,
+        use_fp8_all2all=True,
+        shared_expert_func=lambda: events.append("shared") or torch.full((3, 4), 2.0),
+    )
+    assert events == ["dispatch", "gemm", "combine_send", "shared", "combine_recv"]
+    assert torch.all(result == 5)
+
+
+def test_prefill_overlaps_shared_expert_with_combine(monkeypatch):
+    events = []
+    hidden, topk_weights, topk_idx, w1, w2 = _moe_inputs()
+    import deep_ep
+
+    monkeypatch.setattr(deep_ep.ElasticBuffer, "capture", staticmethod(lambda: events.append("event") or "event"))
+    monkeypatch.setattr(ep_module, "get_deepep_num_max_dispatch_tokens_per_rank_prefill", lambda: 16)
+    monkeypatch.setattr(ep_module, "per_token_group_quant_fp8", lambda *args, **kwargs: (hidden, hidden))
+
+    def dispatch(*args, **kwargs):
+        events.append("dispatch")
+        handle = SimpleNamespace(
+            num_recv_tokens_per_expert_list=[0],
+            recv_src_metadata=torch.zeros(3, 4),
+        )
+        return (hidden, hidden), None, topk_weights, handle, None
+
+    class _Event:
+        def current_stream_wait(self):
+            events.append("combine_recv")
+
+    def combine(*args, **kwargs):
+        assert kwargs["previous_event"] == "event"
+        assert kwargs["async_with_compute_stream"] is True
+        events.append("combine_send")
+        return torch.full((3, 4), 3.0), None, _Event()
+
+    result = fused_experts_impl(
+        hidden,
+        w1,
+        w2,
+        topk_weights,
+        topk_idx,
+        num_experts=16,
+        buffer=SimpleNamespace(dispatch=dispatch, combine=combine),
+        is_prefill=True,
+        use_fp8_w8a8=True,
+        use_fp8_all2all=True,
+        shared_expert_func=lambda: events.append("shared") or torch.full((3, 4), 2.0),
+    )
+    assert events == ["dispatch", "event", "combine_send", "shared", "combine_recv"]
+    assert torch.all(result == 5)
+
+
+def test_rename_shared_expert_as_the_last_routed_expert():
+    weight = DeepseekV4TransformerLayerWeight.__new__(DeepseekV4TransformerLayerWeight)
+    weight.prefix = "layers.0"
+    weight.n_routed_experts = 4
+    weight.experts = SimpleNamespace(
+        quant_method=SimpleNamespace(weight_scale_suffix="weight_scale_inv", weight_zero_point_suffix=None)
+    )
+    tensors = {
+        "layers.0.ffn.shared_experts.w1.weight": torch.ones(2),
+        "layers.0.ffn.shared_experts.w1.scale": torch.ones(1),
+        "layers.0.ffn.shared_experts.w2.weight": torch.ones(2),
+        "layers.0.ffn.shared_experts.w3.weight": torch.ones(2),
+    }
+    weight._rename_shared_experts(tensors)
+    assert torch.equal(tensors["layers.0.ffn.experts.4.w1.weight"], torch.ones(2))
+    assert torch.equal(tensors["layers.0.ffn.experts.4.w1.scale"], torch.ones(1))
+    assert "layers.0.ffn.experts.4.w2.weight" in tensors
+    assert "layers.0.ffn.experts.4.w3.weight" in tensors
+
+
+def test_auto_enable_fused_shared_experts_for_v4_tp(monkeypatch):
+    from lightllm.utils import config_utils
+
+    monkeypatch.setattr(config_utils, "get_model_type", lambda path: "deepseek_v4")
+    args = SimpleNamespace(model_dir="/model", enable_ep_moe=False, enable_fused_shared_experts=False)
+    config_utils.auto_set_fused_shared_experts(args)
+    assert args.enable_fused_shared_experts is True
+
+    args.enable_ep_moe = True
+    args.enable_fused_shared_experts = False
+    config_utils.auto_set_fused_shared_experts(args)
+    assert args.enable_fused_shared_experts is False
+
+
+def test_tp_fused_shared_expert_skips_the_standalone_ffn(monkeypatch):
+    monkeypatch.setattr(layer_module, "use_sm100_mega_moe", lambda method: False)
+    layer, _ids = _layer(False)
+    events = []
+    layer._ffn_shared_expert = _shared_recorder(events)
+    reductions = []
+    layer._tpsp_reduce = lambda input, infer_state: reductions.append(input.clone()) or input
+
+    def routed(**kwargs):
+        events.append("routed")
+        return torch.full((3, 4), 3.0)
+
+    experts = SimpleNamespace(quant_method=None, experts_with_topk=routed)
+    result = layer._ffn(
+        torch.ones(3, 4),
+        SimpleNamespace(is_prefill=False),
+        SimpleNamespace(experts=experts, num_fused_shared_experts=1),
+    )
+    assert events == ["routed"]
+    assert torch.all(result == 3)
+    assert len(reductions) == 1
+    assert torch.all(reductions[0] == 3)
+
+
+@pytest.mark.parametrize("ep_mode", [False, True])
+def test_inplace_backends_compute_shared_expert_first(monkeypatch, ep_mode):
+    monkeypatch.setattr(layer_module, "use_sm100_mega_moe", lambda method: ep_mode)
+    layer, _ids = _layer(ep_mode)
+    events = []
+    x = torch.ones(3, 4)
+    layer._ffn_shared_expert = _shared_recorder(events)
+
+    def routed(**kwargs):
+        events.append("routed")
         kwargs["input_tensor"].fill_(9)
         return torch.full((3, 4), 3.0)
 
-    owner = FusedMoeWeight.__new__(FusedMoeWeight)
-    owner.fuse_moe_impl = SimpleNamespace(supports_decode_shared_expert_overlap=supports)
-    owner.experts_with_topk = routed
-    weights = SimpleNamespace(experts=owner)
     reductions = []
-    layer._tpsp_reduce = lambda input, infer_state: (reductions.append(input) or input)
-    result = layer._ffn(torch.ones(3, 4), SimpleNamespace(is_prefill=prefill), weights)
+    layer._tpsp_reduce = lambda input, infer_state: reductions.append(input) or input
+    experts = SimpleNamespace(quant_method=None, experts_with_topk=routed)
+    result = layer._ffn(x, SimpleNamespace(is_prefill=False), SimpleNamespace(experts=experts))
+    assert events == ["shared", "routed"]
     assert torch.all(result == 5)
-    assert events == (["routed", "shared"] if enabled and supports and not prefill else ["shared", "routed"])
     assert len(reductions) == (0 if ep_mode else 1)
-
-
-@pytest.mark.parametrize("supported", [False, True])
-def test_weight_reports_backend_capability(supported):
-    owner = FusedMoeWeight.__new__(FusedMoeWeight)
-    owner.fuse_moe_impl = SimpleNamespace(supports_decode_shared_expert_overlap=supported)
-    assert owner.supports_decode_shared_expert_overlap is supported
-
-
-@pytest.mark.parametrize("value,enabled", [(None, True), ("0", False), ("1", True), ("TRUE", True)])
-def test_overlap_switch_is_read_when_layer_is_created(monkeypatch, value, enabled):
-    from lightllm.models.deepseek_v4.layer_infer import transformer_layer_infer
-
-    monkeypatch.setenv("LIGHTLLM_CURRENT_RANK_IN_DP", "0")
-    monkeypatch.setenv("LIGHTLLM_DP_WORLD_SIZE", "1")
-    if value is None:
-        monkeypatch.delenv("LIGHTLLM_DSV4_SHARED_EXPERT_OVERLAP", raising=False)
-    else:
-        monkeypatch.setenv("LIGHTLLM_DSV4_SHARED_EXPERT_OVERLAP", value)
-    monkeypatch.setattr(transformer_layer_infer, "get_env_start_args", lambda: SimpleNamespace(enable_ep_moe=True))
-    config = dict(
-        rms_norm_eps=1e-6,
-        hidden_size=4096,
-        num_attention_heads=32,
-        head_dim=512,
-        qk_rope_head_dim=64,
-        o_groups=8,
-        hc_mult=4,
-        hc_sinkhorn_iters=20,
-        hc_eps=1e-6,
-        compress_ratios=[0],
-        num_hash_layers=0,
-        vocab_size=129280,
-        n_layer=1,
-        num_experts_per_tok=6,
-        routed_scaling_factor=1.0,
-        swiglu_limit=10.0,
-        index_head_dim=128,
-        index_n_heads=32,
-        index_topk=512,
-    )
-    layer = DeepseekV4TransformerLayerInfer(0, config)
-    assert layer.enable_shared_expert_overlap is enabled

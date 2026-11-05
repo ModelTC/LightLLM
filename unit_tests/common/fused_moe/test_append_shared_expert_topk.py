@@ -1,12 +1,46 @@
+from types import SimpleNamespace
+
 import pytest
 import torch
 
+from lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight import FusedMoeWeight
 from lightllm.common.basemodel.triton_kernel.fused_moe.append_shared_expert_topk import (
     append_fused_shared_experts,
 )
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required for Triton kernels")
+
+
+def test_experts_with_topk_appends_the_fused_shared_expert(monkeypatch):
+    monkeypatch.setattr(
+        "lightllm.common.basemodel.layer_weights.meta_weights.fused_moe.fused_moe_weight.get_moe_capture_callback",
+        lambda *args, **kwargs: None,
+    )
+    seen = {}
+
+    def run(**kwargs):
+        seen.update(kwargs)
+        return kwargs["input_tensor"]
+
+    weight = SimpleNamespace(
+        num_fused_shared_experts=1,
+        n_routed_experts=4,
+        layer_num_=0,
+        w13=torch.ones(1, device="cuda"),
+        w2=torch.ones(1, device="cuda"),
+        fuse_moe_impl=SimpleNamespace(fused_experts_with_topk=run),
+    )
+    topk_ids = torch.tensor([[0, 2], [1, 3]], dtype=torch.int64, device="cuda")
+    topk_weights = torch.tensor([[0.2, 0.8], [0.4, 0.6]], device="cuda")
+    FusedMoeWeight.experts_with_topk(
+        weight,
+        torch.ones(2, 4, device="cuda"),
+        topk_weights,
+        topk_ids,
+    )
+    assert torch.equal(seen["topk_ids"], torch.tensor([[0, 2, 4], [1, 3, 4]], device="cuda"))
+    assert torch.allclose(seen["topk_weights"], torch.tensor([[0.2, 0.8, 1.0], [0.4, 0.6, 1.0]], device="cuda"))
 
 
 def test_append_fused_shared_experts_without_gate():

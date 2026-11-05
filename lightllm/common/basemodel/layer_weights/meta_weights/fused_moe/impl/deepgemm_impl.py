@@ -1,5 +1,5 @@
 import torch
-from typing import Optional, Tuple, Any, Callable
+from typing import Optional, Tuple, Any
 from .triton_impl import FuseMoeTriton
 from lightllm.distributed import dist_group_manager
 from lightllm.common.quantization.quantize_method import WeightPack
@@ -14,7 +14,6 @@ from lightllm.common.basemodel.triton_kernel.fused_moe.grouped_fused_moe_ep impo
     masked_group_gemm,
     chunked_expanded_moe_forward,
     quantize_fused_experts_input,
-    use_sm100_mega_moe,
 )
 from lightllm.common.basemodel.triton_kernel.fused_moe.moe_silu_and_mul import silu_and_mul_fwd
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
@@ -22,10 +21,6 @@ from lightllm.common.basemodel.triton_kernel.redundancy_topk_ids_repair import r
 
 
 class FuseMoeDeepGEMM(FuseMoeTriton):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.supports_decode_shared_expert_overlap = not use_sm100_mega_moe(self.quant_method)
-
     def _select_experts(
         self,
         input_tensor: torch.Tensor,
@@ -85,9 +80,9 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
         alpha: Optional[float] = None,
         limit: Optional[float] = None,
         clamp_up_add_one: bool = True,
-        shared_expert_func: Optional[Callable[[], torch.Tensor]] = None,
+        shared_expert_func=None,
     ):
-        output = fused_experts(
+        return fused_experts(
             hidden_states=input_tensor,
             w13=w13,
             w2=w2,
@@ -102,7 +97,6 @@ class FuseMoeDeepGEMM(FuseMoeTriton):
             clamp_up_add_one=clamp_up_add_one,
             shared_expert_func=shared_expert_func,
         )
-        return output
 
     def low_latency_dispatch(
         self,

@@ -13,8 +13,8 @@ routes. Timings exclude routing and report the slowest rank, with alternating A/
 order. This is not a complete model accuracy or end-to-end service benchmark.
 
 Keep NUM_MAX_DISPATCH_TOKENS_PER_RANK_DECODE at the service default of 256;
-request count times width must fit that capacity. The switch is read when a layer
-is created, so each mode owns a separate layer and graph.
+request count times width must fit that capacity. Mode 0 computes the shared expert
+before routed experts. Mode 1 is the default overlap schedule.
 """
 import argparse
 import json
@@ -110,7 +110,6 @@ def worker(rank, args, port):
         owner.w13 = pack((args.experts_per_rank, 2 * args.intermediate, args.hidden))
         owner.w2 = pack((args.experts_per_rank, args.hidden, args.intermediate))
         owner.fuse_moe_impl = FuseMoeDeepGEMM(experts, 0, 1.0, quant, 0, None, None, False)
-        assert owner.supports_decode_shared_expert_overlap
 
         def shared_weight(shape):
             w = MMWeightTpl.__new__(MMWeightTpl)
@@ -145,13 +144,8 @@ def worker(rank, args, port):
             index_n_heads=32,
             index_topk=512,
         )
-        layers = {}
-        for mode in (0, 1):
-            os.environ["LIGHTLLM_DSV4_SHARED_EXPERT_OVERLAP"] = str(mode)
-            layer = DeepseekV4TransformerLayerInfer(0, config)
-            assert layer.enable_shared_expert_overlap == bool(mode)
-            layers[mode] = layer
-        original_shared = {mode: layer._ffn_tp for mode, layer in layers.items()}
+        layer = DeepseekV4TransformerLayerInfer(0, config)
+        original_shared = layer._ffn_shared_expert
         stats = []
         for requests in args.requests:
             for width in args.widths:
@@ -159,22 +153,37 @@ def worker(rank, args, port):
                 x = torch.randn(rows, args.hidden, device="cuda", dtype=torch.bfloat16) * 0.1
                 ids = torch.rand(rows, experts, device="cuda").topk(args.topk, dim=-1).indices
                 probs = torch.randn(rows, args.topk, device="cuda").softmax(-1)
-                infer = NS(is_prefill=False)
+                infer = NS(is_prefill=False, microbatch_index=0)
                 counts = {0: 0, 1: 0}
-                for mode, layer in layers.items():
-                    layer._select_experts = lambda x, infer, w: (probs, ids)
-                    original = original_shared[mode]
-
-                    def shared(*a, mode=mode, original=original, **kw):
-                        assert torch.cuda.current_stream().cuda_stream == stream.cuda_stream
-                        counts[mode] += 1
-                        result = original(*a, **kw)
-                        return result
-
-                    layer._ffn_tp = shared
+                layer._select_experts = lambda x, infer, w: (probs, ids)
                 stream = torch.cuda.Stream()
                 stream.wait_stream(torch.cuda.current_stream())
-                funcs = {mode: (lambda mode=mode: layers[mode]._ffn(x, infer, weights)) for mode in (0, 1)}
+
+                def shared(*a, mode, **kw):
+                    assert torch.cuda.current_stream().cuda_stream == stream.cuda_stream
+                    counts[mode] += 1
+                    return original_shared(*a, **kw)
+
+                def run_baseline(mode=0):
+                    layer._ffn_shared_expert = lambda *a, **kw: shared(*a, mode=mode, **kw)
+                    shared_out = layer._ffn_shared_expert(x, infer, weights)
+                    routed_out = weights.experts.experts_with_topk(
+                        input_tensor=x,
+                        topk_weights=probs,
+                        topk_ids=ids,
+                        is_prefill=False,
+                        infer_state=infer,
+                        alpha=1.0,
+                        limit=args.limit,
+                        clamp_up_add_one=False,
+                    )
+                    return routed_out + shared_out
+
+                def run_overlap(mode=1):
+                    layer._ffn_shared_expert = lambda *a, **kw: shared(*a, mode=mode, **kw)
+                    return layer._ffn(x, infer, weights)
+
+                funcs = {0: run_baseline, 1: run_overlap}
                 print(rank, "case", requests, width, "warming", flush=True)
                 with torch.cuda.stream(stream):
                     before = x.clone()
