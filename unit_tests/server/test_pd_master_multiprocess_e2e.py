@@ -25,7 +25,7 @@ from prometheus_client.parser import text_string_to_metric_families
 from lightllm.server.core.objs import FinishStatus
 from lightllm.server.httpserver import pd_loop
 from lightllm.server.pd_io_struct import ObjType, PDDecodeNodeInfo, PDUpKVStatus
-from unit_tests.server.pd_master_test_utils import running_pd_master
+from unit_tests.server.pd_master_test_utils import PD_TEST_NODE_ADDRESSES, PD_TEST_REGISTER_TOKEN, running_pd_master
 
 
 class FakePDPeers:
@@ -45,7 +45,7 @@ class FakePDPeers:
         self.hold_prompt_ids = False
         self.hold_decode = False
         self.busy_prefill_requests = 0
-        self.node_addresses = {"prefill": "prefill.internal:18001", "decode": "decode.internal:18002"}
+        self.node_addresses = PD_TEST_NODE_ADDRESSES
 
     async def __aenter__(self):
         async with httpx.AsyncClient(trust_env=False, timeout=5) as client:
@@ -59,7 +59,11 @@ class FakePDPeers:
                 )
                 for mode, node_id in (("prefill", 501), ("decode", 502)):
                     websocket = await self.stack.enter_async_context(
-                        websockets.connect("ws://" + endpoint["host_ip_port"] + "/pd_register", proxy=None)
+                        websockets.connect(
+                            "ws://" + endpoint["host_ip_port"] + "/pd_register",
+                            additional_headers={"Authorization": f"Bearer {PD_TEST_REGISTER_TOKEN}"},
+                            proxy=None,
+                        )
                     )
                     await websocket.send(
                         json.dumps(

@@ -28,7 +28,8 @@ def _registration(args, dp_index=None, mode="prefill"):
     return info
 
 
-def test_split_connections_register_select_update_and_reconnect_independently():
+def test_split_connections_register_select_update_and_reconnect_independently(monkeypatch):
+    monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", '["p:8000", "d:8000"]')
     args = StartArgs(select_p_d_node_strategy="cache_aware", pd_master_mode="1p1d")
     manager = PDManager(args)
     sockets = [object() for _ in range(4)]
@@ -63,7 +64,8 @@ def test_split_connections_register_select_update_and_reconnect_independently():
 
 
 @pytest.mark.parametrize("mode", ["prefill", "decode"])
-def test_unsplit_reconnection_ignores_old_connection_id_cleanup(mode):
+def test_unsplit_reconnection_ignores_old_connection_id_cleanup(monkeypatch, mode):
+    monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", '["p:8000", "d:8000"]')
     args = StartArgs()
     manager = PDManager(args)
     info = dict(_registration(args, mode=mode), connection_id="old")
@@ -149,8 +151,12 @@ def test_pd_handle_loop_passes_its_fixed_rank_to_each_master(monkeypatch, dp_ind
 
 
 @pytest.mark.parametrize("dp_index", [None, 0, 3])
-def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypatch, dp_index):
+def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypatch, caplog, dp_index):
     from lightllm.server import api_http
+
+    monkeypatch.setenv("LIGHTLLM_PD_REGISTER_TOKEN", "test-pd-secret")
+    caplog.set_level("INFO")
+    monkeypatch.setattr(pd_loop.logger, "handlers", [caplog.handler])
 
     async def run():
         args = StartArgs(run_mode="prefill", dp=8, nnodes=2)
@@ -205,11 +211,24 @@ def test_connection_registers_rank_binds_requests_and_reports_rank_load(monkeypa
             async def __aexit__(self, *_args):
                 return False
 
-        monkeypatch.setattr(pd_loop.websockets, "connect", lambda *_args, **_kwargs: Connection())
+        connections = MagicMock(side_effect=[OSError("retry"), Connection()])
+        monkeypatch.setattr(pd_loop.websockets, "connect", connections)
+        original_sleep = asyncio.sleep
+
+        async def skip_retry_delay(seconds):
+            await original_sleep(0 if seconds == 10 else seconds)
+
+        monkeypatch.setattr(pd_loop.asyncio, "sleep", skip_retry_delay)
         monkeypatch.setattr(pd_loop, "_pd_process_generate", generate)
         await asyncio.wait_for(pd_loop._pd_handle_task(manager, PD_Master_Obj(1, "master:8000"), dp_index), 2)
         assert payloads[0].get("dp_index") == dp_index
         assert "dp_index" in payloads[0]
+        assert connections.call_count == 2
+        for call in connections.call_args_list:
+            assert call.kwargs["additional_headers"] == {"Authorization": "Bearer test-pd-secret"}
+        assert "test-pd-secret" not in json.dumps(payloads[0])
+        assert "Sent registration JSON" in caplog.text
+        assert "test-pd-secret" not in caplog.text
         for payload in payloads[1:]:
             if payload[0] != ObjType.TOKEN_PACKS:
                 continue
@@ -228,6 +247,8 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     from fastapi import WebSocketDisconnect
     from lightllm.server import api_http, api_http_pd
 
+    monkeypatch.setenv("LIGHTLLM_PD_REGISTER_TOKEN", "test-pd-secret")
+    monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", '["p:8000", "d:8000"]')
     args = StartArgs(dp=8, nnodes=2, pd_node_id=1)
     manager = PDManager(args)
     info = _registration(args, dp_index)
@@ -260,6 +281,7 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
         updated_nodes.append(manager.url_to_pd_nodes[obj[2]["connection_key"]])
 
     websocket = SimpleNamespace(
+        headers={"authorization": "Bearer test-pd-secret"},
         accept=AsyncMock(),
         client=("p", 8000),
         receive_text=AsyncMock(return_value=json.dumps(info)),
@@ -281,6 +303,93 @@ def test_reported_load_key_matches_registered_connection_without_rewriting(monke
     assert updated_nodes[0].dp_index == dp_index
     assert updated_nodes[0].websocket is websocket
     assert updated_nodes[0].run_status.total_token_usage_rate == 0.7
+
+
+@pytest.mark.parametrize("node_id, mode, rank", [(2, "prefill", 0), (2, "prefill", 1), (1, "decode", 1)])
+def test_conflicting_address_owner_preserves_routing(monkeypatch, node_id, mode, rank):
+    monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", '["p:8000"]')
+    args = StartArgs(select_p_d_node_strategy="cache_aware")
+    manager = PDManager(args)
+    websocket = object()
+    manager.register_pd(_registration(args, 0), websocket)
+    incumbent = manager.url_to_pd_nodes["p:8000/dp0"]
+    before = (manager.url_to_pd_nodes.copy(), manager.prefill_nodes[:], manager.decode_nodes[:])
+    info = dict(_registration(args, rank), node_id=node_id, mode=mode)
+    with pytest.raises(ValueError):
+        manager.register_pd(info, object())
+    assert (manager.url_to_pd_nodes, manager.prefill_nodes, manager.decode_nodes) == before
+    assert incumbent.websocket is websocket
+    assert manager.selector.prefill_nodes == [incumbent]
+    assert manager.selector.decode_nodes == []
+
+
+@pytest.mark.parametrize(
+    "address",
+    [
+        "169.254.169.254:80",
+        "10.0.0.99:8000",
+        "http://p:8000",
+        "user@p:8000",
+        "p:8000/path",
+        "p:8000?query",
+        "p:8000#fragment",
+        " p:8000",
+        "p:8000\n",
+        "p",
+        "p:0",
+        "p:65536",
+        "p:-1",
+        "p:http",
+        "p:08000",
+        "P:8000",
+        "p.:8000",
+        "127.1:8000",
+        "0x7f000001:8000",
+        "[::1%lo]:8000",
+        "::1:8000",
+    ],
+)
+def test_rejected_destination_never_reaches_health_checks(monkeypatch, address):
+    enrolled = "p:8000" if address in ("169.254.169.254:80", "10.0.0.99:8000") else address
+    monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", json.dumps([enrolled]))
+    args = StartArgs()
+    manager = PDManager(args)
+    with pytest.raises(ValueError):
+        manager.register_pd(dict(_registration(args), client_ip_port=address), object())
+    client = MagicMock()
+    monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.httpx.AsyncClient", client)
+    assert asyncio.run(manager.check_pd_nodes_health())
+    client.assert_not_called()
+    assert manager.url_to_pd_nodes == {}
+    assert manager.prefill_nodes == manager.decode_nodes == []
+
+
+@pytest.mark.parametrize("config", [None, "", "[]", "not json", "{}", '["p:8000", null]', '["p:8000/path"]'])
+def test_invalid_allowlist_fails_closed(monkeypatch, config):
+    if config is None:
+        monkeypatch.delenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", raising=False)
+    else:
+        monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", config)
+    args = StartArgs()
+    manager = PDManager(args)
+    with pytest.raises(ValueError):
+        manager.register_pd(_registration(args), object())
+    assert manager.url_to_pd_nodes == {}
+
+
+@pytest.mark.parametrize("mode", ["prefill", "decode"])
+@pytest.mark.parametrize("address", ["10.0.0.2:8000", "[fd00::2]:8000", "pd-node.cluster.local:8000"])
+def test_enrolled_destinations_use_exact_health_urls(monkeypatch, address, mode):
+    monkeypatch.setenv("LIGHTLLM_PD_ALLOWED_NODE_ADDRESSES", json.dumps([address]))
+    args = StartArgs()
+    manager = PDManager(args)
+    manager.register_pd(dict(_registration(args, mode=mode), client_ip_port=address), object())
+    client = AsyncMock()
+    client.get.return_value = SimpleNamespace(status_code=200)
+    client.__aenter__.return_value = client
+    monkeypatch.setattr("lightllm.server.httpserver_for_pd_master.manager.httpx.AsyncClient", lambda **_kwargs: client)
+    assert asyncio.run(manager.check_pd_nodes_health())
+    client.get.assert_awaited_once_with(f"http://{address}/health")
 
 
 def test_split_option_defaults_off_and_is_prefill_only():
