@@ -52,8 +52,8 @@ def test_ffn_draft_checkpoint_and_graph(mode, layout, monkeypatch, tmp_path):
     from safetensors.torch import save_file
     from transformers import Qwen3MoeConfig, Qwen3MoeForCausalLM
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.core.runner.decode_graph import CudaGraph
-    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.models.qwen3_moe.model import Qwen3MOEModel

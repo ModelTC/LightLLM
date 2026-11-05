@@ -194,7 +194,7 @@ def test_prefill_matches_reference_and_preserves_out(monkeypatch, heads, ratio, 
 @pytest.mark.parametrize("ratio", [0, 4, 128])
 @pytest.mark.parametrize("overlap", [False, True])
 def test_decode_cuda_graph_reads_updated_query_and_lengths(monkeypatch, heads, ratio, overlap):
-    from lightllm.core.runner import decode_graph as cuda_graph_module
+    from lightllm.common.execution.runner import decode_graph as cuda_graph_module
 
     args = SimpleNamespace(
         enable_decode_microbatch_overlap=overlap, enable_tpsp_mix_mode=False, enable_torch_memory_saver=False
@@ -279,7 +279,7 @@ def test_prefill_out_supports_strided_scratch_buffer(heads):
 @pytest.mark.parametrize("heads", [16, 64])
 @pytest.mark.parametrize("ratio", [0, 4, 128])
 def test_prefill_cuda_graph_reads_new_request_state(monkeypatch, heads, ratio):
-    from lightllm.core.runner import prefill_graph as cuda_graph_module
+    from lightllm.common.execution.runner import prefill_graph as cuda_graph_module
     from lightllm.common.basemodel.hidden_collector import NoopHiddenCollector
     from lightllm.models.deepseek_v4.infer_struct import DeepseekV4InferStateInfo
     from lightllm.models.deepseek_v4.layer_infer.transformer_layer_infer import DeepseekV4TransformerLayerInfer

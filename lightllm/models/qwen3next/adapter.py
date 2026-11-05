@@ -13,7 +13,7 @@ class Qwen3NextModelAdapter(GDNModelAdapter):
     transformer_layer_infer_class = Qwen3NextTransformerLayerInfer
 
     def moe_specs(self):
-        from lightllm.core.compute.moe.spec import MoeSpec
+        from lightllm.common.execution.compute.moe.spec import MoeSpec
 
         config = self.config
         experts = config.get("num_experts", 0)

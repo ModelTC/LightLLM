@@ -110,8 +110,8 @@ def test_reward_checkpoint_rejects_incomplete_or_incompatible_head(corruption, m
 def test_wrapper_checkpoint_prefill_decode_prefix_and_graph(family, backend, monkeypatch, tmp_path):
     from safetensors.torch import save_file
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.core.runner.decode_graph import CudaGraph
-    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.server.core.objs.start_args_type import StartArgs

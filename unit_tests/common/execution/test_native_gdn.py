@@ -1,6 +1,6 @@
 """Native GDN contracts, independent recurrence and restored-state execution."""
 
-from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.common.execution.formats.recurrent.spec import ConvSSMStateSpec
 
 
 import pytest
@@ -8,14 +8,14 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.core.compute.attention.batch import AttentionBatch
-from lightllm.core.compute.attention.gdn.backend import GatedDeltaNetBackend, GDNStaticParams
+from lightllm.common.execution.compute.attention.batch import AttentionBatch
+from lightllm.common.execution.compute.attention.gdn.backend import GatedDeltaNetBackend, GDNStaticParams
 from lightllm.models.base.adapter import GDNModelAdapter
-from lightllm.core.planner.planner import Planner
-from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.core.contracts.state import FormatSpec, StateSpec
-from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
-from lightllm.core.storage.attention import ConvSSMStateStore
+from lightllm.common.execution.planner.planner import Planner
+from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.common.execution.contracts.state import FormatSpec, StateSpec
+from lightllm.common.execution.compute.attention.gdn.spec import GatedDeltaNetSpec
+from lightllm.common.execution.storage.attention import ConvSSMStateStore
 
 
 def test_hybrid_declarations_follow_explicit_layers_and_tp():
@@ -62,7 +62,7 @@ def test_draft_and_loop_layers_keep_their_own_numbering():
 
 @pytest.mark.parametrize("bits", [4, 8])
 def test_hybrid_quantized_storage_matches_external_declaration(bits, monkeypatch):
-    from lightllm.core.storage.attention import DenseStateStore
+    from lightllm.common.execution.storage.attention import DenseStateStore
     from lightllm.models.qwen3next.model import Qwen3NextTpPartModel
     from lightllm.server.core.objs.start_args_type import StartArgs
     from unit_tests.common.execution.test_group_quantized import make_format

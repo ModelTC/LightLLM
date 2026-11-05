@@ -228,8 +228,8 @@ def test_router_opens_launcher_readiness_key(monkeypatch, dp, nnodes, local_dp):
 @pytest.mark.parametrize("progress", [False, True])
 def test_model_warmup_progress_and_rank_events(monkeypatch, caplog, progress):
     from contextlib import nullcontext
-    from lightllm.core.runner import warmup as module
-    from lightllm.core.device.cuda import CudaRuntime
+    from lightllm.common.execution.runner import warmup as module
+    from lightllm.common.execution.device.cuda import CudaRuntime
 
     runner = module.WarmupRunner.__new__(module.WarmupRunner)
     runner.runtime = CudaRuntime
@@ -385,7 +385,7 @@ def test_decode_status_connection_errors_are_deduplicated_and_cancel_is_debug(mo
 
 @pytest.mark.parametrize("overlap", [False, True])
 def test_cuda_graph_replay_cost_barrier_uses_current_device(monkeypatch, overlap):
-    from lightllm.core.runner import decode_graph as module
+    from lightllm.common.execution.runner import decode_graph as module
 
     graph = module.CudaGraph.__new__(module.CudaGraph)
     graph.capture_infer_cost = True

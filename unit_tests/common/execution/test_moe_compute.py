@@ -10,15 +10,15 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.core.compute.moe.backend import MoeBackend
-from lightllm.core.planner.planner import Planner
-from lightllm.core.contracts.device import DeviceCaps
-from lightllm.core.contracts.state import FormatSpec
-from lightllm.core.compute.moe.spec import MoeSpec
-from lightllm.core.contracts.provider import MoeOffer, ProbeResult
-from lightllm.core.formats.weights.view import WeightView
-from lightllm.core.planner.weights import bind_compute
-from lightllm.core.registry import ProviderRegistry
+from lightllm.common.execution.compute.moe.backend import MoeBackend
+from lightllm.common.execution.planner.planner import Planner
+from lightllm.common.execution.contracts.device import DeviceCaps
+from lightllm.common.execution.contracts.state import FormatSpec
+from lightllm.common.execution.compute.moe.spec import MoeSpec
+from lightllm.common.execution.contracts.provider import MoeOffer, ProbeResult
+from lightllm.common.execution.formats.weights.view import WeightView
+from lightllm.common.execution.planner.weights import bind_compute
+from lightllm.common.execution.registry import ProviderRegistry
 
 
 def format_for(dtype, quantized=False, shard=(0, 1)):

@@ -5,7 +5,7 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.attention.base_att import BaseDecodeAttState, BasePrefillAttState
-from lightllm.core.runner.decode_graph import CudaGraph
+from lightllm.common.execution.runner.decode_graph import CudaGraph
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 
 
@@ -133,7 +133,7 @@ def test_decode_graph_replay_preserves_capture_buffers_and_owner_lifetime(no_cyc
 
     graph = CudaGraph.__new__(CudaGraph)
     output = object()
-    from lightllm.core.device.graph import GraphExecution
+    from lightllm.common.execution.device.graph import GraphExecution
 
     graph.graph = {4: (GraphExecution(_Graph(), (captured,)), captured, output)}
     del captured

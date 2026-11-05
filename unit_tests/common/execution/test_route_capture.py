@@ -6,7 +6,7 @@ import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
 from lightllm.common.basemodel.moe_route_info_manager import MoeRouteInfoManager, get_moe_capture_callback
-from lightllm.core.runner.state import BatchStateFactory
+from lightllm.common.execution.runner.state import BatchStateFactory
 from unit_tests.common.execution.test_batch_runner import prefill_input
 
 

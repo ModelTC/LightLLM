@@ -16,14 +16,14 @@ from lightllm.common.basemodel.attention.nsa.fp8_glm5_next import (
     Fp8Glm5NextSparsePrefillState,
     Fp8Glm5NextSparseDecodeState,
 )
-from lightllm.core.compute.attention.pooled_nope.decode_fp8 import (
+from lightllm.common.execution.compute.attention.pooled_nope.decode_fp8 import (
     can_use_fp8_sparse_direct_decode,
     fp8_sparse_direct_decode,
 )
 from lightllm.models.glm5_next.triton_kernel.pad_query_heads import _fused_strided_qpad_kernel
 from lightllm.common.attention_state.full_att.packed_mla.fp8_e8m0_packed_mla_write import write_fp8_e8m0_packed_kv
-from lightllm.core.compute.attention.pooled_nope import prefill_fp8 as fp8_prefill
-from lightllm.core.compute.attention.pooled_nope.prefill_fp8 import (
+from lightllm.common.execution.compute.attention.pooled_nope import prefill_fp8 as fp8_prefill
+from lightllm.common.execution.compute.attention.pooled_nope.prefill_fp8 import (
     _build_prefill_row_table_kernel,
     _gather_prefill_kv_kernel,
 )
@@ -1238,7 +1238,7 @@ def test_fp8_h64_generic_prefill_workspace_reuse_mutable_inputs_and_graph_fallba
 
 def test_fp8_generic_prefill_workspace_graph_query_is_generic_h64_only(monkeypatch):
     """H8/direct/selected prefill never queries CUDA graph-capture state."""
-    import lightllm.core.compute.attention.pooled_nope.prefill_fp8 as fp8_prefill
+    import lightllm.common.execution.compute.attention.pooled_nope.prefill_fp8 as fp8_prefill
 
     queries = []
 

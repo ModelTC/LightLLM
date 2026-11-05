@@ -219,7 +219,7 @@ class MoeRouteInfoManager:
         )
 
     def bind_capture(self):
-        from lightllm.core.runner.route_capture import RouteCapture
+        from lightllm.common.execution.runner.route_capture import RouteCapture
 
         if not self.is_buffer_initialized():
             return None

@@ -1,4 +1,4 @@
-from lightllm.core.formats.kv.kernels.hadamard import (
+from lightllm.common.execution.formats.kv.kernels.hadamard import (
     _butterfly_stage,
     _hadamard_transform_kernel,
     _target_programs,

@@ -4,8 +4,8 @@ import triton
 
 from lightllm.utils.vllm_utils import HAS_VLLM, vllm_ops
 
-from lightllm.core.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
-from lightllm.core.compute.attention.pooled_nope.kpool import (
+from lightllm.common.execution.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
+from lightllm.common.execution.compute.attention.pooled_nope.kpool import (
     compress_pools,
     gather_pools,
     gather_paged_pools,

@@ -78,8 +78,8 @@ def test_tiny_model_prefill_decode_prefix_and_graph(
     from lightllm.models.gpt_oss.model import GptOssTpPartModel
     from lightllm.common.basemodel.batch_objs import ModelInput
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.core.runner.decode_graph import CudaGraph
-    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.server.core.objs.start_args_type import StartArgs
     from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
@@ -410,7 +410,7 @@ def test_tiny_model_prefill_decode_prefix_and_graph(
     assert model.attention_execution is None
     assert model._attention_resources.build.selection.workspace_bytes > 0
     if kv_type.startswith("fp8") and not sparse:
-        from lightllm.core.formats.kv.calibration import calibration_table_identity
+        from lightllm.common.execution.formats.kv.calibration import calibration_table_identity
 
         expected_identity = calibration_table_identity(calibration, calibration["quant_type"])
         assert model._attention_resources.stores["history"].format.calibration == expected_identity
@@ -511,7 +511,7 @@ def test_tiny_model_prefill_decode_prefix_and_graph(
             startup_allocations.append((live, indices))
             model.req_manager.req_to_token_indexs[live, :16] = indices.cuda()
             mapping = model.req_manager.req_to_token_indexs[live].clone()
-            from lightllm.core.runner import warmup as warmup_module
+            from lightllm.common.execution.runner import warmup as warmup_module
 
             with monkeypatch.context() as warmup_patch:
                 warmup_patch.setattr(warmup_module.logger, "exception", lambda *args: pytest.fail(str(args)))
@@ -579,8 +579,8 @@ def test_tiny_model_prefill_decode_prefix_and_graph(
 
 def exercise_verification(model, prepare, check, layout):
     from lightllm.common.basemodel.batch_objs import ModelInput
-    from lightllm.core.runner.decode_graph import CudaGraph
-    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
 
     assert {item.phase for item in model.execution_plan.bindings} == {"prefill", "verify"}
     assert model.attention_execution.resources.build.selection.selections[0].offer.execution_limits.max_batch_size >= 9

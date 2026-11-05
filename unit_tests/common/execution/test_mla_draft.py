@@ -84,8 +84,8 @@ def test_mla_draft_checkpoint_prefix_and_graph(model_class, backend, mode, monke
     from safetensors.torch import save_file
     from transformers import DeepseekV3Config, DeepseekV3ForCausalLM
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.core.runner.decode_graph import CudaGraph
-    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.models.deepseek2.model import Deepseek2TpPartModel

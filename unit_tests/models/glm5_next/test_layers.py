@@ -152,7 +152,7 @@ def test_mla_loading_preserves_replicated_qkv_and_sharded_bmm(config, monkeypatc
 
 
 def test_sparse_prefill_graph_rebinds_indexer_inputs_and_request_state(config):
-    from lightllm.core.runner.graph_program import GraphProgram
+    from lightllm.common.execution.runner.graph_program import GraphProgram
 
     layer = Glm5NextTransformerLayerInfer(3, config)
     weight = Glm5NextTransformerLayerWeight(3, torch.bfloat16, config, Quantcfg(config))

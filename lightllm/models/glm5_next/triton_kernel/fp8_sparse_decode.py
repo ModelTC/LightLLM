@@ -1,4 +1,4 @@
-from lightllm.core.compute.attention.pooled_nope.decode_fp8 import (
+from lightllm.common.execution.compute.attention.pooled_nope.decode_fp8 import (
     _fp8_sparse_direct_decode_kernel,
     can_use_fp8_sparse_direct_decode,
     fp8_sparse_direct_decode,

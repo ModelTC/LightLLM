@@ -151,7 +151,7 @@ def init_distributed_env(kvargs, runtime=None):
     device_id = kvargs["rank_id"] % get_node_world_size()
     set_current_device_id(device_id)
     if runtime is None:
-        from lightllm.core.device.cuda import CudaRuntime
+        from lightllm.common.execution.device.cuda import CudaRuntime
 
         runtime = CudaRuntime(device_id)
     if runtime.distributed_backend == "nccl":

@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lightllm.core.storage.query_cache import cached_query
+from lightllm.common.execution.storage.query_cache import cached_query
 
 
 from typing import TYPE_CHECKING, List

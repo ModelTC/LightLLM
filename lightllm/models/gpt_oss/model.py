@@ -5,7 +5,7 @@ from dataclasses import replace
 
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.llama.adapter import LlamaModelAdapter
-from lightllm.core.compute.moe.spec import MoeSpec
+from lightllm.common.execution.compute.moe.spec import MoeSpec
 from lightllm.utils.envs_utils import get_env_start_args
 from lightllm.utils.log_utils import init_logger
 from lightllm.common.basemodel.attention import get_prefill_att_backend_class, get_decode_att_backend_class

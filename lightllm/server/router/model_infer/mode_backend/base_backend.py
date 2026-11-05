@@ -113,7 +113,7 @@ class ModeBackend:
         self.weight_dir = kvargs["weight_dir"]
         max_total_token_num = kvargs["max_total_token_num"]
 
-        from lightllm.core.device.context import create_context
+        from lightllm.common.execution.device.context import create_context
 
         device_index = kvargs["rank_id"] % (self.world_size // self.nnodes)
         self.execution_context = create_context(

@@ -1,8 +1,8 @@
 import torch
 from functools import partial
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
-from lightllm.core.runner import batch_metadata
-from lightllm.core.runner.batch_metadata import RotaryTables
+from lightllm.common.execution.runner import batch_metadata
+from lightllm.common.execution.runner.batch_metadata import RotaryTables
 
 
 class QwenInferStateInfo(LlamaInferStateInfo):

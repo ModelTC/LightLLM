@@ -1,10 +1,10 @@
-from lightllm.core.contracts.state import FormatSpec
-from lightllm.core.contracts.device import DeviceCaps
-from lightllm.core.compute.linear.spec import LinearSpec
-from lightllm.core.planner.plan import LinearPlan, MoePlan
-from lightllm.core.formats.weights.view import WeightView
-from lightllm.core.planner.weights import bind_compute
-from lightllm.core.registry import default_providers
+from lightllm.common.execution.contracts.state import FormatSpec
+from lightllm.common.execution.contracts.device import DeviceCaps
+from lightllm.common.execution.compute.linear.spec import LinearSpec
+from lightllm.common.execution.planner.plan import LinearPlan, MoePlan
+from lightllm.common.execution.formats.weights.view import WeightView
+from lightllm.common.execution.planner.weights import bind_compute
+from lightllm.common.execution.registry import default_providers
 
 
 def weight_device_caps(device, runtime=None):
@@ -154,7 +154,7 @@ def bind_experts(spec, weight, transfers=None, *, providers=None):
     import torch
     from lightllm.distributed import dist_group_manager
     from lightllm.utils.envs_utils import get_env_use_ue8m0_scales
-    from lightllm.core.build import ExpertResources, build_experts
+    from lightllm.common.execution.build import ExpertResources, build_experts
 
     providers = providers if providers is not None else default_providers()
     fmt = FormatSpec(

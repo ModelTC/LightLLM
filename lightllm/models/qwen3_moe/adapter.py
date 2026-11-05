@@ -4,7 +4,7 @@ from lightllm.models.qwen3.adapter import Qwen3ModelAdapter
 
 
 def qwen3_moe_specs(config, dtype, layer_ids):
-    from lightllm.core.compute.moe.spec import MoeSpec
+    from lightllm.common.execution.compute.moe.spec import MoeSpec
 
     experts = config.get("num_experts", 0)
     if not experts:

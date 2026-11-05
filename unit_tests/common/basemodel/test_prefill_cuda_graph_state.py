@@ -4,7 +4,7 @@ import torch
 
 import lightllm.common.basemodel.hidden_collector as hidden_collector_module
 from lightllm.common.basemodel.hidden_collector import LayerHiddenCollector
-from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
 
 
 class _GraphInferState:

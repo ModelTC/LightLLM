@@ -61,7 +61,7 @@ class DeepseekV4IndexInfer(BaseLayerInfer):
             out_buffer=indexer_k_out,
         )
         # Q and K use the same normalized Hadamard transform before FP8 quantization.
-        from lightllm.core.formats.kv.kernels.hadamard import hadamard_transform
+        from lightllm.common.execution.formats.kv.kernels.hadamard import hadamard_transform
 
         if use_custom_tensor_manager:
             hadamard_out = self.alloc_tensor(scratch.shape, scratch.dtype, device=scratch.device)

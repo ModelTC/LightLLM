@@ -1,4 +1,4 @@
-from lightllm.core.contracts.model import ModelWeights
+from lightllm.common.execution.contracts.model import ModelWeights
 from lightllm.models.qwen3_5.adapter import Qwen35ModelAdapter
 from lightllm.models.base.adapter import DenseModelAdapter
 from lightllm.models.qwen3_5.layer_infer.transformer_layer_infer import Qwen35TransformerLayerInfer

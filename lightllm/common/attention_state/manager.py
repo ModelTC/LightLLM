@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from lightllm.core.storage.query_cache import CachedQueries, cached_query
+from lightllm.common.execution.storage.query_cache import CachedQueries, cached_query
 
 from typing import TYPE_CHECKING
 from typing import List
@@ -269,7 +269,7 @@ class AttentionStateManager(CachedQueries):
         if token_capacity is None:
             # 权重和固定运行态已分配，用当前设备剩余显存扣除保留比例及 PD buffer。
             if runtime is None:
-                from lightllm.core.device.cuda import CudaRuntime
+                from lightllm.common.execution.device.cuda import CudaRuntime
 
                 CudaRuntime.empty_cache()
                 gpu_device = torch.device("cuda", get_current_device_id())

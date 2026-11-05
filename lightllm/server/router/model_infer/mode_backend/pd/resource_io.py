@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 import torch
-from lightllm.core.transfer import CopyPlan, Transfer, TransferCompletion
+from lightllm.common.execution.transfer import CopyPlan, Transfer, TransferCompletion
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
