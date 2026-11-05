@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from torch.nn.attention import SDPBackend, sdpa_kernel
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.core.runner import decode_graph as graph_module
+from lightllm.common.execution.runner import decode_graph as graph_module
 from lightllm.common.basemodel.attention.triton import fp as state_module
 from lightllm.common.basemodel.triton_kernel.att.decode_att.gqa.mtp_diverse import (
     mtp_diverse_attn as decode_module,

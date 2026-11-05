@@ -15,14 +15,14 @@ from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda import (
     fused_kda_gate_chunk_cumsum,
 )
 from lightllm.common.basemodel.triton_kernel.linear_att.fla.ops.kda_decode import fused_recurrent_kda
-from lightllm.core.compute.attention.pooled_nope.kpool import (
+from lightllm.common.execution.compute.attention.pooled_nope.kpool import (
     compress_pools,
     gather_pools,
     gather_paged_pools,
     get_pool_ranges,
     expand_topk,
 )
-from lightllm.core.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
+from lightllm.common.execution.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

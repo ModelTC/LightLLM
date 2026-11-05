@@ -3,8 +3,8 @@ from typing import Optional, List
 import torch
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo
 from lightllm.models.neo_chat_moe.triton_kernel.get_neo_position import get_neo_position_triton
-from lightllm.core.runner import batch_metadata
-from lightllm.core.runner.batch_metadata import RotaryTables
+from lightllm.common.execution.runner import batch_metadata
+from lightllm.common.execution.runner.batch_metadata import RotaryTables
 
 
 class NeoChatInferStateInfo(LlamaInferStateInfo):

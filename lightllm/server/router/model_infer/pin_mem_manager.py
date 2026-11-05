@@ -2,7 +2,7 @@ import torch
 import threading
 import collections
 from dataclasses import dataclass
-from lightllm.core.device.cuda import CudaRuntime
+from lightllm.common.execution.device.cuda import CudaRuntime
 from lightllm.utils.dist_utils import get_current_device
 from typing import List, Dict, Union, Sequence
 

@@ -1,4 +1,4 @@
-from lightllm.core.compute.attention.pooled_nope.kpool import (
+from lightllm.common.execution.compute.attention.pooled_nope.kpool import (
     _get_query_block,
     _compress_pools,
     _save_pool_tails,

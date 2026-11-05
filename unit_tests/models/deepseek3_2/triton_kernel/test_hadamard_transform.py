@@ -2,7 +2,7 @@ import pytest
 import torch
 import triton
 
-from lightllm.core.formats.kv.kernels.hadamard import hadamard_transform
+from lightllm.common.execution.formats.kv.kernels.hadamard import hadamard_transform
 
 
 TP = 8

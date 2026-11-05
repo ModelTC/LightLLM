@@ -1,6 +1,6 @@
 """Latent MLA binding, explicit TP replicas and independent attention references."""
 
-from lightllm.core.formats.kv.spec import MLAKVStateSpec
+from lightllm.common.execution.formats.kv.spec import MLAKVStateSpec
 
 
 from dataclasses import replace
@@ -9,18 +9,18 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.core.contracts.device import DeviceCaps
-from lightllm.core.contracts.device import ExecutionLimits
-from lightllm.core.contracts.state import FormatSpec
-from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
-from lightllm.core.planner.planner import Planner
-from lightllm.core.contracts.state import StateSpec
-from lightllm.core.compute.attention.batch import AttentionBatch
-from lightllm.core.compute.attention.mla.backend import MLAAttentionBackend, MLAStaticParams
-from lightllm.core.formats.kv.mla import MLAKVWriter
-from lightllm.core.compute.attention.mla.flashinfer import FlashInferMLABackend
-from lightllm.core.storage.attention import MLAStateStore
-from lightllm.core.planner.planner import AttentionRequest
+from lightllm.common.execution.contracts.device import DeviceCaps
+from lightllm.common.execution.contracts.device import ExecutionLimits
+from lightllm.common.execution.contracts.state import FormatSpec
+from lightllm.common.execution.compute.attention.mla.spec import MLAAttentionSpec
+from lightllm.common.execution.planner.planner import Planner
+from lightllm.common.execution.contracts.state import StateSpec
+from lightllm.common.execution.compute.attention.batch import AttentionBatch
+from lightllm.common.execution.compute.attention.mla.backend import MLAAttentionBackend, MLAStaticParams
+from lightllm.common.execution.formats.kv.mla import MLAKVWriter
+from lightllm.common.execution.compute.attention.mla.flashinfer import FlashInferMLABackend
+from lightllm.common.execution.storage.attention import MLAStateStore
+from lightllm.common.execution.planner.planner import AttentionRequest
 
 
 def test_mla_declarations_and_tp_replicas():
@@ -51,7 +51,7 @@ def test_mla_declarations_and_tp_replicas():
 
 
 def test_flashinfer_mla_plans_have_separate_semantic_reservations(monkeypatch):
-    monkeypatch.setattr("lightllm.core.compute.attention.mla.flashinfer.find_spec", lambda _: object())
+    monkeypatch.setattr("lightllm.common.execution.compute.attention.mla.flashinfer.find_spec", lambda _: object())
     fmt = FormatSpec("plain", torch.float16, "token_latent", ("latent",), 1)
     first = MLAAttentionSpec(32, 512, 128, 64, 128, torch.float16)
     second = replace(first, q_heads=128)
@@ -82,7 +82,7 @@ def test_flashinfer_mla_plans_have_separate_semantic_reservations(monkeypatch):
 @pytest.mark.parametrize("latent_dim", [256, 512])
 @torch.no_grad()
 def test_mla_verify_dynamic_groups_and_graph(implementation, dtype, latent_dim):
-    from lightllm.core.contracts.state import StateView
+    from lightllm.common.execution.contracts.state import StateView
 
     torch.manual_seed(83)
     spec = MLAAttentionSpec(5, latent_dim, 128, 64, 128, dtype, 0.07)
@@ -309,7 +309,7 @@ def test_flashinfer_mla_long_multi_cluster_graph(monkeypatch):
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @torch.no_grad()
 def test_flashinfer_mla_distinct_layers_preserve_plans():
-    from lightllm.core.contracts.state import StateView
+    from lightllm.common.execution.contracts.state import StateView
 
     torch.manual_seed(67)
     dtype = torch.bfloat16

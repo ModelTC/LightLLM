@@ -5,13 +5,13 @@ import sys
 import pytest
 import torch
 
-from lightllm.core.contracts.compute import ComputeResult
-from lightllm.core.contracts.device import DeviceCaps
-from lightllm.core.contracts.state import FormatSpec
-from lightllm.core.device.context import ExecutionContext, create_context
-from lightllm.core.device.graph import GraphExecution
-from lightllm.core.formats.weights.view import WeightView
-from lightllm.core.registry import ProviderRegistry
+from lightllm.common.execution.contracts.compute import ComputeResult
+from lightllm.common.execution.contracts.device import DeviceCaps
+from lightllm.common.execution.contracts.state import FormatSpec
+from lightllm.common.execution.device.context import ExecutionContext, create_context
+from lightllm.common.execution.device.graph import GraphExecution
+from lightllm.common.execution.formats.weights.view import WeightView
+from lightllm.common.execution.registry import ProviderRegistry
 
 
 def test_sampling_buffers_and_events_use_the_execution_device(monkeypatch):
@@ -40,7 +40,7 @@ def test_sampling_buffers_and_events_use_the_execution_device(monkeypatch):
 
 def test_device_discovery_and_triton_capability_use_platform_identity(monkeypatch):
     from lightllm.utils.device_utils import get_current_device_name
-    from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend
+    from lightllm.common.execution.compute.attention.dense.backend import DenseAttentionBackend
 
     api = SimpleNamespace(
         is_available=lambda: True,
@@ -139,8 +139,8 @@ def test_dense_prefill_receives_current_unquantized_kv():
 
 def test_native_weight_finalization_precedes_compute_binding():
     from lightllm.common.basemodel.weight_binding import finalize_weights, bind_linears
-    from lightllm.core.compute.linear.backend import LinearBackend
-    from lightllm.core.compute.linear.spec import LinearSpec
+    from lightllm.common.execution.compute.linear.backend import LinearBackend
+    from lightllm.common.execution.compute.linear.spec import LinearSpec
 
     events = []
     tensor = torch.randn(4, 3)
@@ -185,9 +185,9 @@ def test_fused_output_is_reduced_exactly_once(distribution, reductions):
 
 
 def test_transfer_matches_encoding_and_memory_path_before_submission():
-    from lightllm.core.contracts.transfer import TransferRequest
-    from lightllm.core.registry import TransferProvider
-    from lightllm.core.transfer import CopyPlan, Transfer, TransferCompletion
+    from lightllm.common.execution.contracts.transfer import TransferRequest
+    from lightllm.common.execution.registry import TransferProvider
+    from lightllm.common.execution.transfer import CopyPlan, Transfer, TransferCompletion
 
     fmt = FormatSpec("int8_per_token", torch.int8, "paged", ("k", "v", "scales"), 32)
     request = TransferRequest(fmt, fmt, "device", "host", "cpu_cache")
@@ -210,7 +210,7 @@ def test_transfer_matches_encoding_and_memory_path_before_submission():
 
 
 def test_host_lengths_are_ready_before_graph_buffer_copy():
-    from lightllm.core.compute.attention.batch import AttentionBatch
+    from lightllm.common.execution.compute.attention.batch import AttentionBatch
 
     value = torch.zeros(1, dtype=torch.int32)
     captured = AttentionBatch(
@@ -223,7 +223,7 @@ def test_host_lengths_are_ready_before_graph_buffer_copy():
 
 
 def test_decode_warmup_uses_platform_length_requirement():
-    from lightllm.core.runner.warmup import WarmupRunner
+    from lightllm.common.execution.runner.warmup import WarmupRunner
 
     requests = SimpleNamespace(req_to_token_indexs=torch.zeros(2, 32), HOLD_REQUEST_ID=1)
     runtime = SimpleNamespace(decode_warmup_length=lambda maximum: maximum)

@@ -1,20 +1,20 @@
-from lightllm.core.formats.kv.spec import DenseKVStateSpec
+from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 
 import pytest
 import torch
 
-from lightllm.core.compute.attention.batch import AttentionBatch
-from lightllm.core.compute.attention.dense.backend import DenseStaticParams
-from lightllm.core.compute.attention.dense.flashinfer import FlashInferAttentionBackend
-from lightllm.core.planner.planner import AttentionRequest, Planner
-from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
-from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.core.contracts.state import FormatSpec, StateSpec, StateView
+from lightllm.common.execution.compute.attention.batch import AttentionBatch
+from lightllm.common.execution.compute.attention.dense.backend import DenseStaticParams
+from lightllm.common.execution.compute.attention.dense.flashinfer import FlashInferAttentionBackend
+from lightllm.common.execution.planner.planner import AttentionRequest, Planner
+from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.common.execution.contracts.state import FormatSpec, StateSpec, StateView
 
 
 def test_distinct_formats_require_separate_plan_reservations(monkeypatch):
-    monkeypatch.setattr("lightllm.core.compute.attention.dense.flashinfer.find_spec", lambda name: object())
+    monkeypatch.setattr("lightllm.common.execution.compute.attention.dense.flashinfer.find_spec", lambda name: object())
     spec = DenseAttentionSpec(8, 2, 64, dtype=torch.float16)
     format = FormatSpec("plain", torch.float16, "token_head_dim", ("k", "v"), 1)
     requests = [

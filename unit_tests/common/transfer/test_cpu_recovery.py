@@ -5,7 +5,7 @@ import torch
 
 from lightllm.common.attention_state.manager import AttentionStateManager
 from lightllm.common.attention_state.allocators import StatePageAllocator
-from lightllm.core.transfer import CopyOperation, CopyPlan, Transfer, TransferFailure
+from lightllm.common.execution.transfer import CopyOperation, CopyPlan, Transfer, TransferFailure
 from lightllm.server.router.model_infer.mode_backend import multi_level_kv_cache as implementation
 from unit_tests.common.transfer.helpers import Runtime
 

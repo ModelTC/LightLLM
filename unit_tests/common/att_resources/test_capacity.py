@@ -15,7 +15,7 @@ from unit_tests.common.att_resources.model_helpers import rebuild_full_state
 from typing import TYPE_CHECKING
 from dataclasses import replace
 from functools import partial
-from lightllm.core.storage.query_cache import cached_query
+from lightllm.common.execution.storage.query_cache import cached_query
 from math import prod
 
 import pytest

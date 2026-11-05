@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.core.runner.graph_program import GraphProgram
+from lightllm.common.execution.runner.graph_program import GraphProgram
 
 
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")

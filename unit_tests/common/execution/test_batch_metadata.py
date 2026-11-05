@@ -5,8 +5,8 @@ import pytest
 import torch
 
 from lightllm.common.basemodel import InferStateInfo
-from lightllm.core.runner import batch_metadata as batch_metadata
-from lightllm.core.runner.graph import GraphRunner
+from lightllm.common.execution.runner import batch_metadata as batch_metadata
+from lightllm.common.execution.runner.graph import GraphRunner
 from lightllm.models.gemma3.infer_struct import Gemma3InferStateInfo
 from lightllm.models.gemma4.infer_struct import Gemma4InferStateInfo
 from lightllm.models.llama.infer_struct import LlamaInferStateInfo

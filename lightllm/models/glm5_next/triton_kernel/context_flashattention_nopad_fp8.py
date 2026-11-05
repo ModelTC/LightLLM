@@ -1,4 +1,4 @@
-from lightllm.core.compute.attention.pooled_nope.prefill_fp8 import (
+from lightllm.common.execution.compute.attention.pooled_nope.prefill_fp8 import (
     _direct_smallq_packed_kernel,
     reduce_direct_smallq_kernel,
     can_use_direct_smallq,

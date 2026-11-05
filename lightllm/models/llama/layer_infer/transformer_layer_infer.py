@@ -1,4 +1,4 @@
-from lightllm.core.compute.attention.dense.inputs import DenseInputs
+from lightllm.common.execution.compute.attention.dense.inputs import DenseInputs
 from lightllm.common.attention_state.full_att import FullAttentionState
 from lightllm.common.basemodel.attention import AttControl
 import torch
@@ -34,8 +34,8 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         return
 
     def bind_operations(self, providers, weight, device, communication):
-        from lightllm.core.compute.pointwise.spec import RMSNormSpec, RotarySpec, SwiGLUSpec
-        from lightllm.core.compute.linear.spec import LinearSpec
+        from lightllm.common.execution.compute.pointwise.spec import RMSNormSpec, RotarySpec, SwiGLUSpec
+        from lightllm.common.execution.compute.linear.spec import LinearSpec
 
         self.bound_rope = providers.bind_operation("rope", RotarySpec(self.head_dim_), {}, device, communication)
         for name, norm in (("attention_norm", weight.att_norm_weight_), ("ffn_norm", weight.ffn_norm_weight_)):
@@ -65,7 +65,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             )
 
     def _finish_compute(self, result, infer_state):
-        from lightllm.core.contracts.compute import ComputeResult
+        from lightllm.common.execution.contracts.compute import ComputeResult
         from lightllm.utils.envs_utils import get_env_start_args
 
         if isinstance(result, ComputeResult):
@@ -193,7 +193,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
         if operation is None:
             return self._tpsp_reduce(layer_weight.o_proj.mm(input), infer_state)
         else:
-            from lightllm.core.contracts.compute import ComputeBatch
+            from lightllm.common.execution.contracts.compute import ComputeBatch
 
             result = operation(
                 input, ComputeBatch("prefill" if infer_state.is_prefill else "decode", infer_state.microbatch_index)
@@ -208,7 +208,7 @@ class LlamaTransformerLayerInfer(TransformerLayerInferTpl):
             result = self._ffn_tp(input=input, infer_state=infer_state, layer_weight=layer_weight)
             return self._tpsp_reduce(result, infer_state)
         else:
-            from lightllm.core.contracts.compute import ComputeBatch
+            from lightllm.common.execution.contracts.compute import ComputeBatch
 
             result = operation(
                 input, ComputeBatch("prefill" if infer_state.is_prefill else "decode", infer_state.microbatch_index)

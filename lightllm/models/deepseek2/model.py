@@ -11,8 +11,8 @@ from lightllm.utils.envs_utils import enable_env_vars, get_env_start_args
 from lightllm.distributed.communication_op import dist_group_manager
 from lightllm.common.basemodel.attention import get_mla_decode_att_backend_class, get_mla_prefill_att_backend_class
 from lightllm.models.base.adapter import RecipeModelAdapter
-from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
-from lightllm.core.contracts.state import StateSpec
+from lightllm.common.execution.compute.attention.mla.spec import MLAAttentionSpec
+from lightllm.common.execution.contracts.state import StateSpec
 from lightllm.models.llama.adapter import LlamaModelAdapter
 from copy import deepcopy
 

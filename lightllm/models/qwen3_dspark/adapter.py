@@ -1,4 +1,4 @@
-from lightllm.core.contracts.model import ModelRecipe
+from lightllm.common.execution.contracts.model import ModelRecipe
 from lightllm.models.qwen3_dflash.adapter import Qwen3DFlashModelAdapter
 from lightllm.models.qwen3_dspark.layer_infer.post_layer_infer import Qwen3DSparkPostLayerInfer
 from lightllm.models.qwen3_dspark.layer_weights.pre_and_post_layer_weight import (

@@ -21,8 +21,8 @@ def test_qwen35_draft_checkpoint_prefix_and_graph(backend, monkeypatch, moe=Fals
     from safetensors import safe_open
     from lightllm.common.basemodel.mtp_manager import MtpManager
     from lightllm.common.basemodel.batch_objs import ModelInput
-    from lightllm.core.runner.decode_graph import CudaGraph
-    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.server.core.objs.start_args_type import StartArgs

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.core.runner import batch_metadata as batch_metadata
+from lightllm.common.execution.runner import batch_metadata as batch_metadata
 from lightllm.models.qwen2_vl.infer_struct import Qwen2VLInferStateInfo
 
 

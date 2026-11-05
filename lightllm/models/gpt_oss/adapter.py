@@ -2,7 +2,7 @@ from lightllm.models.gpt_oss.layer_infer.transformer_layer_infer import GptOssTr
 from lightllm.models.gpt_oss.layer_weights.transformer_layer_weight import GptOssTransformerLayerWeight
 from dataclasses import replace
 from lightllm.models.llama.adapter import LlamaModelAdapter
-from lightllm.core.compute.moe.spec import MoeSpec
+from lightllm.common.execution.compute.moe.spec import MoeSpec
 
 
 class GptOssModelAdapter(LlamaModelAdapter):

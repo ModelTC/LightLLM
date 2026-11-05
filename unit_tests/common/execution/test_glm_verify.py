@@ -1,4 +1,4 @@
-from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.common.execution.formats.recurrent.spec import ConvSSMStateSpec
 from dataclasses import replace
 
 import pytest
@@ -6,12 +6,12 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.core.compute.attention.kda.backend import KDAInputs, KDAStaticParams, KimiDeltaAttentionBackend
-from lightllm.core.planner.planner import Planner
-from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.core.contracts.state import FormatSpec, StateSpec
-from lightllm.core.compute.attention.kda.spec import KimiDeltaAttentionSpec
-from lightllm.core.storage.attention import ConvSSMStateStore
+from lightllm.common.execution.compute.attention.kda.backend import KDAInputs, KDAStaticParams, KimiDeltaAttentionBackend
+from lightllm.common.execution.planner.planner import Planner
+from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.common.execution.contracts.state import FormatSpec, StateSpec
+from lightllm.common.execution.compute.attention.kda.spec import KimiDeltaAttentionSpec
+from lightllm.common.execution.storage.attention import ConvSSMStateStore
 from unit_tests.common.execution.test_native_glm import make_batch
 
 
@@ -19,7 +19,7 @@ from unit_tests.common.execution.test_native_glm import make_batch
 def test_glm_draft_declares_checkpoint_and_state_domains(previous_depth):
     from lightllm.models.glm5_next_mtp.model import Glm5NextMTPModel
     from lightllm.models.glm5_next_mtp.adapter import Glm5NextMTPModelAdapter
-    from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
+    from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
 
     raw = dict(
         num_hidden_layers=4,
@@ -121,8 +121,8 @@ def test_glm_mtp_draft_binding_and_graph(mode, implementation, quantized, monkey
 
 @torch.no_grad()
 def exercise_glm_drafts(main, drafts, references, monkeypatch):
-    from lightllm.core.runner.decode_graph import CudaGraph
-    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
     from unit_tests.common.execution.test_model_cuda import prepare_model_batch
 
     histories = [torch.randn(64, 128, dtype=main.data_type, device="cuda") * 0.3 for _ in range(2)]

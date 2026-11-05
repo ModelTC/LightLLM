@@ -104,7 +104,7 @@ class InferenceContext:
 
     @property
     def runtime(self):
-        from lightllm.core.device.cuda import CudaRuntime
+        from lightllm.common.execution.device.cuda import CudaRuntime
 
         return getattr(self.backend, "execution_device", None) or CudaRuntime
 

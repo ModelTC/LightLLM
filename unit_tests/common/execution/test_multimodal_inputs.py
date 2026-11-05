@@ -4,8 +4,8 @@ import pytest
 import torch
 
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.core.runner.state import BatchStateFactory
-from lightllm.core.runner.multimodal import MultimodalInputs
+from lightllm.common.execution.runner.state import BatchStateFactory
+from lightllm.common.execution.runner.multimodal import MultimodalInputs
 from unit_tests.common.execution.test_batch_runner import prefill_input
 
 
@@ -103,7 +103,7 @@ def test_gemma_preserves_image_and_text_embedding_scales():
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 @pytest.mark.parametrize("cache_device", ["cpu", "cuda"])
 def test_bound_embedding_and_deepstack_use_current_chunk_without_global_context(dtype, cache_device, monkeypatch):
-    from lightllm.core.runner.graph_program import GraphProgram
+    from lightllm.common.execution.runner.graph_program import GraphProgram
     from lightllm.models.qwen3_vl.layer_infer.pre_layer_infer import Qwen3VLMultimodalPreLayerInfer
     from lightllm.models.qwen3_vl.layer_infer.transformer_layer_infer import Qwen3VLTransformerLayerInfer
     from lightllm.server.router.model_infer import infer_batch

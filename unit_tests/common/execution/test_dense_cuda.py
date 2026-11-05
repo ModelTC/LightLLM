@@ -1,7 +1,7 @@
 """Small real-kernel checks; no checkpoint, service or distributed group required."""
 
 from lightllm.models.base.attention_batch import attention_batch
-from lightllm.core.formats.kv.spec import DenseKVStateSpec
+from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
 
 
 from types import SimpleNamespace
@@ -94,15 +94,15 @@ def test_bound_attention_matches_sdpa_and_graph(phase, implementation, monkeypat
 @pytest.mark.parametrize("q_heads", [2, 8])
 @pytest.mark.parametrize("phase", ["prefill", "decode", "verify"])
 def test_paged_long_sequences_and_concurrent_lanes(implementation, dtype, q_heads, phase):
-    from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
-    from lightllm.core.contracts.device import DeviceCaps
-    from lightllm.core.contracts.device import ExecutionLimits
-    from lightllm.core.contracts.state import FormatSpec
-    from lightllm.core.planner.planner import Planner
-    from lightllm.core.contracts.state import StateSpec
-    from lightllm.core.contracts.state import StateView
-    from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
-    from lightllm.core.compute.attention.dense.flashinfer import FlashInferAttentionBackend
+    from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
+    from lightllm.common.execution.contracts.device import DeviceCaps
+    from lightllm.common.execution.contracts.device import ExecutionLimits
+    from lightllm.common.execution.contracts.state import FormatSpec
+    from lightllm.common.execution.planner.planner import Planner
+    from lightllm.common.execution.contracts.state import StateSpec
+    from lightllm.common.execution.contracts.state import StateView
+    from lightllm.common.execution.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
+    from lightllm.common.execution.compute.attention.dense.flashinfer import FlashInferAttentionBackend
     from lightllm.models.base.attention_batch import attention_batch
 
     torch.manual_seed(29)

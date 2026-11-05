@@ -226,7 +226,7 @@ def test_build_evicts_cached_state_pages(monkeypatch, kv_allocator_environment, 
     module.shared_req_infos.arr[0, 0, 0] = 0
     full = FullAttKVAllocator(16, page_size=4, pin_memory=False)
     manager = module.backend.model.att_state_manager
-    from lightllm.core.storage.lifetime import DeferredReclaimer
+    from lightllm.common.execution.storage.lifetime import DeferredReclaimer
 
     manager.reclaimer = DeferredReclaimer()
     manager.full_att_allocator = full

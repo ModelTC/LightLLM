@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from lightllm.core.runner.graph import GraphRunner
+from lightllm.common.execution.runner.graph import GraphRunner
 
 import pytest
 import torch

@@ -8,8 +8,8 @@ from lightllm.common.attention_state.allocators import full_att_kv_allocator as 
 from lightllm.common.attention_state.allocators import FullAttKVAllocator
 from lightllm.common.basemodel.basemodel import TpPartBaseModel
 from lightllm.common.basemodel.infer_struct import InferStateInfo
-from lightllm.core.runner.state import BatchStateFactory
-from lightllm.core.runner.warmup import WarmupCleanupError, WarmupRunner
+from lightllm.common.execution.runner.state import BatchStateFactory
+from lightllm.common.execution.runner.warmup import WarmupCleanupError, WarmupRunner
 from lightllm.common.req_manager.base import ReqManager, _ReqLinkedList
 from lightllm.common.triton_utils.autotuner import Autotuner, AutotuneKernelType
 

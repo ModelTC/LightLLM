@@ -1,4 +1,4 @@
-from lightllm.core.contracts.model import ModelWeights
+from lightllm.common.execution.contracts.model import ModelWeights
 from lightllm.models.qwen3_5.adapter import Qwen35ModelAdapter
 from lightllm.models.sensenova_loop.layer_infer.transformer_layer_infer import SenseNovaLoopTransformerLayerInfer
 from lightllm.models.sensenova_loop.layer_weights.transformer_layer_weight import SenseNovaLoopTransformerLayerWeight

@@ -41,7 +41,7 @@ def _check_dspark_checkpoint(dtype, monkeypatch, record_testsuite_property):
     from transformers.models.qwen3.modeling_qwen3 import Qwen3RotaryEmbedding
     from lightllm.common.basemodel.batch_objs import ModelInput
     from lightllm.common.basemodel.mtp_manager import MtpManager
-    from lightllm.core.runner.decode_graph import CudaGraph
+    from lightllm.common.execution.runner.decode_graph import CudaGraph
     from lightllm.common.quantization.no_quant import NoQuantization
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.models import get_draft_model_class

@@ -17,9 +17,9 @@ from .layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from .layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from .layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from lightllm.models.base.adapter import RecipeModelAdapter
-from lightllm.core.compute.attention.kda.spec import KimiDeltaAttentionSpec
-from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
-from lightllm.core.contracts.state import StateSpec
+from lightllm.common.execution.compute.attention.kda.spec import KimiDeltaAttentionSpec
+from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
+from lightllm.common.execution.contracts.state import StateSpec
 from copy import deepcopy
 
 
