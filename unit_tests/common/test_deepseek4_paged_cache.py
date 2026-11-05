@@ -1593,7 +1593,6 @@ def test_standard_cpu_cache_offload_and_load_use_saved_checkpoints(
     )
     monkeypatch.setattr(context, "is_hybrid_att_model", True)
     monkeypatch.setattr(context, "get_overlap_stream", lambda: producer)
-    monkeypatch.setattr(context, "get_cpu_kv_cache_stream", torch.cuda.Stream)
     monkeypatch.setattr(context, "get_can_alloc_token_num", lambda: manager.allocator.can_use_mem_size)
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
     monkeypatch.setattr(common.dist, "barrier", lambda **kwargs: None)

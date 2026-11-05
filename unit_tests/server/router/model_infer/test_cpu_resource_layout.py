@@ -425,7 +425,8 @@ def test_production_offload_preserves_ready_pages_without_host_sync(
         with monkeypatch.context() as patch:
             patch.setattr(torch.cuda.Stream, "synchronize", reject_host_sync)
             patch.setattr(torch.cuda.Stream, "wait_stream", record_wait)
-            task = module.write_req_to_cpu(req, copy_stream)
+            module.get_cpu_offload_stream = lambda: copy_stream
+            task = module.write_req_to_cpu(req)
         assert waited_streams == []
     task.sync_event.synchronize()
     assert write_batches == [(pages, [True, False])]

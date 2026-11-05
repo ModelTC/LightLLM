@@ -177,7 +177,8 @@ def test_cpu_roundtrip_requires_all_linear_pages_and_restores_final_state(
         model=SimpleNamespace(req_manager=requests, att_state_manager=resources),
     )
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda *args, **kwargs: None)
-    task = module.write_req_to_cpu(req, torch.cuda.Stream())
+    module.get_cpu_offload_stream().wait_stream(torch.cuda.current_stream())
+    task = module.write_req_to_cpu(req)
     assert task is not None
     task.sync_event.synchronize()
     pages = task.page_indexes.tolist()
@@ -322,7 +323,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     monkeypatch.setattr(resources.get_cpu_cache_operator(), "write_req", write_to_cpu)
     broadcasts = []
     monkeypatch.setattr(common.dist, "broadcast_object_list", lambda data, **kwargs: broadcasts.append(data))
-    task = module.write_req_to_cpu(req, torch.cuda.Stream())
+    task = module.write_req_to_cpu(req)
     if allocated_pages == 0:
         assert task is None
         assert req.cpu_cache_task_status == InferReq._CpuCacheTaskStatus.FINISHED
@@ -351,7 +352,7 @@ def test_offload_resolves_only_allocated_pages_and_requires_big_slots(
     else:
         del req.hybrid_len_to_big_page_id[missing_length]
     with pytest.raises(KeyError) as error:
-        module.write_req_to_cpu(req, torch.cuda.Stream())
+        module.write_req_to_cpu(req)
     assert error.value.args == (missing_length,)
     assert requested_hashes == [[11, 22], [11, 22]]
     assert len(writes) == 1

@@ -93,17 +93,12 @@ def test_finished_batch_routes_cpu_and_disk_offloads_separately(monkeypatch):
     module.need_sync_compute_stream = lambda: False
     offload_calls = []
 
-    def start_offload(req, cpu_kv_cache_stream):
+    def start_offload(req):
         offload_calls.append((req.shm_req.request_id, CacheTier.DISK in req.cache_tiers))
         return SimpleNamespace(req=req)
 
     module.write_req_to_cpu = start_offload
     monkeypatch.setattr(multi_level_kv_cache_impl.g_infer_context, "is_hybrid_att_model", False)
-    monkeypatch.setattr(
-        multi_level_kv_cache_impl.g_infer_context,
-        "get_cpu_kv_cache_stream",
-        lambda: object(),
-    )
     cache_tiers = (
         (CacheTier.GPU,),
         (CacheTier.CPU,),

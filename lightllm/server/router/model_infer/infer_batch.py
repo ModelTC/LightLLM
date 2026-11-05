@@ -50,7 +50,6 @@ class InferenceContext:
     output_constraint_state_factory: Optional["OutputConstraintStateFactory"] = None
 
     overlap_stream: torch.cuda.Stream = None  # 一些情况下推理进程进行异步折叠操作的异步流对象。
-    cpu_kv_cache_stream: torch.cuda.Stream = None  # 用 cpu kv cache 操作的 stream
     is_hybrid_att_model: bool = False  # 使用大小页 checkpoint 的混合 attention 模型。
 
     def register(
@@ -106,11 +105,6 @@ class InferenceContext:
         if self.overlap_stream is None:
             self.overlap_stream = torch.cuda.Stream()
         return self.overlap_stream
-
-    def get_cpu_kv_cache_stream(self) -> torch.cuda.Stream:
-        if self.cpu_kv_cache_stream is None:
-            self.cpu_kv_cache_stream = torch.cuda.Stream()
-        return self.cpu_kv_cache_stream
 
     def add_reqs(self, requests: List[Tuple[int, int, Any, int]], init_prefix_cache: bool = True) -> List["InferReq"]:
         req_objs = []

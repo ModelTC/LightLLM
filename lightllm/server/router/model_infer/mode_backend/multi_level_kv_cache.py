@@ -62,10 +62,26 @@ class MultiLevelKvCacheModule(object):
         logger.info("MultiLevelKvCacheModule: CPU cache load waits on a recorded event.")
         return False
 
+    def _get_cuda_stream(self, name: str) -> torch.cuda.Stream:
+        stream = getattr(self, name, None)
+        if stream is None:
+            stream = torch.cuda.Stream()
+            setattr(self, name, stream)
+        return stream
+
+    def get_cpu_load_stream(self) -> torch.cuda.Stream:
+        """把 CPU cache 拉回 GPU 的流，与计算流分开。"""
+        return self._get_cuda_stream("_cpu_load_stream")
+
+    def get_cpu_offload_stream(self) -> torch.cuda.Stream:
+        """把 GPU KV 写出到 CPU cache 的流。"""
+        return self._get_cuda_stream("_cpu_offload_stream")
+
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
         all_page_list = []
-        pending_copy = False
+        # 本轮真正发起拷贝时才创建。FA3 仍留在计算流上，这里保持为空。
+        load_stream = None
         is_master_in_dp = self.backend.is_master_in_dp
         for req in reqs:
             page_list = req.shm_req.cpu_cache_match_page_indexes.get_all()
@@ -114,14 +130,15 @@ class MultiLevelKvCacheModule(object):
                     assert ready_page_num <= matched_page_num
                     need_pages = page_list[ready_page_num:matched_page_num]
 
-                    self.read_req_from_cpu(
+                    start_token_len = page_len_list[ready_page_num - 1] if ready_page_num else 0
+                    load_stream = self._copy_matched_prefix(
                         req=req,
                         cpu_page_indices=need_pages,
                         page_lengths=page_len_list[ready_page_num:matched_page_num],
-                        start_token_len=page_len_list[ready_page_num - 1] if ready_page_num else 0,
+                        start_token_len=start_token_len,
+                        load_stream=load_stream,
                     )
                     idle_token_num -= need_token_num
-                    pending_copy = True
 
                 if self.need_sync_compute_stream():
                     torch.cuda.current_stream().synchronize()
@@ -131,9 +148,10 @@ class MultiLevelKvCacheModule(object):
 
             all_page_list.extend(page_list)
 
-        if pending_copy and not self.need_sync_compute_stream():
-            # 拷贝已排在当前计算流上。事件完成后再通知 DP，由 master 释放 CPU 页引用。
-            self._defer_load_release(all_page_list)
+        if load_stream is not None:
+            # 拷贝和跨 rank 汇总都在 load 流上。计算流只插入依赖，CPU 不在这里等待。
+            self._defer_load_release(all_page_list, load_stream)
+            torch.cuda.current_stream().wait_stream(load_stream)
             return
 
         dist.barrier(group=self.init_sync_group)
@@ -144,11 +162,32 @@ class MultiLevelKvCacheModule(object):
             self.cpu_cache_client.lock.release()
         return
 
-    def _defer_load_release(self, pages: List[int]) -> None:
-        if getattr(self.backend, "dp_world_size", 1) > 1:
-            dist.all_reduce(self.load_sync_tensor, group=self.init_sync_group)
-        event = torch.cuda.Event()
-        event.record()
+    def _copy_matched_prefix(
+        self,
+        req: InferReq,
+        cpu_page_indices: List[int],
+        page_lengths: List[int],
+        start_token_len: int,
+        load_stream: Optional[torch.cuda.Stream],
+    ) -> Optional[torch.cuda.Stream]:
+        """FA3 在计算流上拷贝并返回 None。其余 backend 把拷贝排到 load 流，并返回这条流。"""
+        if self.need_sync_compute_stream():
+            self.read_req_from_cpu(req, cpu_page_indices, page_lengths, start_token_len)
+            return None
+        if load_stream is None:
+            load_stream = self.get_cpu_load_stream()
+            # 页索引已经写在计算流上，拉取流先等到这些写入。
+            load_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(load_stream):
+            self.read_req_from_cpu(req, cpu_page_indices, page_lengths, start_token_len)
+        return load_stream
+
+    def _defer_load_release(self, pages: List[int], stream: torch.cuda.Stream) -> None:
+        with torch.cuda.stream(stream):
+            if getattr(self.backend, "dp_world_size", 1) > 1:
+                dist.all_reduce(self.load_sync_tensor, group=self.init_sync_group)
+            event = torch.cuda.Event()
+            event.record()
         if not hasattr(self, "load_tasks"):
             self.load_tasks = deque()
         self.load_tasks.append(LoadTask(pages, event))
@@ -258,7 +297,9 @@ class MultiLevelKvCacheModule(object):
         # 如果开启了cpu cache，将达到finished状态的请求开启将gpu kv cache 卸载到 cpu cache中的操作。
         # 当 kv cache 卸载完成后，才会进行请求的真实退出操作。
         true_finished_reqs = []
-        cpu_stream = g_infer_context.get_cpu_kv_cache_stream()
+        # 写出要看到计算流上已经写好的 KV，计算流不必反过来等这次拷贝。
+        offload_stream = self.get_cpu_offload_stream()
+        offload_stream.wait_stream(torch.cuda.current_stream())
         for req in finished_reqs:
             # 只有 group_req_id 和 request_id 相同的请求才会被卸载到 cpu cache 中。
             # 这个限制是为了兼容 diverse 模式下的请求处理, 只有主请求才 offload kv 到 cpu
@@ -293,7 +334,7 @@ class MultiLevelKvCacheModule(object):
                 g_infer_context.get_overlap_stream().synchronize()
 
             # 发起将请求的 kv cache 卸载到 cpu cache 中的任务
-            trans_task = self.write_req_to_cpu(req=req, cpu_kv_cache_stream=cpu_stream)
+            trans_task = self.write_req_to_cpu(req)
 
             # 根据是否成功创建了卸载任务，决定是否将请求加入到处理队列中
             if trans_task is not None:
@@ -303,16 +344,16 @@ class MultiLevelKvCacheModule(object):
 
         if self.need_sync_compute_stream():
             # TODO fa3 现在必须使用同步模式, 未来需要移除
-            cpu_stream.synchronize()
+            offload_stream.synchronize()
 
         return true_finished_reqs
 
-    def write_req_to_cpu(self, req: InferReq, cpu_kv_cache_stream: torch.cuda.Stream) -> Optional["TransTask"]:
+    def write_req_to_cpu(self, req: InferReq) -> Optional["TransTask"]:
         """选择请求可缓存的前缀，分配 CPU 页并提交写出，返回待确认完成的任务。"""
         assert CacheTier.CPU in req.cache_tiers
         disk_offload_enable = CacheTier.DISK in req.cache_tiers
-        # KV 和 bounded 快照均在搬运流上复制，由后续完成事件统一确认就绪。
-        with torch.cuda.stream(cpu_kv_cache_stream):
+        # KV 和 bounded 快照均在 offload 流上复制，由后续完成事件统一确认就绪。
+        with torch.cuda.stream(self.get_cpu_offload_stream()):
             # 综合考虑后只对prompt做缓存管理，不包含decode内容，这里与radix cache不一致
             token_hash_list = req.shm_req.token_hash_list.get_all()
             page_len_list = req.shm_req.token_hash_page_len_list.get_all()
