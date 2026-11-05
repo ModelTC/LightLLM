@@ -240,10 +240,9 @@ class ConvSSMState(BoundedAttentionState):
             self._ssm.validate_commit(acceptance, self.state_name)
 
     def commit_bounded_att_state(self, acceptance):
-        acceptance.validate()
         self.validate_bounded_att_commit(acceptance)
         if self.mtp_state_index is not None:
-            self._ssm.commit(acceptance, self.mtp_state_index, self.state_name)
+            self._ssm.commit_validated(acceptance, self.mtp_state_index, self.state_name)
 
     # ========================================================================
     # 三、CPU Cache 数据交换

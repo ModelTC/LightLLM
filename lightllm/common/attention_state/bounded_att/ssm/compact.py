@@ -180,6 +180,11 @@ class CompactSSMExecutor(SSMExecutor):
         """先推进通用接受索引，再逐 microbatch 重建 compact state。"""
 
         self.validate_commit(acceptance, state_name)
+        self.commit_validated(acceptance, indices, state_name)
+
+    def commit_validated(self, acceptance, indices, state_name):
+        """使用已验证的 forward 配置完成 compact state 重建。"""
+
         update_accepted_indices(acceptance, indices)
         for reqs, config in acceptance.partitions(state_name):
             self.accept_updates(reqs, indices, run_config=config)

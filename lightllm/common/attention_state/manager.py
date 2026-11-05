@@ -401,8 +401,6 @@ class AttentionStateManager:
         states = self.get_bounded_attention_states(role)
         acceptance.validate({state.state_name for state in states})
         for state in states:
-            state.validate_bounded_att_commit(acceptance)
-        for state in states:
             state.commit_bounded_att_state(acceptance)
 
     # ========================================================================

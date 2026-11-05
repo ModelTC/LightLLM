@@ -333,6 +333,12 @@ class ReplaySSMExecutor(SSMExecutor):
     def commit(self, acceptance, indices, state_name):
         """应用接受结果；MTP 直接推进 cursor，单 token 还需写入 history。"""
 
+        self.validate_commit(acceptance, state_name)
+        self.commit_validated(acceptance, indices, state_name)
+
+    def commit_validated(self, acceptance, indices, state_name):
+        """应用已验证的接受结果，推进 replay cursor。"""
+
         if self.verify_width > 1:
             update_accepted_indices(acceptance, indices, replay_cursors=self.cursors)
         else:

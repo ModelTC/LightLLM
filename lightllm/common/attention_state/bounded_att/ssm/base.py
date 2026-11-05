@@ -79,7 +79,13 @@ class SSMExecutor:
         return None
 
     def commit(self, acceptance, indices, state_name):
-        """将接受结果应用到状态索引；具体合并逻辑由子类实现。"""
+        """校验并应用接受结果；供直接调用 State 接口时使用。"""
+
+        self.validate_commit(acceptance, state_name)
+        self.commit_validated(acceptance, indices, state_name)
+
+    def commit_validated(self, acceptance, indices, state_name):
+        """应用已由 State/Manager 校验过的接受结果，不重复检查公共契约。"""
 
         update_accepted_indices(acceptance, indices)
 
