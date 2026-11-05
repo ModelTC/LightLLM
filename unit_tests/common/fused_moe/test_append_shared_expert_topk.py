@@ -27,7 +27,7 @@ def test_experts_with_topk_appends_the_fused_shared_expert(monkeypatch):
     impl = SimpleNamespace(
         num_fused_shared_experts=1,
         n_routed_experts=4,
-        fused_experts_with_topk=run,
+        _fused_experts=run,
     )
     impl._prepare_expert_execution = lambda **kwargs: FuseMoeTriton._prepare_expert_execution(impl, **kwargs)
     weight = SimpleNamespace(

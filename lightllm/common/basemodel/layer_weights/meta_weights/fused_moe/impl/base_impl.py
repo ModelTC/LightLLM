@@ -107,30 +107,6 @@ class FuseMoeBaseImpl(ABC):
             clamp_up_add_one=clamp_up_add_one,
         )
 
-    def fused_experts_with_topk(
-        self,
-        input_tensor: torch.Tensor,
-        w13: WeightPack,
-        w2: WeightPack,
-        topk_weights: torch.Tensor,
-        topk_ids: torch.Tensor,
-        is_prefill: bool,
-        alpha: Optional[float] = None,
-        limit: Optional[float] = None,
-        clamp_up_add_one: bool = True,
-    ):
-        return self._fused_experts(
-            input_tensor=input_tensor,
-            w13=w13,
-            w2=w2,
-            topk_weights=topk_weights,
-            topk_ids=topk_ids,
-            is_prefill=is_prefill,
-            alpha=alpha,
-            limit=limit,
-            clamp_up_add_one=clamp_up_add_one,
-        )
-
     @abstractmethod
     def _select_experts(
         self,

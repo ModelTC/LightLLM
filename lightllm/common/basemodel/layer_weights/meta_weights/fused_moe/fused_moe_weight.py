@@ -112,6 +112,8 @@ class FusedMoeWeight(BaseWeightTpl):
         else:
             self.local_logic_expert_ids_list = list(range(self.n_routed_experts + self.num_fused_shared_experts))
 
+    # ==================== Prefill / Decode 公共接口 ====================
+
     def experts(
         self,
         input_tensor: torch.Tensor,
@@ -164,6 +166,13 @@ class FusedMoeWeight(BaseWeightTpl):
         clamp_up_add_one: bool = True,
         shared_expert_func=None,
     ) -> torch.Tensor:
+        """执行外部已经选好的 top-k。
+
+        ``experts()`` 从 ``router_logits`` 做通用 grouped top-k。DeepSeek-V4 的路由在层内完成，
+        使用 softplus-sqrt，并带 hash 的 ``tid2eid`` 和视觉 token bias，不能放进通用选择。
+        两路 microbatch 重叠也要先拿到 top-k，才能在一路 dispatch 时让另一路继续选专家。
+        传入的是逻辑专家 id：capture 先看到它们，再做冗余修复或追加 fused shared expert。
+        """
         assert is_prefill is not None, "is_prefill must be explicitly specified for fused MoE execution"
         moe_capture_callback = get_moe_capture_callback(infer_state, self.layer_num_)
         if moe_capture_callback is not None:
@@ -174,12 +183,7 @@ class FusedMoeWeight(BaseWeightTpl):
             is_prefill=is_prefill,
         )
         # The shared-expert callback is only implemented on the DeepGEMM path.
-        run = self.fuse_moe_impl.fused_experts_with_topk
-        extra = {}
-        if shared_expert_func is not None:
-            run = self.fuse_moe_impl._fused_experts
-            extra["shared_expert_func"] = shared_expert_func
-        return run(
+        return self.fuse_moe_impl._fused_experts(
             input_tensor=input_tensor,
             w13=self.w13,
             w2=self.w2,
@@ -189,8 +193,33 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-            **extra,
+            shared_expert_func=shared_expert_func,
         )
+
+    def select_experts_and_quant_input(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+    ):
+        assert self.enable_ep_moe, "select_experts_and_quant_input is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.select_experts_and_quant_input(
+            hidden_states=hidden_states,
+            router_logits=router_logits,
+            e_score_correction_bias=self.e_score_correction_bias,
+            w13=self.w13,
+            use_grouped_topk=self.use_grouped_topk,
+            num_experts_per_tok=self.num_experts_per_tok,
+            norm_topk_prob=self.norm_topk_prob,
+            topk_group=self.topk_group,
+            n_group=self.n_group,
+            scoring_func=self.scoring_func,
+        )
+
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor):
+        assert self.enable_ep_moe, "quantize_dispatch_input is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.quantize_dispatch_input(hidden_states=hidden_states, w13=self.w13)
+
+    # ==================== Decode 接口 ====================
 
     def decode_dispatch(
         self,
@@ -225,44 +254,6 @@ class FusedMoeWeight(BaseWeightTpl):
             topk_weights=topk_weights,
         )
 
-    def quantize_dispatch_input(self, hidden_states: torch.Tensor):
-        assert self.enable_ep_moe, "quantize_dispatch_input is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.quantize_dispatch_input(hidden_states=hidden_states, w13=self.w13)
-
-    def select_experts_and_quant_input(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-    ):
-        assert self.enable_ep_moe, "select_experts_and_quant_input is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.select_experts_and_quant_input(
-            hidden_states=hidden_states,
-            router_logits=router_logits,
-            e_score_correction_bias=self.e_score_correction_bias,
-            w13=self.w13,
-            use_grouped_topk=self.use_grouped_topk,
-            num_experts_per_tok=self.num_experts_per_tok,
-            norm_topk_prob=self.norm_topk_prob,
-            topk_group=self.topk_group,
-            n_group=self.n_group,
-            scoring_func=self.scoring_func,
-        )
-
-    def prefill_dispatch(
-        self,
-        qinput_tensor: Tuple[torch.Tensor],
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-        overlap_event: Optional[Any] = None,
-    ):
-        assert self.enable_ep_moe, "prefill_dispatch is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.prefill_dispatch(
-            qinput_tensor=qinput_tensor,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            overlap_event=overlap_event,
-        )
-
     def decode_masked_group_gemm(
         self,
         recv_x: Tuple[torch.Tensor],
@@ -284,6 +275,36 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
+        )
+
+    def decode_combine(
+        self,
+        expert_output: torch.Tensor,
+        ep_handle: Any,
+        recv_topk_weights: torch.Tensor,
+    ):
+        assert self.enable_ep_moe, "decode_combine is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.decode_combine(
+            expert_output=expert_output,
+            ep_handle=ep_handle,
+            recv_topk_weights=recv_topk_weights,
+        )
+
+    # ==================== Prefill 接口 ====================
+
+    def prefill_dispatch(
+        self,
+        qinput_tensor: Tuple[torch.Tensor],
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        overlap_event: Optional[Any] = None,
+    ):
+        assert self.enable_ep_moe, "prefill_dispatch is only supported when enable_ep_moe is True"
+        return self.fuse_moe_impl.prefill_dispatch(
+            qinput_tensor=qinput_tensor,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            overlap_event=overlap_event,
         )
 
     def prefilled_group_gemm(
@@ -313,19 +334,6 @@ class FusedMoeWeight(BaseWeightTpl):
             alpha=alpha,
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
-        )
-
-    def decode_combine(
-        self,
-        expert_output: torch.Tensor,
-        ep_handle: Any,
-        recv_topk_weights: torch.Tensor,
-    ):
-        assert self.enable_ep_moe, "decode_combine is only supported when enable_ep_moe is True"
-        return self.fuse_moe_impl.decode_combine(
-            expert_output=expert_output,
-            ep_handle=ep_handle,
-            recv_topk_weights=recv_topk_weights,
         )
 
     def prefill_combine(
