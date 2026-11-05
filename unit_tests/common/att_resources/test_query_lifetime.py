@@ -45,7 +45,7 @@ def test_copies_rebuild_queries_and_operators_without_source_references(copy_res
 
 
 def test_invalidating_one_layout_does_not_drop_another_resources_cache():
-    from lightllm.common.execution.storage.query_cache import CachedQueries, cached_query
+    from lightllm.core.storage.query_cache import CachedQueries, cached_query
 
     calls = []
 
@@ -79,7 +79,7 @@ def test_export_excludes_unpicklable_local_query_results():
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
 def test_bound_transfer_keeps_native_storage_without_manager(pd_args):
     from lightllm.common.attention_state import AttentionStateManager
-    from lightllm.common.execution.transfer import Transfer
+    from lightllm.core.transfer import Transfer
     from unit_tests.common.att_resources.model_helpers import rebuild_full_state
     from unit_tests.common.att_resources.test_capacity import definition
 

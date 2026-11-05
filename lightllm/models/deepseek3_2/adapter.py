@@ -1,7 +1,7 @@
-from lightllm.common.execution.formats.kv.spec import SparseMLAKVStateSpec
+from lightllm.core.formats.kv.spec import SparseMLAKVStateSpec
 from lightllm.models.deepseek2.adapter import Deepseek2ModelAdapter
 from dataclasses import asdict, replace
-from lightllm.common.execution.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
+from lightllm.core.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
 from lightllm.models.deepseek3_2.layer_weights.transformer_layer_weight import Deepseek3_2TransformerLayerWeight
 from lightllm.models.deepseek3_2.layer_infer.transformer_layer_infer import Deepseek3_2TransformerLayerInfer
 

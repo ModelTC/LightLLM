@@ -24,6 +24,19 @@ class LinearConfig:
     dependency: str | None = None
 
 
+@dataclass(frozen=True)
+class LinearConfig:
+    encoding: str
+    execute: Callable
+    activation_group_size: int | None = None
+    output_block_size: int = 1
+    allocates_output: bool = False
+    per_output_scale: bool = False
+    min_capability: tuple[int, int] = (8, 9)
+    alignment: int = 1
+    dependency: str | None = None
+
+
 class BoundLinear:
     def __init__(self, offer, weight, scale, bias, allocate, config):
         self.name, self.spec, self.format = offer.backend, offer.spec, offer.format

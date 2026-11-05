@@ -1,15 +1,15 @@
-from lightllm.common.execution.formats.recurrent.spec import ConvSSMStateSpec
-from lightllm.common.execution.formats.kv.spec import IndexerWindowStateSpec
-from lightllm.common.execution.formats.kv.spec import PooledKVStateSpec
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.core.formats.kv.spec import IndexerWindowStateSpec
+from lightllm.core.formats.kv.spec import PooledKVStateSpec
 from lightllm.models.llama.layer_infer.post_layer_infer import LlamaPostLayerInfer
 from lightllm.models.glm5_next.layer_infer.pre_layer_infer import Glm5NextPreLayerInfer
 from lightllm.models.glm5_next.layer_infer.transformer_layer_infer import Glm5NextTransformerLayerInfer
 from lightllm.models.glm5_next.layer_weights.pre_and_post_layer_weight import Glm5NextPreAndPostLayerWeight
 from lightllm.models.glm5_next.layer_weights.transformer_layer_weight import Glm5NextTransformerLayerWeight
 from lightllm.models.base.adapter import RecipeModelAdapter
-from lightllm.common.execution.compute.attention.kda.spec import KimiDeltaAttentionSpec
-from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
-from lightllm.common.execution.contracts.state import StateSpec, LayerStates
+from lightllm.core.compute.attention.kda.spec import KimiDeltaAttentionSpec
+from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
+from lightllm.core.contracts.state import StateSpec, LayerStates
 from copy import deepcopy
 
 

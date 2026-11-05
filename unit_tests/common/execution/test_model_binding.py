@@ -5,10 +5,10 @@ import torch
 
 from lightllm.common.attention_state import AttentionStateManager
 from lightllm.common.attention_state.full_att import GQAAttentionConfig, GQAFullAttentionState
-from lightllm.common.execution.build import BuildConfig, prepare
-from lightllm.common.execution.registry import default_providers
-from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.common.execution.contracts.state import FormatSpec
+from lightllm.core.build import BuildConfig, prepare
+from lightllm.core.registry import default_providers
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.models.qwen2.model import Qwen2TpPartModel
 from lightllm.models.qwen3.model import Qwen3TpPartModel
@@ -70,7 +70,7 @@ def test_model_startup_binds_layers_and_writer(model_class, monkeypatch):
     model, state = make_model(model_class)
     writes = []
     monkeypatch.setattr(
-        "lightllm.common.execution.formats.kv.dense.DenseKVWriter.__call__",
+        "lightllm.core.formats.kv.dense.DenseKVWriter.__call__",
         lambda self, **kw: writes.append(dict(kw, view=self.view)),
     )
     model._init_execution_plan()
@@ -259,8 +259,8 @@ def test_mtp_cohort_keeps_existing_execution_path():
 
 @pytest.mark.parametrize("nested", [False, True])
 def test_qwen35_moe_declares_hybrid_state_and_gated_experts(nested):
-    from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-    from lightllm.common.execution.compute.attention.gdn.spec import GatedDeltaNetSpec
+    from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+    from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
     from lightllm.models.registry import ModelRegistry
     from lightllm.models.qwen3_5_moe.model import Qwen3_5MOETpPartModel
     from lightllm.models.qwen3_5_moe.adapter import Qwen35MoEModelAdapter

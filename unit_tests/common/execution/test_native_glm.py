@@ -1,8 +1,8 @@
 """Pooled history/window contracts and independent KDA/NoPE numerical checks."""
 
-from lightllm.common.execution.formats.recurrent.spec import ConvSSMStateSpec
-from lightllm.common.execution.formats.kv.spec import IndexerWindowStateSpec
-from lightllm.common.execution.formats.kv.spec import PooledKVStateSpec
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.core.formats.kv.spec import IndexerWindowStateSpec
+from lightllm.core.formats.kv.spec import PooledKVStateSpec
 
 
 from dataclasses import replace
@@ -13,20 +13,20 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.compute.attention.batch import AttentionBatch
-from lightllm.common.execution.compute.attention.kda.backend import KDAInputs, KDAStaticParams, KimiDeltaAttentionBackend
-from lightllm.common.execution.planner.planner import AttentionRequest, Planner
-from lightllm.common.execution.compute.attention.pooled_nope.backend import (
+from lightllm.core.compute.attention.batch import AttentionBatch
+from lightllm.core.compute.attention.kda.backend import KDAInputs, KDAStaticParams, KimiDeltaAttentionBackend
+from lightllm.core.planner.planner import AttentionRequest, Planner
+from lightllm.core.compute.attention.pooled_nope.backend import (
     PooledNoPEAttentionBackend,
     PooledNoPEInputs,
     PooledNoPEStaticParams,
 )
-from lightllm.common.execution.formats.kv.pooled_nope import PooledNoPEKVWriter
-from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.common.execution.contracts.state import FormatSpec, StateSpec, StateView
-from lightllm.common.execution.compute.attention.kda.spec import KimiDeltaAttentionSpec
-from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
-from lightllm.common.execution.storage.attention import ConvSSMStateStore, IndexerWindowStateStore, PackedMLAStateStore
+from lightllm.core.formats.kv.pooled_nope import PooledNoPEKVWriter
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec, StateSpec, StateView
+from lightllm.core.compute.attention.kda.spec import KimiDeltaAttentionSpec
+from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
+from lightllm.core.storage.attention import ConvSSMStateStore, IndexerWindowStateStore, PackedMLAStateStore
 
 
 def pooled_contracts(quantized=False, dtype=torch.bfloat16):
@@ -322,7 +322,7 @@ def test_pooled_nope_dense_and_sparse_prefix_graph(
     output = prefill.run(inputs, meta)
     torch.testing.assert_close(output.float(), expected(inputs, meta, physical), rtol=0.02, atol=0.002)
     # Same pooled scores must select the independent FP32 weighted-ReLU top-k set.
-    from lightllm.common.execution.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
+    from lightllm.core.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
 
     q, scale = hadamard_transform_quant_fp8(inputs.index_query, scale=128 ** -0.5)
     weights = inputs.index_weights * (4 ** -0.5 * 128 ** -0.5) * scale.squeeze(-1)
@@ -473,8 +473,8 @@ def test_glm_model_binding_prefix_and_graph(
     from lightllm.distributed.communication_op import dist_group_manager
     from lightllm.server.core.objs.start_args_type import StartArgs
     from lightllm.utils.envs_utils import get_env_start_args, get_llm_data_type
-    from lightllm.common.execution.runner.decode_graph import CudaGraph
-    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.core.runner.decode_graph import CudaGraph
+    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
     from unit_tests.common.execution.test_model_cuda import prepare_model_batch
 
     config = dict(
@@ -774,7 +774,7 @@ def test_glm_model_binding_prefix_and_graph(
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 @pytest.mark.parametrize("dtype", [torch.float16, torch.bfloat16])
 def test_pooled_index_quant_matches_torch_hadamard(dtype):
-    from lightllm.common.execution.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
+    from lightllm.core.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
 
     torch.manual_seed(151)
     x = torch.randn(9, 4, 128, device="cuda", dtype=dtype)
@@ -793,7 +793,7 @@ def test_pooled_index_quant_matches_torch_hadamard(dtype):
 @pytest.mark.parametrize("quantized,implementation", [(False, "triton"), (True, "triton"), (True, "flashmla_sparse")])
 @torch.no_grad()
 def test_pooled_long_decode_topk_and_lane_graph(quantized, implementation):
-    from lightllm.common.execution.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
+    from lightllm.core.formats.kv.kernels.index_quant import hadamard_transform_quant_fp8
 
     torch.manual_seed(157)
     spec, state, tail, fmt, window = pooled_contracts(quantized)
@@ -880,7 +880,7 @@ def test_pooled_long_decode_topk_and_lane_graph(quantized, implementation):
 @pytest.mark.parametrize("heads,count", [(8, 1), (8, 5), (64, 1), (64, 3), (64, 12), (16, 4)])
 @torch.no_grad()
 def test_pooled_fp8_prefill_workspace_and_hold(heads, count, monkeypatch):
-    from lightllm.common.execution.compute.attention.pooled_nope import prefill_fp8 as kernels
+    from lightllm.core.compute.attention.pooled_nope import prefill_fp8 as kernels
 
     torch.manual_seed(163)
     spec, state, tail, fmt, window = pooled_contracts(True)

@@ -1,5 +1,5 @@
-from lightllm.common.execution.compute.attention.workspace import lane_workspace
-from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
+from lightllm.core.compute.attention.workspace import lane_workspace
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -7,13 +7,13 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
+from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
 from lightllm.models.base.adapter import DenseModelAdapter
-from lightllm.common.execution.planner.planner import AttentionRequest, Planner
-from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.common.execution.contracts.state import FormatSpec, StateSpec
-from lightllm.common.execution.storage.attention import DenseStateStore
+from lightllm.core.planner.planner import AttentionRequest, Planner
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec, StateSpec
+from lightllm.core.storage.attention import DenseStateStore
 from lightllm.models.llama.model import LlamaTpPartModel
 from unit_tests.common.execution.test_model_binding import make_model
 

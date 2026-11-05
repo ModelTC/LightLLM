@@ -1,19 +1,19 @@
-from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-from lightllm.common.execution.contracts.device import DeviceCaps
-from lightllm.common.execution.contracts.device import ExecutionLimits
-from lightllm.common.execution.contracts.state import FormatSpec
-from lightllm.common.execution.planner.planner import Planner
-from lightllm.common.execution.contracts.state import StateSpec
-from lightllm.common.execution.contracts.state import StateView
-from lightllm.common.execution.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
-from lightllm.common.execution.contracts.provider import AttentionOffer, ProbeResult
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.contracts.device import DeviceCaps
+from lightllm.core.contracts.device import ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec
+from lightllm.core.planner.planner import Planner
+from lightllm.core.contracts.state import StateSpec
+from lightllm.core.contracts.state import StateView
+from lightllm.core.compute.attention.dense.backend import DenseAttentionBackend, DenseStaticParams
+from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
 
 
 def view(layer=0, role="main", heads=2, dim=64):

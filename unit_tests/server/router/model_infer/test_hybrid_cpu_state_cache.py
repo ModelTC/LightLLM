@@ -1,5 +1,5 @@
 from unit_tests.common.att_resources.model_helpers import build_hybrid_resources
-from lightllm.common.execution.transfer import CopyPlan
+from lightllm.core.transfer import CopyPlan
 import dataclasses
 import json
 from types import SimpleNamespace

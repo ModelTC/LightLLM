@@ -1,5 +1,5 @@
-from lightllm.common.execution.compute.attention.workspace import lane_workspace
-from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
+from lightllm.core.compute.attention.workspace import lane_workspace
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -8,15 +8,15 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.compute.attention.dense.backend import DenseStaticParams
-from lightllm.common.execution.compute.attention.dense.group_quantized import GroupQuantizedAttentionBackend
-from lightllm.common.execution.formats.kv.group_quantized import GroupQuantizedKVWriter
-from lightllm.common.execution.planner.planner import Planner
+from lightllm.core.compute.attention.dense.backend import DenseStaticParams
+from lightllm.core.compute.attention.dense.group_quantized import GroupQuantizedAttentionBackend
+from lightllm.core.formats.kv.group_quantized import GroupQuantizedKVWriter
+from lightllm.core.planner.planner import Planner
 from lightllm.models.base.attention_batch import attention_batch
-from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.common.execution.contracts.state import FormatSpec, StateSpec
-from lightllm.common.execution.storage.attention import DenseStateStore
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec, StateSpec
+from lightllm.core.storage.attention import DenseStateStore
 
 
 def make_format(bits, dtype=torch.float16, group=8, page=4):

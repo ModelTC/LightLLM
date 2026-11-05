@@ -1,19 +1,19 @@
 """Model declarations contain semantics, not allocated storage or backend objects."""
 
-from lightllm.common.execution.contracts.model import ModelWeights
-from lightllm.common.execution.contracts.model import ModelRecipe
-from lightllm.common.execution.formats.recurrent.spec import ConvSSMStateSpec
-from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
+from lightllm.core.contracts.model import ModelWeights
+from lightllm.core.contracts.model import ModelRecipe
+from lightllm.core.formats.recurrent.spec import ConvSSMStateSpec
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 
 
 from copy import deepcopy
 from typing import Any, Protocol
 
-from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-from lightllm.common.execution.compute.attention.gdn.spec import GatedDeltaNetSpec
-from lightllm.common.execution.compute.attention.mla.spec import MLAAttentionSpec
-from lightllm.common.execution.contracts.state import StateSpec, LayerStates
-from lightllm.common.execution.compute.moe.spec import MoeSpec
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
+from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
+from lightllm.core.contracts.state import StateSpec, LayerStates
+from lightllm.core.compute.moe.spec import MoeSpec
 
 
 class RecipeModelAdapter:

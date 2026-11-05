@@ -5,7 +5,7 @@ from unittest.mock import Mock
 import pytest
 import torch
 
-from lightllm.common.execution.transfer import CopyOperation, CopyPlan, TransferCompletion
+from lightllm.core.transfer import CopyOperation, CopyPlan, TransferCompletion
 from lightllm.server.router.model_infer.mode_backend.pd.page_lifetime import PDPageReclaimer
 from lightllm.server.router.model_infer.mode_backend.pd.resource_io import copy_page
 from unit_tests.common.transfer.helpers import Event

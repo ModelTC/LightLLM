@@ -1,4 +1,4 @@
-from lightllm.common.execution.compute.attention.batch import AttentionBatch
+from lightllm.core.compute.attention.batch import AttentionBatch
 
 
 def attention_batch(batch):

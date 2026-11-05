@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 import ast
 import subprocess
 import sys
@@ -9,10 +9,10 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from lightllm.common.execution import BuildConfig, ProviderRegistry, AttentionProvider, StateProvider, build, prepare
-from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.common.execution.contracts.provider import AttentionOffer, ProbeResult
-from lightllm.common.execution.contracts.state import FormatSpec, StateSpec, StateView, LayerStates
+from lightllm.core import BuildConfig, ProviderRegistry, AttentionProvider, StateProvider, build, prepare
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.provider import AttentionOffer, ProbeResult
+from lightllm.core.contracts.state import FormatSpec, StateSpec, StateView, LayerStates
 
 
 @dataclass(frozen=True)
@@ -117,7 +117,7 @@ def test_recurrent_only_build_does_not_require_history_provider():
     _build_with_external_provider("recurrent")
 
 
-def test_common_execution_declarations_import_without_backend_or_service():
+def test_core_declarations_import_without_backend_or_service():
     script = """
 import importlib.abc
 import sys
@@ -130,24 +130,23 @@ class Blocked(importlib.abc.MetaPathFinder):
             raise AssertionError(fullname)
 
 sys.meta_path.insert(0, Blocked())
-from lightllm.common.execution import build, BuildConfig, ProviderRegistry
-from lightllm.common.execution.contracts import ModelAdapter, StateSpec, FormatSpec, StateView
-from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-from lightllm.common.execution.compute.attention.mla.spec import MLAAttentionSpec
-from lightllm.common.execution.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
-from lightllm.common.execution.compute.attention.gdn.spec import GatedDeltaNetSpec
-from lightllm.common.execution.compute.attention.kda.spec import KimiDeltaAttentionSpec
-from lightllm.common.execution.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
+from lightllm.core import build, BuildConfig, ProviderRegistry
+from lightllm.core.contracts import ModelAdapter, StateSpec, FormatSpec, StateView
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.compute.attention.mla.spec import MLAAttentionSpec
+from lightllm.core.compute.attention.sparse_mla.spec import SparseMLAAttentionSpec
+from lightllm.core.compute.attention.gdn.spec import GatedDeltaNetSpec
+from lightllm.core.compute.attention.kda.spec import KimiDeltaAttentionSpec
+from lightllm.core.compute.attention.pooled_nope.spec import PooledNoPEAttentionSpec
 assert DenseAttentionSpec(4, 2, 64).head_dim == 64
 assert not torch.cuda.is_initialized()
 """
     subprocess.run([sys.executable, "-c", script], check=True, capture_output=True, text=True)
 
 
-def test_common_execution_dependencies_and_layout():
+def test_core_dependencies_and_compatibility_direction():
     root = Path(__file__).resolve().parents[3] / "lightllm"
-    assert not (root / "core").exists()
-    for path in (root / "common/execution").rglob("*.py"):
+    for path in (root / "core").rglob("*.py"):
         for node in ast.walk(ast.parse(path.read_text())):
             modules = []
             if isinstance(node, ast.ImportFrom):
@@ -155,16 +154,24 @@ def test_common_execution_dependencies_and_layout():
             elif isinstance(node, ast.Import):
                 modules = [alias.name for alias in node.names]
             assert not any(
-                module.startswith(("lightllm.models", "lightllm.server"))
+                module.startswith(
+                    (
+                        "lightllm.models",
+                        "lightllm.server",
+                        "lightllm.common.execution",
+                        "lightllm.common.basemodel.weight_binding",
+                    )
+                )
                 for module in modules
             ), path
+    assert not list((root / "common/execution").glob("*.py"))
 
 
 def test_existing_graph_paths_share_implementation_objects():
     from lightllm.common.basemodel.cuda_graph import CudaGraph as OldGraph
-    from lightllm.common.execution.runner.decode_graph import CudaGraph
+    from lightllm.core.runner.decode_graph import CudaGraph
     from lightllm.common.basemodel.prefill_cuda_graph import PrefillCudaGraph as OldPrefillGraph
-    from lightllm.common.execution.runner.prefill_graph import PrefillCudaGraph
+    from lightllm.core.runner.prefill_graph import PrefillCudaGraph
 
     assert OldGraph is CudaGraph
     assert OldPrefillGraph is PrefillCudaGraph
@@ -172,7 +179,7 @@ def test_existing_graph_paths_share_implementation_objects():
 
 def test_same_layout_providers_match_full_format_and_reject_ambiguity():
     from dataclasses import replace
-    from lightllm.common.execution.formats.providers import state_providers
+    from lightllm.core.formats.providers import state_providers
 
     fmt = FormatSpec("custom", torch.float32, "token_head_dim", ("k", "v"), 1)
     custom = StateProvider(
@@ -195,8 +202,8 @@ def test_production_state_preparation_uses_injected_registry_and_device(requeste
     from argparse import ArgumentParser
     from contextlib import nullcontext
     from lightllm.common.basemodel.basemodel import TpPartBaseModel
-    from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-    from lightllm.common.execution.formats.providers import state_providers
+    from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+    from lightllm.core.formats.providers import state_providers
     from lightllm.server.api_cli import add_cli_args
 
     args = add_cli_args(ArgumentParser()).parse_args(["--llm_decode_att_backend", requested])
@@ -298,9 +305,9 @@ def test_storage_fixture_patches_the_production_lookup():
 
 
 def test_native_weight_binding_uses_registered_compute_without_loader_objects():
-    from lightllm.common.execution.compute.linear.spec import LinearSpec
-    from lightllm.common.execution.formats.weights.view import WeightView
-    from lightllm.common.execution.planner.weights import bind_compute
+    from lightllm.core.compute.linear.spec import LinearSpec
+    from lightllm.core.formats.weights.view import WeightView
+    from lightllm.core.planner.weights import bind_compute
 
     tensor = torch.eye(2)
     view = WeightView(FormatSpec("plain", torch.float32, "output_input", ("weight",), 1), {"weight": tensor})
@@ -325,7 +332,7 @@ def test_native_weight_binding_uses_registered_compute_without_loader_objects():
 
 
 def test_named_state_inputs_share_history_and_keep_private_windows():
-    from lightllm.common.execution.contracts.state import LayerStates
+    from lightllm.core.contracts.state import LayerStates
 
     kv = StateSpec("main", "kv", 0, (0, 1), CounterState())
     index = StateSpec("main", "index", 0, (0, 1), CounterState())

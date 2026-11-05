@@ -1,5 +1,5 @@
-from lightllm.common.execution.contracts.model import ModelWeights
-from lightllm.common.execution.contracts.model import ModelRecipe
+from lightllm.core.contracts.model import ModelWeights
+from lightllm.core.contracts.model import ModelRecipe
 from copy import deepcopy
 from lightllm.models.glm5_next_mtp.layer_infer.pre_layer_infer import Glm5NextMTPPreLayerInfer
 from lightllm.models.glm5_next_mtp.layer_weights.pre_and_post_layer_weight import Glm5NextMTPPreAndPostLayerWeight

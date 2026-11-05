@@ -1,4 +1,4 @@
-from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 from dataclasses import replace
 from types import SimpleNamespace
 
@@ -7,15 +7,15 @@ import torch
 import torch.nn.functional as F
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.compute.attention.dense.backend import DenseStaticParams
-from lightllm.common.execution.planner.planner import Planner
+from lightllm.core.compute.attention.dense.backend import DenseStaticParams
+from lightllm.core.planner.planner import Planner
 from lightllm.models.base.attention_batch import attention_batch
-from lightllm.common.execution.compute.attention.dense.spec import DenseAttentionSpec
-from lightllm.common.execution.contracts.device import DeviceCaps, ExecutionLimits
-from lightllm.common.execution.contracts.state import FormatSpec, StateSpec
-from lightllm.common.execution.storage.attention import DenseStateStore
-from lightllm.common.execution.compute.attention.dense.static_fp8 import StaticFP8AttentionBackend
-from lightllm.common.execution.formats.kv.static_fp8 import StaticFP8KVWriter
+from lightllm.core.compute.attention.dense.spec import DenseAttentionSpec
+from lightllm.core.contracts.device import DeviceCaps, ExecutionLimits
+from lightllm.core.contracts.state import FormatSpec, StateSpec
+from lightllm.core.storage.attention import DenseStateStore
+from lightllm.core.compute.attention.dense.static_fp8 import StaticFP8AttentionBackend
+from lightllm.core.formats.kv.static_fp8 import StaticFP8KVWriter
 
 
 def fp8_format(per_head, page=4):
@@ -40,9 +40,9 @@ def test_fp8_rejects_missing_calibration_and_incompatible_device():
 
 
 def test_auto_per_tensor_selects_native_flashinfer_on_other_devices(monkeypatch):
-    from lightllm.common.execution.compute.attention.dense.flashinfer import FlashInferAttentionBackend
+    from lightllm.core.compute.attention.dense.flashinfer import FlashInferAttentionBackend
 
-    monkeypatch.setattr("lightllm.common.execution.compute.attention.dense.flashinfer.find_spec", lambda name: object())
+    monkeypatch.setattr("lightllm.core.compute.attention.dense.flashinfer.find_spec", lambda name: object())
     planner = Planner(
         (StaticFP8AttentionBackend("decode"), FlashInferAttentionBackend("decode")),
         DeviceCaps("cuda", 0, (8, 9)),
@@ -64,7 +64,7 @@ def test_auto_per_tensor_selects_native_flashinfer_on_other_devices(monkeypatch)
 def test_bound_fp8_matches_decoded_sdpa_and_replays_graph(
     implementation, per_head, static_q, phase, dtype, page, window
 ):
-    from lightllm.common.execution.compute.attention.dense.flashinfer import FlashInferAttentionBackend
+    from lightllm.core.compute.attention.dense.flashinfer import FlashInferAttentionBackend
 
     torch.manual_seed(40)
     spec = DenseAttentionSpec(8, 2, 64, dtype=dtype, window=window)

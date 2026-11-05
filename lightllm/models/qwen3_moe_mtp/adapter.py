@@ -1,5 +1,5 @@
-from lightllm.common.execution.contracts.model import ModelWeights
-from lightllm.common.execution.contracts.model import ModelRecipe
+from lightllm.core.contracts.model import ModelWeights
+from lightllm.core.contracts.model import ModelRecipe
 from copy import deepcopy
 from lightllm.models.qwen3_moe.adapter import Qwen3MoEModelAdapter, qwen3_moe_specs
 from lightllm.models.qwen3_moe_mtp.layer_weights.pre_and_post_layer_weight import Qwen3MOEMTPPreAndPostLayerWeight

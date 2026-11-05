@@ -1,6 +1,6 @@
 """Native quantized state must agree with the separate CPU service's byte layout."""
 
-from lightllm.common.execution.formats.kv.spec import DenseKVStateSpec
+from lightllm.core.formats.kv.spec import DenseKVStateSpec
 
 
 from dataclasses import asdict
@@ -10,10 +10,10 @@ import pytest
 import torch
 
 from lightllm.common.attention_state import AttentionStateManager
-from lightllm.common.execution.formats.kv.group_quantized import GroupQuantizedKVWriter
-from lightllm.common.execution.contracts.state import StateSpec
-from lightllm.common.execution.storage.attention import DenseStateStore
-from lightllm.common.execution.transfer import Transfer
+from lightllm.core.formats.kv.group_quantized import GroupQuantizedKVWriter
+from lightllm.core.contracts.state import StateSpec
+from lightllm.core.storage.attention import DenseStateStore
+from lightllm.core.transfer import Transfer
 from lightllm.models.llama.model import LlamaTpPartModel
 from lightllm.server.core.objs.start_args_type import StartArgs
 from lightllm.utils.cpu_cache_layout import build_cpu_cache_layouts
