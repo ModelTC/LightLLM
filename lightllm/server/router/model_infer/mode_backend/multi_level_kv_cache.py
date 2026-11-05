@@ -62,20 +62,21 @@ class MultiLevelKvCacheModule(object):
         logger.info("MultiLevelKvCacheModule: CPU cache load waits on a recorded event.")
         return False
 
-    def _get_cuda_stream(self, name: str) -> torch.cuda.Stream:
-        stream = getattr(self, name, None)
-        if stream is None:
-            stream = torch.cuda.Stream()
-            setattr(self, name, stream)
-        return stream
-
     def get_cpu_load_stream(self) -> torch.cuda.Stream:
         """把 CPU cache 拉回 GPU 的流，与计算流分开。"""
-        return self._get_cuda_stream("_cpu_load_stream")
+        stream = getattr(self, "_cpu_load_stream", None)
+        if stream is None:
+            stream = torch.cuda.Stream()
+            setattr(self, "_cpu_load_stream", stream)
+        return stream
 
     def get_cpu_offload_stream(self) -> torch.cuda.Stream:
         """把 GPU KV 写出到 CPU cache 的流。"""
-        return self._get_cuda_stream("_cpu_offload_stream")
+        stream = getattr(self, "_cpu_offload_stream", None)
+        if stream is None:
+            stream = torch.cuda.Stream()
+            setattr(self, "_cpu_offload_stream", stream)
+        return stream
 
     def load_cpu_cache_to_reqs(self, reqs: List[InferReq]):
         idle_token_num = g_infer_context.get_can_alloc_token_num()
