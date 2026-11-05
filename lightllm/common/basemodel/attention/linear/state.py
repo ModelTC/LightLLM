@@ -42,11 +42,13 @@ class LinearPrefillAttState(BasePrefillAttState):
 @dataclass
 class LinearDecodeAttState(BaseDecodeAttState):
     forwards: dict = field(default_factory=dict)
+    _layout_checked: bool = field(default=False, init=False, repr=False)
 
     def get_draft_step(self):
         return self.backend.mtp_step
 
     def init_state(self):
+        self._layout_checked = False
         draft_step = self.get_draft_step()
         infer_state = self.infer_state
         reqs, cu_seqlens = infer_state.b_req_idx, None
@@ -80,10 +82,13 @@ class LinearDecodeAttState(BaseDecodeAttState):
     def clone_for_warmup(self, infer_state):
         state = super().clone_for_warmup(infer_state)
         state.forwards = {name: copy.copy(forward) for name, forward in self.forwards.items()}
+        state._layout_checked = False
         return state
 
     def copy_for_decode_cuda_graph(self, new_state):
-        if self.forwards.keys() != new_state.forwards.keys():
-            raise ValueError("captured linear attention resources changed")
+        if not self._layout_checked:
+            if self.forwards.keys() != new_state.forwards.keys():
+                raise ValueError("captured linear attention resources changed")
         for name, forward in self.forwards.items():
             forward.copy_inputs(new_state.forwards[name])
+        self._layout_checked = True

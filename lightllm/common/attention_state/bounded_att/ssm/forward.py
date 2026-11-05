@@ -1,4 +1,4 @@
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional, TYPE_CHECKING
 
 import torch
@@ -28,6 +28,7 @@ class SSMForward:
     cu_seqlens: Optional[torch.Tensor]
     accepted_token_counts: Optional[torch.Tensor]
     run_config: Optional[SSMRunConfig] = None
+    _layout_checked: bool = field(default=False, init=False, repr=False)
 
     def run_layer(self, logical_layer, q, k, v, a, b, a_log, bias):
         """执行一层线性注意力；logical_layer 会映射到物理权重层。"""
@@ -58,21 +59,28 @@ class SSMForward:
         return StateCommit(self.resource.state_name, payload)
 
     def copy_inputs(self, source: "SSMForward"):
-        """把动态图输入复制到已 capture 的 tensor，保留 capture 时的布局。"""
+        """把动态图输入复制到已 capture 的 tensor。
 
-        if self.resource is not source.resource or self.executor is not source.executor:
-            raise ValueError("cannot copy a forward for a different resource or executor")
-        copies = []
-        for name in ("req_indices", "state_indices", "cu_seqlens", "accepted_token_counts"):
-            target, value = getattr(self, name), getattr(source, name)
-            if (target is None) != (value is None):
-                raise ValueError(f"captured SSM layout changed: {name}")
-            if target is not None:
-                if target.shape != value.shape or target.dtype != value.dtype or target.device != value.device:
-                    raise ValueError(f"captured SSM tensor layout changed: {name}")
-                copies.append((target, value))
+        graph bucket 的资源和 tensor layout 在首次绑定时校验一次，后续调用
+        只更新数据；captured layout 不随请求变化。
+        """
+
+        names = ("req_indices", "state_indices", "cu_seqlens", "accepted_token_counts")
+        if not self._layout_checked:
+            if self.resource is not source.resource or self.executor is not source.executor:
+                raise ValueError("cannot copy a forward for a different resource or executor")
+            for name in names:
+                target, value = getattr(self, name), getattr(source, name)
+                if (target is None) != (value is None) or (
+                    target is not None
+                    and (target.shape != value.shape or target.dtype != value.dtype or target.device != value.device)
+                ):
+                    raise ValueError(f"captured SSM layout changed: {name}")
+            self._layout_checked = True
+
         copied = set()
-        for target, value in copies:
+        for name in names:
+            target, value = getattr(self, name), getattr(source, name)
             if target is not None and target.data_ptr() != value.data_ptr() and target.data_ptr() not in copied:
                 target.copy_(value, non_blocking=True)
                 copied.add(target.data_ptr())
