@@ -39,6 +39,7 @@ class FuseMoeMarlin(FuseMoeTriton):
         clamp_up_add_one: bool = True,
         shared_expert_func=None,
     ):
+        assert shared_expert_func is None, "FuseMoeMarlin does not support shared expert overlap"
         if alpha is not None or limit is not None:
             raise NotImplementedError("FuseMoeMarlin does not support clamped SwiGLU")
 

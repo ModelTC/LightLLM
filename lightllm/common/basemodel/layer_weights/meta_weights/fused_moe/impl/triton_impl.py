@@ -79,6 +79,7 @@ class FuseMoeTriton(FuseMoeBaseImpl):
         clamp_up_add_one: bool = True,
         shared_expert_func=None,
     ):
+        assert shared_expert_func is None, "FuseMoeTriton does not support shared expert overlap"
         w13_weight, w13_scale = w13.weight, w13.weight_scale
         w2_weight, w2_scale = w2.weight, w2.weight_scale
         use_fp8_w8a8 = w13_weight.dtype == torch.float8_e4m3fn

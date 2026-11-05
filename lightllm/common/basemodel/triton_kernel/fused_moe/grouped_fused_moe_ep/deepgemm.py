@@ -31,6 +31,9 @@ except Exception:
     HAS_DEEPGEMM = False
 
 
+# ==================== Prefill / Decode 公共接口 ====================
+
+
 def get_mk_alignment_for_contiguous_layout() -> int:
     """返回 DeepGEMM contiguous grouped GEMM 使用的 M 对齐值。"""
     assert HAS_DEEPGEMM
@@ -91,6 +94,28 @@ def deepgemm_grouped_fp8_nt_contiguous(
         )
 
     raise RuntimeError("deep_gemm does not provide grouped_gemm_fp8 NT contiguous GEMM kernel in this version")
+
+
+def deepgemm_grouped_fp8_fp4_nt_contiguous(
+    input_tuple: Tuple[torch.Tensor, torch.Tensor],
+    w_tuple: Tuple[torch.Tensor, torch.Tensor],
+    out: torch.Tensor,
+    grouped_layout: torch.Tensor,
+    use_psum_layout: bool = False,
+):
+    if HAS_DEEPGEMM and hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous"):
+        return deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
+            input_tuple,
+            w_tuple,
+            out,
+            grouped_layout,
+            use_psum_layout=use_psum_layout,
+            recipe=(1, 1, 32),
+        )
+    raise RuntimeError("deep_gemm does not provide grouped fp8-fp4 NT contiguous GEMM kernel")
+
+
+# ==================== Decode 接口 ====================
 
 
 def decode_masked_group_gemm(
@@ -159,6 +184,9 @@ def decode_masked_group_gemm(
         expected_m_for_psum_layout=expected_m,
     )
     return gemm_out_b
+
+
+# ==================== Prefill 接口 ====================
 
 
 def chunked_expanded_moe_forward(
@@ -269,22 +297,3 @@ def chunked_expanded_moe_forward(
 
     ep_compact_metadata(recv_src_metadata)
     return gather_out
-
-
-def deepgemm_grouped_fp8_fp4_nt_contiguous(
-    input_tuple: Tuple[torch.Tensor, torch.Tensor],
-    w_tuple: Tuple[torch.Tensor, torch.Tensor],
-    out: torch.Tensor,
-    grouped_layout: torch.Tensor,
-    use_psum_layout: bool = False,
-):
-    if HAS_DEEPGEMM and hasattr(deep_gemm, "m_grouped_fp8_fp4_gemm_nt_contiguous"):
-        return deep_gemm.m_grouped_fp8_fp4_gemm_nt_contiguous(
-            input_tuple,
-            w_tuple,
-            out,
-            grouped_layout,
-            use_psum_layout=use_psum_layout,
-            recipe=(1, 1, 32),
-        )
-    raise RuntimeError("deep_gemm does not provide grouped fp8-fp4 NT contiguous GEMM kernel")

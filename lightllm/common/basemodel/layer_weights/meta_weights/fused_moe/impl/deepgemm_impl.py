@@ -103,6 +103,8 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             )
         return topk_weights, topk_ids
 
+    # ==================== Prefill / Decode 公共接口 ====================
+
     def _fused_experts(
         self,
         input_tensor: torch.Tensor,
@@ -132,6 +134,39 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             clamp_up_add_one=clamp_up_add_one,
             shared_expert_func=shared_expert_func,
         )
+
+    def select_experts_and_quant_input(
+        self,
+        hidden_states: torch.Tensor,
+        router_logits: torch.Tensor,
+        e_score_correction_bias: torch.Tensor,
+        w13: WeightPack,
+        use_grouped_topk: bool,
+        num_experts_per_tok: int,
+        norm_topk_prob: bool,
+        topk_group: int,
+        n_group: int,
+        scoring_func: str,
+    ):
+        topk_weights, topk_idx = self._select_experts(
+            input_tensor=hidden_states,
+            router_logits=router_logits,
+            correction_bias=e_score_correction_bias,
+            use_grouped_topk=use_grouped_topk,
+            top_k=num_experts_per_tok,
+            renormalize=norm_topk_prob,
+            topk_group=topk_group,
+            num_expert_group=n_group,
+            scoring_func=scoring_func,
+        )
+        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=True)
+        qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
+        return topk_weights, topk_idx.to(torch.long), qinput_tensor
+
+    def quantize_dispatch_input(self, hidden_states: torch.Tensor, w13: WeightPack):
+        return quantize_fused_experts_input(hidden_states, w13, self.quant_method)
+
+    # ==================== Decode 接口 ====================
 
     def decode_dispatch(
         self,
@@ -198,68 +233,6 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
 
         return recv_x, ep_handle, recv_topk_weights, hook
 
-    def quantize_dispatch_input(self, hidden_states: torch.Tensor, w13: WeightPack):
-        return quantize_fused_experts_input(hidden_states, w13, self.quant_method)
-
-    def select_experts_and_quant_input(
-        self,
-        hidden_states: torch.Tensor,
-        router_logits: torch.Tensor,
-        e_score_correction_bias: torch.Tensor,
-        w13: WeightPack,
-        use_grouped_topk: bool,
-        num_experts_per_tok: int,
-        norm_topk_prob: bool,
-        topk_group: int,
-        n_group: int,
-        scoring_func: str,
-    ):
-        topk_weights, topk_idx = self._select_experts(
-            input_tensor=hidden_states,
-            router_logits=router_logits,
-            correction_bias=e_score_correction_bias,
-            use_grouped_topk=use_grouped_topk,
-            top_k=num_experts_per_tok,
-            renormalize=norm_topk_prob,
-            topk_group=topk_group,
-            num_expert_group=n_group,
-            scoring_func=scoring_func,
-        )
-        topk_weights, topk_idx = self._prepare_expert_execution(topk_weights, topk_idx, is_prefill=True)
-        qinput_tensor = quantize_fused_experts_input(hidden_states, w13, self.quant_method)
-        return topk_weights, topk_idx.to(torch.long), qinput_tensor
-
-    def prefill_dispatch(
-        self,
-        qinput_tensor: Tuple[torch.Tensor],
-        topk_idx: torch.Tensor,
-        topk_weights: torch.Tensor,
-        overlap_event: Optional[Any] = None,
-    ):
-        buffer = dist_group_manager.ep_buffer
-        num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
-        recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
-            qinput_tensor,
-            topk_idx=topk_idx,
-            topk_weights=topk_weights,
-            num_experts=self.total_expert_num_contain_redundancy,
-            num_max_tokens_per_rank=num_max_tokens_per_rank,
-            expert_alignment=get_mk_alignment_for_contiguous_layout(),
-            num_sms=get_ep_num_sms(overlap_with_compute=True),
-            previous_event=overlap_event,
-            async_with_compute_stream=True,
-            allocate_on_comm_stream=True,
-            do_cpu_sync=True,
-            do_handle_copy=False,
-            do_expand=True,
-            use_tma_aligned_col_major_sf=True,
-        )
-
-        def hook():
-            event.current_stream_wait()
-
-        return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
-
     def decode_masked_group_gemm(
         self,
         recv_x: Tuple[torch.Tensor],
@@ -288,6 +261,87 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             limit=limit,
             clamp_up_add_one=clamp_up_add_one,
         )
+
+    def decode_combine(
+        self,
+        expert_output: torch.Tensor,
+        ep_handle: Any,
+        recv_topk_weights: torch.Tensor,
+    ):
+        # 阶段 1：把按 expert 展开的输出归约回去重接收 token 布局。
+        # psum_num_recv_tokens_per_scaleup_rank 的最后一项是去重接收 token 数，
+        # 不是按 expert 展开后的有效行数。
+        dense_output, compact_metadata = ep_reduce_decode_output(
+            expert_output=expert_output,
+            route_weights=recv_topk_weights,
+            recv_src_metadata=ep_handle.recv_src_metadata,
+            num_valid_recv_tokens=ep_handle.psum_num_recv_tokens_per_scaleup_rank[-1:],
+        )
+        ep_handle.recv_src_metadata = compact_metadata
+
+        # 阶段 2：compact metadata 的第一个 top-k 槽位指向同序 dense row，
+        # 其余槽位置为 -1。异步 combine 返回 event，由调用方在消费输出前等待。
+        combined_x, _, event = dist_group_manager.ep_buffer.combine(
+            dense_output,
+            ep_handle,
+            topk_weights=None,
+            num_sms=get_ep_num_sms(overlap_with_compute=True),
+            async_with_compute_stream=True,
+            # Decode combine 没有 previous_event，输出归属计算流；通信流的异步
+            # 生命周期由 DeepEP 内部统一登记。
+            allocate_on_comm_stream=False,
+        )
+
+        def hook():
+            event.current_stream_wait()
+
+        return combined_x, hook
+
+    # ==================== Prefill 接口 ====================
+
+    def prefill_dispatch(
+        self,
+        qinput_tensor: Tuple[torch.Tensor],
+        topk_idx: torch.Tensor,
+        topk_weights: torch.Tensor,
+        overlap_event: Optional[Any] = None,
+    ):
+        buffer = dist_group_manager.ep_buffer
+        num_max_tokens_per_rank = get_deepep_num_max_dispatch_tokens_per_rank_prefill()
+        recv_x, recv_topk_idx, recv_topk_weights, handle, event = buffer.dispatch(
+            qinput_tensor,
+            topk_idx=topk_idx,
+            topk_weights=topk_weights,
+            num_experts=self.total_expert_num_contain_redundancy,
+            num_max_tokens_per_rank=num_max_tokens_per_rank,
+            expert_alignment=get_mk_alignment_for_contiguous_layout(),
+            num_sms=get_ep_num_sms(overlap_with_compute=True),
+            previous_event=overlap_event,
+            async_with_compute_stream=True,
+            allocate_on_comm_stream=True,
+            do_cpu_sync=True,
+            do_handle_copy=False,
+            do_expand=True,
+            use_tma_aligned_col_major_sf=True,
+        )
+        _record_compute_stream(
+            recv_x,
+            recv_topk_idx,
+            recv_topk_weights,
+            handle.topk_idx,
+            handle.psum_num_recv_tokens_per_scaleup_rank,
+            handle.psum_num_recv_tokens_per_expert,
+            handle.num_unaligned_recv_tokens_per_expert,
+            handle.recv_src_metadata,
+            handle.dst_buffer_slot_idx,
+            handle.token_metadata_at_forward,
+            handle.channel_linked_list,
+        )
+
+        def hook():
+            event.current_stream_wait()
+
+        return recv_x, recv_topk_idx, recv_topk_weights, handle.num_recv_tokens_per_expert_list, handle, hook
 
     def prefilled_group_gemm(
         self,
@@ -355,48 +409,13 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
         del recv_x
         return gather_out
 
-    def decode_combine(
-        self,
-        expert_output: torch.Tensor,
-        ep_handle: Any,
-        recv_topk_weights: torch.Tensor,
-    ):
-        # 阶段 1：把按 expert 展开的输出归约回去重接收 token 布局。
-        # psum_num_recv_tokens_per_scaleup_rank 的最后一项是去重接收 token 数，
-        # 不是按 expert 展开后的有效行数。
-        dense_output, compact_metadata = ep_reduce_decode_output(
-            expert_output=expert_output,
-            route_weights=recv_topk_weights,
-            recv_src_metadata=ep_handle.recv_src_metadata,
-            num_valid_recv_tokens=ep_handle.psum_num_recv_tokens_per_scaleup_rank[-1:],
-        )
-        ep_handle.recv_src_metadata = compact_metadata
-
-        # 阶段 2：compact metadata 的第一个 top-k 槽位指向同序 dense row，
-        # 其余槽位置为 -1。异步 combine 返回 event，由调用方在消费输出前等待。
-        combined_x, _, event = dist_group_manager.ep_buffer.combine(
-            dense_output,
-            ep_handle,
-            topk_weights=None,
-            num_sms=get_ep_num_sms(overlap_with_compute=True),
-            async_with_compute_stream=True,
-            # Decode combine 没有 previous_event，输出归属计算流；通信流的异步
-            # 生命周期由 DeepEP 内部统一登记。
-            allocate_on_comm_stream=False,
-        )
-
-        def hook():
-            event.current_stream_wait()
-
-        return combined_x, hook
-
     def prefill_combine(
         self,
         gemm_out_b: torch.Tensor,
         handle: Any,
         overlap_event: Optional[Any] = None,
     ):
-        combined_x, _, event = dist_group_manager.ep_buffer.combine(
+        combined_x, combined_topk_weights, event = dist_group_manager.ep_buffer.combine(
             gemm_out_b,
             handle,
             topk_weights=None,
@@ -405,8 +424,22 @@ class FuseMoeDeepGEMM(FuseMoeBaseImpl):
             async_with_compute_stream=True,
             allocate_on_comm_stream=True,
         )
+        _record_compute_stream(combined_x, combined_topk_weights)
 
         def hook():
             event.current_stream_wait()
 
         return combined_x, hook
+
+
+def _record_compute_stream(*values) -> None:
+    """把通信流上分配的 CUDA tensor 登记到当前计算流。"""
+    compute_stream = torch.cuda.current_stream()
+    pending = list(values)
+    while pending:
+        value = pending.pop()
+        if isinstance(value, torch.Tensor):
+            if value.is_cuda:
+                value.record_stream(compute_stream)
+        elif isinstance(value, (tuple, list)):
+            pending.extend(value)
